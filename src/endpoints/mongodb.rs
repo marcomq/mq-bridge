@@ -65,13 +65,11 @@ impl MessagePublisher for MongoDbPublisher {
         msg_with_metadata
             .metadata
             .insert("mongodb_object_id".to_string(), object_id.to_string());
-        let message_id_i64: Option<i64> = if let Some(id) = msg_with_metadata
-            .message_id {
-                Some(id as i64)
-            }
-            else {
-                None
-            };
+        let message_id_i64: Option<i64> = if let Some(id) = msg_with_metadata.message_id {
+            Some(id as i64)
+        } else {
+            None
+        };
         // Manually construct the document to handle u64 message_id for BSON.
         // BSON only supports i64, so we do a wrapping conversion.
         let doc = doc! {

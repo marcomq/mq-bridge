@@ -1,0 +1,70 @@
+services:
+  kafka:
+    image: confluentinc/cp-kafka:7.9.5
+    container_name: kafka-itest-mq-multi-bridge
+    ports:
+      - "9092:9092"
+    environment:
+      # KRaft settings
+      KAFKA_BROKER_ID: 1
+      KAFKA_PROCESS_ROLES: 'broker,controller'
+      KAFKA_CONTROLLER_QUORUM_VOTERS: '1@kafka:9093'
+      KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
+      # Use a fixed cluster ID for the test environment
+      CLUSTER_ID: 'ci-cluster-id-for-mq-multi-bridge-12345'
+
+      # Listener settings
+      KAFKA_LISTENERS: 'PLAINTEXT://:9092,CONTROLLER://:9093'
+      KAFKA_ADVERTISED_LISTENERS: 'PLAINTEXT://localhost:9092'
+      KAFKA_INTER_BROKER_LISTENER_NAME: 'PLAINTEXT'
+
+      # Other settings
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
+
+    healthcheck:
+      # Use cub to wait for the broker to be available, then check if we can list topics.
+      test: ["CMD-SHELL", "cub kafka-ready -b localhost:9092 1 30 && kafka-topics --bootstrap-server localhost:9092 --list"]
+      interval: 10s
+      timeout: 20s
+      retries: 5
+
+  rabbitmq:
+    image: rabbitmq:4.1.6-management-alpine
+    container_name: rabbitmq-itest-mq-multi-bridge
+    ports:
+      - "5672:5672"
+      - "15672:15672" # Management UI
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "check_running", "-q"]
+      interval: 5s
+      timeout: 20s
+      retries: 5
+
+  nats:
+    image: nats:2.12.2-alpine3.22
+    container_name: nats-itest-mq-multi-bridge
+    command: "-js" # Enable JetStream
+    ports:
+      - "4222:4222"
+      - "8222:8222" # Expose monitoring port for health check
+    healthcheck:
+      test: ["CMD", "nats-server", "-h"]
+      interval: 5s
+      timeout: 20s
+      retries: 5
+
+  mosquitto:
+    image: eclipse-mosquitto:2.0.22
+    container_name: mosquitto-itest-mq-multi-bridge
+    ports:
+      - "1883:1883"
+    healthcheck:
+      # Check if the MQTT port is open and listening. This is more reliable than sub/pub.
+      test: ["CMD-SHELL", "nc -z localhost 1883"]
+      interval: 5s
+      timeout: 20s
+      retries: 5

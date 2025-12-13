@@ -6,6 +6,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use crate::endpoints::memory::{get_or_create_channel, MemoryChannel};
+
 /// The top-level configuration is a map of named routes.
 /// The key is the route name (e.g., "kafka_to_nats").
 pub type Config = HashMap<String, Route>;
@@ -38,6 +40,21 @@ pub struct Endpoint {
     /// The specific endpoint implementation, determined by the configuration key (e.g., "kafka", "nats").
     #[serde(flatten)]
     pub endpoint_type: EndpointType,
+}
+
+impl Endpoint {
+    pub fn new(endpoint_type: EndpointType) -> Self {
+        Self {
+            middlewares: Middlewares::default(),
+            endpoint_type,
+        }
+    }
+    pub fn channel(&self) -> anyhow::Result<MemoryChannel> {
+        match &self.endpoint_type {
+            EndpointType::Memory(cfg) => Ok(get_or_create_channel(&cfg)),
+            _ => Err(anyhow::anyhow!("channel() called on non-memory Endpoint")),
+        }
+    }
 }
 
 /// An enumeration of all supported endpoint types.
@@ -104,7 +121,7 @@ pub struct KafkaEndpoint {
 }
 
 /// General Kafka connection configuration.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct KafkaConfig {
     pub brokers: String,
@@ -115,8 +132,10 @@ pub struct KafkaConfig {
     pub tls: TlsConfig,
     #[serde(default)]
     pub await_ack: bool,
-    pub producer_options: Option<HashMap<String, String>>,
-    pub consumer_options: Option<HashMap<String, String>>,
+    #[serde(default)]
+    pub producer_options: Option<Vec<(String, String)>>,
+    #[serde(default)]
+    pub consumer_options: Option<Vec<(String, String)>>,
 }
 
 // --- NATS Specific Configuration ---
@@ -132,7 +151,7 @@ pub struct NatsEndpoint {
 }
 
 /// General NATS connection configuration.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct NatsConfig {
     pub url: String,
@@ -165,7 +184,7 @@ pub struct AmqpEndpoint {
 }
 
 /// General AMQP connection configuration.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct AmqpConfig {
     pub url: String,
@@ -189,7 +208,7 @@ pub struct MongoDbEndpoint {
 }
 
 /// General MongoDB connection configuration.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct MongoDbConfig {
     pub url: String,
@@ -208,7 +227,7 @@ pub struct MqttEndpoint {
 }
 
 /// General MQTT connection configuration.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct MqttConfig {
     pub url: String,

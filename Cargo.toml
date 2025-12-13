@@ -61,9 +61,9 @@ once_cell = { version = "1.21.3"  }
 dotenvy = { version = "0.15", optional = true }
 
 [features]
-default = ["core"]
+default = ["full"]
 core = ["dedup", "dotenv"]
-full = ["dedup", "dotenv", "mongodb", "kafka", "amqp", "nats", "mqtt", "http"]
+full = ["core", "mongodb", "kafka", "amqp", "nats", "mqtt", "http", "file"]
 
 # Functionality features
 dedup = ["sled"]
@@ -80,6 +80,9 @@ http = ["axum", "reqwest", "axum-server", "rustls", "tokio-rustls", "rustls-pemf
 file = [] # No extra deps
 
 [dev-dependencies]
-# We only need yaml parsing for tests at the moment
 serde_yaml_ng = "0.10.0"
 tempfile = "3.10"
+tracing-appender = "0.2"
+chrono = "0.4"
+metrics-util = "0.20.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }

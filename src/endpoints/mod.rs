@@ -95,7 +95,9 @@ pub async fn create_publisher_from_route(
         #[cfg(feature = "kafka")]
         EndpointType::Kafka(cfg) => {
             let topic = cfg.topic.as_deref().unwrap_or(route_name);
-            Ok(Arc::new(kafka::KafkaPublisher::new(&cfg.config, topic).await?))
+            Ok(Arc::new(
+                kafka::KafkaPublisher::new(&cfg.config, topic).await?,
+            ))
         }
         #[cfg(feature = "nats")]
         EndpointType::Nats(cfg) => {
@@ -107,7 +109,9 @@ pub async fn create_publisher_from_route(
         #[cfg(feature = "amqp")]
         EndpointType::Amqp(cfg) => {
             let queue = cfg.queue.as_deref().unwrap_or(route_name);
-            Ok(Arc::new(amqp::AmqpPublisher::new(&&cfg.config, queue).await?))
+            Ok(Arc::new(
+                amqp::AmqpPublisher::new(&&cfg.config, queue).await?,
+            ))
         }
         #[cfg(feature = "mqtt")]
         EndpointType::Mqtt(cfg) => {
