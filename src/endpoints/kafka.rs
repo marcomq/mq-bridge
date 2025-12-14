@@ -136,15 +136,17 @@ impl MessagePublisher for KafkaPublisher {
     async fn send(&self, message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {
         let mut record = FutureRecord::to(&self.topic).payload(&message.payload);
 
-        if !message.metadata.is_empty() {
-            let mut headers = OwnedHeaders::new();
-            for (key, value) in &message.metadata {
-                headers = headers.insert(rdkafka::message::Header {
-                    key,
-                    value: Some(value.as_bytes()),
-                });
+        if let Some(metadata) = &message.metadata {
+            if !metadata.is_empty() {
+                let mut headers = OwnedHeaders::new();
+                for (key, value) in metadata {
+                    headers = headers.insert(rdkafka::message::Header {
+                        key,
+                        value: Some(value.as_bytes()),
+                    });
+                }
+                record = record.headers(headers);
             }
-            record = record.headers(headers);
         }
 
         let key = if let Some(id) = &message.message_id {
@@ -289,14 +291,16 @@ impl MessageConsumer for KafkaConsumer {
         let mut canonical_message = CanonicalMessage::new(payload.to_vec());
 
         if let Some(headers) = message.headers() {
-            let mut metadata = std::collections::HashMap::new();
-            for header in headers.iter() {
-                metadata.insert(
-                    header.key.to_string(),
-                    String::from_utf8_lossy(header.value.unwrap_or_default()).to_string(),
-                );
+            if headers.count() > 0 {
+                let mut metadata = std::collections::HashMap::new();
+                for header in headers.iter() {
+                    metadata.insert(
+                        header.key.to_string(),
+                        String::from_utf8_lossy(header.value.unwrap_or_default()).to_string(),
+                    );
+                }
+                canonical_message.metadata = Some(metadata);
             }
-            canonical_message.metadata = metadata;
         }
 
         // The commit function for Kafka needs to commit the offset of the processed message.

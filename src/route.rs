@@ -1,14 +1,17 @@
-use std::sync::{Arc, atomic};
+use std::sync::{atomic, Arc};
 //  hot_queue
 //  © Copyright 2025, by Marco Mengelkoch
 //  Licensed under MIT License, see License file for more details
 //  git clone https://github.com/marcomq/hot_queue
-use crate::traits::CommitFunc;
-use async_channel::{bounded, Sender};
-use tokio::{select, task::{self, JoinHandle}};
-use tracing::{debug, error, info, warn};
 use crate::endpoints::{create_consumer_from_route, create_publisher_from_route};
 pub use crate::models::Route;
+use crate::traits::CommitFunc;
+use async_channel::{bounded, Sender};
+use tokio::{
+    select,
+    task::{self, JoinHandle},
+};
+use tracing::{debug, error, info, warn};
 
 impl Route {
     /// Runs the message processing route with concurrency, error handling, and graceful shutdown.
@@ -31,7 +34,9 @@ impl Route {
                 let name_arc = Arc::clone(&name);
 
                 let mut run_task = tokio::spawn(async move {
-                    route_arc.run_until_err(&name_arc,Some(running_clone)).await
+                    route_arc
+                        .run_until_err(&name_arc, Some(running_clone))
+                        .await
                 });
 
                 select! {
@@ -65,23 +70,31 @@ impl Route {
     }
 
     /// The core logic of running the route, designed to be called within a reconnect loop.
-    pub async fn run_until_err(&self, name: &str, running: Option<Arc<atomic::AtomicBool>>) -> anyhow::Result<bool> {
+    pub async fn run_until_err(
+        &self,
+        name: &str,
+        running: Option<Arc<atomic::AtomicBool>>,
+    ) -> anyhow::Result<bool> {
         if self.concurrency == 1 {
             self.run_sequentially(name, running).await
-        }
-        else {
+        } else {
             self.run_concurrently(name, running).await
         }
     }
 
     /// A simplified, sequential runner for when concurrency is 1.
-    async fn run_sequentially(&self, name: &str, running: Option<Arc<atomic::AtomicBool>>) -> anyhow::Result<bool> {
+    async fn run_sequentially(
+        &self,
+        name: &str,
+        running: Option<Arc<atomic::AtomicBool>>,
+    ) -> anyhow::Result<bool> {
         let running = if let Some(running) = running {
             running
         } else {
             Arc::new(atomic::AtomicBool::new(true))
         };
-        let publisher = Arc::new(create_publisher_from_route(name, &self.output.endpoint_type).await?);
+        let publisher =
+            Arc::new(create_publisher_from_route(name, &self.output.endpoint_type).await?);
         let mut consumer = create_consumer_from_route(name, &self.input.endpoint_type).await?;
 
         while running.load(atomic::Ordering::Relaxed) {
@@ -103,16 +116,21 @@ impl Route {
     }
 
     /// The main concurrent runner for when concurrency > 1.
-    async fn run_concurrently(&self, name: &str, running: Option<Arc<atomic::AtomicBool>>) -> anyhow::Result<bool> {
+    async fn run_concurrently(
+        &self,
+        name: &str,
+        running: Option<Arc<atomic::AtomicBool>>,
+    ) -> anyhow::Result<bool> {
         let running = if let Some(running) = running {
             running
         } else {
             Arc::new(atomic::AtomicBool::new(true))
         };
-        let publisher = Arc::new(create_publisher_from_route(name, &self.output.endpoint_type).await?);
+        let publisher =
+            Arc::new(create_publisher_from_route(name, &self.output.endpoint_type).await?);
         let mut consumer = create_consumer_from_route(name, &self.input.endpoint_type).await?;
         let (err_tx, err_rx) = bounded(1); // For critical, route-stopping errors
-        // channel capacity: a small buffer proportional to concurrency
+                                           // channel capacity: a small buffer proportional to concurrency
         let work_capacity = self.concurrency.saturating_mul(4);
         let (work_tx, work_rx) = bounded::<(crate::CanonicalMessage, CommitFunc)>(work_capacity);
 
@@ -130,7 +148,7 @@ impl Route {
                         Err(e) => {
                             error!("Worker failed to send message: {}", e);
                             // Send the error back to the main task to tear down the route
-                            if err_tx.send(e.into()).await.is_err() {
+                            if err_tx.send(e).await.is_err() {
                                 warn!("Could not send error to main task, it might be down.");
                             }
                         }

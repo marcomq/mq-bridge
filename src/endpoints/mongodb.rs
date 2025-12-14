@@ -15,6 +15,7 @@ use mongodb::{
 use mongodb::{Client, Collection};
 use serde::{Deserialize, Serialize};
 use std::any::Any;
+use std::collections::HashMap;
 use std::time::{Duration, SystemTime};
 use tracing::{info, warn};
 
@@ -24,14 +25,17 @@ use tracing::{info, warn};
 struct MongoMessageRaw {
     message_id: i64,
     payload: Binary,
-    metadata: Document,
+    metadata: Option<Document>,
 }
 
 impl TryFrom<MongoMessageRaw> for CanonicalMessage {
     type Error = anyhow::Error;
 
     fn try_from(raw: MongoMessageRaw) -> Result<Self, Self::Error> {
-        let metadata = mongodb::bson::from_document(raw.metadata)
+        let metadata: Option<HashMap<String, String>> = raw
+            .metadata
+            .map(mongodb::bson::from_document)
+            .transpose()
             .context("Failed to deserialize metadata from BSON document")?;
 
         Ok(CanonicalMessage {
@@ -64,6 +68,7 @@ impl MessagePublisher for MongoDbPublisher {
         let mut msg_with_metadata = message;
         msg_with_metadata
             .metadata
+            .get_or_insert_with(Default::default)
             .insert("mongodb_object_id".to_string(), object_id.to_string());
 
         if msg_with_metadata.message_id.is_none() {
@@ -190,15 +195,8 @@ impl MessageConsumer for MongoDbConsumer {
             // This path is used for standalone instances or as a fallback.
             // We loop here to immediately retry claiming another document if the first
             // attempt failed due to a race with another consumer.
-            loop {
-                match self.try_claim_document(doc! {}).await? {
-                    Some(claimed) => return Ok(claimed),
-                    None => {
-                        // No documents were available to be claimed.
-                        // Break the inner loop to wait before the next poll.
-                        break;
-                    }
-                }
+            if let Some(claimed) = self.try_claim_document(doc! {}).await? {
+                return Ok(claimed);
             }
             tokio::time::sleep(self.polling_interval).await;
         }

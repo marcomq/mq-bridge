@@ -1,6 +1,5 @@
 use crate::models::AmqpConfig;
-use crate::traits::MessagePublisher;
-use crate::traits::{BoxFuture, CommitFunc, MessageConsumer};
+use crate::traits::{BoxFuture, CommitFunc, MessageConsumer, MessagePublisher};
 use crate::CanonicalMessage;
 use anyhow::anyhow;
 use async_trait::async_trait;
@@ -13,6 +12,7 @@ use lapin::{
     types::FieldTable,
     BasicProperties, Channel, Connection, ConnectionProperties, Consumer,
 };
+use std::any::Any;
 use std::time::Duration;
 use tracing::{debug, info};
 
@@ -64,15 +64,17 @@ impl AmqpPublisher {
 impl MessagePublisher for AmqpPublisher {
     async fn send(&self, message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {
         let mut properties = BasicProperties::default();
-        if !message.metadata.is_empty() {
-            let mut table = FieldTable::default();
-            for (key, value) in message.metadata {
-                table.insert(
-                    key.into(),
-                    lapin::types::AMQPValue::LongString(value.into()),
-                );
-            }
-            properties = properties.with_headers(table);
+        if let Some(metadata) = message.metadata {
+            if !metadata.is_empty() {
+                let mut table = FieldTable::default();
+                for (key, value) in metadata {
+                    table.insert(
+                        key.into(),
+                        lapin::types::AMQPValue::LongString(value.into()),
+                    );
+                }
+                properties = properties.with_headers(table);
+            } 
         }
 
         let confirmation = self
@@ -102,7 +104,6 @@ pub struct AmqpConsumer {
     consumer: Consumer,
 }
 
-use std::any::Any;
 impl AmqpConsumer {
     pub async fn new(config: &AmqpConfig, queue: &str) -> anyhow::Result<Self> {
         let conn = create_amqp_connection(config).await?;
@@ -200,14 +201,18 @@ impl MessageConsumer for AmqpConsumer {
             .ok_or_else(|| anyhow!("AMQP consumer stream ended"))??;
 
         let mut message = CanonicalMessage::new(delivery.data.clone());
-        if let Some(headers) = delivery.properties.headers() {
-            let mut metadata = std::collections::HashMap::new();
-            for (key, value) in headers.inner().iter() {
-                if let lapin::types::AMQPValue::LongString(s) = value {
-                    metadata.insert(key.to_string(), s.to_string());
+        if let Some(headers) = delivery.properties.headers().as_ref() {
+            if !headers.inner().is_empty() {
+                let mut metadata = std::collections::HashMap::new();
+                for (key, value) in headers.inner().iter() {
+                    if let lapin::types::AMQPValue::LongString(s) = value {
+                        metadata.insert(key.to_string(), s.to_string());
+                    }
+                }
+                if !metadata.is_empty() {
+                    message.metadata = Some(metadata);
                 }
             }
-            message.metadata = metadata;
         }
 
         let commit = Box::new(move |_response| {

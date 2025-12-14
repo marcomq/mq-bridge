@@ -131,7 +131,7 @@ async fn handle_request(
             metadata.insert(key.as_str().to_string(), value_str.to_string());
         }
     }
-    message.metadata = metadata;
+    message.metadata = Some(metadata);
 
     if tx.send((message, response_tx)).await.is_err() {
         return (
@@ -148,19 +148,15 @@ async fn handle_request(
                 axum::http::header::CONTENT_TYPE,
                 response_message
                     .metadata
-                    .get("content-type")
-                    .cloned()
-                    .unwrap_or_else(|| "application/json".to_string()),
+                    .as_ref()
+                    .as_ref()
+                    .and_then(|m| m.get("content-type"))
+                    .map(|s| s.as_str())
+                    .unwrap_or("application/json"),
             )],
             response_message.payload,
         )
             .into_response(),
-        // Ok(Ok(Some(response_message))) => (
-        //     StatusCode::OK,
-        //     [(axum::http::header::CONTENT_TYPE, "application/json")],
-        //     response_message.payload,
-        // )
-        //     .into_response(),
         Ok(Ok(None)) => (StatusCode::ACCEPTED, "Message processed").into_response(),
         Ok(Err(e)) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -216,8 +212,10 @@ impl HttpPublisher {
 impl MessagePublisher for HttpPublisher {
     async fn send(&self, message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {
         let mut request_builder = self.client.post(&self.url);
-        for (key, value) in &message.metadata {
-            request_builder = request_builder.header(key, value);
+        if let Some(metadata) = &message.metadata {
+            for (key, value) in metadata {
+                request_builder = request_builder.header(key, value);
+            }
         }
 
         let response = request_builder
@@ -247,7 +245,9 @@ impl MessagePublisher for HttpPublisher {
         // If a response sink is configured, wrap the response in a CanonicalMessage
         if self.response_sink.is_some() {
             let mut response_message = CanonicalMessage::new(response_bytes);
-            response_message.metadata = response_metadata;
+            if !response_metadata.is_empty() {
+                response_message.metadata = Some(response_metadata);
+            }
             Ok(Some(response_message))
         } else {
             Ok(None)

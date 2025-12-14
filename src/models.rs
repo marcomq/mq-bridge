@@ -51,7 +51,7 @@ impl Endpoint {
     }
     pub fn channel(&self) -> anyhow::Result<MemoryChannel> {
         match &self.endpoint_type {
-            EndpointType::Memory(cfg) => Ok(get_or_create_channel(&cfg)),
+            EndpointType::Memory(cfg) => Ok(get_or_create_channel(cfg)),
             _ => Err(anyhow::anyhow!("channel() called on non-memory Endpoint")),
         }
     }

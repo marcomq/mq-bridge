@@ -66,12 +66,15 @@ impl NatsPublisher {
 #[async_trait]
 impl MessagePublisher for NatsPublisher {
     async fn send(&self, message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {
-        let mut headers = HeaderMap::new();
-        if !message.metadata.is_empty() {
-            for (key, value) in &message.metadata {
+        let headers = if let Some(metadata) = &message.metadata {
+            let mut headers = HeaderMap::new();
+            for (key, value) in metadata {
                 headers.insert(key.as_str(), value.as_str());
             }
-        }
+            headers
+        } else {
+            HeaderMap::new()
+        };
 
         let ack_future = self
             .jetstream
@@ -161,14 +164,16 @@ impl MessageConsumer for NatsConsumer {
         let mut canonical_message = CanonicalMessage::new(message.payload.to_vec());
 
         if let Some(headers) = &message.headers {
-            let mut metadata = std::collections::HashMap::new();
-            for (key, value) in headers.iter() {
-                // A header key can have multiple values. We'll just take the first one.
-                if let Some(first_value) = value.iter().next() {
-                    metadata.insert(key.to_string(), first_value.to_string());
+            if !headers.is_empty() {
+                let mut metadata = std::collections::HashMap::new();
+                for (key, value) in headers.iter() {
+                    // A header key can have multiple values. We'll just take the first one.
+                    if let Some(first_value) = value.iter().next() {
+                        metadata.insert(key.to_string(), first_value.to_string());
+                    }
                 }
+                canonical_message.metadata = Some(metadata);
             }
-            canonical_message.metadata = metadata;
         }
 
         let commit = Box::new(move |_response| {

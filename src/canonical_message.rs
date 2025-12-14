@@ -10,8 +10,8 @@ use std::collections::HashMap;
 pub struct CanonicalMessage {
     pub message_id: Option<u64>,
     pub payload: Vec<u8>,
-    #[serde(default)]
-    pub metadata: HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<HashMap<String, String>>,
 }
 
 impl CanonicalMessage {
@@ -19,7 +19,7 @@ impl CanonicalMessage {
         Self {
             message_id: None,
             payload,
-            metadata: HashMap::new(),
+            metadata: None,
         }
     }
 
@@ -29,7 +29,7 @@ impl CanonicalMessage {
     }
 
     pub fn with_metadata(mut self, metadata: HashMap<String, String>) -> Self {
-        self.metadata = metadata;
+        self.metadata = Some(metadata);
         self
     }
 }

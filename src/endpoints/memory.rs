@@ -49,9 +49,10 @@ impl MemoryChannel {
         for message in messages {
             // The `send` method is async. It will wait gracefully if the channel is full
             // without blocking the thread, allowing other tasks (like the consumer) to run.
-            self.sender.send(message).await.map_err(|e| {
-                anyhow!("Memory channel was closed while filling messages: {}", e)
-            })?;
+            self.sender
+                .send(message)
+                .await
+                .map_err(|e| anyhow!("Memory channel was closed while filling messages: {}", e))?;
         }
         Ok(())
     }
@@ -73,6 +74,11 @@ impl MemoryChannel {
     /// Returns the number of messages currently in the channel.
     pub fn len(&self) -> usize {
         self.receiver.len()
+    }
+
+    /// Returns the number of messages currently in the channel.
+    pub fn is_empty(&self) -> bool {
+        self.receiver.is_empty()
     }
 }
 
@@ -97,7 +103,7 @@ pub struct MemoryPublisher {
 
 impl MemoryPublisher {
     pub fn new(config: &MemoryConfig) -> anyhow::Result<Self> {
-        let channel = get_or_create_channel(&config);
+        let channel = get_or_create_channel(config);
         Ok(Self {
             topic: config.topic.clone(),
             sender: channel.sender.clone(),
@@ -139,7 +145,7 @@ pub struct MemoryConsumer {
 
 impl MemoryConsumer {
     pub fn new(config: &MemoryConfig) -> anyhow::Result<Self> {
-        let channel = get_or_create_channel(&config);
+        let channel = get_or_create_channel(config);
         Ok(Self {
             topic: config.topic.clone(),
             receiver: channel.receiver.clone(),

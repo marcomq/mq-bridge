@@ -18,9 +18,9 @@ pub struct StaticEndpointPublisher {
 }
 
 impl StaticEndpointPublisher {
-    pub fn new(content: &String) -> anyhow::Result<Self> {
+    pub fn new(content: &str) -> anyhow::Result<Self> {
         Ok(Self {
-            content: content.clone(),
+            content: content.to_owned(),
         })
     }
 }
@@ -49,9 +49,9 @@ pub struct StaticRequestConsumer {
 }
 
 impl StaticRequestConsumer {
-    pub fn new(content: &String) -> anyhow::Result<Self> {
+    pub fn new(content: &str) -> anyhow::Result<Self> {
         Ok(Self {
-            content: content.clone(),
+            content: content.to_owned(),
         })
     }
 }

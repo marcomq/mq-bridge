@@ -1,7 +1,5 @@
 use hot_queue::models::{Endpoint, EndpointType, MemoryConfig, Route};
-use std::{
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
 mod integration;
 
@@ -25,7 +23,7 @@ async fn test_memory_to_memory_pipeline() {
             topic: "mem-out".to_string(),
             capacity: Some(num_messages + 10_000), // Ensure output can hold all messages
         })),
-        concurrency: 1,
+        concurrency: 100,
     };
 
     let in_channel = route.input.channel().unwrap();

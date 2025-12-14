@@ -70,7 +70,7 @@ pub async fn create_consumer_from_route(
         EndpointType::Static(cfg) => {
             Ok(Box::new(static_endpoint::StaticRequestConsumer::new(cfg)?))
         }
-        EndpointType::Memory(cfg) => Ok(Box::new(memory::MemoryConsumer::new(&cfg)?)),
+        EndpointType::Memory(cfg) => Ok(Box::new(memory::MemoryConsumer::new(cfg)?)),
         #[cfg(feature = "mongodb")]
         EndpointType::MongoDb(cfg) => {
             let collection = cfg.collection.as_deref().unwrap_or(route_name);
@@ -110,7 +110,7 @@ pub async fn create_publisher_from_route(
         EndpointType::Amqp(cfg) => {
             let queue = cfg.queue.as_deref().unwrap_or(route_name);
             Ok(Arc::new(
-                amqp::AmqpPublisher::new(&&cfg.config, queue).await?,
+                amqp::AmqpPublisher::new(&cfg.config, queue).await?,
             ))
         }
         #[cfg(feature = "mqtt")]
@@ -132,7 +132,7 @@ pub async fn create_publisher_from_route(
         EndpointType::Static(cfg) => Ok(Arc::new(static_endpoint::StaticEndpointPublisher::new(
             cfg,
         )?)),
-        EndpointType::Memory(cfg) => Ok(Arc::new(memory::MemoryPublisher::new(&cfg)?)),
+        EndpointType::Memory(cfg) => Ok(Arc::new(memory::MemoryPublisher::new(cfg)?)),
         #[cfg(feature = "mongodb")]
         EndpointType::MongoDb(cfg) => {
             let collection = cfg.collection.as_deref().unwrap_or(route_name);
@@ -156,7 +156,7 @@ pub async fn create_dlq_from_route(
 ) -> Result<Arc<dyn MessagePublisher>> {
     tracing::info!("DLQ configured for route {}", route_name);
     let publisher = create_publisher_from_route(route_name, endpoint).await?;
-    return Ok(publisher);
+    Ok(publisher)
 }
 
 /*
