@@ -46,25 +46,12 @@ impl MemoryChannel {
 
     /// Helper function for tests to easily fill in messages.
     pub async fn fill_messages(&self, messages: Vec<CanonicalMessage>) -> anyhow::Result<()> {
-        for mut message in messages {
-            loop {
-                // Use a non-blocking send and yield if the channel is full.
-                // This prevents a deadlock where the sender waits for a consumer that
-                // can't run because the sender's thread is blocked.
-                match self.sender.try_send(message) {
-                    Ok(()) => {
-                        tracing::trace!("Message filled: {}", self.sender.len());
-                        break; // Message sent, move to the next one.
-                    }
-                    Err(async_channel::TrySendError::Full(m)) => {
-                        message = m; // We got the message back, so we can retry.
-                        tokio::task::yield_now().await; // Allow the consumer to run.
-                    }
-                    Err(async_channel::TrySendError::Closed(_)) => {
-                        return Err(anyhow!("Memory channel was closed while filling messages"));
-                    }
-                }
-            }
+        for message in messages {
+            // The `send` method is async. It will wait gracefully if the channel is full
+            // without blocking the thread, allowing other tasks (like the consumer) to run.
+            self.sender.send(message).await.map_err(|e| {
+                anyhow!("Memory channel was closed while filling messages: {}", e)
+            })?;
         }
         Ok(())
     }
