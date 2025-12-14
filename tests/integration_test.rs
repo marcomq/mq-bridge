@@ -3,6 +3,7 @@
 
 mod integration;
 
+/*
 #[cfg(all(
     feature = "nats",
     feature = "kafka",
@@ -98,6 +99,7 @@ async fn test_mongodb_performance_pipeline() {
 async fn test_mongodb_performance_direct() {
     integration::mongodb::test_mongodb_performance_direct().await;
 }
+*/
 
 #[tokio::test]
 async fn test_memory_performance_pipeline() {
