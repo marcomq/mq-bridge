@@ -4,7 +4,7 @@
 //  git clone https://github.com/marcomq/hot_queue
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::{collections::HashMap, ops::Deref};
 
 use crate::endpoints::memory::{get_or_create_channel, MemoryChannel};
 

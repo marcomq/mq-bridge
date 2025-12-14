@@ -2,9 +2,8 @@
 //  © Copyright 2025, by Marco Mengelkoch
 //  Licensed under MIT License, see License file for more details
 //  git clone https://github.com/marcomq/hot_queue
-
 use crate::models::MemoryConfig;
-use crate::traits::{BoxFuture, CommitFunc, MessageConsumer, MessagePublisher};
+use crate::traits::{BoxFuture, BulkCommitFunc, CommitFunc, MessageConsumer, MessagePublisher};
 use crate::CanonicalMessage;
 use anyhow::anyhow;
 use async_channel::{bounded, Receiver, Sender};
@@ -23,15 +22,15 @@ static RUNTIME_MEMORY_CHANNELS: Lazy<Mutex<HashMap<String, MemoryChannel>>> =
 /// A shareable, thread-safe, in-memory channel for testing.
 ///
 /// This struct holds the sender and receiver for an in-memory queue.
-/// It can be cloned and shared between your test code and the bridge's endpoints.
+/// It can be cloned and shared between your test code and the bridge's endpoints. It transports batches of messages.
 #[derive(Debug, Clone)]
 pub struct MemoryChannel {
-    pub sender: Sender<CanonicalMessage>,
-    pub receiver: Receiver<CanonicalMessage>,
+    pub sender: Sender<Vec<CanonicalMessage>>,
+    pub receiver: Receiver<Vec<CanonicalMessage>>,
 }
 
 impl MemoryChannel {
-    /// Creates a new channel with a specified capacity.
+    /// Creates a new batch channel with a specified capacity.
     pub fn new(capacity: usize) -> Self {
         let (sender, receiver) = bounded(capacity);
         Self { sender, receiver }
@@ -39,21 +38,18 @@ impl MemoryChannel {
 
     /// Helper function for tests to easily send a message to the channel.
     pub async fn send_message(&self, message: CanonicalMessage) -> anyhow::Result<()> {
-        self.sender.send(message).await?;
+        self.sender.send(vec![message]).await?;
         tracing::info!("Message sent to memory {} channel", self.sender.len());
         Ok(())
     }
 
     /// Helper function for tests to easily fill in messages.
     pub async fn fill_messages(&self, messages: Vec<CanonicalMessage>) -> anyhow::Result<()> {
-        for message in messages {
-            // The `send` method is async. It will wait gracefully if the channel is full
-            // without blocking the thread, allowing other tasks (like the consumer) to run.
-            self.sender
-                .send(message)
-                .await
-                .map_err(|e| anyhow!("Memory channel was closed while filling messages: {}", e))?;
-        }
+        // Send the entire vector as a single batch.
+        self.sender
+            .send(messages)
+            .await
+            .map_err(|e| anyhow!("Memory channel was closed while filling messages: {}", e))?;
         Ok(())
     }
 
@@ -65,8 +61,9 @@ impl MemoryChannel {
     /// Helper function for tests to drain all messages from the channel.
     pub fn drain_messages(&self) -> Vec<CanonicalMessage> {
         let mut messages = Vec::new();
-        while let Ok(msg) = self.receiver.try_recv() {
-            messages.push(msg);
+        // Drain all batches from the channel and flatten them into a single Vec.
+        while let Ok(batch) = self.receiver.try_recv() {
+            messages.extend(batch);
         }
         messages
     }
@@ -98,7 +95,7 @@ pub fn get_or_create_channel(config: &MemoryConfig) -> MemoryChannel {
 #[derive(Clone)]
 pub struct MemoryPublisher {
     topic: String,
-    sender: Sender<CanonicalMessage>,
+    sender: Sender<Vec<CanonicalMessage>>,
 }
 
 impl MemoryPublisher {
@@ -121,12 +118,28 @@ impl MemoryPublisher {
 impl MessagePublisher for MemoryPublisher {
     async fn send(&self, message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {
         self.sender
-            .send(message)
+            .send(vec![message])
             .await
             .map_err(|e| anyhow!("Failed to send to memory channel: {}", e))?;
 
         tracing::trace!(
             "Message sent to publisher memory channel {}",
+            self.sender.len()
+        );
+        Ok(None)
+    }
+
+    async fn send_bulk(
+        &self,
+        messages: Vec<CanonicalMessage>,
+    ) -> anyhow::Result<Option<Vec<CanonicalMessage>>> {
+        self.sender
+            .send(messages)
+            .await
+            .map_err(|e| anyhow!("Failed to send to memory channel: {}", e))?;
+        tracing::trace!(
+            "Batch sent to publisher memory channel {}. Current batch count: {}",
+            self.sender.len(),
             self.sender.len()
         );
         Ok(None)
@@ -140,7 +153,9 @@ impl MessagePublisher for MemoryPublisher {
 /// A source that reads messages from an in-memory channel.
 pub struct MemoryConsumer {
     topic: String,
-    receiver: Receiver<CanonicalMessage>,
+    receiver: Receiver<Vec<CanonicalMessage>>,
+    // Internal buffer to hold messages from a received batch.
+    buffer: Vec<CanonicalMessage>,
 }
 
 impl MemoryConsumer {
@@ -149,6 +164,7 @@ impl MemoryConsumer {
         Ok(Self {
             topic: config.topic.clone(),
             receiver: channel.receiver.clone(),
+            buffer: Vec::new(),
         })
     }
     pub fn channel(&self) -> MemoryChannel {
@@ -162,15 +178,44 @@ impl MemoryConsumer {
 #[async_trait]
 impl MessageConsumer for MemoryConsumer {
     async fn receive(&mut self) -> anyhow::Result<(CanonicalMessage, CommitFunc)> {
-        let message = self
+        // If the buffer is empty, await a new batch from the channel.
+        if self.buffer.is_empty() {
+            let batch = self
+                .receiver
+                .recv()
+                .await
+                .map_err(|_| anyhow!("Memory channel closed."))?;
+            self.buffer = batch;
+        }
+
+        // Pop a message from the buffer. This will panic if empty, but the logic above prevents that.
+        let message = self.buffer.remove(0);
+        let commit = Box::new(|_| Box::pin(async move {}) as BoxFuture<'static, ()>);
+        Ok((message, commit))
+    }
+
+    async fn receive_bulk(
+        &mut self,
+        max_messages: usize,
+    ) -> anyhow::Result<(Vec<CanonicalMessage>, BulkCommitFunc)> {
+        // If the internal buffer has messages, return them first.
+        if !self.buffer.is_empty() {
+            let mut messages_to_return = std::mem::take(&mut self.buffer);
+            if messages_to_return.len() > max_messages {
+                self.buffer = messages_to_return.split_off(max_messages);
+            }
+            let commit = Box::new(|_| Box::pin(async move {}) as BoxFuture<'static, ()>);
+            return Ok((messages_to_return, commit));
+        }
+
+        // Buffer is empty, so wait for a new batch from the channel.
+        let messages = self
             .receiver
             .recv()
             .await
             .map_err(|_| anyhow!("Memory channel closed."))?;
-
-        tracing::trace!("Message receveid. Queued: {}", self.receiver.len());
         let commit = Box::new(|_| Box::pin(async move {}) as BoxFuture<'static, ()>);
-        Ok((message, commit))
+        Ok((messages, commit))
     }
 
     fn as_any(&self) -> &dyn Any {

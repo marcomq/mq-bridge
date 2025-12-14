@@ -1,11 +1,11 @@
-use std::sync::{atomic, Arc};
+use std::sync::Arc;
 //  hot_queue
 //  © Copyright 2025, by Marco Mengelkoch
 //  Licensed under MIT License, see License file for more details
 //  git clone https://github.com/marcomq/hot_queue
 use crate::endpoints::{create_consumer_from_route, create_publisher_from_route};
 pub use crate::models::Route;
-use crate::traits::CommitFunc;
+use crate::traits::BulkCommitFunc;
 use async_channel::{bounded, Sender};
 use tokio::{
     select,
@@ -26,16 +26,16 @@ impl Route {
         let name = Arc::new(name.to_string());
 
         let handle = tokio::spawn(async move {
-            let running = Arc::new(atomic::AtomicBool::new(true));
             loop {
-                let running_clone = Arc::clone(&running);
                 // cheap pointer clones
                 let route_arc = Arc::clone(&route);
                 let name_arc = Arc::clone(&name);
+                let shutdown_rx_clone = shutdown_rx.clone();
 
+                // The actual route logic is in `run_until_err`.
                 let mut run_task = tokio::spawn(async move {
                     route_arc
-                        .run_until_err(&name_arc, Some(running_clone))
+                        .run_until_err(&name_arc, Some(shutdown_rx_clone))
                         .await
                 });
 
@@ -45,21 +45,22 @@ impl Route {
                             warn!("Shutdown channel for route '{}' closed unexpectedly.", name);
                         }
                         info!("Shutdown signal received for route '{}'.", name);
-                        running.store(false, atomic::Ordering::Relaxed);
                         let _ = run_task.await;
                         break;
                     }
                     res = &mut run_task => {
-                        match res {
-                            Ok(Ok(should_continue)) if !should_continue => {
-                                info!("Route '{}' completed gracefully. Shutting down.", name);
-                                break;
+                        if let Ok(res) = res {
+                            match res {
+                                Ok(should_continue) if !should_continue => {
+                                    info!("Route '{}' completed gracefully. Shutting down.", name);
+                                    break;
+                                }
+                                Err(e) => {
+                                    error!("Route '{}' failed: {}. Reconnecting in 5 seconds...", name, e);
+                                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                                }
+                                _ => {} // The route should continue running.
                             }
-                            Ok(Err(e)) => {
-                                error!("Route '{}' failed: {}. Reconnecting in 5 seconds...", name, e);
-                                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-                            }
-                            _ => {}
                         }
                     }
                 }
@@ -73,12 +74,12 @@ impl Route {
     pub async fn run_until_err(
         &self,
         name: &str,
-        running: Option<Arc<atomic::AtomicBool>>,
+        shutdown_rx: Option<async_channel::Receiver<()>>,
     ) -> anyhow::Result<bool> {
         if self.concurrency == 1 {
-            self.run_sequentially(name, running).await
+            self.run_sequentially(name, shutdown_rx).await
         } else {
-            self.run_concurrently(name, running).await
+            self.run_concurrently(name, shutdown_rx).await
         }
     }
 
@@ -86,53 +87,67 @@ impl Route {
     async fn run_sequentially(
         &self,
         name: &str,
-        running: Option<Arc<atomic::AtomicBool>>,
+        shutdown_rx: Option<async_channel::Receiver<()>>,
     ) -> anyhow::Result<bool> {
-        let running = if let Some(running) = running {
-            running
+        let (internal_shutdown_tx, internal_shutdown_rx) = bounded(1);
+        let shutdown_rx = shutdown_rx.unwrap_or(internal_shutdown_rx);
+        let _shutdown_tx = if shutdown_rx.is_closed() {
+            Some(internal_shutdown_tx)
         } else {
-            Arc::new(atomic::AtomicBool::new(true))
+            None
         };
+
         let publisher =
             Arc::new(create_publisher_from_route(name, &self.output.endpoint_type).await?);
         let mut consumer = create_consumer_from_route(name, &self.input.endpoint_type).await?;
 
-        while running.load(atomic::Ordering::Relaxed) {
-            let (message, commit) = match consumer.receive().await {
-                Ok(val) => val,
-                Err(e) => {
-                    warn!("Consumer returned an error, likely end-of-stream: {}. Shutting down route.", e);
-                    break; // Graceful exit on end-of-stream
+        const BATCH_SIZE: usize = 128;
+        loop {
+            select! {
+                _ = shutdown_rx.recv() => {
+                    info!("Shutdown signal received in sequential runner for route '{}'.", name);
+                    return Ok(true); // Stopped by shutdown signal
                 }
-            };
-
-            // Process sequentially without spawning a new task
-            match publisher.send(message).await {
-                Ok(response) => commit(response).await,
-                Err(e) => error!("Failed to send message in sequential route: {}", e),
+                res = consumer.receive_bulk(BATCH_SIZE) => {
+                    let (messages, commit) = match res {
+                        Ok(val) => val,
+                        Err(e) => {
+                            warn!("Consumer returned an error, likely end-of-stream: {}. Shutting down route.", e);
+                            return Ok(false); // Graceful exit on end-of-stream
+                        }
+                    };
+                    debug!("Received a batch of {} messages sequentially", messages.len());
+                    // Process the batch sequentially without spawning a new task
+                    match publisher.send_bulk(messages).await {
+                        Ok(response) => commit(response).await,
+                        Err(e) => error!("Failed to send message in sequential route: {}", e),
+                    }
+                }
             }
         }
-        Ok(running.load(atomic::Ordering::Relaxed))
     }
 
     /// The main concurrent runner for when concurrency > 1.
     async fn run_concurrently(
         &self,
         name: &str,
-        running: Option<Arc<atomic::AtomicBool>>,
+        shutdown_rx: Option<async_channel::Receiver<()>>,
     ) -> anyhow::Result<bool> {
-        let running = if let Some(running) = running {
-            running
+        let (internal_shutdown_tx, internal_shutdown_rx) = bounded(1);
+        let shutdown_rx = shutdown_rx.unwrap_or(internal_shutdown_rx);
+        let _shutdown_tx = if shutdown_rx.is_closed() {
+            Some(internal_shutdown_tx)
         } else {
-            Arc::new(atomic::AtomicBool::new(true))
+            None
         };
         let publisher =
             Arc::new(create_publisher_from_route(name, &self.output.endpoint_type).await?);
         let mut consumer = create_consumer_from_route(name, &self.input.endpoint_type).await?;
         let (err_tx, err_rx) = bounded(1); // For critical, route-stopping errors
                                            // channel capacity: a small buffer proportional to concurrency
-        let work_capacity = self.concurrency.saturating_mul(4);
-        let (work_tx, work_rx) = bounded::<(crate::CanonicalMessage, CommitFunc)>(work_capacity);
+        const BATCH_SIZE: usize = 128;
+        let work_capacity = self.concurrency.saturating_mul(BATCH_SIZE);
+        let (work_tx, work_rx) = bounded::<(Vec<crate::CanonicalMessage>, BulkCommitFunc)>(work_capacity);
 
         // --- Worker Pool ---
         let mut worker_handles = Vec::with_capacity(self.concurrency);
@@ -142,14 +157,17 @@ impl Route {
             let err_tx = err_tx.clone();
             worker_handles.push(task::spawn(async move {
                 debug!("Starting worker {}", i);
-                while let Ok((message, commit)) = work_rx_clone.recv().await {
-                    match publisher.send(message).await {
+                while let Ok((messages, commit)) = work_rx_clone.recv().await {
+                    // The worker now receives a batch and sends it as a bulk.
+                    match publisher.send_bulk(messages).await {
                         Ok(response) => commit(response).await,
                         Err(e) => {
-                            error!("Worker failed to send message: {}", e);
-                            // Send the error back to the main task to tear down the route
+                            error!("Worker failed to send message batch: {}", e);
+                            // Send the error back to the main task to tear down the route.
                             if err_tx.send(e).await.is_err() {
-                                warn!("Could not send error to main task, it might be down.");
+                                warn!(
+                                    "Could not send error to main task, it might be down."
+                                );
                             }
                         }
                     }
@@ -157,7 +175,7 @@ impl Route {
             }));
         }
 
-        while running.load(atomic::Ordering::Relaxed) {
+        loop {
             select! {
                 biased; // Prioritize checking for errors
 
@@ -166,17 +184,22 @@ impl Route {
                     return Err(err);
                 }
 
-                res = consumer.receive() => {
-                    let (message, commit) = match res {
+                _ = shutdown_rx.recv() => {
+                    info!("Shutdown signal received in concurrent runner for route '{}'.", name);
+                    break;
+                }
+
+                res = consumer.receive_bulk(BATCH_SIZE) => {
+                    let (messages, commit) = match res {
                         Ok(val) => val,
                         Err(e) => {
                             warn!("Consumer returned an error, likely end-of-stream: {}. Shutting down route.", e);
                             break; // Exit the select loop gracefully
                         }
                     };
-                    if work_tx.send((message, commit)).await.is_err() {
-                        warn!("Work channel closed, cannot process more messages. Shutting down.");
-                        break;
+                    debug!("Received a batch of {} messages concurrently", messages.len());
+                    if work_tx.send((messages, commit)).await.is_err() {
+                        warn!("Work channel closed, cannot process more messages concurrently. Shutting down.");
                     }
                 }
             }
@@ -190,6 +213,6 @@ impl Route {
             let _ = handle.await;
         }
         // Return true if we should continue (i.e., we were stopped by the running flag), false otherwise.
-        Ok(running.load(atomic::Ordering::Relaxed))
+        Ok(!shutdown_rx.is_empty())
     }
 }
