@@ -11,7 +11,7 @@ mod integration;
 async fn test_memory_to_memory_pipeline() {
     integration::common::setup_logging();
 
-    let num_messages = 500_000;
+    let num_messages = 1500_000;
     let messages_to_send=
         integration::common::generate_test_messages(num_messages);
 
@@ -30,33 +30,28 @@ async fn test_memory_to_memory_pipeline() {
     let in_channel = route.input.channel().unwrap();
     let out_channel = route.output.channel().unwrap();
 
-    let bridge_handle = route.run();
+    let bridge_handle = route.run("mem_2_mem");
 
     println!("--- Starting Memory-to-Memory Pipeline Test ---");
-    let start_time = Instant::now();
 
-    dbg!("0");
+    let start_time = Instant::now();
     let fill_task = tokio::spawn(async move {
         in_channel.fill_messages(messages_to_send).await.unwrap();
         in_channel.close();
     });
-    dbg!("1");
 
     // Wait for the bridge to finish processing.
     let _ = tokio::time::timeout(Duration::from_secs(20), bridge_handle)
         .await
         .expect("Test timed out waiting for bridge to complete");
 
-    dbg!("2.2");
     // Ensure the fill task also completed without error
     fill_task.await.unwrap();
-    dbg!("2");
 
-    let duration = start_time.elapsed();
     let received = out_channel
         .drain_messages();
+    let duration = start_time.elapsed();
 
-    dbg!("3");
     let msgs_per_sec = num_messages as f64 / duration.as_secs_f64();
     println!(
         "Processed {} messages in {:.2?} ({:.2} msgs/sec)",
