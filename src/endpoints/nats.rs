@@ -11,11 +11,17 @@ use rustls::{ClientConfig, DigitallySignedStruct, Error as RustlsError, Signatur
 use std::io::BufReader;
 use std::sync::Arc;
 use tokio::time::Duration;
-use tracing::info;
+use tracing::{info, warn};
+
+enum NatsClient {
+    Core(async_nats::Client),
+    JetStream(jetstream::Context),
+}
 
 pub struct NatsPublisher {
-    jetstream: jetstream::Context,
+    client: NatsClient,
     subject: String,
+    // await_ack is only used for JetStream
     await_ack: bool,
 }
 
@@ -26,35 +32,47 @@ impl NatsPublisher {
         stream_name: Option<&str>,
     ) -> anyhow::Result<Self> {
         let options = build_nats_options(config).await?;
-        let client = options.connect(&config.url).await?;
-        let jetstream = jetstream::new(client.clone());
+        let nats_client = options.connect(&config.url).await?;
 
-        // Ensure the stream exists. This is idempotent.
-        // The stream name is now passed in directly.
-        if let Some(stream_name) = stream_name {
-            info!(stream = %stream_name, "Ensuring NATS stream exists");
-            jetstream
-                .get_or_create_stream(stream::Config {
-                    name: stream_name.to_string(),
-                    // all subjects that start with the stream name.
-                    subjects: vec![format!("{}.>", stream_name)], // e.g., "perf_stream_nats.>"
-                    ..Default::default()
-                })
-                .await?;
+        let client = if !config.no_jetstream {
+            let jetstream = jetstream::new(nats_client);
+            // Ensure the stream exists. This is idempotent.
+            if let Some(stream_name) = stream_name {
+                info!(stream = %stream_name, "Ensuring NATS JetStream stream exists");
+                jetstream
+                    .get_or_create_stream(stream::Config {
+                        name: stream_name.to_string(),
+                        subjects: vec![format!("{}.>", stream_name)],
+                        ..Default::default()
+                    })
+                    .await?;
+            } else {
+                warn!("NATS publisher is in JetStream mode but no 'stream' is configured. Publishing may fail if stream does not exist.");
+            }
+            NatsClient::JetStream(jetstream)
         } else {
-            info!("No default_stream configured for NATS sink, skipping stream creation. This may not work with a JetStream source.");
-        }
+            info!("NATS publisher is in Core mode (non-persistent).");
+            if config.await_ack {
+                warn!("'await_ack' is true but NATS is in Core mode, which does not support acknowledgements. The flag will be ignored.");
+            }
+            NatsClient::Core(nats_client)
+        };
 
         Ok(Self {
-            jetstream,
+            client,
             subject: subject.to_string(),
             await_ack: config.await_ack,
         })
     }
 
     pub fn with_subject(&self, subject: &str) -> Self {
+        // This clone is cheap because NatsClient holds an Arc-like client internally.
+        let client = match &self.client {
+            NatsClient::Core(c) => NatsClient::Core(c.clone()),
+            NatsClient::JetStream(j) => NatsClient::JetStream(j.clone()),
+        };
         Self {
-            jetstream: self.jetstream.clone(),
+            client,
             subject: subject.to_string(),
             await_ack: self.await_ack,
         }
@@ -74,14 +92,23 @@ impl MessagePublisher for NatsPublisher {
             HeaderMap::new()
         };
 
-        let ack_future = self
-            .jetstream
-            .publish_with_headers(self.subject.clone(), headers, message.payload.into())
-            .await?;
+        match &self.client {
+            NatsClient::JetStream(jetstream) => {
+                let ack_future = jetstream
+                    .publish_with_headers(self.subject.clone(), headers, message.payload.into())
+                    .await?;
 
-        if self.await_ack {
-            ack_future.await?; // Wait for the server acknowledgment
+                if self.await_ack {
+                    ack_future.await?; // Wait for the server acknowledgment
+                }
+            }
+            NatsClient::Core(client) => {
+                client
+                    .publish_with_headers(self.subject.clone(), headers, message.payload.into())
+                    .await?;
+            }
         }
+
         Ok(None)
     }
 
@@ -90,9 +117,13 @@ impl MessagePublisher for NatsPublisher {
     }
 }
 
+enum NatsSubscription {
+    Core(async_nats::Subscriber),
+    JetStream(jetstream::consumer::pull::Stream),
+}
+
 pub struct NatsConsumer {
-    _jetstream: jetstream::Context,
-    subscription: jetstream::consumer::pull::Stream,
+    subscription: NatsSubscription,
 }
 use std::any::Any;
 
@@ -104,61 +135,53 @@ impl NatsConsumer {
     ) -> anyhow::Result<Self> {
         let options = build_nats_options(config).await?;
         let client = options.connect(&config.url).await?;
-        let jetstream = jetstream::new(client);
 
-        // Ensure the stream exists. This is idempotent and safe to call from both
-        // publisher and consumer. It prevents race conditions where the consumer
-        // might start before the publisher has created the stream.
-        jetstream
-            .get_or_create_stream(stream::Config {
-                name: stream_name.to_string(),
-                subjects: vec![format!("{}.>", stream_name)],
-                ..Default::default()
-            })
-            .await?;
+        let subscription = if !config.no_jetstream {
+            let jetstream = jetstream::new(client);
+            info!(stream = %stream_name, subject = %subject, "NATS consumer is in JetStream mode.");
 
-        // Now that we've ensured the stream exists, we can get a handle to it.
-        // This is more direct and less prone to race conditions than the previous retry loop.
-        let stream = jetstream.get_stream(stream_name).await?;
+            jetstream
+                .get_or_create_stream(stream::Config {
+                    name: stream_name.to_string(),
+                    subjects: vec![format!("{}.>", stream_name)],
+                    ..Default::default()
+                })
+                .await?;
 
-        let consumer = stream
-            .create_consumer(jetstream::consumer::pull::Config {
-                // Create a unique, durable consumer name based on stream and subject
-                // to allow for multiple routes from the same stream.
-                durable_name: Some(format!(
-                    "mq-bridge-{}-{}",
-                    stream_name,
-                    subject.replace('.', "-")
-                )),
-                filter_subject: subject.to_string(),
-                // Start from the beginning of the stream for all messages
-                deliver_policy: jetstream::consumer::DeliverPolicy::All,
-                // Set a reasonable max ack pending to ensure we don't lose messages
-                max_ack_pending: 10000,
-                ..Default::default()
-            })
-            .await?;
+            let stream = jetstream.get_stream(stream_name).await?;
 
-        // Give the consumer a moment to be ready
-        tokio::time::sleep(Duration::from_millis(100)).await;
+            let consumer = stream
+                .create_consumer(jetstream::consumer::pull::Config {
+                    durable_name: Some(format!(
+                        "mq-bridge-{}-{}",
+                        stream_name,
+                        subject.replace('.', "-")
+                    )),
+                    filter_subject: subject.to_string(),
+                    deliver_policy: jetstream::consumer::DeliverPolicy::All,
+                    max_ack_pending: 10000,
+                    ..Default::default()
+                })
+                .await?;
 
-        let subscription = consumer.messages().await?;
-        info!(stream = %stream_name, subject = %subject, "NATS source subscribed to subject");
+            tokio::time::sleep(Duration::from_millis(100)).await;
 
-        Ok(Self {
-            _jetstream: jetstream,
-            subscription,
-        })
+            let stream = consumer.messages().await?;
+            info!(stream = %stream_name, subject = %subject, "NATS JetStream source subscribed");
+            NatsSubscription::JetStream(stream)
+        } else {
+            info!(subject = %subject, "NATS consumer is in Core mode (non-persistent).");
+            // For Core NATS, we use a queue group to load-balance messages.
+            // The queue group name can be derived from the stream/subject to be unique per route.
+            let queue_group = format!("mq-bridge-{}", stream_name.replace('.', "-")); // The queue_group can be a String
+            let sub = client.queue_subscribe(subject.to_string(), queue_group.clone()).await?;
+            info!(subject = %subject, queue_group = %queue_group, "NATS Core source subscribed");
+            NatsSubscription::Core(sub)
+        };
+
+        Ok(Self { subscription })
     }
-}
-
-#[async_trait]
-impl MessageConsumer for NatsConsumer {
-    async fn receive(&mut self) -> anyhow::Result<(CanonicalMessage, CommitFunc)> {
-        let message = futures::StreamExt::next(&mut self.subscription)
-            .await
-            .ok_or_else(|| anyhow!("NATS subscription stream ended"))??;
-
+    fn create_canonical_message(message: &async_nats::Message) -> CanonicalMessage {
         let mut canonical_message = CanonicalMessage::new(message.payload.to_vec());
 
         if let Some(headers) = &message.headers {
@@ -173,17 +196,41 @@ impl MessageConsumer for NatsConsumer {
                 canonical_message.metadata = Some(metadata);
             }
         }
+        canonical_message
+    }        
+}
 
-        let commit = Box::new(move |_response| {
-            Box::pin(async move {
-                message
-                    .ack()
+#[async_trait]
+impl MessageConsumer for NatsConsumer {
+    async fn receive(&mut self) -> anyhow::Result<(CanonicalMessage, CommitFunc)> {
+        let (message, commit) = match &mut self.subscription {
+            NatsSubscription::JetStream(stream) => {
+                let message = futures::StreamExt::next(stream)
                     .await
-                    .unwrap_or_else(|e| tracing::error!("Failed to ACK NATS message: {:?}", e))
-            }) as BoxFuture<'static, ()>
-        });
+                    .ok_or_else(|| anyhow!("NATS JetStream subscription ended"))??;
+                let msg = Self::create_canonical_message(&message);
+                let commit: CommitFunc = Box::new(move |_response| {
+                    Box::pin(async move {
+                        message.ack().await.unwrap_or_else(|e| {
+                            tracing::error!("Failed to ACK NATS message: {:?}", e)
+                        });
+                    }) as BoxFuture<'static, ()>
+                });
+                (msg, commit)
+            }
+            NatsSubscription::Core(sub) => {
+                let message = futures::StreamExt::next(sub)
+                    .await
+                    .ok_or_else(|| anyhow!("NATS Core subscription ended"))?;
 
-        Ok((canonical_message, commit))
+                // Core NATS has no ack, so the commit is a no-op.
+                let commit: CommitFunc = Box::new(move |_| Box::pin(async {}));
+                let msg = Self::create_canonical_message(&message);
+                (msg, commit)
+            }
+        };
+
+        Ok((message, commit))
     }
 
     fn as_any(&self) -> &dyn Any {

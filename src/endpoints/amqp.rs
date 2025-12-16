@@ -9,7 +9,7 @@ use lapin::{
         BasicAckOptions, BasicConsumeOptions, BasicPublishOptions, BasicQosOptions,
         QueueDeclareOptions,
     },
-    types::FieldTable,
+    types::{FieldTable, ShortString},
     BasicProperties, Channel, Connection, ConnectionProperties, Consumer,
 };
 use std::any::Any;
@@ -20,6 +20,7 @@ pub struct AmqpPublisher {
     channel: Channel,
     exchange: String,
     routing_key: String,
+    persistent: bool,
     await_ack: bool,
 }
 
@@ -37,7 +38,10 @@ impl AmqpPublisher {
         channel
             .queue_declare(
                 routing_key,
-                QueueDeclareOptions::default(),
+                QueueDeclareOptions {
+                    durable: config.persistent,
+                    ..Default::default()
+                },
                 FieldTable::default(),
             )
             .await?;
@@ -46,6 +50,7 @@ impl AmqpPublisher {
             channel,
             exchange: "".to_string(), // Default exchange
             routing_key: routing_key.to_string(),
+            persistent: config.persistent,
             await_ack: config.await_ack,
         })
     }
@@ -55,6 +60,7 @@ impl AmqpPublisher {
             channel: self.channel.clone(),
             exchange: self.exchange.clone(),
             routing_key: routing_key.to_string(),
+            persistent: self.persistent,
             await_ack: self.await_ack,
         }
     }
@@ -63,13 +69,18 @@ impl AmqpPublisher {
 #[async_trait]
 impl MessagePublisher for AmqpPublisher {
     async fn send(&self, message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {
-        let mut properties = BasicProperties::default();
+        let mut properties = if self.persistent {
+            // Delivery mode 2 makes the message persistent
+            BasicProperties::default().with_delivery_mode(2)
+        } else {
+            BasicProperties::default()
+        };
         if let Some(metadata) = message.metadata {
             if !metadata.is_empty() {
                 let mut table = FieldTable::default();
                 for (key, value) in metadata {
                     table.insert(
-                        key.into(),
+                        ShortString::from(key),
                         lapin::types::AMQPValue::LongString(value.into()),
                     );
                 }
@@ -111,7 +122,13 @@ impl AmqpConsumer {
 
         info!(queue = %queue, "Declaring AMQP queue");
         channel
-            .queue_declare(queue, QueueDeclareOptions::default(), FieldTable::default())
+            .queue_declare(
+                queue,
+                QueueDeclareOptions {
+                    durable: config.persistent,
+                    ..Default::default()
+                },
+                FieldTable::default())
             .await?;
 
         // Set prefetch count. This acts as a buffer and is crucial for concurrent processing.
@@ -218,14 +235,15 @@ impl MessageConsumer for AmqpConsumer {
 
         let commit = Box::new(move |_response| {
             Box::pin(async move {
-                delivery
-                    .ack(BasicAckOptions::default())
-                    .await
-                    .expect("Failed to ack AMQP message");
-                debug!(
-                    delivery_tag = delivery.delivery_tag,
-                    "AMQP message acknowledged"
-                );
+                if let Err(e) = delivery.ack(BasicAckOptions::default()).await {
+                    tracing::error!(
+                        delivery_tag = delivery.delivery_tag,
+                        error = %e,
+                        "Failed to ack AMQP message"
+                    );
+                } else {
+                    debug!(delivery_tag = delivery.delivery_tag, "AMQP message acknowledged");
+                }
             }) as BoxFuture<'static, ()>
         });
 

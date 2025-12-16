@@ -255,6 +255,9 @@ pub struct NatsConfig {
     pub tls: TlsConfig,
     #[serde(default)]
     pub await_ack: bool,
+    /// If no_jetstream: true, use Core NATS (fire-and-forget) instead of JetStream. Defaults to false.
+    #[serde(default)]
+    pub no_jetstream: bool,
     pub default_stream: Option<String>,
 }
 
@@ -285,10 +288,15 @@ pub struct AmqpConfig {
     pub password: Option<String>,
     #[serde(default)]
     pub tls: TlsConfig,
+    #[serde(default = "default_amqp_persistent")]
+    pub persistent: bool,
     #[serde(default)]
     pub await_ack: bool,
 }
 
+fn default_amqp_persistent() -> bool {
+    true
+}
 // --- MongoDB Specific Configuration ---
 
 /// MongoDB endpoint configuration.
