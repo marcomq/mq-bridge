@@ -40,7 +40,7 @@ impl TryFrom<MongoMessageRaw> for CanonicalMessage {
 
         Ok(CanonicalMessage {
             message_id: Some(raw.message_id as u64),
-            payload: raw.payload.bytes,
+            payload: raw.payload.bytes.into(),
             metadata,
         })
     }
@@ -90,7 +90,7 @@ impl MessagePublisher for MongoDbPublisher {
             "message_id": message_id_i64, // Convert u64 to i64
             "payload": Bson::Binary(mongodb::bson::Binary {
                 subtype: mongodb::bson::spec::BinarySubtype::Generic,
-                bytes: msg_with_metadata.payload.clone() }),
+                bytes: msg_with_metadata.payload.to_vec() }),
             "metadata": to_document(&msg_with_metadata.metadata)?,
             "locked_until": null
         };

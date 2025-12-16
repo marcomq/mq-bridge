@@ -58,7 +58,7 @@ impl KafkaPublisher {
         }
 
         if let (Some(username), Some(password)) = (&config.username, &config.password) {
-            client_config.set("sasl.mechanisms", "PLAIN");
+            client_config.set("sasl.mechanism", "PLAIN");
             client_config.set("sasl.username", username);
             client_config.set("sasl.password", password);
             client_config.set("security.protocol", "sasl_ssl");
@@ -134,7 +134,7 @@ impl Drop for KafkaPublisher {
 #[async_trait]
 impl MessagePublisher for KafkaPublisher {
     async fn send(&self, message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {
-        let mut record = FutureRecord::to(&self.topic).payload(&message.payload);
+        let mut record = FutureRecord::to(&self.topic).payload(&message.payload[..]);
 
         if let Some(metadata) = &message.metadata {
             if !metadata.is_empty() {

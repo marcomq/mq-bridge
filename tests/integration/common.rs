@@ -6,6 +6,7 @@ use hot_queue::traits::{CommitFunc, MessageConsumer};
 use hot_queue::{CanonicalMessage, Route};
 use serde_json::json;
 use std::any::Any;
+use std::fmt::Display;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -301,8 +302,8 @@ pub async fn measure_write_performance(
     let msgs_per_sec = num_messages as f64 / duration.as_secs_f64();
 
     println!(
-        "  Wrote {} messages in {:.2?} ({:.2} msgs/sec)",
-        num_messages, duration, msgs_per_sec
+        "  Wrote {} messages in {:.2?} ({} msgs/sec)",
+        format_pretty(num_messages), duration, format_pretty(msgs_per_sec)
     );
 }
 
@@ -376,7 +377,36 @@ pub async fn measure_read_performance(
     let msgs_per_sec = num_messages as f64 / duration.as_secs_f64();
 
     println!(
-        "  Read {} messages in {:.2?} ({:.2} msgs/sec)",
-        num_messages, duration, msgs_per_sec
+        "  Read {} messages in {:.2?} ({} msgs/sec)",
+        format_pretty(num_messages), duration, format_pretty(msgs_per_sec)
     );
+}
+
+/// Formats a number with commas as thousand separators.
+/// Handles both integers and floating-point numbers.
+pub fn format_pretty<N: Display>(num: N) -> String {
+    let s = num.to_string();
+    let mut parts = s.splitn(2, '.');
+    let integer_part = parts.next().unwrap_or("");
+    let fractional_part = parts.next();
+
+    let mut formatted_integer = String::with_capacity(integer_part.len() + integer_part.len() / 3);
+    let mut count = 0;
+    for ch in integer_part.chars().rev() {
+        if count > 0 && count % 3 == 0 {
+            formatted_integer.push('_');
+        }
+        formatted_integer.push(ch);
+        count += 1;
+    }
+
+    let formatted_integer = formatted_integer.chars().rev().collect::<String>();
+
+    match fractional_part {
+        Some(frac) => {
+            let truncated_frac = if frac.len() > 2 { &frac[..2] } else { frac };
+            format!("{}.{}", formatted_integer, truncated_frac)
+        }
+        None => formatted_integer,
+    }
 }

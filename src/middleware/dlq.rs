@@ -162,7 +162,53 @@ impl MessagePublisher for DlqPublisher {
                     }
                 }
             }
-            Err(e) => Err(e),
+            Err(e) => {
+                let error_msg = e.to_string();
+                error!(
+                    "Failed to send a batch of {} messages (complete failure). Attempting to send all to DLQ.",
+                    messages.len()
+                );
+
+                // Attempt to send all messages to the DLQ with retry logic
+                let mut attempt = 0;
+                let mut backoff_ms = 100u64;
+                let mut messages_to_retry = messages.clone();
+
+                loop {
+                    attempt += 1;
+                    match self.dlq_publisher.send_bulk(messages_to_retry.clone()).await {
+                        Ok((_, dlq_failed)) if dlq_failed.is_empty() => {
+                            info!("Batch of {} messages successfully sent to DLQ on attempt {} after complete primary failure.", messages.len(), attempt);
+                            return Ok((None, messages));
+                        }
+                        Ok((_, dlq_failed)) if attempt < self.dlq_retry_attempts => {
+                            warn!(
+                                "DLQ bulk send partially failed on attempt {} of {}: {} of {} messages failed. Retrying in {}ms...",
+                                attempt, self.dlq_retry_attempts, dlq_failed.len(), messages_to_retry.len(), backoff_ms
+                            );
+                            messages_to_retry = dlq_failed;
+                            tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                            backoff_ms = (backoff_ms * 2).min(5000);
+                        }
+                        Err(dlq_error) if attempt < self.dlq_retry_attempts => {
+                            warn!(
+                                "DLQ bulk send failed on attempt {} of {}: {}. Retrying in {}ms...",
+                                attempt, self.dlq_retry_attempts, dlq_error, backoff_ms
+                            );
+                            tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                            backoff_ms = (backoff_ms * 2).min(5000);
+                        }
+                        Err(dlq_error) => {
+                            error!("DLQ bulk send failed after {} attempts: {}. Original primary send error: {}", attempt, dlq_error, error_msg);
+                            return Err(anyhow::anyhow!("Primary send failed: {}. DLQ bulk send also failed after {} retries: {}", error_msg, self.dlq_retry_attempts, dlq_error));
+                        }
+                        Ok((_, dlq_failed)) => {
+                            error!("DLQ bulk send failed after {} attempts. {} messages could not be sent to DLQ. Original primary send error: {}", attempt, dlq_failed.len(), error_msg);
+                            return Err(anyhow::anyhow!("Primary send failed: {}. DLQ bulk send also failed after {} retries, with {} messages remaining.", error_msg, self.dlq_retry_attempts, dlq_failed.len()));
+                        }
+                    }
+                }
+            }
         }
     }
 

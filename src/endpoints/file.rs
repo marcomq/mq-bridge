@@ -49,12 +49,11 @@ impl FilePublisher {
 impl MessagePublisher for FilePublisher {
     #[instrument(skip_all, fields(message_id = ?message.message_id))]
     async fn send(&self, message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {
-        let mut payload = message.payload;
-        payload.push(b'\n'); // Add a newline to separate messages
-
         let mut writer = self.writer.lock().await;
-        writer.write_all(&payload).await?;
-        // writer.flush().await?;
+        // Since Bytes is immutable, we write the payload and the newline separately.
+        // The BufWriter will handle this efficiently.
+        writer.write_all(&message.payload).await?;
+        writer.write_all(b"\n").await?;
 
         Ok(None)
     }
@@ -96,16 +95,19 @@ impl FileConsumer {
 impl MessageConsumer for FileConsumer {
     #[instrument(skip(self), fields(path = %self.path), err(level = "info"))]
     async fn receive(&mut self) -> anyhow::Result<(CanonicalMessage, CommitFunc)> {
-        let mut line = String::new();
+        let mut buffer = Vec::new();
 
-        let bytes_read = self.reader.read_line(&mut line).await?;
+        let bytes_read = self.reader.read_until(b'\n', &mut buffer).await?;
         if bytes_read == 0 {
             info!("End of file reached, consumer will stop.");
             return Err(anyhow!("End of file reached: {}", self.path));
         }
 
-        // Trim the newline character that read_line includes
-        let message = CanonicalMessage::new(line.trim_end().as_bytes().to_vec());
+        // Trim the newline character that read_until includes
+        if buffer.ends_with(&[b'\n']) {
+            buffer.pop();
+        }
+        let message = CanonicalMessage::new(buffer);
 
         // The commit for a file source is a no-op.
         let commit = Box::new(move |_| Box::pin(async move {}) as BoxFuture<'static, ()>);

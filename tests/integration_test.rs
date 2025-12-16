@@ -28,11 +28,6 @@ async fn test_amqp_performance_pipeline() {
     integration::amqp::test_amqp_performance_pipeline().await;
 }
 
-#[cfg(feature = "amqp")]
-#[tokio::test]
-async fn test_amqp_performance_direct() {
-    integration::amqp::test_amqp_performance_direct().await;
-}
 
 #[cfg(feature = "kafka")]
 #[tokio::test]
@@ -44,12 +39,6 @@ async fn test_kafka_pipeline() {
 #[tokio::test]
 async fn test_kafka_performance_pipeline() {
     integration::kafka::test_kafka_performance_pipeline().await;
-}
-
-#[cfg(feature = "kafka")]
-#[tokio::test]
-async fn test_kafka_performance_direct() {
-    integration::kafka::test_kafka_performance_direct().await;
 }
 
 #[cfg(feature = "mqtt")]
@@ -64,12 +53,6 @@ async fn test_mqtt_performance_pipeline() {
     integration::mqtt::test_mqtt_performance_pipeline().await;
 }
 
-#[cfg(feature = "mqtt")]
-#[tokio::test]
-async fn test_mqtt_performance_direct() {
-    integration::mqtt::test_mqtt_performance_direct().await;
-}
-
 #[cfg(feature = "nats")]
 #[tokio::test]
 async fn test_nats_pipeline() {
@@ -82,11 +65,6 @@ async fn test_nats_performance_pipeline() {
     integration::nats::test_nats_performance_pipeline().await;
 }
 
-#[cfg(feature = "nats")]
-#[tokio::test]
-async fn test_nats_performance_direct() {
-    integration::nats::test_nats_performance_direct().await;
-}
 
 #[cfg(feature = "mongodb")]
 #[tokio::test]
@@ -94,14 +72,45 @@ async fn test_mongodb_performance_pipeline() {
     integration::mongodb::test_mongodb_performance_pipeline().await;
 }
 
+*/
+
+#[cfg(feature = "amqp")]
+#[tokio::test]
+#[ignore] // This is a performance test, run it explicitly
+async fn test_amqp_performance_direct() {
+    integration::amqp::test_amqp_performance_direct().await;
+}
+    
+#[cfg(feature = "kafka")]
+#[tokio::test]
+#[ignore] // This is a performance test, run it explicitly
+async fn test_kafka_performance_direct() {
+    integration::kafka::test_kafka_performance_direct().await;
+}
+
+#[cfg(feature = "mqtt")]
+#[tokio::test]
+#[ignore] // This is a performance test, run it explicitly
+async fn test_mqtt_performance_direct() {
+    integration::mqtt::test_mqtt_performance_direct().await;
+}
+
+#[cfg(feature = "nats")]
+#[tokio::test]
+#[ignore] // This is a performance test, run it explicitly
+async fn test_nats_performance_direct() {
+    integration::nats::test_nats_performance_direct().await;
+}
+
 #[cfg(feature = "mongodb")]
+#[ignore] // This is a performance test, run it explicitly
 #[tokio::test]
 async fn test_mongodb_performance_direct() {
     integration::mongodb::test_mongodb_performance_direct().await;
 }
-*/
 
 #[tokio::test]
+#[ignore] // This is a performance test, run it explicitly
 async fn test_memory_performance_pipeline() {
     integration::memory::test_memory_performance_pipeline().await;
 }

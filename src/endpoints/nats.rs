@@ -36,11 +36,8 @@ impl NatsPublisher {
             jetstream
                 .get_or_create_stream(stream::Config {
                     name: stream_name.to_string(),
-                    // The stream must be configured to capture the specific subject,
-                    // or a wildcard. A subject filter of `stream_name.>` will capture
-                    // all subjects that start with the stream name. We also add the specific
-                    // subject to ensure it's captured even if it doesn't match the wildcard.
-                    subjects: vec![format!("{}.>", stream_name), subject.to_string()], // e.g., "perf_stream_nats.>"
+                    // all subjects that start with the stream name.
+                    subjects: vec![format!("{}.>", stream_name)], // e.g., "perf_stream_nats.>"
                     ..Default::default()
                 })
                 .await?;
@@ -115,7 +112,7 @@ impl NatsConsumer {
         jetstream
             .get_or_create_stream(stream::Config {
                 name: stream_name.to_string(),
-                subjects: vec![format!("{}.>", stream_name), subject.to_string()],
+                subjects: vec![format!("{}.>", stream_name)],
                 ..Default::default()
             })
             .await?;

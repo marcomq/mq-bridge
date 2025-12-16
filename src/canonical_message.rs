@@ -3,13 +3,14 @@
 //  Licensed under MIT License, see License file for more details
 //  git clone https://github.com/marcomq/hot_queue
 
+use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CanonicalMessage {
     pub message_id: Option<u64>,
-    pub payload: Vec<u8>,
+    pub payload: Bytes,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<HashMap<String, String>>,
 }
@@ -18,7 +19,7 @@ impl CanonicalMessage {
     pub fn new(payload: Vec<u8>) -> Self {
         Self {
             message_id: None,
-            payload,
+            payload: Bytes::from(payload),
             metadata: None,
         }
     }
