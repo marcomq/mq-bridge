@@ -150,7 +150,8 @@ async fn create_amqp_connection(config: &AmqpConfig) -> anyhow::Result<Connectio
 
     let mut last_error = None;
     for attempt in 1..=5 {
-        info!(url = %conn_uri, attempt = attempt, "Attempting to connect to AMQP broker");
+        // Avoid logging credentials embedded in URLs.
+        info!(attempt = attempt, "Attempting to connect to AMQP broker");
         let conn_props = ConnectionProperties::default();
         let result = if config.tls.required {
             let tls_config = build_tls_config(config).await?;

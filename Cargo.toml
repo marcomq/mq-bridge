@@ -80,6 +80,7 @@ http = ["axum", "reqwest", "axum-server", "rustls", "tokio-rustls", "rustls-pemf
 file = [] # No extra deps
 
 [dev-dependencies]
+uuid = { version = "1.19", features = ["v4"] }
 serde_yaml_ng = "0.10.0"
 tempfile = "3.10"
 tracing-appender = "0.2"

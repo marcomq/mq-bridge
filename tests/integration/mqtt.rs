@@ -21,7 +21,7 @@ routes:
     in:
       mqtt: { url: "mqtt://localhost:1883", topic: "test_topic_mqtt" }
     out:
-      memory: { topic: "test-out-mqtt", capacity: {out_capacity} } }
+      memory: { topic: "test-out-mqtt", capacity: {out_capacity} }
 "#;
 
 pub async fn test_mqtt_pipeline() {

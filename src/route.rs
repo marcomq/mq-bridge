@@ -27,40 +27,44 @@ impl Route {
 
         let handle = tokio::spawn(async move {
             loop {
-                // cheap pointer clones
                 let route_arc = Arc::clone(&route);
                 let name_arc = Arc::clone(&name);
-                let shutdown_rx_clone = shutdown_rx.clone();
+                // Create a new, per-iteration internal shutdown channel.
+                // This avoids a race where both this loop and the inner task
+                // try to consume the same external shutdown signal.
+                let (internal_shutdown_tx, internal_shutdown_rx) = bounded(1);
 
                 // The actual route logic is in `run_until_err`.
                 let mut run_task = tokio::spawn(async move {
                     route_arc
-                        .run_until_err(&name_arc, Some(shutdown_rx_clone))
+                        .run_until_err(&name_arc, Some(internal_shutdown_rx))
                         .await
                 });
 
                 select! {
-                    res = shutdown_rx.recv() => {
-                        if res.is_err() {
-                            warn!("Shutdown channel for route '{}' closed unexpectedly.", name);
-                        }
+                    _ = shutdown_rx.recv() => {
                         info!("Shutdown signal received for route '{}'.", name);
+                        // Notify the inner task to shut down.
+                        let _ = internal_shutdown_tx.send(()).await;
+                        // Wait for the inner task to finish gracefully.
                         let _ = run_task.await;
                         break;
                     }
                     res = &mut run_task => {
-                        if let Ok(res) = res {
-                            match res {
-                                Ok(should_continue) if !should_continue => {
-                                    info!("Route '{}' completed gracefully. Shutting down.", name);
-                                    break;
-                                }
-                                Err(e) => {
-                                    error!("Route '{}' failed: {}. Reconnecting in 5 seconds...", name, e);
-                                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-                                }
-                                _ => {} // The route should continue running.
+                        match res {
+                            Ok(Ok(should_continue)) if !should_continue => {
+                                info!("Route '{}' completed gracefully. Shutting down.", name);
+                                break;
                             }
+                            Ok(Err(e)) => {
+                                error!("Route '{}' failed: {}. Reconnecting in 5 seconds...", name, e);
+                                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                            }
+                            Err(e) => {
+                                error!("Route '{}' task panicked: {}. Reconnecting in 5 seconds...", name, e);
+                                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                            }
+                            _ => {} // The route should continue running.
                         }
                     }
                 }
@@ -76,6 +80,13 @@ impl Route {
         name: &str,
         shutdown_rx: Option<async_channel::Receiver<()>>,
     ) -> anyhow::Result<bool> {
+        let (internal_shutdown_tx, internal_shutdown_rx) = bounded(1);
+        let shutdown_rx = shutdown_rx.unwrap_or(internal_shutdown_rx);
+        let _shutdown_tx = if shutdown_rx.is_closed() {
+            Some(internal_shutdown_tx)
+        } else {
+            None
+        };
         if self.concurrency == 1 {
             self.run_sequentially(name, shutdown_rx).await
         } else {
@@ -87,16 +98,8 @@ impl Route {
     async fn run_sequentially(
         &self,
         name: &str,
-        shutdown_rx: Option<async_channel::Receiver<()>>,
+        shutdown_rx: async_channel::Receiver<()>,
     ) -> anyhow::Result<bool> {
-        let (internal_shutdown_tx, internal_shutdown_rx) = bounded(1);
-        let shutdown_rx = shutdown_rx.unwrap_or(internal_shutdown_rx);
-        let _shutdown_tx = if shutdown_rx.is_closed() {
-            Some(internal_shutdown_tx)
-        } else {
-            None
-        };
-
         let publisher =
             Arc::new(create_publisher_from_route(name, &self.output.endpoint_type).await?);
         let mut consumer = create_consumer_from_route(name, &self.input.endpoint_type).await?;
@@ -119,8 +122,10 @@ impl Route {
                     debug!("Received a batch of {} messages sequentially", messages.len());
                     // Process the batch sequentially without spawning a new task
                     match publisher.send_bulk(messages).await {
-                        Ok(response) => commit(response).await,
-                        Err(e) => error!("Failed to send message in sequential route: {}", e),
+                        Ok(response) => {
+                            commit(response).await;
+                        }
+                        Err(e) => return Err(e.into()), // Propagate error to trigger reconnect
                     }
                 }
             }
@@ -131,15 +136,8 @@ impl Route {
     async fn run_concurrently(
         &self,
         name: &str,
-        shutdown_rx: Option<async_channel::Receiver<()>>,
+        shutdown_rx: async_channel::Receiver<()>,
     ) -> anyhow::Result<bool> {
-        let (internal_shutdown_tx, internal_shutdown_rx) = bounded(1);
-        let shutdown_rx = shutdown_rx.unwrap_or(internal_shutdown_rx);
-        let _shutdown_tx = if shutdown_rx.is_closed() {
-            Some(internal_shutdown_tx)
-        } else {
-            None
-        };
         let publisher =
             Arc::new(create_publisher_from_route(name, &self.output.endpoint_type).await?);
         let mut consumer = create_consumer_from_route(name, &self.input.endpoint_type).await?;
