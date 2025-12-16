@@ -41,10 +41,12 @@ pub async fn apply_middlewares_to_consumer(
             }
             Middleware::Dlq(_) => consumer, // DLQ is a publisher-only middleware
             #[allow(unreachable_patterns)]
-            _ => return Err(anyhow::anyhow!(
-                "[middleware:{}] Unsupported consumer middleware",
-                route_name
-            )),
+            _ => {
+                return Err(anyhow::anyhow!(
+                    "[middleware:{}] Unsupported consumer middleware",
+                    route_name
+                ))
+            }
         };
     }
     Ok(consumer)
@@ -70,10 +72,12 @@ pub async fn apply_middlewares_to_publisher(
             #[cfg(feature = "dedup")]
             Middleware::Deduplication(_) => publisher,
             #[allow(unreachable_patterns)]
-            _ => return Err(anyhow::anyhow!(
-                "[middleware:{}] Unsupported publisher middleware",
-                route_name
-            )),
+            _ => {
+                return Err(anyhow::anyhow!(
+                    "[middleware:{}] Unsupported publisher middleware",
+                    route_name
+                ))
+            }
         };
     }
     Ok(publisher.into())

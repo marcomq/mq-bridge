@@ -200,21 +200,23 @@ impl MessageConsumer for MemoryConsumer {
         max_messages: usize,
     ) -> anyhow::Result<(Vec<CanonicalMessage>, BulkCommitFunc)> {
         // If the internal buffer has messages, return them first.
-        if !self.buffer.is_empty() {
-            let mut messages_to_return = std::mem::take(&mut self.buffer);
-            if messages_to_return.len() > max_messages {
-                self.buffer = messages_to_return.split_off(max_messages);
-            }
-            let commit = Box::new(|_| Box::pin(async move {}) as BoxFuture<'static, ()>);
-            return Ok((messages_to_return, commit));
+        if self.buffer.is_empty() {
+            // Buffer is empty, so wait for a new batch from the channel.
+            self.buffer = self
+                .receiver
+                .recv()
+                .await
+                .map_err(|_| anyhow!("Memory channel closed."))?;
         }
 
-        // Buffer is empty, so wait for a new batch from the channel.
-        let messages = self
-            .receiver
-            .recv()
-            .await
-            .map_err(|_| anyhow!("Memory channel closed."))?;
+        // If we got more messages than requested, split off the excess and store back in buffer.
+        let messages = if self.buffer.len() > max_messages {
+            self.buffer.split_off(max_messages)
+        }
+        // Ensure buffer is empty if we're returning all messages.
+        else {
+            std::mem::take(&mut self.buffer)
+        };
         let commit = Box::new(|_| Box::pin(async move {}) as BoxFuture<'static, ()>);
         Ok((messages, commit))
     }

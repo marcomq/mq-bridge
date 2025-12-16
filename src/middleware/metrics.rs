@@ -3,9 +3,9 @@
 //  Licensed under MIT License, see License file for more details
 //  git clone https://github.com/marcomq/hot_queue
 
-use crate::traits::{BulkCommitFunc, CommitFunc, MessageConsumer};
 use crate::models::MetricsMiddleware;
 use crate::traits::MessagePublisher;
+use crate::traits::{BulkCommitFunc, CommitFunc, MessageConsumer};
 use crate::CanonicalMessage;
 use async_trait::async_trait;
 use std::any::Any;
@@ -114,7 +114,10 @@ impl MessageConsumer for MetricsConsumer {
         result
     }
 
-    async fn receive_bulk(&mut self, max_messages: usize) -> anyhow::Result<(Vec<CanonicalMessage>, BulkCommitFunc)> {
+    async fn receive_bulk(
+        &mut self,
+        max_messages: usize,
+    ) -> anyhow::Result<(Vec<CanonicalMessage>, BulkCommitFunc)> {
         let start = Instant::now();
         let result = self.inner.receive_bulk(max_messages).await;
         let duration = start.elapsed();

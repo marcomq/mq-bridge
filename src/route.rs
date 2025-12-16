@@ -142,7 +142,8 @@ impl Route {
                                            // channel capacity: a small buffer proportional to concurrency
         const BATCH_SIZE: usize = 128;
         let work_capacity = self.concurrency.saturating_mul(BATCH_SIZE);
-        let (work_tx, work_rx) = bounded::<(Vec<crate::CanonicalMessage>, BulkCommitFunc)>(work_capacity);
+        let (work_tx, work_rx) =
+            bounded::<(Vec<crate::CanonicalMessage>, BulkCommitFunc)>(work_capacity);
 
         // --- Worker Pool ---
         let mut worker_handles = Vec::with_capacity(self.concurrency);
@@ -154,7 +155,8 @@ impl Route {
                 debug!("Starting worker {}", i);
                 while let Ok((messages, commit)) = work_rx_clone.recv().await {
                     // The worker now receives a batch and sends it as a bulk.
-                    match publisher.send_bulk(messages).await { // Note: removed '?' to handle all cases
+                    match publisher.send_bulk(messages).await {
+                        // Note: removed '?' to handle all cases
                         Ok((response, failed)) if failed.is_empty() => {
                             commit(response).await;
                         }
@@ -164,18 +166,14 @@ impl Route {
                             error!("Worker failed to send message batch: {}", e);
                             // Send the error back to the main task to tear down the route.
                             if err_tx.send(e).await.is_err() {
-                                warn!(
-                                    "Could not send error to main task, it might be down."
-                                );
+                                warn!("Could not send error to main task, it might be down.");
                             }
                         }
                         Err(e) => {
                             error!("Worker failed to send message batch: {}", e);
                             // Send the error back to the main task to tear down the route.
                             if err_tx.send(e).await.is_err() {
-                                warn!(
-                                    "Could not send error to main task, it might be down."
-                                );
+                                warn!("Could not send error to main task, it might be down.");
                             }
                         }
                     }
@@ -222,6 +220,6 @@ impl Route {
             let _ = handle.await;
         }
         // Return true if we should continue (i.e., we were stopped by the running flag), false otherwise.
-        Ok(!shutdown_rx.is_empty())
+        Ok(shutdown_rx.is_empty())
     }
 }

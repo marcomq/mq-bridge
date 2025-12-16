@@ -87,11 +87,15 @@ impl<'de> Deserialize<'de> for Endpoint {
 
                 // Deserialize the extracted middlewares value using the existing helper logic.
                 let middlewares = match middlewares_val {
-                    Some(val) => deserialize_middlewares_from_value(val)
-                        .map_err(serde::de::Error::custom)?,
+                    Some(val) => {
+                        deserialize_middlewares_from_value(val).map_err(serde::de::Error::custom)?
+                    }
                     None => Vec::new(),
                 };
-                Ok(Endpoint { middlewares, endpoint_type })
+                Ok(Endpoint {
+                    middlewares,
+                    endpoint_type,
+                })
             }
         }
 
@@ -122,8 +126,9 @@ where
 {
     match value {
         // This is the case for YAML, which provides a clean sequence.
-        serde_json::Value::Array(arr) => serde_json::from_value(serde_json::Value::Array(arr))
-            .map_err(|e| e.to_string()),
+        serde_json::Value::Array(arr) => {
+            serde_json::from_value(serde_json::Value::Array(arr)).map_err(|e| e.to_string())
+        }
         // This is the case for environment variables, which `config` turns into a map.
         // It also handles the map format from YAML.
         // Since we now enforce sequences for YAML, this branch is primarily for env vars.
@@ -469,7 +474,6 @@ kafka_to_nats:
         } else {
             panic!("Output endpoint should be NATS");
         }
-
     }
 
     #[test]

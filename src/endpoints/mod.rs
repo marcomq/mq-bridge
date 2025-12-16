@@ -46,16 +46,12 @@ async fn create_base_consumer(
         #[cfg(feature = "nats")]
         EndpointType::Nats(cfg) => {
             let subject = cfg.subject.as_deref().unwrap_or(route_name);
-            let stream_name = cfg
-                .stream
-                .as_deref()
-                .or(cfg.stream.as_deref())
-                .ok_or_else(|| {
-                    anyhow!(
-                        "[route:{}] NATS consumer must specify a 'stream' or have a 'default_stream'",
-                        route_name
-                    )
-                })?;
+            let stream_name = cfg.stream.as_deref().ok_or_else(|| {
+                anyhow!(
+                    "[route:{}] NATS consumer must specify a 'stream' or have a 'default_stream'",
+                    route_name
+                )
+            })?;
             Ok(Box::new(
                 nats::NatsConsumer::new(&cfg.config, stream_name, subject).await?,
             ))
@@ -117,24 +113,37 @@ async fn create_base_publisher(
         #[cfg(feature = "kafka")]
         EndpointType::Kafka(cfg) => {
             let topic = cfg.topic.as_deref().unwrap_or(route_name);
-            Ok(Box::new(kafka::KafkaPublisher::new(&cfg.config, topic).await?) as Box<dyn MessagePublisher>)
+            Ok(
+                Box::new(kafka::KafkaPublisher::new(&cfg.config, topic).await?)
+                    as Box<dyn MessagePublisher>,
+            )
         }
         #[cfg(feature = "nats")]
         EndpointType::Nats(cfg) => {
             let subject = cfg.subject.as_deref().unwrap_or(route_name);
-            Ok(Box::new(nats::NatsPublisher::new(&cfg.config, subject, cfg.stream.as_deref()).await?) as Box<dyn MessagePublisher>)
+            Ok(Box::new(
+                nats::NatsPublisher::new(&cfg.config, subject, cfg.stream.as_deref()).await?,
+            ) as Box<dyn MessagePublisher>)
         }
         #[cfg(feature = "amqp")]
         EndpointType::Amqp(cfg) => {
             let queue = cfg.queue.as_deref().unwrap_or(route_name);
-            Ok(Box::new(amqp::AmqpPublisher::new(&cfg.config, queue).await?) as Box<dyn MessagePublisher>)
+            Ok(
+                Box::new(amqp::AmqpPublisher::new(&cfg.config, queue).await?)
+                    as Box<dyn MessagePublisher>,
+            )
         }
         #[cfg(feature = "mqtt")]
         EndpointType::Mqtt(cfg) => {
             let topic = cfg.topic.as_deref().unwrap_or(route_name);
-            Ok(Box::new(mqtt::MqttPublisher::new(&cfg.config, topic, route_name).await?) as Box<dyn MessagePublisher>)
+            Ok(
+                Box::new(mqtt::MqttPublisher::new(&cfg.config, topic, route_name).await?)
+                    as Box<dyn MessagePublisher>,
+            )
         }
-        EndpointType::File(cfg) => Ok(Box::new(file::FilePublisher::new(cfg).await?) as Box<dyn MessagePublisher>),
+        EndpointType::File(cfg) => {
+            Ok(Box::new(file::FilePublisher::new(cfg).await?) as Box<dyn MessagePublisher>)
+        }
         #[cfg(feature = "http")]
         EndpointType::Http(cfg) => {
             let mut sink = http::HttpPublisher::new(&cfg.config).await?;
@@ -143,19 +152,25 @@ async fn create_base_publisher(
             }
             Ok(Box::new(sink) as Box<dyn MessagePublisher>)
         }
-        EndpointType::Static(cfg) => Ok(Box::new(static_endpoint::StaticEndpointPublisher::new(cfg)?) as Box<dyn MessagePublisher>),
-        EndpointType::Memory(cfg) => Ok(Box::new(memory::MemoryPublisher::new(cfg)?) as Box<dyn MessagePublisher>),
+        EndpointType::Static(cfg) => Ok(Box::new(static_endpoint::StaticEndpointPublisher::new(
+            cfg,
+        )?) as Box<dyn MessagePublisher>),
+        EndpointType::Memory(cfg) => {
+            Ok(Box::new(memory::MemoryPublisher::new(cfg)?) as Box<dyn MessagePublisher>)
+        }
         #[cfg(feature = "mongodb")]
         EndpointType::MongoDb(cfg) => {
             let collection = cfg.collection.as_deref().unwrap_or(route_name);
-            Ok(Box::new(mongodb::MongoDbPublisher::new(&cfg.config, collection).await?) as Box<dyn MessagePublisher>)
+            Ok(
+                Box::new(mongodb::MongoDbPublisher::new(&cfg.config, collection).await?)
+                    as Box<dyn MessagePublisher>,
+            )
         }
         #[allow(unreachable_patterns)]
         _ => Err(anyhow!(
             "[route:{}] Unsupported publisher endpoint type",
             route_name
         )),
-    }
-    ?;
+    }?;
     Ok(publisher)
 }

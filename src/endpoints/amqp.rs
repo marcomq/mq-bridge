@@ -74,7 +74,7 @@ impl MessagePublisher for AmqpPublisher {
                     );
                 }
                 properties = properties.with_headers(table);
-            } 
+            }
         }
 
         let confirmation = self

@@ -11,7 +11,7 @@ use sled::Db;
 use std::any::Any;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tracing::{info, instrument};
+use tracing::{debug, error, info, instrument};
 
 pub struct DeduplicationConsumer {
     inner: Box<dyn MessageConsumer>,
@@ -66,16 +66,46 @@ impl MessageConsumer for DeduplicationConsumer {
                 let db = self.db.clone();
                 let ttl = self.ttl_seconds;
                 tokio::spawn(async move {
-                    let cutoff = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs()
-                        - ttl;
-                    for item in db.iter() {
-                        if let Ok((key, val)) = item {
-                            let timestamp = u64::from_be_bytes(val.as_ref().try_into().unwrap());
-                            if timestamp < cutoff {
-                                let _ = db.remove(key);
+                    let now_duration = match SystemTime::now().duration_since(UNIX_EPOCH) {
+                        Ok(duration) => duration,
+                        Err(e) => {
+                            error!("Failed to get system time duration since UNIX_EPOCH for deduplication cleanup: {}", e);
+                            return; // Exit the spawned task if we can't get the current time
+                        }
+                    };
+                    // Use saturating_sub to prevent underflow if ttl is very large, though unlikely for timestamps.
+                    let cutoff = now_duration.as_secs().saturating_sub(ttl);
+
+                    for item_result in db.iter() {
+                        match item_result {
+                            Ok((key, val)) => {
+                                if val.as_ref().len() != 8 {
+                                    warn!("Deduplication DB entry for key {:?} has invalid timestamp length (expected 8 bytes, got {}). Skipping entry.", key, val.as_ref().len());
+                                    continue; // Move to the next item
+                                }
+
+                                // After checking the length, `try_into()` from `&[u8]` to `&[u8; 8]` is infallible.
+                                // However, using `match` explicitly handles the `Err` case for robustness and clarity.
+                                let timestamp_bytes: [u8; 8] = match val.as_ref().try_into() {
+                                    Ok(bytes) => bytes,
+                                    Err(e) => {
+                                        error!("Internal error: Failed to convert DB value to [u8; 8] after length check for key {:?}: {}", key, e);
+                                        continue; // Move to the next item
+                                    }
+                                };
+                                let timestamp = u64::from_be_bytes(timestamp_bytes);
+
+                                // If the timestamp is older than the cutoff, remove it.
+                                if timestamp < cutoff {
+                                    match db.remove(&key) {
+                                        Ok(_) => debug!("Removed expired deduplication entry for key: {:?}", key),
+                                        Err(e) => error!("Failed to remove expired deduplication entry for key {:?}: {}", key, e),
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                error!("Error iterating deduplication DB during cleanup: {}", e);
+                                continue; // Continue to the next item if iteration itself yields an error
                             }
                         }
                     }

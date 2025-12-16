@@ -25,10 +25,14 @@ impl DlqPublisher {
         config: &DeadLetterQueueMiddleware,
         route_name: &str,
     ) -> anyhow::Result<Self> {
-        info!("DLQ Middleware enabled for route '{}' with {} retry attempts", route_name, config.dlq_retry_attempts);
+        info!(
+            "DLQ Middleware enabled for route '{}' with {} retry attempts",
+            route_name, config.dlq_retry_attempts
+        );
         // Box::pin is used here to break the recursive async type definition.
         // create_publisher_from_route -> apply_middlewares -> DlqPublisher::new -> create_publisher_from_route
-        let dlq_publisher = Box::pin(create_publisher_from_route(route_name, &config.endpoint)).await?;
+        let dlq_publisher =
+            Box::pin(create_publisher_from_route(route_name, &config.endpoint)).await?;
         Ok(Self {
             inner,
             dlq_publisher,
@@ -38,7 +42,11 @@ impl DlqPublisher {
 
     /// Attempt to send a message to the DLQ with configurable retries and exponential backoff.
     /// Returns the primary send error if DLQ retries fail, ensuring the caller can retry the primary route.
-    async fn send_to_dlq_with_retry(&self, message: CanonicalMessage, primary_error: &str) -> anyhow::Result<()> {
+    async fn send_to_dlq_with_retry(
+        &self,
+        message: CanonicalMessage,
+        primary_error: &str,
+    ) -> anyhow::Result<()> {
         let mut attempt = 0;
         let mut backoff_ms = 100u64;
 
@@ -66,7 +74,9 @@ impl DlqPublisher {
                     // Return the original primary error so the caller can retry the route
                     return Err(anyhow::anyhow!(
                         "Primary send failed: {}. DLQ send also failed after {} retries: {}",
-                        primary_error, self.dlq_retry_attempts, dlq_error
+                        primary_error,
+                        self.dlq_retry_attempts,
+                        dlq_error
                     ));
                 }
             }
@@ -82,7 +92,7 @@ impl MessagePublisher for DlqPublisher {
             Err(e) => {
                 let error_msg = e.to_string();
                 error!("Failed to send message: {}", error_msg);
-                
+
                 // Attempt to send the message to the DLQ with retry/backoff logic.
                 match self.send_to_dlq_with_retry(message, &error_msg).await {
                     Ok(()) => {
