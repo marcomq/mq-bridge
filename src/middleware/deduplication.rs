@@ -11,7 +11,7 @@ use sled::Db;
 use std::any::Any;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tracing::{debug, error, info, instrument};
+use tracing::{debug, error, info, instrument, warn};
 
 pub struct DeduplicationConsumer {
     inner: Box<dyn MessageConsumer>,
