@@ -1,0 +1,13 @@
+services:
+  nats:
+    image: nats:2.12.2-alpine3.22
+    container_name: nats-itest-mq-multi-bridge
+    command: "-js" # Enable JetStream
+    ports:
+      - "4222:4222"
+      - "8222:8222" # Expose monitoring port for health check
+    healthcheck:
+      test: ["CMD", "nats-server", "-h"]
+      interval: 5s
+      timeout: 20s
+      retries: 5

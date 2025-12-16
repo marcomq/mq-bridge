@@ -1,0 +1,12 @@
+services:
+  rabbitmq:
+    image: rabbitmq:4.1.6-management-alpine
+    container_name: rabbitmq-itest-mq-multi-bridge
+    ports:
+      - "5672:5672"
+      - "15672:15672" # Management UI
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "check_running", "-q"]
+      interval: 5s
+      timeout: 20s
+      retries: 5

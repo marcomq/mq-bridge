@@ -1,0 +1,13 @@
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2.0.22
+    container_name: mosquitto-itest-mq-multi-bridge
+    ports:
+      - "1883:1883"
+    volumes:
+       - "./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro"
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 1883"]
+      interval: 5s
+      timeout: 20s
+      retries: 5

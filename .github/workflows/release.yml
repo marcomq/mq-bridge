@@ -1,0 +1,33 @@
+# .github/workflows/release.yml
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+env:
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  test:
+    name: Cargo Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config zlib1g-dev
+
+      - name: Test with all features (for completeness)
+        run: cargo test --workspace --all-features
+
+      - name: Test with core (production) features
+        run: cargo test --workspace --no-default-features --features core
+
