@@ -128,7 +128,8 @@ impl AmqpConsumer {
                     durable: config.persistent,
                     ..Default::default()
                 },
-                FieldTable::default())
+                FieldTable::default(),
+            )
             .await?;
 
         // Set prefetch count. This acts as a buffer and is crucial for concurrent processing.
@@ -242,7 +243,10 @@ impl MessageConsumer for AmqpConsumer {
                         "Failed to ack AMQP message"
                     );
                 } else {
-                    debug!(delivery_tag = delivery.delivery_tag, "AMQP message acknowledged");
+                    debug!(
+                        delivery_tag = delivery.delivery_tag,
+                        "AMQP message acknowledged"
+                    );
                 }
             }) as BoxFuture<'static, ()>
         });

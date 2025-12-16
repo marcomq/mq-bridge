@@ -114,7 +114,7 @@ impl MessagePublisher for DlqPublisher {
     ) -> anyhow::Result<(Option<Vec<CanonicalMessage>>, Vec<CanonicalMessage>)> {
         match self.inner.send_bulk(messages.clone()).await {
             Ok((responses, failed)) if failed.is_empty() => Ok((responses, failed)),
-            Ok((_responses, failed)) => {
+            Ok((responses, failed)) => {
                 let error_msg = format!("{} messages failed to send", failed.len());
                 error!(
                     "Failed to send a batch of {} messages. Attempting to send to DLQ.",
@@ -128,11 +128,19 @@ impl MessagePublisher for DlqPublisher {
 
                 loop {
                     attempt += 1;
-                    match self.dlq_publisher.send_bulk(messages_to_retry.clone()).await {
+                    match self
+                        .dlq_publisher
+                        .send_bulk(messages_to_retry.clone())
+                        .await
+                    {
                         Ok((_, dlq_failed)) if dlq_failed.is_empty() => {
-                            info!("Batch of {} messages successfully sent to DLQ on attempt {}.", failed.len(), attempt);
-                            // Return the original failed messages to the caller, signaling they were DLQ'd.
-                            return Ok((None, failed));
+                            info!(
+                                "Batch of {} messages successfully sent to DLQ on attempt {}.",
+                                failed.len(),
+                                attempt
+                            );
+                            // Return the successful responses and the original failed messages to the caller.
+                            return Ok((responses, failed));
                         }
                         Ok((_, dlq_failed)) if attempt < self.dlq_retry_attempts => {
                             warn!(
@@ -176,7 +184,11 @@ impl MessagePublisher for DlqPublisher {
 
                 loop {
                     attempt += 1;
-                    match self.dlq_publisher.send_bulk(messages_to_retry.clone()).await {
+                    match self
+                        .dlq_publisher
+                        .send_bulk(messages_to_retry.clone())
+                        .await
+                    {
                         Ok((_, dlq_failed)) if dlq_failed.is_empty() => {
                             info!("Batch of {} messages successfully sent to DLQ on attempt {} after complete primary failure.", messages.len(), attempt);
                             return Ok((None, messages));

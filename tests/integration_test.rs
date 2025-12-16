@@ -80,7 +80,7 @@ async fn test_mongodb_performance_pipeline() {
 async fn test_amqp_performance_direct() {
     integration::amqp::test_amqp_performance_direct().await;
 }
-    
+
 #[cfg(feature = "kafka")]
 #[tokio::test]
 #[ignore] // This is a performance test, run it explicitly

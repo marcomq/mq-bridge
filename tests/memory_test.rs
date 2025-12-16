@@ -8,7 +8,6 @@ mod integration;
 // run in release:
 // cargo test --package hot_queue --test memory_test --features integration-test --release -- test_memory_to_memory_pipeline --exact --nocapture
 
-
 #[tokio::test]
 #[ignore] // This is a performance test, run it explicitly
 async fn test_memory_to_memory_pipeline() {

@@ -174,7 +174,9 @@ impl NatsConsumer {
             // For Core NATS, we use a queue group to load-balance messages.
             // The queue group name can be derived from the stream/subject to be unique per route.
             let queue_group = format!("mq-bridge-{}", stream_name.replace('.', "-")); // The queue_group can be a String
-            let sub = client.queue_subscribe(subject.to_string(), queue_group.clone()).await?;
+            let sub = client
+                .queue_subscribe(subject.to_string(), queue_group.clone())
+                .await?;
             info!(subject = %subject, queue_group = %queue_group, "NATS Core source subscribed");
             NatsSubscription::Core(sub)
         };
@@ -197,7 +199,7 @@ impl NatsConsumer {
             }
         }
         canonical_message
-    }        
+    }
 }
 
 #[async_trait]

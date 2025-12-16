@@ -303,7 +303,9 @@ pub async fn measure_write_performance(
 
     println!(
         "  Wrote {} messages in {:.2?} ({} msgs/sec)",
-        format_pretty(num_messages), duration, format_pretty(msgs_per_sec)
+        format_pretty(num_messages),
+        duration,
+        format_pretty(msgs_per_sec)
     );
 }
 
@@ -378,7 +380,9 @@ pub async fn measure_read_performance(
 
     println!(
         "  Read {} messages in {:.2?} ({} msgs/sec)",
-        format_pretty(num_messages), duration, format_pretty(msgs_per_sec)
+        format_pretty(num_messages),
+        duration,
+        format_pretty(msgs_per_sec)
     );
 }
 
