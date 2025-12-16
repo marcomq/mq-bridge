@@ -233,7 +233,7 @@ impl KafkaConsumer {
             );
         }
         if let (Some(username), Some(password)) = (&config.username, &config.password) {
-            client_config.set("sasl.mechanisms", "PLAIN");
+            client_config.set("sasl.mechanism", "PLAIN");
             client_config.set("sasl.username", username);
             client_config.set("sasl.password", password);
             client_config.set("security.protocol", "sasl_ssl");
