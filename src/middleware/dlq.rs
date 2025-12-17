@@ -108,11 +108,11 @@ impl MessagePublisher for DlqPublisher {
         }
     }
 
-    async fn send_bulk(
+    async fn send_batch(
         &self,
         messages: Vec<CanonicalMessage>,
     ) -> anyhow::Result<(Option<Vec<CanonicalMessage>>, Vec<CanonicalMessage>)> {
-        match self.inner.send_bulk(messages.clone()).await {
+        match self.inner.send_batch(messages.clone()).await {
             Ok((responses, failed)) if failed.is_empty() => Ok((responses, failed)),
             Ok((responses, failed)) => {
                 let error_msg = format!("{} messages failed to send", failed.len());
@@ -130,7 +130,7 @@ impl MessagePublisher for DlqPublisher {
                     attempt += 1;
                     match self
                         .dlq_publisher
-                        .send_bulk(messages_to_retry.clone())
+                        .send_batch(messages_to_retry.clone())
                         .await
                     {
                         Ok((_, dlq_failed)) if dlq_failed.is_empty() => {
@@ -186,7 +186,7 @@ impl MessagePublisher for DlqPublisher {
                     attempt += 1;
                     match self
                         .dlq_publisher
-                        .send_bulk(messages_to_retry.clone())
+                        .send_batch(messages_to_retry.clone())
                         .await
                     {
                         Ok((_, dlq_failed)) if dlq_failed.is_empty() => {

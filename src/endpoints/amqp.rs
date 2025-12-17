@@ -1,5 +1,5 @@
 use crate::models::AmqpConfig;
-use crate::traits::{BoxFuture, BulkCommitFunc, MessageConsumer, MessagePublisher};
+use crate::traits::{BatchCommitFunc, BoxFuture, MessageConsumer, MessagePublisher};
 use crate::CanonicalMessage;
 use anyhow::anyhow;
 use async_trait::async_trait;
@@ -108,11 +108,11 @@ impl MessagePublisher for AmqpPublisher {
     }
 
     // This isn't a real bulk send, but the normal send is fast enough.
-    async fn send_bulk(
+    async fn send_batch(
         &self,
         messages: Vec<CanonicalMessage>,
     ) -> anyhow::Result<(Option<Vec<CanonicalMessage>>, Vec<CanonicalMessage>)> {
-        crate::traits::send_bulk_helper(self, messages, |publisher, message| {
+        crate::traits::send_batch_helper(self, messages, |publisher, message| {
             Box::pin(publisher.send(message))
         })
         .await
@@ -244,10 +244,10 @@ fn delivery_to_canonical_message(delivery: &lapin::message::Delivery) -> Canonic
 
 #[async_trait]
 impl MessageConsumer for AmqpConsumer {
-    async fn receive_bulk(
+    async fn receive_batch(
         &mut self,
         max_messages: usize,
-    ) -> anyhow::Result<(Vec<CanonicalMessage>, BulkCommitFunc)> {
+    ) -> anyhow::Result<(Vec<CanonicalMessage>, BatchCommitFunc)> {
         if max_messages == 0 {
             return Ok((Vec::new(), Box::new(|_| Box::pin(async {}))));
         }

@@ -1,7 +1,7 @@
 #![allow(dead_code)] // This module contains helpers used by various integration tests.
 use async_channel::{bounded, Receiver, Sender};
 use chrono;
-use hot_queue::traits::{BulkCommitFunc, MessagePublisher};
+use hot_queue::traits::{BatchCommitFunc, MessagePublisher};
 use hot_queue::traits::{CommitFunc, MessageConsumer};
 use hot_queue::{CanonicalMessage, Route};
 use once_cell::sync::Lazy;
@@ -344,7 +344,7 @@ pub async fn measure_write_performance(
                 // Retry sending the batch if some messages fail.
                 let mut messages_to_send = batch;
                 loop {
-                    match publisher_clone.send_bulk(messages_to_send.clone()).await {
+                    match publisher_clone.send_batch(messages_to_send.clone()).await {
                         Ok((_, failed)) if failed.is_empty() => break, // All sent successfully
                         Ok((_, failed)) => messages_to_send = failed,  // Retry failed messages
                         Err(e) => eprintln!("Error sending bulk messages: {}", e),
@@ -382,10 +382,10 @@ impl MessageConsumer for MockConsumer {
         tokio::time::sleep(Duration::from_secs(3600)).await;
         unreachable!();
     }
-    async fn receive_bulk(
+    async fn receive_batch(
         &mut self,
         _max_messages: usize,
-    ) -> anyhow::Result<(Vec<CanonicalMessage>, BulkCommitFunc)> {
+    ) -> anyhow::Result<(Vec<CanonicalMessage>, BatchCommitFunc)> {
         // This consumer will block forever, which is fine for tests that only need a publisher.
         // It prevents the route from exiting immediately.
         tokio::time::sleep(Duration::from_secs(3600)).await;
@@ -419,7 +419,7 @@ pub async fn measure_read_performance(
         let missing = std::cmp::min(batch_size, num_messages - current_count);
 
         let mut consumer_guard = consumer_clone.lock().await;
-        let receive_future = consumer_guard.receive_bulk(missing);
+        let receive_future = consumer_guard.receive_batch(missing);
 
         match tokio::time::timeout(Duration::from_secs(5), receive_future).await {
             Ok(Ok((msgs, commit))) if !msgs.is_empty() => {

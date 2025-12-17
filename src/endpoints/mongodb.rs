@@ -1,6 +1,7 @@
 use crate::models::MongoDbConfig;
 use crate::traits::{
-    into_bulk_commit_func, BoxFuture, BulkCommitFunc, CommitFunc, MessageConsumer, MessagePublisher,
+    into_batch_commit_func, BatchCommitFunc, BoxFuture, CommitFunc, MessageConsumer,
+    MessagePublisher,
 };
 use crate::CanonicalMessage;
 use anyhow::{anyhow, Context};
@@ -102,11 +103,11 @@ impl MessagePublisher for MongoDbPublisher {
         Ok(Some(msg_with_metadata))
     }
 
-    async fn send_bulk(
+    async fn send_batch(
         &self,
         messages: Vec<CanonicalMessage>,
     ) -> anyhow::Result<(Option<Vec<CanonicalMessage>>, Vec<CanonicalMessage>)> {
-        crate::traits::send_bulk_helper(self, messages, |publisher, message| {
+        crate::traits::send_batch_helper(self, messages, |publisher, message| {
             Box::pin(publisher.send(message))
         })
         .await
@@ -214,12 +215,12 @@ impl MessageConsumer for MongoDbConsumer {
         }
     }
 
-    async fn receive_bulk(
+    async fn receive_batch(
         &mut self,
         _max_messages: usize,
-    ) -> anyhow::Result<(Vec<CanonicalMessage>, BulkCommitFunc)> {
+    ) -> anyhow::Result<(Vec<CanonicalMessage>, BatchCommitFunc)> {
         let (msg, commit) = self.receive().await?;
-        let commit = into_bulk_commit_func(commit);
+        let commit = into_batch_commit_func(commit);
         Ok((vec![msg], commit))
     }
 

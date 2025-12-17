@@ -2,9 +2,8 @@
 //  © Copyright 2025, by Marco Mengelkoch
 //  Licensed under MIT License, see License file for more details
 //  git clone https://github.com/marcomq/hot_queue
-
 use crate::models::DeduplicationMiddleware;
-use crate::traits::{into_bulk_commit_func, BulkCommitFunc, CommitFunc, MessageConsumer};
+use crate::traits::{into_batch_commit_func, BatchCommitFunc, CommitFunc, MessageConsumer};
 use crate::CanonicalMessage;
 use async_trait::async_trait;
 use sled::Db;
@@ -116,12 +115,12 @@ impl MessageConsumer for DeduplicationConsumer {
         }
     }
 
-    async fn receive_bulk(
+    async fn receive_batch(
         &mut self,
         _max_messages: usize,
-    ) -> anyhow::Result<(Vec<CanonicalMessage>, BulkCommitFunc)> {
+    ) -> anyhow::Result<(Vec<CanonicalMessage>, BatchCommitFunc)> {
         let (msg, commit) = self.receive().await?;
-        let commit = into_bulk_commit_func(commit);
+        let commit = into_batch_commit_func(commit);
         Ok((vec![msg], commit))
     }
 

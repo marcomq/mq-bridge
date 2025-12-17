@@ -2,10 +2,9 @@
 //  © Copyright 2025, by Marco Mengelkoch
 //  Licensed under MIT License, see License file for more details
 //  git clone https://github.com/marcomq/hot_queue
-
 use crate::models::MetricsMiddleware;
 use crate::traits::MessagePublisher;
-use crate::traits::{BulkCommitFunc, CommitFunc, MessageConsumer};
+use crate::traits::{BatchCommitFunc, CommitFunc, MessageConsumer};
 use crate::CanonicalMessage;
 use async_trait::async_trait;
 use std::any::Any;
@@ -46,13 +45,13 @@ impl MessagePublisher for MetricsPublisher {
 
         result
     }
-    async fn send_bulk(
+    async fn send_batch(
         &self,
         messages: Vec<CanonicalMessage>,
     ) -> anyhow::Result<(Option<Vec<CanonicalMessage>>, Vec<CanonicalMessage>)> {
         let total_count = messages.len();
         let start = Instant::now();
-        let result = self.inner.send_bulk(messages).await;
+        let result = self.inner.send_batch(messages).await;
         let duration = start.elapsed();
 
         match &result {
@@ -114,12 +113,12 @@ impl MessageConsumer for MetricsConsumer {
         result
     }
 
-    async fn receive_bulk(
+    async fn receive_batch(
         &mut self,
         max_messages: usize,
-    ) -> anyhow::Result<(Vec<CanonicalMessage>, BulkCommitFunc)> {
+    ) -> anyhow::Result<(Vec<CanonicalMessage>, BatchCommitFunc)> {
         let start = Instant::now();
-        let result = self.inner.receive_bulk(max_messages).await;
+        let result = self.inner.receive_batch(max_messages).await;
         let duration = start.elapsed();
 
         if let Ok((messages, _)) = &result {

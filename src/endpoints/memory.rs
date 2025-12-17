@@ -3,7 +3,7 @@
 //  Licensed under MIT License, see License file for more details
 //  git clone https://github.com/marcomq/hot_queue
 use crate::models::MemoryConfig;
-use crate::traits::{BoxFuture, BulkCommitFunc, MessageConsumer, MessagePublisher};
+use crate::traits::{BatchCommitFunc, BoxFuture, MessageConsumer, MessagePublisher};
 use crate::CanonicalMessage;
 use anyhow::anyhow;
 use async_channel::{bounded, Receiver, Sender};
@@ -116,7 +116,7 @@ impl MemoryPublisher {
 
 #[async_trait]
 impl MessagePublisher for MemoryPublisher {
-    async fn send_bulk(
+    async fn send_batch(
         &self,
         messages: Vec<CanonicalMessage>,
     ) -> anyhow::Result<(Option<Vec<CanonicalMessage>>, Vec<CanonicalMessage>)> {
@@ -165,10 +165,10 @@ impl MemoryConsumer {
 
 #[async_trait]
 impl MessageConsumer for MemoryConsumer {
-    async fn receive_bulk(
+    async fn receive_batch(
         &mut self,
         max_messages: usize,
-    ) -> anyhow::Result<(Vec<CanonicalMessage>, BulkCommitFunc)> {
+    ) -> anyhow::Result<(Vec<CanonicalMessage>, BatchCommitFunc)> {
         // If the internal buffer has messages, return them first.
         if self.buffer.is_empty() {
             // Buffer is empty. Wait for a new batch from the channel.
@@ -244,7 +244,7 @@ mod tests {
 
         // 3. Send messages via the publisher
         publisher
-            .send_bulk(vec![msg1.clone(), msg2.clone()])
+            .send_batch(vec![msg1.clone(), msg2.clone()])
             .await
             .unwrap();
         publisher.send(msg3.clone()).await.unwrap();
@@ -257,11 +257,11 @@ mod tests {
         commit1(None).await;
         assert_eq!(received_msg1.payload, msg1.payload);
 
-        let (received_msg2, commit2) = consumer.receive_bulk(1).await.unwrap();
+        let (received_msg2, commit2) = consumer.receive_batch(1).await.unwrap();
         commit2(None).await;
         assert_eq!(received_msg2.len(), 1);
         assert_eq!(received_msg2.get(0).unwrap().payload, msg2.payload);
-        let (received_msg3, commit3) = consumer.receive_bulk(2).await.unwrap();
+        let (received_msg3, commit3) = consumer.receive_batch(2).await.unwrap();
         commit3(None).await;
         assert_eq!(received_msg3.get(0).unwrap().payload, msg3.payload);
 

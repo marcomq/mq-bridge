@@ -5,7 +5,7 @@ use std::sync::Arc;
 //  git clone https://github.com/marcomq/hot_queue
 use crate::endpoints::{create_consumer_from_route, create_publisher_from_route};
 pub use crate::models::Route;
-use crate::traits::BulkCommitFunc;
+use crate::traits::BatchCommitFunc;
 use async_channel::{bounded, Sender};
 use tokio::{
     select,
@@ -105,7 +105,7 @@ impl Route {
                     info!("Shutdown signal received in sequential runner for route '{}'.", name);
                     return Ok(true); // Stopped by shutdown signal
                 }
-                res = consumer.receive_bulk(BATCH_SIZE) => {
+                res = consumer.receive_batch(BATCH_SIZE) => {
                     let (messages, commit) = match res {
                         Ok(val) => val,
                         Err(e) => {
@@ -115,7 +115,7 @@ impl Route {
                     };
                     debug!("Received a batch of {} messages sequentially", messages.len());
                     // Process the batch sequentially without spawning a new task
-                    match publisher.send_bulk(messages).await {
+                    match publisher.send_batch(messages).await {
                         Ok((response, failed)) if failed.is_empty() => {
                             commit(response).await;
                         }
@@ -144,7 +144,7 @@ impl Route {
         const BATCH_SIZE: usize = 128;
         let work_capacity = self.concurrency.saturating_mul(BATCH_SIZE);
         let (work_tx, work_rx) =
-            bounded::<(Vec<crate::CanonicalMessage>, BulkCommitFunc)>(work_capacity);
+            bounded::<(Vec<crate::CanonicalMessage>, BatchCommitFunc)>(work_capacity);
 
         // --- Worker Pool ---
         let mut worker_handles = Vec::with_capacity(self.concurrency);
@@ -156,7 +156,7 @@ impl Route {
                 debug!("Starting worker {}", i);
                 while let Ok((messages, commit)) = work_rx_clone.recv().await {
                     // The worker now receives a batch and sends it as a bulk.
-                    match publisher.send_bulk(messages).await {
+                    match publisher.send_batch(messages).await {
                         // Note: removed '?' to handle all cases
                         Ok((response, failed)) if failed.is_empty() => {
                             commit(response).await;
@@ -196,7 +196,7 @@ impl Route {
                     break;
                 }
 
-                res = consumer.receive_bulk(BATCH_SIZE) => {
+                res = consumer.receive_batch(BATCH_SIZE) => {
                     let (messages, commit) = match res {
                         Ok(val) => val,
                         Err(e) => {

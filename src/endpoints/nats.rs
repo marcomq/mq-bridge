@@ -1,5 +1,5 @@
 use crate::models::NatsConfig;
-use crate::traits::{BoxFuture, BulkCommitFunc, CommitFunc, MessageConsumer, MessagePublisher};
+use crate::traits::{BatchCommitFunc, BoxFuture, CommitFunc, MessageConsumer, MessagePublisher};
 use crate::CanonicalMessage;
 use anyhow::anyhow;
 use async_nats::{header::HeaderMap, jetstream, jetstream::stream, ConnectOptions};
@@ -113,12 +113,12 @@ impl MessagePublisher for NatsPublisher {
         Ok(None)
     }
 
-    async fn send_bulk(
+    async fn send_batch(
         &self,
         messages: Vec<CanonicalMessage>,
     ) -> anyhow::Result<(Option<Vec<CanonicalMessage>>, Vec<CanonicalMessage>)> {
         // not a real bulk, but fast enough
-        crate::traits::send_bulk_helper(self, messages, |publisher, message| {
+        crate::traits::send_batch_helper(self, messages, |publisher, message| {
             // not a real bulk, but fast enough
             Box::pin(publisher.send(message))
         })
@@ -248,10 +248,10 @@ impl MessageConsumer for NatsConsumer {
         Ok((message, commit))
     }
 
-    async fn receive_bulk(
+    async fn receive_batch(
         &mut self,
         max_messages: usize,
-    ) -> anyhow::Result<(Vec<CanonicalMessage>, BulkCommitFunc)> {
+    ) -> anyhow::Result<(Vec<CanonicalMessage>, BatchCommitFunc)> {
         if max_messages == 0 {
             return Ok((Vec::new(), Box::new(|_| Box::pin(async {}))));
         }
@@ -307,7 +307,7 @@ impl MessageConsumer for NatsConsumer {
             }
         };
 
-        let bulk_commit = Box::new(move |responses: Option<Vec<CanonicalMessage>>| {
+        let batch_commit = Box::new(move |responses: Option<Vec<CanonicalMessage>>| {
             Box::pin(async move {
                 // NATS JetStream ack is per-message, so we ack them all.
                 // We can do this concurrently.
@@ -319,7 +319,7 @@ impl MessageConsumer for NatsConsumer {
             }) as BoxFuture<'static, ()>
         });
 
-        Ok((messages, bulk_commit))
+        Ok((messages, batch_commit))
     }
 
     fn as_any(&self) -> &dyn Any {

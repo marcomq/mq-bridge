@@ -2,8 +2,8 @@
 //  © Copyright 2025, by Marco Mengelkoch
 //  Licensed under MIT License, see License file for more details
 //  git clone https://github.com/marcomq/hot_queue
-
-use crate::traits::{BoxFuture, BulkCommitFunc, MessageConsumer, MessagePublisher};
+use crate::traits::{into_batch_commit_func, BatchCommitFunc};
+use crate::traits::{BoxFuture, MessageConsumer, MessagePublisher};
 use crate::CanonicalMessage;
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;
@@ -58,11 +58,11 @@ impl MessagePublisher for FilePublisher {
     }
 
     // just using normal send for simplicity - it is fast enough
-    async fn send_bulk(
+    async fn send_batch(
         &self,
         messages: Vec<CanonicalMessage>,
     ) -> anyhow::Result<(Option<Vec<CanonicalMessage>>, Vec<CanonicalMessage>)> {
-        crate::traits::send_bulk_helper(self, messages, |publisher, message| {
+        crate::traits::send_batch_helper(self, messages, |publisher, message| {
             Box::pin(publisher.send(message))
         })
         .await
@@ -104,10 +104,10 @@ impl FileConsumer {
 #[async_trait]
 impl MessageConsumer for FileConsumer {
     #[instrument(skip(self), fields(path = %self.path), err(level = "info"))]
-    async fn receive_bulk(
+    async fn receive_batch(
         &mut self,
         _max_messages: usize,
-    ) -> anyhow::Result<(Vec<CanonicalMessage>, BulkCommitFunc)> {
+    ) -> anyhow::Result<(Vec<CanonicalMessage>, BatchCommitFunc)> {
         let mut buffer = Vec::new();
 
         let bytes_read = self.reader.read_until(b'\n', &mut buffer).await?;
@@ -125,7 +125,7 @@ impl MessageConsumer for FileConsumer {
         // The commit for a file source is a no-op.
         let commit = Box::new(move |_| Box::pin(async move {}) as BoxFuture<'static, ()>);
 
-        Ok((vec![message], crate::traits::into_bulk_commit_func(commit)))
+        Ok((vec![message], into_batch_commit_func(commit)))
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -157,7 +157,7 @@ mod tests {
         let msg1 = CanonicalMessage::from_json(json!({"hello": "world"})).unwrap();
         let msg2 = CanonicalMessage::from_json(json!({"foo": "bar"})).unwrap();
 
-        sink.send_bulk(vec![msg1.clone(), msg2.clone()])
+        sink.send_batch(vec![msg1.clone(), msg2.clone()])
             .await
             .unwrap();
         // Explicitly flush to ensure data is written before we try to read it.
@@ -174,14 +174,14 @@ mod tests {
         assert_eq!(received_msg1.message_id, msg1.message_id);
         assert_eq!(received_msg1.payload, msg1.payload);
 
-        let (received_msgs, commit2) = source.receive_bulk(1).await.unwrap();
+        let (received_msgs, commit2) = source.receive_batch(1).await.unwrap();
         let received_msg2 = received_msgs.into_iter().next().unwrap();
         commit2(None).await;
         assert_eq!(received_msg2.message_id, msg2.message_id);
         assert_eq!(received_msg2.payload, msg2.payload);
 
         // 6. Verify that reading again results in EOF
-        let eof_result = source.receive_bulk(1).await;
+        let eof_result = source.receive_batch(1).await;
         match eof_result {
             Ok(_) => panic!("Expected an error, but got Ok"),
             Err(e) => assert!(e.to_string().contains("End of file reached")),
