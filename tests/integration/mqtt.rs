@@ -97,7 +97,6 @@ pub async fn test_mqtt_performance_direct() {
             PERF_TEST_CONCURRENCY,
         )
         .await;
-        let _ = publisher.disconnect().await;
         add_performance_result(super::common::PerformanceResult {
             test_name: "MQTT Direct".to_string(),
             write_performance: write_perf,

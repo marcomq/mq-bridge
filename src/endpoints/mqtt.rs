@@ -15,7 +15,7 @@ use tracing::{error, info, trace, warn};
 pub struct MqttPublisher {
     client: AsyncClient,
     topic: String,
-    _eventloop_handle: Arc<JoinHandle<()>>,
+    eventloop_handle: Arc<JoinHandle<()>>,
 }
 
 impl MqttPublisher {
@@ -29,19 +29,26 @@ impl MqttPublisher {
         Ok(Self {
             client,
             topic: topic.to_string(),
-            _eventloop_handle: Arc::new(eventloop_handle),
+            eventloop_handle: Arc::new(eventloop_handle),
         })
     }
     pub fn with_topic(&self, topic: &str) -> Self {
         Self {
             client: self.client.clone(),
             topic: topic.to_string(),
-            _eventloop_handle: self._eventloop_handle.clone(),
+            eventloop_handle: self.eventloop_handle.clone(),
         }
     }
 
     pub async fn disconnect(&self) -> Result<(), rumqttc::ClientError> {
         self.client.disconnect().await
+    }
+}
+
+impl Drop for MqttPublisher {
+    fn drop(&mut self) {
+        // When the publisher is dropped, abort its background eventloop task.
+        self.eventloop_handle.abort();
     }
 }
 
