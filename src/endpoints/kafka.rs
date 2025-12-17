@@ -118,18 +118,17 @@ impl KafkaPublisher {
             skip_ack: self.skip_ack,
         }
     }
-}
 
-impl Drop for KafkaPublisher {
-    fn drop(&mut self) {
-        // When the sink is dropped, we need to make sure all buffered messages are sent.
-        // `flush` is async, but `drop` is sync. The recommended way is to block on the future.
-        // This is especially important in tests or short-lived processes.
+    /// Flushes any buffered messages and disconnects the producer.
+    /// This method takes ownership to ensure it's the final action.
+    pub async fn disconnect(&self) {
         info!(
             topic = %self.topic,
-            "Flushing Kafka producer before dropping sink..."
+            "Flushing and disconnecting Kafka producer..."
         );
-        let _ = self.producer.flush(Duration::from_secs(10)); // Block for up to 10s
+        if let Err(e) = self.producer.flush(Duration::from_secs(10)) {
+            tracing::warn!("Kafka producer flush failed during disconnect: {:?}", e);
+        }
     }
 }
 
@@ -283,6 +282,12 @@ impl KafkaConsumer {
             consumer,
             stream: Mutex::new(stream),
         })
+    }
+    /// Unsubscribes the consumer from all topics.
+    /// This method takes ownership to ensure it's the final action.
+    pub fn disconnect(&self) {
+        info!("Disconnecting Kafka consumer by unsubscribing...");
+        self.consumer.unsubscribe();
     }
 }
 

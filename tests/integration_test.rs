@@ -83,6 +83,11 @@ async fn test_all_performance_direct() {
     println!("--- Running All Direct Performance Tests ---");
     println!("Tests are run sequentially to ensure accurate measurements.");
 
+    #[cfg(feature = "nats")]
+    {
+        println!("\n\n>>> Starting NATS Direct Performance Test...");
+        integration::nats::test_nats_performance_direct().await;
+    }
     #[cfg(feature = "amqp")]
     {
         println!("\n\n>>> Starting AMQP Direct Performance Test...");
@@ -97,11 +102,6 @@ async fn test_all_performance_direct() {
     {
         println!("\n\n>>> Starting MQTT Direct Performance Test...");
         integration::mqtt::test_mqtt_performance_direct().await;
-    }
-    #[cfg(feature = "nats")]
-    {
-        println!("\n\n>>> Starting NATS Direct Performance Test...");
-        integration::nats::test_nats_performance_direct().await;
     }
     #[cfg(feature = "mongodb")]
     {

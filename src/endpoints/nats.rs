@@ -1,11 +1,10 @@
 use crate::models::NatsConfig;
-use crate::traits::{
-    into_bulk_commit_func, BoxFuture, BulkCommitFunc, CommitFunc, MessageConsumer, MessagePublisher,
-};
+use crate::traits::{BoxFuture, BulkCommitFunc, CommitFunc, MessageConsumer, MessagePublisher};
 use crate::CanonicalMessage;
 use anyhow::anyhow;
 use async_nats::{header::HeaderMap, jetstream, jetstream::stream, ConnectOptions};
 use async_trait::async_trait;
+use futures::{StreamExt, TryStreamExt};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::ring as rustls_ring;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, UnixTime};
@@ -118,7 +117,9 @@ impl MessagePublisher for NatsPublisher {
         &self,
         messages: Vec<CanonicalMessage>,
     ) -> anyhow::Result<(Option<Vec<CanonicalMessage>>, Vec<CanonicalMessage>)> {
+        // not a real bulk, but fast enough
         crate::traits::send_bulk_helper(self, messages, |publisher, message| {
+            // not a real bulk, but fast enough
             Box::pin(publisher.send(message))
         })
         .await
@@ -249,11 +250,76 @@ impl MessageConsumer for NatsConsumer {
 
     async fn receive_bulk(
         &mut self,
-        _max_messages: usize,
+        max_messages: usize,
     ) -> anyhow::Result<(Vec<CanonicalMessage>, BulkCommitFunc)> {
-        let (msg, commit) = self.receive().await?;
-        let commit = into_bulk_commit_func(commit);
-        Ok((vec![msg], commit))
+        if max_messages == 0 {
+            return Ok((Vec::new(), Box::new(|_| Box::pin(async {}))));
+        }
+
+        let (messages, commit_closure) = match &mut self.subscription {
+            NatsSubscription::JetStream(stream) => {
+                let mut canonical_messages = Vec::with_capacity(max_messages);
+                let mut jetstream_messages = Vec::with_capacity(max_messages);
+
+                // Use a short timeout to make the batch fetch non-blocking if no messages are available.
+                let message_stream =
+                    tokio::time::timeout(Duration::from_secs(5), stream.next()).await;
+
+                // Process the first message if it exists
+                if let Ok(Some(Ok(first_message))) = message_stream {
+                    canonical_messages.push(Self::create_canonical_message(&first_message));
+                    jetstream_messages.push(first_message);
+
+                    // Greedily fetch the rest of the batch
+                    while canonical_messages.len() < max_messages {
+                        if let Ok(Some(message)) = stream.try_next().await {
+                            canonical_messages.push(Self::create_canonical_message(&message));
+                            jetstream_messages.push(message);
+                        } else {
+                            break; // No more messages in the buffer
+                        }
+                    }
+                }
+
+                let commit_closure: Box<dyn FnOnce() -> BoxFuture<'static, ()> + Send> =
+                    Box::new(move || {
+                        Box::pin(async move {
+                            for message in jetstream_messages {
+                                if let Err(e) = message.ack().await {
+                                    tracing::error!("Failed to ACK NATS message: {:?}", e);
+                                }
+                            }
+                        }) as BoxFuture<'static, ()>
+                    });
+
+                (canonical_messages, commit_closure)
+            }
+            NatsSubscription::Core(sub) => {
+                let mut messages = Vec::new();
+                // Core NATS has no ack, so the commit is a no-op.
+                let commit_closure: Box<dyn FnOnce() -> BoxFuture<'static, ()> + Send> =
+                    Box::new(|| Box::pin(async {}));
+
+                if let Some(message) = sub.next().await {
+                    messages.push(Self::create_canonical_message(&message));
+                }
+                (messages, commit_closure)
+            }
+        };
+
+        let bulk_commit = Box::new(move |responses: Option<Vec<CanonicalMessage>>| {
+            Box::pin(async move {
+                // NATS JetStream ack is per-message, so we ack them all.
+                // We can do this concurrently.
+                if let Some(_resps) = responses {
+                    // Responses are not handled in this implementation
+                }
+                // Execute the single commit closure for the batch.
+                commit_closure().await;
+            }) as BoxFuture<'static, ()>
+        });
+
+        Ok((messages, bulk_commit))
     }
 
     fn as_any(&self) -> &dyn Any {

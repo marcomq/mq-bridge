@@ -48,7 +48,10 @@ impl MqttPublisher {
 impl Drop for MqttPublisher {
     fn drop(&mut self) {
         // When the publisher is dropped, abort its background eventloop task.
-        self.eventloop_handle.abort();
+        // Only abort when this is the last reference to the eventloop handle.
+        if Arc::strong_count(&self.eventloop_handle) == 1 {
+            self.eventloop_handle.abort();
+        }
     }
 }
 

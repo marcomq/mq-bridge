@@ -401,54 +401,41 @@ pub async fn measure_read_performance(
     name: &str,
     consumer: Arc<tokio::sync::Mutex<dyn MessageConsumer>>,
     num_messages: usize,
-    concurrency: usize,
 ) -> f64 {
     println!("\n--- Measuring Read Performance for {} ---", name);
-    let messages_to_receive = Arc::new(tokio::sync::Semaphore::new(num_messages));
     let start_time = Instant::now();
     let final_count = Arc::new(AtomicUsize::new(0));
+    let batch_size = 100; // A reasonable batch size for single-threaded reading.
 
-    let mut tasks = tokio::task::JoinSet::new();
-    let batch_size = (num_messages / concurrency / 10).max(100);
+    let final_count_clone = Arc::clone(&final_count);
+    let consumer_clone = consumer.clone();
 
-    for _ in 0..concurrency {
-        let consumer_clone = consumer.clone();
-        let semaphore_clone = messages_to_receive.clone();
-        let final_count_clone = Arc::clone(&final_count);
+    loop {
+        let current_count = final_count_clone.load(std::sync::atomic::Ordering::Relaxed);
+        if current_count >= num_messages {
+            break;
+        }
 
-        tasks.spawn(async move {
-            loop {
-                // Use `try_acquire` to avoid blocking forever.
-                // Acquire a permit. If it fails, all messages have been accounted for,
-                // so the worker's job is done.
-                // We must `forget` the permit, otherwise it's returned to the semaphore
-                // when it goes out of scope.
-                if let Ok(permit) = semaphore_clone.try_acquire() {
-                    permit.forget();
-                } else {
-                    break;
-                }
+        let missing = std::cmp::min(batch_size, num_messages - current_count);
 
-                match consumer_clone.lock().await.receive_bulk(batch_size).await {
-                    Ok((msgs, commit)) => {
-                        // Spawn the commit to a separate task to allow the worker
-                        // to immediately start receiving the next message.
-                        final_count_clone
-                            .fetch_add(msgs.len(), std::sync::atomic::Ordering::Relaxed);
-                        tokio::spawn(async move {
-                            commit(None).await;
-                        });
-                    }
-                    Err(e) => {
-                        eprintln!("Error receiving message: {}. Worker stopping.", e);
-                        break; // Exit on consumer error.
-                    }
-                }
+        let mut consumer_guard = consumer_clone.lock().await;
+        let receive_future = consumer_guard.receive_bulk(missing);
+
+        match tokio::time::timeout(Duration::from_secs(5), receive_future).await {
+            Ok(Ok((msgs, commit))) if !msgs.is_empty() => {
+                final_count_clone.fetch_add(msgs.len(), std::sync::atomic::Ordering::Relaxed);
+                tokio::spawn(async move { commit(None).await });
             }
-        });
+            Ok(Err(e)) => {
+                eprintln!("Error receiving message: {}. Stopping read.", e);
+                break;
+            }
+            _ => {
+                // Timeout or empty batch, assume we are done.
+                break;
+            }
+        }
     }
-
-    while tasks.join_next().await.is_some() {}
 
     let duration: Duration = start_time.elapsed();
     // Use the actual number of messages received for calculation, in case of under-delivery.

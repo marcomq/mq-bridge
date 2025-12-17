@@ -65,33 +65,46 @@ pub async fn test_kafka_performance_direct() {
             ..Default::default()
         };
 
-        let publisher = Arc::new(KafkaPublisher::new(&config, topic).await.unwrap());
-        let write_perf = measure_write_performance(
-            "Kafka",
-            publisher,
-            PERF_TEST_MESSAGE_COUNT_DIRECT,
-            PERF_TEST_CONCURRENCY,
-        )
-        .await;
+        // --- Publisher Test ---
+        let write_perf = {
+            let publisher = KafkaPublisher::new(&config, topic).await.unwrap();
+            let publisher = Arc::new(publisher);
+            let publisher_arc = publisher.clone();
+            let write_perf = measure_write_performance(
+                "Kafka",
+                publisher_arc,
+                PERF_TEST_MESSAGE_COUNT_DIRECT,
+                PERF_TEST_CONCURRENCY,
+            )
+            .await;
+            publisher.disconnect().await;
+            write_perf
+        };
 
+        // Wait for a moment to ensure all messages are written and available for consumption.
         tokio::time::sleep(Duration::from_secs(3)).await;
 
-        let consumer = Arc::new(tokio::sync::Mutex::new(
-            KafkaConsumer::new(&config, topic).unwrap(),
-        ));
-        let read_perf = measure_read_performance(
-            "Kafka",
-            consumer,
-            PERF_TEST_MESSAGE_COUNT_DIRECT,
-            PERF_TEST_CONCURRENCY,
-        )
-        .await;
+        // --- Consumer Test ---
+        // We create the consumer in its own scope to control its lifetime.
+        let read_perf = {
+            let consumer = KafkaConsumer::new(&config, topic).unwrap();
+            let consumer_arc = Arc::new(tokio::sync::Mutex::new(consumer));
+            let read_perf = measure_read_performance(
+                "Kafka",
+                consumer_arc.clone(),
+                PERF_TEST_MESSAGE_COUNT_DIRECT,
+            )
+            .await;
+            consumer_arc.lock().await.disconnect();
+            read_perf
+        };
 
         add_performance_result(super::common::PerformanceResult {
             test_name: "Kafka Direct".to_string(),
             write_performance: write_perf,
             read_performance: read_perf,
         });
+        tokio::time::sleep(Duration::from_secs(3)).await;
     })
     .await;
 }

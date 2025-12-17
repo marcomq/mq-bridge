@@ -90,13 +90,8 @@ pub async fn test_mqtt_performance_direct() {
 
         tokio::time::sleep(Duration::from_secs(3)).await;
 
-        let read_perf = measure_read_performance(
-            "MQTT",
-            consumer,
-            PERF_TEST_MESSAGE_COUNT_DIRECT,
-            PERF_TEST_CONCURRENCY,
-        )
-        .await;
+        let read_perf =
+            measure_read_performance("MQTT", consumer, PERF_TEST_MESSAGE_COUNT_DIRECT).await;
         add_performance_result(super::common::PerformanceResult {
             test_name: "MQTT Direct".to_string(),
             write_performance: write_perf,

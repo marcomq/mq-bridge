@@ -80,13 +80,8 @@ pub async fn test_nats_performance_direct() {
                 .await
                 .unwrap(),
         ));
-        let read_perf = measure_read_performance(
-            "NATS",
-            consumer,
-            PERF_TEST_MESSAGE_COUNT_DIRECT,
-            PERF_TEST_CONCURRENCY,
-        )
-        .await;
+        let read_perf =
+            measure_read_performance("NATS", consumer, PERF_TEST_MESSAGE_COUNT_DIRECT).await;
 
         add_performance_result(super::common::PerformanceResult {
             test_name: "NATS Direct".to_string(),

@@ -74,13 +74,8 @@ pub async fn test_amqp_performance_direct() {
         let consumer = Arc::new(tokio::sync::Mutex::new(
             AmqpConsumer::new(&config, queue).await.unwrap(),
         ));
-        let read_perf = measure_read_performance(
-            "AMQP",
-            consumer,
-            PERF_TEST_MESSAGE_COUNT_DIRECT,
-            PERF_TEST_CONCURRENCY,
-        )
-        .await;
+        let read_perf =
+            measure_read_performance("AMQP", consumer, PERF_TEST_MESSAGE_COUNT_DIRECT).await;
 
         add_performance_result(super::common::PerformanceResult {
             test_name: "AMQP Direct".to_string(),
