@@ -437,10 +437,11 @@ pub async fn measure_read_performance(
         }
     }
 
+    let num_messages = final_count.load(std::sync::atomic::Ordering::Relaxed);
     let duration: Duration = start_time.elapsed();
     // Use the actual number of messages received for calculation, in case of under-delivery.
     let msgs_per_sec = if duration.as_secs_f64() > 0.0 {
-        final_count.load(std::sync::atomic::Ordering::Relaxed) as f64 / duration.as_secs_f64()
+        num_messages as f64 / duration.as_secs_f64()
     } else {
         0.0
     };
