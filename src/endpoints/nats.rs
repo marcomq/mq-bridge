@@ -22,7 +22,7 @@ enum NatsClient {
 pub struct NatsPublisher {
     client: NatsClient,
     subject: String,
-    // delayed_ack is only used for JetStream
+    // If false, wait for JetStream acknowledgment; if true, fire-and-forget.
     delayed_ack: bool,
 }
 
@@ -119,7 +119,6 @@ impl MessagePublisher for NatsPublisher {
     ) -> anyhow::Result<(Option<Vec<CanonicalMessage>>, Vec<CanonicalMessage>)> {
         // not a real bulk, but fast enough
         crate::traits::send_batch_helper(self, messages, |publisher, message| {
-            // not a real bulk, but fast enough
             Box::pin(publisher.send(message))
         })
         .await

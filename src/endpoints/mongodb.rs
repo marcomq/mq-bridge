@@ -1,20 +1,17 @@
 use crate::models::MongoDbConfig;
-use crate::traits::{
-    into_batch_commit_func, BatchCommitFunc, BoxFuture, CommitFunc, MessageConsumer,
-    MessagePublisher,
-};
+use crate::traits::{BatchCommitFunc, BoxFuture, CommitFunc, MessageConsumer, MessagePublisher};
 use crate::CanonicalMessage;
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;
 use futures::StreamExt;
 use mongodb::{
+    bson::oid::ObjectId,
     bson::{doc, to_document, Binary, Bson, Document},
     change_stream::ChangeStream,
     error::ErrorKind,
+    options::FindOneAndUpdateOptions,
 };
-use mongodb::{
-    change_stream::event::ChangeStreamEvent, options::FindOneAndUpdateOptions, IndexModel,
-};
+use mongodb::{change_stream::event::ChangeStreamEvent, IndexModel};
 use mongodb::{Client, Collection};
 use serde::{Deserialize, Serialize};
 use std::any::Any;
@@ -217,11 +214,31 @@ impl MessageConsumer for MongoDbConsumer {
 
     async fn receive_batch(
         &mut self,
-        _max_messages: usize,
+        max_messages: usize,
     ) -> anyhow::Result<(Vec<CanonicalMessage>, BatchCommitFunc)> {
-        let (msg, commit) = self.receive().await?;
-        let commit = into_batch_commit_func(commit);
-        Ok((vec![msg], commit))
+        loop {
+            if self.change_stream.is_some() {
+                let (msg, commit) = self.receive().await?;
+                let commit_batch = Box::new(move |_response| commit(None));
+                return Ok((vec![msg], commit_batch));
+            }
+
+            // --- Polling Path (Optimized for Batch) ---
+            let now = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)?
+                .as_secs() as i64;
+            let lock_duration_secs = 60;
+            let locked_until = now + lock_duration_secs;
+            let claimed_docs = self
+                .find_and_claim_documents(doc! {}, max_messages, now, locked_until)
+                .await?;
+
+            if claimed_docs.is_empty() {
+                tokio::time::sleep(self.polling_interval).await;
+            } else {
+                return self.process_claimed_documents(claimed_docs);
+            }
+        }
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -230,6 +247,74 @@ impl MessageConsumer for MongoDbConsumer {
 }
 
 impl MongoDbConsumer {
+    /// Creates a BSON document filter to find available (unlocked) messages.
+    fn available_message_filter(now: i64) -> Document {
+        doc! {
+            "$or": [
+                { "locked_until": { "$exists": false } },
+                { "locked_until": null },
+                { "locked_until": { "$lt": now } }
+            ]
+        }
+    }
+
+    /// Atomically finds and claims one or more documents.
+    /// This is the core logic for both single and batch receives in polling mode.
+    async fn find_and_claim_documents(
+        &self,
+        extra_filter: Document,
+        limit: usize,
+        now: i64,
+        locked_until: i64,
+    ) -> anyhow::Result<Vec<Document>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let mut base_filter = Self::available_message_filter(now);
+        base_filter.extend(extra_filter);
+
+        // 1. Find a batch of available documents.
+        let mut cursor = self
+            .collection
+            .find(base_filter.clone())
+            .limit(limit as i64)
+            .projection(doc! { "_id": 1 })
+            .sort(doc! { "_id": 1 })
+            .await?;
+
+        let mut ids_to_claim = Vec::new();
+        while let Some(result) = cursor.next().await {
+            if let Ok(doc) = result {
+                if let Ok(id) = doc.get_object_id("_id") {
+                    ids_to_claim.push(id);
+                }
+            }
+        }
+
+        if ids_to_claim.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // 2. Attempt to atomically claim the batch of documents.
+        // We re-apply the `locked_until` filter to prevent a race condition
+        // where another consumer locks the documents between our find and update.
+        let mut update_filter = doc! { "_id": { "$in": &ids_to_claim } };
+        update_filter.extend(base_filter);
+
+        let update = doc! { "$set": { "locked_until": locked_until } };
+        let update_result = self.collection.update_many(update_filter, update).await?;
+
+        // 3. If we successfully modified any documents, retrieve their full content.
+        if update_result.modified_count > 0 {
+            self.get_documents_by_ids(&ids_to_claim).await
+        } else {
+            // This means another consumer claimed the documents in a race.
+            // Return an empty vec, and the caller will loop to try again.
+            Ok(Vec::new())
+        }
+    }
+
     /// Atomically finds and locks a document matching the filter.
     /// If the filter is empty, it finds any available document.
     /// If a document is successfully claimed, it returns the message and commit function.
@@ -243,13 +328,7 @@ impl MongoDbConsumer {
         let lock_duration_secs = 60;
         let locked_until = now + lock_duration_secs;
 
-        let mut filter = doc! {
-            "$or": [
-                { "locked_until": { "$exists": false } },
-                { "locked_until": null },
-                { "locked_until": { "$lt": now } }
-            ]
-        };
+        let mut filter = Self::available_message_filter(now);
         filter.extend(extra_filter);
 
         let update = doc! { "$set": { "locked_until": locked_until } };
@@ -298,5 +377,65 @@ impl MongoDbConsumer {
             Ok(None) => Ok(None), // No document found or claimed
             Err(e) => Err(e.into()),
         }
+    }
+
+    /// Retrieves documents by their ObjectIds.
+    async fn get_documents_by_ids(
+        &self,
+        claimed_ids: &[ObjectId],
+    ) -> anyhow::Result<Vec<Document>> {
+        let filter = doc! { "_id": { "$in": claimed_ids } };
+        let mut cursor = self
+            .collection
+            .find(filter)
+            .projection(doc! { "message_id": 1, "payload": 1, "metadata": 1, "_id": 1 })
+            .await?;
+
+        let mut documents = Vec::new();
+        while let Some(result) = cursor.next().await {
+            documents.push(result?);
+        }
+        Ok(documents)
+    }
+
+    /// Processes a vector of claimed BSON documents into canonical messages and a single batch commit function.
+    fn process_claimed_documents(
+        &self,
+        docs: Vec<Document>,
+    ) -> anyhow::Result<(Vec<CanonicalMessage>, BatchCommitFunc)> {
+        let mut messages = Vec::with_capacity(docs.len());
+        let mut object_ids = Vec::with_capacity(docs.len());
+
+        for doc in docs {
+            let raw_msg: MongoMessageRaw = mongodb::bson::from_document(doc.clone())
+                .context("Failed to deserialize MongoDB document")?;
+            let msg: CanonicalMessage = raw_msg.try_into()?;
+            messages.push(msg);
+
+            let object_id = doc
+                .get_object_id("_id")
+                .map_err(|_| anyhow!("Could not find or parse _id in returned document"))?;
+            object_ids.push(object_id);
+        }
+
+        let collection_clone = self.collection.clone();
+        let commit = Box::new(move |_response| {
+            Box::pin(async move {
+                if object_ids.is_empty() {
+                    return;
+                }
+                let filter = doc! { "_id": { "$in": &object_ids } };
+                if let Err(e) = collection_clone.delete_many(filter).await {
+                    tracing::error!(error = %e, "Failed to bulk-ack/delete MongoDB messages");
+                } else {
+                    tracing::trace!(
+                        count = object_ids.len(),
+                        "MongoDB messages acknowledged and deleted"
+                    );
+                }
+            }) as BoxFuture<'static, ()>
+        });
+
+        Ok((messages, commit))
     }
 }
