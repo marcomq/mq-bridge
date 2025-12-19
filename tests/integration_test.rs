@@ -83,15 +83,15 @@ async fn test_all_performance_direct() {
     println!("--- Running All Direct Performance Tests ---");
     println!("Tests are run sequentially to ensure accurate measurements.");
 
-    #[cfg(feature = "mongodb")]
-    {
-        println!("\n\n>>> Starting MongoDB Direct Performance Test...");
-        integration::mongodb::test_mongodb_performance_direct().await;
-    }
     #[cfg(feature = "nats")]
     {
         println!("\n\n>>> Starting NATS Direct Performance Test...");
         integration::nats::test_nats_performance_direct().await;
+    }
+    #[cfg(feature = "mongodb")]
+    {
+        println!("\n\n>>> Starting MongoDB Direct Performance Test...");
+        integration::mongodb::test_mongodb_performance_direct().await;
     }
     #[cfg(feature = "amqp")]
     {

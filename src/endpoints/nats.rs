@@ -255,17 +255,16 @@ impl MessageConsumer for NatsConsumer {
             return Ok((Vec::new(), Box::new(|_| Box::pin(async {}))));
         }
 
-        let (messages, commit_closure) = match &mut self.subscription {
+        match &mut self.subscription {
             NatsSubscription::JetStream(stream) => {
                 let mut canonical_messages = Vec::with_capacity(max_messages);
                 let mut jetstream_messages = Vec::with_capacity(max_messages);
 
                 // Use a short timeout to make the batch fetch non-blocking if no messages are available.
-                let message_stream =
-                    tokio::time::timeout(Duration::from_secs(5), stream.next()).await;
+                let message_stream = stream.next().await;
 
                 // Process the first message if it exists
-                if let Ok(Some(Ok(first_message))) = message_stream {
+                if let Some(Ok(first_message)) = message_stream {
                     canonical_messages.push(Self::create_canonical_message(&first_message));
                     jetstream_messages.push(first_message);
 
@@ -280,45 +279,36 @@ impl MessageConsumer for NatsConsumer {
                     }
                 }
 
-                let commit_closure: Box<dyn FnOnce() -> BoxFuture<'static, ()> + Send> =
-                    Box::new(move || {
+                let commit_closure: BatchCommitFunc = Box::new(move |_responses| {
                         Box::pin(async move {
-                            for message in jetstream_messages {
-                                if let Err(e) = message.ack().await {
-                                    tracing::error!("Failed to ACK NATS message: {:?}", e);
-                                }
-                            }
+                            // Acknowledge messages concurrently.
+                            // A concurrency limit of 1000 is chosen to balance parallelism
+                            // with not overwhelming the NATS server or spawning too many tasks.
+                            futures::stream::iter(jetstream_messages)
+                                .for_each_concurrent(
+                                    Some(1000),
+                                    |message| async move {
+                                        if let Err(e) = message.ack().await {
+                                            tracing::error!("Failed to ACK NATS message: {:?}", e);
+                                        }
+                                    })
+                                .await;
                         }) as BoxFuture<'static, ()>
                     });
 
-                (canonical_messages, commit_closure)
+                Ok((canonical_messages, commit_closure))
             }
             NatsSubscription::Core(sub) => {
                 let mut messages = Vec::new();
                 // Core NATS has no ack, so the commit is a no-op.
-                let commit_closure: Box<dyn FnOnce() -> BoxFuture<'static, ()> + Send> =
-                    Box::new(|| Box::pin(async {}));
+                let commit_closure: BatchCommitFunc = Box::new(|_| Box::pin(async {}));
 
                 if let Some(message) = sub.next().await {
                     messages.push(Self::create_canonical_message(&message));
                 }
-                (messages, commit_closure)
+                Ok((messages, commit_closure))
             }
-        };
-
-        let batch_commit = Box::new(move |responses: Option<Vec<CanonicalMessage>>| {
-            Box::pin(async move {
-                // NATS JetStream ack is per-message, so we ack them all.
-                // We can do this concurrently.
-                if let Some(_resps) = responses {
-                    // Responses are not handled in this implementation
-                }
-                // Execute the single commit closure for the batch.
-                commit_closure().await;
-            }) as BoxFuture<'static, ()>
-        });
-
-        Ok((messages, batch_commit))
+        }
     }
 
     fn as_any(&self) -> &dyn Any {
