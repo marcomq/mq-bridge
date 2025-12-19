@@ -53,8 +53,8 @@ impl NatsPublisher {
             NatsClient::JetStream(jetstream)
         } else {
             info!("NATS publisher is in Core mode (non-persistent).");
-            if !config.delayed_ack {
-                warn!("'delayed_ack' is false but NATS is in Core mode, which does not support acknowledgements. The flag will be ignored.");
+            if config.delayed_ack {
+                tracing::debug!("'delayed_ack' is true but NATS is in Core mode, which always performs fire and forget. The flag will be ignored.");
             }
             NatsClient::Core(nats_client)
         };
