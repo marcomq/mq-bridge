@@ -1,6 +1,7 @@
 use crate::models::NatsConfig;
 use crate::traits::{BatchCommitFunc, BoxFuture, CommitFunc, MessageConsumer, MessagePublisher};
 use crate::CanonicalMessage;
+use crate::APP_NAME;
 use anyhow::anyhow;
 use async_nats::{header::HeaderMap, jetstream, jetstream::stream, ConnectOptions};
 use async_trait::async_trait;
@@ -165,7 +166,8 @@ impl NatsConsumer {
             let consumer = stream
                 .create_consumer(jetstream::consumer::pull::Config {
                     durable_name: Some(format!(
-                        "mq-bridge-{}-{}",
+                        "{}-{}-{}",
+                        APP_NAME,
                         stream_name,
                         subject.replace('.', "-")
                     )),
@@ -185,7 +187,7 @@ impl NatsConsumer {
             info!(subject = %subject, "NATS consumer is in Core mode (non-persistent).");
             // For Core NATS, we use a queue group to load-balance messages.
             // The queue group name can be derived from the stream/subject to be unique per route.
-            let queue_group = format!("mq-bridge-{}", stream_name.replace('.', "-")); // The queue_group can be a String
+            let queue_group = format!("{}-{}", APP_NAME, stream_name.replace('.', "-")); // The queue_group can be a String
             let sub = client
                 .queue_subscribe(subject.to_string(), queue_group.clone())
                 .await?;

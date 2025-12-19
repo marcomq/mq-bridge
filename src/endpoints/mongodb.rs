@@ -23,7 +23,7 @@ use tracing::{info, warn};
 /// The payload is read as a BSON Binary type, which we then manually convert.
 #[derive(Serialize, Deserialize, Debug)]
 struct MongoMessageRaw {
-    message_id: i64,
+    message_id: Option<mongodb::bson::Binary>,
     payload: Binary,
     metadata: Option<Document>,
 }
@@ -38,8 +38,16 @@ impl TryFrom<MongoMessageRaw> for CanonicalMessage {
             .transpose()
             .context("Failed to deserialize metadata from BSON document")?;
 
+        let message_id = raw.message_id.map(|bin| {
+            let mut bytes = [0u8; 16];
+            let len = bin.bytes.len();
+            let copy_len = len.min(16);
+            bytes[16 - copy_len..16].copy_from_slice(&bin.bytes[0..copy_len]);
+            u128::from_be_bytes(bytes)
+        });
+
         Ok(CanonicalMessage {
-            message_id: Some(raw.message_id as u64),
+            message_id,
             payload: raw.payload.bytes.into(),
             metadata,
         })
@@ -73,21 +81,21 @@ impl MessagePublisher for MongoDbPublisher {
 
         if msg_with_metadata.message_id.is_none() {
             // If no message_id is present, generate one from the ObjectId.
-            // We combine the 4-byte timestamp with the last 4 bytes, which include
-            // the 3-byte incrementing counter. This creates a highly unique ID.
             let oid_bytes = object_id.bytes();
-            let mut id_bytes = [0u8; 8];
-            id_bytes[0..4].copy_from_slice(&oid_bytes[0..4]); // Timestamp
-            id_bytes[4..8].copy_from_slice(&oid_bytes[8..12]); // Last byte of random + 3-byte counter
-            msg_with_metadata.message_id = Some(u64::from_be_bytes(id_bytes));
+            let mut id_bytes = [0u8; 16];
+            id_bytes[4..16].copy_from_slice(&oid_bytes);
+            msg_with_metadata.message_id = Some(u128::from_be_bytes(id_bytes));
         }
-        let message_id_i64: Option<i64> = msg_with_metadata.message_id.map(|id| id as i64);
+        let message_id_bin = msg_with_metadata.message_id.map(|id| mongodb::bson::Binary {
+            subtype: mongodb::bson::spec::BinarySubtype::Uuid,
+            bytes: id.to_be_bytes().to_vec(),
+        });
 
         // Manually construct the document to handle u64 message_id for BSON.
         // BSON only supports i64, so we do a wrapping conversion.
         let doc = doc! {
             "_id": object_id,
-            "message_id": message_id_i64, // Convert u64 to i64
+            "message_id": message_id_bin,
             "payload": Bson::Binary(mongodb::bson::Binary {
                 subtype: mongodb::bson::spec::BinarySubtype::Generic,
                 bytes: msg_with_metadata.payload.to_vec() }),

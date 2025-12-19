@@ -12,3 +12,5 @@ pub mod traits;
 
 pub use canonical_message::CanonicalMessage;
 pub use models::Route;
+
+pub const APP_NAME: &str = env!("CARGO_PKG_NAME");

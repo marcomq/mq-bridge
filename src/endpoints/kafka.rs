@@ -143,10 +143,10 @@ impl MessagePublisher for KafkaPublisher {
             }
         }
 
-        let key = if let Some(id) = &message.message_id {
-            id.to_string()
+        let key = if let Some(id) = message.message_id {
+            id.to_be_bytes().to_vec()
         } else {
-            uuid::Uuid::new_v4().to_string()
+            uuid::Uuid::new_v4().as_bytes().to_vec()
         };
         record = record.key(&key);
 

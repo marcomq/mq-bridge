@@ -4,6 +4,7 @@ use crate::traits::{
     MessagePublisher,
 };
 use crate::CanonicalMessage;
+use crate::APP_NAME;
 use anyhow::anyhow;
 use async_trait::async_trait;
 use rumqttc::{tokio_rustls::rustls, AsyncClient, Event, Incoming, MqttOptions, QoS, Transport};
@@ -244,7 +245,7 @@ async fn create_client_and_eventloop(
 ) -> anyhow::Result<(AsyncClient, rumqttc::EventLoop)> {
     let (host, port) = parse_url(&config.url)?;
     // Use a unique client ID based on the bridge_id to prevent collisions.
-    let client_id = sanitize_for_client_id(&format!("mq-multi-bridge-{}", bridge_id));
+    let client_id = sanitize_for_client_id(&format!("{}-{}", APP_NAME, bridge_id));
     let mut mqttoptions = MqttOptions::new(client_id, host, port);
 
     mqttoptions.set_keep_alive(Duration::from_secs(20));

@@ -5,6 +5,7 @@
 
 #[cfg(feature = "amqp")]
 pub mod amqp;
+pub mod fanout;
 pub mod file;
 #[cfg(feature = "http")]
 pub mod http;
@@ -166,6 +167,14 @@ async fn create_base_publisher(
                     as Box<dyn MessagePublisher>,
             )
         }
+        EndpointType::Fanout(endpoints) => {
+            let mut publishers = Vec::with_capacity(endpoints.len());
+            for endpoint in endpoints {
+                let p = Box::pin(create_publisher_from_route(route_name, endpoint)).await?;
+                publishers.push(p);
+            }
+            Ok(Box::new(fanout::FanoutPublisher::new(publishers)) as Box<dyn MessagePublisher>)
+        }
         #[allow(unreachable_patterns)]
         _ => Err(anyhow!(
             "[route:{}] Unsupported publisher endpoint type",
@@ -173,4 +182,48 @@ async fn create_base_publisher(
         )),
     }?;
     Ok(publisher)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::endpoints::memory::get_or_create_channel;
+    use crate::models::{Endpoint, EndpointType, MemoryConfig};
+    use crate::CanonicalMessage;
+
+    #[tokio::test]
+    async fn test_fanout_publisher_integration() {
+        let mem_cfg1 = MemoryConfig {
+            topic: "fanout_1".to_string(),
+            capacity: Some(10),
+        };
+        let mem_cfg2 = MemoryConfig {
+            topic: "fanout_2".to_string(),
+            capacity: Some(10),
+        };
+
+        let ep1 = Endpoint::new(EndpointType::Memory(mem_cfg1.clone()));
+        let ep2 = Endpoint::new(EndpointType::Memory(mem_cfg2.clone()));
+
+        let fanout_ep = Endpoint::new(EndpointType::Fanout(vec![ep1, ep2]));
+
+        let publisher = create_publisher_from_route("test_fanout", &fanout_ep)
+            .await
+            .expect("Failed to create fanout publisher");
+
+        let msg = CanonicalMessage::new(b"fanout_payload".to_vec());
+        publisher.send(msg).await.expect("Failed to send message");
+
+        let chan1 = get_or_create_channel(&mem_cfg1);
+        let chan2 = get_or_create_channel(&mem_cfg2);
+
+        assert_eq!(chan1.len(), 1);
+        assert_eq!(chan2.len(), 1);
+
+        let msg1 = chan1.drain_messages().pop().unwrap();
+        let msg2 = chan2.drain_messages().pop().unwrap();
+
+        assert_eq!(msg1.payload, "fanout_payload".as_bytes());
+        assert_eq!(msg2.payload, "fanout_payload".as_bytes());
+    }
 }

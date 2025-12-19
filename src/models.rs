@@ -195,6 +195,7 @@ pub enum EndpointType {
     MongoDb(MongoDbEndpoint),
     Mqtt(MqttEndpoint),
     Http(HttpEndpoint),
+    Fanout(Vec<Endpoint>),
 }
 
 /// An enumeration of all supported middleware types.
@@ -482,8 +483,8 @@ kafka_to_nats:
                         assert_eq!(nats_cfg.config.url, "nats://localhost:4222");
                     }
                     has_dlq = true;
-                },
-                &crate::models::Middleware::Compute(_) => todo!()
+                }
+                &crate::models::Middleware::Compute(_) => todo!(),
             }
         }
 
@@ -589,6 +590,41 @@ kafka_to_nats:
             // Correctly parsed
         } else {
             panic!("Expected DLQ middleware");
+        }
+    }
+
+    #[test]
+    fn test_deserialize_fanout_yaml() {
+        let yaml = r#"
+fanout_route:
+  input:
+    memory:
+      topic: "input"
+  output:
+    fanout:
+      - memory:
+          topic: "out1"
+      - memory:
+          topic: "out2"
+"#;
+        let config: Config =
+            serde_yaml_ng::from_str(yaml).expect("Failed to deserialize fanout config");
+        let route = config.get("fanout_route").expect("Route should exist");
+
+        if let EndpointType::Fanout(endpoints) = &route.output.endpoint_type {
+            assert_eq!(endpoints.len(), 2);
+            if let EndpointType::Memory(m) = &endpoints[0].endpoint_type {
+                assert_eq!(m.topic, "out1");
+            } else {
+                panic!("Expected memory endpoint 1");
+            }
+            if let EndpointType::Memory(m) = &endpoints[1].endpoint_type {
+                assert_eq!(m.topic, "out2");
+            } else {
+                panic!("Expected memory endpoint 2");
+            }
+        } else {
+            panic!("Expected Fanout endpoint");
         }
     }
 }
