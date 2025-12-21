@@ -6,8 +6,8 @@
 use bytes::Bytes;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 use std::collections::HashMap;
+use uuid::Uuid;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CanonicalMessage {
@@ -41,7 +41,11 @@ impl CanonicalMessage {
 
     pub fn from_json(payload: serde_json::Value) -> Result<Self, serde_json::Error> {
         let mut message_id = None;
-        if let Some(val) = payload.get("message_id").or(payload.get("id")).or(payload.get("_id")) {
+        if let Some(val) = payload
+            .get("message_id")
+            .or(payload.get("id"))
+            .or(payload.get("_id"))
+        {
             if let Some(s) = val.as_str() {
                 if let Ok(uuid) = Uuid::parse_str(s) {
                     message_id = Some(uuid.as_u128());

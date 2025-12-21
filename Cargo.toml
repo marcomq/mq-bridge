@@ -85,3 +85,8 @@ tracing-appender = "0.2"
 chrono = "0.4"
 metrics-util = "0.20.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+criterion = { version = "0.8.1", features = ["async", "async_tokio"] }
+
+[[bench]]
+name = "performance_bench"
+harness = false

@@ -196,7 +196,7 @@ pub struct KafkaConsumer {
 use std::any::Any;
 
 impl KafkaConsumer {
-    pub fn new(config: &KafkaConfig, topic: &str) -> anyhow::Result<Self> {
+    pub async fn new(config: &KafkaConfig, topic: &str) -> anyhow::Result<Self> {
         use std::sync::Arc;
         let mut client_config = ClientConfig::new();
         if let Some(group_id) = &config.group_id {
@@ -355,10 +355,7 @@ fn process_message(
     // A u128 is used to hold both values, with the partition in the high 64 bits
     // and the offset in the low 64 bits.
     let message_id = ((message.partition() as u128) << 64) | (message.offset() as u128);
-    let mut canonical_message = CanonicalMessage::new(
-        payload.to_vec(),
-        Some(message_id),
-    );
+    let mut canonical_message = CanonicalMessage::new(payload.to_vec(), Some(message_id));
     if let Some(headers) = message.headers() {
         if headers.count() > 0 {
             let mut metadata = std::collections::HashMap::new();

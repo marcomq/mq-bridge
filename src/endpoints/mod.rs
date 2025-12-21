@@ -42,7 +42,9 @@ async fn create_base_consumer(
         #[cfg(feature = "kafka")]
         EndpointType::Kafka(cfg) => {
             let topic = cfg.topic.as_deref().unwrap_or(route_name);
-            Ok(Box::new(kafka::KafkaConsumer::new(&cfg.config, topic)?))
+            Ok(Box::new(
+                kafka::KafkaConsumer::new(&cfg.config, topic).await?,
+            ))
         }
         #[cfg(feature = "nats")]
         EndpointType::Nats(cfg) => {
@@ -122,9 +124,11 @@ async fn create_base_publisher(
         #[cfg(feature = "nats")]
         EndpointType::Nats(cfg) => {
             let subject = cfg.subject.as_deref().unwrap_or(route_name);
-            Ok(Box::new(
-                nats::NatsPublisher::new(&cfg.config, subject, cfg.stream.as_deref()).await?,
-            ) as Box<dyn MessagePublisher>)
+            let stream_name = cfg.stream.as_deref().unwrap_or_default();
+            Ok(
+                Box::new(nats::NatsPublisher::new(&cfg.config, stream_name, subject).await?)
+                    as Box<dyn MessagePublisher>,
+            )
         }
         #[cfg(feature = "amqp")]
         EndpointType::Amqp(cfg) => {

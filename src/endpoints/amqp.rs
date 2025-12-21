@@ -1,7 +1,7 @@
 use crate::models::AmqpConfig;
 use crate::traits::{BatchCommitFunc, BoxFuture, MessageConsumer, MessagePublisher};
-use crate::APP_NAME;
 use crate::CanonicalMessage;
+use crate::APP_NAME;
 use anyhow::anyhow;
 use async_trait::async_trait;
 use futures::TryStreamExt;
@@ -21,13 +21,13 @@ use tracing::{debug, info};
 pub struct AmqpPublisher {
     channel: Channel,
     exchange: String,
-    routing_key: String,
+    queue: String,
     no_persistence: bool,
     delayed_ack: bool,
 }
 
 impl AmqpPublisher {
-    pub async fn new(config: &AmqpConfig, routing_key: &str) -> anyhow::Result<Self> {
+    pub async fn new(config: &AmqpConfig, queue: &str) -> anyhow::Result<Self> {
         let conn = create_amqp_connection(config).await?;
         let channel = conn.create_channel().await?;
         // Enable publisher confirms on this channel to allow waiting for acks.
@@ -36,10 +36,10 @@ impl AmqpPublisher {
             .await?;
 
         // Ensure the queue exists before we try to publish to it. This is idempotent.
-        info!(queue = %routing_key, "Declaring AMQP queue in sink");
+        info!(queue = %queue, "Declaring AMQP queue in sink");
         channel
             .queue_declare(
-                routing_key,
+                queue,
                 QueueDeclareOptions {
                     durable: !config.no_persistence,
                     ..Default::default()
@@ -51,20 +51,10 @@ impl AmqpPublisher {
         Ok(Self {
             channel,
             exchange: config.exchange.clone().unwrap_or_default(),
-            routing_key: routing_key.to_string(),
+            queue: queue.to_string(),
             no_persistence: config.no_persistence,
             delayed_ack: config.delayed_ack,
         })
-    }
-
-    pub fn with_routing_key(&self, routing_key: &str) -> Self {
-        Self {
-            channel: self.channel.clone(),
-            exchange: self.exchange.clone(),
-            routing_key: routing_key.to_string(),
-            no_persistence: self.no_persistence,
-            delayed_ack: self.delayed_ack,
-        }
     }
 }
 
@@ -94,7 +84,7 @@ impl MessagePublisher for AmqpPublisher {
             .channel
             .basic_publish(
                 &self.exchange,
-                &self.routing_key,
+                &self.queue,
                 BasicPublishOptions::default(),
                 &message.payload,
                 properties,
@@ -149,7 +139,9 @@ impl AmqpConsumer {
         // We'll get the concurrency from the route config, but for now, let's use a reasonable default
         // that can be overridden by a new method.
         let prefetch_count = config.prefetch_count.unwrap_or(100);
-        channel.basic_qos(prefetch_count, BasicQosOptions::default()).await?;
+        channel
+            .basic_qos(prefetch_count, BasicQosOptions::default())
+            .await?;
 
         let consumer = channel
             .basic_consume(
@@ -224,10 +216,8 @@ async fn build_tls_config(config: &AmqpConfig) -> anyhow::Result<OwnedTLSConfig>
 }
 
 fn delivery_to_canonical_message(delivery: &lapin::message::Delivery) -> CanonicalMessage {
-    let mut canonical_message = CanonicalMessage::new(
-        delivery.data.clone(),
-        Some(delivery.delivery_tag as u128),
-    );
+    let mut canonical_message =
+        CanonicalMessage::new(delivery.data.clone(), Some(delivery.delivery_tag as u128));
     if let Some(headers) = delivery.properties.headers().as_ref() {
         if !headers.inner().is_empty() {
             let mut metadata = std::collections::HashMap::new();

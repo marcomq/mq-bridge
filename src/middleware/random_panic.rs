@@ -23,7 +23,7 @@ impl RandomPanicConsumer {
             probability: config.probability,
         }
     }
-    
+
     fn maybe_panic(&self) {
         if rand::rng().random_bool(self.probability) {
             panic!("RandomPanicMiddleware: Consumer panic triggered!");

@@ -52,7 +52,7 @@ pub async fn test_amqp_performance_direct() {
         let queue = "perf_test_amqp_direct";
         let config = hot_queue::models::AmqpConfig {
             url: "amqp://guest:guest@localhost:5672/%2f".to_string(),
-            delayed_ack: true,
+            delayed_ack: false,
             ..Default::default()
         };
 
@@ -66,7 +66,6 @@ pub async fn test_amqp_performance_direct() {
             },
         )
         .await;
-
         add_performance_result(result);
     })
     .await;

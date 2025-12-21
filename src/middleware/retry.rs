@@ -88,7 +88,10 @@ impl MessagePublisher for RetryPublisher {
                     if attempt >= self.config.max_attempts {
                         return Err(e);
                     }
-                    warn!("Batch send failed (attempt {}/{}): {}. Retrying...", attempt, self.config.max_attempts, e);
+                    warn!(
+                        "Batch send failed (attempt {}/{}): {}. Retrying...",
+                        attempt, self.config.max_attempts, e
+                    );
                 }
             }
             tokio::time::sleep(Duration::from_millis(interval)).await;

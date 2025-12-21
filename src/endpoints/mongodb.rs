@@ -23,7 +23,7 @@ use tracing::{info, warn};
 /// The payload is read as a BSON Binary type, which we then manually convert.
 #[derive(Serialize, Deserialize, Debug)]
 struct MongoMessageRaw {
-    message_id: Option<mongodb::bson::Binary>,
+    message_id: Option<Binary>,
     payload: Binary,
     metadata: Option<Document>,
 }
@@ -71,13 +71,13 @@ impl MongoDbPublisher {
 
 #[async_trait]
 impl MessagePublisher for MongoDbPublisher {
-    async fn send(&self, message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {      
+    async fn send(&self, message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {
         let (object_id, message_id_bin) = if let Some(message_id) = &message.message_id {
             // An ObjectId is 12 bytes. A u128 is 16 bytes. We use the last 12 bytes
             // of the message_id to construct the ObjectId, as they are more likely to be unique.
             let bin_id = message_id.to_be_bytes();
             let id_bytes: [u8; 12] = bin_id[4..].try_into()?;
-            let oid =  mongodb::bson::oid::ObjectId::from(id_bytes);
+            let oid = mongodb::bson::oid::ObjectId::from(id_bytes);
             (oid, bin_id)
         } else {
             let oid = mongodb::bson::oid::ObjectId::new();
@@ -85,10 +85,11 @@ impl MessagePublisher for MongoDbPublisher {
             id_bytes[4..16].copy_from_slice(&oid.bytes());
             (oid, id_bytes)
         };
-        let message_id_bin = mongodb::bson::Binary {
-            subtype: mongodb::bson::spec::BinarySubtype::Uuid,
+        let message_id_bin = Bson::Binary(mongodb::bson::Binary {
+            subtype: mongodb::bson::spec::BinarySubtype::Generic,
             bytes: message_id_bin.to_vec(),
-        };
+        });
+        let metadata = to_document(&message.metadata.unwrap_or_default())?;
 
         // Manually construct the document to handle u64 message_id for BSON.
         // BSON only supports i64, so we do a wrapping conversion.
@@ -98,10 +99,9 @@ impl MessagePublisher for MongoDbPublisher {
             "payload": Bson::Binary(mongodb::bson::Binary {
                 subtype: mongodb::bson::spec::BinarySubtype::Generic,
                 bytes: message.payload.to_vec() }),
-            "metadata": to_document(&message.metadata)?,
+            "metadata": metadata,
             "locked_until": null
         };
-
         self.collection.insert_one(doc).await?;
 
         Ok(None)

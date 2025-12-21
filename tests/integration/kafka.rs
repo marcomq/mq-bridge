@@ -58,7 +58,7 @@ pub async fn test_kafka_performance_direct() {
                 ("acks".to_string(), "1".to_string()), // Wait for leader ack, a good balance
                 ("compression.type".to_string(), "snappy".to_string()), // Use snappy compression
             ]),
-            delayed_ack: true, // Use "fire-and-forget" for high throughput
+            delayed_ack: false, // Use "fire-and-forget" for high throughput
             ..Default::default()
         };
 
@@ -67,7 +67,7 @@ pub async fn test_kafka_performance_direct() {
             || async { Arc::new(KafkaPublisher::new(&config, topic).await.unwrap()) },
             || async {
                 Arc::new(tokio::sync::Mutex::new(
-                    KafkaConsumer::new(&config, topic).unwrap(),
+                    KafkaConsumer::new(&config, topic).await.unwrap(),
                 ))
             },
         )

@@ -12,9 +12,8 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer, UnixTime};
 use rustls::{ClientConfig, DigitallySignedStruct, Error as RustlsError, SignatureScheme};
 use std::io::BufReader;
 use std::sync::Arc;
-use tokio::time::Duration;
-use uuid::Uuid;
 use tracing::{info, warn};
+use uuid::Uuid;
 
 enum NatsClient {
     Core(async_nats::Client),
@@ -31,27 +30,22 @@ pub struct NatsPublisher {
 impl NatsPublisher {
     pub async fn new(
         config: &NatsConfig,
+        stream_name: &str,
         subject: &str,
-        stream_name: Option<&str>,
     ) -> anyhow::Result<Self> {
         let options = build_nats_options(config).await?;
         let nats_client = options.connect(&config.url).await?;
 
         let client = if !config.no_jetstream {
             let jetstream = jetstream::new(nats_client);
-            // Ensure the stream exists. This is idempotent.
-            if let Some(stream_name) = stream_name {
-                info!(stream = %stream_name, "Ensuring NATS JetStream stream exists");
-                jetstream
-                    .get_or_create_stream(stream::Config {
-                        name: stream_name.to_string(),
-                        subjects: vec![format!("{}.>", stream_name)],
-                        ..Default::default()
-                    })
-                    .await?;
-            } else {
-                warn!("NATS publisher is in JetStream mode but no 'stream' is configured. Publishing may fail if stream does not exist.");
-            }
+            info!(stream = %stream_name, "Ensuring NATS JetStream stream exists");
+            jetstream
+                .get_or_create_stream(stream::Config {
+                    name: stream_name.to_string(),
+                    subjects: vec![format!("{}.>", stream_name)],
+                    ..Default::default()
+                })
+                .await?;
             NatsClient::JetStream(jetstream)
         } else {
             info!("NATS publisher is in Core mode (non-persistent).");
@@ -66,19 +60,6 @@ impl NatsPublisher {
             subject: subject.to_string(),
             delayed_ack: config.delayed_ack,
         })
-    }
-
-    pub fn with_subject(&self, subject: &str) -> Self {
-        // This clone is cheap because NatsClient holds an Arc-like client internally.
-        let client = match &self.client {
-            NatsClient::Core(c) => NatsClient::Core(c.clone()),
-            NatsClient::JetStream(j) => NatsClient::JetStream(j.clone()),
-        };
-        Self {
-            client,
-            subject: subject.to_string(),
-            delayed_ack: self.delayed_ack,
-        }
     }
 }
 
@@ -179,8 +160,6 @@ impl NatsConsumer {
                     ..Default::default()
                 })
                 .await?;
-
-            tokio::time::sleep(Duration::from_millis(100)).await;
 
             let stream = consumer.messages().await?;
             info!(stream = %stream_name, subject = %subject, "NATS JetStream source subscribed");
@@ -293,7 +272,8 @@ impl MessageConsumer for NatsConsumer {
                 // Process the first message if it exists
                 if let Some(Ok(first_message)) = message_stream {
                     let sequence = first_message.info().ok().map(|meta| meta.stream_sequence);
-                    canonical_messages.push(Self::create_canonical_message(&first_message, sequence));
+                    canonical_messages
+                        .push(Self::create_canonical_message(&first_message, sequence));
                     jetstream_messages.push(first_message);
 
                     // Greedily fetch the rest of the batch

@@ -61,7 +61,7 @@ pub async fn test_nats_performance_direct() {
             "NATS",
             || async {
                 Arc::new(
-                    NatsPublisher::new(&config, subject, Some(stream_name))
+                    NatsPublisher::new(&config, stream_name, subject)
                         .await
                         .unwrap(),
                 )
@@ -76,7 +76,7 @@ pub async fn test_nats_performance_direct() {
         )
         .await;
 
-        add_performance_result(result);
+        add_performance_result(result.clone());
     })
     .await;
 }
