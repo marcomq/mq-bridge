@@ -1,7 +1,7 @@
 services:
   mongodb:
-    image: mongo:5.0
-    container_name: mongodb-itest-hot_queue
+    image: mongo:8.2
+    container_name: mongodb-itest-mq-bridge
     ports:
       - "27017:27017"
     command: mongod --bind_ip_all

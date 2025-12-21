@@ -1,9 +1,9 @@
 #![allow(dead_code)] // This module contains helpers used by various integration tests.
 use async_channel::{bounded, Receiver, Sender};
 use chrono;
-use hot_queue::traits::{BatchCommitFunc, MessagePublisher};
-use hot_queue::traits::{CommitFunc, MessageConsumer};
-use hot_queue::{CanonicalMessage, Route};
+use mq_bridge::traits::{BatchCommitFunc, MessagePublisher};
+use mq_bridge::traits::{CommitFunc, MessageConsumer};
+use mq_bridge::{CanonicalMessage, Route};
 use once_cell::sync::Lazy;
 use serde_json::json;
 use std::any::Any;
@@ -19,7 +19,7 @@ use tracing_subscriber::filter::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
-use hot_queue::endpoints::memory::MemoryChannel;
+use mq_bridge::endpoints::memory::MemoryChannel;
 
 /// A struct to hold the performance results for a single test run.
 #[derive(Debug, Clone, Default)]

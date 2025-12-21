@@ -1,7 +1,7 @@
 services:
   nats:
     image: nats:2.12.2-alpine3.22
-    container_name: nats-itest-mq-multi-bridge
+    container_name: nats-itest-mq-bridge
     command: "-js" # Enable JetStream
     ports:
       - "4222:4222"

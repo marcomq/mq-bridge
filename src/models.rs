@@ -1,7 +1,7 @@
-//  hot_queue
+//  mq-bridge
 //  © Copyright 2025, by Marco Mengelkoch
 //  Licensed under MIT License, see License file for more details
-//  git clone https://github.com/marcomq/hot_queue
+//  git clone https://github.com/marcomq/mq-bridge
 
 use crate::traits::Compute;
 use serde::{
@@ -492,7 +492,7 @@ kafka_to_nats:
   input:
     middlewares:
       - deduplication:
-          sled_path: "/tmp/hot_queue/dedup_db"
+          sled_path: "/tmp/mq-bridge/dedup_db"
           ttl_seconds: 3600
       - metrics: {}
       - retry:
@@ -542,7 +542,7 @@ kafka_to_nats:
         for middleware in &input.middlewares {
             match middleware {
                 Middleware::Deduplication(dedup) => {
-                    assert_eq!(dedup.sled_path, "/tmp/hot_queue/dedup_db");
+                    assert_eq!(dedup.sled_path, "/tmp/mq-bridge/dedup_db");
                     assert_eq!(dedup.ttl_seconds, 3600);
                     has_dedup = true;
                 }
@@ -614,33 +614,33 @@ kafka_to_nats:
     fn test_deserialize_from_env() {
         // Set environment variables based on README
         unsafe {
-            std::env::set_var("HQ__KAFKA_TO_NATS__CONCURRENCY", "10");
-            std::env::set_var("HQ__KAFKA_TO_NATS__INPUT__KAFKA__TOPIC", "input-topic");
-            std::env::set_var("HQ__KAFKA_TO_NATS__INPUT__KAFKA__BROKERS", "localhost:9092");
+            std::env::set_var("MQB__KAFKA_TO_NATS__CONCURRENCY", "10");
+            std::env::set_var("MQB__KAFKA_TO_NATS__INPUT__KAFKA__TOPIC", "input-topic");
+            std::env::set_var("MQB__KAFKA_TO_NATS__INPUT__KAFKA__BROKERS", "localhost:9092");
             std::env::set_var(
-                "HQ__KAFKA_TO_NATS__INPUT__KAFKA__GROUP_ID",
+                "MQB__KAFKA_TO_NATS__INPUT__KAFKA__GROUP_ID",
                 "my-consumer-group",
             );
-            std::env::set_var("HQ__KAFKA_TO_NATS__INPUT__KAFKA__TLS__REQUIRED", "true");
+            std::env::set_var("MQB__KAFKA_TO_NATS__INPUT__KAFKA__TLS__REQUIRED", "true");
             std::env::set_var(
-                "HQ__KAFKA_TO_NATS__INPUT__KAFKA__TLS__CA_FILE",
+                "MQB__KAFKA_TO_NATS__INPUT__KAFKA__TLS__CA_FILE",
                 "/path_to_ca",
             );
             std::env::set_var(
-                "HQ__KAFKA_TO_NATS__INPUT__KAFKA__TLS__ACCEPT_INVALID_CERTS",
+                "MQB__KAFKA_TO_NATS__INPUT__KAFKA__TLS__ACCEPT_INVALID_CERTS",
                 "true",
             );
-            std::env::set_var("HQ__KAFKA_TO_NATS__OUTPUT__NATS__SUBJECT", "output-subject");
+            std::env::set_var("MQB__KAFKA_TO_NATS__OUTPUT__NATS__SUBJECT", "output-subject");
             std::env::set_var(
-                "HQ__KAFKA_TO_NATS__OUTPUT__NATS__URL",
+                "MQB__KAFKA_TO_NATS__OUTPUT__NATS__URL",
                 "nats://localhost:4222",
             );
             std::env::set_var(
-                "HQ__KAFKA_TO_NATS__INPUT__MIDDLEWARES__0__DLQ__ENDPOINT__NATS__SUBJECT",
+                "MQB__KAFKA_TO_NATS__INPUT__MIDDLEWARES__0__DLQ__ENDPOINT__NATS__SUBJECT",
                 "dlq-subject",
             );
             std::env::set_var(
-                "HQ__KAFKA_TO_NATS__INPUT__MIDDLEWARES__0__DLQ__ENDPOINT__NATS__URL",
+                "MQB__KAFKA_TO_NATS__INPUT__MIDDLEWARES__0__DLQ__ENDPOINT__NATS__URL",
                 "nats://localhost:4222",
             );
         }
@@ -648,7 +648,7 @@ kafka_to_nats:
         let builder = ConfigBuilder::builder()
             // Enable automatic type parsing for values from environment variables.
             .add_source(
-                Environment::with_prefix("HQ")
+                Environment::with_prefix("MQB")
                     .separator("__")
                     .try_parsing(true),
             );

@@ -1,4 +1,4 @@
-use hot_queue::models::{Endpoint, EndpointType, MemoryConfig, Route};
+use mq_bridge::models::{Endpoint, EndpointType, MemoryConfig, Route};
 use std::time::Instant;
 
 use crate::integration::common::format_pretty;
@@ -6,7 +6,7 @@ use crate::integration::common::format_pretty;
 mod integration;
 
 // run in release:
-// cargo test --package hot_queue --test memory_test --features integration-test --release -- test_memory_to_memory_pipeline --exact --nocapture
+// cargo test --package mq-bridge --test memory_test --features integration-test --release -- test_memory_to_memory_pipeline --exact --nocapture
 
 #[tokio::test]
 #[ignore] // This is a performance test, run it explicitly

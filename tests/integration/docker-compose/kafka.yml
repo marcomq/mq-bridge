@@ -1,7 +1,7 @@
 services:
   kafka:
     image: confluentinc/cp-kafka:7.9.5
-    container_name: kafka-itest-mq-multi-bridge
+    container_name: kafka-itest-mq-bridge
     ports:
       - "9092:9092"
     environment:
@@ -11,7 +11,7 @@ services:
       KAFKA_CONTROLLER_QUORUM_VOTERS: '1@kafka:9093'
       KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
       # Use a fixed cluster ID for the test environment
-      CLUSTER_ID: 'ci-cluster-id-for-mq-multi-bridge-12345'
+      CLUSTER_ID: 'ci-cluster-id-for-mq-bridge-12345'
 
       # Listener settings
       KAFKA_LISTENERS: 'PLAINTEXT://:9092,CONTROLLER://:9093'

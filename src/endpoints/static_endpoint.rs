@@ -1,7 +1,7 @@
-//  hot_queue
+//  mq-bridge
 //  © Copyright 2025, by Marco Mengelkoch
 //  Licensed under MIT License, see License file for more details
-//  git clone https://github.com/marcomq/hot_queue
+//  git clone https://github.com/marcomq/mq-bridge
 use crate::traits::MessagePublisher;
 use crate::traits::{into_batch_commit_func, BatchCommitFunc};
 use crate::traits::{BoxFuture, CommitFunc, MessageConsumer};

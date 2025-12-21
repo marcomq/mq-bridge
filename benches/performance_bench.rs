@@ -1,5 +1,5 @@
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
-use hot_queue::traits::{MessageConsumer, MessagePublisher};
+use mq_bridge::traits::{MessageConsumer, MessagePublisher};
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -40,8 +40,8 @@ fn should_run(backend_name: &str) -> bool {
 #[cfg(feature = "nats")]
 mod nats_helper {
     use super::*;
-    use hot_queue::endpoints::nats::{NatsConsumer, NatsPublisher};
-    use hot_queue::models::NatsConfig;
+    use mq_bridge::endpoints::nats::{NatsConsumer, NatsPublisher};
+    use mq_bridge::models::NatsConfig;
 
     fn get_config() -> NatsConfig {
         NatsConfig {
@@ -74,13 +74,13 @@ mod nats_helper {
 #[cfg(feature = "mongodb")]
 mod mongodb_helper {
     use super::*;
-    use hot_queue::endpoints::mongodb::{MongoDbConsumer, MongoDbPublisher};
-    use hot_queue::models::MongoDbConfig;
+    use mq_bridge::endpoints::mongodb::{MongoDbConsumer, MongoDbPublisher};
+    use mq_bridge::models::MongoDbConfig;
 
     fn get_config() -> MongoDbConfig {
         MongoDbConfig {
             url: "mongodb://localhost:27017".to_string(),
-            database: "hot_queue_test_db".to_string(),
+            database: "mq_bridge_test_db".to_string(),
             ..Default::default()
         }
     }
@@ -108,8 +108,8 @@ mod mongodb_helper {
 #[cfg(feature = "amqp")]
 mod amqp_helper {
     use super::*;
-    use hot_queue::endpoints::amqp::{AmqpConsumer, AmqpPublisher};
-    use hot_queue::models::AmqpConfig;
+    use mq_bridge::endpoints::amqp::{AmqpConsumer, AmqpPublisher};
+    use mq_bridge::models::AmqpConfig;
     fn get_config() -> AmqpConfig {
         AmqpConfig {
             url: "amqp://guest:guest@localhost:5672/%2f".to_string(),
@@ -134,8 +134,8 @@ mod amqp_helper {
 #[cfg(feature = "kafka")]
 mod kafka_helper {
     use super::*;
-    use hot_queue::endpoints::kafka::{KafkaConsumer, KafkaPublisher};
-    use hot_queue::models::KafkaConfig;
+    use mq_bridge::endpoints::kafka::{KafkaConsumer, KafkaPublisher};
+    use mq_bridge::models::KafkaConfig;
 
     fn get_config() -> KafkaConfig {
         KafkaConfig {
@@ -165,8 +165,8 @@ mod kafka_helper {
 #[cfg(feature = "mqtt")]
 mod mqtt_helper {
     use super::*;
-    use hot_queue::endpoints::mqtt::{MqttConsumer, MqttPublisher};
-    use hot_queue::models::MqttConfig;
+    use mq_bridge::endpoints::mqtt::{MqttConsumer, MqttPublisher};
+    use mq_bridge::models::MqttConfig;
     use uuid::Uuid;
     fn get_config() -> MqttConfig {
         MqttConfig {
