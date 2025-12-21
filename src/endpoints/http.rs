@@ -21,15 +21,15 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
-use tokio::sync::{mpsc, oneshot};
-use tracing::{info, instrument};
+use tokio::sync::{mpsc, oneshot, watch};
+use tracing::{info, instrument, warn};
 
 type HttpSourceMessage = (CanonicalMessage, CommitFunc);
 
 /// A source that listens for incoming HTTP requests.
 pub struct HttpConsumer {
     request_rx: mpsc::Receiver<HttpSourceMessage>,
-    _shutdown_tx: oneshot::Sender<()>,
+    _shutdown_tx: watch::Sender<()>,
 }
 
 #[derive(Clone)]
@@ -43,25 +43,44 @@ struct HttpConsumerState {
 impl HttpConsumer {
     pub async fn new(config: &HttpConfig) -> anyhow::Result<Self> {
         let (request_tx, request_rx) = mpsc::channel::<HttpSourceMessage>(100);
-        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        let (shutdown_tx, mut shutdown_rx) = watch::channel(());
 
         let pending_requests = if let Some(endpoint) = &config.response_sink {
             let pending = Arc::new(Mutex::new(HashMap::<u128, oneshot::Sender<anyhow::Result<Option<CanonicalMessage>>>>::new()));
             let pending_clone = pending.clone();
             let mut consumer = Box::pin(create_consumer_from_route("http_response_sink", endpoint)).await?;
-
+            let mut shutdown_rx_clone = shutdown_rx.clone();
             tokio::spawn(async move {
-                while let Ok((msg, commit)) = consumer.receive().await {
-                    if let Some(id) = msg.message_id {
-                        let sender = {
-                            let mut map = pending_clone.lock().unwrap();
-                            map.remove(&id)
-                        };
-                        if let Some(tx) = sender {
-                            let _ = tx.send(Ok(Some(msg)));
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = shutdown_rx_clone.changed() => {
+                            info!("HTTP response sink consumer shutting down.");
+                            break;
+                        }
+                        result = consumer.receive() => {
+                            match result {
+                                Ok((msg, commit)) => {
+                                    if let Some(id) = msg.message_id {
+                                        let sender = {
+                                            let mut map = pending_clone.lock().unwrap();
+                                            map.remove(&id)
+                                        };
+                                        if let Some(tx) = sender {
+                                            let _ = tx.send(Ok(Some(msg)));
+                                        } else {
+                                            warn!(message_id = %id, "Received response for unknown/timed-out request in HTTP sink");
+                                        }
+                                    }
+                                    commit(None).await;
+                                }
+                                Err(_) => {
+                                    // Consumer stream ended, exit loop
+                                    break;
+                                }
+                            }
                         }
                     }
-                    commit(None).await;
                 }
             });
             Some(pending)
@@ -107,9 +126,10 @@ impl HttpConsumer {
                 let _ = ready_tx.send(());
 
                 let shutdown_handle = handle.clone();
+                let mut shutdown_rx_clone = shutdown_rx.clone();
                 tokio::spawn(async move {
-                    let _ = shutdown_rx.await;
-                    shutdown_handle.graceful_shutdown(None);
+                    let _ = shutdown_rx_clone.changed().await;
+                    shutdown_handle.graceful_shutdown(Some(std::time::Duration::from_secs(5)));
                 });
 
                 axum_server::bind_rustls(addr, tls_config)
@@ -126,7 +146,7 @@ impl HttpConsumer {
 
                 axum::serve(listener, app)
                     .with_graceful_shutdown(async move {
-                        let _ = shutdown_rx.await;
+                        let _ = shutdown_rx.changed().await;
                     })
                     .await
                     .unwrap();
