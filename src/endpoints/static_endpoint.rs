@@ -89,3 +89,60 @@ impl MessageConsumer for StaticRequestConsumer {
         self
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::CanonicalMessage;
+    use serde_json::Value;
+
+    #[tokio::test]
+    async fn test_static_publisher() {
+        let content = "static_response";
+        let publisher = StaticEndpointPublisher::new(content).unwrap();
+        let msg = CanonicalMessage::new(vec![], None);
+
+        let response = publisher.send(msg).await.unwrap();
+        assert!(response.is_some());
+        let response_msg = response.unwrap();
+        // The publisher serializes the content as a JSON string
+        let expected_payload = serde_json::to_vec(&Value::String(content.to_string())).unwrap();
+        assert_eq!(response_msg.payload, expected_payload);
+    }
+
+    #[tokio::test]
+    async fn test_static_consumer() {
+        let content = "static_message";
+        let mut consumer = StaticRequestConsumer::new(content).unwrap();
+
+        let (msg, _commit) = consumer.receive().await.unwrap();
+        assert_eq!(msg.payload, content.as_bytes());
+    }
+
+    #[test]
+    fn test_static_config_yaml() {
+        use crate::models::{Config, EndpointType};
+
+        let yaml = r#"
+test_route:
+  input:
+    static: "static_input_value"
+  output:
+    static: "static_output_value"
+"#;
+        let config: Config = serde_yaml_ng::from_str(yaml).expect("Failed to parse YAML");
+        let route = config.get("test_route").expect("Route should exist");
+
+        if let EndpointType::Static(val) = &route.input.endpoint_type {
+            assert_eq!(val, "static_input_value");
+        } else {
+            panic!("Input was not static");
+        }
+
+        if let EndpointType::Static(val) = &route.output.endpoint_type {
+            assert_eq!(val, "static_output_value");
+        } else {
+            panic!("Output was not static");
+        }
+    }
+}

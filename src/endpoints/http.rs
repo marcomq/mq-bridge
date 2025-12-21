@@ -2,8 +2,9 @@
 //  © Copyright 2025, by Marco Mengelkoch
 //  Licensed under MIT License, see License file for more details
 //  git clone https://github.com/marcomq/mq-bridge
+use crate::endpoints::{create_consumer_from_route, create_publisher_from_route};
 use crate::models::HttpConfig;
-use crate::traits::{BatchCommitFunc, BoxFuture, MessageConsumer, MessagePublisher};
+use crate::traits::{BatchCommitFunc, BoxFuture, CommitFunc, MessageConsumer, MessagePublisher};
 use crate::CanonicalMessage;
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;
@@ -19,26 +20,61 @@ use axum_server::{tls_rustls::RustlsConfig, Handle};
 use std::any::Any;
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot};
-use tracing::{error, info, instrument};
+use tracing::{info, instrument};
 
-type HttpSourceMessage = (
-    CanonicalMessage,
-    oneshot::Sender<anyhow::Result<Option<CanonicalMessage>>>,
-);
+type HttpSourceMessage = (CanonicalMessage, CommitFunc);
 
 /// A source that listens for incoming HTTP requests.
 pub struct HttpConsumer {
     request_rx: mpsc::Receiver<HttpSourceMessage>,
 }
 
+#[derive(Clone)]
+struct HttpConsumerState {
+    tx: mpsc::Sender<HttpSourceMessage>,
+    pending_requests: Option<
+        Arc<Mutex<HashMap<u128, oneshot::Sender<anyhow::Result<Option<CanonicalMessage>>>>>>,
+    >,
+}
+
 impl HttpConsumer {
     pub async fn new(config: &HttpConfig) -> anyhow::Result<Self> {
         let (request_tx, request_rx) = mpsc::channel::<HttpSourceMessage>(100);
 
+        let pending_requests = if let Some(endpoint) = &config.response_sink {
+            let pending = Arc::new(Mutex::new(HashMap::<u128, oneshot::Sender<anyhow::Result<Option<CanonicalMessage>>>>::new()));
+            let pending_clone = pending.clone();
+            let mut consumer = Box::pin(create_consumer_from_route("http_response_sink", endpoint)).await?;
+
+            tokio::spawn(async move {
+                while let Ok((msg, commit)) = consumer.receive().await {
+                    if let Some(id) = msg.message_id {
+                        let sender = {
+                            let mut map = pending_clone.lock().unwrap();
+                            map.remove(&id)
+                        };
+                        if let Some(tx) = sender {
+                            let _ = tx.send(Ok(Some(msg)));
+                        }
+                    }
+                    commit(None).await;
+                }
+            });
+            Some(pending)
+        } else {
+            None
+        };
+
+        let state = HttpConsumerState {
+            tx: request_tx,
+            pending_requests,
+        };
+
         let app = Router::new()
             .route("/", post(handle_request))
-            .with_state(request_tx);
+            .with_state(state);
 
         let listen_address = config
             .url
@@ -95,20 +131,11 @@ impl MessageConsumer for HttpConsumer {
         &mut self,
         _max_messages: usize,
     ) -> anyhow::Result<(Vec<CanonicalMessage>, BatchCommitFunc)> {
-        let (message, response_tx) = self
+        let (message, commit) = self
             .request_rx
             .recv()
             .await
             .ok_or_else(|| anyhow!("HTTP source channel closed"))?;
-
-        // The commit function sends the response back to the HTTP client.
-        let commit = Box::new(move |response_from_sink: Option<CanonicalMessage>| {
-            Box::pin(async move {
-                if response_tx.send(Ok(response_from_sink)).is_err() {
-                    error!("Failed to send response back to HTTP source handler");
-                }
-            }) as BoxFuture<'static, ()>
-        });
 
         Ok((vec![message], crate::traits::into_batch_commit_func(commit)))
     }
@@ -120,11 +147,11 @@ impl MessageConsumer for HttpConsumer {
 
 #[instrument(skip_all, fields(http.method = "POST", http.uri = "/"))]
 async fn handle_request(
-    State(tx): State<mpsc::Sender<HttpSourceMessage>>,
+    State(state): State<HttpConsumerState>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let (response_tx, response_rx) = oneshot::channel();
+    let (final_tx, final_rx) = oneshot::channel();
     let mut message = CanonicalMessage::new(body.to_vec(), None);
 
     let mut metadata = HashMap::new();
@@ -135,15 +162,63 @@ async fn handle_request(
     }
     message.metadata = Some(metadata);
 
-    if tx.send((message, response_tx)).await.is_err() {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Failed to send request to bridge",
-        )
-            .into_response();
+    if let Some(pending) = &state.pending_requests {
+        if message.message_id.is_none() {
+            message.gen_id();
+        }
+        let id = message.message_id.unwrap();
+        {
+            let mut map = pending.lock().unwrap();
+            map.insert(id, final_tx);
+        }
+
+        // Send to pipeline with a dummy ack channel, as we wait for the sink response
+        let (ack_tx, ack_rx) = oneshot::channel::<anyhow::Result<Option<CanonicalMessage>>>();
+        let commit = Box::new(move |resp| {
+            Box::pin(async move {
+                let _ = ack_tx.send(Ok(resp));
+            }) as BoxFuture<'static, ()>
+        });
+
+        if state.tx.send((message, commit)).await.is_err() {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to send request to bridge",
+            )
+                .into_response();
+        }
+
+        // Wait for pipeline acceptance
+        match ack_rx.await {
+            Ok(Err(e)) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Pipeline error: {}", e),
+                )
+                    .into_response()
+            }
+            Err(_) => {
+                return (StatusCode::INTERNAL_SERVER_ERROR, "Pipeline closed").into_response()
+            }
+            Ok(Ok(_)) => {} // Pipeline accepted, continue waiting for sink response
+        }
+    } else {
+        let commit = Box::new(move |resp| {
+            Box::pin(async move {
+                let _ = final_tx.send(Ok(resp));
+            }) as BoxFuture<'static, ()>
+        });
+
+        if state.tx.send((message, commit)).await.is_err() {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to send request to bridge",
+            )
+                .into_response();
+        }
     }
 
-    match response_rx.await {
+    match final_rx.await {
         Ok(Ok(Some(response_message))) => (
             StatusCode::OK,
             [(
@@ -178,7 +253,7 @@ async fn handle_request(
 pub struct HttpPublisher {
     client: reqwest::Client,
     url: String,
-    response_sink: Option<String>,
+    response_sink: Option<Arc<dyn MessagePublisher>>,
 }
 
 impl HttpPublisher {
@@ -194,10 +269,16 @@ impl HttpPublisher {
             client_builder = client_builder.identity(identity);
         }
 
+        let response_sink = if let Some(endpoint) = &config.response_sink {
+            Some(Box::pin(create_publisher_from_route("http_response_sink", endpoint)).await?)
+        } else {
+            None
+        };
+
         Ok(Self {
             client: client_builder.build()?,
             url: config.url.clone().unwrap_or_default(),
-            response_sink: config.response_sink.clone(),
+            response_sink,
         })
     }
 
@@ -245,12 +326,13 @@ impl MessagePublisher for HttpPublisher {
         }
 
         // If a response sink is configured, wrap the response in a CanonicalMessage
-        if self.response_sink.is_some() {
-            let mut response_message = CanonicalMessage::new(response_bytes, None);
+        if let Some(sink) = &self.response_sink {
+            let mut response_message = CanonicalMessage::new(response_bytes, message.message_id);
             if !response_metadata.is_empty() {
                 response_message.metadata = Some(response_metadata);
             }
-            Ok(Some(response_message))
+            sink.send(response_message).await?;
+            Ok(None)
         } else {
             Ok(None)
         }
@@ -269,5 +351,153 @@ impl MessagePublisher for HttpPublisher {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::{Config, EndpointType, MemoryConfig};
+    use crate::CanonicalMessage;
+    use std::time::Duration;
+
+    // Helper to find a free port
+    fn get_free_port() -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.local_addr().unwrap().port()
+    }
+
+    #[test]
+    fn test_http_config_yaml() {
+        let yaml = r#"
+http_route:
+  input:
+    http:
+      url: "127.0.0.1:8080"
+      response_sink:
+        memory:
+          topic: "response_topic"
+  output:
+    http:
+      url: "http://localhost:9090"
+"#;
+        let config: Config = serde_yaml_ng::from_str(yaml).expect("Failed to parse YAML");
+        let route = config.get("http_route").expect("Route not found");
+
+        match &route.input.endpoint_type {
+            EndpointType::Http(cfg) => {
+                assert_eq!(cfg.config.url, Some("127.0.0.1:8080".to_string()));
+                assert!(cfg.config.response_sink.is_some());
+                if let Some(sink) = &cfg.config.response_sink {
+                    match &sink.endpoint_type {
+                        EndpointType::Memory(mem) => assert_eq!(mem.topic, "response_topic"),
+                        _ => panic!("Expected memory endpoint for sink"),
+                    }
+                }
+            }
+            _ => panic!("Expected HTTP input"),
+        }
+
+        match &route.output.endpoint_type {
+            EndpointType::Http(cfg) => {
+                assert_eq!(cfg.config.url, Some("http://localhost:9090".to_string()));
+            }
+            _ => panic!("Expected HTTP output"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_http_consumer_publisher_integration() {
+        let port = get_free_port();
+        let addr = format!("127.0.0.1:{}", port);
+        let url = format!("http://{}", addr);
+
+        let config = HttpConfig {
+            url: Some(addr.clone()),
+            tls: Default::default(),
+            response_sink: None,
+        };
+
+        // Start Consumer (Server)
+        let mut consumer = HttpConsumer::new(&config).await.expect("Failed to create consumer");
+
+        // Start Publisher (Client)
+        let pub_config = HttpConfig {
+            url: Some(url.clone()),
+            tls: Default::default(),
+            response_sink: None,
+        };
+        let publisher = HttpPublisher::new(&pub_config).await.expect("Failed to create publisher");
+
+        // Send message
+        let msg_payload = b"test_payload".to_vec();
+        let msg = CanonicalMessage::new(msg_payload.clone(), None);
+
+        // Spawn a task to handle the receiving side
+        let receive_task = tokio::spawn(async move {
+            let (received_msg, commit) = consumer.receive().await.expect("Failed to receive");
+            // Send a response back via commit
+            let response_msg = CanonicalMessage::new(b"response_payload".to_vec(), None);
+            commit(Some(response_msg)).await;
+            received_msg
+        });
+
+        // Publisher sends
+        let response = publisher.send(msg).await.expect("Failed to send");
+
+        let received_msg = receive_task.await.expect("Receive task failed");
+        assert_eq!(received_msg.payload, msg_payload);
+        assert!(response.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_http_request_reply_with_sink() {
+        let port = get_free_port();
+        let addr = format!("127.0.0.1:{}", port);
+        let url = format!("http://{}", addr);
+
+        let config = HttpConfig {
+            url: Some(addr.clone()),
+            tls: Default::default(),
+            response_sink: None,
+        };
+        let mut consumer = HttpConsumer::new(&config).await.expect("Failed to create consumer");
+
+        let mem_config = MemoryConfig {
+            topic: "reply_sink".to_string(),
+            capacity: Some(10),
+        };
+        let sink_endpoint = crate::models::Endpoint::new(EndpointType::Memory(mem_config.clone()));
+
+        let pub_config = HttpConfig {
+            url: Some(url.clone()),
+            tls: Default::default(),
+            response_sink: Some(Box::new(sink_endpoint)),
+        };
+        let publisher = HttpPublisher::new(&pub_config).await.expect("Failed to create publisher");
+
+        tokio::spawn(async move {
+            loop {
+                if let Ok((_, commit)) = consumer.receive().await {
+                    let response_msg = CanonicalMessage::new(b"server_reply".to_vec(), None);
+                    commit(Some(response_msg)).await;
+                }
+            }
+        });
+
+        let msg = CanonicalMessage::new(b"request".to_vec(), None);
+        publisher.send(msg).await.expect("Failed to send");
+
+        let channel = crate::endpoints::memory::get_or_create_channel(&mem_config);
+        let mut attempts = 0;
+        while channel.is_empty() && attempts < 20 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            attempts += 1;
+        }
+
+        let responses = channel.drain_messages();
+        assert_eq!(responses.len(), 1);
+        assert_eq!(responses[0].payload.to_vec(), b"server_reply".to_vec());
     }
 }
