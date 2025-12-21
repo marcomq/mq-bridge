@@ -18,9 +18,9 @@ pub struct StaticEndpointPublisher {
 }
 
 impl StaticEndpointPublisher {
-    pub fn new(content: &str) -> anyhow::Result<Self> {
+    pub fn new(config: &str) -> anyhow::Result<Self> {
         Ok(Self {
-            content: content.to_owned(),
+            content: config.to_string(),
         })
     }
 }
@@ -59,9 +59,9 @@ pub struct StaticRequestConsumer {
 }
 
 impl StaticRequestConsumer {
-    pub fn new(content: &str) -> anyhow::Result<Self> {
+    pub fn new(config: &str) -> anyhow::Result<Self> {
         Ok(Self {
-            content: content.to_owned(),
+            content: config.to_string(),
         })
     }
 }

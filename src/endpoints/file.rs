@@ -14,7 +14,7 @@ use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::sync::Mutex;
-use tracing::{info, instrument};
+use tracing::{debug, info, instrument};
 
 /// A sink that writes messages to a file, one per line.
 #[derive(Clone)]
@@ -47,25 +47,33 @@ impl FilePublisher {
 
 #[async_trait]
 impl MessagePublisher for FilePublisher {
-    #[instrument(skip_all, fields(message_id = ?message.message_id))]
-    async fn send(&self, message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {
-        let mut writer = self.writer.lock().await;
-        // Since Bytes is immutable, we write the payload and the newline separately.
-        // The BufWriter will handle this efficiently.
-        writer.write_all(&message.payload).await?;
-        writer.write_all(b"\n").await?;
-        Ok(None)
-    }
-
-    // just using normal send for simplicity - it is fast enough
+    #[instrument(skip_all, fields(batch_size = messages.len()), level = "debug")]
     async fn send_batch(
         &self,
         messages: Vec<CanonicalMessage>,
     ) -> anyhow::Result<(Option<Vec<CanonicalMessage>>, Vec<CanonicalMessage>)> {
-        crate::traits::send_batch_helper(self, messages, |publisher, message| {
-            Box::pin(publisher.send(message))
-        })
-        .await
+        if messages.is_empty() {
+            return Ok((None, Vec::new()));
+        }
+
+        let mut writer = self.writer.lock().await;
+        let mut failed_messages = Vec::new();
+
+        // Iterate over messages, consuming them
+        for msg in messages {
+            if writer.write_all(&msg.payload).await.is_err()
+                || writer.write_all(b"\n").await.is_err()
+            {
+                // If write fails, add the message to the failed list
+                failed_messages.push(msg);
+            }
+            else {
+                tracing::trace!(payload_len = %msg.payload.len(), "Writing message to file");
+            }
+        }
+
+        writer.flush().await?;
+        Ok((None, failed_messages))
     }
 
     async fn flush(&self) -> anyhow::Result<()> {
@@ -103,7 +111,7 @@ impl FileConsumer {
 
 #[async_trait]
 impl MessageConsumer for FileConsumer {
-    #[instrument(skip(self), fields(path = %self.path), err(level = "info"))]
+    #[instrument(skip(self), fields(path = %self.path), err(level = "debug"))]
     async fn receive_batch(
         &mut self,
         _max_messages: usize,
@@ -112,7 +120,7 @@ impl MessageConsumer for FileConsumer {
 
         let bytes_read = self.reader.read_until(b'\n', &mut buffer).await?;
         if bytes_read == 0 {
-            info!("End of file reached, consumer will stop.");
+            debug!("End of file reached, consumer will stop.");
             return Err(anyhow!("End of file reached: {}", self.path));
         }
 

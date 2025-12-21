@@ -74,7 +74,7 @@ async fn create_base_consumer(
         EndpointType::File(path) => Ok(Box::new(file::FileConsumer::new(path).await?)),
         #[cfg(feature = "http")]
         EndpointType::Http(cfg) => Ok(Box::new(http::HttpConsumer::new(&cfg.config).await?)),
-        EndpointType::Static(cfg) => {
+        EndpointType::Static(cfg) => { 
             Ok(Box::new(static_endpoint::StaticRequestConsumer::new(cfg)?))
         }
         EndpointType::Memory(cfg) => Ok(Box::new(memory::MemoryConsumer::new(cfg)?)),
@@ -164,9 +164,8 @@ async fn create_base_publisher(
             }
             Ok(Box::new(sink) as Box<dyn MessagePublisher>)
         }
-        EndpointType::Static(cfg) => Ok(Box::new(static_endpoint::StaticEndpointPublisher::new(
-            cfg,
-        )?) as Box<dyn MessagePublisher>),
+        EndpointType::Static(cfg) => Ok(
+            Box::new(static_endpoint::StaticEndpointPublisher::new(cfg)?) as Box<dyn MessagePublisher>),
         EndpointType::Memory(cfg) => {
             Ok(Box::new(memory::MemoryPublisher::new(cfg)?) as Box<dyn MessagePublisher>)
         }
