@@ -143,10 +143,10 @@ impl MessagePublisher for KafkaPublisher {
             }
         }
 
-        let key = if let Some(id) = &message.message_id {
-            id.to_string()
+        let key = if let Some(id) = message.message_id {
+            id.to_be_bytes().to_vec()
         } else {
-            uuid::Uuid::new_v4().to_string()
+            uuid::Uuid::new_v4().as_bytes().to_vec()
         };
         record = record.key(&key);
 
@@ -196,7 +196,7 @@ pub struct KafkaConsumer {
 use std::any::Any;
 
 impl KafkaConsumer {
-    pub fn new(config: &KafkaConfig, topic: &str) -> anyhow::Result<Self> {
+    pub async fn new(config: &KafkaConfig, topic: &str) -> anyhow::Result<Self> {
         use std::sync::Arc;
         let mut client_config = ClientConfig::new();
         if let Some(group_id) = &config.group_id {
@@ -351,7 +351,11 @@ fn process_message(
     let payload = message
         .payload()
         .ok_or_else(|| anyhow!("Kafka message has no payload"))?;
-    let mut canonical_message = CanonicalMessage::new(payload.to_vec());
+    // Combine partition and offset for a unique ID within a topic.
+    // A u128 is used to hold both values, with the partition in the high 64 bits
+    // and the offset in the low 64 bits.
+    let message_id = ((message.partition() as u32 as u128) << 64) | (message.offset() as u64 as u128);
+    let mut canonical_message = CanonicalMessage::new(payload.to_vec(), Some(message_id));
     if let Some(headers) = message.headers() {
         if headers.count() > 0 {
             let mut metadata = std::collections::HashMap::new();

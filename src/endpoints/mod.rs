@@ -1,10 +1,11 @@
-//  hot_queue
+//  mq-bridge
 //  © Copyright 2025, by Marco Mengelkoch
 //  Licensed under MIT License, see License file for more details
-//  git clone https://github.com/marcomq/hot_queue
+//  git clone https://github.com/marcomq/mq-bridge
 
 #[cfg(feature = "amqp")]
 pub mod amqp;
+pub mod fanout;
 pub mod file;
 #[cfg(feature = "http")]
 pub mod http;
@@ -41,7 +42,9 @@ async fn create_base_consumer(
         #[cfg(feature = "kafka")]
         EndpointType::Kafka(cfg) => {
             let topic = cfg.topic.as_deref().unwrap_or(route_name);
-            Ok(Box::new(kafka::KafkaConsumer::new(&cfg.config, topic)?))
+            Ok(Box::new(
+                kafka::KafkaConsumer::new(&cfg.config, topic).await?,
+            ))
         }
         #[cfg(feature = "nats")]
         EndpointType::Nats(cfg) => {
@@ -95,19 +98,26 @@ pub async fn create_publisher_from_route(
     route_name: &str,
     endpoint: &Endpoint,
 ) -> Result<Arc<dyn MessagePublisher>> {
-    // This function was partially refactored. It should create a base publisher
-    // and then apply middlewares, similar to `create_consumer_from_route`.
-    // However, since the middleware application logic already exists in `middleware/mod.rs`,
-    // we can simply call it after creating the base publisher.
-    // For now, let's fix the immediate compilation errors by creating the base publisher
-    // and wrapping it correctly. The middleware logic can be added back cleanly.
-    let publisher = create_base_publisher(route_name, &endpoint.endpoint_type).await?;
+    create_publisher_with_depth(route_name, endpoint, 0).await
+}
+
+async fn create_publisher_with_depth(
+    route_name: &str,
+    endpoint: &Endpoint,
+    depth: usize,
+) -> Result<Arc<dyn MessagePublisher>> {
+    const MAX_DEPTH: usize = 16;
+    if depth > MAX_DEPTH {
+        return Err(anyhow!("Fanout recursion depth exceeded limit of {}", MAX_DEPTH));
+    }
+    let publisher = create_base_publisher(route_name, &endpoint.endpoint_type, depth).await?;
     crate::middleware::apply_middlewares_to_publisher(publisher, endpoint, route_name).await
 }
 
 async fn create_base_publisher(
     route_name: &str,
     endpoint_type: &EndpointType,
+    depth: usize,
 ) -> Result<Box<dyn MessagePublisher>> {
     let publisher = match endpoint_type {
         #[cfg(feature = "kafka")]
@@ -121,9 +131,11 @@ async fn create_base_publisher(
         #[cfg(feature = "nats")]
         EndpointType::Nats(cfg) => {
             let subject = cfg.subject.as_deref().unwrap_or(route_name);
-            Ok(Box::new(
-                nats::NatsPublisher::new(&cfg.config, subject, cfg.stream.as_deref()).await?,
-            ) as Box<dyn MessagePublisher>)
+            let stream_name = cfg.stream.as_deref().unwrap_or_default();
+            Ok(
+                Box::new(nats::NatsPublisher::new(&cfg.config, stream_name, subject).await?)
+                    as Box<dyn MessagePublisher>,
+            )
         }
         #[cfg(feature = "amqp")]
         EndpointType::Amqp(cfg) => {
@@ -166,6 +178,14 @@ async fn create_base_publisher(
                     as Box<dyn MessagePublisher>,
             )
         }
+        EndpointType::Fanout(endpoints) => {
+            let mut publishers = Vec::with_capacity(endpoints.len());
+            for endpoint in endpoints {
+                let p = Box::pin(create_publisher_with_depth(route_name, endpoint, depth + 1)).await?;
+                publishers.push(p);
+            }
+            Ok(Box::new(fanout::FanoutPublisher::new(publishers)) as Box<dyn MessagePublisher>)
+        }
         #[allow(unreachable_patterns)]
         _ => Err(anyhow!(
             "[route:{}] Unsupported publisher endpoint type",
@@ -173,4 +193,48 @@ async fn create_base_publisher(
         )),
     }?;
     Ok(publisher)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::endpoints::memory::get_or_create_channel;
+    use crate::models::{Endpoint, EndpointType, MemoryConfig};
+    use crate::CanonicalMessage;
+
+    #[tokio::test]
+    async fn test_fanout_publisher_integration() {
+        let mem_cfg1 = MemoryConfig {
+            topic: "fanout_1".to_string(),
+            capacity: Some(10),
+        };
+        let mem_cfg2 = MemoryConfig {
+            topic: "fanout_2".to_string(),
+            capacity: Some(10),
+        };
+
+        let ep1 = Endpoint::new(EndpointType::Memory(mem_cfg1.clone()));
+        let ep2 = Endpoint::new(EndpointType::Memory(mem_cfg2.clone()));
+
+        let fanout_ep = Endpoint::new(EndpointType::Fanout(vec![ep1, ep2]));
+
+        let publisher = create_publisher_from_route("test_fanout", &fanout_ep)
+            .await
+            .expect("Failed to create fanout publisher");
+
+        let msg = CanonicalMessage::new(b"fanout_payload".to_vec(), None);
+        publisher.send(msg).await.expect("Failed to send message");
+
+        let chan1 = get_or_create_channel(&mem_cfg1);
+        let chan2 = get_or_create_channel(&mem_cfg2);
+
+        assert_eq!(chan1.len(), 1);
+        assert_eq!(chan2.len(), 1);
+
+        let msg1 = chan1.drain_messages().pop().unwrap();
+        let msg2 = chan2.drain_messages().pop().unwrap();
+
+        assert_eq!(msg1.payload, "fanout_payload".as_bytes());
+        assert_eq!(msg2.payload, "fanout_payload".as_bytes());
+    }
 }

@@ -1,7 +1,7 @@
-//  hot_queue
+//  mq-bridge
 //  © Copyright 2025, by Marco Mengelkoch
 //  Licensed under MIT License, see License file for more details
-//  git clone https://github.com/marcomq/hot_queue
+//  git clone https://github.com/marcomq/mq-bridge
 use crate::models::MemoryConfig;
 use crate::traits::{BatchCommitFunc, BoxFuture, MessageConsumer, MessagePublisher};
 use crate::CanonicalMessage;
@@ -106,6 +106,9 @@ impl MemoryPublisher {
             sender: channel.sender.clone(),
         })
     }
+
+    /// Note: This helper is primarily for tests expecting a Queue.    
+    /// If used on a broadcast publisher, it will create a separate Queue channel.
     pub fn channel(&self) -> MemoryChannel {
         get_or_create_channel(&MemoryConfig {
             topic: self.topic.clone(),
@@ -124,6 +127,7 @@ impl MessagePublisher for MemoryPublisher {
             .send(messages)
             .await
             .map_err(|e| anyhow!("Failed to send to memory channel: {}", e))?;
+
         tracing::trace!(
             "Batch sent to publisher memory channel. Current batch count: {}",
             self.sender.len()

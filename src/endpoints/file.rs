@@ -1,7 +1,7 @@
-//  hot_queue
+//  mq-bridge
 //  © Copyright 2025, by Marco Mengelkoch
 //  Licensed under MIT License, see License file for more details
-//  git clone https://github.com/marcomq/hot_queue
+//  git clone https://github.com/marcomq/mq-bridge
 use crate::traits::{into_batch_commit_func, BatchCommitFunc};
 use crate::traits::{BoxFuture, MessageConsumer, MessagePublisher};
 use crate::CanonicalMessage;
@@ -120,7 +120,7 @@ impl MessageConsumer for FileConsumer {
         if buffer.ends_with(b"\n") {
             buffer.pop();
         }
-        let message = CanonicalMessage::new(buffer);
+        let message = CanonicalMessage::new(buffer, None);
 
         // The commit for a file source is a no-op.
         let commit = Box::new(move |_| Box::pin(async move {}) as BoxFuture<'static, ()>);

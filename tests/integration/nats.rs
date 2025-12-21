@@ -5,7 +5,7 @@ use super::common::{
     add_performance_result, run_direct_perf_test, run_performance_pipeline_test, run_pipeline_test,
     run_test_with_docker, setup_logging, PERF_TEST_MESSAGE_COUNT,
 };
-use hot_queue::endpoints::nats::{NatsConsumer, NatsPublisher};
+use mq_bridge::endpoints::nats::{NatsConsumer, NatsPublisher};
 const PERF_TEST_MESSAGE_COUNT_DIRECT: usize = 20_000;
 const CONFIG_YAML: &str = r#"
 routes:
@@ -51,7 +51,7 @@ pub async fn test_nats_performance_direct() {
     run_test_with_docker("tests/integration/docker-compose/nats.yml", || async {
         let stream_name = "perf_nats_direct";
         let subject = "perf_nats_direct.subject";
-        let config = hot_queue::models::NatsConfig {
+        let config = mq_bridge::models::NatsConfig {
             url: "nats://localhost:4222".to_string(),
             delayed_ack: false,
             ..Default::default()
@@ -61,7 +61,7 @@ pub async fn test_nats_performance_direct() {
             "NATS",
             || async {
                 Arc::new(
-                    NatsPublisher::new(&config, subject, Some(stream_name))
+                    NatsPublisher::new(&config, stream_name, subject)
                         .await
                         .unwrap(),
                 )

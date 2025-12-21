@@ -1,13 +1,15 @@
-//  hot_queue
+//  mq-bridge
 //  © Copyright 2025, by Marco Mengelkoch
 //  Licensed under MIT License, see License file for more details
-//  git clone https://github.com/marcomq/hot_queue
+//  git clone https://github.com/marcomq/mq-bridge
 
+use crate::traits::Compute;
 use serde::{
     de::{MapAccess, Visitor},
     Deserialize, Deserializer, Serialize,
 };
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::endpoints::memory::{get_or_create_channel, MemoryChannel};
 
@@ -34,6 +36,49 @@ fn default_concurrency() -> usize {
 
 fn default_dlq_retry_attempts() -> usize {
     3
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_retry_attempts() -> usize {
+    3
+}
+fn default_initial_interval_ms() -> u64 {
+    100
+}
+fn default_max_interval_ms() -> u64 {
+    5000
+}
+fn default_multiplier() -> f64 {
+    2.0
+}
+
+#[derive(Clone)]
+pub struct ComputeHandler(pub Arc<dyn Compute>);
+
+impl ComputeHandler {
+    pub fn new(compute: impl Compute + 'static) -> Self {
+        Self(Arc::new(compute))
+    }
+}
+
+impl std::fmt::Debug for ComputeHandler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ComputeHandler")
+    }
+}
+
+impl<'de> Deserialize<'de> for ComputeHandler {
+    fn deserialize<D>(_deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Err(serde::de::Error::custom(
+            "ComputeHandler cannot be deserialized from config",
+        ))
+    }
 }
 
 /// Represents a connection point for messages, which can be a source (input) or a sink (output).
@@ -167,15 +212,20 @@ pub enum EndpointType {
     MongoDb(MongoDbEndpoint),
     Mqtt(MqttEndpoint),
     Http(HttpEndpoint),
+    Fanout(Vec<Endpoint>),
 }
 
 /// An enumeration of all supported middleware types.
 #[derive(Debug, Deserialize, Serialize, Clone)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum Middleware {
     Deduplication(DeduplicationMiddleware),
     Metrics(MetricsMiddleware),
     Dlq(Box<DeadLetterQueueMiddleware>),
+    Retry(RetryMiddleware),
+    RandomPanic(RandomPanicMiddleware),
+    #[serde(skip)]
+    Compute(ComputeHandler),
 }
 
 /// Deduplication middleware configuration.
@@ -200,6 +250,45 @@ pub struct DeadLetterQueueMiddleware {
     /// Number of retry attempts for the DLQ send. Defaults to 3.
     #[serde(default = "default_dlq_retry_attempts")]
     pub dlq_retry_attempts: usize,
+    #[serde(default = "default_initial_interval_ms")]
+    pub dlq_initial_interval_ms: u64,
+    #[serde(default = "default_max_interval_ms")]
+    pub dlq_max_interval_ms: u64,
+    #[serde(default = "default_multiplier")]
+    pub dlq_multiplier: f64,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct RetryMiddleware {
+    #[serde(default = "default_retry_attempts")]
+    pub max_attempts: usize,
+    #[serde(default = "default_initial_interval_ms")]
+    pub initial_interval_ms: u64,
+    #[serde(default = "default_max_interval_ms")]
+    pub max_interval_ms: u64,
+    #[serde(default = "default_multiplier")]
+    pub multiplier: f64,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct RandomPanicMiddleware {
+    #[serde(deserialize_with = "deserialize_probability")]
+    pub probability: f64,
+}
+
+fn deserialize_probability<'de, D>(deserializer: D) -> Result<f64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = f64::deserialize(deserializer)?;
+    if !(0.0..=1.0).contains(&value) {
+        return Err(serde::de::Error::custom(
+            "probability must be between 0.0 and 1.0",
+        ));
+    }
+    Ok(value)
 }
 
 // --- Kafka Specific Configuration ---
@@ -261,6 +350,7 @@ pub struct NatsConfig {
     #[serde(default)]
     pub no_jetstream: bool,
     pub default_stream: Option<String>,
+    pub prefetch_count: Option<usize>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
@@ -288,6 +378,8 @@ pub struct AmqpConfig {
     pub url: String,
     pub username: Option<String>,
     pub password: Option<String>,
+    pub exchange: Option<String>,
+    pub prefetch_count: Option<u16>,
     #[serde(default)]
     pub tls: TlsConfig,
     #[serde(default)]
@@ -314,6 +406,7 @@ pub struct MongoDbEndpoint {
 pub struct MongoDbConfig {
     pub url: String,
     pub database: String,
+    pub polling_interval_ms: Option<u64>,
 }
 
 // --- MQTT Specific Configuration ---
@@ -337,6 +430,10 @@ pub struct MqttConfig {
     #[serde(default)]
     pub tls: TlsConfig,
     pub queue_capacity: Option<usize>,
+    pub qos: Option<u8>,
+    #[serde(default = "default_true")]
+    pub clean_session: bool,
+    pub keep_alive_seconds: Option<u64>,
 }
 
 // --- HTTP Specific Configuration ---
@@ -395,9 +492,14 @@ kafka_to_nats:
   input:
     middlewares:
       - deduplication:
-          sled_path: "/tmp/hot_queue/dedup_db"
+          sled_path: "/tmp/mq-bridge/dedup_db"
           ttl_seconds: 3600
       - metrics: {}
+      - retry:
+          max_attempts: 5
+          initial_interval_ms: 200
+      - random_panic:
+          probability: 0.1
       - dlq:
           endpoint:
             nats:
@@ -430,15 +532,17 @@ kafka_to_nats:
 
         // --- Assert Input ---
         let input = &route.input;
-        assert_eq!(input.middlewares.len(), 3);
+        assert_eq!(input.middlewares.len(), 5);
 
         let mut has_dedup = false;
         let mut has_metrics = false;
         let mut has_dlq = false;
+        let mut has_retry = false;
+        let mut has_random_panic = false;
         for middleware in &input.middlewares {
             match middleware {
                 Middleware::Deduplication(dedup) => {
-                    assert_eq!(dedup.sled_path, "/tmp/hot_queue/dedup_db");
+                    assert_eq!(dedup.sled_path, "/tmp/mq-bridge/dedup_db");
                     assert_eq!(dedup.ttl_seconds, 3600);
                     has_dedup = true;
                 }
@@ -453,6 +557,16 @@ kafka_to_nats:
                     }
                     has_dlq = true;
                 }
+                Middleware::Retry(retry) => {
+                    assert_eq!(retry.max_attempts, 5);
+                    assert_eq!(retry.initial_interval_ms, 200);
+                    has_retry = true;
+                }
+                Middleware::RandomPanic(rp) => {
+                    assert!((rp.probability - 0.1).abs() < f64::EPSILON);
+                    has_random_panic = true;
+                }
+                Middleware::Compute(_) => panic!("Compute middleware cannot be deserialized"),
             }
         }
 
@@ -470,6 +584,8 @@ kafka_to_nats:
         assert!(has_dedup);
         assert!(has_metrics);
         assert!(has_dlq);
+        assert!(has_retry);
+        assert!(has_random_panic);
 
         // --- Assert Output ---
         let output = &route.output;
@@ -498,33 +614,33 @@ kafka_to_nats:
     fn test_deserialize_from_env() {
         // Set environment variables based on README
         unsafe {
-            std::env::set_var("HQ__KAFKA_TO_NATS__CONCURRENCY", "10");
-            std::env::set_var("HQ__KAFKA_TO_NATS__INPUT__KAFKA__TOPIC", "input-topic");
-            std::env::set_var("HQ__KAFKA_TO_NATS__INPUT__KAFKA__BROKERS", "localhost:9092");
+            std::env::set_var("MQB__KAFKA_TO_NATS__CONCURRENCY", "10");
+            std::env::set_var("MQB__KAFKA_TO_NATS__INPUT__KAFKA__TOPIC", "input-topic");
+            std::env::set_var("MQB__KAFKA_TO_NATS__INPUT__KAFKA__BROKERS", "localhost:9092");
             std::env::set_var(
-                "HQ__KAFKA_TO_NATS__INPUT__KAFKA__GROUP_ID",
+                "MQB__KAFKA_TO_NATS__INPUT__KAFKA__GROUP_ID",
                 "my-consumer-group",
             );
-            std::env::set_var("HQ__KAFKA_TO_NATS__INPUT__KAFKA__TLS__REQUIRED", "true");
+            std::env::set_var("MQB__KAFKA_TO_NATS__INPUT__KAFKA__TLS__REQUIRED", "true");
             std::env::set_var(
-                "HQ__KAFKA_TO_NATS__INPUT__KAFKA__TLS__CA_FILE",
+                "MQB__KAFKA_TO_NATS__INPUT__KAFKA__TLS__CA_FILE",
                 "/path_to_ca",
             );
             std::env::set_var(
-                "HQ__KAFKA_TO_NATS__INPUT__KAFKA__TLS__ACCEPT_INVALID_CERTS",
+                "MQB__KAFKA_TO_NATS__INPUT__KAFKA__TLS__ACCEPT_INVALID_CERTS",
                 "true",
             );
-            std::env::set_var("HQ__KAFKA_TO_NATS__OUTPUT__NATS__SUBJECT", "output-subject");
+            std::env::set_var("MQB__KAFKA_TO_NATS__OUTPUT__NATS__SUBJECT", "output-subject");
             std::env::set_var(
-                "HQ__KAFKA_TO_NATS__OUTPUT__NATS__URL",
+                "MQB__KAFKA_TO_NATS__OUTPUT__NATS__URL",
                 "nats://localhost:4222",
             );
             std::env::set_var(
-                "HQ__KAFKA_TO_NATS__INPUT__MIDDLEWARES__0__DLQ__ENDPOINT__NATS__SUBJECT",
+                "MQB__KAFKA_TO_NATS__INPUT__MIDDLEWARES__0__DLQ__ENDPOINT__NATS__SUBJECT",
                 "dlq-subject",
             );
             std::env::set_var(
-                "HQ__KAFKA_TO_NATS__INPUT__MIDDLEWARES__0__DLQ__ENDPOINT__NATS__URL",
+                "MQB__KAFKA_TO_NATS__INPUT__MIDDLEWARES__0__DLQ__ENDPOINT__NATS__URL",
                 "nats://localhost:4222",
             );
         }
@@ -532,7 +648,7 @@ kafka_to_nats:
         let builder = ConfigBuilder::builder()
             // Enable automatic type parsing for values from environment variables.
             .add_source(
-                Environment::with_prefix("HQ")
+                Environment::with_prefix("MQB")
                     .separator("__")
                     .try_parsing(true),
             );
@@ -558,6 +674,41 @@ kafka_to_nats:
             // Correctly parsed
         } else {
             panic!("Expected DLQ middleware");
+        }
+    }
+
+    #[test]
+    fn test_deserialize_fanout_yaml() {
+        let yaml = r#"
+fanout_route:
+  input:
+    memory:
+      topic: "input"
+  output:
+    fanout:
+      - memory:
+          topic: "out1"
+      - memory:
+          topic: "out2"
+"#;
+        let config: Config =
+            serde_yaml_ng::from_str(yaml).expect("Failed to deserialize fanout config");
+        let route = config.get("fanout_route").expect("Route should exist");
+
+        if let EndpointType::Fanout(endpoints) = &route.output.endpoint_type {
+            assert_eq!(endpoints.len(), 2);
+            if let EndpointType::Memory(m) = &endpoints[0].endpoint_type {
+                assert_eq!(m.topic, "out1");
+            } else {
+                panic!("Expected memory endpoint 1");
+            }
+            if let EndpointType::Memory(m) = &endpoints[1].endpoint_type {
+                assert_eq!(m.topic, "out2");
+            } else {
+                panic!("Expected memory endpoint 2");
+            }
+        } else {
+            panic!("Expected Fanout endpoint");
         }
     }
 }

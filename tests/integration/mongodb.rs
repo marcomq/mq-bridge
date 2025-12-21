@@ -7,18 +7,18 @@ use super::common::{
     add_performance_result, run_direct_perf_test, run_performance_pipeline_test, run_pipeline_test,
     run_test_with_docker, setup_logging,
 };
-use hot_queue::endpoints::mongodb::{MongoDbConsumer, MongoDbPublisher};
+use mq_bridge::endpoints::mongodb::{MongoDbConsumer, MongoDbPublisher};
 const CONFIG_YAML: &str = r#"
 routes:
   memory_to_mongodb:
     in:
       memory: { topic: "test-in-mongodb" }
     out:
-      mongodb: { url: "mongodb://localhost:27017", database: "hot_queue_test", collection: "test_collection" }
+      mongodb: { url: "mongodb://localhost:27017", database: "mq_bridge_test", collection: "test_collection" }
 
   mongodb_to_memory:
     in:
-      mongodb: { url: "mongodb://localhost:27017", database: "hot_queue_test", collection: "test_collection" }
+      mongodb: { url: "mongodb://localhost:27017", database: "mq_bridge_test", collection: "test_collection" }
     out:
       memory: { topic: "test-out-mongodb", capacity: {out_capacity} }
 "#;
@@ -51,9 +51,9 @@ pub async fn test_mongodb_performance_direct() {
     setup_logging();
     run_test_with_docker("tests/integration/docker-compose/mongodb.yml", || async {
         let collection_name = "perf_mongodb_direct";
-        let config = hot_queue::models::MongoDbConfig {
+        let config = mq_bridge::models::MongoDbConfig {
             url: "mongodb://localhost:27017".to_string(),
-            database: "hot_queue_test_db".to_string(),
+            database: "mq_bridge_test_db".to_string(),
             ..Default::default()
         };
 

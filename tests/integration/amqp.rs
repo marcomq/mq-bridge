@@ -4,7 +4,7 @@ use super::common::{
     add_performance_result, run_direct_perf_test, run_performance_pipeline_test, run_pipeline_test,
     run_test_with_docker, setup_logging, PERF_TEST_MESSAGE_COUNT,
 };
-use hot_queue::endpoints::amqp::{AmqpConsumer, AmqpPublisher};
+use mq_bridge::endpoints::amqp::{AmqpConsumer, AmqpPublisher};
 use std::sync::Arc;
 
 const CONFIG_YAML: &str = r#"
@@ -50,9 +50,9 @@ pub async fn test_amqp_performance_direct() {
     setup_logging();
     run_test_with_docker("tests/integration/docker-compose/amqp.yml", || async {
         let queue = "perf_test_amqp_direct";
-        let config = hot_queue::models::AmqpConfig {
+        let config = mq_bridge::models::AmqpConfig {
             url: "amqp://guest:guest@localhost:5672/%2f".to_string(),
-            delayed_ack: true,
+            delayed_ack: false,
             ..Default::default()
         };
 
@@ -66,7 +66,6 @@ pub async fn test_amqp_performance_direct() {
             },
         )
         .await;
-
         add_performance_result(result);
     })
     .await;

@@ -1,7 +1,7 @@
-//  hot_queue
+//  mq-bridge
 //  © Copyright 2025, by Marco Mengelkoch
 //  Licensed under MIT License, see License file for more details
-//  git clone https://github.com/marcomq/hot_queue
+//  git clone https://github.com/marcomq/mq-bridge
 use crate::traits::MessagePublisher;
 use crate::traits::{into_batch_commit_func, BatchCommitFunc};
 use crate::traits::{BoxFuture, CommitFunc, MessageConsumer};
@@ -30,7 +30,7 @@ impl MessagePublisher for StaticEndpointPublisher {
     async fn send(&self, _message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {
         trace!(response = %self.content, "Sending static response");
         let payload = serde_json::to_vec(&Value::String(self.content.clone()))?;
-        Ok(Some(CanonicalMessage::new(payload)))
+        Ok(Some(CanonicalMessage::new(payload, None)))
     }
 
     async fn send_batch(
@@ -69,8 +69,7 @@ impl StaticRequestConsumer {
 #[async_trait]
 impl MessageConsumer for StaticRequestConsumer {
     async fn receive(&mut self) -> anyhow::Result<(CanonicalMessage, CommitFunc)> {
-        let payload = self.content.as_bytes().to_vec();
-        let message = CanonicalMessage::new(payload);
+        let message = CanonicalMessage::new(self.content.as_bytes().to_vec(), None);
         let commit = Box::new(|_response: Option<CanonicalMessage>| {
             Box::pin(async {}) as BoxFuture<'static, ()>
         });

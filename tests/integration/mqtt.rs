@@ -4,7 +4,7 @@ use super::common::{
     add_performance_result, run_direct_perf_test, run_performance_pipeline_test, run_pipeline_test,
     run_test_with_docker, setup_logging, PERF_TEST_MESSAGE_COUNT,
 };
-use hot_queue::endpoints::mqtt::{MqttConsumer, MqttPublisher};
+use mq_bridge::endpoints::mqtt::{MqttConsumer, MqttPublisher};
 use std::sync::Arc;
 use uuid::Uuid;
 const CONFIG_YAML: &str = r#"
@@ -50,7 +50,7 @@ pub async fn test_mqtt_performance_direct() {
     setup_logging();
     run_test_with_docker("tests/integration/docker-compose/mqtt.yml", || async {
         let topic = "perf_test_mqtt_direct";
-        let config = hot_queue::models::MqttConfig {
+        let config = mq_bridge::models::MqttConfig {
             url: "mqtt://localhost:1883".to_string(),
             // Increase the client's incoming message buffer to hold all messages from the test run.
             queue_capacity: Some(PERF_TEST_MESSAGE_COUNT * 2), // For batch and single

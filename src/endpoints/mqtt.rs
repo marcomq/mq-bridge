@@ -4,6 +4,7 @@ use crate::traits::{
     MessagePublisher,
 };
 use crate::CanonicalMessage;
+use crate::APP_NAME;
 use anyhow::anyhow;
 use async_trait::async_trait;
 use rumqttc::{tokio_rustls::rustls, AsyncClient, Event, Incoming, MqttOptions, QoS, Transport};
@@ -17,12 +18,14 @@ pub struct MqttPublisher {
     client: AsyncClient,
     topic: String,
     eventloop_handle: Arc<JoinHandle<()>>,
+    qos: QoS,
 }
 
 impl MqttPublisher {
     pub async fn new(config: &MqttConfig, topic: &str, bridge_id: &str) -> anyhow::Result<Self> {
         let (client, eventloop) = create_client_and_eventloop(config, bridge_id).await?;
         let (eventloop_handle, ready_rx) = run_eventloop(eventloop, "Publisher", None);
+        let qos = parse_qos(config.qos.unwrap_or(1));
 
         // Wait for the eventloop to confirm connection.
         tokio::time::timeout(Duration::from_secs(10), ready_rx).await??;
@@ -31,6 +34,7 @@ impl MqttPublisher {
             client,
             topic: topic.to_string(),
             eventloop_handle: Arc::new(eventloop_handle),
+            qos,
         })
     }
     pub fn with_topic(&self, topic: &str) -> Self {
@@ -38,6 +42,7 @@ impl MqttPublisher {
             client: self.client.clone(),
             topic: topic.to_string(),
             eventloop_handle: self.eventloop_handle.clone(),
+            qos: self.qos,
         }
     }
 
@@ -64,7 +69,7 @@ impl MessagePublisher for MqttPublisher {
             "Publishing MQTT message"
         );
         self.client
-            .publish(&self.topic, QoS::AtLeastOnce, false, message.payload)
+            .publish(&self.topic, self.qos, false, message.payload)
             .await?;
         Ok(None)
     }
@@ -98,10 +103,11 @@ impl MqttConsumer {
         let queue_capacity = config.queue_capacity.unwrap_or(100);
         let (message_tx, message_rx) = mpsc::channel(queue_capacity);
 
+        let qos = parse_qos(config.qos.unwrap_or(1));
         let (eventloop_handle, ready_rx) = run_eventloop(
             eventloop,
             "Consumer",
-            Some((client.clone(), topic.to_string(), message_tx)),
+            Some((client.clone(), topic.to_string(), qos, message_tx)),
         );
 
         // Wait for the eventloop to confirm connection and subscription.
@@ -131,7 +137,11 @@ impl MessageConsumer for MqttConsumer {
             .await
             .ok_or_else(|| anyhow!("MQTT source channel closed"))?;
 
-        let canonical_message = CanonicalMessage::new(p.payload.to_vec());
+        // The MQTT `pkid` is a u16 packet identifier for QoS > 0 messages.
+        // It is reused by the client and broker for different messages over time,
+        // so it is NOT a unique message identifier. Using it for deduplication
+        // would lead to incorrect behavior. We pass `None` here.
+        let canonical_message = CanonicalMessage::new(p.payload.to_vec(), None);
 
         let commit = Box::new(move |_response| {
             Box::pin(async move {
@@ -162,7 +172,7 @@ impl MessageConsumer for MqttConsumer {
 fn run_eventloop(
     mut eventloop: rumqttc::EventLoop,
     client_type: &'static str,
-    consumer_info: Option<(AsyncClient, String, mpsc::Sender<rumqttc::Publish>)>,
+    consumer_info: Option<(AsyncClient, String, QoS, mpsc::Sender<rumqttc::Publish>)>,
 ) -> (
     JoinHandle<()>,
     impl Future<Output = Result<(), anyhow::Error>>,
@@ -178,8 +188,8 @@ fn run_eventloop(
                     if ack.code == rumqttc::ConnectReturnCode::Success {
                         info!("MQTT {} connected.", client_type);
                         // If this is a consumer, subscribe to the topic.
-                        if let Some((client, topic, _)) = &consumer_info {
-                            if let Err(e) = client.subscribe(topic, QoS::AtLeastOnce).await {
+                        if let Some((client, topic, qos, _)) = &consumer_info {
+                            if let Err(e) = client.subscribe(topic, *qos).await {
                                 error!("MQTT {} failed to subscribe: {}. Halting.", client_type, e);
                                 if let Some(tx) = ready_tx.take() {
                                     let _ = tx.send(Err(e.into()));
@@ -204,7 +214,7 @@ fn run_eventloop(
                     }
                 }
                 Ok(Event::Incoming(Incoming::Publish(publish))) => {
-                    if let Some((_, _, message_tx)) = &consumer_info {
+                    if let Some((_, _, _, message_tx)) = &consumer_info {
                         if message_tx.send(publish).await.is_err() {
                             info!("MQTT {} message channel closed. Halting.", client_type);
                             break;
@@ -244,11 +254,11 @@ async fn create_client_and_eventloop(
 ) -> anyhow::Result<(AsyncClient, rumqttc::EventLoop)> {
     let (host, port) = parse_url(&config.url)?;
     // Use a unique client ID based on the bridge_id to prevent collisions.
-    let client_id = sanitize_for_client_id(&format!("mq-multi-bridge-{}", bridge_id));
+    let client_id = sanitize_for_client_id(&format!("{}-{}", APP_NAME, bridge_id));
     let mut mqttoptions = MqttOptions::new(client_id, host, port);
 
-    mqttoptions.set_keep_alive(Duration::from_secs(20));
-    mqttoptions.set_clean_session(true);
+    mqttoptions.set_keep_alive(Duration::from_secs(config.keep_alive_seconds.unwrap_or(20)));
+    mqttoptions.set_clean_session(config.clean_session);
 
     if let (Some(username), Some(password)) = (&config.username, &config.password) {
         mqttoptions.set_credentials(username, password);
@@ -376,4 +386,13 @@ fn parse_url(url: &str) -> anyhow::Result<(String, u16)> {
             1883
         });
     Ok((host, port))
+}
+
+fn parse_qos(qos: u8) -> QoS {
+    match qos {
+        0 => QoS::AtMostOnce,
+        1 => QoS::AtLeastOnce,
+        2 => QoS::ExactlyOnce,
+        _ => QoS::AtLeastOnce,
+    }
 }

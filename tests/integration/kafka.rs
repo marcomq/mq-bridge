@@ -4,7 +4,7 @@ use super::common::{
     add_performance_result, run_direct_perf_test, run_performance_pipeline_test, run_pipeline_test,
     run_test_with_docker, setup_logging, PERF_TEST_MESSAGE_COUNT,
 };
-use hot_queue::endpoints::kafka::{KafkaConsumer, KafkaPublisher};
+use mq_bridge::endpoints::kafka::{KafkaConsumer, KafkaPublisher};
 use std::sync::Arc;
 
 const CONFIG_YAML: &str = r#"
@@ -50,7 +50,7 @@ pub async fn test_kafka_performance_direct() {
     setup_logging();
     run_test_with_docker("tests/integration/docker-compose/kafka.yml", || async {
         let topic = "perf_test_kafka_direct";
-        let config = hot_queue::models::KafkaConfig {
+        let config = mq_bridge::models::KafkaConfig {
             brokers: "localhost:9092".to_string(),
             group_id: Some("perf_test_group_kafka".to_string()),
             producer_options: Some(vec![
@@ -58,7 +58,7 @@ pub async fn test_kafka_performance_direct() {
                 ("acks".to_string(), "1".to_string()), // Wait for leader ack, a good balance
                 ("compression.type".to_string(), "snappy".to_string()), // Use snappy compression
             ]),
-            delayed_ack: true, // Use "fire-and-forget" for high throughput
+            delayed_ack: false, // Use "fire-and-forget" for high throughput
             ..Default::default()
         };
 
@@ -67,7 +67,7 @@ pub async fn test_kafka_performance_direct() {
             || async { Arc::new(KafkaPublisher::new(&config, topic).await.unwrap()) },
             || async {
                 Arc::new(tokio::sync::Mutex::new(
-                    KafkaConsumer::new(&config, topic).unwrap(),
+                    KafkaConsumer::new(&config, topic).await.unwrap(),
                 ))
             },
         )

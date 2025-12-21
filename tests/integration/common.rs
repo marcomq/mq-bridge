@@ -1,9 +1,9 @@
 #![allow(dead_code)] // This module contains helpers used by various integration tests.
 use async_channel::{bounded, Receiver, Sender};
 use chrono;
-use hot_queue::traits::{BatchCommitFunc, MessagePublisher};
-use hot_queue::traits::{CommitFunc, MessageConsumer};
-use hot_queue::{CanonicalMessage, Route};
+use mq_bridge::traits::{BatchCommitFunc, MessagePublisher};
+use mq_bridge::traits::{CommitFunc, MessageConsumer};
+use mq_bridge::{CanonicalMessage, Route};
 use once_cell::sync::Lazy;
 use serde_json::json;
 use std::any::Any;
@@ -19,10 +19,10 @@ use tracing_subscriber::filter::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
-use hot_queue::endpoints::memory::MemoryChannel;
+use mq_bridge::endpoints::memory::MemoryChannel;
 
 /// A struct to hold the performance results for a single test run.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct PerformanceResult {
     pub test_name: String,
     pub write_performance: f64,
@@ -319,27 +319,24 @@ where
     let consumer = create_consumer().await;
     tokio::time::sleep(Duration::from_secs(1)).await;
 
-    println!(
-        "\n--- Running Single Performance Test for {} ---",
-        test_name
-    );
     let single_write_perf = measure_single_write_performance(
         &format!("{} (Single)", test_name),
         publisher.clone(),
         PERF_TEST_MESSAGE_COUNT,
         PERF_TEST_CONCURRENCY,
     )
-    .await;
+    .await
+    .as_secs_f64();
     tokio::time::sleep(Duration::from_secs(2)).await;
     let single_read_perf = measure_single_read_performance(
         &format!("{} (Single)", test_name),
         consumer.clone(),
         PERF_TEST_MESSAGE_COUNT,
     )
-    .await;
+    .await
+    .as_secs_f64();
     tokio::time::sleep(Duration::from_secs(2)).await;
 
-    println!("\n--- Running Batch Performance Test for {} ---", test_name);
     tokio::time::sleep(Duration::from_millis(200)).await; // Allow consumer setup
 
     let write_perf = measure_write_performance(
@@ -348,7 +345,8 @@ where
         PERF_TEST_MESSAGE_COUNT,
         PERF_TEST_CONCURRENCY,
     )
-    .await;
+    .await
+    .as_secs_f64();
     tokio::time::sleep(Duration::from_secs(2)).await;
     // Add a delay to ensure messages are queryable, especially for Kafka.
     let read_perf = measure_read_performance(
@@ -356,7 +354,8 @@ where
         consumer.clone(),
         PERF_TEST_MESSAGE_COUNT,
     )
-    .await;
+    .await
+    .as_secs_f64();
 
     drop(consumer);
     drop(publisher);
@@ -364,10 +363,10 @@ where
 
     PerformanceResult {
         test_name: format!("{} Direct", test_name),
-        write_performance: write_perf,
-        read_performance: read_perf,
-        single_write_performance: single_write_perf,
-        single_read_performance: single_read_perf,
+        write_performance: PERF_TEST_MESSAGE_COUNT as f64 / write_perf,
+        read_performance: PERF_TEST_MESSAGE_COUNT as f64 / read_perf,
+        single_write_performance: PERF_TEST_MESSAGE_COUNT as f64 / single_write_perf,
+        single_read_performance: PERF_TEST_MESSAGE_COUNT as f64 / single_read_perf,
     }
 }
 
@@ -380,14 +379,14 @@ pub fn generate_message() -> CanonicalMessage {
 }
 
 pub async fn measure_write_performance(
-    name: &str,
+    _name: &str,
     publisher: Arc<dyn MessagePublisher>,
     num_messages: usize,
     concurrency: usize,
-) -> f64 {
-    println!("\n--- Measuring Write Performance for {} ---", name);
+) -> Duration {
     let (tx, rx): (Sender<CanonicalMessage>, Receiver<CanonicalMessage>) = bounded(concurrency * 2);
 
+    let final_count = Arc::new(AtomicUsize::new(0));
     tokio::spawn(async move {
         for _ in 0..num_messages {
             // The test will hang if the receiver is dropped, so we ignore the error.
@@ -405,6 +404,7 @@ pub async fn measure_write_performance(
         let rx_clone = rx.clone();
         let publisher_clone = publisher.clone();
         let batch_size = (num_messages / concurrency / 10).max(100); // Define a reasonable batch size
+        let final_count_clone = Arc::clone(&final_count);
 
         tasks.spawn(async move {
             loop {
@@ -428,6 +428,7 @@ pub async fn measure_write_performance(
 
                 // Retry sending the batch if some messages fail.
                 let mut messages_to_send = batch;
+                let mut batch_size = messages_to_send.len();
                 let mut retry_count = 0;
                 const MAX_RETRIES: usize = 5;
                 loop {
@@ -435,9 +436,14 @@ pub async fn measure_write_performance(
                         .send_batch(std::mem::take(&mut messages_to_send))
                         .await
                     {
-                        Ok((_, failed)) if failed.is_empty() => break, // All sent successfully
+                        Ok((_, failed)) if failed.is_empty() => {
+                            final_count_clone
+                                .fetch_add(batch_size, std::sync::atomic::Ordering::Relaxed);
+                            break; // All sent successfully
+                        }
                         Ok((_, failed)) => {
                             messages_to_send = failed;
+                            batch_size = messages_to_send.len();
                             retry_count = 0; // Reset on partial success
                         }
                         Err(e) => {
@@ -458,16 +464,12 @@ pub async fn measure_write_performance(
     while tasks.join_next().await.is_some() {}
     publisher.flush().await.unwrap();
 
-    let duration = start_time.elapsed();
-    let msgs_per_sec = num_messages as f64 / duration.as_secs_f64();
-
-    println!(
-        "  Wrote {} messages in {:.2?} ({} msgs/sec)",
-        format_pretty(num_messages),
-        duration,
-        format_pretty(msgs_per_sec)
-    );
-    msgs_per_sec
+    let count = final_count.load(std::sync::atomic::Ordering::Relaxed);
+    if count != num_messages {
+        eprintln!("measure_write_performance: Expected {} messages, but got {}", num_messages, count);
+    }
+    debug_assert_eq!(count, num_messages);
+    start_time.elapsed()
 }
 
 /// A mock consumer that does nothing, useful for testing publishers in isolation.
@@ -495,64 +497,6 @@ impl MessageConsumer for MockConsumer {
     fn as_any(&self) -> &dyn Any {
         self
     }
-}
-
-pub async fn measure_read_performance(
-    name: &str,
-    consumer: Arc<tokio::sync::Mutex<dyn MessageConsumer>>,
-    num_messages: usize,
-) -> f64 {
-    println!("\n--- Measuring Read Performance for {} ---", name);
-    let start_time = Instant::now();
-    let final_count = Arc::new(AtomicUsize::new(0));
-    let batch_size = 100; // A reasonable batch size for single-threaded reading.
-
-    let final_count_clone = Arc::clone(&final_count);
-    let consumer_clone = consumer.clone();
-
-    loop {
-        let current_count = final_count_clone.load(std::sync::atomic::Ordering::Relaxed);
-        if current_count >= num_messages {
-            break;
-        }
-
-        let missing = std::cmp::min(batch_size, num_messages - current_count);
-
-        let mut consumer_guard = consumer_clone.lock().await;
-        let receive_future = consumer_guard.receive_batch(missing);
-
-        match tokio::time::timeout(Duration::from_secs(5), receive_future).await {
-            Ok(Ok((msgs, commit))) if !msgs.is_empty() => {
-                final_count_clone.fetch_add(msgs.len(), std::sync::atomic::Ordering::Relaxed);
-                tokio::spawn(async move { commit(None).await });
-            }
-            Ok(Err(e)) => {
-                eprintln!("Error receiving message: {}. Stopping read.", e);
-                break;
-            }
-            _ => {
-                // Timeout or empty batch, assume we are done.
-                break;
-            }
-        }
-    }
-
-    let num_messages = final_count.load(std::sync::atomic::Ordering::Relaxed);
-    let duration: Duration = start_time.elapsed();
-    // Use the actual number of messages received for calculation, in case of under-delivery.
-    let msgs_per_sec = if duration.as_secs_f64() > 0.0 {
-        num_messages as f64 / duration.as_secs_f64()
-    } else {
-        0.0
-    };
-
-    println!(
-        "  Read {} messages in {:.2?} ({} msgs/sec)",
-        format_pretty(num_messages),
-        duration,
-        format_pretty(msgs_per_sec)
-    );
-    msgs_per_sec
 }
 
 /// Formats a number with underscores as thousand separators.
@@ -584,15 +528,59 @@ pub fn format_pretty<N: Display>(num: N) -> String {
     }
 }
 
+pub async fn measure_read_performance(
+    _name: &str,
+    consumer: Arc<tokio::sync::Mutex<dyn MessageConsumer>>,
+    num_messages: usize,
+) -> Duration {
+    let start_time = Instant::now();
+    let mut final_count = 0;
+    let batch_size = 100; // A reasonable batch size for single-threaded reading.
+
+    let consumer_clone = consumer.clone();
+
+    loop {
+        if final_count >= num_messages {
+            break;
+        }
+
+        let missing = std::cmp::min(batch_size, num_messages - final_count);
+
+        let mut consumer_guard = consumer_clone.lock().await;
+        let receive_future = consumer_guard.receive_batch(missing);
+
+        match tokio::time::timeout(Duration::from_secs(5), receive_future).await {
+            Ok(Ok((msgs, commit))) if !msgs.is_empty() => {
+                final_count += msgs.len();
+                tokio::spawn(async move { commit(None).await });
+            }
+            Ok(Err(e)) => {
+                eprintln!("Error receiving message: {}. Stopping read.", e);
+                break;
+            }
+            _ => {
+                // Timeout or empty batch, assume we are done.
+                break;
+            }
+        }
+    }
+
+    if final_count != num_messages {
+        eprintln!("measure_read_performance: Expected {} messages, but got {}", num_messages, final_count);
+    }
+    debug_assert_eq!(final_count, num_messages);
+    start_time.elapsed()
+}
+
 pub async fn measure_single_write_performance(
-    name: &str,
+    _name: &str,
     publisher: Arc<dyn MessagePublisher>,
     num_messages: usize,
     concurrency: usize,
-) -> f64 {
-    println!("\n--- Measuring Single-Send Performance for {} ---", name);
+) -> Duration {
     let (tx, rx): (Sender<CanonicalMessage>, Receiver<CanonicalMessage>) = bounded(concurrency * 2);
 
+    let final_count = Arc::new(AtomicUsize::new(0));
     tokio::spawn(async move {
         for _ in 0..num_messages {
             if tx.send(generate_message()).await.is_err() {
@@ -608,12 +596,16 @@ pub async fn measure_single_write_performance(
     for _ in 0..concurrency {
         let rx_clone = rx.clone();
         let publisher_clone = publisher.clone();
+        let final_count_clone = Arc::clone(&final_count);
 
         tasks.spawn(async move {
             while let Ok(message) = rx_clone.recv().await {
                 loop {
                     match publisher_clone.send(message.clone()).await {
-                        Ok(_) => break,
+                        Ok(_) => {
+                            final_count_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            break;
+                        }
                         Err(e) => {
                             eprintln!("Error sending message: {}. Retrying...", e);
                             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -628,51 +620,41 @@ pub async fn measure_single_write_performance(
     while tasks.join_next().await.is_some() {}
     publisher.flush().await.unwrap();
 
-    let duration = start_time.elapsed();
-    let msgs_per_sec = num_messages as f64 / duration.as_secs_f64();
-
-    println!(
-        "  Sent {} messages individually in {:.2?} ({} msgs/sec)",
-        format_pretty(num_messages),
-        duration,
-        format_pretty(msgs_per_sec)
-    );
-    msgs_per_sec
+    let count = final_count.load(std::sync::atomic::Ordering::Relaxed);
+    if count != num_messages {
+        eprintln!("measure_single_write_performance: Expected {} messages, but got {}", num_messages, count);
+    }
+    debug_assert_eq!(count, num_messages);
+    start_time.elapsed()
 }
 
 pub async fn measure_single_read_performance(
-    name: &str,
+    _name: &str,
     consumer: Arc<tokio::sync::Mutex<dyn MessageConsumer>>,
     num_messages: usize,
-) -> f64 {
-    println!("\n--- Measuring Single-Read Performance for {} ---", name);
+) -> Duration {
     let start_time = Instant::now();
-
-    for _ in 0..num_messages {
+    let mut final_count = 0;
+    loop {
+        if final_count == num_messages {
+            break;
+        }
         let mut consumer_guard = consumer.lock().await;
         let receive_future = consumer_guard.receive();
         if let Ok(Ok((_msg, commit))) =
             tokio::time::timeout(Duration::from_secs(5), receive_future).await
         {
+            final_count += 1;
             tokio::spawn(async move { commit(None).await });
         } else {
-            eprintln!("Failed to receive message or timed out. Stopping read performance test.");
+            eprintln!("Failed to receive message or timed out. Stopping read.");
             break;
         }
     }
 
-    let duration = start_time.elapsed();
-    let msgs_per_sec = if duration.as_secs_f64() > 0.0 {
-        num_messages as f64 / duration.as_secs_f64()
-    } else {
-        0.0
-    };
-
-    println!(
-        "  Read {} messages individually in {:.2?} ({} msgs/sec)",
-        format_pretty(num_messages),
-        duration,
-        format_pretty(msgs_per_sec)
-    );
-    msgs_per_sec
+    if final_count != num_messages {
+        eprintln!("measure_single_read_performance: Expected {} messages, but got {}", num_messages, final_count);
+    }
+    debug_assert_eq!(final_count, num_messages);
+    start_time.elapsed()
 }

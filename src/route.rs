@@ -1,8 +1,8 @@
 use std::sync::Arc;
-//  hot_queue
+//  mq-bridge
 //  © Copyright 2025, by Marco Mengelkoch
 //  Licensed under MIT License, see License file for more details
-//  git clone https://github.com/marcomq/hot_queue
+//  git clone https://github.com/marcomq/mq-bridge
 use crate::endpoints::{create_consumer_from_route, create_publisher_from_route};
 pub use crate::models::Route;
 use crate::traits::BatchCommitFunc;
@@ -114,6 +114,7 @@ impl Route {
                         }
                     };
                     debug!("Received a batch of {} messages sequentially", messages.len());
+
                     // Process the batch sequentially without spawning a new task
                     match publisher.send_batch(messages).await {
                         Ok((response, failed)) if failed.is_empty() => {

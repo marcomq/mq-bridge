@@ -23,7 +23,7 @@ use tracing::{info, warn};
 /// The payload is read as a BSON Binary type, which we then manually convert.
 #[derive(Serialize, Deserialize, Debug)]
 struct MongoMessageRaw {
-    message_id: i64,
+    message_id: Option<Binary>,
     payload: Binary,
     metadata: Option<Document>,
 }
@@ -38,8 +38,16 @@ impl TryFrom<MongoMessageRaw> for CanonicalMessage {
             .transpose()
             .context("Failed to deserialize metadata from BSON document")?;
 
+        let message_id = raw.message_id.map(|bin| {
+            let mut bytes = [0u8; 16];
+            let len = bin.bytes.len();
+            let copy_len = len.min(16);
+            bytes[16 - copy_len..16].copy_from_slice(&bin.bytes[0..copy_len]);
+            u128::from_be_bytes(bytes)
+        });
+
         Ok(CanonicalMessage {
-            message_id: Some(raw.message_id as u64),
+            message_id,
             payload: raw.payload.bytes.into(),
             metadata,
         })
@@ -64,40 +72,42 @@ impl MongoDbPublisher {
 #[async_trait]
 impl MessagePublisher for MongoDbPublisher {
     async fn send(&self, message: CanonicalMessage) -> anyhow::Result<Option<CanonicalMessage>> {
-        let object_id = mongodb::bson::oid::ObjectId::new();
-        let mut msg_with_metadata = message;
-        msg_with_metadata
-            .metadata
-            .get_or_insert_with(Default::default)
-            .insert("mongodb_object_id".to_string(), object_id.to_string());
-
-        if msg_with_metadata.message_id.is_none() {
-            // If no message_id is present, generate one from the ObjectId.
-            // We combine the 4-byte timestamp with the last 4 bytes, which include
-            // the 3-byte incrementing counter. This creates a highly unique ID.
-            let oid_bytes = object_id.bytes();
-            let mut id_bytes = [0u8; 8];
-            id_bytes[0..4].copy_from_slice(&oid_bytes[0..4]); // Timestamp
-            id_bytes[4..8].copy_from_slice(&oid_bytes[8..12]); // Last byte of random + 3-byte counter
-            msg_with_metadata.message_id = Some(u64::from_be_bytes(id_bytes));
-        }
-        let message_id_i64: Option<i64> = msg_with_metadata.message_id.map(|id| id as i64);
+        let (object_id, message_id_bin) = if let Some(message_id) = &message.message_id {
+            // An ObjectId is 12 bytes. A u128 is 16 bytes. We use the last 12 bytes
+            // of the message_id to construct the ObjectId, as they are more likely to be unique.
+            // NOTE: This discards the high 4 bytes of the message_id. If two message_ids differ
+            // only in the high 4 bytes, they will result in the same ObjectId, potentially causing
+            // a duplicate key error on insert if _id uniqueness is enforced.
+            let bin_id = message_id.to_be_bytes();
+            let id_bytes: [u8; 12] = bin_id[4..].try_into()?;
+            let oid = mongodb::bson::oid::ObjectId::from(id_bytes);
+            (oid, bin_id)
+        } else {
+            let oid = mongodb::bson::oid::ObjectId::new();
+            let mut id_bytes = [0u8; 16];
+            id_bytes[4..16].copy_from_slice(&oid.bytes());
+            (oid, id_bytes)
+        };
+        let message_id_bin = Bson::Binary(mongodb::bson::Binary {
+            subtype: mongodb::bson::spec::BinarySubtype::Generic,
+            bytes: message_id_bin.to_vec(),
+        });
+        let metadata = to_document(&message.metadata.unwrap_or_default())?;
 
         // Manually construct the document to handle u64 message_id for BSON.
         // BSON only supports i64, so we do a wrapping conversion.
         let doc = doc! {
             "_id": object_id,
-            "message_id": message_id_i64, // Convert u64 to i64
+            "message_id": message_id_bin,
             "payload": Bson::Binary(mongodb::bson::Binary {
                 subtype: mongodb::bson::spec::BinarySubtype::Generic,
-                bytes: msg_with_metadata.payload.to_vec() }),
-            "metadata": to_document(&msg_with_metadata.metadata)?,
+                bytes: message.payload.to_vec() }),
+            "metadata": metadata,
             "locked_until": null
         };
-
         self.collection.insert_one(doc).await?;
 
-        Ok(Some(msg_with_metadata))
+        Ok(None)
     }
 
     async fn send_batch(
@@ -162,7 +172,7 @@ impl MongoDbConsumer {
         Ok(Self {
             collection,
             change_stream,
-            polling_interval: Duration::from_millis(100),
+            polling_interval: Duration::from_millis(config.polling_interval_ms.unwrap_or(100)),
         })
     }
 }
