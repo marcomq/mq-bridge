@@ -180,8 +180,9 @@ mod tests {
         let success_clone = success.clone();
 
         // 1. Define Handler
-        let handler = move |msg: CanonicalMessage| {
+        let handler = move |mut msg: CanonicalMessage| {
             success_clone.store(true, Ordering::SeqCst);
+            msg.set_payload_str(format!("modified {}", msg.get_payload_str()));
             async move { Ok(Handled::Publish(msg)) }
         };
         // 2. Define Route
@@ -199,16 +200,16 @@ mod tests {
             .await
             .unwrap();
 
+        // 4. Run
         let res = route.run_until_err("test_route", None);
         input_channel.close();
         res.await.ok(); // eof error due to closed channel
 
-        // 4. Verify
+        // 5. Verify
         assert!(success.load(Ordering::SeqCst) == true);
 
-        // 5. Verify
         let msgs = route.output.channel().unwrap().drain_messages();
         assert_eq!(msgs.len(), 1);
-        assert_eq!(msgs[0].payload, "hello".as_bytes());
+        assert_eq!(msgs[0].get_payload_str(), "modified hello");
     }
 }

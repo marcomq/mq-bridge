@@ -76,6 +76,16 @@ impl CanonicalMessage {
         serde_json::from_slice(&self.payload)
     }
 
+    /// Returns the payload as a UTF-8 lossy string.
+    pub fn get_payload_str(&self) -> std::borrow::Cow<'_, str> {
+        String::from_utf8_lossy(&self.payload)
+    }
+
+    /// Sets the payload of this message to the given string.
+    pub fn set_payload_str(&mut self, payload: impl Into<String>) {
+        self.payload = Bytes::from(payload.into());
+    }
+
     pub fn with_metadata(mut self, metadata: HashMap<String, String>) -> Self {
         self.metadata = metadata;
         self
