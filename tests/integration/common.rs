@@ -59,7 +59,8 @@ impl DockerCompose {
             "Starting docker-compose services from {}...",
             self.compose_file
         );
-        let status = Command::new("docker-compose")
+        let status = Command::new("docker")
+            .arg("compose")
             .arg("-f")
             .arg(&self.compose_file)
             .arg("up")
@@ -68,9 +69,9 @@ impl DockerCompose {
             .stdout(std::process::Stdio::inherit())
             .stderr(std::process::Stdio::inherit())
             .status()
-            .expect("Failed to start docker-compose");
+            .expect("Failed to start docker compose");
 
-        assert!(status.success(), "docker-compose up --wait failed");
+        assert!(status.success(), "docker compose up --wait failed");
         println!("Services from {} should be up.", self.compose_file);
     }
 
@@ -79,14 +80,15 @@ impl DockerCompose {
             "Stopping docker-compose services from {}...",
             self.compose_file
         );
-        Command::new("docker-compose")
+        Command::new("docker")
+            .arg("compose")
             .arg("-f")
             .arg(&self.compose_file)
             .arg("down")
             .stdout(std::process::Stdio::inherit())
             .stderr(std::process::Stdio::inherit())
             .status()
-            .expect("Failed to stop docker-compose");
+            .expect("Failed to stop docker compose");
         println!("Services from {} stopped.", self.compose_file);
     }
 }

@@ -45,3 +45,7 @@ jobs:
 
       - name: Run cargo test
         run: cargo test --lib --bins
+
+      - name: Run integration tests (with Docker)
+        # Run ignored tests sequentially to avoid port conflicts with Docker containers
+        run: cargo test --test '*' --features integration-test  --release -- --ignored --test-threads=1
