@@ -27,6 +27,7 @@ where
 /// This middleware is terminal; it consumes the message and does not pass it to an inner publisher.
 pub struct EventHandlerPublisher {
     // The inner publisher is stored to maintain the middleware chain structure, but it is not used.
+    // This is intentional as this middleware is terminal.
     _inner: Box<dyn MessagePublisher>,
     handler: Arc<dyn EventHandler>,
 }

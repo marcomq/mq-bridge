@@ -71,9 +71,11 @@ impl MessagePublisher for FilePublisher {
                     continue;
                 }
             };
-            if writer.write_all(&serialized_msg).await.is_err()
-                || writer.write_all(b"\n").await.is_err()
-            {
+            if let Err(e) = writer.write_all(&serialized_msg).await {
+                tracing::error!("Failed to write message to file: {}", e);
+                failed_messages.push(msg);
+            } else if let Err(e) = writer.write_all(b"\n").await {
+                tracing::error!("Failed to write newline to file: {}", e);
                 // If write fails, add the message to the failed list
                 failed_messages.push(msg);
             } else {

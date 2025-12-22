@@ -65,9 +65,11 @@ impl MessagePublisher for MetricsPublisher {
                 // We can add a new metric for failures here if desired
             }
             SendBatchOutcome::Ack => {
-                let avg_duration = duration.as_secs_f64() / total_count as f64;
-                metrics::counter!("queue_messages_processed_total", "route" => self.route_name.clone(), "endpoint" => self.endpoint_direction.clone()).increment(total_count as u64);
-                metrics::histogram!("queue_message_processing_duration_seconds", "route" => self.route_name.clone(), "endpoint" => self.endpoint_direction.clone()).record(avg_duration);
+                if total_count > 0 {
+                    let avg_duration = duration.as_secs_f64() / total_count as f64;
+                    metrics::counter!("queue_messages_processed_total", "route" => self.route_name.clone(), "endpoint" => self.endpoint_direction.clone()).increment(total_count as u64);
+                    metrics::histogram!("queue_message_processing_duration_seconds", "route" => self.route_name.clone(), "endpoint" => self.endpoint_direction.clone()).record(avg_duration);
+                }
             }
         }
         Ok(result)

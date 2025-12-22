@@ -125,6 +125,8 @@ impl MessageConsumer for DeduplicationConsumer {
         }
     }
 
+    /// Note: This implementation ignores `_max_messages` and always fetches a single message
+    /// to ensure correct deduplication logic per message.
     async fn receive_batch(
         &mut self,
         _max_messages: usize,

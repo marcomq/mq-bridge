@@ -127,6 +127,10 @@ impl Endpoint {
             endpoint_type,
         }
     }
+/// Returns a reference to the in-memory channel associated with this Endpoint.
+/// This function will only succeed if the Endpoint is of type EndpointType::Memory.
+/// If the Endpoint is not a memory endpoint, this function will return an error.
+/// This function is primarily used for testing purposes where a Queue is needed.
     pub fn channel(&self) -> anyhow::Result<MemoryChannel> {
         match &self.endpoint_type {
             EndpointType::Memory(cfg) => Ok(get_or_create_channel(cfg)),
@@ -135,38 +139,26 @@ impl Endpoint {
     }
 }
 
-/// Helper to deserialize middlewares from a generic serde_json::Value.
-/// This logic was extracted from `deserialize_middlewares_from_map_or_seq`
-/// to be reused by the custom `Endpoint` deserializer.
-fn deserialize_middlewares_from_value(value: serde_json::Value) -> Result<Vec<Middleware>, String>
-where
-{
-    match value {
-        // This is the case for YAML, which provides a clean sequence.
-        serde_json::Value::Array(arr) => {
-            serde_json::from_value(serde_json::Value::Array(arr)).map_err(|e| e.to_string())
-        }
-        // This is the case for environment variables, which `config` turns into a map.
-        // It also handles the map format from YAML.
-        // Since we now enforce sequences for YAML, this branch is primarily for env vars.
-        serde_json::Value::Object(obj) => {
-            // The config crate can produce maps with numeric string keys ("0", "1", ...)
-            // from environment variables. We need to sort by these keys to maintain order.
-            let mut middlewares: Vec<_> = obj
+/// Deserialize middlewares from a generic serde_json::Value.
+///
+/// This logic was extracted from `deserialize_middlewares_from_map_or_seq` to be reused by the custom `Endpoint` deserializer.
+fn deserialize_middlewares_from_value(value: serde_json::Value) -> anyhow::Result<Vec<Middleware>> {
+    Ok(match value {
+        serde_json::Value::Array(arr) => serde_json::from_value(serde_json::Value::Array(arr))?,
+        serde_json::Value::Object(map) => {
+            let mut middlewares: Vec<_> = map
                 .into_iter()
-                // The map is {"0": ..., "1": ...}, so we sort by the numeric key
-                // to preserve the order defined in the environment variables.
-                .filter_map(|(k, v)| k.parse::<usize>().ok().map(|i| (i, v)))
+                // The config crate can produce maps with numeric string keys ("0", "1", ...)
+                // from environment variables. We need to sort by these keys to maintain order.
+                .filter_map(|(key, value)| key.parse::<usize>().ok().map(|index| (index, value)))
                 .collect();
+            middlewares.sort_by_key(|(index, _)| *index);
 
-            middlewares.sort_by_key(|(k, _)| *k);
-
-            let sorted_values = middlewares.into_iter().map(|(_, v)| v).collect();
-            serde_json::from_value(serde_json::Value::Array(sorted_values))
-                .map_err(|e| e.to_string())
+            let sorted_values = middlewares.into_iter().map(|(_, value)| value).collect();
+            serde_json::from_value(serde_json::Value::Array(sorted_values))?
         }
-        _ => Err("Expected middlewares to be a sequence or a map".to_string()),
-    }
+        _ => return Err(anyhow::anyhow!("Expected an array or object")),
+    })
 }
 
 /// An enumeration of all supported endpoint types.

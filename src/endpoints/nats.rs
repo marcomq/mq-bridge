@@ -250,7 +250,7 @@ impl MessageConsumer for NatsConsumer {
             NatsSubscription::Core(sub) => {
                 let message = futures::StreamExt::next(sub)
                     .await
-                    .ok_or_else(|| anyhow!("NATS Core subscription ended"))?;
+                    .ok_or(ConsumerError::EndOfStream)?;
 
                 // Core NATS has no ack, so the commit is a no-op.
                 let commit: CommitFunc = Box::new(move |_| Box::pin(async {}));

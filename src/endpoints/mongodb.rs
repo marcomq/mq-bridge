@@ -204,7 +204,7 @@ impl MessageConsumer for MongoDbConsumer {
         loop {
             if self.change_stream.is_some() {
                 let received = self.receive().await?;
-                let commit_batch = Box::new(move |_response| (received.commit)(None));
+                let commit_batch = crate::traits::into_batch_commit_func(received.commit);
                 return Ok(ReceivedBatch {
                     messages: vec![received.message],
                     commit: commit_batch,

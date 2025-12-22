@@ -35,6 +35,8 @@ impl From<anyhow::Error> for ConsumerError {
 
 impl From<anyhow::Error> for ProcessingError {
     fn from(err: anyhow::Error) -> Self {
+        // Default to Retryable for generic errors. Callers should use
+        // ProcessingError::NonRetryable directly for known permanent failures.
         ProcessingError::Retryable(err)
     }
 }

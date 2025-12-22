@@ -197,7 +197,7 @@ impl MessageConsumer for MemoryConsumer {
         if messages.is_empty() {
             return Ok(ReceivedBatch {
                 messages: Vec::new(),
-                commit: Box::new(|_| Box::pin(async {})),
+                commit: Box::new(|_| Box::pin(async move {}) as BoxFuture<'static, ()>),
             });
         }
 

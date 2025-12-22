@@ -37,7 +37,7 @@ use std::sync::Arc;
 let command_handler = Arc::new(|mut msg: mq_bridge::CanonicalMessage| async move {
     let new_payload = format!("handled_{}", String::from_utf8_lossy(&msg.payload));
     msg.payload = new_payload.into();
-    Ok(Some(msg))
+    Ok(mq_bridge::outcomes::HandlerOutcome::Publish(msg))
 });
 ```
 

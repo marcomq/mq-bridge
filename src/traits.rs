@@ -172,6 +172,8 @@ pub fn into_commit_func(batch_commit: BatchCommitFunc) -> CommitFunc {
 /// Converts a `CommitFunc` into a `BatchCommitFunc` by wrapping it.
 /// This allows a function that commits a single message to be used where a
 /// function that commits a batch of messages is expected. It does so by
+/// extracting the first message from the response vector (if any) and passing
+/// it to the underlying single-message commit function.
 pub fn into_batch_commit_func(commit: CommitFunc) -> BatchCommitFunc {
     Box::new(move |responses: Option<Vec<CanonicalMessage>>| {
         if let Some(resp_vec) = &responses {
