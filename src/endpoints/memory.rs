@@ -4,8 +4,8 @@
 //  git clone https://github.com/marcomq/mq-bridge
 use crate::models::MemoryConfig;
 use crate::traits::{
-    BoxFuture, ConsumerError, MessageConsumer, MessagePublisher, PublisherError, ReceivedBatch,
-    SentBatch,
+    BoxFuture, ConsumerError, MessageConsumer, MessagePublisher, PublisherError, Received,
+    ReceivedBatch, SentBatch,
 };
 use crate::CanonicalMessage;
 use anyhow::anyhow;
@@ -227,6 +227,34 @@ impl MessageConsumer for MemoryConsumer {
     }
 }
 
+pub struct MemorySubscriber {
+    consumer: MemoryConsumer,
+}
+
+impl MemorySubscriber {
+    pub fn new(config: &MemoryConfig, id: &str) -> anyhow::Result<Self> {
+        let mut sub_config = config.clone();
+        sub_config.topic = format!("{}-{}", config.topic, id);
+        let consumer = MemoryConsumer::new(&sub_config)?;
+        Ok(Self { consumer })
+    }
+}
+
+#[async_trait]
+impl MessageConsumer for MemorySubscriber {
+    async fn receive_batch(&mut self, max_messages: usize) -> Result<ReceivedBatch, ConsumerError> {
+        self.consumer.receive_batch(max_messages).await
+    }
+
+    async fn receive(&mut self) -> Result<Received, ConsumerError> {
+        self.consumer.receive().await
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -301,5 +329,29 @@ mod tests {
         // 7. Verify that reading again results in an error because the channel is empty and we are not closing it
         // In a real scenario with a closed channel, this would error out. Here we can just check it's empty.
         // A `receive` call would just hang, waiting for a message.
+    }
+
+    #[tokio::test]
+    async fn test_memory_subscriber_structure() {
+        let cfg = MemoryConfig {
+            topic: "base_topic".to_string(),
+            capacity: Some(10),
+        };
+        let subscriber_id = "sub1";
+        let mut subscriber = MemorySubscriber::new(&cfg, subscriber_id).unwrap();
+
+        // The subscriber should be listening on "base_topic-sub1"
+        // We can verify this by creating a publisher for that specific topic.
+        let pub_cfg = MemoryConfig {
+            topic: format!("base_topic-{}", subscriber_id),
+            capacity: Some(10),
+        };
+        let publisher = MemoryPublisher::new(&pub_cfg).unwrap();
+
+        let msg = CanonicalMessage::from_str("hello subscriber");
+        publisher.send(msg).await.unwrap();
+
+        let received = subscriber.receive().await.unwrap();
+        assert_eq!(received.message.get_payload_str(), "hello subscriber");
     }
 }

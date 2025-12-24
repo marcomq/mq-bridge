@@ -3,7 +3,7 @@
 //  Licensed under MIT License, see License file for more details
 //  git clone https://github.com/marcomq/mq-bridge
 
-use crate::traits::{send_batch_helper, CommandHandler, MessagePublisher};
+use crate::traits::{send_batch_helper, Handler, MessagePublisher};
 use crate::traits::{Handled, HandlerError};
 use crate::CanonicalMessage;
 use async_trait::async_trait;
@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use crate::traits::{PublisherError, Sent, SentBatch};
 #[async_trait]
-impl<F, Fut> CommandHandler for F
+impl<F, Fut> Handler for F
 where
     F: Fn(CanonicalMessage) -> Fut + Send + Sync,
     Fut: Future<Output = Result<Handled, HandlerError>> + Send,
@@ -23,15 +23,15 @@ where
     }
 }
 
-/// A publisher middleware that intercepts messages and passes them to a `CommandHandler`.
+/// A publisher middleware that intercepts messages and passes them to a `Handler`.
 /// If the handler returns a new message, it is passed to the inner publisher.
-pub struct CommandHandlerPublisher {
+pub struct CommandPublisher {
     inner: Box<dyn MessagePublisher>,
-    handler: Arc<dyn CommandHandler>,
+    handler: Arc<dyn Handler>,
 }
 
-impl CommandHandlerPublisher {
-    pub fn new(inner: impl MessagePublisher, handler: impl CommandHandler + 'static) -> Self {
+impl CommandPublisher {
+    pub fn new(inner: impl MessagePublisher, handler: impl Handler + 'static) -> Self {
         Self {
             inner: Box::new(inner),
             handler: Arc::new(handler),
@@ -40,7 +40,7 @@ impl CommandHandlerPublisher {
 }
 
 #[async_trait]
-impl MessagePublisher for CommandHandlerPublisher {
+impl MessagePublisher for CommandPublisher {
     async fn send(&self, message: CanonicalMessage) -> Result<Sent, PublisherError> {
         match self.handler.handle(message).await {
             Ok(Handled::Publish(response_msg)) => self.inner.send(response_msg).await, // Propagate result
@@ -77,7 +77,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_command_handler_produces_response() {
-        let memory_publisher = MemoryPublisher::new_local("test_command_out", 10);
+        let memory_publisher = MemoryPublisher::new_local("test_command_out_resp", 10);
         let channel = memory_publisher.channel();
 
         let handler = |msg: CanonicalMessage| async move {
@@ -87,7 +87,7 @@ mod tests {
             )))
         };
 
-        let publisher = CommandHandlerPublisher::new(memory_publisher, handler);
+        let publisher = CommandPublisher::new(memory_publisher, handler);
 
         let msg = CanonicalMessage::from_str("command1");
         publisher.send(msg).await.unwrap();
@@ -99,12 +99,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_command_handler_acks() {
-        let memory_publisher = MemoryPublisher::new_local("test_command_out", 10);
+        let memory_publisher = MemoryPublisher::new_local("test_command_out_ack", 10);
         let channel = memory_publisher.channel();
 
         let handler = |_msg: CanonicalMessage| async move { Ok(Handled::Ack) };
 
-        let publisher = CommandHandlerPublisher::new(memory_publisher, handler);
+        let publisher = CommandPublisher::new(memory_publisher, handler);
 
         let msg = CanonicalMessage::from_str("command1");
         let result = publisher.send(msg).await.unwrap();
@@ -116,13 +116,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_command_handler_retryable_error() {
-        let memory_publisher = MemoryPublisher::new_local("test_command_out", 10);
+        let memory_publisher = MemoryPublisher::new_local("test_command_out_err", 10);
 
         let handler = |_msg: CanonicalMessage| async move {
             Err(HandlerError::Retryable(anyhow::anyhow!("db is down")))
         };
 
-        let publisher = CommandHandlerPublisher::new(memory_publisher, handler);
+        let publisher = CommandPublisher::new(memory_publisher, handler);
         let result = publisher.send("command1".into()).await;
 
         assert!(result.is_err());
@@ -140,13 +140,13 @@ mod tests {
         let mut consumer = MemoryConsumer::new_local("cmd_input", 10);
         let input_channel = consumer.channel();
 
-        // 2. Setup Output (MemoryPublisher wrapped by CommandHandlerPublisher)
+        // 2. Setup Output (MemoryPublisher wrapped by CommandPublisher)
         let memory_publisher = MemoryPublisher::new_local("cmd_output", 10);
         let output_channel = memory_publisher.channel();
 
         // 3. Create Publisher Middleware with inline handler
         let publisher =
-            CommandHandlerPublisher::new(memory_publisher, |msg: CanonicalMessage| async move {
+            CommandPublisher::new(memory_publisher, |msg: CanonicalMessage| async move {
                 let payload = String::from_utf8_lossy(&msg.payload);
                 let response = format!("processed_{}", payload);
                 Ok(Handled::Publish(response.into()))
@@ -188,6 +188,7 @@ mod tests {
         // 2. Define Route
         let route = Route {
             concurrency: 1,
+            batch_size: 1,
             input: Endpoint::new_memory("route_in", 100),
             output: Endpoint::new_memory("route_out", 100),
         }
@@ -211,5 +212,33 @@ mod tests {
         let msgs = route.output.channel().unwrap().drain_messages();
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].get_payload_str(), "modified hello");
+    }
+
+    #[tokio::test]
+    async fn test_command_handler_inner_publisher_failure() {
+        use crate::traits::MessagePublisher;
+
+        struct FailPublisher;
+        #[async_trait]
+        impl MessagePublisher for FailPublisher {
+            async fn send(&self, _msg: CanonicalMessage) -> Result<Sent, PublisherError> {
+                Err(PublisherError::NonRetryable(anyhow::anyhow!("inner fail")))
+            }
+            async fn send_batch(
+                &self,
+                _msgs: Vec<CanonicalMessage>,
+            ) -> Result<SentBatch, PublisherError> {
+                Ok(SentBatch::Ack)
+            }
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+        }
+
+        let handler = |msg: CanonicalMessage| async move { Ok(Handled::Publish(msg)) };
+        let publisher = CommandPublisher::new(FailPublisher, handler);
+        let result = publisher.send("test".into()).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("inner fail"));
     }
 }

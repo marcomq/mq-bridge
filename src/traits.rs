@@ -12,29 +12,20 @@ use std::any::Any;
 use std::sync::Arc;
 use tracing::warn;
 
-/// A trait for handling commands.
+/// A generic trait for handling messages (commands or events).
 ///
-/// Command handlers process an incoming message and can optionally return a new
-/// message, for example, as a reply or a resulting event to be published.
+/// Handlers process an incoming message and can optionally return a new
+/// message (e.g. a reply) via `Handled::Publish`, or acknowledge processing via `Handled::Ack`.
 #[async_trait]
-pub trait CommandHandler: Send + Sync {
+pub trait Handler: Send + Sync {
     async fn handle(&self, msg: CanonicalMessage) -> Result<Handled, HandlerError>;
 }
 
 #[async_trait]
-impl<T: CommandHandler + ?Sized> CommandHandler for Arc<T> {
+impl<T: Handler + ?Sized> Handler for Arc<T> {
     async fn handle(&self, msg: CanonicalMessage) -> Result<Handled, HandlerError> {
         (**self).handle(msg).await
     }
-}
-
-/// A trait for handling events.
-///
-/// Event handlers process an incoming message. They are not expected to return a
-/// direct response.
-#[async_trait]
-pub trait EventHandler: Send + Sync {
-    async fn handle(&self, msg: CanonicalMessage) -> Result<(), HandlerError>;
 }
 
 /// A closure that can be called to commit the message.

@@ -1,3 +1,4 @@
+use crate::models::{self, Endpoint};
 use std::sync::Arc;
 //  mq-bridge
 //  © Copyright 2025, by Marco Mengelkoch
@@ -7,7 +8,7 @@ pub use crate::models::Route;
 use crate::traits::{BatchCommitFunc, ConsumerError, SentBatch};
 use crate::{
     endpoints::{create_consumer_from_route, create_publisher_from_route},
-    traits::CommandHandler,
+    traits::Handler,
 };
 use async_channel::{bounded, Sender};
 use tokio::{
@@ -17,6 +18,14 @@ use tokio::{
 use tracing::{debug, error, info, warn};
 
 impl Route {
+    pub fn new(input: Endpoint, output: Endpoint) -> Self {
+        Self {
+            input,
+            output,
+            concurrency: models::default_concurrency(),
+            batch_size: models::default_batch_size(),
+        }
+    }
     /// Runs the message processing route with concurrency, error handling, and graceful shutdown.
     ///
     /// This function spawns a set of worker tasks to process messages concurrently.
@@ -101,14 +110,13 @@ impl Route {
         let publisher = create_publisher_from_route(name, &self.output).await?;
         let mut consumer = create_consumer_from_route(name, &self.input).await?;
 
-        const BATCH_SIZE: usize = 128;
         loop {
             select! {
                 _ = shutdown_rx.recv() => {
                     info!("Shutdown signal received in sequential runner for route '{}'.", name);
                     return Ok(true); // Stopped by shutdown signal
                 }
-                res = consumer.receive_batch(BATCH_SIZE) => {
+                res = consumer.receive_batch(self.batch_size) => {
                     let (messages, commit) = match res {
                         Ok(batch) => {
                             if batch.messages.is_empty() {
@@ -161,8 +169,7 @@ impl Route {
         let mut consumer = create_consumer_from_route(name, &self.input).await?;
         let (err_tx, err_rx) = bounded(1); // For critical, route-stopping errors
                                            // channel capacity: a small buffer proportional to concurrency
-        const BATCH_SIZE: usize = 128;
-        let work_capacity = self.concurrency.saturating_mul(BATCH_SIZE);
+        let work_capacity = self.concurrency.saturating_mul(self.batch_size);
         let (work_tx, work_rx) =
             bounded::<(Vec<crate::CanonicalMessage>, BatchCommitFunc)>(work_capacity);
 
@@ -220,7 +227,7 @@ impl Route {
                     break;
                 }
 
-                res = consumer.receive_batch(BATCH_SIZE) => {
+                res = consumer.receive_batch(self.batch_size) => {
                     let (messages, commit) = match res {
                         Ok(batch) => {
                             if batch.messages.is_empty() {
@@ -257,7 +264,7 @@ impl Route {
         Ok(shutdown_rx.is_empty())
     }
 
-    pub fn with_handler(mut self, handler: Arc<dyn CommandHandler>) -> Self {
+    pub fn with_handler(mut self, handler: Arc<dyn Handler>) -> Self {
         self.output.handler = Some(handler);
         self
     }

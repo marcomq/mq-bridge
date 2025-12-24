@@ -14,6 +14,7 @@ use std::{any::Any, future::Future};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, trace, warn};
+use uuid::Uuid;
 pub struct MqttPublisher {
     client: AsyncClient,
     topic: String,
@@ -401,5 +402,101 @@ fn parse_qos(qos: u8) -> QoS {
         1 => QoS::AtLeastOnce,
         2 => QoS::ExactlyOnce,
         _ => QoS::AtLeastOnce,
+    }
+}
+
+pub struct MqttSubscriber {
+    _client: AsyncClient,
+    eventloop_handle: Arc<JoinHandle<()>>,
+    message_rx: mpsc::Receiver<rumqttc::Publish>,
+}
+
+impl MqttSubscriber {
+    /// Creates a new MQTT subscriber.
+    ///
+    /// The subscriber will generate a unique client ID suffix to ensure a unique session (fan-out behavior).
+    /// This prevents the broker from treating multiple subscribers as the same client (which would cause disconnects or load balancing).
+    ///
+    /// The subscriber will start consuming from the specified topic.
+    ///
+    /// The `config` parameter is used to configure the connection and channel.
+    /// The `topic` parameter is used to specify the topic to consume from.
+    ///
+    /// The function will return an error if the eventloop does not confirm connection and subscription within 10 seconds.
+    ///
+    pub async fn new(
+        config: &MqttConfig,
+        topic: &str,
+        subscribe_id: Option<String>,
+    ) -> anyhow::Result<Self> {
+        // Generate a unique client ID suffix to ensure a unique session (fan-out behavior).
+        // This prevents the broker from treating multiple subscribers as the same client (which would cause disconnects or load balancing).
+        let unique_id = subscribe_id.unwrap_or_else(|| Uuid::new_v4().to_string());
+        let (client, eventloop) = create_client_and_eventloop(config, &unique_id).await?;
+
+        let queue_capacity = config.queue_capacity.unwrap_or(100);
+        let (message_tx, message_rx) = mpsc::channel(queue_capacity);
+
+        let qos = parse_qos(config.qos.unwrap_or(1));
+        let (eventloop_handle, ready_rx) = run_eventloop(
+            eventloop,
+            "Subscriber",
+            Some((client.clone(), topic.to_string(), qos, message_tx)),
+        );
+
+        // Wait for the eventloop to confirm connection and subscription.
+        tokio::time::timeout(Duration::from_secs(10), ready_rx).await??;
+
+        Ok(Self {
+            _client: client,
+            message_rx,
+            eventloop_handle: Arc::new(eventloop_handle),
+        })
+    }
+}
+
+impl Drop for MqttSubscriber {
+    fn drop(&mut self) {
+        self.eventloop_handle.abort();
+    }
+}
+
+#[async_trait]
+impl MessageConsumer for MqttSubscriber {
+    async fn receive(&mut self) -> Result<Received, ConsumerError> {
+        let p = self
+            .message_rx
+            .recv()
+            .await
+            .ok_or_else(|| anyhow!("MQTT subscriber channel closed"))?;
+
+        let canonical_message = CanonicalMessage::new(p.payload.to_vec(), None);
+
+        let commit = Box::new(move |_response| {
+            Box::pin(async move {
+                trace!(topic = %p.topic, "MQTT event processed");
+            }) as BoxFuture<'static, ()>
+        });
+
+        Ok(Received {
+            message: canonical_message,
+            commit,
+        })
+    }
+
+    async fn receive_batch(
+        &mut self,
+        _max_messages: usize,
+    ) -> Result<ReceivedBatch, ConsumerError> {
+        let received = self.receive().await?;
+        let commit = into_batch_commit_func(received.commit);
+        Ok(ReceivedBatch {
+            messages: vec![received.message],
+            commit,
+        })
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }

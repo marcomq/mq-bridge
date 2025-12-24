@@ -12,14 +12,15 @@ use lapin::tcp::{OwnedIdentity, OwnedTLSConfig};
 use lapin::{
     options::{
         BasicAckOptions, BasicConsumeOptions, BasicPublishOptions, BasicQosOptions,
-        QueueDeclareOptions,
+        ExchangeDeclareOptions, QueueBindOptions, QueueDeclareOptions,
     },
     types::{FieldTable, ShortString},
-    BasicProperties, Channel, Connection, ConnectionProperties, Consumer,
+    BasicProperties, Channel, Connection, ConnectionProperties, Consumer, ExchangeKind,
 };
 use std::any::Any;
 use std::time::Duration;
 use tracing::{debug, info};
+use uuid::Uuid;
 
 pub struct AmqpPublisher {
     channel: Channel,
@@ -157,6 +158,163 @@ impl AmqpConsumer {
             .await?;
 
         Ok(Self { consumer })
+    }
+}
+
+pub struct AmqpSubscriber {
+    consumer: Consumer,
+}
+
+impl AmqpSubscriber {
+    /// Creates a new AMQP subscriber.
+    ///
+    /// This method will create an AMQP connection, channel, declare a fanout exchange,
+    /// declare a temporary, exclusive, auto-delete queue, bind the queue to the exchange,
+    /// set the prefetch count, and start consuming messages from the queue.
+    ///
+    /// The `config` parameter is used to configure the connection and channel.
+    /// The `queue_or_exchange` parameter is used to determine the exchange name: if the
+    /// `config` has an `exchange` field present, that will be used; otherwise, the
+    /// `queue_or_exchange` parameter will be used as the exchange name.
+    ///
+    /// The subscriber will be consuming messages from a temporary queue that is bound to the
+    /// specified exchange. The queue will be deleted automatically when the subscriber is dropped.
+    ///
+    /// The prefetch count is set to the value of `config.prefetch_count`, or 100 if not present.
+    ///
+    /// The subscriber will be consuming messages with the tag
+    /// `<uuid>_<app_name>_sub_<uuid>`.
+    pub async fn new(
+        config: &AmqpConfig,
+        queue_or_exchange: &str,
+        subscribe_id: Option<String>,
+    ) -> anyhow::Result<Self> {
+        let conn = create_amqp_connection(config).await?;
+        let channel = conn.create_channel().await?;
+
+        // Determine exchange name: use config if present, else use the passed queue/topic name.
+        let exchange_name = config.exchange.as_deref().unwrap_or(queue_or_exchange);
+
+        info!(exchange = %exchange_name, "Declaring AMQP Fanout exchange for subscriber");
+        channel
+            .exchange_declare(
+                exchange_name,
+                ExchangeKind::Fanout,
+                ExchangeDeclareOptions {
+                    durable: true,
+                    ..Default::default()
+                },
+                FieldTable::default(),
+            )
+            .await?;
+
+        // Declare a temporary, exclusive, auto-delete queue
+        let id = subscribe_id.unwrap_or_else(|| Uuid::new_v4().to_string());
+        let queue_name_str = format!("{}-{}-{}", APP_NAME, queue_or_exchange, id);
+        let queue = channel
+            .queue_declare(
+                &queue_name_str,
+                QueueDeclareOptions {
+                    exclusive: true,
+                    auto_delete: true,
+                    ..Default::default()
+                },
+                FieldTable::default(),
+            )
+            .await?;
+        let queue_name = queue.name().as_str();
+
+        info!(queue = %queue_name, exchange = %exchange_name, "Binding temporary queue to exchange");
+        channel
+            .queue_bind(
+                queue_name,
+                exchange_name,
+                "",
+                QueueBindOptions::default(),
+                FieldTable::default(),
+            )
+            .await?;
+
+        let prefetch_count = config.prefetch_count.unwrap_or(100);
+        channel
+            .basic_qos(prefetch_count, BasicQosOptions::default())
+            .await?;
+
+        let consumer_tag = format!("{}_sub_{}", APP_NAME, id);
+        let consumer = channel
+            .basic_consume(
+                queue_name,
+                &consumer_tag,
+                BasicConsumeOptions::default(),
+                FieldTable::default(),
+            )
+            .await?;
+
+        Ok(Self { consumer })
+    }
+}
+
+#[async_trait]
+impl MessageConsumer for AmqpSubscriber {
+    async fn receive_batch(&mut self, max_messages: usize) -> Result<ReceivedBatch, ConsumerError> {
+        if max_messages == 0 {
+            return Ok(ReceivedBatch {
+                messages: Vec::new(),
+                commit: Box::new(|_| Box::pin(async {})),
+            });
+        }
+
+        // 1. Wait for the first message. This will block until a message is available.
+        let mut last_delivery = futures::StreamExt::next(&mut self.consumer)
+            .await
+            .ok_or(ConsumerError::EndOfStream)?
+            .context("Failed to get message from AMQP subscriber stream")?;
+
+        let mut messages = Vec::with_capacity(max_messages);
+        messages.push(delivery_to_canonical_message(&last_delivery));
+
+        // 2. Greedily consume more messages if they are already buffered, up to max_messages.
+        while messages.len() < max_messages {
+            match self.consumer.try_next().await {
+                Ok(Some(delivery)) => {
+                    messages.push(delivery_to_canonical_message(&delivery));
+                    last_delivery = delivery;
+                }
+                Ok(None) => break, // No more messages in the buffer
+                Err(e) => {
+                    // An error occurred, but we have some messages. Process them and let the next call handle the error.
+                    tracing::warn!("Error receiving subsequent AMQP message: {}", e);
+                    break;
+                }
+            }
+        }
+
+        // 3. Create a commit function that acks all received messages.
+        let messages_len = messages.len();
+        let commit = Box::new(move |_response: Option<Vec<CanonicalMessage>>| {
+            Box::pin(async move {
+                let ack_options = BasicAckOptions {
+                    // Use multiple: true only if we've consumed more than one message.
+                    multiple: messages_len > 1,
+                    ..Default::default()
+                };
+                if let Err(e) = last_delivery.ack(ack_options).await {
+                    tracing::error!(last_delivery_tag = last_delivery.delivery_tag, error = %e, "Failed to bulk-ack AMQP messages");
+                } else {
+                    debug!(
+                        last_delivery_tag = last_delivery.delivery_tag,
+                        count = messages_len,
+                        "Bulk-acknowledged AMQP messages"
+                    );
+                }
+            }) as BoxFuture<'static, ()>
+        });
+
+        Ok(ReceivedBatch { messages, commit })
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 

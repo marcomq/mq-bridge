@@ -20,6 +20,7 @@ use rdkafka::{
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, info};
+use uuid::Uuid;
 
 pub struct KafkaPublisher {
     producer: FutureProducer,
@@ -330,6 +331,167 @@ impl MessageConsumer for KafkaConsumer {
         let commit = Box::new(move |_responses: Option<Vec<CanonicalMessage>>| {
             Box::pin(async move {
                 // Only commit if there are offsets to commit.
+                if messages_len > 0 {
+                    if let Err(e) = consumer.commit(&last_offset_tpl, CommitMode::Async) {
+                        tracing::error!("Failed to commit Kafka message batch: {:?}", e);
+                    }
+                }
+            }) as BoxFuture<'static, ()>
+        });
+        Ok(ReceivedBatch { messages, commit })
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+pub struct KafkaSubscriber {
+    consumer: Arc<StreamConsumer>,
+}
+
+impl KafkaSubscriber {
+    /// Creates a new Kafka subscriber.
+    ///
+    /// The subscriber will use the provided `KafkaConfig` to connect to the Kafka cluster.
+    /// It will subscribe to the provided `topic` and start consuming messages from the latest offset.
+    ///
+    /// The subscriber will use a unique group ID, which is generated using a UUID.
+    /// This ensures that the subscriber will receive a copy of the message, even if there are other subscribers with the same group ID.
+    ///
+    /// The subscriber will commit the last offset of the consumed messages batch asynchronously.
+    /// This allows the subscriber to continue consuming messages without waiting for the previous batch to be committed.
+    ///
+    /// The subscriber will stop consuming messages when the stream is closed.
+    /// To stop consuming messages, call `drop()` on the subscriber.
+    pub async fn new(
+        config: &KafkaConfig,
+        topic: &str,
+        subscribe_id: Option<String>,
+    ) -> anyhow::Result<Self> {
+        let mut client_config = ClientConfig::new();
+
+        // Generate a unique group ID for the subscriber to ensure it receives a copy of the message (fan-out).
+        let id = subscribe_id.unwrap_or_else(|| Uuid::new_v4().to_string());
+        let group_id = format!("event-sub-{}", id);
+        client_config.set("group.id", &group_id);
+
+        client_config
+            .set("bootstrap.servers", &config.brokers)
+            .set("enable.auto.commit", "false")
+            .set("auto.offset.reset", "latest") // Start reading from the latest message
+            .set("fetch.min.bytes", "1")
+            .set("socket.connection.setup.timeout.ms", "30000");
+
+        if config.tls.required {
+            client_config.set("security.protocol", "ssl");
+            if let Some(ca_file) = &config.tls.ca_file {
+                client_config.set("ssl.ca.location", ca_file);
+            }
+            if let Some(cert_file) = &config.tls.cert_file {
+                client_config.set("ssl.certificate.location", cert_file);
+            }
+            if let Some(key_file) = &config.tls.key_file {
+                client_config.set("ssl.key.location", key_file);
+            }
+            client_config.set(
+                "enable.ssl.certificate.verification",
+                (!config.tls.accept_invalid_certs).to_string(),
+            );
+        }
+        if let (Some(username), Some(password)) = (&config.username, &config.password) {
+            client_config.set("sasl.mechanism", "PLAIN");
+            client_config.set("sasl.username", username);
+            client_config.set("sasl.password", password);
+            client_config.set("security.protocol", "sasl_ssl");
+        }
+
+        if let Some(options) = &config.consumer_options {
+            for (key, value) in options {
+                client_config.set(key, value);
+            }
+        }
+
+        let consumer: StreamConsumer = client_config.create()?;
+        if !topic.is_empty() {
+            consumer.subscribe(&[topic])?;
+            info!(topic = %topic, group_id = %group_id, "Kafka event subscriber started");
+        }
+
+        Ok(Self {
+            consumer: Arc::new(consumer),
+        })
+    }
+}
+
+impl Drop for KafkaSubscriber {
+    fn drop(&mut self) {
+        self.consumer.unsubscribe();
+    }
+}
+
+#[async_trait]
+impl MessageConsumer for KafkaSubscriber {
+    async fn receive(&mut self) -> Result<Received, ConsumerError> {
+        // Implementation is identical to KafkaConsumer, but operates on the subscriber's consumer
+        let message = self
+            .consumer
+            .recv()
+            .await
+            .context("Failed to receive Kafka message")?;
+        let mut tpl = TopicPartitionList::new();
+        let mut messages = Vec::new();
+        process_message(message, &mut messages, &mut tpl)?;
+        let canonical_message = messages.pop().unwrap();
+
+        let consumer = self.consumer.clone();
+        let commit = Box::new(move |_response: Option<CanonicalMessage>| {
+            Box::pin(async move {
+                if let Err(e) = consumer.commit(&tpl, CommitMode::Async) {
+                    tracing::error!("Failed to commit Kafka message: {:?}", e);
+                }
+            }) as BoxFuture<'static, ()>
+        });
+
+        Ok(Received {
+            message: canonical_message,
+            commit,
+        })
+    }
+
+    async fn receive_batch(&mut self, max_messages: usize) -> Result<ReceivedBatch, ConsumerError> {
+        // Reuse the logic from KafkaConsumer by duplicating it here or refactoring.
+        // For safety/isolation as requested, we duplicate the batch logic which is tied to self.consumer.
+        let mut messages = Vec::with_capacity(max_messages);
+        let mut last_offset_tpl = TopicPartitionList::new();
+        {
+            let mut stream = self.consumer.stream();
+            if let Some(first_message_result) = stream.next().await {
+                match first_message_result {
+                    Ok(message) => {
+                        process_message(message, &mut messages, &mut last_offset_tpl)?;
+                    }
+                    Err(e) => return Err(anyhow!(e).into()),
+                }
+            } else {
+                return Err(ConsumerError::EndOfStream);
+            }
+
+            if !messages.is_empty() {
+                for _ in 1..max_messages {
+                    match stream.try_next().await {
+                        Ok(Some(message)) => {
+                            process_message(message, &mut messages, &mut last_offset_tpl)?;
+                        }
+                        _ => break,
+                    }
+                }
+            }
+        }
+        let messages_len = messages.len();
+        let consumer = self.consumer.clone();
+        let commit = Box::new(move |_responses: Option<Vec<CanonicalMessage>>| {
+            Box::pin(async move {
                 if messages_len > 0 {
                     if let Err(e) = consumer.commit(&last_offset_tpl, CommitMode::Async) {
                         tracing::error!("Failed to commit Kafka message batch: {:?}", e);

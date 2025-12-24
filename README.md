@@ -30,15 +30,19 @@ For implementing business logic, `mq-bridge` provides a handler layer that is se
 You can chain these handlers with endpoint publishers.
 
 ```rust
-use mq_bridge::traits::CommandHandler;
+use mq_bridge::traits::Handler;
+use mq_bridge::{CanonicalMessage, Handled};
 use std::sync::Arc;
 
 // Define a handler that transforms the message payload
-let command_handler = Arc::new(|mut msg: mq_bridge::CanonicalMessage| async move {
+let command_handler = Arc::new(|mut msg: CanonicalMessage| async move {
     let new_payload = format!("handled_{}", String::from_utf8_lossy(&msg.payload));
     msg.payload = new_payload.into();
-    Ok(mq_bridge::Handled::Publish(msg))
+    Ok(Handled::Publish(msg))
 });
+
+// Attach the handler to a route
+// let route = Route { ... }.with_handler(command_handler);
 ```
 
 ### Programmatic Usage
@@ -46,49 +50,49 @@ let command_handler = Arc::new(|mut msg: mq_bridge::CanonicalMessage| async move
 You can define and run routes directly in Rust code.
 
 ```rust
-use mq_bridge::models::{Endpoint, EndpointType, MemoryConfig, Route};
+use mq_bridge::models::{Endpoint, EndpointType, MemoryConfig, CanonicalMessage, Route};
 use std::time::Duration;
 use tokio::time::timeout;
 
 #[tokio::main]
 async fn main() {
     // Define a route from one in-memory channel to another
-    let route = Route {
-        input: Endpoint::new(EndpointType::Memory(MemoryConfig {
-            topic: "mem-in".to_string(),
-            capacity: Some(100),
-        })),
-        output: Endpoint::new(EndpointType::Memory(MemoryConfig {
-            topic: "mem-out".to_string(),
-            capacity: Some(100),
-        })),
-        concurrency: 1,
+    use crate::models::{Endpoint, Route};
+    
+    // 1. Create boolean that is changed in handler
+    let success = Arc::new(AtomicBool::new(false));
+    let success_clone = success.clone();
+
+    // 2. Define Handler
+    let handler = move |mut msg: CanonicalMessage| {
+        success_clone.store(true, Ordering::SeqCst);
+        msg.set_payload_str(format!("modified {}", msg.get_payload_str()));
+        async move { Ok(Handled::Publish(msg)) }
     };
+    // 3. Define Route
+    let input = Endpoint::new_memory("route_in", 200);
+    let output = Endpoint::new_memory("route_out", 200);
+    let route = Route::new(input, output)
+        .with_handler(Arc::new(handler));
 
-    // Get handles to the memory channels for testing
-    let in_channel = route.input.channel().unwrap();
-    let out_channel = route.output.channel().unwrap();
+    // 4. Inject Data
+    let input_channel = route.input.channel().unwrap();
+    input_channel
+        .send_message(CanonicalMessage::from_str("hello"))
+        .await
+        .unwrap();
 
-    // Run the route. It will stop when the input channel is closed and empty.
-    let (run_result, _) = tokio::join!(
-        route.run_until_err("memory-test", None),
-        async {
-            // Send a message
-            in_channel.send_message(mq_bridge::CanonicalMessage::new(b"hello".to_vec(), None)).await.unwrap();
-            // Close the input channel to allow the route to terminate
-            in_channel.close();
-        }
-    );
+    // 5. Run
+    let res = route.run_until_err("test_route", None);
+    input_channel.close();
+    res.await.ok(); // eof error due to closed channel
 
-    // Ensure the route ran without errors
-    run_result.unwrap();
+    // 6. Verify
+    assert!(success.load(Ordering::SeqCst) == true);
 
-    // Verify the message was received
-    let received_messages = out_channel.drain_messages();
-    assert_eq!(received_messages.len(), 1);
-    assert_eq!(received_messages[0].payload, "hello".as_bytes());
-
-    println!("Message successfully bridged from 'mem-in' to 'mem-out'!");
+    let msgs = route.output.channel().unwrap().drain_messages();
+    assert_eq!(msgs.len(), 1);
+    assert_eq!(msgs[0].get_payload_str(), "modified hello");
 }
 ```
 

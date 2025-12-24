@@ -26,6 +26,11 @@ impl CanonicalMessage {
         }
     }
 
+    pub fn from<T: Serialize>(data: &T) -> Result<Self, serde_json::Error> {
+        let bytes = serde_json::to_vec(data)?;
+        Ok(Self::new(bytes, None))
+    }
+
     pub fn from_vec(payload: impl Into<Vec<u8>>) -> Self {
         Self::new(payload.into(), None)
     }
@@ -67,12 +72,7 @@ impl CanonicalMessage {
         Ok(Self::new(bytes, message_id))
     }
 
-    pub fn from_struct<T: Serialize>(data: &T) -> Result<Self, serde_json::Error> {
-        let bytes = serde_json::to_vec(data)?;
-        Ok(Self::new(bytes, None))
-    }
-
-    pub fn get_struct<T: DeserializeOwned>(&self) -> Result<T, serde_json::Error> {
+    pub fn parse<T: DeserializeOwned>(&self) -> Result<T, serde_json::Error> {
         serde_json::from_slice(&self.payload)
     }
 

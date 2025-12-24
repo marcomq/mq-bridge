@@ -11,7 +11,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use crate::{
     endpoints::memory::{get_or_create_channel, MemoryChannel},
-    traits::CommandHandler,
+    traits::Handler,
 };
 
 /// The top-level configuration is a map of named routes.
@@ -25,14 +25,26 @@ pub struct Route {
     /// (Optional) Number of concurrent processing tasks for this route. Defaults to 1.
     #[serde(default = "default_concurrency")]
     pub concurrency: usize,
+    /// (Optional) Number of messages to process in a single batch. Defaults to 128.
+    #[serde(default = "default_batch_size")]
+    pub batch_size: usize,
     /// The input/source endpoint for the route.
     pub input: Endpoint,
     /// The output/sink endpoint for the route.
+    #[serde(default = "default_output_endpoint")]
     pub output: Endpoint,
 }
 
-fn default_concurrency() -> usize {
+pub(crate) fn default_concurrency() -> usize {
     1
+}
+
+pub(crate) fn default_batch_size() -> usize {
+    128
+}
+
+fn default_output_endpoint() -> Endpoint {
+    Endpoint::new(EndpointType::Null)
 }
 
 fn default_dlq_retry_attempts() -> usize {
@@ -64,23 +76,27 @@ pub struct Endpoint {
     #[serde(default)]
     pub middlewares: Vec<Middleware>,
 
+    #[serde(default)]
+    pub mode: ConsumerMode,
+
     /// The specific endpoint implementation, determined by the configuration key (e.g., "kafka", "nats").
     #[serde(flatten)]
     pub endpoint_type: EndpointType,
 
     #[serde(skip_serializing)]
-    pub handler: Option<Arc<dyn CommandHandler>>,
+    pub handler: Option<Arc<dyn Handler>>,
 }
 
 impl std::fmt::Debug for Endpoint {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Endpoint")
             .field("middlewares", &self.middlewares)
+            .field("mode", &self.mode)
             .field("endpoint_type", &self.endpoint_type)
             .field(
                 "handler",
                 &if self.handler.is_some() {
-                    "Some(<CommandHandler>)"
+                    "Some(<Handler>)"
                 } else {
                     "None"
                 },
@@ -100,7 +116,14 @@ impl<'de> Deserialize<'de> for Endpoint {
             type Value = Endpoint;
 
             fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-                formatter.write_str("a map representing an endpoint")
+                formatter.write_str("a map representing an endpoint or null")
+            }
+
+            fn visit_unit<E>(self) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(Endpoint::new(EndpointType::Null))
             }
 
             fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
@@ -111,10 +134,13 @@ impl<'de> Deserialize<'de> for Endpoint {
                 // This allows us to separate the `middlewares` field from the rest.
                 let mut temp_map = serde_json::Map::new();
                 let mut middlewares_val = None;
+                let mut mode_val = None;
 
                 while let Some((key, value)) = map.next_entry::<String, serde_json::Value>()? {
                     if key == "middlewares" {
                         middlewares_val = Some(value);
+                    } else if key == "mode" {
+                        mode_val = Some(value);
                     } else {
                         temp_map.insert(key, value);
                     }
@@ -132,15 +158,21 @@ impl<'de> Deserialize<'de> for Endpoint {
                     }
                     None => Vec::new(),
                 };
+
+                let mode = match mode_val {
+                    Some(val) => serde_json::from_value(val).map_err(serde::de::Error::custom)?,
+                    None => ConsumerMode::default(),
+                };
                 Ok(Endpoint {
                     middlewares,
+                    mode,
                     endpoint_type,
                     handler: None,
                 })
             }
         }
 
-        deserializer.deserialize_map(EndpointVisitor)
+        deserializer.deserialize_any(EndpointVisitor)
     }
 }
 
@@ -148,6 +180,7 @@ impl Endpoint {
     pub fn new(endpoint_type: EndpointType) -> Self {
         Self {
             middlewares: Vec::new(),
+            mode: ConsumerMode::default(),
             endpoint_type,
             handler: None,
         }
@@ -156,6 +189,7 @@ impl Endpoint {
         Self::new(EndpointType::Memory(MemoryConfig {
             topic: topic.to_string(),
             capacity: Some(capacity),
+            ..Default::default()
         }))
     }
     pub fn add_middleware(mut self, middleware: Middleware) -> Self {
@@ -213,6 +247,7 @@ pub enum EndpointType {
     Mqtt(MqttEndpoint),
     Http(HttpEndpoint),
     Fanout(Vec<Endpoint>),
+    Null,
 }
 
 /// An enumeration of all supported middleware types.
@@ -351,6 +386,14 @@ pub struct NatsConfig {
     pub prefetch_count: Option<usize>,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ConsumerMode {
+    #[default]
+    Consume,
+    Subscribe,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 #[serde(deny_unknown_fields)]
 pub struct MemoryConfig {
@@ -405,6 +448,7 @@ pub struct MongoDbConfig {
     pub url: String,
     pub database: String,
     pub polling_interval_ms: Option<u64>,
+    pub ttl_seconds: Option<u64>,
 }
 
 // --- MQTT Specific Configuration ---
@@ -712,5 +756,34 @@ fanout_route:
         } else {
             panic!("Expected Fanout endpoint");
         }
+    }
+
+    #[test]
+    fn test_deserialize_subscribe_mode() {
+        let yaml = r#"
+subscribe_route:
+  input:
+    mode: subscribe
+    memory:
+      topic: "events"
+  output:
+    null: null
+"#;
+        let config: Config = serde_yaml_ng::from_str(yaml).expect("Failed to parse YAML");
+        let route = config.get("subscribe_route").expect("Route not found");
+        assert_eq!(route.input.mode, ConsumerMode::Subscribe);
+    }
+
+    #[test]
+    fn test_deserialize_null_endpoint_shorthand() {
+        let yaml = r#"
+null_route:
+  input:
+    memory: { topic: "in" }
+  output: null
+"#;
+        let config: Config = serde_yaml_ng::from_str(yaml).expect("Failed to parse YAML");
+        let route = config.get("null_route").expect("Route not found");
+        assert!(matches!(route.output.endpoint_type, EndpointType::Null));
     }
 }
