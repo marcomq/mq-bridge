@@ -210,7 +210,9 @@ mod tests {
         let res = handler.handle(msg).await;
         assert!(res.is_err());
         match res.unwrap_err() {
-            HandlerError::NonRetryable(e) => assert!(e.to_string().contains("No handler registered")),
+            HandlerError::NonRetryable(e) => {
+                assert!(e.to_string().contains("No handler registered"))
+            }
             _ => panic!("Expected NonRetryable error"),
         }
     }

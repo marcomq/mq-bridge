@@ -1,10 +1,10 @@
-use crate::models::{self, Endpoint};
-use std::sync::Arc;
 //  mq-bridge
 //  © Copyright 2025, by Marco Mengelkoch
 //  Licensed under MIT License, see License file for more details
 //  git clone https://github.com/marcomq/mq-bridge
+
 pub use crate::models::Route;
+use crate::models::{self, Endpoint};
 use crate::traits::{BatchCommitFunc, ConsumerError, SentBatch};
 use crate::traits::{Handled, HandlerError};
 use crate::{
@@ -14,6 +14,7 @@ use crate::{
 use async_channel::{bounded, Sender};
 use serde::de::DeserializeOwned;
 use std::future::Future;
+use std::sync::Arc;
 use tokio::{
     select,
     task::{self, JoinHandle},
