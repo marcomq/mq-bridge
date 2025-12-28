@@ -145,6 +145,7 @@ async fn create_base_consumer(
                 ))
             }
         }
+        EndpointType::Custom(factory) => factory.create_consumer(route_name).await,
         #[allow(unreachable_patterns)]
         _ => Err(anyhow!(
             "[route:{}] Unsupported consumer endpoint type",
@@ -263,6 +264,7 @@ async fn create_base_publisher(
             }
             Ok(Box::new(fanout::FanoutPublisher::new(publishers)) as Box<dyn MessagePublisher>)
         }
+        EndpointType::Custom(factory) => factory.create_publisher(route_name).await,
         #[allow(unreachable_patterns)]
         _ => Err(anyhow!(
             "[route:{}] Unsupported publisher endpoint type",

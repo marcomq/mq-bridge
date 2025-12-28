@@ -11,7 +11,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use crate::{
     endpoints::memory::{get_or_create_channel, MemoryChannel},
-    traits::Handler,
+    traits::{CustomEndpointFactory, CustomMiddlewareFactory, Handler},
 };
 
 /// The top-level configuration is a map of named routes.
@@ -247,6 +247,8 @@ pub enum EndpointType {
     Mqtt(MqttEndpoint),
     Http(HttpEndpoint),
     Fanout(Vec<Endpoint>),
+    #[serde(skip)]
+    Custom(Arc<dyn CustomEndpointFactory>),
     Null,
 }
 
@@ -259,6 +261,8 @@ pub enum Middleware {
     Dlq(Box<DeadLetterQueueMiddleware>),
     Retry(RetryMiddleware),
     RandomPanic(RandomPanicMiddleware),
+    #[serde(skip)]
+    Custom(Arc<dyn CustomMiddlewareFactory>),
 }
 
 /// Deduplication middleware configuration.
@@ -589,6 +593,8 @@ kafka_to_nats:
                 }
                 Middleware::Metrics(_) => {
                     has_metrics = true;
+                }
+                Middleware::Custom(_) => {
                 }
                 Middleware::Dlq(dlq) => {
                     assert!(dlq.endpoint.middlewares.is_empty());

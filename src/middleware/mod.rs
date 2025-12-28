@@ -46,6 +46,9 @@ pub async fn apply_middlewares_to_consumer(
             Middleware::Dlq(_) => consumer, // DLQ is a publisher-only middleware
             Middleware::Retry(_) => consumer, // Retry is currently publisher-only
             Middleware::RandomPanic(cfg) => Box::new(RandomPanicConsumer::new(consumer, cfg)),
+            Middleware::Custom(factory) => {
+                factory.apply_consumer(consumer, route_name).await?
+            }
             #[allow(unreachable_patterns)]
             _ => {
                 return Err(anyhow::anyhow!(
@@ -79,6 +82,9 @@ pub async fn apply_middlewares_to_publisher(
             Middleware::Deduplication(_) => publisher,
             Middleware::Retry(cfg) => Box::new(RetryPublisher::new(publisher, cfg.clone())),
             Middleware::RandomPanic(cfg) => Box::new(RandomPanicPublisher::new(publisher, cfg)),
+            Middleware::Custom(factory) => {
+                factory.apply_publisher(publisher, route_name).await?
+            }
             #[allow(unreachable_patterns)]
             _ => {
                 return Err(anyhow::anyhow!(
