@@ -52,6 +52,22 @@ impl TryFrom<MongoMessageRaw> for CanonicalMessage {
     }
 }
 
+fn message_to_document(message: &CanonicalMessage) -> anyhow::Result<Document> {
+    let id_uuid = mongodb::bson::Uuid::from_bytes(message.message_id.to_be_bytes());
+    let metadata = to_document(&message.metadata)
+        .context("Failed to serialize metadata to BSON document")?;
+
+    Ok(doc! {
+        "_id": id_uuid,
+        "payload": Bson::Binary(mongodb::bson::Binary {
+            subtype: mongodb::bson::spec::BinarySubtype::Uuid,
+            bytes: message.payload.to_vec() }),
+        "metadata": metadata,
+        "locked_until": null,
+        "created_at": mongodb::bson::DateTime::now()
+    })
+}
+
 /// A publisher that inserts messages into a MongoDB collection.
 pub struct MongoDbPublisher {
     collection: Collection<Document>,
@@ -86,21 +102,7 @@ impl MongoDbPublisher {
 #[async_trait]
 impl MessagePublisher for MongoDbPublisher {
     async fn send(&self, message: CanonicalMessage) -> Result<Sent, PublisherError> {
-        let id_uuid = mongodb::bson::Uuid::from_bytes(message.message_id.to_be_bytes());
-        let metadata = to_document(&message.metadata)
-            .context("Failed to serialize metadata to BSON document")?;
-
-        // Manually construct the document to handle u64 message_id for BSON.
-        // BSON only supports i64, so we do a wrapping conversion.
-        let doc = doc! {
-            "_id": id_uuid,
-            "payload": Bson::Binary(mongodb::bson::Binary {
-                subtype: mongodb::bson::spec::BinarySubtype::Generic,
-                bytes: message.payload.to_vec() }),
-            "metadata": metadata,
-            "locked_until": null,
-            "created_at": mongodb::bson::DateTime::now()
-        };
+        let doc = message_to_document(&message).map_err(PublisherError::NonRetryable)?;
         self.collection
             .insert_one(doc)
             .await
@@ -113,10 +115,55 @@ impl MessagePublisher for MongoDbPublisher {
         &self,
         messages: Vec<CanonicalMessage>,
     ) -> Result<SentBatch, PublisherError> {
-        crate::traits::send_batch_helper(self, messages, |publisher, message| {
-            Box::pin(publisher.send(message))
-        })
-        .await
+        if messages.is_empty() {
+            return Ok(SentBatch::Ack);
+        }
+
+        let mut docs = Vec::with_capacity(messages.len());
+        let mut failed_messages = Vec::new();
+
+        for message in &messages {
+            match message_to_document(message) {
+                Ok(doc) => docs.push(doc),
+                Err(e) => {
+                    failed_messages.push((message.clone(), PublisherError::NonRetryable(e)));
+                }
+            }
+        }
+
+        if docs.is_empty() {
+            if failed_messages.is_empty() {
+                return Ok(SentBatch::Ack);
+            } else {
+                return Ok(SentBatch::Partial {
+                    responses: None,
+                    failed: failed_messages,
+                });
+            }
+        }
+
+        // Use ordered: false to attempt inserting all documents even if some fail (e.g. duplicates).
+        // This improves throughput.
+        let options = mongodb::options::InsertManyOptions::builder()
+            .ordered(false)
+            .build();
+
+        match self.collection.insert_many(docs).with_options(options).await {
+            Ok(_) => {
+                if failed_messages.is_empty() {
+                    Ok(SentBatch::Ack)
+                } else {
+                    Ok(SentBatch::Partial {
+                        responses: None,
+                        failed: failed_messages,
+                    })
+                }
+            }
+            Err(e) => Err(PublisherError::Retryable(anyhow::anyhow!(
+                "MongoDB bulk write failed: {}",
+                e
+            ))),
+        }
     }
 
     fn as_any(&self) -> &dyn Any {
