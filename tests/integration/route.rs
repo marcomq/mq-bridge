@@ -1,14 +1,10 @@
-#![allow(dead_code)]
-
+#![allow(dead_code, unused_imports)]
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
 
-use mq_bridge::{
-    models::{Endpoint, Route},
-    CanonicalMessage, Handled,
-};
+use mq_bridge::{models::Endpoint, CanonicalMessage, Handled, Route};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
