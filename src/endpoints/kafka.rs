@@ -30,9 +30,8 @@ pub struct KafkaPublisher {
 
 impl KafkaPublisher {
     pub async fn new(config: &KafkaConfig, topic: &str) -> anyhow::Result<Self> {
-        let mut client_config = ClientConfig::new();
+        let mut client_config = create_common_config(config);
         client_config
-            .set("bootstrap.servers", &config.brokers)
             // --- Performance Tuning ---
             .set("linger.ms", "100") // Wait 100ms to batch messages for reliability
             .set("batch.num.messages", "10000") // Max messages per batch.
@@ -41,30 +40,6 @@ impl KafkaPublisher {
             .set("acks", "all") // Wait for all in-sync replicas (safer)
             .set("retries", "3") // Retry up to 3 times
             .set("request.timeout.ms", "30000"); // 30 second timeout
-
-        if config.tls.required {
-            client_config.set("security.protocol", "ssl");
-            if let Some(ca_file) = &config.tls.ca_file {
-                client_config.set("ssl.ca.location", ca_file);
-            }
-            if let Some(cert_file) = &config.tls.cert_file {
-                client_config.set("ssl.certificate.location", cert_file);
-            }
-            if let Some(key_file) = &config.tls.key_file {
-                client_config.set("ssl.key.location", key_file);
-            }
-            client_config.set(
-                "enable.ssl.certificate.verification",
-                (!config.tls.accept_invalid_certs).to_string(),
-            );
-        }
-
-        if let (Some(username), Some(password)) = (&config.username, &config.password) {
-            client_config.set("sasl.mechanism", "PLAIN");
-            client_config.set("sasl.username", username);
-            client_config.set("sasl.password", password);
-            client_config.set("security.protocol", "sasl_ssl");
-        }
 
         // Apply custom producer options, allowing overrides of defaults
         if let Some(options) = &config.producer_options {
@@ -171,10 +146,63 @@ impl MessagePublisher for KafkaPublisher {
         &self,
         messages: Vec<CanonicalMessage>,
     ) -> Result<SentBatch, PublisherError> {
-        crate::traits::send_batch_helper(self, messages, |publisher, message| {
-            Box::pin(publisher.send(message))
-        })
-        .await
+        if self.delayed_ack {
+            return crate::traits::send_batch_helper(self, messages, |publisher, message| {
+                Box::pin(publisher.send(message))
+            })
+            .await;
+        }
+
+        let mut delivery_futures = Vec::with_capacity(messages.len());
+        let mut failed_messages = Vec::new();
+
+        for message in messages {
+            let mut record = FutureRecord::to(&self.topic).payload(&message.payload[..]);
+            let key_bytes = message.message_id.to_be_bytes();
+            record = record.key(&key_bytes);
+
+            let mut headers = OwnedHeaders::new();
+            if !message.metadata.is_empty() {
+                for (key, value) in &message.metadata {
+                    headers = headers.insert(rdkafka::message::Header {
+                        key,
+                        value: Some(value.as_bytes()),
+                    });
+                }
+                record = record.headers(headers);
+            }
+
+            match self.producer.send_result(record) {
+                Ok(fut) => delivery_futures.push((message, fut)),
+                Err((e, _)) => failed_messages.push((
+                    message,
+                    PublisherError::Retryable(anyhow!("Kafka enqueue failed: {}", e)),
+                )),
+            }
+        }
+
+        for (message, fut) in delivery_futures {
+            match fut.await {
+                Ok(Ok(_)) => {}
+                Ok(Err((e, _))) => failed_messages.push((
+                    message,
+                    PublisherError::Retryable(anyhow!("Kafka delivery failed: {}", e)),
+                )),
+                Err(_) => failed_messages.push((
+                    message,
+                    PublisherError::Retryable(anyhow!("Kafka delivery future cancelled")),
+                )),
+            }
+        }
+
+        if failed_messages.is_empty() {
+            Ok(SentBatch::Ack)
+        } else {
+            Ok(SentBatch::Partial {
+                responses: None,
+                failed: failed_messages,
+            })
+        }
     }
 
     async fn flush(&self) -> anyhow::Result<()> {
@@ -196,40 +224,16 @@ use std::any::Any;
 impl KafkaConsumer {
     pub async fn new(config: &KafkaConfig, topic: &str) -> anyhow::Result<Self> {
         use std::sync::Arc;
-        let mut client_config = ClientConfig::new();
+        let mut client_config = create_common_config(config);
         if let Some(group_id) = &config.group_id {
             client_config.set("group.id", group_id);
         }
         client_config
-            .set("bootstrap.servers", &config.brokers)
             .set("enable.auto.commit", "false")
             .set("auto.offset.reset", "earliest")
             // --- Performance Tuning for Consumers ---
             .set("fetch.min.bytes", "1") // Start fetching immediately
             .set("socket.connection.setup.timeout.ms", "30000"); // 30 seconds
-
-        if config.tls.required {
-            client_config.set("security.protocol", "ssl");
-            if let Some(ca_file) = &config.tls.ca_file {
-                client_config.set("ssl.ca.location", ca_file);
-            }
-            if let Some(cert_file) = &config.tls.cert_file {
-                client_config.set("ssl.certificate.location", cert_file);
-            }
-            if let Some(key_file) = &config.tls.key_file {
-                client_config.set("ssl.key.location", key_file);
-            }
-            client_config.set(
-                "enable.ssl.certificate.verification",
-                (!config.tls.accept_invalid_certs).to_string(),
-            );
-        }
-        if let (Some(username), Some(password)) = (&config.username, &config.password) {
-            client_config.set("sasl.mechanism", "PLAIN");
-            client_config.set("sasl.username", username);
-            client_config.set("sasl.password", password);
-            client_config.set("security.protocol", "sasl_ssl");
-        }
 
         // Apply custom consumer options
         if let Some(options) = &config.consumer_options {
@@ -291,54 +295,7 @@ impl MessageConsumer for KafkaConsumer {
     }
 
     async fn receive_batch(&mut self, max_messages: usize) -> Result<ReceivedBatch, ConsumerError> {
-        let mut messages = Vec::with_capacity(max_messages);
-        let mut last_offset_tpl = TopicPartitionList::new();
-        {
-            // Create a stream from the consumer for this batch operation.
-            let mut stream = self.consumer.stream();
-
-            // Block and wait for the first message.
-            if let Some(first_message_result) = stream.next().await {
-                match first_message_result {
-                    Ok(message) => {
-                        process_message(message, &mut messages, &mut last_offset_tpl)?;
-                    }
-                    Err(e) => return Err(anyhow!(e).into()),
-                }
-            } else {
-                return Err(ConsumerError::EndOfStream);
-            }
-
-            // If we got one message, greedily consume any others that are already buffered.
-            if !messages.is_empty() {
-                for _ in 1..max_messages {
-                    match stream.try_next().await {
-                        Ok(Some(message)) => {
-                            process_message(message, &mut messages, &mut last_offset_tpl)?;
-                        }
-                        _ => {
-                            // Stream is not ready, an error occurred, or it ended.
-                            // In any case, we stop trying to get more messages for this batch.
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-        let messages_len = messages.len();
-
-        let consumer = self.consumer.clone();
-        let commit = Box::new(move |_responses: Option<Vec<CanonicalMessage>>| {
-            Box::pin(async move {
-                // Only commit if there are offsets to commit.
-                if messages_len > 0 {
-                    if let Err(e) = consumer.commit(&last_offset_tpl, CommitMode::Async) {
-                        tracing::error!("Failed to commit Kafka message batch: {:?}", e);
-                    }
-                }
-            }) as BoxFuture<'static, ()>
-        });
-        Ok(ReceivedBatch { messages, commit })
+        receive_batch_internal(&self.consumer, max_messages).await
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -369,7 +326,7 @@ impl KafkaSubscriber {
         topic: &str,
         subscribe_id: Option<String>,
     ) -> anyhow::Result<Self> {
-        let mut client_config = ClientConfig::new();
+        let mut client_config = create_common_config(config);
 
         // Generate a unique group ID for the subscriber to ensure it receives a copy of the message (fan-out).
         let id = subscribe_id.unwrap_or_else(|| Uuid::new_v4().to_string());
@@ -377,34 +334,10 @@ impl KafkaSubscriber {
         client_config.set("group.id", &group_id);
 
         client_config
-            .set("bootstrap.servers", &config.brokers)
             .set("enable.auto.commit", "false")
             .set("auto.offset.reset", "latest") // Start reading from the latest message
             .set("fetch.min.bytes", "1")
             .set("socket.connection.setup.timeout.ms", "30000");
-
-        if config.tls.required {
-            client_config.set("security.protocol", "ssl");
-            if let Some(ca_file) = &config.tls.ca_file {
-                client_config.set("ssl.ca.location", ca_file);
-            }
-            if let Some(cert_file) = &config.tls.cert_file {
-                client_config.set("ssl.certificate.location", cert_file);
-            }
-            if let Some(key_file) = &config.tls.key_file {
-                client_config.set("ssl.key.location", key_file);
-            }
-            client_config.set(
-                "enable.ssl.certificate.verification",
-                (!config.tls.accept_invalid_certs).to_string(),
-            );
-        }
-        if let (Some(username), Some(password)) = (&config.username, &config.password) {
-            client_config.set("sasl.mechanism", "PLAIN");
-            client_config.set("sasl.username", username);
-            client_config.set("sasl.password", password);
-            client_config.set("security.protocol", "sasl_ssl");
-        }
 
         if let Some(options) = &config.consumer_options {
             for (key, value) in options {
@@ -433,46 +366,7 @@ impl Drop for KafkaSubscriber {
 #[async_trait]
 impl MessageConsumer for KafkaSubscriber {
     async fn receive_batch(&mut self, max_messages: usize) -> Result<ReceivedBatch, ConsumerError> {
-        // Reuse the logic from KafkaConsumer by duplicating it here or refactoring.
-        // For safety/isolation as requested, we duplicate the batch logic which is tied to self.consumer.
-        let mut messages = Vec::with_capacity(max_messages);
-        let mut last_offset_tpl = TopicPartitionList::new();
-        {
-            let mut stream = self.consumer.stream();
-            if let Some(first_message_result) = stream.next().await {
-                match first_message_result {
-                    Ok(message) => {
-                        process_message(message, &mut messages, &mut last_offset_tpl)?;
-                    }
-                    Err(e) => return Err(anyhow!(e).into()),
-                }
-            } else {
-                return Err(ConsumerError::EndOfStream);
-            }
-
-            if !messages.is_empty() {
-                for _ in 1..max_messages {
-                    match stream.try_next().await {
-                        Ok(Some(message)) => {
-                            process_message(message, &mut messages, &mut last_offset_tpl)?;
-                        }
-                        _ => break,
-                    }
-                }
-            }
-        }
-        let messages_len = messages.len();
-        let consumer = self.consumer.clone();
-        let commit = Box::new(move |_responses: Option<Vec<CanonicalMessage>>| {
-            Box::pin(async move {
-                if messages_len > 0 {
-                    if let Err(e) = consumer.commit(&last_offset_tpl, CommitMode::Async) {
-                        tracing::error!("Failed to commit Kafka message batch: {:?}", e);
-                    }
-                }
-            }) as BoxFuture<'static, ()>
-        });
-        Ok(ReceivedBatch { messages, commit })
+        receive_batch_internal(&self.consumer, max_messages).await
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -517,4 +411,88 @@ fn process_message(
             Offset::Offset(message.offset() + 1),
         )
         .map_err(|e| anyhow::anyhow!(e))
+}
+
+fn create_common_config(config: &KafkaConfig) -> ClientConfig {
+    let mut client_config = ClientConfig::new();
+    client_config.set("bootstrap.servers", &config.brokers);
+
+    if config.tls.required {
+        client_config.set("security.protocol", "ssl");
+        if let Some(ca_file) = &config.tls.ca_file {
+            client_config.set("ssl.ca.location", ca_file);
+        }
+        if let Some(cert_file) = &config.tls.cert_file {
+            client_config.set("ssl.certificate.location", cert_file);
+        }
+        if let Some(key_file) = &config.tls.key_file {
+            client_config.set("ssl.key.location", key_file);
+        }
+        client_config.set(
+            "enable.ssl.certificate.verification",
+            (!config.tls.accept_invalid_certs).to_string(),
+        );
+    }
+
+    if let (Some(username), Some(password)) = (&config.username, &config.password) {
+        client_config.set("sasl.mechanism", "PLAIN");
+        client_config.set("sasl.username", username);
+        client_config.set("sasl.password", password);
+        client_config.set("security.protocol", "sasl_ssl");
+    }
+    client_config
+}
+
+async fn receive_batch_internal(
+    consumer: &Arc<StreamConsumer>,
+    max_messages: usize,
+) -> Result<ReceivedBatch, ConsumerError> {
+    let mut messages = Vec::with_capacity(max_messages);
+    let mut last_offset_tpl = TopicPartitionList::new();
+    {
+        // Create a stream from the consumer for this batch operation.
+        let mut stream = consumer.stream();
+
+        // Block and wait for the first message.
+        if let Some(first_message_result) = stream.next().await {
+            match first_message_result {
+                Ok(message) => {
+                    process_message(message, &mut messages, &mut last_offset_tpl)?;
+                }
+                Err(e) => return Err(anyhow!(e).into()),
+            }
+        } else {
+            return Err(ConsumerError::EndOfStream);
+        }
+
+        // If we got one message, greedily consume any others that are already buffered.
+        if !messages.is_empty() {
+            for _ in 1..max_messages {
+                match stream.try_next().await {
+                    Ok(Some(message)) => {
+                        process_message(message, &mut messages, &mut last_offset_tpl)?;
+                    }
+                    _ => {
+                        // Stream is not ready, an error occurred, or it ended.
+                        // In any case, we stop trying to get more messages for this batch.
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    let messages_len = messages.len();
+
+    let consumer = consumer.clone();
+    let commit = Box::new(move |_responses: Option<Vec<CanonicalMessage>>| {
+        Box::pin(async move {
+            // Only commit if there are offsets to commit.
+            if messages_len > 0 {
+                if let Err(e) = consumer.commit(&last_offset_tpl, CommitMode::Async) {
+                    tracing::error!("Failed to commit Kafka message batch: {:?}", e);
+                }
+            }
+        }) as BoxFuture<'static, ()>
+    });
+    Ok(ReceivedBatch { messages, commit })
 }

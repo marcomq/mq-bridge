@@ -120,13 +120,13 @@ impl MessagePublisher for NatsPublisher {
     }
 }
 
-enum NatsSubscription {
-    Core(async_nats::Subscriber),
+enum NatsCore {
+    Ephemeral(async_nats::Subscriber),
     JetStream(Box<jetstream::consumer::pull::Stream>),
 }
 
 pub struct NatsConsumer {
-    subscription: NatsSubscription,
+    core: NatsCore,
 }
 use std::any::Any;
 
@@ -139,7 +139,7 @@ impl NatsConsumer {
         let options = build_nats_options(config).await?;
         let client = options.connect(&config.url).await?;
 
-        let subscription = if !config.no_jetstream {
+        let core = if !config.no_jetstream {
             let jetstream = jetstream::new(client);
             info!(stream = %stream_name, subject = %subject, "NATS consumer is in JetStream mode.");
 
@@ -171,7 +171,7 @@ impl NatsConsumer {
 
             let stream = consumer.messages().await?;
             info!(stream = %stream_name, subject = %subject, "NATS JetStream source subscribed");
-            NatsSubscription::JetStream(Box::new(stream))
+            NatsCore::JetStream(Box::new(stream))
         } else {
             info!(subject = %subject, "NATS consumer is in Core mode (non-persistent).");
             // For Core NATS, we use a queue group to load-balance messages.
@@ -181,134 +181,17 @@ impl NatsConsumer {
                 .queue_subscribe(subject.to_string(), queue_group.clone())
                 .await?;
             info!(subject = %subject, queue_group = %queue_group, "NATS Core source subscribed");
-            NatsSubscription::Core(sub)
+            NatsCore::Ephemeral(sub)
         };
 
-        Ok(Self { subscription })
-    }
-    fn create_canonical_message(
-        message: &async_nats::Message,
-        sequence: Option<u64>,
-    ) -> CanonicalMessage {
-        // The most reliable ID is the JetStream sequence number.
-        let mut message_id: Option<u128> = sequence.map(|s| s as u128);
-
-        // If no sequence is available (e.g., Core NATS), fall back to the Nats-Msg-Id header.
-        if message_id.is_none() {
-            if let Some(headers) = &message.headers {
-                if let Some(msg_id_header) = headers.get("Nats-Msg-Id") {
-                    let id_str = msg_id_header.as_str();
-                    // Attempt to parse the ID as a UUID or a raw u128.
-                    if let Ok(uuid) = Uuid::parse_str(id_str) {
-                        message_id = Some(uuid.as_u128());
-                    } else if let Ok(n) = id_str.parse::<u128>() {
-                        message_id = Some(n);
-                    } else {
-                        warn!(header_value = %id_str, "Could not parse 'Nats-Msg-Id' header as a UUID or u128");
-                    }
-                }
-            }
-        }
-
-        let mut canonical_message = CanonicalMessage::new(message.payload.to_vec(), message_id);
-        if let Some(headers) = &message.headers {
-            if !headers.is_empty() {
-                let mut metadata = std::collections::HashMap::new();
-                for (key, value) in headers.iter() {
-                    // A header key can have multiple values. We'll just take the first one.
-                    if let Some(first_value) = value.iter().next() {
-                        metadata.insert(key.to_string(), first_value.to_string());
-                    }
-                }
-                canonical_message.metadata = metadata;
-            }
-        }
-        canonical_message
+        Ok(Self { core })
     }
 }
 
 #[async_trait]
 impl MessageConsumer for NatsConsumer {
     async fn receive_batch(&mut self, max_messages: usize) -> Result<ReceivedBatch, ConsumerError> {
-        if max_messages == 0 {
-            return Ok(ReceivedBatch {
-                messages: Vec::new(),
-                commit: Box::new(|_| Box::pin(async {})),
-            });
-        }
-
-        match &mut self.subscription {
-            NatsSubscription::JetStream(stream) => {
-                let mut canonical_messages = Vec::with_capacity(max_messages);
-                let mut jetstream_messages = Vec::with_capacity(max_messages);
-
-                // Use a short timeout to make the batch fetch non-blocking if no messages are available.
-                let message_stream = stream.next().await;
-
-                // Process the first message if it exists
-                if let Some(Ok(first_message)) = message_stream {
-                    let sequence = first_message.info().ok().map(|meta| meta.stream_sequence);
-                    canonical_messages
-                        .push(Self::create_canonical_message(&first_message, sequence));
-                    jetstream_messages.push(first_message);
-
-                    // Greedily fetch the rest of the batch
-                    while canonical_messages.len() < max_messages {
-                        if let Ok(Some(message)) = stream.try_next().await {
-                            let sequence = message.info().ok().map(|meta| meta.stream_sequence);
-                            canonical_messages
-                                .push(Self::create_canonical_message(&message, sequence));
-                            jetstream_messages.push(message);
-                        } else {
-                            break; // No more messages in the buffer
-                        }
-                    }
-                }
-
-                let commit_closure: BatchCommitFunc = Box::new(move |_responses| {
-                    Box::pin(async move {
-                        // Acknowledge messages concurrently.
-                        // A concurrency limit of 100 is chosen to balance parallelism
-                        // with not overwhelming the NATS server or spawning too many tasks.
-                        futures::stream::iter(jetstream_messages)
-                            // Limit concurrent acks to avoid overwhelming the server
-                            .for_each_concurrent(Some(100), |message| async move {
-                                if let Err(e) = message.ack().await {
-                                    tracing::error!("Failed to ACK NATS message: {:?}", e);
-                                }
-                            })
-                            .await;
-                    }) as BoxFuture<'static, ()>
-                });
-
-                if canonical_messages.is_empty() {
-                    Err(ConsumerError::EndOfStream)
-                } else {
-                    Ok(ReceivedBatch {
-                        messages: canonical_messages,
-                        commit: commit_closure,
-                    })
-                }
-            }
-            NatsSubscription::Core(sub) => {
-                let mut messages = Vec::new();
-                // Core NATS has no ack, so the commit is a no-op.
-                // Just read one message for now, optimize it later when needed
-                let commit_closure: BatchCommitFunc = Box::new(|_| Box::pin(async {}));
-
-                if let Some(message) = sub.next().await {
-                    messages.push(Self::create_canonical_message(&message, None));
-                }
-                if messages.is_empty() {
-                    Err(ConsumerError::EndOfStream)
-                } else {
-                    Ok(ReceivedBatch {
-                        messages,
-                        commit: commit_closure,
-                    })
-                }
-            }
-        }
+        self.core.receive_batch(max_messages).await
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -317,7 +200,7 @@ impl MessageConsumer for NatsConsumer {
 }
 
 pub struct NatsSubscriber {
-    subscription: NatsSubscription,
+    core: NatsCore,
 }
 
 impl NatsSubscriber {
@@ -337,7 +220,7 @@ impl NatsSubscriber {
         let options = build_nats_options(config).await?;
         let client = options.connect(&config.url).await?;
 
-        let subscription = if !config.no_jetstream {
+        let core = if !config.no_jetstream {
             let jetstream = jetstream::new(client);
             info!(stream = %stream_name, subject = %subject, "NATS event subscriber is in JetStream mode.");
 
@@ -364,16 +247,16 @@ impl NatsSubscriber {
 
             let stream = consumer.messages().await?;
             info!(stream = %stream_name, subject = %subject, "NATS JetStream event subscriber subscribed");
-            NatsSubscription::JetStream(Box::new(stream))
+            NatsCore::JetStream(Box::new(stream))
         } else {
             info!(subject = %subject, "NATS event subscriber is in Core mode.");
             // For Core NATS, we use a standard subscription (no queue group) for broadcast.
             let sub = client.subscribe(subject.to_string()).await?;
             info!(subject = %subject, "NATS Core event subscriber subscribed");
-            NatsSubscription::Core(sub)
+            NatsCore::Ephemeral(sub)
         };
 
-        Ok(Self { subscription })
+        Ok(Self { core })
     }
 }
 
@@ -381,14 +264,14 @@ impl NatsSubscriber {
 impl MessageConsumer for NatsSubscriber {
     async fn receive(&mut self) -> Result<Received, ConsumerError> {
         // Logic is identical to NatsConsumer, delegating to the subscription
-        let (message, commit) = match &mut self.subscription {
-            NatsSubscription::JetStream(stream) => {
+        let (message, commit) = match &mut self.core {
+            NatsCore::JetStream(stream) => {
                 let message = futures::StreamExt::next(stream)
                     .await
                     .ok_or(ConsumerError::EndOfStream)?
                     .context("Failed to get message from NATS JetStream")?;
                 let sequence = message.info().ok().map(|meta| meta.stream_sequence);
-                let msg = NatsConsumer::create_canonical_message(&message, sequence);
+                let msg = create_nats_canonical_message(&message, sequence);
                 let commit: CommitFunc = Box::new(move |_response| {
                     Box::pin(async move {
                         message.ack().await.unwrap_or_else(|e| {
@@ -398,12 +281,12 @@ impl MessageConsumer for NatsSubscriber {
                 });
                 (msg, commit)
             }
-            NatsSubscription::Core(sub) => {
+            NatsCore::Ephemeral(sub) => {
                 let message = futures::StreamExt::next(sub)
                     .await
                     .ok_or(ConsumerError::EndOfStream)?;
                 let commit: CommitFunc = Box::new(move |_| Box::pin(async {}));
-                let msg = NatsConsumer::create_canonical_message(&message, None);
+                let msg = create_nats_canonical_message(&message, None);
                 (msg, commit)
             }
         };
@@ -411,79 +294,7 @@ impl MessageConsumer for NatsSubscriber {
     }
 
     async fn receive_batch(&mut self, max_messages: usize) -> Result<ReceivedBatch, ConsumerError> {
-        // Logic is identical to NatsConsumer
-        if max_messages == 0 {
-            return Ok(ReceivedBatch {
-                messages: Vec::new(),
-                commit: Box::new(|_| Box::pin(async {})),
-            });
-        }
-        match &mut self.subscription {
-            NatsSubscription::JetStream(stream) => {
-                // ... (Same implementation as NatsConsumer::receive_batch for JetStream)
-                // Since we can't easily share the code without refactoring NatsConsumer into a generic,
-                // and the request is to add the subscriber, we reuse the logic by instantiating a NatsConsumer
-                // temporarily or duplicating. Duplication is cleaner for now to avoid breaking existing code.
-                // However, to save space in this response, I will implement a simplified batch fetch for the subscriber
-                // which delegates to receive() loop or implements the same logic.
-                // Let's implement the same logic for correctness.
-                let mut canonical_messages = Vec::with_capacity(max_messages);
-                let mut jetstream_messages = Vec::with_capacity(max_messages);
-                let message_stream = stream.next().await;
-                if let Some(Ok(first_message)) = message_stream {
-                    let sequence = first_message.info().ok().map(|meta| meta.stream_sequence);
-                    canonical_messages.push(NatsConsumer::create_canonical_message(
-                        &first_message,
-                        sequence,
-                    ));
-                    jetstream_messages.push(first_message);
-                    while canonical_messages.len() < max_messages {
-                        if let Ok(Some(message)) = stream.try_next().await {
-                            let sequence = message.info().ok().map(|meta| meta.stream_sequence);
-                            canonical_messages
-                                .push(NatsConsumer::create_canonical_message(&message, sequence));
-                            jetstream_messages.push(message);
-                        } else {
-                            break;
-                        }
-                    }
-                }
-                let commit_closure: BatchCommitFunc = Box::new(move |_responses| {
-                    Box::pin(async move {
-                        futures::stream::iter(jetstream_messages)
-                            .for_each_concurrent(Some(100), |message| async move {
-                                if let Err(e) = message.ack().await {
-                                    tracing::error!("Failed to ACK NATS message: {:?}", e);
-                                }
-                            })
-                            .await;
-                    }) as BoxFuture<'static, ()>
-                });
-                if canonical_messages.is_empty() {
-                    Err(ConsumerError::EndOfStream)
-                } else {
-                    Ok(ReceivedBatch {
-                        messages: canonical_messages,
-                        commit: commit_closure,
-                    })
-                }
-            }
-            NatsSubscription::Core(sub) => {
-                let mut messages = Vec::new();
-                let commit_closure: BatchCommitFunc = Box::new(|_| Box::pin(async {}));
-                if let Some(message) = sub.next().await {
-                    messages.push(NatsConsumer::create_canonical_message(&message, None));
-                }
-                if messages.is_empty() {
-                    Err(ConsumerError::EndOfStream)
-                } else {
-                    Ok(ReceivedBatch {
-                        messages,
-                        commit: commit_closure,
-                    })
-                }
-            }
-        }
+        self.core.receive_batch(max_messages).await
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -604,4 +415,128 @@ async fn build_nats_options(config: &NatsConfig) -> anyhow::Result<ConnectOption
     }
 
     Ok(options)
+}
+
+impl NatsCore {
+    async fn receive_batch(&mut self, max_messages: usize) -> Result<ReceivedBatch, ConsumerError> {
+        if max_messages == 0 {
+            return Ok(ReceivedBatch {
+                messages: Vec::new(),
+                commit: Box::new(|_| Box::pin(async {})),
+            });
+        }
+
+        match self {
+            NatsCore::JetStream(stream) => {
+                let mut canonical_messages = Vec::with_capacity(max_messages);
+                let mut jetstream_messages = Vec::with_capacity(max_messages);
+
+                // Use a short timeout to make the batch fetch non-blocking if no messages are available.
+                let message_stream = stream.next().await;
+
+                // Process the first message if it exists
+                if let Some(Ok(first_message)) = message_stream {
+                    let sequence = first_message.info().ok().map(|meta| meta.stream_sequence);
+                    canonical_messages
+                        .push(create_nats_canonical_message(&first_message, sequence));
+                    jetstream_messages.push(first_message);
+
+                    // Greedily fetch the rest of the batch
+                    while canonical_messages.len() < max_messages {
+                        if let Ok(Some(message)) = stream.try_next().await {
+                            let sequence = message.info().ok().map(|meta| meta.stream_sequence);
+                            canonical_messages
+                                .push(create_nats_canonical_message(&message, sequence));
+                            jetstream_messages.push(message);
+                        } else {
+                            break; // No more messages in the buffer
+                        }
+                    }
+                }
+
+                let commit_closure: BatchCommitFunc = Box::new(move |_responses| {
+                    Box::pin(async move {
+                        // Acknowledge messages concurrently.
+                        // A concurrency limit of 100 is chosen to balance parallelism
+                        // with not overwhelming the NATS server or spawning too many tasks.
+                        futures::stream::iter(jetstream_messages)
+                            // Limit concurrent acks to avoid overwhelming the server
+                            .for_each_concurrent(Some(100), |message| async move {
+                                if let Err(e) = message.ack().await {
+                                    tracing::error!("Failed to ACK NATS message: {:?}", e);
+                                }
+                            })
+                            .await;
+                    }) as BoxFuture<'static, ()>
+                });
+
+                if canonical_messages.is_empty() {
+                    Err(ConsumerError::EndOfStream)
+                } else {
+                    Ok(ReceivedBatch {
+                        messages: canonical_messages,
+                        commit: commit_closure,
+                    })
+                }
+            }
+            NatsCore::Ephemeral(sub) => {
+                let mut messages = Vec::new();
+                // Core NATS has no ack, so the commit is a no-op.
+                // Just read one message for now, optimize it later when needed
+                let commit_closure: BatchCommitFunc = Box::new(|_| Box::pin(async {}));
+
+                if let Some(message) = sub.next().await {
+                    messages.push(create_nats_canonical_message(&message, None));
+                }
+                if messages.is_empty() {
+                    Err(ConsumerError::EndOfStream)
+                } else {
+                    Ok(ReceivedBatch {
+                        messages,
+                        commit: commit_closure,
+                    })
+                }
+            }
+        }
+    }
+}
+
+fn create_nats_canonical_message(
+    message: &async_nats::Message,
+    sequence: Option<u64>,
+) -> CanonicalMessage {
+    // The most reliable ID is the JetStream sequence number.
+    let mut message_id: Option<u128> = sequence.map(|s| s as u128);
+
+    // If no sequence is available (e.g., Core NATS), fall back to the Nats-Msg-Id header.
+    if message_id.is_none() {
+        if let Some(headers) = &message.headers {
+            if let Some(msg_id_header) = headers.get("Nats-Msg-Id") {
+                let id_str = msg_id_header.as_str();
+                // Attempt to parse the ID as a UUID or a raw u128.
+                if let Ok(uuid) = Uuid::parse_str(id_str) {
+                    message_id = Some(uuid.as_u128());
+                } else if let Ok(n) = id_str.parse::<u128>() {
+                    message_id = Some(n);
+                } else {
+                    warn!(header_value = %id_str, "Could not parse 'Nats-Msg-Id' header as a UUID or u128");
+                }
+            }
+        }
+    }
+
+    let mut canonical_message = CanonicalMessage::new(message.payload.to_vec(), message_id);
+    if let Some(headers) = &message.headers {
+        if !headers.is_empty() {
+            let mut metadata = std::collections::HashMap::new();
+            for (key, value) in headers.iter() {
+                // A header key can have multiple values. We'll just take the first one.
+                if let Some(first_value) = value.iter().next() {
+                    metadata.insert(key.to_string(), first_value.to_string());
+                }
+            }
+            canonical_message.metadata = metadata;
+        }
+    }
+    canonical_message
 }
