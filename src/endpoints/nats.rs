@@ -391,7 +391,6 @@ impl NatsCore {
                 let mut canonical_messages = Vec::with_capacity(max_messages);
                 let mut jetstream_messages = Vec::with_capacity(max_messages);
 
-                // Use a short timeout to make the batch fetch non-blocking if no messages are available.
                 let message_stream = stream.next().await;
 
                 // Process the first message if it exists
