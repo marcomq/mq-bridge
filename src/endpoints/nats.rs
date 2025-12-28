@@ -8,7 +8,7 @@ use crate::APP_NAME;
 use anyhow::{anyhow, Context};
 use async_nats::{header::HeaderMap, jetstream, jetstream::stream, ConnectOptions};
 use async_trait::async_trait;
-use futures::{StreamExt, TryStreamExt};
+use futures::{FutureExt, StreamExt, TryStreamExt};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::ring as rustls_ring;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, UnixTime};
@@ -480,13 +480,19 @@ impl NatsCore {
                 }
             }
             NatsCore::Ephemeral(sub) => {
-                let mut messages = Vec::new();
+                let mut messages = Vec::with_capacity(max_messages);
                 // Core NATS has no ack, so the commit is a no-op.
-                // Just read one message for now, optimize it later when needed
                 let commit_closure: BatchCommitFunc = Box::new(|_| Box::pin(async {}));
 
                 if let Some(message) = sub.next().await {
                     messages.push(create_nats_canonical_message(&message, None));
+
+                    while messages.len() < max_messages {
+                        match sub.next().now_or_never() {
+                            Some(Some(message)) => messages.push(create_nats_canonical_message(&message, None)),
+                            _ => break,
+                        }
+                    }
                 }
                 if messages.is_empty() {
                     Err(ConsumerError::EndOfStream)
