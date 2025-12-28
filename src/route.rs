@@ -6,11 +6,14 @@ use std::sync::Arc;
 //  git clone https://github.com/marcomq/mq-bridge
 pub use crate::models::Route;
 use crate::traits::{BatchCommitFunc, ConsumerError, SentBatch};
+use crate::traits::{Handled, HandlerError};
 use crate::{
     endpoints::{create_consumer_from_route, create_publisher_from_route},
     traits::Handler,
 };
 use async_channel::{bounded, Sender};
+use serde::de::DeserializeOwned;
+use std::future::Future;
 use tokio::{
     select,
     task::{self, JoinHandle},
@@ -264,8 +267,63 @@ impl Route {
         Ok(shutdown_rx.is_empty())
     }
 
-    pub fn with_handler(mut self, handler: Arc<dyn Handler>) -> Self {
-        self.output.handler = Some(handler);
+    pub fn with_handler(mut self, handler: impl Handler + 'static) -> Self {
+        self.output.handler = Some(Arc::new(handler));
+        self
+    }
+
+    #[doc(hidden)]
+    pub fn add_simple_handler<T, F, Fut>(self, type_name: &str, handler: F) -> Self
+    where
+        T: DeserializeOwned + Send + Sync + 'static,
+        F: Fn(T) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<Handled, HandlerError>> + Send + 'static,
+    {
+        self.add_handler(type_name, handler)
+    }
+
+    /// Registers a typed handler for the route.
+    ///
+    /// The handler can accept either:
+    /// - `fn(T) -> Future<Output = Result<Handled, HandlerError>>`
+    /// - `fn(T, MessageContext) -> Future<Output = Result<Handled, HandlerError>>`
+    pub fn add_handler<T, H, Args>(mut self, type_name: &str, handler: H) -> Self
+    where
+        T: DeserializeOwned + Send + Sync + 'static,
+        H: crate::type_handler::IntoTypedHandler<T, Args>,
+        Args: Send + Sync + 'static,
+    {
+        // Create the wrapper closure that handles deserialization and context extraction
+        let handler = Arc::new(handler);
+        let wrapper = move |msg: crate::CanonicalMessage| {
+            let handler = handler.clone();
+            async move {
+                let data = msg.parse::<T>().map_err(|e| {
+                    HandlerError::NonRetryable(anyhow::anyhow!("Deserialization failed: {}", e))
+                })?;
+                let ctx = crate::MessageContext::from(msg);
+                handler.call(data, ctx).await
+            }
+        };
+        let wrapper = Arc::new(wrapper);
+
+        let prev_handler = self.output.handler.take();
+
+        let new_handler = if let Some(h) = prev_handler {
+            if let Some(extended) = h.register_handler(type_name, wrapper.clone()) {
+                extended
+            } else {
+                Arc::new(
+                    crate::type_handler::TypeHandler::new()
+                        .with_fallback(h)
+                        .add_handler(type_name, wrapper),
+                )
+            }
+        } else {
+            Arc::new(crate::type_handler::TypeHandler::new().add_handler(type_name, wrapper))
+        };
+
+        self.output.handler = Some(new_handler);
         self
     }
 }

@@ -12,8 +12,9 @@ pub mod models;
 pub mod outcomes;
 pub mod route;
 pub mod traits;
+pub mod type_handler;
 
-pub use canonical_message::CanonicalMessage;
+pub use canonical_message::{CanonicalMessage, MessageContext};
 pub use models::Route;
 pub use outcomes::{Handled, Received, ReceivedBatch, Sent, SentBatch};
 

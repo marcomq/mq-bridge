@@ -24,6 +24,8 @@
 
 For implementing business logic, `mq-bridge` provides a handler layer that is separate from transport-level middleware. This allows you to process messages programmatically.
 
+#### Raw Handlers
+
 *   **`CommandHandler`**: A handler for 1-to-1 or 1-to-0 message transformations. It takes a message and can optionally return a new message to be passed down the publisher chain.
 *   **`EventHandler`**: A terminal handler that consumes a message without returning a new one.
 
@@ -43,6 +45,52 @@ let command_handler = Arc::new(|mut msg: CanonicalMessage| async move {
 
 // Attach the handler to a route
 // let route = Route { ... }.with_handler(command_handler);
+```
+
+#### Typed Handlers
+
+For more structured, type-safe message handling, `mq-bridge` provides `TypeHandler`. It deserializes messages into a specific Rust type before passing them to a handler function. This simplifies message processing by eliminating manual parsing and type checking.
+
+Message selection is based on the `kind` metadata field in the `CanonicalMessage`.
+
+```rust
+use mq_bridge::type_handler::TypeHandler;
+use mq_bridge::{CanonicalMessage, Handled};
+use serde::Deserialize;
+use std::sync::Arc;
+
+// 1. Define your message structures
+#[derive(Deserialize)]
+struct CreateUser {
+    id: u32,
+    username: String,
+}
+
+#[derive(Deserialize)]
+struct DeleteUser {
+    id: u32,
+}
+
+// 2. Create a TypeHandler and register your typed handlers
+let typed_handler = Arc::new(
+    TypeHandler::new()
+        .add("create_user", |cmd: CreateUser| async move {
+            println!("Handling create_user: {}, {}", cmd.id, cmd.username);
+            // ... your logic here
+            Ok(Handled::Ack)
+        })
+        .add("delete_user", |cmd: DeleteUser| async move {
+            println!("Handling delete_user: {}", cmd.id);
+            // ... your logic here
+            Ok(Handled::Ack)
+        }),
+);
+
+// 3. Attach the handler to a route
+// let route = Route { ... }.with_handler(typed_handler);
+
+// 4. A message with metadata `kind: "create_user"` will be deserialized
+//    into a `CreateUser` struct and passed to the first handler.
 ```
 
 ### Programmatic Usage

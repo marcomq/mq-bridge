@@ -17,14 +17,31 @@ use tracing::warn;
 /// Handlers process an incoming message and can optionally return a new
 /// message (e.g. a reply) via `Handled::Publish`, or acknowledge processing via `Handled::Ack`.
 #[async_trait]
-pub trait Handler: Send + Sync {
+pub trait Handler: Send + Sync + 'static {
     async fn handle(&self, msg: CanonicalMessage) -> Result<Handled, HandlerError>;
+
+    /// Tries to register a handler for a specific type.
+    /// Returns `None` if this handler does not support registration (e.g. it's not a TypeHandler).
+    fn register_handler(
+        &self,
+        _type_name: &str,
+        _handler: Arc<dyn Handler>,
+    ) -> Option<Arc<dyn Handler>> {
+        None
+    }
 }
 
 #[async_trait]
 impl<T: Handler + ?Sized> Handler for Arc<T> {
     async fn handle(&self, msg: CanonicalMessage) -> Result<Handled, HandlerError> {
         (**self).handle(msg).await
+    }
+    fn register_handler(
+        &self,
+        type_name: &str,
+        handler: Arc<dyn Handler>,
+    ) -> Option<Arc<dyn Handler>> {
+        (**self).register_handler(type_name, handler)
     }
 }
 

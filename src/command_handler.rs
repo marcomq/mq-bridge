@@ -15,7 +15,7 @@ use crate::traits::{PublisherError, Sent, SentBatch};
 #[async_trait]
 impl<F, Fut> Handler for F
 where
-    F: Fn(CanonicalMessage) -> Fut + Send + Sync,
+    F: Fn(CanonicalMessage) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<Handled, HandlerError>> + Send,
 {
     async fn handle(&self, msg: CanonicalMessage) -> Result<Handled, HandlerError> {

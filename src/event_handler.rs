@@ -19,8 +19,10 @@ pub struct EventPublisher {
 }
 
 impl EventPublisher {
-    pub fn new(handler: Arc<dyn Handler>) -> Self {
-        Self { handler }
+    pub fn new(handler: impl Handler + 'static) -> Self {
+        Self {
+            handler: Arc::new(handler),
+        }
     }
 }
 
