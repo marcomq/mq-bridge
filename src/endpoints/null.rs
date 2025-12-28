@@ -1,4 +1,4 @@
-use crate::traits::{MessagePublisher, PublisherError, Sent, SentBatch};
+use crate::traits::{MessagePublisher, PublisherError, SentBatch};
 use crate::CanonicalMessage;
 use async_trait::async_trait;
 use std::any::Any;
@@ -8,10 +8,6 @@ pub struct NullPublisher;
 
 #[async_trait]
 impl MessagePublisher for NullPublisher {
-    async fn send(&self, _message: CanonicalMessage) -> Result<Sent, PublisherError> {
-        Ok(Sent::Ack)
-    }
-
     async fn send_batch(
         &self,
         _messages: Vec<CanonicalMessage>,

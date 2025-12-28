@@ -229,39 +229,6 @@ impl NatsConsumer {
 
 #[async_trait]
 impl MessageConsumer for NatsConsumer {
-    async fn receive(&mut self) -> Result<Received, ConsumerError> {
-        let (message, commit) = match &mut self.subscription {
-            NatsSubscription::JetStream(stream) => {
-                let message = futures::StreamExt::next(stream)
-                    .await
-                    .ok_or(ConsumerError::EndOfStream)?
-                    .context("Failed to get message from NATS JetStream")?;
-                let sequence = message.info().ok().map(|meta| meta.stream_sequence);
-                let msg = Self::create_canonical_message(&message, sequence);
-                let commit: CommitFunc = Box::new(move |_response| {
-                    Box::pin(async move {
-                        message.ack().await.unwrap_or_else(|e| {
-                            tracing::error!("Failed to ACK NATS message: {:?}", e)
-                        });
-                    }) as BoxFuture<'static, ()>
-                });
-                (msg, commit)
-            }
-            NatsSubscription::Core(sub) => {
-                let message = futures::StreamExt::next(sub)
-                    .await
-                    .ok_or(ConsumerError::EndOfStream)?;
-
-                // Core NATS has no ack, so the commit is a no-op.
-                let commit: CommitFunc = Box::new(move |_| Box::pin(async {}));
-                let msg = Self::create_canonical_message(&message, None);
-                (msg, commit)
-            }
-        };
-
-        Ok(Received { message, commit })
-    }
-
     async fn receive_batch(&mut self, max_messages: usize) -> Result<ReceivedBatch, ConsumerError> {
         if max_messages == 0 {
             return Ok(ReceivedBatch {

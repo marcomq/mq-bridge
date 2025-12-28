@@ -432,33 +432,6 @@ impl Drop for KafkaSubscriber {
 
 #[async_trait]
 impl MessageConsumer for KafkaSubscriber {
-    async fn receive(&mut self) -> Result<Received, ConsumerError> {
-        // Implementation is identical to KafkaConsumer, but operates on the subscriber's consumer
-        let message = self
-            .consumer
-            .recv()
-            .await
-            .context("Failed to receive Kafka message")?;
-        let mut tpl = TopicPartitionList::new();
-        let mut messages = Vec::new();
-        process_message(message, &mut messages, &mut tpl)?;
-        let canonical_message = messages.pop().unwrap();
-
-        let consumer = self.consumer.clone();
-        let commit = Box::new(move |_response: Option<CanonicalMessage>| {
-            Box::pin(async move {
-                if let Err(e) = consumer.commit(&tpl, CommitMode::Async) {
-                    tracing::error!("Failed to commit Kafka message: {:?}", e);
-                }
-            }) as BoxFuture<'static, ()>
-        });
-
-        Ok(Received {
-            message: canonical_message,
-            commit,
-        })
-    }
-
     async fn receive_batch(&mut self, max_messages: usize) -> Result<ReceivedBatch, ConsumerError> {
         // Reuse the logic from KafkaConsumer by duplicating it here or refactoring.
         // For safety/isolation as requested, we duplicate the batch logic which is tied to self.consumer.
