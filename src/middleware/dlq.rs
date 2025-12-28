@@ -133,7 +133,8 @@ impl MessagePublisher for DlqPublisher {
                 // --- Retry logic for bulk DLQ send ---
                 let mut attempt = 0;
                 let mut backoff_ms = self.config.dlq_initial_interval_ms;
-                let mut messages_to_retry: Vec<CanonicalMessage> = failed.iter().map(|(msg, _)| msg.clone()).collect();
+                let mut messages_to_retry: Vec<CanonicalMessage> =
+                    failed.iter().map(|(msg, _)| msg.clone()).collect();
 
                 loop {
                     attempt += 1;
@@ -165,7 +166,8 @@ impl MessagePublisher for DlqPublisher {
                                     "DLQ bulk send partially failed on attempt {} of {}: {} of {} messages failed. Retrying in {}ms...",
                                     attempt, self.config.dlq_retry_attempts, dlq_failed.len(), messages_to_retry.len(), backoff_ms
                                 );
-                                messages_to_retry = dlq_failed.into_iter().map(|(msg, _)| msg).collect();
+                                messages_to_retry =
+                                    dlq_failed.into_iter().map(|(msg, _)| msg).collect();
                                 tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
                                 backoff_ms = self.next_backoff(backoff_ms);
                             } else {
@@ -218,7 +220,8 @@ impl MessagePublisher for DlqPublisher {
                                 "DLQ bulk send partially failed on attempt {} of {}: {} of {} messages failed. Retrying in {}ms...",
                                 attempt, self.config.dlq_retry_attempts, dlq_failed.len(), messages_to_retry.len(), backoff_ms
                             );
-                                messages_to_retry = dlq_failed.into_iter().map(|(msg, _)| msg).collect();
+                            messages_to_retry =
+                                dlq_failed.into_iter().map(|(msg, _)| msg).collect();
                             tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
                             backoff_ms = self.next_backoff(backoff_ms);
                         }

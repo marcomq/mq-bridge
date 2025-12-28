@@ -15,6 +15,7 @@ pub mod traits;
 pub mod type_handler;
 
 pub use canonical_message::{CanonicalMessage, MessageContext};
+pub use errors::HandlerError;
 pub use models::Route;
 pub use outcomes::{Handled, Received, ReceivedBatch, Sent, SentBatch};
 

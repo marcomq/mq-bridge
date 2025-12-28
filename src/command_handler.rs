@@ -207,7 +207,7 @@ mod tests {
         res.await.ok(); // eof error due to closed channel
 
         // 5. Verify
-        assert!(success.load(Ordering::SeqCst) == true);
+        assert!(success.load(Ordering::SeqCst));
 
         let msgs = route.output.channel().unwrap().drain_messages();
         assert_eq!(msgs.len(), 1);

@@ -25,18 +25,15 @@ async fn test_route_with_typed_handler_success() {
     let input = Endpoint::new_memory("in_success", 10);
     let output = Endpoint::new_memory("out_success", 10);
 
-    let route = Route::new(input, output).add_handler(
-        "my_message",
-        move |msg: MyTypedMessage| {
-            let success_clone_2 = success_clone.clone();
-            async move {
-                assert_eq!(msg.id, 123);
-                assert_eq!(msg.content, "hello");
-                success_clone_2.store(true, Ordering::SeqCst);
-                Ok(Handled::Ack)
-            }
-        },
-    );
+    let route = Route::new(input, output).add_handler("my_message", move |msg: MyTypedMessage| {
+        let success_clone_2 = success_clone.clone();
+        async move {
+            assert_eq!(msg.id, 123);
+            assert_eq!(msg.content, "hello");
+            success_clone_2.store(true, Ordering::SeqCst);
+            Ok(Handled::Ack)
+        }
+    });
 
     let in_channel = route.input.channel().unwrap();
     let out_channel = route.output.channel().unwrap();
@@ -103,7 +100,7 @@ async fn test_route_with_typed_handler_failure_handler() {
         "my_message",
         move |msg: MyTypedMessage| async move {
             assert_eq!(msg.id, 456);
-            Err(mq_bridge::errors::HandlerError::NonRetryable(anyhow::anyhow!(
+            Err(mq_bridge::HandlerError::NonRetryable(anyhow::anyhow!(
                 "Handler failed as expected"
             )))
         },

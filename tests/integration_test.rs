@@ -74,7 +74,6 @@ async fn test_mongodb_performance_pipeline() {
 
 */
 
-
 #[tokio::test]
 #[ignore] // This is a performance test, run it explicitly
 async fn test_all_performance_direct() {

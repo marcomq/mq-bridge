@@ -99,13 +99,14 @@ You can define and run routes directly in Rust code.
 
 ```rust
 use mq_bridge::models::{Endpoint, EndpointType, MemoryConfig, CanonicalMessage, Route};
+use mq_bridge::Handled;
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use std::time::Duration;
 use tokio::time::timeout;
 
 #[tokio::main]
 async fn main() {
     // Define a route from one in-memory channel to another
-    use crate::models::{Endpoint, Route};
     
     // 1. Create boolean that is changed in handler
     let success = Arc::new(AtomicBool::new(false));
@@ -136,7 +137,7 @@ async fn main() {
     res.await.ok(); // eof error due to closed channel
 
     // 6. Verify
-    assert!(success.load(Ordering::SeqCst) == true);
+    assert!(success.load(Ordering::SeqCst));
 
     let msgs = route.output.channel().unwrap().drain_messages();
     assert_eq!(msgs.len(), 1);

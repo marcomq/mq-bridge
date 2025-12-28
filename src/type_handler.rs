@@ -180,7 +180,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_typed_handler_with_context() {
-        use crate::MessageContext;
         let handler =
             TypeHandler::new().add("test_ctx", |msg: TestMsg, ctx: MessageContext| async move {
                 assert_eq!(msg.val, "hello");
@@ -241,5 +240,28 @@ mod tests {
 
         let res = handler.handle(msg).await;
         assert!(matches!(res, Err(HandlerError::Retryable(_))));
+    }
+
+    #[tokio::test]
+    async fn test_typed_handler_missing_type_key() {
+        let handler = TypeHandler::new().add("test", |_: TestMsg| async { Ok(Handled::Ack) });
+
+        // Message without "kind" metadata
+        let msg = CanonicalMessage::new(b"{}".to_vec(), None);
+
+        let res = handler.handle(msg).await;
+        assert!(res.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_typed_handler_deserialization_failure() {
+        let handler = TypeHandler::new().add("test", |_: TestMsg| async { Ok(Handled::Ack) });
+
+        // Invalid JSON for TestMsg (missing required field)
+        let msg = CanonicalMessage::new(b"{}".to_vec(), None)
+            .with_metadata(HashMap::from([("kind".to_string(), "test".to_string())]));
+
+        let res = handler.handle(msg).await;
+        assert!(matches!(res, Err(HandlerError::NonRetryable(_))));
     }
 }

@@ -3,17 +3,12 @@
 //  Licensed under MIT License, see License file for more details
 //  git clone https://github.com/marcomq/mq-bridge
 
+use crate::endpoints::{create_consumer_from_route, create_publisher_from_route};
 pub use crate::models::Route;
 use crate::models::{self, Endpoint};
-use crate::traits::{BatchCommitFunc, ConsumerError, SentBatch};
-use crate::traits::{Handled, HandlerError};
-use crate::{
-    endpoints::{create_consumer_from_route, create_publisher_from_route},
-    traits::Handler,
-};
+use crate::traits::{BatchCommitFunc, ConsumerError, Handler, HandlerError, SentBatch};
 use async_channel::{bounded, Sender};
 use serde::de::DeserializeOwned;
-use std::future::Future;
 use std::sync::Arc;
 use tokio::{
     select,
@@ -274,16 +269,6 @@ impl Route {
     pub fn with_handler(mut self, handler: impl Handler + 'static) -> Self {
         self.output.handler = Some(Arc::new(handler));
         self
-    }
-
-    #[doc(hidden)]
-    pub fn add_simple_handler<T, F, Fut>(self, type_name: &str, handler: F) -> Self
-    where
-        T: DeserializeOwned + Send + Sync + 'static,
-        F: Fn(T) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Result<Handled, HandlerError>> + Send + 'static,
-    {
-        self.add_handler(type_name, handler)
     }
 
     /// Registers a typed handler for the route.

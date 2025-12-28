@@ -82,7 +82,11 @@ impl MessagePublisher for RetryPublisher {
                         Ok(SentBatch::Ack)
                     } else {
                         Ok(SentBatch::Partial {
-                            responses: if all_responses.is_empty() { None } else { Some(all_responses) },
+                            responses: if all_responses.is_empty() {
+                                None
+                            } else {
+                                Some(all_responses)
+                            },
                             failed: all_failed,
                         })
                     };
@@ -100,14 +104,22 @@ impl MessagePublisher for RetryPublisher {
 
                     if retryable.is_empty() {
                         return Ok(SentBatch::Partial {
-                            responses: if all_responses.is_empty() { None } else { Some(all_responses) },
+                            responses: if all_responses.is_empty() {
+                                None
+                            } else {
+                                Some(all_responses)
+                            },
                             failed: all_failed,
                         });
                     }
                     if attempt >= self.config.max_attempts {
                         all_failed.extend(retryable);
                         return Ok(SentBatch::Partial {
-                            responses: if all_responses.is_empty() { None } else { Some(all_responses) },
+                            responses: if all_responses.is_empty() {
+                                None
+                            } else {
+                                Some(all_responses)
+                            },
                             failed: all_failed,
                         });
                     }
