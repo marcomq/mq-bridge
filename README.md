@@ -18,6 +18,26 @@
 *   **Middleware**: Components that intercept and process messages (e.g., for error handling).
 *   **Handler**: A programmatic component for business logic, such as transforming messages (`CommandHandler`) or consuming them (`EventHandler`).
 
+## Endpoint Behavior
+
+Different backends and modes (`consumer` vs `subscriber`) have different persistence guarantees.
+
+| Backend | Mode | Persistence | Description |
+| :--- | :--- | :--- | :--- |
+| **Kafka** | Consumer | Persistent | Uses consumer groups. Resumes from last committed offset. |
+| | Subscriber | Ephemeral* | Unique group ID per instance. Starts at `latest`. (*Persistent if `subscribe_id` is set). |
+| **NATS** | Consumer | Persistent | Uses JetStream durable consumers. |
+| | Subscriber | Ephemeral | Uses ephemeral consumers. Receives only new messages. |
+| **AMQP** | Consumer | Persistent | Uses durable queues. |
+| | Subscriber | Ephemeral | Uses temporary, auto-delete queues. |
+| **MQTT** | Consumer | Configurable | Depends on `clean_session`. |
+| | Subscriber | Ephemeral | Unique Client ID per instance. |
+| **MongoDB** | Consumer | Persistent | Documents stored until acknowledged. |
+| | Subscriber | Ephemeral | Change Streams / Polling from current time. |
+| **Memory** | All | Ephemeral | Lost on restart. |
+| **File** | All | Persistent | Stored on disk. |
+| **HTTP** | All | Ephemeral | Direct request/response. |
+
 ## Usage
 
 ### Programmatic Handlers
