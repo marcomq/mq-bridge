@@ -299,7 +299,12 @@ impl MessageConsumer for AmqpSubscriber {
                     ..Default::default()
                 };
                 if let Err(e) = last_delivery.ack(ack_options).await {
-                    tracing::error!(last_delivery_tag = last_delivery.delivery_tag, error = %e, "Failed to bulk-ack AMQP messages");
+                    // TODO: Propagating ack failures requires changing BatchCommitFunc signature (major change). Ack failure may result in redelivery. Enable deduplication middleware to handle duplicates.
+                    tracing::error!(
+                        last_delivery_tag = last_delivery.delivery_tag,
+                        error = %e,
+                        "Failed to bulk-ack AMQP messages"
+                    );
                 } else {
                     debug!(
                         last_delivery_tag = last_delivery.delivery_tag,
@@ -446,8 +451,12 @@ impl MessageConsumer for AmqpConsumer {
                     ..Default::default()
                 };
                 if let Err(e) = last_delivery.ack(ack_options).await {
-                    // Note: If ack fails, we log the error but cannot signal the caller to retry commit as the signature returns ().
-                    tracing::error!(last_delivery_tag = last_delivery.delivery_tag, error = %e, "Failed to bulk-ack AMQP messages");
+                    // TODO: Propagating ack failures requires changing BatchCommitFunc signature (major change). Ack failure may result in redelivery. Enable deduplication middleware to handle duplicates.
+                    tracing::error!(
+                        last_delivery_tag = last_delivery.delivery_tag,
+                        error = %e,
+                        "Failed to bulk-ack AMQP messages"
+                    );
                 } else {
                     debug!(
                         last_delivery_tag = last_delivery.delivery_tag,

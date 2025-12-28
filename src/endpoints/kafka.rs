@@ -282,6 +282,7 @@ impl MessageConsumer for KafkaConsumer {
         let consumer = self.consumer.clone();
         let commit = Box::new(move |_response: Option<CanonicalMessage>| {
             Box::pin(async move {
+                // TODO: Propagating ack failures requires changing BatchCommitFunc signature (major change). Ack failure may result in redelivery. Enable deduplication middleware to handle duplicates.
                 if let Err(e) = consumer.commit(&tpl, CommitMode::Async) {
                     tracing::error!("Failed to commit Kafka message: {:?}", e);
                 }
@@ -488,6 +489,7 @@ async fn receive_batch_internal(
         Box::pin(async move {
             // Only commit if there are offsets to commit.
             if messages_len > 0 {
+                // TODO: Propagating ack failures requires changing BatchCommitFunc signature (major change). Ack failure may result in redelivery. Enable deduplication middleware to handle duplicates.
                 if let Err(e) = consumer.commit(&last_offset_tpl, CommitMode::Async) {
                     tracing::error!("Failed to commit Kafka message batch: {:?}", e);
                 }

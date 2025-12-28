@@ -54,8 +54,8 @@ impl TryFrom<MongoMessageRaw> for CanonicalMessage {
 
 fn message_to_document(message: &CanonicalMessage) -> anyhow::Result<Document> {
     let id_uuid = mongodb::bson::Uuid::from_bytes(message.message_id.to_be_bytes());
-    let metadata = to_document(&message.metadata)
-        .context("Failed to serialize metadata to BSON document")?;
+    let metadata =
+        to_document(&message.metadata).context("Failed to serialize metadata to BSON document")?;
 
     Ok(doc! {
         "_id": id_uuid,
@@ -148,7 +148,12 @@ impl MessagePublisher for MongoDbPublisher {
             .ordered(false)
             .build();
 
-        match self.collection.insert_many(docs).with_options(options).await {
+        match self
+            .collection
+            .insert_many(docs)
+            .with_options(options)
+            .await
+        {
             Ok(_) => {
                 if failed_messages.is_empty() {
                     Ok(SentBatch::Ack)
@@ -422,6 +427,7 @@ impl MongoDbConsumer {
                                 }
                             }
                             Err(e) => {
+                                // TODO: Propagating ack failures requires changing BatchCommitFunc signature (major change). Ack failure may result in redelivery. Enable deduplication middleware to handle duplicates.
                                 tracing::error!(mongodb_id = %id_val, error = %e, "Failed to ack/delete MongoDB message");
                             }
                         }
@@ -485,6 +491,7 @@ impl MongoDbConsumer {
                     return;
                 }
                 let filter = doc! { "_id": { "$in": &ids } };
+                // TODO: Propagating ack failures requires changing BatchCommitFunc signature (major change). Ack failure may result in redelivery. Enable deduplication middleware to handle duplicates.
                 if let Err(e) = collection_clone.delete_many(filter).await {
                     tracing::error!(error = %e, "Failed to bulk-ack/delete MongoDB messages");
                 } else {

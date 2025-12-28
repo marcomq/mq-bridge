@@ -594,8 +594,7 @@ kafka_to_nats:
                 Middleware::Metrics(_) => {
                     has_metrics = true;
                 }
-                Middleware::Custom(_) => {
-                }
+                Middleware::Custom(_) => {}
                 Middleware::Dlq(dlq) => {
                     assert!(dlq.endpoint.middlewares.is_empty());
                     if let EndpointType::Nats(nats_cfg) = &dlq.endpoint.endpoint_type {

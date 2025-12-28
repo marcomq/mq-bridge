@@ -1,7 +1,7 @@
 use crate::models::NatsConfig;
 use crate::traits::{
-    BatchCommitFunc, BoxFuture, CommitFunc, ConsumerError, MessageConsumer, MessagePublisher,
-    PublisherError, Received, ReceivedBatch, Sent, SentBatch,
+    BatchCommitFunc, BoxFuture, ConsumerError, MessageConsumer, MessagePublisher, PublisherError,
+    ReceivedBatch, Sent, SentBatch,
 };
 use crate::CanonicalMessage;
 use crate::APP_NAME;
@@ -136,54 +136,23 @@ impl NatsConsumer {
         stream_name: &str,
         subject: &str,
     ) -> anyhow::Result<Self> {
-        let options = build_nats_options(config).await?;
-        let client = options.connect(&config.url).await?;
+        let durable_name = Some(format!(
+            "{}-{}-{}",
+            APP_NAME,
+            stream_name,
+            subject.replace('.', "-")
+        ));
+        let queue_group = Some(format!("{}-{}", APP_NAME, stream_name.replace('.', "-")));
 
-        let core = if !config.no_jetstream {
-            let jetstream = jetstream::new(client);
-            info!(stream = %stream_name, subject = %subject, "NATS consumer is in JetStream mode.");
-
-            jetstream
-                .get_or_create_stream(stream::Config {
-                    name: stream_name.to_string(),
-                    subjects: vec![format!("{}.>", stream_name)],
-                    ..Default::default()
-                })
-                .await?;
-
-            let stream = jetstream.get_stream(stream_name).await?;
-
-            let max_ack_pending = config.prefetch_count.unwrap_or(10000) as i64;
-            let consumer = stream
-                .create_consumer(jetstream::consumer::pull::Config {
-                    durable_name: Some(format!(
-                        "{}-{}-{}",
-                        APP_NAME,
-                        stream_name,
-                        subject.replace('.', "-")
-                    )),
-                    filter_subject: subject.to_string(),
-                    deliver_policy: jetstream::consumer::DeliverPolicy::All,
-                    max_ack_pending,
-                    ..Default::default()
-                })
-                .await?;
-
-            let stream = consumer.messages().await?;
-            info!(stream = %stream_name, subject = %subject, "NATS JetStream source subscribed");
-            NatsCore::JetStream(Box::new(stream))
-        } else {
-            info!(subject = %subject, "NATS consumer is in Core mode (non-persistent).");
-            // For Core NATS, we use a queue group to load-balance messages.
-            // The queue group name can be derived from the stream/subject to be unique per route.
-            let queue_group = format!("{}-{}", APP_NAME, stream_name.replace('.', "-")); // The queue_group can be a String
-            let sub = client
-                .queue_subscribe(subject.to_string(), queue_group.clone())
-                .await?;
-            info!(subject = %subject, queue_group = %queue_group, "NATS Core source subscribed");
-            NatsCore::Ephemeral(sub)
-        };
-
+        let core = NatsCore::connect(
+            config,
+            stream_name,
+            subject,
+            durable_name,
+            jetstream::consumer::DeliverPolicy::All,
+            queue_group,
+        )
+        .await?;
         Ok(Self { core })
     }
 }
@@ -217,82 +186,21 @@ impl NatsSubscriber {
         stream_name: &str,
         subject: &str,
     ) -> anyhow::Result<Self> {
-        let options = build_nats_options(config).await?;
-        let client = options.connect(&config.url).await?;
-
-        let core = if !config.no_jetstream {
-            let jetstream = jetstream::new(client);
-            info!(stream = %stream_name, subject = %subject, "NATS event subscriber is in JetStream mode.");
-
-            jetstream
-                .get_or_create_stream(stream::Config {
-                    name: stream_name.to_string(),
-                    subjects: vec![format!("{}.>", stream_name)],
-                    ..Default::default()
-                })
-                .await?;
-
-            let stream = jetstream.get_stream(stream_name).await?;
-
-            let max_ack_pending = config.prefetch_count.unwrap_or(10000) as i64;
-            let consumer = stream
-                .create_consumer(jetstream::consumer::pull::Config {
-                    // Ephemeral consumer (no durable_name)
-                    filter_subject: subject.to_string(),
-                    deliver_policy: jetstream::consumer::DeliverPolicy::New, // Only new messages
-                    max_ack_pending,
-                    ..Default::default()
-                })
-                .await?;
-
-            let stream = consumer.messages().await?;
-            info!(stream = %stream_name, subject = %subject, "NATS JetStream event subscriber subscribed");
-            NatsCore::JetStream(Box::new(stream))
-        } else {
-            info!(subject = %subject, "NATS event subscriber is in Core mode.");
-            // For Core NATS, we use a standard subscription (no queue group) for broadcast.
-            let sub = client.subscribe(subject.to_string()).await?;
-            info!(subject = %subject, "NATS Core event subscriber subscribed");
-            NatsCore::Ephemeral(sub)
-        };
-
+        let core = NatsCore::connect(
+            config,
+            stream_name,
+            subject,
+            None,
+            jetstream::consumer::DeliverPolicy::New,
+            None,
+        )
+        .await?;
         Ok(Self { core })
     }
 }
 
 #[async_trait]
 impl MessageConsumer for NatsSubscriber {
-    async fn receive(&mut self) -> Result<Received, ConsumerError> {
-        // Logic is identical to NatsConsumer, delegating to the subscription
-        let (message, commit) = match &mut self.core {
-            NatsCore::JetStream(stream) => {
-                let message = futures::StreamExt::next(stream)
-                    .await
-                    .ok_or(ConsumerError::EndOfStream)?
-                    .context("Failed to get message from NATS JetStream")?;
-                let sequence = message.info().ok().map(|meta| meta.stream_sequence);
-                let msg = create_nats_canonical_message(&message, sequence);
-                let commit: CommitFunc = Box::new(move |_response| {
-                    Box::pin(async move {
-                        message.ack().await.unwrap_or_else(|e| {
-                            tracing::error!("Failed to ACK NATS message: {:?}", e)
-                        });
-                    }) as BoxFuture<'static, ()>
-                });
-                (msg, commit)
-            }
-            NatsCore::Ephemeral(sub) => {
-                let message = futures::StreamExt::next(sub)
-                    .await
-                    .ok_or(ConsumerError::EndOfStream)?;
-                let commit: CommitFunc = Box::new(move |_| Box::pin(async {}));
-                let msg = create_nats_canonical_message(&message, None);
-                (msg, commit)
-            }
-        };
-        Ok(Received { message, commit })
-    }
-
     async fn receive_batch(&mut self, max_messages: usize) -> Result<ReceivedBatch, ConsumerError> {
         self.core.receive_batch(max_messages).await
     }
@@ -418,6 +326,58 @@ async fn build_nats_options(config: &NatsConfig) -> anyhow::Result<ConnectOption
 }
 
 impl NatsCore {
+    async fn connect(
+        config: &NatsConfig,
+        stream_name: &str,
+        subject: &str,
+        durable_name: Option<String>,
+        deliver_policy: jetstream::consumer::DeliverPolicy,
+        queue_group: Option<String>,
+    ) -> anyhow::Result<Self> {
+        let options = build_nats_options(config).await?;
+        let client = options.connect(&config.url).await?;
+
+        if !config.no_jetstream {
+            let jetstream = jetstream::new(client);
+            info!(stream = %stream_name, subject = %subject, "NATS endpoint is in JetStream mode.");
+
+            jetstream
+                .get_or_create_stream(stream::Config {
+                    name: stream_name.to_string(),
+                    subjects: vec![format!("{}.>", stream_name)],
+                    ..Default::default()
+                })
+                .await?;
+
+            let stream = jetstream.get_stream(stream_name).await?;
+
+            let max_ack_pending = config.prefetch_count.unwrap_or(10000) as i64;
+            let consumer = stream
+                .create_consumer(jetstream::consumer::pull::Config {
+                    durable_name,
+                    filter_subject: subject.to_string(),
+                    deliver_policy,
+                    max_ack_pending,
+                    ..Default::default()
+                })
+                .await?;
+
+            let stream = consumer.messages().await?;
+            info!(stream = %stream_name, subject = %subject, "NATS JetStream subscribed");
+            Ok(NatsCore::JetStream(Box::new(stream)))
+        } else {
+            info!(subject = %subject, "NATS endpoint is in Core mode.");
+            let sub = if let Some(qg) = queue_group {
+                info!(queue_group = %qg, "Using queue subscription");
+                client.queue_subscribe(subject.to_string(), qg).await?
+            } else {
+                client.subscribe(subject.to_string()).await?
+            };
+            info!(subject = %subject, "NATS Core subscribed");
+            Ok(NatsCore::Ephemeral(sub))
+        }
+    }
+
     async fn receive_batch(&mut self, max_messages: usize) -> Result<ReceivedBatch, ConsumerError> {
         if max_messages == 0 {
             return Ok(ReceivedBatch {
@@ -462,8 +422,13 @@ impl NatsCore {
                         futures::stream::iter(jetstream_messages)
                             // Limit concurrent acks to avoid overwhelming the server
                             .for_each_concurrent(Some(100), |message| async move {
+                                // TODO: Propagating ack failures requires changing BatchCommitFunc signature (major change). Ack failure may result in redelivery. Enable deduplication middleware to handle duplicates.
                                 if let Err(e) = message.ack().await {
-                                    tracing::error!("Failed to ACK NATS message: {:?}", e);
+                                    tracing::error!(
+                                        subject = %message.subject,
+                                        error = %e,
+                                        "Failed to ACK NATS message"
+                                    );
                                 }
                             })
                             .await;
@@ -489,7 +454,9 @@ impl NatsCore {
 
                     while messages.len() < max_messages {
                         match sub.next().now_or_never() {
-                            Some(Some(message)) => messages.push(create_nats_canonical_message(&message, None)),
+                            Some(Some(message)) => {
+                                messages.push(create_nats_canonical_message(&message, None))
+                            }
                             _ => break,
                         }
                     }
@@ -536,9 +503,14 @@ fn create_nats_canonical_message(
         if !headers.is_empty() {
             let mut metadata = std::collections::HashMap::new();
             for (key, value) in headers.iter() {
-                // A header key can have multiple values. We'll just take the first one.
-                if let Some(first_value) = value.iter().next() {
-                    metadata.insert(key.to_string(), first_value.to_string());
+                // Join multiple values with comma to avoid data loss
+                let joined_value = value
+                    .iter()
+                    .map(|v| v.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                if !joined_value.is_empty() {
+                    metadata.insert(key.to_string(), joined_value);
                 }
             }
             canonical_message.metadata = metadata;
