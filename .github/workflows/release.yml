@@ -28,6 +28,10 @@ jobs:
       - name: Test with all features (for completeness)
         run: cargo test --workspace --all-features
 
+      - name: Run integration tests (with Docker)
+        # Run ignored tests sequentially to avoid port conflicts with Docker containers
+        run: cargo test --test integration_test --features full  --release -- --ignored --test-threads=1
+
       - name: Test with core (production) features
         run: cargo test --workspace --no-default-features --features core
 

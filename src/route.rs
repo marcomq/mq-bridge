@@ -1,15 +1,15 @@
-use std::sync::Arc;
 //  mq-bridge
 //  © Copyright 2025, by Marco Mengelkoch
 //  Licensed under MIT License, see License file for more details
 //  git clone https://github.com/marcomq/mq-bridge
+
+use crate::endpoints::{create_consumer_from_route, create_publisher_from_route};
 pub use crate::models::Route;
-use crate::traits::{BatchCommitFunc, ConsumerError, SentBatch};
-use crate::{
-    endpoints::{create_consumer_from_route, create_publisher_from_route},
-    traits::CommandHandler,
-};
+use crate::models::{self, Endpoint};
+use crate::traits::{BatchCommitFunc, ConsumerError, Handler, HandlerError, SentBatch};
 use async_channel::{bounded, Sender};
+use serde::de::DeserializeOwned;
+use std::sync::Arc;
 use tokio::{
     select,
     task::{self, JoinHandle},
@@ -17,6 +17,14 @@ use tokio::{
 use tracing::{debug, error, info, warn};
 
 impl Route {
+    pub fn new(input: Endpoint, output: Endpoint) -> Self {
+        Self {
+            input,
+            output,
+            concurrency: models::default_concurrency(),
+            batch_size: models::default_batch_size(),
+        }
+    }
     /// Runs the message processing route with concurrency, error handling, and graceful shutdown.
     ///
     /// This function spawns a set of worker tasks to process messages concurrently.
@@ -101,14 +109,13 @@ impl Route {
         let publisher = create_publisher_from_route(name, &self.output).await?;
         let mut consumer = create_consumer_from_route(name, &self.input).await?;
 
-        const BATCH_SIZE: usize = 128;
         loop {
             select! {
                 _ = shutdown_rx.recv() => {
                     info!("Shutdown signal received in sequential runner for route '{}'.", name);
                     return Ok(true); // Stopped by shutdown signal
                 }
-                res = consumer.receive_batch(BATCH_SIZE) => {
+                res = consumer.receive_batch(self.batch_size) => {
                     let (messages, commit) = match res {
                         Ok(batch) => {
                             if batch.messages.is_empty() {
@@ -136,10 +143,11 @@ impl Route {
                             let failed_count = failed.len();
                             commit(responses).await; // Commit the successful messages
                             if failed_count > 0 {
-                                // Replicate old behavior: any failure in a batch is a route-level error.
+                                let (_, first_error) = failed.into_iter().next().unwrap();
                                 return Err(anyhow::anyhow!(
-                                    "Failed to send {} messages in batch (non-retryable).",
-                                    failed_count
+                                    "Failed to send {} messages in batch. First error: {}",
+                                    failed_count,
+                                    first_error
                                 ));
                             }
                         }
@@ -161,8 +169,7 @@ impl Route {
         let mut consumer = create_consumer_from_route(name, &self.input).await?;
         let (err_tx, err_rx) = bounded(1); // For critical, route-stopping errors
                                            // channel capacity: a small buffer proportional to concurrency
-        const BATCH_SIZE: usize = 128;
-        let work_capacity = self.concurrency.saturating_mul(BATCH_SIZE);
+        let work_capacity = self.concurrency.saturating_mul(self.batch_size);
         let (work_tx, work_rx) =
             bounded::<(Vec<crate::CanonicalMessage>, BatchCommitFunc)>(work_capacity);
 
@@ -184,9 +191,11 @@ impl Route {
                             let failed_count = failed.len();
                             commit(responses).await; // Commit the successful messages
                             if failed_count > 0 {
+                                let (_, first_error) = failed.into_iter().next().unwrap();
                                 let e = anyhow::anyhow!(
-                                    "Failed to send {} messages in batch (non-retryable).",
-                                    failed_count
+                                    "Failed to send {} messages in batch. First error: {}",
+                                    failed_count,
+                                    first_error
                                 );
                                 error!("Worker failed to send message batch: {}", e);
                                 if err_tx.send(e).await.is_err() {
@@ -220,7 +229,7 @@ impl Route {
                     break;
                 }
 
-                res = consumer.receive_batch(BATCH_SIZE) => {
+                res = consumer.receive_batch(self.batch_size) => {
                     let (messages, commit) = match res {
                         Ok(batch) => {
                             if batch.messages.is_empty() {
@@ -257,8 +266,53 @@ impl Route {
         Ok(shutdown_rx.is_empty())
     }
 
-    pub fn with_handler(mut self, handler: Arc<dyn CommandHandler>) -> Self {
-        self.output.handler = Some(handler);
+    pub fn with_handler(mut self, handler: impl Handler + 'static) -> Self {
+        self.output.handler = Some(Arc::new(handler));
+        self
+    }
+
+    /// Registers a typed handler for the route.
+    ///
+    /// The handler can accept either:
+    /// - `fn(T) -> Future<Output = Result<Handled, HandlerError>>`
+    /// - `fn(T, MessageContext) -> Future<Output = Result<Handled, HandlerError>>`
+    pub fn add_handler<T, H, Args>(mut self, type_name: &str, handler: H) -> Self
+    where
+        T: DeserializeOwned + Send + Sync + 'static,
+        H: crate::type_handler::IntoTypedHandler<T, Args>,
+        Args: Send + Sync + 'static,
+    {
+        // Create the wrapper closure that handles deserialization and context extraction
+        let handler = Arc::new(handler);
+        let wrapper = move |msg: crate::CanonicalMessage| {
+            let handler = handler.clone();
+            async move {
+                let data = msg.parse::<T>().map_err(|e| {
+                    HandlerError::NonRetryable(anyhow::anyhow!("Deserialization failed: {}", e))
+                })?;
+                let ctx = crate::MessageContext::from(msg);
+                handler.call(data, ctx).await
+            }
+        };
+        let wrapper = Arc::new(wrapper);
+
+        let prev_handler = self.output.handler.take();
+
+        let new_handler = if let Some(h) = prev_handler {
+            if let Some(extended) = h.register_handler(type_name, wrapper.clone()) {
+                extended
+            } else {
+                Arc::new(
+                    crate::type_handler::TypeHandler::new()
+                        .with_fallback(h)
+                        .add_handler(type_name, wrapper),
+                )
+            }
+        } else {
+            Arc::new(crate::type_handler::TypeHandler::new().add_handler(type_name, wrapper))
+        };
+
+        self.output.handler = Some(new_handler);
         self
     }
 }

@@ -1,7 +1,7 @@
 #![allow(dead_code)] // This module contains helpers used by various integration tests.
 use async_channel::{bounded, Receiver, Sender};
 use chrono;
-use mq_bridge::traits::{ConsumerError, MessageConsumer, ReceivedBatch, SentBatch};
+use mq_bridge::traits::{ConsumerError, MessageConsumer, PublisherError, ReceivedBatch, SentBatch};
 use mq_bridge::traits::{MessagePublisher, Received};
 use mq_bridge::{CanonicalMessage, Route};
 use once_cell::sync::Lazy;
@@ -452,7 +452,22 @@ pub async fn measure_write_performance(
                                     .fetch_add(batch_size, std::sync::atomic::Ordering::Relaxed);
                                 break; // All sent successfully
                             } else {
-                                messages_to_send = failed;
+                                let (retryable, non_retryable): (Vec<_>, Vec<_>) = failed
+                                    .into_iter()
+                                    .partition(|(_, e)| matches!(e, PublisherError::Retryable(_)));
+
+                                if !non_retryable.is_empty() {
+                                    final_count_clone.fetch_add(
+                                        non_retryable.len(),
+                                        std::sync::atomic::Ordering::Relaxed,
+                                    );
+                                }
+
+                                if retryable.is_empty() {
+                                    break;
+                                }
+                                messages_to_send =
+                                    retryable.into_iter().map(|(msg, _)| msg).collect();
                                 batch_size = messages_to_send.len();
                                 retry_count = 0; // Reset on partial success
                             }

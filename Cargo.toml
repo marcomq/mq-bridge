@@ -39,7 +39,7 @@ lapin = { version = "3.7", features = ["rustls"], optional = true }
 
 # MongoDB
 mongodb = { version = "3.4", optional = true }
-uuid = { version = "1.19", features = ["v7"]}
+uuid = { version = "1.19", features = ["v4", "v7"]}
 
 # NATS
 async-nats = { version = "0.45", optional = true }
@@ -77,7 +77,6 @@ mqtt = ["rumqttc", "rustls", "tokio-rustls", "rustls-pemfile", "url"]
 http = ["axum", "reqwest", "axum-server", "rustls", "tokio-rustls", "rustls-pemfile"]
 
 [dev-dependencies]
-uuid = { version = "1.19", features = ["v4", "v7"]}
 serde_yaml_ng = "0.10.0"
 tempfile = "3.10"
 tracing-appender = "0.2"

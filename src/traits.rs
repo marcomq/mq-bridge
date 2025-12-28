@@ -12,29 +12,37 @@ use std::any::Any;
 use std::sync::Arc;
 use tracing::warn;
 
-/// A trait for handling commands.
+/// A generic trait for handling messages (commands or events).
 ///
-/// Command handlers process an incoming message and can optionally return a new
-/// message, for example, as a reply or a resulting event to be published.
+/// Handlers process an incoming message and can optionally return a new
+/// message (e.g. a reply) via `Handled::Publish`, or acknowledge processing via `Handled::Ack`.
 #[async_trait]
-pub trait CommandHandler: Send + Sync {
+pub trait Handler: Send + Sync + 'static {
     async fn handle(&self, msg: CanonicalMessage) -> Result<Handled, HandlerError>;
-}
 
-#[async_trait]
-impl<T: CommandHandler + ?Sized> CommandHandler for Arc<T> {
-    async fn handle(&self, msg: CanonicalMessage) -> Result<Handled, HandlerError> {
-        (**self).handle(msg).await
+    /// Tries to register a handler for a specific type.
+    /// Returns `None` if this handler does not support registration (e.g. it's not a TypeHandler).
+    fn register_handler(
+        &self,
+        _type_name: &str,
+        _handler: Arc<dyn Handler>,
+    ) -> Option<Arc<dyn Handler>> {
+        None
     }
 }
 
-/// A trait for handling events.
-///
-/// Event handlers process an incoming message. They are not expected to return a
-/// direct response.
 #[async_trait]
-pub trait EventHandler: Send + Sync {
-    async fn handle(&self, msg: CanonicalMessage) -> Result<(), HandlerError>;
+impl<T: Handler + ?Sized> Handler for Arc<T> {
+    async fn handle(&self, msg: CanonicalMessage) -> Result<Handled, HandlerError> {
+        (**self).handle(msg).await
+    }
+    fn register_handler(
+        &self,
+        type_name: &str,
+        handler: Arc<dyn Handler>,
+    ) -> Option<Arc<dyn Handler>> {
+        (**self).register_handler(type_name, handler)
+    }
 }
 
 /// A closure that can be called to commit the message.
@@ -196,10 +204,10 @@ pub async fn send_batch_helper<P: MessagePublisher + ?Sized>(
                 // Abort the batch and propagate the error to trigger a reconnect.
                 return Err(PublisherError::Retryable(e));
             }
-            Err(PublisherError::NonRetryable(_)) => {
+            Err(PublisherError::NonRetryable(e)) => {
                 // A non-retryable error is specific to this message.
                 // Collect it and continue with the rest of the batch.
-                failed_messages.push(msg);
+                failed_messages.push((msg, PublisherError::NonRetryable(e)));
             }
         }
     }
@@ -248,4 +256,42 @@ pub fn into_batch_commit_func(commit: CommitFunc) -> BatchCommitFunc {
         };
         commit(single_response)
     })
+}
+
+/// Factory for creating custom endpoints (consumers and publishers).
+#[async_trait]
+pub trait CustomEndpointFactory: Send + Sync + std::fmt::Debug {
+    async fn create_consumer(&self, _route_name: &str) -> anyhow::Result<Box<dyn MessageConsumer>> {
+        Err(anyhow::anyhow!(
+            "This custom endpoint does not support creating consumers"
+        ))
+    }
+    async fn create_publisher(
+        &self,
+        _route_name: &str,
+    ) -> anyhow::Result<Box<dyn MessagePublisher>> {
+        Err(anyhow::anyhow!(
+            "This custom endpoint does not support creating publishers"
+        ))
+    }
+}
+
+/// Factory for creating custom middleware.
+#[async_trait]
+pub trait CustomMiddlewareFactory: Send + Sync + std::fmt::Debug {
+    async fn apply_consumer(
+        &self,
+        consumer: Box<dyn MessageConsumer>,
+        _route_name: &str,
+    ) -> anyhow::Result<Box<dyn MessageConsumer>> {
+        Ok(consumer)
+    }
+
+    async fn apply_publisher(
+        &self,
+        publisher: Box<dyn MessagePublisher>,
+        _route_name: &str,
+    ) -> anyhow::Result<Box<dyn MessagePublisher>> {
+        Ok(publisher)
+    }
 }

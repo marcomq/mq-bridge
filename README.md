@@ -18,11 +18,33 @@
 *   **Middleware**: Components that intercept and process messages (e.g., for error handling).
 *   **Handler**: A programmatic component for business logic, such as transforming messages (`CommandHandler`) or consuming them (`EventHandler`).
 
+## Endpoint Behavior
+
+Different backends and modes (`consumer` vs `subscriber`) have different persistence guarantees.
+
+| Backend | Mode | Persistence | Description |
+| :--- | :--- | :--- | :--- |
+| **Kafka** | Consumer | Persistent | Uses consumer groups. Resumes from last committed offset. |
+| | Subscriber | Ephemeral* | Unique group ID per instance. Starts at `latest`. (*Persistent if `subscribe_id` is set). |
+| **NATS** | Consumer | Persistent | Uses JetStream durable consumers. |
+| | Subscriber | Ephemeral | Uses ephemeral consumers. Receives only new messages. |
+| **AMQP** | Consumer | Persistent | Uses durable queues. |
+| | Subscriber | Ephemeral | Uses temporary, auto-delete queues. |
+| **MQTT** | Consumer | Configurable | Depends on `clean_session`. |
+| | Subscriber | Ephemeral | Unique Client ID per instance. |
+| **MongoDB** | Consumer | Persistent | Documents stored until acknowledged. |
+| | Subscriber | Ephemeral | Change Streams / Polling from current time. |
+| **Memory** | All | Ephemeral | Lost on restart. |
+| **File** | All | Persistent | Stored on disk. |
+| **HTTP** | All | Ephemeral | Direct request/response. |
+
 ## Usage
 
 ### Programmatic Handlers
 
 For implementing business logic, `mq-bridge` provides a handler layer that is separate from transport-level middleware. This allows you to process messages programmatically.
+
+#### Raw Handlers
 
 *   **`CommandHandler`**: A handler for 1-to-1 or 1-to-0 message transformations. It takes a message and can optionally return a new message to be passed down the publisher chain.
 *   **`EventHandler`**: A terminal handler that consumes a message without returning a new one.
@@ -30,15 +52,65 @@ For implementing business logic, `mq-bridge` provides a handler layer that is se
 You can chain these handlers with endpoint publishers.
 
 ```rust
-use mq_bridge::traits::CommandHandler;
+use mq_bridge::traits::Handler;
+use mq_bridge::{CanonicalMessage, Handled};
 use std::sync::Arc;
 
 // Define a handler that transforms the message payload
-let command_handler = Arc::new(|mut msg: mq_bridge::CanonicalMessage| async move {
+let command_handler = Arc::new(|mut msg: CanonicalMessage| async move {
     let new_payload = format!("handled_{}", String::from_utf8_lossy(&msg.payload));
     msg.payload = new_payload.into();
-    Ok(mq_bridge::Handled::Publish(msg))
+    Ok(Handled::Publish(msg))
 });
+
+// Attach the handler to a route
+// let route = Route { ... }.with_handler(command_handler);
+```
+
+#### Typed Handlers
+
+For more structured, type-safe message handling, `mq-bridge` provides `TypeHandler`. It deserializes messages into a specific Rust type before passing them to a handler function. This simplifies message processing by eliminating manual parsing and type checking.
+
+Message selection is based on the `kind` metadata field in the `CanonicalMessage`.
+
+```rust
+use mq_bridge::type_handler::TypeHandler;
+use mq_bridge::{CanonicalMessage, Handled};
+use serde::Deserialize;
+use std::sync::Arc;
+
+// 1. Define your message structures
+#[derive(Deserialize)]
+struct CreateUser {
+    id: u32,
+    username: String,
+}
+
+#[derive(Deserialize)]
+struct DeleteUser {
+    id: u32,
+}
+
+// 2. Create a TypeHandler and register your typed handlers
+let typed_handler = Arc::new(
+    TypeHandler::new()
+        .add("create_user", |cmd: CreateUser| async move {
+            println!("Handling create_user: {}, {}", cmd.id, cmd.username);
+            // ... your logic here
+            Ok(Handled::Ack)
+        })
+        .add("delete_user", |cmd: DeleteUser| async move {
+            println!("Handling delete_user: {}", cmd.id);
+            // ... your logic here
+            Ok(Handled::Ack)
+        }),
+);
+
+// 3. Attach the handler to a route
+// let route = Route { ... }.with_handler(typed_handler);
+
+// 4. A message with metadata `kind: "create_user"` will be deserialized
+//    into a `CreateUser` struct and passed to the first handler.
 ```
 
 ### Programmatic Usage
@@ -46,49 +118,50 @@ let command_handler = Arc::new(|mut msg: mq_bridge::CanonicalMessage| async move
 You can define and run routes directly in Rust code.
 
 ```rust
-use mq_bridge::models::{Endpoint, EndpointType, MemoryConfig, Route};
+use mq_bridge::models::{Endpoint, CanonicalMessage, Route};
+use mq_bridge::Handled;
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use std::time::Duration;
 use tokio::time::timeout;
 
 #[tokio::main]
 async fn main() {
     // Define a route from one in-memory channel to another
-    let route = Route {
-        input: Endpoint::new(EndpointType::Memory(MemoryConfig {
-            topic: "mem-in".to_string(),
-            capacity: Some(100),
-        })),
-        output: Endpoint::new(EndpointType::Memory(MemoryConfig {
-            topic: "mem-out".to_string(),
-            capacity: Some(100),
-        })),
-        concurrency: 1,
+    
+    // 1. Create boolean that is changed in handler
+    let success = Arc::new(AtomicBool::new(false));
+    let success_clone = success.clone();
+
+    // 2. Define Handler
+    let handler = move |mut msg: CanonicalMessage| {
+        success_clone.store(true, Ordering::SeqCst);
+        msg.set_payload_str(format!("modified {}", msg.get_payload_str()));
+        async move { Ok(Handled::Publish(msg)) }
     };
+    // 3. Define Route
+    let input = Endpoint::new_memory("route_in", 200);
+    let output = Endpoint::new_memory("route_out", 200);
+    let route = Route::new(input, output)
+        .with_handler(Arc::new(handler));
 
-    // Get handles to the memory channels for testing
-    let in_channel = route.input.channel().unwrap();
-    let out_channel = route.output.channel().unwrap();
+    // 4. Inject Data
+    let input_channel = route.input.channel().unwrap();
+    input_channel
+        .send_message(CanonicalMessage::from_str("hello"))
+        .await
+        .unwrap();
 
-    // Run the route. It will stop when the input channel is closed and empty.
-    let (run_result, _) = tokio::join!(
-        route.run_until_err("memory-test", None),
-        async {
-            // Send a message
-            in_channel.send_message(mq_bridge::CanonicalMessage::new(b"hello".to_vec(), None)).await.unwrap();
-            // Close the input channel to allow the route to terminate
-            in_channel.close();
-        }
-    );
+    // 5. Run
+    let res = route.run_until_err("test_route", None);
+    input_channel.close();
+    res.await.ok(); // eof error due to closed channel
 
-    // Ensure the route ran without errors
-    run_result.unwrap();
+    // 6. Verify
+    assert!(success.load(Ordering::SeqCst));
 
-    // Verify the message was received
-    let received_messages = out_channel.drain_messages();
-    assert_eq!(received_messages.len(), 1);
-    assert_eq!(received_messages[0].payload, "hello".as_bytes());
-
-    println!("Message successfully bridged from 'mem-in' to 'mem-out'!");
+    let msgs = route.output.channel().unwrap().drain_messages();
+    assert_eq!(msgs.len(), 1);
+    assert_eq!(msgs[0].get_payload_str(), "modified hello");
 }
 ```
 

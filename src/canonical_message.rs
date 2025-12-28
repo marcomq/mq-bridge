@@ -26,6 +26,11 @@ impl CanonicalMessage {
         }
     }
 
+    pub fn from_type<T: Serialize>(data: &T) -> Result<Self, serde_json::Error> {
+        let bytes = serde_json::to_vec(data)?;
+        Ok(Self::new(bytes, None))
+    }
+
     pub fn from_vec(payload: impl Into<Vec<u8>>) -> Self {
         Self::new(payload.into(), None)
     }
@@ -67,12 +72,7 @@ impl CanonicalMessage {
         Ok(Self::new(bytes, message_id))
     }
 
-    pub fn from_struct<T: Serialize>(data: &T) -> Result<Self, serde_json::Error> {
-        let bytes = serde_json::to_vec(data)?;
-        Ok(Self::new(bytes, None))
-    }
-
-    pub fn get_struct<T: DeserializeOwned>(&self) -> Result<T, serde_json::Error> {
+    pub fn parse<T: DeserializeOwned>(&self) -> Result<T, serde_json::Error> {
         serde_json::from_slice(&self.payload)
     }
 
@@ -88,6 +88,11 @@ impl CanonicalMessage {
 
     pub fn with_metadata(mut self, metadata: HashMap<String, String>) -> Self {
         self.metadata = metadata;
+        self
+    }
+
+    pub fn with_metadata_kv(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.metadata.insert(key.into(), value.into());
         self
     }
 }
@@ -107,5 +112,22 @@ impl From<String> for CanonicalMessage {
 impl From<Vec<u8>> for CanonicalMessage {
     fn from(v: Vec<u8>) -> Self {
         Self::new(v, None)
+    }
+}
+
+/// A context object that holds metadata and identification for a message,
+/// separated from the payload. Useful for typed handlers.
+#[derive(Debug, Clone)]
+pub struct MessageContext {
+    pub message_id: u128,
+    pub metadata: HashMap<String, String>,
+}
+
+impl From<CanonicalMessage> for MessageContext {
+    fn from(msg: CanonicalMessage) -> Self {
+        Self {
+            message_id: msg.message_id,
+            metadata: msg.metadata,
+        }
     }
 }

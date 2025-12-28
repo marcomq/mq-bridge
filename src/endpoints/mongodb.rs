@@ -52,6 +52,22 @@ impl TryFrom<MongoMessageRaw> for CanonicalMessage {
     }
 }
 
+fn message_to_document(message: &CanonicalMessage) -> anyhow::Result<Document> {
+    let id_uuid = mongodb::bson::Uuid::from_bytes(message.message_id.to_be_bytes());
+    let metadata =
+        to_document(&message.metadata).context("Failed to serialize metadata to BSON document")?;
+
+    Ok(doc! {
+        "_id": id_uuid,
+        "payload": Bson::Binary(mongodb::bson::Binary {
+            subtype: mongodb::bson::spec::BinarySubtype::Uuid,
+            bytes: message.payload.to_vec() }),
+        "metadata": metadata,
+        "locked_until": null,
+        "created_at": mongodb::bson::DateTime::now()
+    })
+}
+
 /// A publisher that inserts messages into a MongoDB collection.
 pub struct MongoDbPublisher {
     collection: Collection<Document>,
@@ -63,6 +79,22 @@ impl MongoDbPublisher {
         let db = client.database(&config.database);
         let collection = db.collection(collection_name);
         info!(database = %config.database, collection = %collection_name, "MongoDB publisher connected");
+
+        if let Some(ttl) = config.ttl_seconds {
+            let options = mongodb::options::IndexOptions::builder()
+                .expire_after(Duration::from_secs(ttl))
+                .build();
+            let model = IndexModel::builder()
+                .keys(doc! { "created_at": 1 })
+                .options(options)
+                .build();
+            if let Err(e) = collection.create_index(model).await {
+                warn!(
+                    "Failed to create TTL index on publisher collection {} : {}",
+                    collection_name, e
+                );
+            }
+        }
         Ok(Self { collection })
     }
 }
@@ -70,20 +102,7 @@ impl MongoDbPublisher {
 #[async_trait]
 impl MessagePublisher for MongoDbPublisher {
     async fn send(&self, message: CanonicalMessage) -> Result<Sent, PublisherError> {
-        let id_uuid = mongodb::bson::Uuid::from_bytes(message.message_id.to_be_bytes());
-        let metadata = to_document(&message.metadata)
-            .context("Failed to serialize metadata to BSON document")?;
-
-        // Manually construct the document to handle u64 message_id for BSON.
-        // BSON only supports i64, so we do a wrapping conversion.
-        let doc = doc! {
-            "_id": id_uuid,
-            "payload": Bson::Binary(mongodb::bson::Binary {
-                subtype: mongodb::bson::spec::BinarySubtype::Generic,
-                bytes: message.payload.to_vec() }),
-            "metadata": metadata,
-            "locked_until": null
-        };
+        let doc = message_to_document(&message).map_err(PublisherError::NonRetryable)?;
         self.collection
             .insert_one(doc)
             .await
@@ -96,10 +115,60 @@ impl MessagePublisher for MongoDbPublisher {
         &self,
         messages: Vec<CanonicalMessage>,
     ) -> Result<SentBatch, PublisherError> {
-        crate::traits::send_batch_helper(self, messages, |publisher, message| {
-            Box::pin(publisher.send(message))
-        })
-        .await
+        if messages.is_empty() {
+            return Ok(SentBatch::Ack);
+        }
+
+        let mut docs = Vec::with_capacity(messages.len());
+        let mut failed_messages = Vec::new();
+
+        for message in &messages {
+            match message_to_document(message) {
+                Ok(doc) => docs.push(doc),
+                Err(e) => {
+                    failed_messages.push((message.clone(), PublisherError::NonRetryable(e)));
+                }
+            }
+        }
+
+        if docs.is_empty() {
+            if failed_messages.is_empty() {
+                return Ok(SentBatch::Ack);
+            } else {
+                return Ok(SentBatch::Partial {
+                    responses: None,
+                    failed: failed_messages,
+                });
+            }
+        }
+
+        // Use ordered: false to attempt inserting all documents even if some fail (e.g. duplicates).
+        // This improves throughput.
+        let options = mongodb::options::InsertManyOptions::builder()
+            .ordered(false)
+            .build();
+
+        match self
+            .collection
+            .insert_many(docs)
+            .with_options(options)
+            .await
+        {
+            Ok(_) => {
+                if failed_messages.is_empty() {
+                    Ok(SentBatch::Ack)
+                } else {
+                    Ok(SentBatch::Partial {
+                        responses: None,
+                        failed: failed_messages,
+                    })
+                }
+            }
+            Err(e) => Err(PublisherError::Retryable(anyhow::anyhow!(
+                "MongoDB bulk write failed: {}",
+                e
+            ))),
+        }
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -358,6 +427,7 @@ impl MongoDbConsumer {
                                 }
                             }
                             Err(e) => {
+                                // TODO: Propagating ack failures requires changing BatchCommitFunc signature (major change). Ack failure may result in redelivery. Enable deduplication middleware to handle duplicates.
                                 tracing::error!(mongodb_id = %id_val, error = %e, "Failed to ack/delete MongoDB message");
                             }
                         }
@@ -421,6 +491,7 @@ impl MongoDbConsumer {
                     return;
                 }
                 let filter = doc! { "_id": { "$in": &ids } };
+                // TODO: Propagating ack failures requires changing BatchCommitFunc signature (major change). Ack failure may result in redelivery. Enable deduplication middleware to handle duplicates.
                 if let Err(e) = collection_clone.delete_many(filter).await {
                     tracing::error!(error = %e, "Failed to bulk-ack/delete MongoDB messages");
                 } else {
@@ -433,5 +504,164 @@ impl MongoDbConsumer {
         });
 
         Ok((messages, commit))
+    }
+}
+
+enum SubscriberStream {
+    ChangeStream(ChangeStream<ChangeStreamEvent<Document>>),
+    Polling {
+        collection: Collection<Document>,
+        last_id: Option<mongodb::bson::Uuid>,
+        interval: Duration,
+    },
+}
+
+pub struct MongoDbSubscriber {
+    inner: tokio::sync::Mutex<SubscriberStream>,
+}
+
+impl MongoDbSubscriber {
+    /// Creates a new MongoDB subscriber.
+    ///
+    /// The subscriber will watch for inserts to the specified collection and treat them as new events.
+    /// If the MongoDB instance does not support ChangeStreams (i.e., a single instance), it will fall back to
+    /// periodically polling the collection for new messages.
+    ///
+    /// Note that the subscriber will start consuming from the last inserted document if ChangeStreams are not
+    /// supported. If the collection is empty, it will start consuming from the next inserted document.
+    ///
+    pub async fn new(config: &MongoDbConfig, collection_name: &str) -> anyhow::Result<Self> {
+        let client = Client::with_uri_str(&config.url).await?;
+        let db = client.database(&config.database);
+        let collection = db.collection::<Document>(collection_name);
+
+        if let Some(ttl) = config.ttl_seconds {
+            let options = mongodb::options::IndexOptions::builder()
+                .expire_after(Duration::from_secs(ttl))
+                .build();
+            let model = IndexModel::builder()
+                .keys(doc! { "created_at": 1 })
+                .options(options)
+                .build();
+            if let Err(e) = collection.create_index(model).await {
+                warn!(
+                    "Failed to create TTL index on subscriber collection {} : {}",
+                    collection_name, e
+                );
+            }
+        }
+
+        // Watch for inserts to treat them as new events.
+        let pipeline = [doc! { "$match": { "operationType": "insert" } }];
+        let change_stream_result = collection.watch().pipeline(pipeline).await;
+
+        let inner = match change_stream_result {
+            Ok(stream) => {
+                info!(database = %config.database, collection = %collection_name, "MongoDB subscriber watching for events (Change Stream)");
+                SubscriberStream::ChangeStream(stream)
+            }
+            Err(e) if matches!(*e.kind, ErrorKind::Command(ref cmd_err) if cmd_err.code == 40573) =>
+            {
+                warn!("MongoDB is a single instance (ChangeStream support check failed). Falling back to polling for subscriber.");
+
+                // Find the last ID to start consuming from "now"
+                let last_doc = collection
+                    .find_one(doc! {})
+                    .sort(doc! { "_id": -1 })
+                    .await?;
+
+                let mut last_id = None;
+                if let Some(last_doc) = last_doc {
+                    if let Some(Bson::Binary(binary)) = last_doc.get("_id") {
+                        if let Ok(uuid) = binary.to_uuid() {
+                            last_id = Some(uuid);
+                        }
+                    }
+                }
+                SubscriberStream::Polling {
+                    collection,
+                    last_id,
+                    interval: Duration::from_millis(config.polling_interval_ms.unwrap_or(100)),
+                }
+            }
+            Err(e) => return Err(e.into()),
+        };
+        Ok(Self {
+            inner: tokio::sync::Mutex::new(inner),
+        })
+    }
+}
+
+#[async_trait]
+impl MessageConsumer for MongoDbSubscriber {
+    async fn receive_batch(&mut self, max_messages: usize) -> Result<ReceivedBatch, ConsumerError> {
+        let mut inner = self.inner.lock().await;
+
+        match &mut *inner {
+            SubscriberStream::ChangeStream(stream) => {
+                let event = stream
+                    .next()
+                    .await
+                    .ok_or(ConsumerError::EndOfStream)?
+                    .context("Error reading from MongoDB change stream")?;
+
+                let doc = event
+                    .full_document
+                    .ok_or_else(|| anyhow!("Change stream event missing full_document"))?;
+                let raw_msg: MongoMessageRaw = mongodb::bson::from_document(doc)
+                    .context("Failed to deserialize MongoDB document")?;
+                let msg: CanonicalMessage = raw_msg.try_into()?;
+
+                Ok(ReceivedBatch {
+                    messages: vec![msg],
+                    commit: Box::new(|_| Box::pin(async {})),
+                })
+            }
+            SubscriberStream::Polling {
+                collection,
+                last_id,
+                interval,
+            } => loop {
+                let mut filter = doc! {};
+                if let Some(id) = last_id {
+                    filter = doc! { "_id": { "$gt": id } };
+                }
+
+                let mut cursor = collection
+                    .find(filter)
+                    .sort(doc! { "_id": 1 })
+                    .limit(max_messages as i64)
+                    .await
+                    .map_err(|e| ConsumerError::Connection(e.into()))?;
+
+                let mut messages = Vec::new();
+                while let Some(doc_result) = cursor.next().await {
+                    let doc = doc_result.map_err(|e| ConsumerError::Connection(e.into()))?;
+
+                    if let Some(Bson::Binary(binary)) = doc.get("_id") {
+                        if let Ok(uuid) = binary.to_uuid() {
+                            *last_id = Some(uuid);
+                        }
+                    }
+
+                    let raw_msg: MongoMessageRaw = mongodb::bson::from_document(doc)
+                        .context("Failed to deserialize MongoDB document")?;
+                    messages.push(raw_msg.try_into()?);
+                }
+
+                if !messages.is_empty() {
+                    return Ok(ReceivedBatch {
+                        messages,
+                        commit: Box::new(|_| Box::pin(async {})),
+                    });
+                }
+
+                tokio::time::sleep(*interval).await;
+            },
+        }
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }

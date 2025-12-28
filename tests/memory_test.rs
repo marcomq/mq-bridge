@@ -1,4 +1,4 @@
-use mq_bridge::models::{Endpoint, EndpointType, MemoryConfig, Route};
+use mq_bridge::models::{Endpoint, Route};
 use std::time::Instant;
 
 use crate::integration::common::format_pretty;
@@ -6,7 +6,7 @@ use crate::integration::common::format_pretty;
 mod integration;
 
 // run in release:
-// cargo test --package mq-bridge --test memory_test --features integration-test --release -- test_memory_to_memory_pipeline --exact --nocapture
+// cargo test --package mq-bridge --test memory_test --release -- test_memory_to_memory_pipeline --exact --nocapture --ignored
 
 #[tokio::test]
 #[ignore] // This is a performance test, run it explicitly
@@ -22,18 +22,9 @@ async fn test_memory_to_memory_pipeline() {
 
     let messages_to_send = integration::common::generate_test_messages(num_messages);
 
-    let route = Route {
-        input: Endpoint::new(EndpointType::Memory(MemoryConfig {
-            topic: "mem-in".to_string(),
-            capacity: Some(200), // A reasonable capacity for the input channel
-        })),
-        output: Endpoint::new(EndpointType::Memory(MemoryConfig {
-            topic: "mem-out".to_string(),
-            capacity: Some(num_messages + 10_000), // Ensure output can hold all messages
-        })),
-        concurrency: 1,
-    };
-
+    let input = Endpoint::new_memory("mem-in", 200);
+    let output = Endpoint::new_memory("mem-out", num_messages);
+    let route = Route::new(input, output);
     let in_channel = route.input.channel().unwrap();
     let out_channel = route.output.channel().unwrap();
 

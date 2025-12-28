@@ -68,6 +68,7 @@ impl MessagePublisher for RetryPublisher {
     ) -> Result<SentBatch, PublisherError> {
         let mut current_messages = messages;
         let mut all_responses = Vec::new();
+        let mut all_failed = Vec::new();
 
         // We reuse the retry_op logic manually here because the state (current_messages) changes
         let mut attempt = 0;
@@ -77,12 +78,16 @@ impl MessagePublisher for RetryPublisher {
             attempt += 1;
             match self.inner.send_batch(current_messages.clone()).await {
                 Ok(SentBatch::Ack) => {
-                    return if all_responses.is_empty() {
+                    return if all_responses.is_empty() && all_failed.is_empty() {
                         Ok(SentBatch::Ack)
                     } else {
                         Ok(SentBatch::Partial {
-                            responses: Some(all_responses),
-                            failed: Vec::new(),
+                            responses: if all_responses.is_empty() {
+                                None
+                            } else {
+                                Some(all_responses)
+                            },
+                            failed: all_failed,
                         })
                     };
                 }
@@ -90,22 +95,41 @@ impl MessagePublisher for RetryPublisher {
                     if let Some(resps) = responses {
                         all_responses.extend(resps);
                     }
-                    if failed.is_empty() {
+
+                    let (retryable, non_retryable): (Vec<_>, Vec<_>) = failed
+                        .into_iter()
+                        .partition(|(_, e)| matches!(e, PublisherError::Retryable(_)));
+
+                    all_failed.extend(non_retryable);
+
+                    if retryable.is_empty() {
                         return Ok(SentBatch::Partial {
-                            responses: Some(all_responses),
-                            failed: Vec::new(),
+                            responses: if all_responses.is_empty() {
+                                None
+                            } else {
+                                Some(all_responses)
+                            },
+                            failed: all_failed,
                         });
                     }
                     if attempt >= self.config.max_attempts {
+                        all_failed.extend(retryable);
                         return Ok(SentBatch::Partial {
-                            responses: Some(all_responses),
-                            failed,
+                            responses: if all_responses.is_empty() {
+                                None
+                            } else {
+                                Some(all_responses)
+                            },
+                            failed: all_failed,
                         });
                     }
-                    warn!("Batch send partially failed (attempt {}/{}): {} messages failed. Retrying...", attempt, self.config.max_attempts, failed.len());
-                    current_messages = failed;
+                    warn!("Batch send partially failed (attempt {}/{}): {} messages failed. Retrying...", attempt, self.config.max_attempts, retryable.len());
+                    current_messages = retryable.into_iter().map(|(msg, _)| msg).collect();
                 }
                 Err(e) => {
+                    if matches!(e, PublisherError::NonRetryable(_)) {
+                        return Err(e);
+                    }
                     if attempt >= self.config.max_attempts {
                         return Err(e);
                     }
