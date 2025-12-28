@@ -19,3 +19,4 @@ pub mod mqtt;
 pub mod all_endpoints;
 #[cfg(feature = "nats")]
 pub mod nats;
+pub mod route;

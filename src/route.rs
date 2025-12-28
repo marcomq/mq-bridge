@@ -148,10 +148,11 @@ impl Route {
                             let failed_count = failed.len();
                             commit(responses).await; // Commit the successful messages
                             if failed_count > 0 {
-                                // Replicate old behavior: any failure in a batch is a route-level error.
+                                let (_, first_error) = failed.into_iter().next().unwrap();
                                 return Err(anyhow::anyhow!(
-                                    "Failed to send {} messages in batch (non-retryable).",
-                                    failed_count
+                                    "Failed to send {} messages in batch. First error: {}",
+                                    failed_count,
+                                    first_error
                                 ));
                             }
                         }
@@ -195,9 +196,11 @@ impl Route {
                             let failed_count = failed.len();
                             commit(responses).await; // Commit the successful messages
                             if failed_count > 0 {
+                                let (_, first_error) = failed.into_iter().next().unwrap();
                                 let e = anyhow::anyhow!(
-                                    "Failed to send {} messages in batch (non-retryable).",
-                                    failed_count
+                                    "Failed to send {} messages in batch. First error: {}",
+                                    failed_count,
+                                    first_error
                                 );
                                 error!("Worker failed to send message batch: {}", e);
                                 if err_tx.send(e).await.is_err() {

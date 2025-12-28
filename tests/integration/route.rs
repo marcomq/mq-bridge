@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -21,8 +22,8 @@ async fn test_route_with_typed_handler_success() {
     let success = Arc::new(AtomicBool::new(false));
     let success_clone = success.clone();
 
-    let input = Endpoint::new_memory("in", 10);
-    let output = Endpoint::new_memory("out", 10);
+    let input = Endpoint::new_memory("in_success", 10);
+    let output = Endpoint::new_memory("out_success", 10);
 
     let route = Route::new(input, output).add_handler(
         "my_message",
@@ -60,8 +61,8 @@ async fn test_route_with_typed_handler_success() {
 
 #[tokio::test]
 async fn test_route_with_typed_handler_failure_deserialization() {
-    let input = Endpoint::new_memory("in", 10);
-    let output = Endpoint::new_memory("out", 10);
+    let input = Endpoint::new_memory("in_fail_deser", 10);
+    let output = Endpoint::new_memory("out_fail_deser", 10);
 
     let route = Route::new(input, output).add_handler(
         "my_message",
@@ -95,14 +96,14 @@ async fn test_route_with_typed_handler_failure_deserialization() {
 
 #[tokio::test]
 async fn test_route_with_typed_handler_failure_handler() {
-    let input = Endpoint::new_memory("in", 10);
-    let output = Endpoint::new_memory("out", 10);
+    let input = Endpoint::new_memory("in_fail_handler", 10);
+    let output = Endpoint::new_memory("out_fail_handler", 10);
 
     let route = Route::new(input, output).add_handler(
         "my_message",
         move |msg: MyTypedMessage| async move {
             assert_eq!(msg.id, 456);
-            Err(mq_bridge::HandlerError::NonRetryable(anyhow::anyhow!(
+            Err(mq_bridge::errors::HandlerError::NonRetryable(anyhow::anyhow!(
                 "Handler failed as expected"
             )))
         },

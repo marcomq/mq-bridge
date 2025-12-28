@@ -1,3 +1,4 @@
+use crate::errors::PublisherError;
 use crate::traits::{BatchCommitFunc, CommitFunc};
 use crate::CanonicalMessage;
 
@@ -28,7 +29,7 @@ pub enum SentBatch {
     /// The batch operation resulted in a mix of successes and failures.
     Partial {
         responses: Option<Vec<CanonicalMessage>>,
-        failed: Vec<CanonicalMessage>,
+        failed: Vec<(CanonicalMessage, PublisherError)>,
     },
 }
 

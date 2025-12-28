@@ -90,6 +90,11 @@ impl CanonicalMessage {
         self.metadata = metadata;
         self
     }
+
+    pub fn with_metadata_kv(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.metadata.insert(key.into(), value.into());
+        self
+    }
 }
 
 impl From<&str> for CanonicalMessage {

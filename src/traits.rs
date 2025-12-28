@@ -204,10 +204,10 @@ pub async fn send_batch_helper<P: MessagePublisher + ?Sized>(
                 // Abort the batch and propagate the error to trigger a reconnect.
                 return Err(PublisherError::Retryable(e));
             }
-            Err(PublisherError::NonRetryable(_)) => {
+            Err(PublisherError::NonRetryable(e)) => {
                 // A non-retryable error is specific to this message.
                 // Collect it and continue with the rest of the batch.
-                failed_messages.push(msg);
+                failed_messages.push((msg, PublisherError::NonRetryable(e)));
             }
         }
     }

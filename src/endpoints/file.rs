@@ -67,17 +67,17 @@ impl MessagePublisher for FilePublisher {
                 Ok(s) => s,
                 Err(e) => {
                     tracing::error!("Failed to serialize message for file sink: {}", e);
-                    failed_messages.push(msg);
+                    failed_messages.push((msg, PublisherError::NonRetryable(anyhow::anyhow!(e))));
                     continue;
                 }
             };
             if let Err(e) = writer.write_all(&serialized_msg).await {
                 tracing::error!("Failed to write message to file: {}", e);
-                failed_messages.push(msg);
+                failed_messages.push((msg, PublisherError::NonRetryable(anyhow::anyhow!(e))));
             } else if let Err(e) = writer.write_all(b"\n").await {
                 tracing::error!("Failed to write newline to file: {}", e);
                 // If write fails, add the message to the failed list
-                failed_messages.push(msg);
+                failed_messages.push((msg, PublisherError::NonRetryable(anyhow::anyhow!(e))));
             } else {
                 tracing::trace!(payload_len = %serialized_msg.len(), "Writing message to file");
             }
