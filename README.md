@@ -118,7 +118,7 @@ let typed_handler = Arc::new(
 You can define and run routes directly in Rust code.
 
 ```rust
-use mq_bridge::models::{Endpoint, EndpointType, MemoryConfig, CanonicalMessage, Route};
+use mq_bridge::models::{Endpoint, CanonicalMessage, Route};
 use mq_bridge::Handled;
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use std::time::Duration;
