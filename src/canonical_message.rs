@@ -122,6 +122,12 @@ impl From<Vec<u8>> for CanonicalMessage {
     }
 }
 
+impl From<serde_json::Value> for CanonicalMessage {
+    fn from(v: serde_json::Value) -> Self {
+        Self::from_json(v).expect("Failed to serialize JSON value")
+    }
+}
+
 /// A context object that holds metadata and identification for a message,
 /// separated from the payload. Useful for typed handlers.
 #[derive(Debug, Clone)]
@@ -137,4 +143,67 @@ impl From<CanonicalMessage> for MessageContext {
             metadata: msg.metadata,
         }
     }
+}
+
+#[doc(hidden)]
+pub mod macro_support {
+    use super::CanonicalMessage;
+    use serde::Serialize;
+
+    pub trait Fallback {
+        fn convert(&self) -> CanonicalMessage;
+    }
+
+    impl<T: Serialize> Fallback for Wrap<T> {
+        fn convert(&self) -> CanonicalMessage {
+            CanonicalMessage::from_type(&self.0).expect("Serialization failed in msg! macro")
+        }
+    }
+
+    pub struct Wrap<T>(pub T);
+
+    impl<T> Wrap<T>
+    where
+        T: Into<CanonicalMessage> + Clone,
+    {
+        pub fn convert(&self) -> CanonicalMessage {
+            self.0.clone().into()
+        }
+    }
+}
+
+/// A macro to create a `CanonicalMessage` easily.
+///
+/// Examples:
+/// ```rust
+/// use mq_bridge::msg;
+///
+/// let m1 = msg!("hello");
+/// let m2 = msg!("hello", "greeting");
+/// let m3 = msg!("hello", "kind" => "greeting");
+///
+/// #[derive(serde::Serialize, Clone)]
+/// struct MyData { val: i32 }
+/// let m4 = msg!(MyData { val: 42 }, "my_type");
+/// ```
+#[macro_export]
+macro_rules! msg {
+    ($payload:expr $(, $key:expr => $val:expr)* $(,)?) => {
+        {
+            use $crate::canonical_message::macro_support::{Wrap, Fallback};
+            let mut msg = Wrap($payload).convert();
+            $(
+                msg = msg.with_metadata_kv($key, $val);
+            )*
+            msg
+        }
+    };
+    ($payload:expr, $kind:expr $(,)?) => {
+        {
+            use $crate::canonical_message::macro_support::{Wrap, Fallback};
+            let mut msg = Wrap($payload).convert();
+            msg = msg.with_type_key($kind);
+            msg
+        }
+    };
 }
