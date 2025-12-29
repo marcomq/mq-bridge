@@ -775,11 +775,22 @@
           ],
           "format": "uint64",
           "minimum": 0
+        },
+        "protocol": {
+          "$ref": "#/$defs/MqttProtocol",
+          "default": "v5"
         }
       },
       "additionalProperties": false,
       "required": [
         "url"
+      ]
+    },
+    "MqttProtocol": {
+      "type": "string",
+      "enum": [
+        "v5",
+        "v3"
       ]
     },
     "HttpEndpoint": {

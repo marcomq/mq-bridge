@@ -52,7 +52,24 @@ impl TryFrom<MongoMessageRaw> for CanonicalMessage {
     }
 }
 
+fn document_to_canonical(doc: Document) -> anyhow::Result<CanonicalMessage> {
+    let payload = serde_json::to_vec(&doc)?;
+    let mut msg = CanonicalMessage::new(payload, None);
+    msg.metadata.insert(
+        "mq_bridge.original_format".to_string(),
+        "raw".to_string(),
+    );
+    Ok(msg)
+}
+
 fn message_to_document(message: &CanonicalMessage) -> anyhow::Result<Document> {
+    if message.metadata.get("mq_bridge.original_format").map(|s| s.as_str()) == Some("raw") {
+        if let Ok(doc) = serde_json::from_slice::<Document>(&message.payload) {
+            return Ok(doc);
+        }
+        // If parsing fails, fall through to standard wrapping
+    }
+
     let id_uuid = mongodb::bson::Uuid::from_bytes(message.message_id.to_be_bytes());
     let metadata =
         to_document(&message.metadata).context("Failed to serialize metadata to BSON document")?;
@@ -407,9 +424,10 @@ impl MongoDbConsumer {
                     .get("_id")
                     .cloned()
                     .ok_or_else(|| anyhow!("Document missing _id"))?;
-                let raw_msg: MongoMessageRaw = mongodb::bson::from_document(doc)
-                    .context("Failed to deserialize MongoDB document")?;
-                let msg: CanonicalMessage = raw_msg.try_into()?;
+                let msg = match mongodb::bson::from_document::<MongoMessageRaw>(doc.clone()) {
+                    Ok(raw_msg) => raw_msg.try_into().unwrap_or(document_to_canonical(doc)?),
+                    Err(_) => document_to_canonical(doc)?,
+                };
 
                 let collection_clone = self.collection.clone();
 
@@ -476,9 +494,10 @@ impl MongoDbConsumer {
                 .get("_id")
                 .cloned()
                 .ok_or_else(|| anyhow!("Document missing _id"))?;
-            let raw_msg: MongoMessageRaw = mongodb::bson::from_document(doc)
-                .context("Failed to deserialize MongoDB document")?;
-            let msg: CanonicalMessage = raw_msg.try_into()?;
+            let msg = match mongodb::bson::from_document::<MongoMessageRaw>(doc.clone()) {
+                Ok(raw_msg) => raw_msg.try_into().unwrap_or(document_to_canonical(doc)?),
+                Err(_) => document_to_canonical(doc)?,
+            };
             messages.push(msg);
 
             ids.push(id_val);
@@ -608,9 +627,10 @@ impl MessageConsumer for MongoDbSubscriber {
                 let doc = event
                     .full_document
                     .ok_or_else(|| anyhow!("Change stream event missing full_document"))?;
-                let raw_msg: MongoMessageRaw = mongodb::bson::from_document(doc)
-                    .context("Failed to deserialize MongoDB document")?;
-                let msg: CanonicalMessage = raw_msg.try_into()?;
+                let msg = match mongodb::bson::from_document::<MongoMessageRaw>(doc.clone()) {
+                    Ok(raw_msg) => raw_msg.try_into().unwrap_or(document_to_canonical(doc)?),
+                    Err(_) => document_to_canonical(doc)?,
+                };
 
                 Ok(ReceivedBatch {
                     messages: vec![msg],
@@ -644,9 +664,11 @@ impl MessageConsumer for MongoDbSubscriber {
                         }
                     }
 
-                    let raw_msg: MongoMessageRaw = mongodb::bson::from_document(doc)
-                        .context("Failed to deserialize MongoDB document")?;
-                    messages.push(raw_msg.try_into()?);
+                    let msg = match mongodb::bson::from_document::<MongoMessageRaw>(doc.clone()) {
+                        Ok(raw_msg) => raw_msg.try_into().unwrap_or(document_to_canonical(doc)?),
+                        Err(_) => document_to_canonical(doc)?,
+                    };
+                    messages.push(msg);
                 }
 
                 if !messages.is_empty() {

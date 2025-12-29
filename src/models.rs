@@ -503,6 +503,17 @@ pub struct MqttConfig {
     #[serde(default = "default_true")]
     pub clean_session: bool,
     pub keep_alive_seconds: Option<u64>,
+    #[serde(default)]
+    pub protocol: MqttProtocol,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum MqttProtocol {
+    #[default]
+    V5,
+    V3,
 }
 
 // --- HTTP Specific Configuration ---
