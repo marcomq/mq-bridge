@@ -188,6 +188,80 @@ let projection_handler = TypeHandler::new()
         // Update read database / cache
         Ok(Handled::Ack)
 }); 
+```
+
+## Configuration Reference
+
+The best way to understand the configuration structure is through a comprehensive example. `mq-bridge` uses a YAML map where keys are route names.
+
+```yaml
+# mq-bridge.yaml
+
+# Route 1: Kafka to NATS
+kafka_to_nats:
+  concurrency: 4
+  input:
+    kafka:
+      brokers: "localhost:9092"
+      topic: "orders"
+      group_id: "bridge_group"
+      # TLS Configuration (Optional)
+      tls:
+        required: true
+        ca_file: "./certs/ca.pem"
+  output:
+    nats:
+      url: "nats://localhost:4222"
+      subject: "orders.processed"
+      stream: "orders_stream"
+
+# Route 2: HTTP Webhook to MongoDB with Middleware
+webhook_to_mongo:
+  input:
+    http:
+      url: "0.0.0.0:8080"
+      # Optional: Send response back to HTTP caller via another endpoint
+      response_out:
+        static: "Accepted"
+    middlewares:
+      - retry:
+          max_attempts: 3
+          initial_interval_ms: 500
+  output:
+    mongodb:
+      url: "mongodb://localhost:27017"
+      database: "app_db"
+      collection: "webhooks"
+
+# Route 3: File to AMQP (RabbitMQ)
+file_ingest:
+  input:
+    file: "./data/input.jsonl"
+  output:
+    amqp:
+      url: "amqp://localhost:5672"
+      exchange: "logs"
+      queue: "file_logs"
+
+# Route 4: MQTT to Switch (Content-based Routing)
+iot_router:
+  input:
+    mqtt:
+      url: "mqtt://localhost:1883"
+      topic: "sensors/+"
+      qos: 1
+  output:
+    switch:
+      metadata_key: "sensor_type"
+      cases:
+        temp:
+          kafka:
+            brokers: "localhost:9092"
+            topic: "temperature"
+      default:
+        memory:
+          topic: "dropped_sensors"
+```
 
 ## Configuration Details
 
