@@ -421,7 +421,7 @@ impl NatsCore {
                         futures::stream::iter(jetstream_messages)
                             // Limit concurrent acks to avoid overwhelming the server
                             .for_each_concurrent(Some(100), |message| async move {
-                                // TODO: Propagating ack failures requires changing BatchCommitFunc signature (major change). Ack failure may result in redelivery. Enable deduplication middleware to handle duplicates.
+                                // Ack failure may result in redelivery. Enable deduplication middleware to handle duplicates.
                                 if let Err(e) = message.ack().await {
                                     tracing::error!(
                                         subject = %message.subject,

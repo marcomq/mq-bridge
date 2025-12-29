@@ -299,7 +299,7 @@ impl MessageConsumer for AmqpSubscriber {
                     ..Default::default()
                 };
                 if let Err(e) = last_delivery.ack(ack_options).await {
-                    // TODO: Propagating ack failures requires changing BatchCommitFunc signature (major change). Ack failure may result in redelivery. Enable deduplication middleware to handle duplicates.
+                    // Ack failure may result in redelivery. Enable deduplication middleware to handle duplicates.
                     tracing::error!(
                         last_delivery_tag = last_delivery.delivery_tag,
                         error = %e,
@@ -451,7 +451,7 @@ impl MessageConsumer for AmqpConsumer {
                     ..Default::default()
                 };
                 if let Err(e) = last_delivery.ack(ack_options).await {
-                    // TODO: Propagating ack failures requires changing BatchCommitFunc signature (major change). Ack failure may result in redelivery. Enable deduplication middleware to handle duplicates.
+                    // Ack failure may result in redelivery. Enable deduplication middleware to handle duplicates.
                     tracing::error!(
                         last_delivery_tag = last_delivery.delivery_tag,
                         error = %e,

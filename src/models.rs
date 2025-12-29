@@ -247,6 +247,7 @@ pub enum EndpointType {
     Mqtt(MqttEndpoint),
     Http(HttpEndpoint),
     Fanout(Vec<Endpoint>),
+    Switch(SwitchConfig),
     #[serde(skip)]
     Custom(Arc<dyn CustomEndpointFactory>),
     Null,
@@ -500,6 +501,16 @@ pub struct HttpConfig {
     #[serde(default)]
     pub tls: TlsConfig,
     pub response_out: Option<Box<Endpoint>>,
+}
+
+// --- Switch/Router Configuration ---
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct SwitchConfig {
+    pub metadata_key: String,
+    pub cases: HashMap<String, Endpoint>,
+    pub default: Option<Box<Endpoint>>,
 }
 
 // --- Common Configuration ---

@@ -427,7 +427,7 @@ impl MongoDbConsumer {
                                 }
                             }
                             Err(e) => {
-                                // TODO: Propagating ack failures requires changing BatchCommitFunc signature (major change). Ack failure may result in redelivery. Enable deduplication middleware to handle duplicates.
+                                // Ack failure may result in redelivery. Enable deduplication middleware to handle duplicates.
                                 tracing::error!(mongodb_id = %id_val, error = %e, "Failed to ack/delete MongoDB message");
                             }
                         }
@@ -491,7 +491,7 @@ impl MongoDbConsumer {
                     return;
                 }
                 let filter = doc! { "_id": { "$in": &ids } };
-                // TODO: Propagating ack failures requires changing BatchCommitFunc signature (major change). Ack failure may result in redelivery. Enable deduplication middleware to handle duplicates.
+                // Ack failure may result in redelivery. Enable deduplication middleware to handle duplicates.
                 if let Err(e) = collection_clone.delete_many(filter).await {
                     tracing::error!(error = %e, "Failed to bulk-ack/delete MongoDB messages");
                 } else {

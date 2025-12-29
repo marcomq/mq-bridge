@@ -19,6 +19,7 @@ pub mod mqtt;
 #[cfg(feature = "nats")]
 pub mod nats;
 pub mod null;
+pub mod switch;
 pub mod static_endpoint;
 use crate::middleware::apply_middlewares_to_consumer;
 use crate::models::{Endpoint, EndpointType};
@@ -146,6 +147,10 @@ async fn create_base_consumer(
             }
         }
         EndpointType::Custom(factory) => factory.create_consumer(route_name).await,
+        EndpointType::Switch(_) => Err(anyhow!(
+            "[route:{}] Switch endpoint is only supported as an output",
+            route_name
+        )),
         #[allow(unreachable_patterns)]
         _ => Err(anyhow!(
             "[route:{}] Unsupported consumer endpoint type",
@@ -263,6 +268,24 @@ async fn create_base_publisher(
                 publishers.push(p);
             }
             Ok(Box::new(fanout::FanoutPublisher::new(publishers)) as Box<dyn MessagePublisher>)
+        }
+        EndpointType::Switch(cfg) => {
+            let mut cases = std::collections::HashMap::new();
+            for (key, endpoint) in &cfg.cases {
+                let p =
+                    Box::pin(create_publisher_with_depth(route_name, endpoint, depth + 1)).await?;
+                cases.insert(key.clone(), p);
+            }
+            let default = if let Some(endpoint) = &cfg.default {
+                Some(Box::pin(create_publisher_with_depth(route_name, endpoint, depth + 1)).await?)
+            } else {
+                None
+            };
+            Ok(Box::new(switch::SwitchPublisher::new(
+                cfg.metadata_key.clone(),
+                cases,
+                default,
+            )) as Box<dyn MessagePublisher>)
         }
         EndpointType::Custom(factory) => factory.create_publisher(route_name).await,
         #[allow(unreachable_patterns)]

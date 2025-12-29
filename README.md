@@ -197,6 +197,36 @@ input:
     # ... kafka config
 ```
 
+### Specialized Endpoints
+
+#### Switch
+
+The `switch` endpoint is a conditional publisher that routes messages to different outputs based on a metadata key.
+
+It checks the specified `metadata_key` in each message. If the key's value matches one of the `cases`, the message is forwarded to that endpoint. If no case matches, it's sent to the `default` endpoint. If there is no default, the message is dropped.
+
+This is useful for content-based routing.
+
+**Example**: Route orders to different systems based on `country_code` metadata.
+
+```yaml
+output:
+  switch:
+    metadata_key: "country_code"
+    cases:
+      US:
+        kafka:
+          topic: "us_orders"
+          brokers: "kafka-us:9092"
+      EU:
+        nats:
+          subject: "eu_orders"
+          url: "nats-eu:4222"
+    default:
+      file:
+        path: "/var/data/unroutable_orders.log"
+```
+
 ## Running Tests
 The project includes a comprehensive suite of integration and performance tests that require Docker.
 
