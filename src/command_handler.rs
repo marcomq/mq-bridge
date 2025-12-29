@@ -192,7 +192,7 @@ mod tests {
             input: Endpoint::new_memory("route_in", 100),
             output: Endpoint::new_memory("route_out", 100),
         }
-        .with_handler(Arc::new(handler));
+        .with_handler(handler);
 
         // 3. Inject Data
         let input_channel = route.input.channel().unwrap();

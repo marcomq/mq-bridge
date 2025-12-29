@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
 
+use crate::type_handler::KIND_KEY;
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CanonicalMessage {
     pub message_id: u128,
@@ -93,6 +95,11 @@ impl CanonicalMessage {
 
     pub fn with_metadata_kv(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.metadata.insert(key.into(), value.into());
+        self
+    }
+
+    pub fn with_type_key(mut self, kind: impl Into<String>) -> Self {
+        self.metadata.insert(KIND_KEY.into(), kind.into());
         self
     }
 }

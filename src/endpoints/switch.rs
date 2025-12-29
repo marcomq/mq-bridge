@@ -82,8 +82,14 @@ mod tests {
         let chan_default = pub_default.channel();
 
         let mut cases = HashMap::new();
-        cases.insert("A".to_string(), Arc::new(pub_a) as Arc<dyn MessagePublisher>);
-        cases.insert("B".to_string(), Arc::new(pub_b) as Arc<dyn MessagePublisher>);
+        cases.insert(
+            "A".to_string(),
+            Arc::new(pub_a) as Arc<dyn MessagePublisher>,
+        );
+        cases.insert(
+            "B".to_string(),
+            Arc::new(pub_b) as Arc<dyn MessagePublisher>,
+        );
 
         let switch = SwitchPublisher::new(
             "route_key".to_string(),
@@ -92,8 +98,7 @@ mod tests {
         );
 
         // Test Case A
-        let msg_a = CanonicalMessage::from_str("payload_a")
-            .with_metadata_kv("route_key", "A");
+        let msg_a = CanonicalMessage::from_str("payload_a").with_metadata_kv("route_key", "A");
         switch.send(msg_a).await.unwrap();
         assert_eq!(chan_a.len(), 1);
         assert_eq!(chan_b.len(), 0);
@@ -101,8 +106,7 @@ mod tests {
         chan_a.drain_messages();
 
         // Test Case B
-        let msg_b = CanonicalMessage::from_str("payload_b")
-            .with_metadata_kv("route_key", "B");
+        let msg_b = CanonicalMessage::from_str("payload_b").with_metadata_kv("route_key", "B");
         switch.send(msg_b).await.unwrap();
         assert_eq!(chan_a.len(), 0);
         assert_eq!(chan_b.len(), 1);
@@ -110,8 +114,8 @@ mod tests {
         chan_b.drain_messages();
 
         // Test Default (Unknown Key)
-        let msg_c = CanonicalMessage::new(b"payload_c".to_vec(), None)
-            .with_metadata_kv("route_key", "C");
+        let msg_c =
+            CanonicalMessage::new(b"payload_c".to_vec(), None).with_metadata_kv("route_key", "C");
         switch.send(msg_c).await.unwrap();
         assert_eq!(chan_a.len(), 0);
         assert_eq!(chan_b.len(), 0);

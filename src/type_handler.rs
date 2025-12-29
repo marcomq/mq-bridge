@@ -30,6 +30,8 @@ pub struct TypeHandler {
     pub(crate) fallback: Option<Arc<dyn Handler>>,
 }
 
+pub const KIND_KEY: &str = "kind";
+
 /// A helper trait to allow registering handlers with or without context.
 pub trait IntoTypedHandler<T, Args>: Send + Sync + 'static {
     type Future: Future<Output = Result<Handled, HandlerError>> + Send + 'static;
@@ -65,7 +67,7 @@ impl TypeHandler {
     pub fn new() -> Self {
         Self {
             handlers: HashMap::new(),
-            type_key: "kind".into(),
+            type_key: KIND_KEY.into(),
             fallback: None,
         }
     }
@@ -172,7 +174,7 @@ mod tests {
             val: "hello".into(),
         })
         .unwrap()
-        .with_metadata(HashMap::from([("kind".to_string(), "test_a".to_string())]));
+        .with_type_key("test_a");
 
         let res = handler.handle(msg).await;
         assert!(res.is_ok());
@@ -236,7 +238,7 @@ mod tests {
 
         let msg = CanonicalMessage::from_type(&TestMsg { val: "x".into() })
             .unwrap()
-            .with_metadata(HashMap::from([("kind".to_string(), "fail".to_string())]));
+            .with_type_key("fail");
 
         let res = handler.handle(msg).await;
         assert!(matches!(res, Err(HandlerError::Retryable(_))));
@@ -263,5 +265,157 @@ mod tests {
 
         let res = handler.handle(msg).await;
         assert!(matches!(res, Err(HandlerError::NonRetryable(_))));
+    }
+
+    #[tokio::test]
+    async fn test_cqrs_pattern_example() {
+        #[derive(Serialize, Deserialize)]
+        struct SubmitOrder {
+            id: u32,
+        }
+
+        #[derive(Serialize, Deserialize)]
+        struct OrderSubmitted {
+            id: u32,
+        }
+
+        // 1. Command Handler (Write Side)
+        let command_bus = TypeHandler::new().add("submit_order", |cmd: SubmitOrder| async move {
+            // Execute business logic...
+            // Emit event
+            let evt = OrderSubmitted { id: cmd.id };
+            Ok(Handled::Publish(
+                CanonicalMessage::from_type(&evt)
+                    .unwrap()
+                    .with_type_key("order_submitted"),
+            ))
+        });
+
+        // 2. Event Handler (Read Side / Projection)
+        let projection_handler =
+            TypeHandler::new().add("order_submitted", |evt: OrderSubmitted| async move {
+                // Update read database / cache
+                assert_eq!(evt.id, 101);
+                Ok(Handled::Ack)
+            });
+
+        // Simulate incoming command
+        let cmd = SubmitOrder { id: 101 };
+        let cmd_msg = CanonicalMessage::from_type(&cmd)
+            .unwrap()
+            .with_type_key("submit_order");
+
+        // Process command
+        let result = command_bus.handle(cmd_msg).await.unwrap();
+
+        if let Handled::Publish(event_msg) = result {
+            // Verify event type
+            assert_eq!(
+                event_msg.metadata.get("kind").map(|s| s.as_str()),
+                Some("order_submitted")
+            );
+
+            // Process event (Projection)
+            let proj_result = projection_handler.handle(event_msg).await.unwrap();
+            assert!(matches!(proj_result, Handled::Ack));
+        } else {
+            panic!("Expected Handled::Publish");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_cqrs_integration_with_routes() {
+        use crate::endpoints::memory::get_or_create_channel;
+        use crate::models::{Endpoint, EndpointType, MemoryConfig, Route};
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        #[derive(Serialize, Deserialize)]
+        struct SubmitOrder {
+            id: u32,
+        }
+
+        #[derive(Serialize, Deserialize)]
+        struct OrderSubmitted {
+            id: u32,
+        }
+
+        // Shared state to verify projection update
+        let read_model_state = Arc::new(AtomicU32::new(0));
+        let read_model_clone = read_model_state.clone();
+
+        // 1. Command Handler (Write Side)
+        let command_handler =
+            TypeHandler::new().add("submit_order", |cmd: SubmitOrder| async move {
+                let evt = OrderSubmitted { id: cmd.id };
+                Ok(Handled::Publish(
+                    CanonicalMessage::from_type(&evt)
+                        .unwrap()
+                        .with_type_key("order_submitted"),
+                ))
+            });
+
+        // 2. Event Handler (Read Side)
+        let event_handler =
+            TypeHandler::new().add("order_submitted", move |evt: OrderSubmitted| {
+                let state = read_model_clone.clone();
+                async move {
+                    state.store(evt.id, Ordering::SeqCst);
+                    Ok(Handled::Ack)
+                }
+            });
+
+        // 3. Define Endpoints & Routes
+        let cmd_in_cfg = MemoryConfig {
+            topic: "cmd_in".to_string(),
+            capacity: Some(10),
+        };
+        let event_bus_cfg = MemoryConfig {
+            topic: "event_bus".to_string(),
+            capacity: Some(10),
+        };
+        let proj_out_cfg = MemoryConfig {
+            topic: "proj_out".to_string(),
+            capacity: Some(10),
+        };
+
+        let cmd_in_ep = Endpoint::new(EndpointType::Memory(cmd_in_cfg.clone()));
+        let event_bus_ep = Endpoint::new(EndpointType::Memory(event_bus_cfg.clone()));
+        let proj_out_ep = Endpoint::new(EndpointType::Memory(proj_out_cfg.clone()));
+
+        let command_route =
+            Route::new(cmd_in_ep.clone(), event_bus_ep.clone()).with_handler(command_handler);
+
+        let event_route =
+            Route::new(event_bus_ep.clone(), proj_out_ep.clone()).with_handler(event_handler);
+
+        // 4. Run Routes
+        let h1 =
+            tokio::spawn(async move { command_route.run_until_err("command_route", None).await });
+        let h2 = tokio::spawn(async move { event_route.run_until_err("event_route", None).await });
+
+        // 5. Send Command
+        let cmd_channel = get_or_create_channel(&cmd_in_cfg);
+        let cmd = SubmitOrder { id: 777 };
+        let msg = CanonicalMessage::from_type(&cmd)
+            .unwrap()
+            .with_type_key("submit_order");
+        cmd_channel.send_message(msg).await.unwrap();
+
+        // 6. Wait for consistency
+        let mut attempts = 0;
+        while read_model_state.load(Ordering::SeqCst) != 777 && attempts < 50 {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            attempts += 1;
+        }
+
+        assert_eq!(read_model_state.load(Ordering::SeqCst), 777);
+
+        // Cleanup
+        cmd_channel.close();
+        let event_channel = get_or_create_channel(&event_bus_cfg);
+        event_channel.close();
+
+        let _ = h1.await;
+        let _ = h2.await;
     }
 }

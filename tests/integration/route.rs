@@ -41,7 +41,7 @@ async fn test_route_with_typed_handler_success() {
 
     let canonical_message = CanonicalMessage::from_type(&message)
         .unwrap()
-        .with_metadata_kv("kind", "my_message");
+        .with_type_key("my_message");
 
     in_channel.send_message(canonical_message).await.unwrap();
     in_channel.close();
@@ -70,8 +70,8 @@ async fn test_route_with_typed_handler_failure_deserialization() {
     let out_channel = route.output.channel().unwrap();
 
     // Send a message that will fail to deserialize into MyTypedMessage
-    let canonical_message = CanonicalMessage::new("invalid json".as_bytes().to_vec(), None)
-        .with_metadata_kv("kind", "my_message");
+    let canonical_message =
+        CanonicalMessage::new("invalid json".as_bytes().to_vec(), None).with_type_key("my_message");
 
     in_channel.send_message(canonical_message).await.unwrap();
     in_channel.close();
@@ -112,7 +112,7 @@ async fn test_route_with_typed_handler_failure_handler() {
 
     let canonical_message = CanonicalMessage::from_type(&message)
         .unwrap()
-        .with_metadata_kv("kind", "my_message");
+        .with_type_key("my_message");
 
     in_channel.send_message(canonical_message).await.unwrap();
     in_channel.close();

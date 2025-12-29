@@ -1,10 +1,11 @@
 # mq-bridge
-`mq-bridge` is an asynchronous message bridging library for Rust. It connects different messaging systems, data stores, and protocols. It is built on Tokio and supports patterns like retries, dead-letter queues, and message deduplication.
+`mq-bridge` is an asynchronous message bridging library for Rust. It connects different messaging systems, data stores, and protocols. Unlike a classic bridge that simply forwards messages, `mq-bridge` acts as a **programmable integration layer**, allowing for transformation, filtering, handling, and complex routing. It is built on Tokio and supports patterns like retries, dead-letter queues, and message deduplication.
 
 ## Features
 
 *   **Supported Backends**: Kafka, NATS, AMQP (RabbitMQ), MQTT, MongoDB, HTTP, Files, and in-memory channels.
 *   **Configuration**: Routes can be defined via YAML or environment variables.
+*   **Programmable Logic**: Inject custom Rust handlers to transform or filter messages in-flight.
 *   **Middleware**:
     *   **Retries**: Exponential backoff for transient failures.
     *   **Dead-Letter Queues (DLQ)**: Redirect failed messages.
@@ -57,11 +58,11 @@ use mq_bridge::{CanonicalMessage, Handled};
 use std::sync::Arc;
 
 // Define a handler that transforms the message payload
-let command_handler = Arc::new(|mut msg: CanonicalMessage| async move {
+let command_handler = |mut msg: CanonicalMessage| async move {
     let new_payload = format!("handled_{}", String::from_utf8_lossy(&msg.payload));
     msg.payload = new_payload.into();
     Ok(Handled::Publish(msg))
-});
+};
 
 // Attach the handler to a route
 // let route = Route { ... }.with_handler(command_handler);
@@ -92,19 +93,17 @@ struct DeleteUser {
 }
 
 // 2. Create a TypeHandler and register your typed handlers
-let typed_handler = Arc::new(
-    TypeHandler::new()
-        .add("create_user", |cmd: CreateUser| async move {
-            println!("Handling create_user: {}, {}", cmd.id, cmd.username);
-            // ... your logic here
-            Ok(Handled::Ack)
-        })
-        .add("delete_user", |cmd: DeleteUser| async move {
-            println!("Handling delete_user: {}", cmd.id);
-            // ... your logic here
-            Ok(Handled::Ack)
-        }),
-);
+let typed_handler = TypeHandler::new()
+    .add("create_user", |cmd: CreateUser| async move {
+        println!("Handling create_user: {}, {}", cmd.id, cmd.username);
+        // ... your logic here
+        Ok(Handled::Ack)
+    })
+    .add("delete_user", |cmd: DeleteUser| async move {
+        println!("Handling delete_user: {}", cmd.id);
+        // ... your logic here
+        Ok(Handled::Ack)
+    });
 
 // 3. Attach the handler to a route
 // let route = Route { ... }.with_handler(typed_handler);
@@ -142,7 +141,7 @@ async fn main() {
     let input = Endpoint::new_memory("route_in", 200);
     let output = Endpoint::new_memory("route_out", 200);
     let route = Route::new(input, output)
-        .with_handler(Arc::new(handler));
+        .with_handler(handler);
 
     // 4. Inject Data
     let input_channel = route.input.channel().unwrap();
@@ -164,6 +163,31 @@ async fn main() {
     assert_eq!(msgs[0].get_payload_str(), "modified hello");
 }
 ```
+
+## Patterns: CQRS 
+mq-bridge is well-suited for implementing Command Query Responsibility Segregation (CQRS). By combining Routes with Typed Handlers, the bridge serves as both the Command Bus and the Event Bus. 
+* Command Bus: An input source (e.g., HTTP) receives a command. A TypeHandler processes it (Write Model) and optionally emits an event. 
+* Event Bus: The emitted event is published to a broker (e.g., Kafka). Downstream routes subscribe to these events to update Read Models (Projections). 
+
+```rust 
+// 1. Command Handler (Write Side) 
+let command_bus = TypeHandler::new()
+    .add("submit_order", |cmd: SubmitOrder| async move {
+        // Execute business logic, save to DB...
+        // Emit event
+        let evt = OrderSubmitted { id: cmd.id };
+        Ok(Handled::Publish(
+            CanonicalMessage::from_type(evt).unwrap()
+                .with_type_key("order_submitted")
+        ))
+});
+
+// 2. Event Handler (Read Side / Projection) 
+let projection_handler = TypeHandler::new()
+    .add("order_submitted", |evt: OrderSubmitted| async move {
+        // Update read database / cache
+        Ok(Handled::Ack)
+}); 
 
 ## Configuration Details
 
@@ -239,6 +263,9 @@ To run the criterion benchmarks:
 ```sh
 cargo bench --features "full"
 ```
+Unfortuntately, the results of `cargo bench` are not really meaningfull yet. 
+The times are not stable yet, it is therefore recommended to perform the 
+integration performance test.
 
 ## License
 `mq-bridge` is licensed under the MIT License.

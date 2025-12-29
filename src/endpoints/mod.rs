@@ -19,8 +19,8 @@ pub mod mqtt;
 #[cfg(feature = "nats")]
 pub mod nats;
 pub mod null;
-pub mod switch;
 pub mod static_endpoint;
+pub mod switch;
 use crate::middleware::apply_middlewares_to_consumer;
 use crate::models::{Endpoint, EndpointType};
 use crate::traits::{MessageConsumer, MessagePublisher};
