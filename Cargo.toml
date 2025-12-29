@@ -6,7 +6,7 @@ description = "An asynchronous message bridging library connecting Kafka, MQTT, 
 repository = "https://github.com/marcomq/mq-bridge"
 license = "MIT"
 readme = "README.md"
-keywords = ["bridge", "messaging", "kafka", "nats", "amqp", "cqrs"]
+keywords = ["messaging", "kafka", "nats", "amqp", "cqrs"]
 categories = ["asynchronous", "network-programming"]
 
 [dependencies]
