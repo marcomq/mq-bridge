@@ -278,7 +278,7 @@ impl Drop for PerformanceSummaryPrinter {
                 format_pretty(result.single_read_performance)
             );
         }
-        println!("---------------------------------------------------------------------------------------\n");
+        println!("-------------------------------------------------------------------------------------------------\n");
     }
 }
 /// A test harness that manages the lifecycle of Docker containers for a single test.
@@ -372,7 +372,7 @@ where
     }
 }
 
-pub const PERF_TEST_MESSAGE_COUNT: usize = 20_000;
+pub const PERF_TEST_MESSAGE_COUNT: usize = 50_000;
 pub const PERF_TEST_CONCURRENCY: usize = 100;
 
 pub fn generate_message() -> CanonicalMessage {

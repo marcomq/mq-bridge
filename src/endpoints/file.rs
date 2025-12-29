@@ -63,12 +63,21 @@ impl MessagePublisher for FilePublisher {
 
         // Iterate over messages, consuming them
         for msg in messages {
-            let serialized_msg = match serde_json::to_vec(&msg) {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::error!("Failed to serialize message for file sink: {}", e);
-                    failed_messages.push((msg, PublisherError::NonRetryable(anyhow::anyhow!(e))));
-                    continue;
+            let serialized_msg = if msg
+                .metadata
+                .get("mq_bridge.original_format")
+                .map(|s| s.as_str())
+                == Some("raw")
+            {
+                msg.payload.to_vec()
+            } else {
+                match serde_json::to_vec(&msg) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::error!("Failed to serialize message for file sink: {}", e);
+                        failed_messages.push((msg, PublisherError::NonRetryable(anyhow::anyhow!(e))));
+                        continue;
+                    }
                 }
             };
             if let Err(e) = writer.write_all(&serialized_msg).await {
@@ -149,12 +158,21 @@ impl MessageConsumer for FileConsumer {
             return Err(ConsumerError::EndOfStream);
         }
 
-        let message: CanonicalMessage = serde_json::from_slice(&buffer).with_context(|| {
-            format!(
-                "Failed to deserialize message from file: {}",
-                String::from_utf8_lossy(&buffer)
-            )
-        })?;
+        if buffer.ends_with(b"\n") {
+            buffer.pop();
+        }
+
+        let message = match serde_json::from_slice::<CanonicalMessage>(&buffer) {
+            Ok(msg) => msg,
+            Err(_) => {
+                let mut msg = CanonicalMessage::new(buffer, None);
+                msg.metadata.insert(
+                    "mq_bridge.original_format".to_string(),
+                    "raw".to_string(),
+                );
+                msg
+            }
+        };
 
         // The commit for a file source is a no-op.
         let commit = Box::new(move |_| Box::pin(async move {}) as BoxFuture<'static, ()>);
