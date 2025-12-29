@@ -23,7 +23,7 @@ pub mod static_endpoint;
 pub mod switch;
 use crate::middleware::apply_middlewares_to_consumer;
 use crate::models::{Endpoint, EndpointType};
-use crate::traits::{MessageConsumer, MessagePublisher};
+use crate::traits::{BoxFuture, MessageConsumer, MessagePublisher};
 use anyhow::{anyhow, Result};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -173,26 +173,28 @@ pub async fn create_publisher_from_route(
     create_publisher_with_depth(route_name, endpoint, 0).await
 }
 
-async fn create_publisher_with_depth(
-    route_name: &str,
-    endpoint: &Endpoint,
+fn create_publisher_with_depth<'a>(
+    route_name: &'a str,
+    endpoint: &'a Endpoint,
     depth: usize,
-) -> Result<Arc<dyn MessagePublisher>> {
-    const MAX_DEPTH: usize = 16;
-    if depth > MAX_DEPTH {
-        return Err(anyhow!(
-            "Fanout recursion depth exceeded limit of {}",
-            MAX_DEPTH
-        ));
-    }
-    let mut publisher = create_base_publisher(route_name, &endpoint.endpoint_type, depth).await?;
-    if let Some(handler) = &endpoint.handler {
-        publisher = Box::new(crate::command_handler::CommandPublisher::new(
-            publisher,
-            handler.clone(),
-        ));
-    }
-    crate::middleware::apply_middlewares_to_publisher(publisher, endpoint, route_name).await
+) -> BoxFuture<'a, Result<Arc<dyn MessagePublisher>>> {
+    Box::pin(async move {
+        const MAX_DEPTH: usize = 16;
+        if depth > MAX_DEPTH {
+            return Err(anyhow!(
+                "Fanout recursion depth exceeded limit of {}",
+                MAX_DEPTH
+            ));
+        }
+        let mut publisher = create_base_publisher(route_name, &endpoint.endpoint_type, depth).await?;
+        if let Some(handler) = &endpoint.handler {
+            publisher = Box::new(crate::command_handler::CommandPublisher::new(
+                publisher,
+                handler.clone(),
+            ));
+        }
+        crate::middleware::apply_middlewares_to_publisher(publisher, endpoint, route_name).await
+    })
 }
 
 async fn create_base_publisher(
@@ -264,7 +266,7 @@ async fn create_base_publisher(
             let mut publishers = Vec::with_capacity(endpoints.len());
             for endpoint in endpoints {
                 let p =
-                    Box::pin(create_publisher_with_depth(route_name, endpoint, depth + 1)).await?;
+                    create_publisher_with_depth(route_name, endpoint, depth + 1).await?;
                 publishers.push(p);
             }
             Ok(Box::new(fanout::FanoutPublisher::new(publishers)) as Box<dyn MessagePublisher>)
@@ -273,11 +275,11 @@ async fn create_base_publisher(
             let mut cases = std::collections::HashMap::new();
             for (key, endpoint) in &cfg.cases {
                 let p =
-                    Box::pin(create_publisher_with_depth(route_name, endpoint, depth + 1)).await?;
+                    create_publisher_with_depth(route_name, endpoint, depth + 1).await?;
                 cases.insert(key.clone(), p);
             }
             let default = if let Some(endpoint) = &cfg.default {
-                Some(Box::pin(create_publisher_with_depth(route_name, endpoint, depth + 1)).await?)
+                Some(create_publisher_with_depth(route_name, endpoint, depth + 1).await?)
             } else {
                 None
             };

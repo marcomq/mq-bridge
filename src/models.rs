@@ -20,6 +20,7 @@ pub type Config = HashMap<String, Route>;
 
 /// Defines a single message processing route from an input to an output.
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Route {
     /// (Optional) Number of concurrent processing tasks for this route. Defaults to 1.
@@ -70,6 +71,7 @@ fn default_multiplier() -> f64 {
 
 /// Represents a connection point for messages, which can be a source (input) or a sink (output).
 #[derive(Serialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Endpoint {
     /// (Optional) A list of middlewares to apply to the endpoint.
@@ -84,6 +86,7 @@ pub struct Endpoint {
     pub endpoint_type: EndpointType,
 
     #[serde(skip_serializing)]
+    #[cfg_attr(feature = "schema", schemars(skip))]
     pub handler: Option<Arc<dyn Handler>>,
 }
 
@@ -235,6 +238,7 @@ fn deserialize_middlewares_from_value(value: serde_json::Value) -> anyhow::Resul
 /// `#[serde(rename_all = "lowercase")]` ensures that the keys in the config (e.g., "kafka")
 /// match the enum variants.
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum EndpointType {
     Kafka(KafkaEndpoint),
@@ -255,6 +259,7 @@ pub enum EndpointType {
 
 /// An enumeration of all supported middleware types.
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum Middleware {
     Deduplication(DeduplicationMiddleware),
@@ -268,6 +273,7 @@ pub enum Middleware {
 
 /// Deduplication middleware configuration.
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct DeduplicationMiddleware {
     pub sled_path: String,
@@ -277,11 +283,13 @@ pub struct DeduplicationMiddleware {
 /// Metrics middleware configuration. It's currently a struct without fields
 /// but can be extended later. Its presence in the config enables the middleware.
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct MetricsMiddleware {}
 
 /// Dead-Letter Queue (DLQ) middleware configuration.
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct DeadLetterQueueMiddleware {
     pub endpoint: Endpoint,
@@ -297,6 +305,7 @@ pub struct DeadLetterQueueMiddleware {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct RetryMiddleware {
     #[serde(default = "default_retry_attempts")]
@@ -310,6 +319,7 @@ pub struct RetryMiddleware {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct RandomPanicMiddleware {
     #[serde(deserialize_with = "deserialize_probability")]
@@ -333,6 +343,7 @@ where
 
 /// Kafka endpoint configuration, combining connection and topic details.
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct KafkaEndpoint {
     pub topic: Option<String>,
@@ -342,6 +353,7 @@ pub struct KafkaEndpoint {
 
 /// General Kafka connection configuration.
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct KafkaConfig {
     pub brokers: String,
@@ -363,6 +375,7 @@ pub struct KafkaConfig {
 
 /// NATS endpoint configuration, combining connection and subject details.
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct NatsEndpoint {
     pub subject: Option<String>,
@@ -373,6 +386,7 @@ pub struct NatsEndpoint {
 
 /// General NATS connection configuration.
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct NatsConfig {
     pub url: String,
@@ -392,6 +406,7 @@ pub struct NatsConfig {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum ConsumerMode {
     #[default]
@@ -400,6 +415,7 @@ pub enum ConsumerMode {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct MemoryConfig {
     pub topic: String,
@@ -410,6 +426,7 @@ pub struct MemoryConfig {
 
 /// AMQP endpoint configuration, combining connection and queue details.
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct AmqpEndpoint {
     pub queue: Option<String>,
@@ -419,6 +436,7 @@ pub struct AmqpEndpoint {
 
 /// General AMQP connection configuration.
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct AmqpConfig {
     pub url: String,
@@ -439,6 +457,7 @@ pub struct AmqpConfig {
 
 /// MongoDB endpoint configuration.
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct MongoDbEndpoint {
     pub collection: Option<String>,
@@ -448,6 +467,7 @@ pub struct MongoDbEndpoint {
 
 /// General MongoDB connection configuration.
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct MongoDbConfig {
     pub url: String,
@@ -460,6 +480,7 @@ pub struct MongoDbConfig {
 
 /// MQTT endpoint configuration.
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct MqttEndpoint {
     pub topic: Option<String>,
@@ -469,6 +490,7 @@ pub struct MqttEndpoint {
 
 /// General MQTT connection configuration.
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct MqttConfig {
     pub url: String,
@@ -487,6 +509,7 @@ pub struct MqttConfig {
 
 /// HTTP endpoint configuration.
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct HttpEndpoint {
     #[serde(flatten)]
@@ -495,6 +518,7 @@ pub struct HttpEndpoint {
 
 /// General HTTP connection configuration.
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct HttpConfig {
     pub url: Option<String>,
@@ -506,6 +530,7 @@ pub struct HttpConfig {
 // --- Switch/Router Configuration ---
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct SwitchConfig {
     pub metadata_key: String,
@@ -517,6 +542,7 @@ pub struct SwitchConfig {
 
 /// TLS configuration for secure connections.
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct TlsConfig {
     pub required: bool,
@@ -801,5 +827,20 @@ null_route:
         let config: Config = serde_yaml_ng::from_str(yaml).expect("Failed to parse YAML");
         let route = config.get("null_route").expect("Route not found");
         assert!(matches!(route.output.endpoint_type, EndpointType::Null));
+    }
+}
+
+#[cfg(all(test, feature = "schema"))]
+mod schema_tests {
+    use super::*;
+
+    #[test]
+    fn generate_json_schema() {
+        let schema = schemars::schema_for!(Config);
+        let schema_json = serde_json::to_string_pretty(&schema).unwrap();
+
+        let mut path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        path.push("mq-bridge.schema.json");
+        std::fs::write(path, schema_json).expect("Failed to write schema file");
     }
 }

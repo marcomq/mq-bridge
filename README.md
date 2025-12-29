@@ -325,6 +325,19 @@ output:
         path: "/var/data/unroutable_orders.log"
 ```
 
+### IDE Support (Schema Validation) 
+mq-bridge includes a JSON schema for configuration validation and auto-completion. 
+1. Ensure you have a YAML plugin installed (e.g., YAML for VS Code). 
+2. Configure your editor to reference the schema. For VS Code, add this to .vscode/settings.json: 
+```json 
+{ 
+  "yaml.schemas": { 
+    "https://raw.githubusercontent.com/marcomq/mq-bridge/main/mq-bridge.schema.json": ["mq-bridge.yaml", "config.yaml"]
+  } 
+} 
+```
+To regenerate the schema from this repo, run: `cargo test --features schema`
+
 ## Running Tests
 The project includes a comprehensive suite of integration and performance tests that require Docker.
 
