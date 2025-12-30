@@ -402,13 +402,14 @@ impl NatsCore {
 
                     // Greedily fetch the rest of the batch
                     while canonical_messages.len() < max_messages {
-                        if let Ok(Some(message)) = stream.try_next().await {
-                            let sequence = message.info().ok().map(|meta| meta.stream_sequence);
-                            canonical_messages
-                                .push(create_nats_canonical_message(&message, sequence));
-                            jetstream_messages.push(message);
-                        } else {
-                            break; // No more messages in the buffer
+                        match stream.try_next().now_or_never() {
+                            Some(Ok(Some(message))) => {
+                                let sequence = message.info().ok().map(|meta| meta.stream_sequence);
+                                canonical_messages
+                                    .push(create_nats_canonical_message(&message, sequence));
+                                jetstream_messages.push(message);
+                            }
+                            _ => break, // No more messages in the buffer or stream ended/errored
                         }
                     }
                 }

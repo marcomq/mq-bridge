@@ -10,15 +10,15 @@ const PERF_TEST_MESSAGE_COUNT_DIRECT: usize = 20_000;
 const CONFIG_YAML: &str = r#"
 routes:
   memory_to_nats:
-    in:
+    input:
       memory: { topic: "test-in-nats" }
-    out:
-      nats: { url: "nats://localhost:4222", subject: "test-stream.pipeline", stream: "test-stream", delayed_ack: false }
+    output:
+      nats: { url: "nats://localhost:4222", subject: "test-stream.pipeline", stream: "test-stream" }
 
   nats_to_memory:
-    in:
-      nats: { url: "nats://localhost:4222", subject: "test-stream.pipeline", stream: "test-stream", delayed_ack: false  }
-    out:
+    input:
+      nats: { url: "nats://localhost:4222", subject: "test-stream.pipeline", stream: "test-stream" }
+    output:
       memory: { topic: "test-out-nats", capacity: {out_capacity} }
 "#;
 
@@ -53,7 +53,6 @@ pub async fn test_nats_performance_direct() {
         let subject = "perf_nats_direct.subject";
         let config = mq_bridge::models::NatsConfig {
             url: "nats://localhost:4222".to_string(),
-            delayed_ack: false,
             ..Default::default()
         };
 

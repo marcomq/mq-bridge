@@ -11,15 +11,15 @@ use mq_bridge::endpoints::mongodb::{MongoDbConsumer, MongoDbPublisher};
 const CONFIG_YAML: &str = r#"
 routes:
   memory_to_mongodb:
-    in:
+    input:
       memory: { topic: "test-in-mongodb" }
-    out:
+    output:
       mongodb: { url: "mongodb://localhost:27017", database: "mq_bridge_test", collection: "test_collection" }
 
   mongodb_to_memory:
-    in:
+    input:
       mongodb: { url: "mongodb://localhost:27017", database: "mq_bridge_test", collection: "test_collection" }
-    out:
+    output:
       memory: { topic: "test-out-mongodb", capacity: {out_capacity} }
 "#;
 

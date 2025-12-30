@@ -6,7 +6,7 @@ use crate::traits::{
 use crate::CanonicalMessage;
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;
-use futures::{StreamExt, TryStreamExt};
+use futures::{FutureExt, StreamExt, TryStreamExt};
 use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
 use rdkafka::message::OwnedHeaders;
 use rdkafka::producer::{FutureProducer, FutureRecord, Producer};
@@ -469,8 +469,8 @@ async fn receive_batch_internal(
         // If we got one message, greedily consume any others that are already buffered.
         if !messages.is_empty() {
             for _ in 1..max_messages {
-                match stream.try_next().await {
-                    Ok(Some(message)) => {
+                match stream.try_next().now_or_never() {
+                    Some(Ok(Some(message))) => {
                         process_message(message, &mut messages, &mut last_offset_tpl)?;
                     }
                     _ => {

@@ -9,15 +9,15 @@ metrics:
 
 routes:
   memory_to_internal:
-    in:
+    input:
       memory: { topic: "test-in-internal" }
-    out:
+    output:
       memory: { topic: "test-inntermediate-memory", capacity: {out_capacity} }
 
   internal_to_memory:
-    in:
+    input:
       memory: { topic: "test-inntermediate-memory", capacity: {out_capacity}  }
-    out:
+    output:
       memory: { topic: "test-out-internal", capacity: {out_capacity} }
 "#;
 
@@ -27,5 +27,5 @@ pub async fn test_memory_performance_pipeline() {
         "{out_capacity}",
         &(PERF_TEST_MESSAGE_COUNT + 1000).to_string(),
     );
-    run_performance_pipeline_test("memory", &config_yaml, PERF_TEST_MESSAGE_COUNT).await;
+    run_performance_pipeline_test("internal", &config_yaml, PERF_TEST_MESSAGE_COUNT).await;
 }

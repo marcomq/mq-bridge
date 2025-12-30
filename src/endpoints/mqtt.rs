@@ -12,9 +12,7 @@ use rumqttc::v5::mqttbytes::QoS as QoSV5;
 use rumqttc::v5::{
     AsyncClient as AsyncClientV5, EventLoop as EventLoopV5, MqttOptions as MqttOptionsV5,
 };
-use rumqttc::{
-    tokio_rustls::rustls, AsyncClient, Event, MqttOptions, QoS, Transport,
-};
+use rumqttc::{tokio_rustls::rustls, AsyncClient, Event, MqttOptions, QoS, Transport};
 use std::sync::Arc;
 use std::time::Duration;
 use std::{any::Any, future::Future};
@@ -45,7 +43,12 @@ impl Client {
         }
     }
 
-    async fn publish(&self, topic: &str, qos: QoS, message: CanonicalMessage) -> anyhow::Result<()> {
+    async fn publish(
+        &self,
+        topic: &str,
+        qos: QoS,
+        message: CanonicalMessage,
+    ) -> anyhow::Result<()> {
         match self {
             Client::V5(client) => {
                 let mut props = PublishProperties::default();
@@ -59,7 +62,9 @@ impl Client {
             }
             Client::V3(client) => {
                 if !message.metadata.is_empty() {
-                    warn!("MQTT protocol is V3, but message has metadata. Metadata will be dropped.");
+                    warn!(
+                        "MQTT protocol is V3, but message has metadata. Metadata will be dropped."
+                    );
                 }
                 client
                     .publish(topic, qos, false, message.payload)
@@ -126,18 +131,27 @@ impl MessagePublisher for MqttPublisher {
             "Publishing MQTT message"
         );
 
-        self.client.publish(&self.topic, self.qos, message).await.context("Failed to publish MQTT message")?;
+        self.client
+            .publish(&self.topic, self.qos, message)
+            .await
+            .context("Failed to publish MQTT message")?;
         Ok(Sent::Ack)
     }
 
-    async fn send_batch(&self, messages: Vec<CanonicalMessage>) -> Result<SentBatch, PublisherError> {
+    async fn send_batch(
+        &self,
+        messages: Vec<CanonicalMessage>,
+    ) -> Result<SentBatch, PublisherError> {
         for message in messages {
             tracing::trace!(
                 payload = %String::from_utf8_lossy(&message.payload),
                 "Publishing MQTT message"
             );
 
-            self.client.publish(&self.topic, self.qos, message).await.context("Failed to publish MQTT message")?;
+            self.client
+                .publish(&self.topic, self.qos, message)
+                .await
+                .context("Failed to publish MQTT message")?;
         }
         Ok(SentBatch::Ack)
     }
@@ -214,21 +228,17 @@ impl Drop for MqttListener {
 #[async_trait]
 impl MessageConsumer for MqttListener {
     async fn receive(&mut self) -> Result<Received, ConsumerError> {
-        let p = self
-            .message_rx
-            .recv()
-            .await
-            .ok_or_else(|| {
-                anyhow!(
-                    "MQTT {} channel closed",
-                    if self.log_noun == "message" {
-                        "source"
-                    } else {
-                        "subscriber"
-                    }
-                )
-            })?;
-        
+        let p = self.message_rx.recv().await.ok_or_else(|| {
+            anyhow!(
+                "MQTT {} channel closed",
+                if self.log_noun == "message" {
+                    "source"
+                } else {
+                    "subscriber"
+                }
+            )
+        })?;
+
         let topic_for_trace = p.topic().to_string();
         let canonical_message = p.to_canonical();
         let log_noun = self.log_noun;
@@ -246,20 +256,16 @@ impl MessageConsumer for MqttListener {
     }
 
     async fn receive_batch(&mut self, max_messages: usize) -> Result<ReceivedBatch, ConsumerError> {
-        let first = self
-            .message_rx
-            .recv()
-            .await
-            .ok_or_else(|| {
-                anyhow!(
-                    "MQTT {} channel closed",
-                    if self.log_noun == "message" {
-                        "source"
-                    } else {
-                        "subscriber"
-                    }
-                )
-            })?;
+        let first = self.message_rx.recv().await.ok_or_else(|| {
+            anyhow!(
+                "MQTT {} channel closed",
+                if self.log_noun == "message" {
+                    "source"
+                } else {
+                    "subscriber"
+                }
+            )
+        })?;
 
         let mut messages = Vec::with_capacity(max_messages);
         messages.push(first.to_canonical());
@@ -279,10 +285,7 @@ impl MessageConsumer for MqttListener {
             }) as BoxFuture<'static, ()>
         });
 
-        Ok(ReceivedBatch {
-            messages,
-            commit,
-        })
+        Ok(ReceivedBatch { messages, commit })
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -378,8 +381,8 @@ macro_rules! impl_eventloop_runner {
             consumer_info: Option<($client_type, String, QoS, mpsc::Sender<ReceivedMessage>)>,
             mut ready_tx: Option<oneshot::Sender<Result<(), anyhow::Error>>>,
         ) {
-            use $incoming_path as Incoming;
             use $event_path as MqttEvent;
+            use $incoming_path as Incoming;
             loop {
                 match eventloop.poll().await {
                     Ok(MqttEvent::Incoming(Incoming::ConnAck(ack))) => {
@@ -424,7 +427,10 @@ macro_rules! impl_eventloop_runner {
                         trace!("MQTT {} received event: {:?}", client_type, event);
                     }
                     Err(e) => {
-                        error!("MQTT {} eventloop error: {}. Reconnecting...", client_type, e);
+                        error!(
+                            "MQTT {} eventloop error: {}. Reconnecting...",
+                            client_type, e
+                        );
                         if let Some(tx) = ready_tx.take() {
                             let _ = tx.send(Err(e.into()));
                         }

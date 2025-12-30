@@ -186,7 +186,8 @@ fn create_publisher_with_depth<'a>(
                 MAX_DEPTH
             ));
         }
-        let mut publisher = create_base_publisher(route_name, &endpoint.endpoint_type, depth).await?;
+        let mut publisher =
+            create_base_publisher(route_name, &endpoint.endpoint_type, depth).await?;
         if let Some(handler) = &endpoint.handler {
             publisher = Box::new(crate::command_handler::CommandPublisher::new(
                 publisher,
@@ -265,8 +266,7 @@ async fn create_base_publisher(
         EndpointType::Fanout(endpoints) => {
             let mut publishers = Vec::with_capacity(endpoints.len());
             for endpoint in endpoints {
-                let p =
-                    create_publisher_with_depth(route_name, endpoint, depth + 1).await?;
+                let p = create_publisher_with_depth(route_name, endpoint, depth + 1).await?;
                 publishers.push(p);
             }
             Ok(Box::new(fanout::FanoutPublisher::new(publishers)) as Box<dyn MessagePublisher>)
@@ -274,8 +274,7 @@ async fn create_base_publisher(
         EndpointType::Switch(cfg) => {
             let mut cases = std::collections::HashMap::new();
             for (key, endpoint) in &cfg.cases {
-                let p =
-                    create_publisher_with_depth(route_name, endpoint, depth + 1).await?;
+                let p = create_publisher_with_depth(route_name, endpoint, depth + 1).await?;
                 cases.insert(key.clone(), p);
             }
             let default = if let Some(endpoint) = &cfg.default {

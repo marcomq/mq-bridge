@@ -55,15 +55,18 @@ impl TryFrom<MongoMessageRaw> for CanonicalMessage {
 fn document_to_canonical(doc: Document) -> anyhow::Result<CanonicalMessage> {
     let payload = serde_json::to_vec(&doc)?;
     let mut msg = CanonicalMessage::new(payload, None);
-    msg.metadata.insert(
-        "mq_bridge.original_format".to_string(),
-        "raw".to_string(),
-    );
+    msg.metadata
+        .insert("mq_bridge.original_format".to_string(), "raw".to_string());
     Ok(msg)
 }
 
 fn message_to_document(message: &CanonicalMessage) -> anyhow::Result<Document> {
-    if message.metadata.get("mq_bridge.original_format").map(|s| s.as_str()) == Some("raw") {
+    if message
+        .metadata
+        .get("mq_bridge.original_format")
+        .map(|s| s.as_str())
+        == Some("raw")
+    {
         if let Ok(doc) = serde_json::from_slice::<Document>(&message.payload) {
             return Ok(doc);
         }

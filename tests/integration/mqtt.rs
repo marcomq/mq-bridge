@@ -10,15 +10,15 @@ use uuid::Uuid;
 const CONFIG_YAML: &str = r#"
 routes:
   memory_to_mqtt:
-    in:
+    input:
       memory: { topic: "test-in-mqtt" }
-    out:
+    output:
       mqtt: { url: "mqtt://localhost:1883", topic: "test_topic_mqtt" }
 
   mqtt_to_memory:
-    in:
+    input:
       mqtt: { url: "mqtt://localhost:1883", topic: "test_topic_mqtt" }
-    out:
+    output:
       memory: { topic: "test-out-mqtt", capacity: {out_capacity} }
 "#;
 

@@ -10,15 +10,24 @@ use std::sync::Arc;
 const CONFIG_YAML: &str = r#"
 routes:
   memory_to_kafka:
-    in:
+    input:
       memory: { topic: "kafka-test-in" }
-    out:
-      kafka: { brokers: "localhost:9092", topic: "test_topic_kafka" }
+    output:
+      kafka: 
+        brokers: "localhost:9092"
+        topic: "test_topic_kafka"
+        producer_options: 
+            - ["queue.buffering.max.ms", "50"]
+            - ["acks", "1"]
+            - ["compression.type", "snappy"]
 
   kafka_to_memory:
-    in:
-      kafka: { brokers: "localhost:9092", topic: "test_topic_kafka", group_id: "test_group" }
-    out:
+    input:
+      kafka:
+        brokers: "localhost:9092"
+        topic: "test_topic_kafka"
+        group_id: "test_group"
+    output:
       memory: { topic: "kafka-test-out", capacity: {out_capacity} }
 "#;
 

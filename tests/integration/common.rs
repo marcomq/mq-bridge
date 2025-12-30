@@ -12,7 +12,6 @@ use std::process::Command;
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tempfile::tempdir;
 
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::filter::EnvFilter;
@@ -85,6 +84,7 @@ impl DockerCompose {
             .arg("-f")
             .arg(&self.compose_file)
             .arg("down")
+            .arg("-v")
             .stdout(std::process::Stdio::inherit())
             .stderr(std::process::Stdio::inherit())
             .status()
@@ -113,7 +113,6 @@ pub fn generate_test_messages(num_messages: usize) -> Vec<CanonicalMessage> {
 
 /// A test harness to simplify integration testing of bridge pipelines.
 struct TestHarness {
-    _temp_dir: tempfile::TempDir,
     in_channel: MemoryChannel,
     out_channel: MemoryChannel,
     messages_to_send: Vec<CanonicalMessage>,
@@ -122,7 +121,6 @@ struct TestHarness {
 impl TestHarness {
     /// Creates a new TestHarness for a given broker and configuration.
     fn new(in_route: Route, out_route: Route, num_messages: usize) -> Self {
-        let temp_dir = tempdir().unwrap();
         let messages_to_send = generate_test_messages(num_messages);
 
         // The input to the system is the input of the `memory_to_*` route.
@@ -132,7 +130,6 @@ impl TestHarness {
         let out_channel = out_route.output.channel().unwrap();
 
         Self {
-            _temp_dir: temp_dir,
             in_channel,
             out_channel,
             messages_to_send,
@@ -161,45 +158,76 @@ pub async fn run_performance_pipeline_test(
 }
 
 async fn run_pipeline_test_internal(
-    _broker_name: &str,
-    _config_yaml: &str,
-    _num_messages: usize,
-    _is_performance_test: bool,
+    broker_name: &str,
+    config_yaml: &str,
+    num_messages: usize,
+    is_performance_test: bool,
 ) {
-    /*
-    let app_config: AppConfig =
+    let yaml_val: serde_yaml_ng::Value =
         serde_yaml_ng::from_str(config_yaml).expect("Failed to parse YAML config");
-    let mut harness = TestHarness::new(app_config, num_messages);
+    let routes_val = yaml_val.get("routes").expect("YAML must have 'routes' key");
+    let routes: std::collections::HashMap<String, Route> =
+        serde_yaml_ng::from_value(routes_val.clone()).expect("Failed to parse routes");
 
-    let bridge_handle = harness.bridge.run();
-    let start_time = std::time::Instant::now();
+    let in_route_name = format!("memory_to_{}", broker_name.to_lowercase());
+    let out_route_name = format!("{}_to_memory", broker_name.to_lowercase());
+
+    let in_route = routes
+        .get(&in_route_name)
+        .unwrap_or_else(|| panic!("Route {} not found", in_route_name))
+        .clone();
+    let out_route = routes
+        .get(&out_route_name)
+        .unwrap_or_else(|| panic!("Route {} not found", out_route_name))
+        .clone();
+
+    let harness = TestHarness::new(in_route.clone(), out_route.clone(), num_messages);
+
+    let (in_handle, in_shutdown) = in_route.run(&in_route_name);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let (out_handle, out_shutdown) = out_route.run(&out_route_name);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let start_time = Instant::now();
 
     harness.send_messages().await;
 
     // Wait for all messages to be processed by checking the metrics.
     let timeout = if is_performance_test {
-        Duration::from_secs(60)
+        Duration::from_secs(70)
     } else {
         Duration::from_secs(30)
     };
+    let mut received = Vec::with_capacity(num_messages);
     let wait_start = Instant::now();
+    let mut last_log_time = Instant::now();
     while wait_start.elapsed() < timeout {
-        let received_count = harness.out_channel.len();
-        if received_count >= num_messages {
+        received.extend(harness.out_channel.drain_messages());
+        if received.len() >= num_messages {
             break;
+        }
+        if last_log_time.elapsed() > Duration::from_secs(5) {
+            println!(
+                "Progress: {}/{} messages received",
+                received.len(),
+                num_messages
+            );
+            last_log_time = Instant::now();
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
-    if harness.shutdown_tx.send(()).is_err() {
-        println!("WARN: Could not send shutdown signal, bridge may have already stopped.");
-    }
+    let _ = in_shutdown.send(()).await;
+    let _ = out_shutdown.send(()).await;
+    let _ = in_handle.await;
+    let _ = out_handle.await;
 
-    let received = harness.out_channel.drain_messages()
+    // Drain any remaining messages that arrived during shutdown
+    received.extend(harness.out_channel.drain_messages());
     let duration = start_time.elapsed();
 
     if is_performance_test {
-        let messages_per_second = num_messages as f64 / duration.as_secs_f64();
+        let messages_per_second = received.len() as f64 / duration.as_secs_f64();
         println!("\n--- {} Performance Test Results ---", broker_name);
         println!(
             "Processed {} messages in {:.3} seconds.",
@@ -208,6 +236,14 @@ async fn run_pipeline_test_internal(
         );
         println!("Rate: {:.2} messages/second", messages_per_second);
         println!("--------------------------------\n");
+
+        add_performance_result(PerformanceResult {
+            test_name: format!("{} Pipeline", broker_name),
+            write_performance: messages_per_second,
+            read_performance: messages_per_second,
+            single_write_performance: 0.0,
+            single_read_performance: 0.0,
+        });
     }
 
     assert_eq!(
@@ -219,9 +255,6 @@ async fn run_pipeline_test_internal(
         received.len()
     );
     println!("Successfully verified {} route!", broker_name);
-
-    let _ = bridge_handle.await;
-    */
 }
 
 static LOG_GUARD: Mutex<Option<WorkerGuard>> = Mutex::new(None);

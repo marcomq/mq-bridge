@@ -75,7 +75,8 @@ impl MessagePublisher for FilePublisher {
                     Ok(s) => s,
                     Err(e) => {
                         tracing::error!("Failed to serialize message for file sink: {}", e);
-                        failed_messages.push((msg, PublisherError::NonRetryable(anyhow::anyhow!(e))));
+                        failed_messages
+                            .push((msg, PublisherError::NonRetryable(anyhow::anyhow!(e))));
                         continue;
                     }
                 }
@@ -166,10 +167,8 @@ impl MessageConsumer for FileConsumer {
             Ok(msg) => msg,
             Err(_) => {
                 let mut msg = CanonicalMessage::new(buffer, None);
-                msg.metadata.insert(
-                    "mq_bridge.original_format".to_string(),
-                    "raw".to_string(),
-                );
+                msg.metadata
+                    .insert("mq_bridge.original_format".to_string(), "raw".to_string());
                 msg
             }
         };

@@ -7,7 +7,7 @@ use crate::CanonicalMessage;
 use crate::APP_NAME;
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;
-use futures::TryStreamExt;
+use futures::{FutureExt, TryStreamExt};
 use lapin::tcp::{OwnedIdentity, OwnedTLSConfig};
 use lapin::{
     options::{
@@ -275,17 +275,18 @@ impl MessageConsumer for AmqpSubscriber {
 
         // 2. Greedily consume more messages if they are already buffered, up to max_messages.
         while messages.len() < max_messages {
-            match self.consumer.try_next().await {
-                Ok(Some(delivery)) => {
+            match self.consumer.try_next().now_or_never() {
+                Some(Ok(Some(delivery))) => {
                     messages.push(delivery_to_canonical_message(&delivery));
                     last_delivery = delivery;
                 }
-                Ok(None) => break, // No more messages in the buffer
-                Err(e) => {
+                Some(Ok(None)) => break, // Stream ended
+                Some(Err(e)) => {
                     // An error occurred, but we have some messages. Process them and let the next call handle the error.
                     tracing::warn!("Error receiving subsequent AMQP message: {}", e);
                     break;
                 }
+                None => break, // Stream is pending (no messages ready immediately)
             }
         }
 
@@ -427,17 +428,18 @@ impl MessageConsumer for AmqpConsumer {
 
         // 2. Greedily consume more messages if they are already buffered, up to max_messages.
         while messages.len() < max_messages {
-            match self.consumer.try_next().await {
-                Ok(Some(delivery)) => {
+            match self.consumer.try_next().now_or_never() {
+                Some(Ok(Some(delivery))) => {
                     messages.push(delivery_to_canonical_message(&delivery));
                     last_delivery = delivery;
                 }
-                Ok(None) => break, // No more messages in the buffer
-                Err(e) => {
+                Some(Ok(None)) => break, // Stream ended
+                Some(Err(e)) => {
                     // An error occurred, but we have some messages. Process them and let the next call handle the error.
                     tracing::warn!("Error receiving subsequent AMQP message: {}", e);
                     break;
                 }
+                None => break, // Stream is pending (no messages ready immediately)
             }
         }
 
