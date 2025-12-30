@@ -25,7 +25,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, oneshot, watch}; 
+use tokio::sync::{mpsc, oneshot, watch};
 use tracing::{info, instrument};
 
 type HttpSourceMessage = (CanonicalMessage, CommitFunc);
@@ -352,11 +352,7 @@ impl MessagePublisher for HttpPublisher {
         let send_futures = messages.into_iter().map(|message| {
             // Clone the message for the error case.
             let msg_for_err = message.clone();
-            async move {
-                self.send(message)
-                    .await
-                    .map_err(|e| (msg_for_err, e))
-            }
+            async move { self.send(message).await.map_err(|e| (msg_for_err, e)) }
         });
 
         let results = join_all(send_futures).await;
@@ -376,7 +372,11 @@ impl MessagePublisher for HttpPublisher {
             Ok(SentBatch::Ack)
         } else {
             Ok(SentBatch::Partial {
-                responses: if responses.is_empty() { None } else { Some(responses) },
+                responses: if responses.is_empty() {
+                    None
+                } else {
+                    Some(responses)
+                },
                 failed,
             })
         }

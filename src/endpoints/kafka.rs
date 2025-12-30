@@ -1,10 +1,10 @@
+use crate::canonical_message::tracing_support::LazyMessageIds;
 use crate::models::KafkaConfig;
 use crate::traits::{
     BoxFuture, ConsumerError, MessageConsumer, MessagePublisher, PublisherError, Received,
     ReceivedBatch, Sent, SentBatch,
 };
 use crate::CanonicalMessage;
-use crate::canonical_message::tracing_support::LazyMessageIds;
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;
 use futures::{FutureExt, StreamExt, TryStreamExt};
@@ -108,7 +108,7 @@ impl Drop for KafkaPublisher {
 #[async_trait]
 impl MessagePublisher for KafkaPublisher {
     async fn send(&self, message: CanonicalMessage) -> Result<Sent, PublisherError> {
-        trace!( 
+        trace!(
             topic = %self.topic,
             message_id = %format!("{:032x}", message.message_id),
             payload_size = message.payload.len(),
@@ -266,7 +266,10 @@ impl KafkaConsumer {
         // Wrap the consumer in an Arc to allow it to be shared.
         let consumer = Arc::new(consumer);
 
-        Ok(Self { consumer, topic: topic.to_string() })
+        Ok(Self {
+            consumer,
+            topic: topic.to_string(),
+        })
     }
 }
 

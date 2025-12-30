@@ -62,15 +62,23 @@ impl MessagePublisher for SwitchPublisher {
 
         // Group messages by their target publisher.
         // We use the raw pointer of the Arc as a key to group messages for the same publisher instance.
-        let mut grouped_messages: HashMap<String, (Arc<dyn MessagePublisher>, Vec<CanonicalMessage>)> =
-            HashMap::new();
+        let mut grouped_messages: HashMap<
+            String,
+            (Arc<dyn MessagePublisher>, Vec<CanonicalMessage>),
+        > = HashMap::new();
 
         for message in messages {
             if let Some(publisher) = self.get_publisher(&message) {
                 // Use the pointer address of the Arc as a key. This is safe as the Arcs live
                 // as long as the SwitchPublisher and we clone them into the map.
                 grouped_messages
-                    .entry(message.metadata.get(&self.metadata_key).cloned().unwrap_or_default())
+                    .entry(
+                        message
+                            .metadata
+                            .get(&self.metadata_key)
+                            .cloned()
+                            .unwrap_or_default(),
+                    )
                     .or_insert_with(|| (publisher.clone(), Vec::new()))
                     .1
                     .push(message);

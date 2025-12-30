@@ -155,7 +155,11 @@ pub mod tracing_support {
 
     impl<'a> std::fmt::Debug for LazyMessageIds<'a> {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            let ids: Vec<String> = self.0.iter().map(|m| format!("{:032x}", m.message_id)).collect();
+            let ids: Vec<String> = self
+                .0
+                .iter()
+                .map(|m| format!("{:032x}", m.message_id))
+                .collect();
             f.debug_list().entries(ids).finish()
         }
     }

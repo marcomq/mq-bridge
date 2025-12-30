@@ -1,10 +1,10 @@
+use crate::canonical_message::tracing_support::LazyMessageIds;
 use crate::models::NatsConfig;
 use crate::traits::{
     BatchCommitFunc, BoxFuture, ConsumerError, MessageConsumer, MessagePublisher, PublisherError,
     ReceivedBatch, Sent, SentBatch,
 };
 use crate::CanonicalMessage;
-use crate::canonical_message::tracing_support::LazyMessageIds;
 use crate::APP_NAME;
 use anyhow::{anyhow, Context};
 use async_nats::{header::HeaderMap, jetstream, jetstream::stream, ConnectOptions};
@@ -70,7 +70,7 @@ impl NatsPublisher {
 #[async_trait]
 impl MessagePublisher for NatsPublisher {
     async fn send(&self, message: CanonicalMessage) -> Result<Sent, PublisherError> {
-        trace!( 
+        trace!(
             subject = %self.subject,
             message_id = %format!("{:032x}", message.message_id),
             payload_size = message.payload.len(),
@@ -147,7 +147,11 @@ impl MessagePublisher for NatsPublisher {
                         HeaderMap::new()
                     };
                     match jetstream
-                        .publish_with_headers(self.subject.clone(), headers, message.payload.clone())
+                        .publish_with_headers(
+                            self.subject.clone(),
+                            headers,
+                            message.payload.clone(),
+                        )
                         .await
                     {
                         Ok(ack) => ack_futures.push((message, ack)),
@@ -222,7 +226,10 @@ impl NatsConsumer {
             queue_group,
         )
         .await?;
-        Ok(Self { core, subject: subject.to_string() })
+        Ok(Self {
+            core,
+            subject: subject.to_string(),
+        })
     }
 }
 
@@ -265,7 +272,10 @@ impl NatsSubscriber {
             None,
         )
         .await?;
-        Ok(Self { core, subject: subject.to_string() })
+        Ok(Self {
+            core,
+            subject: subject.to_string(),
+        })
     }
 }
 
@@ -448,7 +458,11 @@ impl NatsCore {
         }
     }
 
-    async fn receive_batch(&mut self, max_messages: usize, subject: &str) -> Result<ReceivedBatch, ConsumerError> {
+    async fn receive_batch(
+        &mut self,
+        max_messages: usize,
+        subject: &str,
+    ) -> Result<ReceivedBatch, ConsumerError> {
         if max_messages == 0 {
             return Ok(ReceivedBatch {
                 messages: Vec::new(),

@@ -1,10 +1,10 @@
+use crate::canonical_message::tracing_support::LazyMessageIds;
 use crate::models::MongoDbConfig;
 use crate::traits::{
     BatchCommitFunc, BoxFuture, ConsumerError, MessageConsumer, MessagePublisher, PublisherError,
     Received, ReceivedBatch, Sent, SentBatch,
 };
 use crate::CanonicalMessage;
-use crate::canonical_message::tracing_support::LazyMessageIds;
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -117,7 +117,10 @@ impl MongoDbPublisher {
                 );
             }
         }
-        Ok(Self { collection, collection_name: collection_name.to_string() })
+        Ok(Self {
+            collection,
+            collection_name: collection_name.to_string(),
+        })
     }
 }
 

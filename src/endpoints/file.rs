@@ -2,12 +2,12 @@
 //  © Copyright 2025, by Marco Mengelkoch
 //  Licensed under MIT License, see License file for more details
 //  git clone https://github.com/marcomq/mq-bridge
+use crate::canonical_message::tracing_support::LazyMessageIds;
 use crate::traits::{
     into_batch_commit_func, BoxFuture, ConsumerError, MessageConsumer, MessagePublisher,
     PublisherError, ReceivedBatch, SentBatch,
 };
 use crate::CanonicalMessage;
-use crate::canonical_message::tracing_support::LazyMessageIds;
 use anyhow::Context;
 use async_trait::async_trait;
 use std::any::Any;
@@ -16,7 +16,7 @@ use std::sync::Arc;
 use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::io::{AsyncWriteExt, BufWriter};
-use tokio::sync::Mutex; 
+use tokio::sync::Mutex;
 use tracing::{debug, info, instrument};
 
 /// A sink that writes messages to a file, one per line.

@@ -1,10 +1,10 @@
+use crate::canonical_message::tracing_support::LazyMessageIds;
 use crate::models::AmqpConfig;
 use crate::traits::{
     BoxFuture, ConsumerError, MessageConsumer, MessagePublisher, PublisherError, ReceivedBatch,
     Sent, SentBatch,
 };
 use crate::CanonicalMessage;
-use crate::canonical_message::tracing_support::LazyMessageIds;
 use crate::APP_NAME;
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;
@@ -167,7 +167,10 @@ impl MessagePublisher for AmqpPublisher {
                 Ok(_) => {}
                 Err(e) => failed_messages.push((
                     message,
-                    PublisherError::Retryable(anyhow::anyhow!("Publisher confirmation failed: {}", e)),
+                    PublisherError::Retryable(anyhow::anyhow!(
+                        "Publisher confirmation failed: {}",
+                        e
+                    )),
                 )),
             }
         }
@@ -226,7 +229,10 @@ impl AmqpConsumer {
             )
             .await?;
 
-        Ok(Self { consumer, queue: queue.to_string() })
+        Ok(Self {
+            consumer,
+            queue: queue.to_string(),
+        })
     }
 }
 
@@ -321,7 +327,10 @@ impl AmqpSubscriber {
             )
             .await?;
 
-        Ok(Self { consumer, queue: queue_name_owned })
+        Ok(Self {
+            consumer,
+            queue: queue_name_owned,
+        })
     }
 }
 
@@ -465,8 +474,7 @@ fn delivery_to_canonical_message(delivery: &lapin::message::Delivery) -> Canonic
         }
     }
 
-    let mut canonical_message =
-        CanonicalMessage::new(delivery.data.clone(), message_id);
+    let mut canonical_message = CanonicalMessage::new(delivery.data.clone(), message_id);
 
     if let Some(amqp_id) = delivery.properties.message_id().as_ref() {
         canonical_message
@@ -474,9 +482,10 @@ fn delivery_to_canonical_message(delivery: &lapin::message::Delivery) -> Canonic
             .insert("amqp_message_id".to_string(), amqp_id.to_string());
     }
     if let Some(correlation_id) = delivery.properties.correlation_id().as_ref() {
-        canonical_message
-            .metadata
-            .insert("amqp_correlation_id".to_string(), correlation_id.to_string());
+        canonical_message.metadata.insert(
+            "amqp_correlation_id".to_string(),
+            correlation_id.to_string(),
+        );
     }
 
     if let Some(headers) = delivery.properties.headers().as_ref() {
@@ -488,7 +497,9 @@ fn delivery_to_canonical_message(delivery: &lapin::message::Delivery) -> Canonic
                 lapin::types::AMQPValue::LongInt(i) => i.to_string(),
                 _ => continue,
             };
-            canonical_message.metadata.insert(key.to_string(), value_str);
+            canonical_message
+                .metadata
+                .insert(key.to_string(), value_str);
         }
     }
     canonical_message
