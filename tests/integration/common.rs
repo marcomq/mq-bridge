@@ -359,7 +359,7 @@ where
     let single_write_perf = measure_single_write_performance(
         &format!("{} (Single)", test_name),
         publisher.clone(),
-        PERF_TEST_MESSAGE_COUNT,
+        PERF_TEST_SINGLE_MESSAGE_COUNT,
         PERF_TEST_CONCURRENCY,
     )
     .await
@@ -368,7 +368,7 @@ where
     let single_read_perf = measure_single_read_performance(
         &format!("{} (Single)", test_name),
         consumer.clone(),
-        PERF_TEST_MESSAGE_COUNT,
+        PERF_TEST_SINGLE_MESSAGE_COUNT,
     )
     .await
     .as_secs_f64();
@@ -379,7 +379,7 @@ where
     let write_perf = measure_write_performance(
         &format!("{} (Batch)", test_name),
         publisher.clone(),
-        PERF_TEST_MESSAGE_COUNT,
+        PERF_TEST_BATCH_MESSAGE_COUNT,
         PERF_TEST_CONCURRENCY,
     )
     .await
@@ -389,7 +389,7 @@ where
     let read_perf = measure_read_performance(
         &format!("{} (Batch)", test_name),
         consumer.clone(),
-        PERF_TEST_MESSAGE_COUNT,
+        PERF_TEST_BATCH_MESSAGE_COUNT,
     )
     .await
     .as_secs_f64();
@@ -400,14 +400,16 @@ where
 
     PerformanceResult {
         test_name: format!("{} Direct", test_name),
-        write_performance: PERF_TEST_MESSAGE_COUNT as f64 / write_perf,
-        read_performance: PERF_TEST_MESSAGE_COUNT as f64 / read_perf,
-        single_write_performance: PERF_TEST_MESSAGE_COUNT as f64 / single_write_perf,
-        single_read_performance: PERF_TEST_MESSAGE_COUNT as f64 / single_read_perf,
+        write_performance: PERF_TEST_BATCH_MESSAGE_COUNT as f64 / write_perf,
+        read_performance: PERF_TEST_BATCH_MESSAGE_COUNT as f64 / read_perf,
+        single_write_performance: PERF_TEST_SINGLE_MESSAGE_COUNT as f64 / single_write_perf,
+        single_read_performance: PERF_TEST_SINGLE_MESSAGE_COUNT as f64 / single_read_perf,
     }
 }
 
-pub const PERF_TEST_MESSAGE_COUNT: usize = 50_000;
+pub const PERF_TEST_BATCH_MESSAGE_COUNT: usize = 250_000;
+pub const PERF_TEST_SINGLE_MESSAGE_COUNT: usize = 5_000;
+pub const PERF_TEST_MESSAGE_COUNT: usize = PERF_TEST_BATCH_MESSAGE_COUNT;
 pub const PERF_TEST_CONCURRENCY: usize = 100;
 
 pub fn generate_message() -> CanonicalMessage {
