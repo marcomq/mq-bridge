@@ -349,7 +349,7 @@ mod tests {
         };
         let publisher = MemoryPublisher::new(&pub_cfg).unwrap();
 
-        let msg = CanonicalMessage::from_str("hello subscriber");
+        let msg = CanonicalMessage::from("hello subscriber");
         publisher.send(msg).await.unwrap();
 
         let received = subscriber.receive().await.unwrap();

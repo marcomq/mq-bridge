@@ -146,7 +146,7 @@ async fn main() {
     // 4. Inject Data
     let input_channel = route.input.channel().unwrap();
     input_channel
-        .send_message(CanonicalMessage::from_str("hello"))
+        .send_message("hello".into())
         .await
         .unwrap();
 

@@ -540,7 +540,7 @@ impl MongoDbConsumer {
 }
 
 enum SubscriberStream {
-    ChangeStream(ChangeStream<ChangeStreamEvent<Document>>),
+    ChangeStream(Box<ChangeStream<ChangeStreamEvent<Document>>>),
     Polling {
         collection: Collection<Document>,
         last_id: Option<mongodb::bson::Uuid>,
@@ -591,7 +591,7 @@ impl MongoDbSubscriber {
         let inner = match change_stream_result {
             Ok(stream) => {
                 info!(database = %config.database, collection = %collection_name, "MongoDB subscriber watching for events (Change Stream)");
-                SubscriberStream::ChangeStream(stream)
+                SubscriberStream::ChangeStream(Box::new(stream))
             }
             Err(e) if matches!(*e.kind, ErrorKind::Command(ref cmd_err) if cmd_err.code == 40573) =>
             {

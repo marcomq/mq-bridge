@@ -37,10 +37,6 @@ impl CanonicalMessage {
         Self::new(payload.into(), None)
     }
 
-    pub fn from_str(payload: &str) -> Self {
-        Self::new(payload.as_bytes().into(), None)
-    }
-
     pub fn set_id(&mut self, id: u128) {
         self.message_id = id;
     }
@@ -106,7 +102,7 @@ impl CanonicalMessage {
 
 impl From<&str> for CanonicalMessage {
     fn from(s: &str) -> Self {
-        Self::from_str(s)
+        Self::new(s.as_bytes().into(), None)
     }
 }
 

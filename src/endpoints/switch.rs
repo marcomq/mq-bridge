@@ -172,7 +172,7 @@ mod tests {
         );
 
         // Test Case A
-        let msg_a = CanonicalMessage::from_str("payload_a").with_metadata_kv("route_key", "A");
+        let msg_a = CanonicalMessage::from("payload_a").with_metadata_kv("route_key", "A");
         switch.send(msg_a).await.unwrap();
         assert_eq!(chan_a.len(), 1);
         assert_eq!(chan_b.len(), 0);
@@ -180,7 +180,7 @@ mod tests {
         chan_a.drain_messages();
 
         // Test Case B
-        let msg_b = CanonicalMessage::from_str("payload_b").with_metadata_kv("route_key", "B");
+        let msg_b = CanonicalMessage::from("payload_b").with_metadata_kv("route_key", "B");
         switch.send(msg_b).await.unwrap();
         assert_eq!(chan_a.len(), 0);
         assert_eq!(chan_b.len(), 1);

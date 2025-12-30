@@ -322,8 +322,8 @@ impl MessageConsumer for MqttConsumer {
 }
 
 enum EventLoop {
-    V3(rumqttc::EventLoop),
-    V5(EventLoopV5),
+    V3(Box<rumqttc::EventLoop>),
+    V5(Box<EventLoopV5>),
 }
 
 /// Runs the MQTT event loop, handling connections, subscriptions, and message forwarding.
@@ -351,7 +351,7 @@ async fn run_eventloop(
                 } else {
                     None
                 };
-                run_eventloop_v3(el, client_type, consumer_v3, Some(ready_tx)).await;
+                run_eventloop_v3(*el, client_type, consumer_v3, Some(ready_tx)).await;
             }
             EventLoop::V5(el) => {
                 let consumer_v5 = if let Some((client, topic, qos, tx)) = consumer_info {
@@ -364,7 +364,7 @@ async fn run_eventloop(
                 } else {
                     None
                 };
-                run_eventloop_v5(el, client_type, consumer_v5, Some(ready_tx)).await;
+                run_eventloop_v5(*el, client_type, consumer_v5, Some(ready_tx)).await;
             }
         }
         debug!("MQTT {} eventloop finished.", client_type);
@@ -492,7 +492,7 @@ async fn create_client_and_eventloop(
             }
 
             let (client, eventloop) = AsyncClientV5::new(mqttoptions, queue_capacity);
-            (Client::V5(client), EventLoop::V5(eventloop))
+            (Client::V5(client), EventLoop::V5(Box::new(eventloop)))
         }
         MqttProtocol::V3 => {
             let mut mqttoptions = MqttOptions::new(client_id, host, port);
@@ -510,7 +510,7 @@ async fn create_client_and_eventloop(
             }
 
             let (client, eventloop) = AsyncClient::new(mqttoptions, queue_capacity);
-            (Client::V3(client), EventLoop::V3(eventloop))
+            (Client::V3(client), EventLoop::V3(Box::new(eventloop)))
         }
     };
 
