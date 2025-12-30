@@ -92,7 +92,6 @@ impl MessagePublisher for FilePublisher {
                 tracing::error!("Failed to write newline to file: {}", e);
                 // If write fails, add the message to the failed list
                 failed_messages.push((msg, PublisherError::NonRetryable(anyhow::anyhow!(e))));
-            } else {
             }
         }
 
