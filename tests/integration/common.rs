@@ -407,8 +407,8 @@ where
     }
 }
 
-pub const PERF_TEST_BATCH_MESSAGE_COUNT: usize = 250_000;
-pub const PERF_TEST_SINGLE_MESSAGE_COUNT: usize = 5_000;
+pub const PERF_TEST_BATCH_MESSAGE_COUNT: usize = 150_000;
+pub const PERF_TEST_SINGLE_MESSAGE_COUNT: usize = 15_000;
 pub const PERF_TEST_MESSAGE_COUNT: usize = PERF_TEST_BATCH_MESSAGE_COUNT;
 pub const PERF_TEST_CONCURRENCY: usize = 100;
 

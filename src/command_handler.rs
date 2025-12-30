@@ -192,10 +192,7 @@ mod tests {
 
         // 3. Inject Data
         let input_channel = route.input.channel().unwrap();
-        input_channel
-            .send_message("hello".into())
-            .await
-            .unwrap();
+        input_channel.send_message("hello".into()).await.unwrap();
 
         // 4. Run
         let res = route.run_until_err("test_route", None);
