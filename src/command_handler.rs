@@ -45,7 +45,7 @@ impl MessagePublisher for CommandPublisher {
         match self.handler.handle(message).await {
             Ok(Handled::Publish(response_msg)) => self.inner.send(response_msg).await, // Propagate result
             Ok(Handled::Ack) => Ok(Sent::Ack),
-            Err(e) => Err(e.into()), // Converts HandlerError to PublisherError
+            Err(e) => Err(e), // Converts HandlerError to PublisherError
         }
     }
 

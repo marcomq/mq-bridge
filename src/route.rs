@@ -129,7 +129,7 @@ impl Route {
                         }
                         Err(ConsumerError::Connection(e)) => {
                             // Propagate error to trigger reconnect by the outer loop
-                            return Err(e.into());
+                            return Err(e);
                         }
                     };
                     debug!("Received a batch of {} messages sequentially", messages.len());
@@ -243,7 +243,7 @@ impl Route {
                         }
                         Err(ConsumerError::Connection(e)) => {
                             // Propagate error to trigger reconnect by the outer loop
-                            return Err(e.into());
+                            return Err(e);
                         }
                     };
                     debug!("Received a batch of {} messages concurrently", messages.len());

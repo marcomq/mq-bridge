@@ -46,9 +46,7 @@ impl MessagePublisher for FanoutPublisher {
         // If any publisher returns a hard error, we propagate it.
         // We don't currently aggregate partial failures from different fan-out destinations.
         for result in results {
-            if let Err(e) = result {
-                return Err(e);
-            }
+            result?
         }
 
         Ok(SentBatch::Ack)

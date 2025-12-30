@@ -62,6 +62,12 @@ where
     }
 }
 
+impl Default for TypeHandler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TypeHandler {
     /// Creates a new TypeHandler that looks for the specified key in message metadata to determine the message type.
     pub fn new() -> Self {

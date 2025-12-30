@@ -31,7 +31,7 @@ impl MessagePublisher for EventPublisher {
     async fn send(&self, message: CanonicalMessage) -> Result<Sent, PublisherError> {
         match self.handler.handle(message).await {
             Ok(_) => Ok(Sent::Ack),  // Ignore result (Ack or Publish), just Ack.
-            Err(e) => Err(e.into()), // Converts HandlerError to PublisherError
+            Err(e) => Err(e), // Converts HandlerError to PublisherError
         }
     }
 
