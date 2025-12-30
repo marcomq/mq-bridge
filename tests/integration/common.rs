@@ -268,6 +268,8 @@ pub fn setup_logging() {
 
         *LOG_GUARD.lock().unwrap() = Some(guard);
 
+        // Default to `info` for tests, but allow overriding with the RUST_LOG environment variable.
+        // For example: `RUST_LOG=info cargo test...` or `RUST_LOG=mq_bridge=trace cargo test...`
         let env_filter =
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 

@@ -4,6 +4,7 @@ use crate::traits::{
     ReceivedBatch, Sent, SentBatch,
 };
 use crate::CanonicalMessage;
+use crate::canonical_message::tracing_support::LazyMessageIds;
 use crate::APP_NAME;
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;
@@ -13,6 +14,7 @@ use rumqttc::v5::{
     AsyncClient as AsyncClientV5, EventLoop as EventLoopV5, MqttOptions as MqttOptionsV5,
 };
 use rumqttc::{tokio_rustls::rustls, AsyncClient, Event, MqttOptions, QoS, Transport};
+use std::fmt::Debug;
 use std::sync::Arc;
 use std::time::Duration;
 use std::{any::Any, future::Future};
@@ -126,8 +128,10 @@ impl Drop for MqttPublisher {
 #[async_trait]
 impl MessagePublisher for MqttPublisher {
     async fn send(&self, message: CanonicalMessage) -> Result<Sent, PublisherError> {
-        tracing::trace!(
-            payload = %String::from_utf8_lossy(&message.payload),
+        trace!(
+            message_id = %format!("{:032x}", message.message_id),
+            topic = %self.topic,
+            payload_size = message.payload.len(),
             "Publishing MQTT message"
         );
 
@@ -142,12 +146,8 @@ impl MessagePublisher for MqttPublisher {
         &self,
         messages: Vec<CanonicalMessage>,
     ) -> Result<SentBatch, PublisherError> {
+        trace!(count = messages.len(), topic = %self.topic, message_ids = ?LazyMessageIds(&messages), "Publishing batch of MQTT messages");
         for message in messages {
-            tracing::trace!(
-                payload = %String::from_utf8_lossy(&message.payload),
-                "Publishing MQTT message"
-            );
-
             self.client
                 .publish(&self.topic, self.qos, message)
                 .await
@@ -186,6 +186,7 @@ struct MqttListener {
     eventloop_handle: Arc<JoinHandle<()>>,
     message_rx: mpsc::Receiver<ReceivedMessage>,
     log_noun: &'static str,
+    topic: String,
 }
 
 impl MqttListener {
@@ -215,6 +216,7 @@ impl MqttListener {
             eventloop_handle: Arc::new(eventloop_handle),
             message_rx,
             log_noun,
+            topic: topic.to_string(),
         })
     }
 }
@@ -278,10 +280,12 @@ impl MessageConsumer for MqttListener {
         }
 
         let count = messages.len();
+        trace!(count = count, topic = %self.topic, message_ids = ?LazyMessageIds(&messages), "Received batch of MQTT messages");
         let log_noun = self.log_noun;
+        let message_ids = format!("{:?}", LazyMessageIds(&messages)); // could be optimized
         let commit = Box::new(move |_responses: Option<Vec<CanonicalMessage>>| {
             Box::pin(async move {
-                trace!("MQTT batch of {} {}s processed", count, log_noun);
+                trace!(count = count, message_ids = %message_ids, "MQTT batch of {}s processed", log_noun);
             }) as BoxFuture<'static, ()>
         });
 

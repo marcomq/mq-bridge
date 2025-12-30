@@ -4,6 +4,7 @@ use crate::traits::{
     Received, ReceivedBatch, Sent, SentBatch,
 };
 use crate::CanonicalMessage;
+use crate::canonical_message::tracing_support::LazyMessageIds;
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -91,6 +92,7 @@ fn message_to_document(message: &CanonicalMessage) -> anyhow::Result<Document> {
 /// A publisher that inserts messages into a MongoDB collection.
 pub struct MongoDbPublisher {
     collection: Collection<Document>,
+    collection_name: String,
 }
 
 impl MongoDbPublisher {
@@ -115,13 +117,14 @@ impl MongoDbPublisher {
                 );
             }
         }
-        Ok(Self { collection })
+        Ok(Self { collection, collection_name: collection_name.to_string() })
     }
 }
 
 #[async_trait]
 impl MessagePublisher for MongoDbPublisher {
     async fn send(&self, message: CanonicalMessage) -> Result<Sent, PublisherError> {
+        tracing::trace!(message_id = %format!("{:032x}", message.message_id), collection = %self.collection_name, "Publishing document to MongoDB");
         let doc = message_to_document(&message).map_err(PublisherError::NonRetryable)?;
         self.collection
             .insert_one(doc)
@@ -139,6 +142,7 @@ impl MessagePublisher for MongoDbPublisher {
             return Ok(SentBatch::Ack);
         }
 
+        tracing::trace!(count = messages.len(), collection = %self.collection_name, message_ids = ?LazyMessageIds(&messages), "Publishing batch of documents to MongoDB");
         let mut docs = Vec::with_capacity(messages.len());
         let mut failed_messages = Vec::new();
 
@@ -201,6 +205,7 @@ pub struct MongoDbConsumer {
     collection: Collection<Document>,
     change_stream: Option<tokio::sync::Mutex<ChangeStream<ChangeStreamEvent<Document>>>>,
     polling_interval: Duration,
+    collection_name: String,
 }
 
 impl MongoDbConsumer {
@@ -244,6 +249,7 @@ impl MongoDbConsumer {
             collection,
             change_stream,
             polling_interval: Duration::from_millis(config.polling_interval_ms.unwrap_or(100)),
+            collection_name: collection_name.to_string(),
         })
     }
 }
@@ -506,6 +512,7 @@ impl MongoDbConsumer {
             ids.push(id_val);
         }
 
+        tracing::trace!(count = messages.len(), collection = %self.collection_name, message_ids = ?LazyMessageIds(&messages), "Received batch of MongoDB documents");
         let collection_clone = self.collection.clone();
         let commit = Box::new(move |_response| {
             Box::pin(async move {
@@ -540,6 +547,7 @@ enum SubscriberStream {
 
 pub struct MongoDbSubscriber {
     inner: tokio::sync::Mutex<SubscriberStream>,
+    collection_name: String,
 }
 
 impl MongoDbSubscriber {
@@ -610,6 +618,7 @@ impl MongoDbSubscriber {
         };
         Ok(Self {
             inner: tokio::sync::Mutex::new(inner),
+            collection_name: collection_name.to_string(),
         })
     }
 }
@@ -635,6 +644,7 @@ impl MessageConsumer for MongoDbSubscriber {
                     Err(_) => document_to_canonical(doc)?,
                 };
 
+                tracing::trace!(message_id = %format!("{:032x}", msg.message_id), collection = %self.collection_name, "Received MongoDB change stream event");
                 Ok(ReceivedBatch {
                     messages: vec![msg],
                     commit: Box::new(|_| Box::pin(async {})),
@@ -675,6 +685,7 @@ impl MessageConsumer for MongoDbSubscriber {
                 }
 
                 if !messages.is_empty() {
+                    tracing::trace!(count = messages.len(), collection = %self.collection_name, message_ids = ?LazyMessageIds(&messages), "Received batch of MongoDB documents via polling");
                     return Ok(ReceivedBatch {
                         messages,
                         commit: Box::new(|_| Box::pin(async {})),

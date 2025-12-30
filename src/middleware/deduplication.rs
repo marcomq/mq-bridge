@@ -12,7 +12,7 @@ use sled::Db;
 use std::any::Any;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tracing::{debug, error, info, instrument, warn};
+use tracing::{debug, error, info, instrument, trace, warn};
 
 pub struct DeduplicationConsumer {
     inner: Box<dyn MessageConsumer>,
@@ -48,6 +48,7 @@ impl MessageConsumer for DeduplicationConsumer {
             let message = received.message;
             let commit = received.commit;
             let key = message.message_id.to_be_bytes().to_vec();
+            let message_id_hex = format!("{:032x}", message.message_id);
 
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -61,10 +62,14 @@ impl MessageConsumer for DeduplicationConsumer {
             {
                 Ok(_) => {
                     // Successfully inserted - not a duplicate, proceed
+                    trace!(
+                        message_id = %message_id_hex,
+                        "Deduplication check passed (new message)"
+                    );
                 }
                 Err(_) => {
                     // Key already exists - duplicate detected
-                    info!("Duplicate message detected and skipped");
+                    info!(message_id = %message_id_hex, "Duplicate message detected and skipped");
                     commit(None).await;
                     continue;
                 }

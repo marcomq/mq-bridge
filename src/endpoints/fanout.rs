@@ -28,12 +28,30 @@ impl MessagePublisher for FanoutPublisher {
         &self,
         messages: Vec<CanonicalMessage>,
     ) -> Result<SentBatch, PublisherError> {
-        // We use the helper to send messages one by one to ensure reliable fan-out
-        // to all configured publishers.
-        crate::traits::send_batch_helper(self, messages, |publisher, message| {
-            Box::pin(publisher.send(message))
-        })
-        .await
+        use futures::future::join_all;
+
+        if messages.is_empty() {
+            return Ok(SentBatch::Ack);
+        }
+
+        // Send the batch to all publishers concurrently.
+        let batch_sends = self.publishers.iter().map(|p| {
+            // Each publisher gets a clone of the entire batch. This can be memory-intensive.
+            p.send_batch(messages.clone())
+        });
+
+        let results = join_all(batch_sends).await;
+
+        // For fan-out, we consider the batch successful if it was successfully sent to *all* publishers.
+        // If any publisher returns a hard error, we propagate it.
+        // We don't currently aggregate partial failures from different fan-out destinations.
+        for result in results {
+            if let Err(e) = result {
+                return Err(e);
+            }
+        }
+
+        Ok(SentBatch::Ack)
     }
 
     fn as_any(&self) -> &dyn Any {

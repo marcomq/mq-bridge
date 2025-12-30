@@ -146,6 +146,22 @@ impl From<CanonicalMessage> for MessageContext {
 }
 
 #[doc(hidden)]
+pub mod tracing_support {
+    use super::CanonicalMessage;
+
+    /// A helper struct to lazily format a slice of message IDs for tracing.
+    /// The collection and formatting only occurs if the trace is enabled.
+    pub struct LazyMessageIds<'a>(pub &'a [CanonicalMessage]);
+
+    impl<'a> std::fmt::Debug for LazyMessageIds<'a> {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            let ids: Vec<String> = self.0.iter().map(|m| format!("{:032x}", m.message_id)).collect();
+            f.debug_list().entries(ids).finish()
+        }
+    }
+}
+
+#[doc(hidden)]
 pub mod macro_support {
     use super::CanonicalMessage;
     use serde::Serialize;

@@ -4,6 +4,7 @@ use crate::traits::{
     ReceivedBatch, Sent, SentBatch,
 };
 use crate::CanonicalMessage;
+use crate::canonical_message::tracing_support::LazyMessageIds;
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;
 use futures::{FutureExt, StreamExt, TryStreamExt};
@@ -19,7 +20,7 @@ use rdkafka::{
 };
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{debug, info};
+use tracing::{debug, info, trace};
 use uuid::Uuid;
 
 pub struct KafkaPublisher {
@@ -107,6 +108,12 @@ impl Drop for KafkaPublisher {
 #[async_trait]
 impl MessagePublisher for KafkaPublisher {
     async fn send(&self, message: CanonicalMessage) -> Result<Sent, PublisherError> {
+        trace!( 
+            topic = %self.topic,
+            message_id = %format!("{:032x}", message.message_id),
+            payload_size = message.payload.len(),
+            "Publishing Kafka message"
+        );
         let mut record = FutureRecord::to(&self.topic).payload(&message.payload[..]);
 
         if !message.metadata.is_empty() {
@@ -146,6 +153,12 @@ impl MessagePublisher for KafkaPublisher {
         &self,
         messages: Vec<CanonicalMessage>,
     ) -> Result<SentBatch, PublisherError> {
+        trace!(
+            topic = %self.topic,
+            count = messages.len(),
+            message_ids = ?LazyMessageIds(&messages),
+            "Publishing batch of Kafka messages"
+        );
         if self.delayed_ack {
             return crate::traits::send_batch_helper(self, messages, |publisher, message| {
                 Box::pin(publisher.send(message))
@@ -218,6 +231,7 @@ impl MessagePublisher for KafkaPublisher {
 pub struct KafkaConsumer {
     // The consumer needs to be stored to keep the connection alive.
     consumer: Arc<StreamConsumer>,
+    topic: String,
 }
 use std::any::Any;
 
@@ -252,7 +266,7 @@ impl KafkaConsumer {
         // Wrap the consumer in an Arc to allow it to be shared.
         let consumer = Arc::new(consumer);
 
-        Ok(Self { consumer })
+        Ok(Self { consumer, topic: topic.to_string() })
     }
 }
 
@@ -296,7 +310,7 @@ impl MessageConsumer for KafkaConsumer {
     }
 
     async fn receive_batch(&mut self, max_messages: usize) -> Result<ReceivedBatch, ConsumerError> {
-        receive_batch_internal(&self.consumer, max_messages).await
+        receive_batch_internal(&self.consumer, max_messages, &self.topic).await
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -306,6 +320,7 @@ impl MessageConsumer for KafkaConsumer {
 
 pub struct KafkaSubscriber {
     consumer: Arc<StreamConsumer>,
+    topic: String,
 }
 
 impl KafkaSubscriber {
@@ -354,6 +369,7 @@ impl KafkaSubscriber {
 
         Ok(Self {
             consumer: Arc::new(consumer),
+            topic: topic.to_string(),
         })
     }
 }
@@ -367,7 +383,7 @@ impl Drop for KafkaSubscriber {
 #[async_trait]
 impl MessageConsumer for KafkaSubscriber {
     async fn receive_batch(&mut self, max_messages: usize) -> Result<ReceivedBatch, ConsumerError> {
-        receive_batch_internal(&self.consumer, max_messages).await
+        receive_batch_internal(&self.consumer, max_messages, &self.topic).await
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -447,6 +463,7 @@ fn create_common_config(config: &KafkaConfig) -> ClientConfig {
 async fn receive_batch_internal(
     consumer: &Arc<StreamConsumer>,
     max_messages: usize,
+    topic: &str,
 ) -> Result<ReceivedBatch, ConsumerError> {
     let mut messages = Vec::with_capacity(max_messages);
     let mut last_offset_tpl = TopicPartitionList::new();
@@ -483,6 +500,7 @@ async fn receive_batch_internal(
         }
     }
     let messages_len = messages.len();
+    trace!(count = messages_len, topic = %topic, message_ids = ?LazyMessageIds(&messages), "Received batch of Kafka messages");
 
     let consumer = consumer.clone();
     let commit = Box::new(move |_responses: Option<Vec<CanonicalMessage>>| {
