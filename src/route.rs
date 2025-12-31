@@ -30,12 +30,12 @@ impl Route {
     /// This function spawns a set of worker tasks to process messages concurrently.
     /// It returns a `JoinHandle` for the main route task and a `Sender` channel
     /// that can be used to signal a graceful shutdown.
-    pub fn run(&self, name: &str) -> anyhow::Result<(JoinHandle<()>, Sender<()>)> {
+    pub fn run(&self, name_str: &str) -> anyhow::Result<(JoinHandle<()>, Sender<()>)> {
         let (shutdown_tx, shutdown_rx) = bounded(1);
         let (ready_tx, ready_rx) = bounded(1);
         // Use `Arc` so route/name clones are cheap (pointer copy) in the reconnect loop.
         let route = Arc::new(self.clone());
-        let name = Arc::new(name.to_string());
+        let name = Arc::new(name_str.to_string());
 
         let handle = tokio::spawn(async move {
             loop {
@@ -88,21 +88,21 @@ impl Route {
             }
         });
 
-        let start = std::time::Instant::now();
-        loop {
-            if ready_rx.try_recv().is_ok() {
-                return Ok((handle, shutdown_tx));
-            }
-            if start.elapsed() > std::time::Duration::from_secs(5) {
+        let ready_rx_clone = ready_rx.clone();
+        let timeout = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            ready_rx_clone.close();
+        });
+
+        match ready_rx.recv_blocking() {
+            Ok(_) => {
+                timeout.abort();
+                Ok((handle, shutdown_tx))
+            },
+            Err(_) => {
                 handle.abort();
-                return Err(anyhow::anyhow!("Route '{}' failed to start within 5 seconds", name));
+                Err(anyhow::anyhow!("Route '{}' failed to start within 5 seconds or encountered an error", name_str))
             }
-            if ready_rx.is_closed() {
-                handle.abort();
-                return Err(anyhow::anyhow!("Route '{}' failed to start (channel closed)", name));
-            }
-            // Sleep briefly to avoid busy-waiting
-            std::thread::sleep(std::time::Duration::from_millis(50));
         }
     }
 
