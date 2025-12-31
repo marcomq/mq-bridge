@@ -14,10 +14,10 @@ use rumqttc::v5::{
     AsyncClient as AsyncClientV5, EventLoop as EventLoopV5, MqttOptions as MqttOptionsV5,
 };
 use rumqttc::{tokio_rustls::rustls, AsyncClient, MqttOptions, QoS, Transport};
+use std::any::Any;
 use std::fmt::Debug;
 use std::sync::Arc;
 use std::time::Duration;
-use std::any::Any;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::{error, info, trace, warn};
@@ -79,7 +79,10 @@ impl Client {
     async fn subscribe(&self, topic: &str, qos: QoS) -> anyhow::Result<()> {
         match self {
             Client::V3(client) => client.subscribe(topic, qos).await.map_err(|e| e.into()),
-            Client::V5(client) => client.subscribe(topic, to_qos_v5(qos)).await.map_err(|e| e.into()),
+            Client::V5(client) => client
+                .subscribe(topic, to_qos_v5(qos))
+                .await
+                .map_err(|e| e.into()),
         }
     }
 }
@@ -193,7 +196,7 @@ impl MessageConsumer for MqttConsumer {
 #[derive(Debug)]
 enum EventWrapper {
     V3(rumqttc::Event),
-    V5(rumqttc::v5::Event),
+    V5(Box<rumqttc::v5::Event>),
 }
 
 enum EventLoop {
@@ -342,12 +345,12 @@ async fn run_eventloop(
                 .poll()
                 .await
                 .map(EventWrapper::V3)
-                .map_err(|e| anyhow::Error::new(e)),
+                .map_err(anyhow::Error::new),
             EventLoop::V5(el) => el
                 .poll()
                 .await
-                .map(EventWrapper::V5)
-                .map_err(|e| anyhow::Error::new(e)),
+                .map(|e| EventWrapper::V5(Box::new(e)))
+                .map_err(anyhow::Error::new),
         };
 
         match event_result {
@@ -360,13 +363,14 @@ async fn run_eventloop(
                         }
                     }
                 }
-                EventWrapper::V5(rumqttc::v5::Event::Incoming(
-                    rumqttc::v5::Incoming::Publish(p),
-                )) => {
-                    if let Some(tx) = &message_tx {
-                        let msg = publish_to_canonical_message_v5(p);
-                        if tx.send(msg).await.is_err() {
-                            break;
+                EventWrapper::V5(event) => {
+                    if let rumqttc::v5::Event::Incoming(rumqttc::v5::Incoming::Publish(p)) = *event
+                    {
+                        if let Some(tx) = &message_tx {
+                            let msg = publish_to_canonical_message_v5(p);
+                            if tx.send(msg).await.is_err() {
+                                break;
+                            }
                         }
                     }
                 }

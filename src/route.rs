@@ -50,11 +50,7 @@ impl Route {
                 // The actual route logic is in `run_until_err`.
                 let mut run_task = tokio::spawn(async move {
                     route_arc
-                        .run_until_err(
-                            &name_arc,
-                            Some(internal_shutdown_rx),
-                            Some(ready_tx_clone),
-                        )
+                        .run_until_err(&name_arc, Some(internal_shutdown_rx), Some(ready_tx_clone))
                         .await
                 });
 
@@ -98,10 +94,13 @@ impl Route {
             Ok(_) => {
                 timeout.abort();
                 Ok((handle, shutdown_tx))
-            },
+            }
             Err(_) => {
                 handle.abort();
-                Err(anyhow::anyhow!("Route '{}' failed to start within 5 seconds or encountered an error", name_str))
+                Err(anyhow::anyhow!(
+                    "Route '{}' failed to start within 5 seconds or encountered an error",
+                    name_str
+                ))
             }
         }
     }
