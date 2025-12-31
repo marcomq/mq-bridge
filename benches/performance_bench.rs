@@ -17,8 +17,6 @@ use integration::common::{
     PERF_TEST_CONCURRENCY,
 };
 
-use crate::integration::common::{PERF_TEST_BATCH_MESSAGE_COUNT, PERF_TEST_SINGLE_MESSAGE_COUNT};
-
 const PERF_TEST_MESSAGE_COUNT: usize = 1000;
 const DEFAULT_SLEEP: Duration = Duration::from_millis(50);
 
@@ -412,8 +410,8 @@ fn performance_benchmarks(c: &mut Criterion) {
         println!("\n\n--- Consolidated Performance Test Results (msgs/sec) ---");
         println!(
             "\n\n--- Batch = {} msgs, Single = {} msgs ---",
-            format_pretty(PERF_TEST_BATCH_MESSAGE_COUNT),
-            format_pretty(PERF_TEST_SINGLE_MESSAGE_COUNT)
+            format_pretty(PERF_TEST_MESSAGE_COUNT),
+            format_pretty(PERF_TEST_MESSAGE_COUNT)
         );
         println!(
             "{:<25} | {:>15} | {:>15} | {:>15} | {:>15}",

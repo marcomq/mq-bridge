@@ -35,7 +35,7 @@ async fn test_memory_to_memory_pipeline() {
     // Run the pipeline and the message sending concurrently.
     let (run_result, _) = tokio::join!(
         // The route will run until the input channel is closed and empty.
-        route.run_until_err("mem_2_mem", None),
+        route.run_until_err("mem_2_mem", None, None),
         // This task sends all messages and then closes the channel,
         // which signals the route to stop.
         async {

@@ -32,6 +32,7 @@ impl Route {
     /// that can be used to signal a graceful shutdown.
     pub fn run(&self, name: &str) -> (JoinHandle<()>, Sender<()>) {
         let (shutdown_tx, shutdown_rx) = bounded(1);
+        let (ready_tx, ready_rx) = bounded(1);
         // Use `Arc` so route/name clones are cheap (pointer copy) in the reconnect loop.
         let route = Arc::new(self.clone());
         let name = Arc::new(name.to_string());
@@ -44,11 +45,16 @@ impl Route {
                 // This avoids a race where both this loop and the inner task
                 // try to consume the same external shutdown signal.
                 let (internal_shutdown_tx, internal_shutdown_rx) = bounded(1);
+                let ready_tx_clone = ready_tx.clone();
 
                 // The actual route logic is in `run_until_err`.
                 let mut run_task = tokio::spawn(async move {
                     route_arc
-                        .run_until_err(&name_arc, Some(internal_shutdown_rx))
+                        .run_until_err(
+                            &name_arc,
+                            Some(internal_shutdown_rx),
+                            Some(ready_tx_clone),
+                        )
                         .await
                 });
 
@@ -81,7 +87,7 @@ impl Route {
                 }
             }
         });
-
+        ready_rx.recv_blocking().ok();
         (handle, shutdown_tx)
     }
 
@@ -90,13 +96,14 @@ impl Route {
         &self,
         name: &str,
         shutdown_rx: Option<async_channel::Receiver<()>>,
+        ready_tx: Option<Sender<()>>,
     ) -> anyhow::Result<bool> {
         let (_internal_shutdown_tx, internal_shutdown_rx) = bounded(1);
         let shutdown_rx = shutdown_rx.unwrap_or(internal_shutdown_rx);
         if self.concurrency == 1 {
-            self.run_sequentially(name, shutdown_rx).await
+            self.run_sequentially(name, shutdown_rx, ready_tx).await
         } else {
-            self.run_concurrently(name, shutdown_rx).await
+            self.run_concurrently(name, shutdown_rx, ready_tx).await
         }
     }
 
@@ -105,10 +112,13 @@ impl Route {
         &self,
         name: &str,
         shutdown_rx: async_channel::Receiver<()>,
+        ready_tx: Option<Sender<()>>,
     ) -> anyhow::Result<bool> {
         let publisher = create_publisher_from_route(name, &self.output).await?;
         let mut consumer = create_consumer_from_route(name, &self.input).await?;
-
+        if let Some(tx) = ready_tx {
+            let _ = tx.send(()).await;
+        }
         loop {
             select! {
                 _ = shutdown_rx.recv() => {
@@ -164,9 +174,13 @@ impl Route {
         &self,
         name: &str,
         shutdown_rx: async_channel::Receiver<()>,
+        ready_tx: Option<Sender<()>>,
     ) -> anyhow::Result<bool> {
         let publisher = create_publisher_from_route(name, &self.output).await?;
         let mut consumer = create_consumer_from_route(name, &self.input).await?;
+        if let Some(tx) = ready_tx {
+            let _ = tx.send(()).await;
+        }
         let (err_tx, err_rx) = bounded(1); // For critical, route-stopping errors
                                            // channel capacity: a small buffer proportional to concurrency
         let work_capacity = self.concurrency.saturating_mul(self.batch_size);

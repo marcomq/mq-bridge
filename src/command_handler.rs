@@ -195,7 +195,7 @@ mod tests {
         input_channel.send_message("hello".into()).await.unwrap();
 
         // 4. Run
-        let res = route.run_until_err("test_route", None);
+        let res = route.run_until_err("test_route", None, None);
         input_channel.close();
         res.await.ok(); // eof error due to closed channel
 

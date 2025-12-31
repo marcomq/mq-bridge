@@ -20,6 +20,12 @@ use tracing_subscriber::util::SubscriberInitExt;
 
 use mq_bridge::endpoints::memory::MemoryChannel;
 
+
+pub const PERF_TEST_BATCH_MESSAGE_COUNT: usize = 250_000;
+pub const PERF_TEST_SINGLE_MESSAGE_COUNT: usize = 12_500;
+pub const PERF_TEST_MESSAGE_COUNT: usize = PERF_TEST_BATCH_MESSAGE_COUNT;
+pub const PERF_TEST_CONCURRENCY: usize = 100;
+
 /// A struct to hold the performance results for a single test run.
 #[derive(Debug, Clone, Default)]
 pub struct PerformanceResult {
@@ -36,6 +42,14 @@ static PERFORMANCE_RESULTS: Lazy<Mutex<Vec<PerformanceResult>>> =
 
 /// Adds a performance result to the global collector.
 pub fn add_performance_result(result: PerformanceResult) {
+    println!(
+        "Performance Result for {}: Write Batch: {}, Read Batch: {}, Write Single: {}, Read Single: {}",
+        result.test_name,
+        format_pretty(result.write_performance),
+        format_pretty(result.read_performance),
+        format_pretty(result.single_write_performance),
+        format_pretty(result.single_read_performance)
+    );
     PERFORMANCE_RESULTS.lock().unwrap().push(result);
 }
 
@@ -184,9 +198,7 @@ async fn run_pipeline_test_internal(
     let harness = TestHarness::new(in_route.clone(), out_route.clone(), num_messages);
 
     let (in_handle, in_shutdown) = in_route.run(&in_route_name);
-    tokio::time::sleep(Duration::from_millis(200)).await;
     let (out_handle, out_shutdown) = out_route.run(&out_route_name);
-    tokio::time::sleep(Duration::from_millis(200)).await;
 
     let start_time = Instant::now();
 
@@ -295,6 +307,11 @@ impl Drop for PerformanceSummaryPrinter {
         }
 
         println!("\n\n--- Consolidated Performance Test Results (msgs/sec) ---");
+        println!(
+            "\n\n--- Batch = {} msgs, Single = {} msgs ---",
+            format_pretty(PERF_TEST_BATCH_MESSAGE_COUNT),
+            format_pretty(PERF_TEST_SINGLE_MESSAGE_COUNT)
+        );
         println!(
             "{:<25} | {:>15} | {:>15} | {:>15} | {:>15}",
             "Test Name", "Write (Batch)", "Read (Batch)", "Write (Single)", "Read (Single)"
@@ -406,12 +423,6 @@ where
         single_read_performance: PERF_TEST_SINGLE_MESSAGE_COUNT as f64 / single_read_perf,
     }
 }
-
-pub const PERF_TEST_BATCH_MESSAGE_COUNT: usize = 150_000;
-pub const PERF_TEST_SINGLE_MESSAGE_COUNT: usize = 15_000;
-pub const PERF_TEST_MESSAGE_COUNT: usize = PERF_TEST_BATCH_MESSAGE_COUNT;
-pub const PERF_TEST_CONCURRENCY: usize = 100;
-
 pub fn generate_message() -> CanonicalMessage {
     CanonicalMessage::from_json(json!({ "perf_test": true, "ts": chrono::Utc::now().to_rfc3339() }))
         .unwrap()
