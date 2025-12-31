@@ -58,6 +58,9 @@ Different backends and modes (`consumer` vs `subscriber`) have different persist
 
 ## Usage
 
+There is a separate repository to use mq-bridge as standalone app, for example as docker container that can be configured via yaml or env variables:
+https://github.com/marcomq/mq-bridge-app
+
 ### Programmatic Handlers
 
 For implementing business logic, `mq-bridge` provides a handler layer that is separate from transport-level middleware. This allows you to process messages programmatically.
