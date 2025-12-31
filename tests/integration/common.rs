@@ -197,8 +197,8 @@ async fn run_pipeline_test_internal(
 
     let harness = TestHarness::new(in_route.clone(), out_route.clone(), num_messages);
 
-    let (in_handle, in_shutdown) = in_route.run(&in_route_name);
-    let (out_handle, out_shutdown) = out_route.run(&out_route_name);
+    let (in_handle, in_shutdown) = in_route.run(&in_route_name).expect("Failed to start in_route");
+    let (out_handle, out_shutdown) = out_route.run(&out_route_name).expect("Failed to start out_route");
 
     let start_time = Instant::now();
 

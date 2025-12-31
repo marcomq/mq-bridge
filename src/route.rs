@@ -30,7 +30,7 @@ impl Route {
     /// This function spawns a set of worker tasks to process messages concurrently.
     /// It returns a `JoinHandle` for the main route task and a `Sender` channel
     /// that can be used to signal a graceful shutdown.
-    pub fn run(&self, name: &str) -> (JoinHandle<()>, Sender<()>) {
+    pub fn run(&self, name: &str) -> anyhow::Result<(JoinHandle<()>, Sender<()>)> {
         let (shutdown_tx, shutdown_rx) = bounded(1);
         let (ready_tx, ready_rx) = bounded(1);
         // Use `Arc` so route/name clones are cheap (pointer copy) in the reconnect loop.
@@ -87,8 +87,23 @@ impl Route {
                 }
             }
         });
-        ready_rx.recv_blocking().ok();
-        (handle, shutdown_tx)
+
+        let start = std::time::Instant::now();
+        loop {
+            if ready_rx.try_recv().is_ok() {
+                return Ok((handle, shutdown_tx));
+            }
+            if start.elapsed() > std::time::Duration::from_secs(5) {
+                handle.abort();
+                return Err(anyhow::anyhow!("Route '{}' failed to start within 5 seconds", name));
+            }
+            if ready_rx.is_closed() {
+                handle.abort();
+                return Err(anyhow::anyhow!("Route '{}' failed to start (channel closed)", name));
+            }
+            // Sleep briefly to avoid busy-waiting
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
     }
 
     /// The core logic of running the route, designed to be called within a reconnect loop.
