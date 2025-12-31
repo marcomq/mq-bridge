@@ -2,6 +2,7 @@
 //  © Copyright 2025, by Marco Mengelkoch
 //  Licensed under MIT License, see License file for more details
 //  git clone https://github.com/marcomq/mq-bridge
+use crate::canonical_message::tracing_support::LazyMessageIds;
 use crate::models::MemoryConfig;
 use crate::traits::{
     BoxFuture, ConsumerError, MessageConsumer, MessagePublisher, PublisherError, Received,
@@ -15,7 +16,7 @@ use once_cell::sync::Lazy;
 use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Mutex;
-use tracing::info;
+use tracing::{info, trace};
 
 /// A map to hold memory channels for the duration of the bridge setup.
 /// This allows a consumer and publisher in different routes to connect to the same in-memory topic.
@@ -134,17 +135,16 @@ impl MessagePublisher for MemoryPublisher {
         &self,
         messages: Vec<CanonicalMessage>,
     ) -> Result<SentBatch, PublisherError> {
+        trace!(
+            topic = %self.topic,
+            message_ids = ?LazyMessageIds(&messages),
+            "Sending batch to memory channel. Current batch count: {}",
+            self.sender.len()
+        );
         self.sender
             .send(messages)
             .await
             .map_err(|e| anyhow!("Failed to send to memory channel: {}", e))?;
-
-        tracing::trace!(
-            "Batch sent to publisher memory channel. Current batch count: {}",
-            self.sender.len()
-        );
-        // Memory channel sends are atomic; if it succeeds, all messages were sent.
-        // Return no responses and an empty vec of failed messages.
         Ok(SentBatch::Ack)
     }
 
@@ -211,6 +211,7 @@ impl MessageConsumer for MemoryConsumer {
         let mut messages = self.buffer.split_off(split_at);
         messages.reverse(); // Reverse back to original order.
 
+        trace!(count = messages.len(), topic = %self.topic, message_ids = ?LazyMessageIds(&messages), "Received batch of memory messages");
         if messages.is_empty() {
             return Ok(ReceivedBatch {
                 messages: Vec::new(),
@@ -348,7 +349,7 @@ mod tests {
         };
         let publisher = MemoryPublisher::new(&pub_cfg).unwrap();
 
-        let msg = CanonicalMessage::from_str("hello subscriber");
+        let msg = CanonicalMessage::from("hello subscriber");
         publisher.send(msg).await.unwrap();
 
         let received = subscriber.receive().await.unwrap();

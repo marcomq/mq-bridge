@@ -46,7 +46,7 @@ async fn test_route_with_typed_handler_success() {
     in_channel.send_message(canonical_message).await.unwrap();
     in_channel.close();
 
-    route.run_until_err("test", None).await.ok();
+    route.run_until_err("test", None, None).await.ok();
 
     assert!(success.load(Ordering::SeqCst));
     assert_eq!(out_channel.len(), 0); // Ack should not publish
@@ -76,7 +76,7 @@ async fn test_route_with_typed_handler_failure_deserialization() {
     in_channel.send_message(canonical_message).await.unwrap();
     in_channel.close();
 
-    let res = route.run_until_err("test", None).await;
+    let res = route.run_until_err("test", None, None).await;
 
     // The error should be a non-retryable handler error about deserialization
     assert!(res.is_err());
@@ -117,7 +117,7 @@ async fn test_route_with_typed_handler_failure_handler() {
     in_channel.send_message(canonical_message).await.unwrap();
     in_channel.close();
 
-    let res = route.run_until_err("test", None).await;
+    let res = route.run_until_err("test", None, None).await;
 
     // The error should be the non-retryable handler error from our handler
     assert!(res.is_err());

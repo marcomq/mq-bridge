@@ -192,7 +192,6 @@ impl Endpoint {
         Self::new(EndpointType::Memory(MemoryConfig {
             topic: topic.to_string(),
             capacity: Some(capacity),
-            ..Default::default()
         }))
     }
     pub fn add_middleware(mut self, middleware: Middleware) -> Self {

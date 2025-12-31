@@ -45,7 +45,7 @@ impl MessagePublisher for CommandPublisher {
         match self.handler.handle(message).await {
             Ok(Handled::Publish(response_msg)) => self.inner.send(response_msg).await, // Propagate result
             Ok(Handled::Ack) => Ok(Sent::Ack),
-            Err(e) => Err(e.into()), // Converts HandlerError to PublisherError
+            Err(e) => Err(e), // Converts HandlerError to PublisherError
         }
     }
 
@@ -82,15 +82,12 @@ mod tests {
 
         let handler = |msg: CanonicalMessage| async move {
             let response_payload = format!("response_to_{}", String::from_utf8_lossy(&msg.payload));
-            Ok(Handled::Publish(CanonicalMessage::from_str(
-                &response_payload,
-            )))
+            Ok(Handled::Publish(response_payload.into()))
         };
 
         let publisher = CommandPublisher::new(memory_publisher, handler);
 
-        let msg = CanonicalMessage::from_str("command1");
-        publisher.send(msg).await.unwrap();
+        publisher.send("command1".into()).await.unwrap();
 
         let received = channel.drain_messages();
         assert_eq!(received.len(), 1);
@@ -106,8 +103,7 @@ mod tests {
 
         let publisher = CommandPublisher::new(memory_publisher, handler);
 
-        let msg = CanonicalMessage::from_str("command1");
-        let result = publisher.send(msg).await.unwrap();
+        let result = publisher.send("command1".into()).await.unwrap();
 
         assert!(matches!(result, Sent::Ack));
         let received = channel.drain_messages();
@@ -196,13 +192,10 @@ mod tests {
 
         // 3. Inject Data
         let input_channel = route.input.channel().unwrap();
-        input_channel
-            .send_message(CanonicalMessage::from_str("hello"))
-            .await
-            .unwrap();
+        input_channel.send_message("hello".into()).await.unwrap();
 
         // 4. Run
-        let res = route.run_until_err("test_route", None);
+        let res = route.run_until_err("test_route", None, None);
         input_channel.close();
         res.await.ok(); // eof error due to closed channel
 

@@ -62,6 +62,12 @@ where
     }
 }
 
+impl Default for TypeHandler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TypeHandler {
     /// Creates a new TypeHandler that looks for the specified key in message metadata to determine the message type.
     pub fn new() -> Self {
@@ -390,8 +396,8 @@ mod tests {
 
         // 4. Run Routes
         let h1 =
-            tokio::spawn(async move { command_route.run_until_err("command_route", None).await });
-        let h2 = tokio::spawn(async move { event_route.run_until_err("event_route", None).await });
+            tokio::spawn(async move { command_route.run_until_err("command_route", None, None).await });
+        let h2 = tokio::spawn(async move { event_route.run_until_err("event_route", None, None).await });
 
         // 5. Send Command
         let cmd_channel = get_or_create_channel(&cmd_in_cfg);

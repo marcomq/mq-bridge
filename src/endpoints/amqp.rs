@@ -1,3 +1,4 @@
+use crate::canonical_message::tracing_support::LazyMessageIds;
 use crate::models::AmqpConfig;
 use crate::traits::{
     BoxFuture, ConsumerError, MessageConsumer, MessagePublisher, PublisherError, ReceivedBatch,
@@ -7,7 +8,7 @@ use crate::CanonicalMessage;
 use crate::APP_NAME;
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;
-use futures::TryStreamExt;
+use futures::{FutureExt, StreamExt, TryStreamExt};
 use lapin::tcp::{OwnedIdentity, OwnedTLSConfig};
 use lapin::{
     options::{
@@ -19,7 +20,7 @@ use lapin::{
 };
 use std::any::Any;
 use std::time::Duration;
-use tracing::{debug, info};
+use tracing::{info, trace, warn};
 use uuid::Uuid;
 
 pub struct AmqpPublisher {
@@ -65,6 +66,12 @@ impl AmqpPublisher {
 #[async_trait]
 impl MessagePublisher for AmqpPublisher {
     async fn send(&self, message: CanonicalMessage) -> Result<Sent, PublisherError> {
+        trace!(
+            message_id = %format!("{:032x}", message.message_id),
+            queue = %self.queue,
+            payload_size = message.payload.len(),
+            "Publishing AMQP message"
+        );
         let mut properties = if self.no_persistence {
             BasicProperties::default()
         } else {
@@ -103,15 +110,79 @@ impl MessagePublisher for AmqpPublisher {
         Ok(Sent::Ack)
     }
 
-    // This isn't a real bulk send, but the normal send is fast enough.
     async fn send_batch(
         &self,
         messages: Vec<CanonicalMessage>,
     ) -> Result<SentBatch, PublisherError> {
-        crate::traits::send_batch_helper(self, messages, |publisher, message| {
-            Box::pin(publisher.send(message))
-        })
-        .await
+        trace!(count = messages.len(), queue = %self.queue, message_ids = ?LazyMessageIds(&messages), "Publishing batch of AMQP messages");
+        if self.delayed_ack {
+            return crate::traits::send_batch_helper(self, messages, |publisher, message| {
+                Box::pin(publisher.send(message))
+            })
+            .await;
+        }
+
+        let mut pending_confirms = Vec::with_capacity(messages.len());
+        let mut failed_messages = Vec::new();
+
+        for message in messages {
+            let mut properties = if self.no_persistence {
+                BasicProperties::default()
+            } else {
+                BasicProperties::default().with_delivery_mode(2)
+            };
+
+            if !message.metadata.is_empty() {
+                let mut table = FieldTable::default();
+                for (key, value) in &message.metadata {
+                    table.insert(
+                        ShortString::from(key.clone()),
+                        lapin::types::AMQPValue::LongString(value.clone().into()),
+                    );
+                }
+                properties = properties.with_headers(table);
+            }
+
+            match self
+                .channel
+                .basic_publish(
+                    &self.exchange,
+                    &self.queue,
+                    BasicPublishOptions::default(),
+                    &message.payload,
+                    properties,
+                )
+                .await
+            {
+                Ok(confirmation) => pending_confirms.push((message, confirmation)),
+                Err(e) => failed_messages.push((
+                    message,
+                    PublisherError::Retryable(anyhow::anyhow!("Failed to publish: {}", e)),
+                )),
+            }
+        }
+
+        for (message, confirmation) in pending_confirms {
+            match confirmation.await {
+                Ok(_) => {}
+                Err(e) => failed_messages.push((
+                    message,
+                    PublisherError::Retryable(anyhow::anyhow!(
+                        "Publisher confirmation failed: {}",
+                        e
+                    )),
+                )),
+            }
+        }
+
+        if failed_messages.is_empty() {
+            Ok(SentBatch::Ack)
+        } else {
+            Ok(SentBatch::Partial {
+                responses: None,
+                failed: failed_messages,
+            })
+        }
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -121,6 +192,7 @@ impl MessagePublisher for AmqpPublisher {
 
 pub struct AmqpConsumer {
     consumer: Consumer,
+    queue: String,
 }
 
 impl AmqpConsumer {
@@ -157,12 +229,16 @@ impl AmqpConsumer {
             )
             .await?;
 
-        Ok(Self { consumer })
+        Ok(Self {
+            consumer,
+            queue: queue.to_string(),
+        })
     }
 }
 
 pub struct AmqpSubscriber {
     consumer: Consumer,
+    queue: String,
 }
 
 impl AmqpSubscriber {
@@ -223,6 +299,7 @@ impl AmqpSubscriber {
             )
             .await?;
         let queue_name = queue.name().as_str();
+        let queue_name_owned = queue_name.to_string();
 
         info!(queue = %queue_name, exchange = %exchange_name, "Binding temporary queue to exchange");
         channel
@@ -250,7 +327,10 @@ impl AmqpSubscriber {
             )
             .await?;
 
-        Ok(Self { consumer })
+        Ok(Self {
+            consumer,
+            queue: queue_name_owned,
+        })
     }
 }
 
@@ -265,53 +345,48 @@ impl MessageConsumer for AmqpSubscriber {
         }
 
         // 1. Wait for the first message. This will block until a message is available.
-        let mut last_delivery = futures::StreamExt::next(&mut self.consumer)
+        let first_delivery = self
+            .consumer
+            .next()
             .await
             .ok_or(ConsumerError::EndOfStream)?
             .context("Failed to get message from AMQP subscriber stream")?;
 
         let mut messages = Vec::with_capacity(max_messages);
-        messages.push(delivery_to_canonical_message(&last_delivery));
+        let mut ackers = Vec::with_capacity(max_messages);
+
+        messages.push(delivery_to_canonical_message(&first_delivery));
+        ackers.push(first_delivery.acker);
 
         // 2. Greedily consume more messages if they are already buffered, up to max_messages.
         while messages.len() < max_messages {
-            match self.consumer.try_next().await {
-                Ok(Some(delivery)) => {
+            match self.consumer.try_next().now_or_never() {
+                Some(Ok(Some(delivery))) => {
                     messages.push(delivery_to_canonical_message(&delivery));
-                    last_delivery = delivery;
+                    ackers.push(delivery.acker);
                 }
-                Ok(None) => break, // No more messages in the buffer
-                Err(e) => {
+                Some(Ok(None)) => break, // Stream ended
+                Some(Err(e)) => {
                     // An error occurred, but we have some messages. Process them and let the next call handle the error.
                     tracing::warn!("Error receiving subsequent AMQP message: {}", e);
                     break;
                 }
+                None => break, // Stream is pending (no messages ready immediately)
             }
         }
 
         // 3. Create a commit function that acks all received messages.
         let messages_len = messages.len();
+        trace!(count = messages_len, queue = %self.queue, message_ids = ?LazyMessageIds(&messages), "Received batch of AMQP subscriber messages");
         let commit = Box::new(move |_response: Option<Vec<CanonicalMessage>>| {
             Box::pin(async move {
-                let ack_options = BasicAckOptions {
-                    // Use multiple: true only if we've consumed more than one message.
-                    multiple: messages_len > 1,
-                    ..Default::default()
-                };
-                if let Err(e) = last_delivery.ack(ack_options).await {
-                    // Ack failure may result in redelivery. Enable deduplication middleware to handle duplicates.
-                    tracing::error!(
-                        last_delivery_tag = last_delivery.delivery_tag,
-                        error = %e,
-                        "Failed to bulk-ack AMQP messages"
-                    );
-                } else {
-                    debug!(
-                        last_delivery_tag = last_delivery.delivery_tag,
-                        count = messages_len,
-                        "Bulk-acknowledged AMQP messages"
-                    );
-                }
+                futures::stream::iter(ackers)
+                    .for_each_concurrent(None, |acker| async move {
+                        if let Err(e) = acker.ack(BasicAckOptions::default()).await {
+                            tracing::error!(error = %e, "Failed to ack AMQP message");
+                        }
+                    })
+                    .await;
             }) as BoxFuture<'static, ()>
         });
 
@@ -383,24 +458,41 @@ async fn build_tls_config(config: &AmqpConfig) -> anyhow::Result<OwnedTLSConfig>
 }
 
 fn delivery_to_canonical_message(delivery: &lapin::message::Delivery) -> CanonicalMessage {
-    let mut canonical_message =
-        CanonicalMessage::new(delivery.data.clone(), Some(delivery.delivery_tag as u128));
+    let mut message_id = Some(delivery.delivery_tag as u128);
+    if let Some(amqp_id) = delivery.properties.message_id().as_ref() {
+        if let Ok(uuid) = Uuid::parse_str(amqp_id.as_str()) {
+            message_id = Some(uuid.as_u128());
+        } else if let Ok(val) = amqp_id.as_str().parse::<u128>() {
+            message_id = Some(val);
+        }
+    }
+
+    let mut canonical_message = CanonicalMessage::new(delivery.data.clone(), message_id);
+
+    if let Some(amqp_id) = delivery.properties.message_id().as_ref() {
+        canonical_message
+            .metadata
+            .insert("amqp_message_id".to_string(), amqp_id.to_string());
+    }
+    if let Some(correlation_id) = delivery.properties.correlation_id().as_ref() {
+        canonical_message.metadata.insert(
+            "amqp_correlation_id".to_string(),
+            correlation_id.to_string(),
+        );
+    }
+
     if let Some(headers) = delivery.properties.headers().as_ref() {
-        if !headers.inner().is_empty() {
-            let mut metadata = std::collections::HashMap::new();
-            for (key, value) in headers.inner().iter() {
-                let value_str = match value {
-                    lapin::types::AMQPValue::LongString(s) => s.to_string(),
-                    lapin::types::AMQPValue::ShortString(s) => s.to_string(),
-                    lapin::types::AMQPValue::Boolean(b) => b.to_string(),
-                    lapin::types::AMQPValue::LongInt(i) => i.to_string(),
-                    _ => continue,
-                };
-                metadata.insert(key.to_string(), value_str);
-            }
-            if !metadata.is_empty() {
-                canonical_message.metadata = metadata;
-            }
+        for (key, value) in headers.inner().iter() {
+            let value_str = match value {
+                lapin::types::AMQPValue::LongString(s) => s.to_string(),
+                lapin::types::AMQPValue::ShortString(s) => s.to_string(),
+                lapin::types::AMQPValue::Boolean(b) => b.to_string(),
+                lapin::types::AMQPValue::LongInt(i) => i.to_string(),
+                _ => continue,
+            };
+            canonical_message
+                .metadata
+                .insert(key.to_string(), value_str);
         }
     }
     canonical_message
@@ -417,53 +509,48 @@ impl MessageConsumer for AmqpConsumer {
         }
 
         // 1. Wait for the first message. This will block until a message is available.
-        let mut last_delivery = futures::StreamExt::next(&mut self.consumer)
+        let first_delivery = self
+            .consumer
+            .next()
             .await
             .ok_or(ConsumerError::EndOfStream)?
             .context("Failed to get message from AMQP consumer stream")?;
 
         let mut messages = Vec::with_capacity(max_messages);
-        messages.push(delivery_to_canonical_message(&last_delivery));
+        let mut ackers = Vec::with_capacity(max_messages);
+
+        messages.push(delivery_to_canonical_message(&first_delivery));
+        ackers.push(first_delivery.acker);
 
         // 2. Greedily consume more messages if they are already buffered, up to max_messages.
         while messages.len() < max_messages {
-            match self.consumer.try_next().await {
-                Ok(Some(delivery)) => {
+            match self.consumer.try_next().now_or_never() {
+                Some(Ok(Some(delivery))) => {
                     messages.push(delivery_to_canonical_message(&delivery));
-                    last_delivery = delivery;
+                    ackers.push(delivery.acker);
                 }
-                Ok(None) => break, // No more messages in the buffer
-                Err(e) => {
+                Some(Ok(None)) => break, // Stream ended
+                Some(Err(e)) => {
                     // An error occurred, but we have some messages. Process them and let the next call handle the error.
-                    tracing::warn!("Error receiving subsequent AMQP message: {}", e);
+                    warn!("Error receiving subsequent AMQP message: {}", e);
                     break;
                 }
+                None => break, // Stream is pending (no messages ready immediately)
             }
         }
 
         // 3. Create a commit function that acks all received messages.
         let messages_len = messages.len();
+        trace!(count = messages_len, queue = %self.queue, message_ids = ?LazyMessageIds(&messages), "Received batch of AMQP messages");
         let commit = Box::new(move |_response: Option<Vec<CanonicalMessage>>| {
             Box::pin(async move {
-                let ack_options = BasicAckOptions {
-                    // Use multiple: true only if we've consumed more than one message.
-                    multiple: messages_len > 1,
-                    ..Default::default()
-                };
-                if let Err(e) = last_delivery.ack(ack_options).await {
-                    // Ack failure may result in redelivery. Enable deduplication middleware to handle duplicates.
-                    tracing::error!(
-                        last_delivery_tag = last_delivery.delivery_tag,
-                        error = %e,
-                        "Failed to bulk-ack AMQP messages"
-                    );
-                } else {
-                    debug!(
-                        last_delivery_tag = last_delivery.delivery_tag,
-                        count = messages_len,
-                        "Bulk-acknowledged AMQP messages"
-                    );
-                }
+                futures::stream::iter(ackers)
+                    .for_each_concurrent(None, |acker| async move {
+                        if let Err(e) = acker.ack(BasicAckOptions::default()).await {
+                            tracing::error!(error = %e, "Failed to ack AMQP message");
+                        }
+                    })
+                    .await;
             }) as BoxFuture<'static, ()>
         });
 

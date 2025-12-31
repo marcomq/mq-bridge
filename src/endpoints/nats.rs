@@ -1,3 +1,4 @@
+use crate::canonical_message::tracing_support::LazyMessageIds;
 use crate::models::NatsConfig;
 use crate::traits::{
     BatchCommitFunc, BoxFuture, ConsumerError, MessageConsumer, MessagePublisher, PublisherError,
@@ -15,7 +16,7 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer, UnixTime};
 use rustls::{ClientConfig, DigitallySignedStruct, Error as RustlsError, SignatureScheme};
 use std::io::BufReader;
 use std::sync::Arc;
-use tracing::{info, warn};
+use tracing::{info, trace, warn};
 use uuid::Uuid;
 
 enum NatsClient {
@@ -69,6 +70,12 @@ impl NatsPublisher {
 #[async_trait]
 impl MessagePublisher for NatsPublisher {
     async fn send(&self, message: CanonicalMessage) -> Result<Sent, PublisherError> {
+        trace!(
+            subject = %self.subject,
+            message_id = %format!("{:032x}", message.message_id),
+            payload_size = message.payload.len(),
+            "Publishing NATS message"
+        );
         let headers = if !message.metadata.is_empty() {
             let mut headers = HeaderMap::new();
             for (key, value) in &message.metadata {
@@ -108,11 +115,76 @@ impl MessagePublisher for NatsPublisher {
         &self,
         messages: Vec<CanonicalMessage>,
     ) -> Result<SentBatch, PublisherError> {
-        // not a real bulk, but fast enough
-        crate::traits::send_batch_helper(self, messages, |publisher, message| {
-            Box::pin(publisher.send(message))
-        })
-        .await
+        trace!(
+            subject = %self.subject,
+            count = messages.len(),
+            message_ids = ?LazyMessageIds(&messages),
+            "Publishing batch of NATS messages"
+        );
+
+        match &self.client {
+            NatsClient::JetStream(jetstream) => {
+                if self.delayed_ack {
+                    // Fire-and-forget is faster, no need to wait for acks.
+                    return crate::traits::send_batch_helper(self, messages, |p, m| {
+                        Box::pin(p.send(m))
+                    })
+                    .await;
+                }
+
+                // Publish all and then wait for all acks.
+                let mut ack_futures = Vec::with_capacity(messages.len());
+                let mut failed_messages = Vec::new();
+
+                for message in messages {
+                    let headers = if !message.metadata.is_empty() {
+                        let mut headers = HeaderMap::new();
+                        for (key, value) in &message.metadata {
+                            headers.insert(key.as_str(), value.as_str());
+                        }
+                        headers
+                    } else {
+                        HeaderMap::new()
+                    };
+                    match jetstream
+                        .publish_with_headers(
+                            self.subject.clone(),
+                            headers,
+                            message.payload.clone(),
+                        )
+                        .await
+                    {
+                        Ok(ack) => ack_futures.push((message, ack)),
+                        Err(e) => failed_messages.push((
+                            message,
+                            PublisherError::Retryable(anyhow!("NATS publish failed: {}", e)),
+                        )),
+                    }
+                }
+
+                for (message, ack) in ack_futures {
+                    if let Err(e) = ack.await {
+                        failed_messages.push((
+                            message,
+                            PublisherError::Retryable(anyhow!("NATS ack failed: {}", e)),
+                        ));
+                    }
+                }
+
+                if failed_messages.is_empty() {
+                    Ok(SentBatch::Ack)
+                } else {
+                    Ok(SentBatch::Partial {
+                        responses: None,
+                        failed: failed_messages,
+                    })
+                }
+            }
+            NatsClient::Core(_) => {
+                // Core NATS is fire-and-forget, so the helper is efficient enough.
+                crate::traits::send_batch_helper(self, messages, |p, m| Box::pin(p.send(m))).await
+            }
+        }
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -127,6 +199,7 @@ enum NatsCore {
 
 pub struct NatsConsumer {
     core: NatsCore,
+    subject: String,
 }
 use std::any::Any;
 
@@ -153,14 +226,17 @@ impl NatsConsumer {
             queue_group,
         )
         .await?;
-        Ok(Self { core })
+        Ok(Self {
+            core,
+            subject: subject.to_string(),
+        })
     }
 }
 
 #[async_trait]
 impl MessageConsumer for NatsConsumer {
     async fn receive_batch(&mut self, max_messages: usize) -> Result<ReceivedBatch, ConsumerError> {
-        self.core.receive_batch(max_messages).await
+        self.core.receive_batch(max_messages, &self.subject).await
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -170,6 +246,7 @@ impl MessageConsumer for NatsConsumer {
 
 pub struct NatsSubscriber {
     core: NatsCore,
+    subject: String,
 }
 
 impl NatsSubscriber {
@@ -195,14 +272,17 @@ impl NatsSubscriber {
             None,
         )
         .await?;
-        Ok(Self { core })
+        Ok(Self {
+            core,
+            subject: subject.to_string(),
+        })
     }
 }
 
 #[async_trait]
 impl MessageConsumer for NatsSubscriber {
     async fn receive_batch(&mut self, max_messages: usize) -> Result<ReceivedBatch, ConsumerError> {
-        self.core.receive_batch(max_messages).await
+        self.core.receive_batch(max_messages, &self.subject).await
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -378,7 +458,11 @@ impl NatsCore {
         }
     }
 
-    async fn receive_batch(&mut self, max_messages: usize) -> Result<ReceivedBatch, ConsumerError> {
+    async fn receive_batch(
+        &mut self,
+        max_messages: usize,
+        subject: &str,
+    ) -> Result<ReceivedBatch, ConsumerError> {
         if max_messages == 0 {
             return Ok(ReceivedBatch {
                 messages: Vec::new(),
@@ -402,17 +486,19 @@ impl NatsCore {
 
                     // Greedily fetch the rest of the batch
                     while canonical_messages.len() < max_messages {
-                        if let Ok(Some(message)) = stream.try_next().await {
-                            let sequence = message.info().ok().map(|meta| meta.stream_sequence);
-                            canonical_messages
-                                .push(create_nats_canonical_message(&message, sequence));
-                            jetstream_messages.push(message);
-                        } else {
-                            break; // No more messages in the buffer
+                        match stream.try_next().now_or_never() {
+                            Some(Ok(Some(message))) => {
+                                let sequence = message.info().ok().map(|meta| meta.stream_sequence);
+                                canonical_messages
+                                    .push(create_nats_canonical_message(&message, sequence));
+                                jetstream_messages.push(message);
+                            }
+                            _ => break, // No more messages in the buffer or stream ended/errored
                         }
                     }
                 }
 
+                trace!(count = canonical_messages.len(), subject = %subject, message_ids = ?LazyMessageIds(&canonical_messages), "Received batch of NATS JetStream messages");
                 let commit_closure: BatchCommitFunc = Box::new(move |_responses| {
                     Box::pin(async move {
                         // Acknowledge messages concurrently.
@@ -460,6 +546,7 @@ impl NatsCore {
                         }
                     }
                 }
+                trace!(count = messages.len(), subject = %subject, message_ids = ?LazyMessageIds(&messages), "Received batch of NATS Core messages");
                 if messages.is_empty() {
                     Err(ConsumerError::EndOfStream)
                 } else {

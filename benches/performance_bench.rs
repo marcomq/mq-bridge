@@ -409,6 +409,11 @@ fn performance_benchmarks(c: &mut Criterion) {
     if !results.is_empty() {
         println!("\n\n--- Consolidated Performance Test Results (msgs/sec) ---");
         println!(
+            "\n\n--- Batch = {} msgs, Single = {} msgs ---",
+            format_pretty(PERF_TEST_MESSAGE_COUNT),
+            format_pretty(PERF_TEST_MESSAGE_COUNT)
+        );
+        println!(
             "{:<25} | {:>15} | {:>15} | {:>15} | {:>15}",
             "Test Name", "Write (Batch)", "Read (Batch)", "Write (Single)", "Read (Single)"
         );

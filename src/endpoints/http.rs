@@ -156,6 +156,7 @@ async fn handle_request(
     body: Bytes,
 ) -> Response {
     let mut message = CanonicalMessage::new(body.to_vec(), None);
+    tracing::trace!(message_id = %format!("{:032x}", message.message_id), "Received HTTP request");
     let mut metadata = HashMap::new();
     for (key, value) in headers.iter() {
         if let Ok(value_str) = value.to_str() {
@@ -282,6 +283,11 @@ impl HttpPublisher {
 #[async_trait]
 impl MessagePublisher for HttpPublisher {
     async fn send(&self, message: CanonicalMessage) -> Result<Sent, PublisherError> {
+        tracing::trace!(
+            message_id = %format!("{:032x}", message.message_id),
+            url = %self.url,
+            "Sending HTTP request"
+        );
         let mut request_builder = self.client.post(&self.url);
         for (key, value) in &message.metadata {
             request_builder = request_builder.header(key, value);
@@ -333,15 +339,47 @@ impl MessagePublisher for HttpPublisher {
         }
     }
 
-    // not a real bulk, but fast enough
     async fn send_batch(
         &self,
         messages: Vec<CanonicalMessage>,
     ) -> Result<SentBatch, PublisherError> {
-        crate::traits::send_batch_helper(self, messages, |publisher, message| {
-            Box::pin(publisher.send(message))
-        })
-        .await
+        use futures::future::join_all;
+
+        if messages.is_empty() {
+            return Ok(SentBatch::Ack);
+        }
+
+        let send_futures = messages.into_iter().map(|message| {
+            // Clone the message for the error case.
+            let msg_for_err = message.clone();
+            async move { self.send(message).await.map_err(|e| (msg_for_err, e)) }
+        });
+
+        let results = join_all(send_futures).await;
+
+        let mut responses = Vec::new();
+        let mut failed = Vec::new();
+
+        for result in results {
+            match result {
+                Ok(Sent::Response(resp)) => responses.push(resp),
+                Ok(Sent::Ack) => {}
+                Err((msg, e)) => failed.push((msg, e)),
+            }
+        }
+
+        if failed.is_empty() && responses.is_empty() {
+            Ok(SentBatch::Ack)
+        } else {
+            Ok(SentBatch::Partial {
+                responses: if responses.is_empty() {
+                    None
+                } else {
+                    Some(responses)
+                },
+                failed,
+            })
+        }
     }
 
     fn as_any(&self) -> &dyn Any {

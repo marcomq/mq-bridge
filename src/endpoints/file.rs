@@ -2,6 +2,7 @@
 //  © Copyright 2025, by Marco Mengelkoch
 //  Licensed under MIT License, see License file for more details
 //  git clone https://github.com/marcomq/mq-bridge
+use crate::canonical_message::tracing_support::LazyMessageIds;
 use crate::traits::{
     into_batch_commit_func, BoxFuture, ConsumerError, MessageConsumer, MessagePublisher,
     PublisherError, ReceivedBatch, SentBatch,
@@ -22,6 +23,7 @@ use tracing::{debug, info, instrument};
 #[derive(Clone)]
 pub struct FilePublisher {
     writer: Arc<Mutex<BufWriter<File>>>,
+    path: String,
 }
 
 impl FilePublisher {
@@ -43,6 +45,7 @@ impl FilePublisher {
         info!(path = %path_str, "File sink opened for appending");
         Ok(Self {
             writer: Arc::new(Mutex::new(BufWriter::new(file))),
+            path: path_str.to_string(),
         })
     }
 }
@@ -58,6 +61,7 @@ impl MessagePublisher for FilePublisher {
             return Ok(SentBatch::Ack);
         }
 
+        tracing::trace!(count = messages.len(), path = %self.path, message_ids = ?LazyMessageIds(&messages), "Writing batch to file");
         let mut writer = self.writer.lock().await;
         let mut failed_messages = Vec::new();
 
@@ -75,7 +79,8 @@ impl MessagePublisher for FilePublisher {
                     Ok(s) => s,
                     Err(e) => {
                         tracing::error!("Failed to serialize message for file sink: {}", e);
-                        failed_messages.push((msg, PublisherError::NonRetryable(anyhow::anyhow!(e))));
+                        failed_messages
+                            .push((msg, PublisherError::NonRetryable(anyhow::anyhow!(e))));
                         continue;
                     }
                 }
@@ -87,8 +92,6 @@ impl MessagePublisher for FilePublisher {
                 tracing::error!("Failed to write newline to file: {}", e);
                 // If write fails, add the message to the failed list
                 failed_messages.push((msg, PublisherError::NonRetryable(anyhow::anyhow!(e))));
-            } else {
-                tracing::trace!(payload_len = %serialized_msg.len(), "Writing message to file");
             }
         }
 
@@ -166,10 +169,8 @@ impl MessageConsumer for FileConsumer {
             Ok(msg) => msg,
             Err(_) => {
                 let mut msg = CanonicalMessage::new(buffer, None);
-                msg.metadata.insert(
-                    "mq_bridge.original_format".to_string(),
-                    "raw".to_string(),
-                );
+                msg.metadata
+                    .insert("mq_bridge.original_format".to_string(), "raw".to_string());
                 msg
             }
         };
@@ -177,6 +178,7 @@ impl MessageConsumer for FileConsumer {
         // The commit for a file source is a no-op.
         let commit = Box::new(move |_| Box::pin(async move {}) as BoxFuture<'static, ()>);
 
+        tracing::trace!(message_id = %format!("{:032x}", message.message_id), path = %self.path, "Received message from file");
         Ok(ReceivedBatch {
             messages: vec![message],
             commit: into_batch_commit_func(commit),

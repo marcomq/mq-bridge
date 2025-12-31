@@ -37,10 +37,6 @@ impl CanonicalMessage {
         Self::new(payload.into(), None)
     }
 
-    pub fn from_str(payload: &str) -> Self {
-        Self::new(payload.as_bytes().into(), None)
-    }
-
     pub fn set_id(&mut self, id: u128) {
         self.message_id = id;
     }
@@ -106,7 +102,7 @@ impl CanonicalMessage {
 
 impl From<&str> for CanonicalMessage {
     fn from(s: &str) -> Self {
-        Self::from_str(s)
+        Self::new(s.as_bytes().into(), None)
     }
 }
 
@@ -141,6 +137,26 @@ impl From<CanonicalMessage> for MessageContext {
         Self {
             message_id: msg.message_id,
             metadata: msg.metadata,
+        }
+    }
+}
+
+#[doc(hidden)]
+pub mod tracing_support {
+    use super::CanonicalMessage;
+
+    /// A helper struct to lazily format a slice of message IDs for tracing.
+    /// The collection and formatting only occurs if the trace is enabled.
+    pub struct LazyMessageIds<'a>(pub &'a [CanonicalMessage]);
+
+    impl<'a> std::fmt::Debug for LazyMessageIds<'a> {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            let ids: Vec<String> = self
+                .0
+                .iter()
+                .map(|m| format!("{:032x}", m.message_id))
+                .collect();
+            f.debug_list().entries(ids).finish()
         }
     }
 }

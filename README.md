@@ -1,10 +1,10 @@
 # mq-bridge
-`mq-bridge` is an asynchronous message bridging library for Rust. It connects different messaging systems, data stores, and protocols. Unlike a classic bridge that simply forwards messages, `mq-bridge` acts as a **programmable integration layer**, allowing for transformation, filtering, handling, and complex routing. It is built on Tokio and supports patterns like retries, dead-letter queues, and message deduplication.
+`mq-bridge` is an asynchronous message library for Rust. It connects different messaging systems, data stores, and protocols. Unlike a classic bridge that simply forwards messages, `mq-bridge` acts as a **programmable integration layer**, allowing for transformation, filtering, handling, events, and complex routing. It is built on Tokio and supports patterns like retries, dead-letter queues, and message deduplication.
 
 ## Features
 
 *   **Supported Backends**: Kafka, NATS, AMQP (RabbitMQ), MQTT, MongoDB, HTTP, Files, and in-memory channels.
-*   **Configuration**: Routes can be defined via YAML or environment variables.
+*   **Configuration**: Routes can be defined via YAML, JSON or environment variables.
 *   **Programmable Logic**: Inject custom Rust handlers to transform or filter messages in-flight.
 *   **Middleware**:
     *   **Retries**: Exponential backoff for transient failures.
@@ -12,12 +12,29 @@
     *   **Deduplication**: Message deduplication using `sled`.
 *   **Concurrency**: Configurable concurrency per route using Tokio.
 
+## Philosophy & Focus
+
+`mq-bridge` is designed as a **programmable integration layer**. Its primary goal is to decouple your application logic from the underlying messaging infrastructure.
+
+Unlike libraries that enforce specific architectural patterns (like strict CQRS/Event Sourcing domain modeling) or concurrency models (like Actors), `mq-bridge` remains unopinionated about your domain logic. Instead, it focuses on **reliable data movement** and **protocol abstraction**.
+
+### When to use mq-bridge
+*   **Hybrid Messaging**: Connect systems speaking different protocols (e.g., MQTT to Kafka) without writing custom adapters.
+*   **Infrastructure Abstraction**: Write business logic that consumes `CanonicalMessage`s, allowing you to swap the underlying transport (e.g., switching from RabbitMQ to NATS) via configuration.
+*   **Resilient Pipelines**: Apply uniform reliability patterns (Retries, DLQ, Deduplication) across all your data flows.
+*   **Sidecar / Gateway**: Deploy as a standalone service to ingest, filter, and route messages before they reach your core services.
+
+### When NOT to use mq-bridge
+*   **Stateful Stream Processing**: For windowing, joins, or complex aggregations over time, dedicated stream processing engines are more suitable.
+*   **Domain Aggregate Management**: If you need a framework to manage the lifecycle, versioning, and replay of domain aggregates (Event Sourcing), use a specialized library. `mq-bridge` handles the *bus*, not the *entity*.
+*   **Specialization**: `mq-bridge` focuses on a subset of messaging patterns like pub/sub and batching, emulating them if not natively supported. If you need very specific features from a messaging library or protocol, the abstraction layer of `mq-bridge` may prevent you from using them.
+
 ## Core Concepts
 
 *   **Route**: A named data pipeline that defines a flow from one `input` to one `output`.
 *   **Endpoint**: A source or sink for messages.
 *   **Middleware**: Components that intercept and process messages (e.g., for error handling).
-*   **Handler**: A programmatic component for business logic, such as transforming messages (`CommandHandler`) or consuming them (`EventHandler`).
+*   **Handler**: A programmatic component for business logic, such as transforming/consuming messages (`CommandHandler`) or subscribe them (`EventHandler`).
 
 ## Endpoint Behavior
 
@@ -48,7 +65,7 @@ For implementing business logic, `mq-bridge` provides a handler layer that is se
 #### Raw Handlers
 
 *   **`CommandHandler`**: A handler for 1-to-1 or 1-to-0 message transformations. It takes a message and can optionally return a new message to be passed down the publisher chain.
-*   **`EventHandler`**: A terminal handler that consumes a message without returning a new one.
+*   **`EventHandler`**: A terminal handler that reads new messages without removing them for other event handlers.
 
 You can chain these handlers with endpoint publishers.
 
@@ -146,12 +163,12 @@ async fn main() {
     // 4. Inject Data
     let input_channel = route.input.channel().unwrap();
     input_channel
-        .send_message(CanonicalMessage::from_str("hello"))
+        .send_message("hello".into())
         .await
         .unwrap();
 
     // 5. Run
-    let res = route.run_until_err("test_route", None);
+    let res = route.run_until_err("test_route", None, None);
     input_channel.close();
     res.await.ok(); // eof error due to closed channel
 

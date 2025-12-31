@@ -30,11 +30,12 @@ impl Route {
     /// This function spawns a set of worker tasks to process messages concurrently.
     /// It returns a `JoinHandle` for the main route task and a `Sender` channel
     /// that can be used to signal a graceful shutdown.
-    pub fn run(&self, name: &str) -> (JoinHandle<()>, Sender<()>) {
+    pub fn run(&self, name_str: &str) -> anyhow::Result<(JoinHandle<()>, Sender<()>)> {
         let (shutdown_tx, shutdown_rx) = bounded(1);
+        let (ready_tx, ready_rx) = bounded(1);
         // Use `Arc` so route/name clones are cheap (pointer copy) in the reconnect loop.
         let route = Arc::new(self.clone());
-        let name = Arc::new(name.to_string());
+        let name = Arc::new(name_str.to_string());
 
         let handle = tokio::spawn(async move {
             loop {
@@ -44,11 +45,16 @@ impl Route {
                 // This avoids a race where both this loop and the inner task
                 // try to consume the same external shutdown signal.
                 let (internal_shutdown_tx, internal_shutdown_rx) = bounded(1);
+                let ready_tx_clone = ready_tx.clone();
 
                 // The actual route logic is in `run_until_err`.
                 let mut run_task = tokio::spawn(async move {
                     route_arc
-                        .run_until_err(&name_arc, Some(internal_shutdown_rx))
+                        .run_until_err(
+                            &name_arc,
+                            Some(internal_shutdown_rx),
+                            Some(ready_tx_clone),
+                        )
                         .await
                 });
 
@@ -82,7 +88,22 @@ impl Route {
             }
         });
 
-        (handle, shutdown_tx)
+        let ready_rx_clone = ready_rx.clone();
+        let timeout = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            ready_rx_clone.close();
+        });
+
+        match ready_rx.recv_blocking() {
+            Ok(_) => {
+                timeout.abort();
+                Ok((handle, shutdown_tx))
+            },
+            Err(_) => {
+                handle.abort();
+                Err(anyhow::anyhow!("Route '{}' failed to start within 5 seconds or encountered an error", name_str))
+            }
+        }
     }
 
     /// The core logic of running the route, designed to be called within a reconnect loop.
@@ -90,13 +111,14 @@ impl Route {
         &self,
         name: &str,
         shutdown_rx: Option<async_channel::Receiver<()>>,
+        ready_tx: Option<Sender<()>>,
     ) -> anyhow::Result<bool> {
         let (_internal_shutdown_tx, internal_shutdown_rx) = bounded(1);
         let shutdown_rx = shutdown_rx.unwrap_or(internal_shutdown_rx);
         if self.concurrency == 1 {
-            self.run_sequentially(name, shutdown_rx).await
+            self.run_sequentially(name, shutdown_rx, ready_tx).await
         } else {
-            self.run_concurrently(name, shutdown_rx).await
+            self.run_concurrently(name, shutdown_rx, ready_tx).await
         }
     }
 
@@ -105,10 +127,13 @@ impl Route {
         &self,
         name: &str,
         shutdown_rx: async_channel::Receiver<()>,
+        ready_tx: Option<Sender<()>>,
     ) -> anyhow::Result<bool> {
         let publisher = create_publisher_from_route(name, &self.output).await?;
         let mut consumer = create_consumer_from_route(name, &self.input).await?;
-
+        if let Some(tx) = ready_tx {
+            let _ = tx.send(()).await;
+        }
         loop {
             select! {
                 _ = shutdown_rx.recv() => {
@@ -129,7 +154,7 @@ impl Route {
                         }
                         Err(ConsumerError::Connection(e)) => {
                             // Propagate error to trigger reconnect by the outer loop
-                            return Err(e.into());
+                            return Err(e);
                         }
                     };
                     debug!("Received a batch of {} messages sequentially", messages.len());
@@ -164,9 +189,13 @@ impl Route {
         &self,
         name: &str,
         shutdown_rx: async_channel::Receiver<()>,
+        ready_tx: Option<Sender<()>>,
     ) -> anyhow::Result<bool> {
         let publisher = create_publisher_from_route(name, &self.output).await?;
         let mut consumer = create_consumer_from_route(name, &self.input).await?;
+        if let Some(tx) = ready_tx {
+            let _ = tx.send(()).await;
+        }
         let (err_tx, err_rx) = bounded(1); // For critical, route-stopping errors
                                            // channel capacity: a small buffer proportional to concurrency
         let work_capacity = self.concurrency.saturating_mul(self.batch_size);
@@ -243,7 +272,7 @@ impl Route {
                         }
                         Err(ConsumerError::Connection(e)) => {
                             // Propagate error to trigger reconnect by the outer loop
-                            return Err(e.into());
+                            return Err(e);
                         }
                     };
                     debug!("Received a batch of {} messages concurrently", messages.len());

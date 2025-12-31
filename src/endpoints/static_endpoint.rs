@@ -30,10 +30,14 @@ impl StaticEndpointPublisher {
 #[async_trait]
 impl MessagePublisher for StaticEndpointPublisher {
     async fn send(&self, _message: CanonicalMessage) -> Result<Sent, PublisherError> {
-        trace!(response = %self.content, "Sending static response");
         let payload = serde_json::to_vec(&Value::String(self.content.clone()))
             .context("Failed to serialize static response to JSON")?;
-        Ok(Sent::Response(CanonicalMessage::new(payload, None)))
+        let response_msg = CanonicalMessage::new(payload, None);
+        trace!(
+            message_id = %format!("{:032x}", response_msg.message_id),
+            response = %self.content, "Sending static response"
+        );
+        Ok(Sent::Response(response_msg))
     }
 
     async fn send_batch(
@@ -73,6 +77,7 @@ impl StaticRequestConsumer {
 impl MessageConsumer for StaticRequestConsumer {
     async fn receive(&mut self) -> Result<Received, ConsumerError> {
         let message = CanonicalMessage::new(self.content.as_bytes().to_vec(), None);
+        trace!(message_id = %format!("{:032x}", message.message_id), "Producing static message");
         let commit = Box::new(|_response: Option<CanonicalMessage>| {
             Box::pin(async {}) as BoxFuture<'static, ()>
         });

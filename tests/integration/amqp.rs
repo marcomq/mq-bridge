@@ -10,15 +10,15 @@ use std::sync::Arc;
 const CONFIG_YAML: &str = r#"
 routes:
   memory_to_amqp:
-    in:
+    input:
       memory: { topic: "amqp-test-in" }
-    out:
-      amqp: { url: "amqp://guest:guest@localhost:5672/%2f", queue: "test_queue_amqp", delayed_ack: false  }
+    output:
+      amqp: { url: "amqp://guest:guest@localhost:5672/%2f", queue: "test_queue_amqp" }
 
   amqp_to_memory:
-    in:
-      amqp: { url: "amqp://guest:guest@localhost:5672/%2f", queue: "test_queue_amqp", delayed_ack: false  }
-    out:
+    input:
+      amqp: { url: "amqp://guest:guest@localhost:5672/%2f", queue: "test_queue_amqp", prefetch_count: 1000 }
+    output:
       memory: { topic: "amqp-test-out", capacity: {out_capacity} }
 "#;
 
@@ -53,6 +53,7 @@ pub async fn test_amqp_performance_direct() {
         let config = mq_bridge::models::AmqpConfig {
             url: "amqp://guest:guest@localhost:5672/%2f".to_string(),
             delayed_ack: false,
+            prefetch_count: Some(1000),
             ..Default::default()
         };
 
