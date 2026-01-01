@@ -384,14 +384,8 @@
             "null"
           ]
         },
-        "brokers": {
+        "url": {
           "type": "string"
-        },
-        "group_id": {
-          "type": [
-            "string",
-            "null"
-          ]
         },
         "username": {
           "type": [
@@ -415,6 +409,12 @@
             "cert_password": null,
             "accept_invalid_certs": false
           }
+        },
+        "group_id": {
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "delayed_ack": {
           "description": "If true, do not wait for an acknowledgement when sending to broker. Defaults to false.",
@@ -464,7 +464,7 @@
       },
       "additionalProperties": false,
       "required": [
-        "brokers"
+        "url"
       ]
     },
     "TlsConfig": {
@@ -539,12 +539,6 @@
             "null"
           ]
         },
-        "token": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
         "tls": {
           "$ref": "#/$defs/TlsConfig",
           "default": {
@@ -555,6 +549,12 @@
             "cert_password": null,
             "accept_invalid_certs": false
           }
+        },
+        "token": {
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "delayed_ack": {
           "description": "If true, do not wait for an acknowledgement when sending to broker. Defaults to false.",
@@ -631,6 +631,17 @@
             "null"
           ]
         },
+        "tls": {
+          "$ref": "#/$defs/TlsConfig",
+          "default": {
+            "required": false,
+            "ca_file": null,
+            "cert_file": null,
+            "key_file": null,
+            "cert_password": null,
+            "accept_invalid_certs": false
+          }
+        },
         "exchange": {
           "type": [
             "string",
@@ -645,17 +656,6 @@
           "format": "uint16",
           "minimum": 0,
           "maximum": 65535
-        },
-        "tls": {
-          "$ref": "#/$defs/TlsConfig",
-          "default": {
-            "required": false,
-            "ca_file": null,
-            "cert_file": null,
-            "key_file": null,
-            "cert_password": null,
-            "accept_invalid_certs": false
-          }
         },
         "no_persistence": {
           "type": "boolean",
@@ -684,6 +684,29 @@
         },
         "url": {
           "type": "string"
+        },
+        "username": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "password": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tls": {
+          "$ref": "#/$defs/TlsConfig",
+          "default": {
+            "required": false,
+            "ca_file": null,
+            "cert_file": null,
+            "key_file": null,
+            "cert_password": null,
+            "accept_invalid_certs": false
+          }
         },
         "database": {
           "type": "string"

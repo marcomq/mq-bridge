@@ -193,11 +193,10 @@ impl MessageConsumer for MemoryConsumer {
         // If the internal buffer has messages, return them first.
         if self.buffer.is_empty() {
             // Buffer is empty. Wait for a new batch from the channel.
-            self.buffer = self
-                .receiver
-                .recv()
-                .await
-                .map_err(|_| anyhow!("Memory channel closed."))?;
+            self.buffer = match self.receiver.recv().await {
+                Ok(batch) => batch,
+                Err(_) => return Err(ConsumerError::EndOfStream),
+            };
             // Reverse the buffer so we can efficiently pop from the end.
             self.buffer.reverse();
         }

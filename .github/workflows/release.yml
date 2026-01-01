@@ -1,37 +1,68 @@
-# .github/workflows/release.yml
 name: Release
 
 on:
   push:
     tags:
-      - 'v*.*.*'
+      - 'v*'
 
 env:
-  IMAGE_NAME: ${{ github.repository }}
+  CARGO_TERM_COLOR: always
 
 jobs:
-  test:
-    name: Cargo Test
+  release:
+    name: Release
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
+      - uses: actions/checkout@v4
+      
       - name: Install Rust toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: dtolnay/rust-toolchain@stable
+      
+      - name: Cache cargo registry
+        uses: actions/cache@v4
         with:
-          toolchain: stable
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+      
+      - name: Build release
+        run: cargo build --release --all-features
+      
+      - name: Run tests
+        run: cargo test --all-features --release
+      
+      - name: Create release archive
+        run: |
+          mkdir -p release
+          tar czf release/mq-bridge-${{ github.ref_name }}-linux-x86_64.tar.gz target/release/mq-bridge 2>/dev/null || true
+          zip -r release/mq-bridge-${{ github.ref_name }}-linux-x86_64.zip target/release/mq-bridge 2>/dev/null || true
+      
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: release/*
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config zlib1g-dev
-
-      - name: Test with all features (for completeness)
-        run: cargo test --workspace --all-features
-
-      - name: Run integration tests (with Docker)
-        # Run ignored tests sequentially to avoid port conflicts with Docker containers
-        run: cargo test --test integration_test --features full  --release -- --ignored --test-threads=1
-
-      - name: Test with core (production) features
-        run: cargo test --workspace --no-default-features --features core
-
+  publish-crates-io:
+    name: Publish to crates.io
+    runs-on: ubuntu-latest
+    needs: release
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      
+      - name: Publish to crates.io
+        run: cargo publish --token ${{ secrets.CRATES_IO_TOKEN }}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}

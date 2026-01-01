@@ -301,6 +301,11 @@ impl Route {
         for handle in worker_handles {
             let _ = handle.await;
         }
+
+        if let Ok(err) = err_rx.try_recv() {
+            return Err(err);
+        }
+
         // Return true if shutdown was requested (channel is empty means it was closed/consumed),
         // false if we reached end-of-stream naturally.
         Ok(shutdown_rx.is_empty())
