@@ -96,3 +96,8 @@ criterion = { version = "0.8.1", features = ["async", "async_tokio"] }
 [[bench]]
 name = "performance_bench"
 harness = false
+
+[target.'cfg(windows)'.dependencies.rdkafka]
+version = "0.38"
+features = ["cmake-build", "tokio"]
+optional = true
