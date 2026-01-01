@@ -286,22 +286,17 @@ impl MessageConsumer for MqttListener {
             None => return Err(ConsumerError::EndOfStream),
         }
 
-        // Try to fill the batch with a small timeout to allow for accumulation.
-        // This significantly improves throughput by reducing the number of small batches.
-        if messages.len() < max_messages {
-            let deadline = tokio::time::Instant::now() + Duration::from_millis(5);
-            while messages.len() < max_messages {
-                match tokio::time::timeout_at(deadline, self.message_rx.recv()).await {
-                    Ok(Some(msg)) => {
-                        reply_infos.push((
-                            msg.metadata.get("mqtt_response_topic").cloned(),
-                            msg.metadata.get("mqtt_correlation_data").cloned(),
-                        ));
-                        messages.push(msg);
-                    }
-                    Ok(None) => break, // Channel closed
-                    Err(_) => break,   // Timeout
+        // Greedily consume more messages if they are already buffered, up to max_messages.
+        while messages.len() < max_messages {
+            match self.message_rx.try_recv() {
+                Ok(msg) => {
+                    reply_infos.push((
+                        msg.metadata.get("mqtt_response_topic").cloned(),
+                        msg.metadata.get("mqtt_correlation_data").cloned(),
+                    ));
+                    messages.push(msg);
                 }
+                Err(_) => break, // Empty or Disconnected
             }
         }
 
@@ -344,6 +339,9 @@ async fn create_client_and_eventloop(
             let mut mqttoptions = MqttOptionsV5::new(client_id, host, port);
             mqttoptions
                 .set_keep_alive(Duration::from_secs(config.keep_alive_seconds.unwrap_or(20)));
+            if let Some(inflight) = config.max_inflight {
+                mqttoptions.set_outgoing_inflight_upper_limit(inflight);
+            }
             mqttoptions.set_clean_start(config.clean_session);
 
             if let (Some(username), Some(password)) = (&config.username, &config.password) {
@@ -362,6 +360,9 @@ async fn create_client_and_eventloop(
             let mut mqttoptions = MqttOptions::new(client_id, host, port);
             mqttoptions
                 .set_keep_alive(Duration::from_secs(config.keep_alive_seconds.unwrap_or(20)));
+            if let Some(inflight) = config.max_inflight {
+                mqttoptions.set_inflight(inflight);
+            }
             mqttoptions.set_clean_session(config.clean_session);
 
             if let (Some(username), Some(password)) = (&config.username, &config.password) {

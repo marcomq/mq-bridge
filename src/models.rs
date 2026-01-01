@@ -504,6 +504,7 @@ pub struct MqttConfig {
     #[serde(default)]
     pub tls: TlsConfig,
     pub queue_capacity: Option<usize>,
+    pub max_inflight: Option<u16>,
     pub qos: Option<u8>,
     #[serde(default = "default_clean_session")]
     pub clean_session: bool, // false => persistence

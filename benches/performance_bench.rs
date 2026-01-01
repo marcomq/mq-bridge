@@ -181,6 +181,7 @@ mod mqtt_helper {
         MqttConfig {
             url: "tcp://localhost:1883".to_string(),
             queue_capacity: Some(PERF_TEST_MESSAGE_COUNT * 4), // For batch and single
+            max_inflight: Some(1000),
             qos: Some(1),
             clean_session: false,
             keep_alive_seconds: Some(60),
@@ -238,6 +239,7 @@ fn performance_benchmarks(c: &mut Criterion) {
                         let mut total = Duration::ZERO;
                         let publisher = backend::create_publisher().await;
                         let consumer = backend::create_consumer().await;
+                        tokio::time::sleep(DEFAULT_SLEEP).await;
                         for _ in 0..iters {
                             // Note: create_publisher must be `pub` in the integration module
                             let duration = measure_single_write_performance(
@@ -269,6 +271,7 @@ fn performance_benchmarks(c: &mut Criterion) {
                         let mut total = Duration::ZERO;
                         let publisher = backend::create_publisher().await;
                         let consumer = backend::create_consumer().await;
+                        tokio::time::sleep(DEFAULT_SLEEP).await;
                         for _ in 0..iters {
 
                             // Fill the queue first (setup, not measured)
@@ -306,6 +309,7 @@ fn performance_benchmarks(c: &mut Criterion) {
                         let mut total = Duration::ZERO;
                         let publisher = backend::create_publisher().await;
                         let consumer = backend::create_consumer().await;
+                        tokio::time::sleep(DEFAULT_SLEEP).await;
                         for _ in 0..iters {
                             let duration = measure_write_performance(
                                 concat!($name, "_batch_write"),
@@ -337,6 +341,7 @@ fn performance_benchmarks(c: &mut Criterion) {
                         let mut total = Duration::ZERO;
                         let publisher = backend::create_publisher().await;
                         let consumer = backend::create_consumer().await;
+                        tokio::time::sleep(DEFAULT_SLEEP).await;
                         for _ in 0..iters {
 
                             // Fill the queue first (setup, not measured)

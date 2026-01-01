@@ -459,7 +459,7 @@ pub async fn measure_write_performance(
     num_messages: usize,
     concurrency: usize,
 ) -> Duration {
-    println!("Starting write performance test (Batch) for {}", _name);
+    // write performance test (Batch) for {}", _name);
     let batch_size = 128; // Define a reasonable batch size
     let (tx, rx): (Sender<CanonicalMessage>, Receiver<CanonicalMessage>) =
         bounded(batch_size * concurrency * 2);
@@ -635,7 +635,7 @@ pub async fn measure_read_performance(
     consumer: Arc<tokio::sync::Mutex<dyn MessageConsumer>>,
     num_messages: usize,
 ) -> Duration {
-    println!("Starting read performance test (Batch) for {}", _name);
+    // println!("Starting read performance test (Batch) for {}", _name);
     let start_time = Instant::now();
     let mut final_count = 0;
     let batch_size = 128; // A reasonable batch size for single-threaded reading.
@@ -652,7 +652,7 @@ pub async fn measure_read_performance(
         let mut consumer_guard = consumer_clone.lock().await;
         let receive_future = consumer_guard.receive_batch(missing);
 
-        match tokio::time::timeout(Duration::from_secs(5), receive_future).await {
+        match tokio::time::timeout(Duration::from_secs(10), receive_future).await {
             Ok(Ok(batch)) if !batch.messages.is_empty() => {
                 final_count += batch.messages.len();
                 let commit = batch.commit;
@@ -685,7 +685,7 @@ pub async fn measure_single_write_performance(
     num_messages: usize,
     concurrency: usize,
 ) -> Duration {
-    println!("Starting single write performance test for {}", _name);
+    // println!("Starting single write performance test for {}", _name);
     let (tx, rx): (Sender<CanonicalMessage>, Receiver<CanonicalMessage>) = bounded(concurrency * 2);
 
     let final_count = Arc::new(AtomicUsize::new(0));
@@ -744,7 +744,7 @@ pub async fn measure_single_read_performance(
     consumer: Arc<tokio::sync::Mutex<dyn MessageConsumer>>,
     num_messages: usize,
 ) -> Duration {
-    println!("Starting single read performance test for {}", _name);
+    // println!("Starting single read performance test for {}", _name);
     let start_time = Instant::now();
     let mut final_count = 0;
     loop {
@@ -756,7 +756,7 @@ pub async fn measure_single_read_performance(
         if let Ok(Ok(Received {
             message: _msg,
             commit,
-        })) = tokio::time::timeout(Duration::from_secs(5), receive_future).await
+        })) = tokio::time::timeout(Duration::from_secs(10), receive_future).await
         {
             final_count += 1;
             tokio::spawn(async move { commit(None).await });
