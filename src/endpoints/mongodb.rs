@@ -97,7 +97,7 @@ pub struct MongoDbPublisher {
 
 impl MongoDbPublisher {
     pub async fn new(config: &MongoDbConfig, collection_name: &str) -> anyhow::Result<Self> {
-        let client = Client::with_uri_str(&config.url).await?;
+        let client = create_client(config).await?;
         let db = client.database(&config.database);
         let collection = db.collection(collection_name);
         info!(database = %config.database, collection = %collection_name, "MongoDB publisher connected");
@@ -213,7 +213,7 @@ pub struct MongoDbConsumer {
 
 impl MongoDbConsumer {
     pub async fn new(config: &MongoDbConfig, collection_name: &str) -> anyhow::Result<Self> {
-        let client = Client::with_uri_str(&config.url).await?;
+        let client = create_client(config).await?;
         // The first operation will trigger connection and topology discovery.
         client.list_database_names().await?;
 
@@ -564,7 +564,7 @@ impl MongoDbSubscriber {
     /// supported. If the collection is empty, it will start consuming from the next inserted document.
     ///
     pub async fn new(config: &MongoDbConfig, collection_name: &str) -> anyhow::Result<Self> {
-        let client = Client::with_uri_str(&config.url).await?;
+        let client = create_client(config).await?;
         let db = client.database(&config.database);
         let collection = db.collection::<Document>(collection_name);
 
@@ -703,4 +703,37 @@ impl MessageConsumer for MongoDbSubscriber {
     fn as_any(&self) -> &dyn Any {
         self
     }
+}
+
+async fn create_client(config: &MongoDbConfig) -> anyhow::Result<Client> {
+    let mut client_options = mongodb::options::ClientOptions::parse(&config.url).await?;
+    if let (Some(username), Some(password)) = (&config.username, &config.password) {
+        client_options.credential = Some(
+            mongodb::options::Credential::builder()
+                .username(username.clone())
+                .password(password.clone())
+                .build(),
+        );
+    }
+
+    if config.tls.required {
+        let mut tls_options = mongodb::options::TlsOptions::builder().build();
+        if let Some(ca_file) = &config.tls.ca_file {
+            tls_options.ca_file_path = Some(std::path::PathBuf::from(ca_file));
+        }
+        if let Some(cert_file) = &config.tls.cert_file {
+            tls_options.cert_key_file_path = Some(std::path::PathBuf::from(cert_file));
+        }
+        if config.tls.key_file.is_some() {
+            tracing::warn!("MongoDB TLS configuration: 'key_file' is ignored. The private key must be included in the 'cert_file' (PEM format).");
+        }
+        if let Some(cert_password) = &config.tls.cert_password {
+            tls_options.tls_certificate_key_file_password = Some(cert_password.as_bytes().to_vec());
+        }
+        if config.tls.accept_invalid_certs {
+            tls_options.allow_invalid_certificates = Some(true);
+        }
+        client_options.tls = Some(mongodb::options::Tls::Enabled(tls_options));
+    }
+    Ok(Client::with_options(client_options)?)
 }

@@ -222,7 +222,7 @@ kafka_to_nats:
   concurrency: 4
   input:
     kafka:
-      brokers: "localhost:9092"
+      url: "localhost:9092"
       topic: "orders"
       group_id: "bridge_group"
       # TLS Configuration (Optional)
@@ -276,7 +276,7 @@ iot_router:
       cases:
         temp:
           kafka:
-            brokers: "localhost:9092"
+            url: "localhost:9092"
             topic: "temperature"
       default:
         memory:
@@ -335,7 +335,7 @@ output:
       US:
         kafka:
           topic: "us_orders"
-          brokers: "kafka-us:9092"
+          url: "kafka-us:9092"
       EU:
         nats:
           subject: "eu_orders"

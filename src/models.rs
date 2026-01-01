@@ -355,12 +355,12 @@ pub struct KafkaEndpoint {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct KafkaConfig {
-    pub brokers: String,
-    pub group_id: Option<String>,
+    pub url: String,
     pub username: Option<String>,
     pub password: Option<String>, // Consider using a secret management type
     #[serde(default)]
     pub tls: TlsConfig,
+    pub group_id: Option<String>,
     /// If true, do not wait for an acknowledgement when sending to broker. Defaults to false.
     #[serde(default)]
     pub delayed_ack: bool,
@@ -391,9 +391,9 @@ pub struct NatsConfig {
     pub url: String,
     pub username: Option<String>,
     pub password: Option<String>,
-    pub token: Option<String>,
     #[serde(default)]
     pub tls: TlsConfig,
+    pub token: Option<String>,
     /// If true, do not wait for an acknowledgement when sending to broker. Defaults to false.
     #[serde(default)]
     pub delayed_ack: bool,
@@ -441,10 +441,10 @@ pub struct AmqpConfig {
     pub url: String,
     pub username: Option<String>,
     pub password: Option<String>,
-    pub exchange: Option<String>,
-    pub prefetch_count: Option<u16>,
     #[serde(default)]
     pub tls: TlsConfig,
+    pub exchange: Option<String>,
+    pub prefetch_count: Option<u16>,
     #[serde(default)]
     pub no_persistence: bool,
     /// If true, do not wait for an acknowledgement when sending to broker. Defaults to false.
@@ -470,6 +470,10 @@ pub struct MongoDbEndpoint {
 #[serde(deny_unknown_fields)]
 pub struct MongoDbConfig {
     pub url: String,
+    pub username: Option<String>,
+    pub password: Option<String>,
+    #[serde(default)]
+    pub tls: TlsConfig,
     pub database: String,
     pub polling_interval_ms: Option<u64>,
     pub ttl_seconds: Option<u64>,
@@ -599,7 +603,7 @@ kafka_to_nats:
               url: "nats://localhost:4222"
     kafka:
       topic: "input-topic"
-      brokers: "localhost:9092"
+      url: "localhost:9092"
       group_id: "my-consumer-group"
       tls:
         required: true
@@ -664,7 +668,7 @@ kafka_to_nats:
 
         if let EndpointType::Kafka(kafka) = &input.endpoint_type {
             assert_eq!(kafka.topic, Some("input-topic".to_string()));
-            assert_eq!(kafka.config.brokers, "localhost:9092");
+            assert_eq!(kafka.config.url, "localhost:9092");
             assert_eq!(kafka.config.group_id, Some("my-consumer-group".to_string()));
             let tls = &kafka.config.tls;
             assert_eq!(tls.required, true);
@@ -709,7 +713,7 @@ kafka_to_nats:
             std::env::set_var("MQB__KAFKA_TO_NATS__CONCURRENCY", "10");
             std::env::set_var("MQB__KAFKA_TO_NATS__INPUT__KAFKA__TOPIC", "input-topic");
             std::env::set_var(
-                "MQB__KAFKA_TO_NATS__INPUT__KAFKA__BROKERS",
+                "MQB__KAFKA_TO_NATS__INPUT__KAFKA__URL",
                 "localhost:9092",
             );
             std::env::set_var(

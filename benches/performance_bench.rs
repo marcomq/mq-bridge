@@ -148,7 +148,7 @@ mod kafka_helper {
 
     fn get_config() -> KafkaConfig {
         KafkaConfig {
-            brokers: "localhost:9092".to_string(),
+            url: "localhost:9092".to_string(),
             group_id: Some("perf_test_group_kafka".to_string()),
             producer_options: Some(vec![
                 ("queue.buffering.max.ms".to_string(), "50".to_string()), // Linger for 50ms to batch messages
