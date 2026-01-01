@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use std::any::Any;
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime};
-use tracing::{info, warn};
+use tracing::{info, trace, warn};
 
 /// A helper struct for deserialization that matches the BSON structure exactly.
 /// The payload is read as a BSON Binary type, which we then manually convert.
@@ -127,7 +127,7 @@ impl MongoDbPublisher {
 #[async_trait]
 impl MessagePublisher for MongoDbPublisher {
     async fn send(&self, message: CanonicalMessage) -> Result<Sent, PublisherError> {
-        tracing::trace!(message_id = %format!("{:032x}", message.message_id), collection = %self.collection_name, "Publishing document to MongoDB");
+        trace!(message_id = %format!("{:032x}", message.message_id), collection = %self.collection_name, "Publishing document to MongoDB");
         let doc = message_to_document(&message).map_err(PublisherError::NonRetryable)?;
         self.collection
             .insert_one(doc)
@@ -145,7 +145,7 @@ impl MessagePublisher for MongoDbPublisher {
             return Ok(SentBatch::Ack);
         }
 
-        tracing::trace!(count = messages.len(), collection = %self.collection_name, message_ids = ?LazyMessageIds(&messages), "Publishing batch of documents to MongoDB");
+        trace!(count = messages.len(), collection = %self.collection_name, message_ids = ?LazyMessageIds(&messages), "Publishing batch of documents to MongoDB");
         let mut docs = Vec::with_capacity(messages.len());
         let mut failed_messages = Vec::new();
 
@@ -451,7 +451,7 @@ impl MongoDbConsumer {
                         {
                             Ok(delete_result) => {
                                 if delete_result.deleted_count == 1 {
-                                    tracing::trace!(mongodb_id = %id_val, "MongoDB message acknowledged and deleted");
+                                    trace!(mongodb_id = %id_val, "MongoDB message acknowledged and deleted");
                                 } else {
                                     warn!(mongodb_id = %id_val, "Attempted to ack/delete MongoDB message, but it was not found (already deleted?)");
                                 }
@@ -515,7 +515,7 @@ impl MongoDbConsumer {
             ids.push(id_val);
         }
 
-        tracing::trace!(count = messages.len(), collection = %self.collection_name, message_ids = ?LazyMessageIds(&messages), "Received batch of MongoDB documents");
+        trace!(count = messages.len(), collection = %self.collection_name, message_ids = ?LazyMessageIds(&messages), "Received batch of MongoDB documents");
         let collection_clone = self.collection.clone();
         let commit = Box::new(move |_response| {
             Box::pin(async move {
@@ -527,7 +527,7 @@ impl MongoDbConsumer {
                 if let Err(e) = collection_clone.delete_many(filter).await {
                     tracing::error!(error = %e, "Failed to bulk-ack/delete MongoDB messages");
                 } else {
-                    tracing::trace!(
+                    trace!(
                         count = ids.len(),
                         "MongoDB messages acknowledged and deleted"
                     );
@@ -647,7 +647,7 @@ impl MessageConsumer for MongoDbSubscriber {
                     Err(_) => document_to_canonical(doc)?,
                 };
 
-                tracing::trace!(message_id = %format!("{:032x}", msg.message_id), collection = %self.collection_name, "Received MongoDB change stream event");
+                trace!(message_id = %format!("{:032x}", msg.message_id), collection = %self.collection_name, "Received MongoDB change stream event");
                 Ok(ReceivedBatch {
                     messages: vec![msg],
                     commit: Box::new(|_| Box::pin(async {})),
@@ -688,7 +688,7 @@ impl MessageConsumer for MongoDbSubscriber {
                 }
 
                 if !messages.is_empty() {
-                    tracing::trace!(count = messages.len(), collection = %self.collection_name, message_ids = ?LazyMessageIds(&messages), "Received batch of MongoDB documents via polling");
+                    trace!(count = messages.len(), collection = %self.collection_name, message_ids = ?LazyMessageIds(&messages), "Received batch of MongoDB documents via polling");
                     return Ok(ReceivedBatch {
                         messages,
                         commit: Box::new(|_| Box::pin(async {})),

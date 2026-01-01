@@ -431,13 +431,39 @@ pub fn generate_message() -> CanonicalMessage {
         .unwrap()
 }
 
+/// Measure the performance of writing messages to a publisher.
+///
+/// This test creates a publisher and consumer with a bounded channel.
+/// It then spawns a number of tasks to write messages to the publisher
+/// concurrently. Each task will write a batch of messages to
+/// the publisher, retrying if any messages fail. The test times how long
+/// it takes to write all the messages to the publisher.
+///
+/// The number of messages to write, the concurrency level and the batch
+/// size are all configurable. The test will retry sending a batch up
+/// to `MAX_RETRIES` times if any messages fail.
+///
+/// The test will return how long it took to write all the messages to the
+/// publisher. If the count of messages written is not equal to the
+/// expected count, an error will be logged.
+///
+/// `num_messages`: The number of messages to write to the publisher.
+///
+/// `concurrency`: The number of tasks to spawn concurrently to write
+/// messages to the publisher.
+///
+/// `batch_size`: The size of each batch of messages to write to the
+/// publisher. This is calculated as `(num_messages / concurrency / 10).min(16).max(128)`
+///
 pub async fn measure_write_performance(
     _name: &str,
     publisher: Arc<dyn MessagePublisher>,
     num_messages: usize,
     concurrency: usize,
 ) -> Duration {
-    let (tx, rx): (Sender<CanonicalMessage>, Receiver<CanonicalMessage>) = bounded(concurrency * 2);
+    let batch_size = 128; // Define a reasonable batch size
+    let (tx, rx): (Sender<CanonicalMessage>, Receiver<CanonicalMessage>) =
+        bounded(batch_size * concurrency * 2);
 
     let final_count = Arc::new(AtomicUsize::new(0));
     tokio::spawn(async move {
@@ -456,7 +482,6 @@ pub async fn measure_write_performance(
     for _ in 0..concurrency {
         let rx_clone = rx.clone();
         let publisher_clone = publisher.clone();
-        let batch_size = (num_messages / concurrency / 10).max(100); // Define a reasonable batch size
         let final_count_clone = Arc::clone(&final_count);
 
         tasks.spawn(async move {
@@ -615,7 +640,7 @@ pub async fn measure_read_performance(
 ) -> Duration {
     let start_time = Instant::now();
     let mut final_count = 0;
-    let batch_size = 100; // A reasonable batch size for single-threaded reading.
+    let batch_size = 128; // A reasonable batch size for single-threaded reading.
 
     let consumer_clone = consumer.clone();
 

@@ -17,7 +17,7 @@ use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::sync::Mutex;
-use tracing::{debug, info, instrument};
+use tracing::{debug, info, instrument, trace};
 
 /// A sink that writes messages to a file, one per line.
 #[derive(Clone)]
@@ -61,7 +61,7 @@ impl MessagePublisher for FilePublisher {
             return Ok(SentBatch::Ack);
         }
 
-        tracing::trace!(count = messages.len(), path = %self.path, message_ids = ?LazyMessageIds(&messages), "Writing batch to file");
+        trace!(count = messages.len(), path = %self.path, message_ids = ?LazyMessageIds(&messages), "Writing batch to file");
         let mut writer = self.writer.lock().await;
         let mut failed_messages = Vec::new();
 
@@ -178,7 +178,7 @@ impl MessageConsumer for FileConsumer {
         // The commit for a file source is a no-op.
         let commit = Box::new(move |_| Box::pin(async move {}) as BoxFuture<'static, ()>);
 
-        tracing::trace!(message_id = %format!("{:032x}", message.message_id), path = %self.path, "Received message from file");
+        trace!(message_id = %format!("{:032x}", message.message_id), path = %self.path, "Received message from file");
         Ok(ReceivedBatch {
             messages: vec![message],
             commit: into_batch_commit_func(commit),

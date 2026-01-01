@@ -262,16 +262,15 @@ impl MessageConsumer for MqttListener {
             None => return Err(ConsumerError::EndOfStream),
         }
 
-        // If we have space for more, try to fill the batch without blocking excessively.
-        // A single yield is often enough for a producer on another task to run and fill the channel.
+        // Try to fill the batch with a small timeout to allow for accumulation.
+        // This significantly improves throughput by reducing the number of small batches.
         if messages.len() < max_messages {
-            tokio::task::yield_now().await;
-
-            // Now, greedily drain whatever is in the channel.
+            let deadline = tokio::time::Instant::now() + Duration::from_millis(5);
             while messages.len() < max_messages {
-                match self.message_rx.try_recv() {
-                    Ok(msg) => messages.push(msg),
-                    Err(_) => break, // Channel is empty or closed
+                match tokio::time::timeout_at(deadline, self.message_rx.recv()).await {
+                    Ok(Some(msg)) => messages.push(msg),
+                    Ok(None) => break, // Channel closed
+                    Err(_) => break,   // Timeout
                 }
             }
         }

@@ -51,11 +51,6 @@ fn default_output_endpoint() -> Endpoint {
 fn default_dlq_retry_attempts() -> usize {
     3
 }
-
-fn default_true() -> bool {
-    true
-}
-
 fn default_retry_attempts() -> usize {
     3
 }
@@ -67,6 +62,9 @@ fn default_max_interval_ms() -> u64 {
 }
 fn default_multiplier() -> f64 {
     2.0
+}
+fn default_clean_session() -> bool {
+    false
 }
 
 /// Represents a connection point for messages, which can be a source (input) or a sink (output).
@@ -503,8 +501,8 @@ pub struct MqttConfig {
     pub tls: TlsConfig,
     pub queue_capacity: Option<usize>,
     pub qos: Option<u8>,
-    #[serde(default = "default_true")]
-    pub clean_session: bool,
+    #[serde(default = "default_clean_session")]
+    pub clean_session: bool, // false => persistance
     pub keep_alive_seconds: Option<u64>,
     #[serde(default)]
     pub protocol: MqttProtocol,
@@ -712,10 +710,7 @@ kafka_to_nats:
         unsafe {
             std::env::set_var("MQB__KAFKA_TO_NATS__CONCURRENCY", "10");
             std::env::set_var("MQB__KAFKA_TO_NATS__INPUT__KAFKA__TOPIC", "input-topic");
-            std::env::set_var(
-                "MQB__KAFKA_TO_NATS__INPUT__KAFKA__URL",
-                "localhost:9092",
-            );
+            std::env::set_var("MQB__KAFKA_TO_NATS__INPUT__KAFKA__URL", "localhost:9092");
             std::env::set_var(
                 "MQB__KAFKA_TO_NATS__INPUT__KAFKA__GROUP_ID",
                 "my-consumer-group",

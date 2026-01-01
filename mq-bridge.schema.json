@@ -789,7 +789,7 @@
         },
         "clean_session": {
           "type": "boolean",
-          "default": true
+          "default": false
         },
         "keep_alive_seconds": {
           "type": [

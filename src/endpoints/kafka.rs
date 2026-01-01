@@ -7,7 +7,7 @@ use crate::traits::{
 use crate::CanonicalMessage;
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;
-use futures::{FutureExt, StreamExt, TryStreamExt};
+use futures::StreamExt;
 use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
 use rdkafka::message::OwnedHeaders;
 use rdkafka::producer::{FutureProducer, FutureRecord, Producer};
@@ -403,12 +403,61 @@ fn process_message(
     let payload = message
         .payload()
         .ok_or_else(|| anyhow!("Kafka message has no payload"))?;
+
+    // Try to extract message_id from the Kafka key first (where we store it when publishing).
+    // The key is set to message_id.to_be_bytes() which is 16 bytes for a u128.
+    let mut message_id: Option<u128> = None;
+    if let Some(key) = message.key() {
+        if key.len() == 16 {
+            // Try to parse the key as a u128 (big-endian bytes)
+            message_id =
+                Some(u128::from_be_bytes(key.try_into().map_err(|_| {
+                    anyhow!("Failed to convert key to u128 bytes")
+                })?));
+        }
+    }
+
+    // If no message_id from key, check headers for a message_id
+    if message_id.is_none() {
+        if let Some(headers) = message.headers() {
+            for header in headers.iter() {
+                if header.key == "message_id" || header.key == "mq_bridge.message_id" {
+                    if let Some(value) = header.value {
+                        let id_str = String::from_utf8_lossy(value);
+                        // Try to parse as UUID first
+                        if let Ok(uuid) = Uuid::parse_str(&id_str) {
+                            message_id = Some(uuid.as_u128());
+                            break;
+                        }
+                        // Try to parse as hex string
+                        else if let Ok(n) =
+                            u128::from_str_radix(id_str.trim_start_matches("0x"), 16)
+                        {
+                            message_id = Some(n);
+                            break;
+                        }
+                        // Try to parse as decimal string
+                        else if let Ok(n) = id_str.parse::<u128>() {
+                            message_id = Some(n);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Fall back to partition+offset if no message_id found
     // Combine partition and offset for a unique ID within a topic.
     // A u128 is used to hold both values, with the partition in the high 64 bits
     // and the offset in the low 64 bits.
-    let message_id =
-        ((message.partition() as u32 as u128) << 64) | (message.offset() as u64 as u128);
+    let message_id = message_id.unwrap_or_else(|| {
+        ((message.partition() as u32 as u128) << 64) | (message.offset() as u64 as u128)
+    });
+
     let mut canonical_message = CanonicalMessage::new(payload.to_vec(), Some(message_id));
+
+    // Process headers into metadata
     if let Some(headers) = message.headers() {
         if headers.count() > 0 {
             let mut metadata = std::collections::HashMap::new();
@@ -421,6 +470,7 @@ fn process_message(
             canonical_message.metadata = metadata;
         }
     }
+
     messages.push(canonical_message);
 
     // Update the topic partition list with the latest offset
@@ -471,35 +521,22 @@ async fn receive_batch_internal(
     let mut messages = Vec::with_capacity(max_messages);
     let mut last_offset_tpl = TopicPartitionList::new();
     {
-        // Create a stream from the consumer for this batch operation.
-        let mut stream = consumer.stream();
+        let stream = consumer.stream();
+        // Use ready_chunks to efficiently fetch a batch of available messages.
+        // This waits for at least one message, then consumes all currently available messages up to max_messages.
+        let mut chunk_stream = stream.ready_chunks(max_messages);
 
-        // Block and wait for the first message.
-        if let Some(first_message_result) = stream.next().await {
-            match first_message_result {
-                Ok(message) => {
-                    process_message(message, &mut messages, &mut last_offset_tpl)?;
+        if let Some(chunk) = chunk_stream.next().await {
+            for message_result in chunk {
+                match message_result {
+                    Ok(message) => {
+                        process_message(message, &mut messages, &mut last_offset_tpl)?;
+                    }
+                    Err(e) => return Err(anyhow!(e).into()),
                 }
-                Err(e) => return Err(anyhow!(e).into()),
             }
         } else {
             return Err(ConsumerError::EndOfStream);
-        }
-
-        // If we got one message, greedily consume any others that are already buffered.
-        if !messages.is_empty() {
-            for _ in 1..max_messages {
-                match stream.try_next().now_or_never() {
-                    Some(Ok(Some(message))) => {
-                        process_message(message, &mut messages, &mut last_offset_tpl)?;
-                    }
-                    _ => {
-                        // Stream is not ready, an error occurred, or it ended.
-                        // In any case, we stop trying to get more messages for this batch.
-                        break;
-                    }
-                }
-            }
         }
     }
     let messages_len = messages.len();

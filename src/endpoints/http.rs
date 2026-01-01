@@ -26,7 +26,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, watch};
-use tracing::{info, instrument};
+use tracing::{info, instrument, trace};
 
 type HttpSourceMessage = (CanonicalMessage, CommitFunc);
 
@@ -156,7 +156,7 @@ async fn handle_request(
     body: Bytes,
 ) -> Response {
     let mut message = CanonicalMessage::new(body.to_vec(), None);
-    tracing::trace!(message_id = %format!("{:032x}", message.message_id), "Received HTTP request");
+    trace!(message_id = %format!("{:032x}", message.message_id), "Received HTTP request");
     let mut metadata = HashMap::new();
     for (key, value) in headers.iter() {
         if let Ok(value_str) = value.to_str() {
@@ -283,7 +283,7 @@ impl HttpPublisher {
 #[async_trait]
 impl MessagePublisher for HttpPublisher {
     async fn send(&self, message: CanonicalMessage) -> Result<Sent, PublisherError> {
-        tracing::trace!(
+        trace!(
             message_id = %format!("{:032x}", message.message_id),
             url = %self.url,
             "Sending HTTP request"
