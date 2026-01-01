@@ -113,8 +113,7 @@ impl Drop for DockerCompose {
 }
 
 pub fn generate_test_messages(num_messages: usize) -> Vec<CanonicalMessage> {
-    let mut messages = Vec::new();
-    messages.reserve(num_messages);
+    let mut messages = Vec::with_capacity(num_messages);
 
     for i in 0..num_messages {
         let payload = json!({ "message_num": i, "test_id": "integration" });
@@ -613,13 +612,11 @@ pub fn format_pretty<N: Display>(num: N) -> String {
     let fractional_part = parts.next();
 
     let mut formatted_integer = String::with_capacity(integer_part.len() + integer_part.len() / 3);
-    let mut count = 0;
-    for ch in integer_part.chars().rev() {
+    for (count, ch)  in integer_part.chars().rev().enumerate() {
         if count > 0 && count % 3 == 0 {
             formatted_integer.push('_');
         }
         formatted_integer.push(ch);
-        count += 1;
     }
 
     let formatted_integer = formatted_integer.chars().rev().collect::<String>();

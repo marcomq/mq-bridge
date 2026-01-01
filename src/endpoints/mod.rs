@@ -324,12 +324,10 @@ mod tests {
         let mem_cfg1 = MemoryConfig {
             topic: "fanout_1".to_string(),
             capacity: Some(10),
-            ..Default::default()
         };
         let mem_cfg2 = MemoryConfig {
             topic: "fanout_2".to_string(),
             capacity: Some(10),
-            ..Default::default()
         };
 
         let ep1 = Endpoint::new(EndpointType::Memory(mem_cfg1.clone()));

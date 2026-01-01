@@ -15,7 +15,7 @@ async fn test_memory_to_memory_pipeline() {
 
     println!("--- Generating Test messages ---");
     let num_messages = if cfg!(debug_assertions) {
-        1000_000
+        1_000_000
     } else {
         10_000_000
     };
