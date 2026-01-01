@@ -354,7 +354,7 @@ pub struct KafkaEndpoint {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct KafkaConfig {
-    pub url: String,
+    pub url: String, // can be comma separated list of brokers
     pub username: Option<String>,
     pub password: Option<String>, // Consider using a secret management type
     #[serde(default)]
@@ -506,7 +506,7 @@ pub struct MqttConfig {
     pub queue_capacity: Option<usize>,
     pub qos: Option<u8>,
     #[serde(default = "default_clean_session")]
-    pub clean_session: bool, // false => persistance
+    pub clean_session: bool, // false => persistence
     pub keep_alive_seconds: Option<u64>,
     #[serde(default)]
     pub protocol: MqttProtocol,

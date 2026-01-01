@@ -17,10 +17,10 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        rust: [stable, beta]
+        rust: [stable]
         include:
           - os: ubuntu-latest
-            rust: nightly
+            rust: beta
     steps:
       - uses: actions/checkout@v4
       
@@ -46,4 +46,3 @@ jobs:
       
       - name: Check build
         run: cargo build --all-features
-

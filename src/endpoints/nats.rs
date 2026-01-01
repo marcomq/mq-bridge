@@ -591,11 +591,22 @@ impl NatsCore {
                 let commit_closure: BatchCommitFunc = Box::new(move |responses| {
                     Box::pin(async move {
                         if let Some(resps) = responses {
+                            if resps.len() != reply_subjects.len() {
+                                tracing::warn!(
+                                    "NATS Core batch reply count mismatch: received {} messages but got {} responses. Pairing up to the shorter length.",
+                                    reply_subjects.len(),
+                                    resps.len()
+                                );
+                            }
                             for (reply_opt, resp) in reply_subjects.iter().zip(resps) {
                                 if let Some(reply) = reply_opt {
-                                    if let Err(e) =
-                                        client.publish(reply.clone(), resp.payload).await
-                                    {
+                                    let publish_result = tokio::time::timeout(
+                                        std::time::Duration::from_secs(5),
+                                        client.publish(reply.clone(), resp.payload),
+                                    )
+                                    .await;
+
+                                    if let Err(e) = publish_result {
                                         tracing::error!(
                                             subject = %reply,
                                             error = %e,
