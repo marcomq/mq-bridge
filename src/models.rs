@@ -679,9 +679,9 @@ kafka_to_nats:
             assert_eq!(kafka.config.url, "localhost:9092");
             assert_eq!(kafka.config.group_id, Some("my-consumer-group".to_string()));
             let tls = &kafka.config.tls;
-            assert_eq!(tls.required, true);
+            assert!(tls.required);
             assert_eq!(tls.ca_file.as_deref(), Some("/path_to_ca"));
-            assert_eq!(tls.accept_invalid_certs, true);
+            assert!(tls.accept_invalid_certs);
         } else {
             panic!("Input endpoint should be Kafka");
         }

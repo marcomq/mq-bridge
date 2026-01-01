@@ -317,11 +317,11 @@ mod tests {
         let (received_msg2, commit2) = (batch2.messages, batch2.commit);
         commit2(None).await;
         assert_eq!(received_msg2.len(), 1);
-        assert_eq!(received_msg2.get(0).unwrap().payload, msg2.payload);
+        assert_eq!(received_msg2.first().unwrap().payload, msg2.payload);
         let batch3 = consumer.receive_batch(2).await.unwrap();
         let (received_msg3, commit3) = (batch3.messages, batch3.commit);
         commit3(None).await;
-        assert_eq!(received_msg3.get(0).unwrap().payload, msg3.payload);
+        assert_eq!(received_msg3.first().unwrap().payload, msg3.payload);
 
         // 6. Verify that the channel is now empty
         assert_eq!(publisher.channel().len(), 0);
