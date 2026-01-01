@@ -19,4 +19,5 @@ pub use errors::HandlerError;
 pub use models::Route;
 pub use outcomes::{Handled, Received, ReceivedBatch, Sent, SentBatch};
 
+/// The application name, derived from the package name in Cargo.toml.
 pub const APP_NAME: &str = env!("CARGO_PKG_NAME");

@@ -61,9 +61,9 @@ axum-server = { version = "0.8.0", features = ["tls-rustls"], optional = true }
 
 url = { version = "2.5", optional = true }
 
-# Memory (for testing) # TODO - use tokio
+# Memory (for testing)
 async-channel = { version = "2.5.0" }
-once_cell = { version = "1.21.3"  }
+once_cell = { version = "1.21.3" }
 schemars = { version = "1.2", optional = true }
 
 [features]

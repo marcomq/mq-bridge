@@ -17,6 +17,11 @@ use tokio::{
 use tracing::{debug, error, info, warn};
 
 impl Route {
+    /// Creates a new route with default concurrency (1) and batch size (128).
+    ///
+    /// # Arguments
+    /// * `input` - The input/source endpoint for the route
+    /// * `output` - The output/sink endpoint for the route
     pub fn new(input: Endpoint, output: Endpoint) -> Self {
         Self {
             input,
@@ -167,7 +172,10 @@ impl Route {
                             let failed_count = failed.len();
                             commit(responses).await; // Commit the successful messages
                             if failed_count > 0 {
-                                let (_, first_error) = failed.into_iter().next().unwrap();
+                                let (_, first_error) = failed
+                                    .into_iter()
+                                    .next()
+                                    .expect("failed_count > 0 implies at least one failed message");
                                 return Err(anyhow::anyhow!(
                                     "Failed to send {} messages in batch. First error: {}",
                                     failed_count,
@@ -219,7 +227,10 @@ impl Route {
                             let failed_count = failed.len();
                             commit(responses).await; // Commit the successful messages
                             if failed_count > 0 {
-                                let (_, first_error) = failed.into_iter().next().unwrap();
+                                let (_, first_error) = failed
+                                    .into_iter()
+                                    .next()
+                                    .expect("failed_count > 0 implies at least one failed message");
                                 let e = anyhow::anyhow!(
                                     "Failed to send {} messages in batch. First error: {}",
                                     failed_count,
@@ -290,7 +301,8 @@ impl Route {
         for handle in worker_handles {
             let _ = handle.await;
         }
-        // Return true if we should continue (i.e., we were stopped by the running flag), false otherwise.
+        // Return true if shutdown was requested (channel is empty means it was closed/consumed),
+        // false if we reached end-of-stream naturally.
         Ok(shutdown_rx.is_empty())
     }
 
