@@ -612,7 +612,7 @@ pub fn format_pretty<N: Display>(num: N) -> String {
     let fractional_part = parts.next();
 
     let mut formatted_integer = String::with_capacity(integer_part.len() + integer_part.len() / 3);
-    for (count, ch)  in integer_part.chars().rev().enumerate() {
+    for (count, ch) in integer_part.chars().rev().enumerate() {
         if count > 0 && count % 3 == 0 {
             formatted_integer.push('_');
         }
