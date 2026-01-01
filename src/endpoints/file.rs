@@ -255,7 +255,7 @@ mod tests {
         let nested_dir_path = dir.path().join("nested");
         let file_path = nested_dir_path.join("test.log");
 
-        let sink_result = FilePublisher::new(&file_path.to_str().unwrap()).await;
+        let sink_result = FilePublisher::new(file_path.to_str().unwrap()).await;
 
         assert!(sink_result.is_ok());
         assert!(nested_dir_path.exists());
