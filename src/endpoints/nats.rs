@@ -26,9 +26,12 @@ enum NatsClient {
 
 pub struct NatsPublisher {
     client: NatsClient,
+    core_client: async_nats::Client,
     subject: String,
     // If false, wait for JetStream acknowledgment; if true, fire-and-forget.
     delayed_ack: bool,
+    request_reply: bool,
+    request_timeout: std::time::Duration,
 }
 
 impl NatsPublisher {
@@ -39,6 +42,7 @@ impl NatsPublisher {
     ) -> anyhow::Result<Self> {
         let options = build_nats_options(config).await?;
         let nats_client = options.connect(&config.url).await?;
+        let core_client = nats_client.clone();
 
         let client = if !config.no_jetstream {
             let jetstream = jetstream::new(nats_client);
@@ -47,6 +51,8 @@ impl NatsPublisher {
                 .get_or_create_stream(stream::Config {
                     name: stream_name.to_string(),
                     subjects: vec![format!("{}.>", stream_name)],
+                    max_messages: 1_000_000,
+                    max_bytes: 1024 * 1024 * 1024, // 1GB
                     ..Default::default()
                 })
                 .await?;
@@ -61,8 +67,13 @@ impl NatsPublisher {
 
         Ok(Self {
             client,
+            core_client,
             subject: subject.to_string(),
             delayed_ack: config.delayed_ack,
+            request_reply: config.request_reply,
+            request_timeout: std::time::Duration::from_millis(
+                config.request_timeout_ms.unwrap_or(2000),
+            ),
         })
     }
 }
@@ -86,18 +97,46 @@ impl MessagePublisher for NatsPublisher {
             HeaderMap::new()
         };
 
+        if self.request_reply {
+            let response = tokio::time::timeout(
+                self.request_timeout,
+                self.core_client.request_with_headers(
+                    self.subject.clone(),
+                    headers,
+                    message.payload,
+                ),
+            )
+            .await
+            .map_err(|_| PublisherError::Retryable(anyhow!("NATS request timed out")))?
+            .map_err(|e| PublisherError::Retryable(anyhow!("NATS request failed: {}", e)))?;
+
+            let response_msg = create_nats_canonical_message(&response, None);
+            return Ok(Sent::Response(response_msg));
+        }
+
         match &self.client {
             NatsClient::JetStream(jetstream) => {
+                tracing::trace!("Publishing to NATS JetStream subject: {}", self.subject);
                 let ack_future = jetstream
                     .publish_with_headers(self.subject.clone(), headers, message.payload)
                     .await
                     .context("Failed to publish to NATS JetStream")?;
+                tracing::trace!("Published to NATS JetStream, waiting for ack");
 
                 if !self.delayed_ack {
-                    ack_future
-                        .await
-                        .context("Failed to get NATS JetStream publish acknowledgement")?;
-                    // Wait for the server acknowledgment
+                    match tokio::time::timeout(std::time::Duration::from_secs(5), ack_future).await
+                    {
+                        Ok(Ok(_)) => tracing::trace!("Ack received"),
+                        Ok(Err(e)) => {
+                            return Err(PublisherError::Retryable(anyhow!(
+                                "NATS Ack failed: {}",
+                                e
+                            )))
+                        }
+                        Err(_) => {
+                            return Err(PublisherError::Retryable(anyhow!("NATS Ack timed out")))
+                        }
+                    }
                 }
             }
             NatsClient::Core(client) => {
@@ -122,63 +161,17 @@ impl MessagePublisher for NatsPublisher {
             "Publishing batch of NATS messages"
         );
 
+        if self.request_reply {
+            // For request-reply, we must send individually and gather responses.
+            return crate::traits::send_batch_helper(self, messages, |p, m| Box::pin(p.send(m)))
+                .await;
+        }
+
         match &self.client {
-            NatsClient::JetStream(jetstream) => {
-                if self.delayed_ack {
-                    // Fire-and-forget is faster, no need to wait for acks.
-                    return crate::traits::send_batch_helper(self, messages, |p, m| {
-                        Box::pin(p.send(m))
-                    })
-                    .await;
-                }
-
-                // Publish all and then wait for all acks.
-                let mut ack_futures = Vec::with_capacity(messages.len());
-                let mut failed_messages = Vec::new();
-
-                for message in messages {
-                    let headers = if !message.metadata.is_empty() {
-                        let mut headers = HeaderMap::new();
-                        for (key, value) in &message.metadata {
-                            headers.insert(key.as_str(), value.as_str());
-                        }
-                        headers
-                    } else {
-                        HeaderMap::new()
-                    };
-                    match jetstream
-                        .publish_with_headers(
-                            self.subject.clone(),
-                            headers,
-                            message.payload.clone(),
-                        )
-                        .await
-                    {
-                        Ok(ack) => ack_futures.push((message, ack)),
-                        Err(e) => failed_messages.push((
-                            message,
-                            PublisherError::Retryable(anyhow!("NATS publish failed: {}", e)),
-                        )),
-                    }
-                }
-
-                for (message, ack) in ack_futures {
-                    if let Err(e) = ack.await {
-                        failed_messages.push((
-                            message,
-                            PublisherError::Retryable(anyhow!("NATS ack failed: {}", e)),
-                        ));
-                    }
-                }
-
-                if failed_messages.is_empty() {
-                    Ok(SentBatch::Ack)
-                } else {
-                    Ok(SentBatch::Partial {
-                        responses: None,
-                        failed: failed_messages,
-                    })
-                }
+            NatsClient::JetStream(_jetstream) => {
+                // Use send_batch_helper to send messages sequentially.
+                // This avoids overwhelming the NATS client buffer with too many in-flight messages when using JetStream with acks.
+                crate::traits::send_batch_helper(self, messages, |p, m| Box::pin(p.send(m))).await
             }
             NatsClient::Core(_) => {
                 // Core NATS is fire-and-forget, so the helper is efficient enough.
@@ -190,6 +183,13 @@ impl MessagePublisher for NatsPublisher {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
+
+    async fn flush(&self) -> anyhow::Result<()> {
+        self.core_client
+            .flush()
+            .await
+            .map_err(|e| anyhow!("NATS flush failed: {}", e))
+    }
 }
 
 enum NatsCore {
@@ -199,6 +199,7 @@ enum NatsCore {
 
 pub struct NatsConsumer {
     core: NatsCore,
+    client: async_nats::Client,
     subject: String,
 }
 use std::any::Any;
@@ -217,7 +218,7 @@ impl NatsConsumer {
         ));
         let queue_group = Some(format!("{}-{}", APP_NAME, stream_name.replace('.', "-")));
 
-        let core = NatsCore::connect(
+        let (core, client) = NatsCore::connect(
             config,
             stream_name,
             subject,
@@ -228,6 +229,7 @@ impl NatsConsumer {
         .await?;
         Ok(Self {
             core,
+            client,
             subject: subject.to_string(),
         })
     }
@@ -236,7 +238,9 @@ impl NatsConsumer {
 #[async_trait]
 impl MessageConsumer for NatsConsumer {
     async fn receive_batch(&mut self, max_messages: usize) -> Result<ReceivedBatch, ConsumerError> {
-        self.core.receive_batch(max_messages, &self.subject).await
+        self.core
+            .receive_batch(max_messages, &self.subject, &self.client)
+            .await
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -246,6 +250,7 @@ impl MessageConsumer for NatsConsumer {
 
 pub struct NatsSubscriber {
     core: NatsCore,
+    client: async_nats::Client,
     subject: String,
 }
 
@@ -263,7 +268,7 @@ impl NatsSubscriber {
         stream_name: &str,
         subject: &str,
     ) -> anyhow::Result<Self> {
-        let core = NatsCore::connect(
+        let (core, client) = NatsCore::connect(
             config,
             stream_name,
             subject,
@@ -274,6 +279,7 @@ impl NatsSubscriber {
         .await?;
         Ok(Self {
             core,
+            client,
             subject: subject.to_string(),
         })
     }
@@ -282,7 +288,9 @@ impl NatsSubscriber {
 #[async_trait]
 impl MessageConsumer for NatsSubscriber {
     async fn receive_batch(&mut self, max_messages: usize) -> Result<ReceivedBatch, ConsumerError> {
-        self.core.receive_batch(max_messages, &self.subject).await
+        self.core
+            .receive_batch(max_messages, &self.subject, &self.client)
+            .await
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -413,9 +421,10 @@ impl NatsCore {
         durable_name: Option<String>,
         deliver_policy: jetstream::consumer::DeliverPolicy,
         queue_group: Option<String>,
-    ) -> anyhow::Result<Self> {
+    ) -> anyhow::Result<(Self, async_nats::Client)> {
         let options = build_nats_options(config).await?;
         let client = options.connect(&config.url).await?;
+        let client_clone = client.clone();
 
         if !config.no_jetstream {
             let jetstream = jetstream::new(client);
@@ -425,6 +434,8 @@ impl NatsCore {
                 .get_or_create_stream(stream::Config {
                     name: stream_name.to_string(),
                     subjects: vec![format!("{}.>", stream_name)],
+                    max_messages: 1_000_000,
+                    max_bytes: 1024 * 1024 * 1024, // 1GB
                     ..Default::default()
                 })
                 .await?;
@@ -444,7 +455,7 @@ impl NatsCore {
 
             let stream = consumer.messages().await?;
             info!(stream = %stream_name, subject = %subject, "NATS JetStream subscribed");
-            Ok(NatsCore::JetStream(Box::new(stream)))
+            Ok((NatsCore::JetStream(Box::new(stream)), client_clone))
         } else {
             info!(subject = %subject, "NATS endpoint is in Core mode.");
             let sub = if let Some(qg) = queue_group {
@@ -454,7 +465,7 @@ impl NatsCore {
                 client.subscribe(subject.to_string()).await?
             };
             info!(subject = %subject, "NATS Core subscribed");
-            Ok(NatsCore::Ephemeral(sub))
+            Ok((NatsCore::Ephemeral(sub), client_clone))
         }
     }
 
@@ -462,6 +473,7 @@ impl NatsCore {
         &mut self,
         max_messages: usize,
         subject: &str,
+        client: &async_nats::Client,
     ) -> Result<ReceivedBatch, ConsumerError> {
         if max_messages == 0 {
             return Ok(ReceivedBatch {
@@ -475,7 +487,9 @@ impl NatsCore {
                 let mut canonical_messages = Vec::with_capacity(max_messages);
                 let mut jetstream_messages = Vec::with_capacity(max_messages);
 
+                tracing::trace!("Waiting for next NATS JetStream message");
                 let message_stream = stream.next().await;
+                tracing::trace!("Received NATS JetStream message");
 
                 // Process the first message if it exists
                 if let Some(Ok(first_message)) = message_stream {
@@ -499,8 +513,26 @@ impl NatsCore {
                 }
 
                 trace!(count = canonical_messages.len(), subject = %subject, message_ids = ?LazyMessageIds(&canonical_messages), "Received batch of NATS JetStream messages");
-                let commit_closure: BatchCommitFunc = Box::new(move |_responses| {
+                let client = client.clone();
+                let commit_closure: BatchCommitFunc = Box::new(move |responses| {
                     Box::pin(async move {
+                        // Handle replies if responses are provided
+                        if let Some(resps) = responses {
+                            for (msg, resp) in jetstream_messages.iter().zip(resps) {
+                                if let Some(reply) = msg.reply.as_ref() {
+                                    if let Err(e) =
+                                        client.publish(reply.clone(), resp.payload).await
+                                    {
+                                        tracing::error!(
+                                            subject = %reply,
+                                            error = %e,
+                                            "Failed to publish NATS reply"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+
                         // Acknowledge messages concurrently.
                         // A concurrency limit of 100 is chosen to balance parallelism
                         // with not overwhelming the NATS server or spawning too many tasks.
@@ -531,21 +563,44 @@ impl NatsCore {
             }
             NatsCore::Ephemeral(sub) => {
                 let mut messages = Vec::with_capacity(max_messages);
-                // Core NATS has no ack, so the commit is a no-op.
-                let commit_closure: BatchCommitFunc = Box::new(|_| Box::pin(async {}));
+                let mut reply_subjects = Vec::with_capacity(max_messages);
 
                 if let Some(message) = sub.next().await {
+                    reply_subjects.push(message.reply.clone());
                     messages.push(create_nats_canonical_message(&message, None));
 
                     while messages.len() < max_messages {
                         match sub.next().now_or_never() {
                             Some(Some(message)) => {
+                                reply_subjects.push(message.reply.clone());
                                 messages.push(create_nats_canonical_message(&message, None))
                             }
                             _ => break,
                         }
                     }
                 }
+
+                let client = client.clone();
+                let commit_closure: BatchCommitFunc = Box::new(move |responses| {
+                    Box::pin(async move {
+                        if let Some(resps) = responses {
+                            for (reply_opt, resp) in reply_subjects.iter().zip(resps) {
+                                if let Some(reply) = reply_opt {
+                                    if let Err(e) =
+                                        client.publish(reply.clone(), resp.payload).await
+                                    {
+                                        tracing::error!(
+                                            subject = %reply,
+                                            error = %e,
+                                            "Failed to publish NATS reply"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }) as BoxFuture<'static, ()>
+                });
+
                 trace!(count = messages.len(), subject = %subject, message_ids = ?LazyMessageIds(&messages), "Received batch of NATS Core messages");
                 if messages.is_empty() {
                     Err(ConsumerError::EndOfStream)

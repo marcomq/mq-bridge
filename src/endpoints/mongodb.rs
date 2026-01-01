@@ -15,7 +15,7 @@ use mongodb::{
     options::FindOneAndUpdateOptions,
 };
 use mongodb::{change_stream::event::ChangeStreamEvent, IndexModel};
-use mongodb::{Client, Collection};
+use mongodb::{Client, Collection, Database};
 use serde::{Deserialize, Serialize};
 use std::any::Any;
 use std::collections::HashMap;
@@ -206,6 +206,7 @@ impl MessagePublisher for MongoDbPublisher {
 /// A consumer that receives messages from a MongoDB collection, treating it like a queue.
 pub struct MongoDbConsumer {
     collection: Collection<Document>,
+    db: Database,
     change_stream: Option<tokio::sync::Mutex<ChangeStream<ChangeStreamEvent<Document>>>>,
     polling_interval: Duration,
     collection_name: String,
@@ -250,6 +251,7 @@ impl MongoDbConsumer {
 
         Ok(Self {
             collection,
+            db,
             change_stream,
             polling_interval: Duration::from_millis(config.polling_interval_ms.unwrap_or(100)),
             collection_name: collection_name.to_string(),
@@ -441,10 +443,22 @@ impl MongoDbConsumer {
                     Err(_) => document_to_canonical(doc)?,
                 };
 
+                let reply_collection_name =
+                    msg.metadata.get("mongodb_reply_to_collection").cloned();
+                let db = self.db.clone();
                 let collection_clone = self.collection.clone();
 
-                let commit = Box::new(move |_response| {
+                let commit = Box::new(move |response: Option<CanonicalMessage>| {
                     Box::pin(async move {
+                        if let (Some(resp), Some(coll_name)) = (response, reply_collection_name) {
+                            if let Ok(doc) = message_to_document(&resp) {
+                                let reply_coll = db.collection::<Document>(&coll_name);
+                                if let Err(e) = reply_coll.insert_one(doc).await {
+                                    tracing::error!(collection = %coll_name, error = %e, "Failed to insert MongoDB reply");
+                                }
+                            }
+                        }
+
                         match collection_clone
                             .delete_one(doc! { "_id": id_val.clone() })
                             .await
@@ -500,6 +514,7 @@ impl MongoDbConsumer {
     ) -> anyhow::Result<(Vec<CanonicalMessage>, BatchCommitFunc)> {
         let mut messages = Vec::with_capacity(docs.len());
         let mut ids = Vec::with_capacity(docs.len());
+        let mut reply_infos = Vec::with_capacity(docs.len());
 
         for doc in docs {
             let id_val = doc
@@ -510,6 +525,7 @@ impl MongoDbConsumer {
                 Ok(raw_msg) => raw_msg.try_into().unwrap_or(document_to_canonical(doc)?),
                 Err(_) => document_to_canonical(doc)?,
             };
+            reply_infos.push(msg.metadata.get("mongodb_reply_to_collection").cloned());
             messages.push(msg);
 
             ids.push(id_val);
@@ -517,8 +533,20 @@ impl MongoDbConsumer {
 
         trace!(count = messages.len(), collection = %self.collection_name, message_ids = ?LazyMessageIds(&messages), "Received batch of MongoDB documents");
         let collection_clone = self.collection.clone();
-        let commit = Box::new(move |_response| {
+        let db = self.db.clone();
+
+        let commit = Box::new(move |responses: Option<Vec<CanonicalMessage>>| {
             Box::pin(async move {
+                if let Some(resps) = responses {
+                    for (reply_coll_opt, resp) in reply_infos.iter().zip(resps) {
+                        if let Some(coll_name) = reply_coll_opt {
+                            if let Ok(doc) = message_to_document(&resp) {
+                                let _ = db.collection::<Document>(coll_name).insert_one(doc).await;
+                            }
+                        }
+                    }
+                }
+
                 if ids.is_empty() {
                     return;
                 }

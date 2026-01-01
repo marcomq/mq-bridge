@@ -205,7 +205,7 @@ enum EventLoop {
 }
 
 struct MqttListener {
-    _client: Client,
+    client: Client,
     eventloop_handle: JoinHandle<()>,
     message_rx: mpsc::Receiver<CanonicalMessage>,
 }
@@ -228,7 +228,7 @@ impl MqttListener {
         info!("MQTT subscribed to {}", topic);
 
         Ok(Self {
-            _client: client,
+            client,
             eventloop_handle,
             message_rx: rx,
         })
@@ -249,16 +249,40 @@ impl MessageConsumer for MqttListener {
             .recv()
             .await
             .ok_or(ConsumerError::EndOfStream)?;
-        let commit = Box::new(|_| Box::pin(async {}) as BoxFuture<'static, ()>);
+
+        let client = self.client.clone();
+        let reply_topic = message.metadata.get("mqtt_response_topic").cloned();
+        let correlation_data = message.metadata.get("mqtt_correlation_data").cloned();
+
+        let commit = Box::new(move |response: Option<CanonicalMessage>| {
+            Box::pin(async move {
+                if let (Some(resp), Some(rt)) = (response, reply_topic) {
+                    let mut msg = resp;
+                    if let Some(cd) = correlation_data {
+                        msg.metadata.insert("mqtt_correlation_data".to_string(), cd);
+                    }
+                    if let Err(e) = client.publish(&rt, QoS::AtLeastOnce, msg).await {
+                        tracing::error!(topic = %rt, error = %e, "Failed to publish MQTT reply");
+                    }
+                }
+            }) as BoxFuture<'static, ()>
+        });
         Ok(Received { message, commit })
     }
 
     async fn receive_batch(&mut self, max_messages: usize) -> Result<ReceivedBatch, ConsumerError> {
         let mut messages = Vec::with_capacity(max_messages);
+        let mut reply_infos = Vec::with_capacity(max_messages);
 
         // Block for the first message
         match self.message_rx.recv().await {
-            Some(msg) => messages.push(msg),
+            Some(msg) => {
+                reply_infos.push((
+                    msg.metadata.get("mqtt_response_topic").cloned(),
+                    msg.metadata.get("mqtt_correlation_data").cloned(),
+                ));
+                messages.push(msg);
+            }
             None => return Err(ConsumerError::EndOfStream),
         }
 
@@ -268,14 +292,38 @@ impl MessageConsumer for MqttListener {
             let deadline = tokio::time::Instant::now() + Duration::from_millis(5);
             while messages.len() < max_messages {
                 match tokio::time::timeout_at(deadline, self.message_rx.recv()).await {
-                    Ok(Some(msg)) => messages.push(msg),
+                    Ok(Some(msg)) => {
+                        reply_infos.push((
+                            msg.metadata.get("mqtt_response_topic").cloned(),
+                            msg.metadata.get("mqtt_correlation_data").cloned(),
+                        ));
+                        messages.push(msg);
+                    }
                     Ok(None) => break, // Channel closed
                     Err(_) => break,   // Timeout
                 }
             }
         }
 
-        let commit = Box::new(|_| Box::pin(async {}) as BoxFuture<'static, ()>);
+        let client = self.client.clone();
+        let commit = Box::new(move |responses: Option<Vec<CanonicalMessage>>| {
+            Box::pin(async move {
+                if let Some(resps) = responses {
+                    for ((reply_topic, correlation_data), resp) in reply_infos.iter().zip(resps) {
+                        if let Some(rt) = reply_topic {
+                            let mut msg = resp.clone();
+                            if let Some(cd) = correlation_data {
+                                msg.metadata
+                                    .insert("mqtt_correlation_data".to_string(), cd.clone());
+                            }
+                            if let Err(e) = client.publish(rt, QoS::AtLeastOnce, msg).await {
+                                tracing::error!(topic = %rt, error = %e, "Failed to publish MQTT reply");
+                            }
+                        }
+                    }
+                }
+            }) as BoxFuture<'static, ()>
+        });
         Ok(ReceivedBatch { messages, commit })
     }
 
@@ -391,6 +439,15 @@ fn publish_to_canonical_message_v5(p: PublishV5) -> CanonicalMessage {
             let mut metadata = std::collections::HashMap::new();
             for (key, value) in &props.user_properties {
                 metadata.insert(key.clone(), value.clone());
+            }
+            if let Some(rt) = &props.response_topic {
+                metadata.insert("mqtt_response_topic".to_string(), rt.clone());
+            }
+            if let Some(cd) = &props.correlation_data {
+                metadata.insert(
+                    "mqtt_correlation_data".to_string(),
+                    String::from_utf8_lossy(cd).to_string(),
+                );
             }
             canonical_message.metadata = metadata;
         }

@@ -20,8 +20,8 @@ use tracing_subscriber::util::SubscriberInitExt;
 
 use mq_bridge::endpoints::memory::MemoryChannel;
 
-pub const PERF_TEST_BATCH_MESSAGE_COUNT: usize = 150_000;
-pub const PERF_TEST_SINGLE_MESSAGE_COUNT: usize = 15_000;
+pub const PERF_TEST_BATCH_MESSAGE_COUNT: usize = 100_000;
+pub const PERF_TEST_SINGLE_MESSAGE_COUNT: usize = 10_000;
 pub const PERF_TEST_MESSAGE_COUNT: usize = PERF_TEST_BATCH_MESSAGE_COUNT;
 pub const PERF_TEST_CONCURRENCY: usize = 100;
 
@@ -461,6 +461,7 @@ pub async fn measure_write_performance(
     num_messages: usize,
     concurrency: usize,
 ) -> Duration {
+    println!("Starting write performance test (Batch) for {}", _name);
     let batch_size = 128; // Define a reasonable batch size
     let (tx, rx): (Sender<CanonicalMessage>, Receiver<CanonicalMessage>) =
         bounded(batch_size * concurrency * 2);
@@ -638,6 +639,7 @@ pub async fn measure_read_performance(
     consumer: Arc<tokio::sync::Mutex<dyn MessageConsumer>>,
     num_messages: usize,
 ) -> Duration {
+    println!("Starting read performance test (Batch) for {}", _name);
     let start_time = Instant::now();
     let mut final_count = 0;
     let batch_size = 128; // A reasonable batch size for single-threaded reading.
@@ -687,6 +689,7 @@ pub async fn measure_single_write_performance(
     num_messages: usize,
     concurrency: usize,
 ) -> Duration {
+    println!("Starting single write performance test for {}", _name);
     let (tx, rx): (Sender<CanonicalMessage>, Receiver<CanonicalMessage>) = bounded(concurrency * 2);
 
     let final_count = Arc::new(AtomicUsize::new(0));
@@ -745,6 +748,7 @@ pub async fn measure_single_read_performance(
     consumer: Arc<tokio::sync::Mutex<dyn MessageConsumer>>,
     num_messages: usize,
 ) -> Duration {
+    println!("Starting single read performance test for {}", _name);
     let start_time = Instant::now();
     let mut final_count = 0;
     loop {

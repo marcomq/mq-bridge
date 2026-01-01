@@ -18,6 +18,7 @@ tests/
 │   ├── memory.rs
 │   └── route.rs
 ├── integration_test.rs   # Main integration test runner
+├── request_reply_test.rs # Request-reply pattern tests
 ├── memory_test.rs        # Memory-only performance tests
 └── performance_pipeline.rs # Pipeline performance tests
 ```
@@ -159,6 +160,9 @@ cargo test --lib
 # Integration tests (requires Docker)
 cargo test --test integration_test --features full --release -- --ignored --nocapture --test-threads=1
 
+# Request-reply tests (requires Docker)
+cargo test --test request_reply_test --features full --release -- --ignored --nocapture --test-threads=1
+
 # Memory tests
 cargo test --test memory_test --features integration-test --release -- --nocapture
 
@@ -208,4 +212,3 @@ Performance tests should:
 - Integration tests run on main branch (may be flaky)
 - Performance benchmarks run on schedule
 - All tests must pass before merging
-

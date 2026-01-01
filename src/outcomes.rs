@@ -26,7 +26,7 @@ pub enum Sent {
 pub enum SentBatch {
     /// All messages in the batch were sent successfully. No responses were generated.
     Ack,
-    /// The batch operation resulted in a mix of successes and failures.
+    /// The batch operation resulted in a mix of successes and/or failures.
     Partial {
         responses: Option<Vec<CanonicalMessage>>,
         failed: Vec<(CanonicalMessage, PublisherError)>,

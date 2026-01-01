@@ -249,6 +249,7 @@ pub enum EndpointType {
     Http(HttpEndpoint),
     Fanout(Vec<Endpoint>),
     Switch(SwitchConfig),
+    Response(ResponseConfig),
     #[serde(skip)]
     Custom(Arc<dyn CustomEndpointFactory>),
     Null,
@@ -400,6 +401,9 @@ pub struct NatsConfig {
     pub no_jetstream: bool,
     pub default_stream: Option<String>,
     pub prefetch_count: Option<usize>,
+    #[serde(default)]
+    pub request_reply: bool,
+    pub request_timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
@@ -549,6 +553,12 @@ pub struct SwitchConfig {
     pub cases: HashMap<String, Endpoint>,
     pub default: Option<Box<Endpoint>>,
 }
+
+// --- Response Endpoint Configuration ---
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct ResponseConfig {}
 
 // --- Common Configuration ---
 

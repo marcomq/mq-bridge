@@ -618,4 +618,45 @@ http_route:
         let expected_body = serde_json::to_string(static_content).unwrap();
         assert_eq!(body, expected_body);
     }
+
+    #[tokio::test]
+    async fn test_http_to_response_endpoint() {
+        let port = get_free_port();
+        let addr = format!("127.0.0.1:{}", port);
+        let http_config = HttpConfig {
+            url: Some(addr.clone()),
+            tls: Default::default(),
+            response_out: None,
+        };
+        let mut consumer = HttpConsumer::new(&http_config).await.unwrap();
+
+        // Create ResponsePublisher via factory to simulate route config
+        let response_endpoint =
+            crate::models::Endpoint::new(EndpointType::Response(crate::models::ResponseConfig {}));
+        let publisher = create_publisher_from_route("test_response", &response_endpoint)
+            .await
+            .unwrap();
+
+        tokio::spawn(async move {
+            if let Ok(received) = consumer.receive().await {
+                let outcome = publisher.send(received.message).await.unwrap();
+                let resp = match outcome {
+                    Sent::Response(msg) => Some(msg),
+                    Sent::Ack => None,
+                };
+                (received.commit)(resp).await;
+            }
+        });
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("http://{}", addr))
+            .body("echo_test")
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.text().await.unwrap(), "echo_test");
+    }
 }

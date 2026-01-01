@@ -8,6 +8,8 @@ use super::common::{
     run_test_with_docker, setup_logging,
 };
 use mq_bridge::endpoints::mongodb::{MongoDbConsumer, MongoDbPublisher};
+use mq_bridge::traits::{MessageConsumer, MessagePublisher};
+use mq_bridge::CanonicalMessage;
 const CONFIG_YAML: &str = r#"
 routes:
   memory_to_mongodb:
@@ -31,6 +33,66 @@ pub async fn test_mongodb_pipeline() {
             &(PERF_TEST_MESSAGE_COUNT + 1000).to_string(),
         );
         run_pipeline_test("mongodb", &config_yaml).await;
+    })
+    .await;
+}
+
+pub async fn test_mongodb_request_reply() {
+    setup_logging();
+    run_test_with_docker("tests/integration/docker-compose/mongodb.yml", || async {
+        let req_collection = "req_collection";
+        let reply_collection = "reply_collection";
+        let db_name = "mq_bridge_test_req_rep";
+
+        let config = mq_bridge::models::MongoDbConfig {
+            url: "mongodb://localhost:27017".to_string(),
+            database: db_name.to_string(),
+            polling_interval_ms: Some(100),
+            ..Default::default()
+        };
+
+        // Publisher to send request
+        let publisher = MongoDbPublisher::new(&config, req_collection)
+            .await
+            .expect("Failed to create publisher");
+
+        // Consumer to process request
+        let mut consumer = MongoDbConsumer::new(&config, req_collection)
+            .await
+            .expect("Failed to create consumer");
+
+        // Send request
+        let mut msg = CanonicalMessage::new(b"request_payload".to_vec(), None);
+        msg.metadata.insert(
+            "mongodb_reply_to_collection".to_string(),
+            reply_collection.to_string(),
+        );
+        publisher.send(msg).await.expect("Failed to send request");
+
+        // Receive and reply
+        let received = consumer.receive().await.expect("Failed to receive");
+        let response_msg = CanonicalMessage::new(b"response_payload".to_vec(), None);
+        (received.commit)(Some(response_msg)).await;
+
+        // Verify reply in DB
+        let client = mongodb::Client::with_uri_str(&config.url).await.unwrap();
+        let db = client.database(db_name);
+        let coll = db.collection::<mongodb::bson::Document>(reply_collection);
+
+        // Poll for reply
+        let mut found = false;
+        for _ in 0..20 {
+            if let Ok(Some(doc)) = coll.find_one(mongodb::bson::doc! {}).await {
+                if let Ok(binary) = doc.get_binary_generic("payload") {
+                    if binary == b"response_payload" {
+                        found = true;
+                        break;
+                    }
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(found, "Reply not found in collection");
     })
     .await;
 }
