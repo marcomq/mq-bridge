@@ -268,7 +268,13 @@ impl KafkaConsumer {
         let consumer = Arc::new(consumer);
 
         // Create a producer for sending replies
-        let producer_config = create_common_config(config);
+        let mut producer_config = create_common_config(config);
+        // Apply custom producer options, allowing overrides of defaults
+        if let Some(options) = &config.producer_options {
+            for (key, value) in options {
+                producer_config.set(key, value);
+            }
+        }
         let producer: FutureProducer = producer_config.create()?;
 
         Ok(Self {

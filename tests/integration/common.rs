@@ -452,8 +452,7 @@ pub fn generate_message() -> CanonicalMessage {
 /// `concurrency`: The number of tasks to spawn concurrently to write
 /// messages to the publisher.
 ///
-/// `batch_size`: The size of each batch of messages to write to the
-/// publisher. This is calculated as `(num_messages / concurrency / 10).min(16).max(128)`
+/// The batch size is fixed at 128 messages per batch.
 ///
 pub async fn measure_write_performance(
     _name: &str,
@@ -463,30 +462,6 @@ pub async fn measure_write_performance(
 ) -> Duration {
     println!("Starting write performance test (Batch) for {}", _name);
     let batch_size = 128; // Define a reasonable batch size
-    let (tx, rx): (Sender<CanonicalMessage>, Receiver<CanonicalMessage>) =
-        bounded(batch_size * concurrency * 2);
-
-    let final_count = Arc::new(AtomicUsize::new(0));
-    tokio::spawn(async move {
-        for _ in 0..num_messages {
-            // The test will hang if the receiver is dropped, so we ignore the error.
-            if tx.send(generate_message()).await.is_err() {
-                break;
-            }
-        }
-        tx.close();
-    });
-
-    let start_time = Instant::now();
-    let mut tasks = tokio::task::JoinSet::new();
-
-    for _ in 0..concurrency {
-        let rx_clone = rx.clone();
-        let publisher_clone = publisher.clone();
-        let final_count_clone = Arc::clone(&final_count);
-
-        tasks.spawn(async move {
-            loop {
                 // Wait for the first message to start a batch.
                 let first_message = match rx_clone.recv().await {
                     Ok(msg) => msg,

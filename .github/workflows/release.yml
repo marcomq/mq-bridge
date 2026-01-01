@@ -41,8 +41,13 @@ jobs:
       - name: Create release archive
         run: |
           mkdir -p release
-          tar czf release/mq-bridge-${{ github.ref_name }}-linux-x86_64.tar.gz target/release/mq-bridge 2>/dev/null || true
-          zip -r release/mq-bridge-${{ github.ref_name }}-linux-x86_64.zip target/release/mq-bridge 2>/dev/null || true
+          if [ -f target/release/mq-bridge ]; then
+            tar czf release/mq-bridge-${{ github.ref_name }}-linux-x86_64.tar.gz -C target/release mq-bridge
+            zip -j release/mq-bridge-${{ github.ref_name }}-linux-x86_64.zip target/release/mq-bridge
+          else
+            echo "Error: Binary not found at target/release/mq-bridge"
+            exit 1
+          fi
       
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
@@ -63,6 +68,6 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
       
       - name: Publish to crates.io
-        run: cargo publish --token ${{ secrets.CRATES_IO_TOKEN }}
+        run: cargo publish
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}

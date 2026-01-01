@@ -518,6 +518,13 @@ impl NatsCore {
                     Box::pin(async move {
                         // Handle replies if responses are provided
                         if let Some(resps) = responses {
+                            if resps.len() != jetstream_messages.len() {
+                                tracing::warn!(
+                                    "NATS JetStream batch reply count mismatch: received {} messages but got {} responses. Pairing up to the shorter length.",
+                                    jetstream_messages.len(),
+                                    resps.len()
+                                );
+                            }
                             for (msg, resp) in jetstream_messages.iter().zip(resps) {
                                 if let Some(reply) = msg.reply.as_ref() {
                                     if let Err(e) =

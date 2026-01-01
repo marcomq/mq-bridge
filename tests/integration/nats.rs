@@ -71,7 +71,7 @@ pub async fn test_nats_request_reply() {
 
         match result {
             Sent::Response(resp) => {
-                assert_eq!(resp.payload, b"pong");
+                assert_eq!(resp.payload.to_vec(), b"pong");
             }
             _ => panic!("Expected response"),
         }

@@ -541,7 +541,10 @@ impl MongoDbConsumer {
                     for (reply_coll_opt, resp) in reply_infos.iter().zip(resps) {
                         if let Some(coll_name) = reply_coll_opt {
                             if let Ok(doc) = message_to_document(&resp) {
-                                let _ = db.collection::<Document>(coll_name).insert_one(doc).await;
+                                let reply_coll = db.collection::<Document>(coll_name);
+                                if let Err(e) = reply_coll.insert_one(doc).await {
+                                    tracing::error!(collection = %coll_name, response_id = %format!("{:032x}", resp.message_id), error = %e, "Failed to insert MongoDB batch reply");
+                                }
                             }
                         }
                     }
