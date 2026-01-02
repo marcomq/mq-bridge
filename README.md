@@ -184,6 +184,70 @@ async fn main() {
 }
 ```
 
+## Patterns: Request-Response
+
+`mq-bridge` supports request-response patterns, essential for building interactive services (e.g., web APIs). This pattern allows a client to send a request and wait for a correlated response. Due to the asynchronous nature of messaging, ensuring the correct response is delivered to the correct requester is critical, especially under concurrent loads.
+
+`mq-bridge` offers two ways to handle this, with the `response` output being the most direct and safest for handling concurrency.
+
+### The `response` Output Endpoint (Recommended)
+
+The recommended approach for request-response is to use the dedicated `response` endpoint in your route's `output`.
+
+**How it works:**
+1. An input endpoint that supports request-response (like `http`) receives a request.
+2. The message is passed through the route's processing chain. This is where you typically attach a `handler` to process the request and generate a response payload.
+3. The final message is sent to the `output`.
+4. If the output is `response: {}`, the bridge sends the message back to the original input source, which then sends it as the reply (e.g., as an HTTP response).
+
+This model inherently solves the correlation problem. The response is part of the same execution context as the request, so there's no risk of mixing up responses between different concurrent requests.
+
+#### Example: HTTP API Gateway
+
+Consider a route that exposes an HTTP endpoint. For each request, it executes a handler to produce a result and returns it to the client.
+
+**YAML Configuration (`mq-bridge.yaml`):**
+```yaml
+api_gateway:
+  concurrency: 10 # Handle up to 10 requests concurrently
+  input:
+    http:
+      url: "0.0.0.0:8080"
+  output:
+    # The 'response' endpoint sends the processed message back to the HTTP client.
+    # A handler must be attached programmatically to generate the response.
+    response: {}
+```
+
+**Programmatic Handler Attachment (in Rust):**
+You would then load this configuration and attach a handler to the route's output endpoint in your Rust code.
+
+```rust
+use mq_bridge::models::{Config, Handled};
+use mq_bridge::CanonicalMessage;
+
+async fn run() {
+    // 1. Load configuration from YAML
+    // let config: Config = serde_yaml_ng::from_str(include_str!("mq-bridge.yaml")).unwrap();
+    // let mut route = config.get("api_gateway").unwrap().clone();
+
+    // 2. Define the handler that processes the request
+    let handler = |mut msg: CanonicalMessage| async move {
+        // Example: echo the request body with a prefix
+        let request_body = String::from_utf8_lossy(&msg.payload);
+        let response_body = format!("Handled response for: {}", request_body);
+        msg.payload = response_body.into();
+        Ok(Handled::Publish(msg))
+    };
+
+    // 3. Attach the handler to the output endpoint
+    // route.output.handler = Some(std::sync::Arc::new(handler));
+    
+    // 4. Run the route
+    // route.run_until_err("api_gateway", None, None).await;
+}
+```
+
 ## Patterns: CQRS 
 mq-bridge is well-suited for implementing Command Query Responsibility Segregation (CQRS). By combining Routes with Typed Handlers, the bridge serves as both the Command Bus and the Event Bus. 
 * Command Bus: An input source (e.g., HTTP) receives a command. A TypeHandler processes it (Write Model) and optionally emits an event. 
@@ -222,7 +286,7 @@ kafka_to_nats:
   concurrency: 4
   input:
     kafka:
-      brokers: "localhost:9092"
+      url: "localhost:9092"
       topic: "orders"
       group_id: "bridge_group"
       # TLS Configuration (Optional)
@@ -276,7 +340,7 @@ iot_router:
       cases:
         temp:
           kafka:
-            brokers: "localhost:9092"
+            url: "localhost:9092"
             topic: "temperature"
       default:
         memory:
@@ -335,7 +399,7 @@ output:
       US:
         kafka:
           topic: "us_orders"
-          brokers: "kafka-us:9092"
+          url: "kafka-us:9092"
       EU:
         nats:
           subject: "eu_orders"

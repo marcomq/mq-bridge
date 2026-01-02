@@ -189,6 +189,17 @@
         {
           "type": "object",
           "properties": {
+            "response": {
+              "$ref": "#/$defs/ResponseConfig"
+            }
+          },
+          "required": [
+            "response"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
             "null": {
               "type": "null"
             }
@@ -385,13 +396,8 @@
           ]
         },
         "brokers": {
+          "description": "Comma-separated list of Kafka broker URLs (e.g., \"localhost:9092,localhost:9093\").",
           "type": "string"
-        },
-        "group_id": {
-          "type": [
-            "string",
-            "null"
-          ]
         },
         "username": {
           "type": [
@@ -415,6 +421,12 @@
             "cert_password": null,
             "accept_invalid_certs": false
           }
+        },
+        "group_id": {
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "delayed_ack": {
           "description": "If true, do not wait for an acknowledgement when sending to broker. Defaults to false.",
@@ -525,6 +537,7 @@
           ]
         },
         "url": {
+          "description": "Comma-separated list of NATS server URLs (e.g., \"nats://localhost:4222,nats://localhost:4223\").",
           "type": "string"
         },
         "username": {
@@ -534,12 +547,6 @@
           ]
         },
         "password": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "token": {
           "type": [
             "string",
             "null"
@@ -555,6 +562,12 @@
             "cert_password": null,
             "accept_invalid_certs": false
           }
+        },
+        "token": {
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "delayed_ack": {
           "description": "If true, do not wait for an acknowledgement when sending to broker. Defaults to false.",
@@ -578,6 +591,18 @@
             "null"
           ],
           "format": "uint",
+          "minimum": 0
+        },
+        "request_reply": {
+          "type": "boolean",
+          "default": false
+        },
+        "request_timeout_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
           "minimum": 0
         }
       },
@@ -617,6 +642,7 @@
           ]
         },
         "url": {
+          "description": "AMQP connection URI. The `lapin` client connects to a single host specified in the URI.\nFor high availability, provide the address of a load balancer or use DNS resolution\nthat points to multiple brokers. Example: \"amqp://localhost:5672/vhost\".",
           "type": "string"
         },
         "username": {
@@ -630,6 +656,17 @@
             "string",
             "null"
           ]
+        },
+        "tls": {
+          "$ref": "#/$defs/TlsConfig",
+          "default": {
+            "required": false,
+            "ca_file": null,
+            "cert_file": null,
+            "key_file": null,
+            "cert_password": null,
+            "accept_invalid_certs": false
+          }
         },
         "exchange": {
           "type": [
@@ -645,17 +682,6 @@
           "format": "uint16",
           "minimum": 0,
           "maximum": 65535
-        },
-        "tls": {
-          "$ref": "#/$defs/TlsConfig",
-          "default": {
-            "required": false,
-            "ca_file": null,
-            "cert_file": null,
-            "key_file": null,
-            "cert_password": null,
-            "accept_invalid_certs": false
-          }
         },
         "no_persistence": {
           "type": "boolean",
@@ -683,7 +709,31 @@
           ]
         },
         "url": {
+          "description": "MongoDB connection string URI. Can contain a comma-separated list of hosts for a replica set.",
           "type": "string"
+        },
+        "username": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "password": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tls": {
+          "$ref": "#/$defs/TlsConfig",
+          "default": {
+            "required": false,
+            "ca_file": null,
+            "cert_file": null,
+            "key_file": null,
+            "cert_password": null,
+            "accept_invalid_certs": false
+          }
         },
         "database": {
           "type": "string"
@@ -722,6 +772,7 @@
           ]
         },
         "url": {
+          "description": "MQTT broker URL (e.g., \"tcp://localhost:1883\"). Does not support multiple hosts.",
           "type": "string"
         },
         "username": {
@@ -755,6 +806,15 @@
           "format": "uint",
           "minimum": 0
         },
+        "max_inflight": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "minimum": 0,
+          "maximum": 65535
+        },
         "qos": {
           "type": [
             "integer",
@@ -766,7 +826,7 @@
         },
         "clean_session": {
           "type": "boolean",
-          "default": true
+          "default": false
         },
         "keep_alive_seconds": {
           "type": [
@@ -798,6 +858,7 @@
       "type": "object",
       "properties": {
         "url": {
+          "description": "For consumers, the listen address (e.g., \"0.0.0.0:8080\"). For publishers, the target URL.",
           "type": [
             "string",
             "null"
@@ -855,6 +916,10 @@
         "metadata_key",
         "cases"
       ]
+    },
+    "ResponseConfig": {
+      "type": "object",
+      "additionalProperties": false
     }
   }
 }

@@ -56,9 +56,10 @@ pub type BatchCommitFunc =
 
 #[async_trait]
 pub trait MessageConsumer: Send + Sync {
-    /// Receives a batch of messages. Needs to be implemented.
-    /// In doubt, just implement a receive_batch that returns 1 message as vec
     /// Receives a batch of messages.
+    ///
+    /// This method must be implemented by all consumers.
+    /// If in doubt, implement `receive_batch` to return a single message as a vector.
     async fn receive_batch(&mut self, _max_messages: usize)
         -> Result<ReceivedBatch, ConsumerError>;
 
@@ -105,8 +106,10 @@ pub trait MessageConsumer: Send + Sync {
 
 #[async_trait]
 pub trait MessagePublisher: Send + Sync + 'static {
-    /// Sends a batch of messages. Endpoints needs to override this.
-    /// In doubt, just implement a send_batch that returns 1 message as vec
+    /// Sends a batch of messages.
+    ///
+    /// This method must be implemented by all publishers.
+    /// If in doubt, implement `send_batch` to send messages one at a time.
     async fn send_batch(
         &self,
         messages: Vec<CanonicalMessage>,

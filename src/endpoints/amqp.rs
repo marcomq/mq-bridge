@@ -78,9 +78,19 @@ impl MessagePublisher for AmqpPublisher {
             // Delivery mode 2 makes the message persistent
             BasicProperties::default().with_delivery_mode(2)
         };
+        if let Some(reply_to) = message.metadata.get("reply_to") {
+            properties = properties.with_reply_to(reply_to.clone().into());
+        }
+        if let Some(correlation_id) = message.metadata.get("correlation_id") {
+            properties = properties.with_correlation_id(correlation_id.clone().into());
+        }
         if !message.metadata.is_empty() {
             let mut table = FieldTable::default();
             for (key, value) in message.metadata {
+                // Skip reply_to and correlation_id since they're already set as native properties
+                if key == "reply_to" || key == "correlation_id" {
+                    continue;
+                }
                 table.insert(
                     ShortString::from(key),
                     lapin::types::AMQPValue::LongString(value.into()),
@@ -131,10 +141,20 @@ impl MessagePublisher for AmqpPublisher {
             } else {
                 BasicProperties::default().with_delivery_mode(2)
             };
+            if let Some(reply_to) = message.metadata.get("reply_to") {
+                properties = properties.with_reply_to(reply_to.clone().into());
+            }
+            if let Some(correlation_id) = message.metadata.get("correlation_id") {
+                properties = properties.with_correlation_id(correlation_id.clone().into());
+            }
 
             if !message.metadata.is_empty() {
                 let mut table = FieldTable::default();
                 for (key, value) in &message.metadata {
+                    // Skip reply_to and correlation_id since they're already set as native properties
+                    if key == "reply_to" || key == "correlation_id" {
+                        continue;
+                    }
                     table.insert(
                         ShortString::from(key.clone()),
                         lapin::types::AMQPValue::LongString(value.clone().into()),
@@ -192,6 +212,7 @@ impl MessagePublisher for AmqpPublisher {
 
 pub struct AmqpConsumer {
     consumer: Consumer,
+    channel: Channel,
     queue: String,
 }
 
@@ -231,6 +252,7 @@ impl AmqpConsumer {
 
         Ok(Self {
             consumer,
+            channel,
             queue: queue.to_string(),
         })
     }
@@ -475,10 +497,14 @@ fn delivery_to_canonical_message(delivery: &lapin::message::Delivery) -> Canonic
             .insert("amqp_message_id".to_string(), amqp_id.to_string());
     }
     if let Some(correlation_id) = delivery.properties.correlation_id().as_ref() {
-        canonical_message.metadata.insert(
-            "amqp_correlation_id".to_string(),
-            correlation_id.to_string(),
-        );
+        canonical_message
+            .metadata
+            .insert("correlation_id".to_string(), correlation_id.to_string());
+    }
+    if let Some(reply_to) = delivery.properties.reply_to().as_ref() {
+        canonical_message
+            .metadata
+            .insert("reply_to".to_string(), reply_to.to_string());
     }
 
     if let Some(headers) = delivery.properties.headers().as_ref() {
@@ -518,15 +544,26 @@ impl MessageConsumer for AmqpConsumer {
 
         let mut messages = Vec::with_capacity(max_messages);
         let mut ackers = Vec::with_capacity(max_messages);
+        let mut reply_infos = Vec::with_capacity(max_messages);
 
-        messages.push(delivery_to_canonical_message(&first_delivery));
+        let msg = delivery_to_canonical_message(&first_delivery);
+        reply_infos.push((
+            msg.metadata.get("reply_to").cloned(),
+            msg.metadata.get("correlation_id").cloned(),
+        ));
+        messages.push(msg);
         ackers.push(first_delivery.acker);
 
         // 2. Greedily consume more messages if they are already buffered, up to max_messages.
         while messages.len() < max_messages {
             match self.consumer.try_next().now_or_never() {
                 Some(Ok(Some(delivery))) => {
-                    messages.push(delivery_to_canonical_message(&delivery));
+                    let msg = delivery_to_canonical_message(&delivery);
+                    reply_infos.push((
+                        msg.metadata.get("reply_to").cloned(),
+                        msg.metadata.get("correlation_id").cloned(),
+                    ));
+                    messages.push(msg);
                     ackers.push(delivery.acker);
                 }
                 Some(Ok(None)) => break, // Stream ended
@@ -542,8 +579,35 @@ impl MessageConsumer for AmqpConsumer {
         // 3. Create a commit function that acks all received messages.
         let messages_len = messages.len();
         trace!(count = messages_len, queue = %self.queue, message_ids = ?LazyMessageIds(&messages), "Received batch of AMQP messages");
-        let commit = Box::new(move |_response: Option<Vec<CanonicalMessage>>| {
+        let channel = self.channel.clone();
+        let commit = Box::new(move |responses: Option<Vec<CanonicalMessage>>| {
             Box::pin(async move {
+                // Handle replies if responses are provided
+                if let Some(resps) = responses {
+                    for ((reply_to, correlation_id), resp) in reply_infos.iter().zip(resps) {
+                        if let Some(rt) = reply_to {
+                            let mut props = BasicProperties::default();
+                            if let Some(cid) = correlation_id {
+                                props = props.with_correlation_id(cid.clone().into());
+                            }
+
+                            // Publish response to the default exchange with the routing key set to reply_to
+                            if let Err(e) = channel
+                                .basic_publish(
+                                    "", // Default exchange
+                                    rt,
+                                    BasicPublishOptions::default(),
+                                    &resp.payload,
+                                    props,
+                                )
+                                .await
+                            {
+                                tracing::error!(reply_to = %rt, error = %e, "Failed to publish AMQP reply");
+                            }
+                        }
+                    }
+                }
+
                 futures::stream::iter(ackers)
                     .for_each_concurrent(None, |acker| async move {
                         if let Err(e) = acker.ack(BasicAckOptions::default()).await {

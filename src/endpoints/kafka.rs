@@ -7,7 +7,7 @@ use crate::traits::{
 use crate::CanonicalMessage;
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;
-use futures::{FutureExt, StreamExt, TryStreamExt};
+use futures::StreamExt;
 use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
 use rdkafka::message::OwnedHeaders;
 use rdkafka::producer::{FutureProducer, FutureRecord, Producer};
@@ -231,6 +231,7 @@ impl MessagePublisher for KafkaPublisher {
 pub struct KafkaConsumer {
     // The consumer needs to be stored to keep the connection alive.
     consumer: Arc<StreamConsumer>,
+    producer: FutureProducer,
     topic: String,
 }
 use std::any::Any;
@@ -266,8 +267,27 @@ impl KafkaConsumer {
         // Wrap the consumer in an Arc to allow it to be shared.
         let consumer = Arc::new(consumer);
 
+        // Create a producer for sending replies
+        let mut producer_config = create_common_config(config);
+        // Apply similar defaults as KafkaPublisher for reliability
+        producer_config
+            .set("linger.ms", "100")
+            .set("batch.num.messages", "10000")
+            .set("compression.type", "lz4")
+            .set("acks", "all")
+            .set("retries", "3")
+            .set("request.timeout.ms", "30000");
+        // Apply custom producer options, allowing overrides of defaults
+        if let Some(options) = &config.producer_options {
+            for (key, value) in options {
+                producer_config.set(key, value);
+            }
+        }
+        let producer: FutureProducer = producer_config.create()?;
+
         Ok(Self {
             consumer,
+            producer,
             topic: topic.to_string(),
         })
     }
@@ -294,11 +314,34 @@ impl MessageConsumer for KafkaConsumer {
         process_message(message, &mut messages, &mut tpl)?;
         let canonical_message = messages.pop().unwrap();
 
+        let reply_topic = canonical_message.metadata.get("reply_to").cloned();
+        let correlation_id = canonical_message.metadata.get("correlation_id").cloned();
+
         // The commit function for Kafka needs to commit the offset of the processed message.
         // We can't move `self.consumer` into the closure, but we can commit by position.
         let consumer = self.consumer.clone();
-        let commit = Box::new(move |_response: Option<CanonicalMessage>| {
+        let producer = self.producer.clone();
+
+        let commit = Box::new(move |response: Option<CanonicalMessage>| {
             Box::pin(async move {
+                // Handle reply
+                if let (Some(resp), Some(rt)) = (response, reply_topic) {
+                    let mut record: FutureRecord<'_, (), _> =
+                        FutureRecord::to(&rt).payload(&resp.payload[..]);
+                    let mut headers = OwnedHeaders::new();
+                    if let Some(cid) = correlation_id {
+                        headers = headers.insert(rdkafka::message::Header {
+                            key: "correlation_id",
+                            value: Some(cid.as_bytes()),
+                        });
+                    }
+                    record = record.headers(headers);
+
+                    if let Err((e, _)) = producer.send(record, Duration::from_secs(0)).await {
+                        tracing::error!(topic = %rt, error = %e, "Failed to publish Kafka reply");
+                    }
+                }
+
                 // Ack failure may result in redelivery. Enable deduplication middleware to handle duplicates.
                 if let Err(e) = consumer.commit(&tpl, CommitMode::Async) {
                     tracing::error!("Failed to commit Kafka message: {:?}", e);
@@ -313,7 +356,7 @@ impl MessageConsumer for KafkaConsumer {
     }
 
     async fn receive_batch(&mut self, max_messages: usize) -> Result<ReceivedBatch, ConsumerError> {
-        receive_batch_internal(&self.consumer, max_messages, &self.topic).await
+        receive_batch_internal(&self.consumer, &self.producer, max_messages, &self.topic).await
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -386,7 +429,12 @@ impl Drop for KafkaSubscriber {
 #[async_trait]
 impl MessageConsumer for KafkaSubscriber {
     async fn receive_batch(&mut self, max_messages: usize) -> Result<ReceivedBatch, ConsumerError> {
-        receive_batch_internal(&self.consumer, max_messages, &self.topic).await
+        // Subscribers generally don't reply, but we pass a dummy producer or handle it if we wanted to.
+        // For now, we can reuse the internal logic but we need a producer.
+        // Since Subscriber struct doesn't have one, we can't support replies easily here without changing Subscriber.
+        // Given the context, let's just not support replies for Subscribers (which is standard).
+        // We need to adapt receive_batch_internal to make producer optional.
+        receive_batch_internal(&self.consumer, None, max_messages, &self.topic).await
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -403,12 +451,60 @@ fn process_message(
     let payload = message
         .payload()
         .ok_or_else(|| anyhow!("Kafka message has no payload"))?;
+
+    // Try to extract message_id from the Kafka key first (where we store it when publishing).
+    // The key is set to message_id.to_be_bytes() which is 16 bytes for a u128.
+    let mut message_id: Option<u128> = None;
+    if let Some(key) = message.key() {
+        if key.len() == 16 {
+            // Parse the key as a u128 (big-endian bytes)
+            // unwrap is safe: length check guarantees exactly 16 bytes
+            let bytes: [u8; 16] = key.try_into().unwrap();
+            message_id = Some(u128::from_be_bytes(bytes));
+        }
+    }
+
+    // If no message_id from key, check headers for a message_id
+    if message_id.is_none() {
+        if let Some(headers) = message.headers() {
+            for header in headers.iter() {
+                if header.key == "message_id" || header.key == "mq_bridge.message_id" {
+                    if let Some(value) = header.value {
+                        let id_str = String::from_utf8_lossy(value);
+                        // Try to parse as UUID first
+                        if let Ok(uuid) = Uuid::parse_str(&id_str) {
+                            message_id = Some(uuid.as_u128());
+                            break;
+                        }
+                        // Try to parse as hex string
+                        else if let Ok(n) =
+                            u128::from_str_radix(id_str.trim_start_matches("0x"), 16)
+                        {
+                            message_id = Some(n);
+                            break;
+                        }
+                        // Try to parse as decimal string
+                        else if let Ok(n) = id_str.parse::<u128>() {
+                            message_id = Some(n);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Fall back to partition+offset if no message_id found
     // Combine partition and offset for a unique ID within a topic.
     // A u128 is used to hold both values, with the partition in the high 64 bits
     // and the offset in the low 64 bits.
-    let message_id =
-        ((message.partition() as u32 as u128) << 64) | (message.offset() as u64 as u128);
+    let message_id = message_id.unwrap_or_else(|| {
+        ((message.partition() as u32 as u128) << 64) | (message.offset() as u64 as u128)
+    });
+
     let mut canonical_message = CanonicalMessage::new(payload.to_vec(), Some(message_id));
+
+    // Process headers into metadata
     if let Some(headers) = message.headers() {
         if headers.count() > 0 {
             let mut metadata = std::collections::HashMap::new();
@@ -421,6 +517,7 @@ fn process_message(
             canonical_message.metadata = metadata;
         }
     }
+
     messages.push(canonical_message);
 
     // Update the topic partition list with the latest offset
@@ -465,49 +562,77 @@ fn create_common_config(config: &KafkaConfig) -> ClientConfig {
 
 async fn receive_batch_internal(
     consumer: &Arc<StreamConsumer>,
+    producer: impl Into<Option<&FutureProducer>>,
     max_messages: usize,
     topic: &str,
 ) -> Result<ReceivedBatch, ConsumerError> {
     let mut messages = Vec::with_capacity(max_messages);
     let mut last_offset_tpl = TopicPartitionList::new();
-    {
-        // Create a stream from the consumer for this batch operation.
-        let mut stream = consumer.stream();
+    let mut reply_infos = Vec::with_capacity(max_messages);
 
-        // Block and wait for the first message.
-        if let Some(first_message_result) = stream.next().await {
-            match first_message_result {
-                Ok(message) => {
-                    process_message(message, &mut messages, &mut last_offset_tpl)?;
+    {
+        let stream = consumer.stream();
+        // Use ready_chunks to efficiently fetch a batch of available messages.
+        // This waits for at least one message, then consumes all currently available messages up to max_messages.
+        let mut chunk_stream = stream.ready_chunks(max_messages);
+
+        if let Some(chunk) = chunk_stream.next().await {
+            for message_result in chunk {
+                match message_result {
+                    Ok(message) => {
+                        process_message(message, &mut messages, &mut last_offset_tpl)?;
+                        // process_message pushes to messages, so we can peek the last one
+                        if let Some(last_msg) = messages.last() {
+                            reply_infos.push((
+                                last_msg.metadata.get("reply_to").cloned(),
+                                last_msg.metadata.get("correlation_id").cloned(),
+                            ));
+                        }
+                    }
+                    Err(e) => return Err(anyhow!(e).into()),
                 }
-                Err(e) => return Err(anyhow!(e).into()),
             }
         } else {
             return Err(ConsumerError::EndOfStream);
-        }
-
-        // If we got one message, greedily consume any others that are already buffered.
-        if !messages.is_empty() {
-            for _ in 1..max_messages {
-                match stream.try_next().now_or_never() {
-                    Some(Ok(Some(message))) => {
-                        process_message(message, &mut messages, &mut last_offset_tpl)?;
-                    }
-                    _ => {
-                        // Stream is not ready, an error occurred, or it ended.
-                        // In any case, we stop trying to get more messages for this batch.
-                        break;
-                    }
-                }
-            }
         }
     }
     let messages_len = messages.len();
     trace!(count = messages_len, topic = %topic, message_ids = ?LazyMessageIds(&messages), "Received batch of Kafka messages");
 
     let consumer = consumer.clone();
-    let commit = Box::new(move |_responses: Option<Vec<CanonicalMessage>>| {
+    let producer = producer.into().cloned();
+
+    let commit = Box::new(move |responses: Option<Vec<CanonicalMessage>>| {
         Box::pin(async move {
+            // Handle replies
+            if let (Some(resps), Some(prod)) = (responses, producer) {
+                if resps.len() != reply_infos.len() {
+                    tracing::warn!(
+                        expected = reply_infos.len(),
+                        actual = resps.len(),
+                        "Response count mismatch with received messages"
+                    );
+                }
+                for ((reply_topic, correlation_id), resp) in reply_infos.iter().zip(resps) {
+                    if let Some(rt) = reply_topic {
+                        let mut record: FutureRecord<'_, (), _> =
+                            FutureRecord::to(rt).payload(&resp.payload[..]);
+                        let mut headers = OwnedHeaders::new();
+                        if let Some(cid) = correlation_id {
+                            headers = headers.insert(rdkafka::message::Header {
+                                key: "correlation_id",
+                                value: Some(cid.as_bytes()),
+                            });
+                        }
+                        record = record.headers(headers);
+
+                        if let Err((e, _)) = prod.send(record, Duration::from_secs(0)).await {
+                            tracing::error!(topic = %rt, error = %e, "Failed to publish Kafka reply");
+                        }
+                    }
+                }
+            }
+
             // Only commit if there are offsets to commit.
             if messages_len > 0 {
                 // Ack failure may result in redelivery. Enable deduplication middleware to handle duplicates.

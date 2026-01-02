@@ -1,0 +1,77 @@
+use std::env;
+use std::fs;
+use std::path::PathBuf;
+use std::process::Command;
+
+#[test]
+#[ignore = "Requires git, internet access, and takes time. Runs downstream integration tests."]
+fn armature_messaging_test() {
+    // Define paths: Use target directory so it is cleaned up by cargo clean and ignored by git
+    let target_dir = PathBuf::from("target/tmp_integration");
+    let test_dir = target_dir.join("armature_test");
+
+    // Clean up previous run
+    if test_dir.exists() {
+        fs::remove_dir_all(&test_dir).expect("Failed to clean up previous test run");
+    }
+    fs::create_dir_all(&test_dir).expect("Failed to create test directory");
+
+    let repo_url = "https://github.com/pegasusheavy/armature.git";
+    let branch = "develop";
+    let subdirectory = "armature-messaging";
+
+    // 1. Clone Repo
+    println!("Cloning {} (branch: {})...", repo_url, branch);
+    let status = Command::new("git")
+        .args(["clone", "--branch", branch, "--depth", "1", repo_url, "."])
+        .current_dir(&test_dir)
+        .status()
+        .expect("Failed to execute git clone");
+    assert!(status.success(), "Failed to clone armature repo");
+
+    let project_dir = test_dir.join(subdirectory);
+    assert!(
+        project_dir.exists(),
+        "armature-messaging directory not found in cloned repo"
+    );
+
+    // 2. Get absolute path to current mq-bridge
+    let mq_bridge_path = env::current_dir()
+        .expect("Failed to get current dir")
+        .canonicalize()
+        .expect("Failed to canonicalize path");
+
+    // 3. Patch dependency using cargo add to point to local version
+    let cargo_bin = env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    println!(
+        "Patching mq-bridge dependency to local path: {:?}",
+        mq_bridge_path
+    );
+    let status = Command::new(&cargo_bin)
+        .args([
+            "add",
+            "mq-bridge",
+            "--path",
+            mq_bridge_path.to_str().unwrap(),
+        ])
+        .current_dir(&project_dir)
+        .status()
+        .expect("Failed to execute cargo add");
+    assert!(status.success(), "Failed to patch mq-bridge dependency");
+
+    // 4. Run tests
+    println!("Running armature-messaging tests...");
+    let status = Command::new(&cargo_bin)
+        .arg("test")
+        .arg("--features=mq-bridge-full")
+        .arg("--")
+        .arg("--ignored")
+        .current_dir(&project_dir)
+        .status()
+        .expect("Failed to execute cargo test");
+
+    assert!(
+        status.success(),
+        "armature-messaging tests failed with local mq-bridge changes"
+    );
+}

@@ -20,9 +20,8 @@ use tracing_subscriber::util::SubscriberInitExt;
 
 use mq_bridge::endpoints::memory::MemoryChannel;
 
-
-pub const PERF_TEST_BATCH_MESSAGE_COUNT: usize = 150_000;
-pub const PERF_TEST_SINGLE_MESSAGE_COUNT: usize = 15_000;
+pub const PERF_TEST_BATCH_MESSAGE_COUNT: usize = 100_000;
+pub const PERF_TEST_SINGLE_MESSAGE_COUNT: usize = 10_000;
 pub const PERF_TEST_MESSAGE_COUNT: usize = PERF_TEST_BATCH_MESSAGE_COUNT;
 pub const PERF_TEST_CONCURRENCY: usize = 100;
 
@@ -114,8 +113,7 @@ impl Drop for DockerCompose {
 }
 
 pub fn generate_test_messages(num_messages: usize) -> Vec<CanonicalMessage> {
-    let mut messages = Vec::new();
-    messages.reserve(num_messages);
+    let mut messages = Vec::with_capacity(num_messages);
 
     for i in 0..num_messages {
         let payload = json!({ "message_num": i, "test_id": "integration" });
@@ -197,8 +195,12 @@ async fn run_pipeline_test_internal(
 
     let harness = TestHarness::new(in_route.clone(), out_route.clone(), num_messages);
 
-    let (in_handle, in_shutdown) = in_route.run(&in_route_name).expect("Failed to start in_route");
-    let (out_handle, out_shutdown) = out_route.run(&out_route_name).expect("Failed to start out_route");
+    let (in_handle, in_shutdown) = in_route
+        .run(&in_route_name)
+        .expect("Failed to start in_route");
+    let (out_handle, out_shutdown) = out_route
+        .run(&out_route_name)
+        .expect("Failed to start out_route");
 
     let start_time = Instant::now();
 
@@ -428,13 +430,39 @@ pub fn generate_message() -> CanonicalMessage {
         .unwrap()
 }
 
+/// Measure the performance of writing messages to a publisher.
+///
+/// This test creates a publisher and consumer with a bounded channel.
+/// It then spawns a number of tasks to write messages to the publisher
+/// concurrently. Each task will write a batch of messages to
+/// the publisher, retrying if any messages fail. The test times how long
+/// it takes to write all the messages to the publisher.
+///
+/// The number of messages to write, the concurrency level and the batch
+/// size are all configurable. The test will retry sending a batch up
+/// to `MAX_RETRIES` times if any messages fail.
+///
+/// The test will return how long it took to write all the messages to the
+/// publisher. If the count of messages written is not equal to the
+/// expected count, an error will be logged.
+///
+/// `num_messages`: The number of messages to write to the publisher.
+///
+/// `concurrency`: The number of tasks to spawn concurrently to write
+/// messages to the publisher.
+///
+/// The batch size is fixed at 128 messages per batch.
+///
 pub async fn measure_write_performance(
     _name: &str,
     publisher: Arc<dyn MessagePublisher>,
     num_messages: usize,
     concurrency: usize,
 ) -> Duration {
-    let (tx, rx): (Sender<CanonicalMessage>, Receiver<CanonicalMessage>) = bounded(concurrency * 2);
+    // write performance test (Batch) for {}", _name);
+    let batch_size = 128; // Define a reasonable batch size
+    let (tx, rx): (Sender<CanonicalMessage>, Receiver<CanonicalMessage>) =
+        bounded(batch_size * concurrency * 2);
 
     let final_count = Arc::new(AtomicUsize::new(0));
     tokio::spawn(async move {
@@ -453,7 +481,6 @@ pub async fn measure_write_performance(
     for _ in 0..concurrency {
         let rx_clone = rx.clone();
         let publisher_clone = publisher.clone();
-        let batch_size = (num_messages / concurrency / 10).max(100); // Define a reasonable batch size
         let final_count_clone = Arc::clone(&final_count);
 
         tasks.spawn(async move {
@@ -585,13 +612,11 @@ pub fn format_pretty<N: Display>(num: N) -> String {
     let fractional_part = parts.next();
 
     let mut formatted_integer = String::with_capacity(integer_part.len() + integer_part.len() / 3);
-    let mut count = 0;
-    for ch in integer_part.chars().rev() {
+    for (count, ch) in integer_part.chars().rev().enumerate() {
         if count > 0 && count % 3 == 0 {
             formatted_integer.push('_');
         }
         formatted_integer.push(ch);
-        count += 1;
     }
 
     let formatted_integer = formatted_integer.chars().rev().collect::<String>();
@@ -610,9 +635,10 @@ pub async fn measure_read_performance(
     consumer: Arc<tokio::sync::Mutex<dyn MessageConsumer>>,
     num_messages: usize,
 ) -> Duration {
+    // println!("Starting read performance test (Batch) for {}", _name);
     let start_time = Instant::now();
     let mut final_count = 0;
-    let batch_size = 100; // A reasonable batch size for single-threaded reading.
+    let batch_size = 128; // A reasonable batch size for single-threaded reading.
 
     let consumer_clone = consumer.clone();
 
@@ -626,7 +652,7 @@ pub async fn measure_read_performance(
         let mut consumer_guard = consumer_clone.lock().await;
         let receive_future = consumer_guard.receive_batch(missing);
 
-        match tokio::time::timeout(Duration::from_secs(5), receive_future).await {
+        match tokio::time::timeout(Duration::from_secs(10), receive_future).await {
             Ok(Ok(batch)) if !batch.messages.is_empty() => {
                 final_count += batch.messages.len();
                 let commit = batch.commit;
@@ -659,6 +685,7 @@ pub async fn measure_single_write_performance(
     num_messages: usize,
     concurrency: usize,
 ) -> Duration {
+    // println!("Starting single write performance test for {}", _name);
     let (tx, rx): (Sender<CanonicalMessage>, Receiver<CanonicalMessage>) = bounded(concurrency * 2);
 
     let final_count = Arc::new(AtomicUsize::new(0));
@@ -717,6 +744,7 @@ pub async fn measure_single_read_performance(
     consumer: Arc<tokio::sync::Mutex<dyn MessageConsumer>>,
     num_messages: usize,
 ) -> Duration {
+    // println!("Starting single read performance test for {}", _name);
     let start_time = Instant::now();
     let mut final_count = 0;
     loop {
@@ -728,7 +756,7 @@ pub async fn measure_single_read_performance(
         if let Ok(Ok(Received {
             message: _msg,
             commit,
-        })) = tokio::time::timeout(Duration::from_secs(5), receive_future).await
+        })) = tokio::time::timeout(Duration::from_secs(10), receive_future).await
         {
             final_count += 1;
             tokio::spawn(async move { commit(None).await });

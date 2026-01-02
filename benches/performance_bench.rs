@@ -18,7 +18,7 @@ use integration::common::{
 };
 
 const PERF_TEST_MESSAGE_COUNT: usize = 1000;
-const DEFAULT_SLEEP: Duration = Duration::from_millis(50);
+const DEFAULT_SLEEP: Duration = Duration::from_millis(10);
 
 static BENCH_RESULTS: Lazy<Mutex<HashMap<String, PerformanceResult>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
@@ -181,6 +181,7 @@ mod mqtt_helper {
         MqttConfig {
             url: "tcp://localhost:1883".to_string(),
             queue_capacity: Some(PERF_TEST_MESSAGE_COUNT * 4), // For batch and single
+            max_inflight: Some(1000),
             qos: Some(1),
             clean_session: false,
             keep_alive_seconds: Some(60),
@@ -238,6 +239,7 @@ fn performance_benchmarks(c: &mut Criterion) {
                         let mut total = Duration::ZERO;
                         let publisher = backend::create_publisher().await;
                         let consumer = backend::create_consumer().await;
+                        tokio::time::sleep(DEFAULT_SLEEP).await;
                         for _ in 0..iters {
                             // Note: create_publisher must be `pub` in the integration module
                             let duration = measure_single_write_performance(
@@ -250,7 +252,7 @@ fn performance_benchmarks(c: &mut Criterion) {
                             total += duration;
                             tokio::time::sleep(DEFAULT_SLEEP).await;
                             // Cleanup: Read the messages we just wrote so the queue is empty for the next iteration
-                            measure_single_read_performance("cleanup", Arc::clone(&consumer), PERF_TEST_MESSAGE_COUNT).await;
+                            measure_read_performance("cleanup", Arc::clone(&consumer), PERF_TEST_MESSAGE_COUNT).await;
                             tokio::time::sleep(DEFAULT_SLEEP).await;
                         }
                         let msgs_per_sec = (iters as f64 * PERF_TEST_MESSAGE_COUNT as f64) / total.as_secs_f64();
@@ -269,10 +271,11 @@ fn performance_benchmarks(c: &mut Criterion) {
                         let mut total = Duration::ZERO;
                         let publisher = backend::create_publisher().await;
                         let consumer = backend::create_consumer().await;
+                        tokio::time::sleep(DEFAULT_SLEEP).await;
                         for _ in 0..iters {
 
                             // Fill the queue first (setup, not measured)
-                            measure_single_write_performance(
+                            measure_write_performance(
                                 "setup_fill",
                                 Arc::clone(&publisher),
                                 PERF_TEST_MESSAGE_COUNT,
@@ -306,6 +309,7 @@ fn performance_benchmarks(c: &mut Criterion) {
                         let mut total = Duration::ZERO;
                         let publisher = backend::create_publisher().await;
                         let consumer = backend::create_consumer().await;
+                        tokio::time::sleep(DEFAULT_SLEEP).await;
                         for _ in 0..iters {
                             let duration = measure_write_performance(
                                 concat!($name, "_batch_write"),
@@ -337,6 +341,7 @@ fn performance_benchmarks(c: &mut Criterion) {
                         let mut total = Duration::ZERO;
                         let publisher = backend::create_publisher().await;
                         let consumer = backend::create_consumer().await;
+                        tokio::time::sleep(DEFAULT_SLEEP).await;
                         for _ in 0..iters {
 
                             // Fill the queue first (setup, not measured)

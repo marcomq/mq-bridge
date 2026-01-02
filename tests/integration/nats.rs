@@ -6,7 +6,6 @@ use super::common::{
     run_test_with_docker, setup_logging, PERF_TEST_MESSAGE_COUNT,
 };
 use mq_bridge::endpoints::nats::{NatsConsumer, NatsPublisher};
-const PERF_TEST_MESSAGE_COUNT_DIRECT: usize = 20_000;
 const CONFIG_YAML: &str = r#"
 routes:
   memory_to_nats:

@@ -30,7 +30,7 @@ impl DlqPublisher {
             route_name, config.dlq_retry_attempts
         );
         // Box::pin is used here to break the recursive async type definition.
-        // create_publisher_from_route -> apply_middlewares -> DlqPublisher::new -> create_publisher_from_route
+        // create_publisher -> apply_middlewares -> DlqPublisher::new -> create_publisher
         let dlq_publisher =
             Box::pin(create_publisher_from_route(route_name, &config.endpoint)).await?;
         Ok(Self {

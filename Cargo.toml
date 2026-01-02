@@ -1,6 +1,6 @@
 [package]
 name = "mq-bridge"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "An asynchronous message bridging library connecting Kafka, MQTT, AMQP, NATS, MongoDB, HTTP, and more."
 repository = "https://github.com/marcomq/mq-bridge"
@@ -44,7 +44,7 @@ async-stream = { version = "0.3", optional = true } # Used by Kafka consumer
 lapin = { version = "3.7", features = ["rustls"], optional = true }
 
 # MongoDB
-mongodb = { version = "3.4", optional = true }
+mongodb = { version = "3.4", optional = true, features = ["cert-key-password"] }
 uuid = { version = "1.19", features = ["v4", "v7"]}
 
 # NATS
@@ -61,13 +61,13 @@ axum-server = { version = "0.8.0", features = ["tls-rustls"], optional = true }
 
 url = { version = "2.5", optional = true }
 
-# Memory (for testing) # TODO - use tokio
+# Memory (for testing)
 async-channel = { version = "2.5.0" }
-once_cell = { version = "1.21.3"  }
+once_cell = { version = "1.21.3" }
 schemars = { version = "1.2", optional = true }
 
 [features]
-default = []
+default = ["full"]
 full = ["mongodb", "kafka", "amqp", "nats", "mqtt", "http", "metrics", "dedup"]
 
 # Functionality features
@@ -96,3 +96,8 @@ criterion = { version = "0.8.1", features = ["async", "async_tokio"] }
 [[bench]]
 name = "performance_bench"
 harness = false
+
+[target.'cfg(windows)'.dependencies.rdkafka]
+version = "0.38"
+features = ["cmake-build", "tokio"]
+optional = true

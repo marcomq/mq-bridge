@@ -14,7 +14,7 @@ routes:
       memory: { topic: "kafka-test-in" }
     output:
       kafka: 
-        brokers: "localhost:9092"
+        url: "localhost:9092"
         topic: "test_topic_kafka"
         producer_options: 
             - ["queue.buffering.max.ms", "50"]
@@ -24,7 +24,7 @@ routes:
   kafka_to_memory:
     input:
       kafka:
-        brokers: "localhost:9092"
+        url: "localhost:9092"
         topic: "test_topic_kafka"
         group_id: "test_group"
     output:

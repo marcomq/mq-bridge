@@ -18,6 +18,10 @@ use crate::{
 /// The key is the route name (e.g., "kafka_to_nats").
 pub type Config = HashMap<String, Route>;
 
+/// A configuration map for named publishers (endpoints).
+/// The key is the publisher name.
+pub type PublisherConfig = HashMap<String, Endpoint>;
+
 /// Defines a single message processing route from an input to an output.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -51,11 +55,6 @@ fn default_output_endpoint() -> Endpoint {
 fn default_dlq_retry_attempts() -> usize {
     3
 }
-
-fn default_true() -> bool {
-    true
-}
-
 fn default_retry_attempts() -> usize {
     3
 }
@@ -67,6 +66,9 @@ fn default_max_interval_ms() -> u64 {
 }
 fn default_multiplier() -> f64 {
     2.0
+}
+fn default_clean_session() -> bool {
+    false
 }
 
 /// Represents a connection point for messages, which can be a source (input) or a sink (output).
@@ -251,6 +253,7 @@ pub enum EndpointType {
     Http(HttpEndpoint),
     Fanout(Vec<Endpoint>),
     Switch(SwitchConfig),
+    Response(ResponseConfig),
     #[serde(skip)]
     Custom(Arc<dyn CustomEndpointFactory>),
     Null,
@@ -355,12 +358,15 @@ pub struct KafkaEndpoint {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct KafkaConfig {
+    // pub url: String // use "pub brokers: String" here.
+    /// Comma-separated list of Kafka broker URLs. Can also be specified using the alias 'url'.
+    #[serde(alias = "url")]
     pub brokers: String,
-    pub group_id: Option<String>,
     pub username: Option<String>,
     pub password: Option<String>, // Consider using a secret management type
     #[serde(default)]
     pub tls: TlsConfig,
+    pub group_id: Option<String>,
     /// If true, do not wait for an acknowledgement when sending to broker. Defaults to false.
     #[serde(default)]
     pub delayed_ack: bool,
@@ -388,12 +394,13 @@ pub struct NatsEndpoint {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct NatsConfig {
+    /// Comma-separated list of NATS server URLs (e.g., "nats://localhost:4222,nats://localhost:4223").
     pub url: String,
     pub username: Option<String>,
     pub password: Option<String>,
-    pub token: Option<String>,
     #[serde(default)]
     pub tls: TlsConfig,
+    pub token: Option<String>,
     /// If true, do not wait for an acknowledgement when sending to broker. Defaults to false.
     #[serde(default)]
     pub delayed_ack: bool,
@@ -401,7 +408,12 @@ pub struct NatsConfig {
     #[serde(default)]
     pub no_jetstream: bool,
     pub default_stream: Option<String>,
+    pub stream_max_messages: Option<i64>,
+    pub stream_max_bytes: Option<i64>,
     pub prefetch_count: Option<usize>,
+    #[serde(default)]
+    pub request_reply: bool,
+    pub request_timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
@@ -438,13 +450,16 @@ pub struct AmqpEndpoint {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct AmqpConfig {
+    /// AMQP connection URI. The `lapin` client connects to a single host specified in the URI.
+    /// For high availability, provide the address of a load balancer or use DNS resolution
+    /// that points to multiple brokers. Example: "amqp://localhost:5672/vhost".
     pub url: String,
     pub username: Option<String>,
     pub password: Option<String>,
-    pub exchange: Option<String>,
-    pub prefetch_count: Option<u16>,
     #[serde(default)]
     pub tls: TlsConfig,
+    pub exchange: Option<String>,
+    pub prefetch_count: Option<u16>,
     #[serde(default)]
     pub no_persistence: bool,
     /// If true, do not wait for an acknowledgement when sending to broker. Defaults to false.
@@ -469,7 +484,17 @@ pub struct MongoDbEndpoint {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct MongoDbConfig {
+    /// MongoDB connection string URI. Can contain a comma-separated list of hosts for a replica set.
+    /// Credentials provided via the separate `username` and `password` fields take precedence over any credentials embedded in the URL.
     pub url: String,
+    /// Optional username. Takes precedence over any credentials embedded in the `url`.
+    /// Use embedded URL credentials for simple one-off connections but prefer explicit username/password fields (or environment-sourced secrets) for clarity and secret management in production.
+    pub username: Option<String>,
+    /// Optional password. Takes precedence over any credentials embedded in the `url`.
+    /// Use embedded URL credentials for simple one-off connections but prefer explicit username/password fields (or environment-sourced secrets) for clarity and secret management in production.
+    pub password: Option<String>,
+    #[serde(default)]
+    pub tls: TlsConfig,
     pub database: String,
     pub polling_interval_ms: Option<u64>,
     pub ttl_seconds: Option<u64>,
@@ -492,15 +517,17 @@ pub struct MqttEndpoint {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct MqttConfig {
+    /// MQTT broker URL (e.g., "tcp://localhost:1883"). Does not support multiple hosts.
     pub url: String,
     pub username: Option<String>,
     pub password: Option<String>,
     #[serde(default)]
     pub tls: TlsConfig,
     pub queue_capacity: Option<usize>,
+    pub max_inflight: Option<u16>,
     pub qos: Option<u8>,
-    #[serde(default = "default_true")]
-    pub clean_session: bool,
+    #[serde(default = "default_clean_session")]
+    pub clean_session: bool, // false => persistence
     pub keep_alive_seconds: Option<u64>,
     #[serde(default)]
     pub protocol: MqttProtocol,
@@ -531,6 +558,7 @@ pub struct HttpEndpoint {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct HttpConfig {
+    /// For consumers, the listen address (e.g., "0.0.0.0:8080"). For publishers, the target URL.
     pub url: Option<String>,
     #[serde(default)]
     pub tls: TlsConfig,
@@ -547,6 +575,12 @@ pub struct SwitchConfig {
     pub cases: HashMap<String, Endpoint>,
     pub default: Option<Box<Endpoint>>,
 }
+
+// --- Response Endpoint Configuration ---
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct ResponseConfig {}
 
 // --- Common Configuration ---
 
@@ -667,9 +701,9 @@ kafka_to_nats:
             assert_eq!(kafka.config.brokers, "localhost:9092");
             assert_eq!(kafka.config.group_id, Some("my-consumer-group".to_string()));
             let tls = &kafka.config.tls;
-            assert_eq!(tls.required, true);
+            assert!(tls.required);
             assert_eq!(tls.ca_file.as_deref(), Some("/path_to_ca"));
-            assert_eq!(tls.accept_invalid_certs, true);
+            assert!(tls.accept_invalid_certs);
         } else {
             panic!("Input endpoint should be Kafka");
         }

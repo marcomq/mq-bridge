@@ -193,11 +193,10 @@ impl MessageConsumer for MemoryConsumer {
         // If the internal buffer has messages, return them first.
         if self.buffer.is_empty() {
             // Buffer is empty. Wait for a new batch from the channel.
-            self.buffer = self
-                .receiver
-                .recv()
-                .await
-                .map_err(|_| anyhow!("Memory channel closed."))?;
+            self.buffer = match self.receiver.recv().await {
+                Ok(batch) => batch,
+                Err(_) => return Err(ConsumerError::EndOfStream),
+            };
             // Reverse the buffer so we can efficiently pop from the end.
             self.buffer.reverse();
         }
@@ -318,11 +317,11 @@ mod tests {
         let (received_msg2, commit2) = (batch2.messages, batch2.commit);
         commit2(None).await;
         assert_eq!(received_msg2.len(), 1);
-        assert_eq!(received_msg2.get(0).unwrap().payload, msg2.payload);
+        assert_eq!(received_msg2.first().unwrap().payload, msg2.payload);
         let batch3 = consumer.receive_batch(2).await.unwrap();
         let (received_msg3, commit3) = (batch3.messages, batch3.commit);
         commit3(None).await;
-        assert_eq!(received_msg3.get(0).unwrap().payload, msg3.payload);
+        assert_eq!(received_msg3.first().unwrap().payload, msg3.payload);
 
         // 6. Verify that the channel is now empty
         assert_eq!(publisher.channel().len(), 0);

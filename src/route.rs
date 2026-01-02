@@ -17,6 +17,11 @@ use tokio::{
 use tracing::{debug, error, info, warn};
 
 impl Route {
+    /// Creates a new route with default concurrency (1) and batch size (128).
+    ///
+    /// # Arguments
+    /// * `input` - The input/source endpoint for the route
+    /// * `output` - The output/sink endpoint for the route
     pub fn new(input: Endpoint, output: Endpoint) -> Self {
         Self {
             input,
@@ -50,11 +55,7 @@ impl Route {
                 // The actual route logic is in `run_until_err`.
                 let mut run_task = tokio::spawn(async move {
                     route_arc
-                        .run_until_err(
-                            &name_arc,
-                            Some(internal_shutdown_rx),
-                            Some(ready_tx_clone),
-                        )
+                        .run_until_err(&name_arc, Some(internal_shutdown_rx), Some(ready_tx_clone))
                         .await
                 });
 
@@ -98,10 +99,13 @@ impl Route {
             Ok(_) => {
                 timeout.abort();
                 Ok((handle, shutdown_tx))
-            },
+            }
             Err(_) => {
                 handle.abort();
-                Err(anyhow::anyhow!("Route '{}' failed to start within 5 seconds or encountered an error", name_str))
+                Err(anyhow::anyhow!(
+                    "Route '{}' failed to start within 5 seconds or encountered an error",
+                    name_str
+                ))
             }
         }
     }
@@ -168,7 +172,10 @@ impl Route {
                             let failed_count = failed.len();
                             commit(responses).await; // Commit the successful messages
                             if failed_count > 0 {
-                                let (_, first_error) = failed.into_iter().next().unwrap();
+                                let (_, first_error) = failed
+                                    .into_iter()
+                                    .next()
+                                    .expect("failed_count > 0 implies at least one failed message");
                                 return Err(anyhow::anyhow!(
                                     "Failed to send {} messages in batch. First error: {}",
                                     failed_count,
@@ -220,7 +227,10 @@ impl Route {
                             let failed_count = failed.len();
                             commit(responses).await; // Commit the successful messages
                             if failed_count > 0 {
-                                let (_, first_error) = failed.into_iter().next().unwrap();
+                                let (_, first_error) = failed
+                                    .into_iter()
+                                    .next()
+                                    .expect("failed_count > 0 implies at least one failed message");
                                 let e = anyhow::anyhow!(
                                     "Failed to send {} messages in batch. First error: {}",
                                     failed_count,
@@ -291,7 +301,13 @@ impl Route {
         for handle in worker_handles {
             let _ = handle.await;
         }
-        // Return true if we should continue (i.e., we were stopped by the running flag), false otherwise.
+
+        if let Ok(err) = err_rx.try_recv() {
+            return Err(err);
+        }
+
+        // Return true if shutdown was requested (channel is empty means it was closed/consumed),
+        // false if we reached end-of-stream naturally.
         Ok(shutdown_rx.is_empty())
     }
 

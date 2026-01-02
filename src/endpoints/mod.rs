@@ -19,6 +19,7 @@ pub mod mqtt;
 #[cfg(feature = "nats")]
 pub mod nats;
 pub mod null;
+pub mod response;
 pub mod static_endpoint;
 pub mod switch;
 use crate::middleware::apply_middlewares_to_consumer;
@@ -288,6 +289,9 @@ async fn create_base_publisher(
                 default,
             )) as Box<dyn MessagePublisher>)
         }
+        EndpointType::Response(_) => {
+            Ok(Box::new(response::ResponsePublisher) as Box<dyn MessagePublisher>)
+        }
         EndpointType::Custom(factory) => factory.create_publisher(route_name).await,
         #[allow(unreachable_patterns)]
         _ => Err(anyhow!(
@@ -320,12 +324,10 @@ mod tests {
         let mem_cfg1 = MemoryConfig {
             topic: "fanout_1".to_string(),
             capacity: Some(10),
-            ..Default::default()
         };
         let mem_cfg2 = MemoryConfig {
             topic: "fanout_2".to_string(),
             capacity: Some(10),
-            ..Default::default()
         };
 
         let ep1 = Endpoint::new(EndpointType::Memory(mem_cfg1.clone()));
