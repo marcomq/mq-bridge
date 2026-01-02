@@ -14,7 +14,7 @@ pub struct Publisher {
 impl Publisher {
     /// Creates a new publisher for the given endpoint configuration.
     pub async fn new(endpoint: models::Endpoint) -> anyhow::Result<Self> {
-        let publisher = endpoints::create_publisher("publisher", &endpoint).await?;
+        let publisher = endpoints::create_publisher_from_route("publisher", &endpoint).await?;
         Ok(Self { publisher })
     }
 

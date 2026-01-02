@@ -30,7 +30,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 /// Creates a `MessageConsumer` based on the route's "in" configuration.
-pub async fn create_consumer(
+pub async fn create_consumer_from_route(
     route_name: &str,
     endpoint: &Endpoint,
 ) -> Result<Box<dyn MessageConsumer>> {
@@ -161,7 +161,7 @@ async fn create_base_consumer(
 }
 
 /// Creates a `MessagePublisher` based on the route's "out" configuration.
-pub async fn create_publisher(
+pub async fn create_publisher_from_route(
     route_name: &str,
     endpoint: &Endpoint,
 ) -> Result<Arc<dyn MessagePublisher>> {
@@ -335,7 +335,7 @@ mod tests {
 
         let fanout_ep = Endpoint::new(EndpointType::Fanout(vec![ep1, ep2]));
 
-        let publisher = create_publisher("test_fanout", &fanout_ep)
+        let publisher = create_publisher_from_route("test_fanout", &fanout_ep)
             .await
             .expect("Failed to create fanout publisher");
 
@@ -367,7 +367,7 @@ mod tests {
             handler: None,
         };
 
-        let consumer = create_consumer("test", &endpoint).await.unwrap();
+        let consumer = create_consumer_from_route("test", &endpoint).await.unwrap();
         // Check if it is a MemorySubscriber
         let is_subscriber = consumer
             .as_any()

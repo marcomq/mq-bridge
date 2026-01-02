@@ -3,7 +3,7 @@
 //  Licensed under MIT License, see License file for more details
 //  git clone https://github.com/marcomq/mq-bridge
 
-use crate::endpoints::create_publisher;
+use crate::endpoints::create_publisher_from_route;
 use crate::models::DeadLetterQueueMiddleware;
 use crate::traits::{MessagePublisher, PublisherError, Sent, SentBatch};
 use crate::CanonicalMessage;
@@ -31,7 +31,7 @@ impl DlqPublisher {
         );
         // Box::pin is used here to break the recursive async type definition.
         // create_publisher -> apply_middlewares -> DlqPublisher::new -> create_publisher
-        let dlq_publisher = Box::pin(create_publisher(route_name, &config.endpoint)).await?;
+        let dlq_publisher = Box::pin(create_publisher_from_route(route_name, &config.endpoint)).await?;
         Ok(Self {
             inner,
             dlq_publisher,
