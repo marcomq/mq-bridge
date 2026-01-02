@@ -51,8 +51,8 @@ impl NatsPublisher {
                 .get_or_create_stream(stream::Config {
                     name: stream_name.to_string(),
                     subjects: vec![format!("{}.>", stream_name)],
-                    max_messages: 1_000_000,
-                    max_bytes: 1024 * 1024 * 1024, // 1GB
+                    max_messages: config.stream_max_messages.unwrap_or(1_000_000),
+                    max_bytes: config.stream_max_bytes.unwrap_or(1024 * 1024 * 1024), // 1GB
                     ..Default::default()
                 })
                 .await?;
@@ -434,8 +434,8 @@ impl NatsCore {
                 .get_or_create_stream(stream::Config {
                     name: stream_name.to_string(),
                     subjects: vec![format!("{}.>", stream_name)],
-                    max_messages: 1_000_000,
-                    max_bytes: 1024 * 1024 * 1024, // 1GB
+                    max_messages: config.stream_max_messages.unwrap_or(1_000_000),
+                    max_bytes: config.stream_max_bytes.unwrap_or(1024 * 1024 * 1024), // 1GB
                     ..Default::default()
                 })
                 .await?;
@@ -527,14 +527,27 @@ impl NatsCore {
                             }
                             for (msg, resp) in jetstream_messages.iter().zip(resps) {
                                 if let Some(reply) = msg.reply.as_ref() {
-                                    if let Err(e) =
-                                        client.publish(reply.clone(), resp.payload).await
-                                    {
-                                        tracing::error!(
-                                            subject = %reply,
-                                            error = %e,
-                                            "Failed to publish NATS reply"
-                                        );
+                                    let publish_result = tokio::time::timeout(
+                                        std::time::Duration::from_secs(60),
+                                        client.publish(reply.clone(), resp.payload),
+                                    )
+                                    .await;
+
+                                    match publish_result {
+                                        Err(_) => {
+                                            tracing::error!(
+                                                subject = %reply,
+                                                "Failed to publish NATS reply (timeout)"
+                                            );
+                                        }
+                                        Ok(Err(e)) => {
+                                            tracing::error!(
+                                                subject = %reply,
+                                                error = %e,
+                                                "Failed to publish NATS reply"
+                                            );
+                                        }
+                                        Ok(Ok(_)) => {}
                                     }
                                 }
                             }
@@ -601,17 +614,26 @@ impl NatsCore {
                             for (reply_opt, resp) in reply_subjects.iter().zip(resps) {
                                 if let Some(reply) = reply_opt {
                                     let publish_result = tokio::time::timeout(
-                                        std::time::Duration::from_secs(5),
+                                        std::time::Duration::from_secs(60),
                                         client.publish(reply.clone(), resp.payload),
                                     )
                                     .await;
 
-                                    if let Err(e) = publish_result {
-                                        tracing::error!(
-                                            subject = %reply,
-                                            error = %e,
-                                            "Failed to publish NATS reply"
-                                        );
+                                    match publish_result {
+                                        Err(_) => {
+                                            tracing::error!(
+                                                subject = %reply,
+                                                "Failed to publish NATS reply (timeout)"
+                                            );
+                                        }
+                                        Ok(Err(e)) => {
+                                            tracing::error!(
+                                                subject = %reply,
+                                                error = %e,
+                                                "Failed to publish NATS reply"
+                                            );
+                                        }
+                                        Ok(Ok(_)) => {}
                                     }
                                 }
                             }
@@ -674,11 +696,11 @@ fn create_nats_canonical_message(
             }
             canonical_message.metadata = metadata;
         }
-        if let Some(reply) = &message.reply {
-            canonical_message
-                .metadata
-                .insert("reply_to".to_string(), reply.to_string());
-        }
+    }
+    if let Some(reply) = &message.reply {
+        canonical_message
+            .metadata
+            .insert("reply_to".to_string(), reply.to_string());
     }
     canonical_message
 }

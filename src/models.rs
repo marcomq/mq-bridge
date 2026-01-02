@@ -358,7 +358,7 @@ pub struct KafkaEndpoint {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct KafkaConfig {
-    // pub url: String is called "pub brokers: String" here.
+    // pub url: String // use "pub brokers: String" here.
     /// Comma-separated list of Kafka broker URLs. Can also be specified using the alias 'url'.
     #[serde(alias = "url")]
     pub brokers: String,
@@ -408,6 +408,8 @@ pub struct NatsConfig {
     #[serde(default)]
     pub no_jetstream: bool,
     pub default_stream: Option<String>,
+    pub stream_max_messages: Option<i64>,
+    pub stream_max_bytes: Option<i64>,
     pub prefetch_count: Option<usize>,
     #[serde(default)]
     pub request_reply: bool,

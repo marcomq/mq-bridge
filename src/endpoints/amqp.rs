@@ -87,6 +87,10 @@ impl MessagePublisher for AmqpPublisher {
         if !message.metadata.is_empty() {
             let mut table = FieldTable::default();
             for (key, value) in message.metadata {
+                // Skip reply_to and correlation_id since they're already set as native properties
+                if key == "reply_to" || key == "correlation_id" {
+                    continue;
+                }
                 table.insert(
                     ShortString::from(key),
                     lapin::types::AMQPValue::LongString(value.into()),
@@ -147,6 +151,10 @@ impl MessagePublisher for AmqpPublisher {
             if !message.metadata.is_empty() {
                 let mut table = FieldTable::default();
                 for (key, value) in &message.metadata {
+                    // Skip reply_to and correlation_id since they're already set as native properties
+                    if key == "reply_to" || key == "correlation_id" {
+                        continue;
+                    }
                     table.insert(
                         ShortString::from(key.clone()),
                         lapin::types::AMQPValue::LongString(value.clone().into()),

@@ -269,6 +269,14 @@ impl KafkaConsumer {
 
         // Create a producer for sending replies
         let mut producer_config = create_common_config(config);
+        // Apply similar defaults as KafkaPublisher for reliability
+        producer_config
+            .set("linger.ms", "100")
+            .set("batch.num.messages", "10000")
+            .set("compression.type", "lz4")
+            .set("acks", "all")
+            .set("retries", "3")
+            .set("request.timeout.ms", "30000");
         // Apply custom producer options, allowing overrides of defaults
         if let Some(options) = &config.producer_options {
             for (key, value) in options {
@@ -449,11 +457,10 @@ fn process_message(
     let mut message_id: Option<u128> = None;
     if let Some(key) = message.key() {
         if key.len() == 16 {
-            // Try to parse the key as a u128 (big-endian bytes)
-            message_id =
-                Some(u128::from_be_bytes(key.try_into().map_err(|_| {
-                    anyhow!("Failed to convert key to u128 bytes")
-                })?));
+            // Parse the key as a u128 (big-endian bytes)
+            // unwrap is safe: length check guarantees exactly 16 bytes
+            let bytes: [u8; 16] = key.try_into().unwrap();
+            message_id = Some(u128::from_be_bytes(bytes));
         }
     }
 
@@ -599,6 +606,13 @@ async fn receive_batch_internal(
         Box::pin(async move {
             // Handle replies
             if let (Some(resps), Some(prod)) = (responses, producer) {
+                if resps.len() != reply_infos.len() {
+                    tracing::warn!(
+                        expected = reply_infos.len(),
+                        actual = resps.len(),
+                        "Response count mismatch with received messages"
+                    );
+                }
                 for ((reply_topic, correlation_id), resp) in reply_infos.iter().zip(resps) {
                     if let Some(rt) = reply_topic {
                         let mut record: FutureRecord<'_, (), _> =

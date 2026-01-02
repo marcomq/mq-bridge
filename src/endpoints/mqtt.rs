@@ -255,7 +255,7 @@ impl MessageConsumer for MqttListener {
                     }
                     // Use a timeout to prevent hanging if the client buffer is full or eventloop is stuck
                     match tokio::time::timeout(
-                        Duration::from_secs(5),
+                        Duration::from_secs(60),
                         client.publish(&rt, QoS::AtLeastOnce, msg),
                     )
                     .await
@@ -310,13 +310,24 @@ impl MessageConsumer for MqttListener {
                 if let Some(resps) = responses {
                     for ((reply_topic, correlation_data), resp) in reply_infos.iter().zip(resps) {
                         if let Some(rt) = reply_topic {
-                            let mut msg = resp.clone();
+                            let mut msg = resp;
                             if let Some(cd) = correlation_data {
                                 msg.metadata
                                     .insert("correlation_id".to_string(), cd.clone());
                             }
-                            if let Err(e) = client.publish(rt, QoS::AtLeastOnce, msg).await {
-                                tracing::error!(topic = %rt, error = %e, "Failed to publish MQTT reply");
+                            match tokio::time::timeout(
+                                Duration::from_secs(60),
+                                client.publish(rt, QoS::AtLeastOnce, msg),
+                            )
+                            .await
+                            {
+                                Ok(Err(e)) => {
+                                    tracing::error!(topic = %rt, error = %e, "Failed to publish MQTT reply")
+                                }
+                                Ok(Ok(_)) => {}
+                                Err(_) => {
+                                    tracing::error!(topic = %rt, "Timed out publishing MQTT reply")
+                                }
                             }
                         }
                     }
@@ -468,7 +479,7 @@ fn publish_to_canonical_message_v5(p: PublishV5) -> CanonicalMessage {
         if let Some(cd) = &props.correlation_data {
             metadata.insert(
                 "correlation_id".to_string(),
-                String::from_utf8_lossy(cd).to_string(),
+                String::from_utf8_lossy(cd).into_owned(),
             );
         }
 
