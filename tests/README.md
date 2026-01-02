@@ -9,3 +9,7 @@ CONFIG_FILE=tests/integration/config/integration.yml cargo run
 ###
 Internal memory performance test:
 `cargo test --test memory_test --features integration-test  --release -- --nocapture`
+
+###
+Run with full tracing:
+`RUST_LOG=info,mq_bridge=trace cargo test...`

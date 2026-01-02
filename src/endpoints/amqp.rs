@@ -78,6 +78,12 @@ impl MessagePublisher for AmqpPublisher {
             // Delivery mode 2 makes the message persistent
             BasicProperties::default().with_delivery_mode(2)
         };
+        if let Some(reply_to) = message.metadata.get("reply_to") {
+            properties = properties.with_reply_to(reply_to.clone().into());
+        }
+        if let Some(correlation_id) = message.metadata.get("correlation_id") {
+            properties = properties.with_correlation_id(correlation_id.clone().into());
+        }
         if !message.metadata.is_empty() {
             let mut table = FieldTable::default();
             for (key, value) in message.metadata {
@@ -131,6 +137,12 @@ impl MessagePublisher for AmqpPublisher {
             } else {
                 BasicProperties::default().with_delivery_mode(2)
             };
+            if let Some(reply_to) = message.metadata.get("reply_to") {
+                properties = properties.with_reply_to(reply_to.clone().into());
+            }
+            if let Some(correlation_id) = message.metadata.get("correlation_id") {
+                properties = properties.with_correlation_id(correlation_id.clone().into());
+            }
 
             if !message.metadata.is_empty() {
                 let mut table = FieldTable::default();
@@ -477,15 +489,14 @@ fn delivery_to_canonical_message(delivery: &lapin::message::Delivery) -> Canonic
             .insert("amqp_message_id".to_string(), amqp_id.to_string());
     }
     if let Some(correlation_id) = delivery.properties.correlation_id().as_ref() {
-        canonical_message.metadata.insert(
-            "amqp_correlation_id".to_string(),
-            correlation_id.to_string(),
-        );
+        canonical_message
+            .metadata
+            .insert("correlation_id".to_string(), correlation_id.to_string());
     }
     if let Some(reply_to) = delivery.properties.reply_to().as_ref() {
         canonical_message
             .metadata
-            .insert("amqp_reply_to".to_string(), reply_to.to_string());
+            .insert("reply_to".to_string(), reply_to.to_string());
     }
 
     if let Some(headers) = delivery.properties.headers().as_ref() {
@@ -529,8 +540,8 @@ impl MessageConsumer for AmqpConsumer {
 
         let msg = delivery_to_canonical_message(&first_delivery);
         reply_infos.push((
-            msg.metadata.get("amqp_reply_to").cloned(),
-            msg.metadata.get("amqp_correlation_id").cloned(),
+            msg.metadata.get("reply_to").cloned(),
+            msg.metadata.get("correlation_id").cloned(),
         ));
         messages.push(msg);
         ackers.push(first_delivery.acker);
@@ -541,8 +552,8 @@ impl MessageConsumer for AmqpConsumer {
                 Some(Ok(Some(delivery))) => {
                     let msg = delivery_to_canonical_message(&delivery);
                     reply_infos.push((
-                        msg.metadata.get("amqp_reply_to").cloned(),
-                        msg.metadata.get("amqp_correlation_id").cloned(),
+                        msg.metadata.get("reply_to").cloned(),
+                        msg.metadata.get("correlation_id").cloned(),
                     ));
                     messages.push(msg);
                     ackers.push(delivery.acker);

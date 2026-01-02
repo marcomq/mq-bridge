@@ -306,11 +306,8 @@ impl MessageConsumer for KafkaConsumer {
         process_message(message, &mut messages, &mut tpl)?;
         let canonical_message = messages.pop().unwrap();
 
-        let reply_topic = canonical_message.metadata.get("kafka_reply_topic").cloned();
-        let correlation_id = canonical_message
-            .metadata
-            .get("kafka_correlation_id")
-            .cloned();
+        let reply_topic = canonical_message.metadata.get("reply_to").cloned();
+        let correlation_id = canonical_message.metadata.get("correlation_id").cloned();
 
         // The commit function for Kafka needs to commit the offset of the processed message.
         // We can't move `self.consumer` into the closure, but we can commit by position.
@@ -326,7 +323,7 @@ impl MessageConsumer for KafkaConsumer {
                     let mut headers = OwnedHeaders::new();
                     if let Some(cid) = correlation_id {
                         headers = headers.insert(rdkafka::message::Header {
-                            key: "kafka_correlation_id",
+                            key: "correlation_id",
                             value: Some(cid.as_bytes()),
                         });
                     }
@@ -580,8 +577,8 @@ async fn receive_batch_internal(
                         // process_message pushes to messages, so we can peek the last one
                         if let Some(last_msg) = messages.last() {
                             reply_infos.push((
-                                last_msg.metadata.get("kafka_reply_topic").cloned(),
-                                last_msg.metadata.get("kafka_correlation_id").cloned(),
+                                last_msg.metadata.get("reply_to").cloned(),
+                                last_msg.metadata.get("correlation_id").cloned(),
                             ));
                         }
                     }
@@ -609,7 +606,7 @@ async fn receive_batch_internal(
                         let mut headers = OwnedHeaders::new();
                         if let Some(cid) = correlation_id {
                             headers = headers.insert(rdkafka::message::Header {
-                                key: "kafka_correlation_id",
+                                key: "correlation_id",
                                 value: Some(cid.as_bytes()),
                             });
                         }

@@ -81,7 +81,7 @@ fn message_to_document(message: &CanonicalMessage) -> anyhow::Result<Document> {
     Ok(doc! {
         "_id": id_uuid,
         "payload": Bson::Binary(mongodb::bson::Binary {
-            subtype: mongodb::bson::spec::BinarySubtype::Uuid,
+            subtype: mongodb::bson::spec::BinarySubtype::Generic,
             bytes: message.payload.to_vec() }),
         "metadata": metadata,
         "locked_until": null,
@@ -443,8 +443,7 @@ impl MongoDbConsumer {
                     Err(_) => document_to_canonical(doc)?,
                 };
 
-                let reply_collection_name =
-                    msg.metadata.get("mongodb_reply_to_collection").cloned();
+                let reply_collection_name = msg.metadata.get("reply_to").cloned();
                 let db = self.db.clone();
                 let collection_clone = self.collection.clone();
 
@@ -525,7 +524,7 @@ impl MongoDbConsumer {
                 Ok(raw_msg) => raw_msg.try_into().unwrap_or(document_to_canonical(doc)?),
                 Err(_) => document_to_canonical(doc)?,
             };
-            reply_infos.push(msg.metadata.get("mongodb_reply_to_collection").cloned());
+            reply_infos.push(msg.metadata.get("reply_to").cloned());
             messages.push(msg);
 
             ids.push(id_val);

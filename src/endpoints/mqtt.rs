@@ -19,8 +19,7 @@ use std::fmt::Debug;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
-use tracing::{error, info, trace, warn};
+use tracing::{debug, error, info, trace, warn};
 use uuid::Uuid;
 
 #[derive(Clone)]
@@ -55,6 +54,12 @@ impl Client {
             Client::V5(client) => {
                 let mut props = PublishProperties::default();
                 if !message.metadata.is_empty() {
+                    if let Some(rt) = message.metadata.get("reply_to") {
+                        props.response_topic = Some(rt.clone());
+                    }
+                    if let Some(cd) = message.metadata.get("correlation_id") {
+                        props.correlation_data = Some(cd.as_bytes().to_vec().into());
+                    }
                     props.user_properties = message.metadata.into_iter().collect();
                 }
                 client
@@ -90,7 +95,7 @@ impl Client {
 pub struct MqttPublisher {
     client: Client,
     topic: String,
-    eventloop_handle: Arc<JoinHandle<()>>,
+    stop_tx: mpsc::Sender<()>,
     qos: QoS,
 }
 
@@ -99,14 +104,15 @@ impl MqttPublisher {
         let client_id = sanitize_for_client_id(&format!("{}-{}", APP_NAME, bridge_id));
         let (client, eventloop) = create_client_and_eventloop(config, &client_id).await?;
         let qos = parse_qos(config.qos.unwrap_or(1));
+        let (stop_tx, stop_rx) = mpsc::channel(1);
 
         // The publisher needs a background event loop to handle keep-alives and other control packets.
-        let eventloop_handle = tokio::spawn(run_eventloop(eventloop, None));
+        tokio::spawn(run_eventloop(eventloop, None, stop_rx));
 
         Ok(Self {
             client,
             topic: topic.to_string(),
-            eventloop_handle: Arc::new(eventloop_handle),
+            stop_tx,
             qos,
         })
     }
@@ -114,23 +120,13 @@ impl MqttPublisher {
         Self {
             client: self.client.clone(),
             topic: topic.to_string(),
-            eventloop_handle: self.eventloop_handle.clone(),
+            stop_tx: self.stop_tx.clone(),
             qos: self.qos,
         }
     }
 
     pub async fn disconnect(&self) -> anyhow::Result<()> {
         self.client.disconnect().await
-    }
-}
-
-impl Drop for MqttPublisher {
-    fn drop(&mut self) {
-        // When the publisher is dropped, abort its background eventloop task.
-        // Only abort when this is the last reference to the eventloop handle.
-        if Arc::strong_count(&self.eventloop_handle) == 1 {
-            self.eventloop_handle.abort();
-        }
     }
 }
 
@@ -206,7 +202,7 @@ enum EventLoop {
 
 struct MqttListener {
     client: Client,
-    eventloop_handle: JoinHandle<()>,
+    _stop_tx: mpsc::Sender<()>,
     message_rx: mpsc::Receiver<CanonicalMessage>,
 }
 
@@ -221,23 +217,18 @@ impl MqttListener {
         let qos = parse_qos(config.qos.unwrap_or(1));
         let queue_capacity = config.queue_capacity.unwrap_or(100);
         let (tx, rx) = mpsc::channel(queue_capacity);
+        let (stop_tx, stop_rx) = mpsc::channel(1);
 
-        let eventloop_handle = tokio::spawn(run_eventloop(eventloop, Some(tx)));
+        tokio::spawn(run_eventloop(eventloop, Some(tx), stop_rx));
 
         client.subscribe(topic, qos).await?;
         info!("MQTT subscribed to {}", topic);
 
         Ok(Self {
             client,
-            eventloop_handle,
+            _stop_tx: stop_tx,
             message_rx: rx,
         })
-    }
-}
-
-impl Drop for MqttListener {
-    fn drop(&mut self) {
-        self.eventloop_handle.abort();
     }
 }
 
@@ -251,19 +242,32 @@ impl MessageConsumer for MqttListener {
             .ok_or(ConsumerError::EndOfStream)?;
 
         let client = self.client.clone();
-        let reply_topic = message.metadata.get("mqtt_response_topic").cloned();
-        let correlation_data = message.metadata.get("mqtt_correlation_data").cloned();
+        let reply_topic = message.metadata.get("reply_to").cloned();
+        let correlation_data = message.metadata.get("correlation_id").cloned();
 
         let commit = Box::new(move |response: Option<CanonicalMessage>| {
             Box::pin(async move {
                 if let (Some(resp), Some(rt)) = (response, reply_topic) {
+                    trace!(topic = %rt, "Committing MQTT message, sending reply");
                     let mut msg = resp;
                     if let Some(cd) = correlation_data {
-                        msg.metadata.insert("mqtt_correlation_data".to_string(), cd);
+                        msg.metadata.insert("correlation_id".to_string(), cd);
                     }
-                    if let Err(e) = client.publish(&rt, QoS::AtLeastOnce, msg).await {
-                        tracing::error!(topic = %rt, error = %e, "Failed to publish MQTT reply");
+                    // Use a timeout to prevent hanging if the client buffer is full or eventloop is stuck
+                    match tokio::time::timeout(
+                        Duration::from_secs(5),
+                        client.publish(&rt, QoS::AtLeastOnce, msg),
+                    )
+                    .await
+                    {
+                        Ok(Err(e)) => {
+                            error!(topic = %rt, error = %e, "Failed to publish MQTT reply")
+                        }
+                        Ok(Ok(_)) => trace!(topic = %rt, "MQTT reply published to channel"),
+                        Err(_) => error!(topic = %rt, "Timed out publishing MQTT reply"),
                     }
+                } else {
+                    trace!("MQTT commit called with no response or no reply_topic");
                 }
             }) as BoxFuture<'static, ()>
         });
@@ -278,8 +282,8 @@ impl MessageConsumer for MqttListener {
         match self.message_rx.recv().await {
             Some(msg) => {
                 reply_infos.push((
-                    msg.metadata.get("mqtt_response_topic").cloned(),
-                    msg.metadata.get("mqtt_correlation_data").cloned(),
+                    msg.metadata.get("reply_to").cloned(),
+                    msg.metadata.get("correlation_id").cloned(),
                 ));
                 messages.push(msg);
             }
@@ -291,8 +295,8 @@ impl MessageConsumer for MqttListener {
             match self.message_rx.try_recv() {
                 Ok(msg) => {
                     reply_infos.push((
-                        msg.metadata.get("mqtt_response_topic").cloned(),
-                        msg.metadata.get("mqtt_correlation_data").cloned(),
+                        msg.metadata.get("reply_to").cloned(),
+                        msg.metadata.get("correlation_id").cloned(),
                     ));
                     messages.push(msg);
                 }
@@ -309,7 +313,7 @@ impl MessageConsumer for MqttListener {
                             let mut msg = resp.clone();
                             if let Some(cd) = correlation_data {
                                 msg.metadata
-                                    .insert("mqtt_correlation_data".to_string(), cd.clone());
+                                    .insert("correlation_id".to_string(), cd.clone());
                             }
                             if let Err(e) = client.publish(rt, QoS::AtLeastOnce, msg).await {
                                 tracing::error!(topic = %rt, error = %e, "Failed to publish MQTT reply");
@@ -386,22 +390,27 @@ async fn create_client_and_eventloop(
 async fn run_eventloop(
     mut eventloop: EventLoop,
     message_tx: Option<mpsc::Sender<CanonicalMessage>>,
+    mut stop_rx: mpsc::Receiver<()>,
 ) {
-    loop {
-        let event_result = match &mut eventloop {
-            EventLoop::V3(el) => el
-                .poll()
-                .await
-                .map(EventWrapper::V3)
-                .map_err(anyhow::Error::new),
-            EventLoop::V5(el) => el
-                .poll()
-                .await
-                .map(|e| EventWrapper::V5(Box::new(e)))
-                .map_err(anyhow::Error::new),
-        };
+    let mut stopping = false;
+    // A future that is always pending until we decide to start the timeout
+    let mut flush_timeout: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
+        Box::pin(futures::future::pending());
 
-        match event_result {
+    loop {
+        tokio::select! {
+            _ = stop_rx.recv(), if !stopping => {
+                stopping = true;
+                // Run for a bit longer to flush outgoing messages (like ACKs or replies)
+                flush_timeout = Box::pin(tokio::time::sleep(Duration::from_millis(100)));
+                debug!("MQTT client dropped, flushing event loop for 100ms");
+            }
+            _ = &mut flush_timeout, if stopping => {
+                debug!("MQTT event loop flush complete, exiting");
+                break;
+            }
+            event_result = poll_event(&mut eventloop) => {
+                match event_result {
             Ok(event) => match event {
                 EventWrapper::V3(rumqttc::Event::Incoming(rumqttc::Incoming::Publish(p))) => {
                     if let Some(tx) = &message_tx {
@@ -424,11 +433,24 @@ async fn run_eventloop(
                 }
                 _ => {}
             },
-            Err(e) => {
-                error!("MQTT EventLoop error: {}. Reconnecting...", e);
-                tokio::time::sleep(Duration::from_secs(1)).await;
+                    Err(e) => {
+                        error!("MQTT EventLoop error: {}. Reconnecting...", e);
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    }
+                }
             }
         }
+    }
+}
+
+async fn poll_event(eventloop: &mut EventLoop) -> anyhow::Result<EventWrapper> {
+    match eventloop {
+        EventLoop::V3(el) => el.poll().await.map(EventWrapper::V3).map_err(|e| e.into()),
+        EventLoop::V5(el) => el
+            .poll()
+            .await
+            .map(|e| EventWrapper::V5(Box::new(e)))
+            .map_err(|e| e.into()),
     }
 }
 
@@ -436,20 +458,21 @@ fn publish_to_canonical_message_v5(p: PublishV5) -> CanonicalMessage {
     let mut canonical_message = CanonicalMessage::new(p.payload.to_vec(), None);
 
     if let Some(props) = &p.properties {
-        if !props.user_properties.is_empty() {
-            let mut metadata = std::collections::HashMap::new();
-            for (key, value) in &props.user_properties {
-                metadata.insert(key.clone(), value.clone());
-            }
-            if let Some(rt) = &props.response_topic {
-                metadata.insert("mqtt_response_topic".to_string(), rt.clone());
-            }
-            if let Some(cd) = &props.correlation_data {
-                metadata.insert(
-                    "mqtt_correlation_data".to_string(),
-                    String::from_utf8_lossy(cd).to_string(),
-                );
-            }
+        let mut metadata = std::collections::HashMap::new();
+        for (key, value) in &props.user_properties {
+            metadata.insert(key.clone(), value.clone());
+        }
+        if let Some(rt) = &props.response_topic {
+            metadata.insert("reply_to".to_string(), rt.clone());
+        }
+        if let Some(cd) = &props.correlation_data {
+            metadata.insert(
+                "correlation_id".to_string(),
+                String::from_utf8_lossy(cd).to_string(),
+            );
+        }
+
+        if !metadata.is_empty() {
             canonical_message.metadata = metadata;
         }
     }

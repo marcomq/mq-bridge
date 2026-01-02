@@ -674,6 +674,11 @@ fn create_nats_canonical_message(
             }
             canonical_message.metadata = metadata;
         }
+        if let Some(reply) = &message.reply {
+            canonical_message
+                .metadata
+                .insert("reply_to".to_string(), reply.to_string());
+        }
     }
     canonical_message
 }
