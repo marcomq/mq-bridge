@@ -1,6 +1,6 @@
 [package]
 name = "mq-bridge"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 description = "An asynchronous message bridging library connecting Kafka, MQTT, AMQP, NATS, MongoDB, HTTP, and more."
 repository = "https://github.com/marcomq/mq-bridge"
