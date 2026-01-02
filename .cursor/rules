@@ -104,7 +104,7 @@ kafka_to_nats:
 
 ### Common Patterns
 
-1. **Creating endpoints**: Use factory functions in `endpoints/mod.rs` (`create_consumer_from_route`, `create_publisher_from_route`)
+1. **Creating endpoints**: Use factory functions in `endpoints/mod.rs` (`create_consumer`, `create_publisher`)
 2. **Adding middleware**: Middlewares are applied in `middleware/mod.rs` via `apply_middlewares_to_consumer` and `apply_middlewares_to_publisher`
 3. **Custom endpoints**: Implement `CustomEndpointFactory` trait
 4. **Custom middleware**: Implement `CustomMiddlewareFactory` trait

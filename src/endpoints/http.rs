@@ -2,7 +2,7 @@
 //  © Copyright 2025, by Marco Mengelkoch
 //  Licensed under MIT License, see License file for more details
 //  git clone https://github.com/marcomq/mq-bridge
-use crate::endpoints::create_publisher_from_route;
+use crate::endpoints::create_publisher;
 use crate::models::HttpConfig;
 use crate::traits::{
     BoxFuture, CommitFunc, ConsumerError, MessageConsumer, MessagePublisher, PublisherError,
@@ -48,7 +48,7 @@ impl HttpConsumer {
         let (shutdown_tx, mut shutdown_rx) = watch::channel(());
 
         let response_sink = if let Some(endpoint) = &config.response_out {
-            Some(create_publisher_from_route("http_response_sink", endpoint).await?)
+            Some(create_publisher("http_response_sink", endpoint).await?)
         } else {
             None
         };
@@ -259,7 +259,7 @@ impl HttpPublisher {
         }
 
         let response_sink = if let Some(endpoint) = &config.response_out {
-            Some(Box::pin(create_publisher_from_route("http_response_sink", endpoint)).await?)
+            Some(Box::pin(create_publisher("http_response_sink", endpoint)).await?)
         } else {
             None
         };
@@ -633,7 +633,7 @@ http_route:
         // Create ResponsePublisher via factory to simulate route config
         let response_endpoint =
             crate::models::Endpoint::new(EndpointType::Response(crate::models::ResponseConfig {}));
-        let publisher = create_publisher_from_route("test_response", &response_endpoint)
+        let publisher = create_publisher("test_response", &response_endpoint)
             .await
             .unwrap();
 

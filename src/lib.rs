@@ -10,6 +10,7 @@ pub mod event_handler;
 pub mod middleware;
 pub mod models;
 pub mod outcomes;
+pub mod publisher;
 pub mod route;
 pub mod traits;
 pub mod type_handler;
@@ -18,6 +19,7 @@ pub use canonical_message::{CanonicalMessage, MessageContext};
 pub use errors::HandlerError;
 pub use models::Route;
 pub use outcomes::{Handled, Received, ReceivedBatch, Sent, SentBatch};
+pub use publisher::Publisher;
 
 /// The application name, derived from the package name in Cargo.toml.
 pub const APP_NAME: &str = env!("CARGO_PKG_NAME");

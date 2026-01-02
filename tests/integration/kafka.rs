@@ -52,7 +52,7 @@ pub async fn test_kafka_request_reply() {
         let reply_topic = "test_req_rep_reply_topic";
 
         let config = mq_bridge::models::KafkaConfig {
-            url: "localhost:9092".to_string(),
+            brokers: "localhost:9092".to_string(),
             group_id: Some("req_rep_group".to_string()),
             producer_options: Some(vec![("acks".to_string(), "1".to_string())]),
             ..Default::default()
@@ -147,7 +147,7 @@ pub async fn test_kafka_performance_direct() {
     run_test_with_docker("tests/integration/docker-compose/kafka.yml", || async {
         let topic = "perf_test_kafka_direct";
         let config = mq_bridge::models::KafkaConfig {
-            url: "localhost:9092".to_string(),
+            brokers: "localhost:9092".to_string(),
             group_id: Some("perf_test_group_kafka".to_string()),
             producer_options: Some(vec![
                 ("queue.buffering.max.ms".to_string(), "50".to_string()), // Linger for 50ms to batch messages

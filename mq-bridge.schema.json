@@ -189,6 +189,17 @@
         {
           "type": "object",
           "properties": {
+            "response": {
+              "$ref": "#/$defs/ResponseConfig"
+            }
+          },
+          "required": [
+            "response"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
             "null": {
               "type": "null"
             }
@@ -384,7 +395,8 @@
             "null"
           ]
         },
-        "url": {
+        "brokers": {
+          "description": "Comma-separated list of Kafka broker URLs (e.g., \"localhost:9092,localhost:9093\").",
           "type": "string"
         },
         "username": {
@@ -464,7 +476,7 @@
       },
       "additionalProperties": false,
       "required": [
-        "url"
+        "brokers"
       ]
     },
     "TlsConfig": {
@@ -525,6 +537,7 @@
           ]
         },
         "url": {
+          "description": "Comma-separated list of NATS server URLs (e.g., \"nats://localhost:4222,nats://localhost:4223\").",
           "type": "string"
         },
         "username": {
@@ -579,6 +592,18 @@
           ],
           "format": "uint",
           "minimum": 0
+        },
+        "request_reply": {
+          "type": "boolean",
+          "default": false
+        },
+        "request_timeout_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
         }
       },
       "additionalProperties": false,
@@ -617,6 +642,7 @@
           ]
         },
         "url": {
+          "description": "AMQP connection URI. The `lapin` client connects to a single host specified in the URI.\nFor high availability, provide the address of a load balancer or use DNS resolution\nthat points to multiple brokers. Example: \"amqp://localhost:5672/vhost\".",
           "type": "string"
         },
         "username": {
@@ -683,6 +709,7 @@
           ]
         },
         "url": {
+          "description": "MongoDB connection string URI. Can contain a comma-separated list of hosts for a replica set.",
           "type": "string"
         },
         "username": {
@@ -745,6 +772,7 @@
           ]
         },
         "url": {
+          "description": "MQTT broker URL (e.g., \"tcp://localhost:1883\"). Does not support multiple hosts.",
           "type": "string"
         },
         "username": {
@@ -777,6 +805,15 @@
           ],
           "format": "uint",
           "minimum": 0
+        },
+        "max_inflight": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "minimum": 0,
+          "maximum": 65535
         },
         "qos": {
           "type": [
@@ -821,6 +858,7 @@
       "type": "object",
       "properties": {
         "url": {
+          "description": "For consumers, the listen address (e.g., \"0.0.0.0:8080\"). For publishers, the target URL.",
           "type": [
             "string",
             "null"
@@ -878,6 +916,10 @@
         "metadata_key",
         "cases"
       ]
+    },
+    "ResponseConfig": {
+      "type": "object",
+      "additionalProperties": false
     }
   }
 }

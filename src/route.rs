@@ -3,7 +3,7 @@
 //  Licensed under MIT License, see License file for more details
 //  git clone https://github.com/marcomq/mq-bridge
 
-use crate::endpoints::{create_consumer_from_route, create_publisher_from_route};
+use crate::endpoints::{create_consumer, create_publisher};
 pub use crate::models::Route;
 use crate::models::{self, Endpoint};
 use crate::traits::{BatchCommitFunc, ConsumerError, Handler, HandlerError, SentBatch};
@@ -133,8 +133,8 @@ impl Route {
         shutdown_rx: async_channel::Receiver<()>,
         ready_tx: Option<Sender<()>>,
     ) -> anyhow::Result<bool> {
-        let publisher = create_publisher_from_route(name, &self.output).await?;
-        let mut consumer = create_consumer_from_route(name, &self.input).await?;
+        let publisher = create_publisher(name, &self.output).await?;
+        let mut consumer = create_consumer(name, &self.input).await?;
         if let Some(tx) = ready_tx {
             let _ = tx.send(()).await;
         }
@@ -198,8 +198,8 @@ impl Route {
         shutdown_rx: async_channel::Receiver<()>,
         ready_tx: Option<Sender<()>>,
     ) -> anyhow::Result<bool> {
-        let publisher = create_publisher_from_route(name, &self.output).await?;
-        let mut consumer = create_consumer_from_route(name, &self.input).await?;
+        let publisher = create_publisher(name, &self.output).await?;
+        let mut consumer = create_consumer(name, &self.input).await?;
         if let Some(tx) = ready_tx {
             let _ = tx.send(()).await;
         }

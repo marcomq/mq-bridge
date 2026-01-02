@@ -18,6 +18,10 @@ use crate::{
 /// The key is the route name (e.g., "kafka_to_nats").
 pub type Config = HashMap<String, Route>;
 
+/// A configuration map for named publishers (endpoints).
+/// The key is the publisher name.
+pub type PublisherConfig = HashMap<String, Endpoint>;
+
 /// Defines a single message processing route from an input to an output.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -354,7 +358,9 @@ pub struct KafkaEndpoint {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct KafkaConfig {
-    pub url: String, // can be comma separated list of brokers
+    // pub url: String is called "pub brokers: String" here.
+    /// Comma-separated list of Kafka broker URLs (e.g., "localhost:9092,localhost:9093").
+    pub brokers: String,
     pub username: Option<String>,
     pub password: Option<String>, // Consider using a secret management type
     #[serde(default)]
@@ -387,6 +393,7 @@ pub struct NatsEndpoint {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct NatsConfig {
+    /// Comma-separated list of NATS server URLs (e.g., "nats://localhost:4222,nats://localhost:4223").
     pub url: String,
     pub username: Option<String>,
     pub password: Option<String>,
@@ -440,6 +447,9 @@ pub struct AmqpEndpoint {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct AmqpConfig {
+    /// AMQP connection URI. The `lapin` client connects to a single host specified in the URI.
+    /// For high availability, provide the address of a load balancer or use DNS resolution
+    /// that points to multiple brokers. Example: "amqp://localhost:5672/vhost".
     pub url: String,
     pub username: Option<String>,
     pub password: Option<String>,
@@ -471,6 +481,7 @@ pub struct MongoDbEndpoint {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct MongoDbConfig {
+    /// MongoDB connection string URI. Can contain a comma-separated list of hosts for a replica set.
     pub url: String,
     pub username: Option<String>,
     pub password: Option<String>,
@@ -498,6 +509,7 @@ pub struct MqttEndpoint {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct MqttConfig {
+    /// MQTT broker URL (e.g., "tcp://localhost:1883"). Does not support multiple hosts.
     pub url: String,
     pub username: Option<String>,
     pub password: Option<String>,
@@ -538,6 +550,7 @@ pub struct HttpEndpoint {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct HttpConfig {
+    /// For consumers, the listen address (e.g., "0.0.0.0:8080"). For publishers, the target URL.
     pub url: Option<String>,
     #[serde(default)]
     pub tls: TlsConfig,
@@ -612,7 +625,7 @@ kafka_to_nats:
               url: "nats://localhost:4222"
     kafka:
       topic: "input-topic"
-      url: "localhost:9092"
+      brokers: "localhost:9092"
       group_id: "my-consumer-group"
       tls:
         required: true
@@ -677,7 +690,7 @@ kafka_to_nats:
 
         if let EndpointType::Kafka(kafka) = &input.endpoint_type {
             assert_eq!(kafka.topic, Some("input-topic".to_string()));
-            assert_eq!(kafka.config.url, "localhost:9092");
+            assert_eq!(kafka.config.brokers, "localhost:9092");
             assert_eq!(kafka.config.group_id, Some("my-consumer-group".to_string()));
             let tls = &kafka.config.tls;
             assert!(tls.required);
@@ -721,7 +734,10 @@ kafka_to_nats:
         unsafe {
             std::env::set_var("MQB__KAFKA_TO_NATS__CONCURRENCY", "10");
             std::env::set_var("MQB__KAFKA_TO_NATS__INPUT__KAFKA__TOPIC", "input-topic");
-            std::env::set_var("MQB__KAFKA_TO_NATS__INPUT__KAFKA__URL", "localhost:9092");
+            std::env::set_var(
+                "MQB__KAFKA_TO_NATS__INPUT__KAFKA__BROKERS",
+                "localhost:9092",
+            );
             std::env::set_var(
                 "MQB__KAFKA_TO_NATS__INPUT__KAFKA__GROUP_ID",
                 "my-consumer-group",

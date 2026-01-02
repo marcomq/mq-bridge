@@ -528,7 +528,7 @@ fn process_message(
 
 fn create_common_config(config: &KafkaConfig) -> ClientConfig {
     let mut client_config = ClientConfig::new();
-    client_config.set("bootstrap.servers", &config.url);
+    client_config.set("bootstrap.servers", &config.brokers);
 
     if config.tls.required {
         client_config.set("security.protocol", "ssl");
