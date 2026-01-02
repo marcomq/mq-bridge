@@ -23,7 +23,7 @@ fn armature_messaging_test() {
     // 1. Clone Repo
     println!("Cloning {} (branch: {})...", repo_url, branch);
     let status = Command::new("git")
-        .args(&["clone", "--branch", branch, "--depth", "1", repo_url, "."])
+        .args(["clone", "--branch", branch, "--depth", "1", repo_url, "."])
         .current_dir(&test_dir)
         .status()
         .expect("Failed to execute git clone");
@@ -48,7 +48,7 @@ fn armature_messaging_test() {
         mq_bridge_path
     );
     let status = Command::new(&cargo_bin)
-        .args(&[
+        .args([
             "add",
             "mq-bridge",
             "--path",
