@@ -483,8 +483,13 @@ pub struct MongoDbEndpoint {
 #[serde(deny_unknown_fields)]
 pub struct MongoDbConfig {
     /// MongoDB connection string URI. Can contain a comma-separated list of hosts for a replica set.
+    /// Credentials provided via the separate `username` and `password` fields take precedence over any credentials embedded in the URL.
     pub url: String,
+    /// Optional username. Takes precedence over any credentials embedded in the `url`.
+    /// Use embedded URL credentials for simple one-off connections but prefer explicit username/password fields (or environment-sourced secrets) for clarity and secret management in production.
     pub username: Option<String>,
+    /// Optional password. Takes precedence over any credentials embedded in the `url`.
+    /// Use embedded URL credentials for simple one-off connections but prefer explicit username/password fields (or environment-sourced secrets) for clarity and secret management in production.
     pub password: Option<String>,
     #[serde(default)]
     pub tls: TlsConfig,
