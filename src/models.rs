@@ -359,7 +359,8 @@ pub struct KafkaEndpoint {
 #[serde(deny_unknown_fields)]
 pub struct KafkaConfig {
     // pub url: String is called "pub brokers: String" here.
-    /// Comma-separated list of Kafka broker URLs (e.g., "localhost:9092,localhost:9093").
+    /// Comma-separated list of Kafka broker URLs. Can also be specified using the alias 'url'.
+    #[serde(alias = "url")]
     pub brokers: String,
     pub username: Option<String>,
     pub password: Option<String>, // Consider using a secret management type
