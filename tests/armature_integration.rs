@@ -9,7 +9,7 @@ fn armature_messaging_test() {
     // Define paths: Use target directory so it is cleaned up by cargo clean and ignored by git
     let target_dir = PathBuf::from("target/tmp_integration");
     let test_dir = target_dir.join("armature_test");
-    
+
     // Clean up previous run
     if test_dir.exists() {
         fs::remove_dir_all(&test_dir).expect("Failed to clean up previous test run");
@@ -30,17 +30,30 @@ fn armature_messaging_test() {
     assert!(status.success(), "Failed to clone armature repo");
 
     let project_dir = test_dir.join(subdirectory);
-    assert!(project_dir.exists(), "armature-messaging directory not found in cloned repo");
+    assert!(
+        project_dir.exists(),
+        "armature-messaging directory not found in cloned repo"
+    );
 
     // 2. Get absolute path to current mq-bridge
-    let mq_bridge_path = env::current_dir().expect("Failed to get current dir")
-        .canonicalize().expect("Failed to canonicalize path");
-    
+    let mq_bridge_path = env::current_dir()
+        .expect("Failed to get current dir")
+        .canonicalize()
+        .expect("Failed to canonicalize path");
+
     // 3. Patch dependency using cargo add to point to local version
     let cargo_bin = env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
-    println!("Patching mq-bridge dependency to local path: {:?}", mq_bridge_path);
+    println!(
+        "Patching mq-bridge dependency to local path: {:?}",
+        mq_bridge_path
+    );
     let status = Command::new(&cargo_bin)
-        .args(&["add", "mq-bridge", "--path", mq_bridge_path.to_str().unwrap()])
+        .args(&[
+            "add",
+            "mq-bridge",
+            "--path",
+            mq_bridge_path.to_str().unwrap(),
+        ])
         .current_dir(&project_dir)
         .status()
         .expect("Failed to execute cargo add");
@@ -56,6 +69,9 @@ fn armature_messaging_test() {
         .current_dir(&project_dir)
         .status()
         .expect("Failed to execute cargo test");
-    
-    assert!(status.success(), "armature-messaging tests failed with local mq-bridge changes");
+
+    assert!(
+        status.success(),
+        "armature-messaging tests failed with local mq-bridge changes"
+    );
 }
