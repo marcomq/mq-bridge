@@ -72,7 +72,7 @@ pub trait MessageConsumer: Send + Sync {
             if let Some(msg) = batch.messages.pop() {
                 debug_assert!(batch.messages.is_empty());
                 if !batch.messages.is_empty() {
-                    warn!(
+                    tracing::error!(
                         "receive_batch(1) returned {} extra messages; dropping them (implementation bug)",
                         batch.messages.len()
                     );
@@ -83,6 +83,7 @@ pub trait MessageConsumer: Send + Sync {
                 });
             }
             // Batch was success but empty, which is unexpected for receive(1). Loop.
+            tokio::task::yield_now().await;
         }
     }
 
@@ -120,12 +121,10 @@ pub trait MessagePublisher: Send + Sync + 'static {
             Ok(SentBatch::Ack) => Ok(Sent::Ack),
             Ok(SentBatch::Partial {
                 mut responses,
-                failed,
+                mut failed,
             }) => {
-                if !failed.is_empty() {
-                    Err(PublisherError::NonRetryable(anyhow::anyhow!(
-                        "Failed to send single message"
-                    )))
+                if let Some((_, err)) = failed.pop() {
+                    Err(err)
                 } else if let Some(res) = responses.as_mut().and_then(|r| r.pop()) {
                     Ok(Sent::Response(res))
                 } else {
@@ -188,6 +187,8 @@ impl<T: MessagePublisher + ?Sized> MessagePublisher for Box<T> {
 
 /// A helper function to send messages in bulk by calling `send` for each one.
 /// This is useful for `MessagePublisher` implementations that don't have a native bulk sending mechanism.
+/// Requires that "send" is implemented for the publisher. Otherwise causes an infinite loop,
+/// as send is calling "send_batch" by default.
 pub async fn send_batch_helper<P: MessagePublisher + ?Sized>(
     publisher: &P,
     messages: Vec<CanonicalMessage>,
@@ -198,14 +199,19 @@ pub async fn send_batch_helper<P: MessagePublisher + ?Sized>(
     let mut responses = Vec::new();
     let mut failed_messages = Vec::new();
 
-    for msg in messages {
+    let mut iter = messages.into_iter();
+    while let Some(msg) = iter.next() {
         match callback(publisher, msg.clone()).await {
             Ok(Sent::Response(resp)) => responses.push(resp),
             Ok(Sent::Ack) => {}
             Err(PublisherError::Retryable(e)) => {
                 // A retryable error likely affects the whole connection.
-                // Abort the batch and propagate the error to trigger a reconnect.
-                return Err(PublisherError::Retryable(e));
+                // We must return what succeeded so far (responses) and mark the rest as failed.
+                failed_messages.push((msg, PublisherError::Retryable(e)));
+                for m in iter {
+                    failed_messages.push((m, PublisherError::Retryable(anyhow::anyhow!("Batch aborted due to previous error"))));
+                }
+                break;
             }
             Err(PublisherError::NonRetryable(e)) => {
                 // A non-retryable error is specific to this message.
@@ -296,5 +302,104 @@ pub trait CustomMiddlewareFactory: Send + Sync + std::fmt::Debug {
         _route_name: &str,
     ) -> anyhow::Result<Box<dyn MessagePublisher>> {
         Ok(publisher)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::CanonicalMessage;
+    use anyhow::anyhow;
+
+    struct MockPublisher;
+    #[async_trait]
+    impl MessagePublisher for MockPublisher {
+        async fn send_batch(
+            &self,
+            _msgs: Vec<CanonicalMessage>,
+        ) -> Result<SentBatch, PublisherError> {
+            Ok(SentBatch::Ack)
+        }
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    #[tokio::test]
+    async fn test_send_batch_helper_partial_failure() {
+        let publisher = MockPublisher;
+        let msgs = vec![
+            CanonicalMessage::from("1"),
+            CanonicalMessage::from("2"),
+            CanonicalMessage::from("3"),
+        ];
+
+        let result = send_batch_helper(&publisher, msgs.clone(), |_pub, msg| {
+            Box::pin(async move {
+                let payload = msg.get_payload_str();
+                if payload == "1" {
+                    Ok(Sent::Response(CanonicalMessage::from("resp1")))
+                } else if payload == "2" {
+                    Err(PublisherError::Retryable(anyhow!("fail")))
+                } else {
+                    Ok(Sent::Ack)
+                }
+            })
+        })
+        .await;
+
+        match result {
+            Ok(SentBatch::Partial { responses, failed }) => {
+                // 1. Verify response from first message
+                assert!(responses.is_some());
+                let resps = responses.unwrap();
+                assert_eq!(resps.len(), 1);
+                assert_eq!(resps[0].get_payload_str(), "resp1");
+
+                // 2. Verify failures
+                // Message 2 failed explicitly
+                // Message 3 failed implicitly because batch was aborted
+                assert_eq!(failed.len(), 2);
+                assert_eq!(failed[0].0.get_payload_str(), "2");
+                assert!(matches!(failed[0].1, PublisherError::Retryable(_)));
+
+                assert_eq!(failed[1].0.get_payload_str(), "3");
+                assert!(matches!(failed[1].1, PublisherError::Retryable(_)));
+            }
+            _ => panic!("Expected Partial result"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_send_propagates_single_error() {
+        struct FailPublisher;
+        #[async_trait]
+        impl MessagePublisher for FailPublisher {
+            async fn send_batch(
+                &self,
+                msgs: Vec<CanonicalMessage>,
+            ) -> Result<SentBatch, PublisherError> {
+                // Simulate what send_batch_helper does on single failure
+                Ok(SentBatch::Partial {
+                    responses: None,
+                    failed: vec![(
+                        msgs[0].clone(),
+                        PublisherError::NonRetryable(anyhow!("inner")),
+                    )],
+                })
+            }
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
+        }
+
+        let publ = FailPublisher;
+        let res = publ.send(CanonicalMessage::from("test")).await;
+
+        assert!(res.is_err());
+        match res.unwrap_err() {
+            PublisherError::NonRetryable(e) => assert_eq!(e.to_string(), "inner"),
+            _ => panic!("Expected NonRetryable error"),
+        }
     }
 }
