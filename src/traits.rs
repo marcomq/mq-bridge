@@ -209,7 +209,12 @@ pub async fn send_batch_helper<P: MessagePublisher + ?Sized>(
                 // We must return what succeeded so far (responses) and mark the rest as failed.
                 failed_messages.push((msg, PublisherError::Retryable(e)));
                 for m in iter {
-                    failed_messages.push((m, PublisherError::Retryable(anyhow::anyhow!("Batch aborted due to previous error"))));
+                    failed_messages.push((
+                        m,
+                        PublisherError::Retryable(anyhow::anyhow!(
+                            "Batch aborted due to previous error"
+                        )),
+                    ));
                 }
                 break;
             }

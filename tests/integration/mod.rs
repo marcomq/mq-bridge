@@ -1,5 +1,7 @@
 #[cfg(feature = "amqp")]
 pub mod amqp;
+#[cfg(feature = "aws")]
+pub mod aws;
 pub mod common;
 #[cfg(feature = "kafka")]
 pub mod kafka;

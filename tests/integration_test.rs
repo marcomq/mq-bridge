@@ -12,6 +12,11 @@ async fn test_all_performance_direct() {
     println!("--- Running All Direct Performance Tests ---");
     println!("Tests are run sequentially to ensure accurate measurements.");
 
+    #[cfg(feature = "aws")]
+    {
+        println!("\n\n>>> Starting AWS Direct Performance Test...");
+        integration::aws::test_aws_performance_direct().await;
+    }
     #[cfg(feature = "nats")]
     {
         println!("\n\n>>> Starting NATS Direct Performance Test...");

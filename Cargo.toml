@@ -54,10 +54,14 @@ async-nats = { version = "0.45", optional = true }
 rumqttc = { version = "0.25.1", optional = true }
 
 # HTTP
-axum = { version = "0.8.7", optional = true }
-reqwest = { version = "0.12", features = ["json", "rustls-tls"], optional = true }
+axum = { version = "0.8.8", optional = true }
+reqwest = { version = "0.13.1", features = ["json", "rustls"], optional = true }
 axum-server = { version = "0.8.0", features = ["tls-rustls"], optional = true }
 
+# AWS
+aws-config = { version = "1.5", optional = true, features = ["behavior-version-latest"] }
+aws-sdk-sqs = { version = "1.50", optional = true }
+aws-sdk-sns = { version = "1.54", optional = true }
 
 url = { version = "2.5", optional = true }
 
@@ -68,7 +72,7 @@ schemars = { version = "1.2", optional = true }
 
 [features]
 default = ["full"]
-full = ["mongodb", "kafka", "amqp", "nats", "mqtt", "http", "metrics", "dedup"]
+full = ["mongodb", "kafka", "amqp", "nats", "mqtt", "http", "metrics", "dedup", "aws"]
 
 # Functionality features
 dedup = ["sled"]
@@ -83,6 +87,7 @@ mongodb = ["dep:mongodb"]
 mqtt = ["rumqttc", "rustls", "tokio-rustls", "rustls-pemfile", "url"]
 http = ["axum", "reqwest", "axum-server", "rustls", "tokio-rustls", "rustls-pemfile"]
 schema = ["dep:schemars"]
+aws = ["aws-config", "aws-sdk-sqs", "aws-sdk-sns"]
 
 [dev-dependencies]
 serde_yaml_ng = "0.10.0"

@@ -5,6 +5,8 @@
 
 #[cfg(feature = "amqp")]
 pub mod amqp;
+#[cfg(feature = "aws")]
+pub mod aws;
 pub mod fanout;
 pub mod file;
 #[cfg(feature = "http")]
@@ -49,6 +51,11 @@ async fn create_base_consumer(
     endpoint: &Endpoint,
 ) -> Result<Box<dyn MessageConsumer>> {
     match &endpoint.endpoint_type {
+        #[cfg(feature = "aws")]
+        EndpointType::Aws(cfg) => {
+            ensure_consume_mode("Aws", endpoint.mode.clone())?;
+            Ok(Box::new(aws::AwsConsumer::new(cfg).await?))
+        }
         #[cfg(feature = "kafka")]
         EndpointType::Kafka(cfg) => {
             let topic = cfg.topic.as_deref().unwrap_or(route_name);
@@ -205,6 +212,10 @@ async fn create_base_publisher(
     depth: usize,
 ) -> Result<Box<dyn MessagePublisher>> {
     let publisher = match endpoint_type {
+        #[cfg(feature = "aws")]
+        EndpointType::Aws(cfg) => {
+            Ok(Box::new(aws::AwsPublisher::new(cfg).await?) as Box<dyn MessagePublisher>)
+        }
         #[cfg(feature = "kafka")]
         EndpointType::Kafka(cfg) => {
             let topic = cfg.topic.as_deref().unwrap_or(route_name);

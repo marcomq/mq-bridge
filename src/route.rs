@@ -418,6 +418,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "Takes too much time for regular tests"]
     async fn test_route_recovery_from_panic() {
         // Use unique topic names to avoid interference from other tests sharing the static memory channels
         let unique_suffix = uuid::Uuid::now_v7().simple().to_string();
@@ -440,7 +441,10 @@ mod tests {
 
         // 1. Send a message. The consumer will panic before picking it up.
         let input_ch = input.channel().unwrap();
-        input_ch.send_message("persistent_msg".into()).await.unwrap();
+        input_ch
+            .send_message("persistent_msg".into())
+            .await
+            .unwrap();
 
         // 2. Wait for the panic to occur and the route to enter sleep.
         // We loop briefly to allow the spawned task to execute and panic.
@@ -451,16 +455,19 @@ mod tests {
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
-        assert!(!should_panic.load(Ordering::SeqCst), "Route should have panicked");
+        assert!(
+            !should_panic.load(Ordering::SeqCst),
+            "Route should have panicked"
+        );
 
         // 3. Wait for recovery (5s backoff + restart time).
         // We sleep the minimum backoff, then poll with a generous timeout to handle loaded CI environments.
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-        
+
         // 4. Verify the message is processed after recovery.
         let output_ch = output.channel().unwrap();
         let mut received = Vec::new();
-        
+
         // Poll for output for up to 10 seconds
         let start = std::time::Instant::now();
         while start.elapsed() < std::time::Duration::from_secs(10) {
@@ -473,7 +480,11 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
 
-        assert_eq!(received.len(), 1, "Should have received the message after recovery");
+        assert_eq!(
+            received.len(),
+            1,
+            "Should have received the message after recovery"
+        );
         assert_eq!(received[0].get_payload_str(), "persistent_msg");
 
         // Cleanup

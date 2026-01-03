@@ -1,0 +1,378 @@
+use crate::canonical_message::tracing_support::LazyMessageIds;
+use crate::models::AwsEndpoint;
+use crate::traits::{
+    BatchCommitFunc, ConsumerError, MessageConsumer, MessagePublisher, PublisherError,
+    ReceivedBatch, Sent, SentBatch,
+};
+use crate::CanonicalMessage;
+use anyhow::{anyhow, Context};
+use async_trait::async_trait;
+use aws_config::BehaviorVersion;
+use aws_sdk_sns::Client as SnsClient;
+use aws_sdk_sqs::Client as SqsClient;
+use std::any::Any;
+use tracing::{error, trace};
+
+pub struct AwsConsumer {
+    client: SqsClient,
+    queue_url: String,
+    max_messages: i32,
+    wait_time_seconds: i32,
+}
+
+impl AwsConsumer {
+    pub async fn new(endpoint: &AwsEndpoint) -> anyhow::Result<Self> {
+        let config = load_aws_config(endpoint).await;
+        let client = SqsClient::new(&config);
+        let queue_url = endpoint
+            .queue_url
+            .clone()
+            .ok_or_else(|| anyhow!("queue_url is required for AWS consumer"))?;
+
+        Ok(Self {
+            client,
+            queue_url,
+            max_messages: endpoint.config.max_messages.unwrap_or(10).clamp(1, 10),
+            wait_time_seconds: endpoint.config.wait_time_seconds.unwrap_or(20).clamp(0, 20),
+        })
+    }
+}
+
+#[async_trait]
+impl MessageConsumer for AwsConsumer {
+    async fn receive_batch(&mut self, max_messages: usize) -> Result<ReceivedBatch, ConsumerError> {
+        let mut messages = Vec::with_capacity(max_messages);
+        let mut receipt_handles = Vec::with_capacity(max_messages);
+        let mut wait_time = self.wait_time_seconds;
+
+        loop {
+            let remaining = max_messages - messages.len();
+            if remaining == 0 {
+                break;
+            }
+            let max_to_fetch = (remaining as i32).min(self.max_messages);
+
+            trace!(
+                queue_url = %self.queue_url,
+                max_to_fetch,
+                current_count = messages.len(),
+                "Receiving AWS messages"
+            );
+
+            let resp = self
+                .client
+                .receive_message()
+                .queue_url(&self.queue_url)
+                .max_number_of_messages(max_to_fetch)
+                .wait_time_seconds(wait_time)
+                .message_attribute_names("All")
+                .send()
+                .await
+                .map_err(|e| ConsumerError::Connection(anyhow!(e)))?;
+
+            let sqs_messages = resp.messages.unwrap_or_default();
+            let count = sqs_messages.len();
+
+            if count == 0 {
+                break;
+            }
+
+            for msg in sqs_messages {
+                if let Some(receipt_handle) = msg.receipt_handle {
+                    let body = msg.body.unwrap_or_default().into_bytes();
+                    let mut canonical = CanonicalMessage::new(body, None);
+
+                    if let Some(attrs) = msg.message_attributes {
+                        for (k, v) in attrs {
+                            if let Some(s) = v.string_value {
+                                canonical.metadata.insert(k, s);
+                            }
+                        }
+                    }
+
+                    messages.push(canonical);
+                    receipt_handles.push(receipt_handle);
+                }
+            }
+
+            if count < max_to_fetch as usize {
+                break;
+            }
+            // Don't wait for subsequent fetches to fill the batch
+            wait_time = 0;
+        }
+
+        if messages.is_empty() {
+            return Ok(ReceivedBatch {
+                messages: Vec::new(),
+                commit: Box::new(|_| Box::pin(async {})),
+            });
+        }
+
+        trace!(
+            count = messages.len(),
+            queue_url = %self.queue_url,
+            message_ids = ?LazyMessageIds(&messages),
+            "Received batch of AWS SQS messages"
+        );
+
+        let client = self.client.clone();
+        let queue_url = self.queue_url.clone();
+
+        let commit: BatchCommitFunc = Box::new(move |_results| {
+            let client = client.clone();
+            let queue_url = queue_url.clone();
+            let handles = receipt_handles.clone();
+            Box::pin(async move {
+                let mut entries = Vec::new();
+                for (i, handle) in handles.iter().enumerate() {
+                    entries.push(
+                        aws_sdk_sqs::types::DeleteMessageBatchRequestEntry::builder()
+                            .id(format!("{}", i))
+                            .receipt_handle(handle)
+                            .build()
+                            .unwrap(),
+                    );
+                }
+
+                // SQS batch delete limit is 10
+                for chunk in entries.chunks(10) {
+                    let _ = client
+                        .delete_message_batch()
+                        .queue_url(&queue_url)
+                        .set_entries(Some(chunk.to_vec()))
+                        .send()
+                        .await
+                        .map_err(|e| error!("Failed to delete SQS messages: {}", e));
+                }
+            })
+        });
+
+        Ok(ReceivedBatch { messages, commit })
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+pub struct AwsPublisher {
+    sqs_client: Option<SqsClient>,
+    sns_client: Option<SnsClient>,
+    queue_url: Option<String>,
+    topic_arn: Option<String>,
+}
+
+impl AwsPublisher {
+    pub async fn new(endpoint: &AwsEndpoint) -> anyhow::Result<Self> {
+        let config = load_aws_config(endpoint).await;
+
+        let (sqs_client, queue_url) = if let Some(url) = &endpoint.queue_url {
+            (Some(SqsClient::new(&config)), Some(url.clone()))
+        } else {
+            (None, None)
+        };
+
+        let (sns_client, topic_arn) = if let Some(arn) = &endpoint.topic_arn {
+            (Some(SnsClient::new(&config)), Some(arn.clone()))
+        } else {
+            (None, None)
+        };
+
+        if sqs_client.is_none() && sns_client.is_none() {
+            return Err(anyhow!(
+                "Either queue_url or topic_arn must be provided for AWS publisher"
+            ));
+        }
+
+        Ok(Self {
+            sqs_client,
+            sns_client,
+            queue_url,
+            topic_arn,
+        })
+    }
+}
+
+#[async_trait]
+impl MessagePublisher for AwsPublisher {
+    async fn send(&self, message: CanonicalMessage) -> Result<Sent, PublisherError> {
+        trace!(
+            message_id = %format!("{:032x}", message.message_id),
+            queue_url = ?self.queue_url,
+            topic_arn = ?self.topic_arn,
+            payload_size = message.payload.len(),
+            "Publishing AWS message"
+        );
+        let body = String::from_utf8(message.payload.to_vec())
+            .context("AWS payload must be valid UTF-8")?;
+
+        if let (Some(client), Some(url)) = (&self.sqs_client, &self.queue_url) {
+            let mut req = client.send_message().queue_url(url).message_body(&body);
+            for (k, v) in &message.metadata {
+                req = req.message_attributes(
+                    k,
+                    aws_sdk_sqs::types::MessageAttributeValue::builder()
+                        .data_type("String")
+                        .string_value(v)
+                        .build()
+                        .unwrap(),
+                );
+            }
+            req.send().await.map_err(|e| anyhow!(e))?;
+        }
+
+        if let (Some(client), Some(arn)) = (&self.sns_client, &self.topic_arn) {
+            let mut req = client.publish().topic_arn(arn).message(&body);
+            for (k, v) in &message.metadata {
+                req = req.message_attributes(
+                    k,
+                    aws_sdk_sns::types::MessageAttributeValue::builder()
+                        .data_type("String")
+                        .string_value(v)
+                        .build()
+                        .unwrap(),
+                );
+            }
+            req.send().await.map_err(|e| anyhow!(e))?;
+        }
+
+        Ok(Sent::Ack)
+    }
+
+    async fn send_batch(
+        &self,
+        messages: Vec<CanonicalMessage>,
+    ) -> Result<SentBatch, PublisherError> {
+        trace!(
+            count = messages.len(),
+            queue_url = ?self.queue_url,
+            topic_arn = ?self.topic_arn,
+            message_ids = ?LazyMessageIds(&messages),
+            "Publishing batch of AWS messages"
+        );
+
+        if self.sns_client.is_some() {
+            return crate::traits::send_batch_helper(self, messages, |publisher, message| {
+                Box::pin(publisher.send(message))
+            })
+            .await;
+        }
+
+        if let (Some(client), Some(url)) = (&self.sqs_client, &self.queue_url) {
+            let mut failed_messages = Vec::new();
+
+            for chunk in messages.chunks(10) {
+                let mut entries = Vec::with_capacity(chunk.len());
+                let mut valid_indices = Vec::with_capacity(chunk.len());
+                for (i, msg) in chunk.iter().enumerate() {
+                    let body = match String::from_utf8(msg.payload.to_vec()) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            failed_messages
+                                .push((msg.clone(), PublisherError::NonRetryable(anyhow!(e))));
+                            continue;
+                        }
+                    };
+
+                    let mut entry = aws_sdk_sqs::types::SendMessageBatchRequestEntry::builder()
+                        .id(format!("{}", i))
+                        .message_body(body);
+
+                    for (k, v) in &msg.metadata {
+                        entry = entry.message_attributes(
+                            k,
+                            aws_sdk_sqs::types::MessageAttributeValue::builder()
+                                .data_type("String")
+                                .string_value(v)
+                                .build()
+                                .unwrap(),
+                        );
+                    }
+                    entries.push(entry.build().unwrap());
+                    valid_indices.push(i);
+                }
+
+                if entries.is_empty() {
+                    continue;
+                }
+
+                let resp_result = client
+                    .send_message_batch()
+                    .queue_url(url)
+                    .set_entries(Some(entries))
+                    .send()
+                    .await;
+
+                match resp_result {
+                    Ok(resp) => {
+                        if !resp.failed.is_empty() {
+                            for failure in resp.failed {
+                                let id_idx = failure.id.parse::<usize>().unwrap();
+                                let msg = chunk[id_idx].clone();
+                                let err = if failure.sender_fault {
+                                    PublisherError::NonRetryable(anyhow!(failure
+                                        .message
+                                        .unwrap_or_default()))
+                                } else {
+                                    PublisherError::Retryable(anyhow!(failure
+                                        .message
+                                        .unwrap_or_default()))
+                                };
+                                failed_messages.push((msg, err));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        for i in valid_indices {
+                            failed_messages.push((
+                                chunk[i].clone(),
+                                PublisherError::Retryable(anyhow!("Batch send failed: {}", e)),
+                            ));
+                        }
+                    }
+                }
+            }
+
+            if failed_messages.is_empty() {
+                Ok(SentBatch::Ack)
+            } else {
+                Ok(SentBatch::Partial {
+                    responses: None,
+                    failed: failed_messages,
+                })
+            }
+        } else {
+            Ok(SentBatch::Ack)
+        }
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+async fn load_aws_config(endpoint: &AwsEndpoint) -> aws_config::SdkConfig {
+    let mut loader = aws_config::defaults(BehaviorVersion::latest());
+    if let Some(region) = &endpoint.config.region {
+        loader = loader.region(aws_config::Region::new(region.clone()));
+    }
+    if let Some(url) = &endpoint.config.endpoint_url {
+        loader = loader.endpoint_url(url);
+    }
+
+    if let (Some(access_key), Some(secret_key)) =
+        (&endpoint.config.access_key, &endpoint.config.secret_key)
+    {
+        let credentials = aws_sdk_sqs::config::Credentials::new(
+            access_key.clone(),
+            secret_key.clone(),
+            endpoint.config.session_token.clone(),
+            None,
+            "static",
+        );
+        loader = loader.credentials_provider(credentials);
+    }
+
+    loader.load().await
+}

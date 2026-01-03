@@ -1,0 +1,18 @@
+services:
+  localstack:
+    image: localstack/localstack:4.9.0
+    ports:
+      - "4566:4566"
+    environment:
+      - SERVICES=sqs,sns
+      # - DEBUG=0
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+      - LS_LOG=warn
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4566/_localstack/health"]
+      interval: 2s
+      timeout: 10s
+      retries: 15
