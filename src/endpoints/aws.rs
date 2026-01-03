@@ -78,21 +78,41 @@ impl MessageConsumer for AwsConsumer {
             }
 
             for msg in sqs_messages {
-                if let Some(receipt_handle) = msg.receipt_handle {
-                    let body = msg.body.unwrap_or_default().into_bytes();
-                    let mut canonical = CanonicalMessage::new(body, None);
+                let receipt_handle = msg.receipt_handle;
+                let body_str = msg.body.unwrap_or_default();
 
-                    if let Some(attrs) = msg.message_attributes {
-                        for (k, v) in attrs {
-                            if let Some(s) = v.string_value {
-                                canonical.metadata.insert(k, s);
-                            }
+                if receipt_handle.is_none() {
+                    let preview = if body_str.len() > 50 {
+                        let cut = body_str
+                            .char_indices()
+                            .nth(50)
+                            .map(|(i, _)| i)
+                            .unwrap_or(body_str.len());
+                        format!("{}...", &body_str[..cut])
+                    } else {
+                        body_str.clone()
+                    };
+                    tracing::warn!(
+                        message_id = ?msg.message_id,
+                        len = body_str.len(),
+                        preview = %preview,
+                        "AWS SQS message missing receipt_handle. Processing payload but cannot acknowledge/delete."
+                    );
+                }
+
+                let body = body_str.into_bytes();
+                let mut canonical = CanonicalMessage::new(body, None);
+
+                if let Some(attrs) = msg.message_attributes {
+                    for (k, v) in attrs {
+                        if let Some(s) = v.string_value {
+                            canonical.metadata.insert(k, s);
                         }
                     }
-
-                    messages.push(canonical);
-                    receipt_handles.push(receipt_handle);
                 }
+
+                messages.push(canonical);
+                receipt_handles.push(receipt_handle);
             }
 
             if count < max_to_fetch as usize {
@@ -125,14 +145,16 @@ impl MessageConsumer for AwsConsumer {
             let handles = receipt_handles.clone();
             Box::pin(async move {
                 let mut entries = Vec::new();
-                for (i, handle) in handles.iter().enumerate() {
-                    entries.push(
-                        aws_sdk_sqs::types::DeleteMessageBatchRequestEntry::builder()
-                            .id(format!("{}", i))
-                            .receipt_handle(handle)
-                            .build()
-                            .unwrap(),
-                    );
+                for (i, handle_opt) in handles.iter().enumerate() {
+                    if let Some(handle) = handle_opt {
+                        entries.push(
+                            aws_sdk_sqs::types::DeleteMessageBatchRequestEntry::builder()
+                                .id(format!("{}", i))
+                                .receipt_handle(handle)
+                                .build()
+                                .unwrap(),
+                        );
+                    }
                 }
 
                 // SQS batch delete limit is 10
