@@ -59,9 +59,9 @@ reqwest = { version = "0.13.1", features = ["json"], optional = true }
 axum-server = { version = "0.8.0", features = ["tls-rustls"], optional = true }
 
 # AWS
-aws-config = { version = "1.5", optional = true, features = ["behavior-version-latest"] }
-aws-sdk-sqs = { version = "1.50", optional = true }
-aws-sdk-sns = { version = "1.54", optional = true }
+aws-config = { version = "1.8.12", optional = true, features = ["behavior-version-latest"] }
+aws-sdk-sqs = { version = "1.91", optional = true }
+aws-sdk-sns = { version = "1.92", optional = true }
 
 url = { version = "2.5", optional = true }
 
