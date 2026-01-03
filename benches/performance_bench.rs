@@ -217,7 +217,7 @@ mod aws_helper {
     use mq_bridge::endpoints::aws::{AwsConsumer, AwsPublisher};
     use mq_bridge::models::{AwsConfig, AwsEndpoint};
 
-    async fn ensure_queue_exists() {
+    async fn ensure_queue_exists() -> String {
         let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
             .region(aws_config::Region::new("us-east-1"))
             .endpoint_url("http://localhost:4566")
@@ -225,21 +225,27 @@ mod aws_helper {
             .load()
             .await;
         let client = aws_sdk_sqs::Client::new(&config);
-        let _ = client
+        let resp = client
             .create_queue()
             .queue_name("perf-test-queue")
             .send()
-            .await;
-        let _ = client
+            .await
+            .expect("Failed to create SQS queue");
+        let queue_url = resp.queue_url.expect("SQS queue URL was None");
+        client
             .purge_queue()
-            .queue_url("http://localhost:4566/000000000000/perf-test-queue")
+            .queue_url(&queue_url)
             .send()
-            .await;
+            .await
+            .expect("Failed to purge SQS queue");
+        queue_url
     }
 
-    fn get_endpoint() -> AwsEndpoint {
+    fn get_endpoint(queue_url: Option<String>) -> AwsEndpoint {
         AwsEndpoint {
-            queue_url: Some("http://localhost:4566/000000000000/perf-test-queue".to_string()),
+            queue_url: Some(queue_url.unwrap_or_else(|| {
+                "http://localhost:4566/000000000000/perf-test-queue".to_string()
+            })),
             topic_arn: None,
             config: AwsConfig {
                 region: Some("us-east-1".to_string()),
@@ -252,12 +258,14 @@ mod aws_helper {
     }
 
     pub async fn create_publisher() -> Arc<dyn MessagePublisher> {
-        ensure_queue_exists().await;
-        Arc::new(AwsPublisher::new(&get_endpoint()).await.unwrap())
+        let url = ensure_queue_exists().await;
+        Arc::new(AwsPublisher::new(&get_endpoint(Some(url))).await.unwrap())
     }
 
     pub async fn create_consumer() -> Arc<Mutex<dyn MessageConsumer>> {
-        Arc::new(Mutex::new(AwsConsumer::new(&get_endpoint()).await.unwrap()))
+        Arc::new(Mutex::new(
+            AwsConsumer::new(&get_endpoint(None)).await.unwrap(),
+        ))
     }
 }
 
