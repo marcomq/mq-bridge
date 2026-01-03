@@ -8,6 +8,7 @@ use crate::CanonicalMessage;
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;
 use aws_config::BehaviorVersion;
+use aws_sdk_sns::config::Credentials;
 use aws_sdk_sns::Client as SnsClient;
 use aws_sdk_sqs::Client as SqsClient;
 use std::any::Any;
@@ -159,13 +160,30 @@ impl MessageConsumer for AwsConsumer {
 
                 // SQS batch delete limit is 10
                 for chunk in entries.chunks(10) {
-                    let _ = client
+                    match client
                         .delete_message_batch()
                         .queue_url(&queue_url)
                         .set_entries(Some(chunk.to_vec()))
                         .send()
                         .await
-                        .map_err(|e| error!("Failed to delete SQS messages: {}", e));
+                    {
+                        Ok(resp) => {
+                            if !resp.failed.is_empty() {
+                                let count = resp.failed.len();
+                                error!(queue_url = %queue_url, failed_count = count, "Partial failure deleting SQS messages");
+                                for failure in resp.failed {
+                                    error!(id = ?failure.id, code = ?failure.code, message = ?failure.message, sender_fault = failure.sender_fault, "SQS delete failure detail");
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            error!(
+                                queue_url = %queue_url,
+                                error = %e,
+                                "Failed to delete SQS message batch"
+                            );
+                        }
+                    }
                 }
             })
         });
@@ -229,6 +247,8 @@ impl MessagePublisher for AwsPublisher {
         let body = String::from_utf8(message.payload.to_vec())
             .context("AWS payload must be valid UTF-8")?;
 
+        let mut errors = Vec::new();
+
         if let (Some(client), Some(url)) = (&self.sqs_client, &self.queue_url) {
             let mut req = client.send_message().queue_url(url).message_body(&body);
             for (k, v) in &message.metadata {
@@ -241,7 +261,9 @@ impl MessagePublisher for AwsPublisher {
                         .unwrap(),
                 );
             }
-            req.send().await.map_err(|e| anyhow!(e))?;
+            if let Err(e) = req.send().await {
+                errors.push(anyhow!(e).context("Failed to send to SQS"));
+            }
         }
 
         if let (Some(client), Some(arn)) = (&self.sns_client, &self.topic_arn) {
@@ -256,7 +278,21 @@ impl MessagePublisher for AwsPublisher {
                         .unwrap(),
                 );
             }
-            req.send().await.map_err(|e| anyhow!(e))?;
+            if let Err(e) = req.send().await {
+                errors.push(anyhow!(e).context("Failed to send to SNS"));
+            }
+        }
+
+        if !errors.is_empty() {
+            let msg = errors
+                .iter()
+                .map(|e| e.to_string())
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(PublisherError::Retryable(anyhow!(
+                "AWS publish failed: {}",
+                msg
+            )));
         }
 
         Ok(Sent::Ack)
@@ -330,18 +366,27 @@ impl MessagePublisher for AwsPublisher {
                     Ok(resp) => {
                         if !resp.failed.is_empty() {
                             for failure in resp.failed {
-                                let id_idx = failure.id.parse::<usize>().unwrap();
-                                let msg = chunk[id_idx].clone();
-                                let err = if failure.sender_fault {
-                                    PublisherError::NonRetryable(anyhow!(failure
-                                        .message
-                                        .unwrap_or_default()))
+                                if let Ok(id_idx) = failure.id.parse::<usize>() {
+                                    if let Some(msg) = chunk.get(id_idx) {
+                                        let err = if failure.sender_fault {
+                                            PublisherError::NonRetryable(anyhow!(failure
+                                                .message
+                                                .unwrap_or_default()))
+                                        } else {
+                                            PublisherError::Retryable(anyhow!(failure
+                                                .message
+                                                .unwrap_or_default()))
+                                        };
+                                        failed_messages.push((msg.clone(), err));
+                                    } else {
+                                        error!(id = %failure.id, index = id_idx, chunk_size = chunk.len(), "Invalid index parsed from SQS failure ID. Skipping failure.");
+                                    }
                                 } else {
-                                    PublisherError::Retryable(anyhow!(failure
-                                        .message
-                                        .unwrap_or_default()))
-                                };
-                                failed_messages.push((msg, err));
+                                    error!(
+                                        id = %failure.id,
+                                        "Failed to parse index from SQS failure ID. Skipping failure."
+                                    );
+                                }
                             }
                         }
                     }
@@ -386,7 +431,7 @@ async fn load_aws_config(endpoint: &AwsEndpoint) -> aws_config::SdkConfig {
     if let (Some(access_key), Some(secret_key)) =
         (&endpoint.config.access_key, &endpoint.config.secret_key)
     {
-        let credentials = aws_sdk_sqs::config::Credentials::new(
+        let credentials = Credentials::new(
             access_key.clone(),
             secret_key.clone(),
             endpoint.config.session_token.clone(),
