@@ -210,6 +210,57 @@ mod mqtt_helper {
     }
 }
 
+#[cfg(feature = "aws")]
+mod aws_helper {
+    use super::*;
+    use aws_sdk_sns::config::Credentials;
+    use mq_bridge::endpoints::aws::{AwsConsumer, AwsPublisher};
+    use mq_bridge::models::{AwsConfig, AwsEndpoint};
+
+    async fn ensure_queue_exists() {
+        let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .region(aws_config::Region::new("us-east-1"))
+            .endpoint_url("http://localhost:4566")
+            .credentials_provider(Credentials::new("test", "test", None, None, "static"))
+            .load()
+            .await;
+        let client = aws_sdk_sqs::Client::new(&config);
+        let _ = client
+            .create_queue()
+            .queue_name("perf-test-queue")
+            .send()
+            .await;
+        let _ = client
+            .purge_queue()
+            .queue_url("http://localhost:4566/000000000000/perf-test-queue")
+            .send()
+            .await;
+    }
+
+    fn get_endpoint() -> AwsEndpoint {
+        AwsEndpoint {
+            queue_url: Some("http://localhost:4566/000000000000/perf-test-queue".to_string()),
+            topic_arn: None,
+            config: AwsConfig {
+                region: Some("us-east-1".to_string()),
+                endpoint_url: Some("http://localhost:4566".to_string()),
+                access_key: Some("test".to_string()),
+                secret_key: Some("test".to_string()),
+                ..Default::default()
+            },
+        }
+    }
+
+    pub async fn create_publisher() -> Arc<dyn MessagePublisher> {
+        ensure_queue_exists().await;
+        Arc::new(AwsPublisher::new(&get_endpoint()).await.unwrap())
+    }
+
+    pub async fn create_consumer() -> Arc<Mutex<dyn MessageConsumer>> {
+        Arc::new(Mutex::new(AwsConsumer::new(&get_endpoint()).await.unwrap()))
+    }
+}
+
 fn performance_benchmarks(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
 
@@ -378,6 +429,12 @@ fn performance_benchmarks(c: &mut Criterion) {
         };
     }
 
+    bench_backend!(
+        "aws",
+        "aws",
+        "tests/integration/docker-compose/aws.yml",
+        aws_helper
+    );
     bench_backend!(
         "kafka",
         "kafka",
