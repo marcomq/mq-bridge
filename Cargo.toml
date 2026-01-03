@@ -71,7 +71,7 @@ once_cell = { version = "1.21.3" }
 schemars = { version = "1.2", optional = true }
 
 [features]
-default = ["full"]
+default = []
 full = ["mongodb", "kafka", "amqp", "nats", "mqtt", "http", "metrics", "dedup", "aws"]
 
 # Functionality features
