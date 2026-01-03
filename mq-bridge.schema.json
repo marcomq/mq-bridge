@@ -65,6 +65,17 @@
         {
           "type": "object",
           "properties": {
+            "aws": {
+              "$ref": "#/$defs/AwsEndpoint"
+            }
+          },
+          "required": [
+            "aws"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
             "kafka": {
               "$ref": "#/$defs/KafkaEndpoint"
             }
@@ -385,6 +396,68 @@
         "subscribe"
       ]
     },
+    "AwsEndpoint": {
+      "type": "object",
+      "properties": {
+        "queue_url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "topic_arn": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "region": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "endpoint_url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "access_key": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "secret_key": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "session_token": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "max_messages": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32"
+        },
+        "wait_time_seconds": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32"
+        }
+      },
+      "additionalProperties": false
+    },
     "KafkaEndpoint": {
       "description": "Kafka endpoint configuration, combining connection and topic details.",
       "type": "object",
@@ -396,7 +469,7 @@
           ]
         },
         "brokers": {
-          "description": "Comma-separated list of Kafka broker URLs (e.g., \"localhost:9092,localhost:9093\").",
+          "description": "Comma-separated list of Kafka broker URLs. Can also be specified using the alias 'url'.",
           "type": "string"
         },
         "username": {
@@ -585,6 +658,20 @@
             "null"
           ]
         },
+        "stream_max_messages": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "stream_max_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
         "prefetch_count": {
           "type": [
             "integer",
@@ -709,16 +796,18 @@
           ]
         },
         "url": {
-          "description": "MongoDB connection string URI. Can contain a comma-separated list of hosts for a replica set.",
+          "description": "MongoDB connection string URI. Can contain a comma-separated list of hosts for a replica set.\nCredentials provided via the separate `username` and `password` fields take precedence over any credentials embedded in the URL.",
           "type": "string"
         },
         "username": {
+          "description": "Optional username. Takes precedence over any credentials embedded in the `url`.\nUse embedded URL credentials for simple one-off connections but prefer explicit username/password fields (or environment-sourced secrets) for clarity and secret management in production.",
           "type": [
             "string",
             "null"
           ]
         },
         "password": {
+          "description": "Optional password. Takes precedence over any credentials embedded in the `url`.\nUse embedded URL credentials for simple one-off connections but prefer explicit username/password fields (or environment-sourced secrets) for clarity and secret management in production.",
           "type": [
             "string",
             "null"

@@ -425,7 +425,9 @@ async fn run_eventloop(
             Ok(event) => match event {
                 EventWrapper::V3(rumqttc::Event::Incoming(rumqttc::Incoming::Publish(p))) => {
                     if let Some(tx) = &message_tx {
+                        let topic = p.topic.clone();
                         let msg = publish_to_canonical_message_v3(p);
+                        trace!(message_id = %format!("{:032x}", msg.message_id), %topic, "Received MQTT v3 message");
                         if tx.send(msg).await.is_err() {
                             break;
                         }
@@ -435,7 +437,9 @@ async fn run_eventloop(
                     if let rumqttc::v5::Event::Incoming(rumqttc::v5::Incoming::Publish(p)) = *event
                     {
                         if let Some(tx) = &message_tx {
+                            let topic_bytes = p.topic.clone();
                             let msg = publish_to_canonical_message_v5(p);
+                            trace!(message_id = %format!("{:032x}", msg.message_id), topic = %String::from_utf8_lossy(&topic_bytes), "Received MQTT v5 message");
                             if tx.send(msg).await.is_err() {
                                 break;
                             }

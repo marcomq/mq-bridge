@@ -242,6 +242,8 @@ fn deserialize_middlewares_from_value(value: serde_json::Value) -> anyhow::Resul
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum EndpointType {
+    #[cfg(feature = "aws")]
+    Aws(AwsEndpoint),
     Kafka(KafkaEndpoint),
     Nats(NatsEndpoint),
     File(String),
@@ -339,6 +341,33 @@ where
         ));
     }
     Ok(value)
+}
+
+// --- AWS Specific Configuration ---
+
+#[cfg(feature = "aws")]
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct AwsEndpoint {
+    pub queue_url: Option<String>,
+    pub topic_arn: Option<String>,
+    #[serde(flatten)]
+    pub config: AwsConfig,
+}
+
+#[cfg(feature = "aws")]
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct AwsConfig {
+    pub region: Option<String>,
+    pub endpoint_url: Option<String>,
+    pub access_key: Option<String>,
+    pub secret_key: Option<String>,
+    pub session_token: Option<String>,
+    pub max_messages: Option<i32>,
+    pub wait_time_seconds: Option<i32>,
 }
 
 // --- Kafka Specific Configuration ---

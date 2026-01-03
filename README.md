@@ -3,7 +3,7 @@
 
 ## Features
 
-*   **Supported Backends**: Kafka, NATS, AMQP (RabbitMQ), MQTT, MongoDB, HTTP, Files, and in-memory channels.
+*   **Supported Backends**: Kafka, NATS, AMQP (RabbitMQ), MQTT, MongoDB, HTTP, Files, AWS (SQS/SNS), and in-memory channels.
 *   **Configuration**: Routes can be defined via YAML, JSON or environment variables.
 *   **Programmable Logic**: Inject custom Rust handlers to transform or filter messages in-flight.
 *   **Middleware**:
@@ -52,6 +52,8 @@ Different backends and modes (`consumer` vs `subscriber`) have different persist
 | | Subscriber | Ephemeral | Unique Client ID per instance. |
 | **MongoDB** | Consumer | Persistent | Documents stored until acknowledged. |
 | | Subscriber | Ephemeral | Change Streams / Polling from current time. |
+| **AWS** | Consumer | Persistent | Uses SQS queues. |
+| | Subscriber | - | Not supported. |
 | **Memory** | All | Ephemeral | Lost on restart. |
 | **File** | All | Persistent | Stored on disk. |
 | **HTTP** | All | Ephemeral | Direct request/response. |
@@ -326,6 +328,21 @@ file_ingest:
       url: "amqp://localhost:5672"
       exchange: "logs"
       queue: "file_logs"
+
+# Route 5: AWS SQS to SNS
+aws_sqs_to_sns:
+  input:
+    aws:
+      # To consume from SNS, subscribe this SQS queue to the SNS topic in AWS Console/Terraform.
+      queue_url: "https://sqs.us-east-1.amazonaws.com/000000000000/my-queue"
+      region: "us-east-1"
+      # Credentials (optional if using env vars or IAM roles)
+      access_key: "test"
+      secret_key: "test"
+  output:
+    aws:
+      topic_arn: "arn:aws:sns:us-east-1:000000000000:my-topic"
+      region: "us-east-1"
 
 # Route 4: MQTT to Switch (Content-based Routing)
 iot_router:
