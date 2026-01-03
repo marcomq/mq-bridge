@@ -51,7 +51,6 @@ async fn ensure_queue_exists() {
 
 pub async fn test_aws_pipeline() {
     setup_logging();
-    std::env::set_var("AWS_EC2_METADATA_DISABLED", "true");
     run_test_with_docker("tests/integration/docker-compose/aws.yml", || async {
         ensure_queue_exists().await;
         let config_yaml = CONFIG_YAML.replace(
@@ -65,7 +64,6 @@ pub async fn test_aws_pipeline() {
 
 pub async fn test_aws_performance_pipeline() {
     setup_logging();
-    std::env::set_var("AWS_EC2_METADATA_DISABLED", "true");
     run_test_with_docker("tests/integration/docker-compose/aws.yml", || async {
         ensure_queue_exists().await;
         let config_yaml = CONFIG_YAML.replace(
@@ -79,7 +77,6 @@ pub async fn test_aws_performance_pipeline() {
 
 pub async fn test_aws_performance_direct() {
     setup_logging();
-    std::env::set_var("AWS_EC2_METADATA_DISABLED", "true");
     run_test_with_docker("tests/integration/docker-compose/aws.yml", || async {
         ensure_queue_exists().await;
 
@@ -88,7 +85,7 @@ pub async fn test_aws_performance_direct() {
             topic_arn: None,
             config: mq_bridge::models::AwsConfig {
                 region: Some("us-east-1".to_string()),
-                endpoint_url: Some("http:/localhost:4566".to_string()),
+                endpoint_url: Some("http://localhost:4566".to_string()),
                 access_key: Some("test".to_string()),
                 secret_key: Some("test".to_string()),
                 ..Default::default()
