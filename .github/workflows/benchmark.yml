@@ -44,9 +44,10 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
+          export CARGO_TERM_COLOR=never
           cargo bench --bench performance_bench --features full -- --output-format bencher | tee raw_output.txt
           # Filter output to only include benchmark results, removing Docker logs and custom prints
-          grep "bench: " raw_output.txt > output.txt
+          awk '/^test / { if ($0 ~ /bench:/) { print $0; name="" } else { name=$2 } } /^bench:/ { if (name != "") { print "test " name " ... " $0; name="" } }' raw_output.txt > output.txt
       
       - name: Store benchmark result
         uses: benchmark-action/github-action-benchmark@v1

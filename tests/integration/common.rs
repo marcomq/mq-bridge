@@ -541,6 +541,7 @@ pub async fn measure_write_performance(
                                 if retryable.is_empty() {
                                     break;
                                 }
+                                eprintln!("Retrying: {}", retryable.len());
                                 messages_to_send =
                                     retryable.into_iter().map(|(msg, _)| msg).collect();
                                 batch_size = messages_to_send.len();
