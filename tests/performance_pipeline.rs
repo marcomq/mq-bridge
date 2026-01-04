@@ -46,4 +46,3 @@ async fn test_mongodb_performance_pipeline() {
 async fn test_mongodb_replica_set_pipeline() {
     integration::mongodb::test_mongodb_replica_set_pipeline().await;
 }
-
