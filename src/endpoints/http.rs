@@ -5,12 +5,15 @@
 use crate::endpoints::create_publisher_from_route;
 use crate::models::HttpConfig;
 use crate::traits::{
-    BoxFuture, CommitFunc, ConsumerError, MessageConsumer, MessagePublisher, PublisherError,
-    ReceivedBatch, Sent, SentBatch,
+    BoxFuture, ConsumerError, MessageConsumer, MessagePublisher, PublisherError, ReceivedBatch,
+    Sent, SentBatch,
 };
+#[cfg(feature = "axum")]
+use crate::traits::{CommitFunc, Received};
 use crate::CanonicalMessage;
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;
+#[cfg(feature = "axum")]
 use axum::{
     body::Bytes,
     extract::State,
@@ -19,33 +22,37 @@ use axum::{
     routing::post,
     Router,
 };
+#[cfg(feature = "axum")]
 use axum_server::{tls_rustls::RustlsConfig, Handle};
 use std::any::Any;
 use std::collections::HashMap;
+#[cfg(feature = "axum")]
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
-use tokio::sync::{mpsc, oneshot, watch};
-use tracing::{info, instrument, trace};
+use tracing::{info, trace};
 
+#[cfg(feature = "axum")]
 type HttpSourceMessage = (CanonicalMessage, CommitFunc);
 
 /// A source that listens for incoming HTTP requests.
+#[cfg(feature = "axum")]
 pub struct HttpConsumer {
-    request_rx: mpsc::Receiver<HttpSourceMessage>,
-    _shutdown_tx: watch::Sender<()>,
+    request_rx: tokio::sync::mpsc::Receiver<HttpSourceMessage>,
+    _shutdown_tx: tokio::sync::watch::Sender<()>,
 }
 
+#[cfg(feature = "axum")]
 #[derive(Clone)]
 struct HttpConsumerState {
-    tx: mpsc::Sender<HttpSourceMessage>,
+    tx: tokio::sync::mpsc::Sender<HttpSourceMessage>,
     response_sink: Option<Arc<dyn MessagePublisher>>,
 }
 
+#[cfg(feature = "axum")]
 impl HttpConsumer {
     pub async fn new(config: &HttpConfig) -> anyhow::Result<Self> {
-        let (request_tx, request_rx) = mpsc::channel::<HttpSourceMessage>(100);
-        let (shutdown_tx, mut shutdown_rx) = watch::channel(());
+        let (request_tx, request_rx) = tokio::sync::mpsc::channel::<HttpSourceMessage>(100);
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(());
 
         let response_sink = if let Some(endpoint) = &config.response_out {
             Some(create_publisher_from_route("http_response_sink", endpoint).await?)
@@ -73,7 +80,7 @@ impl HttpConsumer {
         let tls_config = config.tls.clone();
         let handle = Handle::new();
         // Channel to signal when the server is ready
-        let (ready_tx, ready_rx) = oneshot::channel::<()>();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
 
         tokio::spawn(async move {
             if tls_config.is_tls_server_configured() {
@@ -126,6 +133,7 @@ impl HttpConsumer {
     }
 }
 
+#[cfg(feature = "axum")]
 #[async_trait]
 impl MessageConsumer for HttpConsumer {
     async fn receive_batch(
@@ -149,7 +157,8 @@ impl MessageConsumer for HttpConsumer {
     }
 }
 
-#[instrument(skip_all, fields(http.method = "POST", http.uri = "/"))]
+#[cfg(feature = "axum")]
+#[tracing::instrument(skip_all, fields(http.method = "POST", http.uri = "/"))]
 async fn handle_request(
     State(state): State<HttpConsumerState>,
     headers: HeaderMap,
@@ -172,7 +181,7 @@ async fn handle_request(
     };
 
     // Channel to receive the commit confirmation from the pipeline
-    let (ack_tx, ack_rx) = oneshot::channel::<Option<CanonicalMessage>>();
+    let (ack_tx, ack_rx) = tokio::sync::oneshot::channel::<Option<CanonicalMessage>>();
     let commit = Box::new(move |resp| {
         Box::pin(async move {
             let _ = ack_tx.send(resp);
@@ -188,7 +197,7 @@ async fn handle_request(
     }
 
     // Wait for pipeline to process the message
-    let timeout_duration = Duration::from_secs(30);
+    let timeout_duration = std::time::Duration::from_secs(30);
     match tokio::time::timeout(timeout_duration, async {
         match ack_rx.await {
             Ok(pipeline_response) => {
@@ -219,6 +228,7 @@ async fn handle_request(
     }
 }
 
+#[cfg(feature = "axum")]
 fn make_response(message: Option<CanonicalMessage>) -> Response {
     match message {
         Some(msg) => (
@@ -238,6 +248,7 @@ fn make_response(message: Option<CanonicalMessage>) -> Response {
 }
 
 /// A sink that sends messages to an HTTP endpoint.
+#[cfg(feature = "reqwest")]
 #[derive(Clone)]
 pub struct HttpPublisher {
     client: reqwest::Client,
@@ -245,6 +256,7 @@ pub struct HttpPublisher {
     response_out: Option<Arc<dyn MessagePublisher>>,
 }
 
+#[cfg(feature = "reqwest")]
 impl HttpPublisher {
     pub async fn new(config: &HttpConfig) -> anyhow::Result<Self> {
         let mut client_builder = reqwest::Client::builder();
@@ -280,6 +292,7 @@ impl HttpPublisher {
     }
 }
 
+#[cfg(feature = "reqwest")]
 #[async_trait]
 impl MessagePublisher for HttpPublisher {
     async fn send(&self, message: CanonicalMessage) -> Result<Sent, PublisherError> {
@@ -388,6 +401,7 @@ impl MessagePublisher for HttpPublisher {
 }
 
 #[cfg(test)]
+#[cfg(all(feature = "axum", feature = "reqwest"))]
 mod tests {
     use super::*;
     use crate::models::{Config, EndpointType, MemoryConfig};
