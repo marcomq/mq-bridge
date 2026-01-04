@@ -35,6 +35,22 @@ pub async fn test_mongodb_pipeline() {
     .await;
 }
 
+pub async fn test_mongodb_replica_set_pipeline() {
+    setup_logging();
+    run_test_with_docker("tests/integration/docker-compose/mongodb-replica.yml", || async {
+        let config_yaml = CONFIG_YAML
+            .replace("mongodb://localhost:27017", "mongodb://localhost:27018/?replicaSet=rs0")
+            .replace("memory_to_mongodb", "memory_to_mongodb_rs")
+            .replace("mongodb_to_memory", "mongodb_rs_to_memory")
+            .replace(
+                "{out_capacity}",
+                &(PERF_TEST_MESSAGE_COUNT + 1000).to_string(),
+            );
+        run_pipeline_test("mongodb_rs", &config_yaml).await;
+    })
+    .await;
+}
+
 pub async fn test_mongodb_performance_pipeline() {
     setup_logging();
     run_test_with_docker("tests/integration/docker-compose/mongodb.yml", || async {
@@ -47,13 +63,23 @@ pub async fn test_mongodb_performance_pipeline() {
     .await;
 }
 
-pub async fn test_mongodb_performance_direct() {
+async fn run_mongodb_direct_perf_test_impl(
+    compose_file: &str,
+    url: &str,
+    database: &str,
+    collection_name: &str,
+    test_name: &str,
+) {
     setup_logging();
-    run_test_with_docker("tests/integration/docker-compose/mongodb.yml", || async {
-        let collection_name = "perf_mongodb_direct";
+    let url = url.to_string();
+    let database = database.to_string();
+    let collection_name = collection_name.to_string();
+    let test_name = test_name.to_string();
+
+    run_test_with_docker(compose_file, || async move {
         let config = mq_bridge::models::MongoDbConfig {
-            url: "mongodb://localhost:27017".to_string(),
-            database: "mq_bridge_test_db".to_string(),
+            url,
+            database,
             ..Default::default()
         };
 
@@ -61,23 +87,23 @@ pub async fn test_mongodb_performance_direct() {
         let client = mongodb::Client::with_uri_str(&config.url).await.unwrap();
         client
             .database(&config.database)
-            .collection::<mongodb::bson::Document>(collection_name)
+            .collection::<mongodb::bson::Document>(&collection_name)
             .drop()
             .await
             .ok();
 
         let result = run_direct_perf_test(
-            "MongoDB",
+            &test_name,
             || async {
                 Arc::new(
-                    MongoDbPublisher::new(&config, collection_name)
+                    MongoDbPublisher::new(&config, &collection_name)
                         .await
                         .unwrap(),
                 )
             },
             || async {
                 Arc::new(tokio::sync::Mutex::new(
-                    MongoDbConsumer::new(&config, collection_name)
+                    MongoDbConsumer::new(&config, &collection_name)
                         .await
                         .unwrap(),
                 ))
@@ -87,5 +113,27 @@ pub async fn test_mongodb_performance_direct() {
 
         add_performance_result(result);
     })
+    .await;
+}
+
+pub async fn test_mongodb_performance_direct() {
+    run_mongodb_direct_perf_test_impl(
+        "tests/integration/docker-compose/mongodb.yml",
+        "mongodb://localhost:27017",
+        "mq_bridge_test_db",
+        "perf_mongodb_direct",
+        "MongoDB",
+    )
+    .await;
+}
+
+pub async fn test_mongodb_replica_set_performance_direct() {
+    run_mongodb_direct_perf_test_impl(
+        "tests/integration/docker-compose/mongodb-replica.yml",
+        "mongodb://localhost:27018/?replicaSet=rs0",
+        "mq_bridge_test_db_rs",
+        "perf_mongodb_rs_direct",
+        "MongoDB RS",
+    )
     .await;
 }

@@ -10,6 +10,10 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+permissions:
+  contents: write
+  deployments: write
+
 jobs:
   benchmark:
     name: Performance Benchmarks
@@ -33,6 +37,16 @@ jobs:
             ${{ runner.os }}-cargo-
       
       - name: Run benchmarks
-        run: cargo bench --features full
-        continue-on-error: true  # Benchmarks may vary, don't fail CI
-
+        run: cargo bench --features full -- --output-format bencher | tee output.txt
+      
+      - name: Store benchmark result
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: Rust Benchmark
+          tool: 'cargo'
+          output-file-path: output.txt
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          auto-push: true
+          alert-threshold: '150%'
+          comment-on-alert: true
+          fail-on-alert: false

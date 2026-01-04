@@ -9,12 +9,12 @@ This document outlines the unit testing strategy for mq-bridge.
 ```
 tests/
 ├── integration/          # Integration tests (require Docker)
-│   ├── all_endpoints.rs
 │   ├── kafka.rs
 │   ├── nats.rs
 │   ├── amqp.rs
 │   ├── mqtt.rs
 │   ├── mongodb.rs
+│   ├── aws.rs
 │   ├── memory.rs
 │   └── route.rs
 ├── integration_test.rs   # Main integration test runner
