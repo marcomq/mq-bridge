@@ -49,6 +49,18 @@ jobs:
           # Filter output to only include benchmark results, removing Docker logs and custom prints
           awk '/^test / { if ($0 ~ /bench:/) { print $0; name="" } else { name=$2 } } /^bench:/ { if (name != "") { print "test " name " ... " $0; name="" } }' raw_output.txt > output.txt
       
+      - name: Create gh-pages branch if missing
+        run: |
+          git fetch origin gh-pages || {
+            git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git config --global user.name "github-actions[bot]"
+            git checkout --orphan gh-pages
+            git rm -rf .
+            git commit --allow-empty -m "Initialize gh-pages branch"
+            git push origin gh-pages
+            git checkout ${{ github.sha }}
+          }
+
       - name: Store benchmark result
         uses: benchmark-action/github-action-benchmark@v1
         with:
