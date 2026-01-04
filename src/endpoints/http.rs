@@ -4,12 +4,12 @@
 //  git clone https://github.com/marcomq/mq-bridge
 use crate::endpoints::create_publisher_from_route;
 use crate::models::HttpConfig;
+#[cfg(feature = "axum")]
+use crate::traits::CommitFunc;
 use crate::traits::{
     BoxFuture, ConsumerError, MessageConsumer, MessagePublisher, PublisherError, ReceivedBatch,
     Sent, SentBatch,
 };
-#[cfg(feature = "axum")]
-use crate::traits::CommitFunc;
 use crate::CanonicalMessage;
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;

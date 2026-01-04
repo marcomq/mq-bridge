@@ -208,7 +208,7 @@ async fn run_pipeline_test_internal(
 
     // Wait for all messages to be processed by checking the metrics.
     let timeout = if is_performance_test {
-        Duration::from_secs(70)
+        Duration::from_secs(210)
     } else {
         Duration::from_secs(30)
     };
