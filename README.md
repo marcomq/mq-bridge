@@ -1,9 +1,23 @@
 # mq-bridge
+
+[![Crates.io](https://img.shields.io/crates/v/mq-bridge.svg)](https://crates.io/crates/mq-bridge)
+[![Docs.rs](https://docs.rs/mq-bridge/badge.svg)](https://docs.rs/mq-bridge)
+[![CI](https://github.com/marcomq/mq-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/marcomq/mq-bridge/actions)
+![Linux](https://img.shields.io/badge/Linux-supported-green?logo=linux)
+![Windows](https://img.shields.io/badge/Windows-supported-green?logo=windows)
+![macOS](https://img.shields.io/badge/macOS-supported-green?logo=apple)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+```text
+      ┌──────── mq-bridge ────────┐
+──────┴───────────────────────────┴──────
+```
+
 `mq-bridge` is an asynchronous message library for Rust. It connects different messaging systems, data stores, and protocols. Unlike a classic bridge that simply forwards messages, `mq-bridge` acts as a **programmable integration layer**, allowing for transformation, filtering, handling, events, and complex routing. It is built on Tokio and supports patterns like retries, dead-letter queues, and message deduplication.
 
 ## Features
 
-*   **Supported Backends**: Kafka, NATS, AMQP (RabbitMQ), MQTT, MongoDB, HTTP, Files, and in-memory channels.
+*   **Supported Backends**: Kafka, NATS, AMQP (RabbitMQ), MQTT, MongoDB, HTTP, Files, AWS (SQS/SNS), and in-memory channels.
 *   **Configuration**: Routes can be defined via YAML, JSON or environment variables.
 *   **Programmable Logic**: Inject custom Rust handlers to transform or filter messages in-flight.
 *   **Middleware**:
@@ -52,6 +66,8 @@ Different backends and modes (`consumer` vs `subscriber`) have different persist
 | | Subscriber | Ephemeral | Unique Client ID per instance. |
 | **MongoDB** | Consumer | Persistent | Documents stored until acknowledged. |
 | | Subscriber | Ephemeral | Change Streams / Polling from current time. |
+| **AWS** | Consumer | Persistent | Uses SQS queues. |
+| | Subscriber | - | Not supported. |
 | **Memory** | All | Ephemeral | Lost on restart. |
 | **File** | All | Persistent | Stored on disk. |
 | **HTTP** | All | Ephemeral | Direct request/response. |
@@ -326,6 +342,21 @@ file_ingest:
       url: "amqp://localhost:5672"
       exchange: "logs"
       queue: "file_logs"
+
+# Route 5: AWS SQS to SNS
+aws_sqs_to_sns:
+  input:
+    aws:
+      # To consume from SNS, subscribe this SQS queue to the SNS topic in AWS Console/Terraform.
+      queue_url: "https://sqs.us-east-1.amazonaws.com/000000000000/my-queue"
+      region: "us-east-1"
+      # Credentials (optional if using env vars or IAM roles)
+      access_key: "test"
+      secret_key: "test"
+  output:
+    aws:
+      topic_arn: "arn:aws:sns:us-east-1:000000000000:my-topic"
+      region: "us-east-1"
 
 # Route 4: MQTT to Switch (Content-based Routing)
 iot_router:

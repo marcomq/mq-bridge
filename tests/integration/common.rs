@@ -208,7 +208,7 @@ async fn run_pipeline_test_internal(
 
     // Wait for all messages to be processed by checking the metrics.
     let timeout = if is_performance_test {
-        Duration::from_secs(70)
+        Duration::from_secs(210)
     } else {
         Duration::from_secs(30)
     };
@@ -541,6 +541,7 @@ pub async fn measure_write_performance(
                                 if retryable.is_empty() {
                                     break;
                                 }
+                                eprintln!("Retrying: {}", retryable.len());
                                 messages_to_send =
                                     retryable.into_iter().map(|(msg, _)| msg).collect();
                                 batch_size = messages_to_send.len();

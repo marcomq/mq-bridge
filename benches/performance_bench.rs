@@ -24,14 +24,31 @@ static BENCH_RESULTS: Lazy<Mutex<HashMap<String, PerformanceResult>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
 fn should_run(backend_name: &str) -> bool {
-    let args: Vec<String> = std::env::args()
-        .skip(1)
-        .filter(|s| !s.starts_with('-'))
-        .collect();
-    if args.is_empty() {
+    let mut filters = Vec::new();
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        // Only skip values for flags that are known to take values
+        if arg == "--output-format"
+            || arg == "--baseline"
+            || arg == "--save-baseline"
+            || arg == "--load-baseline"
+            || arg == "--profile-time"
+        {
+            args.next();
+            continue;
+        }
+        if arg.starts_with("--") {
+            continue;
+        }
+        if !arg.starts_with('-') {
+            filters.push(arg);
+        }
+    }
+    if filters.is_empty() {
         return true;
     }
-    args.iter()
+    filters
+        .iter()
         .any(|arg| backend_name.contains(arg) || arg.contains(backend_name))
 }
 
@@ -210,6 +227,65 @@ mod mqtt_helper {
     }
 }
 
+#[cfg(feature = "aws")]
+mod aws_helper {
+    use super::*;
+    use aws_sdk_sns::config::Credentials;
+    use mq_bridge::endpoints::aws::{AwsConsumer, AwsPublisher};
+    use mq_bridge::models::{AwsConfig, AwsEndpoint};
+
+    async fn ensure_queue_exists() -> String {
+        let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .region(aws_config::Region::new("us-east-1"))
+            .endpoint_url("http://localhost:4566")
+            .credentials_provider(Credentials::new("test", "test", None, None, "static"))
+            .load()
+            .await;
+        let client = aws_sdk_sqs::Client::new(&config);
+        let resp = client
+            .create_queue()
+            .queue_name("perf-test-queue")
+            .send()
+            .await
+            .expect("Failed to create SQS queue");
+        let queue_url = resp.queue_url.expect("SQS queue URL was None");
+        client
+            .purge_queue()
+            .queue_url(&queue_url)
+            .send()
+            .await
+            .expect("Failed to purge SQS queue");
+        queue_url
+    }
+
+    fn get_endpoint(queue_url: Option<String>) -> AwsEndpoint {
+        AwsEndpoint {
+            queue_url: Some(queue_url.unwrap_or_else(|| {
+                "http://localhost:4566/000000000000/perf-test-queue".to_string()
+            })),
+            topic_arn: None,
+            config: AwsConfig {
+                region: Some("us-east-1".to_string()),
+                endpoint_url: Some("http://localhost:4566".to_string()),
+                access_key: Some("test".to_string()),
+                secret_key: Some("test".to_string()),
+                ..Default::default()
+            },
+        }
+    }
+
+    pub async fn create_publisher() -> Arc<dyn MessagePublisher> {
+        let url = ensure_queue_exists().await;
+        Arc::new(AwsPublisher::new(&get_endpoint(Some(url))).await.unwrap())
+    }
+
+    pub async fn create_consumer() -> Arc<Mutex<dyn MessageConsumer>> {
+        Arc::new(Mutex::new(
+            AwsConsumer::new(&get_endpoint(None)).await.unwrap(),
+        ))
+    }
+}
+
 fn performance_benchmarks(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
 
@@ -378,6 +454,12 @@ fn performance_benchmarks(c: &mut Criterion) {
         };
     }
 
+    bench_backend!(
+        "aws",
+        "aws",
+        "tests/integration/docker-compose/aws.yml",
+        aws_helper
+    );
     bench_backend!(
         "kafka",
         "kafka",

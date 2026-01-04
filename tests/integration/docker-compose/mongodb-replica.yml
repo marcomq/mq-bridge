@@ -1,0 +1,15 @@
+services:
+  mongodb-rs:
+    image: mongo:8.2
+    container_name: mongodb-rs-itest-mq-bridge
+    ports:
+      - "27018:27018"
+    command: ["--replSet", "rs0", "--bind_ip_all", "--port", "27018"]
+    healthcheck:
+      # Try to initiate the replica set. If it fails (e.g. already initiated), check status.
+      # We explicitly set the host to localhost:27018 so the driver (running on host) matches the member config.
+      test: echo "try { rs.initiate({_id:'rs0',members:[{_id:0,host:'localhost:27018'}]}) } catch(e) { rs.status().ok }" | mongosh --port 27018 --quiet
+      interval: 2s
+      timeout: 10s
+      retries: 10
+      start_period: 5s

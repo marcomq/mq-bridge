@@ -9,7 +9,7 @@ mod integration;
 // cargo test --package mq-bridge --test memory_test --release -- test_memory_to_memory_pipeline --exact --nocapture --ignored
 
 #[tokio::test]
-#[ignore] // This is a performance test, run it explicitly
+#[ignore = "Performance test"] // This is a performance test, run it explicitly
 async fn test_memory_to_memory_pipeline() {
     integration::common::setup_logging();
 

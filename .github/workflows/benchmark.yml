@@ -10,6 +10,10 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+permissions:
+  contents: write
+  deployments: write
+
 jobs:
   benchmark:
     name: Performance Benchmarks
@@ -32,7 +36,39 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
       
-      - name: Run benchmarks
-        run: cargo bench --features full
-        continue-on-error: true  # Benchmarks may vary, don't fail CI
+      - name: Pre-pull docker images
+        run: |
+          find tests/integration/docker-compose -name "*.yml" | xargs -P 4 -I {} docker compose -f {} pull -q
 
+      - name: Run benchmarks
+        shell: bash
+        run: |
+          set -o pipefail
+          export CARGO_TERM_COLOR=never
+          cargo bench --bench performance_bench --features full -- --output-format bencher | tee raw_output.txt
+          # Filter output to only include benchmark results, removing Docker logs and custom prints
+          awk '/^test / { if ($0 ~ /bench:/) { print $0; name="" } else { name=$2 } } /^bench:/ { if (name != "") { print "test " name " ... " $0; name="" } }' raw_output.txt > output.txt
+      
+      - name: Create gh-pages branch if missing
+        run: |
+          git fetch origin gh-pages || {
+            git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git config --global user.name "github-actions[bot]"
+            git checkout --orphan gh-pages
+            git rm -rf .
+            git commit --allow-empty -m "Initialize gh-pages branch"
+            git push origin gh-pages
+            git checkout ${{ github.sha }}
+          }
+
+      - name: Store benchmark result
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: Rust Benchmark
+          tool: 'cargo'
+          output-file-path: output.txt
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          auto-push: true
+          alert-threshold: '150%'
+          comment-on-alert: true
+          fail-on-alert: false

@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, dev]
+    branches: [main]
   pull_request:
     branches: [main, dev]
 
@@ -56,6 +56,7 @@ jobs:
           - "mqtt"
           - "mongodb"
           - "http"
+          - "aws"
     steps:
       - uses: actions/checkout@v4
       
@@ -133,11 +134,23 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
       
+      - name: Pre-pull docker images
+        run: |
+          find tests/integration/docker-compose -name "*.yml" | xargs -P 4 -I {} docker compose -f {} pull -q
+
+      - name: Run armature integration tests
+        run: |
+          cargo test --test armature_integration  -- --ignored --nocapture --test-threads=1 
+
       - name: Run integration tests
         run: |
           cargo test --test integration_test --features full --release -- --nocapture --test-threads=1
         continue-on-error: true  # Integration tests may be flaky, don't fail CI
 
+      - name: Run integration performance tests
+        run: |
+          cargo test --test integration_test --features full --release -- test_all_performance_direct --ignored --nocapture --test-threads=1 
+        continue-on-error: true  # Integration tests may be flaky, don't fail CI
   # Documentation
   docs:
     name: Documentation

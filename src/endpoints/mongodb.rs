@@ -241,7 +241,7 @@ impl MongoDbConsumer {
             }
             Err(e) if matches!(*e.kind, ErrorKind::Command(ref cmd_err) if cmd_err.code == 40573) =>
             {
-                warn!("MongoDB is a single instance (ChangeStream support check failed). Falling back to polling for consumer.");
+                info!("MongoDB is a single instance (ChangeStream support check failed). Falling back to polling for consumer.");
                 None
             }
             Err(e) => return Err(e.into()), // For any other error, we propagate it.
@@ -263,70 +263,63 @@ impl MongoDbConsumer {
 impl MessageConsumer for MongoDbConsumer {
     async fn receive(&mut self) -> Result<Received, ConsumerError> {
         loop {
-            // This outer loop handles both polling and change stream logic.
-            if let Some(stream_mutex) = &self.change_stream {
-                // --- Change Stream Path ---
-                let mut stream = stream_mutex.lock().await;
-                if let Some(event_result) = stream.next().await {
-                    let event = event_result.context("Error reading from change stream")?;
-                    if let Some(id_val) = event.full_document.as_ref().and_then(|d| d.get("_id")) {
-                        // Attempt to claim the specific document from the event.
-                        // Retry a few times to handle replication lag/visibility delays.
-                        for _ in 0..3 {
-                            if let Some(claimed) =
-                                self.try_claim_document(doc! {"_id": id_val}).await?
-                            {
-                                return Ok(claimed);
-                            }
-                            tokio::time::sleep(Duration::from_millis(10)).await;
-                        }
-                        // If we failed, another consumer got it. Log and wait for the next event.
-                        warn!(mongodb_id = %id_val, "Failed to claim document from change stream event after retries. Another consumer may have claimed it.");
-                    }
-                    continue; // Go to the next change stream event
-                } else {
-                    return Err(anyhow!("MongoDB change stream ended unexpectedly").into());
-                }
-            }
-
-            // --- Polling Path ---
-            // This path is used for standalone instances or as a fallback.
-            // We loop here to immediately retry claiming another document if the first
-            // attempt failed due to a race with another consumer.
+            // Always try to poll for a single document first using the efficient atomic operation.
+            // This works for both standalone and replica sets and ensures we drain backlogs fast.
+            // Unlike receive_batch which uses a 3-step process (find, update, find),
+            // try_claim_document uses find_one_and_update which is a single round-trip.
             if let Some(claimed) = self.try_claim_document(doc! {}).await? {
                 return Ok(claimed);
             }
+
+            // If no document found, wait.
+            if let Some(stream_mutex) = &self.change_stream {
+                // --- Change Stream Path ---
+                // Wait for an event to wake us up.
+                let mut stream = stream_mutex.lock().await;
+                match stream.next().await {
+                    Some(Ok(_)) => continue, // Event received, loop back to try claiming documents.
+                    Some(Err(e)) => return Err(ConsumerError::Connection(e.into())),
+                    None => return Err(anyhow!("MongoDB change stream ended unexpectedly").into()),
+                }
+            }
+
+            // --- Polling Path (Standalone) ---
             tokio::time::sleep(self.polling_interval).await;
         }
     }
 
     async fn receive_batch(&mut self, max_messages: usize) -> Result<ReceivedBatch, ConsumerError> {
         loop {
-            if self.change_stream.is_some() {
-                let received = self.receive().await?;
-                let commit_batch = crate::traits::into_batch_commit_func(received.commit);
-                return Ok(ReceivedBatch {
-                    messages: vec![received.message],
-                    commit: commit_batch,
-                });
-            }
-
-            // --- Polling Path (Optimized for Batch) ---
+            // Always try to poll for a batch first. This ensures high throughput for backlogs
+            // and works for both standalone (polling) and replica sets (hybrid).
             let now = SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .context("System time is before UNIX EPOCH")?
                 .as_secs() as i64;
             let lock_duration_secs = 60;
             let locked_until = now + lock_duration_secs;
+
             let claimed_docs = self
                 .find_and_claim_documents(doc! {}, max_messages, now, locked_until)
                 .await?;
 
-            if claimed_docs.is_empty() {
-                tokio::time::sleep(self.polling_interval).await;
-            } else {
+            if !claimed_docs.is_empty() {
                 let (messages, commit) = self.process_claimed_documents(claimed_docs)?;
                 return Ok(ReceivedBatch { messages, commit });
+            }
+
+            // If no documents found, wait before retrying.
+            if let Some(stream_mutex) = &self.change_stream {
+                // Replica Set: Wait for a change stream event to wake us up.
+                let mut stream = stream_mutex.lock().await;
+                match stream.next().await {
+                    Some(Ok(_)) => {} // Event received, loop back to try claiming documents.
+                    Some(Err(e)) => return Err(ConsumerError::Connection(e.into())),
+                    None => return Err(anyhow!("MongoDB change stream ended unexpectedly").into()),
+                }
+            } else {
+                // Standalone: Sleep for polling interval.
+                tokio::time::sleep(self.polling_interval).await;
             }
         }
     }
@@ -438,9 +431,20 @@ impl MongoDbConsumer {
                     .get("_id")
                     .cloned()
                     .ok_or_else(|| anyhow!("Document missing _id"))?;
-                let msg = match mongodb::bson::from_document::<MongoMessageRaw>(doc.clone()) {
-                    Ok(raw_msg) => raw_msg.try_into().unwrap_or(document_to_canonical(doc)?),
-                    Err(_) => document_to_canonical(doc)?,
+
+                // Optimization: Avoid cloning the document (which copies the payload) if it looks like a standard message.
+                // We assume that if 'payload' is a Binary, it is a standard message.
+                let is_standard_msg = doc
+                    .get("payload")
+                    .map(|b| matches!(b, Bson::Binary(_)))
+                    .unwrap_or(false);
+                let msg = if is_standard_msg {
+                    match mongodb::bson::from_document::<MongoMessageRaw>(doc.clone()) {
+                        Ok(raw_msg) => raw_msg.try_into().unwrap_or(document_to_canonical(doc)?),
+                        Err(_) => document_to_canonical(doc)?,
+                    }
+                } else {
+                    document_to_canonical(doc)?
                 };
 
                 let reply_collection_name = msg.metadata.get("reply_to").cloned();
@@ -520,9 +524,17 @@ impl MongoDbConsumer {
                 .get("_id")
                 .cloned()
                 .ok_or_else(|| anyhow!("Document missing _id"))?;
-            let msg = match mongodb::bson::from_document::<MongoMessageRaw>(doc.clone()) {
-                Ok(raw_msg) => raw_msg.try_into().unwrap_or(document_to_canonical(doc)?),
-                Err(_) => document_to_canonical(doc)?,
+
+            let is_standard_msg = doc
+                .get("payload")
+                .map(|b| matches!(b, Bson::Binary(_)))
+                .unwrap_or(false);
+            let msg = if is_standard_msg {
+                mongodb::bson::from_document::<MongoMessageRaw>(doc)
+                    .map_err(|e| anyhow!("Failed to parse standard MongoDB message: {}", e))?
+                    .try_into()?
+            } else {
+                document_to_canonical(doc)?
             };
             reply_infos.push(msg.metadata.get("reply_to").cloned());
             messages.push(msg);
@@ -625,7 +637,7 @@ impl MongoDbSubscriber {
             }
             Err(e) if matches!(*e.kind, ErrorKind::Command(ref cmd_err) if cmd_err.code == 40573) =>
             {
-                warn!("MongoDB is a single instance (ChangeStream support check failed). Falling back to polling for subscriber.");
+                info!("MongoDB is a single instance (ChangeStream support check failed). Falling back to polling for subscriber.");
 
                 // Find the last ID to start consuming from "now"
                 let last_doc = collection
