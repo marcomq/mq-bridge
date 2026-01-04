@@ -4,7 +4,9 @@
 mod integration;
 
 fn should_run(test_name: &str) -> bool {
-    let filter = std::env::var("MQB_TEST_BACKEND").unwrap_or_default().to_lowercase();
+    let filter = std::env::var("MQB_TEST_BACKEND")
+        .unwrap_or_default()
+        .to_lowercase();
     if filter.is_empty() {
         return true;
     }
