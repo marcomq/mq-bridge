@@ -24,14 +24,22 @@ static BENCH_RESULTS: Lazy<Mutex<HashMap<String, PerformanceResult>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
 fn should_run(backend_name: &str) -> bool {
-    let args: Vec<String> = std::env::args()
-        .skip(1)
-        .filter(|s| !s.starts_with('-'))
-        .collect();
-    if args.is_empty() {
+    let mut filters = Vec::new();
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        if arg.starts_with("--") {
+            // This is a criterion argument, skip its value as well.
+            args.next();
+            continue;
+        }
+        if !arg.starts_with('-') {
+            filters.push(arg);
+        }
+    }
+    if filters.is_empty() {
         return true;
     }
-    args.iter()
+    filters.iter()
         .any(|arg| backend_name.contains(arg) || arg.contains(backend_name))
 }
 

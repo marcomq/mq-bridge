@@ -36,6 +36,10 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
       
+      - name: Pre-pull docker images
+        run: |
+          find tests/integration/docker-compose -name "*.yml" | xargs -P 4 -I {} docker compose -f {} pull -q
+
       - name: Run benchmarks
         run: cargo bench --features full -- --output-format bencher | tee output.txt
       
