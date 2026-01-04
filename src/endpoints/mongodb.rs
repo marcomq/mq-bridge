@@ -439,9 +439,10 @@ impl MongoDbConsumer {
                     .map(|b| matches!(b, Bson::Binary(_)))
                     .unwrap_or(false);
                 let msg = if is_standard_msg {
-                    mongodb::bson::from_document::<MongoMessageRaw>(doc)
-                        .map_err(|e| anyhow!("Failed to parse standard MongoDB message: {}", e))?
-                        .try_into()?
+                    match mongodb::bson::from_document::<MongoMessageRaw>(doc.clone()) {
+                        Ok(raw_msg) => raw_msg.try_into().unwrap_or(document_to_canonical(doc)?),
+                        Err(_) => document_to_canonical(doc)?,
+                    }
                 } else {
                     document_to_canonical(doc)?
                 };
