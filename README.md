@@ -1,4 +1,18 @@
 # mq-bridge
+
+[![Crates.io](https://img.shields.io/crates/v/mq-bridge.svg)](https://crates.io/crates/mq-bridge)
+[![Docs.rs](https://docs.rs/mq-bridge/badge.svg)](https://docs.rs/mq-bridge)
+[![CI](https://github.com/marcomq/mq-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/marcomq/mq-bridge/actions)
+![Linux](https://img.shields.io/badge/Linux-supported-green?logo=linux)
+![Windows](https://img.shields.io/badge/Windows-supported-green?logo=windows)
+![macOS](https://img.shields.io/badge/macOS-supported-green?logo=apple)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+```text
+      ┌──────── mq-bridge ────────┐
+──────┴───────────────────────────┴──────
+```
+
 `mq-bridge` is an asynchronous message library for Rust. It connects different messaging systems, data stores, and protocols. Unlike a classic bridge that simply forwards messages, `mq-bridge` acts as a **programmable integration layer**, allowing for transformation, filtering, handling, events, and complex routing. It is built on Tokio and supports patterns like retries, dead-letter queues, and message deduplication.
 
 ## Features

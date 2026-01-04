@@ -41,7 +41,10 @@ jobs:
           find tests/integration/docker-compose -name "*.yml" | xargs -P 4 -I {} docker compose -f {} pull -q
 
       - name: Run benchmarks
-        run: cargo bench --features full -- --output-format bencher | tee output.txt
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo bench --bench performance_bench --features full -- --output-format bencher | tee output.txt
       
       - name: Store benchmark result
         uses: benchmark-action/github-action-benchmark@v1

@@ -27,9 +27,17 @@ fn should_run(backend_name: &str) -> bool {
     let mut filters = Vec::new();
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
-        if arg.starts_with("--") {
-            // This is a criterion argument, skip its value as well.
+        // Only skip values for flags that are known to take values
+        if arg == "--output-format"
+            || arg == "--baseline"
+            || arg == "--save-baseline"
+            || arg == "--load-baseline"
+            || arg == "--profile-time"
+        {
             args.next();
+            continue;
+        }
+        if arg.starts_with("--") {
             continue;
         }
         if !arg.starts_with('-') {
