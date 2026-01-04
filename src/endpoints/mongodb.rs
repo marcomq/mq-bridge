@@ -241,7 +241,7 @@ impl MongoDbConsumer {
             }
             Err(e) if matches!(*e.kind, ErrorKind::Command(ref cmd_err) if cmd_err.code == 40573) =>
             {
-                warn!("MongoDB is a single instance (ChangeStream support check failed). Falling back to polling for consumer.");
+                info!("MongoDB is a single instance (ChangeStream support check failed). Falling back to polling for consumer.");
                 None
             }
             Err(e) => return Err(e.into()), // For any other error, we propagate it.
@@ -636,7 +636,7 @@ impl MongoDbSubscriber {
             }
             Err(e) if matches!(*e.kind, ErrorKind::Command(ref cmd_err) if cmd_err.code == 40573) =>
             {
-                warn!("MongoDB is a single instance (ChangeStream support check failed). Falling back to polling for subscriber.");
+                info!("MongoDB is a single instance (ChangeStream support check failed). Falling back to polling for subscriber.");
 
                 // Find the last ID to start consuming from "now"
                 let last_doc = collection
