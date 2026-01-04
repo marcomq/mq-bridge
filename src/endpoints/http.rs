@@ -9,7 +9,7 @@ use crate::traits::{
     Sent, SentBatch,
 };
 #[cfg(feature = "axum")]
-use crate::traits::{CommitFunc, Received};
+use crate::traits::CommitFunc;
 use crate::CanonicalMessage;
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;
