@@ -39,7 +39,8 @@ fn should_run(backend_name: &str) -> bool {
     if filters.is_empty() {
         return true;
     }
-    filters.iter()
+    filters
+        .iter()
         .any(|arg| backend_name.contains(arg) || arg.contains(backend_name))
 }
 
