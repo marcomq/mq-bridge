@@ -26,6 +26,8 @@ pub mod null;
 pub mod response;
 pub mod static_endpoint;
 pub mod switch;
+#[cfg(feature = "zeromq")]
+pub mod zeromq;
 use crate::middleware::apply_middlewares_to_consumer;
 use crate::models::{Endpoint, EndpointType};
 use crate::traits::{BoxFuture, MessageConsumer, MessagePublisher};
@@ -128,6 +130,14 @@ async fn create_base_consumer(
                 Ok(Box::new(
                     ibm_mq::create_ibm_mq_consumer(route_name, cfg).await?,
                 ))
+            }
+        }
+        #[cfg(feature = "zeromq")]
+        EndpointType::ZeroMq(cfg) => {
+            if endpoint.mode == crate::models::ConsumerMode::Subscribe {
+                Ok(Box::new(zeromq::ZeroMqSubscriber::new(cfg).await?))
+            } else {
+                Ok(Box::new(zeromq::ZeroMqConsumer::new(cfg).await?))
             }
         }
         EndpointType::File(path) => {
@@ -274,6 +284,10 @@ async fn create_base_publisher(
         EndpointType::IbmMq(cfg) => Ok(Box::new(
             ibm_mq::create_ibm_mq_publisher(route_name, cfg).await?,
         ) as Box<dyn MessagePublisher>),
+        #[cfg(feature = "zeromq")]
+        EndpointType::ZeroMq(cfg) => {
+            Ok(Box::new(zeromq::ZeroMqPublisher::new(cfg).await?) as Box<dyn MessagePublisher>)
+        }
         #[cfg(any(feature = "http-client", feature = "http-server"))]
         EndpointType::Http(cfg) => {
             #[cfg(feature = "reqwest")]

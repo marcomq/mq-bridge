@@ -164,6 +164,17 @@
         {
           "type": "object",
           "properties": {
+            "zeromq": {
+              "$ref": "#/$defs/ZeroMqEndpoint"
+            }
+          },
+          "required": [
+            "zeromq"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
             "http": {
               "$ref": "#/$defs/HttpEndpoint"
             }
@@ -783,6 +794,40 @@
       "additionalProperties": false,
       "required": [
         "url"
+      ]
+    },
+    "ZeroMqEndpoint": {
+      "type": "object",
+      "properties": {
+        "topic": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "url": {
+          "type": "string"
+        },
+        "socket_type": {
+          "$ref": "#/$defs/ZeroMqSocketType"
+        },
+        "bind": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "url"
+      ]
+    },
+    "ZeroMqSocketType": {
+      "type": "string",
+      "enum": [
+        "push",
+        "pull",
+        "pub",
+        "sub"
       ]
     },
     "MongoDbEndpoint": {

@@ -1,6 +1,6 @@
 [package]
 name = "mq-bridge"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2021"
 description = "An asynchronous message bridging library connecting Kafka, MQTT, AMQP, NATS, MongoDB, HTTP, and more."
 repository = "https://github.com/marcomq/mq-bridge"
@@ -66,6 +66,9 @@ aws-config = { version = "1.8.12", optional = true, features = ["behavior-versio
 aws-sdk-sqs = { version = "1.91", optional = true }
 aws-sdk-sns = { version = "1.92", optional = true }
 
+# ZeroMQ
+zeromq = { version = "0.4", optional = true }
+
 url = { version = "2.5", optional = true }
 
 # Memory (for testing)
@@ -75,12 +78,14 @@ schemars = { version = "1.2", optional = true }
 
 [features]
 default = []
-full = ["mongodb", "kafka", "amqp", "nats", "mqtt", "http", "metrics", "dedup", "aws"]
+full = ["mongodb", "kafka", "amqp", "nats", "mqtt", "http", "metrics", "dedup", "aws", "zeromq"]
 
 # Functionality features
 dedup = ["sled"]
 metrics = ["dep:metrics"]
 
+# Generate Schema file
+schema = ["dep:schemars"]
 
 # Endpoint features
 kafka = ["rdkafka", "async-stream"]
@@ -91,9 +96,9 @@ mqtt = ["rumqttc", "rustls", "tokio-rustls", "rustls-pemfile", "url"]
 http = ["http-client", "http-server"]
 http-client = ["reqwest", "rustls", "tokio-rustls", "rustls-pemfile"]
 http-server = ["axum", "axum-server", "rustls", "tokio-rustls", "rustls-pemfile"]
-schema = ["dep:schemars"]
 aws = ["aws-config", "aws-sdk-sqs", "aws-sdk-sns"]
 ibm-mq = ["mqi"]
+zeromq = ["dep:zeromq"]
 
 [dev-dependencies]
 serde_yaml_ng = "0.10.0"

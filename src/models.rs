@@ -254,6 +254,7 @@ pub enum EndpointType {
     Mqtt(MqttEndpoint),
     IbmMq(IbmMqEndpoint),
     Http(HttpEndpoint),
+    ZeroMq(ZeroMqEndpoint),
     Fanout(Vec<Endpoint>),
     Switch(SwitchConfig),
     Response(ResponseConfig),
@@ -563,6 +564,15 @@ pub struct MqttConfig {
     pub protocol: MqttProtocol,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum MqttProtocol {
+    #[default]
+    V5,
+    V3,
+}
+
 // --- IBM MQ Specific Configuration ---
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -591,13 +601,40 @@ pub struct IbmMqConfig {
     pub tls: TlsConfig,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
+// --- ZeroMQ Specific Configuration ---
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct ZeroMqEndpoint {
+    pub topic: Option<String>,
+    #[serde(flatten)]
+    pub config: ZeroMqConfig,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct ZeroMqConfig {
+    pub url: String,
+    #[serde(default)]
+    pub socket_type: Option<ZeroMqSocketType>,
+    #[serde(default)]
+    pub bind: bool,
+    #[serde(default)]
+    pub internal_buffer_size: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
-pub enum MqttProtocol {
-    #[default]
-    V5,
-    V3,
+pub enum ZeroMqSocketType {
+    Push,
+    Pull,
+    Pub,
+    Sub,
+    Req,
+    Rep,
 }
 
 // --- HTTP Specific Configuration ---

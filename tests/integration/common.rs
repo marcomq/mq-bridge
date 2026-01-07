@@ -1,6 +1,5 @@
 #![allow(dead_code)] // This module contains helpers used by various integration tests.
 use async_channel::{bounded, Receiver, Sender};
-use chrono;
 use mq_bridge::traits::{ConsumerError, MessageConsumer, PublisherError, ReceivedBatch, SentBatch};
 use mq_bridge::traits::{MessagePublisher, Received};
 use mq_bridge::{CanonicalMessage, Route};
@@ -425,9 +424,13 @@ where
         single_read_performance: PERF_TEST_SINGLE_MESSAGE_COUNT as f64 / single_read_perf,
     }
 }
+
+static STATIC_PAYLOAD: Lazy<Vec<u8>> = Lazy::new(|| {
+    serde_json::to_vec(&json!({ "perf_test": true, "static": true })).unwrap()
+});
+
 pub fn generate_message() -> CanonicalMessage {
-    CanonicalMessage::from_json(json!({ "perf_test": true, "ts": chrono::Utc::now().to_rfc3339() }))
-        .unwrap()
+    CanonicalMessage::new(STATIC_PAYLOAD.clone(), None)
 }
 
 /// Measure the performance of writing messages to a publisher.
@@ -465,15 +468,21 @@ pub async fn measure_write_performance(
         bounded(batch_size * concurrency * 2);
 
     let final_count = Arc::new(AtomicUsize::new(0));
-    tokio::spawn(async move {
-        for _ in 0..num_messages {
-            // The test will hang if the receiver is dropped, so we ignore the error.
-            if tx.send(generate_message()).await.is_err() {
-                break;
+
+    // Spawn multiple generators to ensure we don't bottleneck on message creation.
+    let generator_count = (concurrency / 10).clamp(1, 8);
+    for i in 0..generator_count {
+        let tx = tx.clone();
+        let count = num_messages / generator_count + if i < num_messages % generator_count { 1 } else { 0 };
+        tokio::spawn(async move {
+            for _ in 0..count {
+                if tx.send(generate_message()).await.is_err() {
+                    break;
+                }
             }
-        }
-        tx.close();
-    });
+        });
+    }
+    drop(tx); // Close the original sender so the channel closes when all generators are done.
 
     let start_time = Instant::now();
     let mut tasks = tokio::task::JoinSet::new();
@@ -690,14 +699,20 @@ pub async fn measure_single_write_performance(
     let (tx, rx): (Sender<CanonicalMessage>, Receiver<CanonicalMessage>) = bounded(concurrency * 2);
 
     let final_count = Arc::new(AtomicUsize::new(0));
-    tokio::spawn(async move {
-        for _ in 0..num_messages {
-            if tx.send(generate_message()).await.is_err() {
-                break;
+
+    let generator_count = (concurrency / 10).clamp(1, 8);
+    for i in 0..generator_count {
+        let tx = tx.clone();
+        let count = num_messages / generator_count + if i < num_messages % generator_count { 1 } else { 0 };
+        tokio::spawn(async move {
+            for _ in 0..count {
+                if tx.send(generate_message()).await.is_err() {
+                    break;
+                }
             }
-        }
-        tx.close();
-    });
+        });
+    }
+    drop(tx);
 
     let start_time = Instant::now();
     let mut tasks = tokio::task::JoinSet::new();

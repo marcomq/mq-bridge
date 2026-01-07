@@ -17,7 +17,7 @@
 
 ## Features
 
-*   **Supported Backends**: Kafka, NATS, AMQP (RabbitMQ), MQTT, MongoDB, HTTP, Files, AWS (SQS/SNS), IBM MQ, and in-memory channels.
+*   **Supported Backends**: Kafka, NATS, AMQP (RabbitMQ), MQTT, MongoDB, HTTP, ZeroMQ, Files, AWS (SQS/SNS), IBM MQ, and in-memory channels.
     > **Note**: IBM MQ is not included in the `full` feature set. It requires the `ibm-mq` feature and the IBM MQ Client library. See [mqi crate](https://crates.io/crates/mqi/) for installation details.
 *   **Configuration**: Routes can be defined via YAML, JSON or environment variables.
 *   **Programmable Logic**: Inject custom Rust handlers to transform or filter messages in-flight.
@@ -86,6 +86,8 @@ Different backends and modes (`consumer` vs `subscriber`) have different persist
 | **Memory** | All | Ephemeral | Lost on restart. |
 | **File** | All | Persistent | Stored on disk. |
 | **HTTP** | All | Ephemeral | Direct request/response. |
+| **ZeroMQ** | Consumer | Ephemeral | Uses PULL/REP sockets. |
+| | Subscriber | Ephemeral | Uses SUB sockets. |
 
 ## Usage
 
@@ -405,6 +407,19 @@ iot_router:
       default:
         memory:
           topic: "dropped_sensors"
+
+# Route 7: ZeroMQ PUSH/PULL
+zeromq_pipeline:
+  input:
+    zeromq:
+      url: "tcp://0.0.0.0:5555"
+      socket_type: "pull"
+      bind: true
+  output:
+    zeromq:
+      url: "tcp://localhost:5556"
+      socket_type: "push"
+      bind: false
 ```
 
 ## Configuration Details
