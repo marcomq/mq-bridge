@@ -106,7 +106,7 @@ jobs:
             ${{ runner.os }}-cargo-
       
       - name: Run unit tests
-        run: cargo test --lib --all-features
+        run: cargo test --lib --features=full 
 
   # Integration tests (requires Docker)
   integration-test:
