@@ -274,9 +274,6 @@ async fn create_base_publisher(
         EndpointType::IbmMq(cfg) => Ok(Box::new(
             ibm_mq::create_ibm_mq_publisher(route_name, cfg).await?,
         ) as Box<dyn MessagePublisher>),
-        EndpointType::File(cfg) => {
-            Ok(Box::new(file::FilePublisher::new(cfg).await?) as Box<dyn MessagePublisher>)
-        }
         #[cfg(any(feature = "http-client", feature = "http-server"))]
         EndpointType::Http(cfg) => {
             #[cfg(feature = "reqwest")]
@@ -292,12 +289,6 @@ async fn create_base_publisher(
                 Err(anyhow!("HTTP publisher requires the 'reqwest' feature"))
             }
         }
-        EndpointType::Static(cfg) => Ok(Box::new(static_endpoint::StaticEndpointPublisher::new(
-            cfg,
-        )?) as Box<dyn MessagePublisher>),
-        EndpointType::Memory(cfg) => {
-            Ok(Box::new(memory::MemoryPublisher::new(cfg)?) as Box<dyn MessagePublisher>)
-        }
         #[cfg(feature = "mongodb")]
         EndpointType::MongoDb(cfg) => {
             let collection = cfg.collection.as_deref().unwrap_or(route_name);
@@ -305,6 +296,15 @@ async fn create_base_publisher(
                 Box::new(mongodb::MongoDbPublisher::new(&cfg.config, collection).await?)
                     as Box<dyn MessagePublisher>,
             )
+        }
+        EndpointType::File(cfg) => {
+            Ok(Box::new(file::FilePublisher::new(cfg).await?) as Box<dyn MessagePublisher>)
+        }
+        EndpointType::Static(cfg) => Ok(Box::new(static_endpoint::StaticEndpointPublisher::new(
+            cfg,
+        )?) as Box<dyn MessagePublisher>),
+        EndpointType::Memory(cfg) => {
+            Ok(Box::new(memory::MemoryPublisher::new(cfg)?) as Box<dyn MessagePublisher>)
         }
         EndpointType::Null => Ok(Box::new(null::NullPublisher) as Box<dyn MessagePublisher>),
         EndpointType::Fanout(endpoints) => {

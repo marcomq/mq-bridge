@@ -1,5 +1,4 @@
 // tests/integration/ibm_mq.rs
-#![cfg(feature = "ibm-mq")]
 #![allow(dead_code)]
 
 /// This test requires a running IBM MQ instance.
