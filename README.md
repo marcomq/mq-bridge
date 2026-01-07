@@ -39,7 +39,7 @@ This library was created in 2025 is still kind of new. There are automated unit 
 There are integration tests for consumers and publishers to verify that they are working 
 as expected with standard docker containers of the latest stable version.
 
-It may still be possible be possible that there are issues with
+It may still be possible that there are issues with
 - old or very new versions of broker servers
 - specific settings of the brokers
 - subscribers, as those haven't been tested a lot
