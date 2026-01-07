@@ -38,21 +38,9 @@ jobs:
       - name: Run tests
         run: cargo test --release --features=full 
       
-      - name: Create release archive
-        run: |
-          mkdir -p release
-          if [ -f target/release/mq-bridge ]; then
-            tar czf release/mq-bridge-${{ github.ref_name }}-linux-x86_64.tar.gz -C target/release mq-bridge
-            zip -j release/mq-bridge-${{ github.ref_name }}-linux-x86_64.zip target/release/mq-bridge
-          else
-            echo "Error: Binary not found at target/release/mq-bridge"
-            exit 1
-          fi
-      
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: release/*
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
