@@ -252,6 +252,7 @@ pub enum EndpointType {
     Amqp(AmqpEndpoint),
     MongoDb(MongoDbEndpoint),
     Mqtt(MqttEndpoint),
+    IbmMq(IbmMqEndpoint),
     Http(HttpEndpoint),
     Fanout(Vec<Endpoint>),
     Switch(SwitchConfig),
@@ -560,6 +561,34 @@ pub struct MqttConfig {
     pub keep_alive_seconds: Option<u64>,
     #[serde(default)]
     pub protocol: MqttProtocol,
+}
+
+// --- IBM MQ Specific Configuration ---
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct IbmMqEndpoint {
+    pub queue: Option<String>,
+    pub topic: Option<String>,
+    #[serde(flatten)]
+    pub config: IbmMqConfig,
+}
+
+/// General IBM MQ connection configuration.
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct IbmMqConfig {
+    /// Comma-separated list of IBM MQ connection names (e.g., "localhost(1414),otherhost(1414)").
+    pub connection_name: String,
+    pub queue_manager: String,
+    pub channel: String,
+    pub user: Option<String>,
+    pub password: Option<String>,
+    pub cipher_spec: Option<String>,
+    #[serde(default)]
+    pub tls: TlsConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq, Eq)]

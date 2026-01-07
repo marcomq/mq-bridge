@@ -46,3 +46,10 @@ async fn test_mongodb_performance_pipeline() {
 async fn test_mongodb_replica_set_pipeline() {
     integration::mongodb::test_mongodb_replica_set_pipeline().await;
 }
+
+#[cfg(feature = "ibm-mq")]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn test_ibm_mq_performance_pipeline() {
+    integration::ibm_mq::test_ibm_mq_performance_pipeline().await;
+}

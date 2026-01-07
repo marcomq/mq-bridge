@@ -11,6 +11,8 @@ pub mod fanout;
 pub mod file;
 #[cfg(any(feature = "http-client", feature = "http-server"))]
 pub mod http;
+#[cfg(feature = "ibm-mq")]
+pub mod ibm_mq;
 #[cfg(feature = "kafka")]
 pub mod kafka;
 pub mod memory;
@@ -113,6 +115,18 @@ async fn create_base_consumer(
             } else {
                 Ok(Box::new(
                     mqtt::MqttConsumer::new(&cfg.config, topic, route_name).await?,
+                ))
+            }
+        }
+        #[cfg(feature = "ibm-mq")]
+        EndpointType::IbmMq(cfg) => {
+            if endpoint.mode == crate::models::ConsumerMode::Subscribe {
+                Ok(Box::new(
+                    ibm_mq::create_ibm_mq_subscriber(route_name, cfg).await?,
+                ))
+            } else {
+                Ok(Box::new(
+                    ibm_mq::create_ibm_mq_consumer(route_name, cfg).await?,
                 ))
             }
         }
@@ -256,6 +270,10 @@ async fn create_base_publisher(
                     as Box<dyn MessagePublisher>,
             )
         }
+        #[cfg(feature = "ibm-mq")]
+        EndpointType::IbmMq(cfg) => Ok(Box::new(
+            ibm_mq::create_ibm_mq_publisher(route_name, cfg).await?,
+        ) as Box<dyn MessagePublisher>),
         EndpointType::File(cfg) => {
             Ok(Box::new(file::FilePublisher::new(cfg).await?) as Box<dyn MessagePublisher>)
         }
