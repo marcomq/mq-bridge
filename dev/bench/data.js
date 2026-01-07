@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1767804790600,
+  "lastUpdate": 1767823119666,
   "repoUrl": "https://github.com/marcomq/mq-bridge",
   "entries": {
     "Rust Benchmark": [
@@ -827,6 +827,174 @@ window.BENCHMARK_DATA = {
             "name": "performance/mqtt_batch_read",
             "value": 11724350,
             "range": "± 112832",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "62469331+marcomq@users.noreply.github.com",
+            "name": "Marco Mengelkoch",
+            "username": "marcomq"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "f1a7bfe7ade23786157c9b4a88c8d6d0af0790a6",
+          "message": "Remove release archive creation from workflow\n\nRemoved the step for creating a release archive in the workflow.",
+          "timestamp": "2026-01-07T22:43:40+01:00",
+          "tree_id": "f3be619bb81bd56c2cb3a9ddefa1da475a599fc4",
+          "url": "https://github.com/marcomq/mq-bridge/commit/f1a7bfe7ade23786157c9b4a88c8d6d0af0790a6"
+        },
+        "date": 1767823119330,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "performance/aws_single_write",
+            "value": 1293385747,
+            "range": "± 33844766",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/aws_single_read",
+            "value": 2781966465,
+            "range": "± 23949366",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/aws_batch_write",
+            "value": 197825964,
+            "range": "± 144257039",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/aws_batch_read",
+            "value": 310543887,
+            "range": "± 11920421",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/kafka_single_write",
+            "value": 1908658786,
+            "range": "± 234200280",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/kafka_single_read",
+            "value": 5022450,
+            "range": "± 362803",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/kafka_batch_write",
+            "value": 1045404030,
+            "range": "± 25734994",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/kafka_batch_read",
+            "value": 3438880,
+            "range": "± 958869",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/amqp_single_write",
+            "value": 26621523,
+            "range": "± 1916615",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/amqp_single_read",
+            "value": 20296774,
+            "range": "± 2206223",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/amqp_batch_write",
+            "value": 22454355,
+            "range": "± 1761395",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/amqp_batch_read",
+            "value": 19537491,
+            "range": "± 2626400",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/nats_single_write",
+            "value": 17210609,
+            "range": "± 3852648",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/nats_single_read",
+            "value": 9600328,
+            "range": "± 362999",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/nats_batch_write",
+            "value": 45629310,
+            "range": "± 4394319",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/nats_batch_read",
+            "value": 9050527,
+            "range": "± 375055",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/mongodb_single_write",
+            "value": 80772084,
+            "range": "± 9596412",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/mongodb_single_read",
+            "value": 512946075,
+            "range": "± 14306120",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/mongodb_batch_write",
+            "value": 10851090,
+            "range": "± 1260027",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/mongodb_batch_read",
+            "value": 49003455,
+            "range": "± 2087040",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/mqtt_single_write",
+            "value": 2753696,
+            "range": "± 57076",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/mqtt_single_read",
+            "value": 12019159,
+            "range": "± 284600",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/mqtt_batch_write",
+            "value": 2733076,
+            "range": "± 65940",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/mqtt_batch_read",
+            "value": 12121455,
+            "range": "± 172358",
             "unit": "ns/iter"
           }
         ]
