@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1767803688196,
+  "lastUpdate": 1767803928636,
   "repoUrl": "https://github.com/marcomq/mq-bridge",
   "entries": {
     "Rust Benchmark": [
@@ -495,6 +495,170 @@ window.BENCHMARK_DATA = {
             "name": "performance/mqtt_batch_read",
             "value": 11796065,
             "range": "± 204754",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "marcomq",
+            "username": "marcomq"
+          },
+          "committer": {
+            "name": "marcomq",
+            "username": "marcomq"
+          },
+          "id": "4352ffdcd2fe8d7d394b605243a31cb5e74d9b33",
+          "message": "Add IBM MQ support",
+          "timestamp": "2026-01-06T21:06:25Z",
+          "url": "https://github.com/marcomq/mq-bridge/pull/9/commits/4352ffdcd2fe8d7d394b605243a31cb5e74d9b33"
+        },
+        "date": 1767803928016,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "performance/aws_single_write",
+            "value": 1287070165,
+            "range": "± 40303228",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/aws_single_read",
+            "value": 2837581640,
+            "range": "± 34762418",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/aws_batch_write",
+            "value": 203291689,
+            "range": "± 364055892",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/aws_batch_read",
+            "value": 314204198,
+            "range": "± 3337623",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/kafka_single_write",
+            "value": 1463525804,
+            "range": "± 234088094",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/kafka_single_read",
+            "value": 5138562,
+            "range": "± 3173882",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/kafka_batch_write",
+            "value": 1067514680,
+            "range": "± 48467863",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/kafka_batch_read",
+            "value": 3392963,
+            "range": "± 253500",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/amqp_single_write",
+            "value": 25190251,
+            "range": "± 2924469",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/amqp_single_read",
+            "value": 20733773,
+            "range": "± 3011357",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/amqp_batch_write",
+            "value": 23414770,
+            "range": "± 1727721",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/amqp_batch_read",
+            "value": 19945613,
+            "range": "± 2053942",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/nats_single_write",
+            "value": 16957764,
+            "range": "± 3965480",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/nats_single_read",
+            "value": 9616497,
+            "range": "± 229191",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/nats_batch_write",
+            "value": 46143179,
+            "range": "± 5829687",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/nats_batch_read",
+            "value": 8955444,
+            "range": "± 318304",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/mongodb_single_write",
+            "value": 80556410,
+            "range": "± 10389329",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/mongodb_single_read",
+            "value": 522204558,
+            "range": "± 11818082",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/mongodb_batch_write",
+            "value": 10354819,
+            "range": "± 1239754",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/mongodb_batch_read",
+            "value": 53588017,
+            "range": "± 2735036",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/mqtt_single_write",
+            "value": 2841157,
+            "range": "± 68132",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/mqtt_single_read",
+            "value": 11990299,
+            "range": "± 257810",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/mqtt_batch_write",
+            "value": 2779639,
+            "range": "± 51238",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/mqtt_batch_read",
+            "value": 11924790,
+            "range": "± 129511",
             "unit": "ns/iter"
           }
         ]
