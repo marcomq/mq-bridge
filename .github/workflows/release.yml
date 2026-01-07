@@ -33,10 +33,10 @@ jobs:
             ${{ runner.os }}-cargo-
       
       - name: Build release
-        run: cargo build --release --all-features
+        run: cargo build --release --features=full 
       
       - name: Run tests
-        run: cargo test --all-features --release
+        run: cargo test --release --features=full 
       
       - name: Create release archive
         run: |

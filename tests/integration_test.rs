@@ -68,6 +68,13 @@ async fn test_all_performance_direct() {
             integration::amqp::test_amqp_performance_direct().await;
         }
     }
+    #[cfg(feature = "ibm-mq")]
+    {
+        if should_run("ibm_mq") {
+            println!("\n\n>>> Starting IBM MQ Direct Performance Test...");
+            integration::ibm_mq::test_ibm_mq_performance_direct().await;
+        }
+    }
 
     // The summary table will be printed here when `_summary_printer` is dropped.
 }

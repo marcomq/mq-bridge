@@ -17,7 +17,8 @@
 
 ## Features
 
-*   **Supported Backends**: Kafka, NATS, AMQP (RabbitMQ), MQTT, MongoDB, HTTP, Files, AWS (SQS/SNS), and in-memory channels.
+*   **Supported Backends**: Kafka, NATS, AMQP (RabbitMQ), MQTT, MongoDB, HTTP, Files, AWS (SQS/SNS), IBM MQ, and in-memory channels.
+    > **Note**: IBM MQ is not included in the `full` feature set. It requires the `ibm-mq` feature and the IBM MQ Client library. See [mqi crate](https://crates.io/crates/mqi/) for installation details.
 *   **Configuration**: Routes can be defined via YAML, JSON or environment variables.
 *   **Programmable Logic**: Inject custom Rust handlers to transform or filter messages in-flight.
 *   **Middleware**:
@@ -31,6 +32,18 @@
 `mq-bridge` is designed as a **programmable integration layer**. Its primary goal is to decouple your application logic from the underlying messaging infrastructure.
 
 Unlike libraries that enforce specific architectural patterns (like strict CQRS/Event Sourcing domain modeling) or concurrency models (like Actors), `mq-bridge` remains unopinionated about your domain logic. Instead, it focuses on **reliable data movement** and **protocol abstraction**.
+
+## Status
+
+This library was created in 2025 is still kind of new. There are automated unit and integration tests. 
+There are integration tests for consumers and publishers to verify that they are working 
+as expected with standard docker containers of the latest stable version.
+
+It may still be possible that there are issues with
+- old or very new versions of broker servers
+- specific settings of the brokers
+- subscribers, as those haven't been tested a lot
+- TLS integration, as this also hasn't been tested a lot and is usually non-trivial to set up
 
 ### When to use mq-bridge
 *   **Hybrid Messaging**: Connect systems speaking different protocols (e.g., MQTT to Kafka) without writing custom adapters.
@@ -64,6 +77,8 @@ Different backends and modes (`consumer` vs `subscriber`) have different persist
 | | Subscriber | Ephemeral | Uses temporary, auto-delete queues. |
 | **MQTT** | Consumer | Configurable | Depends on `clean_session`. |
 | | Subscriber | Ephemeral | Unique Client ID per instance. |
+| **IBM MQ** | Consumer | Persistent | Reads from a defined queue. |
+| | Subscriber | Ephemeral | Uses non-durable managed subscriptions. |
 | **MongoDB** | Consumer | Persistent | Documents stored until acknowledged. |
 | | Subscriber | Ephemeral | Change Streams / Polling from current time. |
 | **AWS** | Consumer | Persistent | Uses SQS queues. |
@@ -343,7 +358,7 @@ file_ingest:
       exchange: "logs"
       queue: "file_logs"
 
-# Route 5: AWS SQS to SNS
+# Route 4: AWS SQS to SNS
 aws_sqs_to_sns:
   input:
     aws:
@@ -358,7 +373,21 @@ aws_sqs_to_sns:
       topic_arn: "arn:aws:sns:us-east-1:000000000000:my-topic"
       region: "us-east-1"
 
-# Route 4: MQTT to Switch (Content-based Routing)
+# Route 5: IBM MQ Example
+ibm_mq_route:
+  input:
+    ibm_mq:
+      queue_manager: "QM1"
+      connection_name: "localhost(1414)"
+      channel: "DEV.APP.SVRCONN"
+      queue: "DEV.QUEUE.1"
+      user: "app"
+      password: "admin"
+  output:
+    memory:
+      topic: "received_from_mq"
+
+# Route 6: MQTT to Switch (Content-based Routing)
 iot_router:
   input:
     mqtt:

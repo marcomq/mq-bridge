@@ -42,7 +42,7 @@ jobs:
             ${{ runner.os }}-${{ matrix.rust }}-cargo-
       
       - name: Run tests
-        run: cargo test --lib --all-features
+        run: cargo test --lib --features=full
       
       - name: Check build
-        run: cargo build --all-features
+        run: cargo build --features=full
