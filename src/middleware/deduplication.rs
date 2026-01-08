@@ -60,7 +60,7 @@ impl MessageConsumer for DeduplicationConsumer {
             // Pending state has a short TTL to allow recovery from crashes.
             const STATE_PENDING: u8 = 0;
             const STATE_PROCESSED: u8 = 1;
-            const PENDING_TTL: u64 = 60;
+            const PENDING_TTL: u64 = 5;
 
             let mut pending_val = Vec::with_capacity(9);
             pending_val.push(STATE_PENDING);
@@ -75,15 +75,15 @@ impl MessageConsumer for DeduplicationConsumer {
             loop {
                 match self
                     .db
-                    .compare_and_swap(&key, None::<&[u8]>, Some(&pending_val[..]))
+                    .compare_and_swap(&key, None::<&[u8]>, Some(pending_val.as_slice()))
                 {
                     Ok(Ok(())) => break,
                     Ok(Err(cas_error)) => {
-                        if let Some(current_val) = &cas_error.current {
+                        if let Some(current_bytes) = cas_error.current.as_deref() {
                             // Key exists. Check if it is within TTL.
-                            let (ts, ttl) = if current_val.len() == 9 {
-                                let state = current_val[0];
-                                let ts_bytes: [u8; 8] = current_val[1..9].try_into().unwrap();
+                            let (ts, ttl) = if current_bytes.len() == 9 {
+                                let state = current_bytes[0];
+                                let ts_bytes: [u8; 8] = current_bytes[1..9].try_into().unwrap();
                                 (
                                     u64::from_be_bytes(ts_bytes),
                                     if state == STATE_PENDING {
@@ -92,8 +92,8 @@ impl MessageConsumer for DeduplicationConsumer {
                                         self.ttl_seconds
                                     },
                                 )
-                            } else if current_val.len() == 8 {
-                                let ts_bytes: [u8; 8] = current_val.as_ref().try_into().unwrap();
+                            } else if current_bytes.len() == 8 {
+                                let ts_bytes: [u8; 8] = current_bytes.try_into().unwrap();
                                 (u64::from_be_bytes(ts_bytes), self.ttl_seconds)
                             } else {
                                 (0, 0) // Invalid length, treat as expired
@@ -106,8 +106,8 @@ impl MessageConsumer for DeduplicationConsumer {
                             // Expired or invalid, try to overwrite
                             match self.db.compare_and_swap(
                                 &key,
-                                Some(&current_val),
-                                Some(&pending_val[..]),
+                                Some(current_bytes),
+                                Some(pending_val.as_slice()),
                             ) {
                                 Ok(Ok(())) => break,
                                 Ok(Err(_)) => continue, // Retry

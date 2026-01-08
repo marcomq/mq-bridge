@@ -1,4 +1,4 @@
-# mq-bridge
+# mq-bridge library
 
 [![Crates.io](https://img.shields.io/crates/v/mq-bridge.svg)](https://crates.io/crates/mq-bridge)
 [![Docs.rs](https://docs.rs/mq-bridge/badge.svg)](https://docs.rs/mq-bridge)
@@ -9,11 +9,11 @@
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 ```text
-      ┌──────── mq-bridge ────────┐
+      ┌────── mq-bridge-lib ──────┐
 ──────┴───────────────────────────┴──────
 ```
 
-`mq-bridge` is an asynchronous message library for Rust. It connects different messaging systems, data stores, and protocols. Unlike a classic bridge that simply forwards messages, `mq-bridge` acts as a **programmable integration layer**, allowing for transformation, filtering, handling, events, and complex routing. It is built on Tokio and supports patterns like retries, dead-letter queues, and message deduplication.
+n`mq-bridge` is an asynchronous message library for Rust. It connects different messaging systems, data stores, and protocols. Unlike a classic bridge that simply forwards messages, `mq-bridge` acts as a **programmable integration layer**, allowing for transformation, filtering, routing and event/command handling. It is built on Tokio and supports patterns like retries, dead-letter queues, and message deduplication.
 
 ## Features
 
@@ -35,7 +35,7 @@ Unlike libraries that enforce specific architectural patterns (like strict CQRS/
 
 ## Status
 
-This library was created in 2025 is still kind of new. There are automated unit and integration tests. 
+This library was created in 2025 and is still kind of new. There are automated unit and integration tests. 
 There are integration tests for consumers and publishers to verify that they are working 
 as expected with standard docker containers of the latest stable version.
 
@@ -509,9 +509,7 @@ To run the criterion benchmarks:
 ```sh
 cargo bench --features "full"
 ```
-Unfortuntately, the results of `cargo bench` are not really meaningfull yet. 
-The times are not stable yet, it is therefore recommended to perform the 
-integration performance test.
+The times are not stable yet, it is therefore recommended to perform the integration performance test if you want to measure throughput.
 
 ## License
 `mq-bridge` is licensed under the MIT License.
