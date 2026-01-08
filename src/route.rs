@@ -236,6 +236,7 @@ impl Route {
             let publisher = Arc::clone(&publisher);
             let err_tx = err_tx.clone();
             let commit_semaphore = commit_semaphore.clone();
+            let mut commit_tasks = JoinSet::new();
             join_set.spawn(async move {
                 debug!("Starting worker {}", i);
                 while let Ok((messages, commit)) = work_rx_clone.recv().await {
@@ -248,7 +249,7 @@ impl Route {
                                     break;
                                 }
                             };
-                            tokio::spawn(async move {
+                            commit_tasks.spawn(async move {
                                 commit(None).await;
                                 drop(permit);
                             });
@@ -282,7 +283,7 @@ impl Route {
                                     break;
                                 }
                             };
-                            tokio::spawn(async move {
+                            commit_tasks.spawn(async move {
                                 commit(responses).await;
                                 drop(permit);
                             });
@@ -297,6 +298,8 @@ impl Route {
                         }
                     }
                 }
+                // Wait for all in-flight commits to complete
+                while commit_tasks.join_next().await.is_some() {}
             });
         }
 
