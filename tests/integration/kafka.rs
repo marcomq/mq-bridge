@@ -10,6 +10,8 @@ use std::sync::Arc;
 const CONFIG_YAML: &str = r#"
 routes:
   memory_to_kafka:
+    concurrency: 4
+    batch_size: 128
     input:
       memory: { topic: "kafka-test-in" }
     output:
@@ -22,6 +24,8 @@ routes:
             - ["compression.type", "snappy"]
 
   kafka_to_memory:
+    concurrency: 4
+    batch_size: 128
     input:
       kafka:
         url: "localhost:9092"

@@ -9,12 +9,16 @@ use mq_bridge::endpoints::nats::{NatsConsumer, NatsPublisher};
 const CONFIG_YAML: &str = r#"
 routes:
   memory_to_nats:
+    concurrency: 4
+    batch_size: 128
     input:
       memory: { topic: "test-in-nats" }
     output:
       nats: { url: "nats://localhost:4222", subject: "test-stream.pipeline", stream: "test-stream" }
 
   nats_to_memory:
+    concurrency: 4
+    batch_size: 128
     input:
       nats: { url: "nats://localhost:4222", subject: "test-stream.pipeline", stream: "test-stream" }
     output:
