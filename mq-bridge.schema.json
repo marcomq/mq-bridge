@@ -79,6 +79,21 @@
         "url"
       ]
     },
+    "CommitConcurrencyMiddleware": {
+      "description": "Configuration for limiting the number of parallel commit tasks of publishers.",
+      "type": "object",
+      "properties": {
+        "limit": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "limit"
+      ]
+    },
     "ConsumerMode": {
       "type": "string",
       "enum": [
@@ -604,6 +619,18 @@
         {
           "type": "object",
           "properties": {
+            "commit_concurrency": {
+              "$ref": "#/$defs/CommitConcurrencyMiddleware"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "commit_concurrency"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
             "retry": {
               "$ref": "#/$defs/RetryMiddleware"
             }
@@ -979,13 +1006,6 @@
         "input": {
           "description": "The input/source endpoint for the route.",
           "$ref": "#/$defs/Endpoint"
-        },
-        "max_parallel_commits": {
-          "description": "(Optional) Maximum number of parallel commit tasks (acknowledgements) allowed. Defaults to 4096.",
-          "type": "integer",
-          "format": "uint",
-          "default": 4096,
-          "minimum": 0
         },
         "output": {
           "description": "The output/sink endpoint for the route.",

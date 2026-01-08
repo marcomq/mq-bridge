@@ -33,9 +33,6 @@ pub struct Route {
     /// (Optional) Number of messages to process in a single batch. Defaults to 1.
     #[serde(default = "default_batch_size")]
     pub batch_size: usize,
-    /// (Optional) Maximum number of parallel commit tasks (acknowledgements) allowed. Defaults to 4096.
-    #[serde(default = "default_max_parallel_commits")]
-    pub max_parallel_commits: usize,
     /// The input/source endpoint for the route.
     pub input: Endpoint,
     /// The output/sink endpoint for the route.
@@ -49,10 +46,6 @@ pub(crate) fn default_concurrency() -> usize {
 
 pub(crate) fn default_batch_size() -> usize {
     1
-}
-
-pub(crate) fn default_max_parallel_commits() -> usize {
-    4096
 }
 
 fn default_output_endpoint() -> Endpoint {
@@ -278,6 +271,7 @@ pub enum Middleware {
     Deduplication(DeduplicationMiddleware),
     Metrics(MetricsMiddleware),
     Dlq(Box<DeadLetterQueueMiddleware>),
+    CommitConcurrency(CommitConcurrencyMiddleware),
     Retry(RetryMiddleware),
     RandomPanic(RandomPanicMiddleware),
     #[serde(skip)]
@@ -291,6 +285,14 @@ pub enum Middleware {
 pub struct DeduplicationMiddleware {
     pub sled_path: String,
     pub ttl_seconds: u64,
+}
+
+/// Configuration for limiting the number of parallel commit tasks of publishers.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct CommitConcurrencyMiddleware {
+    pub limit: usize,
 }
 
 /// Metrics middleware configuration. It's currently a struct without fields
@@ -850,6 +852,7 @@ kafka_to_nats:
                     assert!((rp.probability - 0.1).abs() < f64::EPSILON);
                     has_random_panic = true;
                 }
+                Middleware::CommitConcurrency(_) => {}
             }
         }
 

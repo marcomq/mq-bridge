@@ -31,7 +31,6 @@ impl Route {
             output,
             concurrency: models::default_concurrency(),
             batch_size: models::default_batch_size(),
-            max_parallel_commits: models::default_max_parallel_commits(),
         }
     }
     /// Runs the message processing route with concurrency, error handling, and graceful shutdown.
@@ -139,7 +138,17 @@ impl Route {
     ) -> anyhow::Result<bool> {
         let publisher = create_publisher_from_route(name, &self.output).await?;
         let mut consumer = create_consumer_from_route(name, &self.input).await?;
-        let commit_semaphore = Arc::new(Semaphore::new(self.max_parallel_commits));
+        let max_parallel_commits = self
+            .input
+            .middlewares
+            .iter()
+            .find_map(|m| match m {
+                models::Middleware::CommitConcurrency(c) => Some(c.limit),
+                _ => None,
+            })
+            .unwrap_or(4096);
+
+        let commit_semaphore = Arc::new(Semaphore::new(max_parallel_commits));
         if let Some(tx) = ready_tx {
             let _ = tx.send(()).await;
         }
@@ -227,7 +236,17 @@ impl Route {
         let work_capacity = self.concurrency.saturating_mul(self.batch_size);
         let (work_tx, work_rx) =
             bounded::<(Vec<crate::CanonicalMessage>, BatchCommitFunc)>(work_capacity);
-        let commit_semaphore = Arc::new(Semaphore::new(self.max_parallel_commits));
+        let max_parallel_commits = self
+            .input
+            .middlewares
+            .iter()
+            .find_map(|m| match m {
+                models::Middleware::CommitConcurrency(c) => Some(c.limit),
+                _ => None,
+            })
+            .unwrap_or(4096);
+
+        let commit_semaphore = Arc::new(Semaphore::new(max_parallel_commits));
 
         // --- Worker Pool ---
         let mut join_set = JoinSet::new();

@@ -211,3 +211,114 @@ async fn test_route_with_typed_handler_failure_handler() {
     // No message should be published to the output
     assert_eq!(out_channel.len(), 0);
 }
+
+#[tokio::test]
+async fn test_commit_concurrency_limit() {
+    use mq_bridge::models::{CommitConcurrencyMiddleware, Endpoint, Middleware, Route};
+    use mq_bridge::traits::{
+        ConsumerError, CustomMiddlewareFactory, MessageConsumer, ReceivedBatch,
+    };
+    use mq_bridge::CanonicalMessage;
+    use std::any::Any;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    #[derive(Debug)]
+    struct SlowCommitMiddleware {
+        delay: Duration,
+    }
+
+    #[async_trait::async_trait]
+    impl CustomMiddlewareFactory for SlowCommitMiddleware {
+        async fn apply_consumer(
+            &self,
+            consumer: Box<dyn MessageConsumer>,
+            _route_name: &str,
+        ) -> anyhow::Result<Box<dyn MessageConsumer>> {
+            struct Wrapper {
+                inner: Box<dyn MessageConsumer>,
+                delay: Duration,
+            }
+
+            #[async_trait::async_trait]
+            impl MessageConsumer for Wrapper {
+                async fn receive_batch(
+                    &mut self,
+                    max_messages: usize,
+                ) -> Result<ReceivedBatch, ConsumerError> {
+                    let mut batch = self.inner.receive_batch(max_messages).await?;
+                    let original_commit = batch.commit;
+                    let delay = self.delay;
+                    batch.commit = Box::new(move |resp| {
+                        Box::pin(async move {
+                            tokio::time::sleep(delay).await;
+                            original_commit(resp).await;
+                        })
+                    });
+                    Ok(batch)
+                }
+                fn as_any(&self) -> &dyn Any {
+                    self
+                }
+            }
+            Ok(Box::new(Wrapper {
+                inner: consumer,
+                delay: self.delay,
+            }))
+        }
+    }
+
+    let run_test_case = |limit: usize| async move {
+        let input = Endpoint::new_memory(&format!("in_limit_{}", limit), 100)
+            .add_middleware(Middleware::Custom(Arc::new(SlowCommitMiddleware {
+                delay: Duration::from_millis(100),
+            })))
+            .add_middleware(Middleware::CommitConcurrency(CommitConcurrencyMiddleware {
+                limit,
+            }));
+        let output = Endpoint::new_memory(&format!("out_limit_{}", limit), 100);
+        let route = Route::new(input, output);
+
+        let in_channel = route.input.channel().unwrap();
+        let out_channel = route.output.channel().unwrap();
+
+        for i in 0..5 {
+            in_channel
+                .send_message(CanonicalMessage::from(format!("msg{}", i)))
+                .await
+                .unwrap();
+        }
+
+        let start = std::time::Instant::now();
+        let handle = tokio::spawn(async move {
+            route
+                .run_until_err(&format!("route_{}", limit), None, None)
+                .await
+        });
+
+        while out_channel.len() < 5 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let duration = start.elapsed();
+        in_channel.close();
+        handle.abort();
+        duration
+    };
+
+    // Case 1: High concurrency (Parallel commits) -> Should be fast (no blocking on semaphore)
+    let duration_fast = run_test_case(10).await;
+    assert!(
+        duration_fast < Duration::from_millis(200),
+        "Fast route took too long: {:?}",
+        duration_fast
+    );
+
+    // Case 2: Low concurrency (Sequential commits) -> Should be slow (~300ms)
+    // Msg 1 & 2 sent at T=0. Msg 3 at T=100. Msg 4 at T=200. Msg 5 at T=300.
+    let duration_slow = run_test_case(1).await;
+    assert!(
+        duration_slow >= Duration::from_millis(250),
+        "Slow route was too fast: {:?}",
+        duration_slow
+    );
+}

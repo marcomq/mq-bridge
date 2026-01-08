@@ -45,6 +45,7 @@ pub async fn apply_middlewares_to_consumer(
             }
             Middleware::Dlq(_) => consumer, // DLQ is a publisher-only middleware
             Middleware::Retry(_) => consumer, // Retry is currently publisher-only
+            Middleware::CommitConcurrency(_) => consumer, // Configuration only, read by Route
             Middleware::RandomPanic(cfg) => Box::new(RandomPanicConsumer::new(consumer, cfg)),
             Middleware::Custom(factory) => factory.apply_consumer(consumer, route_name).await?,
             #[allow(unreachable_patterns)]
@@ -78,6 +79,10 @@ pub async fn apply_middlewares_to_publisher(
             // This middleware is consumer-only
             #[cfg(feature = "dedup")]
             Middleware::Deduplication(_) => publisher,
+            Middleware::CommitConcurrency(_) => {
+                tracing::warn!("CommitConcurrency middleware is ignored on publishers (output endpoints). It should be configured on the input endpoint.");
+                publisher
+            }
             Middleware::Retry(cfg) => Box::new(RetryPublisher::new(publisher, cfg.clone())),
             Middleware::RandomPanic(cfg) => Box::new(RandomPanicPublisher::new(publisher, cfg)),
             Middleware::Custom(factory) => factory.apply_publisher(publisher, route_name).await?,
