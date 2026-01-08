@@ -241,7 +241,13 @@ impl Route {
                 while let Ok((messages, commit)) = work_rx_clone.recv().await {
                     match publisher.send_batch(messages).await {
                         Ok(SentBatch::Ack) => {
-                            let permit = commit_semaphore.clone().acquire_owned().await.expect("Semaphore closed");
+                            let permit = match commit_semaphore.clone().acquire_owned().await {
+                                Ok(p) => p,
+                                Err(_) => {
+                                    warn!("Semaphore closed, worker exiting");
+                                    break;
+                                }
+                            };
                             tokio::spawn(async move {
                                 commit(None).await;
                                 drop(permit);
@@ -269,7 +275,13 @@ impl Route {
                             for (msg, e) in failed {
                                 error!("Worker dropping message (ID: {:032x}) due to non-retryable error: {}", msg.message_id, e);
                             }
-                            let permit = commit_semaphore.clone().acquire_owned().await.expect("Semaphore closed");
+                            let permit = match commit_semaphore.clone().acquire_owned().await {
+                                Ok(p) => p,
+                                Err(_) => {
+                                    warn!("Semaphore closed, worker exiting");
+                                    break;
+                                }
+                            };
                             tokio::spawn(async move {
                                 commit(responses).await;
                                 drop(permit);

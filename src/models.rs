@@ -405,7 +405,7 @@ pub struct KafkaConfig {
     #[serde(default)]
     pub tls: TlsConfig,
     pub group_id: Option<String>,
-    /// If true, do not wait for an acknowledgement when sending to broker. Defaults to false.
+    /// (Publisher only) If true, do not wait for an acknowledgement when sending to broker. Defaults to false.
     #[serde(default)]
     pub delayed_ack: bool,
     #[serde(default)]
@@ -439,7 +439,9 @@ pub struct NatsConfig {
     #[serde(default)]
     pub tls: TlsConfig,
     pub token: Option<String>,
-    /// If true, do not wait for an acknowledgement when sending to broker. Defaults to false.
+    #[serde(default)]
+    pub request_reply: bool,
+    /// (Publisher only) If true, do not wait for an acknowledgement when sending to broker. Defaults to false.
     #[serde(default)]
     pub delayed_ack: bool,
     /// If no_jetstream: true, use Core NATS (fire-and-forget) instead of JetStream. Defaults to false.
@@ -449,8 +451,6 @@ pub struct NatsConfig {
     pub stream_max_messages: Option<i64>,
     pub stream_max_bytes: Option<i64>,
     pub prefetch_count: Option<usize>,
-    #[serde(default)]
-    pub request_reply: bool,
     pub request_timeout_ms: Option<u64>,
 }
 
@@ -500,7 +500,7 @@ pub struct AmqpConfig {
     pub prefetch_count: Option<u16>,
     #[serde(default)]
     pub no_persistence: bool,
-    /// If true, do not wait for an acknowledgement when sending to broker. Defaults to false.
+    /// (Publisher only) If true, do not wait for an acknowledgement when sending to broker. Defaults to false.
     #[serde(default)]
     pub delayed_ack: bool,
 }

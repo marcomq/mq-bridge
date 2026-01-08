@@ -54,9 +54,56 @@ impl MessageConsumer for DeduplicationConsumer {
                 .duration_since(UNIX_EPOCH)
                 .context("System time is before UNIX EPOCH")?
                 .as_secs();
+            let now_bytes = now.to_be_bytes();
+            
+            // Use a prefix to distinguish between pending (0) and processed (1) states.
+            // Pending state has a short TTL to allow recovery from crashes.
+            const STATE_PENDING: u8 = 0;
+            const STATE_PROCESSED: u8 = 1;
+            const PENDING_TTL: u64 = 60; 
 
-            // Check if message was already processed
-            if self.db.contains_key(&key).context("Failed to check DB")? {
+            let mut pending_val = Vec::with_capacity(9);
+            pending_val.push(STATE_PENDING);
+            pending_val.extend_from_slice(&now_bytes);
+
+            let mut processed_val = Vec::with_capacity(9);
+            processed_val.push(STATE_PROCESSED);
+            processed_val.extend_from_slice(&now_bytes);
+
+            // Attempt atomic insert-if-absent to reserve the message ID
+            let mut is_duplicate = false;
+            loop {
+                match self.db.compare_and_swap(&key, None::<&[u8]>, Some(&pending_val)) {
+                    Ok(Ok(())) => break,
+                    Ok(Err(current_val)) => {
+                        // Key exists. Check if it is within TTL.
+                        let (ts, ttl) = if current_val.len() == 9 {
+                            let state = current_val[0];
+                            let ts_bytes: [u8; 8] = current_val[1..9].try_into().unwrap();
+                            (u64::from_be_bytes(ts_bytes), if state == STATE_PENDING { PENDING_TTL } else { self.ttl_seconds })
+                        } else if current_val.len() == 8 {
+                            let ts_bytes: [u8; 8] = current_val.as_ref().try_into().unwrap();
+                            (u64::from_be_bytes(ts_bytes), self.ttl_seconds)
+                        } else {
+                            (0, 0) // Invalid length, treat as expired
+                        };
+
+                        if now.saturating_sub(ts) < ttl {
+                            is_duplicate = true;
+                            break;
+                        }
+                        // Expired or invalid, try to overwrite
+                        match self.db.compare_and_swap(&key, Some(&current_val), Some(&pending_val)) {
+                            Ok(Ok(())) => break,
+                            Ok(Err(_)) => continue, // Retry
+                            Err(e) => return Err(ConsumerError::Connection(anyhow::anyhow!("Deduplication DB error: {}", e))),
+                        }
+                    }
+                    Err(e) => return Err(ConsumerError::Connection(anyhow::anyhow!("Deduplication DB error: {}", e))),
+                }
+            }
+
+            if is_duplicate {
                 info!(message_id = %message_id_hex, "Duplicate message detected and skipped");
                 original_commit(None).await;
                 continue;
@@ -65,23 +112,23 @@ impl MessageConsumer for DeduplicationConsumer {
             let db = self.db.clone();
             let key_clone = key.clone();
 
-            // Wrap commit to insert into DB upon success (At-Least-Once)
+            // Wrap commit to update DB to "processed" state
             let commit = Box::new(move |response| {
                 Box::pin(async move {
-                    // Mark as processed BEFORE committing to broker.
-                    // This prevents duplicates if the process crashes after processing but before the broker receives the ack.
-                    if let Err(e) = db.insert(&key_clone, &now.to_be_bytes()[..]) {
+                    // Update the pending marker to the final processed value
+                    if let Err(e) = db.insert(&key_clone, processed_val) {
                         error!(
-                            "Failed to mark message as processed in deduplication DB: {}",
+                            "Failed to update message as processed in deduplication DB: {}",
                             e
                         );
                     } else {
-                        trace!("Marked message as processed in deduplication DB");
+                        trace!("Updated message as processed in deduplication DB");
                     }
                     original_commit(response).await;
                 }) as crate::traits::BoxFuture<'static, ()>
             });
 
+            // remove outdated
             if rand::random::<u8>() < 5 {
                 // ~2% chance
                 let db = self.db.clone();
@@ -100,14 +147,15 @@ impl MessageConsumer for DeduplicationConsumer {
                     for item_result in db.iter() {
                         match item_result {
                             Ok((key, val)) => {
-                                if val.as_ref().len() != 8 {
-                                    warn!("Deduplication DB entry for key {:?} has invalid timestamp length (expected 8 bytes, got {}). Skipping entry.", key, val.as_ref().len());
+                                let len = val.as_ref().len();
+                                let ts_offset = if len == 9 { 1 } else if len == 8 { 0 } else {
+                                    warn!("Deduplication DB entry for key {:?} has invalid timestamp length (expected 8 or 9 bytes, got {}). Skipping entry.", key, len);
                                     continue; // Move to the next item
-                                }
+                                };
 
                                 // After checking the length, `try_into()` from `&[u8]` to `&[u8; 8]` is infallible.
                                 // However, using `match` explicitly handles the `Err` case for robustness and clarity.
-                                let timestamp_bytes: [u8; 8] = match val.as_ref().try_into() {
+                                let timestamp_bytes: [u8; 8] = match val.as_ref()[ts_offset..ts_offset+8].try_into() {
                                     Ok(bytes) => bytes,
                                     Err(e) => {
                                         error!("Internal error: Failed to convert DB value to [u8; 8] after length check for key {:?}: {}", key, e);
