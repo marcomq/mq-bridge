@@ -75,46 +75,46 @@ impl MessageConsumer for DeduplicationConsumer {
             loop {
                 match self
                     .db
-                    .compare_and_swap(&key, None::<&[u8]>, Some(&pending_val))
+                    .compare_and_swap(&key, None::<&[u8]>, Some(&pending_val[..]))
                 {
                     Ok(Ok(())) => break,
-                    Ok(Err(current_val)) => {
-                        // Key exists. Check if it is within TTL.
-                        let (ts, ttl) = if current_val.len() == 9 {
-                            let state = current_val[0];
-                            let ts_bytes: [u8; 8] = current_val[1..9].try_into().unwrap();
-                            (
-                                u64::from_be_bytes(ts_bytes),
-                                if state == STATE_PENDING {
-                                    PENDING_TTL
-                                } else {
-                                    self.ttl_seconds
-                                },
-                            )
-                        } else if current_val.len() == 8 {
-                            let ts_bytes: [u8; 8] = current_val.as_ref().try_into().unwrap();
-                            (u64::from_be_bytes(ts_bytes), self.ttl_seconds)
-                        } else {
-                            (0, 0) // Invalid length, treat as expired
-                        };
+                    Ok(Err(cas_error)) => {
+                        if let Some(current_val) = &cas_error.current {
+                            // Key exists. Check if it is within TTL.
+                            let (ts, ttl) = if current_val.len() == 9 {
+                                let state = current_val[0];
+                                let ts_bytes: [u8; 8] = current_val[1..9].try_into().unwrap();
+                                (
+                                    u64::from_be_bytes(ts_bytes),
+                                    if state == STATE_PENDING {
+                                        PENDING_TTL
+                                    } else {
+                                        self.ttl_seconds
+                                    },
+                                )
+                            } else if current_val.len() == 8 {
+                                let ts_bytes: [u8; 8] = current_val.as_ref().try_into().unwrap();
+                                (u64::from_be_bytes(ts_bytes), self.ttl_seconds)
+                            } else {
+                                (0, 0) // Invalid length, treat as expired
+                            };
 
-                        if now.saturating_sub(ts) < ttl {
-                            is_duplicate = true;
-                            break;
-                        }
-                        // Expired or invalid, try to overwrite
-                        match self
-                            .db
-                            .compare_and_swap(&key, Some(&current_val), Some(&pending_val))
-                        {
-                            Ok(Ok(())) => break,
-                            Ok(Err(_)) => continue, // Retry
-                            Err(e) => {
-                                return Err(ConsumerError::Connection(anyhow::anyhow!(
-                                    "Deduplication DB error: {}",
-                                    e
-                                )))
+                            if now.saturating_sub(ts) < ttl {
+                                is_duplicate = true;
+                                break;
                             }
+                            // Expired or invalid, try to overwrite
+                            match self.db.compare_and_swap(
+                                &key,
+                                Some(&current_val),
+                                Some(&pending_val[..]),
+                            ) {
+                                Ok(Ok(())) => break,
+                                Ok(Err(_)) => continue, // Retry
+                                Err(e) => return Err(ConsumerError::Connection(anyhow::anyhow!("Deduplication DB error: {}", e))),
+                            }
+                        } else {
+                            continue;
                         }
                     }
                     Err(e) => {
