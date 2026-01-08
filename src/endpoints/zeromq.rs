@@ -271,9 +271,7 @@ impl ZeroMqConsumer {
                 // Actually, let's restructure to avoid the dummy return.
                 if let ReceiverSocket::Rep(_) = socket {
                     if let Err(e) = res {
-                        let _ = tx
-                            .send(Err(ConsumerError::Connection(anyhow!(e))))
-                            .await;
+                        let _ = tx.send(Err(ConsumerError::Connection(anyhow!(e)))).await;
                     }
                     continue;
                 }

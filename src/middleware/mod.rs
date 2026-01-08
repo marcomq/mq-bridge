@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 #[cfg(feature = "dedup")]
 mod deduplication;
+mod delay;
 mod dlq;
 #[cfg(feature = "metrics")]
 mod metrics;
@@ -18,6 +19,7 @@ mod retry;
 
 #[cfg(feature = "dedup")]
 use deduplication::DeduplicationConsumer;
+use delay::{DelayConsumer, DelayPublisher};
 use dlq::DlqPublisher;
 #[cfg(feature = "metrics")]
 use metrics::{MetricsConsumer, MetricsPublisher};
@@ -46,6 +48,7 @@ pub async fn apply_middlewares_to_consumer(
             Middleware::Dlq(_) => consumer, // DLQ is a publisher-only middleware
             Middleware::Retry(_) => consumer, // Retry is currently publisher-only
             Middleware::CommitConcurrency(_) => consumer, // Configuration only, read by Route
+            Middleware::Delay(cfg) => Box::new(DelayConsumer::new(consumer, cfg)),
             Middleware::RandomPanic(cfg) => Box::new(RandomPanicConsumer::new(consumer, cfg)),
             Middleware::Custom(factory) => factory.apply_consumer(consumer, route_name).await?,
             #[allow(unreachable_patterns)]
@@ -84,6 +87,7 @@ pub async fn apply_middlewares_to_publisher(
                 publisher
             }
             Middleware::Retry(cfg) => Box::new(RetryPublisher::new(publisher, cfg.clone())),
+            Middleware::Delay(cfg) => Box::new(DelayPublisher::new(publisher, cfg)),
             Middleware::RandomPanic(cfg) => Box::new(RandomPanicPublisher::new(publisher, cfg)),
             Middleware::Custom(factory) => factory.apply_publisher(publisher, route_name).await?,
             #[allow(unreachable_patterns)]

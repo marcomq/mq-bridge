@@ -274,6 +274,7 @@ pub enum Middleware {
     CommitConcurrency(CommitConcurrencyMiddleware),
     Retry(RetryMiddleware),
     RandomPanic(RandomPanicMiddleware),
+    Delay(DelayMiddleware),
     #[serde(skip)]
     Custom(Arc<dyn CustomMiddlewareFactory>),
 }
@@ -331,6 +332,13 @@ pub struct RetryMiddleware {
     pub max_interval_ms: u64,
     #[serde(default = "default_multiplier")]
     pub multiplier: f64,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct DelayMiddleware {
+    pub delay_ms: u64,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -853,6 +861,7 @@ kafka_to_nats:
                     has_random_panic = true;
                 }
                 Middleware::CommitConcurrency(_) => {}
+                Middleware::Delay(_) => {}
             }
         }
 

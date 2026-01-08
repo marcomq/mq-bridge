@@ -326,3 +326,51 @@ async fn test_commit_concurrency_limit() {
         "Sequential should be slower than parallel"
     );
 }
+
+#[tokio::test]
+async fn test_delay_middleware_in_route() {
+    use mq_bridge::models::{DelayMiddleware, Endpoint, EndpointType, Middleware, Route};
+    use std::time::{Duration, Instant};
+
+    // Input: Static consumer that produces "hello"
+    // We apply delay middleware to it.
+    let input = Endpoint::new(EndpointType::Static("hello".to_string()))
+        .add_middleware(Middleware::Delay(DelayMiddleware { delay_ms: 100 }));
+
+    // Output: Memory
+    let output = Endpoint::new_memory("delay_route_out", 100);
+
+    let route = Route::new(input, output);
+    let out_channel = route.output.channel().unwrap();
+
+    let start = Instant::now();
+
+    // Run the route in a background task
+    let handle = tokio::spawn(async move {
+        // Run for a short time or until we get enough messages
+        route.run_until_err("delay_test", None, None).await
+    });
+
+    // Wait for 3 messages.
+    // 1st message: delay 100ms -> receive -> send.
+    // 2nd message: delay 100ms -> receive -> send.
+    // 3rd message: delay 100ms -> receive -> send.
+    // Total time should be around 300ms + overhead.
+
+    while out_channel.len() < 3 {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        if start.elapsed() > Duration::from_secs(2) {
+            panic!("Timeout waiting for delayed messages");
+        }
+    }
+
+    let elapsed = start.elapsed();
+    handle.abort();
+
+    // With 100ms delay, 3 messages should take at least 300ms.
+    assert!(
+        elapsed >= Duration::from_millis(300),
+        "Route was too fast: {:?}",
+        elapsed
+    );
+}

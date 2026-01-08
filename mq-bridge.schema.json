@@ -157,6 +157,20 @@
         "ttl_seconds"
       ]
     },
+    "DelayMiddleware": {
+      "type": "object",
+      "properties": {
+        "delay_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "delay_ms"
+      ]
+    },
     "Endpoint": {
       "description": "Represents a connection point for messages, which can be a source (input) or a sink (output).",
       "type": "object",
@@ -650,6 +664,18 @@
           "additionalProperties": false,
           "required": [
             "random_panic"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "delay": {
+              "$ref": "#/$defs/DelayMiddleware"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "delay"
           ]
         }
       ]
