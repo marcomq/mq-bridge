@@ -111,7 +111,12 @@ impl MessageConsumer for DeduplicationConsumer {
                             ) {
                                 Ok(Ok(())) => break,
                                 Ok(Err(_)) => continue, // Retry
-                                Err(e) => return Err(ConsumerError::Connection(anyhow::anyhow!("Deduplication DB error: {}", e))),
+                                Err(e) => {
+                                    return Err(ConsumerError::Connection(anyhow::anyhow!(
+                                        "Deduplication DB error: {}",
+                                        e
+                                    )))
+                                }
                             }
                         } else {
                             continue;
