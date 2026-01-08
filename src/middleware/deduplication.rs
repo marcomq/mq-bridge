@@ -72,7 +72,13 @@ impl MessageConsumer for DeduplicationConsumer {
 
             // Attempt atomic insert-if-absent to reserve the message ID
             let mut is_duplicate = false;
+            let mut attempts = 0;
             loop {
+                if attempts > 10 {
+                    tokio::task::yield_now().await;
+                    attempts = 0;
+                }
+                attempts += 1;
                 match self
                     .db
                     .compare_and_swap(&key, None::<&[u8]>, Some(pending_val.as_slice()))
