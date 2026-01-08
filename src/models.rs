@@ -29,9 +29,11 @@ pub type PublisherConfig = HashMap<String, Endpoint>;
 pub struct Route {
     /// (Optional) Number of concurrent processing tasks for this route. Defaults to 1.
     #[serde(default = "default_concurrency")]
+    #[cfg_attr(feature = "schema", schemars(range(min = 1)))]
     pub concurrency: usize,
     /// (Optional) Number of messages to process in a single batch. Defaults to 1.
     #[serde(default = "default_batch_size")]
+    #[cfg_attr(feature = "schema", schemars(range(min = 1)))]
     pub batch_size: usize,
     /// The input/source endpoint for the route.
     pub input: Endpoint,
@@ -80,6 +82,7 @@ pub struct Endpoint {
     #[serde(default)]
     pub middlewares: Vec<Middleware>,
 
+    /// (input only) The processing mode for the endpoint.
     #[serde(default)]
     pub mode: ConsumerMode,
 
@@ -375,7 +378,6 @@ pub struct AwsEndpoint {
     pub config: AwsConfig,
 }
 
-#[cfg(feature = "aws")]
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]

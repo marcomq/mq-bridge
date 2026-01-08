@@ -20,7 +20,7 @@ enum SenderSocket {
 }
 
 enum PublisherJob {
-    Send(ZmqMessage),
+    Send(ZmqMessage, oneshot::Sender<zeromq::ZmqResult<()>>),
     Request(ZmqMessage, oneshot::Sender<zeromq::ZmqResult<ZmqMessage>>),
 }
 
@@ -74,16 +74,12 @@ impl ZeroMqPublisher {
         tokio::spawn(async move {
             while let Ok(job) = rx.recv().await {
                 match job {
-                    PublisherJob::Send(msg) => match &mut socket {
+                    PublisherJob::Send(msg, ack_tx) => match &mut socket {
                         SenderSocket::Push(s) => {
-                            if let Err(e) = s.send(msg).await {
-                                tracing::error!("Failed to send ZeroMQ Push message: {}", e);
-                            }
+                            let _ = ack_tx.send(s.send(msg).await);
                         }
                         SenderSocket::Pub(s) => {
-                            if let Err(e) = s.send(msg).await {
-                                tracing::error!("Failed to send ZeroMQ Pub message: {}", e);
-                            }
+                            let _ = ack_tx.send(s.send(msg).await);
                         }
                         SenderSocket::Req(_) => {
                             tracing::error!("Req socket received Send job, expected Request");
@@ -140,10 +136,15 @@ impl MessagePublisher for ZeroMqPublisher {
                 failed: vec![],
             })
         } else {
+            let (ack_tx, ack_rx) = oneshot::channel();
             self.tx
-                .send(PublisherJob::Send(zmq_msg))
+                .send(PublisherJob::Send(zmq_msg, ack_tx))
                 .await
                 .map_err(|_| PublisherError::Retryable(anyhow!("ZeroMQ publisher task closed")))?;
+            ack_rx
+                .await
+                .map_err(|_| PublisherError::Retryable(anyhow!("ZeroMQ publisher task dropped ack channel")))?
+                .map_err(|e| PublisherError::Retryable(anyhow!(e)))?;
             Ok(SentBatch::Ack)
         }
     }
@@ -407,7 +408,7 @@ impl MessageConsumer for ZeroMqSubscriber {
         self.0.receive_batch(max_messages).await
     }
     fn as_any(&self) -> &dyn Any {
-        self.0.as_any()
+        self
     }
 }
 

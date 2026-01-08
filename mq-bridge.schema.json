@@ -184,6 +184,7 @@
           }
         },
         "mode": {
+          "description": "(input only) The processing mode for the endpoint.",
           "$ref": "#/$defs/ConsumerMode",
           "default": "consume"
         }
@@ -1020,14 +1021,14 @@
           "type": "integer",
           "format": "uint",
           "default": 1,
-          "minimum": 0
+          "minimum": 1
         },
         "concurrency": {
           "description": "(Optional) Number of concurrent processing tasks for this route. Defaults to 1.",
           "type": "integer",
           "format": "uint",
           "default": 1,
-          "minimum": 0
+          "minimum": 1
         },
         "input": {
           "description": "The input/source endpoint for the route.",
