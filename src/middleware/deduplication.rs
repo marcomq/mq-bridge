@@ -46,7 +46,7 @@ impl MessageConsumer for DeduplicationConsumer {
         loop {
             let received = self.inner.receive().await?;
             let message = received.message;
-            let commit = received.commit;
+            let original_commit = received.commit;
             let key = message.message_id.to_be_bytes().to_vec();
             let message_id_hex = format!("{:032x}", message.message_id);
 
@@ -54,26 +54,32 @@ impl MessageConsumer for DeduplicationConsumer {
                 .duration_since(UNIX_EPOCH)
                 .context("System time is before UNIX EPOCH")?
                 .as_secs();
-            // Atomically insert only if key doesn't exist
-            match self
-                .db
-                .compare_and_swap(&key, None as Option<&[u8]>, Some(&now.to_be_bytes()[..]))
-                .context("Failed to perform compare-and-swap in deduplication DB")?
-            {
-                Ok(_) => {
-                    // Successfully inserted - not a duplicate, proceed
-                    trace!(
-                        message_id = %message_id_hex,
-                        "Deduplication check passed (new message)"
-                    );
-                }
-                Err(_) => {
-                    // Key already exists - duplicate detected
-                    info!(message_id = %message_id_hex, "Duplicate message detected and skipped");
-                    commit(None).await;
-                    continue;
-                }
+
+            // Check if message was already processed
+            if self.db.contains_key(&key).context("Failed to check DB")? {
+                info!(message_id = %message_id_hex, "Duplicate message detected and skipped");
+                original_commit(None).await;
+                continue;
             }
+
+            let db = self.db.clone();
+            let key_clone = key.clone();
+
+            // Wrap commit to insert into DB upon success (At-Least-Once)
+            let commit = Box::new(move |response| {
+                Box::pin(async move {
+                    // Mark as processed BEFORE committing to broker.
+                    // This prevents duplicates if the process crashes after processing but before the broker receives the ack.
+                    if let Err(e) = db.insert(&key_clone, &now.to_be_bytes()[..]) {
+                        error!("Failed to mark message as processed in deduplication DB: {}", e);
+                    } else {
+                        trace!(
+                            "Marked message as processed in deduplication DB"
+                        );
+                    }
+                    original_commit(response).await;
+                }) as crate::traits::BoxFuture<'static, ()>
+            });
 
             if rand::random::<u8>() < 5 {
                 // ~2% chance

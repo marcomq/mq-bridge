@@ -115,8 +115,8 @@ pub fn generate_test_messages(num_messages: usize) -> Vec<CanonicalMessage> {
     let mut messages = Vec::with_capacity(num_messages);
 
     for i in 0..num_messages {
-        let payload = json!({ "message_num": i, "test_id": "integration" });
-        let msg = CanonicalMessage::from_json(payload.clone()).unwrap();
+        let payload = format!(r#"{{"message_num":{},"test_id":"integration"}}"#, i);
+        let msg = CanonicalMessage::new(payload.into_bytes(), None);
         messages.push(msg);
     }
     messages

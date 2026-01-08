@@ -30,7 +30,7 @@ pub struct Route {
     /// (Optional) Number of concurrent processing tasks for this route. Defaults to 1.
     #[serde(default = "default_concurrency")]
     pub concurrency: usize,
-    /// (Optional) Number of messages to process in a single batch. Defaults to 128.
+    /// (Optional) Number of messages to process in a single batch. Defaults to 1.
     #[serde(default = "default_batch_size")]
     pub batch_size: usize,
     /// The input/source endpoint for the route.
@@ -45,7 +45,7 @@ pub(crate) fn default_concurrency() -> usize {
 }
 
 pub(crate) fn default_batch_size() -> usize {
-    128
+    1
 }
 
 fn default_output_endpoint() -> Endpoint {
