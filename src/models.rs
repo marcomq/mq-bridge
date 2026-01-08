@@ -33,6 +33,9 @@ pub struct Route {
     /// (Optional) Number of messages to process in a single batch. Defaults to 1.
     #[serde(default = "default_batch_size")]
     pub batch_size: usize,
+    /// (Optional) Maximum number of parallel commit tasks (acknowledgements) allowed. Defaults to 4096.
+    #[serde(default = "default_max_parallel_commits")]
+    pub max_parallel_commits: usize,
     /// The input/source endpoint for the route.
     pub input: Endpoint,
     /// The output/sink endpoint for the route.
@@ -46,6 +49,10 @@ pub(crate) fn default_concurrency() -> usize {
 
 pub(crate) fn default_batch_size() -> usize {
     1
+}
+
+pub(crate) fn default_max_parallel_commits() -> usize {
+    4096
 }
 
 fn default_output_endpoint() -> Endpoint {

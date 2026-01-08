@@ -71,11 +71,12 @@ impl MessageConsumer for DeduplicationConsumer {
                     // Mark as processed BEFORE committing to broker.
                     // This prevents duplicates if the process crashes after processing but before the broker receives the ack.
                     if let Err(e) = db.insert(&key_clone, &now.to_be_bytes()[..]) {
-                        error!("Failed to mark message as processed in deduplication DB: {}", e);
-                    } else {
-                        trace!(
-                            "Marked message as processed in deduplication DB"
+                        error!(
+                            "Failed to mark message as processed in deduplication DB: {}",
+                            e
                         );
+                    } else {
+                        trace!("Marked message as processed in deduplication DB");
                     }
                     original_commit(response).await;
                 }) as crate::traits::BoxFuture<'static, ()>

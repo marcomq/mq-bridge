@@ -920,10 +920,10 @@
       "type": "object",
       "properties": {
         "batch_size": {
-          "description": "(Optional) Number of messages to process in a single batch. Defaults to 128.",
+          "description": "(Optional) Number of messages to process in a single batch. Defaults to 1.",
           "type": "integer",
           "format": "uint",
-          "default": 128,
+          "default": 1,
           "minimum": 0
         },
         "concurrency": {
@@ -936,6 +936,13 @@
         "input": {
           "description": "The input/source endpoint for the route.",
           "$ref": "#/$defs/Endpoint"
+        },
+        "max_parallel_commits": {
+          "description": "(Optional) Maximum number of parallel commit tasks (acknowledgements) allowed. Defaults to 4096.",
+          "type": "integer",
+          "format": "uint",
+          "default": 4096,
+          "minimum": 0
         },
         "output": {
           "description": "The output/sink endpoint for the route.",

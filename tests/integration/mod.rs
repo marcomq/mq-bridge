@@ -2,17 +2,19 @@
 pub mod amqp;
 #[cfg(feature = "aws")]
 pub mod aws;
-pub mod common;
 #[cfg(feature = "ibm-mq")]
 pub mod ibm_mq;
 #[cfg(feature = "kafka")]
 pub mod kafka;
-pub mod memory;
 #[cfg(feature = "mongodb")]
 pub mod mongodb;
 #[cfg(feature = "mqtt")]
 pub mod mqtt;
-
 #[cfg(feature = "nats")]
 pub mod nats;
+#[cfg(feature = "zeromq")]
+pub mod zeromq;
+
+pub mod common;
+pub mod memory;
 pub mod route;

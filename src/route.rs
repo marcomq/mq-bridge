@@ -6,12 +6,15 @@
 use crate::endpoints::{create_consumer_from_route, create_publisher_from_route};
 pub use crate::models::Route;
 use crate::models::{self, Endpoint};
-use crate::traits::{BatchCommitFunc, ConsumerError, Handler, HandlerError, PublisherError, SentBatch};
+use crate::traits::{
+    BatchCommitFunc, ConsumerError, Handler, HandlerError, PublisherError, SentBatch,
+};
 use async_channel::{bounded, Sender};
 use serde::de::DeserializeOwned;
 use std::sync::Arc;
 use tokio::{
     select,
+    sync::Semaphore,
     task::{JoinHandle, JoinSet},
 };
 use tracing::{debug, error, info, warn};
@@ -28,6 +31,7 @@ impl Route {
             output,
             concurrency: models::default_concurrency(),
             batch_size: models::default_batch_size(),
+            max_parallel_commits: models::default_max_parallel_commits(),
         }
     }
     /// Runs the message processing route with concurrency, error handling, and graceful shutdown.
@@ -135,6 +139,7 @@ impl Route {
     ) -> anyhow::Result<bool> {
         let publisher = create_publisher_from_route(name, &self.output).await?;
         let mut consumer = create_consumer_from_route(name, &self.input).await?;
+        let commit_semaphore = Arc::new(Semaphore::new(self.max_parallel_commits));
         if let Some(tx) = ready_tx {
             let _ = tx.send(()).await;
         }
@@ -167,7 +172,12 @@ impl Route {
                     let commit = received_batch.commit;
                     match publisher.send_batch(received_batch.messages).await {
                         Ok(SentBatch::Ack) => {
-                            commit(None).await;
+                            let permit = commit_semaphore.clone().acquire_owned().await.map_err(|e| anyhow::anyhow!("Semaphore error: {}", e))?;
+                            tokio::spawn(async move {
+                                commit(None).await;
+                                // Permit is dropped here, releasing the slot
+                                drop(permit);
+                            });
                         }
                         Ok(SentBatch::Partial { responses, failed }) => {
                             let has_retryable = failed.iter().any(|(_, e)| matches!(e, PublisherError::Retryable(_)));
@@ -186,7 +196,11 @@ impl Route {
                             for (msg, e) in failed {
                                 error!("Dropping message (ID: {:032x}) due to non-retryable error: {}", msg.message_id, e);
                             }
-                            commit(responses).await;
+                            let permit = commit_semaphore.clone().acquire_owned().await.map_err(|e| anyhow::anyhow!("Semaphore error: {}", e))?;
+                            tokio::spawn(async move {
+                                commit(responses).await;
+                                drop(permit);
+                            });
                         }
                         Err(e) => return Err(e.into()), // Propagate error to trigger reconnect
                     }
@@ -213,6 +227,7 @@ impl Route {
         let work_capacity = self.concurrency.saturating_mul(self.batch_size);
         let (work_tx, work_rx) =
             bounded::<(Vec<crate::CanonicalMessage>, BatchCommitFunc)>(work_capacity);
+        let commit_semaphore = Arc::new(Semaphore::new(self.max_parallel_commits));
 
         // --- Worker Pool ---
         let mut join_set = JoinSet::new();
@@ -220,12 +235,17 @@ impl Route {
             let work_rx_clone = work_rx.clone();
             let publisher = Arc::clone(&publisher);
             let err_tx = err_tx.clone();
+            let commit_semaphore = commit_semaphore.clone();
             join_set.spawn(async move {
                 debug!("Starting worker {}", i);
                 while let Ok((messages, commit)) = work_rx_clone.recv().await {
                     match publisher.send_batch(messages).await {
                         Ok(SentBatch::Ack) => {
-                            commit(None).await;
+                            let permit = commit_semaphore.clone().acquire_owned().await.expect("Semaphore closed");
+                            tokio::spawn(async move {
+                                commit(None).await;
+                                drop(permit);
+                            });
                         }
                         Ok(SentBatch::Partial { responses, failed }) => {
                             let has_retryable = failed.iter().any(|(_, e)| matches!(e, PublisherError::Retryable(_)));
@@ -249,7 +269,11 @@ impl Route {
                             for (msg, e) in failed {
                                 error!("Worker dropping message (ID: {:032x}) due to non-retryable error: {}", msg.message_id, e);
                             }
-                            commit(responses).await;
+                            let permit = commit_semaphore.clone().acquire_owned().await.expect("Semaphore closed");
+                            tokio::spawn(async move {
+                                commit(responses).await;
+                                drop(permit);
+                            });
                         }
                         Err(e) => {
                             error!("Worker failed to send message batch: {}", e);

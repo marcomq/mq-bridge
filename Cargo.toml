@@ -78,6 +78,7 @@ schemars = { version = "1.2", optional = true }
 
 [features]
 default = []
+fast = ["kafka", "amqp", "nats", "mqtt", "http", "metrics", "dedup"]
 full = ["mongodb", "kafka", "amqp", "nats", "mqtt", "http", "metrics", "dedup", "aws", "zeromq"]
 
 # Functionality features

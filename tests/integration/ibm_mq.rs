@@ -78,7 +78,7 @@ pub async fn test_ibm_mq_performance_pipeline() {
 
         let mut route = Route::new(input_ep, output_ep);
         route.concurrency = 4;
-        route.batch_size = 50;
+        route.batch_size = 128;
         let out_channel = route.output.channel().unwrap();
 
         // Run route in background
