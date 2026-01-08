@@ -270,9 +270,9 @@ impl ZeroMqConsumer {
                 // For Rep, we already handled the send inside the match. For others, we send here.
                 // Actually, let's restructure to avoid the dummy return.
                 if let ReceiverSocket::Rep(_) = socket {
-                    if res.is_err() {
+                    if let Err(e) = res {
                         let _ = tx
-                            .send(Err(ConsumerError::Connection(anyhow!(res.unwrap_err()))))
+                            .send(Err(ConsumerError::Connection(anyhow!(e))))
                             .await;
                     }
                     continue;
