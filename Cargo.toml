@@ -78,7 +78,7 @@ schemars = { version = "1.2", optional = true }
 
 [features]
 default = []
-fast_compile = ["kafka", "amqp", "nats", "mqtt", "http", "metrics", "dedup"]
+fast-compile = ["kafka", "amqp", "nats", "mqtt", "http", "metrics", "dedup"]
 full = ["mongodb", "kafka", "amqp", "nats", "mqtt", "http", "metrics", "dedup", "aws", "zeromq"]
 
 # Functionality features
