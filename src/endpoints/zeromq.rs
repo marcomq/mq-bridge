@@ -257,9 +257,16 @@ impl ZeroMqConsumer {
                                     break;
                                 }
                                 // Wait for the reply from the consumer logic
-                                let reply = reply_rx
-                                    .await
-                                    .unwrap_or_else(|_| ZmqMessage::from(bytes::Bytes::new()));
+                                let reply = match reply_rx.await {
+                                    Ok(msg) => msg,
+                                    Err(e) => {
+                                        tracing::error!(
+                                            "Failed to receive reply from consumer logic: {}",
+                                            e
+                                        );
+                                        ZmqMessage::from(bytes::Bytes::from("consumer_failed"))
+                                    }
+                                };
                                 s.send(reply).await.map(|_| ConsumerItem {
                                     msg: ZmqMessage::from(bytes::Bytes::new()),
                                     reply_tx: None,
