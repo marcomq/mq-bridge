@@ -298,8 +298,13 @@ impl ZeroMqConsumer {
         if payload.is_empty() {
             return Ok(vec![]);
         }
-        let messages: Vec<CanonicalMessage> = serde_json::from_slice(&payload)?;
-        Ok(messages)
+        if let Ok(messages) = serde_json::from_slice::<Vec<CanonicalMessage>>(&payload) {
+            return Ok(messages);
+        }
+        if let Ok(message) = serde_json::from_slice::<CanonicalMessage>(&payload) {
+            return Ok(vec![message]);
+        }
+        Ok(vec![CanonicalMessage::new(payload.to_vec(), None)])
     }
 
     async fn fill_buffer(&mut self) -> Result<(), ConsumerError> {
