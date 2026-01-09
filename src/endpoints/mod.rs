@@ -147,13 +147,13 @@ async fn create_base_consumer(
         #[cfg(any(feature = "http-client", feature = "http-server"))]
         EndpointType::Http(cfg) => {
             ensure_consume_mode("Http", endpoint.mode.clone())?;
-            #[cfg(feature = "axum")]
+            #[cfg(feature = "http-server")]
             {
                 Ok(Box::new(http::HttpConsumer::new(&cfg.config).await?))
             }
-            #[cfg(not(feature = "axum"))]
+            #[cfg(not(feature = "http-server"))]
             {
-                Err(anyhow!("HTTP consumer requires the 'axum' feature"))
+                Err(anyhow!("HTTP consumer requires the 'http-server' feature"))
             }
         }
         EndpointType::Static(cfg) => {
@@ -289,11 +289,11 @@ async fn create_base_publisher(
             Ok(Box::new(zeromq::ZeroMqPublisher::new(cfg).await?) as Box<dyn MessagePublisher>)
         }
         #[cfg(any(feature = "http-client", feature = "http-server"))]
-        EndpointType::Http(cfg) => {
+        EndpointType::Http(_cfg) => {
             #[cfg(feature = "reqwest")]
             {
-                let mut sink = http::HttpPublisher::new(&cfg.config).await?;
-                if let Some(url) = &cfg.config.url {
+                let mut sink = http::HttpPublisher::new(&_cfg.config).await?;
+                if let Some(url) = &_cfg.config.url {
                     sink = sink.with_url(url);
                 }
                 Ok(Box::new(sink) as Box<dyn MessagePublisher>)

@@ -726,6 +726,8 @@ pub struct HttpConfig {
     pub tls: TlsConfig,
     /// (Consumer only) Optional endpoint to send the response to.
     pub response_out: Option<Box<Endpoint>>,
+    /// (Consumer only) Number of worker threads to use. Defaults to 0 for unlimited.
+    pub workers: Option<usize>
 }
 
 // --- Switch/Router Configuration ---
