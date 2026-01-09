@@ -8,16 +8,15 @@ use crate::models::HttpConfig;
 #[cfg(feature = "actix-web")]
 use crate::traits::CommitFunc;
 use crate::traits::{
-    BoxFuture, ConsumerError, MessageConsumer, MessagePublisher, ReceivedBatch,
-    Sent,
+    BoxFuture, ConsumerError, MessageConsumer, MessagePublisher, ReceivedBatch, Sent,
 };
 #[cfg(feature = "reqwest")]
 use crate::traits::{PublisherError, SentBatch};
 use crate::CanonicalMessage;
-use anyhow::{anyhow, Context};
-use async_trait::async_trait;
 #[cfg(feature = "actix-web")]
 use actix_web::{web, App, HttpRequest, HttpResponse, HttpServer, Responder};
+use anyhow::{anyhow, Context};
+use async_trait::async_trait;
 use std::any::Any;
 use std::collections::HashMap;
 #[cfg(feature = "actix-web")]
@@ -74,7 +73,9 @@ impl HttpConsumer {
 
         let workers = config.workers.unwrap_or(0);
         let workers = if workers == 0 {
-            std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1)
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1)
         } else {
             workers
         };
