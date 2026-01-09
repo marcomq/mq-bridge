@@ -213,12 +213,6 @@ async fn handle_request(
     }
     message.metadata = metadata;
 
-    let message_for_sink = if state.response_sink.is_some() {
-        Some(message.clone())
-    } else {
-        None
-    };
-
     // Channel to receive the commit confirmation from the pipeline
     let (ack_tx, ack_rx) = tokio::sync::oneshot::channel::<Option<CanonicalMessage>>();
     let commit = Box::new(move |resp| {
@@ -239,11 +233,15 @@ async fn handle_request(
                 // Pipeline processed the message.
                 // If a response sink is configured, use it to generate the response.
                 if let Some(sink) = &state.response_sink {
-                    match sink.send(message_for_sink.unwrap()).await {
-                        Ok(Sent::Response(sink_response)) => make_response(Some(sink_response)),
-                        Ok(Sent::Ack) => make_response(None),
-                        Err(e) => HttpResponse::InternalServerError()
-                            .body(format!("Response sink error: {}", e)),
+                    if let Some(resp) = pipeline_response {
+                        match sink.send(resp).await {
+                            Ok(Sent::Response(sink_response)) => make_response(Some(sink_response)),
+                            Ok(Sent::Ack) => make_response(None),
+                            Err(e) => HttpResponse::InternalServerError()
+                                .body(format!("Response sink error: {}", e)),
+                        }
+                    } else {
+                        make_response(None)
                     }
                 } else {
                     // No sink configured, use the pipeline response (if any)
@@ -539,19 +537,20 @@ http_route:
         let addr = format!("127.0.0.1:{}", port);
         let url = format!("http://{}", addr);
 
-        let config = HttpConfig {
-            url: Some(addr.clone()),
-            ..Default::default()
-        };
-        let mut consumer = HttpConsumer::new(&config)
-            .await
-            .expect("Failed to create consumer");
-
         let mem_config = MemoryConfig {
             topic: "reply_sink".to_string(),
             capacity: Some(10),
         };
         let sink_endpoint = crate::models::Endpoint::new(EndpointType::Memory(mem_config.clone()));
+
+        let config = HttpConfig {
+            url: Some(addr.clone()),
+            response_out: Some(Box::new(sink_endpoint)),
+            ..Default::default()
+        };
+        let mut consumer = HttpConsumer::new(&config)
+            .await
+            .expect("Failed to create consumer");
 
         let pub_config = HttpConfig {
             url: Some(url.clone()),
