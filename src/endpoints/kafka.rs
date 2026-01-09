@@ -169,7 +169,8 @@ impl MessagePublisher for KafkaPublisher {
         let mut delivery_futures = Vec::with_capacity(messages.len());
         let mut failed_messages = Vec::new();
 
-        for message in messages {
+        let mut iter = messages.into_iter();
+        while let Some(message) = iter.next() {
             let mut record = FutureRecord::to(&self.topic).payload(&message.payload[..]);
             let key_bytes = message.message_id.to_be_bytes();
             record = record.key(&key_bytes);
@@ -187,10 +188,24 @@ impl MessagePublisher for KafkaPublisher {
 
             match self.producer.send_result(record) {
                 Ok(fut) => delivery_futures.push((message, fut)),
-                Err((e, _)) => failed_messages.push((
-                    message,
-                    PublisherError::Retryable(anyhow!("Kafka enqueue failed: {}", e)),
-                )),
+                Err((e, _)) => {
+                    failed_messages.push((
+                        message,
+                        PublisherError::Retryable(anyhow!("Kafka enqueue failed: {}", e)),
+                    ));
+                    // Abort the batch to preserve ordering.
+                    // If we continued, subsequent messages might succeed while this one failed,
+                    // causing out-of-order delivery on retry.
+                    for skipped_msg in iter {
+                        failed_messages.push((
+                            skipped_msg,
+                            PublisherError::Retryable(anyhow!(
+                                "Batch aborted due to previous error"
+                            )),
+                        ));
+                    }
+                    break;
+                }
             }
         }
 

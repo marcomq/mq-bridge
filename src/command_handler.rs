@@ -182,12 +182,10 @@ mod tests {
             async move { Ok(Handled::Publish(msg)) }
         };
         // 2. Define Route
-        let route = Route {
-            concurrency: 1,
-            batch_size: 1,
-            input: Endpoint::new_memory("route_in", 100),
-            output: Endpoint::new_memory("route_out", 100),
-        }
+        let route = Route::new(
+            Endpoint::new_memory("route_in", 100),
+            Endpoint::new_memory("route_out", 100),
+        )
         .with_handler(handler);
 
         // 3. Inject Data

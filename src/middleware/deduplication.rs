@@ -46,7 +46,7 @@ impl MessageConsumer for DeduplicationConsumer {
         loop {
             let received = self.inner.receive().await?;
             let message = received.message;
-            let commit = received.commit;
+            let original_commit = received.commit;
             let key = message.message_id.to_be_bytes().to_vec();
             let message_id_hex = format!("{:032x}", message.message_id);
 
@@ -54,27 +54,125 @@ impl MessageConsumer for DeduplicationConsumer {
                 .duration_since(UNIX_EPOCH)
                 .context("System time is before UNIX EPOCH")?
                 .as_secs();
-            // Atomically insert only if key doesn't exist
-            match self
-                .db
-                .compare_and_swap(&key, None as Option<&[u8]>, Some(&now.to_be_bytes()[..]))
-                .context("Failed to perform compare-and-swap in deduplication DB")?
-            {
-                Ok(_) => {
-                    // Successfully inserted - not a duplicate, proceed
-                    trace!(
-                        message_id = %message_id_hex,
-                        "Deduplication check passed (new message)"
-                    );
+            let now_bytes = now.to_be_bytes();
+
+            // Use a prefix to distinguish between pending (0) and processed (1) states.
+            // Pending state has a short TTL to allow recovery from crashes.
+            const STATE_PENDING: u8 = 0;
+            const STATE_PROCESSED: u8 = 1;
+            const PENDING_TTL: u64 = 5;
+
+            let mut pending_val = Vec::with_capacity(9);
+            pending_val.push(STATE_PENDING);
+            pending_val.extend_from_slice(&now_bytes);
+
+            let mut processed_val = Vec::with_capacity(9);
+            processed_val.push(STATE_PROCESSED);
+            processed_val.extend_from_slice(&now_bytes);
+
+            // Attempt atomic insert-if-absent to reserve the message ID
+            let mut is_duplicate = false;
+            let mut yield_counter = 0;
+            let mut total_attempts = 0;
+            const MAX_TOTAL_ATTEMPTS: usize = 1000;
+            loop {
+                if total_attempts >= MAX_TOTAL_ATTEMPTS {
+                    return Err(ConsumerError::Connection(anyhow::anyhow!(
+                        "Deduplication CAS exceeded max attempts for message ID {}",
+                        message_id_hex
+                    )));
                 }
-                Err(_) => {
-                    // Key already exists - duplicate detected
-                    info!(message_id = %message_id_hex, "Duplicate message detected and skipped");
-                    commit(None).await;
-                    continue;
+                if yield_counter > 10 {
+                    tokio::task::yield_now().await;
+                    yield_counter = 0;
+                }
+                yield_counter += 1;
+                total_attempts += 1;
+                match self
+                    .db
+                    .compare_and_swap(&key, None::<&[u8]>, Some(pending_val.as_slice()))
+                {
+                    Ok(Ok(())) => break,
+                    Ok(Err(cas_error)) => {
+                        if let Some(current_bytes) = cas_error.current.as_deref() {
+                            // Key exists. Check if it is within TTL.
+                            let (ts, ttl) = if current_bytes.len() == 9 {
+                                let state = current_bytes[0];
+                                let ts_bytes: [u8; 8] = current_bytes[1..9].try_into().unwrap();
+                                (
+                                    u64::from_be_bytes(ts_bytes),
+                                    if state == STATE_PENDING {
+                                        PENDING_TTL
+                                    } else {
+                                        self.ttl_seconds
+                                    },
+                                )
+                            } else if current_bytes.len() == 8 {
+                                let ts_bytes: [u8; 8] = current_bytes.try_into().unwrap();
+                                (u64::from_be_bytes(ts_bytes), self.ttl_seconds)
+                            } else {
+                                (0, 0) // Invalid length, treat as expired
+                            };
+
+                            if now.saturating_sub(ts) < ttl {
+                                is_duplicate = true;
+                                break;
+                            }
+                            // Expired or invalid, try to overwrite
+                            match self.db.compare_and_swap(
+                                &key,
+                                Some(current_bytes),
+                                Some(pending_val.as_slice()),
+                            ) {
+                                Ok(Ok(())) => break,
+                                Ok(Err(_)) => continue, // Retry
+                                Err(e) => {
+                                    return Err(ConsumerError::Connection(anyhow::anyhow!(
+                                        "Deduplication DB error: {}",
+                                        e
+                                    )))
+                                }
+                            }
+                        } else {
+                            continue;
+                        }
+                    }
+                    Err(e) => {
+                        return Err(ConsumerError::Connection(anyhow::anyhow!(
+                            "Deduplication DB error: {}",
+                            e
+                        )))
+                    }
                 }
             }
 
+            if is_duplicate {
+                info!(message_id = %message_id_hex, "Duplicate message detected and skipped");
+                original_commit(None).await;
+                continue;
+            }
+
+            let db = self.db.clone();
+            let key_clone = key.clone();
+
+            // Wrap commit to update DB to "processed" state
+            let commit = Box::new(move |response| {
+                Box::pin(async move {
+                    original_commit(response).await;
+
+                    // Update the pending marker to the final processed value
+                    if let Err(e) = db.insert(&key_clone, processed_val) {
+                        error!(
+                            "Failed to update message as processed in deduplication DB: {}",
+                            e
+                        );
+                    } else {
+                        trace!("Updated message as processed in deduplication DB");
+                    }
+                }) as crate::traits::BoxFuture<'static, ()>
+            });
+
+            // remove outdated
             if rand::random::<u8>() < 5 {
                 // ~2% chance
                 let db = self.db.clone();
@@ -93,14 +191,22 @@ impl MessageConsumer for DeduplicationConsumer {
                     for item_result in db.iter() {
                         match item_result {
                             Ok((key, val)) => {
-                                if val.as_ref().len() != 8 {
-                                    warn!("Deduplication DB entry for key {:?} has invalid timestamp length (expected 8 bytes, got {}). Skipping entry.", key, val.as_ref().len());
+                                let len = val.as_ref().len();
+                                let ts_offset = if len == 9 {
+                                    1
+                                } else if len == 8 {
+                                    0
+                                } else {
+                                    warn!("Deduplication DB entry for key {:?} has invalid timestamp length (expected 8 or 9 bytes, got {}). Skipping entry.", key, len);
                                     continue; // Move to the next item
-                                }
+                                };
 
                                 // After checking the length, `try_into()` from `&[u8]` to `&[u8; 8]` is infallible.
                                 // However, using `match` explicitly handles the `Err` case for robustness and clarity.
-                                let timestamp_bytes: [u8; 8] = match val.as_ref().try_into() {
+                                let timestamp_bytes: [u8; 8] = match val.as_ref()
+                                    [ts_offset..ts_offset + 8]
+                                    .try_into()
+                                {
                                     Ok(bytes) => bytes,
                                     Err(e) => {
                                         error!("Internal error: Failed to convert DB value to [u8; 8] after length check for key {:?}: {}", key, e);

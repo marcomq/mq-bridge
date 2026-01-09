@@ -1,6 +1,5 @@
 #![allow(dead_code)] // This module contains helpers used by various integration tests.
 use async_channel::{bounded, Receiver, Sender};
-use chrono;
 use mq_bridge::traits::{ConsumerError, MessageConsumer, PublisherError, ReceivedBatch, SentBatch};
 use mq_bridge::traits::{MessagePublisher, Received};
 use mq_bridge::{CanonicalMessage, Route};
@@ -12,6 +11,7 @@ use std::process::Command;
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use tokio::sync::Semaphore;
 
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::filter::EnvFilter;
@@ -24,6 +24,7 @@ pub const PERF_TEST_BATCH_MESSAGE_COUNT: usize = 100_000;
 pub const PERF_TEST_SINGLE_MESSAGE_COUNT: usize = 10_000;
 pub const PERF_TEST_MESSAGE_COUNT: usize = PERF_TEST_BATCH_MESSAGE_COUNT;
 pub const PERF_TEST_CONCURRENCY: usize = 100;
+const MAX_PARALLEL_COMMITS: usize = 4096;
 
 /// A struct to hold the performance results for a single test run.
 #[derive(Debug, Clone, Default)]
@@ -116,8 +117,8 @@ pub fn generate_test_messages(num_messages: usize) -> Vec<CanonicalMessage> {
     let mut messages = Vec::with_capacity(num_messages);
 
     for i in 0..num_messages {
-        let payload = json!({ "message_num": i, "test_id": "integration" });
-        let msg = CanonicalMessage::from_json(payload.clone()).unwrap();
+        let payload = format!(r#"{{"message_num":{},"test_id":"integration"}}"#, i);
+        let msg = CanonicalMessage::new(payload.into_bytes(), None);
         messages.push(msg);
     }
     messages
@@ -425,9 +426,12 @@ where
         single_read_performance: PERF_TEST_SINGLE_MESSAGE_COUNT as f64 / single_read_perf,
     }
 }
+
+static STATIC_PAYLOAD: Lazy<Vec<u8>> =
+    Lazy::new(|| serde_json::to_vec(&json!({ "perf_test": true, "static": true })).unwrap());
+
 pub fn generate_message() -> CanonicalMessage {
-    CanonicalMessage::from_json(json!({ "perf_test": true, "ts": chrono::Utc::now().to_rfc3339() }))
-        .unwrap()
+    CanonicalMessage::new(STATIC_PAYLOAD.clone(), None)
 }
 
 /// Measure the performance of writing messages to a publisher.
@@ -465,15 +469,26 @@ pub async fn measure_write_performance(
         bounded(batch_size * concurrency * 2);
 
     let final_count = Arc::new(AtomicUsize::new(0));
-    tokio::spawn(async move {
-        for _ in 0..num_messages {
-            // The test will hang if the receiver is dropped, so we ignore the error.
-            if tx.send(generate_message()).await.is_err() {
-                break;
+
+    // Spawn multiple generators to ensure we don't bottleneck on message creation.
+    let generator_count = (concurrency / 10).clamp(1, 8);
+    for i in 0..generator_count {
+        let tx = tx.clone();
+        let count = num_messages / generator_count
+            + if i < num_messages % generator_count {
+                1
+            } else {
+                0
+            };
+        tokio::spawn(async move {
+            for _ in 0..count {
+                if tx.send(generate_message()).await.is_err() {
+                    break;
+                }
             }
-        }
-        tx.close();
-    });
+        });
+    }
+    drop(tx); // Close the original sender so the channel closes when all generators are done.
 
     let start_time = Instant::now();
     let mut tasks = tokio::task::JoinSet::new();
@@ -640,6 +655,7 @@ pub async fn measure_read_performance(
     let start_time = Instant::now();
     let mut final_count = 0;
     let batch_size = 128; // A reasonable batch size for single-threaded reading.
+    let commit_semaphore = Arc::new(Semaphore::new(MAX_PARALLEL_COMMITS));
 
     let consumer_clone = consumer.clone();
 
@@ -657,7 +673,15 @@ pub async fn measure_read_performance(
             Ok(Ok(batch)) if !batch.messages.is_empty() => {
                 final_count += batch.messages.len();
                 let commit = batch.commit;
-                tokio::spawn(async move { commit(None).await });
+                let permit = commit_semaphore
+                    .clone()
+                    .acquire_owned()
+                    .await
+                    .expect("Semaphore closed");
+                tokio::spawn(async move {
+                    commit(None).await;
+                    drop(permit);
+                });
             }
             Ok(Err(e)) => {
                 eprintln!("Error receiving message: {}. Stopping read.", e);
@@ -690,14 +714,25 @@ pub async fn measure_single_write_performance(
     let (tx, rx): (Sender<CanonicalMessage>, Receiver<CanonicalMessage>) = bounded(concurrency * 2);
 
     let final_count = Arc::new(AtomicUsize::new(0));
-    tokio::spawn(async move {
-        for _ in 0..num_messages {
-            if tx.send(generate_message()).await.is_err() {
-                break;
+
+    let generator_count = (concurrency / 10).clamp(1, 8);
+    for i in 0..generator_count {
+        let tx = tx.clone();
+        let count = num_messages / generator_count
+            + if i < num_messages % generator_count {
+                1
+            } else {
+                0
+            };
+        tokio::spawn(async move {
+            for _ in 0..count {
+                if tx.send(generate_message()).await.is_err() {
+                    break;
+                }
             }
-        }
-        tx.close();
-    });
+        });
+    }
+    drop(tx);
 
     let start_time = Instant::now();
     let mut tasks = tokio::task::JoinSet::new();
@@ -748,6 +783,7 @@ pub async fn measure_single_read_performance(
     // println!("Starting single read performance test for {}", _name);
     let start_time = Instant::now();
     let mut final_count = 0;
+    let commit_semaphore = Arc::new(Semaphore::new(MAX_PARALLEL_COMMITS));
     loop {
         if final_count == num_messages {
             break;
@@ -760,7 +796,15 @@ pub async fn measure_single_read_performance(
         })) = tokio::time::timeout(Duration::from_secs(10), receive_future).await
         {
             final_count += 1;
-            tokio::spawn(async move { commit(None).await });
+            let permit = commit_semaphore
+                .clone()
+                .acquire_owned()
+                .await
+                .expect("Semaphore closed");
+            tokio::spawn(async move {
+                commit(None).await;
+                drop(permit);
+            });
         } else {
             eprintln!("Failed to receive message or timed out. Stopping read.");
             break;

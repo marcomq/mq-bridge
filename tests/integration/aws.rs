@@ -10,6 +10,8 @@ use std::sync::Arc;
 const CONFIG_YAML: &str = r#"
 routes:
   memory_to_aws:
+    concurrency: 4
+    batch_size: 10
     input:
       memory: { topic: "aws-test-in" }
     output:
@@ -21,6 +23,8 @@ routes:
         secret_key: "test"
 
   aws_to_memory:
+    concurrency: 4
+    batch_size: 10
     input:
       aws:
         queue_url: "http://localhost:4566/000000000000/test-queue"

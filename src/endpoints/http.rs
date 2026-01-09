@@ -2,53 +2,49 @@
 //  © Copyright 2025, by Marco Mengelkoch
 //  Licensed under MIT License, see License file for more details
 //  git clone https://github.com/marcomq/mq-bridge
+
 use crate::endpoints::create_publisher_from_route;
 use crate::models::HttpConfig;
-#[cfg(feature = "axum")]
+#[cfg(feature = "actix-web")]
 use crate::traits::CommitFunc;
 use crate::traits::{
-    BoxFuture, ConsumerError, MessageConsumer, MessagePublisher, PublisherError, ReceivedBatch,
-    Sent, SentBatch,
+    BoxFuture, ConsumerError, MessageConsumer, MessagePublisher, ReceivedBatch, Sent,
 };
+#[cfg(feature = "reqwest")]
+use crate::traits::{PublisherError, SentBatch};
 use crate::CanonicalMessage;
+#[cfg(feature = "actix-web")]
+use actix_web::{web, App, HttpRequest, HttpResponse, HttpServer, Responder};
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;
-#[cfg(feature = "axum")]
-use axum::{
-    body::Bytes,
-    extract::State,
-    http::{header::HeaderMap, StatusCode},
-    response::{IntoResponse, Response},
-    routing::post,
-    Router,
-};
-#[cfg(feature = "axum")]
-use axum_server::{tls_rustls::RustlsConfig, Handle};
 use std::any::Any;
 use std::collections::HashMap;
-#[cfg(feature = "axum")]
+#[cfg(feature = "actix-web")]
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tracing::{info, trace};
+use uuid::Uuid;
 
-#[cfg(feature = "axum")]
+#[cfg(feature = "actix-web")]
 type HttpSourceMessage = (CanonicalMessage, CommitFunc);
 
 /// A source that listens for incoming HTTP requests.
-#[cfg(feature = "axum")]
+#[cfg(feature = "actix-web")]
 pub struct HttpConsumer {
     request_rx: tokio::sync::mpsc::Receiver<HttpSourceMessage>,
     _shutdown_tx: tokio::sync::watch::Sender<()>,
+    _server_handle: actix_web::dev::ServerHandle,
 }
 
-#[cfg(feature = "axum")]
+#[cfg(feature = "actix-web")]
 #[derive(Clone)]
 struct HttpConsumerState {
     tx: tokio::sync::mpsc::Sender<HttpSourceMessage>,
     response_sink: Option<Arc<dyn MessagePublisher>>,
+    message_id_header: String,
 }
 
-#[cfg(feature = "axum")]
+#[cfg(feature = "actix-web")]
 impl HttpConsumer {
     pub async fn new(config: &HttpConfig) -> anyhow::Result<Self> {
         let (request_tx, request_rx) = tokio::sync::mpsc::channel::<HttpSourceMessage>(100);
@@ -60,14 +56,15 @@ impl HttpConsumer {
             None
         };
 
+        let message_id_header = config
+            .message_id_header
+            .clone()
+            .unwrap_or_else(|| "message-id".to_string());
         let state = HttpConsumerState {
             tx: request_tx,
             response_sink,
+            message_id_header,
         };
-
-        let app = Router::new()
-            .route("/", post(handle_request))
-            .with_state(state);
 
         let listen_address = config
             .url
@@ -78,62 +75,91 @@ impl HttpConsumer {
             .with_context(|| format!("Invalid listen address: {}", listen_address))?;
 
         let tls_config = config.tls.clone();
-        let handle = Handle::new();
         // Channel to signal when the server is ready
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
 
+        let workers = config.workers.unwrap_or(0);
+        let workers = if workers == 0 {
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1)
+        } else {
+            workers
+        };
+        let server = HttpServer::new(move || {
+            App::new()
+                .app_data(web::Data::new(state.clone()))
+                // actual request handle here:
+                .default_service(web::to(handle_request))
+        })
+        .workers(workers)
+        .disable_signals(); // We handle shutdown manually
+
+        let server = if tls_config.is_tls_server_configured() {
+            info!("Starting HTTPS source on {} with {} workers", addr, workers);
+            let config = load_rustls_config(&tls_config)?;
+            server.bind_rustls_0_23(addr, config)?
+        } else {
+            info!("Starting HTTP source on {} with {} workers", addr, workers);
+            server.bind(addr)?
+        };
+
+        let server = server.run();
+        let handle = server.handle();
+
         tokio::spawn(async move {
-            if tls_config.is_tls_server_configured() {
-                info!("Starting HTTPS source on {}", addr);
-
-                // We clone the paths to move them into the async block.
-                let cert_path = tls_config.cert_file.unwrap();
-                let key_path = tls_config.key_file.unwrap();
-
-                let tls_config = RustlsConfig::from_pem_file(cert_path, key_path)
-                    .await
-                    .unwrap();
-
-                // Signal that we are about to start serving
-                let _ = ready_tx.send(());
-
-                let shutdown_handle = handle.clone();
-                let mut shutdown_rx_clone = shutdown_rx.clone();
-                tokio::spawn(async move {
-                    let _ = shutdown_rx_clone.changed().await;
-                    shutdown_handle.graceful_shutdown(Some(std::time::Duration::from_secs(5)));
-                });
-
-                axum_server::bind_rustls(addr, tls_config)
-                    .handle(handle)
-                    .serve(app.into_make_service())
-                    .await
-                    .unwrap();
-            } else {
-                let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-                info!("Starting HTTP source on {}", listener.local_addr().unwrap());
-
-                // Signal that we are about to start serving
-                let _ = ready_tx.send(());
-
-                axum::serve(listener, app)
-                    .with_graceful_shutdown(async move {
-                        let _ = shutdown_rx.changed().await;
-                    })
-                    .await
-                    .unwrap();
+            // Signal that we are about to start serving
+            let _ = ready_tx.send(());
+            if let Err(e) = server.await {
+                tracing::error!("HTTP server error: {}", e);
             }
+        });
+
+        // Spawn shutdown handler
+        let shutdown_handle = handle.clone();
+        tokio::spawn(async move {
+            let _ = shutdown_rx.changed().await;
+            shutdown_handle.stop(true).await;
         });
 
         ready_rx.await?;
         Ok(Self {
             request_rx,
             _shutdown_tx: shutdown_tx,
+            _server_handle: handle,
         })
     }
 }
 
-#[cfg(feature = "axum")]
+#[cfg(feature = "actix-web")]
+fn load_rustls_config(
+    tls_config: &crate::models::TlsConfig,
+) -> anyhow::Result<rustls::ServerConfig> {
+    let cert_file = tls_config
+        .cert_file
+        .as_ref()
+        .ok_or_else(|| anyhow!("Missing cert_file"))?;
+    let key_file = tls_config
+        .key_file
+        .as_ref()
+        .ok_or_else(|| anyhow!("Missing key_file"))?;
+
+    let cert_file = std::fs::File::open(cert_file)?;
+    let mut cert_reader = std::io::BufReader::new(cert_file);
+    let certs = rustls_pemfile::certs(&mut cert_reader).collect::<Result<Vec<_>, _>>()?;
+
+    let key_file = std::fs::File::open(key_file)?;
+    let mut key_reader = std::io::BufReader::new(key_file);
+    let key = rustls_pemfile::private_key(&mut key_reader)?
+        .ok_or_else(|| anyhow!("No private key found"))?;
+
+    let config = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)?;
+    Ok(config)
+}
+
+#[cfg(feature = "actix-web")]
 #[async_trait]
 impl MessageConsumer for HttpConsumer {
     async fn receive_batch(
@@ -157,28 +183,44 @@ impl MessageConsumer for HttpConsumer {
     }
 }
 
-#[cfg(feature = "axum")]
-#[tracing::instrument(skip_all, fields(http.method = "POST", http.uri = "/"))]
+#[cfg(feature = "actix-web")]
+#[tracing::instrument(skip_all, fields(http.method = %req.method(), http.uri = %req.uri()))]
 async fn handle_request(
-    State(state): State<HttpConsumerState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
-    let mut message = CanonicalMessage::new(body.to_vec(), None);
+    state: web::Data<HttpConsumerState>,
+    req: HttpRequest,
+    body: web::Bytes,
+) -> impl Responder {
+    let mut message_id = None;
+    if let Some(header_value) = req.headers().get(state.message_id_header.as_str()) {
+        if let Ok(s) = header_value.to_str() {
+            if let Ok(uuid) = Uuid::parse_str(s) {
+                message_id = Some(uuid.as_u128());
+            } else if let Ok(n) = u128::from_str_radix(s.trim_start_matches("0x"), 16) {
+                message_id = Some(n);
+            } else if let Ok(n) = s.parse::<u128>() {
+                message_id = Some(n);
+            }
+        }
+    }
+
+    let payload = body.to_vec();
+
+    let mut message = CanonicalMessage::new(payload, message_id);
     trace!(message_id = %format!("{:032x}", message.message_id), "Received HTTP request");
     let mut metadata = HashMap::new();
-    for (key, value) in headers.iter() {
+    for (key, value) in req.headers().iter() {
         if let Ok(value_str) = value.to_str() {
             metadata.insert(key.as_str().to_string(), value_str.to_string());
         }
     }
+    metadata.insert("http_method".to_string(), req.method().to_string());
+    metadata.insert("http_path".to_string(), req.path().to_string());
+    metadata.insert("http_query".to_string(), req.query_string().to_string());
+    metadata.insert("http_uri".to_string(), req.uri().to_string());
+    if let Some(peer) = req.peer_addr() {
+        metadata.insert("http_peer_addr".to_string(), peer.to_string());
+    }
     message.metadata = metadata;
-
-    let message_for_sink = if state.response_sink.is_some() {
-        Some(message.clone())
-    } else {
-        None
-    };
 
     // Channel to receive the commit confirmation from the pipeline
     let (ack_tx, ack_rx) = tokio::sync::oneshot::channel::<Option<CanonicalMessage>>();
@@ -188,12 +230,9 @@ async fn handle_request(
         }) as BoxFuture<'static, ()>
     });
 
-    if state.tx.send((message, commit)).await.is_err() {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Failed to send request to bridge",
-        )
-            .into_response();
+    if let Err(e) = state.tx.send((message, commit)).await {
+        tracing::error!("Failed to send request to bridge: {}", e);
+        return HttpResponse::InternalServerError().body("Failed to send request to bridge");
     }
 
     // Wait for pipeline to process the message
@@ -204,46 +243,45 @@ async fn handle_request(
                 // Pipeline processed the message.
                 // If a response sink is configured, use it to generate the response.
                 if let Some(sink) = &state.response_sink {
-                    match sink.send(message_for_sink.unwrap()).await {
-                        Ok(Sent::Response(sink_response)) => make_response(Some(sink_response)),
-                        Ok(Sent::Ack) => make_response(None),
-                        Err(e) => (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            format!("Response sink error: {}", e),
-                        )
-                            .into_response(),
+                    if let Some(resp) = pipeline_response {
+                        match sink.send(resp).await {
+                            Ok(Sent::Response(sink_response)) => make_response(Some(sink_response)),
+                            Ok(Sent::Ack) => make_response(None),
+                            Err(e) => HttpResponse::InternalServerError()
+                                .body(format!("Response sink error: {}", e)),
+                        }
+                    } else {
+                        make_response(None)
                     }
                 } else {
                     // No sink configured, use the pipeline response (if any)
                     make_response(pipeline_response)
                 }
             }
-            Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Pipeline closed").into_response(),
+            Err(_) => HttpResponse::InternalServerError().body("Pipeline closed"),
         }
     })
     .await
     {
         Ok(response) => response,
-        Err(_) => (StatusCode::GATEWAY_TIMEOUT, "Request timed out").into_response(),
+        Err(_) => HttpResponse::GatewayTimeout().body("Request timed out"),
     }
 }
 
-#[cfg(feature = "axum")]
-fn make_response(message: Option<CanonicalMessage>) -> Response {
+#[cfg(feature = "actix-web")]
+fn make_response(message: Option<CanonicalMessage>) -> HttpResponse {
     match message {
-        Some(msg) => (
-            StatusCode::OK,
-            [(
-                axum::http::header::CONTENT_TYPE,
-                msg.metadata
-                    .get("content-type")
-                    .map(|s| s.as_str())
-                    .unwrap_or("application/json"),
-            )],
-            msg.payload,
-        )
-            .into_response(),
-        None => (StatusCode::ACCEPTED, "Message processed").into_response(),
+        Some(msg) => {
+            let content_type = msg
+                .metadata
+                .get("content-type")
+                .map(|s| s.as_str())
+                .unwrap_or("application/octet-stream");
+            HttpResponse::Ok()
+                .content_type(content_type)
+                .body(msg.payload)
+        }
+        None => HttpResponse::Accepted().body("Message processed"),
     }
 }
 
@@ -401,7 +439,7 @@ impl MessagePublisher for HttpPublisher {
 }
 
 #[cfg(test)]
-#[cfg(all(feature = "axum", feature = "reqwest"))]
+#[cfg(all(feature = "actix-web", feature = "reqwest"))]
 mod tests {
     use super::*;
     use crate::models::{Config, EndpointType, MemoryConfig};
@@ -461,8 +499,7 @@ http_route:
 
         let config = HttpConfig {
             url: Some(addr.clone()),
-            tls: Default::default(),
-            response_out: None,
+            ..Default::default()
         };
 
         // Start Consumer (Server)
@@ -473,8 +510,7 @@ http_route:
         // Start Publisher (Client)
         let pub_config = HttpConfig {
             url: Some(url.clone()),
-            tls: Default::default(),
-            response_out: None,
+            ..Default::default()
         };
         let publisher = HttpPublisher::new(&pub_config)
             .await
@@ -511,25 +547,24 @@ http_route:
         let addr = format!("127.0.0.1:{}", port);
         let url = format!("http://{}", addr);
 
-        let config = HttpConfig {
-            url: Some(addr.clone()),
-            tls: Default::default(),
-            response_out: None,
-        };
-        let mut consumer = HttpConsumer::new(&config)
-            .await
-            .expect("Failed to create consumer");
-
         let mem_config = MemoryConfig {
             topic: "reply_sink".to_string(),
             capacity: Some(10),
         };
         let sink_endpoint = crate::models::Endpoint::new(EndpointType::Memory(mem_config.clone()));
 
+        let config = HttpConfig {
+            url: Some(addr.clone()),
+            response_out: Some(Box::new(sink_endpoint)),
+            ..Default::default()
+        };
+        let mut consumer = HttpConsumer::new(&config)
+            .await
+            .expect("Failed to create consumer");
+
         let pub_config = HttpConfig {
             url: Some(url.clone()),
-            tls: Default::default(),
-            response_out: Some(Box::new(sink_endpoint)),
+            ..Default::default()
         };
         let publisher = HttpPublisher::new(&pub_config)
             .await
@@ -565,8 +600,7 @@ http_route:
         let addr = format!("127.0.0.1:{}", port);
         let config = HttpConfig {
             url: Some(addr.clone()),
-            tls: Default::default(),
-            response_out: None,
+            ..Default::default()
         };
 
         {
@@ -594,8 +628,7 @@ http_route:
         let addr = format!("127.0.0.1:{}", port);
         let http_config = HttpConfig {
             url: Some(addr.clone()),
-            tls: Default::default(),
-            response_out: None,
+            ..Default::default()
         };
         let mut consumer = HttpConsumer::new(&http_config).await.unwrap();
 
@@ -627,7 +660,7 @@ http_route:
             .unwrap();
 
         // 5. Assert the response from the server
-        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
         let body = response.text().await.unwrap();
         let expected_body = serde_json::to_string(static_content).unwrap();
         assert_eq!(body, expected_body);
@@ -639,8 +672,7 @@ http_route:
         let addr = format!("127.0.0.1:{}", port);
         let http_config = HttpConfig {
             url: Some(addr.clone()),
-            tls: Default::default(),
-            response_out: None,
+            ..Default::default()
         };
         let mut consumer = HttpConsumer::new(&http_config).await.unwrap();
 
@@ -670,7 +702,7 @@ http_route:
             .await
             .unwrap();
 
-        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
         assert_eq!(resp.text().await.unwrap(), "echo_test");
     }
 }

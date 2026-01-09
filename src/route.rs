@@ -6,13 +6,16 @@
 use crate::endpoints::{create_consumer_from_route, create_publisher_from_route};
 pub use crate::models::Route;
 use crate::models::{self, Endpoint};
-use crate::traits::{BatchCommitFunc, ConsumerError, Handler, HandlerError, SentBatch};
+use crate::traits::{
+    BatchCommitFunc, ConsumerError, Handler, HandlerError, PublisherError, SentBatch,
+};
 use async_channel::{bounded, Sender};
 use serde::de::DeserializeOwned;
 use std::sync::Arc;
 use tokio::{
     select,
-    task::{self, JoinHandle},
+    sync::Semaphore,
+    task::{JoinHandle, JoinSet},
 };
 use tracing::{debug, error, info, warn};
 
@@ -135,6 +138,18 @@ impl Route {
     ) -> anyhow::Result<bool> {
         let publisher = create_publisher_from_route(name, &self.output).await?;
         let mut consumer = create_consumer_from_route(name, &self.input).await?;
+        let max_parallel_commits = self
+            .input
+            .middlewares
+            .iter()
+            .find_map(|m| match m {
+                models::Middleware::CommitConcurrency(c) => Some(c.limit),
+                _ => None,
+            })
+            .unwrap_or(4096);
+
+        let commit_semaphore = Arc::new(Semaphore::new(max_parallel_commits));
+        let mut commit_tasks = JoinSet::new();
         if let Some(tx) = ready_tx {
             let _ = tx.send(()).await;
         }
@@ -142,15 +157,16 @@ impl Route {
             select! {
                 _ = shutdown_rx.recv() => {
                     info!("Shutdown signal received in sequential runner for route '{}'.", name);
+                    while commit_tasks.join_next().await.is_some() {}
                     return Ok(true); // Stopped by shutdown signal
                 }
                 res = consumer.receive_batch(self.batch_size) => {
-                    let (messages, commit) = match res {
+                    let received_batch = match res {
                         Ok(batch) => {
                             if batch.messages.is_empty() {
                                 continue; // No messages, loop to select! again
                             }
-                            (batch.messages, batch.commit)
+                            batch
                         }
                         Err(ConsumerError::EndOfStream) => {
                             info!("Consumer for route '{}' reached end of stream. Shutting down.", name);
@@ -161,33 +177,48 @@ impl Route {
                             return Err(e);
                         }
                     };
-                    debug!("Received a batch of {} messages sequentially", messages.len());
+                    debug!("Received a batch of {} messages sequentially", received_batch.messages.len());
 
                     // Process the batch sequentially without spawning a new task
-                    match publisher.send_batch(messages).await {
+                    let commit = received_batch.commit;
+                    match publisher.send_batch(received_batch.messages).await {
                         Ok(SentBatch::Ack) => {
-                            commit(None).await;
+                            let permit = commit_semaphore.clone().acquire_owned().await.map_err(|e| anyhow::anyhow!("Semaphore error: {}", e))?;
+                            commit_tasks.spawn(async move {
+                                commit(None).await;
+                                // Permit is dropped here, releasing the slot
+                                drop(permit);
+                            });
                         }
                         Ok(SentBatch::Partial { responses, failed }) => {
-                            let failed_count = failed.len();
-                            commit(responses).await; // Commit the successful messages
-                            if failed_count > 0 {
+                            let has_retryable = failed.iter().any(|(_, e)| matches!(e, PublisherError::Retryable(_)));
+                            if has_retryable {
+                                let failed_count = failed.len();
                                 let (_, first_error) = failed
                                     .into_iter()
-                                    .next()
-                                    .expect("failed_count > 0 implies at least one failed message");
+                                    .find(|(_, e)| matches!(e, PublisherError::Retryable(_)))
+                                    .expect("has_retryable is true");
                                 return Err(anyhow::anyhow!(
-                                    "Failed to send {} messages in batch. First error: {}",
+                                    "Failed to send {} messages in batch. First retryable error: {}",
                                     failed_count,
                                     first_error
                                 ));
                             }
+                            for (msg, e) in failed {
+                                error!("Dropping message (ID: {:032x}) due to non-retryable error: {}", msg.message_id, e);
+                            }
+                            let permit = commit_semaphore.clone().acquire_owned().await.map_err(|e| anyhow::anyhow!("Semaphore error: {}", e))?;
+                            commit_tasks.spawn(async move {
+                                commit(responses).await;
+                                drop(permit);
+                            });
                         }
                         Err(e) => return Err(e.into()), // Propagate error to trigger reconnect
                     }
                 }
             }
         }
+        while commit_tasks.join_next().await.is_some() {}
         Ok(false) // Indicate graceful shutdown due to end-of-stream
     }
 
@@ -208,31 +239,53 @@ impl Route {
         let work_capacity = self.concurrency.saturating_mul(self.batch_size);
         let (work_tx, work_rx) =
             bounded::<(Vec<crate::CanonicalMessage>, BatchCommitFunc)>(work_capacity);
+        let max_parallel_commits = self
+            .input
+            .middlewares
+            .iter()
+            .find_map(|m| match m {
+                models::Middleware::CommitConcurrency(c) => Some(c.limit),
+                _ => None,
+            })
+            .unwrap_or(4096);
+
+        let commit_semaphore = Arc::new(Semaphore::new(max_parallel_commits));
 
         // --- Worker Pool ---
-        let mut worker_handles = Vec::with_capacity(self.concurrency);
+        let mut join_set = JoinSet::new();
         for i in 0..self.concurrency {
             let work_rx_clone = work_rx.clone();
             let publisher = Arc::clone(&publisher);
             let err_tx = err_tx.clone();
-            worker_handles.push(task::spawn(async move {
+            let commit_semaphore = commit_semaphore.clone();
+            let mut commit_tasks = JoinSet::new();
+            join_set.spawn(async move {
                 debug!("Starting worker {}", i);
                 while let Ok((messages, commit)) = work_rx_clone.recv().await {
-                    // The worker now receives a batch and sends it as a bulk.
                     match publisher.send_batch(messages).await {
                         Ok(SentBatch::Ack) => {
-                            commit(None).await;
+                            let permit = match commit_semaphore.clone().acquire_owned().await {
+                                Ok(p) => p,
+                                Err(_) => {
+                                    warn!("Semaphore closed, worker exiting");
+                                    break;
+                                }
+                            };
+                            commit_tasks.spawn(async move {
+                                commit(None).await;
+                                drop(permit);
+                            });
                         }
                         Ok(SentBatch::Partial { responses, failed }) => {
-                            let failed_count = failed.len();
-                            commit(responses).await; // Commit the successful messages
-                            if failed_count > 0 {
+                            let has_retryable = failed.iter().any(|(_, e)| matches!(e, PublisherError::Retryable(_)));
+                            if has_retryable {
+                                let failed_count = failed.len();
                                 let (_, first_error) = failed
                                     .into_iter()
-                                    .next()
-                                    .expect("failed_count > 0 implies at least one failed message");
+                                    .find(|(_, e)| matches!(e, PublisherError::Retryable(_)))
+                                    .expect("has_retryable is true");
                                 let e = anyhow::anyhow!(
-                                    "Failed to send {} messages in batch. First error: {}",
+                                    "Failed to send {} messages in batch. First retryable error: {}",
                                     failed_count,
                                     first_error
                                 );
@@ -240,7 +293,22 @@ impl Route {
                                 if err_tx.send(e).await.is_err() {
                                     warn!("Could not send error to main task, it might be down.");
                                 }
+                                break; // Stop processing this batch
                             }
+                            for (msg, e) in failed {
+                                error!("Worker dropping message (ID: {:032x}) due to non-retryable error: {}", msg.message_id, e);
+                            }
+                            let permit = match commit_semaphore.clone().acquire_owned().await {
+                                Ok(p) => p,
+                                Err(_) => {
+                                    warn!("Semaphore closed, worker exiting");
+                                    break;
+                                }
+                            };
+                            commit_tasks.spawn(async move {
+                                commit(responses).await;
+                                drop(permit);
+                            });
                         }
                         Err(e) => {
                             error!("Worker failed to send message batch: {}", e);
@@ -248,10 +316,13 @@ impl Route {
                             if err_tx.send(e.into()).await.is_err() {
                                 warn!("Could not send error to main task, it might be down.");
                             }
+                            break;
                         }
                     }
                 }
-            }));
+                // Wait for all in-flight commits to complete
+                while commit_tasks.join_next().await.is_some() {}
+            });
         }
 
         loop {
@@ -261,6 +332,19 @@ impl Route {
                 Ok(err) = err_rx.recv() => {
                     error!("A worker reported a critical error. Shutting down route.");
                     return Err(err);
+                }
+
+                Some(res) = join_set.join_next() => {
+                    match res {
+                        Ok(_) => {
+                            error!("A worker task finished unexpectedly. Shutting down route.");
+                            return Err(anyhow::anyhow!("Worker task finished unexpectedly"));
+                        }
+                        Err(e) => {
+                            error!("A worker task panicked: {}. Shutting down route.", e);
+                            return Err(e.into());
+                        }
+                    }
                 }
 
                 _ = shutdown_rx.recv() => {
@@ -298,9 +382,7 @@ impl Route {
         // Close the work channel. Workers will finish their current message and then exit the loop.
         drop(work_tx);
         // Wait for all worker tasks to complete.
-        for handle in worker_handles {
-            let _ = handle.await;
-        }
+        while join_set.join_next().await.is_some() {}
 
         if let Ok(err) = err_rx.try_recv() {
             return Err(err);

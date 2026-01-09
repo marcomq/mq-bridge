@@ -10,12 +10,16 @@ use std::sync::Arc;
 const CONFIG_YAML: &str = r#"
 routes:
   memory_to_amqp:
+    concurrency: 4
+    batch_size: 128
     input:
       memory: { topic: "amqp-test-in" }
     output:
       amqp: { url: "amqp://guest:guest@localhost:5672/%2f", queue: "test_queue_amqp" }
 
   amqp_to_memory:
+    concurrency: 4
+    batch_size: 128
     input:
       amqp: { url: "amqp://guest:guest@localhost:5672/%2f", queue: "test_queue_amqp", prefetch_count: 1000 }
     output:

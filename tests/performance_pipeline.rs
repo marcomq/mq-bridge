@@ -1,5 +1,11 @@
 mod integration;
 
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn test_memory_performance_pipeline() {
+    integration::memory::test_memory_performance_pipeline().await;
+}
+
 #[cfg(feature = "kafka")]
 #[tokio::test(flavor = "multi_thread")]
 #[ignore]
@@ -52,4 +58,11 @@ async fn test_mongodb_replica_set_pipeline() {
 #[ignore]
 async fn test_ibm_mq_performance_pipeline() {
     integration::ibm_mq::test_ibm_mq_performance_pipeline().await;
+}
+
+#[cfg(feature = "zeromq")]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn test_zeromq_performance_pipeline() {
+    integration::zeromq::test_zeromq_performance_pipeline().await;
 }

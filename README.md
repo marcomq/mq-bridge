@@ -1,4 +1,4 @@
-# mq-bridge
+# mq-bridge library
 
 [![Crates.io](https://img.shields.io/crates/v/mq-bridge.svg)](https://crates.io/crates/mq-bridge)
 [![Docs.rs](https://docs.rs/mq-bridge/badge.svg)](https://docs.rs/mq-bridge)
@@ -9,15 +9,15 @@
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 ```text
-      ┌──────── mq-bridge ────────┐
+      ┌────── mq-bridge-lib ──────┐
 ──────┴───────────────────────────┴──────
 ```
 
-`mq-bridge` is an asynchronous message library for Rust. It connects different messaging systems, data stores, and protocols. Unlike a classic bridge that simply forwards messages, `mq-bridge` acts as a **programmable integration layer**, allowing for transformation, filtering, handling, events, and complex routing. It is built on Tokio and supports patterns like retries, dead-letter queues, and message deduplication.
+n`mq-bridge` is an asynchronous message library for Rust. It connects different messaging systems, data stores, and protocols. Unlike a classic bridge that simply forwards messages, `mq-bridge` acts as a **programmable integration layer**, allowing for transformation, filtering, routing and event/command handling. It is built on Tokio and supports patterns like retries, dead-letter queues, and message deduplication.
 
 ## Features
 
-*   **Supported Backends**: Kafka, NATS, AMQP (RabbitMQ), MQTT, MongoDB, HTTP, Files, AWS (SQS/SNS), IBM MQ, and in-memory channels.
+*   **Supported Backends**: Kafka, NATS, AMQP (RabbitMQ), MQTT, MongoDB, HTTP, ZeroMQ, Files, AWS (SQS/SNS), IBM MQ, and in-memory channels.
     > **Note**: IBM MQ is not included in the `full` feature set. It requires the `ibm-mq` feature and the IBM MQ Client library. See [mqi crate](https://crates.io/crates/mqi/) for installation details.
 *   **Configuration**: Routes can be defined via YAML, JSON or environment variables.
 *   **Programmable Logic**: Inject custom Rust handlers to transform or filter messages in-flight.
@@ -35,7 +35,7 @@ Unlike libraries that enforce specific architectural patterns (like strict CQRS/
 
 ## Status
 
-This library was created in 2025 is still kind of new. There are automated unit and integration tests. 
+This library was created in 2025 and is still kind of new. There are automated unit and integration tests. 
 There are integration tests for consumers and publishers to verify that they are working 
 as expected with standard docker containers of the latest stable version.
 
@@ -86,6 +86,8 @@ Different backends and modes (`consumer` vs `subscriber`) have different persist
 | **Memory** | All | Ephemeral | Lost on restart. |
 | **File** | All | Persistent | Stored on disk. |
 | **HTTP** | All | Ephemeral | Direct request/response. |
+| **ZeroMQ** | Consumer | Ephemeral | Uses PULL/REP sockets. |
+| | Subscriber | Ephemeral | Uses SUB sockets. |
 
 ## Usage
 
@@ -405,6 +407,19 @@ iot_router:
       default:
         memory:
           topic: "dropped_sensors"
+
+# Route 7: ZeroMQ PUSH/PULL
+zeromq_pipeline:
+  input:
+    zeromq:
+      url: "tcp://0.0.0.0:5555"
+      socket_type: "pull"
+      bind: true
+  output:
+    zeromq:
+      url: "tcp://localhost:5556"
+      socket_type: "push"
+      bind: false
 ```
 
 ## Configuration Details
@@ -494,9 +509,7 @@ To run the criterion benchmarks:
 ```sh
 cargo bench --features "full"
 ```
-Unfortuntately, the results of `cargo bench` are not really meaningfull yet. 
-The times are not stable yet, it is therefore recommended to perform the 
-integration performance test.
+The times are not stable yet, it is therefore recommended to perform the integration performance test if you want to measure throughput.
 
 ## License
 `mq-bridge` is licensed under the MIT License.

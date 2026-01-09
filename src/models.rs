@@ -29,9 +29,11 @@ pub type PublisherConfig = HashMap<String, Endpoint>;
 pub struct Route {
     /// (Optional) Number of concurrent processing tasks for this route. Defaults to 1.
     #[serde(default = "default_concurrency")]
+    #[cfg_attr(feature = "schema", schemars(range(min = 1)))]
     pub concurrency: usize,
-    /// (Optional) Number of messages to process in a single batch. Defaults to 128.
+    /// (Optional) Number of messages to process in a single batch. Defaults to 1.
     #[serde(default = "default_batch_size")]
+    #[cfg_attr(feature = "schema", schemars(range(min = 1)))]
     pub batch_size: usize,
     /// The input/source endpoint for the route.
     pub input: Endpoint,
@@ -45,7 +47,7 @@ pub(crate) fn default_concurrency() -> usize {
 }
 
 pub(crate) fn default_batch_size() -> usize {
-    128
+    1
 }
 
 fn default_output_endpoint() -> Endpoint {
@@ -80,6 +82,7 @@ pub struct Endpoint {
     #[serde(default)]
     pub middlewares: Vec<Middleware>,
 
+    /// (input only) The processing mode for the endpoint.
     #[serde(default)]
     pub mode: ConsumerMode,
 
@@ -254,6 +257,7 @@ pub enum EndpointType {
     Mqtt(MqttEndpoint),
     IbmMq(IbmMqEndpoint),
     Http(HttpEndpoint),
+    ZeroMq(ZeroMqEndpoint),
     Fanout(Vec<Endpoint>),
     Switch(SwitchConfig),
     Response(ResponseConfig),
@@ -270,8 +274,10 @@ pub enum Middleware {
     Deduplication(DeduplicationMiddleware),
     Metrics(MetricsMiddleware),
     Dlq(Box<DeadLetterQueueMiddleware>),
+    CommitConcurrency(CommitConcurrencyMiddleware),
     Retry(RetryMiddleware),
     RandomPanic(RandomPanicMiddleware),
+    Delay(DelayMiddleware),
     #[serde(skip)]
     Custom(Arc<dyn CustomMiddlewareFactory>),
 }
@@ -283,6 +289,14 @@ pub enum Middleware {
 pub struct DeduplicationMiddleware {
     pub sled_path: String,
     pub ttl_seconds: u64,
+}
+
+/// Configuration for limiting the number of parallel commit tasks of publishers.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct CommitConcurrencyMiddleware {
+    pub limit: usize,
 }
 
 /// Metrics middleware configuration. It's currently a struct without fields
@@ -326,6 +340,13 @@ pub struct RetryMiddleware {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
+pub struct DelayMiddleware {
+    pub delay_ms: u64,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub struct RandomPanicMiddleware {
     #[serde(deserialize_with = "deserialize_probability")]
     pub probability: f64,
@@ -357,7 +378,6 @@ pub struct AwsEndpoint {
     pub config: AwsConfig,
 }
 
-#[cfg(feature = "aws")]
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
@@ -392,16 +412,22 @@ pub struct KafkaConfig {
     /// Comma-separated list of Kafka broker URLs. Can also be specified using the alias 'url'.
     #[serde(alias = "url")]
     pub brokers: String,
+    /// Optional username for SASL authentication.
     pub username: Option<String>,
-    pub password: Option<String>, // Consider using a secret management type
+    /// Optional password for SASL authentication.
+    pub password: Option<String>,
+    /// TLS configuration.
     #[serde(default)]
     pub tls: TlsConfig,
+    /// Consumer group ID. Required for consumers.
     pub group_id: Option<String>,
-    /// If true, do not wait for an acknowledgement when sending to broker. Defaults to false.
+    /// (Publisher only) If true, do not wait for an acknowledgement when sending to broker. Defaults to false.
     #[serde(default)]
     pub delayed_ack: bool,
+    /// Additional librdkafka producer configuration options (key-value pairs).
     #[serde(default)]
     pub producer_options: Option<Vec<(String, String)>>,
+    /// Additional librdkafka consumer configuration options (key-value pairs).
     #[serde(default)]
     pub consumer_options: Option<Vec<(String, String)>>,
 }
@@ -426,24 +452,36 @@ pub struct NatsEndpoint {
 pub struct NatsConfig {
     /// Comma-separated list of NATS server URLs (e.g., "nats://localhost:4222,nats://localhost:4223").
     pub url: String,
+    /// Optional username for authentication.
     pub username: Option<String>,
+    /// Optional password for authentication.
     pub password: Option<String>,
+    /// TLS configuration.
     #[serde(default)]
     pub tls: TlsConfig,
+    /// Optional token for authentication.
     pub token: Option<String>,
-    /// If true, do not wait for an acknowledgement when sending to broker. Defaults to false.
+    /// (Publisher only) If true, the publisher uses the request-reply pattern.
+    /// It sends a request and waits for a response (using `core_client.request_with_headers()`)
+    /// with timeout handling. Defaults to false.
+    #[serde(default)]
+    pub request_reply: bool,
+    /// Timeout for request-reply operations in milliseconds. Defaults to 2000ms.
+    pub request_timeout_ms: Option<u64>,
+    /// (Publisher only) If true, do not wait for an acknowledgement when sending to broker. Defaults to false.
     #[serde(default)]
     pub delayed_ack: bool,
     /// If no_jetstream: true, use Core NATS (fire-and-forget) instead of JetStream. Defaults to false.
     #[serde(default)]
     pub no_jetstream: bool,
+    /// The default stream name to use if not specified in the endpoint configuration.
     pub default_stream: Option<String>,
+    /// Maximum number of messages in the stream (if created by the bridge). Defaults to 1,000,000.
     pub stream_max_messages: Option<i64>,
+    /// Maximum total bytes in the stream (if created by the bridge). Defaults to 1GB.
     pub stream_max_bytes: Option<i64>,
+    /// Number of messages to prefetch from the consumer. Defaults to 10000.
     pub prefetch_count: Option<usize>,
-    #[serde(default)]
-    pub request_reply: bool,
-    pub request_timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
@@ -484,15 +522,21 @@ pub struct AmqpConfig {
     /// For high availability, provide the address of a load balancer or use DNS resolution
     /// that points to multiple brokers. Example: "amqp://localhost:5672/vhost".
     pub url: String,
+    /// Optional username for authentication.
     pub username: Option<String>,
+    /// Optional password for authentication.
     pub password: Option<String>,
+    /// TLS configuration.
     #[serde(default)]
     pub tls: TlsConfig,
+    /// The exchange to publish to or bind the queue to.
     pub exchange: Option<String>,
+    /// Number of messages to prefetch. Defaults to 100.
     pub prefetch_count: Option<u16>,
+    /// If true, declare queues as non-durable (transient). Defaults to false.
     #[serde(default)]
     pub no_persistence: bool,
-    /// If true, do not wait for an acknowledgement when sending to broker. Defaults to false.
+    /// (Publisher only) If true, do not wait for an acknowledgement when sending to broker. Defaults to false.
     #[serde(default)]
     pub delayed_ack: bool,
 }
@@ -523,10 +567,14 @@ pub struct MongoDbConfig {
     /// Optional password. Takes precedence over any credentials embedded in the `url`.
     /// Use embedded URL credentials for simple one-off connections but prefer explicit username/password fields (or environment-sourced secrets) for clarity and secret management in production.
     pub password: Option<String>,
+    /// TLS configuration.
     #[serde(default)]
     pub tls: TlsConfig,
+    /// The database name.
     pub database: String,
+    /// Polling interval in milliseconds for the consumer (when not using Change Streams). Defaults to 100ms.
     pub polling_interval_ms: Option<u64>,
+    /// TTL in seconds for documents created by the publisher. If set, a TTL index is created.
     pub ttl_seconds: Option<u64>,
 }
 
@@ -549,18 +597,36 @@ pub struct MqttEndpoint {
 pub struct MqttConfig {
     /// MQTT broker URL (e.g., "tcp://localhost:1883"). Does not support multiple hosts.
     pub url: String,
+    /// Optional username for authentication.
     pub username: Option<String>,
+    /// Optional password for authentication.
     pub password: Option<String>,
+    /// TLS configuration.
     #[serde(default)]
     pub tls: TlsConfig,
+    /// Capacity of the internal channel for incoming messages. Defaults to 100.
     pub queue_capacity: Option<usize>,
+    /// Maximum number of inflight messages.
     pub max_inflight: Option<u16>,
+    /// Quality of Service level (0, 1, or 2). Defaults to 1.
     pub qos: Option<u8>,
+    /// If true, start with a clean session. Defaults to false (persistent session).
     #[serde(default = "default_clean_session")]
-    pub clean_session: bool, // false => persistence
+    pub clean_session: bool,
+    /// Keep-alive interval in seconds. Defaults to 20.
     pub keep_alive_seconds: Option<u64>,
+    /// MQTT protocol version (V3 or V5). Defaults to V5.
     #[serde(default)]
     pub protocol: MqttProtocol,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum MqttProtocol {
+    #[default]
+    V5,
+    V3,
 }
 
 // --- IBM MQ Specific Configuration ---
@@ -582,22 +648,59 @@ pub struct IbmMqEndpoint {
 pub struct IbmMqConfig {
     /// Comma-separated list of IBM MQ connection names (e.g., "localhost(1414),otherhost(1414)").
     pub connection_name: String,
+    /// The queue manager name.
     pub queue_manager: String,
+    /// The channel name.
     pub channel: String,
+    /// Optional username for authentication.
     pub user: Option<String>,
+    /// Optional password for authentication.
     pub password: Option<String>,
+    /// Cipher spec for TLS connection.
     pub cipher_spec: Option<String>,
+    /// TLS configuration.
     #[serde(default)]
     pub tls: TlsConfig,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
+// --- ZeroMQ Specific Configuration ---
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct ZeroMqEndpoint {
+    pub topic: Option<String>,
+    #[serde(flatten)]
+    pub config: ZeroMqConfig,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct ZeroMqConfig {
+    /// The ZeroMQ URL (e.g., "tcp://127.0.0.1:5555").
+    pub url: String,
+    /// The socket type (PUSH, PULL, PUB, SUB, REQ, REP).
+    #[serde(default)]
+    pub socket_type: Option<ZeroMqSocketType>,
+    /// If true, bind to the address. If false, connect.
+    #[serde(default)]
+    pub bind: bool,
+    /// Internal buffer size for the channel. Defaults to 128.
+    #[serde(default)]
+    pub internal_buffer_size: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
-pub enum MqttProtocol {
-    #[default]
-    V5,
-    V3,
+pub enum ZeroMqSocketType {
+    Push,
+    Pull,
+    Pub,
+    Sub,
+    Req,
+    Rep,
 }
 
 // --- HTTP Specific Configuration ---
@@ -618,9 +721,15 @@ pub struct HttpEndpoint {
 pub struct HttpConfig {
     /// For consumers, the listen address (e.g., "0.0.0.0:8080"). For publishers, the target URL.
     pub url: Option<String>,
+    /// TLS configuration.
     #[serde(default)]
     pub tls: TlsConfig,
+    /// (Consumer only) Optional endpoint to send the response to.
     pub response_out: Option<Box<Endpoint>>,
+    /// (Consumer only) Number of worker threads to use. Defaults to 0 for unlimited.
+    pub workers: Option<usize>,
+    /// (Consumer only) Header key to extract the message ID from. Defaults to "message-id".
+    pub message_id_header: Option<String>,
 }
 
 // --- Switch/Router Configuration ---
@@ -647,11 +756,17 @@ pub struct ResponseConfig {}
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct TlsConfig {
+    /// If true, enable TLS/SSL.
     pub required: bool,
+    /// Path to the CA certificate file.
     pub ca_file: Option<String>,
+    /// Path to the client certificate file (PEM).
     pub cert_file: Option<String>,
+    /// Path to the client private key file (PEM).
     pub key_file: Option<String>,
+    /// Password for the private key (if encrypted).
     pub cert_password: Option<String>,
+    /// If true, disable server certificate verification (insecure).
     #[serde(default)]
     pub accept_invalid_certs: bool,
 }
@@ -751,6 +866,8 @@ kafka_to_nats:
                     assert!((rp.probability - 0.1).abs() < f64::EPSILON);
                     has_random_panic = true;
                 }
+                Middleware::CommitConcurrency(_) => {}
+                Middleware::Delay(_) => {}
             }
         }
 

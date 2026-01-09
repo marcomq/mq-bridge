@@ -11,12 +11,16 @@ use mq_bridge::endpoints::mongodb::{MongoDbConsumer, MongoDbPublisher};
 const CONFIG_YAML: &str = r#"
 routes:
   memory_to_mongodb:
+    concurrency: 4
+    batch_size: 128
     input:
       memory: { topic: "test-in-mongodb" }
     output:
       mongodb: { url: "mongodb://localhost:27017", database: "mq_bridge_test", collection: "test_collection" }
 
   mongodb_to_memory:
+    concurrency: 4
+    batch_size: 128
     input:
       mongodb: { url: "mongodb://localhost:27017", database: "mq_bridge_test", collection: "test_collection" }
     output:
