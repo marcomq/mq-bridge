@@ -23,6 +23,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tracing::{info, trace};
+use uuid::Uuid;
 
 #[cfg(feature = "actix-web")]
 type HttpSourceMessage = (CanonicalMessage, CommitFunc);
@@ -40,6 +41,7 @@ pub struct HttpConsumer {
 struct HttpConsumerState {
     tx: tokio::sync::mpsc::Sender<HttpSourceMessage>,
     response_sink: Option<Arc<dyn MessagePublisher>>,
+    message_id_header: String,
 }
 
 #[cfg(feature = "actix-web")]
@@ -54,9 +56,14 @@ impl HttpConsumer {
             None
         };
 
+        let message_id_header = config
+            .message_id_header
+            .clone()
+            .unwrap_or_else(|| "message-id".to_string());
         let state = HttpConsumerState {
             tx: request_tx,
             response_sink,
+            message_id_header,
         };
 
         let listen_address = config
@@ -82,18 +89,17 @@ impl HttpConsumer {
         let server = HttpServer::new(move || {
             App::new()
                 .app_data(web::Data::new(state.clone()))
+                // actual request handle here:
                 .route("/", web::post().to(handle_request))
         })
         .workers(workers)
         .disable_signals(); // We handle shutdown manually
 
         let server = if tls_config.is_tls_server_configured() {
-            info!("Starting HTTPS source on {}", addr);
             info!("Starting HTTPS source on {} with {} workers", addr, workers);
             let config = load_rustls_config(&tls_config)?;
             server.bind_rustls_0_23(addr, config)?
         } else {
-            info!("Starting HTTP source on {}", addr);
             info!("Starting HTTP source on {} with {} workers", addr, workers);
             server.bind(addr)?
         };
@@ -184,7 +190,20 @@ async fn handle_request(
     req: HttpRequest,
     body: web::Bytes,
 ) -> impl Responder {
-    let mut message = CanonicalMessage::new(body.to_vec(), None);
+    let mut message_id = None;
+    if let Some(header_value) = req.headers().get(state.message_id_header.as_str()) {
+        if let Ok(s) = header_value.to_str() {
+            if let Ok(uuid) = Uuid::parse_str(s) {
+                message_id = Some(uuid.as_u128());
+            } else if let Ok(n) = u128::from_str_radix(s.trim_start_matches("0x"), 16) {
+                message_id = Some(n);
+            } else if let Ok(n) = s.parse::<u128>() {
+                message_id = Some(n);
+            }
+        }
+    }
+
+    let mut message = CanonicalMessage::new(body.to_vec(), message_id);
     trace!(message_id = %format!("{:032x}", message.message_id), "Received HTTP request");
     let mut metadata = HashMap::new();
     for (key, value) in req.headers().iter() {

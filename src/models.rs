@@ -728,6 +728,8 @@ pub struct HttpConfig {
     pub response_out: Option<Box<Endpoint>>,
     /// (Consumer only) Number of worker threads to use. Defaults to 0 for unlimited.
     pub workers: Option<usize>,
+    /// (Consumer only) Header key to extract the message ID from. Defaults to "message-id".
+    pub message_id_header: Option<String>,
 }
 
 // --- Switch/Router Configuration ---
