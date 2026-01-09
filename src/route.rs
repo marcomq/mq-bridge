@@ -149,6 +149,7 @@ impl Route {
             .unwrap_or(4096);
 
         let commit_semaphore = Arc::new(Semaphore::new(max_parallel_commits));
+        let mut commit_tasks = JoinSet::new();
         if let Some(tx) = ready_tx {
             let _ = tx.send(()).await;
         }
@@ -156,6 +157,7 @@ impl Route {
             select! {
                 _ = shutdown_rx.recv() => {
                     info!("Shutdown signal received in sequential runner for route '{}'.", name);
+                    while commit_tasks.join_next().await.is_some() {}
                     return Ok(true); // Stopped by shutdown signal
                 }
                 res = consumer.receive_batch(self.batch_size) => {
@@ -182,7 +184,7 @@ impl Route {
                     match publisher.send_batch(received_batch.messages).await {
                         Ok(SentBatch::Ack) => {
                             let permit = commit_semaphore.clone().acquire_owned().await.map_err(|e| anyhow::anyhow!("Semaphore error: {}", e))?;
-                            tokio::spawn(async move {
+                            commit_tasks.spawn(async move {
                                 commit(None).await;
                                 // Permit is dropped here, releasing the slot
                                 drop(permit);
@@ -206,7 +208,7 @@ impl Route {
                                 error!("Dropping message (ID: {:032x}) due to non-retryable error: {}", msg.message_id, e);
                             }
                             let permit = commit_semaphore.clone().acquire_owned().await.map_err(|e| anyhow::anyhow!("Semaphore error: {}", e))?;
-                            tokio::spawn(async move {
+                            commit_tasks.spawn(async move {
                                 commit(responses).await;
                                 drop(permit);
                             });
@@ -216,6 +218,7 @@ impl Route {
                 }
             }
         }
+        while commit_tasks.join_next().await.is_some() {}
         Ok(false) // Indicate graceful shutdown due to end-of-stream
     }
 

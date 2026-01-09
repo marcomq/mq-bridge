@@ -82,7 +82,9 @@ impl ZeroMqPublisher {
                             let _ = ack_tx.send(s.send(msg).await);
                         }
                         SenderSocket::Req(_) => {
-                            tracing::error!("Req socket received Send job, expected Request");
+                            let err_msg = "Req socket received Send job, expected Request";
+                            tracing::error!("{}", err_msg);
+                            let _ = ack_tx.send(Err(zeromq::ZmqError::Other(err_msg)));
                         }
                     },
                     PublisherJob::Request(msg, reply_tx) => match &mut socket {
@@ -95,7 +97,9 @@ impl ZeroMqPublisher {
                             }
                         }
                         _ => {
-                            tracing::error!("Push/Pub socket received Request job, expected Send");
+                            let err_msg = "Push/Pub socket received Request job, expected Send";
+                            tracing::error!("{}", err_msg);
+                            let _ = reply_tx.send(Err(zeromq::ZmqError::Other(err_msg)));
                         }
                     },
                 }

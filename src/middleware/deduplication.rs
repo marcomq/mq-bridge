@@ -72,13 +72,22 @@ impl MessageConsumer for DeduplicationConsumer {
 
             // Attempt atomic insert-if-absent to reserve the message ID
             let mut is_duplicate = false;
-            let mut attempts = 0;
+            let mut yield_counter = 0;
+            let mut total_attempts = 0;
+            const MAX_TOTAL_ATTEMPTS: usize = 1000;
             loop {
-                if attempts > 10 {
-                    tokio::task::yield_now().await;
-                    attempts = 0;
+                if total_attempts >= MAX_TOTAL_ATTEMPTS {
+                    return Err(ConsumerError::Connection(anyhow::anyhow!(
+                        "Deduplication CAS exceeded max attempts for message ID {}",
+                        message_id_hex
+                    )));
                 }
-                attempts += 1;
+                if yield_counter > 10 {
+                    tokio::task::yield_now().await;
+                    yield_counter = 0;
+                }
+                yield_counter += 1;
+                total_attempts += 1;
                 match self
                     .db
                     .compare_and_swap(&key, None::<&[u8]>, Some(pending_val.as_slice()))
@@ -149,6 +158,8 @@ impl MessageConsumer for DeduplicationConsumer {
             // Wrap commit to update DB to "processed" state
             let commit = Box::new(move |response| {
                 Box::pin(async move {
+                    original_commit(response).await;
+
                     // Update the pending marker to the final processed value
                     if let Err(e) = db.insert(&key_clone, processed_val) {
                         error!(
@@ -158,7 +169,6 @@ impl MessageConsumer for DeduplicationConsumer {
                     } else {
                         trace!("Updated message as processed in deduplication DB");
                     }
-                    original_commit(response).await;
                 }) as crate::traits::BoxFuture<'static, ()>
             });
 
