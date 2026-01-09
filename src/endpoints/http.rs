@@ -203,19 +203,7 @@ async fn handle_request(
         }
     }
 
-    let mut payload = body.to_vec();
-    // If GET request with empty body, try to use query parameters as payload
-    if payload.is_empty() && req.method().as_str() == "GET" {
-        let query = req.query_string();
-        if !query.is_empty() {
-            let params: HashMap<String, String> = url::form_urlencoded::parse(query.as_bytes())
-                .into_owned()
-                .collect();
-            if let Ok(json) = serde_json::to_vec(&params) {
-                payload = json;
-            }
-        }
-    }
+    let payload = body.to_vec();
 
     let mut message = CanonicalMessage::new(payload, message_id);
     trace!(message_id = %format!("{:032x}", message.message_id), "Received HTTP request");
@@ -242,7 +230,8 @@ async fn handle_request(
         }) as BoxFuture<'static, ()>
     });
 
-    if state.tx.send((message, commit)).await.is_err() {
+    if let Err(e) = state.tx.send((message, commit)).await {
+        tracing::error!("Failed to send request to bridge: {}", e);
         return HttpResponse::InternalServerError().body("Failed to send request to bridge");
     }
 
@@ -287,7 +276,7 @@ fn make_response(message: Option<CanonicalMessage>) -> HttpResponse {
                 .metadata
                 .get("content-type")
                 .map(|s| s.as_str())
-                .unwrap_or("application/json");
+                .unwrap_or("application/octet-stream");
             HttpResponse::Ok()
                 .content_type(content_type)
                 .body(msg.payload)
