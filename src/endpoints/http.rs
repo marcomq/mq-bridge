@@ -472,8 +472,7 @@ http_route:
 
         let config = HttpConfig {
             url: Some(addr.clone()),
-            tls: Default::default(),
-            response_out: None,
+            ..Default::default()
         };
 
         // Start Consumer (Server)
@@ -484,8 +483,7 @@ http_route:
         // Start Publisher (Client)
         let pub_config = HttpConfig {
             url: Some(url.clone()),
-            tls: Default::default(),
-            response_out: None,
+            ..Default::default()
         };
         let publisher = HttpPublisher::new(&pub_config)
             .await
@@ -526,6 +524,7 @@ http_route:
             url: Some(addr.clone()),
             tls: Default::default(),
             response_out: None,
+            workers: None,
         };
         let mut consumer = HttpConsumer::new(&config)
             .await
@@ -541,6 +540,7 @@ http_route:
             url: Some(url.clone()),
             tls: Default::default(),
             response_out: Some(Box::new(sink_endpoint)),
+            workers: None,
         };
         let publisher = HttpPublisher::new(&pub_config)
             .await
@@ -578,6 +578,7 @@ http_route:
             url: Some(addr.clone()),
             tls: Default::default(),
             response_out: None,
+            workers: None,
         };
 
         {
@@ -607,6 +608,7 @@ http_route:
             url: Some(addr.clone()),
             tls: Default::default(),
             response_out: None,
+            workers: None,
         };
         let mut consumer = HttpConsumer::new(&http_config).await.unwrap();
 
@@ -652,6 +654,7 @@ http_route:
             url: Some(addr.clone()),
             tls: Default::default(),
             response_out: None,
+            workers: None,
         };
         let mut consumer = HttpConsumer::new(&http_config).await.unwrap();
 
