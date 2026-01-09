@@ -90,7 +90,7 @@ impl HttpConsumer {
             App::new()
                 .app_data(web::Data::new(state.clone()))
                 // actual request handle here:
-                .route("/", web::post().to(handle_request))
+                .default_service(web::to(handle_request))
         })
         .workers(workers)
         .disable_signals(); // We handle shutdown manually
@@ -184,7 +184,7 @@ impl MessageConsumer for HttpConsumer {
 }
 
 #[cfg(feature = "actix-web")]
-#[tracing::instrument(skip_all, fields(http.method = "POST", http.uri = "/"))]
+#[tracing::instrument(skip_all, fields(http.method = %req.method(), http.uri = %req.uri()))]
 async fn handle_request(
     state: web::Data<HttpConsumerState>,
     req: HttpRequest,
@@ -203,13 +203,34 @@ async fn handle_request(
         }
     }
 
-    let mut message = CanonicalMessage::new(body.to_vec(), message_id);
+    let mut payload = body.to_vec();
+    // If GET request with empty body, try to use query parameters as payload
+    if payload.is_empty() && req.method().as_str() == "GET" {
+        let query = req.query_string();
+        if !query.is_empty() {
+            let params: HashMap<String, String> = url::form_urlencoded::parse(query.as_bytes())
+                .into_owned()
+                .collect();
+            if let Ok(json) = serde_json::to_vec(&params) {
+                payload = json;
+            }
+        }
+    }
+
+    let mut message = CanonicalMessage::new(payload, message_id);
     trace!(message_id = %format!("{:032x}", message.message_id), "Received HTTP request");
     let mut metadata = HashMap::new();
     for (key, value) in req.headers().iter() {
         if let Ok(value_str) = value.to_str() {
             metadata.insert(key.as_str().to_string(), value_str.to_string());
         }
+    }
+    metadata.insert("http_method".to_string(), req.method().to_string());
+    metadata.insert("http_path".to_string(), req.path().to_string());
+    metadata.insert("http_query".to_string(), req.query_string().to_string());
+    metadata.insert("http_uri".to_string(), req.uri().to_string());
+    if let Some(peer) = req.peer_addr() {
+        metadata.insert("http_peer_addr".to_string(), peer.to_string());
     }
     message.metadata = metadata;
 
