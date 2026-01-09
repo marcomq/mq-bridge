@@ -143,7 +143,9 @@ impl MessagePublisher for ZeroMqPublisher {
                 .map_err(|_| PublisherError::Retryable(anyhow!("ZeroMQ publisher task closed")))?;
             ack_rx
                 .await
-                .map_err(|_| PublisherError::Retryable(anyhow!("ZeroMQ publisher task dropped ack channel")))?
+                .map_err(|_| {
+                    PublisherError::Retryable(anyhow!("ZeroMQ publisher task dropped ack channel"))
+                })?
                 .map_err(|e| PublisherError::Retryable(anyhow!(e)))?;
             Ok(SentBatch::Ack)
         }
