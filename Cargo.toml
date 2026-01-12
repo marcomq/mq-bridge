@@ -11,7 +11,6 @@ categories = ["asynchronous", "network-programming"]
 
 [dependencies]
 
-config = { version = "0.15" }
 serde = { version = "1.0", features = ["derive"] }
 anyhow = "1.0.86"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util", "net", "signal"] }
@@ -40,7 +39,6 @@ sled = { version = "0.34", optional = true }
 
 # Kafka
 rdkafka = { version = "0.38", features = ["tokio"], optional = true }
-async-stream = { version = "0.3", optional = true } # Used by Kafka consumer
 
 # AMQP (RabbitMQ)
 lapin = { version = "3.7", features = ["rustls"], optional = true }
@@ -88,7 +86,7 @@ metrics = ["dep:metrics"]
 schema = ["dep:schemars"]
 
 # Endpoint features
-kafka = ["rdkafka", "async-stream"]
+kafka = ["rdkafka"]
 amqp = ["lapin", "rustls", "rustls-pemfile", "url"]
 nats = ["async-nats", "rustls", "rustls-pemfile"]
 mongodb = ["dep:mongodb"]
@@ -101,6 +99,7 @@ ibm-mq = ["mqi"]
 zeromq = ["dep:zeromq"]
 
 [dev-dependencies]
+config = { version = "0.15" }
 serde_yaml_ng = "0.10.0"
 tempfile = "3.10"
 tracing-appender = "0.2"
