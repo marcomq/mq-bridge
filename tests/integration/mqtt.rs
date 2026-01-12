@@ -1,8 +1,9 @@
 #![allow(dead_code)]
 
 use super::common::{
-    add_performance_result, run_direct_perf_test, run_performance_pipeline_test, run_pipeline_test,
-    run_test_with_docker, setup_logging, PERF_TEST_BATCH_MESSAGE_COUNT,
+    add_performance_result, run_chaos_pipeline_test, run_direct_perf_test,
+    run_performance_pipeline_test, run_pipeline_test, run_test_with_docker,
+    run_test_with_docker_controller, setup_logging, PERF_TEST_BATCH_MESSAGE_COUNT,
 };
 use mq_bridge::endpoints::mqtt::{MqttConsumer, MqttPublisher};
 use std::sync::Arc;
@@ -15,13 +16,18 @@ routes:
     input:
       memory: { topic: "test-in-mqtt" }
     output:
-      mqtt: { url: "mqtt://localhost:1883", topic: "test_topic_mqtt" }
+      middlewares:
+        - retry:
+            max_attempts: 20
+            initial_interval_ms: 500
+            max_interval_ms: 2000
+      mqtt: { url: "mqtt://localhost:1883", topic: "test_topic_mqtt", clean_session: false, qos: 1, max_inflight: 500, queue_capacity: 1000 }
 
   mqtt_to_memory:
     concurrency: 4
     batch_size: 128
     input:
-      mqtt: { url: "mqtt://localhost:1883", topic: "test_topic_mqtt" }
+      mqtt: { url: "mqtt://localhost:1883", topic: "test_topic_mqtt", clean_session: false, qos: 1, max_inflight: 500, queue_capacity: 1000 }
     output:
       memory: { topic: "test-out-mqtt", capacity: {out_capacity} }
 "#;
@@ -34,6 +40,18 @@ pub async fn test_mqtt_pipeline() {
             &(PERF_TEST_BATCH_MESSAGE_COUNT + 1000).to_string(),
         ); // Use a small capacity for non-perf test
         run_pipeline_test("mqtt", &config_yaml).await;
+    })
+    .await;
+}
+
+pub async fn test_mqtt_chaos() {
+    setup_logging();
+    run_test_with_docker_controller("tests/integration/docker-compose/mqtt.yml", |controller| async move {
+        let config_yaml = CONFIG_YAML.replace(
+            "{out_capacity}",
+            &(PERF_TEST_BATCH_MESSAGE_COUNT + 1000).to_string(),
+        );
+        run_chaos_pipeline_test("mqtt", &config_yaml, controller, "mosquitto").await;
     })
     .await;
 }

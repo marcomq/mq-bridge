@@ -1,8 +1,9 @@
 #![allow(dead_code)]
 
 use super::common::{
-    add_performance_result, run_direct_perf_test, run_performance_pipeline_test, run_pipeline_test,
-    run_test_with_docker, setup_logging, PERF_TEST_MESSAGE_COUNT,
+    add_performance_result, run_chaos_pipeline_test, run_direct_perf_test,
+    run_performance_pipeline_test, run_pipeline_test, run_test_with_docker,
+    run_test_with_docker_controller, setup_logging, PERF_TEST_MESSAGE_COUNT,
 };
 use mq_bridge::endpoints::aws::{AwsConsumer, AwsPublisher};
 use std::sync::Arc;
@@ -15,6 +16,11 @@ routes:
     input:
       memory: { topic: "aws-test-in" }
     output:
+      middlewares:
+        - retry:
+            max_attempts: 20
+            initial_interval_ms: 500
+            max_interval_ms: 2000
       aws:
         queue_url: "http://localhost:4566/000000000000/test-queue"
         region: "us-east-1"
@@ -62,6 +68,19 @@ pub async fn test_aws_pipeline() {
             &(PERF_TEST_MESSAGE_COUNT + 1000).to_string(),
         );
         run_pipeline_test("aws", &config_yaml).await;
+    })
+    .await;
+}
+
+pub async fn test_aws_chaos() {
+    setup_logging();
+    run_test_with_docker_controller("tests/integration/docker-compose/aws.yml", |controller| async move {
+        ensure_queue_exists().await;
+        let config_yaml = CONFIG_YAML.replace(
+            "{out_capacity}",
+            &(PERF_TEST_MESSAGE_COUNT + 1000).to_string(),
+        );
+        run_chaos_pipeline_test("aws", &config_yaml, controller, "localstack").await;
     })
     .await;
 }

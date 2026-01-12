@@ -14,6 +14,7 @@ use rumqttc::v5::mqttbytes::QoS as QoSV5;
 use rumqttc::v5::{
     AsyncClient as AsyncClientV5, EventLoop as EventLoopV5, MqttOptions as MqttOptionsV5,
 };
+use rumqttc::Publish as PublishV3;
 use rumqttc::{tokio_rustls::rustls, AsyncClient, MqttOptions, QoS, Transport};
 use std::any::Any;
 use std::fmt::Debug;
@@ -42,6 +43,14 @@ impl Client {
         match self {
             Client::V3(client) => client.disconnect().await.map_err(|e| e.into()),
             Client::V5(client) => client.disconnect().await.map_err(|e| e.into()),
+        }
+    }
+
+    async fn ack(&self, ack: &MqttAck) -> anyhow::Result<()> {
+        match (self, ack) {
+            (Client::V3(c), MqttAck::V3(p)) => c.ack(p).await.map_err(|e| e.into()),
+            (Client::V5(c), MqttAck::V5(p)) => c.ack(p).await.map_err(|e| e.into()),
+            _ => Ok(()), // Mismatch or None (QoS 0), ignore
         }
     }
 
@@ -108,7 +117,7 @@ impl MqttPublisher {
         let (stop_tx, stop_rx) = mpsc::channel(1);
 
         // The publisher needs a background event loop to handle keep-alives and other control packets.
-        tokio::spawn(run_eventloop(eventloop, None, stop_rx));
+        tokio::spawn(run_eventloop(eventloop, None::<Sender<MqttInternalMessage>>, stop_rx, None, !config.delayed_ack));
 
         Ok(Self {
             client,
@@ -201,10 +210,21 @@ enum EventLoop {
     V5(Box<EventLoopV5>),
 }
 
+struct MqttInternalMessage {
+    msg: CanonicalMessage,
+    ack: MqttAck,
+}
+
+enum MqttAck {
+    V3(PublishV3),
+    V5(PublishV5),
+    None,
+}
+
 struct MqttListener {
     client: Client,
     _stop_tx: mpsc::Sender<()>,
-    message_rx: Receiver<CanonicalMessage>,
+    message_rx: Receiver<MqttInternalMessage>,
 }
 
 impl MqttListener {
@@ -220,7 +240,8 @@ impl MqttListener {
         let (tx, rx) = bounded(queue_capacity);
         let (stop_tx, stop_rx) = mpsc::channel(1);
 
-        tokio::spawn(run_eventloop(eventloop, Some(tx), stop_rx));
+        let sub_info = Some((client.clone(), topic.to_string(), qos));
+        tokio::spawn(run_eventloop(eventloop, Some(tx), stop_rx, sub_info, !config.delayed_ack));
 
         client.subscribe(topic, qos).await?;
         info!("MQTT subscribed to {}", topic);
@@ -236,15 +257,17 @@ impl MqttListener {
 #[async_trait]
 impl MessageConsumer for MqttListener {
     async fn receive(&mut self) -> Result<Received, ConsumerError> {
-        let message = self
+        let internal = self
             .message_rx
             .recv()
             .await
             .map_err(|_| ConsumerError::EndOfStream)?;
 
+        let message = internal.msg;
         let client = self.client.clone();
         let reply_topic = message.metadata.get("reply_to").cloned();
         let correlation_data = message.metadata.get("correlation_id").cloned();
+        let ack_info = internal.ack;
 
         let commit = Box::new(move |response: Option<CanonicalMessage>| {
             Box::pin(async move {
@@ -274,6 +297,11 @@ impl MessageConsumer for MqttListener {
                 } else {
                     trace!("MQTT commit called with no response or no reply_topic");
                 }
+
+                // Acknowledge the original message
+                if let Err(e) = client.ack(&ack_info).await {
+                    error!("Failed to ack MQTT message: {}", e);
+                }
                 Ok(())
             }) as BoxFuture<'static, anyhow::Result<()>>
         });
@@ -283,15 +311,17 @@ impl MessageConsumer for MqttListener {
     async fn receive_batch(&mut self, max_messages: usize) -> Result<ReceivedBatch, ConsumerError> {
         let mut messages = Vec::with_capacity(max_messages);
         let mut reply_infos = Vec::with_capacity(max_messages);
+        let mut acks = Vec::with_capacity(max_messages);
 
         // Block for the first message
         match self.message_rx.recv().await {
-            Ok(msg) => {
+            Ok(internal) => {
                 reply_infos.push((
-                    msg.metadata.get("reply_to").cloned(),
-                    msg.metadata.get("correlation_id").cloned(),
+                    internal.msg.metadata.get("reply_to").cloned(),
+                    internal.msg.metadata.get("correlation_id").cloned(),
                 ));
-                messages.push(msg);
+                messages.push(internal.msg);
+                acks.push(internal.ack);
             }
             Err(_) => return Err(ConsumerError::EndOfStream),
         }
@@ -299,12 +329,13 @@ impl MessageConsumer for MqttListener {
         // Greedily consume more messages if they are already buffered, up to max_messages.
         while messages.len() < max_messages {
             match self.message_rx.try_recv() {
-                Ok(msg) => {
+                Ok(internal) => {
                     reply_infos.push((
-                        msg.metadata.get("reply_to").cloned(),
-                        msg.metadata.get("correlation_id").cloned(),
+                        internal.msg.metadata.get("reply_to").cloned(),
+                        internal.msg.metadata.get("correlation_id").cloned(),
                     ));
-                    messages.push(msg);
+                    messages.push(internal.msg);
+                    acks.push(internal.ack);
                 }
                 Err(_) => break, // Empty or Disconnected
             }
@@ -340,6 +371,12 @@ impl MessageConsumer for MqttListener {
                         }
                     }
                 }
+
+                for ack in acks {
+                    if let Err(e) = client.ack(&ack).await {
+                        error!("Failed to ack MQTT message in batch: {}", e);
+                    }
+                }
                 Ok(())
             }) as BoxFuture<'static, anyhow::Result<()>>
         });
@@ -363,10 +400,18 @@ async fn create_client_and_eventloop(
             let mut mqttoptions = MqttOptionsV5::new(client_id, host, port);
             mqttoptions
                 .set_keep_alive(Duration::from_secs(config.keep_alive_seconds.unwrap_or(20)));
+            mqttoptions.set_manual_acks(!config.delayed_ack);
             if let Some(inflight) = config.max_inflight {
                 mqttoptions.set_outgoing_inflight_upper_limit(inflight);
             }
             mqttoptions.set_clean_start(config.clean_session);
+            
+            if let Some(expiry) = config.session_expiry_interval {
+                mqttoptions.set_session_expiry_interval(Some(expiry));
+            } else if !config.clean_session {
+                // If persistence is requested but no expiry set, default to 1 hour to ensure session survives disconnects.
+                mqttoptions.set_session_expiry_interval(Some(3600));
+            }
 
             if let (Some(username), Some(password)) = (&config.username, &config.password) {
                 mqttoptions.set_credentials(username, password);
@@ -384,6 +429,7 @@ async fn create_client_and_eventloop(
             let mut mqttoptions = MqttOptions::new(client_id, host, port);
             mqttoptions
                 .set_keep_alive(Duration::from_secs(config.keep_alive_seconds.unwrap_or(20)));
+            mqttoptions.set_manual_acks(!config.delayed_ack);
             if let Some(inflight) = config.max_inflight {
                 mqttoptions.set_inflight(inflight);
             }
@@ -409,8 +455,10 @@ async fn create_client_and_eventloop(
 
 async fn run_eventloop(
     mut eventloop: EventLoop,
-    message_tx: Option<Sender<CanonicalMessage>>,
+    message_tx: Option<Sender<MqttInternalMessage>>,
     mut stop_rx: mpsc::Receiver<()>,
+    subscription_info: Option<(Client, String, QoS)>,
+    manual_acks: bool,
 ) {
     let mut stopping = false;
     // A future that is always pending until we decide to start the timeout
@@ -432,27 +480,74 @@ async fn run_eventloop(
             event_result = poll_event(&mut eventloop) => {
                 match event_result {
             Ok(event) => match event {
-                EventWrapper::V3(rumqttc::Event::Incoming(rumqttc::Incoming::Publish(p))) => {
-                    if let Some(tx) = &message_tx {
-                        let topic = p.topic.clone();
-                        let msg = publish_to_canonical_message_v3(p);
-                        trace!(message_id = %format!("{:032x}", msg.message_id), %topic, "Received MQTT v3 message");
-                        if tx.send(msg).await.is_err() {
-                            break;
-                        }
-                    }
-                }
-                EventWrapper::V5(event) => {
-                    if let rumqttc::v5::Event::Incoming(rumqttc::v5::Incoming::Publish(p)) = *event
-                    {
+                EventWrapper::V3(rumqttc::Event::Incoming(incoming)) => match incoming {
+                    rumqttc::Incoming::Publish(p) => {
                         if let Some(tx) = &message_tx {
-                            let topic_bytes = p.topic.clone();
-                            let msg = publish_to_canonical_message_v5(p);
-                            trace!(message_id = %format!("{:032x}", msg.message_id), topic = %String::from_utf8_lossy(&topic_bytes), "Received MQTT v5 message");
-                            if tx.send(msg).await.is_err() {
+                            let topic = p.topic.clone();
+                            let msg = publish_to_canonical_message_v3(&p);
+                            let ack = if manual_acks && p.qos != QoS::AtMostOnce { MqttAck::V3(p) } else { MqttAck::None };
+                            let internal = MqttInternalMessage {
+                                msg, ack
+                            };
+                            trace!(message_id = %format!("{:032x}", internal.msg.message_id), %topic, "Received MQTT v3 message");
+                            if tx.send(internal).await.is_err() {
                                 break;
                             }
                         }
+                    }
+                    rumqttc::Incoming::ConnAck(ack) => {
+                        if !ack.session_present {
+                            if let Some((client, topic, qos)) = &subscription_info {
+                                let client = client.clone();
+                                let topic = topic.clone();
+                                let qos = *qos;
+                                info!("Session not present on V3 connection, resubscribing to {}", topic);
+                                tokio::spawn(async move {
+                                    if let Err(e) = client.subscribe(&topic, qos).await {
+                                        error!("Failed to resubscribe: {}", e);
+                                    }
+                                });
+                            }
+                        } else {
+                            info!("Session present on V3 connection, resuming...");
+                        }
+                    }
+                    _ => {}
+                },
+                EventWrapper::V5(event) => {
+                    match *event {
+                        rumqttc::v5::Event::Incoming(rumqttc::v5::Incoming::Publish(p)) => {
+                            if let Some(tx) = &message_tx {
+                                let topic_bytes = p.topic.clone();
+                                let msg = publish_to_canonical_message_v5(&p);
+                                let ack = if manual_acks && p.qos != QoSV5::AtMostOnce { MqttAck::V5(p) } else { MqttAck::None };
+                                let internal = MqttInternalMessage {
+                                    msg, ack
+                                };
+                                trace!(message_id = %format!("{:032x}", internal.msg.message_id), topic = %String::from_utf8_lossy(&topic_bytes), "Received MQTT v5 message");
+                                if tx.send(internal).await.is_err() {
+                                    break;
+                                }
+                            }
+                        }
+                        rumqttc::v5::Event::Incoming(rumqttc::v5::Incoming::ConnAck(ack)) => {
+                            if !ack.session_present {
+                                if let Some((client, topic, qos)) = &subscription_info {
+                                    let client = client.clone();
+                                    let topic = topic.clone();
+                                    let qos = *qos;
+                                    info!("Session not present on V5 connection, resubscribing to {}", topic);
+                                    tokio::spawn(async move {
+                                        if let Err(e) = client.subscribe(&topic, qos).await {
+                                            error!("Failed to resubscribe: {}", e);
+                                        }
+                                    });
+                                }
+                            } else {
+                                info!("Session present on V5 connection, resuming...");
+                            }
+                        }
+                        _ => {}
                     }
                 }
                 _ => {}
@@ -478,7 +573,7 @@ async fn poll_event(eventloop: &mut EventLoop) -> anyhow::Result<EventWrapper> {
     }
 }
 
-fn publish_to_canonical_message_v5(p: PublishV5) -> CanonicalMessage {
+fn publish_to_canonical_message_v5(p: &PublishV5) -> CanonicalMessage {
     let mut canonical_message = CanonicalMessage::new(p.payload.to_vec(), None);
 
     if let Some(props) = &p.properties {
@@ -503,7 +598,7 @@ fn publish_to_canonical_message_v5(p: PublishV5) -> CanonicalMessage {
     canonical_message
 }
 
-fn publish_to_canonical_message_v3(p: rumqttc::Publish) -> CanonicalMessage {
+fn publish_to_canonical_message_v3(p: &rumqttc::Publish) -> CanonicalMessage {
     if let Ok(msg) = serde_json::from_slice::<CanonicalMessage>(&p.payload) {
         return msg;
     }

@@ -2,8 +2,9 @@
 use std::sync::Arc;
 
 use super::common::{
-    add_performance_result, run_direct_perf_test, run_performance_pipeline_test, run_pipeline_test,
-    run_test_with_docker, setup_logging, PERF_TEST_MESSAGE_COUNT,
+    add_performance_result, run_chaos_pipeline_test, run_direct_perf_test,
+    run_performance_pipeline_test, run_pipeline_test, run_test_with_docker,
+    run_test_with_docker_controller, setup_logging, PERF_TEST_MESSAGE_COUNT,
 };
 use mq_bridge::endpoints::nats::{NatsConsumer, NatsPublisher};
 const CONFIG_YAML: &str = r#"
@@ -14,6 +15,11 @@ routes:
     input:
       memory: { topic: "test-in-nats" }
     output:
+      middlewares:
+        - retry:
+            max_attempts: 20
+            initial_interval_ms: 500
+            max_interval_ms: 2000
       nats: { url: "nats://localhost:4222", subject: "test-stream.pipeline", stream: "test-stream" }
 
   nats_to_memory:
@@ -33,6 +39,18 @@ pub async fn test_nats_pipeline() {
             &(PERF_TEST_MESSAGE_COUNT + 1000).to_string(),
         ); // Use a small capacity for non-perf test
         run_pipeline_test("nats", &config_yaml).await;
+    })
+    .await;
+}
+
+pub async fn test_nats_chaos() {
+    setup_logging();
+    run_test_with_docker_controller("tests/integration/docker-compose/nats.yml", |controller| async move {
+        let config_yaml = CONFIG_YAML.replace(
+            "{out_capacity}",
+            &(PERF_TEST_MESSAGE_COUNT + 1000).to_string(),
+        );
+        run_chaos_pipeline_test("nats", &config_yaml, controller, "nats").await;
     })
     .await;
 }

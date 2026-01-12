@@ -618,6 +618,12 @@ pub struct MqttConfig {
     /// MQTT protocol version (V3 or V5). Defaults to V5.
     #[serde(default)]
     pub protocol: MqttProtocol,
+    /// Session expiry interval in seconds (MQTT v5 only).
+    pub session_expiry_interval: Option<u32>,
+    /// If true, messages are acknowledged immediately upon receipt (auto-ack).
+    /// If false (default), messages are acknowledged after processing (manual-ack).
+    #[serde(default)]
+    pub delayed_ack: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq, Eq)]

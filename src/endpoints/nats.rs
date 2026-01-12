@@ -492,23 +492,27 @@ impl NatsCore {
                 tracing::trace!("Received NATS JetStream message");
 
                 // Process the first message if it exists
-                if let Some(Ok(first_message)) = message_stream {
-                    let sequence = first_message.info().ok().map(|meta| meta.stream_sequence);
-                    canonical_messages
-                        .push(create_nats_canonical_message(&first_message, sequence));
-                    jetstream_messages.push(first_message);
+                match message_stream {
+                    Some(Ok(first_message)) => {
+                        let sequence = first_message.info().ok().map(|meta| meta.stream_sequence);
+                        canonical_messages
+                            .push(create_nats_canonical_message(&first_message, sequence));
+                        jetstream_messages.push(first_message);
+                    }
+                    Some(Err(e)) => return Err(ConsumerError::Connection(anyhow::anyhow!(e))),
+                    None => return Err(ConsumerError::Connection(anyhow::anyhow!("NATS JetStream ended"))),
+                }
 
-                    // Greedily fetch the rest of the batch
-                    while canonical_messages.len() < max_messages {
-                        match stream.try_next().now_or_never() {
-                            Some(Ok(Some(message))) => {
-                                let sequence = message.info().ok().map(|meta| meta.stream_sequence);
-                                canonical_messages
-                                    .push(create_nats_canonical_message(&message, sequence));
-                                jetstream_messages.push(message);
-                            }
-                            _ => break, // No more messages in the buffer or stream ended/errored
+                // Greedily fetch the rest of the batch
+                while canonical_messages.len() < max_messages {
+                    match stream.try_next().now_or_never() {
+                        Some(Ok(Some(message))) => {
+                            let sequence = message.info().ok().map(|meta| meta.stream_sequence);
+                            canonical_messages
+                                .push(create_nats_canonical_message(&message, sequence));
+                            jetstream_messages.push(message);
                         }
+                        _ => break, // No more messages in the buffer or stream ended/errored
                     }
                 }
 
@@ -575,14 +579,10 @@ impl NatsCore {
                 }) as BoxFuture<'static, anyhow::Result<()>>
                 });
 
-                if canonical_messages.is_empty() {
-                    Err(ConsumerError::EndOfStream)
-                } else {
-                    Ok(ReceivedBatch {
-                        messages: canonical_messages,
-                        commit: commit_closure,
-                    })
-                }
+                Ok(ReceivedBatch {
+                    messages: canonical_messages,
+                    commit: commit_closure,
+                })
             }
             NatsCore::Ephemeral(sub) => {
                 let mut messages = Vec::with_capacity(max_messages);
@@ -601,6 +601,8 @@ impl NatsCore {
                             _ => break,
                         }
                     }
+                } else {
+                    return Err(ConsumerError::Connection(anyhow::anyhow!("NATS Core subscription ended")));
                 }
 
                 let client = client.clone();
@@ -646,14 +648,10 @@ impl NatsCore {
                 });
 
                 trace!(count = messages.len(), subject = %subject, message_ids = ?LazyMessageIds(&messages), "Received batch of NATS Core messages");
-                if messages.is_empty() {
-                    Err(ConsumerError::EndOfStream)
-                } else {
-                    Ok(ReceivedBatch {
-                        messages,
-                        commit: commit_closure,
-                    })
-                }
+                Ok(ReceivedBatch {
+                    messages,
+                    commit: commit_closure,
+                })
             }
         }
     }

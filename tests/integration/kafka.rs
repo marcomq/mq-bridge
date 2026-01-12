@@ -1,8 +1,9 @@
 #![allow(dead_code)]
 
 use super::common::{
-    add_performance_result, run_direct_perf_test, run_performance_pipeline_test, run_pipeline_test,
-    run_test_with_docker, setup_logging, PERF_TEST_MESSAGE_COUNT,
+    add_performance_result, run_chaos_pipeline_test, run_direct_perf_test,
+    run_performance_pipeline_test, run_pipeline_test, run_test_with_docker,
+    run_test_with_docker_controller, setup_logging, PERF_TEST_MESSAGE_COUNT,
 };
 use mq_bridge::endpoints::kafka::{KafkaConsumer, KafkaPublisher};
 use std::sync::Arc;
@@ -15,6 +16,11 @@ routes:
     input:
       memory: { topic: "kafka-test-in" }
     output:
+      middlewares:
+        - retry:
+            max_attempts: 20
+            initial_interval_ms: 500
+            max_interval_ms: 2000
       kafka: 
         url: "localhost:9092"
         topic: "test_topic_kafka"
@@ -43,6 +49,18 @@ pub async fn test_kafka_pipeline() {
             &(PERF_TEST_MESSAGE_COUNT + 1000).to_string(),
         );
         run_pipeline_test("kafka", &config_yaml).await;
+    })
+    .await;
+}
+
+pub async fn test_kafka_chaos() {
+    setup_logging();
+    run_test_with_docker_controller("tests/integration/docker-compose/kafka.yml", |controller| async move {
+        let config_yaml = CONFIG_YAML.replace(
+            "{out_capacity}",
+            &(PERF_TEST_MESSAGE_COUNT + 1000).to_string(),
+        );
+        run_chaos_pipeline_test("kafka", &config_yaml, controller, "kafka").await;
     })
     .await;
 }
