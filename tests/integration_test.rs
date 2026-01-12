@@ -132,6 +132,13 @@ async fn test_all_chaos() {
         }
     }
 
+    #[cfg(feature = "ibm-mq")]
+    {
+        if should_run("ibm_mq") {
+            println!("\n\n>>> Starting IBM MQ Chaos Test...");
+            integration::ibm_mq::test_ibm_mq_chaos().await;
+        }
+    }
+
     // AWS chaos test is excluded by default as it requires LocalStack which can be heavy/flaky in some envs
-    // IBM MQ chaos test is excluded as it requires complex setup
 }

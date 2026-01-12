@@ -226,7 +226,9 @@ async fn handle_request(
     let (ack_tx, ack_rx) = tokio::sync::oneshot::channel::<Option<CanonicalMessage>>();
     let commit = Box::new(move |resp| {
         Box::pin(async move {
-            let _ = ack_tx.send(resp);
+            if ack_tx.send(resp).is_err() {
+                return Err(anyhow::anyhow!("Failed to send ack to HTTP handler"));
+            }
             Ok(())
         }) as BoxFuture<'static, anyhow::Result<()>>
     });

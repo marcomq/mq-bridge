@@ -374,3 +374,47 @@ async fn test_delay_middleware_in_route() {
         elapsed
     );
 }
+
+#[tokio::test]
+async fn test_custom_endpoint_factory_programmatic() {
+    use mq_bridge::models::{Endpoint, EndpointType, Route};
+    use mq_bridge::traits::{CustomEndpointFactory, MessageConsumer, MessagePublisher};
+    use std::sync::Arc;
+
+    #[derive(Debug)]
+    struct MyFactory;
+
+    #[async_trait::async_trait]
+    impl CustomEndpointFactory for MyFactory {
+        async fn create_consumer(
+            &self,
+            _route_name: &str,
+        ) -> anyhow::Result<Box<dyn MessageConsumer>> {
+            Ok(Box::new(
+                mq_bridge::endpoints::static_endpoint::StaticRequestConsumer::new("custom_msg")
+                    .unwrap(),
+            ))
+        }
+        async fn create_publisher(
+            &self,
+            _route_name: &str,
+        ) -> anyhow::Result<Box<dyn MessagePublisher>> {
+            Ok(Box::new(mq_bridge::endpoints::null::NullPublisher))
+        }
+    }
+
+    let input = Endpoint::new(EndpointType::Custom(Arc::new(MyFactory)));
+    let output = Endpoint::new(EndpointType::Custom(Arc::new(MyFactory)));
+
+    let route = Route::new(input, output);
+
+    // Run the route for a short duration to ensure it initializes and processes messages
+    let result = tokio::time::timeout(
+        std::time::Duration::from_millis(50),
+        route.run_until_err("custom_test", None, None),
+    )
+    .await;
+
+    // We expect a timeout because StaticConsumer produces infinitely and NullPublisher accepts infinitely.
+    assert!(result.is_err(), "Route should have run indefinitely until timeout");
+}
