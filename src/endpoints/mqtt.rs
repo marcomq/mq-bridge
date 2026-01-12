@@ -1,3 +1,4 @@
+use async_channel::{bounded, Receiver, Sender};
 use crate::canonical_message::tracing_support::LazyMessageIds;
 use crate::models::{MqttConfig, MqttProtocol};
 use crate::traits::{
@@ -203,7 +204,7 @@ enum EventLoop {
 struct MqttListener {
     client: Client,
     _stop_tx: mpsc::Sender<()>,
-    message_rx: mpsc::Receiver<CanonicalMessage>,
+    message_rx: Receiver<CanonicalMessage>,
 }
 
 impl MqttListener {
@@ -216,7 +217,7 @@ impl MqttListener {
         let (client, eventloop) = create_client_and_eventloop(config, client_id).await?;
         let qos = parse_qos(config.qos.unwrap_or(1));
         let queue_capacity = config.queue_capacity.unwrap_or(100);
-        let (tx, rx) = mpsc::channel(queue_capacity);
+        let (tx, rx) = bounded(queue_capacity);
         let (stop_tx, stop_rx) = mpsc::channel(1);
 
         tokio::spawn(run_eventloop(eventloop, Some(tx), stop_rx));
@@ -239,7 +240,7 @@ impl MessageConsumer for MqttListener {
             .message_rx
             .recv()
             .await
-            .ok_or(ConsumerError::EndOfStream)?;
+            .map_err(|_| ConsumerError::EndOfStream)?;
 
         let client = self.client.clone();
         let reply_topic = message.metadata.get("reply_to").cloned();
@@ -261,15 +262,20 @@ impl MessageConsumer for MqttListener {
                     .await
                     {
                         Ok(Err(e)) => {
-                            error!(topic = %rt, error = %e, "Failed to publish MQTT reply")
+                            error!(topic = %rt, error = %e, "Failed to publish MQTT reply");
+                            return Err(anyhow::anyhow!("Failed to publish MQTT reply: {}", e));
                         }
                         Ok(Ok(_)) => trace!(topic = %rt, "MQTT reply published to channel"),
-                        Err(_) => error!(topic = %rt, "Timed out publishing MQTT reply"),
+                        Err(_) => {
+                            error!(topic = %rt, "Timed out publishing MQTT reply");
+                            return Err(anyhow::anyhow!("Timed out publishing MQTT reply to {}", rt));
+                        }
                     }
                 } else {
                     trace!("MQTT commit called with no response or no reply_topic");
                 }
-            }) as BoxFuture<'static, ()>
+                Ok(())
+            }) as BoxFuture<'static, anyhow::Result<()>>
         });
         Ok(Received { message, commit })
     }
@@ -280,14 +286,14 @@ impl MessageConsumer for MqttListener {
 
         // Block for the first message
         match self.message_rx.recv().await {
-            Some(msg) => {
+            Ok(msg) => {
                 reply_infos.push((
                     msg.metadata.get("reply_to").cloned(),
                     msg.metadata.get("correlation_id").cloned(),
                 ));
                 messages.push(msg);
             }
-            None => return Err(ConsumerError::EndOfStream),
+            Err(_) => return Err(ConsumerError::EndOfStream),
         }
 
         // Greedily consume more messages if they are already buffered, up to max_messages.
@@ -322,17 +328,20 @@ impl MessageConsumer for MqttListener {
                             .await
                             {
                                 Ok(Err(e)) => {
-                                    tracing::error!(topic = %rt, error = %e, "Failed to publish MQTT reply")
+                                    tracing::error!(topic = %rt, error = %e, "Failed to publish MQTT reply");
+                                    return Err(anyhow::anyhow!("Failed to publish MQTT reply: {}", e));
                                 }
                                 Ok(Ok(_)) => {}
                                 Err(_) => {
-                                    tracing::error!(topic = %rt, "Timed out publishing MQTT reply")
+                                    tracing::error!(topic = %rt, "Timed out publishing MQTT reply");
+                                    return Err(anyhow::anyhow!("Timed out publishing MQTT reply to {}", rt));
                                 }
                             }
                         }
                     }
                 }
-            }) as BoxFuture<'static, ()>
+                Ok(())
+            }) as BoxFuture<'static, anyhow::Result<()>>
         });
         Ok(ReceivedBatch { messages, commit })
     }
@@ -400,7 +409,7 @@ async fn create_client_and_eventloop(
 
 async fn run_eventloop(
     mut eventloop: EventLoop,
-    message_tx: Option<mpsc::Sender<CanonicalMessage>>,
+    message_tx: Option<Sender<CanonicalMessage>>,
     mut stop_rx: mpsc::Receiver<()>,
 ) {
     let mut stopping = false;

@@ -10,6 +10,7 @@ use crate::traits::{
     BatchCommitFunc, ConsumerError, Handler, HandlerError, PublisherError, SentBatch,
 };
 use async_channel::{bounded, Sender};
+use std::collections::BTreeMap;
 use serde::de::DeserializeOwned;
 use std::sync::Arc;
 use tokio::{
@@ -148,6 +149,7 @@ impl Route {
             })
             .unwrap_or(4096);
 
+        let (err_tx, err_rx) = bounded(1);
         let commit_semaphore = Arc::new(Semaphore::new(max_parallel_commits));
         let mut commit_tasks = JoinSet::new();
         if let Some(tx) = ready_tx {
@@ -155,6 +157,8 @@ impl Route {
         }
         loop {
             select! {
+                Ok(err) = err_rx.recv() => return Err(err),
+
                 _ = shutdown_rx.recv() => {
                     info!("Shutdown signal received in sequential runner for route '{}'.", name);
                     while commit_tasks.join_next().await.is_some() {}
@@ -184,8 +188,12 @@ impl Route {
                     match publisher.send_batch(received_batch.messages).await {
                         Ok(SentBatch::Ack) => {
                             let permit = commit_semaphore.clone().acquire_owned().await.map_err(|e| anyhow::anyhow!("Semaphore error: {}", e))?;
+                            let err_tx = err_tx.clone();
                             commit_tasks.spawn(async move {
-                                commit(None).await;
+                                if let Err(e) = commit(None).await {
+                                    error!("Commit failed: {}", e);
+                                    let _ = err_tx.send(e).await;
+                                }
                                 // Permit is dropped here, releasing the slot
                                 drop(permit);
                             });
@@ -208,8 +216,12 @@ impl Route {
                                 error!("Dropping message (ID: {:032x}) due to non-retryable error: {}", msg.message_id, e);
                             }
                             let permit = commit_semaphore.clone().acquire_owned().await.map_err(|e| anyhow::anyhow!("Semaphore error: {}", e))?;
+                            let err_tx = err_tx.clone();
                             commit_tasks.spawn(async move {
-                                commit(responses).await;
+                                if let Err(e) = commit(responses).await {
+                                    error!("Commit failed: {}", e);
+                                    let _ = err_tx.send(e).await;
+                                }
                                 drop(permit);
                             });
                         }
@@ -251,6 +263,31 @@ impl Route {
 
         let commit_semaphore = Arc::new(Semaphore::new(max_parallel_commits));
 
+        // --- Ordered Commit Sequencer ---
+        // To prevent data loss with cumulative-ack brokers (Kafka/AMQP), commits must happen in order.
+        // We assign a sequence number to each batch and use a sequencer task to enforce order.
+        type SequencerItem = (
+            Option<Vec<crate::CanonicalMessage>>,
+            BatchCommitFunc,
+            tokio::sync::oneshot::Sender<anyhow::Result<()>>,
+        );
+        let (seq_tx, seq_rx) = bounded::<(u64, SequencerItem)>(self.concurrency * 2);
+
+        let sequencer_handle = tokio::spawn(async move {
+            let mut buffer: BTreeMap<u64, SequencerItem> = BTreeMap::new();
+            let mut next_seq = 0u64;
+            while let Ok((seq, item)) = seq_rx.recv().await {
+                buffer.insert(seq, item);
+                while let Some((responses, commit_func, notify)) = buffer.remove(&next_seq) {
+                    // Execute the commit
+                    let res = commit_func(responses).await;
+                    // Notify the worker that commit is done
+                    let _ = notify.send(res);
+                    next_seq += 1;
+                }
+            }
+        });
+
         // --- Worker Pool ---
         let mut join_set = JoinSet::new();
         for i in 0..self.concurrency {
@@ -271,8 +308,12 @@ impl Route {
                                     break;
                                 }
                             };
+                            let err_tx = err_tx.clone();
                             commit_tasks.spawn(async move {
-                                commit(None).await;
+                                if let Err(e) = commit(None).await {
+                                    error!("Commit failed: {}", e);
+                                    let _ = err_tx.send(e).await;
+                                }
                                 drop(permit);
                             });
                         }
@@ -305,8 +346,12 @@ impl Route {
                                     break;
                                 }
                             };
+                            let err_tx = err_tx.clone();
                             commit_tasks.spawn(async move {
-                                commit(responses).await;
+                                if let Err(e) = commit(responses).await {
+                                    error!("Commit failed: {}", e);
+                                    let _ = err_tx.send(e).await;
+                                }
                                 drop(permit);
                             });
                         }
@@ -325,6 +370,7 @@ impl Route {
             });
         }
 
+        let mut seq_counter = 0u64;
         loop {
             select! {
                 biased; // Prioritize checking for errors
@@ -370,7 +416,31 @@ impl Route {
                         }
                     };
                     debug!("Received a batch of {} messages concurrently", messages.len());
-                    if work_tx.send((messages, commit)).await.is_err() {
+
+                    // Wrap the commit function to route it through the sequencer
+                    let seq = seq_counter;
+                    seq_counter += 1;
+                    let seq_tx = seq_tx.clone();
+
+                    let wrapped_commit: BatchCommitFunc = Box::new(move |responses| {
+                        Box::pin(async move {
+                            let (notify_tx, notify_rx) = tokio::sync::oneshot::channel();
+                            // Send to sequencer
+                            if seq_tx.send((seq, (responses, commit, notify_tx))).await.is_ok() {
+                                // Wait for sequencer to execute the commit
+                                match notify_rx.await {
+                                    Ok(res) => res,
+                                    Err(_) => {
+                                        Err(anyhow::anyhow!("Sequencer dropped the commit channel unexpectedly"))
+                                    }
+                                }
+                            } else {
+                                Err(anyhow::anyhow!("Failed to send commit to sequencer, route is likely shutting down"))
+                            }
+                        })
+                    });
+
+                    if work_tx.send((messages, wrapped_commit)).await.is_err() {
                         warn!("Work channel closed, cannot process more messages concurrently. Shutting down.");
                         break;
                     }
@@ -383,6 +453,10 @@ impl Route {
         drop(work_tx);
         // Wait for all worker tasks to complete.
         while join_set.join_next().await.is_some() {}
+        
+        // Close sequencer
+        drop(seq_tx);
+        let _ = sequencer_handle.await;
 
         if let Ok(err) = err_rx.try_recv() {
             return Err(err);

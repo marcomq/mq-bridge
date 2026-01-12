@@ -252,7 +252,7 @@ async fn test_commit_concurrency_limit() {
                     batch.commit = Box::new(move |resp| {
                         Box::pin(async move {
                             tokio::time::sleep(delay).await;
-                            original_commit(resp).await;
+                            original_commit(resp).await
                         })
                     });
                     Ok(batch)

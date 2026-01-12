@@ -79,7 +79,7 @@ impl MessageConsumer for StaticRequestConsumer {
         let message = CanonicalMessage::new(self.content.as_bytes().to_vec(), None);
         trace!(message_id = %format!("{:032x}", message.message_id), "Producing static message");
         let commit = Box::new(|_response: Option<CanonicalMessage>| {
-            Box::pin(async {}) as BoxFuture<'static, ()>
+            Box::pin(async { Ok(()) }) as BoxFuture<'static, anyhow::Result<()>>
         });
         Ok(Received { message, commit })
     }

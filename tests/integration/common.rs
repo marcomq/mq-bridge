@@ -679,7 +679,7 @@ pub async fn measure_read_performance(
                     .await
                     .expect("Semaphore closed");
                 tokio::spawn(async move {
-                    commit(None).await;
+                    let _ = commit(None).await;
                     drop(permit);
                 });
             }
@@ -802,7 +802,7 @@ pub async fn measure_single_read_performance(
                 .await
                 .expect("Semaphore closed");
             tokio::spawn(async move {
-                commit(None).await;
+                let _ = commit(None).await;
                 drop(permit);
             });
         } else {

@@ -214,11 +214,11 @@ impl MessageConsumer for MemoryConsumer {
         if messages.is_empty() {
             return Ok(ReceivedBatch {
                 messages: Vec::new(),
-                commit: Box::new(|_| Box::pin(async move {}) as BoxFuture<'static, ()>),
+                commit: Box::new(|_| Box::pin(async move { Ok(()) }) as BoxFuture<'static, anyhow::Result<()>>),
             });
         }
 
-        let commit = Box::new(|_| Box::pin(async move {}) as BoxFuture<'static, ()>);
+        let commit = Box::new(|_| Box::pin(async move { Ok(()) }) as BoxFuture<'static, anyhow::Result<()>>);
         Ok(ReceivedBatch { messages, commit })
     }
 
@@ -280,7 +280,7 @@ mod tests {
         sleep(std::time::Duration::from_millis(10)).await;
         // Receive it with the consumer
         let received = consumer.receive().await.unwrap();
-        (received.commit)(None).await;
+        let _ = (received.commit)(None).await;
         assert_eq!(received.message.payload, msg.payload);
         assert_eq!(consumer.channel().len(), 0);
     }
@@ -310,17 +310,17 @@ mod tests {
 
         // 5. Receive the messages and verify them
         let received1 = consumer.receive().await.unwrap();
-        (received1.commit)(None).await;
+        let _ = (received1.commit)(None).await;
         assert_eq!(received1.message.payload, msg1.payload);
 
         let batch2 = consumer.receive_batch(1).await.unwrap();
         let (received_msg2, commit2) = (batch2.messages, batch2.commit);
-        commit2(None).await;
+        let _ = commit2(None).await;
         assert_eq!(received_msg2.len(), 1);
         assert_eq!(received_msg2.first().unwrap().payload, msg2.payload);
         let batch3 = consumer.receive_batch(2).await.unwrap();
         let (received_msg3, commit3) = (batch3.messages, batch3.commit);
-        commit3(None).await;
+        let _ = commit3(None).await;
         assert_eq!(received_msg3.first().unwrap().payload, msg3.payload);
 
         // 6. Verify that the channel is now empty

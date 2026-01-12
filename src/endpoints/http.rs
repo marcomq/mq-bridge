@@ -227,7 +227,8 @@ async fn handle_request(
     let commit = Box::new(move |resp| {
         Box::pin(async move {
             let _ = ack_tx.send(resp);
-        }) as BoxFuture<'static, ()>
+            Ok(())
+        }) as BoxFuture<'static, anyhow::Result<()>>
     });
 
     if let Err(e) = state.tx.send((message, commit)).await {
@@ -525,7 +526,7 @@ http_route:
             let received = consumer.receive().await.expect("Failed to receive");
             // Send a response back via commit
             let response_msg = CanonicalMessage::new(b"response_payload".to_vec(), None);
-            (received.commit)(Some(response_msg)).await;
+            let _ = (received.commit)(Some(response_msg)).await;
             received.message
         });
 
@@ -574,7 +575,7 @@ http_route:
             loop {
                 if let Ok(received) = consumer.receive().await {
                     let response_msg = CanonicalMessage::new(b"server_reply".to_vec(), None);
-                    (received.commit)(Some(response_msg)).await;
+                    let _ = (received.commit)(Some(response_msg)).await;
                 }
             }
         });
@@ -647,7 +648,7 @@ http_route:
                     Sent::Response(msg) => Some(msg),
                     Sent::Ack => None,
                 };
-                (received.commit)(pipeline_response).await;
+                let _ = (received.commit)(pipeline_response).await;
             }
         });
 
@@ -690,7 +691,7 @@ http_route:
                     Sent::Response(msg) => Some(msg),
                     Sent::Ack => None,
                 };
-                (received.commit)(resp).await;
+                let _ = (received.commit)(resp).await;
             }
         });
 

@@ -458,6 +458,7 @@ impl MongoDbConsumer {
                                 let reply_coll = db.collection::<Document>(&coll_name);
                                 if let Err(e) = reply_coll.insert_one(doc).await {
                                     tracing::error!(collection = %coll_name, error = %e, "Failed to insert MongoDB reply");
+                                    return Err(anyhow::anyhow!("Failed to insert MongoDB reply: {}", e));
                                 }
                             }
                         }
@@ -476,9 +477,11 @@ impl MongoDbConsumer {
                             Err(e) => {
                                 // Ack failure may result in redelivery. Enable deduplication middleware to handle duplicates.
                                 tracing::error!(mongodb_id = %id_val, error = %e, "Failed to ack/delete MongoDB message");
+                                return Err(anyhow::anyhow!("Failed to ack/delete MongoDB message: {}", e));
                             }
                         }
-                    }) as BoxFuture<'static, ()>
+                        Ok(())
+                    }) as BoxFuture<'static, anyhow::Result<()>>
                 });
 
                 Ok(Some(Received {
@@ -555,6 +558,7 @@ impl MongoDbConsumer {
                                 let reply_coll = db.collection::<Document>(coll_name);
                                 if let Err(e) = reply_coll.insert_one(doc).await {
                                     tracing::error!(collection = %coll_name, response_id = %format!("{:032x}", resp.message_id), error = %e, "Failed to insert MongoDB batch reply");
+                                    return Err(anyhow::anyhow!("Failed to insert MongoDB batch reply: {}", e));
                                 }
                             }
                         }
@@ -562,19 +566,21 @@ impl MongoDbConsumer {
                 }
 
                 if ids.is_empty() {
-                    return;
+                    return Ok(());
                 }
                 let filter = doc! { "_id": { "$in": &ids } };
                 // Ack failure may result in redelivery. Enable deduplication middleware to handle duplicates.
                 if let Err(e) = collection_clone.delete_many(filter).await {
                     tracing::error!(error = %e, "Failed to bulk-ack/delete MongoDB messages");
+                    return Err(anyhow::anyhow!("Failed to bulk-ack/delete MongoDB messages: {}", e));
                 } else {
                     trace!(
                         count = ids.len(),
                         "MongoDB messages acknowledged and deleted"
                     );
                 }
-            }) as BoxFuture<'static, ()>
+                Ok(())
+            }) as BoxFuture<'static, anyhow::Result<()>>
         });
 
         Ok((messages, commit))
@@ -692,7 +698,7 @@ impl MessageConsumer for MongoDbSubscriber {
                 trace!(message_id = %format!("{:032x}", msg.message_id), collection = %self.collection_name, "Received MongoDB change stream event");
                 Ok(ReceivedBatch {
                     messages: vec![msg],
-                    commit: Box::new(|_| Box::pin(async {})),
+                    commit: Box::new(|_| Box::pin(async { Ok(()) })),
                 })
             }
             SubscriberStream::Polling {
@@ -733,7 +739,7 @@ impl MessageConsumer for MongoDbSubscriber {
                     trace!(count = messages.len(), collection = %self.collection_name, message_ids = ?LazyMessageIds(&messages), "Received batch of MongoDB documents via polling");
                     return Ok(ReceivedBatch {
                         messages,
-                        commit: Box::new(|_| Box::pin(async {})),
+                        commit: Box::new(|_| Box::pin(async { Ok(()) })),
                     });
                 }
 

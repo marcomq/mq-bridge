@@ -176,7 +176,7 @@ impl MessageConsumer for FileConsumer {
         };
 
         // The commit for a file source is a no-op.
-        let commit = Box::new(move |_| Box::pin(async move {}) as BoxFuture<'static, ()>);
+        let commit = Box::new(move |_| Box::pin(async move { Ok(()) }) as BoxFuture<'static, anyhow::Result<()>>);
 
         trace!(message_id = %format!("{:032x}", message.message_id), path = %self.path, "Received message from file");
         Ok(ReceivedBatch {
@@ -228,7 +228,7 @@ mod tests {
 
         // 5. Receive the messages and verify them
         let received1 = source.receive().await.unwrap();
-        (received1.commit)(None).await; // Commit is a no-op, but we should call it
+        let _ = (received1.commit)(None).await; // Commit is a no-op, but we should call it
 
         assert_eq!(received1.message.message_id, msg1.message_id);
         assert_eq!(received1.message.payload, msg1.payload);
@@ -236,7 +236,7 @@ mod tests {
         let batch = source.receive_batch(1).await.unwrap();
         let (received_msgs, commit2) = (batch.messages, batch.commit);
         let received_msg2 = received_msgs.into_iter().next().unwrap();
-        commit2(None).await;
+        let _ = commit2(None).await;
         assert_eq!(received_msg2.message_id, msg2.message_id);
         assert_eq!(received_msg2.payload, msg2.payload);
 

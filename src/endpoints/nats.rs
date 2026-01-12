@@ -478,7 +478,7 @@ impl NatsCore {
         if max_messages == 0 {
             return Ok(ReceivedBatch {
                 messages: Vec::new(),
-                commit: Box::new(|_| Box::pin(async {})),
+                commit: Box::new(|_| Box::pin(async { Ok(()) })),
             });
         }
 
@@ -556,20 +556,23 @@ impl NatsCore {
                         // Acknowledge messages concurrently.
                         // A concurrency limit of 100 is chosen to balance parallelism
                         // with not overwhelming the NATS server or spawning too many tasks.
-                        futures::stream::iter(jetstream_messages)
-                            // Limit concurrent acks to avoid overwhelming the server
-                            .for_each_concurrent(Some(100), |message| async move {
-                                // Ack failure may result in redelivery. Enable deduplication middleware to handle duplicates.
-                                if let Err(e) = message.ack().await {
-                                    tracing::error!(
-                                        subject = %message.subject,
-                                        error = %e,
-                                        "Failed to ACK NATS message"
-                                    );
-                                }
-                            })
+                        let ack_futures = jetstream_messages.into_iter().map(|message| async move {
+                            message.ack().await.map_err(|e| anyhow::anyhow!("Failed to ACK NATS message subject {}: {}", message.subject, e))
+                        });
+
+                        let results: Vec<Result<(), anyhow::Error>> = futures::stream::iter(ack_futures)
+                            .buffer_unordered(100)
+                            .collect()
                             .await;
-                    }) as BoxFuture<'static, ()>
+
+                        for res in results {
+                            if let Err(e) = res {
+                                tracing::error!(error = %e, "NATS JetStream ack failed");
+                                return Err(e);
+                            }
+                        }
+                    Ok(())
+                }) as BoxFuture<'static, anyhow::Result<()>>
                 });
 
                 if canonical_messages.is_empty() {
@@ -638,7 +641,8 @@ impl NatsCore {
                                 }
                             }
                         }
-                    }) as BoxFuture<'static, ()>
+                        Ok(())
+                    }) as BoxFuture<'static, anyhow::Result<()>>
                 });
 
                 trace!(count = messages.len(), subject = %subject, message_ids = ?LazyMessageIds(&messages), "Received batch of NATS Core messages");

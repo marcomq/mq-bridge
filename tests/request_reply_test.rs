@@ -11,7 +11,7 @@ async fn run_service_reply(mut consumer: Box<dyn MessageConsumer>, response_payl
     match tokio::time::timeout(std::time::Duration::from_secs(5), receive_future).await {
         Ok(Ok(received)) => {
             let response = CanonicalMessage::new(response_payload.to_vec(), None);
-            (received.commit)(Some(response)).await;
+            let _ = (received.commit)(Some(response)).await;
         }
         Ok(Err(e)) => panic!("Service consumer failed to receive: {:?}", e),
         Err(_) => panic!("Service consumer receive timed out"),

@@ -148,7 +148,9 @@ impl MessageConsumer for DeduplicationConsumer {
 
             if is_duplicate {
                 info!(message_id = %message_id_hex, "Duplicate message detected and skipped");
-                original_commit(None).await;
+                if let Err(e) = original_commit(None).await {
+                    warn!("Failed to commit skipped duplicate message: {}", e);
+                }
                 continue;
             }
 
@@ -158,7 +160,7 @@ impl MessageConsumer for DeduplicationConsumer {
             // Wrap commit to update DB to "processed" state
             let commit = Box::new(move |response| {
                 Box::pin(async move {
-                    original_commit(response).await;
+                    original_commit(response).await?;
 
                     // Update the pending marker to the final processed value
                     if let Err(e) = db.insert(&key_clone, processed_val) {
@@ -169,7 +171,8 @@ impl MessageConsumer for DeduplicationConsumer {
                     } else {
                         trace!("Updated message as processed in deduplication DB");
                     }
-                }) as crate::traits::BoxFuture<'static, ()>
+                    Ok(())
+                }) as crate::traits::BoxFuture<'static, anyhow::Result<()>>
             });
 
             // remove outdated
@@ -298,11 +301,11 @@ mod tests {
         // First receive: Should be msg1 (ID 100)
         let rec1 = dedup_consumer.receive().await.unwrap();
         assert_eq!(rec1.message.message_id, 100);
-        (rec1.commit)(None).await;
+        let _ = (rec1.commit)(None).await;
 
         // Second receive: Should be msg3 (ID 101). msg2 (ID 100) is skipped internally.
         let rec2 = dedup_consumer.receive().await.unwrap();
         assert_eq!(rec2.message.message_id, 101);
-        (rec2.commit)(None).await;
+        let _ = (rec2.commit)(None).await;
     }
 }

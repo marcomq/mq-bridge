@@ -165,7 +165,7 @@ mod tests {
         assert_eq!(output_msgs.len(), 1);
         assert_eq!(output_msgs[0].payload.to_vec(), b"processed_test_data");
 
-        (received.commit)(None).await;
+        let _ = (received.commit)(None).await;
     }
 
     #[tokio::test]
