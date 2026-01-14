@@ -1,4 +1,3 @@
-use async_channel::{bounded, Receiver, Sender};
 use crate::canonical_message::tracing_support::LazyMessageIds;
 use crate::models::{MqttConfig, MqttProtocol};
 use crate::traits::{
@@ -8,6 +7,7 @@ use crate::traits::{
 use crate::CanonicalMessage;
 use crate::APP_NAME;
 use anyhow::{anyhow, Context};
+use async_channel::{bounded, Receiver, Sender};
 use async_trait::async_trait;
 use rumqttc::v5::mqttbytes::v5::{Publish as PublishV5, PublishProperties};
 use rumqttc::v5::mqttbytes::QoS as QoSV5;
@@ -117,7 +117,13 @@ impl MqttPublisher {
         let (stop_tx, stop_rx) = mpsc::channel(1);
 
         // The publisher needs a background event loop to handle keep-alives and other control packets.
-        tokio::spawn(run_eventloop(eventloop, None::<Sender<MqttInternalMessage>>, stop_rx, None, !config.delayed_ack));
+        tokio::spawn(run_eventloop(
+            eventloop,
+            None::<Sender<MqttInternalMessage>>,
+            stop_rx,
+            None,
+            !config.delayed_ack,
+        ));
 
         Ok(Self {
             client,
@@ -241,7 +247,13 @@ impl MqttListener {
         let (stop_tx, stop_rx) = mpsc::channel(1);
 
         let sub_info = Some((client.clone(), topic.to_string(), qos));
-        tokio::spawn(run_eventloop(eventloop, Some(tx), stop_rx, sub_info, !config.delayed_ack));
+        tokio::spawn(run_eventloop(
+            eventloop,
+            Some(tx),
+            stop_rx,
+            sub_info,
+            !config.delayed_ack,
+        ));
 
         client.subscribe(topic, qos).await?;
         info!("MQTT subscribed to {}", topic);
@@ -291,7 +303,10 @@ impl MessageConsumer for MqttListener {
                         Ok(Ok(_)) => trace!(topic = %rt, "MQTT reply published to channel"),
                         Err(_) => {
                             error!(topic = %rt, "Timed out publishing MQTT reply");
-                            return Err(anyhow::anyhow!("Timed out publishing MQTT reply to {}", rt));
+                            return Err(anyhow::anyhow!(
+                                "Timed out publishing MQTT reply to {}",
+                                rt
+                            ));
                         }
                     }
                 } else {
@@ -360,12 +375,18 @@ impl MessageConsumer for MqttListener {
                             {
                                 Ok(Err(e)) => {
                                     tracing::error!(topic = %rt, error = %e, "Failed to publish MQTT reply");
-                                    return Err(anyhow::anyhow!("Failed to publish MQTT reply: {}", e));
+                                    return Err(anyhow::anyhow!(
+                                        "Failed to publish MQTT reply: {}",
+                                        e
+                                    ));
                                 }
                                 Ok(Ok(_)) => {}
                                 Err(_) => {
                                     tracing::error!(topic = %rt, "Timed out publishing MQTT reply");
-                                    return Err(anyhow::anyhow!("Timed out publishing MQTT reply to {}", rt));
+                                    return Err(anyhow::anyhow!(
+                                        "Timed out publishing MQTT reply to {}",
+                                        rt
+                                    ));
                                 }
                             }
                         }
@@ -405,7 +426,7 @@ async fn create_client_and_eventloop(
                 mqttoptions.set_outgoing_inflight_upper_limit(inflight);
             }
             mqttoptions.set_clean_start(config.clean_session);
-            
+
             if let Some(expiry) = config.session_expiry_interval {
                 mqttoptions.set_session_expiry_interval(Some(expiry));
             } else if !config.clean_session {

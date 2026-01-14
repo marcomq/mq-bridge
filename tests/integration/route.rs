@@ -416,5 +416,8 @@ async fn test_custom_endpoint_factory_programmatic() {
     .await;
 
     // We expect a timeout because StaticConsumer produces infinitely and NullPublisher accepts infinitely.
-    assert!(result.is_err(), "Route should have run indefinitely until timeout");
+    assert!(
+        result.is_err(),
+        "Route should have run indefinitely until timeout"
+    );
 }

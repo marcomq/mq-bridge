@@ -10,8 +10,8 @@ use crate::traits::{
     BatchCommitFunc, ConsumerError, Handler, HandlerError, PublisherError, SentBatch,
 };
 use async_channel::{bounded, Sender};
-use std::collections::BTreeMap;
 use serde::de::DeserializeOwned;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use tokio::{
     select,
@@ -453,7 +453,7 @@ impl Route {
         drop(work_tx);
         // Wait for all worker tasks to complete.
         while join_set.join_next().await.is_some() {}
-        
+
         // Close sequencer
         drop(seq_tx);
         let _ = sequencer_handle.await;

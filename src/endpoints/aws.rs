@@ -174,7 +174,10 @@ impl MessageConsumer for AwsConsumer {
                                 for failure in resp.failed {
                                     error!(id = ?failure.id, code = ?failure.code, message = ?failure.message, sender_fault = failure.sender_fault, "SQS delete failure detail");
                                 }
-                                return Err(anyhow::anyhow!("SQS delete batch failed for {} messages", count));
+                                return Err(anyhow::anyhow!(
+                                    "SQS delete batch failed for {} messages",
+                                    count
+                                ));
                             }
                         }
                         Err(e) => {
@@ -183,7 +186,10 @@ impl MessageConsumer for AwsConsumer {
                                 error = %e,
                                 "Failed to delete SQS message batch"
                             );
-                            return Err(anyhow::anyhow!("Failed to delete SQS message batch: {}", e));
+                            return Err(anyhow::anyhow!(
+                                "Failed to delete SQS message batch: {}",
+                                e
+                            ));
                         }
                     }
                 }

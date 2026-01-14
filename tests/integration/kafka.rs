@@ -55,13 +55,16 @@ pub async fn test_kafka_pipeline() {
 
 pub async fn test_kafka_chaos() {
     setup_logging();
-    run_test_with_docker_controller("tests/integration/docker-compose/kafka.yml", |controller| async move {
-        let config_yaml = CONFIG_YAML.replace(
-            "{out_capacity}",
-            &(PERF_TEST_MESSAGE_COUNT + 1000).to_string(),
-        );
-        run_chaos_pipeline_test("kafka", &config_yaml, controller, "kafka").await;
-    })
+    run_test_with_docker_controller(
+        "tests/integration/docker-compose/kafka.yml",
+        |controller| async move {
+            let config_yaml = CONFIG_YAML.replace(
+                "{out_capacity}",
+                &(PERF_TEST_MESSAGE_COUNT + 1000).to_string(),
+            );
+            run_chaos_pipeline_test("kafka", &config_yaml, controller, "kafka").await;
+        },
+    )
     .await;
 }
 

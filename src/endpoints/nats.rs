@@ -500,7 +500,11 @@ impl NatsCore {
                         jetstream_messages.push(first_message);
                     }
                     Some(Err(e)) => return Err(ConsumerError::Connection(anyhow::anyhow!(e))),
-                    None => return Err(ConsumerError::Connection(anyhow::anyhow!("NATS JetStream ended"))),
+                    None => {
+                        return Err(ConsumerError::Connection(anyhow::anyhow!(
+                            "NATS JetStream ended"
+                        )))
+                    }
                 }
 
                 // Greedily fetch the rest of the batch
@@ -560,14 +564,22 @@ impl NatsCore {
                         // Acknowledge messages concurrently.
                         // A concurrency limit of 100 is chosen to balance parallelism
                         // with not overwhelming the NATS server or spawning too many tasks.
-                        let ack_futures = jetstream_messages.into_iter().map(|message| async move {
-                            message.ack().await.map_err(|e| anyhow::anyhow!("Failed to ACK NATS message subject {}: {}", message.subject, e))
-                        });
+                        let ack_futures =
+                            jetstream_messages.into_iter().map(|message| async move {
+                                message.ack().await.map_err(|e| {
+                                    anyhow::anyhow!(
+                                        "Failed to ACK NATS message subject {}: {}",
+                                        message.subject,
+                                        e
+                                    )
+                                })
+                            });
 
-                        let results: Vec<Result<(), anyhow::Error>> = futures::stream::iter(ack_futures)
-                            .buffer_unordered(100)
-                            .collect()
-                            .await;
+                        let results: Vec<Result<(), anyhow::Error>> =
+                            futures::stream::iter(ack_futures)
+                                .buffer_unordered(100)
+                                .collect()
+                                .await;
 
                         for res in results {
                             if let Err(e) = res {
@@ -575,8 +587,8 @@ impl NatsCore {
                                 return Err(e);
                             }
                         }
-                    Ok(())
-                }) as BoxFuture<'static, anyhow::Result<()>>
+                        Ok(())
+                    }) as BoxFuture<'static, anyhow::Result<()>>
                 });
 
                 Ok(ReceivedBatch {
@@ -602,7 +614,9 @@ impl NatsCore {
                         }
                     }
                 } else {
-                    return Err(ConsumerError::Connection(anyhow::anyhow!("NATS Core subscription ended")));
+                    return Err(ConsumerError::Connection(anyhow::anyhow!(
+                        "NATS Core subscription ended"
+                    )));
                 }
 
                 let client = client.clone();

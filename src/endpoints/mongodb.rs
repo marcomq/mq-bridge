@@ -458,7 +458,10 @@ impl MongoDbConsumer {
                                 let reply_coll = db.collection::<Document>(&coll_name);
                                 if let Err(e) = reply_coll.insert_one(doc).await {
                                     tracing::error!(collection = %coll_name, error = %e, "Failed to insert MongoDB reply");
-                                    return Err(anyhow::anyhow!("Failed to insert MongoDB reply: {}", e));
+                                    return Err(anyhow::anyhow!(
+                                        "Failed to insert MongoDB reply: {}",
+                                        e
+                                    ));
                                 }
                             }
                         }
@@ -477,7 +480,10 @@ impl MongoDbConsumer {
                             Err(e) => {
                                 // Ack failure may result in redelivery. Enable deduplication middleware to handle duplicates.
                                 tracing::error!(mongodb_id = %id_val, error = %e, "Failed to ack/delete MongoDB message");
-                                return Err(anyhow::anyhow!("Failed to ack/delete MongoDB message: {}", e));
+                                return Err(anyhow::anyhow!(
+                                    "Failed to ack/delete MongoDB message: {}",
+                                    e
+                                ));
                             }
                         }
                         Ok(())
@@ -558,7 +564,10 @@ impl MongoDbConsumer {
                                 let reply_coll = db.collection::<Document>(coll_name);
                                 if let Err(e) = reply_coll.insert_one(doc).await {
                                     tracing::error!(collection = %coll_name, response_id = %format!("{:032x}", resp.message_id), error = %e, "Failed to insert MongoDB batch reply");
-                                    return Err(anyhow::anyhow!("Failed to insert MongoDB batch reply: {}", e));
+                                    return Err(anyhow::anyhow!(
+                                        "Failed to insert MongoDB batch reply: {}",
+                                        e
+                                    ));
                                 }
                             }
                         }
@@ -572,7 +581,10 @@ impl MongoDbConsumer {
                 // Ack failure may result in redelivery. Enable deduplication middleware to handle duplicates.
                 if let Err(e) = collection_clone.delete_many(filter).await {
                     tracing::error!(error = %e, "Failed to bulk-ack/delete MongoDB messages");
-                    return Err(anyhow::anyhow!("Failed to bulk-ack/delete MongoDB messages: {}", e));
+                    return Err(anyhow::anyhow!(
+                        "Failed to bulk-ack/delete MongoDB messages: {}",
+                        e
+                    ));
                 } else {
                     trace!(
                         count = ids.len(),

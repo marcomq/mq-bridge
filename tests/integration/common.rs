@@ -1,14 +1,14 @@
 #![allow(dead_code)] // This module contains helpers used by various integration tests.
 use async_channel::{bounded, Receiver, Sender};
-use mq_bridge::traits::{ConsumerError, MessageConsumer, PublisherError, ReceivedBatch, SentBatch};
 use mq_bridge::traits::{BoxFuture, MessagePublisher, Received};
+use mq_bridge::traits::{ConsumerError, MessageConsumer, PublisherError, ReceivedBatch, SentBatch};
 use mq_bridge::{CanonicalMessage, Route};
 use once_cell::sync::Lazy;
 use serde_json::json;
 use std::any::Any;
+use std::collections::HashSet;
 use std::fmt::Display;
 use std::process::Command;
-use std::collections::HashSet;
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};

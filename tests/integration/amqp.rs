@@ -46,13 +46,16 @@ pub async fn test_amqp_pipeline() {
 
 pub async fn test_amqp_chaos() {
     setup_logging();
-    run_test_with_docker_controller("tests/integration/docker-compose/amqp.yml", |controller| async move {
-        let config_yaml = CONFIG_YAML.replace(
-            "{out_capacity}",
-            &(PERF_TEST_MESSAGE_COUNT + 1000).to_string(),
-        );
-        run_chaos_pipeline_test("AMQP", &config_yaml, controller, "rabbitmq").await;
-    })
+    run_test_with_docker_controller(
+        "tests/integration/docker-compose/amqp.yml",
+        |controller| async move {
+            let config_yaml = CONFIG_YAML.replace(
+                "{out_capacity}",
+                &(PERF_TEST_MESSAGE_COUNT + 1000).to_string(),
+            );
+            run_chaos_pipeline_test("AMQP", &config_yaml, controller, "rabbitmq").await;
+        },
+    )
     .await;
 }
 

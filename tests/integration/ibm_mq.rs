@@ -106,8 +106,10 @@ pub async fn test_ibm_mq_performance_pipeline() {
 
 pub async fn test_ibm_mq_chaos() {
     setup_logging();
-    run_test_with_docker_controller("tests/integration/docker-compose/ibm_mq.yml", |controller| async move {
-        let config_yaml = r#"
+    run_test_with_docker_controller(
+        "tests/integration/docker-compose/ibm_mq.yml",
+        |controller| async move {
+            let config_yaml = r#"
 routes:
   memory_to_ibm_mq:
     input:
@@ -134,8 +136,9 @@ routes:
       memory:
         topic: "chaos_out"
 "#;
-        run_chaos_pipeline_test("ibm_mq", config_yaml, controller, "mq").await;
-    })
+            run_chaos_pipeline_test("ibm_mq", config_yaml, controller, "mq").await;
+        },
+    )
     .await;
 }
 

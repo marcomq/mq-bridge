@@ -47,13 +47,16 @@ pub async fn test_mongodb_pipeline() {
 
 pub async fn test_mongodb_chaos() {
     setup_logging();
-    run_test_with_docker_controller("tests/integration/docker-compose/mongodb.yml", |controller| async move {
-        let config_yaml = CONFIG_YAML.replace(
-            "{out_capacity}",
-            &(PERF_TEST_MESSAGE_COUNT + 1000).to_string(),
-        );
-        run_chaos_pipeline_test("mongodb", &config_yaml, controller, "mongodb").await;
-    })
+    run_test_with_docker_controller(
+        "tests/integration/docker-compose/mongodb.yml",
+        |controller| async move {
+            let config_yaml = CONFIG_YAML.replace(
+                "{out_capacity}",
+                &(PERF_TEST_MESSAGE_COUNT + 1000).to_string(),
+            );
+            run_chaos_pipeline_test("mongodb", &config_yaml, controller, "mongodb").await;
+        },
+    )
     .await;
 }
 

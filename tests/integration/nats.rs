@@ -45,13 +45,16 @@ pub async fn test_nats_pipeline() {
 
 pub async fn test_nats_chaos() {
     setup_logging();
-    run_test_with_docker_controller("tests/integration/docker-compose/nats.yml", |controller| async move {
-        let config_yaml = CONFIG_YAML.replace(
-            "{out_capacity}",
-            &(PERF_TEST_MESSAGE_COUNT + 1000).to_string(),
-        );
-        run_chaos_pipeline_test("nats", &config_yaml, controller, "nats").await;
-    })
+    run_test_with_docker_controller(
+        "tests/integration/docker-compose/nats.yml",
+        |controller| async move {
+            let config_yaml = CONFIG_YAML.replace(
+                "{out_capacity}",
+                &(PERF_TEST_MESSAGE_COUNT + 1000).to_string(),
+            );
+            run_chaos_pipeline_test("nats", &config_yaml, controller, "nats").await;
+        },
+    )
     .await;
 }
 

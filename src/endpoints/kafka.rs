@@ -659,7 +659,10 @@ async fn receive_batch_internal(
                 // Ack failure may result in redelivery. Enable deduplication middleware to handle duplicates.
                 if let Err(e) = consumer.commit(&last_offset_tpl, CommitMode::Async) {
                     tracing::error!("Failed to commit Kafka message batch: {:?}", e);
-                    return Err(anyhow::anyhow!("Failed to commit Kafka message batch: {:?}", e));
+                    return Err(anyhow::anyhow!(
+                        "Failed to commit Kafka message batch: {:?}",
+                        e
+                    ));
                 }
             }
             Ok(())

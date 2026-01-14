@@ -176,7 +176,9 @@ impl MessageConsumer for FileConsumer {
         };
 
         // The commit for a file source is a no-op.
-        let commit = Box::new(move |_| Box::pin(async move { Ok(()) }) as BoxFuture<'static, anyhow::Result<()>>);
+        let commit = Box::new(move |_| {
+            Box::pin(async move { Ok(()) }) as BoxFuture<'static, anyhow::Result<()>>
+        });
 
         trace!(message_id = %format!("{:032x}", message.message_id), path = %self.path, "Received message from file");
         Ok(ReceivedBatch {
