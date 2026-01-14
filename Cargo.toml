@@ -12,17 +12,17 @@ categories = ["asynchronous", "network-programming"]
 [dependencies]
 
 serde = { version = "1.0", features = ["derive"] }
-anyhow = "1.0.86"
+anyhow = "1.0"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util", "net", "signal"] }
-async-trait = "0.1.68"
-serde_json = "1.0.149"
-thiserror = "2.0.17"
-futures = "0.3.31"
-tracing = "0.1.44"
-rand = "0.9.2"
-bytes = { version = "1.11.0", features = ["serde"] }
-async-channel = { version = "2.5.0" }
-once_cell = { version = "1.21.3" }
+async-trait = "0.1"
+serde_json = "1.0"
+thiserror = "2.0"
+futures = "0.3"
+tracing = "0.1"
+bytes = { version = "1", features = ["serde"] }
+async-channel = { version = "2.5" }
+once_cell = { version = "1.21" }
+uuid = { version = "1.19", features = ["v4", "v7"]}
 
 # Common TLS dependencies
 rustls = { version = "0.23", features = ["ring"], optional = true }
@@ -35,6 +35,9 @@ metrics = { version = "0.24", optional = true }
 # Storage for Deduplication
 sled = { version = "0.34", optional = true }
 
+# Panic Middleware
+rand = { version = "0.9",  optional = true }
+
 # --- Optional Endpoint Dependencies ---
 
 # Kafka
@@ -45,23 +48,22 @@ lapin = { version = "3.7", features = ["rustls"], optional = true }
 
 # MongoDB
 mongodb = { version = "3.4", optional = true, features = ["cert-key-password"] }
-uuid = { version = "1.19", features = ["v4", "v7"]}
 
 # NATS
 async-nats = { version = "0.45", optional = true }
 
 # MQTT
-rumqttc = { version = "0.25.1", optional = true }
+rumqttc = { version = "0.25", optional = true }
 
 # IBM MQ
-mqi = { version = "0.3.0", optional = true }
+mqi = { version = "0.3", optional = true }
 
 # HTTP
 actix-web = { version = "4.12", features = ["rustls-0_23"], optional = true }
-reqwest = { version = "0.13.1", features = ["json"], optional = true }
+reqwest = { version = "0.13", features = ["json"], optional = true }
 
 # AWS
-aws-config = { version = "1.8.12", optional = true, features = ["behavior-version-latest"] }
+aws-config = { version = "1.8", optional = true, features = ["behavior-version-latest"] }
 aws-sdk-sqs = { version = "1.91", optional = true }
 aws-sdk-sns = { version = "1.92", optional = true }
 
@@ -75,12 +77,13 @@ schemars = { version = "1.2", optional = true }
 
 [features]
 default = []
-middleware = ["metrics", "dedup"]
+middleware = ["metrics", "dedup", "panic"]
 full = ["mongodb", "kafka", "amqp", "nats", "mqtt", "http", "metrics", "dedup", "aws", "zeromq"]
 
 # Functionality features
-dedup = ["sled"]
+dedup = ["sled", "dep:rand"]
 metrics = ["dep:metrics"]
+panic = ["dep:rand"]
 
 # Generate Schema file
 schema = ["dep:schemars"]
@@ -100,13 +103,14 @@ zeromq = ["dep:zeromq"]
 
 [dev-dependencies]
 config = { version = "0.15" }
-serde_yaml_ng = "0.10.0"
+serde_yaml_ng = "0.10"
 tempfile = "3.10"
 tracing-appender = "0.2"
 chrono = "0.4"
-metrics-util = "0.20.1"
+metrics-util = "0.20"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
-criterion = { version = "0.8.1", features = ["async", "async_tokio"] }
+criterion = { version = "0.8", features = ["async", "async_tokio"] }
+rand = { version = "0.9" }
 
 [[bench]]
 name = "performance_bench"

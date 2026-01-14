@@ -23,6 +23,10 @@ use tracing::{info, trace};
 static RUNTIME_MEMORY_CHANNELS: Lazy<Mutex<HashMap<String, MemoryChannel>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
+/// A map to hold memory response channels.
+static RUNTIME_RESPONSE_CHANNELS: Lazy<Mutex<HashMap<String, MemoryResponseChannel>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
 /// A shareable, thread-safe, in-memory channel for testing.
 ///
 /// This struct holds the sender and receiver for an in-memory queue.
@@ -83,6 +87,39 @@ impl MemoryChannel {
     }
 }
 
+/// A shareable, thread-safe, in-memory channel for responses.
+#[derive(Debug, Clone)]
+pub struct MemoryResponseChannel {
+    pub sender: Sender<CanonicalMessage>,
+    pub receiver: Receiver<CanonicalMessage>,
+}
+
+impl MemoryResponseChannel {
+    pub fn new(capacity: usize) -> Self {
+        let (sender, receiver) = bounded(capacity);
+        Self { sender, receiver }
+    }
+
+    pub fn close(&self) {
+        self.sender.close();
+    }
+
+    pub fn len(&self) -> usize {
+        self.receiver.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.receiver.is_empty()
+    }
+
+    pub async fn wait_for_response(&self) -> anyhow::Result<CanonicalMessage> {
+        self.receiver
+            .recv()
+            .await
+            .map_err(|e| anyhow!("Error receiving response: {}", e))
+    }
+}
+
 /// Gets a shared `MemoryChannel` for a given topic, creating it if it doesn't exist.
 pub fn get_or_create_channel(config: &MemoryConfig) -> MemoryChannel {
     let mut channels = RUNTIME_MEMORY_CHANNELS.lock().unwrap();
@@ -91,6 +128,18 @@ pub fn get_or_create_channel(config: &MemoryConfig) -> MemoryChannel {
         .or_insert_with(|| {
             info!(topic = %config.topic, "Creating new runtime memory channel");
             MemoryChannel::new(config.capacity.unwrap_or(100))
+        })
+        .clone()
+}
+
+/// Gets a shared `MemoryResponseChannel` for a given topic, creating it if it doesn't exist.
+pub fn get_or_create_response_channel(topic: &str) -> MemoryResponseChannel {
+    let mut channels = RUNTIME_RESPONSE_CHANNELS.lock().unwrap();
+    channels
+        .entry(topic.to_string())
+        .or_insert_with(|| {
+            info!(topic = %topic, "Creating new runtime memory response channel");
+            MemoryResponseChannel::new(100)
         })
         .clone()
 }
@@ -218,7 +267,19 @@ impl MessageConsumer for MemoryConsumer {
             });
         }
 
-        let commit = Box::new(|_| Box::pin(async move { Ok(()) }) as BoxFuture<'static, anyhow::Result<()>>);
+        let topic = self.topic.clone();
+        let commit = Box::new(move |responses: Option<Vec<CanonicalMessage>>| {
+            Box::pin(async move {
+                if let Some(resps) = responses {
+                    let channel = get_or_create_response_channel(&topic);
+                    for resp in resps {
+                        // If the receiver is dropped, sending will fail. We can ignore it.
+                        let _ = channel.sender.send(resp).await;
+                    }
+                }
+                Ok(())
+            }) as BoxFuture<'static, anyhow::Result<()>>
+        });
         Ok(ReceivedBatch { messages, commit })
     }
 
@@ -258,9 +319,11 @@ impl MessageConsumer for MemorySubscriber {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::{Endpoint, EndpointType, ResponseConfig, Route};
+    use crate::traits::Handled;
     use crate::CanonicalMessage;
     use serde_json::json;
-    use tokio::time::sleep;
+    use tokio::time::{sleep, timeout};
 
     #[tokio::test]
     async fn test_memory_channel_integration() {
@@ -353,5 +416,55 @@ mod tests {
 
         let received = subscriber.receive().await.unwrap();
         assert_eq!(received.message.get_payload_str(), "hello subscriber");
+    }
+
+    #[tokio::test]
+    async fn test_memory_request_response_flow() {
+        // 1. Define a route from a memory input to a `response` output.
+        let topic = "mem_req_res_topic";
+        let input_endpoint = Endpoint::new_memory(topic, 10);
+        let output_endpoint = Endpoint::new(EndpointType::Response(ResponseConfig::default()));
+
+        // 2. The route needs a handler to process the request and create a response message.
+        let handler = |mut msg: CanonicalMessage| async move {
+            let request_payload = msg.get_payload_str();
+            let response_payload = format!("response to {}", request_payload);
+            msg.set_payload_str(response_payload);
+            Ok(Handled::Publish(msg))
+        };
+
+        let route = Route::new(input_endpoint, output_endpoint).with_handler(handler);
+
+        // 3. Get the input channel for the route's memory endpoint.
+        let input_channel = route.input.channel().unwrap();
+
+        // 4. Get the *response* channel for the route's memory endpoint topic.
+        let response_channel = get_or_create_response_channel(topic);
+
+        // 5. Run the route in the background.
+        let route_handle = tokio::spawn(async move {
+            // The route will run until the input channel is closed.
+            route.run_until_err("mem_req_res_test", None, None).await
+        });
+
+        // 6. Send a request message to the input channel.
+        let request_message = CanonicalMessage::from("my request");
+        input_channel.send_message(request_message).await.unwrap();
+
+        // 7. Wait for a response message on the response channel.
+        let response_message = timeout(
+            std::time::Duration::from_secs(2),
+            response_channel.wait_for_response(),
+        )
+        .await
+        .expect("Timed out waiting for response")
+        .unwrap();
+
+        // 8. Assert the response is correct.
+        assert_eq!(response_message.get_payload_str(), "response to my request");
+
+        // 9. Clean up (stop the route).
+        input_channel.close();
+        route_handle.await.unwrap().ok(); // The route will return an EndOfStream error which is ok.
     }
 }
