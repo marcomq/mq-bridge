@@ -141,8 +141,11 @@ async fn create_base_consumer(
             }
         }
         EndpointType::File(path) => {
-            ensure_consume_mode("File", endpoint.mode.clone())?;
-            Ok(Box::new(file::FileConsumer::new(path).await?))
+            if endpoint.mode == crate::models::ConsumerMode::Subscribe {
+                Ok(Box::new(file::FileSubscriber::new(path).await?))
+            } else {
+                Ok(Box::new(file::FileConsumer::new(path).await?))
+            }
         }
         #[cfg(any(feature = "http-client", feature = "http-server"))]
         EndpointType::Http(cfg) => {
