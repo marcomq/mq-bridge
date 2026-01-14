@@ -306,31 +306,40 @@ impl MessageConsumer for FileConsumer {
                 let mut reader = BufReader::new(file);
 
                 let temp_path = format!("{}.tmp", path);
-                let temp_file = File::create(&temp_path)
-                    .await
-                    .context("Failed to create temp file")?;
-                let mut writer = BufWriter::new(temp_file);
+                let result = async {
+                    let temp_file = File::create(&temp_path)
+                        .await
+                        .context("Failed to create temp file")?;
+                    let mut writer = BufWriter::new(temp_file);
 
-                let mut lines_skipped = 0;
+                    let mut lines_skipped = 0;
 
-                // Skip the first N lines (where N is the batch size we just processed)
-                // Note: This simple implementation assumes ordered commits.
-                while lines_skipped < lines_to_remove {
-                    let mut skip_buf = Vec::new();
-                    if reader.read_until(b'\n', &mut skip_buf).await? == 0 {
-                        break;
+                    // Skip the first N lines (where N is the batch size we just processed)
+                    // Note: This simple implementation assumes ordered commits.
+                    while lines_skipped < lines_to_remove {
+                        let mut skip_buf = Vec::new();
+                        if reader.read_until(b'\n', &mut skip_buf).await? == 0 {
+                            break;
+                        }
+                        lines_skipped += 1;
                     }
-                    lines_skipped += 1;
+
+                    // Write the rest using streaming copy
+                    io::copy(&mut reader, &mut writer).await?;
+                    writer.flush().await?;
+
+                    // Rewrite the file
+                    fs::rename(&temp_path, &path)
+                        .await
+                        .context("Failed to replace file for commit")?;
+                    Ok(())
                 }
+                .await;
 
-                // Write the rest using streaming copy
-                io::copy(&mut reader, &mut writer).await?;
-                writer.flush().await?;
-
-                // Rewrite the file
-                fs::rename(&temp_path, &path)
-                    .await
-                    .context("Failed to replace file for commit")?;
+                if let Err(e) = result {
+                    let _ = fs::remove_file(&temp_path).await;
+                    return Err(e);
+                }
 
                 // Update state
                 state.in_flight_lines = state.in_flight_lines.saturating_sub(lines_to_remove);
