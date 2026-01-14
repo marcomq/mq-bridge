@@ -461,15 +461,18 @@ impl MongoDbConsumer {
                 let commit = Box::new(move |response: Option<CanonicalMessage>| {
                     Box::pin(async move {
                         if let (Some(resp), Some(coll_name)) = (response, reply_collection_name) {
-                            if let Ok(doc) = message_to_document(&resp) {
-                                let reply_coll = db.collection::<Document>(&coll_name);
-                                if let Err(e) = reply_coll.insert_one(doc).await {
-                                    tracing::error!(collection = %coll_name, error = %e, "Failed to insert MongoDB reply");
-                                    return Err(anyhow::anyhow!(
-                                        "Failed to insert MongoDB reply: {}",
-                                        e
-                                    ));
-                                }
+                            let doc = message_to_document(&resp).map_err(|e| {
+                                tracing::error!(collection = %coll_name, error = %e, "Failed to serialize MongoDB reply");
+                                anyhow::anyhow!("Failed to serialize MongoDB reply: {}", e)
+                            })?;
+
+                            let reply_coll = db.collection::<Document>(&coll_name);
+                            if let Err(e) = reply_coll.insert_one(doc).await {
+                                tracing::error!(collection = %coll_name, error = %e, "Failed to insert MongoDB reply");
+                                return Err(anyhow::anyhow!(
+                                    "Failed to insert MongoDB reply: {}",
+                                    e
+                                ));
                             }
                         }
 
@@ -567,15 +570,20 @@ impl MongoDbConsumer {
                 if let Some(resps) = responses {
                     for (reply_coll_opt, resp) in reply_infos.iter().zip(resps) {
                         if let Some(coll_name) = reply_coll_opt {
-                            if let Ok(doc) = message_to_document(&resp) {
-                                let reply_coll = db.collection::<Document>(coll_name);
-                                if let Err(e) = reply_coll.insert_one(doc).await {
-                                    tracing::error!(collection = %coll_name, response_id = %format!("{:032x}", resp.message_id), error = %e, "Failed to insert MongoDB batch reply");
-                                    return Err(anyhow::anyhow!(
-                                        "Failed to insert MongoDB batch reply: {}",
-                                        e
-                                    ));
+                            let doc = match message_to_document(&resp) {
+                                Ok(d) => d,
+                                Err(e) => {
+                                    tracing::error!(collection = %coll_name, response_id = %format!("{:032x}", resp.message_id), error = %e, "Failed to serialize MongoDB batch reply");
+                                    return Err(anyhow::anyhow!("Failed to serialize MongoDB batch reply: {}", e));
                                 }
+                            };
+                            let reply_coll = db.collection::<Document>(coll_name);
+                            if let Err(e) = reply_coll.insert_one(doc).await {
+                                tracing::error!(collection = %coll_name, response_id = %format!("{:032x}", resp.message_id), error = %e, "Failed to insert MongoDB batch reply");
+                                return Err(anyhow::anyhow!(
+                                    "Failed to insert MongoDB batch reply: {}",
+                                    e
+                                ));
                             }
                         }
                     }
