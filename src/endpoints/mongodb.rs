@@ -234,20 +234,20 @@ impl MongoDbConsumer {
         let pipeline = [doc! { "$match": { "operationType": "insert" } }];
         let change_stream_result = collection.watch().pipeline(pipeline).await;
 
-        let change_stream = match change_stream_result {
+        let (change_stream, mode) = match change_stream_result {
             Ok(stream) => {
                 info!("MongoDB is a replica set/sharded cluster. Using change stream.");
-                Some(tokio::sync::Mutex::new(stream))
+                (Some(tokio::sync::Mutex::new(stream)), "change_stream")
             }
             Err(e) if matches!(*e.kind, ErrorKind::Command(ref cmd_err) if cmd_err.code == 40573) =>
             {
                 info!("MongoDB is a single instance (ChangeStream support check failed). Falling back to polling for consumer.");
-                None
+                (None, "polling")
             }
             Err(e) => return Err(e.into()), // For any other error, we propagate it.
         };
 
-        info!(database = %config.database, collection = %collection_name, "MongoDB consumer connected and watching for changes");
+        info!(database = %config.database, collection = %collection_name, mode = %mode, "MongoDB consumer connected");
 
         Ok(Self {
             collection,
@@ -276,10 +276,14 @@ impl MessageConsumer for MongoDbConsumer {
                 // --- Change Stream Path ---
                 // Wait for an event to wake us up.
                 let mut stream = stream_mutex.lock().await;
-                match stream.next().await {
-                    Some(Ok(_)) => continue, // Event received, loop back to try claiming documents.
-                    Some(Err(e)) => return Err(ConsumerError::Connection(e.into())),
-                    None => return Err(anyhow!("MongoDB change stream ended unexpectedly").into()),
+                // Use a timeout to ensure we periodically check for documents even if stream is silent.
+                match tokio::time::timeout(Duration::from_secs(5), stream.next()).await {
+                    Ok(Some(Ok(_))) => continue, // Event received, loop back to try claiming documents.
+                    Ok(Some(Err(e))) => return Err(ConsumerError::Connection(e.into())),
+                    Ok(None) => {
+                        return Err(anyhow!("MongoDB change stream ended unexpectedly").into())
+                    }
+                    Err(_) => continue, // Timeout, loop back to check for documents.
                 }
             }
 
@@ -312,10 +316,13 @@ impl MessageConsumer for MongoDbConsumer {
             if let Some(stream_mutex) = &self.change_stream {
                 // Replica Set: Wait for a change stream event to wake us up.
                 let mut stream = stream_mutex.lock().await;
-                match stream.next().await {
-                    Some(Ok(_)) => {} // Event received, loop back to try claiming documents.
-                    Some(Err(e)) => return Err(ConsumerError::Connection(e.into())),
-                    None => return Err(anyhow!("MongoDB change stream ended unexpectedly").into()),
+                match tokio::time::timeout(Duration::from_secs(5), stream.next()).await {
+                    Ok(Some(Ok(_))) => {} // Event received, loop back to try claiming documents.
+                    Ok(Some(Err(e))) => return Err(ConsumerError::Connection(e.into())),
+                    Ok(None) => {
+                        return Err(anyhow!("MongoDB change stream ended unexpectedly").into())
+                    }
+                    Err(_) => {} // Timeout, loop back to check for documents.
                 }
             } else {
                 // Standalone: Sleep for polling interval.
