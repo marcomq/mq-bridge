@@ -201,6 +201,9 @@ impl MessageConsumer for FileSubscriber {
 
 struct FileConsumerState {
     in_flight_lines: usize,
+    next_batch_seq: u64,
+    next_commit_seq: u64,
+    pending_commits: std::collections::BTreeMap<u64, usize>,
 }
 
 /// A consumer that reads messages from a file and removes them upon commit.
@@ -214,7 +217,12 @@ impl FileConsumer {
         info!(path = %path, "File consumer opened");
         Ok(Self {
             path: path.to_string(),
-            state: Arc::new(Mutex::new(FileConsumerState { in_flight_lines: 0 })),
+            state: Arc::new(Mutex::new(FileConsumerState {
+                in_flight_lines: 0,
+                next_batch_seq: 0,
+                next_commit_seq: 0,
+                pending_commits: std::collections::BTreeMap::new(),
+            })),
         })
     }
 }
@@ -225,6 +233,7 @@ impl MessageConsumer for FileConsumer {
     async fn receive_batch(&mut self, max_messages: usize) -> Result<ReceivedBatch, ConsumerError> {
         let mut messages = Vec::new();
         let mut lines_read = 0;
+        let batch_seq;
 
         // 1. Wait for the first message
         loop {
@@ -282,6 +291,8 @@ impl MessageConsumer for FileConsumer {
                     messages.push(parse_message(buffer));
                 }
 
+                batch_seq = state.next_batch_seq;
+                state.next_batch_seq += 1;
                 state.in_flight_lines += lines_read;
                 drop(state);
                 break;
@@ -300,6 +311,24 @@ impl MessageConsumer for FileConsumer {
         let commit: CommitFunc = Box::new(move |_| {
             Box::pin(async move {
                 let mut state = state.lock().await;
+
+                state.pending_commits.insert(batch_seq, lines_to_remove);
+
+                // Check if we can process any commits in order
+                let mut total_lines_to_remove = 0;
+                let mut batches_to_process: u64 = 0;
+                let mut current_seq = state.next_commit_seq;
+
+                while let Some(&lines) = state.pending_commits.get(&current_seq) {
+                    total_lines_to_remove += lines;
+                    batches_to_process += 1;
+                    current_seq += 1;
+                }
+
+                if batches_to_process == 0 {
+                    return Ok(());
+                }
+
                 // Read the whole file
                 let file = File::open(&path)
                     .await
@@ -317,7 +346,7 @@ impl MessageConsumer for FileConsumer {
 
                     // Skip the first N lines (where N is the batch size we just processed)
                     // Note: This simple implementation assumes ordered commits.
-                    while lines_skipped < lines_to_remove {
+                    while lines_skipped < total_lines_to_remove {
                         let mut skip_buf = Vec::new();
                         if reader.read_until(b'\n', &mut skip_buf).await? == 0 {
                             break;
@@ -343,7 +372,12 @@ impl MessageConsumer for FileConsumer {
                 }
 
                 // Update state
-                state.in_flight_lines = state.in_flight_lines.saturating_sub(lines_to_remove);
+                state.in_flight_lines = state.in_flight_lines.saturating_sub(total_lines_to_remove);
+                let start_seq = state.next_commit_seq;
+                state.next_commit_seq += batches_to_process;
+                for i in 0..batches_to_process {
+                    state.pending_commits.remove(&(start_seq + i));
+                }
                 Ok(())
             })
         });

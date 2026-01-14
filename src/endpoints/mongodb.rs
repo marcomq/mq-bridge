@@ -574,7 +574,10 @@ impl MongoDbConsumer {
                                 Ok(d) => d,
                                 Err(e) => {
                                     tracing::error!(collection = %coll_name, response_id = %format!("{:032x}", resp.message_id), error = %e, "Failed to serialize MongoDB batch reply");
-                                    return Err(anyhow::anyhow!("Failed to serialize MongoDB batch reply: {}", e));
+                                    return Err(anyhow::anyhow!(
+                                        "Failed to serialize MongoDB batch reply: {}",
+                                        e
+                                    ));
                                 }
                             };
                             let reply_coll = db.collection::<Document>(coll_name);
