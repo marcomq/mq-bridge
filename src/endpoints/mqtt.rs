@@ -396,6 +396,7 @@ impl MessageConsumer for MqttListener {
                 for ack in acks {
                     if let Err(e) = client.ack(&ack).await {
                         error!("Failed to ack MQTT message in batch: {}", e);
+                        return Err(e);
                     }
                 }
                 Ok(())
