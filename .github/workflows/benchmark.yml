@@ -49,6 +49,38 @@ jobs:
           # Filter output to only include benchmark results, removing Docker logs and custom prints
           awk '/^test / { if ($0 ~ /bench:/) { print $0; name="" } else { name=$2 } } /^bench:/ { if (name != "") { print "test " name " ... " $0; name="" } }' raw_output.txt > output.txt
       
+      - name: Generate Throughput Summary
+        run: |
+          python3 -c '
+          import re
+          import os
+          
+          data = {}
+          try:
+              with open("raw_output.txt", "r") as f:
+                  for line in f:
+                      # Match lines like: "aws single_write: 1 iters, total time 1.48s, 673.75 msgs/sec"
+                      m = re.search(r"^\s*(.*): .* ([\d\.]+) msgs/sec", line)
+                      if m:
+                          name = m.group(1).strip()
+                          rate = float(m.group(2))
+                          if name not in data:
+                              data[name] = []
+                          data[name].append(rate)
+              
+              if data:
+                  with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+                      f.write("### Benchmark Throughput Results\n")
+                      f.write("| Test Case | Average msgs/sec | Samples |\n")
+                      f.write("|-----------|------------------|---------|\n")
+                      for name in sorted(data.keys()):
+                          rates = data[name]
+                          avg = sum(rates) / len(rates)
+                          f.write(f"| {name} | {avg:,.2f} | {len(rates)} |\n")
+          except Exception as e:
+              print(f"Error generating summary: {e}")
+          '
+
       - name: Create gh-pages branch if missing
         run: |
           git fetch origin gh-pages || {

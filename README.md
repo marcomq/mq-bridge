@@ -3,6 +3,7 @@
 [![Crates.io](https://img.shields.io/crates/v/mq-bridge.svg)](https://crates.io/crates/mq-bridge)
 [![Docs.rs](https://docs.rs/mq-bridge/badge.svg)](https://docs.rs/mq-bridge)
 [![CI](https://github.com/marcomq/mq-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/marcomq/mq-bridge/actions)
+[![Benchmark](https://github.com/marcomq/mq-bridge/actions/workflows/benchmark.yml/badge.svg)](https://marcomq.github.io/mq-bridge/dev/bench/)
 ![Linux](https://img.shields.io/badge/Linux-supported-green?logo=linux)
 ![Windows](https://img.shields.io/badge/Windows-supported-green?logo=windows)
 ![macOS](https://img.shields.io/badge/macOS-supported-green?logo=apple)
