@@ -35,17 +35,71 @@ use anyhow::{anyhow, Result};
 use std::sync::Arc;
 use uuid::Uuid;
 
-/// Creates a `MessageConsumer` based on the route's "in" configuration.
-pub async fn create_consumer_from_route(
-    route_name: &str,
-    endpoint: &Endpoint,
-) -> Result<Box<dyn MessageConsumer>> {
+/// Validates the consumer configuration for a route.
+pub fn check_consumer(route_name: &str, endpoint: &Endpoint) -> Result<()> {
     if endpoint.handler.is_some() {
         tracing::warn!(
             route = route_name,
             "Endpoint 'handler' is set on an input endpoint. Handlers are currently only supported on output endpoints (publishers) and will be ignored here."
         );
     }
+    match &endpoint.endpoint_type {
+        #[cfg(feature = "aws")]
+        EndpointType::Aws(_) => ensure_consume_mode("Aws", endpoint.mode.clone()),
+        #[cfg(feature = "kafka")]
+        EndpointType::Kafka(_) => Ok(()),
+        #[cfg(feature = "nats")]
+        EndpointType::Nats(cfg) => {
+            if cfg.stream.is_none() && cfg.config.default_stream.is_none() {
+                return Err(anyhow!(
+                    "[route:{}] NATS consumer must specify a 'stream' or have a 'default_stream'",
+                    route_name
+                ));
+            }
+            Ok(())
+        }
+        #[cfg(feature = "amqp")]
+        EndpointType::Amqp(_) => Ok(()),
+        #[cfg(feature = "mqtt")]
+        EndpointType::Mqtt(_) => Ok(()),
+        #[cfg(feature = "ibm-mq")]
+        EndpointType::IbmMq(_) => Ok(()),
+        #[cfg(feature = "zeromq")]
+        EndpointType::ZeroMq(_) => Ok(()),
+        EndpointType::File(_) => Ok(()),
+        #[cfg(any(feature = "http-client", feature = "http-server"))]
+        EndpointType::Http(_) => {
+            ensure_consume_mode("Http", endpoint.mode.clone())?;
+            #[cfg(not(feature = "http-server"))]
+            {
+                Err(anyhow!("HTTP consumer requires the 'http-server' feature"))
+            }
+            #[cfg(feature = "http-server")]
+            Ok(())
+        }
+        EndpointType::Static(_) => ensure_consume_mode("Static", endpoint.mode.clone()),
+        EndpointType::Memory(_) => Ok(()),
+        #[cfg(feature = "mongodb")]
+        EndpointType::MongoDb(_) => Ok(()),
+        EndpointType::Custom(_) => Ok(()),
+        EndpointType::Switch(_) => Err(anyhow!(
+            "[route:{}] Switch endpoint is only supported as an output",
+            route_name
+        )),
+        #[allow(unreachable_patterns)]
+        _ => Err(anyhow!(
+            "[route:{}] Unsupported consumer endpoint type",
+            route_name
+        )),
+    }
+}
+
+/// Creates a `MessageConsumer` based on the route's "in" configuration.
+pub async fn create_consumer_from_route(
+    route_name: &str,
+    endpoint: &Endpoint,
+) -> Result<Box<dyn MessageConsumer>> {
+    check_consumer(route_name, endpoint)?;
     let consumer = create_base_consumer(route_name, endpoint).await?;
     apply_middlewares_to_consumer(consumer, endpoint, route_name).await
 }
@@ -201,17 +255,86 @@ async fn create_base_consumer(
     }
 }
 
-/// Creates a `MessagePublisher` based on the route's "out" configuration.
-pub async fn create_publisher_from_route(
-    route_name: &str,
-    endpoint: &Endpoint,
-) -> Result<Arc<dyn MessagePublisher>> {
+/// Validates the publisher configuration for a route.
+pub fn check_publisher(route_name: &str, endpoint: &Endpoint) -> Result<()> {
     if endpoint.mode == crate::models::ConsumerMode::Subscribe {
         tracing::warn!(
             route = route_name,
             "Endpoint 'mode' is set to 'subscribe' on an output endpoint. This is likely a configuration error as 'mode' only applies to inputs."
         );
     }
+    check_publisher_recursive(route_name, endpoint, 0)
+}
+
+fn check_publisher_recursive(route_name: &str, endpoint: &Endpoint, depth: usize) -> Result<()> {
+    const MAX_DEPTH: usize = 16;
+    if depth > MAX_DEPTH {
+        return Err(anyhow!(
+            "Fanout recursion depth exceeded limit of {}",
+            MAX_DEPTH
+        ));
+    }
+    match &endpoint.endpoint_type {
+        #[cfg(feature = "aws")]
+        EndpointType::Aws(_) => Ok(()),
+        #[cfg(feature = "kafka")]
+        EndpointType::Kafka(_) => Ok(()),
+        #[cfg(feature = "nats")]
+        EndpointType::Nats(_) => Ok(()),
+        #[cfg(feature = "amqp")]
+        EndpointType::Amqp(_) => Ok(()),
+        #[cfg(feature = "mqtt")]
+        EndpointType::Mqtt(_) => Ok(()),
+        #[cfg(feature = "ibm-mq")]
+        EndpointType::IbmMq(_) => Ok(()),
+        #[cfg(feature = "zeromq")]
+        EndpointType::ZeroMq(_) => Ok(()),
+        #[cfg(any(feature = "http-client", feature = "http-server"))]
+        EndpointType::Http(_) => {
+            #[cfg(not(feature = "reqwest"))]
+            {
+                Err(anyhow!("HTTP publisher requires the 'reqwest' feature"))
+            }
+            #[cfg(feature = "reqwest")]
+            Ok(())
+        }
+        #[cfg(feature = "mongodb")]
+        EndpointType::MongoDb(_) => Ok(()),
+        EndpointType::File(_) => Ok(()),
+        EndpointType::Static(_) => Ok(()),
+        EndpointType::Memory(_) => Ok(()),
+        EndpointType::Null => Ok(()),
+        EndpointType::Fanout(endpoints) => {
+            for endpoint in endpoints {
+                check_publisher_recursive(route_name, endpoint, depth + 1)?;
+            }
+            Ok(())
+        }
+        EndpointType::Switch(cfg) => {
+            for endpoint in cfg.cases.values() {
+                check_publisher_recursive(route_name, endpoint, depth + 1)?;
+            }
+            if let Some(endpoint) = &cfg.default {
+                check_publisher_recursive(route_name, endpoint, depth + 1)?;
+            }
+            Ok(())
+        }
+        EndpointType::Response(_) => Ok(()),
+        EndpointType::Custom(_) => Ok(()),
+        #[allow(unreachable_patterns)]
+        _ => Err(anyhow!(
+            "[route:{}] Unsupported publisher endpoint type",
+            route_name
+        )),
+    }
+}
+
+/// Creates a `MessagePublisher` based on the route's "out" configuration.
+pub async fn create_publisher_from_route(
+    route_name: &str,
+    endpoint: &Endpoint,
+) -> Result<Arc<dyn MessagePublisher>> {
+    check_publisher(route_name, endpoint)?;
     create_publisher_with_depth(route_name, endpoint, 0).await
 }
 

@@ -75,12 +75,20 @@ impl Route {
         crate::Publisher::new(self.output.clone()).await
     }
 
+    /// Validates the route configuration, checking if endpoints are supported and correctly configured.
+    pub fn check(&self, name: &str) -> anyhow::Result<()> {
+        crate::endpoints::check_consumer(name, &self.input)?;
+        crate::endpoints::check_publisher(name, &self.output)?;
+        Ok(())
+    }
+
     /// Runs the message processing route with concurrency, error handling, and graceful shutdown.
     ///
     /// This function spawns a set of worker tasks to process messages concurrently.
     /// It returns a `JoinHandle` for the main route task and a `Sender` channel
     /// that can be used to signal a graceful shutdown.
     pub fn run(&self, name_str: &str) -> anyhow::Result<(JoinHandle<()>, Sender<()>)> {
+        self.check(name_str)?;
         let (shutdown_tx, shutdown_rx) = bounded(1);
         let (ready_tx, ready_rx) = bounded(1);
         // Use `Arc` so route/name clones are cheap (pointer copy) in the reconnect loop.
