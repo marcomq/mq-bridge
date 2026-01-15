@@ -47,8 +47,8 @@ impl Default for Route {
         Self {
             concurrency: default_concurrency(),
             batch_size: default_batch_size(),
-            input: Endpoint::default(),
-            output: Endpoint::default(),
+            input: Endpoint::null(),
+            output: Endpoint::null(),
         }
     }
 }
@@ -224,6 +224,9 @@ impl Endpoint {
             EndpointType::Memory(cfg) => Ok(get_or_create_channel(cfg)),
             _ => Err(anyhow::anyhow!("channel() called on non-memory Endpoint")),
         }
+    }
+    pub fn null() -> Self {
+        Self::new(EndpointType::Null)
     }
 }
 

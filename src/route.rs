@@ -11,8 +11,8 @@ use crate::traits::{
 };
 use async_channel::{bounded, Sender};
 use serde::de::DeserializeOwned;
-use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{Arc, OnceLock, RwLock};
 use tokio::{
     select,
     sync::Semaphore,
@@ -20,16 +20,18 @@ use tokio::{
 };
 use tracing::{debug, error, info, warn};
 
+static ROUTE_REGISTRY: OnceLock<RwLock<HashMap<String, Route>>> = OnceLock::new();
+
 #[derive(Debug)]
 pub struct RouteHandle((JoinHandle<()>, Sender<()>));
 
 impl RouteHandle {
     pub async fn stop(&self) {
-        let _ = self.0.1.send(()).await;
+        let _ = self.0 .1.send(()).await;
     }
 
     pub async fn join(self) -> Result<(), tokio::task::JoinError> {
-        self.0.0.await
+        self.0 .0.await
     }
 }
 
@@ -52,6 +54,21 @@ impl Route {
             ..Default::default()
         }
     }
+
+    /// Registers this route globally with a given name.
+    pub fn register(&self, name: &str) {
+        let registry = ROUTE_REGISTRY.get_or_init(|| RwLock::new(HashMap::new()));
+        let mut map = registry.write().expect("Route registry lock poisoned");
+        map.insert(name.to_string(), self.clone());
+    }
+
+    /// Retrieves a registered route by name.
+    pub fn get(name: &str) -> Option<Self> {
+        let registry = ROUTE_REGISTRY.get_or_init(|| RwLock::new(HashMap::new()));
+        let map = registry.read().expect("Route registry lock poisoned");
+        map.get(name).cloned()
+    }
+
     /// Runs the message processing route with concurrency, error handling, and graceful shutdown.
     ///
     /// This function spawns a set of worker tasks to process messages concurrently.
@@ -663,5 +680,20 @@ mod tests {
         // Cleanup
         route_handle.stop().await;
         let _ = route_handle.join().await;
+    }
+
+    #[test]
+    fn test_route_registry() {
+        let input = Endpoint::new_memory("reg_in", 10);
+        let output = Endpoint::new_memory("reg_out", 10);
+        let route = Route::new(input, output);
+
+        route.register("my_static_route");
+
+        let retrieved = Route::get("my_static_route");
+        assert!(retrieved.is_some());
+
+        let missing = Route::get("unknown_route");
+        assert!(missing.is_none());
     }
 }

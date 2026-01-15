@@ -4,12 +4,16 @@ use crate::traits;
 use crate::CanonicalMessage;
 use crate::Sent;
 use crate::SentBatch;
+use std::collections::HashMap;
+use std::sync::{OnceLock, RwLock};
 
 /// A simple wrapper around a publisher to send messages to a specific endpoint.
 #[derive(Clone)]
 pub struct Publisher {
     publisher: std::sync::Arc<dyn traits::MessagePublisher>,
 }
+
+static PUBLISHER_REGISTRY: OnceLock<RwLock<HashMap<String, Publisher>>> = OnceLock::new();
 
 impl Publisher {
     /// Creates a new publisher for the given endpoint configuration.
@@ -33,6 +37,20 @@ impl Publisher {
             .await
             .map_err(|e| anyhow::anyhow!(e))
     }
+
+    /// Registers this publisher globally with a given name.
+    pub fn register(&self, name: &str) {
+        let registry = PUBLISHER_REGISTRY.get_or_init(|| RwLock::new(HashMap::new()));
+        let mut map = registry.write().expect("Publisher registry lock poisoned");
+        map.insert(name.to_string(), self.clone());
+    }
+
+    /// Retrieves a registered publisher by name.
+    pub fn get(name: &str) -> Option<Self> {
+        let registry = PUBLISHER_REGISTRY.get_or_init(|| RwLock::new(HashMap::new()));
+        let map = registry.read().expect("Publisher registry lock poisoned");
+        map.get(name).cloned()
+    }
 }
 
 #[cfg(test)]
@@ -42,6 +60,7 @@ mod tests {
     use crate::models::{Endpoint, EndpointType, MemoryConfig, PublisherConfig};
     use crate::CanonicalMessage;
     use std::collections::HashMap;
+    use std::sync::Arc;
 
     #[tokio::test]
     async fn test_publisher_config_usage() {
@@ -76,5 +95,18 @@ mod tests {
         let received = channel.drain_messages();
         assert_eq!(received.len(), 1);
         assert_eq!(received[0].get_payload_str(), "hello world");
+    }
+
+    #[tokio::test]
+    async fn test_publisher_registry() {
+        let endpoint = Endpoint::new_memory("registry_test", 10);
+        let publisher = Publisher::new(endpoint)
+            .await
+            .expect("Failed to create publisher");
+
+        publisher.register("static_pub");
+
+        let retrieved = Publisher::get("static_pub").expect("Failed to get publisher");
+        assert!(Arc::ptr_eq(&publisher.publisher, &retrieved.publisher));
     }
 }
