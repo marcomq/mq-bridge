@@ -42,6 +42,17 @@ pub struct Route {
     pub output: Endpoint,
 }
 
+impl Default for Route {
+    fn default() -> Self {
+        Self {
+            concurrency: default_concurrency(),
+            batch_size: default_batch_size(),
+            input: Endpoint::default(),
+            output: Endpoint::default(),
+        }
+    }
+}
+
 pub(crate) fn default_concurrency() -> usize {
     1
 }
@@ -74,7 +85,7 @@ fn default_clean_session() -> bool {
 }
 
 /// Represents a connection point for messages, which can be a source (input) or a sink (output).
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Endpoint {
@@ -241,11 +252,10 @@ fn deserialize_middlewares_from_value(value: serde_json::Value) -> anyhow::Resul
 /// An enumeration of all supported endpoint types.
 /// `#[serde(rename_all = "lowercase")]` ensures that the keys in the config (e.g., "kafka")
 /// match the enum variants.
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum EndpointType {
-    #[cfg(feature = "aws")]
     Aws(AwsEndpoint),
     Kafka(KafkaEndpoint),
     Nats(NatsEndpoint),
@@ -263,6 +273,7 @@ pub enum EndpointType {
     Response(ResponseConfig),
     #[serde(skip)]
     Custom(Arc<dyn CustomEndpointFactory>),
+    #[default]
     Null,
 }
 
@@ -366,8 +377,6 @@ where
 }
 
 // --- AWS Specific Configuration ---
-
-#[cfg(feature = "aws")]
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]

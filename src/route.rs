@@ -20,6 +20,25 @@ use tokio::{
 };
 use tracing::{debug, error, info, warn};
 
+#[derive(Debug)]
+pub struct RouteHandle((JoinHandle<()>, Sender<()>));
+
+impl RouteHandle {
+    pub async fn stop(&self) {
+        let _ = self.0.1.send(()).await;
+    }
+
+    pub async fn join(self) -> Result<(), tokio::task::JoinError> {
+        self.0.0.await
+    }
+}
+
+impl From<(JoinHandle<()>, Sender<()>)> for RouteHandle {
+    fn from(tuple: (JoinHandle<()>, Sender<()>)) -> Self {
+        RouteHandle(tuple)
+    }
+}
+
 impl Route {
     /// Creates a new route with default concurrency (1) and batch size (128).
     ///
@@ -30,8 +49,7 @@ impl Route {
         Self {
             input,
             output,
-            concurrency: models::default_concurrency(),
-            batch_size: models::default_batch_size(),
+            ..Default::default()
         }
     }
     /// Runs the message processing route with concurrency, error handling, and graceful shutdown.
@@ -593,8 +611,7 @@ mod tests {
         let route = Route::new(input.clone(), output.clone());
 
         // Start the route
-        let (handle, shutdown) = route.run("panic_test").expect("Failed to run route");
-
+        let route_handle = RouteHandle(route.run("panic_test").expect("Failed to run route"));
         // 1. Send a message. The consumer will panic before picking it up.
         let input_ch = input.channel().unwrap();
         input_ch
@@ -644,7 +661,7 @@ mod tests {
         assert_eq!(received[0].get_payload_str(), "persistent_msg");
 
         // Cleanup
-        shutdown.close();
-        let _ = handle.await;
+        route_handle.stop().await;
+        let _ = route_handle.join().await;
     }
 }
