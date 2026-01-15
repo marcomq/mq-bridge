@@ -69,6 +69,12 @@ impl Route {
         map.get(name).cloned()
     }
 
+    /// Creates a new Publisher configured for this route's output.
+    /// This is useful if you want to send messages to the same destination as this route.
+    pub async fn create_publisher(&self) -> anyhow::Result<crate::Publisher> {
+        crate::Publisher::new(self.output.clone()).await
+    }
+
     /// Runs the message processing route with concurrency, error handling, and graceful shutdown.
     ///
     /// This function spawns a set of worker tasks to process messages concurrently.
@@ -134,7 +140,7 @@ impl Route {
             ready_rx_clone.close();
         });
 
-        match ready_rx.recv_blocking() {
+        match tokio::task::block_in_place(|| ready_rx.recv_blocking()) {
             Ok(_) => {
                 timeout.abort();
                 Ok((handle, shutdown_tx))
@@ -187,17 +193,21 @@ impl Route {
         let (err_tx, err_rx) = bounded(1);
         let commit_semaphore = Arc::new(Semaphore::new(max_parallel_commits));
         let mut commit_tasks = JoinSet::new();
+
+        // Sequencer setup to ensure ordered commits even with parallel commit tasks
+        let (seq_tx, sequencer_handle) = spawn_sequencer(max_parallel_commits);
+        let mut seq_counter = 0u64;
+
         if let Some(tx) = ready_tx {
             let _ = tx.send(()).await;
         }
-        loop {
+        let run_result = loop {
             select! {
-                Ok(err) = err_rx.recv() => return Err(err),
+                Ok(err) = err_rx.recv() => break Err(err),
 
                 _ = shutdown_rx.recv() => {
                     info!("Shutdown signal received in sequential runner for route '{}'.", name);
-                    while commit_tasks.join_next().await.is_some() {}
-                    return Ok(true); // Stopped by shutdown signal
+                    break Ok(true); // Stopped by shutdown signal
                 }
                 res = consumer.receive_batch(self.batch_size) => {
                     let received_batch = match res {
@@ -209,17 +219,20 @@ impl Route {
                         }
                         Err(ConsumerError::EndOfStream) => {
                             info!("Consumer for route '{}' reached end of stream. Shutting down.", name);
-                            break; // Graceful exit
+                            break Ok(false); // Graceful exit
                         }
                         Err(ConsumerError::Connection(e)) => {
                             // Propagate error to trigger reconnect by the outer loop
-                            return Err(e);
+                            break Err(e);
                         }
                     };
                     debug!("Received a batch of {} messages sequentially", received_batch.messages.len());
 
                     // Process the batch sequentially without spawning a new task
-                    let commit = received_batch.commit;
+                    let seq = seq_counter;
+                    seq_counter += 1;
+                    let commit = wrap_commit(received_batch.commit, seq, seq_tx.clone());
+
                     match publisher.send_batch(received_batch.messages).await {
                         Ok(SentBatch::Ack) => {
                             let permit = commit_semaphore.clone().acquire_owned().await.map_err(|e| anyhow::anyhow!("Semaphore error: {}", e))?;
@@ -241,7 +254,7 @@ impl Route {
                                     .into_iter()
                                     .find(|(_, e)| matches!(e, PublisherError::Retryable(_)))
                                     .expect("has_retryable is true");
-                                return Err(anyhow::anyhow!(
+                                break Err(anyhow::anyhow!(
                                     "Failed to send {} messages in batch. First retryable error: {}",
                                     failed_count,
                                     first_error
@@ -260,13 +273,17 @@ impl Route {
                                 drop(permit);
                             });
                         }
-                        Err(e) => return Err(e.into()), // Propagate error to trigger reconnect
+                        Err(e) => break Err(e.into()), // Propagate error to trigger reconnect
                     }
                 }
             }
-        }
+        };
+
+        drop(seq_tx);
+        drop(err_rx); // Prevent deadlock if tasks try to report errors during shutdown
         while commit_tasks.join_next().await.is_some() {}
-        Ok(false) // Indicate graceful shutdown due to end-of-stream
+        let _ = sequencer_handle.await;
+        run_result
     }
 
     /// The main concurrent runner for when concurrency > 1.
@@ -301,27 +318,7 @@ impl Route {
         // --- Ordered Commit Sequencer ---
         // To prevent data loss with cumulative-ack brokers (Kafka/AMQP), commits must happen in order.
         // We assign a sequence number to each batch and use a sequencer task to enforce order.
-        type SequencerItem = (
-            Option<Vec<crate::CanonicalMessage>>,
-            BatchCommitFunc,
-            tokio::sync::oneshot::Sender<anyhow::Result<()>>,
-        );
-        let (seq_tx, seq_rx) = bounded::<(u64, SequencerItem)>(self.concurrency * 2);
-
-        let sequencer_handle = tokio::spawn(async move {
-            let mut buffer: BTreeMap<u64, SequencerItem> = BTreeMap::new();
-            let mut next_seq = 0u64;
-            while let Ok((seq, item)) = seq_rx.recv().await {
-                buffer.insert(seq, item);
-                while let Some((responses, commit_func, notify)) = buffer.remove(&next_seq) {
-                    // Execute the commit
-                    let res = commit_func(responses).await;
-                    // Notify the worker that commit is done
-                    let _ = notify.send(res);
-                    next_seq += 1;
-                }
-            }
-        });
+        let (seq_tx, sequencer_handle) = spawn_sequencer(self.concurrency * 2);
 
         // --- Worker Pool ---
         let mut join_set = JoinSet::new();
@@ -455,25 +452,7 @@ impl Route {
                     // Wrap the commit function to route it through the sequencer
                     let seq = seq_counter;
                     seq_counter += 1;
-                    let seq_tx = seq_tx.clone();
-
-                    let wrapped_commit: BatchCommitFunc = Box::new(move |responses| {
-                        Box::pin(async move {
-                            let (notify_tx, notify_rx) = tokio::sync::oneshot::channel();
-                            // Send to sequencer
-                            if seq_tx.send((seq, (responses, commit, notify_tx))).await.is_ok() {
-                                // Wait for sequencer to execute the commit
-                                match notify_rx.await {
-                                    Ok(res) => res,
-                                    Err(_) => {
-                                        Err(anyhow::anyhow!("Sequencer dropped the commit channel unexpectedly"))
-                                    }
-                                }
-                            } else {
-                                Err(anyhow::anyhow!("Failed to send commit to sequencer, route is likely shutting down"))
-                            }
-                        })
-                    });
+                    let wrapped_commit = wrap_commit(commit, seq, seq_tx.clone());
 
                     if work_tx.send((messages, wrapped_commit)).await.is_err() {
                         warn!("Work channel closed, cannot process more messages concurrently. Shutting down.");
@@ -551,6 +530,62 @@ impl Route {
         self.output.handler = Some(new_handler);
         self
     }
+}
+
+type SequencerItem = (
+    Option<Vec<crate::CanonicalMessage>>,
+    BatchCommitFunc,
+    tokio::sync::oneshot::Sender<anyhow::Result<()>>,
+);
+
+fn spawn_sequencer(buffer_size: usize) -> (Sender<(u64, SequencerItem)>, JoinHandle<()>) {
+    let (seq_tx, seq_rx) = bounded::<(u64, SequencerItem)>(buffer_size);
+
+    let sequencer_handle = tokio::spawn(async move {
+        let mut buffer: BTreeMap<u64, SequencerItem> = BTreeMap::new();
+        let mut next_seq = 0u64;
+        while let Ok((seq, item)) = seq_rx.recv().await {
+            buffer.insert(seq, item);
+            while let Some((responses, commit_func, notify)) = buffer.remove(&next_seq) {
+                // Execute the commit
+                let res = commit_func(responses).await;
+                // Notify the worker that commit is done
+                let _ = notify.send(res);
+                next_seq += 1;
+            }
+        }
+    });
+    (seq_tx, sequencer_handle)
+}
+
+fn wrap_commit(
+    commit: BatchCommitFunc,
+    seq: u64,
+    seq_tx: Sender<(u64, SequencerItem)>,
+) -> BatchCommitFunc {
+    Box::new(move |responses| {
+        Box::pin(async move {
+            let (notify_tx, notify_rx) = tokio::sync::oneshot::channel();
+            // Send to sequencer
+            if seq_tx
+                .send((seq, (responses, commit, notify_tx)))
+                .await
+                .is_ok()
+            {
+                // Wait for sequencer to execute the commit
+                match notify_rx.await {
+                    Ok(res) => res,
+                    Err(_) => Err(anyhow::anyhow!(
+                        "Sequencer dropped the commit channel unexpectedly"
+                    )),
+                }
+            } else {
+                Err(anyhow::anyhow!(
+                    "Failed to send commit to sequencer, route is likely shutting down"
+                ))
+            }
+        })
+    })
 }
 
 #[cfg(test)]
@@ -695,5 +730,15 @@ mod tests {
 
         let missing = Route::get("unknown_route");
         assert!(missing.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_route_create_publisher() {
+        let input = Endpoint::new_memory("cp_in", 10);
+        let output = Endpoint::new_memory("cp_out", 10);
+        let route = Route::new(input, output);
+
+        let publisher = route.create_publisher().await;
+        assert!(publisher.is_ok());
     }
 }
