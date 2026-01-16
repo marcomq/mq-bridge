@@ -45,6 +45,7 @@
           "minimum": 0
         },
         "queue": {
+          "description": "The AMQP queue name.",
           "type": [
             "string",
             "null"
@@ -79,11 +80,83 @@
         "url"
       ]
     },
+    "AwsEndpoint": {
+      "type": "object",
+      "properties": {
+        "access_key": {
+          "description": "AWS Access Key ID.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "endpoint_url": {
+          "description": "Custom endpoint URL (e.g., for LocalStack).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "max_messages": {
+          "description": "Maximum number of messages to receive in a batch (1-10).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32"
+        },
+        "queue_url": {
+          "description": "The SQS queue URL.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "region": {
+          "description": "AWS Region (e.g., \"us-east-1\").",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "secret_key": {
+          "description": "AWS Secret Access Key.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "session_token": {
+          "description": "AWS Session Token.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "topic_arn": {
+          "description": "The SNS topic ARN.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "wait_time_seconds": {
+          "description": "Wait time for long polling in seconds (0-20).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32"
+        }
+      },
+      "additionalProperties": false
+    },
     "CommitConcurrencyMiddleware": {
       "description": "Configuration for limiting the number of parallel commit tasks of publishers.",
       "type": "object",
       "properties": {
         "limit": {
+          "description": "The maximum number of concurrent commit tasks allowed.",
           "type": "integer",
           "format": "uint",
           "minimum": 0
@@ -106,18 +179,21 @@
       "type": "object",
       "properties": {
         "dlq_initial_interval_ms": {
+          "description": "Initial retry interval in milliseconds. Defaults to 100ms.",
           "type": "integer",
           "format": "uint64",
           "default": 100,
           "minimum": 0
         },
         "dlq_max_interval_ms": {
+          "description": "Maximum retry interval in milliseconds. Defaults to 5000ms.",
           "type": "integer",
           "format": "uint64",
           "default": 5000,
           "minimum": 0
         },
         "dlq_multiplier": {
+          "description": "Multiplier for exponential backoff. Defaults to 2.0.",
           "type": "number",
           "format": "double",
           "default": 2.0
@@ -130,6 +206,7 @@
           "minimum": 0
         },
         "endpoint": {
+          "description": "The endpoint to send failed messages to.",
           "$ref": "#/$defs/Endpoint"
         }
       },
@@ -143,9 +220,11 @@
       "type": "object",
       "properties": {
         "sled_path": {
+          "description": "Path to the Sled database directory.",
           "type": "string"
         },
         "ttl_seconds": {
+          "description": "Time-to-live for deduplication entries in seconds.",
           "type": "integer",
           "format": "uint64",
           "minimum": 0
@@ -161,6 +240,7 @@
       "type": "object",
       "properties": {
         "delay_ms": {
+          "description": "Delay duration in milliseconds.",
           "type": "integer",
           "format": "uint64",
           "minimum": 0
@@ -190,6 +270,17 @@
         }
       },
       "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "aws": {
+              "$ref": "#/$defs/AwsEndpoint"
+            }
+          },
+          "required": [
+            "aws"
+          ]
+        },
         {
           "type": "object",
           "properties": {
@@ -365,6 +456,13 @@
       "description": "HTTP endpoint configuration.",
       "type": "object",
       "properties": {
+        "message_id_header": {
+          "description": "(Consumer only) Header key to extract the message ID from. Defaults to \"message-id\".",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "response_out": {
           "description": "(Consumer only) Optional endpoint to send the response to.",
           "anyOf": [
@@ -394,6 +492,15 @@
             "string",
             "null"
           ]
+        },
+        "workers": {
+          "description": "(Consumer only) Number of worker threads to use. Defaults to 0 for unlimited.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
         }
       },
       "additionalProperties": false
@@ -425,6 +532,7 @@
           ]
         },
         "queue": {
+          "description": "The IBM MQ queue name.",
           "type": [
             "string",
             "null"
@@ -447,6 +555,7 @@
           }
         },
         "topic": {
+          "description": "The IBM MQ topic string.",
           "type": [
             "string",
             "null"
@@ -549,6 +658,7 @@
           }
         },
         "topic": {
+          "description": "The Kafka topic to produce to or consume from.",
           "type": [
             "string",
             "null"
@@ -571,6 +681,7 @@
       "type": "object",
       "properties": {
         "capacity": {
+          "description": "The capacity of the channel.",
           "type": [
             "integer",
             "null"
@@ -579,6 +690,7 @@
           "minimum": 0
         },
         "topic": {
+          "description": "The topic name for the in-memory channel.",
           "type": "string"
         }
       },
@@ -686,6 +798,7 @@
       "type": "object",
       "properties": {
         "collection": {
+          "description": "The MongoDB collection name.",
           "type": [
             "string",
             "null"
@@ -759,6 +872,11 @@
           "type": "boolean",
           "default": false
         },
+        "delayed_ack": {
+          "description": "If true, messages are acknowledged immediately upon receipt (auto-ack).\nIf false (default), messages are acknowledged after processing (manual-ack).",
+          "type": "boolean",
+          "default": false
+        },
         "keep_alive_seconds": {
           "description": "Keep-alive interval in seconds. Defaults to 20.",
           "type": [
@@ -809,6 +927,15 @@
           "format": "uint",
           "minimum": 0
         },
+        "session_expiry_interval": {
+          "description": "Session expiry interval in seconds (MQTT v5 only).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
         "tls": {
           "description": "TLS configuration.",
           "$ref": "#/$defs/TlsConfig",
@@ -822,6 +949,7 @@
           }
         },
         "topic": {
+          "description": "The MQTT topic.",
           "type": [
             "string",
             "null"
@@ -903,6 +1031,7 @@
           "minimum": 0
         },
         "stream": {
+          "description": "The JetStream stream name (optional).",
           "type": [
             "string",
             "null"
@@ -925,6 +1054,7 @@
           "format": "int64"
         },
         "subject": {
+          "description": "The NATS subject to publish to or subscribe to.",
           "type": [
             "string",
             "null"
@@ -970,6 +1100,7 @@
       "type": "object",
       "properties": {
         "probability": {
+          "description": "Probability of panic (0.0 to 1.0).",
           "type": "number",
           "format": "double"
         }
@@ -987,24 +1118,28 @@
       "type": "object",
       "properties": {
         "initial_interval_ms": {
+          "description": "Initial retry interval in milliseconds. Defaults to 100ms.",
           "type": "integer",
           "format": "uint64",
           "default": 100,
           "minimum": 0
         },
         "max_attempts": {
+          "description": "Maximum number of retry attempts. Defaults to 3.",
           "type": "integer",
           "format": "uint",
           "default": 3,
           "minimum": 0
         },
         "max_interval_ms": {
+          "description": "Maximum retry interval in milliseconds. Defaults to 5000ms.",
           "type": "integer",
           "format": "uint64",
           "default": 5000,
           "minimum": 0
         },
         "multiplier": {
+          "description": "Multiplier for exponential backoff. Defaults to 2.0.",
           "type": "number",
           "format": "double",
           "default": 2.0
@@ -1053,12 +1188,14 @@
       "type": "object",
       "properties": {
         "cases": {
+          "description": "A map of values to endpoints.",
           "type": "object",
           "additionalProperties": {
             "$ref": "#/$defs/Endpoint"
           }
         },
         "default": {
+          "description": "The default endpoint if no case matches.",
           "anyOf": [
             {
               "$ref": "#/$defs/Endpoint"
@@ -1069,6 +1206,7 @@
           ]
         },
         "metadata_key": {
+          "description": "The metadata key to inspect for routing decisions.",
           "type": "string"
         }
       },
@@ -1156,6 +1294,7 @@
           "default": null
         },
         "topic": {
+          "description": "The ZeroMQ topic (for PUB/SUB sockets).",
           "type": [
             "string",
             "null"

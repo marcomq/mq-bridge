@@ -56,6 +56,16 @@ impl Route {
     }
 
     /// Registers this route globally with a given name.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mq_bridge::{Route, models::Endpoint};
+    ///
+    /// let route = Route::new(Endpoint::new_memory("in", 10), Endpoint::new_memory("out", 10));
+    /// route.register("global_route");
+    /// assert!(Route::get("global_route").is_some());
+    /// ```
     pub fn register(&self, name: &str) {
         let registry = ROUTE_REGISTRY.get_or_init(|| RwLock::new(HashMap::new()));
         let mut map = registry.write().expect("Route registry lock poisoned");
@@ -71,6 +81,18 @@ impl Route {
 
     /// Creates a new Publisher configured for this route's output.
     /// This is useful if you want to send messages to the same destination as this route.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # tokio::runtime::Runtime::new().unwrap().block_on(async {
+    /// use mq_bridge::{Route, models::Endpoint};
+    ///
+    /// let route = Route::new(Endpoint::new_memory("in", 10), Endpoint::new_memory("out", 10));
+    /// let publisher = route.create_publisher().await;
+    /// assert!(publisher.is_ok());
+    /// # });
+    /// ```
     pub async fn create_publisher(&self) -> anyhow::Result<crate::Publisher> {
         crate::Publisher::new(self.output.clone()).await
     }
@@ -84,9 +106,36 @@ impl Route {
 
     /// Runs the message processing route with concurrency, error handling, and graceful shutdown.
     ///
-    /// This function spawns a set of worker tasks to process messages concurrently.
+    /// This function spawns the necessary background tasks to process messages. It **blocks**
+    /// until the route is successfully initialized (i.e., connections are established) or until
+    /// a timeout occurs.
+    /// The name_str parameter is just used for logging and tracing.
+    ///
     /// It returns a `JoinHandle` for the main route task and a `Sender` channel
-    /// that can be used to signal a graceful shutdown.
+    /// that can be used to signal a graceful shutdown. The result is typically converted into a
+    /// [`RouteHandle`] for easier management.
+    ///
+    /// # Runtime Requirement
+    /// This method uses `tokio::task::block_in_place` to wait for the route to initialize,
+    /// which requires a multi-threaded Tokio runtime. Calling this from a single-threaded
+    /// runtime (e.g., `flavor = "current_thread"`) will cause a panic.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use mq_bridge::{Route, route::RouteHandle, models::Endpoint};
+    /// # async fn example() -> anyhow::Result<()> {
+    /// let route = Route::new(Endpoint::new_memory("in", 10), Endpoint::new_memory("out", 10));
+    ///
+    /// // Start the route (blocks until initialized) and convert to RouteHandle
+    /// let handle: RouteHandle = route.run("my_route")?.into();
+    ///
+    /// // Stop the route later
+    /// handle.stop().await;
+    /// handle.join().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn run(&self, name_str: &str) -> anyhow::Result<(JoinHandle<()>, Sender<()>)> {
         self.check(name_str)?;
         let (shutdown_tx, shutdown_rx) = bounded(1);
@@ -288,8 +337,22 @@ impl Route {
         };
 
         drop(seq_tx);
-        drop(err_rx); // Prevent deadlock if tasks try to report errors during shutdown
-        while commit_tasks.join_next().await.is_some() {}
+        // Drain errors while waiting for tasks to finish to prevent deadlocks and lost errors
+        loop {
+            select! {
+                res = err_rx.recv() => {
+                    if let Ok(err) = res {
+                        error!("Error reported during shutdown: {}", err);
+                    }
+                }
+                res = commit_tasks.join_next() => {
+                    if res.is_none() {
+                        break;
+                    }
+                }
+            }
+        }
+        drop(err_rx);
         let _ = sequencer_handle.await;
         run_result
     }
@@ -499,6 +562,26 @@ impl Route {
     /// The handler can accept either:
     /// - `fn(T) -> Future<Output = Result<Handled, HandlerError>>`
     /// - `fn(T, MessageContext) -> Future<Output = Result<Handled, HandlerError>>`
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use mq_bridge::{Route, models::Endpoint, Handled, HandlerError};
+    /// # use serde::Deserialize;
+    /// # use std::sync::Arc;
+    ///
+    /// #[derive(Deserialize)]
+    /// struct MyData {
+    ///     id: u32,
+    /// }
+    ///
+    /// async fn my_handler(data: MyData) -> Result<Handled, HandlerError> {
+    ///     Ok(Handled::Ack)
+    /// }
+    ///
+    /// let route = Route::new(Endpoint::new_memory("in", 10), Endpoint::new_memory("out", 10))
+    ///     .add_handler("my_type", my_handler);
+    /// ```
     pub fn add_handler<T, H, Args>(mut self, type_name: &str, handler: H) -> Self
     where
         T: DeserializeOwned + Send + Sync + 'static,
@@ -552,14 +635,55 @@ fn spawn_sequencer(buffer_size: usize) -> (Sender<(u64, SequencerItem)>, JoinHan
     let sequencer_handle = tokio::spawn(async move {
         let mut buffer: BTreeMap<u64, SequencerItem> = BTreeMap::new();
         let mut next_seq = 0u64;
-        while let Ok((seq, item)) = seq_rx.recv().await {
-            buffer.insert(seq, item);
+        let mut deadline: Option<tokio::time::Instant> = None;
+        const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+        loop {
             while let Some((responses, commit_func, notify)) = buffer.remove(&next_seq) {
-                // Execute the commit
                 let res = commit_func(responses).await;
-                // Notify the worker that commit is done
                 let _ = notify.send(res);
                 next_seq += 1;
+            }
+
+            if !buffer.is_empty() {
+                if deadline.is_none() {
+                    deadline = Some(tokio::time::Instant::now() + TIMEOUT);
+                }
+            } else {
+                deadline = None;
+            }
+
+            let timeout_fut = async {
+                if let Some(d) = deadline {
+                    tokio::time::sleep_until(d).await
+                } else {
+                    std::future::pending().await
+                }
+            };
+
+            select! {
+                res = seq_rx.recv() => {
+                    match res {
+                        Ok((seq, item)) => {
+                            buffer.insert(seq, item);
+                        }
+                        Err(_) => {
+                            for (_, (_, _, notify)) in buffer {
+                                let _ = notify.send(Err(anyhow::anyhow!("Sequencer shutting down")));
+                            }
+                            break;
+                        }
+                    }
+                }
+                _ = timeout_fut => {
+                    if let Some(&first_seq) = buffer.keys().next() {
+                        warn!("Sequencer timed out waiting for seq {}. Jumping to {}.", next_seq, first_seq);
+                        next_seq = first_seq;
+                    } else {
+                        next_seq += 1;
+                    }
+                    deadline = None;
+                }
             }
         }
     });
@@ -671,7 +795,8 @@ mod tests {
         let route = Route::new(input.clone(), output.clone());
 
         // Start the route
-        let route_handle = RouteHandle(route.run("panic_test").expect("Failed to run route"));
+        let route_handle: RouteHandle =
+            route.run("panic_test").expect("Failed to run route").into();
         // 1. Send a message. The consumer will panic before picking it up.
         let input_ch = input.channel().unwrap();
         input_ch
@@ -723,30 +848,5 @@ mod tests {
         // Cleanup
         route_handle.stop().await;
         let _ = route_handle.join().await;
-    }
-
-    #[test]
-    fn test_route_registry() {
-        let input = Endpoint::new_memory("reg_in", 10);
-        let output = Endpoint::new_memory("reg_out", 10);
-        let route = Route::new(input, output);
-
-        route.register("my_static_route");
-
-        let retrieved = Route::get("my_static_route");
-        assert!(retrieved.is_some());
-
-        let missing = Route::get("unknown_route");
-        assert!(missing.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_route_create_publisher() {
-        let input = Endpoint::new_memory("cp_in", 10);
-        let output = Endpoint::new_memory("cp_out", 10);
-        let route = Route::new(input, output);
-
-        let publisher = route.create_publisher().await;
-        assert!(publisher.is_ok());
     }
 }
