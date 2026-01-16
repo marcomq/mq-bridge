@@ -484,8 +484,10 @@ pub struct AwsConfig {
     /// AWS Session Token.
     pub session_token: Option<String>,
     /// Maximum number of messages to receive in a batch (1-10).
+    #[cfg_attr(feature = "schema", schemars(range(min = 1, max = 10)))]
     pub max_messages: Option<i32>,
     /// Wait time for long polling in seconds (0-20).
+    #[cfg_attr(feature = "schema", schemars(range(min = 0, max = 20)))]
     pub wait_time_seconds: Option<i32>,
 }
 

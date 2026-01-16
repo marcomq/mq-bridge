@@ -665,10 +665,15 @@ fn spawn_sequencer(buffer_size: usize) -> (Sender<(u64, SequencerItem)>, JoinHan
                 res = seq_rx.recv() => {
                     match res {
                         Ok((seq, item)) => {
-                            buffer.insert(seq, item);
+                            if seq < next_seq {
+                                let (_, _, notify) = item;
+                                let _ = notify.send(Err(anyhow::anyhow!("Sequencer received late item (seq {} < next_seq {})", seq, next_seq)));
+                            } else {
+                                buffer.insert(seq, item);
+                            }
                         }
                         Err(_) => {
-                            for (_, (_, _, notify)) in buffer {
+                            for (_, (_, _, notify)) in std::mem::take(&mut buffer) {
                                 let _ = notify.send(Err(anyhow::anyhow!("Sequencer shutting down")));
                             }
                             break;
@@ -677,8 +682,12 @@ fn spawn_sequencer(buffer_size: usize) -> (Sender<(u64, SequencerItem)>, JoinHan
                 }
                 _ = timeout_fut => {
                     if let Some(&first_seq) = buffer.keys().next() {
-                        warn!("Sequencer timed out waiting for seq {}. Jumping to {}.", next_seq, first_seq);
-                        next_seq = first_seq;
+                        if first_seq > next_seq {
+                            warn!("Sequencer timed out waiting for seq {}. Jumping to {}.", next_seq, first_seq);
+                            next_seq = first_seq;
+                        } else {
+                            next_seq += 1;
+                        }
                     } else {
                         next_seq += 1;
                     }

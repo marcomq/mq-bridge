@@ -1,0 +1,12 @@
+version: "0.2.0"
+breaking_changes: true
+tasks:
+  - title: "Refactor Http Endpoint"
+    description: "Refactor Http Endpoint so that the response is similar as in Nats"
+    status: "Todo"
+  - title: "Route::run return type"
+    description: "Make Route::run respond a RouteHandle"
+    status: "Todo"
+  - title: "Rename kafka.brokers"
+    description: "Rename kafka.brokers to kafka.url"
+    status: "Todo"
