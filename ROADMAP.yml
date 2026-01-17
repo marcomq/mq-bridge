@@ -1,12 +1,22 @@
-version: "0.2.0"
-breaking_changes: true
-tasks:
-  - title: "Refactor Http Endpoint"
-    description: "Refactor Http Endpoint so that the response is similar as in Nats"
-    status: "Todo"
-  - title: "Route::run return type"
-    description: "Make Route::run respond a RouteHandle"
-    status: "Todo"
-  - title: "Rename kafka.brokers"
-    description: "Rename kafka.brokers to kafka.url"
-    status: "Todo"
+- version: "0.1"
+  breaking_changes: false
+  tasks:
+    - title: "Add registry for custom middleware"
+      description: "Try to make adding custom middleware easier and streamline."
+      status: "Todo"
+    - title: "Add registry for custom endpoints"
+      description: "Try to make adding custom endpoints easier and consistent. Investigate possibility to have plugin endpoints."
+      status: "Todo"
+
+- version: "0.2.0"
+  breaking_changes: true
+  tasks:
+    - title: "Refactor Http Endpoint"
+      description: "Refactor Http Endpoint so that the response is similar as in Nats"
+      status: "Todo"
+    - title: "Route::run return type"
+      description: "Make Route::run respond a RouteHandle"
+      status: "Todo"
+    - title: "Rename kafka.brokers"
+      description: "Rename kafka.brokers to kafka.url"
+      status: "Todo"

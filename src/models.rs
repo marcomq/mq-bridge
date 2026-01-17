@@ -129,7 +129,7 @@ pub struct Endpoint {
     #[serde(default)]
     pub middlewares: Vec<Middleware>,
 
-    /// (input only) The processing mode for the endpoint.
+    /// (Consumer only) The processing mode for the endpoint.
     #[serde(default)]
     pub mode: ConsumerMode,
 

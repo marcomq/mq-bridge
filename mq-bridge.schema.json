@@ -103,7 +103,9 @@
             "integer",
             "null"
           ],
-          "format": "int32"
+          "format": "int32",
+          "maximum": 10,
+          "minimum": 1
         },
         "queue_url": {
           "description": "The SQS queue URL.",
@@ -146,7 +148,9 @@
             "integer",
             "null"
           ],
-          "format": "int32"
+          "format": "int32",
+          "maximum": 20,
+          "minimum": 0
         }
       },
       "additionalProperties": false
@@ -264,7 +268,7 @@
           }
         },
         "mode": {
-          "description": "(input only) The processing mode for the endpoint.",
+          "description": "(Consumer only) The processing mode for the endpoint.",
           "$ref": "#/$defs/ConsumerMode",
           "default": "consume"
         }
