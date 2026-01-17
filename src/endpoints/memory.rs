@@ -329,13 +329,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_memory_channel_integration() {
-        let cfg = MemoryConfig {
-            topic: String::from("test-mem1"),
-            capacity: Some(10),
-        };
-
-        let mut consumer = MemoryConsumer::new(&cfg).unwrap();
-        let publisher = MemoryPublisher::new(&cfg).unwrap();
+        let mut consumer = MemoryConsumer::new_local("test-mem1", 10);
+        let publisher = MemoryPublisher::new_local("test-mem1", 10);
 
         let msg = CanonicalMessage::from_json(json!({"hello": "memory"})).unwrap();
 
@@ -352,12 +347,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_memory_publisher_and_consumer_integration() {
-        let cfg = MemoryConfig {
-            topic: String::from("test-mem2"),
-            capacity: Some(10),
-        };
-        let mut consumer = MemoryConsumer::new(&cfg).unwrap();
-        let publisher = MemoryPublisher::new(&cfg).unwrap();
+        let mut consumer = MemoryConsumer::new_local("test-mem2", 10);
+        let publisher = MemoryPublisher::new_local("test-mem2", 10);
 
         let msg1 = CanonicalMessage::from_json(json!({"message": "one"})).unwrap();
         let msg2 = CanonicalMessage::from_json(json!({"message": "two"})).unwrap();
@@ -420,7 +411,7 @@ mod tests {
         assert_eq!(received.message.get_payload_str(), "hello subscriber");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_memory_request_response_flow() {
         // 1. Define a route from a memory input to a `response` output.
         let topic = "mem_req_res_topic";
@@ -444,10 +435,7 @@ mod tests {
         let response_channel = get_or_create_response_channel(topic);
 
         // 5. Run the route in the background.
-        let route_handle = tokio::spawn(async move {
-            // The route will run until the input channel is closed.
-            route.run_until_err("mem_req_res_test", None, None).await
-        });
+        route.deploy("mem_req_res_test").await.unwrap();
 
         // 6. Send a request message to the input channel.
         let request_message = CanonicalMessage::from("my request");
@@ -467,6 +455,6 @@ mod tests {
 
         // 9. Clean up (stop the route).
         input_channel.close();
-        route_handle.await.unwrap().ok(); // The route will return an EndOfStream error which is ok.
+        Route::stop("mem_req_res_test").await;
     }
 }

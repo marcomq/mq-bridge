@@ -551,24 +551,16 @@ fn ensure_consume_mode(endpoint_type: &str, mode: crate::models::ConsumerMode) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::endpoints::memory::get_or_create_channel;
-    use crate::models::{Endpoint, EndpointType, MemoryConfig};
+    use crate::models::{Endpoint, EndpointType};
     use crate::CanonicalMessage;
 
     #[tokio::test]
     async fn test_fanout_publisher_integration() {
-        let mem_cfg1 = MemoryConfig {
-            topic: "fanout_1".to_string(),
-            capacity: Some(10),
-        };
-        let mem_cfg2 = MemoryConfig {
-            topic: "fanout_2".to_string(),
-            capacity: Some(10),
-        };
+        let ep1 = Endpoint::new_memory("fanout_1", 10);
+        let ep2 = Endpoint::new_memory("fanout_2", 10);
 
-        let ep1 = Endpoint::new(EndpointType::Memory(mem_cfg1.clone()));
-        let ep2 = Endpoint::new(EndpointType::Memory(mem_cfg2.clone()));
-
+        let chan1 = ep1.channel().unwrap();
+        let chan2 = ep2.channel().unwrap();
         let fanout_ep = Endpoint::new(EndpointType::Fanout(vec![ep1, ep2]));
 
         let publisher = create_publisher_from_route("test_fanout", &fanout_ep)
@@ -578,8 +570,6 @@ mod tests {
         let msg = CanonicalMessage::new(b"fanout_payload".to_vec(), None);
         publisher.send(msg).await.expect("Failed to send message");
 
-        let chan1 = get_or_create_channel(&mem_cfg1);
-        let chan2 = get_or_create_channel(&mem_cfg2);
 
         assert_eq!(chan1.len(), 1);
         assert_eq!(chan2.len(), 1);
@@ -591,6 +581,7 @@ mod tests {
         assert_eq!(msg2.payload, "fanout_payload".as_bytes());
     }
 
+    use crate::models::MemoryConfig;
     #[tokio::test]
     async fn test_factory_creates_memory_subscriber() {
         let endpoint = Endpoint {

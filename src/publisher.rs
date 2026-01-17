@@ -63,8 +63,7 @@ impl Publisher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::endpoints::memory::get_or_create_channel;
-    use crate::models::{Endpoint, EndpointType, MemoryConfig, PublisherConfig};
+    use crate::models::{Endpoint, PublisherConfig};
     use crate::CanonicalMessage;
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -73,13 +72,8 @@ mod tests {
     async fn test_publisher_config_usage() {
         // 1. Create a PublisherConfig (simulating loading from config)
         let mut publisher_config: PublisherConfig = HashMap::new();
-
-        let mem_cfg = MemoryConfig {
-            topic: "pub_test_topic".to_string(),
-            capacity: Some(10),
-        };
-        let endpoint = Endpoint::new(EndpointType::Memory(mem_cfg.clone()));
-
+        let endpoint = Endpoint::new_memory("pub_test_topic", 10);
+        let channel = endpoint.channel().unwrap();
         publisher_config.insert("my_publisher".to_string(), endpoint);
 
         // 2. Initialize publishers from config
@@ -98,7 +92,6 @@ mod tests {
         publisher.send(msg).await.expect("Failed to send message");
 
         // 4. Verify with underlying channel
-        let channel = get_or_create_channel(&mem_cfg);
         let received = channel.drain_messages();
         assert_eq!(received.len(), 1);
         assert_eq!(received[0].get_payload_str(), "hello world");

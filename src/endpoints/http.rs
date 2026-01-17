@@ -550,11 +550,7 @@ http_route:
         let addr = format!("127.0.0.1:{}", port);
         let url = format!("http://{}", addr);
 
-        let mem_config = MemoryConfig {
-            topic: "reply_sink".to_string(),
-            capacity: Some(10),
-        };
-        let sink_endpoint = crate::models::Endpoint::new(EndpointType::Memory(mem_config.clone()));
+        let sink_endpoint = crate::models::Endpoint::new_memory("reply_sink", 10);
 
         let config = HttpConfig {
             url: Some(addr.clone()),
@@ -585,7 +581,7 @@ http_route:
         let msg = CanonicalMessage::new(b"request".to_vec(), None);
         publisher.send(msg).await.expect("Failed to send");
 
-        let channel = crate::endpoints::memory::get_or_create_channel(&mem_config);
+        let channel = sink_endpoint.channel().unwrap();
         let mut attempts = 0;
         while channel.is_empty() && attempts < 20 {
             tokio::time::sleep(Duration::from_millis(50)).await;

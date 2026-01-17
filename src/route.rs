@@ -139,6 +139,12 @@ impl Route {
         crate::Publisher::new(self.output.clone()).await
     }
 
+    /// Creates a consumer connected to the route's output.
+    /// This is primarily useful for integration tests to verify messages reaching the destination.
+    pub async fn connect_to_output(&self, name: &str) -> anyhow::Result<Box<dyn crate::traits::MessageConsumer>> {
+        create_consumer_from_route(name, &self.output).await
+    }
+
     /// Validates the route configuration, checking if endpoints are supported and correctly configured.
     /// Core types like file, memory, and response are always supported.
     /// # Arguments
@@ -850,8 +856,10 @@ mod tests {
         let route = Route::new(input.clone(), output.clone());
 
         // Start the route
-        let route_handle: RouteHandle =
-            route.run("panic_test").expect("Failed to run route").into();
+        route
+            .deploy("panic_test")
+            .await
+            .expect("Failed to deploy route");
         // 1. Send a message. The consumer will panic before picking it up.
         let input_ch = input.channel().unwrap();
         input_ch
@@ -878,30 +886,17 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 
         // 4. Verify the message is processed after recovery.
-        let output_ch = output.channel().unwrap();
-        let mut received = Vec::new();
+        let mut verifier = route.connect_to_output("verifier").await.unwrap();
+        let received = tokio::time::timeout(std::time::Duration::from_secs(10), verifier.receive())
+            .await
+            .expect("Timed out waiting for message after recovery")
+            .expect("Stream closed");
 
-        // Poll for output for up to 10 seconds
-        let start = std::time::Instant::now();
-        while start.elapsed() < std::time::Duration::from_secs(10) {
-            let msgs = output_ch.drain_messages();
-            if !msgs.is_empty() {
-                received.extend(msgs);
-                break;
-            }
-            tokio::task::yield_now().await;
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        }
-
-        assert_eq!(
-            received.len(),
-            1,
-            "Should have received the message after recovery"
-        );
-        assert_eq!(received[0].get_payload_str(), "persistent_msg");
+        assert_eq!(received.message.get_payload_str(), "persistent_msg");
+        // not necessary here, but it's a good idea to commit
+        (received.commit)(None).await.unwrap();
 
         // Cleanup
-        route_handle.stop().await;
-        let _ = route_handle.join().await;
+        Route::stop("panic_test").await;
     }
 }
