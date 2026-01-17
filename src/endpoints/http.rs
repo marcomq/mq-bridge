@@ -445,7 +445,7 @@ impl MessagePublisher for HttpPublisher {
 #[cfg(all(feature = "actix-web", feature = "reqwest"))]
 mod tests {
     use super::*;
-    use crate::models::{Config, EndpointType, MemoryConfig};
+    use crate::models::{Config, EndpointType};
     use crate::CanonicalMessage;
     use std::time::Duration;
 
@@ -551,6 +551,7 @@ http_route:
         let url = format!("http://{}", addr);
 
         let sink_endpoint = crate::models::Endpoint::new_memory("reply_sink", 10);
+        let channel = sink_endpoint.channel().unwrap();
 
         let config = HttpConfig {
             url: Some(addr.clone()),
@@ -581,7 +582,6 @@ http_route:
         let msg = CanonicalMessage::new(b"request".to_vec(), None);
         publisher.send(msg).await.expect("Failed to send");
 
-        let channel = sink_endpoint.channel().unwrap();
         let mut attempts = 0;
         while channel.is_empty() && attempts < 20 {
             tokio::time::sleep(Duration::from_millis(50)).await;
