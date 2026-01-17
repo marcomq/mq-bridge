@@ -79,7 +79,7 @@ schemars = { version = "1.2", optional = true }
 [features]
 default = []
 middleware = ["metrics", "dedup", "panic"]
-full = ["mongodb", "kafka", "amqp", "nats", "mqtt", "http", "metrics", "dedup", "aws", "zeromq"]
+full = ["middleware", "mongodb", "kafka", "amqp", "nats", "mqtt", "http", "aws", "zeromq"]
 
 # Functionality features
 dedup = ["sled", "dep:rand"]
