@@ -48,7 +48,7 @@ rdkafka = { version = "0.38", features = ["tokio"], optional = true }
 lapin = { version = "3.7", features = ["rustls"], optional = true }
 
 # MongoDB
-mongodb = { version = "3.5", optional = true, features = ["cert-key-password"] }
+mongodb = { version = "3.4", optional = true, features = ["cert-key-password"] }
 
 # NATS
 async-nats = { version = "0.45", optional = true }
