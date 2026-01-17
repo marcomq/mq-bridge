@@ -362,7 +362,7 @@ impl MessageConsumer for AmqpSubscriber {
         if max_messages == 0 {
             return Ok(ReceivedBatch {
                 messages: Vec::new(),
-                commit: Box::new(|_| Box::pin(async {})),
+                commit: Box::new(|_| Box::pin(async { Ok(()) })),
             });
         }
 
@@ -402,14 +402,16 @@ impl MessageConsumer for AmqpSubscriber {
         trace!(count = messages_len, queue = %self.queue, message_ids = ?LazyMessageIds(&messages), "Received batch of AMQP subscriber messages");
         let commit = Box::new(move |_response: Option<Vec<CanonicalMessage>>| {
             Box::pin(async move {
-                futures::stream::iter(ackers)
-                    .for_each_concurrent(None, |acker| async move {
-                        if let Err(e) = acker.ack(BasicAckOptions::default()).await {
-                            tracing::error!(error = %e, "Failed to ack AMQP message");
-                        }
-                    })
-                    .await;
-            }) as BoxFuture<'static, ()>
+                let futures = ackers
+                    .into_iter()
+                    .map(|acker| async move { acker.ack(BasicAckOptions::default()).await });
+                for res in futures::future::join_all(futures).await {
+                    if let Err(e) = res {
+                        return Err(anyhow::anyhow!("Failed to ack AMQP message: {}", e));
+                    }
+                }
+                Ok(())
+            }) as BoxFuture<'static, anyhow::Result<()>>
         });
 
         Ok(ReceivedBatch { messages, commit })
@@ -530,7 +532,7 @@ impl MessageConsumer for AmqpConsumer {
         if max_messages == 0 {
             return Ok(ReceivedBatch {
                 messages: Vec::new(),
-                commit: Box::new(|_| Box::pin(async {})),
+                commit: Box::new(|_| Box::pin(async { Ok(()) })),
             });
         }
 
@@ -608,14 +610,17 @@ impl MessageConsumer for AmqpConsumer {
                     }
                 }
 
-                futures::stream::iter(ackers)
-                    .for_each_concurrent(None, |acker| async move {
-                        if let Err(e) = acker.ack(BasicAckOptions::default()).await {
-                            tracing::error!(error = %e, "Failed to ack AMQP message");
-                        }
-                    })
-                    .await;
-            }) as BoxFuture<'static, ()>
+                // Run acks concurrently and collect results.
+                let futures = ackers
+                    .into_iter()
+                    .map(|acker| async move { acker.ack(BasicAckOptions::default()).await });
+                for res in futures::future::join_all(futures).await {
+                    if let Err(e) = res {
+                        return Err(anyhow::anyhow!("Failed to ack AMQP message: {}", e));
+                    }
+                }
+                Ok(())
+            }) as BoxFuture<'static, anyhow::Result<()>>
         });
 
         Ok(ReceivedBatch { messages, commit })

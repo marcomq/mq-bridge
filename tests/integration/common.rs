@@ -1,11 +1,12 @@
 #![allow(dead_code)] // This module contains helpers used by various integration tests.
 use async_channel::{bounded, Receiver, Sender};
+use mq_bridge::traits::{BoxFuture, MessagePublisher, Received};
 use mq_bridge::traits::{ConsumerError, MessageConsumer, PublisherError, ReceivedBatch, SentBatch};
-use mq_bridge::traits::{MessagePublisher, Received};
 use mq_bridge::{CanonicalMessage, Route};
 use once_cell::sync::Lazy;
 use serde_json::json;
 use std::any::Any;
+use std::collections::HashSet;
 use std::fmt::Display;
 use std::process::Command;
 use std::sync::atomic::AtomicUsize;
@@ -56,6 +57,56 @@ pub fn add_performance_result(result: PerformanceResult) {
 /// A mock struct whose Drop implementation will print the summary table.
 pub struct PerformanceSummaryPrinter;
 
+pub struct DockerController {
+    compose_file: String,
+}
+
+impl DockerController {
+    pub fn new(compose_file: &str) -> Self {
+        Self {
+            compose_file: compose_file.to_string(),
+        }
+    }
+
+    pub fn stop_service(&self, service: &str) {
+        println!(
+            "Stopping docker-compose service {} from {}...",
+            service, self.compose_file
+        );
+        let status = Command::new("docker")
+            .arg("compose")
+            .arg("-f")
+            .arg(&self.compose_file)
+            .arg("stop")
+            .arg(service)
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit())
+            .status()
+            .expect("Failed to stop docker compose service");
+
+        assert!(status.success(), "docker compose stop failed");
+    }
+
+    pub fn start_service(&self, service: &str) {
+        println!(
+            "Starting docker-compose service {} from {}...",
+            service, self.compose_file
+        );
+        let status = Command::new("docker")
+            .arg("compose")
+            .arg("-f")
+            .arg(&self.compose_file)
+            .arg("start")
+            .arg(service)
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit())
+            .status()
+            .expect("Failed to start docker compose service");
+
+        assert!(status.success(), "docker compose start failed");
+    }
+}
+
 pub struct DockerCompose {
     compose_file: String,
 }
@@ -104,6 +155,10 @@ impl DockerCompose {
             .status()
             .expect("Failed to stop docker compose");
         println!("Services from {} stopped.", self.compose_file);
+    }
+
+    pub fn controller(&self) -> DockerController {
+        DockerController::new(&self.compose_file)
     }
 }
 
@@ -159,7 +214,7 @@ impl TestHarness {
 }
 
 pub async fn run_pipeline_test(broker_name: &str, config_yaml: &str) {
-    run_pipeline_test_internal(broker_name, config_yaml, 5, false).await;
+    run_pipeline_test_internal(broker_name, config_yaml, 5, false, None).await;
 }
 
 pub async fn run_performance_pipeline_test(
@@ -167,7 +222,26 @@ pub async fn run_performance_pipeline_test(
     config_yaml: &str,
     num_messages: usize,
 ) {
-    run_pipeline_test_internal(broker_name, config_yaml, num_messages, true).await;
+    run_pipeline_test_internal(broker_name, config_yaml, num_messages, true, None).await;
+}
+
+pub async fn run_chaos_pipeline_test(
+    broker_name: &str,
+    config_yaml: &str,
+    docker_controller: DockerController,
+    service_name: &str,
+) {
+    let service_name = service_name.to_string();
+    let injector = Box::new(move || {
+        Box::pin(async move {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            docker_controller.stop_service(&service_name);
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            docker_controller.start_service(&service_name);
+        }) as BoxFuture<'static, ()>
+    });
+
+    run_pipeline_test_internal(broker_name, config_yaml, 10000, false, Some(injector)).await;
 }
 
 async fn run_pipeline_test_internal(
@@ -175,6 +249,7 @@ async fn run_pipeline_test_internal(
     config_yaml: &str,
     num_messages: usize,
     is_performance_test: bool,
+    chaos_injector: Option<Box<dyn FnOnce() -> BoxFuture<'static, ()> + Send>>,
 ) {
     let yaml_val: serde_yaml_ng::Value =
         serde_yaml_ng::from_str(config_yaml).expect("Failed to parse YAML config");
@@ -207,6 +282,10 @@ async fn run_pipeline_test_internal(
 
     harness.send_messages().await;
 
+    if let Some(injector) = chaos_injector {
+        tokio::spawn(injector());
+    }
+
     // Wait for all messages to be processed by checking the metrics.
     let timeout = if is_performance_test {
         Duration::from_secs(210)
@@ -214,18 +293,39 @@ async fn run_pipeline_test_internal(
         Duration::from_secs(30)
     };
     let mut received = Vec::with_capacity(num_messages);
+    let mut unique_received_ids = HashSet::new();
+
     let wait_start = Instant::now();
     let mut last_log_time = Instant::now();
     while wait_start.elapsed() < timeout {
-        received.extend(harness.out_channel.drain_messages());
-        if received.len() >= num_messages {
+        let batch = harness.out_channel.drain_messages();
+        if !batch.is_empty() {
+            if !is_performance_test {
+                for msg in &batch {
+                    if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&msg.payload) {
+                        if let Some(num) = val.get("message_num").and_then(|v| v.as_u64()) {
+                            unique_received_ids.insert(num);
+                        }
+                    }
+                }
+            }
+            received.extend(batch);
+        }
+
+        if is_performance_test {
+            if received.len() >= num_messages {
+                break;
+            }
+        } else if unique_received_ids.len() >= num_messages {
             break;
         }
+
         if last_log_time.elapsed() > Duration::from_secs(5) {
             println!(
-                "Progress: {}/{} messages received",
+                "Progress: {}/{} messages received (Unique: {})",
                 received.len(),
-                num_messages
+                num_messages,
+                unique_received_ids.len()
             );
             last_log_time = Instant::now();
         }
@@ -238,7 +338,19 @@ async fn run_pipeline_test_internal(
     let _ = out_handle.await;
 
     // Drain any remaining messages that arrived during shutdown
-    received.extend(harness.out_channel.drain_messages());
+    let batch = harness.out_channel.drain_messages();
+    if !batch.is_empty() {
+        if !is_performance_test {
+            for msg in &batch {
+                if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&msg.payload) {
+                    if let Some(num) = val.get("message_num").and_then(|v| v.as_u64()) {
+                        unique_received_ids.insert(num);
+                    }
+                }
+            }
+        }
+        received.extend(batch);
+    }
     let duration = start_time.elapsed();
 
     if is_performance_test {
@@ -259,16 +371,27 @@ async fn run_pipeline_test_internal(
             single_write_performance: 0.0,
             single_read_performance: 0.0,
         });
+
+        assert_eq!(
+            received.len(),
+            num_messages,
+            "TEST FAILED for [{}]: Expected {} messages, but found {}.",
+            broker_name,
+            num_messages,
+            received.len()
+        );
+    } else {
+        assert_eq!(
+            unique_received_ids.len(),
+            num_messages,
+            "TEST FAILED for [{}]: Expected {} unique messages, but found {}. Total received: {}",
+            broker_name,
+            num_messages,
+            unique_received_ids.len(),
+            received.len()
+        );
     }
 
-    assert_eq!(
-        received.len(),
-        num_messages,
-        "TEST FAILED for [{}]: Expected {} messages, but found {}.",
-        broker_name,
-        num_messages,
-        received.len()
-    );
     println!("Successfully verified {} route!", broker_name);
 }
 
@@ -348,6 +471,19 @@ where
     // Give some time for docker to be ready
     _docker.up();
     test_fn().await;
+}
+
+/// A test harness that manages the lifecycle of Docker containers for a single test,
+/// providing a controller to manipulate services during the test.
+pub async fn run_test_with_docker_controller<F, Fut>(compose_file: &str, test_fn: F)
+where
+    F: FnOnce(DockerController) -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    let docker = DockerCompose::new(compose_file);
+    // Give some time for docker to be ready
+    docker.up();
+    test_fn(docker.controller()).await;
 }
 
 /// A generic test runner for direct performance tests.
@@ -679,7 +815,7 @@ pub async fn measure_read_performance(
                     .await
                     .expect("Semaphore closed");
                 tokio::spawn(async move {
-                    commit(None).await;
+                    let _ = commit(None).await;
                     drop(permit);
                 });
             }
@@ -802,7 +938,7 @@ pub async fn measure_single_read_performance(
                 .await
                 .expect("Semaphore closed");
             tokio::spawn(async move {
-                commit(None).await;
+                let _ = commit(None).await;
                 drop(permit);
             });
         } else {

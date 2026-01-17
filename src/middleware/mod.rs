@@ -14,6 +14,7 @@ mod delay;
 mod dlq;
 #[cfg(feature = "metrics")]
 mod metrics;
+#[cfg(feature = "panic")]
 mod random_panic;
 mod retry;
 
@@ -23,6 +24,7 @@ use delay::{DelayConsumer, DelayPublisher};
 use dlq::DlqPublisher;
 #[cfg(feature = "metrics")]
 use metrics::{MetricsConsumer, MetricsPublisher};
+#[cfg(feature = "panic")]
 use random_panic::{RandomPanicConsumer, RandomPanicPublisher};
 use retry::RetryPublisher;
 
@@ -49,6 +51,7 @@ pub async fn apply_middlewares_to_consumer(
             Middleware::Retry(_) => consumer, // Retry is currently publisher-only
             Middleware::CommitConcurrency(_) => consumer, // Configuration only, read by Route
             Middleware::Delay(cfg) => Box::new(DelayConsumer::new(consumer, cfg)),
+            #[cfg(feature = "panic")]
             Middleware::RandomPanic(cfg) => Box::new(RandomPanicConsumer::new(consumer, cfg)),
             Middleware::Custom(factory) => factory.apply_consumer(consumer, route_name).await?,
             #[allow(unreachable_patterns)]
@@ -88,6 +91,7 @@ pub async fn apply_middlewares_to_publisher(
             }
             Middleware::Retry(cfg) => Box::new(RetryPublisher::new(publisher, cfg.clone())),
             Middleware::Delay(cfg) => Box::new(DelayPublisher::new(publisher, cfg)),
+            #[cfg(feature = "panic")]
             Middleware::RandomPanic(cfg) => Box::new(RandomPanicPublisher::new(publisher, cfg)),
             Middleware::Custom(factory) => factory.apply_publisher(publisher, route_name).await?,
             #[allow(unreachable_patterns)]

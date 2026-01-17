@@ -395,7 +395,8 @@ impl MessageConsumer for ZeroMqConsumer {
                         }
                     }
                 }
-            }) as BoxFuture<'static, ()>
+                Ok(())
+            }) as BoxFuture<'static, anyhow::Result<()>>
         });
         Ok(ReceivedBatch { messages, commit })
     }

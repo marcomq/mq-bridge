@@ -1,0 +1,50 @@
+- version: "0.1"
+  breaking_changes: false
+  tasks:
+
+- version: "0.2.0"
+  breaking_changes: true
+  tasks:
+    - title: "Refactor Http Endpoint"
+      id: "A1"
+      description: "Refactor Http Endpoint so that the response is similar as in Nats"
+      status: "Todo"
+    - title: "Route::run return type"
+      id: "B2"
+      description: "Make Route::run respond a RouteHandle"
+      status: "Todo"
+    - title: "Rename kafka.brokers"
+      id: "C3"
+      description: "Rename kafka.brokers to kafka.url"
+      status: "Todo"
+    - title: "Add registry for custom endpoints"
+      id: "D4"
+      description: |
+        Breaking Change: Refactor `EndpointType::Custom` to store a config struct (type_name + serde_json::Value) instead of a factory trait object.
+        Update `EndpointVisitor` deserialization to fallback to `EndpointType::Custom` when encountering unknown keys in the config map.
+        Implement a global `EndpointRegistry` (singleton) to register `CustomEndpointFactory` implementations by name.
+        Resolve the factory at runtime during Route initialization to instantiate the actual endpoint.
+      status: "Todo"
+    - title: "Extract IBM MQ endpoint to separate crate"
+      id: "D5"
+      description: |
+        Breaking Change: Remove `IbmMq` variant from `EndpointType` in `mq-bridge` core.
+        Create a new crate `mq-bridge-ibm-mq` that depends on `mq-bridge`.
+        Implement `CustomEndpointFactory` in the new crate to handle IBM MQ configuration and initialization.
+        This serves as a proof-of-concept for the plugin system (D4).
+      status: "Todo"
+    - title: "Add registry for custom middleware"
+      id: "D6"
+      description: |
+        Breaking Change: Refactor `Middleware::Custom` to store a config struct (type_name + serde_json::Value) instead of a factory trait object.
+        Implement custom `Deserialize` logic for `Middleware` to map unknown keys to `Middleware::Custom`.
+        Implement a global `MiddlewareRegistry` to register `CustomMiddlewareFactory` implementations.
+        Resolve the factory at runtime to instantiate the middleware.
+      status: "Todo"
+    - title: "Add encryption middleware as separate crate"
+      id: "D7"
+      description: |
+        Create a new crate `mq-bridge-encryption` that depends on `mq-bridge`.
+        Implement `CustomMiddlewareFactory` in the new crate to handle message encryption/decryption configuration and logic.
+        This serves as a proof-of-concept for the custom middleware registry (D6).
+      status: "Todo"

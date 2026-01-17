@@ -35,17 +35,95 @@ use anyhow::{anyhow, Result};
 use std::sync::Arc;
 use uuid::Uuid;
 
-/// Creates a `MessageConsumer` based on the route's "in" configuration.
-pub async fn create_consumer_from_route(
+/// Validates the consumer configuration for a route.
+pub fn check_consumer(
     route_name: &str,
     endpoint: &Endpoint,
-) -> Result<Box<dyn MessageConsumer>> {
+    allowed_types: Option<&[&str]>,
+) -> Result<()> {
     if endpoint.handler.is_some() {
         tracing::warn!(
             route = route_name,
             "Endpoint 'handler' is set on an input endpoint. Handlers are currently only supported on output endpoints (publishers) and will be ignored here."
         );
     }
+    if let Some(allowed) = allowed_types {
+        if !endpoint.endpoint_type.is_core() {
+            let name = endpoint.endpoint_type.name();
+            if !allowed.contains(&name) {
+                return Err(anyhow!(
+                    "[route:{}] Endpoint type '{}' is not allowed by policy",
+                    route_name,
+                    name
+                ));
+            }
+        }
+    }
+    match &endpoint.endpoint_type {
+        #[cfg(feature = "aws")]
+        EndpointType::Aws(_) => ensure_consume_mode("Aws", endpoint.mode.clone()),
+        #[cfg(feature = "kafka")]
+        EndpointType::Kafka(_) => Ok(()),
+        #[cfg(feature = "nats")]
+        EndpointType::Nats(cfg) => {
+            if cfg.stream.is_none() && cfg.config.default_stream.is_none() {
+                return Err(anyhow!(
+                    "[route:{}] NATS consumer must specify a 'stream' or have a 'default_stream'",
+                    route_name
+                ));
+            }
+            Ok(())
+        }
+        #[cfg(feature = "amqp")]
+        EndpointType::Amqp(_) => Ok(()),
+        #[cfg(feature = "mqtt")]
+        EndpointType::Mqtt(_) => Ok(()),
+        #[cfg(feature = "ibm-mq")]
+        EndpointType::IbmMq(_) => Ok(()),
+        #[cfg(feature = "zeromq")]
+        EndpointType::ZeroMq(_) => Ok(()),
+        EndpointType::File(_) => Ok(()),
+        #[cfg(any(feature = "http-client", feature = "http-server"))]
+        EndpointType::Http(_) => {
+            ensure_consume_mode("Http", endpoint.mode.clone())?;
+            #[cfg(not(feature = "http-server"))]
+            {
+                Err(anyhow!("HTTP consumer requires the 'http-server' feature"))
+            }
+            #[cfg(feature = "http-server")]
+            Ok(())
+        }
+        EndpointType::Static(_) => ensure_consume_mode("Static", endpoint.mode.clone()),
+        EndpointType::Memory(_) => Ok(()),
+        #[cfg(feature = "mongodb")]
+        EndpointType::MongoDb(_) => Ok(()),
+        EndpointType::Custom(_) => Ok(()),
+        EndpointType::Switch(_) => Err(anyhow!(
+            "[route:{}] Switch endpoint is only supported as an output",
+            route_name
+        )),
+        #[allow(unreachable_patterns)]
+        _ => {
+            if let Some(allowed) = allowed_types {
+                let name = endpoint.endpoint_type.name();
+                if allowed.contains(&name) {
+                    return Ok(());
+                }
+            }
+            Err(anyhow!(
+                "[route:{}] Unsupported consumer endpoint type",
+                route_name
+            ))
+        }
+    }
+}
+
+/// Creates a `MessageConsumer` based on the route's "in" configuration.
+pub async fn create_consumer_from_route(
+    route_name: &str,
+    endpoint: &Endpoint,
+) -> Result<Box<dyn MessageConsumer>> {
+    check_consumer(route_name, endpoint, None)?;
     let consumer = create_base_consumer(route_name, endpoint).await?;
     apply_middlewares_to_consumer(consumer, endpoint, route_name).await
 }
@@ -141,8 +219,11 @@ async fn create_base_consumer(
             }
         }
         EndpointType::File(path) => {
-            ensure_consume_mode("File", endpoint.mode.clone())?;
-            Ok(Box::new(file::FileConsumer::new(path).await?))
+            if endpoint.mode == crate::models::ConsumerMode::Subscribe {
+                Ok(Box::new(file::FileSubscriber::new(path).await?))
+            } else {
+                Ok(Box::new(file::FileConsumer::new(path).await?))
+            }
         }
         #[cfg(any(feature = "http-client", feature = "http-server"))]
         EndpointType::Http(cfg) => {
@@ -198,17 +279,115 @@ async fn create_base_consumer(
     }
 }
 
-/// Creates a `MessagePublisher` based on the route's "out" configuration.
-pub async fn create_publisher_from_route(
+/// Validates the publisher configuration for a route.
+pub fn check_publisher(
     route_name: &str,
     endpoint: &Endpoint,
-) -> Result<Arc<dyn MessagePublisher>> {
+    allowed_types: Option<&[&str]>,
+) -> Result<()> {
     if endpoint.mode == crate::models::ConsumerMode::Subscribe {
         tracing::warn!(
             route = route_name,
             "Endpoint 'mode' is set to 'subscribe' on an output endpoint. This is likely a configuration error as 'mode' only applies to inputs."
         );
     }
+    check_publisher_recursive(route_name, endpoint, 0, allowed_types)
+}
+
+fn check_publisher_recursive(
+    route_name: &str,
+    endpoint: &Endpoint,
+    depth: usize,
+    allowed_types: Option<&[&str]>,
+) -> Result<()> {
+    if let Some(allowed) = allowed_types {
+        if !endpoint.endpoint_type.is_core() {
+            let name = endpoint.endpoint_type.name();
+            if !allowed.contains(&name) {
+                return Err(anyhow!(
+                    "[route:{}] Endpoint type '{}' is not allowed by policy",
+                    route_name,
+                    name
+                ));
+            }
+        }
+    }
+    const MAX_DEPTH: usize = 16;
+    if depth > MAX_DEPTH {
+        return Err(anyhow!(
+            "Fanout recursion depth exceeded limit of {}",
+            MAX_DEPTH
+        ));
+    }
+    match &endpoint.endpoint_type {
+        #[cfg(feature = "aws")]
+        EndpointType::Aws(_) => Ok(()),
+        #[cfg(feature = "kafka")]
+        EndpointType::Kafka(_) => Ok(()),
+        #[cfg(feature = "nats")]
+        EndpointType::Nats(_) => Ok(()),
+        #[cfg(feature = "amqp")]
+        EndpointType::Amqp(_) => Ok(()),
+        #[cfg(feature = "mqtt")]
+        EndpointType::Mqtt(_) => Ok(()),
+        #[cfg(feature = "ibm-mq")]
+        EndpointType::IbmMq(_) => Ok(()),
+        #[cfg(feature = "zeromq")]
+        EndpointType::ZeroMq(_) => Ok(()),
+        #[cfg(any(feature = "http-client", feature = "http-server"))]
+        EndpointType::Http(_) => {
+            #[cfg(not(feature = "reqwest"))]
+            {
+                Err(anyhow!("HTTP publisher requires the 'reqwest' feature"))
+            }
+            #[cfg(feature = "reqwest")]
+            Ok(())
+        }
+        #[cfg(feature = "mongodb")]
+        EndpointType::MongoDb(_) => Ok(()),
+        EndpointType::File(_) => Ok(()),
+        EndpointType::Static(_) => Ok(()),
+        EndpointType::Memory(_) => Ok(()),
+        EndpointType::Null => Ok(()),
+        EndpointType::Fanout(endpoints) => {
+            for endpoint in endpoints {
+                check_publisher_recursive(route_name, endpoint, depth + 1, allowed_types)?;
+            }
+            Ok(())
+        }
+        EndpointType::Switch(cfg) => {
+            for endpoint in cfg.cases.values() {
+                check_publisher_recursive(route_name, endpoint, depth + 1, allowed_types)?;
+            }
+            if let Some(endpoint) = &cfg.default {
+                check_publisher_recursive(route_name, endpoint, depth + 1, allowed_types)?;
+            }
+            Ok(())
+        }
+        EndpointType::Response(_) => Ok(()),
+        EndpointType::Custom(_) => Ok(()),
+        #[allow(unreachable_patterns)]
+        _ => {
+            if let Some(allowed) = allowed_types {
+                let name = endpoint.endpoint_type.name();
+                if allowed.contains(&name) {
+                    return Ok(());
+                }
+            }
+            Err(anyhow!(
+                "[route:{}] Unsupported publisher endpoint type",
+                route_name
+            ))
+        }
+    }
+}
+
+/// Creates a `MessagePublisher` based on the route's "out" configuration.
+pub async fn create_publisher_from_route(
+    route_name: &str,
+    endpoint: &Endpoint,
+) -> Result<Arc<dyn MessagePublisher>> {
+    check_publisher(route_name, endpoint, None)?;
     create_publisher_with_depth(route_name, endpoint, 0).await
 }
 
@@ -372,24 +551,16 @@ fn ensure_consume_mode(endpoint_type: &str, mode: crate::models::ConsumerMode) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::endpoints::memory::get_or_create_channel;
-    use crate::models::{Endpoint, EndpointType, MemoryConfig};
+    use crate::models::{Endpoint, EndpointType};
     use crate::CanonicalMessage;
 
     #[tokio::test]
     async fn test_fanout_publisher_integration() {
-        let mem_cfg1 = MemoryConfig {
-            topic: "fanout_1".to_string(),
-            capacity: Some(10),
-        };
-        let mem_cfg2 = MemoryConfig {
-            topic: "fanout_2".to_string(),
-            capacity: Some(10),
-        };
+        let ep1 = Endpoint::new_memory("fanout_1", 10);
+        let ep2 = Endpoint::new_memory("fanout_2", 10);
 
-        let ep1 = Endpoint::new(EndpointType::Memory(mem_cfg1.clone()));
-        let ep2 = Endpoint::new(EndpointType::Memory(mem_cfg2.clone()));
-
+        let chan1 = ep1.channel().unwrap();
+        let chan2 = ep2.channel().unwrap();
         let fanout_ep = Endpoint::new(EndpointType::Fanout(vec![ep1, ep2]));
 
         let publisher = create_publisher_from_route("test_fanout", &fanout_ep)
@@ -398,9 +569,6 @@ mod tests {
 
         let msg = CanonicalMessage::new(b"fanout_payload".to_vec(), None);
         publisher.send(msg).await.expect("Failed to send message");
-
-        let chan1 = get_or_create_channel(&mem_cfg1);
-        let chan2 = get_or_create_channel(&mem_cfg2);
 
         assert_eq!(chan1.len(), 1);
         assert_eq!(chan2.len(), 1);
@@ -412,6 +580,7 @@ mod tests {
         assert_eq!(msg2.payload, "fanout_payload".as_bytes());
     }
 
+    use crate::models::MemoryConfig;
     #[tokio::test]
     async fn test_factory_creates_memory_subscriber() {
         let endpoint = Endpoint {

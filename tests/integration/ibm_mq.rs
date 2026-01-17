@@ -25,8 +25,8 @@
 /// `ALTER AUTHINFO(SYSTEM.DEFAULT.AUTHINFO.IDPWOS) AUTHTYPE(IDPWOS) ADOPTCTX(YES)`
 /// `REFRESH SECURITY(*)`
 use crate::integration::common::{
-    add_performance_result, generate_test_messages, run_direct_perf_test, run_test_with_docker,
-    setup_logging,
+    add_performance_result, generate_test_messages, run_chaos_pipeline_test, run_direct_perf_test,
+    run_test_with_docker, run_test_with_docker_controller, setup_logging,
 };
 use mq_bridge::endpoints::ibm_mq::{IbmMqConsumer, IbmMqPublisher};
 use mq_bridge::models::{ConsumerMode, Endpoint, EndpointType, IbmMqConfig, IbmMqEndpoint, Route};
@@ -101,6 +101,44 @@ pub async fn test_ibm_mq_performance_pipeline() {
         handle.abort();
         println!("IBM MQ Pipeline test passed!");
     })
+    .await;
+}
+
+pub async fn test_ibm_mq_chaos() {
+    setup_logging();
+    run_test_with_docker_controller(
+        "tests/integration/docker-compose/ibm_mq.yml",
+        |controller| async move {
+            let config_yaml = r#"
+routes:
+  memory_to_ibm_mq:
+    input:
+      memory:
+        topic: "chaos_in"
+    output:
+      ibmmq:
+        queue_manager: "QM1"
+        connection_name: "localhost(1414)"
+        channel: "DEV.APP.SVRCONN"
+        queue: "DEV.QUEUE.1"
+        user: "app"
+        password: "admin"
+  ibm_mq_to_memory:
+    input:
+      ibmmq:
+        queue_manager: "QM1"
+        connection_name: "localhost(1414)"
+        channel: "DEV.APP.SVRCONN"
+        queue: "DEV.QUEUE.1"
+        user: "app"
+        password: "admin"
+    output:
+      memory:
+        topic: "chaos_out"
+"#;
+            run_chaos_pipeline_test("ibm_mq", config_yaml, controller, "mq").await;
+        },
+    )
     .await;
 }
 

@@ -31,6 +31,10 @@ pub struct KafkaPublisher {
 
 impl KafkaPublisher {
     pub async fn new(config: &KafkaConfig, topic: &str) -> anyhow::Result<Self> {
+        if config.delayed_ack {
+            tracing::warn!("Kafka 'delayed_ack' is enabled. Messages are acknowledged before broker confirmation. This carries a risk of data loss in the event of a crash.");
+        }
+
         let mut client_config = create_common_config(config);
         client_config
             // --- Performance Tuning ---
@@ -360,8 +364,10 @@ impl MessageConsumer for KafkaConsumer {
                 // Ack failure may result in redelivery. Enable deduplication middleware to handle duplicates.
                 if let Err(e) = consumer.commit(&tpl, CommitMode::Async) {
                     tracing::error!("Failed to commit Kafka message: {:?}", e);
+                    return Err(anyhow::anyhow!("Failed to commit Kafka message: {:?}", e));
                 }
-            }) as BoxFuture<'static, ()>
+                Ok(())
+            }) as BoxFuture<'static, anyhow::Result<()>>
         });
 
         Ok(Received {
@@ -653,9 +659,14 @@ async fn receive_batch_internal(
                 // Ack failure may result in redelivery. Enable deduplication middleware to handle duplicates.
                 if let Err(e) = consumer.commit(&last_offset_tpl, CommitMode::Async) {
                     tracing::error!("Failed to commit Kafka message batch: {:?}", e);
+                    return Err(anyhow::anyhow!(
+                        "Failed to commit Kafka message batch: {:?}",
+                        e
+                    ));
                 }
             }
-        }) as BoxFuture<'static, ()>
+            Ok(())
+        }) as BoxFuture<'static, anyhow::Result<()>>
     });
     Ok(ReceivedBatch { messages, commit })
 }

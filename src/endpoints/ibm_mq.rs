@@ -319,7 +319,7 @@ impl IbmMqConsumer {
                 } else {
                     let _ = reply_tx.send(Ok(ReceivedBatch {
                         messages,
-                        commit: Box::new(|_| Box::pin(async {})),
+                        commit: Box::new(|_| Box::pin(async { Ok(()) })),
                     }));
                 }
             }
@@ -473,7 +473,7 @@ impl IbmMqSubscriber {
                 } else {
                     let _ = reply_tx.send(Ok(ReceivedBatch {
                         messages,
-                        commit: Box::new(|_| Box::pin(async {})),
+                        commit: Box::new(|_| Box::pin(async { Ok(()) })),
                     }));
                 }
             }

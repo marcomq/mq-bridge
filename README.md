@@ -3,6 +3,7 @@
 [![Crates.io](https://img.shields.io/crates/v/mq-bridge.svg)](https://crates.io/crates/mq-bridge)
 [![Docs.rs](https://docs.rs/mq-bridge/badge.svg)](https://docs.rs/mq-bridge)
 [![CI](https://github.com/marcomq/mq-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/marcomq/mq-bridge/actions)
+[![Benchmark](https://github.com/marcomq/mq-bridge/actions/workflows/benchmark.yml/badge.svg)](https://marcomq.github.io/mq-bridge/dev/bench/)
 ![Linux](https://img.shields.io/badge/Linux-supported-green?logo=linux)
 ![Windows](https://img.shields.io/badge/Windows-supported-green?logo=windows)
 ![macOS](https://img.shields.io/badge/macOS-supported-green?logo=apple)
@@ -196,24 +197,23 @@ async fn main() {
     let route = Route::new(input, output)
         .with_handler(handler);
 
-    // 4. Inject Data
+    // 4. Run (deploys the route in the background)
+    route.deploy("test_route").await.unwrap();
+
+    // 5. Inject Data
     let input_channel = route.input.channel().unwrap();
     input_channel
         .send_message("hello".into())
         .await
         .unwrap();
 
-    // 5. Run
-    let res = route.run_until_err("test_route", None, None);
-    input_channel.close();
-    res.await.ok(); // eof error due to closed channel
-
     // 6. Verify
+    let mut verifier = route.connect_to_output("verifier").await.unwrap();
+    let received = verifier.receive().await.unwrap();
+    assert_eq!(received.message.get_payload_str(), "modified hello");
     assert!(success.load(Ordering::SeqCst));
 
-    let msgs = route.output.channel().unwrap().drain_messages();
-    assert_eq!(msgs.len(), 1);
-    assert_eq!(msgs[0].get_payload_str(), "modified hello");
+    Route::stop("test_route").await;
 }
 ```
 

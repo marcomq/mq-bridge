@@ -5,9 +5,13 @@ services:
     ports:
       - "1883:1883"
     volumes:
-       - "./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro"
+       - "./mosquitto_persistence.conf:/mosquitto/config/mosquitto.conf:ro"
+       - "mosquitto_data:/mosquitto/data"
     healthcheck:
       test: ["CMD-SHELL", "nc -z localhost 1883"]
       interval: 5s
       timeout: 20s
       retries: 5
+
+volumes:
+  mosquitto_data:

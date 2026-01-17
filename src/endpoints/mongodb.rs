@@ -234,20 +234,20 @@ impl MongoDbConsumer {
         let pipeline = [doc! { "$match": { "operationType": "insert" } }];
         let change_stream_result = collection.watch().pipeline(pipeline).await;
 
-        let change_stream = match change_stream_result {
+        let (change_stream, mode) = match change_stream_result {
             Ok(stream) => {
                 info!("MongoDB is a replica set/sharded cluster. Using change stream.");
-                Some(tokio::sync::Mutex::new(stream))
+                (Some(tokio::sync::Mutex::new(stream)), "change_stream")
             }
             Err(e) if matches!(*e.kind, ErrorKind::Command(ref cmd_err) if cmd_err.code == 40573) =>
             {
                 info!("MongoDB is a single instance (ChangeStream support check failed). Falling back to polling for consumer.");
-                None
+                (None, "polling")
             }
             Err(e) => return Err(e.into()), // For any other error, we propagate it.
         };
 
-        info!(database = %config.database, collection = %collection_name, "MongoDB consumer connected and watching for changes");
+        info!(database = %config.database, collection = %collection_name, mode = %mode, "MongoDB consumer connected");
 
         Ok(Self {
             collection,
@@ -276,10 +276,14 @@ impl MessageConsumer for MongoDbConsumer {
                 // --- Change Stream Path ---
                 // Wait for an event to wake us up.
                 let mut stream = stream_mutex.lock().await;
-                match stream.next().await {
-                    Some(Ok(_)) => continue, // Event received, loop back to try claiming documents.
-                    Some(Err(e)) => return Err(ConsumerError::Connection(e.into())),
-                    None => return Err(anyhow!("MongoDB change stream ended unexpectedly").into()),
+                // Use a timeout to ensure we periodically check for documents even if stream is silent.
+                match tokio::time::timeout(Duration::from_secs(5), stream.next()).await {
+                    Ok(Some(Ok(_))) => continue, // Event received, loop back to try claiming documents.
+                    Ok(Some(Err(e))) => return Err(ConsumerError::Connection(e.into())),
+                    Ok(None) => {
+                        return Err(anyhow!("MongoDB change stream ended unexpectedly").into())
+                    }
+                    Err(_) => continue, // Timeout, loop back to check for documents.
                 }
             }
 
@@ -312,10 +316,13 @@ impl MessageConsumer for MongoDbConsumer {
             if let Some(stream_mutex) = &self.change_stream {
                 // Replica Set: Wait for a change stream event to wake us up.
                 let mut stream = stream_mutex.lock().await;
-                match stream.next().await {
-                    Some(Ok(_)) => {} // Event received, loop back to try claiming documents.
-                    Some(Err(e)) => return Err(ConsumerError::Connection(e.into())),
-                    None => return Err(anyhow!("MongoDB change stream ended unexpectedly").into()),
+                match tokio::time::timeout(Duration::from_secs(5), stream.next()).await {
+                    Ok(Some(Ok(_))) => {} // Event received, loop back to try claiming documents.
+                    Ok(Some(Err(e))) => return Err(ConsumerError::Connection(e.into())),
+                    Ok(None) => {
+                        return Err(anyhow!("MongoDB change stream ended unexpectedly").into())
+                    }
+                    Err(_) => {} // Timeout, loop back to check for documents.
                 }
             } else {
                 // Standalone: Sleep for polling interval.
@@ -454,11 +461,18 @@ impl MongoDbConsumer {
                 let commit = Box::new(move |response: Option<CanonicalMessage>| {
                     Box::pin(async move {
                         if let (Some(resp), Some(coll_name)) = (response, reply_collection_name) {
-                            if let Ok(doc) = message_to_document(&resp) {
-                                let reply_coll = db.collection::<Document>(&coll_name);
-                                if let Err(e) = reply_coll.insert_one(doc).await {
-                                    tracing::error!(collection = %coll_name, error = %e, "Failed to insert MongoDB reply");
-                                }
+                            let doc = message_to_document(&resp).map_err(|e| {
+                                tracing::error!(collection = %coll_name, error = %e, "Failed to serialize MongoDB reply");
+                                anyhow::anyhow!("Failed to serialize MongoDB reply: {}", e)
+                            })?;
+
+                            let reply_coll = db.collection::<Document>(&coll_name);
+                            if let Err(e) = reply_coll.insert_one(doc).await {
+                                tracing::error!(collection = %coll_name, error = %e, "Failed to insert MongoDB reply");
+                                return Err(anyhow::anyhow!(
+                                    "Failed to insert MongoDB reply: {}",
+                                    e
+                                ));
                             }
                         }
 
@@ -476,9 +490,14 @@ impl MongoDbConsumer {
                             Err(e) => {
                                 // Ack failure may result in redelivery. Enable deduplication middleware to handle duplicates.
                                 tracing::error!(mongodb_id = %id_val, error = %e, "Failed to ack/delete MongoDB message");
+                                return Err(anyhow::anyhow!(
+                                    "Failed to ack/delete MongoDB message: {}",
+                                    e
+                                ));
                             }
                         }
-                    }) as BoxFuture<'static, ()>
+                        Ok(())
+                    }) as BoxFuture<'static, anyhow::Result<()>>
                 });
 
                 Ok(Some(Received {
@@ -551,30 +570,47 @@ impl MongoDbConsumer {
                 if let Some(resps) = responses {
                     for (reply_coll_opt, resp) in reply_infos.iter().zip(resps) {
                         if let Some(coll_name) = reply_coll_opt {
-                            if let Ok(doc) = message_to_document(&resp) {
-                                let reply_coll = db.collection::<Document>(coll_name);
-                                if let Err(e) = reply_coll.insert_one(doc).await {
-                                    tracing::error!(collection = %coll_name, response_id = %format!("{:032x}", resp.message_id), error = %e, "Failed to insert MongoDB batch reply");
+                            let doc = match message_to_document(&resp) {
+                                Ok(d) => d,
+                                Err(e) => {
+                                    tracing::error!(collection = %coll_name, response_id = %format!("{:032x}", resp.message_id), error = %e, "Failed to serialize MongoDB batch reply");
+                                    return Err(anyhow::anyhow!(
+                                        "Failed to serialize MongoDB batch reply: {}",
+                                        e
+                                    ));
                                 }
+                            };
+                            let reply_coll = db.collection::<Document>(coll_name);
+                            if let Err(e) = reply_coll.insert_one(doc).await {
+                                tracing::error!(collection = %coll_name, response_id = %format!("{:032x}", resp.message_id), error = %e, "Failed to insert MongoDB batch reply");
+                                return Err(anyhow::anyhow!(
+                                    "Failed to insert MongoDB batch reply: {}",
+                                    e
+                                ));
                             }
                         }
                     }
                 }
 
                 if ids.is_empty() {
-                    return;
+                    return Ok(());
                 }
                 let filter = doc! { "_id": { "$in": &ids } };
                 // Ack failure may result in redelivery. Enable deduplication middleware to handle duplicates.
                 if let Err(e) = collection_clone.delete_many(filter).await {
                     tracing::error!(error = %e, "Failed to bulk-ack/delete MongoDB messages");
+                    return Err(anyhow::anyhow!(
+                        "Failed to bulk-ack/delete MongoDB messages: {}",
+                        e
+                    ));
                 } else {
                     trace!(
                         count = ids.len(),
                         "MongoDB messages acknowledged and deleted"
                     );
                 }
-            }) as BoxFuture<'static, ()>
+                Ok(())
+            }) as BoxFuture<'static, anyhow::Result<()>>
         });
 
         Ok((messages, commit))
@@ -692,7 +728,7 @@ impl MessageConsumer for MongoDbSubscriber {
                 trace!(message_id = %format!("{:032x}", msg.message_id), collection = %self.collection_name, "Received MongoDB change stream event");
                 Ok(ReceivedBatch {
                     messages: vec![msg],
-                    commit: Box::new(|_| Box::pin(async {})),
+                    commit: Box::new(|_| Box::pin(async { Ok(()) })),
                 })
             }
             SubscriberStream::Polling {
@@ -733,7 +769,7 @@ impl MessageConsumer for MongoDbSubscriber {
                     trace!(count = messages.len(), collection = %self.collection_name, message_ids = ?LazyMessageIds(&messages), "Received batch of MongoDB documents via polling");
                     return Ok(ReceivedBatch {
                         messages,
-                        commit: Box::new(|_| Box::pin(async {})),
+                        commit: Box::new(|_| Box::pin(async { Ok(()) })),
                     });
                 }
 

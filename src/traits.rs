@@ -47,12 +47,16 @@ impl<T: Handler + ?Sized> Handler for Arc<T> {
 
 /// A closure that can be called to commit the message.
 /// It returns a `BoxFuture` to allow for async commit operations.
-pub type CommitFunc =
-    Box<dyn FnOnce(Option<CanonicalMessage>) -> BoxFuture<'static, ()> + Send + 'static>;
+pub type CommitFunc = Box<
+    dyn FnOnce(Option<CanonicalMessage>) -> BoxFuture<'static, anyhow::Result<()>> + Send + 'static,
+>;
 
 /// A closure for committing a batch of messages.
-pub type BatchCommitFunc =
-    Box<dyn FnOnce(Option<Vec<CanonicalMessage>>) -> BoxFuture<'static, ()> + Send + 'static>;
+pub type BatchCommitFunc = Box<
+    dyn FnOnce(Option<Vec<CanonicalMessage>>) -> BoxFuture<'static, anyhow::Result<()>>
+        + Send
+        + 'static,
+>;
 
 #[async_trait]
 pub trait MessageConsumer: Send + Sync {

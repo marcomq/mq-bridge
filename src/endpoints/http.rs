@@ -226,8 +226,11 @@ async fn handle_request(
     let (ack_tx, ack_rx) = tokio::sync::oneshot::channel::<Option<CanonicalMessage>>();
     let commit = Box::new(move |resp| {
         Box::pin(async move {
-            let _ = ack_tx.send(resp);
-        }) as BoxFuture<'static, ()>
+            if ack_tx.send(resp).is_err() {
+                return Err(anyhow::anyhow!("Failed to send ack to HTTP handler"));
+            }
+            Ok(())
+        }) as BoxFuture<'static, anyhow::Result<()>>
     });
 
     if let Err(e) = state.tx.send((message, commit)).await {
@@ -442,7 +445,7 @@ impl MessagePublisher for HttpPublisher {
 #[cfg(all(feature = "actix-web", feature = "reqwest"))]
 mod tests {
     use super::*;
-    use crate::models::{Config, EndpointType, MemoryConfig};
+    use crate::models::{Config, EndpointType};
     use crate::CanonicalMessage;
     use std::time::Duration;
 
@@ -525,7 +528,7 @@ http_route:
             let received = consumer.receive().await.expect("Failed to receive");
             // Send a response back via commit
             let response_msg = CanonicalMessage::new(b"response_payload".to_vec(), None);
-            (received.commit)(Some(response_msg)).await;
+            let _ = (received.commit)(Some(response_msg)).await;
             received.message
         });
 
@@ -547,11 +550,8 @@ http_route:
         let addr = format!("127.0.0.1:{}", port);
         let url = format!("http://{}", addr);
 
-        let mem_config = MemoryConfig {
-            topic: "reply_sink".to_string(),
-            capacity: Some(10),
-        };
-        let sink_endpoint = crate::models::Endpoint::new(EndpointType::Memory(mem_config.clone()));
+        let sink_endpoint = crate::models::Endpoint::new_memory("reply_sink", 10);
+        let channel = sink_endpoint.channel().unwrap();
 
         let config = HttpConfig {
             url: Some(addr.clone()),
@@ -574,7 +574,7 @@ http_route:
             loop {
                 if let Ok(received) = consumer.receive().await {
                     let response_msg = CanonicalMessage::new(b"server_reply".to_vec(), None);
-                    (received.commit)(Some(response_msg)).await;
+                    let _ = (received.commit)(Some(response_msg)).await;
                 }
             }
         });
@@ -582,7 +582,6 @@ http_route:
         let msg = CanonicalMessage::new(b"request".to_vec(), None);
         publisher.send(msg).await.expect("Failed to send");
 
-        let channel = crate::endpoints::memory::get_or_create_channel(&mem_config);
         let mut attempts = 0;
         while channel.is_empty() && attempts < 20 {
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -647,7 +646,7 @@ http_route:
                     Sent::Response(msg) => Some(msg),
                     Sent::Ack => None,
                 };
-                (received.commit)(pipeline_response).await;
+                let _ = (received.commit)(pipeline_response).await;
             }
         });
 
@@ -690,7 +689,7 @@ http_route:
                     Sent::Response(msg) => Some(msg),
                     Sent::Ack => None,
                 };
-                (received.commit)(resp).await;
+                let _ = (received.commit)(resp).await;
             }
         });
 
