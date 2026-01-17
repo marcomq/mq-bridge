@@ -277,7 +277,7 @@ async fn run() {
     // route.output.handler = Some(std::sync::Arc::new(handler));
     
     // 4. Run the route
-    // route.run_until_err("api_gateway", None, None).await;
+    // route.deploy("api_gateway").await.unwrap();
 }
 ```
 

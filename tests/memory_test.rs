@@ -8,7 +8,7 @@ mod integration;
 // run in release:
 // cargo test --package mq-bridge --test memory_test --release -- test_memory_to_memory_pipeline --exact --nocapture --ignored
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 #[ignore = "Performance test"] // This is a performance test, run it explicitly
 async fn test_memory_to_memory_pipeline() {
     integration::common::setup_logging();
@@ -30,25 +30,24 @@ async fn test_memory_to_memory_pipeline() {
 
     println!("--- Starting Memory-to-Memory Pipeline Test ---");
 
+    route.deploy("mem_2_mem").await.unwrap();
+
     let start_time = Instant::now();
 
-    // Run the pipeline and the message sending concurrently.
-    let (run_result, _) = tokio::join!(
-        // The route will run until the input channel is closed and empty.
-        route.run_until_err("mem_2_mem", None, None),
-        // This task sends all messages and then closes the channel,
-        // which signals the route to stop.
-        async {
-            in_channel.fill_messages(messages_to_send).await.unwrap();
-            in_channel.close();
+    in_channel.fill_messages(messages_to_send).await.unwrap();
+    in_channel.close();
+
+    let mut received = Vec::with_capacity(num_messages);
+    while received.len() < num_messages {
+        let batch = out_channel.drain_messages();
+        received.extend(batch);
+        if received.len() >= num_messages {
+            break;
         }
-    );
-
-    // run_result will have Err("Memory channel closed.")
-    run_result.ok();
-
-    let received = out_channel.drain_messages();
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
     let duration = start_time.elapsed();
+    Route::stop("mem_2_mem").await;
 
     let msgs_per_sec = num_messages as f64 / duration.as_secs_f64();
 
