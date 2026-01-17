@@ -168,7 +168,7 @@ mod tests {
         let _ = (received.commit)(None).await;
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_command_handler_with_route_config() {
         use crate::models::{Endpoint, Route};
 
@@ -188,21 +188,19 @@ mod tests {
         )
         .with_handler(handler);
 
-        // 3. Inject Data
+        // 3. Deploy Route
+        route.deploy("command_handler_test_route").await.unwrap();
+
+        // 4. Inject Data
         let input_channel = route.input.channel().unwrap();
         input_channel.send_message("hello".into()).await.unwrap();
 
-        // 4. Run
-        let res = route.run_until_err("test_route", None, None);
-        input_channel.close();
-        res.await.ok(); // eof error due to closed channel
-
         // 5. Verify
+        let mut verifier = route.connect_to_output("verifier").await.unwrap();
+        let received = verifier.receive().await.unwrap();
+        assert_eq!(received.message.get_payload_str(), "modified hello");
         assert!(success.load(Ordering::SeqCst));
-
-        let msgs = route.output.channel().unwrap().drain_messages();
-        assert_eq!(msgs.len(), 1);
-        assert_eq!(msgs[0].get_payload_str(), "modified hello");
+        Route::stop("command_handler_test_route").await;
     }
 
     #[tokio::test]

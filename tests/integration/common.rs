@@ -271,12 +271,14 @@ async fn run_pipeline_test_internal(
 
     let harness = TestHarness::new(in_route.clone(), out_route.clone(), num_messages);
 
-    let (in_handle, in_shutdown) = in_route
-        .run(&in_route_name)
-        .expect("Failed to start in_route");
-    let (out_handle, out_shutdown) = out_route
-        .run(&out_route_name)
-        .expect("Failed to start out_route");
+    in_route
+        .deploy(&in_route_name)
+        .await
+        .expect("Failed to deploy in_route");
+    out_route
+        .deploy(&out_route_name)
+        .await
+        .expect("Failed to deploy out_route");
 
     let start_time = Instant::now();
 
@@ -332,10 +334,8 @@ async fn run_pipeline_test_internal(
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
-    let _ = in_shutdown.send(()).await;
-    let _ = out_shutdown.send(()).await;
-    let _ = in_handle.await;
-    let _ = out_handle.await;
+    Route::stop(&in_route_name).await;
+    Route::stop(&out_route_name).await;
 
     // Drain any remaining messages that arrived during shutdown
     let batch = harness.out_channel.drain_messages();

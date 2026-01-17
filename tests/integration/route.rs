@@ -16,7 +16,7 @@ struct MyTypedMessage {
     content: String,
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_route_with_typed_handler_success() {
     let success = Arc::new(AtomicBool::new(false));
     let success_clone = success.clone();
@@ -46,10 +46,18 @@ async fn test_route_with_typed_handler_success() {
         .unwrap()
         .with_type_key("my_message");
 
-    in_channel.send_message(canonical_message).await.unwrap();
-    in_channel.close();
+    route.deploy("test_route_with_typed_handler_success").await.unwrap();
 
-    route.run_until_err("test", None, None).await.ok();
+    in_channel.send_message(canonical_message).await.unwrap();
+    let start = std::time::Instant::now();
+    while !success.load(Ordering::SeqCst) {
+        if start.elapsed() > std::time::Duration::from_secs(5) {
+            panic!("Timeout waiting for handler");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    Route::stop("test_route_with_typed_handler_success").await;
 
     assert!(success.load(Ordering::SeqCst));
     assert_eq!(out_channel.len(), 0); // Ack should not publish
@@ -120,7 +128,7 @@ async fn test_retryable_error_without_middleware_crashes_route() {
     assert!(res.is_err());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_retryable_error_with_middleware_succeeds() {
     let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let attempts_clone = attempts.clone();
@@ -162,13 +170,19 @@ async fn test_retryable_error_with_middleware_succeeds() {
         .unwrap()
         .with_type_key("my_message");
 
+    route.deploy("test_retryable_error_with_middleware_succeeds").await.unwrap();
+
     in_channel.send_message(canonical_message).await.unwrap();
-    in_channel.close();
+    let start = std::time::Instant::now();
+    while out_channel.is_empty() {
+        if start.elapsed() > std::time::Duration::from_secs(5) {
+            panic!("Timeout waiting for retry success");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
 
-    let res = route.run_until_err("test", None, None).await;
+    Route::stop("test_retryable_error_with_middleware_succeeds").await;
 
-    // Should succeed because middleware retries
-    assert!(res.is_ok());
     assert_eq!(attempts.load(Ordering::SeqCst), 3);
     assert_eq!(out_channel.len(), 1);
 }
@@ -212,7 +226,7 @@ async fn test_route_with_typed_handler_failure_handler() {
     assert_eq!(out_channel.len(), 0);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_commit_concurrency_limit() {
     use mq_bridge::models::{CommitConcurrencyMiddleware, Endpoint, Middleware, Route};
     use mq_bridge::traits::{
@@ -290,18 +304,14 @@ async fn test_commit_concurrency_limit() {
         }
 
         let start = std::time::Instant::now();
-        let handle = tokio::spawn(async move {
-            route
-                .run_until_err(&format!("route_{}", limit), None, None)
-                .await
-        });
+        let route_name = format!("test_commit_concurrency_limit_{}", limit);
+        route.deploy(&route_name).await.unwrap();
 
         while out_channel.len() < 5 {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         let duration = start.elapsed();
-        in_channel.close();
-        handle.abort();
+        Route::stop(&route_name).await;
         duration
     };
 
@@ -327,7 +337,7 @@ async fn test_commit_concurrency_limit() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_delay_middleware_in_route() {
     use mq_bridge::models::{DelayMiddleware, Endpoint, EndpointType, Middleware, Route};
     use std::time::{Duration, Instant};
@@ -345,11 +355,7 @@ async fn test_delay_middleware_in_route() {
 
     let start = Instant::now();
 
-    // Run the route in a background task
-    let handle = tokio::spawn(async move {
-        // Run for a short time or until we get enough messages
-        route.run_until_err("delay_test", None, None).await
-    });
+    route.deploy("test_delay_middleware_in_route").await.unwrap();
 
     // Wait for 3 messages.
     // 1st message: delay 100ms -> receive -> send.
@@ -365,7 +371,7 @@ async fn test_delay_middleware_in_route() {
     }
 
     let elapsed = start.elapsed();
-    handle.abort();
+    Route::stop("test_delay_middleware_in_route").await;
 
     // With 100ms delay, 3 messages should take at least 300ms.
     assert!(
