@@ -570,7 +570,6 @@ mod tests {
         let msg = CanonicalMessage::new(b"fanout_payload".to_vec(), None);
         publisher.send(msg).await.expect("Failed to send message");
 
-
         assert_eq!(chan1.len(), 1);
         assert_eq!(chan2.len(), 1);
 

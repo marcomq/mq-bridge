@@ -141,7 +141,10 @@ impl Route {
 
     /// Creates a consumer connected to the route's output.
     /// This is primarily useful for integration tests to verify messages reaching the destination.
-    pub async fn connect_to_output(&self, name: &str) -> anyhow::Result<Box<dyn crate::traits::MessageConsumer>> {
+    pub async fn connect_to_output(
+        &self,
+        name: &str,
+    ) -> anyhow::Result<Box<dyn crate::traits::MessageConsumer>> {
         create_consumer_from_route(name, &self.output).await
     }
 
