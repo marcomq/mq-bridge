@@ -30,6 +30,7 @@ pub mod switch;
 pub mod zeromq;
 use crate::middleware::apply_middlewares_to_consumer;
 use crate::models::{Endpoint, EndpointType};
+use crate::route::get_endpoint_factory;
 use crate::traits::{BoxFuture, MessageConsumer, MessagePublisher};
 use anyhow::{anyhow, Result};
 use std::sync::Arc;
@@ -97,7 +98,7 @@ pub fn check_consumer(
         EndpointType::Memory(_) => Ok(()),
         #[cfg(feature = "mongodb")]
         EndpointType::MongoDb(_) => Ok(()),
-        EndpointType::Custom(_) => Ok(()),
+        EndpointType::Custom { .. } => Ok(()),
         EndpointType::Switch(_) => Err(anyhow!(
             "[route:{}] Switch endpoint is only supported as an output",
             route_name
@@ -266,7 +267,11 @@ async fn create_base_consumer(
                 ))
             }
         }
-        EndpointType::Custom(factory) => factory.create_consumer(route_name).await,
+        EndpointType::Custom { name, config } => {
+            let factory = get_endpoint_factory(name)
+                .ok_or_else(|| anyhow!("Custom endpoint factory '{}' not found", name))?;
+            factory.create_consumer(route_name, config).await
+        }
         EndpointType::Switch(_) => Err(anyhow!(
             "[route:{}] Switch endpoint is only supported as an output",
             route_name
@@ -365,7 +370,7 @@ fn check_publisher_recursive(
             Ok(())
         }
         EndpointType::Response(_) => Ok(()),
-        EndpointType::Custom(_) => Ok(()),
+        EndpointType::Custom { .. } => Ok(()),
         #[allow(unreachable_patterns)]
         _ => {
             if let Some(allowed) = allowed_types {
@@ -528,7 +533,11 @@ async fn create_base_publisher(
         EndpointType::Response(_) => {
             Ok(Box::new(response::ResponsePublisher) as Box<dyn MessagePublisher>)
         }
-        EndpointType::Custom(factory) => factory.create_publisher(route_name).await,
+        EndpointType::Custom { name, config } => {
+            let factory = get_endpoint_factory(name)
+                .ok_or_else(|| anyhow!("Custom endpoint factory '{}' not found", name))?;
+            factory.create_publisher(route_name, config).await
+        }
         #[allow(unreachable_patterns)]
         _ => Err(anyhow!(
             "[route:{}] Unsupported publisher endpoint type",

@@ -21,7 +21,7 @@
         Implement a global `EndpointRegistry` (singleton) to register `CustomEndpointFactory` implementations by name.
         Resolve the factory at runtime during Route initialization to instantiate the actual endpoint.
         @src/models.rs @src/endpoints.rs @src/route.rs
-      status: "Todo"
+      status: "Done"
     - title: "Extract IBM MQ endpoint to separate crate"
       id: "D5"
       description: |
@@ -30,7 +30,7 @@
         Implement `CustomEndpointFactory` in the new crate to handle IBM MQ configuration and initialization.
         This serves as a proof-of-concept for the plugin system (D4).
         @src/models.rs
-      status: "Todo"
+      status: "In Progress"
     - title: "Add registry for custom middleware"
       id: "D6"
       description: |
@@ -39,7 +39,7 @@
         Implement a global `MiddlewareRegistry` to register `CustomMiddlewareFactory` implementations.
         Resolve the factory at runtime to instantiate the middleware.
         @src/models.rs @src/middleware.rs
-      status: "Todo"
+      status: "Done"
     - title: "Add encryption middleware as separate crate"
       id: "D7"
       description: |

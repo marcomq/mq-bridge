@@ -7,7 +7,8 @@ use crate::endpoints::{create_consumer_from_route, create_publisher_from_route};
 pub use crate::models::Route;
 use crate::models::{self, Endpoint};
 use crate::traits::{
-    BatchCommitFunc, ConsumerError, Handler, HandlerError, PublisherError, SentBatch,
+    BatchCommitFunc, ConsumerError, CustomEndpointFactory, CustomMiddlewareFactory, Handler,
+    HandlerError, PublisherError, SentBatch,
 };
 use async_channel::{bounded, Sender};
 use serde::de::DeserializeOwned;
@@ -46,6 +47,34 @@ struct ActiveRoute {
 }
 
 static ROUTE_REGISTRY: OnceLock<RwLock<HashMap<String, ActiveRoute>>> = OnceLock::new();
+static ENDPOINT_REGISTRY: OnceLock<RwLock<HashMap<String, Arc<dyn CustomEndpointFactory>>>> =
+    OnceLock::new();
+static MIDDLEWARE_REGISTRY: OnceLock<RwLock<HashMap<String, Arc<dyn CustomMiddlewareFactory>>>> =
+    OnceLock::new();
+
+pub fn register_endpoint_factory(name: &str, factory: Arc<dyn CustomEndpointFactory>) {
+    let registry = ENDPOINT_REGISTRY.get_or_init(|| RwLock::new(HashMap::new()));
+    let mut map = registry.write().expect("Endpoint registry lock poisoned");
+    map.insert(name.to_string(), factory);
+}
+
+pub fn get_endpoint_factory(name: &str) -> Option<Arc<dyn CustomEndpointFactory>> {
+    let registry = ENDPOINT_REGISTRY.get_or_init(|| RwLock::new(HashMap::new()));
+    let map = registry.read().expect("Endpoint registry lock poisoned");
+    map.get(name).cloned()
+}
+
+pub fn register_middleware_factory(name: &str, factory: Arc<dyn CustomMiddlewareFactory>) {
+    let registry = MIDDLEWARE_REGISTRY.get_or_init(|| RwLock::new(HashMap::new()));
+    let mut map = registry.write().expect("Middleware registry lock poisoned");
+    map.insert(name.to_string(), factory);
+}
+
+pub fn get_middleware_factory(name: &str) -> Option<Arc<dyn CustomMiddlewareFactory>> {
+    let registry = MIDDLEWARE_REGISTRY.get_or_init(|| RwLock::new(HashMap::new()));
+    let map = registry.read().expect("Middleware registry lock poisoned");
+    map.get(name).cloned()
+}
 
 impl Route {
     /// Creates a new route with default concurrency (1) and batch size (128).
@@ -789,6 +818,7 @@ mod tests {
             &self,
             consumer: Box<dyn MessageConsumer>,
             _route_name: &str,
+            _config: &serde_json::Value,
         ) -> anyhow::Result<Box<dyn MessageConsumer>> {
             Ok(Box::new(PanicConsumer {
                 inner: consumer,
@@ -836,9 +866,13 @@ mod tests {
         let factory = PanicMiddlewareFactory {
             should_panic: should_panic.clone(),
         };
+        register_middleware_factory("panic_factory", Arc::new(factory));
 
         let input = Endpoint::new_memory(&in_topic, 10)
-            .add_middleware(Middleware::Custom(Arc::new(factory)));
+            .add_middleware(Middleware::Custom {
+                name: "panic_factory".to_string(),
+                config: serde_json::Value::Null,
+            });
         let output = Endpoint::new_memory(&out_topic, 10);
 
         let route = Route::new(input.clone(), output.clone());

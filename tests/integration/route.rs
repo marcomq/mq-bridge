@@ -254,6 +254,7 @@ async fn test_commit_concurrency_limit() {
             &self,
             consumer: Box<dyn MessageConsumer>,
             _route_name: &str,
+            _config: &serde_json::Value,
         ) -> anyhow::Result<Box<dyn MessageConsumer>> {
             struct Wrapper {
                 inner: Box<dyn MessageConsumer>,
@@ -289,10 +290,16 @@ async fn test_commit_concurrency_limit() {
     }
 
     let run_test_case = |limit: usize| async move {
+        let factory = Arc::new(SlowCommitMiddleware {
+            delay: Duration::from_millis(100),
+        });
+        mq_bridge::route::register_middleware_factory("slow_commit", factory);
+
         let input = Endpoint::new_memory(&format!("in_limit_{}", limit), 100)
-            .add_middleware(Middleware::Custom(Arc::new(SlowCommitMiddleware {
-                delay: Duration::from_millis(100),
-            })))
+            .add_middleware(Middleware::Custom {
+                name: "slow_commit".to_string(),
+                config: serde_json::Value::Null,
+            })
             .add_middleware(Middleware::CommitConcurrency(CommitConcurrencyMiddleware {
                 limit,
             }));
@@ -404,6 +411,7 @@ async fn test_custom_endpoint_factory_programmatic() {
         async fn create_consumer(
             &self,
             _route_name: &str,
+            _config: &serde_json::Value,
         ) -> anyhow::Result<Box<dyn MessageConsumer>> {
             Ok(Box::new(
                 mq_bridge::endpoints::static_endpoint::StaticRequestConsumer::new("custom_msg")
@@ -413,13 +421,22 @@ async fn test_custom_endpoint_factory_programmatic() {
         async fn create_publisher(
             &self,
             _route_name: &str,
+            _config: &serde_json::Value,
         ) -> anyhow::Result<Box<dyn MessagePublisher>> {
             Ok(Box::new(mq_bridge::endpoints::null::NullPublisher))
         }
     }
 
-    let input = Endpoint::new(EndpointType::Custom(Arc::new(MyFactory)));
-    let output = Endpoint::new(EndpointType::Custom(Arc::new(MyFactory)));
+    mq_bridge::route::register_endpoint_factory("my_factory", Arc::new(MyFactory));
+
+    let input = Endpoint::new(EndpointType::Custom {
+        name: "my_factory".to_string(),
+        config: serde_json::Value::Null,
+    });
+    let output = Endpoint::new(EndpointType::Custom {
+        name: "my_factory".to_string(),
+        config: serde_json::Value::Null,
+    });
 
     let route = Route::new(input, output);
 
@@ -435,4 +452,119 @@ async fn test_custom_endpoint_factory_programmatic() {
         result.is_err(),
         "Route should have run indefinitely until timeout"
     );
+}
+
+#[tokio::test]
+async fn test_custom_components_yaml_configuration() {
+    use mq_bridge::models::{Config, EndpointType, Middleware};
+    use mq_bridge::route::{register_endpoint_factory, register_middleware_factory};
+    use mq_bridge::traits::{
+        CustomEndpointFactory, CustomMiddlewareFactory, MessageConsumer, MessagePublisher,
+    };
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+
+    // 1. Define Custom Factories
+    #[derive(Debug)]
+    struct YamlEndpointFactory;
+    #[async_trait::async_trait]
+    impl CustomEndpointFactory for YamlEndpointFactory {
+        async fn create_consumer(
+            &self,
+            _route: &str,
+            config: &serde_json::Value,
+        ) -> anyhow::Result<Box<dyn MessageConsumer>> {
+            let content = config
+                .get("content")
+                .and_then(|v| v.as_str())
+                .unwrap_or("default");
+            Ok(Box::new(
+                mq_bridge::endpoints::static_endpoint::StaticRequestConsumer::new(content).unwrap(),
+            ))
+        }
+        async fn create_publisher(
+            &self,
+            _route: &str,
+            _config: &serde_json::Value,
+        ) -> anyhow::Result<Box<dyn MessagePublisher>> {
+            Ok(Box::new(mq_bridge::endpoints::null::NullPublisher))
+        }
+    }
+
+    #[derive(Debug)]
+    struct YamlMiddlewareFactory {
+        flag: Arc<AtomicBool>,
+    }
+    #[async_trait::async_trait]
+    impl CustomMiddlewareFactory for YamlMiddlewareFactory {
+        async fn apply_consumer(
+            &self,
+            consumer: Box<dyn MessageConsumer>,
+            _route: &str,
+            config: &serde_json::Value,
+        ) -> anyhow::Result<Box<dyn MessageConsumer>> {
+            if config.get("active").and_then(|v| v.as_bool()) == Some(true) {
+                self.flag.store(true, Ordering::SeqCst);
+            }
+            Ok(consumer)
+        }
+    }
+
+    // 2. Register Factories
+    let mw_flag = Arc::new(AtomicBool::new(false));
+    register_endpoint_factory("my_yaml_endpoint", Arc::new(YamlEndpointFactory));
+    register_middleware_factory(
+        "my_yaml_middleware",
+        Arc::new(YamlMiddlewareFactory {
+            flag: mw_flag.clone(),
+        }),
+    );
+
+    // 3. Define YAML
+    let yaml = r#"
+    yaml_test_route:
+      input:
+        middlewares:
+          - my_yaml_middleware:
+              active: true
+        my_yaml_endpoint:
+          content: "yaml_msg"
+      output:
+        my_yaml_endpoint: {}
+    "#;
+
+    // 4. Parse YAML
+    let config: Config = serde_yaml_ng::from_str(yaml).expect("Failed to parse YAML");
+    let route = config.get("yaml_test_route").expect("Route not found").clone();
+
+    // 5. Verify Deserialization
+    if let EndpointType::Custom { name, config } = &route.input.endpoint_type {
+        assert_eq!(name, "my_yaml_endpoint");
+        assert_eq!(config["content"], "yaml_msg");
+    } else {
+        panic!("Input endpoint should be Custom");
+    }
+
+    if let Middleware::Custom { name, config } = &route.input.middlewares[0] {
+        assert_eq!(name, "my_yaml_middleware");
+        assert_eq!(config["active"], true);
+    } else {
+        panic!("Input middleware should be Custom");
+    }
+
+    // 6. Run Route to verify factory resolution
+    let handle = tokio::spawn(async move { route.run_until_err("yaml_test", None, None).await });
+
+    // Give it a moment to initialize and process one message
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    // Check if middleware ran
+    assert!(
+        mw_flag.load(Ordering::SeqCst),
+        "Middleware should have been executed"
+    );
+
+    handle.abort();
 }

@@ -11,7 +11,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use crate::{
     endpoints::memory::{get_or_create_channel, MemoryChannel},
-    traits::{CustomEndpointFactory, CustomMiddlewareFactory, Handler},
+    traits::Handler,
 };
 
 /// The top-level configuration is a map of named routes.
@@ -203,9 +203,29 @@ impl<'de> Deserialize<'de> for Endpoint {
                 }
 
                 // Deserialize the rest of the map into the flattened EndpointType.
-                let endpoint_type: EndpointType =
-                    serde_json::from_value(serde_json::Value::Object(temp_map))
-                        .map_err(serde::de::Error::custom)?;
+                let temp_val = serde_json::Value::Object(temp_map);
+                let endpoint_type: EndpointType = match serde_json::from_value(temp_val.clone()) {
+                    Ok(et) => et,
+                    Err(_) => {
+                        if let serde_json::Value::Object(map) = &temp_val {
+                            if map.len() == 1 {
+                                let (name, config) = map.iter().next().unwrap();
+                                EndpointType::Custom {
+                                    name: name.clone(),
+                                    config: config.clone(),
+                                }
+                            } else if map.is_empty() {
+                                EndpointType::Null
+                            } else {
+                                return Err(serde::de::Error::custom(
+                                    "Invalid endpoint configuration: multiple keys found or unknown endpoint type",
+                                ));
+                            }
+                        } else {
+                            return Err(serde::de::Error::custom("Invalid endpoint configuration"));
+                        }
+                    }
+                };
 
                 // Deserialize the extracted middlewares value using the existing helper logic.
                 let middlewares = match middlewares_val {
@@ -279,8 +299,8 @@ impl Endpoint {
 ///
 /// This logic was extracted from `deserialize_middlewares_from_map_or_seq` to be reused by the custom `Endpoint` deserializer.
 fn deserialize_middlewares_from_value(value: serde_json::Value) -> anyhow::Result<Vec<Middleware>> {
-    Ok(match value {
-        serde_json::Value::Array(arr) => serde_json::from_value(serde_json::Value::Array(arr))?,
+    let arr = match value {
+        serde_json::Value::Array(arr) => arr,
         serde_json::Value::Object(map) => {
             let mut middlewares: Vec<_> = map
                 .into_iter()
@@ -290,11 +310,30 @@ fn deserialize_middlewares_from_value(value: serde_json::Value) -> anyhow::Resul
                 .collect();
             middlewares.sort_by_key(|(index, _)| *index);
 
-            let sorted_values = middlewares.into_iter().map(|(_, value)| value).collect();
-            serde_json::from_value(serde_json::Value::Array(sorted_values))?
+            middlewares.into_iter().map(|(_, value)| value).collect()
         }
         _ => return Err(anyhow::anyhow!("Expected an array or object")),
-    })
+    };
+
+    let mut middlewares = Vec::new();
+    for item in arr {
+        if let Ok(m) = serde_json::from_value::<Middleware>(item.clone()) {
+            middlewares.push(m);
+        } else if let serde_json::Value::Object(map) = &item {
+            if map.len() == 1 {
+                let (name, config) = map.iter().next().unwrap();
+                middlewares.push(Middleware::Custom {
+                    name: name.clone(),
+                    config: config.clone(),
+                });
+            } else {
+                return Err(anyhow::anyhow!("Invalid middleware configuration: {:?}", item));
+            }
+        } else {
+            return Err(anyhow::anyhow!("Invalid middleware configuration: {:?}", item));
+        }
+    }
+    Ok(middlewares)
 }
 
 /// An enumeration of all supported endpoint types.
@@ -337,8 +376,10 @@ pub enum EndpointType {
     Fanout(Vec<Endpoint>),
     Switch(SwitchConfig),
     Response(ResponseConfig),
-    #[serde(skip)]
-    Custom(Arc<dyn CustomEndpointFactory>),
+    Custom {
+        name: String,
+        config: serde_json::Value,
+    },
     #[default]
     Null,
 }
@@ -361,7 +402,7 @@ impl EndpointType {
             EndpointType::Fanout(_) => "fanout",
             EndpointType::Switch(_) => "switch",
             EndpointType::Response(_) => "response",
-            EndpointType::Custom(_) => "custom",
+            EndpointType::Custom { .. } => "custom",
             EndpointType::Null => "null",
         }
     }
@@ -375,7 +416,7 @@ impl EndpointType {
                 | EndpointType::Fanout(_)
                 | EndpointType::Switch(_)
                 | EndpointType::Response(_)
-                | EndpointType::Custom(_)
+                | EndpointType::Custom { .. }
                 | EndpointType::Null
         )
     }
@@ -393,8 +434,10 @@ pub enum Middleware {
     Retry(RetryMiddleware),
     RandomPanic(RandomPanicMiddleware),
     Delay(DelayMiddleware),
-    #[serde(skip)]
-    Custom(Arc<dyn CustomMiddlewareFactory>),
+    Custom {
+        name: String,
+        config: serde_json::Value,
+    },
 }
 
 /// Deduplication middleware configuration.
@@ -1009,7 +1052,7 @@ kafka_to_nats:
                 Middleware::Metrics(_) => {
                     has_metrics = true;
                 }
-                Middleware::Custom(_) => {}
+                Middleware::Custom { .. } => {}
                 Middleware::Dlq(dlq) => {
                     assert!(dlq.endpoint.middlewares.is_empty());
                     if let EndpointType::Nats(nats_cfg) = &dlq.endpoint.endpoint_type {
