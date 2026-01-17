@@ -29,7 +29,7 @@ async fn test_kafka_request_reply() {
         let reply_topic = "test_req_rep_reply_topic";
 
         let config = mq_bridge::models::KafkaConfig {
-            brokers: "localhost:9092".to_string(),
+            url: "localhost:9092".to_string(),
             group_id: Some("req_rep_group".to_string()),
             producer_options: Some(vec![("acks".to_string(), "1".to_string())]),
             ..Default::default()

@@ -275,14 +275,14 @@ async fn handle_request(
 fn make_response(message: Option<CanonicalMessage>) -> HttpResponse {
     match message {
         Some(msg) => {
-            let content_type = msg
-                .metadata
-                .get("content-type")
-                .map(|s| s.as_str())
-                .unwrap_or("application/octet-stream");
-            HttpResponse::Ok()
-                .content_type(content_type)
-                .body(msg.payload)
+            let mut builder = HttpResponse::Ok();
+            for (key, value) in &msg.metadata {
+                builder.insert_header((key.as_str(), value.as_str()));
+            }
+            if !msg.metadata.contains_key("content-type") {
+                builder.content_type("application/octet-stream");
+            }
+            builder.body(msg.payload)
         }
         None => HttpResponse::Accepted().body("Message processed"),
     }

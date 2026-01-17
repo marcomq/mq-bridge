@@ -1,6 +1,6 @@
 [package]
 name = "mq-bridge"
-version = "0.1.7"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.70"  # 2021 edition was released in 1.56
 description = "An asynchronous message bridging library connecting Kafka, MQTT, AMQP, NATS, MongoDB, HTTP, and more."

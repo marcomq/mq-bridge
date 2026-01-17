@@ -85,7 +85,7 @@ pub async fn test_kafka_performance_direct() {
     run_test_with_docker("tests/integration/docker-compose/kafka.yml", || async {
         let topic = "perf_test_kafka_direct";
         let config = mq_bridge::models::KafkaConfig {
-            brokers: "localhost:9092".to_string(),
+            url: "localhost:9092".to_string(),
             group_id: Some("perf_test_group_kafka".to_string()),
             producer_options: Some(vec![
                 ("queue.buffering.max.ms".to_string(), "50".to_string()), // Linger for 50ms to batch messages

@@ -35,7 +35,7 @@ use crate::{
 ///       - metrics: {}
 ///     kafka:
 ///       topic: "input-topic"
-///       brokers: "localhost:9092"
+///       url: "localhost:9092"
 ///       group_id: "my-consumer-group"
 ///   output:
 ///     nats:
@@ -548,10 +548,8 @@ pub struct KafkaEndpoint {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct KafkaConfig {
-    // pub url: String // use "pub brokers: String" here.
-    /// Comma-separated list of Kafka broker URLs. Can also be specified using the alias 'url'.
-    #[serde(alias = "url")]
-    pub brokers: String,
+    /// Comma-separated list of Kafka broker URLs.
+    pub url: String,
     /// Optional username for SASL authentication.
     pub username: Option<String>,
     /// Optional password for SASL authentication.
@@ -971,7 +969,7 @@ kafka_to_nats:
               url: "nats://localhost:4222"
     kafka:
       topic: "input-topic"
-      brokers: "localhost:9092"
+      url: "localhost:9092"
       group_id: "my-consumer-group"
       tls:
         required: true
@@ -1038,7 +1036,7 @@ kafka_to_nats:
 
         if let EndpointType::Kafka(kafka) = &input.endpoint_type {
             assert_eq!(kafka.topic, Some("input-topic".to_string()));
-            assert_eq!(kafka.config.brokers, "localhost:9092");
+            assert_eq!(kafka.config.url, "localhost:9092");
             assert_eq!(kafka.config.group_id, Some("my-consumer-group".to_string()));
             let tls = &kafka.config.tls;
             assert!(tls.required);
@@ -1083,7 +1081,7 @@ kafka_to_nats:
             std::env::set_var("MQB__KAFKA_TO_NATS__CONCURRENCY", "10");
             std::env::set_var("MQB__KAFKA_TO_NATS__INPUT__KAFKA__TOPIC", "input-topic");
             std::env::set_var(
-                "MQB__KAFKA_TO_NATS__INPUT__KAFKA__BROKERS",
+                "MQB__KAFKA_TO_NATS__INPUT__KAFKA__URL",
                 "localhost:9092",
             );
             std::env::set_var(
