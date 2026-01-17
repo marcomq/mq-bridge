@@ -20,14 +20,13 @@ use tokio::{
 };
 use tracing::{debug, error, info, warn};
 
-static ROUTE_REGISTRY: OnceLock<RwLock<HashMap<String, Route>>> = OnceLock::new();
-
 #[derive(Debug)]
 pub struct RouteHandle((JoinHandle<()>, Sender<()>));
 
 impl RouteHandle {
     pub async fn stop(&self) {
         let _ = self.0 .1.send(()).await;
+        self.0 .1.close();
     }
 
     pub async fn join(self) -> Result<(), tokio::task::JoinError> {
@@ -40,6 +39,13 @@ impl From<(JoinHandle<()>, Sender<()>)> for RouteHandle {
         RouteHandle(tuple)
     }
 }
+
+struct ActiveRoute {
+    route: Route,
+    handle: RouteHandle,
+}
+
+static ROUTE_REGISTRY: OnceLock<RwLock<HashMap<String, ActiveRoute>>> = OnceLock::new();
 
 impl Route {
     /// Creates a new route with default concurrency (1) and batch size (128).
@@ -55,28 +61,64 @@ impl Route {
         }
     }
 
-    /// Registers this route globally with a given name.
-    ///
+    /// Retrieves a registered (and running) route by name.
+    pub fn get(name: &str) -> Option<Self> {
+        let registry = ROUTE_REGISTRY.get_or_init(|| RwLock::new(HashMap::new()));
+        let map = registry.read().expect("Route registry lock poisoned");
+        map.get(name).map(|active| active.route.clone())
+    }
+
+    /// Returns a list of all registered route names.
+    pub fn list() -> Vec<String> {
+        let registry = ROUTE_REGISTRY.get_or_init(|| RwLock::new(HashMap::new()));
+        let map = registry.read().expect("Route registry lock poisoned");
+        map.keys().cloned().collect()
+    }
+
+    /// Registers the route and starts it.
+    /// If a route with the same name is already running, it will be stopped first.
+    ///    
     /// # Examples
-    ///
     /// ```
     /// use mq_bridge::{Route, models::Endpoint};
     ///
     /// let route = Route::new(Endpoint::new_memory("in", 10), Endpoint::new_memory("out", 10));
-    /// route.register("global_route");
+    /// # tokio::runtime::Runtime::new().unwrap().block_on(async {
+    /// route.deploy("global_route").await.unwrap();
     /// assert!(Route::get("global_route").is_some());
+    /// # });
     /// ```
-    pub fn register(&self, name: &str) {
+    pub async fn deploy(&self, name: &str) -> anyhow::Result<()> {
+        Self::stop(name).await;
+
+        let (join, tx) = self.run(name)?;
+        let handle = RouteHandle((join, tx));
+        let active = ActiveRoute {
+            route: self.clone(),
+            handle,
+        };
+
         let registry = ROUTE_REGISTRY.get_or_init(|| RwLock::new(HashMap::new()));
         let mut map = registry.write().expect("Route registry lock poisoned");
-        map.insert(name.to_string(), self.clone());
+        map.insert(name.to_string(), active);
+        Ok(())
     }
 
-    /// Retrieves a registered route by name.
-    pub fn get(name: &str) -> Option<Self> {
+    /// Stops a running route by name and removes it from the registry.
+    pub async fn stop(name: &str) -> bool {
         let registry = ROUTE_REGISTRY.get_or_init(|| RwLock::new(HashMap::new()));
-        let map = registry.read().expect("Route registry lock poisoned");
-        map.get(name).cloned()
+        let active_opt = {
+            let mut map = registry.write().expect("Route registry lock poisoned");
+            map.remove(name)
+        };
+
+        if let Some(active) = active_opt {
+            active.handle.stop().await;
+            let _ = active.handle.join().await;
+            true
+        } else {
+            false
+        }
     }
 
     /// Creates a new Publisher configured for this route's output.
@@ -98,9 +140,13 @@ impl Route {
     }
 
     /// Validates the route configuration, checking if endpoints are supported and correctly configured.
-    pub fn check(&self, name: &str) -> anyhow::Result<()> {
-        crate::endpoints::check_consumer(name, &self.input)?;
-        crate::endpoints::check_publisher(name, &self.output)?;
+    /// Core types like file, memory, and response are always supported.
+    /// # Arguments
+    /// * `name` - The name of the route
+    /// * `allowed_endpoints` - An optional list of allowed endpoint types
+    pub fn check(&self, name: &str, allowed_endpoints: Option<&[&str]>) -> anyhow::Result<()> {
+        crate::endpoints::check_consumer(name, &self.input, allowed_endpoints)?;
+        crate::endpoints::check_publisher(name, &self.output, allowed_endpoints)?;
         Ok(())
     }
 
@@ -137,7 +183,7 @@ impl Route {
     /// # }
     /// ```
     pub fn run(&self, name_str: &str) -> anyhow::Result<(JoinHandle<()>, Sender<()>)> {
-        self.check(name_str)?;
+        self.check(name_str, None)?;
         let (shutdown_tx, shutdown_rx) = bounded(1);
         let (ready_tx, ready_rx) = bounded(1);
         // Use `Arc` so route/name clones are cheap (pointer copy) in the reconnect loop.

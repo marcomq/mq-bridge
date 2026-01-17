@@ -36,12 +36,28 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 /// Validates the consumer configuration for a route.
-pub fn check_consumer(route_name: &str, endpoint: &Endpoint) -> Result<()> {
+pub fn check_consumer(
+    route_name: &str,
+    endpoint: &Endpoint,
+    allowed_types: Option<&[&str]>,
+) -> Result<()> {
     if endpoint.handler.is_some() {
         tracing::warn!(
             route = route_name,
             "Endpoint 'handler' is set on an input endpoint. Handlers are currently only supported on output endpoints (publishers) and will be ignored here."
         );
+    }
+    if let Some(allowed) = allowed_types {
+        if !endpoint.endpoint_type.is_core() {
+            let name = endpoint.endpoint_type.name();
+            if !allowed.contains(&name) {
+                return Err(anyhow!(
+                    "[route:{}] Endpoint type '{}' is not allowed by policy",
+                    route_name,
+                    name
+                ));
+            }
+        }
     }
     match &endpoint.endpoint_type {
         #[cfg(feature = "aws")]
@@ -87,10 +103,18 @@ pub fn check_consumer(route_name: &str, endpoint: &Endpoint) -> Result<()> {
             route_name
         )),
         #[allow(unreachable_patterns)]
-        _ => Err(anyhow!(
-            "[route:{}] Unsupported consumer endpoint type",
-            route_name
-        )),
+        _ => {
+            if let Some(allowed) = allowed_types {
+                let name = endpoint.endpoint_type.name();
+                if allowed.contains(&name) {
+                    return Ok(());
+                }
+            }
+            Err(anyhow!(
+                "[route:{}] Unsupported consumer endpoint type",
+                route_name
+            ))
+        }
     }
 }
 
@@ -99,7 +123,7 @@ pub async fn create_consumer_from_route(
     route_name: &str,
     endpoint: &Endpoint,
 ) -> Result<Box<dyn MessageConsumer>> {
-    check_consumer(route_name, endpoint)?;
+    check_consumer(route_name, endpoint, None)?;
     let consumer = create_base_consumer(route_name, endpoint).await?;
     apply_middlewares_to_consumer(consumer, endpoint, route_name).await
 }
@@ -256,17 +280,38 @@ async fn create_base_consumer(
 }
 
 /// Validates the publisher configuration for a route.
-pub fn check_publisher(route_name: &str, endpoint: &Endpoint) -> Result<()> {
+pub fn check_publisher(
+    route_name: &str,
+    endpoint: &Endpoint,
+    allowed_types: Option<&[&str]>,
+) -> Result<()> {
     if endpoint.mode == crate::models::ConsumerMode::Subscribe {
         tracing::warn!(
             route = route_name,
             "Endpoint 'mode' is set to 'subscribe' on an output endpoint. This is likely a configuration error as 'mode' only applies to inputs."
         );
     }
-    check_publisher_recursive(route_name, endpoint, 0)
+    check_publisher_recursive(route_name, endpoint, 0, allowed_types)
 }
 
-fn check_publisher_recursive(route_name: &str, endpoint: &Endpoint, depth: usize) -> Result<()> {
+fn check_publisher_recursive(
+    route_name: &str,
+    endpoint: &Endpoint,
+    depth: usize,
+    allowed_types: Option<&[&str]>,
+) -> Result<()> {
+    if let Some(allowed) = allowed_types {
+        if !endpoint.endpoint_type.is_core() {
+            let name = endpoint.endpoint_type.name();
+            if !allowed.contains(&name) {
+                return Err(anyhow!(
+                    "[route:{}] Endpoint type '{}' is not allowed by policy",
+                    route_name,
+                    name
+                ));
+            }
+        }
+    }
     const MAX_DEPTH: usize = 16;
     if depth > MAX_DEPTH {
         return Err(anyhow!(
@@ -306,26 +351,34 @@ fn check_publisher_recursive(route_name: &str, endpoint: &Endpoint, depth: usize
         EndpointType::Null => Ok(()),
         EndpointType::Fanout(endpoints) => {
             for endpoint in endpoints {
-                check_publisher_recursive(route_name, endpoint, depth + 1)?;
+                check_publisher_recursive(route_name, endpoint, depth + 1, allowed_types)?;
             }
             Ok(())
         }
         EndpointType::Switch(cfg) => {
             for endpoint in cfg.cases.values() {
-                check_publisher_recursive(route_name, endpoint, depth + 1)?;
+                check_publisher_recursive(route_name, endpoint, depth + 1, allowed_types)?;
             }
             if let Some(endpoint) = &cfg.default {
-                check_publisher_recursive(route_name, endpoint, depth + 1)?;
+                check_publisher_recursive(route_name, endpoint, depth + 1, allowed_types)?;
             }
             Ok(())
         }
         EndpointType::Response(_) => Ok(()),
         EndpointType::Custom(_) => Ok(()),
         #[allow(unreachable_patterns)]
-        _ => Err(anyhow!(
-            "[route:{}] Unsupported publisher endpoint type",
-            route_name
-        )),
+        _ => {
+            if let Some(allowed) = allowed_types {
+                let name = endpoint.endpoint_type.name();
+                if allowed.contains(&name) {
+                    return Ok(());
+                }
+            }
+            Err(anyhow!(
+                "[route:{}] Unsupported publisher endpoint type",
+                route_name
+            ))
+        }
     }
 }
 
@@ -334,7 +387,7 @@ pub async fn create_publisher_from_route(
     route_name: &str,
     endpoint: &Endpoint,
 ) -> Result<Arc<dyn MessagePublisher>> {
-    check_publisher(route_name, endpoint)?;
+    check_publisher(route_name, endpoint, None)?;
     create_publisher_with_depth(route_name, endpoint, 0).await
 }
 

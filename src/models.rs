@@ -343,6 +343,44 @@ pub enum EndpointType {
     Null,
 }
 
+impl EndpointType {
+    pub fn name(&self) -> &'static str {
+        match self {
+            EndpointType::Aws(_) => "aws",
+            EndpointType::Kafka(_) => "kafka",
+            EndpointType::Nats(_) => "nats",
+            EndpointType::File(_) => "file",
+            EndpointType::Static(_) => "static",
+            EndpointType::Memory(_) => "memory",
+            EndpointType::Amqp(_) => "amqp",
+            EndpointType::MongoDb(_) => "mongodb",
+            EndpointType::Mqtt(_) => "mqtt",
+            EndpointType::IbmMq(_) => "ibm_mq",
+            EndpointType::Http(_) => "http",
+            EndpointType::ZeroMq(_) => "zeromq",
+            EndpointType::Fanout(_) => "fanout",
+            EndpointType::Switch(_) => "switch",
+            EndpointType::Response(_) => "response",
+            EndpointType::Custom(_) => "custom",
+            EndpointType::Null => "null",
+        }
+    }
+
+    pub fn is_core(&self) -> bool {
+        matches!(
+            self,
+            EndpointType::File(_)
+                | EndpointType::Static(_)
+                | EndpointType::Memory(_)
+                | EndpointType::Fanout(_)
+                | EndpointType::Switch(_)
+                | EndpointType::Response(_)
+                | EndpointType::Custom(_)
+                | EndpointType::Null
+        )
+    }
+}
+
 /// An enumeration of all supported middleware types.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]

@@ -39,10 +39,10 @@ impl Publisher {
     }
 
     /// Registers this publisher globally with a given name.
-    pub fn register(&self, name: &str) {
+    pub fn register(&self, name: &str) -> Option<Self> {
         let registry = PUBLISHER_REGISTRY.get_or_init(|| RwLock::new(HashMap::new()));
         let mut map = registry.write().expect("Publisher registry lock poisoned");
-        map.insert(name.to_string(), self.clone());
+        map.insert(name.to_string(), self.clone())
     }
 
     /// Retrieves a registered publisher by name.
@@ -50,6 +50,13 @@ impl Publisher {
         let registry = PUBLISHER_REGISTRY.get_or_init(|| RwLock::new(HashMap::new()));
         let map = registry.read().expect("Publisher registry lock poisoned");
         map.get(name).cloned()
+    }
+
+    /// Removes a registered publisher by name.
+    pub fn unregister(name: &str) -> Option<Self> {
+        let registry = PUBLISHER_REGISTRY.get_or_init(|| RwLock::new(HashMap::new()));
+        let mut map = registry.write().expect("Publisher registry lock poisoned");
+        map.remove(name)
     }
 }
 
