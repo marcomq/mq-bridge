@@ -884,8 +884,6 @@ pub struct HttpConfig {
     /// TLS configuration.
     #[serde(default)]
     pub tls: TlsConfig,
-    /// (Consumer only) Optional endpoint to send the response to.
-    pub response_out: Option<Box<Endpoint>>,
     /// (Consumer only) Number of worker threads to use. Defaults to 0 for unlimited.
     pub workers: Option<usize>,
     /// (Consumer only) Header key to extract the message ID from. Defaults to "message-id".
@@ -1080,10 +1078,7 @@ kafka_to_nats:
         unsafe {
             std::env::set_var("MQB__KAFKA_TO_NATS__CONCURRENCY", "10");
             std::env::set_var("MQB__KAFKA_TO_NATS__INPUT__KAFKA__TOPIC", "input-topic");
-            std::env::set_var(
-                "MQB__KAFKA_TO_NATS__INPUT__KAFKA__URL",
-                "localhost:9092",
-            );
+            std::env::set_var("MQB__KAFKA_TO_NATS__INPUT__KAFKA__URL", "localhost:9092");
             std::env::set_var(
                 "MQB__KAFKA_TO_NATS__INPUT__KAFKA__GROUP_ID",
                 "my-consumer-group",

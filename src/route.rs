@@ -241,9 +241,7 @@ impl Route {
         });
 
         match tokio::time::timeout(std::time::Duration::from_secs(5), ready_rx.recv()).await {
-            Ok(Ok(_)) => {
-                Ok(RouteHandle((handle, shutdown_tx)))
-            }
+            Ok(Ok(_)) => Ok(RouteHandle((handle, shutdown_tx))),
             _ => {
                 handle.abort();
                 Err(anyhow::anyhow!(

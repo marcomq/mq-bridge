@@ -46,7 +46,10 @@ async fn test_route_with_typed_handler_success() {
         .unwrap()
         .with_type_key("my_message");
 
-    route.deploy("test_route_with_typed_handler_success").await.unwrap();
+    route
+        .deploy("test_route_with_typed_handler_success")
+        .await
+        .unwrap();
 
     in_channel.send_message(canonical_message).await.unwrap();
     let start = std::time::Instant::now();
@@ -170,7 +173,10 @@ async fn test_retryable_error_with_middleware_succeeds() {
         .unwrap()
         .with_type_key("my_message");
 
-    route.deploy("test_retryable_error_with_middleware_succeeds").await.unwrap();
+    route
+        .deploy("test_retryable_error_with_middleware_succeeds")
+        .await
+        .unwrap();
 
     in_channel.send_message(canonical_message).await.unwrap();
     let start = std::time::Instant::now();
@@ -355,7 +361,10 @@ async fn test_delay_middleware_in_route() {
 
     let start = Instant::now();
 
-    route.deploy("test_delay_middleware_in_route").await.unwrap();
+    route
+        .deploy("test_delay_middleware_in_route")
+        .await
+        .unwrap();
 
     // Wait for 3 messages.
     // 1st message: delay 100ms -> receive -> send.

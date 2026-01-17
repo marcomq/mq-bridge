@@ -3,7 +3,6 @@
 //  Licensed under MIT License, see License file for more details
 //  git clone https://github.com/marcomq/mq-bridge
 
-use crate::endpoints::create_publisher_from_route;
 use crate::models::HttpConfig;
 #[cfg(feature = "actix-web")]
 use crate::traits::CommitFunc;
@@ -21,7 +20,6 @@ use std::any::Any;
 use std::collections::HashMap;
 #[cfg(feature = "actix-web")]
 use std::net::SocketAddr;
-use std::sync::Arc;
 use tracing::{info, trace};
 use uuid::Uuid;
 
@@ -40,7 +38,6 @@ pub struct HttpConsumer {
 #[derive(Clone)]
 struct HttpConsumerState {
     tx: tokio::sync::mpsc::Sender<HttpSourceMessage>,
-    response_sink: Option<Arc<dyn MessagePublisher>>,
     message_id_header: String,
 }
 
@@ -50,19 +47,12 @@ impl HttpConsumer {
         let (request_tx, request_rx) = tokio::sync::mpsc::channel::<HttpSourceMessage>(100);
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(());
 
-        let response_sink = if let Some(endpoint) = &config.response_out {
-            Some(create_publisher_from_route("http_response_sink", endpoint).await?)
-        } else {
-            None
-        };
-
         let message_id_header = config
             .message_id_header
             .clone()
             .unwrap_or_else(|| "message-id".to_string());
         let state = HttpConsumerState {
             tx: request_tx,
-            response_sink,
             message_id_header,
         };
 
@@ -244,22 +234,7 @@ async fn handle_request(
         match ack_rx.await {
             Ok(pipeline_response) => {
                 // Pipeline processed the message.
-                // If a response sink is configured, use it to generate the response.
-                if let Some(sink) = &state.response_sink {
-                    if let Some(resp) = pipeline_response {
-                        match sink.send(resp).await {
-                            Ok(Sent::Response(sink_response)) => make_response(Some(sink_response)),
-                            Ok(Sent::Ack) => make_response(None),
-                            Err(e) => HttpResponse::InternalServerError()
-                                .body(format!("Response sink error: {}", e)),
-                        }
-                    } else {
-                        make_response(None)
-                    }
-                } else {
-                    // No sink configured, use the pipeline response (if any)
-                    make_response(pipeline_response)
-                }
+                make_response(pipeline_response)
             }
             Err(_) => HttpResponse::InternalServerError().body("Pipeline closed"),
         }
@@ -294,7 +269,6 @@ fn make_response(message: Option<CanonicalMessage>) -> HttpResponse {
 pub struct HttpPublisher {
     client: reqwest::Client,
     url: String,
-    response_out: Option<Arc<dyn MessagePublisher>>,
 }
 
 #[cfg(feature = "reqwest")]
@@ -311,16 +285,9 @@ impl HttpPublisher {
             client_builder = client_builder.identity(identity);
         }
 
-        let response_sink = if let Some(endpoint) = &config.response_out {
-            Some(Box::pin(create_publisher_from_route("http_response_sink", endpoint)).await?)
-        } else {
-            None
-        };
-
         Ok(Self {
             client: client_builder.build()?,
             url: config.url.clone().unwrap_or_default(),
-            response_out: response_sink,
         })
     }
 
@@ -328,7 +295,6 @@ impl HttpPublisher {
         Self {
             client: self.client.clone(),
             url: url.to_string(),
-            response_out: self.response_out.clone(),
         }
     }
 }
@@ -377,20 +343,9 @@ impl MessagePublisher for HttpPublisher {
         }
 
         // If a response sink is configured, wrap the response in a CanonicalMessage
-        if let Some(sink) = &self.response_out {
-            let mut response_message =
-                CanonicalMessage::new(response_bytes, Some(message.message_id));
-            if !response_metadata.is_empty() {
-                response_message.metadata = response_metadata;
-            }
-            sink.send(response_message).await?;
-            Ok(Sent::Ack)
-        } else {
-            let mut response_message =
-                CanonicalMessage::new(response_bytes, Some(message.message_id));
-            response_message.metadata = response_metadata;
-            Ok(Sent::Response(response_message))
-        }
+        let mut response_message = CanonicalMessage::new(response_bytes, Some(message.message_id));
+        response_message.metadata = response_metadata;
+        Ok(Sent::Response(response_message))
     }
 
     async fn send_batch(
@@ -445,6 +400,7 @@ impl MessagePublisher for HttpPublisher {
 #[cfg(all(feature = "actix-web", feature = "reqwest"))]
 mod tests {
     use super::*;
+    use crate::endpoints::create_publisher_from_route;
     use crate::models::{Config, EndpointType};
     use crate::CanonicalMessage;
     use std::time::Duration;
@@ -462,9 +418,6 @@ http_route:
   input:
     http:
       url: "127.0.0.1:8080"
-      response_out:
-        memory:
-          topic: "response_topic"
   output:
     http:
       url: "http://localhost:9090"
@@ -475,13 +428,6 @@ http_route:
         match &route.input.endpoint_type {
             EndpointType::Http(cfg) => {
                 assert_eq!(cfg.config.url, Some("127.0.0.1:8080".to_string()));
-                assert!(cfg.config.response_out.is_some());
-                if let Some(sink) = &cfg.config.response_out {
-                    match &sink.endpoint_type {
-                        EndpointType::Memory(mem) => assert_eq!(mem.topic, "response_topic"),
-                        _ => panic!("Expected memory endpoint for sink"),
-                    }
-                }
             }
             _ => panic!("Expected HTTP input"),
         }
@@ -542,55 +488,6 @@ http_route:
             _ => panic!("Expected response"),
         };
         assert_eq!(response.payload, b"response_payload".to_vec());
-    }
-
-    #[tokio::test]
-    async fn test_http_request_reply_with_sink() {
-        let port = get_free_port();
-        let addr = format!("127.0.0.1:{}", port);
-        let url = format!("http://{}", addr);
-
-        let sink_endpoint = crate::models::Endpoint::new_memory("reply_sink", 10);
-        let channel = sink_endpoint.channel().unwrap();
-
-        let config = HttpConfig {
-            url: Some(addr.clone()),
-            response_out: Some(Box::new(sink_endpoint)),
-            ..Default::default()
-        };
-        let mut consumer = HttpConsumer::new(&config)
-            .await
-            .expect("Failed to create consumer");
-
-        let pub_config = HttpConfig {
-            url: Some(url.clone()),
-            ..Default::default()
-        };
-        let publisher = HttpPublisher::new(&pub_config)
-            .await
-            .expect("Failed to create publisher");
-
-        tokio::spawn(async move {
-            loop {
-                if let Ok(received) = consumer.receive().await {
-                    let response_msg = CanonicalMessage::new(b"server_reply".to_vec(), None);
-                    let _ = (received.commit)(Some(response_msg)).await;
-                }
-            }
-        });
-
-        let msg = CanonicalMessage::new(b"request".to_vec(), None);
-        publisher.send(msg).await.expect("Failed to send");
-
-        let mut attempts = 0;
-        while channel.is_empty() && attempts < 20 {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            attempts += 1;
-        }
-
-        let responses = channel.drain_messages();
-        assert_eq!(responses.len(), 1);
-        assert_eq!(responses[0].payload.to_vec(), b"server_reply".to_vec());
     }
 
     #[tokio::test]
@@ -703,5 +600,56 @@ http_route:
 
         assert_eq!(resp.status(), reqwest::StatusCode::OK);
         assert_eq!(resp.text().await.unwrap(), "echo_test");
+    }
+
+    #[tokio::test]
+    async fn test_http_request_reply_with_handler() {
+        use crate::traits::Handled;
+
+        let port = get_free_port();
+        let addr = format!("127.0.0.1:{}", port);
+        let http_config = HttpConfig {
+            url: Some(addr.clone()),
+            ..Default::default()
+        };
+        let mut consumer = HttpConsumer::new(&http_config).await.unwrap();
+
+        let mut response_endpoint =
+            crate::models::Endpoint::new(EndpointType::Response(crate::models::ResponseConfig {}));
+
+        let handler = |mut msg: CanonicalMessage| async move {
+            let original = String::from_utf8_lossy(&msg.payload).to_string();
+            msg.payload = format!("handled: {}", original).into();
+            Ok(Handled::Publish(msg))
+        };
+        response_endpoint.handler = Some(std::sync::Arc::new(handler));
+
+        let publisher = create_publisher_from_route("test_response_handler", &response_endpoint)
+            .await
+            .unwrap();
+
+        tokio::spawn(async move {
+            loop {
+                if let Ok(received) = consumer.receive().await {
+                    let outcome = publisher.send(received.message).await.unwrap();
+                    let resp = match outcome {
+                        Sent::Response(msg) => Some(msg),
+                        Sent::Ack => None,
+                    };
+                    let _ = (received.commit)(resp).await;
+                }
+            }
+        });
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("http://{}", addr))
+            .body("input_data")
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        assert_eq!(resp.text().await.unwrap(), "handled: input_data");
     }
 }
