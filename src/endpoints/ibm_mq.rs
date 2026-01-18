@@ -388,7 +388,7 @@ async fn spawn_consumer_thread(
                                     Box::pin(async move {
                                         let (reply_tx, reply_rx) = oneshot::channel();
                                         let should_backout =
-                                            failed.map_or(false, |msgs| !msgs.is_empty());
+                                            failed.is_some_and(|msgs| !msgs.is_empty());
                                         let job = if !should_backout {
                                             ConsumerJob::Commit { reply_tx }
                                         } else {
