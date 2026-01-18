@@ -84,7 +84,7 @@ schemars = { version = "1.2", optional = true }
 serde_yaml_ng = { version = "0.10", optional = true }
 
 [features]
-default = ["ibm-mq"]
+default = []
 middleware = ["metrics", "dedup", "panic"]
 full = ["middleware", "mongodb", "kafka", "amqp", "nats", "mqtt", "http", "aws", "zeromq"]
 
