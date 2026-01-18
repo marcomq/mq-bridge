@@ -4,9 +4,9 @@
 //  git clone https://github.com/marcomq/mq-bridge
 
 use crate::models::{Endpoint, Middleware};
+use crate::route::get_middleware_factory;
 use crate::traits::{MessageConsumer, MessagePublisher};
 use anyhow::Result;
-use crate::route::get_middleware_factory;
 use std::sync::Arc;
 
 #[cfg(feature = "dedup")]
@@ -55,8 +55,9 @@ pub async fn apply_middlewares_to_consumer(
             #[cfg(feature = "panic")]
             Middleware::RandomPanic(cfg) => Box::new(RandomPanicConsumer::new(consumer, cfg)),
             Middleware::Custom { name, config } => {
-                let factory = get_middleware_factory(name)
-                    .ok_or_else(|| anyhow::anyhow!("Custom middleware factory '{}' not found", name))?;
+                let factory = get_middleware_factory(name).ok_or_else(|| {
+                    anyhow::anyhow!("Custom middleware factory '{}' not found", name)
+                })?;
                 factory.apply_consumer(consumer, route_name, config).await?
             }
             #[allow(unreachable_patterns)]
@@ -99,9 +100,12 @@ pub async fn apply_middlewares_to_publisher(
             #[cfg(feature = "panic")]
             Middleware::RandomPanic(cfg) => Box::new(RandomPanicPublisher::new(publisher, cfg)),
             Middleware::Custom { name, config } => {
-                let factory = get_middleware_factory(name)
-                    .ok_or_else(|| anyhow::anyhow!("Custom middleware factory '{}' not found", name))?;
-                factory.apply_publisher(publisher, route_name, config).await?
+                let factory = get_middleware_factory(name).ok_or_else(|| {
+                    anyhow::anyhow!("Custom middleware factory '{}' not found", name)
+                })?;
+                factory
+                    .apply_publisher(publisher, route_name, config)
+                    .await?
             }
             #[allow(unreachable_patterns)]
             _ => {

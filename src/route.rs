@@ -868,11 +868,10 @@ mod tests {
         };
         register_middleware_factory("panic_factory", Arc::new(factory));
 
-        let input = Endpoint::new_memory(&in_topic, 10)
-            .add_middleware(Middleware::Custom {
-                name: "panic_factory".to_string(),
-                config: serde_json::Value::Null,
-            });
+        let input = Endpoint::new_memory(&in_topic, 10).add_middleware(Middleware::Custom {
+            name: "panic_factory".to_string(),
+            config: serde_json::Value::Null,
+        });
         let output = Endpoint::new_memory(&out_topic, 10);
 
         let route = Route::new(input.clone(), output.clone());

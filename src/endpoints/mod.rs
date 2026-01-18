@@ -79,8 +79,6 @@ pub fn check_consumer(
         EndpointType::Amqp(_) => Ok(()),
         #[cfg(feature = "mqtt")]
         EndpointType::Mqtt(_) => Ok(()),
-        #[cfg(feature = "ibm-mq")]
-        EndpointType::IbmMq(_) => Ok(()),
         #[cfg(feature = "zeromq")]
         EndpointType::ZeroMq(_) => Ok(()),
         EndpointType::File(_) => Ok(()),
@@ -196,18 +194,6 @@ async fn create_base_consumer(
             } else {
                 Ok(Box::new(
                     mqtt::MqttConsumer::new(&cfg.config, topic, route_name).await?,
-                ))
-            }
-        }
-        #[cfg(feature = "ibm-mq")]
-        EndpointType::IbmMq(cfg) => {
-            if endpoint.mode == crate::models::ConsumerMode::Subscribe {
-                Ok(Box::new(
-                    ibm_mq::create_ibm_mq_subscriber(route_name, cfg).await?,
-                ))
-            } else {
-                Ok(Box::new(
-                    ibm_mq::create_ibm_mq_consumer(route_name, cfg).await?,
                 ))
             }
         }
@@ -335,8 +321,6 @@ fn check_publisher_recursive(
         EndpointType::Amqp(_) => Ok(()),
         #[cfg(feature = "mqtt")]
         EndpointType::Mqtt(_) => Ok(()),
-        #[cfg(feature = "ibm-mq")]
-        EndpointType::IbmMq(_) => Ok(()),
         #[cfg(feature = "zeromq")]
         EndpointType::ZeroMq(_) => Ok(()),
         #[cfg(any(feature = "http-client", feature = "http-server"))]
@@ -464,10 +448,6 @@ async fn create_base_publisher(
                     as Box<dyn MessagePublisher>,
             )
         }
-        #[cfg(feature = "ibm-mq")]
-        EndpointType::IbmMq(cfg) => Ok(Box::new(
-            ibm_mq::create_ibm_mq_publisher(route_name, cfg).await?,
-        ) as Box<dyn MessagePublisher>),
         #[cfg(feature = "zeromq")]
         EndpointType::ZeroMq(cfg) => {
             Ok(Box::new(zeromq::ZeroMqPublisher::new(cfg).await?) as Box<dyn MessagePublisher>)

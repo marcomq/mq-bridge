@@ -12,6 +12,8 @@ pub mod models;
 pub mod outcomes;
 pub mod publisher;
 pub mod route;
+#[cfg(feature = "test-utils")]
+pub mod test_utils;
 pub mod traits;
 pub mod type_handler;
 

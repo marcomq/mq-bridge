@@ -39,6 +39,10 @@ sled = { version = "0.34", optional = true }
 # Panic Middleware
 rand = { version = "0.9",  optional = true }
 
+# Test Utils
+tracing-appender = { version = "0.2", optional = true }
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"], optional = true }
+
 # --- Optional Endpoint Dependencies ---
 
 # Kafka
@@ -76,6 +80,9 @@ url = { version = "2.5", optional = true }
 # Generate JSON schema
 schemars = { version = "1.2", optional = true }
 
+# test-utils
+serde_yaml_ng = { version = "0.10", optional = true }
+
 [features]
 default = []
 middleware = ["metrics", "dedup", "panic"]
@@ -85,6 +92,7 @@ full = ["middleware", "mongodb", "kafka", "amqp", "nats", "mqtt", "http", "aws",
 dedup = ["sled", "dep:rand"]
 metrics = ["dep:metrics"]
 panic = ["dep:rand"]
+test-utils = ["dep:tracing-appender", "dep:tracing-subscriber", "dep:serde_yaml_ng"]
 
 # Generate Schema file
 schema = ["dep:schemars"]
@@ -106,16 +114,32 @@ zeromq = ["dep:zeromq"]
 config = { version = "0.15" }
 serde_yaml_ng = "0.10"
 tempfile = "3.10"
-tracing-appender = "0.2"
 chrono = "0.4"
 metrics-util = "0.20"
-tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 criterion = { version = "0.8", features = ["async", "async_tokio"] }
 rand = { version = "0.9" }
+mq-bridge = { path = ".", features = ["test-utils"] }
 
 [[bench]]
 name = "performance_bench"
 harness = false
+required-features = ["test-utils"]
+
+[[test]]
+name = "integration_test"
+required-features = ["test-utils"]
+
+[[test]]
+name = "memory_test"
+required-features = ["test-utils"]
+
+[[test]]
+name = "request_reply_test"
+required-features = ["test-utils"]
+
+[[test]]
+name = "performance_pipeline"
+required-features = ["test-utils"]
 
 [target.'cfg(windows)'.dependencies.rdkafka]
 version = "0.38"
