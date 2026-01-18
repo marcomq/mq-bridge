@@ -121,6 +121,27 @@ fn default_clean_session() -> bool {
     false
 }
 
+fn is_known_endpoint_name(name: &str) -> bool {
+    matches!(
+        name,
+        "aws"
+            | "kafka"
+            | "nats"
+            | "file"
+            | "static"
+            | "memory"
+            | "amqp"
+            | "mongodb"
+            | "mqtt"
+            | "http"
+            | "ibm-mq"
+            | "zeromq"
+            | "fanout"
+            | "switch"
+            | "response"
+    )
+}
+
 /// Represents a connection point for messages, which can be a source (input) or a sink (output).
 #[derive(Serialize, Clone, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -207,10 +228,13 @@ impl<'de> Deserialize<'de> for Endpoint {
                 let temp_val = serde_json::Value::Object(temp_map);
                 let endpoint_type: EndpointType = match serde_json::from_value(temp_val.clone()) {
                     Ok(et) => et,
-                    Err(_) => {
+                    Err(original_err) => {
                         if let serde_json::Value::Object(map) = &temp_val {
                             if map.len() == 1 {
                                 let (name, config) = map.iter().next().unwrap();
+                                if is_known_endpoint_name(name) {
+                                    return Err(serde::de::Error::custom(original_err));
+                                }
                                 trace!("Falling back to Custom endpoint for key: {}", name);
                                 EndpointType::Custom {
                                     name: name.clone(),

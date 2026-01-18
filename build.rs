@@ -19,6 +19,8 @@ fn main() {
         println!("cargo:rustc-link-search=native={}", lib_path);
         // In production, you might prefer setting LD_LIBRARY_PATH instead of hardcoding rpath,
         // but rpath is convenient for containerized deployments.
-        println!("cargo:rustc-link-arg=-Wl,-rpath,{}", lib_path);
+        if cfg!(target_family = "unix") {
+            println!("cargo:rustc-link-arg=-Wl,-rpath,{}", lib_path);
+        }
     }
 }
