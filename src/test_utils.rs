@@ -1,8 +1,8 @@
 #![allow(dead_code)] // This module contains helpers used by various integration tests.
 use async_channel::{bounded, Receiver, Sender};
-use mq_bridge::traits::{BoxFuture, MessagePublisher, Received};
-use mq_bridge::traits::{ConsumerError, MessageConsumer, PublisherError, ReceivedBatch, SentBatch};
-use mq_bridge::{CanonicalMessage, Route};
+use crate::traits::{BoxFuture, MessagePublisher, Received};
+use crate::traits::{ConsumerError, MessageConsumer, PublisherError, ReceivedBatch, SentBatch};
+use crate::{CanonicalMessage, Route};
 use once_cell::sync::Lazy;
 use serde_json::json;
 use std::any::Any;
@@ -19,7 +19,7 @@ use tracing_subscriber::filter::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
-use mq_bridge::endpoints::memory::MemoryChannel;
+use crate::endpoints::memory::MemoryChannel;
 
 pub const PERF_TEST_BATCH_MESSAGE_COUNT: usize = 100_000;
 pub const PERF_TEST_SINGLE_MESSAGE_COUNT: usize = 10_000;

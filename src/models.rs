@@ -370,7 +370,6 @@ pub enum EndpointType {
     Amqp(AmqpEndpoint),
     MongoDb(MongoDbEndpoint),
     Mqtt(MqttEndpoint),
-    IbmMq(IbmMqEndpoint),
     Http(HttpEndpoint),
     ZeroMq(ZeroMqEndpoint),
     Fanout(Vec<Endpoint>),
@@ -396,7 +395,6 @@ impl EndpointType {
             EndpointType::Amqp(_) => "amqp",
             EndpointType::MongoDb(_) => "mongodb",
             EndpointType::Mqtt(_) => "mqtt",
-            EndpointType::IbmMq(_) => "ibm_mq",
             EndpointType::Http(_) => "http",
             EndpointType::ZeroMq(_) => "zeromq",
             EndpointType::Fanout(_) => "fanout",
@@ -824,43 +822,6 @@ pub enum MqttProtocol {
     #[default]
     V5,
     V3,
-}
-
-// --- IBM MQ Specific Configuration ---
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(deny_unknown_fields)]
-pub struct IbmMqEndpoint {
-    /// The IBM MQ queue name.
-    pub queue: Option<String>,
-    /// The IBM MQ topic string.
-    pub topic: Option<String>,
-    /// IBM MQ connection configuration.
-    #[serde(flatten)]
-    pub config: IbmMqConfig,
-}
-
-/// General IBM MQ connection configuration.
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(deny_unknown_fields)]
-pub struct IbmMqConfig {
-    /// Comma-separated list of IBM MQ connection names (e.g., "localhost(1414),otherhost(1414)").
-    pub connection_name: String,
-    /// The queue manager name.
-    pub queue_manager: String,
-    /// The channel name.
-    pub channel: String,
-    /// Optional username for authentication.
-    pub user: Option<String>,
-    /// Optional password for authentication.
-    pub password: Option<String>,
-    /// Cipher spec for TLS connection.
-    pub cipher_spec: Option<String>,
-    /// TLS configuration.
-    #[serde(default)]
-    pub tls: TlsConfig,
 }
 
 // --- ZeroMQ Specific Configuration ---

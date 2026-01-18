@@ -9,9 +9,9 @@ use tokio::sync::Mutex;
 
 // Include the integration module from the tests directory so we can reuse the test logic.
 #[path = "../tests/integration/mod.rs"]
-mod integration;
+mod integration; // Still needed for backend modules like kafka, nats etc.
 
-use integration::common::{
+use mq_bridge::test_utils::{
     format_pretty, measure_read_performance, measure_single_read_performance,
     measure_single_write_performance, measure_write_performance, DockerCompose, PerformanceResult,
     PERF_TEST_CONCURRENCY,

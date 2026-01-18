@@ -5,11 +5,11 @@
 
 use crate::{
     canonical_message::CanonicalMessage,
-    models::{IbmMqConfig, IbmMqEndpoint},
+    models::TlsConfig,
     outcomes::SentBatch,
-    traits::{ConsumerError, MessageConsumer, MessagePublisher, PublisherError, ReceivedBatch},
+    traits::{ConsumerError, CustomEndpointFactory, MessageConsumer, MessagePublisher, PublisherError, ReceivedBatch},
 };
-use anyhow::Context;
+use anyhow::{anyhow, Context};
 use async_trait::async_trait;
 use mqi::{
     connection::{Credentials, MqServer, ThreadNone, Tls},
@@ -21,8 +21,29 @@ use mqi::{
     MqStr, Object, Subscription, Syncpoint,
 };
 use std::thread;
+use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{info, warn};
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct IbmMqEndpoint {
+    pub queue: Option<String>,
+    pub topic: Option<String>,
+    #[serde(flatten)]
+    pub config: IbmMqConfig,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+pub struct IbmMqConfig {
+    pub connection_name: String,
+    pub queue_manager: String,
+    pub channel: String,
+    pub user: Option<String>,
+    pub password: Option<String>,
+    pub cipher_spec: Option<String>,
+    #[serde(default)]
+    pub tls: TlsConfig,
+}
 
 type BatchJob = (
     Vec<CanonicalMessage>,
@@ -501,4 +522,33 @@ pub async fn create_ibm_mq_subscriber(
         .unwrap_or(name)
         .to_string();
     Ok(IbmMqSubscriber::new(endpoint.config.clone(), topic_name).await?)
+}
+
+#[derive(Debug)]
+pub struct IbmMqFactory;
+
+#[async_trait]
+impl CustomEndpointFactory for IbmMqFactory {
+    async fn create_consumer(
+        &self,
+        route_name: &str,
+        config: &serde_json::Value,
+    ) -> anyhow::Result<Box<dyn MessageConsumer>> {
+        let endpoint: IbmMqEndpoint = serde_json::from_value(config.clone())?;
+        // Heuristic: if topic is present, assume subscriber mode
+        if endpoint.topic.is_some() {
+            Ok(Box::new(create_ibm_mq_subscriber(route_name, &endpoint).await?))
+        } else {
+            Ok(Box::new(create_ibm_mq_consumer(route_name, &endpoint).await?))
+        }
+    }
+
+    async fn create_publisher(
+        &self,
+        route_name: &str,
+        config: &serde_json::Value,
+    ) -> anyhow::Result<Box<dyn MessagePublisher>> {
+        let endpoint: IbmMqEndpoint = serde_json::from_value(config.clone())?;
+        Ok(Box::new(create_ibm_mq_publisher(route_name, &endpoint).await?) as Box<dyn MessagePublisher>)
+    }
 }
