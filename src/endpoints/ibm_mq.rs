@@ -198,6 +198,7 @@ impl IbmMqPublisher {
                                     "MQ commit failed: {}",
                                     e
                                 )));
+                                let _ = Syncpoint::new(&qm).backout();
                             }
                         }
                     } else if let Some(sp) = syncpoint {

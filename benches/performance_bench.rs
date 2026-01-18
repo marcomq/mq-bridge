@@ -314,6 +314,7 @@ pub mod zeromq_helper {
     }
 }
 
+#[cfg(feature = "ibm-mq")]
 pub mod ibm_mq_helper {
     use mq_bridge::{
         models::{IbmMqConfig, IbmMqEndpoint},

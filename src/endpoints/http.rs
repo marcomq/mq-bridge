@@ -629,15 +629,13 @@ http_route:
             .unwrap();
 
         tokio::spawn(async move {
-            loop {
-                if let Ok(received) = consumer.receive().await {
-                    let outcome = publisher.send(received.message).await.unwrap();
-                    let resp = match outcome {
-                        Sent::Response(msg) => Some(msg),
-                        Sent::Ack => None,
-                    };
-                    let _ = (received.commit)(resp).await;
-                }
+            if let Ok(received) = consumer.receive().await {
+                let outcome = publisher.send(received.message).await.unwrap();
+                let resp = match outcome {
+                    Sent::Response(msg) => Some(msg),
+                    Sent::Ack => None,
+                };
+                let _ = (received.commit)(resp).await;
             }
         });
 

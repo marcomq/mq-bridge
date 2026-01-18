@@ -13,6 +13,7 @@ use crate::{
     endpoints::memory::{get_or_create_channel, MemoryChannel},
     traits::Handler,
 };
+use tracing::trace;
 
 /// The top-level configuration is a map of named routes.
 /// The key is the route name (e.g., "kafka_to_nats").
@@ -210,6 +211,7 @@ impl<'de> Deserialize<'de> for Endpoint {
                         if let serde_json::Value::Object(map) = &temp_val {
                             if map.len() == 1 {
                                 let (name, config) = map.iter().next().unwrap();
+                                trace!("Falling back to Custom endpoint for key: {}", name);
                                 EndpointType::Custom {
                                     name: name.clone(),
                                     config: config.clone(),
@@ -596,6 +598,7 @@ pub struct KafkaEndpoint {
 #[serde(deny_unknown_fields)]
 pub struct KafkaConfig {
     /// Comma-separated list of Kafka broker URLs.
+    #[serde(alias = "brokers")]
     pub url: String,
     /// Optional username for SASL authentication.
     pub username: Option<String>,
