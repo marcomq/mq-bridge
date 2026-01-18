@@ -340,9 +340,10 @@ pub mod ibm_mq_helper {
             config: get_config(),
         };
 
-        let publisher = mq_bridge::endpoints::ibm_mq::create_ibm_mq_publisher("bench_pub", &endpoint_config)
-            .await
-            .expect("Failed to create publisher");
+        let publisher =
+            mq_bridge::endpoints::ibm_mq::create_ibm_mq_publisher("bench_pub", &endpoint_config)
+                .await
+                .expect("Failed to create publisher");
         Arc::new(publisher)
     }
 
@@ -353,9 +354,10 @@ pub mod ibm_mq_helper {
             config: get_config(),
         };
 
-        let consumer = mq_bridge::endpoints::ibm_mq::create_ibm_mq_consumer("bench_sub", &endpoint_config)
-            .await
-            .expect("Failed to create consumer");
+        let consumer =
+            mq_bridge::endpoints::ibm_mq::create_ibm_mq_consumer("bench_sub", &endpoint_config)
+                .await
+                .expect("Failed to create consumer");
         Arc::new(Mutex::new(consumer))
     }
 }
