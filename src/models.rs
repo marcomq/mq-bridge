@@ -11,7 +11,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use crate::{
     endpoints::memory::{get_or_create_channel, MemoryChannel},
-    traits::{CustomEndpointFactory, CustomMiddlewareFactory, Handler},
+    traits::Handler,
 };
 
 /// The top-level configuration is a map of named routes.
@@ -35,7 +35,7 @@ use crate::{
 ///       - metrics: {}
 ///     kafka:
 ///       topic: "input-topic"
-///       brokers: "localhost:9092"
+///       url: "localhost:9092"
 ///       group_id: "my-consumer-group"
 ///   output:
 ///     nats:
@@ -203,9 +203,29 @@ impl<'de> Deserialize<'de> for Endpoint {
                 }
 
                 // Deserialize the rest of the map into the flattened EndpointType.
-                let endpoint_type: EndpointType =
-                    serde_json::from_value(serde_json::Value::Object(temp_map))
-                        .map_err(serde::de::Error::custom)?;
+                let temp_val = serde_json::Value::Object(temp_map);
+                let endpoint_type: EndpointType = match serde_json::from_value(temp_val.clone()) {
+                    Ok(et) => et,
+                    Err(_) => {
+                        if let serde_json::Value::Object(map) = &temp_val {
+                            if map.len() == 1 {
+                                let (name, config) = map.iter().next().unwrap();
+                                EndpointType::Custom {
+                                    name: name.clone(),
+                                    config: config.clone(),
+                                }
+                            } else if map.is_empty() {
+                                EndpointType::Null
+                            } else {
+                                return Err(serde::de::Error::custom(
+                                    "Invalid endpoint configuration: multiple keys found or unknown endpoint type",
+                                ));
+                            }
+                        } else {
+                            return Err(serde::de::Error::custom("Invalid endpoint configuration"));
+                        }
+                    }
+                };
 
                 // Deserialize the extracted middlewares value using the existing helper logic.
                 let middlewares = match middlewares_val {
@@ -279,8 +299,8 @@ impl Endpoint {
 ///
 /// This logic was extracted from `deserialize_middlewares_from_map_or_seq` to be reused by the custom `Endpoint` deserializer.
 fn deserialize_middlewares_from_value(value: serde_json::Value) -> anyhow::Result<Vec<Middleware>> {
-    Ok(match value {
-        serde_json::Value::Array(arr) => serde_json::from_value(serde_json::Value::Array(arr))?,
+    let arr = match value {
+        serde_json::Value::Array(arr) => arr,
         serde_json::Value::Object(map) => {
             let mut middlewares: Vec<_> = map
                 .into_iter()
@@ -290,11 +310,36 @@ fn deserialize_middlewares_from_value(value: serde_json::Value) -> anyhow::Resul
                 .collect();
             middlewares.sort_by_key(|(index, _)| *index);
 
-            let sorted_values = middlewares.into_iter().map(|(_, value)| value).collect();
-            serde_json::from_value(serde_json::Value::Array(sorted_values))?
+            middlewares.into_iter().map(|(_, value)| value).collect()
         }
         _ => return Err(anyhow::anyhow!("Expected an array or object")),
-    })
+    };
+
+    let mut middlewares = Vec::new();
+    for item in arr {
+        if let Ok(m) = serde_json::from_value::<Middleware>(item.clone()) {
+            middlewares.push(m);
+        } else if let serde_json::Value::Object(map) = &item {
+            if map.len() == 1 {
+                let (name, config) = map.iter().next().unwrap();
+                middlewares.push(Middleware::Custom {
+                    name: name.clone(),
+                    config: config.clone(),
+                });
+            } else {
+                return Err(anyhow::anyhow!(
+                    "Invalid middleware configuration: {:?}",
+                    item
+                ));
+            }
+        } else {
+            return Err(anyhow::anyhow!(
+                "Invalid middleware configuration: {:?}",
+                item
+            ));
+        }
+    }
+    Ok(middlewares)
 }
 
 /// An enumeration of all supported endpoint types.
@@ -331,14 +376,15 @@ pub enum EndpointType {
     Amqp(AmqpEndpoint),
     MongoDb(MongoDbEndpoint),
     Mqtt(MqttEndpoint),
-    IbmMq(IbmMqEndpoint),
     Http(HttpEndpoint),
     ZeroMq(ZeroMqEndpoint),
     Fanout(Vec<Endpoint>),
     Switch(SwitchConfig),
     Response(ResponseConfig),
-    #[serde(skip)]
-    Custom(Arc<dyn CustomEndpointFactory>),
+    Custom {
+        name: String,
+        config: serde_json::Value,
+    },
     #[default]
     Null,
 }
@@ -355,13 +401,12 @@ impl EndpointType {
             EndpointType::Amqp(_) => "amqp",
             EndpointType::MongoDb(_) => "mongodb",
             EndpointType::Mqtt(_) => "mqtt",
-            EndpointType::IbmMq(_) => "ibm_mq",
             EndpointType::Http(_) => "http",
             EndpointType::ZeroMq(_) => "zeromq",
             EndpointType::Fanout(_) => "fanout",
             EndpointType::Switch(_) => "switch",
             EndpointType::Response(_) => "response",
-            EndpointType::Custom(_) => "custom",
+            EndpointType::Custom { .. } => "custom",
             EndpointType::Null => "null",
         }
     }
@@ -375,7 +420,7 @@ impl EndpointType {
                 | EndpointType::Fanout(_)
                 | EndpointType::Switch(_)
                 | EndpointType::Response(_)
-                | EndpointType::Custom(_)
+                | EndpointType::Custom { .. }
                 | EndpointType::Null
         )
     }
@@ -393,8 +438,10 @@ pub enum Middleware {
     Retry(RetryMiddleware),
     RandomPanic(RandomPanicMiddleware),
     Delay(DelayMiddleware),
-    #[serde(skip)]
-    Custom(Arc<dyn CustomMiddlewareFactory>),
+    Custom {
+        name: String,
+        config: serde_json::Value,
+    },
 }
 
 /// Deduplication middleware configuration.
@@ -548,10 +595,8 @@ pub struct KafkaEndpoint {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct KafkaConfig {
-    // pub url: String // use "pub brokers: String" here.
-    /// Comma-separated list of Kafka broker URLs. Can also be specified using the alias 'url'.
-    #[serde(alias = "url")]
-    pub brokers: String,
+    /// Comma-separated list of Kafka broker URLs.
+    pub url: String,
     /// Optional username for SASL authentication.
     pub username: Option<String>,
     /// Optional password for SASL authentication.
@@ -785,43 +830,6 @@ pub enum MqttProtocol {
     V3,
 }
 
-// --- IBM MQ Specific Configuration ---
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(deny_unknown_fields)]
-pub struct IbmMqEndpoint {
-    /// The IBM MQ queue name.
-    pub queue: Option<String>,
-    /// The IBM MQ topic string.
-    pub topic: Option<String>,
-    /// IBM MQ connection configuration.
-    #[serde(flatten)]
-    pub config: IbmMqConfig,
-}
-
-/// General IBM MQ connection configuration.
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(deny_unknown_fields)]
-pub struct IbmMqConfig {
-    /// Comma-separated list of IBM MQ connection names (e.g., "localhost(1414),otherhost(1414)").
-    pub connection_name: String,
-    /// The queue manager name.
-    pub queue_manager: String,
-    /// The channel name.
-    pub channel: String,
-    /// Optional username for authentication.
-    pub user: Option<String>,
-    /// Optional password for authentication.
-    pub password: Option<String>,
-    /// Cipher spec for TLS connection.
-    pub cipher_spec: Option<String>,
-    /// TLS configuration.
-    #[serde(default)]
-    pub tls: TlsConfig,
-}
-
 // --- ZeroMQ Specific Configuration ---
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -886,12 +894,62 @@ pub struct HttpConfig {
     /// TLS configuration.
     #[serde(default)]
     pub tls: TlsConfig,
-    /// (Consumer only) Optional endpoint to send the response to.
-    pub response_out: Option<Box<Endpoint>>,
     /// (Consumer only) Number of worker threads to use. Defaults to 0 for unlimited.
     pub workers: Option<usize>,
     /// (Consumer only) Header key to extract the message ID from. Defaults to "message-id".
     pub message_id_header: Option<String>,
+}
+
+// --- IBM MQ Specific Configuration ---
+
+/// Configuration for an IBM MQ Endpoint.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct IbmMqEndpoint {
+    /// Target Queue name for point-to-point messaging. Optional if `topic` is set; defaults to route name if omitted.
+    pub queue: Option<String>,
+    /// Target Topic string for Publish/Subscribe. If set, enables subscriber mode. Optional if `queue` is set.
+    pub topic: Option<String>,
+    /// Connection details for the Queue Manager.
+    #[serde(flatten)]
+    pub config: IbmMqConfig,
+}
+
+/// Connection settings for the IBM MQ Queue Manager.
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct IbmMqConfig {
+    /// Required. Connection string in `host(port)` format. Supports comma-separated list for failover (e.g., `host1(1414),host2(1414)`).
+    pub connection_name: String,
+    /// Required. Name of the Queue Manager to connect to (e.g., `QM1`).
+    pub queue_manager: String,
+    /// Required. Server Connection (SVRCONN) Channel name defined on the QM.
+    pub channel: String,
+    /// Username for authentication. Optional; required if the channel enforces authentication.
+    pub user: Option<String>,
+    /// Password for authentication. Optional; required if the channel enforces authentication.
+    pub password: Option<String>,
+    /// TLS CipherSpec (e.g., `ANY_TLS12`). Optional; required for encrypted connections.
+    pub cipher_spec: Option<String>,
+    /// TLS configuration settings (e.g., keystore paths). Optional.
+    #[serde(default)]
+    pub tls: TlsConfig,
+    /// Maximum message size in bytes (default: 4MB). Optional.
+    #[serde(default = "default_max_message_size")]
+    pub max_message_size: usize,
+    /// Polling timeout in milliseconds (default: 1000ms). Optional.
+    #[serde(default = "default_wait_timeout_ms")]
+    pub wait_timeout_ms: i32,
+}
+
+fn default_max_message_size() -> usize {
+    4 * 1024 * 1024 // 4MB default
+}
+
+fn default_wait_timeout_ms() -> i32 {
+    1000 // 1 second default
 }
 
 // --- Switch/Router Configuration ---
@@ -971,7 +1029,7 @@ kafka_to_nats:
               url: "nats://localhost:4222"
     kafka:
       topic: "input-topic"
-      brokers: "localhost:9092"
+      url: "localhost:9092"
       group_id: "my-consumer-group"
       tls:
         required: true
@@ -1013,7 +1071,7 @@ kafka_to_nats:
                 Middleware::Metrics(_) => {
                     has_metrics = true;
                 }
-                Middleware::Custom(_) => {}
+                Middleware::Custom { .. } => {}
                 Middleware::Dlq(dlq) => {
                     assert!(dlq.endpoint.middlewares.is_empty());
                     if let EndpointType::Nats(nats_cfg) = &dlq.endpoint.endpoint_type {
@@ -1038,7 +1096,7 @@ kafka_to_nats:
 
         if let EndpointType::Kafka(kafka) = &input.endpoint_type {
             assert_eq!(kafka.topic, Some("input-topic".to_string()));
-            assert_eq!(kafka.config.brokers, "localhost:9092");
+            assert_eq!(kafka.config.url, "localhost:9092");
             assert_eq!(kafka.config.group_id, Some("my-consumer-group".to_string()));
             let tls = &kafka.config.tls;
             assert!(tls.required);
@@ -1082,10 +1140,7 @@ kafka_to_nats:
         unsafe {
             std::env::set_var("MQB__KAFKA_TO_NATS__CONCURRENCY", "10");
             std::env::set_var("MQB__KAFKA_TO_NATS__INPUT__KAFKA__TOPIC", "input-topic");
-            std::env::set_var(
-                "MQB__KAFKA_TO_NATS__INPUT__KAFKA__BROKERS",
-                "localhost:9092",
-            );
+            std::env::set_var("MQB__KAFKA_TO_NATS__INPUT__KAFKA__URL", "localhost:9092");
             std::env::set_var(
                 "MQB__KAFKA_TO_NATS__INPUT__KAFKA__GROUP_ID",
                 "my-consumer-group",

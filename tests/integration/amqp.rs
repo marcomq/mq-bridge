@@ -1,11 +1,11 @@
 #![allow(dead_code)]
 
-use super::common::{
+use mq_bridge::endpoints::amqp::{AmqpConsumer, AmqpPublisher};
+use mq_bridge::test_utils::{
     add_performance_result, run_chaos_pipeline_test, run_direct_perf_test,
     run_performance_pipeline_test, run_pipeline_test, run_test_with_docker,
     run_test_with_docker_controller, setup_logging, PERF_TEST_MESSAGE_COUNT,
 };
-use mq_bridge::endpoints::amqp::{AmqpConsumer, AmqpPublisher};
 use std::sync::Arc;
 
 const CONFIG_YAML: &str = r#"

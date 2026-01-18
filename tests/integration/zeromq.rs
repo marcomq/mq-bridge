@@ -1,6 +1,8 @@
 #![allow(dead_code)]
 
-use super::common::{run_performance_pipeline_test, setup_logging, PERF_TEST_MESSAGE_COUNT};
+use mq_bridge::test_utils::{
+    run_performance_pipeline_test, setup_logging, PERF_TEST_MESSAGE_COUNT,
+};
 
 const CONFIG_YAML: &str = r#"
 routes:

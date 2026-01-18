@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use super::common::{run_performance_pipeline_test, setup_logging};
+use mq_bridge::test_utils::{run_performance_pipeline_test, setup_logging};
 const PERF_TEST_MESSAGE_COUNT: usize = 1_250_000;
 const PERF_TEST_CONCURRENCY: usize = 1;
 const CONFIG_YAML: &str = r#"

@@ -279,7 +279,11 @@ pub fn into_batch_commit_func(commit: CommitFunc) -> BatchCommitFunc {
 /// Factory for creating custom endpoints (consumers and publishers).
 #[async_trait]
 pub trait CustomEndpointFactory: Send + Sync + std::fmt::Debug {
-    async fn create_consumer(&self, _route_name: &str) -> anyhow::Result<Box<dyn MessageConsumer>> {
+    async fn create_consumer(
+        &self,
+        _route_name: &str,
+        _config: &serde_json::Value,
+    ) -> anyhow::Result<Box<dyn MessageConsumer>> {
         Err(anyhow::anyhow!(
             "This custom endpoint does not support creating consumers"
         ))
@@ -287,6 +291,7 @@ pub trait CustomEndpointFactory: Send + Sync + std::fmt::Debug {
     async fn create_publisher(
         &self,
         _route_name: &str,
+        _config: &serde_json::Value,
     ) -> anyhow::Result<Box<dyn MessagePublisher>> {
         Err(anyhow::anyhow!(
             "This custom endpoint does not support creating publishers"
@@ -301,6 +306,7 @@ pub trait CustomMiddlewareFactory: Send + Sync + std::fmt::Debug {
         &self,
         consumer: Box<dyn MessageConsumer>,
         _route_name: &str,
+        _config: &serde_json::Value,
     ) -> anyhow::Result<Box<dyn MessageConsumer>> {
         Ok(consumer)
     }
@@ -309,6 +315,7 @@ pub trait CustomMiddlewareFactory: Send + Sync + std::fmt::Debug {
         &self,
         publisher: Box<dyn MessagePublisher>,
         _route_name: &str,
+        _config: &serde_json::Value,
     ) -> anyhow::Result<Box<dyn MessagePublisher>> {
         Ok(publisher)
     }
