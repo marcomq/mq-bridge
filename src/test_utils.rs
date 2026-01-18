@@ -1,8 +1,8 @@
 #![allow(dead_code)] // This module contains helpers used by various integration tests.
-use async_channel::{bounded, Receiver, Sender};
 use crate::traits::{BoxFuture, MessagePublisher, Received};
 use crate::traits::{ConsumerError, MessageConsumer, PublisherError, ReceivedBatch, SentBatch};
 use crate::{CanonicalMessage, Route};
+use async_channel::{bounded, Receiver, Sender};
 use once_cell::sync::Lazy;
 use serde_json::json;
 use std::any::Any;
@@ -12,7 +12,7 @@ use std::process::Command;
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tokio::sync::Semaphore;
+use tokio::sync::{Mutex as AsyncMutex, Semaphore};
 
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::filter::EnvFilter;
@@ -40,6 +40,9 @@ pub struct PerformanceResult {
 /// A global, thread-safe collector for performance results.
 static PERFORMANCE_RESULTS: Lazy<Mutex<Vec<PerformanceResult>>> =
     Lazy::new(|| Mutex::new(Vec::new()));
+
+/// Global lock to serialize tests that use Docker containers.
+static DOCKER_TEST_LOCK: Lazy<AsyncMutex<()>> = Lazy::new(|| AsyncMutex::new(()));
 
 /// Adds a performance result to the global collector.
 pub fn add_performance_result(result: PerformanceResult) {
@@ -284,12 +287,13 @@ async fn run_pipeline_test_internal(
 
     harness.send_messages().await;
 
+    let is_chaos_test = chaos_injector.is_some();
     if let Some(injector) = chaos_injector {
         tokio::spawn(injector());
     }
 
     // Wait for all messages to be processed by checking the metrics.
-    let timeout = if is_performance_test {
+    let timeout = if is_performance_test || is_chaos_test {
         Duration::from_secs(210)
     } else {
         Duration::from_secs(30)
@@ -467,9 +471,11 @@ where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = ()>,
 {
-    let _docker = DockerCompose::new(compose_file);
+    let _guard = DOCKER_TEST_LOCK.lock().await;
+    let docker = DockerCompose::new(compose_file);
+    docker.down();
     // Give some time for docker to be ready
-    _docker.up();
+    docker.up();
     test_fn().await;
 }
 
@@ -480,7 +486,9 @@ where
     F: FnOnce(DockerController) -> Fut,
     Fut: std::future::Future<Output = ()>,
 {
+    let _guard = DOCKER_TEST_LOCK.lock().await;
     let docker = DockerCompose::new(compose_file);
+    docker.down();
     // Give some time for docker to be ready
     docker.up();
     test_fn(docker.controller()).await;
@@ -955,4 +963,281 @@ pub async fn measure_single_read_performance(
     }
     debug_assert_eq!(final_count, num_messages);
     start_time.elapsed()
+}
+
+pub fn should_run_benchmark(backend_name: &str) -> bool {
+    let mut filters = Vec::new();
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        // Only skip values for flags that are known to take values
+        if arg == "--output-format"
+            || arg == "--baseline"
+            || arg == "--save-baseline"
+            || arg == "--load-baseline"
+            || arg == "--profile-time"
+        {
+            args.next();
+            continue;
+        }
+        if arg.starts_with("--") {
+            continue;
+        }
+        if !arg.starts_with('-') {
+            filters.push(arg);
+        }
+    }
+    if filters.is_empty() {
+        return true;
+    }
+    filters
+        .iter()
+        .any(|arg| backend_name.contains(arg) || arg.contains(backend_name))
+}
+
+pub fn print_benchmark_results(
+    results: &std::collections::HashMap<String, PerformanceResult>,
+    msg_count: usize,
+) {
+    if !results.is_empty() {
+        println!("\n\n--- Consolidated Performance Test Results (msgs/sec) ---");
+        println!(
+            "\n\n--- Batch = {} msgs, Single = {} msgs ---",
+            format_pretty(msg_count),
+            format_pretty(msg_count)
+        );
+        println!(
+            "{:<25} | {:>15} | {:>15} | {:>15} | {:>15}",
+            "Test Name", "Write (Batch)", "Read (Batch)", "Write (Single)", "Read (Single)"
+        );
+        println!(
+            "{:-<25}-|-{:->15}-|-{:->15}-|-{:->15}-|-{:->15}",
+            "", "", "", "", ""
+        );
+        let mut sorted_results: Vec<_> = results.iter().collect();
+        sorted_results.sort_by_key(|(name, _)| *name);
+        for (name, stats) in sorted_results {
+            println!(
+                "{:<25} | {:>15} | {:>15} | {:>15} | {:>15}",
+                format!("{} Direct", name),
+                format_pretty(stats.write_performance),
+                format_pretty(stats.read_performance),
+                format_pretty(stats.single_write_performance),
+                format_pretty(stats.single_read_performance)
+            );
+        }
+        println!("---------------------------------------------------------------------------------------\n");
+    }
+}
+
+#[macro_export]
+macro_rules! run_benchmarks {
+    ($name:literal, $group:expr, $rt:expr, $results:expr, $msg_count:expr, $concurrency:expr) => {
+        $group.bench_function(concat!($name, "_single_write"), |b| {
+            b.to_async($rt).iter_custom(|iters| async move {
+                let mut total = std::time::Duration::ZERO;
+                // Create consumer first to support brokerless protocols like ZeroMQ
+                let consumer = backend::create_consumer().await;
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                let publisher = backend::create_publisher().await;
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                for _ in 0..iters {
+                    let duration = $crate::test_utils::measure_single_write_performance(
+                        concat!($name, "_single_write"),
+                        std::sync::Arc::clone(&publisher),
+                        $msg_count,
+                        $concurrency,
+                    )
+                    .await;
+                    total += duration;
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                    $crate::test_utils::measure_read_performance(
+                        "cleanup",
+                        std::sync::Arc::clone(&consumer),
+                        $msg_count,
+                    )
+                    .await;
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                }
+                let msgs_per_sec = (iters as f64 * $msg_count as f64) / total.as_secs_f64();
+                {
+                    let mut results = $results.lock().await;
+                    let stats = results.entry($name.to_string()).or_default();
+                    stats.single_write_performance = msgs_per_sec;
+                }
+                println!(
+                    "\n{} single_write: {} iters, total time {:?}, {:.2} msgs/sec",
+                    $name, iters, total, msgs_per_sec
+                );
+                total
+            })
+        });
+
+        $group.bench_function(concat!($name, "_single_read"), |b| {
+            b.to_async($rt).iter_custom(|iters| async move {
+                let mut total = std::time::Duration::ZERO;
+                let consumer = backend::create_consumer().await;
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                let publisher = backend::create_publisher().await;
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                for _ in 0..iters {
+                    $crate::test_utils::measure_write_performance(
+                        "setup_fill",
+                        std::sync::Arc::clone(&publisher),
+                        $msg_count,
+                        $concurrency,
+                    )
+                    .await;
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+
+                    let duration = $crate::test_utils::measure_single_read_performance(
+                        concat!($name, "_single_read"),
+                        std::sync::Arc::clone(&consumer),
+                        $msg_count,
+                    )
+                    .await;
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                    total += duration;
+                }
+                let msgs_per_sec = (iters as f64 * $msg_count as f64) / total.as_secs_f64();
+                {
+                    let mut results = $results.lock().await;
+                    let stats = results.entry($name.to_string()).or_default();
+                    stats.single_read_performance = msgs_per_sec;
+                }
+                println!(
+                    "\n{} single_read: {} iters, total time {:?}, {:.2} msgs/sec",
+                    $name, iters, total, msgs_per_sec
+                );
+                total
+            })
+        });
+
+        $group.bench_function(concat!($name, "_batch_write"), |b| {
+            b.to_async($rt).iter_custom(|iters| async move {
+                let mut total = std::time::Duration::ZERO;
+                let consumer = backend::create_consumer().await;
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                let publisher = backend::create_publisher().await;
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                for _ in 0..iters {
+                    let duration = $crate::test_utils::measure_write_performance(
+                        concat!($name, "_batch_write"),
+                        std::sync::Arc::clone(&publisher),
+                        $msg_count,
+                        $concurrency,
+                    )
+                    .await;
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                    total += duration;
+
+                    $crate::test_utils::measure_read_performance(
+                        "cleanup",
+                        std::sync::Arc::clone(&consumer),
+                        $msg_count,
+                    )
+                    .await;
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                }
+                let msgs_per_sec = (iters as f64 * $msg_count as f64) / total.as_secs_f64();
+                {
+                    let mut results = $results.lock().await;
+                    let stats = results.entry($name.to_string()).or_default();
+                    stats.write_performance = msgs_per_sec;
+                }
+                println!(
+                    "\n{} batch_write: {} iters, total time {:?}, {:.2} msgs/sec",
+                    $name, iters, total, msgs_per_sec
+                );
+                total
+            })
+        });
+
+        $group.bench_function(concat!($name, "_batch_read"), |b| {
+            b.to_async($rt).iter_custom(|iters| async move {
+                let mut total = std::time::Duration::ZERO;
+                let consumer = backend::create_consumer().await;
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                let publisher = backend::create_publisher().await;
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                for _ in 0..iters {
+                    $crate::test_utils::measure_write_performance(
+                        "setup_fill",
+                        std::sync::Arc::clone(&publisher),
+                        $msg_count,
+                        $concurrency,
+                    )
+                    .await;
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+
+                    let duration = $crate::test_utils::measure_read_performance(
+                        concat!($name, "_batch_read"),
+                        std::sync::Arc::clone(&consumer),
+                        $msg_count,
+                    )
+                    .await;
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                    total += duration;
+                }
+                let msgs_per_sec = (iters as f64 * $msg_count as f64) / total.as_secs_f64();
+                {
+                    let mut results = $results.lock().await;
+                    let stats = results.entry($name.to_string()).or_default();
+                    stats.read_performance = msgs_per_sec;
+                }
+                println!(
+                    "\n{} batch_read: {} iters, total time {:?}, {:.2} msgs/sec",
+                    $name, iters, total, msgs_per_sec
+                );
+                total
+            })
+        });
+    };
+}
+
+#[macro_export]
+macro_rules! bench_backend {
+    ("", $name:literal, $compose_file:literal, $helper:path, $group:expr, $rt:expr, $results:expr, $msg_count:expr, $concurrency:expr) => {
+        if $crate::test_utils::should_run_benchmark($name) {
+            use $helper as backend;
+
+            // Start the Docker environment for this backend.
+            // The DockerCompose struct handles `docker-compose up` on creation and `down` on drop.
+            let _docker = $crate::test_utils::DockerCompose::new($compose_file);
+            _docker.down();
+            _docker.up();
+
+            $crate::run_benchmarks!($name, $group, $rt, $results, $msg_count, $concurrency);
+            _docker.down();
+        }
+    };
+    ($feature:literal, $name:literal, $compose_file:literal, $helper:path, $group:expr, $rt:expr, $results:expr, $msg_count:expr, $concurrency:expr) => {
+        #[cfg(feature = $feature)]
+        if $crate::test_utils::should_run_benchmark($name) {
+            use $helper as backend;
+
+            // Start the Docker environment for this backend.
+            // The DockerCompose struct handles `docker-compose up` on creation and `down` on drop.
+            let _docker = $crate::test_utils::DockerCompose::new($compose_file);
+            _docker.down();
+            _docker.up();
+
+            $crate::run_benchmarks!($name, $group, $rt, $results, $msg_count, $concurrency);
+            _docker.down();
+        }
+    };
+    ($feature:literal, $name:literal, $helper:path, $group:expr, $rt:expr, $results:expr, $msg_count:expr, $concurrency:expr) => {
+        #[cfg(feature = $feature)]
+        if $crate::test_utils::should_run_benchmark($name) {
+            use $helper as backend;
+            // No docker setup
+            $crate::run_benchmarks!($name, $group, $rt, $results, $msg_count, $concurrency);
+        }
+    };
+    ($name:literal, $helper:path, $group:expr, $rt:expr, $results:expr, $msg_count:expr, $concurrency:expr) => {
+        if $crate::test_utils::should_run_benchmark($name) {
+            use $helper as backend;
+            // No docker setup, no feature gate
+            $crate::run_benchmarks!($name, $group, $rt, $results, $msg_count, $concurrency);
+        }
+    };
 }

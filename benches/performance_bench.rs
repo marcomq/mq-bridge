@@ -1,8 +1,6 @@
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
-use mq_bridge::traits::{MessageConsumer, MessagePublisher};
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::Duration;
 use tokio::runtime::Runtime;
 use tokio::sync::Mutex;
@@ -11,55 +9,23 @@ use tokio::sync::Mutex;
 #[path = "../tests/integration/mod.rs"]
 mod integration; // Still needed for backend modules like kafka, nats etc.
 
-use mq_bridge::test_utils::{
-    format_pretty, measure_read_performance, measure_single_read_performance,
-    measure_single_write_performance, measure_write_performance, DockerCompose, PerformanceResult,
-    PERF_TEST_CONCURRENCY,
-};
+use mq_bridge::bench_backend;
+use mq_bridge::test_utils::{print_benchmark_results, PerformanceResult, PERF_TEST_CONCURRENCY};
 
 const PERF_TEST_MESSAGE_COUNT: usize = 1000;
-const DEFAULT_SLEEP: Duration = Duration::from_millis(1);
-const DEFAULT_INIT_SLEEP: Duration = Duration::from_millis(100);
 
 static BENCH_RESULTS: Lazy<Mutex<HashMap<String, PerformanceResult>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
-fn should_run(backend_name: &str) -> bool {
-    let mut filters = Vec::new();
-    let mut args = std::env::args().skip(1);
-    while let Some(arg) = args.next() {
-        // Only skip values for flags that are known to take values
-        if arg == "--output-format"
-            || arg == "--baseline"
-            || arg == "--save-baseline"
-            || arg == "--load-baseline"
-            || arg == "--profile-time"
-        {
-            args.next();
-            continue;
-        }
-        if arg.starts_with("--") {
-            continue;
-        }
-        if !arg.starts_with('-') {
-            filters.push(arg);
-        }
-    }
-    if filters.is_empty() {
-        return true;
-    }
-    filters
-        .iter()
-        .any(|arg| backend_name.contains(arg) || arg.contains(backend_name))
-}
-
 // --- Helper Modules for Backend Setup ---
 
 #[cfg(feature = "nats")]
-mod nats_helper {
-    use super::*;
+pub mod nats_helper {
     use mq_bridge::endpoints::nats::{NatsConsumer, NatsPublisher};
     use mq_bridge::models::NatsConfig;
+    use mq_bridge::traits::{MessageConsumer, MessagePublisher};
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
 
     fn get_config() -> NatsConfig {
         NatsConfig {
@@ -90,10 +56,12 @@ mod nats_helper {
 }
 
 #[cfg(feature = "mongodb")]
-mod mongodb_helper {
-    use super::*;
+pub mod mongodb_helper {
     use mq_bridge::endpoints::mongodb::{MongoDbConsumer, MongoDbPublisher};
     use mq_bridge::models::MongoDbConfig;
+    use mq_bridge::traits::{MessageConsumer, MessagePublisher};
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
 
     fn get_config() -> MongoDbConfig {
         MongoDbConfig {
@@ -133,10 +101,13 @@ mod mongodb_helper {
 }
 
 #[cfg(feature = "amqp")]
-mod amqp_helper {
-    use super::*;
+pub mod amqp_helper {
     use mq_bridge::endpoints::amqp::{AmqpConsumer, AmqpPublisher};
     use mq_bridge::models::AmqpConfig;
+    use mq_bridge::traits::{MessageConsumer, MessagePublisher};
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
     fn get_config() -> AmqpConfig {
         AmqpConfig {
             url: "amqp://guest:guest@localhost:5672/%2f".to_string(),
@@ -159,10 +130,12 @@ mod amqp_helper {
 }
 
 #[cfg(feature = "kafka")]
-mod kafka_helper {
-    use super::*;
+pub mod kafka_helper {
     use mq_bridge::endpoints::kafka::{KafkaConsumer, KafkaPublisher};
     use mq_bridge::models::KafkaConfig;
+    use mq_bridge::traits::{MessageConsumer, MessagePublisher};
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
 
     fn get_config() -> KafkaConfig {
         KafkaConfig {
@@ -190,11 +163,15 @@ mod kafka_helper {
 }
 
 #[cfg(feature = "mqtt")]
-mod mqtt_helper {
-    use super::*;
+pub mod mqtt_helper {
+    use super::PERF_TEST_MESSAGE_COUNT;
     use mq_bridge::endpoints::mqtt::{MqttConsumer, MqttPublisher};
     use mq_bridge::models::MqttConfig;
+    use mq_bridge::traits::{MessageConsumer, MessagePublisher};
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
     use uuid::Uuid;
+
     fn get_config() -> MqttConfig {
         MqttConfig {
             url: "tcp://localhost:1883".to_string(),
@@ -229,11 +206,13 @@ mod mqtt_helper {
 }
 
 #[cfg(feature = "aws")]
-mod aws_helper {
-    use super::*;
+pub mod aws_helper {
     use aws_sdk_sns::config::Credentials;
     use mq_bridge::endpoints::aws::{AwsConsumer, AwsPublisher};
     use mq_bridge::models::{AwsConfig, AwsEndpoint};
+    use mq_bridge::traits::{MessageConsumer, MessagePublisher};
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
 
     async fn ensure_queue_exists() -> String {
         let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
@@ -288,12 +267,16 @@ mod aws_helper {
 }
 
 #[cfg(feature = "zeromq")]
-mod zeromq_helper {
-    use super::*;
+pub mod zeromq_helper {
+    use super::PERF_TEST_MESSAGE_COUNT;
     use mq_bridge::endpoints::zeromq::{ZeroMqConsumer, ZeroMqPublisher};
     use mq_bridge::models::{ZeroMqConfig, ZeroMqEndpoint, ZeroMqSocketType};
+    use mq_bridge::traits::{MessageConsumer, MessagePublisher};
+    use once_cell::sync::Lazy;
     use rand::Rng;
     use std::sync::atomic::{AtomicU16, Ordering};
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
 
     static PORT: Lazy<AtomicU16> = Lazy::new(|| {
         let mut rng = rand::rng();
@@ -331,11 +314,61 @@ mod zeromq_helper {
     }
 }
 
-mod memory_helper {
-    use super::*;
+pub mod ibm_mq_helper {
+    use mq_bridge::{
+        models::{IbmMqConfig, IbmMqEndpoint},
+        traits::{MessageConsumer, MessagePublisher},
+    };
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    pub fn get_config() -> IbmMqConfig {
+        IbmMqConfig {
+            user: Some("app".to_string()),
+            password: Some("admin".to_string()),
+            queue_manager: "QM1".to_string(),
+            connection_name: "localhost(1414)".to_string(),
+            channel: "DEV.APP.SVRCONN".to_string(),
+            ..Default::default()
+        }
+    }
+
+    pub async fn create_publisher() -> Arc<dyn MessagePublisher> {
+        let endpoint_config = IbmMqEndpoint {
+            queue: Some("DEV.QUEUE.1".to_string()),
+            topic: None,
+            config: get_config(),
+        };
+
+        let publisher = mq_bridge::endpoints::ibm_mq::create_ibm_mq_publisher("bench_pub", &endpoint_config)
+            .await
+            .expect("Failed to create publisher");
+        Arc::new(publisher)
+    }
+
+    pub async fn create_consumer() -> Arc<Mutex<dyn MessageConsumer>> {
+        let endpoint_config = IbmMqEndpoint {
+            queue: Some("DEV.QUEUE.1".to_string()),
+            topic: None,
+            config: get_config(),
+        };
+
+        let consumer = mq_bridge::endpoints::ibm_mq::create_ibm_mq_consumer("bench_sub", &endpoint_config)
+            .await
+            .expect("Failed to create consumer");
+        Arc::new(Mutex::new(consumer))
+    }
+}
+
+pub mod memory_helper {
+    use super::PERF_TEST_MESSAGE_COUNT;
     use mq_bridge::endpoints::memory::{MemoryConsumer, MemoryPublisher};
     use mq_bridge::models::MemoryConfig;
+    use mq_bridge::traits::{MessageConsumer, MessagePublisher};
+    use once_cell::sync::Lazy;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
 
     static TOPIC_ID: Lazy<AtomicUsize> = Lazy::new(|| AtomicUsize::new(0));
 
@@ -369,278 +402,107 @@ fn performance_benchmarks(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(10));
     group.warm_up_time(Duration::from_secs(1));
 
-    macro_rules! run_benchmarks {
-        ($name:literal) => {
-            group.bench_function(concat!($name, "_single_write"), |b| {
-                b.to_async(&rt).iter_custom(|iters| async move {
-                    let mut total = Duration::ZERO;
-                    // Create consumer first to support brokerless protocols like ZeroMQ
-                    let consumer = backend::create_consumer().await;
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                    let publisher = backend::create_publisher().await;
-                    tokio::time::sleep(DEFAULT_INIT_SLEEP).await;
-                    for _ in 0..iters {
-                        let duration = measure_single_write_performance(
-                            concat!($name, "_single_write"),
-                            Arc::clone(&publisher),
-                            PERF_TEST_MESSAGE_COUNT,
-                            PERF_TEST_CONCURRENCY,
-                        )
-                        .await;
-                        total += duration;
-                        tokio::time::sleep(DEFAULT_SLEEP).await;
-                        measure_read_performance(
-                            "cleanup",
-                            Arc::clone(&consumer),
-                            PERF_TEST_MESSAGE_COUNT,
-                        )
-                        .await;
-                        tokio::time::sleep(DEFAULT_SLEEP).await;
-                    }
-                    let msgs_per_sec =
-                        (iters as f64 * PERF_TEST_MESSAGE_COUNT as f64) / total.as_secs_f64();
-                    {
-                        let mut results = BENCH_RESULTS.lock().await;
-                        let stats = results.entry($name.to_string()).or_default();
-                        stats.single_write_performance = msgs_per_sec;
-                    }
-                    println!(
-                        "\n{} single_write: {} iters, total time {:?}, {:.2} msgs/sec",
-                        $name, iters, total, msgs_per_sec
-                    );
-                    total
-                })
-            });
-
-            group.bench_function(concat!($name, "_single_read"), |b| {
-                b.to_async(&rt).iter_custom(|iters| async move {
-                    let mut total = Duration::ZERO;
-                    let consumer = backend::create_consumer().await;
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                    let publisher = backend::create_publisher().await;
-                    tokio::time::sleep(DEFAULT_INIT_SLEEP).await;
-                    for _ in 0..iters {
-                        measure_write_performance(
-                            "setup_fill",
-                            Arc::clone(&publisher),
-                            PERF_TEST_MESSAGE_COUNT,
-                            PERF_TEST_CONCURRENCY,
-                        )
-                        .await;
-                        tokio::time::sleep(DEFAULT_SLEEP).await;
-
-                        let duration = measure_single_read_performance(
-                            concat!($name, "_single_read"),
-                            Arc::clone(&consumer),
-                            PERF_TEST_MESSAGE_COUNT,
-                        )
-                        .await;
-                        tokio::time::sleep(DEFAULT_SLEEP).await;
-                        total += duration;
-                    }
-                    let msgs_per_sec =
-                        (iters as f64 * PERF_TEST_MESSAGE_COUNT as f64) / total.as_secs_f64();
-                    {
-                        let mut results = BENCH_RESULTS.lock().await;
-                        let stats = results.entry($name.to_string()).or_default();
-                        stats.single_read_performance = msgs_per_sec;
-                    }
-                    println!(
-                        "\n{} single_read: {} iters, total time {:?}, {:.2} msgs/sec",
-                        $name, iters, total, msgs_per_sec
-                    );
-                    total
-                })
-            });
-
-            group.bench_function(concat!($name, "_batch_write"), |b| {
-                b.to_async(&rt).iter_custom(|iters| async move {
-                    let mut total = Duration::ZERO;
-                    let consumer = backend::create_consumer().await;
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                    let publisher = backend::create_publisher().await;
-                    tokio::time::sleep(DEFAULT_INIT_SLEEP).await;
-                    for _ in 0..iters {
-                        let duration = measure_write_performance(
-                            concat!($name, "_batch_write"),
-                            Arc::clone(&publisher),
-                            PERF_TEST_MESSAGE_COUNT,
-                            PERF_TEST_CONCURRENCY,
-                        )
-                        .await;
-                        tokio::time::sleep(DEFAULT_SLEEP).await;
-                        total += duration;
-
-                        measure_read_performance(
-                            "cleanup",
-                            Arc::clone(&consumer),
-                            PERF_TEST_MESSAGE_COUNT,
-                        )
-                        .await;
-                        tokio::time::sleep(DEFAULT_SLEEP).await;
-                    }
-                    let msgs_per_sec =
-                        (iters as f64 * PERF_TEST_MESSAGE_COUNT as f64) / total.as_secs_f64();
-                    {
-                        let mut results = BENCH_RESULTS.lock().await;
-                        let stats = results.entry($name.to_string()).or_default();
-                        stats.write_performance = msgs_per_sec;
-                    }
-                    println!(
-                        "\n{} batch_write: {} iters, total time {:?}, {:.2} msgs/sec",
-                        $name, iters, total, msgs_per_sec
-                    );
-                    total
-                })
-            });
-
-            group.bench_function(concat!($name, "_batch_read"), |b| {
-                b.to_async(&rt).iter_custom(|iters| async move {
-                    let mut total = Duration::ZERO;
-                    let consumer = backend::create_consumer().await;
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                    let publisher = backend::create_publisher().await;
-                    tokio::time::sleep(DEFAULT_INIT_SLEEP).await;
-                    for _ in 0..iters {
-                        measure_write_performance(
-                            "setup_fill",
-                            Arc::clone(&publisher),
-                            PERF_TEST_MESSAGE_COUNT,
-                            PERF_TEST_CONCURRENCY,
-                        )
-                        .await;
-                        tokio::time::sleep(DEFAULT_SLEEP).await;
-
-                        let duration = measure_read_performance(
-                            concat!($name, "_batch_read"),
-                            Arc::clone(&consumer),
-                            PERF_TEST_MESSAGE_COUNT,
-                        )
-                        .await;
-                        tokio::time::sleep(DEFAULT_SLEEP).await;
-                        total += duration;
-                    }
-                    let msgs_per_sec =
-                        (iters as f64 * PERF_TEST_MESSAGE_COUNT as f64) / total.as_secs_f64();
-                    {
-                        let mut results = BENCH_RESULTS.lock().await;
-                        let stats = results.entry($name.to_string()).or_default();
-                        stats.read_performance = msgs_per_sec;
-                    }
-                    println!(
-                        "\n{} batch_read: {} iters, total time {:?}, {:.2} msgs/sec",
-                        $name, iters, total, msgs_per_sec
-                    );
-                    total
-                })
-            });
-        };
-    }
-
-    macro_rules! bench_backend {
-        ($feature:literal, $name:literal, $compose_file:literal, $helper:path) => {
-            #[cfg(feature = $feature)]
-            if should_run($name) {
-                use $helper as backend;
-
-                // Start the Docker environment for this backend.
-                // The DockerCompose struct handles `docker-compose up` on creation and `down` on drop.
-                let _docker = DockerCompose::new($compose_file);
-                _docker.down();
-                _docker.up();
-
-                run_benchmarks!($name);
-                _docker.down();
-            }
-        };
-        ($feature:literal, $name:literal, $helper:path) => {
-            #[cfg(feature = $feature)]
-            if should_run($name) {
-                use $helper as backend;
-                // No docker setup
-                run_benchmarks!($name);
-            }
-        };
-        ($name:literal, $helper:path) => {
-            if should_run($name) {
-                use $helper as backend;
-                // No docker setup, no feature gate
-                run_benchmarks!($name);
-            }
-        };
-    }
-
     bench_backend!(
         "aws",
         "aws",
         "tests/integration/docker-compose/aws.yml",
-        aws_helper
+        aws_helper,
+        group,
+        &rt,
+        &BENCH_RESULTS,
+        PERF_TEST_MESSAGE_COUNT,
+        PERF_TEST_CONCURRENCY
     );
     bench_backend!(
         "kafka",
         "kafka",
         "tests/integration/docker-compose/kafka.yml",
-        kafka_helper
+        kafka_helper,
+        group,
+        &rt,
+        &BENCH_RESULTS,
+        PERF_TEST_MESSAGE_COUNT,
+        PERF_TEST_CONCURRENCY
     );
     bench_backend!(
         "amqp",
         "amqp",
         "tests/integration/docker-compose/amqp.yml",
-        amqp_helper
+        amqp_helper,
+        group,
+        &rt,
+        &BENCH_RESULTS,
+        PERF_TEST_MESSAGE_COUNT,
+        PERF_TEST_CONCURRENCY
     );
     bench_backend!(
         "nats",
         "nats",
         "tests/integration/docker-compose/nats.yml",
-        nats_helper
+        nats_helper,
+        group,
+        &rt,
+        &BENCH_RESULTS,
+        PERF_TEST_MESSAGE_COUNT,
+        PERF_TEST_CONCURRENCY
     );
     bench_backend!(
         "mongodb",
         "mongodb",
         "tests/integration/docker-compose/mongodb.yml",
-        mongodb_helper
+        mongodb_helper,
+        group,
+        &rt,
+        &BENCH_RESULTS,
+        PERF_TEST_MESSAGE_COUNT,
+        PERF_TEST_CONCURRENCY
     );
     bench_backend!(
         "mqtt",
         "mqtt",
         "tests/integration/docker-compose/mqtt.yml",
-        mqtt_helper
+        mqtt_helper,
+        group,
+        &rt,
+        &BENCH_RESULTS,
+        PERF_TEST_MESSAGE_COUNT,
+        PERF_TEST_CONCURRENCY
     );
 
-    bench_backend!("zeromq", "zeromq", zeromq_helper);
-    bench_backend!("memory", memory_helper);
+    bench_backend!(
+        "zeromq",
+        "zeromq",
+        zeromq_helper,
+        group,
+        &rt,
+        &BENCH_RESULTS,
+        PERF_TEST_MESSAGE_COUNT,
+        PERF_TEST_CONCURRENCY
+    );
+    bench_backend!(
+        "ibm-mq",
+        "ibm-mq",
+        "tests/integration/docker-compose/ibm_mq.yml",
+        ibm_mq_helper,
+        group,
+        &rt,
+        &BENCH_RESULTS,
+        PERF_TEST_MESSAGE_COUNT,
+        PERF_TEST_CONCURRENCY
+    );
+    bench_backend!(
+        "memory",
+        memory_helper,
+        group,
+        &rt,
+        &BENCH_RESULTS,
+        PERF_TEST_MESSAGE_COUNT,
+        PERF_TEST_CONCURRENCY
+    );
 
     // Print consolidated results
     let results = BENCH_RESULTS.blocking_lock();
-    if !results.is_empty() {
-        println!("\n\n--- Consolidated Performance Test Results (msgs/sec) ---");
-        println!(
-            "\n\n--- Batch = {} msgs, Single = {} msgs ---",
-            format_pretty(PERF_TEST_MESSAGE_COUNT),
-            format_pretty(PERF_TEST_MESSAGE_COUNT)
-        );
-        println!(
-            "{:<25} | {:>15} | {:>15} | {:>15} | {:>15}",
-            "Test Name", "Write (Batch)", "Read (Batch)", "Write (Single)", "Read (Single)"
-        );
-        println!(
-            "{:-<25}-|-{:->15}-|-{:->15}-|-{:->15}-|-{:->15}",
-            "", "", "", "", ""
-        );
-        let mut sorted_results: Vec<_> = results.iter().collect();
-        sorted_results.sort_by_key(|(name, _)| *name);
-        for (name, stats) in sorted_results {
-            println!(
-                "{:<25} | {:>15} | {:>15} | {:>15} | {:>15}",
-                format!("{} Direct", name),
-                format_pretty(stats.write_performance),
-                format_pretty(stats.read_performance),
-                format_pretty(stats.single_write_performance),
-                format_pretty(stats.single_read_performance)
-            );
-        }
-        println!("---------------------------------------------------------------------------------------\n");
-    }
+    print_benchmark_results(&results, PERF_TEST_MESSAGE_COUNT);
     group.finish();
 }
 

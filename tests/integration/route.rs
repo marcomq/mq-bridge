@@ -537,7 +537,10 @@ async fn test_custom_components_yaml_configuration() {
 
     // 4. Parse YAML
     let config: Config = serde_yaml_ng::from_str(yaml).expect("Failed to parse YAML");
-    let route = config.get("yaml_test_route").expect("Route not found").clone();
+    let route = config
+        .get("yaml_test_route")
+        .expect("Route not found")
+        .clone();
 
     // 5. Verify Deserialization
     if let EndpointType::Custom { name, config } = &route.input.endpoint_type {

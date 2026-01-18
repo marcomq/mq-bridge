@@ -80,8 +80,11 @@ url = { version = "2.5", optional = true }
 # Generate JSON schema
 schemars = { version = "1.2", optional = true }
 
+# test-utils
+serde_yaml_ng = { version = "0.10", optional = true }
+
 [features]
-default = []
+default = ["ibm-mq"]
 middleware = ["metrics", "dedup", "panic"]
 full = ["middleware", "mongodb", "kafka", "amqp", "nats", "mqtt", "http", "aws", "zeromq"]
 
@@ -89,7 +92,7 @@ full = ["middleware", "mongodb", "kafka", "amqp", "nats", "mqtt", "http", "aws",
 dedup = ["sled", "dep:rand"]
 metrics = ["dep:metrics"]
 panic = ["dep:rand"]
-test-utils = ["dep:tracing-appender", "dep:tracing-subscriber"]
+test-utils = ["dep:tracing-appender", "dep:tracing-subscriber", "dep:serde_yaml_ng"]
 
 # Generate Schema file
 schema = ["dep:schemars"]
@@ -115,6 +118,7 @@ chrono = "0.4"
 metrics-util = "0.20"
 criterion = { version = "0.8", features = ["async", "async_tokio"] }
 rand = { version = "0.9" }
+mq-bridge = { path = ".", features = ["test-utils"] }
 
 [[bench]]
 name = "performance_bench"
