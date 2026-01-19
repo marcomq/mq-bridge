@@ -197,6 +197,14 @@ async fn create_base_consumer(
                 ))
             }
         }
+        #[cfg(feature = "ibm-mq")]
+        EndpointType::IbmMq(cfg) => {
+            if endpoint.mode == crate::models::ConsumerMode::Subscribe {
+                Ok(Box::new(ibm_mq::IbmMqSubscriber::new(cfg, route_name).await?))
+            } else {
+                Ok(Box::new(ibm_mq::IbmMqConsumer::new(cfg, route_name).await?))
+            }
+        }
         #[cfg(feature = "zeromq")]
         EndpointType::ZeroMq(cfg) => {
             if endpoint.mode == crate::models::ConsumerMode::Subscribe {

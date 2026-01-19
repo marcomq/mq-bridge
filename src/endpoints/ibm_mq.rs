@@ -38,7 +38,7 @@ pub async fn create_ibm_mq_publisher(
     endpoint: &IbmMqEndpoint,
 ) -> anyhow::Result<IbmMqPublisher> {
     info!("Creating IBM MQ publisher for route {}", name);
-    Ok(IbmMqPublisher::new(endpoint.clone(), name.to_string()).await?)
+    Ok(IbmMqPublisher::new(endpoint, name).await?)
 }
 
 pub async fn create_ibm_mq_consumer(
@@ -46,7 +46,7 @@ pub async fn create_ibm_mq_consumer(
     endpoint: &IbmMqEndpoint,
 ) -> anyhow::Result<IbmMqConsumer> {
     info!("Creating IBM MQ consumer for route {}", name);
-    Ok(IbmMqConsumer::new(endpoint.clone(), name.to_string()).await?)
+    Ok(IbmMqConsumer::new(endpoint, name).await?)
 }
 
 pub async fn create_ibm_mq_subscriber(
@@ -54,7 +54,7 @@ pub async fn create_ibm_mq_subscriber(
     endpoint: &IbmMqEndpoint,
 ) -> anyhow::Result<IbmMqSubscriber> {
     info!("Creating IBM MQ subscriber for route {}", name);
-    Ok(IbmMqSubscriber::new(endpoint.clone(), name.to_string()).await?)
+    Ok(IbmMqSubscriber::new(endpoint, name).await?)
 }
 
 macro_rules! connect_mq {
@@ -121,9 +121,11 @@ pub struct IbmMqPublisher {
 }
 
 impl IbmMqPublisher {
-    pub async fn new(endpoint: IbmMqEndpoint, route_name: String) -> Result<Self, PublisherError> {
+    pub async fn new(endpoint: &IbmMqEndpoint, route_name: &str) -> Result<Self, PublisherError> {
         let (tx, mut rx) = mpsc::channel::<BatchJob>(100);
         let (init_tx, init_rx) = oneshot::channel();
+        let route_name = route_name.to_string();
+        let endpoint = endpoint.clone();
 
         thread::spawn(move || {
             let mut init_tx = Some(init_tx);
@@ -494,11 +496,11 @@ impl MessageConsumer for IbmMqConsumer {
 }
 
 impl IbmMqConsumer {
-    pub async fn new(endpoint: IbmMqEndpoint, route_name: String) -> Result<Self, ConsumerError> {
+    pub async fn new(endpoint: &IbmMqEndpoint, route_name: &str) -> Result<Self, ConsumerError> {
         if endpoint.topic.is_some() {
             warn!("IbmMqConsumer initialized with a 'topic' set. It will behave as a Subscriber. Verify if this is intended.");
         }
-        let tx = spawn_consumer_thread(endpoint, route_name).await?;
+        let tx = spawn_consumer_thread(endpoint.clone(), route_name.to_string()).await?;
         Ok(Self { tx })
     }
 }
@@ -535,11 +537,11 @@ impl MessageConsumer for IbmMqSubscriber {
 }
 
 impl IbmMqSubscriber {
-    pub async fn new(endpoint: IbmMqEndpoint, route_name: String) -> Result<Self, ConsumerError> {
+    pub async fn new(endpoint: &IbmMqEndpoint, route_name: &str) -> Result<Self, ConsumerError> {
         if endpoint.topic.is_none() {
             warn!("IbmMqSubscriber initialized without a 'topic' set. It will behave as a Queue Consumer. Verify if this is intended.");
         }
-        let tx = spawn_consumer_thread(endpoint, route_name).await?;
+        let tx = spawn_consumer_thread(endpoint.clone(), route_name.to_string()).await?;
         Ok(Self { tx })
     }
 }

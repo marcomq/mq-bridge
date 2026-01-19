@@ -59,7 +59,7 @@ pub async fn test_ibm_mq_performance_pipeline() {
             queue: Some(queue_name.to_string()),
             topic: None,
         };
-        let publisher = IbmMqPublisher::new(endpoint, queue_name.to_string())
+        let publisher = IbmMqPublisher::new(&endpoint, queue_name)
             .await
             .expect("Failed to create publisher");
 
@@ -169,7 +169,7 @@ pub async fn test_ibm_mq_performance_direct() {
                     topic: None,
                 };
                 Arc::new(
-                    IbmMqPublisher::new(endpoint, queue.to_string())
+                    IbmMqPublisher::new(&endpoint, queue)
                         .await
                         .unwrap(),
                 )
@@ -181,7 +181,7 @@ pub async fn test_ibm_mq_performance_direct() {
                     topic: None,
                 };
                 Arc::new(tokio::sync::Mutex::new(
-                    IbmMqConsumer::new(endpoint, queue.to_string())
+                    IbmMqConsumer::new(&endpoint, queue)
                         .await
                         .unwrap(),
                 ))
@@ -206,10 +206,10 @@ pub async fn test_ibm_mq_performance_direct2() {
             queue: Some(queue_name.to_string()),
             topic: None,
         };
-        let publisher = IbmMqPublisher::new(endpoint.clone(), queue_name.to_string())
+        let publisher = IbmMqPublisher::new(&endpoint, queue_name)
             .await
             .unwrap();
-        let mut consumer = IbmMqConsumer::new(endpoint, queue_name.to_string())
+        let mut consumer = IbmMqConsumer::new(&endpoint, queue_name)
             .await
             .unwrap();
 

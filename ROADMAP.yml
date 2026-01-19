@@ -47,3 +47,26 @@
         Implement `CustomMiddlewareFactory` in the new crate to handle message encryption/decryption configuration and logic.
         This serves as a proof-of-concept for the custom middleware registry (D6).
       status: "Todo"
+    - title: "OpenTelemetry Context Propagation"
+      id: "E8"
+      description: |
+        Implement middleware to extract and inject W3C Trace Context (Traceparent) headers from/to message metadata.
+        This enables distributed tracing across microservices connected via the bridge.
+        @src/middleware.rs
+      status: "Todo"
+    - title: "Explicit Nack Support"
+      id: "F10"
+      description: |
+        Update `MessageConsumer` trait and `CommitFunc` to support explicit Negative Acknowledgement (Nack).
+        This allows consumers to reject messages (e.g., on serialization failure) and have the broker redeliver or DLQ them immediately,
+        instead of waiting for a timeout or connection drop.
+        @src/traits.rs @src/endpoints/
+      status: "Todo"
+    - title: "SQL Endpoint (sqlx)"
+      id: "G11"
+      description: |
+        Implement a generic SQL endpoint using `sqlx` supporting Postgres, MySQL, and SQLite.
+        Consumer: Poll table based on cursor (id/timestamp) or queue-like (lock/delete).
+        Publisher: Insert message payload/metadata into table.
+        @src/endpoints/sql.rs
+      status: "Todo"
