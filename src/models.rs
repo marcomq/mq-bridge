@@ -102,9 +102,6 @@ fn default_output_endpoint() -> Endpoint {
     Endpoint::new(EndpointType::Null)
 }
 
-fn default_dlq_retry_attempts() -> usize {
-    3
-}
 fn default_retry_attempts() -> usize {
     3
 }
@@ -499,25 +496,14 @@ pub struct CommitConcurrencyMiddleware {
 #[serde(deny_unknown_fields)]
 pub struct MetricsMiddleware {}
 
-/// Dead-Letter Queue (DLQ) middleware configuration.
+/// Dead-Letter Queue (DLQ) middleware configuration. It is recommended that the
+/// endpoint is also using a retry to avoid package loss
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct DeadLetterQueueMiddleware {
     /// The endpoint to send failed messages to.
     pub endpoint: Endpoint,
-    /// Number of retry attempts for the DLQ send. Defaults to 3.
-    #[serde(default = "default_dlq_retry_attempts")]
-    pub dlq_retry_attempts: usize,
-    /// Initial retry interval in milliseconds. Defaults to 100ms.
-    #[serde(default = "default_initial_interval_ms")]
-    pub dlq_initial_interval_ms: u64,
-    /// Maximum retry interval in milliseconds. Defaults to 5000ms.
-    #[serde(default = "default_max_interval_ms")]
-    pub dlq_max_interval_ms: u64,
-    /// Multiplier for exponential backoff. Defaults to 2.0.
-    #[serde(default = "default_multiplier")]
-    pub dlq_multiplier: f64,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
