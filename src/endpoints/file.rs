@@ -4,8 +4,8 @@
 //  git clone https://github.com/marcomq/mq-bridge
 use crate::canonical_message::tracing_support::LazyMessageIds;
 use crate::traits::{
-    into_batch_commit_func, CommitFunc, ConsumerError, MessageConsumer, MessageDisposition,
-    MessagePublisher, PublisherError, ReceivedBatch, SentBatch,
+    into_batch_commit_func, CommitFunc, ConsumerError, MessageConsumer, MessagePublisher,
+    PublisherError, ReceivedBatch, SentBatch,
 };
 use crate::CanonicalMessage;
 use anyhow::Context;
@@ -186,8 +186,7 @@ impl MessageConsumer for FileSubscriber {
             messages.push(parse_message(buffer));
         }
 
-        let commit: CommitFunc =
-            Box::new(move |_: MessageDisposition| Box::pin(async move { Ok(()) }));
+        let commit: CommitFunc = Box::new(move |_| Box::pin(async move { Ok(()) }));
 
         Ok(ReceivedBatch {
             messages,
@@ -309,7 +308,7 @@ impl MessageConsumer for FileConsumer {
         let state = self.state.clone();
         let lines_to_remove = lines_read;
 
-        let commit: CommitFunc = Box::new(move |_: MessageDisposition| {
+        let commit: CommitFunc = Box::new(move |_| {
             Box::pin(async move {
                 let mut state = state.lock().await;
 

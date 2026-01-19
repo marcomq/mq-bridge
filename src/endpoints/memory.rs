@@ -5,8 +5,8 @@
 use crate::canonical_message::tracing_support::LazyMessageIds;
 use crate::models::MemoryConfig;
 use crate::traits::{
-    BoxFuture, ConsumerError, MessageConsumer, MessageDisposition, MessagePublisher,
-    PublisherError, Received, ReceivedBatch, SentBatch,
+    BatchCommitFunc, BoxFuture, ConsumerError, MessageConsumer, MessageDisposition,
+    MessagePublisher, PublisherError, Received, ReceivedBatch, SentBatch,
 };
 use crate::CanonicalMessage;
 use anyhow::anyhow;
@@ -281,7 +281,7 @@ impl MessageConsumer for MemoryConsumer {
                 }
                 Ok(())
             }) as BoxFuture<'static, anyhow::Result<()>>
-        });
+        }) as BatchCommitFunc;
         Ok(ReceivedBatch { messages, commit })
     }
 

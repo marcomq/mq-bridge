@@ -214,9 +214,9 @@ async fn handle_request(
 
     // Channel to receive the commit confirmation from the pipeline
     let (ack_tx, ack_rx) = tokio::sync::oneshot::channel::<MessageDisposition>();
-    let commit = Box::new(move |resp: MessageDisposition| {
+    let commit = Box::new(move |disposition: MessageDisposition| {
         Box::pin(async move {
-            if ack_tx.send(resp).is_err() {
+            if ack_tx.send(disposition).is_err() {
                 return Err(anyhow::anyhow!("Failed to send ack to HTTP handler"));
             }
             Ok(())

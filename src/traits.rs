@@ -13,6 +13,9 @@ use std::sync::Arc;
 use tracing::warn;
 
 /// The disposition of a processed message.
+///
+/// Implements `From<Option<CanonicalMessage>>` for compatibility:
+/// `None` maps to `Ack`, `Some(msg)` maps to `Reply(msg)`.
 #[derive(Debug, Clone)]
 pub enum MessageDisposition {
     /// Acknowledge processing (success).
@@ -21,6 +24,24 @@ pub enum MessageDisposition {
     Reply(CanonicalMessage),
     /// Negative acknowledgement (failure).
     Nack,
+}
+
+impl From<Option<CanonicalMessage>> for MessageDisposition {
+    fn from(opt: Option<CanonicalMessage>) -> Self {
+        match opt {
+            Some(msg) => MessageDisposition::Reply(msg),
+            None => MessageDisposition::Ack,
+        }
+    }
+}
+
+impl From<Handled> for MessageDisposition {
+    fn from(handled: Handled) -> Self {
+        match handled {
+            Handled::Ack => MessageDisposition::Ack,
+            Handled::Publish(msg) => MessageDisposition::Reply(msg),
+        }
+    }
 }
 
 /// A generic trait for handling messages (commands or events).

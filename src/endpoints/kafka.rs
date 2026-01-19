@@ -1,8 +1,8 @@
 use crate::canonical_message::tracing_support::LazyMessageIds;
 use crate::models::KafkaConfig;
 use crate::traits::{
-    BoxFuture, ConsumerError, MessageConsumer, MessageDisposition, MessagePublisher,
-    PublisherError, Received, ReceivedBatch, Sent, SentBatch,
+    BatchCommitFunc, BoxFuture, ConsumerError, MessageConsumer, MessageDisposition,
+    MessagePublisher, PublisherError, Received, ReceivedBatch, Sent, SentBatch,
 };
 use crate::CanonicalMessage;
 use anyhow::{anyhow, Context};
@@ -670,6 +670,6 @@ async fn receive_batch_internal(
             }
             Ok(())
         }) as BoxFuture<'static, anyhow::Result<()>>
-    });
+    }) as BatchCommitFunc;
     Ok(ReceivedBatch { messages, commit })
 }
