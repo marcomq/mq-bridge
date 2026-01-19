@@ -477,7 +477,7 @@ http_route:
             let received = consumer.receive().await.expect("Failed to receive");
             // Send a response back via commit
             let response_msg = CanonicalMessage::new(b"response_payload".to_vec(), None);
-            let _ = (received.commit)(Some(response_msg)).await;
+            let _ = (received.commit)(crate::traits::MessageDisposition::Reply(response_msg)).await;
             received.message
         });
 
@@ -542,11 +542,11 @@ http_route:
             if let Ok(received) = consumer.receive().await {
                 let static_response_outcome =
                     static_publisher.send(received.message).await.unwrap();
-                let pipeline_response = match static_response_outcome {
-                    Sent::Response(msg) => Some(msg),
-                    Sent::Ack => None,
+                let disposition = match static_response_outcome {
+                    Sent::Response(msg) => crate::traits::MessageDisposition::Reply(msg),
+                    Sent::Ack => crate::traits::MessageDisposition::Ack,
                 };
-                let _ = (received.commit)(pipeline_response).await;
+                let _ = (received.commit)(disposition).await;
             }
         });
 
@@ -585,11 +585,11 @@ http_route:
         tokio::spawn(async move {
             if let Ok(received) = consumer.receive().await {
                 let outcome = publisher.send(received.message).await.unwrap();
-                let resp = match outcome {
-                    Sent::Response(msg) => Some(msg),
-                    Sent::Ack => None,
+                let disposition = match outcome {
+                    Sent::Response(msg) => crate::traits::MessageDisposition::Reply(msg),
+                    Sent::Ack => crate::traits::MessageDisposition::Ack,
                 };
-                let _ = (received.commit)(resp).await;
+                let _ = (received.commit)(disposition).await;
             }
         });
 
@@ -634,11 +634,11 @@ http_route:
         tokio::spawn(async move {
             if let Ok(received) = consumer.receive().await {
                 let outcome = publisher.send(received.message).await.unwrap();
-                let resp = match outcome {
-                    Sent::Response(msg) => Some(msg),
-                    Sent::Ack => None,
+                let disposition = match outcome {
+                    Sent::Response(msg) => crate::traits::MessageDisposition::Reply(msg),
+                    Sent::Ack => crate::traits::MessageDisposition::Ack,
                 };
-                let _ = (received.commit)(resp).await;
+                let _ = (received.commit)(disposition).await;
             }
         });
 

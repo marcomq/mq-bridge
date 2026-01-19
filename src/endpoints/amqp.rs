@@ -400,7 +400,7 @@ impl MessageConsumer for AmqpSubscriber {
         // 3. Create a commit function that acks all received messages.
         let messages_len = messages.len();
         trace!(count = messages_len, queue = %self.queue, message_ids = ?LazyMessageIds(&messages), "Received batch of AMQP subscriber messages");
-        let commit = Box::new(move |_response: Option<Vec<CanonicalMessage>>| {
+        let commit = Box::new(move |_dispositions: Vec<MessageDisposition>| {
             Box::pin(async move {
                 let futures = ackers
                     .into_iter()
