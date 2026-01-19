@@ -168,11 +168,7 @@ pub async fn test_ibm_mq_performance_direct() {
                     queue: Some(queue.to_string()),
                     topic: None,
                 };
-                Arc::new(
-                    IbmMqPublisher::new(&endpoint, queue)
-                        .await
-                        .unwrap(),
-                )
+                Arc::new(IbmMqPublisher::new(&endpoint, queue).await.unwrap())
             },
             || async {
                 let endpoint = IbmMqEndpoint {
@@ -181,9 +177,7 @@ pub async fn test_ibm_mq_performance_direct() {
                     topic: None,
                 };
                 Arc::new(tokio::sync::Mutex::new(
-                    IbmMqConsumer::new(&endpoint, queue)
-                        .await
-                        .unwrap(),
+                    IbmMqConsumer::new(&endpoint, queue).await.unwrap(),
                 ))
             },
         )
@@ -206,12 +200,8 @@ pub async fn test_ibm_mq_performance_direct2() {
             queue: Some(queue_name.to_string()),
             topic: None,
         };
-        let publisher = IbmMqPublisher::new(&endpoint, queue_name)
-            .await
-            .unwrap();
-        let mut consumer = IbmMqConsumer::new(&endpoint, queue_name)
-            .await
-            .unwrap();
+        let publisher = IbmMqPublisher::new(&endpoint, queue_name).await.unwrap();
+        let mut consumer = IbmMqConsumer::new(&endpoint, queue_name).await.unwrap();
 
         println!("--- Starting IBM MQ Direct Performance Test ---");
         let start = Instant::now();
