@@ -1,8 +1,8 @@
 use crate::canonical_message::tracing_support::LazyMessageIds;
 use crate::models::NatsConfig;
 use crate::traits::{
-    BatchCommitFunc, BoxFuture, ConsumerError, MessageConsumer, MessagePublisher, PublisherError,
-    ReceivedBatch, Sent, SentBatch,
+    BatchCommitFunc, BoxFuture, ConsumerError, MessageConsumer, MessageDisposition,
+    MessagePublisher, PublisherError, ReceivedBatch, Sent, SentBatch,
 };
 use crate::CanonicalMessage;
 use crate::APP_NAME;
@@ -522,41 +522,42 @@ impl NatsCore {
 
                 trace!(count = canonical_messages.len(), subject = %subject, message_ids = ?LazyMessageIds(&canonical_messages), "Received batch of NATS JetStream messages");
                 let client = client.clone();
-                let commit_closure: BatchCommitFunc = Box::new(move |responses| {
+                let commit_closure: BatchCommitFunc = Box::new(move |dispositions| {
                     Box::pin(async move {
                         // Handle replies if responses are provided
-                        if let Some(resps) = responses {
-                            if resps.len() != jetstream_messages.len() {
-                                tracing::warn!(
+
+                        if dispositions.len() != jetstream_messages.len() {
+                            tracing::warn!(
                                     "NATS JetStream batch reply count mismatch: received {} messages but got {} responses. Pairing up to the shorter length.",
                                     jetstream_messages.len(),
-                                    resps.len()
+                                    dispositions.len()
                                 );
-                            }
-                            for (msg, resp) in jetstream_messages.iter().zip(resps) {
-                                if let Some(reply) = msg.reply.as_ref() {
-                                    let publish_result = tokio::time::timeout(
-                                        std::time::Duration::from_secs(60),
-                                        client.publish(reply.clone(), resp.payload),
-                                    )
-                                    .await;
+                        }
+                        for (msg, disposition) in jetstream_messages.iter().zip(dispositions) {
+                            if let (Some(reply), MessageDisposition::Reply(resp)) =
+                                (msg.reply.as_ref(), disposition)
+                            {
+                                let publish_result = tokio::time::timeout(
+                                    std::time::Duration::from_secs(60),
+                                    client.publish(reply.clone(), resp.payload),
+                                )
+                                .await;
 
-                                    match publish_result {
-                                        Err(_) => {
-                                            tracing::error!(
-                                                subject = %reply,
-                                                "Failed to publish NATS reply (timeout)"
-                                            );
-                                        }
-                                        Ok(Err(e)) => {
-                                            tracing::error!(
-                                                subject = %reply,
-                                                error = %e,
-                                                "Failed to publish NATS reply"
-                                            );
-                                        }
-                                        Ok(Ok(_)) => {}
+                                match publish_result {
+                                    Err(_) => {
+                                        tracing::error!(
+                                            subject = %reply,
+                                            "Failed to publish NATS reply (timeout)"
+                                        );
                                     }
+                                    Ok(Err(e)) => {
+                                        tracing::error!(
+                                            subject = %reply,
+                                            error = %e,
+                                            "Failed to publish NATS reply"
+                                        );
+                                    }
+                                    Ok(Ok(_)) => {}
                                 }
                             }
                         }
@@ -620,40 +621,40 @@ impl NatsCore {
                 }
 
                 let client = client.clone();
-                let commit_closure: BatchCommitFunc = Box::new(move |responses| {
+                let commit_closure: BatchCommitFunc = Box::new(move |dispositions| {
                     Box::pin(async move {
-                        if let Some(resps) = responses {
-                            if resps.len() != reply_subjects.len() {
-                                tracing::warn!(
+                        if dispositions.len() != reply_subjects.len() {
+                            tracing::warn!(
                                     "NATS Core batch reply count mismatch: received {} messages but got {} responses. Pairing up to the shorter length.",
                                     reply_subjects.len(),
-                                    resps.len()
+                                    dispositions.len()
                                 );
-                            }
-                            for (reply_opt, resp) in reply_subjects.iter().zip(resps) {
-                                if let Some(reply) = reply_opt {
-                                    let publish_result = tokio::time::timeout(
-                                        std::time::Duration::from_secs(60),
-                                        client.publish(reply.clone(), resp.payload),
-                                    )
-                                    .await;
+                        }
+                        for (reply_opt, disposition) in reply_subjects.iter().zip(dispositions) {
+                            if let (Some(reply), MessageDisposition::Reply(resp)) =
+                                (reply_opt, disposition)
+                            {
+                                let publish_result = tokio::time::timeout(
+                                    std::time::Duration::from_secs(60),
+                                    client.publish(reply.clone(), resp.payload),
+                                )
+                                .await;
 
-                                    match publish_result {
-                                        Err(_) => {
-                                            tracing::error!(
-                                                subject = %reply,
-                                                "Failed to publish NATS reply (timeout)"
-                                            );
-                                        }
-                                        Ok(Err(e)) => {
-                                            tracing::error!(
-                                                subject = %reply,
-                                                error = %e,
-                                                "Failed to publish NATS reply"
-                                            );
-                                        }
-                                        Ok(Ok(_)) => {}
+                                match publish_result {
+                                    Err(_) => {
+                                        tracing::error!(
+                                            subject = %reply,
+                                            "Failed to publish NATS reply (timeout)"
+                                        );
                                     }
+                                    Ok(Err(e)) => {
+                                        tracing::error!(
+                                            subject = %reply,
+                                            error = %e,
+                                            "Failed to publish NATS reply"
+                                        );
+                                    }
+                                    Ok(Ok(_)) => {}
                                 }
                             }
                         }

@@ -11,8 +11,8 @@ use crate::{
     canonical_message::CanonicalMessage,
     outcomes::SentBatch,
     traits::{
-        self, ConsumerError, CustomEndpointFactory, MessageConsumer, MessagePublisher,
-        PublisherError, ReceivedBatch,
+        self, ConsumerError, CustomEndpointFactory, MessageConsumer, MessageDisposition,
+        MessagePublisher, PublisherError, ReceivedBatch,
     },
 };
 use mqi::{
@@ -385,13 +385,15 @@ async fn spawn_consumer_thread(
                                 connection_error = true;
                             }
                             let tx_commit = tx_loop.clone();
-                            let commit_fn =
-                                Box::new(move |failed: Option<Vec<CanonicalMessage>>| {
+                            let commit_fn: traits::BatchCommitFunc =
+                                Box::new(move |dispositions: Vec<MessageDisposition>| {
                                     let tx = tx_commit.clone();
                                     Box::pin(async move {
                                         let (reply_tx, reply_rx) = oneshot::channel();
-                                        let should_backout =
-                                            failed.is_some_and(|msgs| !msgs.is_empty());
+                                        let should_backout = dispositions
+                                            .iter()
+                                            .any(|d| matches!(d, MessageDisposition::Nack));
+
                                         let job = if !should_backout {
                                             ConsumerJob::Commit { reply_tx }
                                         } else {

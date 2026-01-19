@@ -132,6 +132,7 @@ fn is_known_endpoint_name(name: &str) -> bool {
             | "mqtt"
             | "http"
             | "ibm-mq"
+            | "ibmmq"
             | "zeromq"
             | "fanout"
             | "switch"
@@ -318,6 +319,20 @@ impl Endpoint {
     }
 }
 
+fn is_known_middleware_name(name: &str) -> bool {
+    matches!(
+        name,
+        "deduplication"
+            | "metrics"
+            | "dlq"
+            | "commit_concurrency"
+            | "retry"
+            | "random_panic"
+            | "delay"
+            | "custom"
+    )
+}
+
 /// Deserialize middlewares from a generic serde_json::Value.
 ///
 /// This logic was extracted from `deserialize_middlewares_from_map_or_seq` to be reused by the custom `Endpoint` deserializer.
@@ -340,7 +355,34 @@ fn deserialize_middlewares_from_value(value: serde_json::Value) -> anyhow::Resul
 
     let mut middlewares = Vec::new();
     for item in arr {
-        if let Ok(m) = serde_json::from_value::<Middleware>(item.clone()) {
+        // Check if it is a map with a single key that matches a known middleware
+        let known_name = if let serde_json::Value::Object(map) = &item {
+            if map.len() == 1 {
+                let (name, _) = map.iter().next().unwrap();
+                if is_known_middleware_name(name) {
+                    Some(name.clone())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if let Some(name) = known_name {
+            match serde_json::from_value::<Middleware>(item.clone()) {
+                Ok(m) => middlewares.push(m),
+                Err(e) => {
+                    return Err(anyhow::anyhow!(
+                        "Failed to deserialize known middleware '{}': {}",
+                        name,
+                        e
+                    ))
+                }
+            }
+        } else if let Ok(m) = serde_json::from_value::<Middleware>(item.clone()) {
             middlewares.push(m);
         } else if let serde_json::Value::Object(map) = &item {
             if map.len() == 1 {
@@ -426,7 +468,7 @@ impl EndpointType {
             EndpointType::MongoDb(_) => "mongodb",
             EndpointType::Mqtt(_) => "mqtt",
             EndpointType::Http(_) => "http",
-            EndpointType::IbmMq(_) => "ibm-mq",
+            EndpointType::IbmMq(_) => "ibmmq",
             EndpointType::ZeroMq(_) => "zeromq",
             EndpointType::Fanout(_) => "fanout",
             EndpointType::Switch(_) => "switch",
@@ -497,8 +539,8 @@ pub struct CommitConcurrencyMiddleware {
 pub struct MetricsMiddleware {}
 
 /// Dead-Letter Queue (DLQ) middleware configuration. It is recommended that the
-/// endpoint is also using a retry to avoid package loss
-#[derive(Debug, Deserialize, Serialize, Clone)]
+/// endpoint is also using a retry to avoid message loss
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct DeadLetterQueueMiddleware {
@@ -506,7 +548,7 @@ pub struct DeadLetterQueueMiddleware {
     pub endpoint: Endpoint,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct RetryMiddleware {

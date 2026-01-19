@@ -4,11 +4,11 @@
 //  git clone https://github.com/marcomq/mq-bridge
 
 use crate::models::HttpConfig;
-#[cfg(feature = "actix-web")]
-use crate::traits::CommitFunc;
 use crate::traits::{
     BoxFuture, ConsumerError, MessageConsumer, MessagePublisher, ReceivedBatch, Sent,
 };
+#[cfg(feature = "actix-web")]
+use crate::traits::{CommitFunc, MessageDisposition};
 #[cfg(feature = "reqwest")]
 use crate::traits::{PublisherError, SentBatch};
 use crate::CanonicalMessage;
@@ -213,8 +213,8 @@ async fn handle_request(
     message.metadata = metadata;
 
     // Channel to receive the commit confirmation from the pipeline
-    let (ack_tx, ack_rx) = tokio::sync::oneshot::channel::<Option<CanonicalMessage>>();
-    let commit = Box::new(move |resp| {
+    let (ack_tx, ack_rx) = tokio::sync::oneshot::channel::<MessageDisposition>();
+    let commit = Box::new(move |resp: MessageDisposition| {
         Box::pin(async move {
             if ack_tx.send(resp).is_err() {
                 return Err(anyhow::anyhow!("Failed to send ack to HTTP handler"));
@@ -232,9 +232,9 @@ async fn handle_request(
     let timeout_duration = std::time::Duration::from_secs(30);
     match tokio::time::timeout(timeout_duration, async {
         match ack_rx.await {
-            Ok(pipeline_response) => {
+            Ok(disposition) => {
                 // Pipeline processed the message.
-                make_response(pipeline_response)
+                make_response(disposition)
             }
             Err(_) => HttpResponse::InternalServerError().body("Pipeline closed"),
         }
@@ -247,9 +247,9 @@ async fn handle_request(
 }
 
 #[cfg(feature = "actix-web")]
-fn make_response(message: Option<CanonicalMessage>) -> HttpResponse {
-    match message {
-        Some(msg) => {
+fn make_response(disposition: MessageDisposition) -> HttpResponse {
+    match disposition {
+        MessageDisposition::Reply(msg) => {
             let mut builder = HttpResponse::Ok();
             for (key, value) in &msg.metadata {
                 builder.insert_header((key.as_str(), value.as_str()));
@@ -259,7 +259,10 @@ fn make_response(message: Option<CanonicalMessage>) -> HttpResponse {
             }
             builder.body(msg.payload)
         }
-        None => HttpResponse::Accepted().body("Message processed"),
+        MessageDisposition::Ack => HttpResponse::Accepted().body("Message processed"),
+        MessageDisposition::Nack => {
+            HttpResponse::InternalServerError().body("Message processing failed")
+        }
     }
 }
 

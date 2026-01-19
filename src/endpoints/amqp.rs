@@ -1,8 +1,8 @@
 use crate::canonical_message::tracing_support::LazyMessageIds;
 use crate::models::AmqpConfig;
 use crate::traits::{
-    BoxFuture, ConsumerError, MessageConsumer, MessagePublisher, PublisherError, ReceivedBatch,
-    Sent, SentBatch,
+    BoxFuture, ConsumerError, MessageConsumer, MessageDisposition, MessagePublisher,
+    PublisherError, ReceivedBatch, Sent, SentBatch,
 };
 use crate::CanonicalMessage;
 use crate::APP_NAME;
@@ -582,30 +582,31 @@ impl MessageConsumer for AmqpConsumer {
         let messages_len = messages.len();
         trace!(count = messages_len, queue = %self.queue, message_ids = ?LazyMessageIds(&messages), "Received batch of AMQP messages");
         let channel = self.channel.clone();
-        let commit = Box::new(move |responses: Option<Vec<CanonicalMessage>>| {
+        let commit = Box::new(move |dispositions: Vec<MessageDisposition>| {
             Box::pin(async move {
                 // Handle replies if responses are provided
-                if let Some(resps) = responses {
-                    for ((reply_to, correlation_id), resp) in reply_infos.iter().zip(resps) {
-                        if let Some(rt) = reply_to {
-                            let mut props = BasicProperties::default();
-                            if let Some(cid) = correlation_id {
-                                props = props.with_correlation_id(cid.clone().into());
-                            }
 
-                            // Publish response to the default exchange with the routing key set to reply_to
-                            if let Err(e) = channel
-                                .basic_publish(
-                                    "", // Default exchange
-                                    rt,
-                                    BasicPublishOptions::default(),
-                                    &resp.payload,
-                                    props,
-                                )
-                                .await
-                            {
-                                tracing::error!(reply_to = %rt, error = %e, "Failed to publish AMQP reply");
-                            }
+                for ((reply_to, correlation_id), disposition) in
+                    reply_infos.iter().zip(dispositions)
+                {
+                    if let (Some(rt), MessageDisposition::Reply(resp)) = (reply_to, disposition) {
+                        let mut props = BasicProperties::default();
+                        if let Some(cid) = correlation_id {
+                            props = props.with_correlation_id(cid.clone().into());
+                        }
+
+                        // Publish response to the default exchange with the routing key set to reply_to
+                        if let Err(e) = channel
+                            .basic_publish(
+                                "", // Default exchange
+                                rt,
+                                BasicPublishOptions::default(),
+                                &resp.payload,
+                                props,
+                            )
+                            .await
+                        {
+                            tracing::error!(reply_to = %rt, error = %e, "Failed to publish AMQP reply");
                         }
                     }
                 }

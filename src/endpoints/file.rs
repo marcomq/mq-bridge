@@ -4,8 +4,8 @@
 //  git clone https://github.com/marcomq/mq-bridge
 use crate::canonical_message::tracing_support::LazyMessageIds;
 use crate::traits::{
-    into_batch_commit_func, CommitFunc, ConsumerError, MessageConsumer, MessagePublisher,
-    PublisherError, ReceivedBatch, SentBatch,
+    into_batch_commit_func, CommitFunc, ConsumerError, MessageConsumer, MessageDisposition,
+    MessagePublisher, PublisherError, ReceivedBatch, SentBatch,
 };
 use crate::CanonicalMessage;
 use anyhow::Context;
@@ -186,7 +186,8 @@ impl MessageConsumer for FileSubscriber {
             messages.push(parse_message(buffer));
         }
 
-        let commit: CommitFunc = Box::new(move |_| Box::pin(async move { Ok(()) }));
+        let commit: CommitFunc =
+            Box::new(move |_: MessageDisposition| Box::pin(async move { Ok(()) }));
 
         Ok(ReceivedBatch {
             messages,
@@ -308,7 +309,7 @@ impl MessageConsumer for FileConsumer {
         let state = self.state.clone();
         let lines_to_remove = lines_read;
 
-        let commit: CommitFunc = Box::new(move |_| {
+        let commit: CommitFunc = Box::new(move |_: MessageDisposition| {
             Box::pin(async move {
                 let mut state = state.lock().await;
 
@@ -445,15 +446,16 @@ mod tests {
 
         // 5. Receive the messages and verify them
         let received1 = source.receive().await.unwrap();
-        let _ = (received1.commit)(None).await; // Commit is a no-op, but we should call it
+        let _ = (received1.commit)(crate::traits::MessageDisposition::Ack).await; // Commit is a no-op, but we should call it
 
         assert_eq!(received1.message.message_id, msg1.message_id);
         assert_eq!(received1.message.payload, msg1.payload);
 
         let batch = source.receive_batch(1).await.unwrap();
         let (received_msgs, commit2) = (batch.messages, batch.commit);
+        let len = received_msgs.len();
         let received_msg2 = received_msgs.into_iter().next().unwrap();
-        let _ = commit2(None).await;
+        let _ = commit2(vec![crate::traits::MessageDisposition::Ack; len]).await;
         assert_eq!(received_msg2.message_id, msg2.message_id);
         assert_eq!(received_msg2.payload, msg2.payload);
 
@@ -497,7 +499,9 @@ mod tests {
         assert_eq!(received1.message.payload.as_ref(), b"line1");
 
         // Commit first message (should remove line1)
-        (received1.commit)(None).await.unwrap();
+        (received1.commit)(crate::traits::MessageDisposition::Ack)
+            .await
+            .unwrap();
 
         // Verify file content
         let content = tokio::fs::read_to_string(&file_path).await.unwrap();
@@ -506,12 +510,16 @@ mod tests {
         // Receive second message
         let received2 = consumer.receive().await.unwrap();
         assert_eq!(received2.message.payload.as_ref(), b"line2");
-        (received2.commit)(None).await.unwrap();
+        (received2.commit)(crate::traits::MessageDisposition::Ack)
+            .await
+            .unwrap();
 
         // Receive third message
         let received3 = consumer.receive().await.unwrap();
         assert_eq!(received3.message.payload.as_ref(), b"line3");
-        (received3.commit)(None).await.unwrap();
+        (received3.commit)(crate::traits::MessageDisposition::Ack)
+            .await
+            .unwrap();
 
         // Verify file is empty
         let content = tokio::fs::read_to_string(&file_path).await.unwrap();

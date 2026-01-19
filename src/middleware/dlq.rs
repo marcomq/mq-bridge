@@ -46,7 +46,7 @@ impl MessagePublisher for DlqPublisher {
 
                 // Attempt to send the message to the DLQ.
                 // If this fails, we immediately return the original error.
-                // Use a retry middware if you want to retry sending the message to the DLQ.
+                // Use a retry middleware if you want to retry sending the message to the DLQ.
                 match self.dlq_publisher.send(message).await {
                     Ok(_) => {
                         // Message successfully sent to DLQ. We return Ok(None) to signal that

@@ -1,8 +1,8 @@
 use crate::canonical_message::tracing_support::LazyMessageIds;
 use crate::models::MongoDbConfig;
 use crate::traits::{
-    BatchCommitFunc, BoxFuture, ConsumerError, MessageConsumer, MessagePublisher, PublisherError,
-    Received, ReceivedBatch, Sent, SentBatch,
+    BatchCommitFunc, BoxFuture, ConsumerError, MessageConsumer, MessageDisposition,
+    MessagePublisher, PublisherError, Received, ReceivedBatch, Sent, SentBatch,
 };
 use crate::CanonicalMessage;
 use anyhow::{anyhow, Context};
@@ -458,9 +458,11 @@ impl MongoDbConsumer {
                 let db = self.db.clone();
                 let collection_clone = self.collection.clone();
 
-                let commit = Box::new(move |response: Option<CanonicalMessage>| {
+                let commit = Box::new(move |disposition: MessageDisposition| {
                     Box::pin(async move {
-                        if let (Some(resp), Some(coll_name)) = (response, reply_collection_name) {
+                        if let (MessageDisposition::Reply(resp), Some(coll_name)) =
+                            (disposition, reply_collection_name)
+                        {
                             let doc = message_to_document(&resp).map_err(|e| {
                                 tracing::error!(collection = %coll_name, error = %e, "Failed to serialize MongoDB reply");
                                 anyhow::anyhow!("Failed to serialize MongoDB reply: {}", e)
@@ -565,29 +567,29 @@ impl MongoDbConsumer {
         let collection_clone = self.collection.clone();
         let db = self.db.clone();
 
-        let commit = Box::new(move |responses: Option<Vec<CanonicalMessage>>| {
+        let commit = Box::new(move |dispositions: Vec<MessageDisposition>| {
             Box::pin(async move {
-                if let Some(resps) = responses {
-                    for (reply_coll_opt, resp) in reply_infos.iter().zip(resps) {
-                        if let Some(coll_name) = reply_coll_opt {
-                            let doc = match message_to_document(&resp) {
-                                Ok(d) => d,
-                                Err(e) => {
-                                    tracing::error!(collection = %coll_name, response_id = %format!("{:032x}", resp.message_id), error = %e, "Failed to serialize MongoDB batch reply");
-                                    return Err(anyhow::anyhow!(
-                                        "Failed to serialize MongoDB batch reply: {}",
-                                        e
-                                    ));
-                                }
-                            };
-                            let reply_coll = db.collection::<Document>(coll_name);
-                            if let Err(e) = reply_coll.insert_one(doc).await {
-                                tracing::error!(collection = %coll_name, response_id = %format!("{:032x}", resp.message_id), error = %e, "Failed to insert MongoDB batch reply");
+                for (reply_coll_opt, disposition) in reply_infos.iter().zip(dispositions) {
+                    if let (Some(coll_name), MessageDisposition::Reply(resp)) =
+                        (reply_coll_opt, disposition)
+                    {
+                        let doc = match message_to_document(&resp) {
+                            Ok(d) => d,
+                            Err(e) => {
+                                tracing::error!(collection = %coll_name, response_id = %format!("{:032x}", resp.message_id), error = %e, "Failed to serialize MongoDB batch reply");
                                 return Err(anyhow::anyhow!(
-                                    "Failed to insert MongoDB batch reply: {}",
+                                    "Failed to serialize MongoDB batch reply: {}",
                                     e
                                 ));
                             }
+                        };
+                        let reply_coll = db.collection::<Document>(coll_name);
+                        if let Err(e) = reply_coll.insert_one(doc).await {
+                            tracing::error!(collection = %coll_name, response_id = %format!("{:032x}", resp.message_id), error = %e, "Failed to insert MongoDB batch reply");
+                            return Err(anyhow::anyhow!(
+                                "Failed to insert MongoDB batch reply: {}",
+                                e
+                            ));
                         }
                     }
                 }

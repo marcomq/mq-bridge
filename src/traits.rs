@@ -12,6 +12,17 @@ use std::any::Any;
 use std::sync::Arc;
 use tracing::warn;
 
+/// The disposition of a processed message.
+#[derive(Debug, Clone)]
+pub enum MessageDisposition {
+    /// Acknowledge processing (success).
+    Ack,
+    /// Acknowledge processing and send a reply.
+    Reply(CanonicalMessage),
+    /// Negative acknowledgement (failure).
+    Nack,
+}
+
 /// A generic trait for handling messages (commands or events).
 ///
 /// Handlers process an incoming message and can optionally return a new
@@ -47,15 +58,12 @@ impl<T: Handler + ?Sized> Handler for Arc<T> {
 
 /// A closure that can be called to commit the message.
 /// It returns a `BoxFuture` to allow for async commit operations.
-pub type CommitFunc = Box<
-    dyn FnOnce(Option<CanonicalMessage>) -> BoxFuture<'static, anyhow::Result<()>> + Send + 'static,
->;
+pub type CommitFunc =
+    Box<dyn FnOnce(MessageDisposition) -> BoxFuture<'static, anyhow::Result<()>> + Send + 'static>;
 
 /// A closure for committing a batch of messages.
 pub type BatchCommitFunc = Box<
-    dyn FnOnce(Option<Vec<CanonicalMessage>>) -> BoxFuture<'static, anyhow::Result<()>>
-        + Send
-        + 'static,
+    dyn FnOnce(Vec<MessageDisposition>) -> BoxFuture<'static, anyhow::Result<()>> + Send + 'static,
 >;
 
 #[async_trait]
@@ -96,10 +104,13 @@ pub trait MessageConsumer: Send + Sync {
         _max_messages: usize,
     ) -> Result<ReceivedBatch, ConsumerError> {
         let received = self.receive().await?; // The `?` now correctly handles ConsumerError
-        let batch_commit = Box::new(move |responses: Option<Vec<CanonicalMessage>>| {
-            // The default implementation only handles one message, so we take the first response.
-            let single_response = responses.and_then(|v| v.into_iter().next());
-            (received.commit)(single_response)
+        let batch_commit = Box::new(move |dispositions: Vec<MessageDisposition>| {
+            // The default implementation only handles one message, so we take the first disposition.
+            let single_disposition = dispositions
+                .into_iter()
+                .next()
+                .unwrap_or(MessageDisposition::Ack);
+            (received.commit)(single_disposition)
         }) as BatchCommitFunc;
         Ok(ReceivedBatch {
             messages: vec![received.message],
@@ -248,9 +259,9 @@ pub async fn send_batch_helper<P: MessagePublisher + ?Sized>(
 /// This allows a function that commits a batch of messages to be used where a
 /// function that commits a single message is expected.
 pub fn into_commit_func(batch_commit: BatchCommitFunc) -> CommitFunc {
-    Box::new(move |response: Option<CanonicalMessage>| {
-        let single_response_vec = response.map(|resp| vec![resp]);
-        batch_commit(single_response_vec)
+    Box::new(move |disposition: MessageDisposition| {
+        let batch_disposition = vec![disposition];
+        batch_commit(batch_disposition)
     })
 }
 
@@ -260,19 +271,18 @@ pub fn into_commit_func(batch_commit: BatchCommitFunc) -> CommitFunc {
 /// extracting the first message from the response vector (if any) and passing
 /// it to the underlying single-message commit function.
 pub fn into_batch_commit_func(commit: CommitFunc) -> BatchCommitFunc {
-    Box::new(move |responses: Option<Vec<CanonicalMessage>>| {
-        let single_response = match responses {
-            Some(resp_vec) if resp_vec.len() > 1 => {
-                warn!(
-                    "into_batch_commit_func called with batch of {} messages; dropping all responses to avoid partial commit (incorrect usage)",
-                    resp_vec.len()
-                );
-                None
-            }
-            Some(mut resp_vec) => resp_vec.pop(),
-            None => None,
+    Box::new(move |mut dispositions: Vec<MessageDisposition>| {
+        let single_disposition = if dispositions.len() > 1 {
+            warn!(
+                "into_batch_commit_func called with batch of {} messages; dropping all responses to avoid partial commit (incorrect usage)",
+                dispositions.len()
+            );
+            // Default to Ack to avoid hanging if we can't process the batch correctly
+            MessageDisposition::Ack
+        } else {
+            dispositions.pop().unwrap_or(MessageDisposition::Ack)
         };
-        commit(single_response)
+        commit(single_disposition)
     })
 }
 

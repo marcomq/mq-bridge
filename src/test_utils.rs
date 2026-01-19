@@ -1,5 +1,5 @@
 #![allow(dead_code)] // This module contains helpers used by various integration tests.
-use crate::traits::{BoxFuture, MessagePublisher, Received};
+use crate::traits::{BoxFuture, MessageDisposition, MessagePublisher, Received};
 use crate::traits::{ConsumerError, MessageConsumer, PublisherError, ReceivedBatch, SentBatch};
 use crate::{CanonicalMessage, Route};
 use async_channel::{bounded, Receiver, Sender};
@@ -823,7 +823,7 @@ pub async fn measure_read_performance(
                     .await
                     .expect("Semaphore closed");
                 tokio::spawn(async move {
-                    let _ = commit(None).await;
+                    let _ = commit(vec![MessageDisposition::Ack; batch.messages.len()]).await;
                     drop(permit);
                 });
             }
@@ -946,7 +946,7 @@ pub async fn measure_single_read_performance(
                 .await
                 .expect("Semaphore closed");
             tokio::spawn(async move {
-                let _ = commit(None).await;
+                let _ = commit(MessageDisposition::Ack).await;
                 drop(permit);
             });
         } else {

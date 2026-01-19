@@ -1,8 +1,8 @@
 use crate::canonical_message::tracing_support::LazyMessageIds;
 use crate::models::AwsEndpoint;
 use crate::traits::{
-    BatchCommitFunc, ConsumerError, MessageConsumer, MessagePublisher, PublisherError,
-    ReceivedBatch, Sent, SentBatch,
+    BatchCommitFunc, ConsumerError, MessageConsumer, MessageDisposition, MessagePublisher,
+    PublisherError, ReceivedBatch, Sent, SentBatch,
 };
 use crate::CanonicalMessage;
 use anyhow::{anyhow, Context};
@@ -140,7 +140,7 @@ impl MessageConsumer for AwsConsumer {
         let client = self.client.clone();
         let queue_url = self.queue_url.clone();
 
-        let commit: BatchCommitFunc = Box::new(move |_results| {
+        let commit: BatchCommitFunc = Box::new(move |_dispositions: Vec<MessageDisposition>| {
             let client = client.clone();
             let queue_url = queue_url.clone();
             let handles = receipt_handles.clone();

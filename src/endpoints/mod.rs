@@ -81,7 +81,10 @@ pub fn check_consumer(
         EndpointType::Mqtt(_) => Ok(()),
         #[cfg(feature = "zeromq")]
         EndpointType::ZeroMq(_) => Ok(()),
-        EndpointType::File(_) => Ok(()),
+        #[cfg(feature = "ibm-mq")]
+        EndpointType::IbmMq(_) => Ok(()),
+        #[cfg(feature = "mongodb")]
+        EndpointType::MongoDb(_) => Ok(()),
         #[cfg(any(feature = "http-client", feature = "http-server"))]
         EndpointType::Http(_) => {
             ensure_consume_mode("Http", endpoint.mode.clone())?;
@@ -94,8 +97,7 @@ pub fn check_consumer(
         }
         EndpointType::Static(_) => ensure_consume_mode("Static", endpoint.mode.clone()),
         EndpointType::Memory(_) => Ok(()),
-        #[cfg(feature = "mongodb")]
-        EndpointType::MongoDb(_) => Ok(()),
+        EndpointType::File(_) => Ok(()),
         EndpointType::Custom { .. } => Ok(()),
         EndpointType::Switch(_) => Err(anyhow!(
             "[route:{}] Switch endpoint is only supported as an output",

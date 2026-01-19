@@ -4,7 +4,8 @@
 //  git clone https://github.com/marcomq/mq-bridge
 use crate::models::DeduplicationMiddleware;
 use crate::traits::{
-    into_batch_commit_func, ConsumerError, MessageConsumer, Received, ReceivedBatch,
+    into_batch_commit_func, ConsumerError, MessageConsumer, MessageDisposition, Received,
+    ReceivedBatch,
 };
 use anyhow::Context;
 use async_trait::async_trait;
@@ -158,9 +159,9 @@ impl MessageConsumer for DeduplicationConsumer {
             let key_clone = key.clone();
 
             // Wrap commit to update DB to "processed" state
-            let commit = Box::new(move |response| {
+            let commit = Box::new(move |disposition: MessageDisposition| {
                 Box::pin(async move {
-                    original_commit(response).await?;
+                    original_commit(disposition).await?;
 
                     // Update the pending marker to the final processed value
                     if let Err(e) = db.insert(&key_clone, processed_val) {

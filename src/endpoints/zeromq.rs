@@ -1,7 +1,7 @@
 use crate::models::{ZeroMqEndpoint, ZeroMqSocketType};
 use crate::traits::{
-    BoxFuture, ConsumerError, MessageConsumer, MessagePublisher, PublisherError, Received,
-    ReceivedBatch, SentBatch,
+    BoxFuture, ConsumerError, MessageConsumer, MessageDisposition, MessagePublisher,
+    PublisherError, Received, ReceivedBatch, SentBatch,
 };
 use crate::CanonicalMessage;
 use anyhow::anyhow;
@@ -372,13 +372,17 @@ impl MessageConsumer for ZeroMqConsumer {
             contexts.push(buffered.reply_context);
         }
 
-        let commit = Box::new(move |responses: Option<Vec<CanonicalMessage>>| {
+        let commit = Box::new(move |dispositions: Vec<MessageDisposition>| {
             Box::pin(async move {
-                let resps = responses.unwrap_or_default();
-
                 for (i, ctx_opt) in contexts.into_iter().enumerate() {
                     if let Some(ctx) = ctx_opt {
-                        let resp = resps.get(i).cloned();
+                        let resp = dispositions.get(i).and_then(|d| {
+                            if let MessageDisposition::Reply(r) = d {
+                                Some(r.clone())
+                            } else {
+                                None
+                            }
+                        });
 
                         let mut state = ctx.state.lock().unwrap();
                         state.responses[ctx.index] = resp;

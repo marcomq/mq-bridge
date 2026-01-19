@@ -71,7 +71,7 @@ async fn test_all_performance_direct() {
     }
     #[cfg(feature = "ibm-mq")]
     {
-        if should_run("ibm_mq") {
+        if should_run("ibm-mq") {
             println!("\n\n>>> Starting IBM MQ Direct Performance Test...");
             integration::ibm_mq::test_ibm_mq_performance_direct().await;
         }
@@ -134,7 +134,7 @@ async fn test_all_chaos() {
 
     #[cfg(feature = "ibm-mq")]
     {
-        if should_run("ibm_mq") {
+        if should_run("ibm-mq") {
             println!("\n\n>>> Starting IBM MQ Chaos Test...");
             integration::ibm_mq::test_ibm_mq_chaos().await;
         }

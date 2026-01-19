@@ -1,8 +1,8 @@
 use crate::canonical_message::tracing_support::LazyMessageIds;
 use crate::models::{MqttConfig, MqttProtocol};
 use crate::traits::{
-    BoxFuture, ConsumerError, MessageConsumer, MessagePublisher, PublisherError, Received,
-    ReceivedBatch, Sent, SentBatch,
+    BoxFuture, ConsumerError, MessageConsumer, MessageDisposition, MessagePublisher,
+    PublisherError, Received, ReceivedBatch, Sent, SentBatch,
 };
 use crate::CanonicalMessage;
 use crate::APP_NAME;
@@ -282,9 +282,9 @@ impl MessageConsumer for MqttListener {
         let correlation_data = message.metadata.get("correlation_id").cloned();
         let ack_info = internal.ack;
 
-        let commit = Box::new(move |response: Option<CanonicalMessage>| {
+        let commit = Box::new(move |disposition: MessageDisposition| {
             Box::pin(async move {
-                if let (Some(resp), Some(rt)) = (response, reply_topic) {
+                if let (MessageDisposition::Reply(resp), Some(rt)) = (disposition, reply_topic) {
                     trace!(topic = %rt, "Committing MQTT message, sending reply");
                     let mut msg = resp;
                     if let Some(cd) = correlation_data {
@@ -358,37 +358,35 @@ impl MessageConsumer for MqttListener {
         }
 
         let client = self.client.clone();
-        let commit = Box::new(move |responses: Option<Vec<CanonicalMessage>>| {
+        let commit = Box::new(move |dispositions: Vec<MessageDisposition>| {
             Box::pin(async move {
-                if let Some(resps) = responses {
-                    for ((reply_topic, correlation_data), resp) in reply_infos.iter().zip(resps) {
-                        if let Some(rt) = reply_topic {
-                            let mut msg = resp;
-                            if let Some(cd) = correlation_data {
-                                msg.metadata
-                                    .insert("correlation_id".to_string(), cd.clone());
+                for ((reply_topic, correlation_data), disposition) in
+                    reply_infos.iter().zip(dispositions)
+                {
+                    if let (Some(rt), MessageDisposition::Reply(resp)) = (reply_topic, disposition)
+                    {
+                        let mut msg = resp;
+                        if let Some(cd) = correlation_data {
+                            msg.metadata
+                                .insert("correlation_id".to_string(), cd.clone());
+                        }
+                        match tokio::time::timeout(
+                            Duration::from_secs(60),
+                            client.publish(rt, QoS::AtLeastOnce, msg),
+                        )
+                        .await
+                        {
+                            Ok(Err(e)) => {
+                                tracing::error!(topic = %rt, error = %e, "Failed to publish MQTT reply");
+                                return Err(anyhow::anyhow!("Failed to publish MQTT reply: {}", e));
                             }
-                            match tokio::time::timeout(
-                                Duration::from_secs(60),
-                                client.publish(rt, QoS::AtLeastOnce, msg),
-                            )
-                            .await
-                            {
-                                Ok(Err(e)) => {
-                                    tracing::error!(topic = %rt, error = %e, "Failed to publish MQTT reply");
-                                    return Err(anyhow::anyhow!(
-                                        "Failed to publish MQTT reply: {}",
-                                        e
-                                    ));
-                                }
-                                Ok(Ok(_)) => {}
-                                Err(_) => {
-                                    tracing::error!(topic = %rt, "Timed out publishing MQTT reply");
-                                    return Err(anyhow::anyhow!(
-                                        "Timed out publishing MQTT reply to {}",
-                                        rt
-                                    ));
-                                }
+                            Ok(Ok(_)) => {}
+                            Err(_) => {
+                                tracing::error!(topic = %rt, "Timed out publishing MQTT reply");
+                                return Err(anyhow::anyhow!(
+                                    "Timed out publishing MQTT reply to {}",
+                                    rt
+                                ));
                             }
                         }
                     }

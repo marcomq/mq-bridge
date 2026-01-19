@@ -1,8 +1,8 @@
 use crate::canonical_message::tracing_support::LazyMessageIds;
 use crate::models::KafkaConfig;
 use crate::traits::{
-    BoxFuture, ConsumerError, MessageConsumer, MessagePublisher, PublisherError, Received,
-    ReceivedBatch, Sent, SentBatch,
+    BoxFuture, ConsumerError, MessageConsumer, MessageDisposition, MessagePublisher,
+    PublisherError, Received, ReceivedBatch, Sent, SentBatch,
 };
 use crate::CanonicalMessage;
 use anyhow::{anyhow, Context};
@@ -341,10 +341,10 @@ impl MessageConsumer for KafkaConsumer {
         let consumer = self.consumer.clone();
         let producer = self.producer.clone();
 
-        let commit = Box::new(move |response: Option<CanonicalMessage>| {
+        let commit = Box::new(move |disposition: MessageDisposition| {
             Box::pin(async move {
                 // Handle reply
-                if let (Some(resp), Some(rt)) = (response, reply_topic) {
+                if let (MessageDisposition::Reply(resp), Some(rt)) = (disposition, reply_topic) {
                     let mut record: FutureRecord<'_, (), _> =
                         FutureRecord::to(&rt).payload(&resp.payload[..]);
                     let mut headers = OwnedHeaders::new();
@@ -623,19 +623,22 @@ async fn receive_batch_internal(
     let consumer = consumer.clone();
     let producer = producer.into().cloned();
 
-    let commit = Box::new(move |responses: Option<Vec<CanonicalMessage>>| {
+    let commit = Box::new(move |dispositions: Vec<MessageDisposition>| {
         Box::pin(async move {
             // Handle replies
-            if let (Some(resps), Some(prod)) = (responses, producer) {
-                if resps.len() != reply_infos.len() {
+            if let Some(prod) = producer {
+                if dispositions.len() != reply_infos.len() {
                     tracing::warn!(
                         expected = reply_infos.len(),
-                        actual = resps.len(),
+                        actual = dispositions.len(),
                         "Response count mismatch with received messages"
                     );
                 }
-                for ((reply_topic, correlation_id), resp) in reply_infos.iter().zip(resps) {
-                    if let Some(rt) = reply_topic {
+                for ((reply_topic, correlation_id), disposition) in
+                    reply_infos.iter().zip(dispositions)
+                {
+                    if let (Some(rt), MessageDisposition::Reply(resp)) = (reply_topic, disposition)
+                    {
                         let mut record: FutureRecord<'_, (), _> =
                             FutureRecord::to(rt).payload(&resp.payload[..]);
                         let mut headers = OwnedHeaders::new();
