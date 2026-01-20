@@ -297,7 +297,11 @@ impl Endpoint {
         Self::new(EndpointType::Memory(MemoryConfig {
             topic: topic.to_string(),
             capacity: Some(capacity),
+            request_reply: false,
         }))
+    }
+    pub fn new_response() -> Self {
+        Self::new(EndpointType::Response(ResponseConfig::default()))
     }
     pub fn add_middleware(mut self, middleware: Middleware) -> Self {
         self.middlewares.push(middleware);
@@ -749,6 +753,9 @@ pub struct MemoryConfig {
     pub topic: String,
     /// The capacity of the channel.
     pub capacity: Option<usize>,
+    /// (Publisher only) If true, send() waits for a response.
+    #[serde(default)]
+    pub request_reply: bool,
 }
 
 // --- AMQP Specific Configuration ---

@@ -6,7 +6,7 @@ use crate::canonical_message::tracing_support::LazyMessageIds;
 use crate::models::MemoryConfig;
 use crate::traits::{
     BatchCommitFunc, BoxFuture, ConsumerError, MessageConsumer, MessageDisposition,
-    MessagePublisher, PublisherError, Received, ReceivedBatch, SentBatch,
+    MessagePublisher, PublisherError, Received, ReceivedBatch, Sent, SentBatch,
 };
 use crate::CanonicalMessage;
 use anyhow::anyhow;
@@ -15,7 +15,8 @@ use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use std::any::Any;
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+use tokio::sync::oneshot;
 use tracing::{info, trace};
 
 /// A map to hold memory channels for the duration of the bridge setup.
@@ -92,12 +93,17 @@ impl MemoryChannel {
 pub struct MemoryResponseChannel {
     pub sender: Sender<CanonicalMessage>,
     pub receiver: Receiver<CanonicalMessage>,
+    waiters: Arc<Mutex<HashMap<String, oneshot::Sender<CanonicalMessage>>>>,
 }
 
 impl MemoryResponseChannel {
     pub fn new(capacity: usize) -> Self {
         let (sender, receiver) = bounded(capacity);
-        Self { sender, receiver }
+        Self {
+            sender,
+            receiver,
+            waiters: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 
     pub fn close(&self) {
@@ -117,6 +123,17 @@ impl MemoryResponseChannel {
             .recv()
             .await
             .map_err(|e| anyhow!("Error receiving response: {}", e))
+    }
+
+    pub fn register_waiter(&self, correlation_id: &str, sender: oneshot::Sender<CanonicalMessage>) {
+        self.waiters
+            .lock()
+            .unwrap()
+            .insert(correlation_id.to_string(), sender);
+    }
+
+    pub fn remove_waiter(&self, correlation_id: &str) -> Option<oneshot::Sender<CanonicalMessage>> {
+        self.waiters.lock().unwrap().remove(correlation_id)
     }
 }
 
@@ -149,6 +166,7 @@ pub fn get_or_create_response_channel(topic: &str) -> MemoryResponseChannel {
 pub struct MemoryPublisher {
     topic: String,
     sender: Sender<Vec<CanonicalMessage>>,
+    request_reply: bool,
 }
 
 impl MemoryPublisher {
@@ -157,13 +175,19 @@ impl MemoryPublisher {
         Ok(Self {
             topic: config.topic.clone(),
             sender: channel.sender.clone(),
+            request_reply: config.request_reply,
         })
     }
 
+    /// Creates a new local memory publisher.
+    ///
+    /// This method creates a new in-memory publisher with the specified topic and capacity.
+    /// The publisher will send messages to the in-memory channel for the specified topic.
     pub fn new_local(topic: &str, capacity: usize) -> Self {
         Self::new(&MemoryConfig {
             topic: topic.to_string(),
             capacity: Some(capacity),
+            request_reply: false,
         })
         .expect("Failed to create local memory publisher")
     }
@@ -174,12 +198,46 @@ impl MemoryPublisher {
         get_or_create_channel(&MemoryConfig {
             topic: self.topic.clone(),
             capacity: None,
+            request_reply: false,
         })
     }
 }
 
 #[async_trait]
 impl MessagePublisher for MemoryPublisher {
+    async fn send(&self, mut message: CanonicalMessage) -> Result<Sent, PublisherError> {
+        if self.request_reply {
+            let cid = message
+                .metadata
+                .entry("correlation_id".to_string())
+                .or_insert_with(|| uuid::Uuid::new_v4().to_string())
+                .clone();
+
+            let (tx, rx) = oneshot::channel();
+
+            // Register waiter before sending
+            let response_channel = get_or_create_response_channel(&self.topic);
+            response_channel.register_waiter(&cid, tx);
+
+            // Send the message
+            self.send_batch(vec![message]).await?;
+
+            // Wait for the response
+            let response = rx.await.map_err(|e| {
+                anyhow!(
+                    "Failed to receive response for correlation_id {}: {}",
+                    cid,
+                    e
+                )
+            })?;
+
+            Ok(Sent::Response(response))
+        } else {
+            self.send_batch(vec![message]).await?;
+            Ok(Sent::Ack)
+        }
+    }
+
     async fn send_batch(
         &self,
         messages: Vec<CanonicalMessage>,
@@ -224,6 +282,7 @@ impl MemoryConsumer {
         Self::new(&MemoryConfig {
             topic: topic.to_string(),
             capacity: Some(capacity),
+            request_reply: false,
         })
         .expect("Failed to create local memory consumer")
     }
@@ -232,6 +291,7 @@ impl MemoryConsumer {
         get_or_create_channel(&MemoryConfig {
             topic: self.topic.clone(),
             capacity: None,
+            request_reply: false,
         })
     }
 }
@@ -276,7 +336,17 @@ impl MessageConsumer for MemoryConsumer {
                 for disposition in dispositions {
                     if let MessageDisposition::Reply(resp) = disposition {
                         // If the receiver is dropped, sending will fail. We can ignore it.
-                        let _ = channel.sender.send(resp).await;
+                        let mut handled = false;
+                        if let Some(cid) = resp.metadata.get("correlation_id") {
+                            if let Some(tx) = channel.remove_waiter(cid) {
+                                let _ = tx.send(resp.clone());
+                                handled = true;
+                            }
+                        }
+
+                        if !handled {
+                            let _ = channel.sender.send(resp).await;
+                        }
                     }
                 }
                 Ok(())
@@ -321,11 +391,11 @@ impl MessageConsumer for MemorySubscriber {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{Endpoint, EndpointType, ResponseConfig, Route};
+    use crate::models::{Endpoint, Route};
     use crate::traits::Handled;
     use crate::CanonicalMessage;
     use serde_json::json;
-    use tokio::time::{sleep, timeout};
+    use tokio::time::sleep;
 
     #[tokio::test]
     async fn test_memory_channel_integration() {
@@ -392,6 +462,7 @@ mod tests {
         let cfg = MemoryConfig {
             topic: "base_topic".to_string(),
             capacity: Some(10),
+            request_reply: false,
         };
         let subscriber_id = "sub1";
         let mut subscriber = MemorySubscriber::new(&cfg, subscriber_id).unwrap();
@@ -401,6 +472,7 @@ mod tests {
         let pub_cfg = MemoryConfig {
             topic: format!("base_topic-{}", subscriber_id),
             capacity: Some(10),
+            request_reply: false,
         };
         let publisher = MemoryPublisher::new(&pub_cfg).unwrap();
 
@@ -412,49 +484,37 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn test_memory_request_response_flow() {
-        // 1. Define a route from a memory input to a `response` output.
-        let topic = "mem_req_res_topic";
-        let input_endpoint = Endpoint::new_memory(topic, 10);
-        let output_endpoint = Endpoint::new(EndpointType::Response(ResponseConfig::default()));
-
-        // 2. The route needs a handler to process the request and create a response message.
+    async fn test_memory_request_reply_mode() {
+        let topic = format!("mem_rr_topic_{}", uuid::Uuid::new_v4());
+        let input_endpoint = Endpoint::new_memory(&topic, 10);
+        let output_endpoint = Endpoint::new_response();
         let handler = |mut msg: CanonicalMessage| async move {
             let request_payload = msg.get_payload_str();
-            let response_payload = format!("response to {}", request_payload);
+            let response_payload = format!("reply to {}", request_payload);
             msg.set_payload_str(response_payload);
             Ok(Handled::Publish(msg))
         };
 
         let route = Route::new(input_endpoint, output_endpoint).with_handler(handler);
+        route.deploy("mem_rr_test").await.unwrap();
 
-        // 3. Get the input channel for the route's memory endpoint.
-        let input_channel = route.input.channel().unwrap();
-
-        // 4. Get the *response* channel for the route's memory endpoint topic.
-        let response_channel = get_or_create_response_channel(topic);
-
-        // 5. Run the route in the background.
-        route.deploy("mem_req_res_test").await.unwrap();
-
-        // 6. Send a request message to the input channel.
-        let request_message = CanonicalMessage::from("my request");
-        input_channel.send_message(request_message).await.unwrap();
-
-        // 7. Wait for a response message on the response channel.
-        let response_message = timeout(
-            std::time::Duration::from_secs(2),
-            response_channel.wait_for_response(),
-        )
-        .await
-        .expect("Timed out waiting for response")
+        // Create a publisher with request_reply = true
+        let publisher = MemoryPublisher::new(&MemoryConfig {
+            topic: topic.clone(),
+            capacity: Some(10),
+            request_reply: true,
+        })
         .unwrap();
 
-        // 8. Assert the response is correct.
-        assert_eq!(response_message.get_payload_str(), "response to my request");
+        let result = publisher.send("direct request".into()).await.unwrap();
 
-        // 9. Clean up (stop the route).
-        input_channel.close();
-        Route::stop("mem_req_res_test").await;
+        if let Sent::Response(response_msg) = result {
+            assert_eq!(response_msg.get_payload_str(), "reply to direct request");
+        } else {
+            panic!("Expected Sent::Response, got {:?}", result);
+        }
+
+        // Clean up
+        Route::stop("mem_rr_test").await;
     }
 }

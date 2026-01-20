@@ -263,7 +263,7 @@ impl MessageConsumer for DeduplicationConsumer {
 mod tests {
     use super::*;
     use crate::endpoints::memory::MemoryConsumer;
-    use crate::models::{DeduplicationMiddleware, MemoryConfig};
+    use crate::models::DeduplicationMiddleware;
     use crate::CanonicalMessage;
     use tempfile::tempdir;
 
@@ -277,11 +277,7 @@ mod tests {
             ttl_seconds: 60,
         };
 
-        let mem_cfg = MemoryConfig {
-            topic: "dedup_topic".to_string(),
-            capacity: Some(10),
-        };
-        let mem_consumer = MemoryConsumer::new(&mem_cfg).unwrap();
+        let mem_consumer = MemoryConsumer::new_local("dedup_topic", 10);
         let channel = mem_consumer.channel();
 
         // 1. Send a message

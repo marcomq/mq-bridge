@@ -77,18 +77,13 @@ impl MessagePublisher for DelayPublisher {
 mod tests {
     use super::*;
     use crate::endpoints::memory::{MemoryConsumer, MemoryPublisher};
-    use crate::models::MemoryConfig;
     use crate::CanonicalMessage;
     use std::time::Instant;
 
     #[tokio::test]
     async fn test_delay_consumer() {
         let config = DelayMiddleware { delay_ms: 50 };
-        let mem_cfg = MemoryConfig {
-            topic: "delay_test_in".to_string(),
-            capacity: Some(10),
-        };
-        let mem_consumer = MemoryConsumer::new(&mem_cfg).unwrap();
+        let mem_consumer = MemoryConsumer::new_local("delay_test_in", 10);
         let channel = mem_consumer.channel();
         channel
             .send_message(CanonicalMessage::from("test"))
@@ -107,11 +102,7 @@ mod tests {
     #[tokio::test]
     async fn test_delay_publisher() {
         let config = DelayMiddleware { delay_ms: 50 };
-        let mem_cfg = MemoryConfig {
-            topic: "delay_test_out".to_string(),
-            capacity: Some(10),
-        };
-        let mem_publisher = MemoryPublisher::new(&mem_cfg).unwrap();
+        let mem_publisher = MemoryPublisher::new_local("delay_test_out", 10);
         let publisher = DelayPublisher::new(Box::new(mem_publisher), &config);
 
         let start = Instant::now();

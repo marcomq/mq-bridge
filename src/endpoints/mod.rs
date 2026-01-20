@@ -590,6 +590,7 @@ mod tests {
             endpoint_type: EndpointType::Memory(MemoryConfig {
                 topic: "mem".to_string(),
                 capacity: None,
+                request_reply: false,
             }),
             middlewares: vec![],
             handler: None,
