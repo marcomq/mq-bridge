@@ -106,6 +106,11 @@ impl CanonicalMessage {
         self.metadata.insert(KIND_KEY.into(), kind.into());
         self
     }
+
+    pub fn set_raw(&mut self) {
+        self.metadata
+            .insert("mq_bridge.original_format".to_string(), "raw".to_string());
+    }
 }
 
 impl From<&str> for CanonicalMessage {

@@ -164,3 +164,161 @@ impl MessagePublisher for DlqPublisher {
         self
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::CanonicalMessage;
+    use crate::middleware::retry::RetryPublisher;
+    use crate::models::RetryMiddleware;
+    use async_trait::async_trait;
+    use std::sync::Mutex;
+
+    #[derive(Clone)]
+    struct MockFailingPublisher {
+        calls: Arc<Mutex<usize>>,
+    }
+
+    #[async_trait]
+    impl MessagePublisher for MockFailingPublisher {
+        async fn send(&self, _msg: CanonicalMessage) -> Result<Sent, PublisherError> {
+            *self.calls.lock().unwrap() += 1;
+            Err(PublisherError::Retryable(anyhow::anyhow!("Always fails")))
+        }
+
+        async fn send_batch(
+            &self,
+            _messages: Vec<CanonicalMessage>,
+        ) -> Result<SentBatch, PublisherError> {
+            Ok(SentBatch::Ack)
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    #[derive(Clone)]
+    struct MockSuccessPublisher {
+        calls: Arc<Mutex<usize>>,
+    }
+
+    #[async_trait]
+    impl MessagePublisher for MockSuccessPublisher {
+        async fn send(&self, _msg: CanonicalMessage) -> Result<Sent, PublisherError> {
+            *self.calls.lock().unwrap() += 1;
+            Ok(Sent::Ack)
+        }
+
+        async fn send_batch(
+            &self,
+            _messages: Vec<CanonicalMessage>,
+        ) -> Result<SentBatch, PublisherError> {
+            Ok(SentBatch::Ack)
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    #[tokio::test]
+    async fn test_retry_before_dlq() {
+        let target_calls = Arc::new(Mutex::new(0));
+        let failing_target = MockFailingPublisher {
+            calls: target_calls.clone(),
+        };
+
+        // Retry wrapper: max_attempts 4 means it tries 4 times total
+        let retry_config = RetryMiddleware {
+            max_attempts: 4,
+            initial_interval_ms: 1,
+            max_interval_ms: 10,
+            multiplier: 1.0,
+        };
+        let retry_publisher = RetryPublisher::new(
+            Box::new(failing_target),
+            retry_config,
+        );
+
+        let dlq_calls = Arc::new(Mutex::new(0));
+        let dlq_target = MockSuccessPublisher {
+            calls: dlq_calls.clone(),
+        };
+
+        // DLQ wrapper: wraps the retry publisher
+        let dlq_middleware = DlqPublisher {
+            inner: Box::new(retry_publisher),
+            dlq_publisher: Arc::new(dlq_target),
+        };
+
+        let msg = CanonicalMessage::new(b"test".to_vec(), None);
+
+        // Execute
+        let result = dlq_middleware.send(msg).await;
+
+        // Assertions
+        assert!(result.is_ok(), "DLQ should handle the failure");
+        assert_eq!(
+            *target_calls.lock().unwrap(),
+            4,
+            "Target should be called 4 times (max_attempts)"
+        );
+        assert_eq!(
+            *dlq_calls.lock().unwrap(),
+            1,
+            "DLQ should be called exactly once after retries fail"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dlq_integration_with_memory() {
+        use crate::endpoints::memory::MemoryPublisher;
+
+        // 1. Setup DLQ destination (Memory)
+        let dlq_topic = "dlq_topic";
+        let dlq_publisher = MemoryPublisher::new_local(dlq_topic, 10);
+        let dlq_channel = dlq_publisher.channel();
+
+        // 2. Setup Failing Primary (Mock)
+        let target_calls = Arc::new(Mutex::new(0));
+        let failing_target = MockFailingPublisher {
+            calls: target_calls.clone(),
+        };
+
+        // 3. Setup Retry (max_attempts = 3)
+        let retry_config = RetryMiddleware {
+            max_attempts: 3,
+            initial_interval_ms: 1,
+            max_interval_ms: 10,
+            multiplier: 1.0,
+        };
+        let retry_publisher = RetryPublisher::new(
+            Box::new(failing_target),
+            retry_config,
+        );
+
+        // 4. Setup DLQ Middleware
+        let dlq_middleware = DlqPublisher {
+            inner: Box::new(retry_publisher),
+            dlq_publisher: Arc::new(dlq_publisher),
+        };
+
+        let msg_payload = b"failed_message";
+        let msg = CanonicalMessage::new(msg_payload.to_vec(), None);
+
+        // 5. Send
+        let result = dlq_middleware.send(msg).await;
+
+        // 6. Verify
+        assert!(result.is_ok(), "Send should succeed (handled by DLQ)");
+
+        // Check retries happened
+        assert_eq!(*target_calls.lock().unwrap(), 3); // max_attempts
+
+        // Check message is in DLQ memory channel
+        let dlq_msgs = dlq_channel.drain_messages();
+        assert_eq!(dlq_msgs.len(), 1);
+        assert_eq!(dlq_msgs[0].payload, msg_payload.as_slice());
+    }
+}

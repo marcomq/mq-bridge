@@ -254,7 +254,11 @@ fn make_response(disposition: MessageDisposition) -> HttpResponse {
             for (key, value) in &msg.metadata {
                 builder.insert_header((key.as_str(), value.as_str()));
             }
-            if !msg.metadata.contains_key("content-type") {
+            let has_content_type = msg
+                .metadata
+                .keys()
+                .any(|k| k.eq_ignore_ascii_case("content-type"));
+            if !has_content_type {
                 builder.content_type("application/octet-stream");
             }
             builder.body(msg.payload)

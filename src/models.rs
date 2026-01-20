@@ -303,6 +303,10 @@ impl Endpoint {
         self.middlewares.push(middleware);
         self
     }
+    pub fn add_middlewares(mut self, mut middlewares: Vec<Middleware>) -> Self {
+        self.middlewares.append(&mut middlewares);
+        self
+    }
     ///
     /// Returns a reference to the in-memory channel associated with this Endpoint.
     /// This function will only succeed if the Endpoint is of type EndpointType::Memory.

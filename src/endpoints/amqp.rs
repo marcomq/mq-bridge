@@ -584,6 +584,19 @@ impl MessageConsumer for AmqpConsumer {
         let channel = self.channel.clone();
         let commit = Box::new(move |dispositions: Vec<MessageDisposition>| {
             Box::pin(async move {
+                if dispositions.len() != reply_infos.len() {
+                    tracing::error!(
+                        expected = reply_infos.len(),
+                        actual = dispositions.len(),
+                        "AMQP batch commit received mismatched disposition count"
+                    );
+                    return Err(anyhow::anyhow!(
+                        "AMQP batch commit received mismatched disposition count: expected {}, got {}",
+                        reply_infos.len(),
+                        dispositions.len()
+                    ));
+                }
+
                 // Handle replies if responses are provided
 
                 for ((reply_to, correlation_id), disposition) in
