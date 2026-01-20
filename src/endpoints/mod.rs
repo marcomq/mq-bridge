@@ -133,23 +133,26 @@ async fn create_base_consumer(
     route_name: &str,
     endpoint: &Endpoint,
 ) -> Result<Box<dyn MessageConsumer>> {
+    // Helper to coerce concrete consumers to the trait object, fixing type inference issues in the match block.
+    fn boxed<T: MessageConsumer + 'static>(c: T) -> Box<dyn MessageConsumer> {
+        Box::new(c)
+    }
+
     match &endpoint.endpoint_type {
         #[cfg(feature = "aws")]
         EndpointType::Aws(cfg) => {
             ensure_consume_mode("Aws", endpoint.mode.clone())?;
-            Ok(Box::new(aws::AwsConsumer::new(cfg).await?))
+            Ok(boxed(aws::AwsConsumer::new(cfg).await?))
         }
         #[cfg(feature = "kafka")]
         EndpointType::Kafka(cfg) => {
             let topic = cfg.topic.as_deref().unwrap_or(route_name);
             if endpoint.mode == crate::models::ConsumerMode::Subscribe {
-                Ok(Box::new(
+                Ok(boxed(
                     kafka::KafkaSubscriber::new(&cfg.config, topic, None).await?,
                 ))
             } else {
-                Ok(Box::new(
-                    kafka::KafkaConsumer::new(&cfg.config, topic).await?,
-                ))
+                Ok(boxed(kafka::KafkaConsumer::new(&cfg.config, topic).await?))
             }
         }
         #[cfg(feature = "nats")]
@@ -166,11 +169,11 @@ async fn create_base_consumer(
                     )
                 })?;
             if endpoint.mode == crate::models::ConsumerMode::Subscribe {
-                Ok(Box::new(
+                Ok(boxed(
                     nats::NatsSubscriber::new(&cfg.config, stream_name, subject).await?,
                 ))
             } else {
-                Ok(Box::new(
+                Ok(boxed(
                     nats::NatsConsumer::new(&cfg.config, stream_name, subject).await?,
                 ))
             }
@@ -179,22 +182,22 @@ async fn create_base_consumer(
         EndpointType::Amqp(cfg) => {
             let queue = cfg.queue.as_deref().unwrap_or(route_name);
             if endpoint.mode == crate::models::ConsumerMode::Subscribe {
-                Ok(Box::new(
+                Ok(boxed(
                     amqp::AmqpSubscriber::new(&cfg.config, queue, None).await?,
                 ))
             } else {
-                Ok(Box::new(amqp::AmqpConsumer::new(&cfg.config, queue).await?))
+                Ok(boxed(amqp::AmqpConsumer::new(&cfg.config, queue).await?))
             }
         }
         #[cfg(feature = "mqtt")]
         EndpointType::Mqtt(cfg) => {
             let topic = cfg.topic.as_deref().unwrap_or(route_name);
             if endpoint.mode == crate::models::ConsumerMode::Subscribe {
-                Ok(Box::new(
+                Ok(boxed(
                     mqtt::MqttSubscriber::new(&cfg.config, topic, None).await?,
                 ))
             } else {
-                Ok(Box::new(
+                Ok(boxed(
                     mqtt::MqttConsumer::new(&cfg.config, topic, route_name).await?,
                 ))
             }
@@ -202,26 +205,24 @@ async fn create_base_consumer(
         #[cfg(feature = "ibm-mq")]
         EndpointType::IbmMq(cfg) => {
             if endpoint.mode == crate::models::ConsumerMode::Subscribe {
-                Ok(Box::new(
-                    ibm_mq::IbmMqSubscriber::new(cfg, route_name).await?,
-                ))
+                Ok(boxed(ibm_mq::IbmMqSubscriber::new(cfg, route_name).await?))
             } else {
-                Ok(Box::new(ibm_mq::IbmMqConsumer::new(cfg, route_name).await?))
+                Ok(boxed(ibm_mq::IbmMqConsumer::new(cfg, route_name).await?))
             }
         }
         #[cfg(feature = "zeromq")]
         EndpointType::ZeroMq(cfg) => {
             if endpoint.mode == crate::models::ConsumerMode::Subscribe {
-                Ok(Box::new(zeromq::ZeroMqSubscriber::new(cfg).await?))
+                Ok(boxed(zeromq::ZeroMqSubscriber::new(cfg).await?))
             } else {
-                Ok(Box::new(zeromq::ZeroMqConsumer::new(cfg).await?))
+                Ok(boxed(zeromq::ZeroMqConsumer::new(cfg).await?))
             }
         }
         EndpointType::File(path) => {
             if endpoint.mode == crate::models::ConsumerMode::Subscribe {
-                Ok(Box::new(file::FileSubscriber::new(path).await?))
+                Ok(boxed(file::FileSubscriber::new(path).await?))
             } else {
-                Ok(Box::new(file::FileConsumer::new(path).await?))
+                Ok(boxed(file::FileConsumer::new(path).await?))
             }
         }
         #[cfg(any(feature = "http-client", feature = "http-server"))]
@@ -229,7 +230,7 @@ async fn create_base_consumer(
             ensure_consume_mode("Http", endpoint.mode.clone())?;
             #[cfg(feature = "http-server")]
             {
-                Ok(Box::new(http::HttpConsumer::new(&cfg.config).await?))
+                Ok(boxed(http::HttpConsumer::new(&cfg.config).await?))
             }
             #[cfg(not(feature = "http-server"))]
             {
@@ -238,14 +239,14 @@ async fn create_base_consumer(
         }
         EndpointType::Static(cfg) => {
             ensure_consume_mode("Static", endpoint.mode.clone())?;
-            Ok(Box::new(static_endpoint::StaticRequestConsumer::new(cfg)?))
+            Ok(boxed(static_endpoint::StaticRequestConsumer::new(cfg)?))
         }
         EndpointType::Memory(cfg) => {
             if endpoint.mode == crate::models::ConsumerMode::Subscribe {
                 let id = Uuid::new_v4().to_string();
-                Ok(Box::new(memory::MemorySubscriber::new(cfg, &id)?))
+                Ok(boxed(memory::MemorySubscriber::new(cfg, &id)?))
             } else {
-                Ok(Box::new(memory::MemoryConsumer::new(cfg)?))
+                Ok(boxed(memory::MemoryConsumer::new(cfg)?))
             }
         }
         #[cfg(feature = "mongodb")]
@@ -256,11 +257,11 @@ async fn create_base_consumer(
                 if config.ttl_seconds.is_none() {
                     config.ttl_seconds = Some(86400); // Remove events by default after 24 hours
                 }
-                Ok(Box::new(
+                Ok(boxed(
                     mongodb::MongoDbSubscriber::new(&config, collection).await?,
                 ))
             } else {
-                Ok(Box::new(
+                Ok(boxed(
                     mongodb::MongoDbConsumer::new(&cfg.config, collection).await?,
                 ))
             }

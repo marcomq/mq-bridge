@@ -168,9 +168,9 @@ impl MessagePublisher for DlqPublisher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::CanonicalMessage;
     use crate::middleware::retry::RetryPublisher;
     use crate::models::RetryMiddleware;
+    use crate::CanonicalMessage;
     use async_trait::async_trait;
     use std::sync::Mutex;
 
@@ -236,10 +236,7 @@ mod tests {
             max_interval_ms: 10,
             multiplier: 1.0,
         };
-        let retry_publisher = RetryPublisher::new(
-            Box::new(failing_target),
-            retry_config,
-        );
+        let retry_publisher = RetryPublisher::new(Box::new(failing_target), retry_config);
 
         let dlq_calls = Arc::new(Mutex::new(0));
         let dlq_target = MockSuccessPublisher {
@@ -293,10 +290,7 @@ mod tests {
             max_interval_ms: 10,
             multiplier: 1.0,
         };
-        let retry_publisher = RetryPublisher::new(
-            Box::new(failing_target),
-            retry_config,
-        );
+        let retry_publisher = RetryPublisher::new(Box::new(failing_target), retry_config);
 
         // 4. Setup DLQ Middleware
         let dlq_middleware = DlqPublisher {

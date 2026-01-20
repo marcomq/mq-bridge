@@ -694,13 +694,13 @@ impl Route {
         self.output.handler = Some(new_handler);
         self
     }
-    pub fn add_handlers<T, H, Args>(mut self, handlers: HashMap<&str, H>) -> Self 
+    pub fn add_handlers<T, H, Args>(mut self, handlers: HashMap<&str, H>) -> Self
     where
         T: DeserializeOwned + Send + Sync + 'static,
         H: crate::type_handler::IntoTypedHandler<T, Args>,
         Args: Send + Sync + 'static,
     {
-        for (type_name, handler) in handlers { 
+        for (type_name, handler) in handlers {
             self = self.add_handler(type_name, handler);
         }
         self
