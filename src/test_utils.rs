@@ -13,6 +13,7 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex as AsyncMutex, Semaphore};
+use uuid::{NoContext, Timestamp, Uuid};
 
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::filter::EnvFilter;
@@ -174,9 +175,10 @@ impl Drop for DockerCompose {
 pub fn generate_test_messages(num_messages: usize) -> Vec<CanonicalMessage> {
     let mut messages = Vec::with_capacity(num_messages);
 
+    let id = Uuid::now_v7().as_u128();
     for i in 0..num_messages {
         let payload = format!(r#"{{"message_num":{},"test_id":"integration"}}"#, i);
-        let msg = CanonicalMessage::new(payload.into_bytes(), None);
+        let msg = CanonicalMessage::new(payload.into_bytes(), Some(id + i as u128));
         messages.push(msg);
     }
     messages
@@ -574,8 +576,8 @@ where
 static STATIC_PAYLOAD: Lazy<Vec<u8>> =
     Lazy::new(|| serde_json::to_vec(&json!({ "perf_test": true, "static": true })).unwrap());
 
-pub fn generate_message() -> CanonicalMessage {
-    CanonicalMessage::new(STATIC_PAYLOAD.clone(), None)
+pub fn generate_message(id: u128) -> CanonicalMessage {
+    CanonicalMessage::new(STATIC_PAYLOAD.clone(), Some(id))
 }
 
 /// Measure the performance of writing messages to a publisher.
@@ -618,6 +620,8 @@ pub async fn measure_write_performance(
 
     // Spawn multiple generators to ensure we don't bottleneck on message creation.
     let generator_count = (concurrency / 10).clamp(1, 8);
+
+    let ts = Timestamp::now(NoContext);
     for i in 0..generator_count {
         let tx = tx.clone();
         let count = num_messages / generator_count
@@ -628,8 +632,9 @@ pub async fn measure_write_performance(
             };
         tokio::spawn(async move {
             let mut batch = Vec::with_capacity(batch_size);
+            let id = Uuid::new_v7(ts).as_u128();
             for _ in 0..count {
-                batch.push(generate_message());
+                batch.push(generate_message(id + count as u128));
                 if batch.len() >= batch_size {
                     if tx.send(batch).await.is_err() {
                         eprintln!("Error sending to channel");
@@ -856,6 +861,7 @@ pub async fn measure_single_write_performance(
 
     let final_count = Arc::new(AtomicUsize::new(0));
 
+    let ts = Timestamp::now(NoContext);
     let generator_count = (concurrency / 10).clamp(1, 8);
     for i in 0..generator_count {
         let tx = tx.clone();
@@ -866,8 +872,9 @@ pub async fn measure_single_write_performance(
                 0
             };
         tokio::spawn(async move {
+            let id = Uuid::new_v7(ts).as_u128();
             for _ in 0..count {
-                if tx.send(generate_message()).await.is_err() {
+                if tx.send(generate_message(id + count as u128)).await.is_err() {
                     break;
                 }
             }
