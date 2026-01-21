@@ -609,8 +609,10 @@ pub async fn measure_write_performance(
 ) -> Duration {
     // write performance test (Batch) for {}", _name);
     let batch_size = 128; // Define a reasonable batch size
-    let (tx, rx): (Sender<Vec<CanonicalMessage>>, Receiver<Vec<CanonicalMessage>>) =
-        bounded(concurrency * 4);
+    let (tx, rx): (
+        Sender<Vec<CanonicalMessage>>,
+        Receiver<Vec<CanonicalMessage>>,
+    ) = bounded(concurrency * 4);
 
     let final_count = Arc::new(AtomicUsize::new(0));
 
@@ -664,8 +666,10 @@ pub async fn measure_write_performance(
                         .await
                     {
                         Ok(SentBatch::Ack) => {
-                            final_count_clone
-                                .fetch_add(current_batch_size, std::sync::atomic::Ordering::Relaxed);
+                            final_count_clone.fetch_add(
+                                current_batch_size,
+                                std::sync::atomic::Ordering::Relaxed,
+                            );
                             break; // All sent successfully
                         }
                         Ok(SentBatch::Partial {
@@ -673,8 +677,10 @@ pub async fn measure_write_performance(
                             failed,
                         }) => {
                             if failed.is_empty() {
-                                final_count_clone
-                                    .fetch_add(current_batch_size, std::sync::atomic::Ordering::Relaxed);
+                                final_count_clone.fetch_add(
+                                    current_batch_size,
+                                    std::sync::atomic::Ordering::Relaxed,
+                                );
                                 break; // All sent successfully
                             } else {
                                 let (retryable, non_retryable): (Vec<_>, Vec<_>) = failed
