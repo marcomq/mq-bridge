@@ -835,6 +835,9 @@ pub struct MongoDbConfig {
     pub database: String,
     /// Polling interval in milliseconds for the consumer (when not using Change Streams). Defaults to 100ms.
     pub polling_interval_ms: Option<u64>,
+    /// (Publisher only) If true, the publisher will wait for a response in a dedicated collection. Defaults to false.
+    #[serde(default)]
+    pub request_reply: bool,
     /// TTL in seconds for documents created by the publisher. If set, a TTL index is created.
     pub ttl_seconds: Option<u64>,
 }

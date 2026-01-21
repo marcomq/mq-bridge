@@ -210,7 +210,7 @@ impl MessagePublisher for MemoryPublisher {
             let cid = message
                 .metadata
                 .entry("correlation_id".to_string())
-                .or_insert_with(|| uuid::Uuid::new_v4().to_string())
+                .or_insert_with(|| uuid::Uuid::now_v7().to_string())
                 .clone();
 
             let (tx, rx) = oneshot::channel();
@@ -220,16 +220,24 @@ impl MessagePublisher for MemoryPublisher {
             response_channel.register_waiter(&cid, tx);
 
             // Send the message
-            self.send_batch(vec![message]).await?;
+            if let Err(e) = self.send_batch(vec![message]).await {
+                response_channel.remove_waiter(&cid);
+                return Err(e);
+            }
 
             // Wait for the response
-            let response = rx.await.map_err(|e| {
-                anyhow!(
-                    "Failed to receive response for correlation_id {}: {}",
-                    cid,
-                    e
-                )
-            })?;
+            let response = match rx.await {
+                Ok(resp) => resp,
+                Err(e) => {
+                    response_channel.remove_waiter(&cid);
+                    return Err(anyhow!(
+                        "Failed to receive response for correlation_id {}: {}",
+                        cid,
+                        e
+                    )
+                    .into());
+                }
+            };
 
             Ok(Sent::Response(response))
         } else {

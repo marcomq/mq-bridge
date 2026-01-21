@@ -128,52 +128,50 @@ async fn test_nats_request_reply() {
 #[cfg(feature = "mongodb")]
 #[tokio::test]
 #[ignore]
-async fn test_mongodb_request_reply() {
+async fn test_mongodb_request_reply_pattern() {
     use mq_bridge::endpoints::mongodb::{MongoDbConsumer, MongoDbPublisher};
+    use mq_bridge::traits::Sent;
     setup_logging();
     run_test_with_docker("tests/integration/docker-compose/mongodb.yml", || async {
-        let req_collection = "req_collection";
-        let reply_collection = "reply_collection";
+        let req_collection = "req_rep_collection";
         let db_name = "mq_bridge_test_req_rep";
 
-        let config = mq_bridge::models::MongoDbConfig {
+        // 1. Setup the "service" side (the consumer that replies)
+        let service_config = mq_bridge::models::MongoDbConfig {
             url: "mongodb://localhost:27017".to_string(),
             database: db_name.to_string(),
             ..Default::default()
         };
-
-        let publisher = MongoDbPublisher::new(&config, req_collection)
+        let service_consumer = MongoDbConsumer::new(&service_config, req_collection)
             .await
             .unwrap();
-        let consumer = MongoDbConsumer::new(&config, req_collection).await.unwrap();
 
         tokio::spawn(async move {
-            run_service_reply(Box::new(consumer), b"response_payload").await;
+            run_service_reply(Box::new(service_consumer), b"mongo_response").await;
         });
 
-        let mut msg = CanonicalMessage::new(b"request_payload".to_vec(), None);
-        msg.metadata
-            .insert("reply_to".to_string(), reply_collection.to_string());
-        publisher.send(msg).await.unwrap();
+        // 2. Setup the "client" side (the publisher that sends and waits)
+        let client_config = mq_bridge::models::MongoDbConfig {
+            url: "mongodb://localhost:27017".to_string(),
+            database: db_name.to_string(),
+            request_reply: true, // Enable request-reply mode
+            ..Default::default()
+        };
+        let client_publisher = MongoDbPublisher::new(&client_config, req_collection)
+            .await
+            .unwrap();
 
-        // Verify reply in DB
-        let client = mongodb::Client::with_uri_str(&config.url).await.unwrap();
-        let db = client.database(db_name);
-        let coll = db.collection::<mongodb::bson::Document>(reply_collection);
+        // 3. Send request and wait for response
+        let request_msg = CanonicalMessage::new(b"mongo_request".to_vec(), None);
+        let result = client_publisher.send(request_msg).await.unwrap();
 
-        let mut found = false;
-        for _ in 0..20 {
-            if let Ok(Some(doc)) = coll.find_one(mongodb::bson::doc! {}).await {
-                if let Ok(binary) = doc.get_binary_generic("payload") {
-                    if binary == b"response_payload" {
-                        found = true;
-                        break;
-                    }
-                }
+        // 4. Assert the response
+        match result {
+            Sent::Response(resp) => {
+                assert_eq!(resp.get_payload_str(), "mongo_response");
             }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            _ => panic!("Expected Sent::Response, got {:?}", result),
         }
-        assert!(found, "Reply not found in collection");
         println!("MongoDB Request-Reply test passed!");
     })
     .await;

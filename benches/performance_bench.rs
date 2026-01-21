@@ -377,20 +377,18 @@ pub mod memory_helper {
 
     pub async fn create_publisher() -> Arc<dyn MessagePublisher> {
         let id = TOPIC_ID.load(Ordering::SeqCst);
-        let config = MemoryConfig {
-            topic: format!("perf_memory_{}", id),
-            capacity: Some(PERF_TEST_MESSAGE_COUNT * 2),
-        };
-        Arc::new(MemoryPublisher::new(&config).unwrap())
+        Arc::new(MemoryPublisher::new_local(
+            &format!("perf_memory_{}", id),
+            PERF_TEST_MESSAGE_COUNT * 2,
+        ))
     }
 
     pub async fn create_consumer() -> Arc<Mutex<dyn MessageConsumer>> {
         let id = TOPIC_ID.fetch_add(1, Ordering::SeqCst) + 1;
-        let config = MemoryConfig {
-            topic: format!("perf_memory_{}", id),
-            capacity: Some(PERF_TEST_MESSAGE_COUNT * 2),
-        };
-        Arc::new(Mutex::new(MemoryConsumer::new(&config).unwrap()))
+        Arc::new(Mutex::new(MemoryConsumer::new_local(
+            &format!("perf_memory_{}", id),
+            PERF_TEST_MESSAGE_COUNT * 2,
+        )))
     }
 }
 

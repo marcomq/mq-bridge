@@ -107,9 +107,10 @@ impl CanonicalMessage {
         self
     }
 
-    pub fn set_raw(&mut self) {
+    pub fn as_raw(mut self) -> Self {
         self.metadata
             .insert("mq_bridge.original_format".to_string(), "raw".to_string());
+        self
     }
 }
 

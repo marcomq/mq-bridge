@@ -100,7 +100,8 @@ fn armature_messaging_test() {
             .replace(
                 "(received.commit)(Some(response))",
                 "(received.commit)(Some(response).into())",
-            );
+            )
+            .replace("MemoryConfig {", "MemoryConfig { request_reply: false,");
         fs::write(&source_path, new_content).expect("Failed to write patched mq_bridge.rs");
     }
 
