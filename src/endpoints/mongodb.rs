@@ -265,7 +265,7 @@ impl MessagePublisher for MongoDbPublisher {
 
         loop {
             if start.elapsed() > timeout {
-                return Err(PublisherError::Retryable(anyhow!(
+                return Err(PublisherError::NonRetryable(anyhow!(
                     "Request timed out waiting for MongoDB response"
                 )));
             }

@@ -36,8 +36,8 @@ metrics = { version = "0.24", optional = true }
 # Storage for Deduplication
 sled = { version = "0.34", optional = true }
 
-# Panic Middleware
-rand = { version = "0.9",  optional = true }
+# Gen IDs
+rand = { version = "0.9" }
 
 # Test Utils
 tracing-appender = { version = "0.2", optional = true }
@@ -89,9 +89,9 @@ middleware = ["metrics", "dedup", "panic"]
 full = ["middleware", "mongodb", "kafka", "amqp", "nats", "mqtt", "http", "aws", "zeromq"]
 
 # Functionality features
-dedup = ["sled", "dep:rand"]
+dedup = ["sled"]
 metrics = ["dep:metrics"]
-panic = ["dep:rand"]
+panic = []
 test-utils = ["dep:tracing-appender", "dep:tracing-subscriber", "dep:serde_yaml_ng", "uuid/v7"]
 
 # Generate Schema file
@@ -117,7 +117,6 @@ tempfile = "3.10"
 chrono = "0.4"
 metrics-util = "0.20"
 criterion = { version = "0.8", features = ["async", "async_tokio"] }
-rand = { version = "0.9" }
 mq-bridge = { path = ".", features = ["test-utils"] }
 
 [[bench]]

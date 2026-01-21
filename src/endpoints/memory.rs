@@ -93,7 +93,7 @@ impl MemoryChannel {
 pub struct MemoryResponseChannel {
     pub sender: Sender<CanonicalMessage>,
     pub receiver: Receiver<CanonicalMessage>,
-    waiters: Arc<Mutex<HashMap<String, oneshot::Sender<CanonicalMessage>>>>,
+    waiters: Arc<tokio::sync::Mutex<HashMap<String, oneshot::Sender<CanonicalMessage>>>>,
 }
 
 impl MemoryResponseChannel {
@@ -102,7 +102,7 @@ impl MemoryResponseChannel {
         Self {
             sender,
             receiver,
-            waiters: Arc::new(Mutex::new(HashMap::new())),
+            waiters: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -125,15 +125,22 @@ impl MemoryResponseChannel {
             .map_err(|e| anyhow!("Error receiving response: {}", e))
     }
 
-    pub fn register_waiter(&self, correlation_id: &str, sender: oneshot::Sender<CanonicalMessage>) {
+    pub async fn register_waiter(
+        &self,
+        correlation_id: &str,
+        sender: oneshot::Sender<CanonicalMessage>,
+    ) {
         self.waiters
             .lock()
-            .unwrap()
+            .await
             .insert(correlation_id.to_string(), sender);
     }
 
-    pub fn remove_waiter(&self, correlation_id: &str) -> Option<oneshot::Sender<CanonicalMessage>> {
-        self.waiters.lock().unwrap().remove(correlation_id)
+    pub async fn remove_waiter(
+        &self,
+        correlation_id: &str,
+    ) -> Option<oneshot::Sender<CanonicalMessage>> {
+        self.waiters.lock().await.remove(correlation_id)
     }
 }
 
@@ -221,11 +228,11 @@ impl MessagePublisher for MemoryPublisher {
 
             // Register waiter before sending
             let response_channel = get_or_create_response_channel(&self.topic);
-            response_channel.register_waiter(&cid, tx);
+            response_channel.register_waiter(&cid, tx).await;
 
             // Send the message
             if let Err(e) = self.send_batch(vec![message]).await {
-                response_channel.remove_waiter(&cid);
+                response_channel.remove_waiter(&cid).await;
                 return Err(e);
             }
 
@@ -233,7 +240,7 @@ impl MessagePublisher for MemoryPublisher {
             let response = match tokio::time::timeout(self.request_timeout, rx).await {
                 Ok(Ok(resp)) => resp,
                 Ok(Err(e)) => {
-                    response_channel.remove_waiter(&cid);
+                    response_channel.remove_waiter(&cid).await;
                     return Err(anyhow!(
                         "Failed to receive response for correlation_id {}: {}",
                         cid,
@@ -242,7 +249,7 @@ impl MessagePublisher for MemoryPublisher {
                     .into());
                 }
                 Err(_) => {
-                    response_channel.remove_waiter(&cid);
+                    response_channel.remove_waiter(&cid).await;
                     return Err(PublisherError::Retryable(anyhow!(
                         "Request timed out waiting for response for correlation_id {}",
                         cid
@@ -359,7 +366,7 @@ impl MessageConsumer for MemoryConsumer {
                         // If the receiver is dropped, sending will fail. We can ignore it.
                         let mut handled = false;
                         if let Some(cid) = resp.metadata.get("correlation_id") {
-                            if let Some(tx) = channel.remove_waiter(cid) {
+                            if let Some(tx) = channel.remove_waiter(cid).await {
                                 let _ = tx.send(resp.clone());
                                 handled = true;
                             }

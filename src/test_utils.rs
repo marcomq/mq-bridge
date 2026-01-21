@@ -13,7 +13,6 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex as AsyncMutex, Semaphore};
-use uuid::Uuid;
 
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::filter::EnvFilter;
@@ -174,7 +173,7 @@ impl Drop for DockerCompose {
 
 pub fn generate_test_messages(num_messages: usize) -> Vec<CanonicalMessage> {
     let mut messages = Vec::with_capacity(num_messages);
-    let id = Uuid::new_v4().as_u128();
+    let id = crate::next_id::next_id();
     for i in 0..num_messages {
         let payload = format!(r#"{{"message_num":{},"test_id":"integration"}}"#, i);
         let msg = CanonicalMessage::new(payload.into_bytes(), Some(i as u128 + id));
@@ -629,7 +628,7 @@ pub async fn measure_write_performance(
             };
         tokio::spawn(async move {
             let mut batch = Vec::with_capacity(batch_size);
-            let id = Uuid::new_v4().as_u128();
+            let id = crate::next_id::next_id();
             for i in 0..count {
                 batch.push(generate_message(i as u128 + id));
                 if batch.len() >= batch_size {
@@ -868,7 +867,7 @@ pub async fn measure_single_write_performance(
                 0
             };
         tokio::spawn(async move {
-            let id = Uuid::new_v4().as_u128();
+            let id = crate::next_id::next_id();
             for i in 0..count {
                 if tx.send(generate_message(i as u128 + id)).await.is_err() {
                     break;
@@ -1196,6 +1195,7 @@ macro_rules! run_benchmarks {
 
 #[macro_export]
 macro_rules! bench_backend {
+    // Matches a backend that requires Docker but has no specific feature gate.
     ("", $name:literal, $compose_file:literal, $helper:path, $group:expr, $rt:expr, $results:expr, $msg_count:expr, $concurrency:expr) => {
         if $crate::test_utils::should_run_benchmark($name) {
             use $helper as backend;
