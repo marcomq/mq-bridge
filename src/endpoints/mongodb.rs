@@ -111,6 +111,40 @@ fn parse_mongodb_document(doc: Document) -> anyhow::Result<CanonicalMessage> {
     document_to_canonical(doc)
 }
 
+/// Handle a reply to a MongoDB collection by inserting the response into the collection.
+///
+/// The reply will be inserted into the collection specified by the `reply_to` parameter.
+/// If the `correlation_id` parameter is specified, it will be inserted into the reply document
+/// as a field named `correlation_id` before insertion.
+///
+/// The function will log an error if the reply document cannot be serialized to BSON or if
+/// the insertion into the collection fails.
+async fn handle_reply(
+    db: &Database,
+    reply_to: Option<&String>,
+    correlation_id: Option<&String>,
+    response: CanonicalMessage,
+) -> anyhow::Result<()> {
+    if let Some(coll_name) = reply_to {
+        let mut resp = response;
+        if let Some(cid) = correlation_id {
+            resp.metadata
+                .insert("correlation_id".to_string(), cid.clone());
+        }
+        let doc = message_to_document(&resp).map_err(|e| {
+            tracing::error!(collection = %coll_name, error = %e, "Failed to serialize MongoDB reply");
+            anyhow!("Failed to serialize MongoDB reply: {}", e)
+        })?;
+
+        let reply_coll = db.collection::<Document>(coll_name);
+        if let Err(e) = reply_coll.insert_one(doc).await {
+            tracing::error!(collection = %coll_name, error = %e, "Failed to insert MongoDB reply");
+            return Err(anyhow::anyhow!("Failed to insert MongoDB reply: {}", e,));
+        }
+    }
+    Ok(())
+}
+
 /// A publisher that inserts messages into a MongoDB collection.
 pub struct MongoDbPublisher {
     collection: Collection<Document>,
@@ -556,25 +590,27 @@ impl MongoDbConsumer {
                     Box::pin(async move {
                         // Only send a reply if the message has a 'reply_to' destination and the disposition is a Reply.
                         // This allows for fire-and-forget patterns (no reply_to) or explicit replies.
-                        if let (MessageDisposition::Reply(resp), Some(coll_name)) =
-                            (disposition, reply_collection_name)
-                        {
-                            let mut resp = resp;
-                            if let Some(cid) = correlation_id {
-                                resp.metadata.insert("correlation_id".to_string(), cid);
+                        match disposition {
+                            MessageDisposition::Reply(resp) => {
+                                handle_reply(
+                                    &db,
+                                    reply_collection_name.as_ref(),
+                                    correlation_id.as_ref(),
+                                    resp,
+                                )
+                                .await?;
                             }
-                            let doc = message_to_document(&resp).map_err(|e| {
-                                tracing::error!(collection = %coll_name, error = %e, "Failed to serialize MongoDB reply");
-                                anyhow!("Failed to serialize MongoDB reply: {}", e)
-                            })?;
-
-                            let reply_coll = db.collection::<Document>(&coll_name);
-                            if let Err(e) = reply_coll.insert_one(doc).await {
-                                tracing::error!(collection = %coll_name, error = %e, "Failed to insert MongoDB reply");
-                                return Err(anyhow::anyhow!(
-                                    "Failed to insert MongoDB reply: {}",
-                                    e,
-                                ));
+                            MessageDisposition::Ack => {}
+                            MessageDisposition::Nack(_) => {
+                                collection_clone
+                                    .update_one(
+                                        doc! { "_id": id_val.clone() },
+                                        doc! { "$set": { "locked_until": null } },
+                                        None,
+                                    )
+                                    .await
+                                    .context("Failed to unlock Nacked message")?;
+                                return Ok(());
                             }
                         }
 
@@ -662,47 +698,50 @@ impl MongoDbConsumer {
 
         let commit = Box::new(move |dispositions: Vec<MessageDisposition>| {
             Box::pin(async move {
-                for ((reply_coll_opt, correlation_id_opt), disposition) in
-                    reply_infos.iter().zip(dispositions)
+                let mut ids_to_delete = Vec::new();
+                let mut ids_to_unlock = Vec::new();
+
+                for (((reply_coll_opt, correlation_id_opt), disposition), id) in
+                    reply_infos.iter().zip(dispositions).zip(ids.iter())
                 {
                     // Only send a reply if the message has a 'reply_to' destination and the disposition is a Reply.
                     // This allows for fire-and-forget patterns (no reply_to) or explicit replies.
-                    if let (Some(coll_name), MessageDisposition::Reply(resp)) =
-                        (reply_coll_opt, disposition)
-                    {
-                        let mut resp = resp;
-                        let res = {
-                            if let Some(cid) = correlation_id_opt {
-                                resp.metadata
-                                    .insert("correlation_id".to_string(), cid.clone());
-                            };
-                            message_to_document(&resp)
-                        };
-                        let doc = match res {
-                            Ok(d) => d,
-                            Err(e) => {
-                                tracing::error!(collection = %coll_name, response_id = %format!("{:032x}", resp.message_id), error = %e, "Failed to serialize MongoDB batch reply");
-                                return Err(anyhow::anyhow!(
-                                    "Failed to serialize MongoDB batch reply: {}",
-                                    e
-                                ));
-                            }
-                        };
-                        let reply_coll = db.collection::<Document>(coll_name);
-                        if let Err(e) = reply_coll.insert_one(doc).await {
-                            tracing::error!(collection = %coll_name, response_id = %format!("{:032x}", resp.message_id), error = %e, "Failed to insert MongoDB batch reply");
-                            return Err(anyhow::anyhow!(
-                                "Failed to insert MongoDB batch reply: {}",
-                                e
-                            ));
+                    match disposition {
+                        MessageDisposition::Reply(resp) => {
+                            handle_reply(
+                                &db,
+                                reply_coll_opt.as_ref(),
+                                correlation_id_opt.as_ref(),
+                                resp,
+                            )
+                            .await?;
+                            ids_to_delete.push(id.clone());
+                        }
+                        MessageDisposition::Ack => {
+                            ids_to_delete.push(id.clone());
+                        }
+                        MessageDisposition::Nack(_) => {
+                            ids_to_unlock.push(id.clone());
                         }
                     }
                 }
 
-                if ids.is_empty() {
+                if !ids_to_unlock.is_empty() {
+                    let filter = doc! { "_id": { "$in": &ids_to_unlock } };
+                    let update = doc! { "$set": { "locked_until": null } };
+                    if let Err(e) = collection_clone.update_many(filter, update).await {
+                        tracing::error!(error = %e, "Failed to unlock Nacked MongoDB messages");
+                        return Err(anyhow::anyhow!(
+                            "Failed to unlock Nacked MongoDB messages: {}",
+                            e
+                        ));
+                    }
+                }
+
+                if ids_to_delete.is_empty() {
                     return Ok(());
                 }
-                let filter = doc! { "_id": { "$in": &ids } };
+                let filter = doc! { "_id": { "$in": &ids_to_delete } };
                 // Ack failure may result in redelivery. Enable deduplication middleware to handle duplicates.
                 if let Err(e) = collection_clone.delete_many(filter).await {
                     tracing::error!(error = %e, "Failed to bulk-ack/delete MongoDB messages");
@@ -712,7 +751,7 @@ impl MongoDbConsumer {
                     ));
                 } else {
                     trace!(
-                        count = ids.len(),
+                        count = ids_to_delete.len(),
                         "MongoDB messages acknowledged and deleted"
                     );
                 }
@@ -842,22 +881,9 @@ impl MessageConsumer for MongoDbSubscriber {
                         for disposition in dispositions {
                             // Only send a reply if the message has a 'reply_to' destination and the disposition is a Reply.
                             // This allows for fire-and-forget patterns (no reply_to) or explicit replies.
-                            if let (MessageDisposition::Reply(mut resp), Some(coll_name)) =
-                                (disposition, &reply_to)
-                            {
-                                if let Some(cid) = &correlation_id {
-                                    resp.metadata
-                                        .insert("correlation_id".to_string(), cid.clone());
-                                }
-                                let doc = message_to_document(&resp).map_err(|e| {
-                                    anyhow::anyhow!("Failed to serialize MongoDB reply: {}", e)
-                                })?;
-                                db.collection::<Document>(coll_name)
-                                    .insert_one(doc)
-                                    .await
-                                    .map_err(|e| {
-                                        anyhow::anyhow!("Failed to insert reply: {}", e)
-                                    })?;
+                            if let MessageDisposition::Reply(resp) = disposition {
+                                handle_reply(&db, reply_to.as_ref(), correlation_id.as_ref(), resp)
+                                    .await?;
                             }
                         }
                         Ok(())
@@ -921,21 +947,14 @@ impl MessageConsumer for MongoDbSubscriber {
                             {
                                 // Only send a reply if the message has a 'reply_to' destination and the disposition is a Reply.
                                 // This allows for fire-and-forget patterns (no reply_to) or explicit replies.
-                                if let (MessageDisposition::Reply(mut resp), Some(coll_name)) =
-                                    (disposition, reply_to)
-                                {
-                                    if let Some(cid) = correlation_id {
-                                        resp.metadata.insert("correlation_id".to_string(), cid);
-                                    }
-                                    let doc = message_to_document(&resp).map_err(|e| {
-                                        anyhow::anyhow!("Failed to serialize MongoDB reply: {}", e)
-                                    })?;
-                                    db.collection::<Document>(&coll_name)
-                                        .insert_one(doc)
-                                        .await
-                                        .map_err(|e| {
-                                            anyhow::anyhow!("Failed to insert reply: {}", e)
-                                        })?;
+                                if let MessageDisposition::Reply(resp) = disposition {
+                                    handle_reply(
+                                        &db,
+                                        reply_to.as_ref(),
+                                        correlation_id.as_ref(),
+                                        resp,
+                                    )
+                                    .await?;
                                 }
                             }
                             Ok(())

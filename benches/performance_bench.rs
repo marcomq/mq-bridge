@@ -73,6 +73,16 @@ pub mod mongodb_helper {
     pub async fn create_publisher() -> Arc<dyn MessagePublisher> {
         let collection_name = "perf_mongodb_direct";
         let config = get_config();
+        Arc::new(
+            MongoDbPublisher::new(&config, collection_name)
+                .await
+                .unwrap(),
+        )
+    }
+
+    pub async fn create_consumer() -> Arc<Mutex<dyn MessageConsumer>> {
+        let collection_name = "perf_mongodb_direct";
+        let config = get_config();
 
         // Drop collection before test to ensure clean state
         let client = mongodb::Client::with_uri_str(&config.url).await.unwrap();
@@ -83,17 +93,8 @@ pub mod mongodb_helper {
             .await
             .ok();
 
-        Arc::new(
-            MongoDbPublisher::new(&config, collection_name)
-                .await
-                .unwrap(),
-        )
-    }
-
-    pub async fn create_consumer() -> Arc<Mutex<dyn MessageConsumer>> {
-        let collection_name = "perf_mongodb_direct";
         Arc::new(Mutex::new(
-            MongoDbConsumer::new(&get_config(), collection_name)
+            MongoDbConsumer::new(&config, collection_name)
                 .await
                 .unwrap(),
         ))
