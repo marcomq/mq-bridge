@@ -214,7 +214,7 @@ impl MessagePublisher for MemoryPublisher {
             let cid = message
                 .metadata
                 .entry("correlation_id".to_string())
-                .or_insert_with(|| uuid::Uuid::now_v7().to_string())
+                .or_insert_with(|| uuid::Uuid::new_v4().to_string())
                 .clone();
 
             let (tx, rx) = oneshot::channel();

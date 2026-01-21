@@ -22,7 +22,7 @@ pub struct CanonicalMessage {
 impl CanonicalMessage {
     pub fn new(payload: Vec<u8>, message_id: Option<u128>) -> Self {
         Self {
-            message_id: message_id.unwrap_or_else(|| Uuid::now_v7().as_u128()),
+            message_id: message_id.unwrap_or_else(|| Uuid::new_v4().as_u128()),
             payload: Bytes::from(payload),
             metadata: HashMap::new(),
         }
@@ -30,7 +30,7 @@ impl CanonicalMessage {
 
     pub fn new_bytes(payload: Bytes, message_id: Option<u128>) -> Self {
         Self {
-            message_id: message_id.unwrap_or_else(|| Uuid::now_v7().as_u128()),
+            message_id: message_id.unwrap_or_else(|| Uuid::new_v4().as_u128()),
             payload,
             metadata: HashMap::new(),
         }

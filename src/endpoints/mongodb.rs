@@ -217,10 +217,22 @@ impl MessagePublisher for MongoDbPublisher {
         if !self.request_reply {
             trace!(message_id = %format!("{:032x}", message.message_id), collection = %self.collection_name, "Publishing document to MongoDB");
             let doc = message_to_document(&message).map_err(PublisherError::NonRetryable)?;
-            self.collection
-                .insert_one(doc)
-                .await
-                .context("Failed to insert document into MongoDB")?;
+            match self.collection.insert_one(doc).await {
+                Ok(_) => {}
+                Err(e) => {
+                    if let ErrorKind::Write(mongodb::error::WriteFailure::WriteError(ref w)) =
+                        *e.kind
+                    {
+                        if w.code == 11000 {
+                            warn!(message_id = %format!("{:032x}", message.message_id), "Duplicate key error inserting into MongoDB. Treating as idempotent success.");
+                            return Ok(Sent::Ack);
+                        }
+                    }
+                    return Err(PublisherError::Retryable(
+                        anyhow::anyhow!(e).context("Failed to insert document into MongoDB"),
+                    ));
+                }
+            }
 
             return Ok(Sent::Ack);
         }
@@ -601,12 +613,11 @@ impl MongoDbConsumer {
                                 .await?;
                             }
                             MessageDisposition::Ack => {}
-                            MessageDisposition::Nack(_) => {
+                            MessageDisposition::Nack => {
                                 collection_clone
                                     .update_one(
                                         doc! { "_id": id_val.clone() },
                                         doc! { "$set": { "locked_until": null } },
-                                        None,
                                     )
                                     .await
                                     .context("Failed to unlock Nacked message")?;
@@ -720,7 +731,7 @@ impl MongoDbConsumer {
                         MessageDisposition::Ack => {
                             ids_to_delete.push(id.clone());
                         }
-                        MessageDisposition::Nack(_) => {
+                        MessageDisposition::Nack => {
                             ids_to_unlock.push(id.clone());
                         }
                     }
