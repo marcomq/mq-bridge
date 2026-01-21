@@ -72,7 +72,7 @@ impl NatsPublisher {
             delayed_ack: config.delayed_ack,
             request_reply: config.request_reply,
             request_timeout: std::time::Duration::from_millis(
-                config.request_timeout_ms.unwrap_or(2000),
+                config.request_timeout_ms.unwrap_or(30_000),
             ),
         })
     }
@@ -534,6 +534,7 @@ impl NatsCore {
                                 );
                         }
                         for (msg, disposition) in jetstream_messages.iter().zip(dispositions) {
+                            // Only send a reply if the NATS message has a reply subject and the disposition is a Reply.
                             if let (Some(reply), MessageDisposition::Reply(resp)) =
                                 (msg.reply.as_ref(), disposition)
                             {
@@ -631,6 +632,7 @@ impl NatsCore {
                                 );
                         }
                         for (reply_opt, disposition) in reply_subjects.iter().zip(dispositions) {
+                            // Only send a reply if the NATS message has a reply subject and the disposition is a Reply.
                             if let (Some(reply), MessageDisposition::Reply(resp)) =
                                 (reply_opt, disposition)
                             {

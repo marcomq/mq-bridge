@@ -235,20 +235,21 @@ The recommended approach for request-response is to use the dedicated `response`
 
 This model inherently solves the correlation problem. The response is part of the same execution context as the request, so there's no risk of mixing up responses between different concurrent requests.
 
-#### Example: HTTP API Gateway
+#### Example: MongoDB Request-Response
 
-Consider a route that exposes an HTTP endpoint. For each request, it executes a handler to produce a result and returns it to the client.
+Consider a scenario where a service writes a request document to MongoDB and waits for a reply. This library picks up the document, processes it via a handler, and writes the result back to a reply collection.
 
 **YAML Configuration (`mq-bridge.yaml`):**
 ```yaml
-api_gateway:
-  concurrency: 10 # Handle up to 10 requests concurrently
+mongo_responder:
   input:
-    http:
-      url: "0.0.0.0:8080"
+    mongodb:
+      url: "mongodb://localhost:27017"
+      database: "app_db"
+      collection: "requests"
   output:
-    # The 'response' endpoint sends the processed message back to the HTTP client.
-    # A handler must be attached programmatically to generate the response.
+    # The 'response' endpoint sends the processed message back to the 'requests_replies' collection
+    # (or whatever reply_to was set to by the sender).
     response: {}
 ```
 

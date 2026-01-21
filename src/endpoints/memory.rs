@@ -167,6 +167,7 @@ pub struct MemoryPublisher {
     topic: String,
     sender: Sender<Vec<CanonicalMessage>>,
     request_reply: bool,
+    request_timeout: std::time::Duration,
 }
 
 impl MemoryPublisher {
@@ -176,6 +177,9 @@ impl MemoryPublisher {
             topic: config.topic.clone(),
             sender: channel.sender.clone(),
             request_reply: config.request_reply,
+            request_timeout: std::time::Duration::from_millis(
+                config.request_timeout_ms.unwrap_or(30000),
+            ),
         })
     }
 
@@ -187,7 +191,7 @@ impl MemoryPublisher {
         Self::new(&MemoryConfig {
             topic: topic.to_string(),
             capacity: Some(capacity),
-            request_reply: false,
+            ..Default::default()
         })
         .expect("Failed to create local memory publisher")
     }
@@ -198,7 +202,7 @@ impl MemoryPublisher {
         get_or_create_channel(&MemoryConfig {
             topic: self.topic.clone(),
             capacity: None,
-            request_reply: false,
+            ..Default::default()
         })
     }
 }
@@ -226,9 +230,9 @@ impl MessagePublisher for MemoryPublisher {
             }
 
             // Wait for the response
-            let response = match rx.await {
-                Ok(resp) => resp,
-                Err(e) => {
+            let response = match tokio::time::timeout(self.request_timeout, rx).await {
+                Ok(Ok(resp)) => resp,
+                Ok(Err(e)) => {
                     response_channel.remove_waiter(&cid);
                     return Err(anyhow!(
                         "Failed to receive response for correlation_id {}: {}",
@@ -236,6 +240,13 @@ impl MessagePublisher for MemoryPublisher {
                         e
                     )
                     .into());
+                }
+                Err(_) => {
+                    response_channel.remove_waiter(&cid);
+                    return Err(PublisherError::Retryable(anyhow!(
+                        "Request timed out waiting for response for correlation_id {}",
+                        cid
+                    )));
                 }
             };
 
@@ -290,7 +301,7 @@ impl MemoryConsumer {
         Self::new(&MemoryConfig {
             topic: topic.to_string(),
             capacity: Some(capacity),
-            request_reply: false,
+            ..Default::default()
         })
         .expect("Failed to create local memory consumer")
     }
@@ -299,7 +310,7 @@ impl MemoryConsumer {
         get_or_create_channel(&MemoryConfig {
             topic: self.topic.clone(),
             capacity: None,
-            request_reply: false,
+            ..Default::default()
         })
     }
 }
@@ -342,6 +353,8 @@ impl MessageConsumer for MemoryConsumer {
             Box::pin(async move {
                 let channel = get_or_create_response_channel(&topic);
                 for disposition in dispositions {
+                    // In memory channels, we always attempt to send the reply to the response channel
+                    // if the disposition is a Reply. The publisher side decides whether to wait for it.
                     if let MessageDisposition::Reply(resp) = disposition {
                         // If the receiver is dropped, sending will fail. We can ignore it.
                         let mut handled = false;
@@ -470,7 +483,7 @@ mod tests {
         let cfg = MemoryConfig {
             topic: "base_topic".to_string(),
             capacity: Some(10),
-            request_reply: false,
+            ..Default::default()
         };
         let subscriber_id = "sub1";
         let mut subscriber = MemorySubscriber::new(&cfg, subscriber_id).unwrap();
@@ -480,7 +493,7 @@ mod tests {
         let pub_cfg = MemoryConfig {
             topic: format!("base_topic-{}", subscriber_id),
             capacity: Some(10),
-            request_reply: false,
+            ..Default::default()
         };
         let publisher = MemoryPublisher::new(&pub_cfg).unwrap();
 
@@ -511,6 +524,7 @@ mod tests {
             topic: topic.clone(),
             capacity: Some(10),
             request_reply: true,
+            request_timeout_ms: Some(2000),
         })
         .unwrap();
 

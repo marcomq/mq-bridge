@@ -587,11 +587,7 @@ mod tests {
     async fn test_factory_creates_memory_subscriber() {
         let endpoint = Endpoint {
             mode: crate::models::ConsumerMode::Subscribe,
-            endpoint_type: EndpointType::Memory(MemoryConfig {
-                topic: "mem".to_string(),
-                capacity: None,
-                request_reply: false,
-            }),
+            endpoint_type: EndpointType::Memory(MemoryConfig::new("mem".to_string(), None)),
             middlewares: vec![],
             handler: None,
         };

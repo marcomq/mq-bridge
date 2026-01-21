@@ -713,11 +713,11 @@ pub struct NatsConfig {
     /// Optional token for authentication.
     pub token: Option<String>,
     /// (Publisher only) If true, the publisher uses the request-reply pattern.
-    /// It sends a request and waits for a response (using `core_client.request_with_headers()`)
-    /// with timeout handling. Defaults to false.
+    /// It sends a request and waits for a response (using `core_client.request_with_headers()`).
+    /// Defaults to false.
     #[serde(default)]
     pub request_reply: bool,
-    /// Timeout for request-reply operations in milliseconds. Defaults to 2000ms.
+    /// Timeout for request-reply operations in milliseconds. Defaults to 30000ms.
     pub request_timeout_ms: Option<u64>,
     /// (Publisher only) If true, do not wait for an acknowledgement when sending to broker. Defaults to false.
     #[serde(default)]
@@ -755,6 +755,8 @@ pub struct MemoryConfig {
     /// (Publisher only) If true, send() waits for a response.
     #[serde(default)]
     pub request_reply: bool,
+    /// Timeout for request-reply operations in milliseconds. Defaults to 30000ms.
+    pub request_timeout_ms: Option<u64>,
 }
 
 impl MemoryConfig {
@@ -762,7 +764,7 @@ impl MemoryConfig {
         Self {
             topic: topic.into(),
             capacity,
-            request_reply: false,
+            ..Default::default()
         }
     }
 }
@@ -849,6 +851,8 @@ pub struct MongoDbConfig {
     pub request_reply: bool,
     /// TTL in seconds for documents created by the publisher. If set, a TTL index is created.
     pub ttl_seconds: Option<u64>,
+    /// Timeout for request-reply operations in milliseconds. Defaults to 30000ms.
+    pub request_timeout_ms: Option<u64>,
 }
 
 // --- MQTT Specific Configuration ---
@@ -978,6 +982,8 @@ pub struct HttpConfig {
     pub workers: Option<usize>,
     /// (Consumer only) Header key to extract the message ID from. Defaults to "message-id".
     pub message_id_header: Option<String>,
+    /// Timeout for request-reply operations in milliseconds. Defaults to 30000ms.
+    pub request_timeout_ms: Option<u64>,
 }
 
 // --- IBM MQ Specific Configuration ---
@@ -1050,7 +1056,9 @@ pub struct SwitchConfig {
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
-pub struct ResponseConfig {}
+pub struct ResponseConfig {
+    // This struct is a marker and currently has no fields.
+}
 
 // --- Common Configuration ---
 

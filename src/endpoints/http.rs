@@ -39,6 +39,7 @@ pub struct HttpConsumer {
 struct HttpConsumerState {
     tx: tokio::sync::mpsc::Sender<HttpSourceMessage>,
     message_id_header: String,
+    request_timeout: std::time::Duration,
 }
 
 #[cfg(feature = "actix-web")]
@@ -51,9 +52,12 @@ impl HttpConsumer {
             .message_id_header
             .clone()
             .unwrap_or_else(|| "message-id".to_string());
+        let request_timeout =
+            std::time::Duration::from_millis(config.request_timeout_ms.unwrap_or(30000));
         let state = HttpConsumerState {
             tx: request_tx,
             message_id_header,
+            request_timeout,
         };
 
         let listen_address = config
@@ -212,7 +216,9 @@ async fn handle_request(
     }
     message.metadata = metadata;
 
-    // Channel to receive the commit confirmation from the pipeline
+    // Channel to receive the commit confirmation from the pipeline.
+    // The HTTP response will be determined by the disposition received here.
+    // Reply -> 200 OK with payload. Ack -> 202 Accepted. Nack -> 500 Internal Server Error.
     let (ack_tx, ack_rx) = tokio::sync::oneshot::channel::<MessageDisposition>();
     let commit = Box::new(move |disposition: MessageDisposition| {
         Box::pin(async move {
@@ -229,7 +235,7 @@ async fn handle_request(
     }
 
     // Wait for pipeline to process the message
-    let timeout_duration = std::time::Duration::from_secs(30);
+    let timeout_duration = state.request_timeout;
     match tokio::time::timeout(timeout_duration, async {
         match ack_rx.await {
             Ok(disposition) => {

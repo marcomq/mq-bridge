@@ -111,6 +111,7 @@ pub struct MongoDbPublisher {
     db: Database,
     collection_name: String,
     request_reply: bool,
+    request_timeout: Duration,
 }
 
 impl MongoDbPublisher {
@@ -165,6 +166,7 @@ impl MongoDbPublisher {
             db,
             collection_name: collection_name.to_string(),
             request_reply: config.request_reply,
+            request_timeout: Duration::from_millis(config.request_timeout_ms.unwrap_or(30000)),
         })
     }
 }
@@ -206,7 +208,7 @@ impl MessagePublisher for MongoDbPublisher {
         let reply_collection = self.db.collection::<Document>(&reply_collection_name);
         let filter = doc! { "metadata.correlation_id": correlation_id.clone() };
 
-        let timeout = Duration::from_secs(30); // TODO: Make this configurable
+        let timeout = self.request_timeout;
         let start = Instant::now();
 
         loop {
@@ -546,6 +548,8 @@ impl MongoDbConsumer {
 
                 let commit = Box::new(move |disposition: MessageDisposition| {
                     Box::pin(async move {
+                        // Only send a reply if the message has a 'reply_to' destination and the disposition is a Reply.
+                        // This allows for fire-and-forget patterns (no reply_to) or explicit replies.
                         if let (MessageDisposition::Reply(resp), Some(coll_name)) =
                             (disposition, reply_collection_name)
                         {
@@ -655,6 +659,8 @@ impl MongoDbConsumer {
                 for ((reply_coll_opt, correlation_id_opt), disposition) in
                     reply_infos.iter().zip(dispositions)
                 {
+                    // Only send a reply if the message has a 'reply_to' destination and the disposition is a Reply.
+                    // This allows for fire-and-forget patterns (no reply_to) or explicit replies.
                     if let (Some(coll_name), MessageDisposition::Reply(resp)) =
                         (reply_coll_opt, disposition)
                     {
@@ -724,6 +730,7 @@ enum SubscriberStream {
 pub struct MongoDbSubscriber {
     inner: tokio::sync::Mutex<SubscriberStream>,
     collection_name: String,
+    db: Database,
 }
 
 impl MongoDbSubscriber {
@@ -795,6 +802,7 @@ impl MongoDbSubscriber {
         Ok(Self {
             inner: tokio::sync::Mutex::new(inner),
             collection_name: collection_name.to_string(),
+            db,
         })
     }
 }
@@ -818,9 +826,41 @@ impl MessageConsumer for MongoDbSubscriber {
                 let msg = parse_mongodb_document(doc)?;
 
                 trace!(message_id = %format!("{:032x}", msg.message_id), collection = %self.collection_name, "Received MongoDB change stream event");
+
+                let reply_to = msg.metadata.get("reply_to").cloned();
+                let correlation_id = msg.metadata.get("correlation_id").cloned();
+                let db = self.db.clone();
+
+                let commit = Box::new(move |dispositions: Vec<MessageDisposition>| {
+                    Box::pin(async move {
+                        for disposition in dispositions {
+                            // Only send a reply if the message has a 'reply_to' destination and the disposition is a Reply.
+                            // This allows for fire-and-forget patterns (no reply_to) or explicit replies.
+                            if let (MessageDisposition::Reply(mut resp), Some(coll_name)) =
+                                (disposition, &reply_to)
+                            {
+                                if let Some(cid) = &correlation_id {
+                                    resp.metadata
+                                        .insert("correlation_id".to_string(), cid.clone());
+                                }
+                                let doc = message_to_document(&resp).map_err(|e| {
+                                    anyhow::anyhow!("Failed to serialize MongoDB reply: {}", e)
+                                })?;
+                                db.collection::<Document>(coll_name)
+                                    .insert_one(doc)
+                                    .await
+                                    .map_err(|e| {
+                                        anyhow::anyhow!("Failed to insert reply: {}", e)
+                                    })?;
+                            }
+                        }
+                        Ok(())
+                    }) as BoxFuture<'static, anyhow::Result<()>>
+                });
+
                 Ok(ReceivedBatch {
                     messages: vec![msg],
-                    commit: Box::new(|_| Box::pin(async { Ok(()) })),
+                    commit,
                 })
             }
             SubscriberStream::Polling {
@@ -856,10 +896,46 @@ impl MessageConsumer for MongoDbSubscriber {
 
                 if !messages.is_empty() {
                     trace!(count = messages.len(), collection = %self.collection_name, message_ids = ?LazyMessageIds(&messages), "Received batch of MongoDB documents via polling");
-                    return Ok(ReceivedBatch {
-                        messages,
-                        commit: Box::new(|_| Box::pin(async { Ok(()) })),
+
+                    let reply_infos: Vec<_> = messages
+                        .iter()
+                        .map(|m| {
+                            (
+                                m.metadata.get("reply_to").cloned(),
+                                m.metadata.get("correlation_id").cloned(),
+                            )
+                        })
+                        .collect();
+                    let db = self.db.clone();
+
+                    let commit = Box::new(move |dispositions: Vec<MessageDisposition>| {
+                        Box::pin(async move {
+                            for (disposition, (reply_to, correlation_id)) in
+                                dispositions.into_iter().zip(reply_infos)
+                            {
+                                // Only send a reply if the message has a 'reply_to' destination and the disposition is a Reply.
+                                // This allows for fire-and-forget patterns (no reply_to) or explicit replies.
+                                if let (MessageDisposition::Reply(mut resp), Some(coll_name)) =
+                                    (disposition, reply_to)
+                                {
+                                    if let Some(cid) = correlation_id {
+                                        resp.metadata.insert("correlation_id".to_string(), cid);
+                                    }
+                                    let doc = message_to_document(&resp).map_err(|e| {
+                                        anyhow::anyhow!("Failed to serialize MongoDB reply: {}", e)
+                                    })?;
+                                    db.collection::<Document>(&coll_name)
+                                        .insert_one(doc)
+                                        .await
+                                        .map_err(|e| {
+                                            anyhow::anyhow!("Failed to insert reply: {}", e)
+                                        })?;
+                                }
+                            }
+                            Ok(())
+                        }) as BoxFuture<'static, anyhow::Result<()>>
                     });
+                    return Ok(ReceivedBatch { messages, commit });
                 }
 
                 tokio::time::sleep(*interval).await;
