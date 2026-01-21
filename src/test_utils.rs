@@ -870,11 +870,7 @@ pub async fn measure_single_write_performance(
         tokio::spawn(async move {
             let id = Uuid::new_v4().as_u128();
             for i in 0..count {
-                if tx
-                    .send(generate_message(i as u128 + id))
-                    .await
-                    .is_err()
-                {
+                if tx.send(generate_message(i as u128 + id)).await.is_err() {
                     break;
                 }
             }
