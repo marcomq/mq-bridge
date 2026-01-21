@@ -294,11 +294,10 @@ impl Endpoint {
     /// let endpoint = Endpoint::new_memory("my_topic", 100);
     /// ```
     pub fn new_memory(topic: &str, capacity: usize) -> Self {
-        Self::new(EndpointType::Memory(MemoryConfig {
-            topic: topic.to_string(),
-            capacity: Some(capacity),
-            request_reply: false,
-        }))
+        Self::new(EndpointType::Memory(MemoryConfig::new(
+            topic,
+            Some(capacity),
+        )))
     }
     pub fn new_response() -> Self {
         Self::new(EndpointType::Response(ResponseConfig::default()))
@@ -756,6 +755,16 @@ pub struct MemoryConfig {
     /// (Publisher only) If true, send() waits for a response.
     #[serde(default)]
     pub request_reply: bool,
+}
+
+impl MemoryConfig {
+    pub fn new(topic: impl Into<String>, capacity: Option<usize>) -> Self {
+        Self {
+            topic: topic.into(),
+            capacity,
+            request_reply: false,
+        }
+    }
 }
 
 // --- AMQP Specific Configuration ---

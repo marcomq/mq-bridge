@@ -366,7 +366,6 @@ pub mod ibm_mq_helper {
 pub mod memory_helper {
     use super::PERF_TEST_MESSAGE_COUNT;
     use mq_bridge::endpoints::memory::{MemoryConsumer, MemoryPublisher};
-    use mq_bridge::models::MemoryConfig;
     use mq_bridge::traits::{MessageConsumer, MessagePublisher};
     use once_cell::sync::Lazy;
     use std::sync::atomic::{AtomicUsize, Ordering};

@@ -659,13 +659,14 @@ impl MongoDbConsumer {
                         (reply_coll_opt, disposition)
                     {
                         let mut resp = resp;
-                        let doc = match {
+                        let res = {
                             if let Some(cid) = correlation_id_opt {
                                 resp.metadata
                                     .insert("correlation_id".to_string(), cid.clone());
                             };
                             message_to_document(&resp)
-                        } {
+                        };
+                        let doc = match res {
                             Ok(d) => d,
                             Err(e) => {
                                 tracing::error!(collection = %coll_name, response_id = %format!("{:032x}", resp.message_id), error = %e, "Failed to serialize MongoDB batch reply");
