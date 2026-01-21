@@ -609,8 +609,8 @@ pub async fn measure_write_performance(
 ) -> Duration {
     // write performance test (Batch) for {}", _name);
     let batch_size = 128; // Define a reasonable batch size
-    let (tx, rx): (Sender<CanonicalMessage>, Receiver<CanonicalMessage>) =
-        bounded(batch_size * concurrency * 2);
+    let (tx, rx): (Sender<Vec<CanonicalMessage>>, Receiver<Vec<CanonicalMessage>>) =
+        bounded(concurrency * 4);
 
     let final_count = Arc::new(AtomicUsize::new(0));
 
@@ -625,10 +625,19 @@ pub async fn measure_write_performance(
                 0
             };
         tokio::spawn(async move {
+            let mut batch = Vec::with_capacity(batch_size);
             for _ in 0..count {
-                if tx.send(generate_message()).await.is_err() {
-                    break;
+                batch.push(generate_message());
+                if batch.len() >= batch_size {
+                    if tx.send(batch).await.is_err() {
+                        eprintln!("Error sending to channel");
+                        return;
+                    }
+                    batch = Vec::with_capacity(batch_size);
                 }
+            }
+            if !batch.is_empty() {
+                let _ = tx.send(batch).await;
             }
         });
     }
@@ -643,28 +652,10 @@ pub async fn measure_write_performance(
         let final_count_clone = Arc::clone(&final_count);
 
         tasks.spawn(async move {
-            loop {
-                // Wait for the first message to start a batch.
-                let first_message = match rx_clone.recv().await {
-                    Ok(msg) => msg,
-                    Err(_) => break, // Channel is closed and empty, so we're done.
-                };
-
-                let mut batch = Vec::with_capacity(batch_size);
-                batch.push(first_message);
-
-                // Greedily fill the rest of the batch without waiting.
-                for _ in 1..batch_size {
-                    if let Ok(msg) = rx_clone.try_recv() {
-                        batch.push(msg);
-                    } else {
-                        break; // Channel is empty for now.
-                    }
-                }
-
+            while let Ok(batch) = rx_clone.recv().await {
                 // Retry sending the batch if some messages fail.
                 let mut messages_to_send = batch;
-                let mut batch_size = messages_to_send.len();
+                let mut current_batch_size = messages_to_send.len();
                 let mut retry_count = 0;
                 const MAX_RETRIES: usize = 5;
                 loop {
@@ -674,7 +665,7 @@ pub async fn measure_write_performance(
                     {
                         Ok(SentBatch::Ack) => {
                             final_count_clone
-                                .fetch_add(batch_size, std::sync::atomic::Ordering::Relaxed);
+                                .fetch_add(current_batch_size, std::sync::atomic::Ordering::Relaxed);
                             break; // All sent successfully
                         }
                         Ok(SentBatch::Partial {
@@ -683,7 +674,7 @@ pub async fn measure_write_performance(
                         }) => {
                             if failed.is_empty() {
                                 final_count_clone
-                                    .fetch_add(batch_size, std::sync::atomic::Ordering::Relaxed);
+                                    .fetch_add(current_batch_size, std::sync::atomic::Ordering::Relaxed);
                                 break; // All sent successfully
                             } else {
                                 let (retryable, non_retryable): (Vec<_>, Vec<_>) = failed
@@ -703,7 +694,7 @@ pub async fn measure_write_performance(
                                 eprintln!("Retrying: {}", retryable.len());
                                 messages_to_send =
                                     retryable.into_iter().map(|(msg, _)| msg).collect();
-                                batch_size = messages_to_send.len();
+                                current_batch_size = messages_to_send.len();
                                 retry_count = 0; // Reset on partial success
                             }
                         }

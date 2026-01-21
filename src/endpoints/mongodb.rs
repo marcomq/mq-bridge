@@ -62,11 +62,17 @@ fn document_to_canonical(doc: Document) -> anyhow::Result<CanonicalMessage> {
 }
 
 fn message_to_document(message: &CanonicalMessage) -> anyhow::Result<Document> {
-    if message
-        .metadata
-        .get("mq_bridge.original_format")
-        .map(|s| s.as_str())
-        == Some("raw")
+    // If request-reply metadata is present, we must use the wrapped format to preserve it,
+    // regardless of whether the original format was raw.
+    let force_wrapped = message.metadata.contains_key("correlation_id")
+        || message.metadata.contains_key("reply_to");
+
+    if !force_wrapped
+        && message
+            .metadata
+            .get("mq_bridge.original_format")
+            .map(|s| s.as_str())
+            == Some("raw")
     {
         if let Ok(doc) = serde_json::from_slice::<Document>(&message.payload) {
             return Ok(doc);

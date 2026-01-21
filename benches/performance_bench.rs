@@ -367,25 +367,19 @@ pub mod memory_helper {
     use super::PERF_TEST_MESSAGE_COUNT;
     use mq_bridge::endpoints::memory::{MemoryConsumer, MemoryPublisher};
     use mq_bridge::traits::{MessageConsumer, MessagePublisher};
-    use once_cell::sync::Lazy;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use tokio::sync::Mutex;
 
-    static TOPIC_ID: Lazy<AtomicUsize> = Lazy::new(|| AtomicUsize::new(0));
-
     pub async fn create_publisher() -> Arc<dyn MessagePublisher> {
-        let id = TOPIC_ID.load(Ordering::SeqCst);
         Arc::new(MemoryPublisher::new_local(
-            &format!("perf_memory_{}", id),
+            "perf_memory_bench",
             PERF_TEST_MESSAGE_COUNT * 2,
         ))
     }
 
     pub async fn create_consumer() -> Arc<Mutex<dyn MessageConsumer>> {
-        let id = TOPIC_ID.fetch_add(1, Ordering::SeqCst) + 1;
         Arc::new(Mutex::new(MemoryConsumer::new_local(
-            &format!("perf_memory_{}", id),
+            "perf_memory_bench",
             PERF_TEST_MESSAGE_COUNT * 2,
         )))
     }
