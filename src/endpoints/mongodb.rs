@@ -734,6 +734,7 @@ impl MongoDbConsumer {
                 }
                 let mut ids_to_delete = Vec::new();
                 let mut ids_to_unlock = Vec::new();
+                let mut errors = Vec::new();
 
                 for (((reply_coll_opt, correlation_id_opt), disposition), id) in
                     reply_infos.iter().zip(dispositions).zip(ids.iter())
@@ -742,14 +743,21 @@ impl MongoDbConsumer {
                     // This allows for fire-and-forget patterns (no reply_to) or explicit replies.
                     match disposition {
                         MessageDisposition::Reply(resp) => {
-                            handle_reply(
+                            match handle_reply(
                                 &db,
                                 reply_coll_opt.as_ref(),
                                 correlation_id_opt.as_ref(),
                                 resp,
                             )
-                            .await?;
-                            ids_to_delete.push(id.clone());
+                            .await
+                            {
+                                Ok(_) => ids_to_delete.push(id.clone()),
+                                Err(e) => {
+                                    tracing::error!(id = %id, error = %e, "Failed to send reply");
+                                    errors.push(e);
+                                    ids_to_unlock.push(id.clone());
+                                }
+                            }
                         }
                         MessageDisposition::Ack => {
                             ids_to_delete.push(id.clone());
@@ -772,22 +780,28 @@ impl MongoDbConsumer {
                     }
                 }
 
-                if ids_to_delete.is_empty() {
-                    return Ok(());
+                if !ids_to_delete.is_empty() {
+                    let filter = doc! { "_id": { "$in": &ids_to_delete } };
+                    // Ack failure may result in redelivery. Enable deduplication middleware to handle duplicates.
+                    if let Err(e) = collection_clone.delete_many(filter).await {
+                        tracing::error!(error = %e, "Failed to bulk-ack/delete MongoDB messages");
+                        return Err(anyhow::anyhow!(
+                            "Failed to bulk-ack/delete MongoDB messages: {}",
+                            e
+                        ));
+                    } else {
+                        trace!(
+                            count = ids_to_delete.len(),
+                            "MongoDB messages acknowledged and deleted"
+                        );
+                    }
                 }
-                let filter = doc! { "_id": { "$in": &ids_to_delete } };
-                // Ack failure may result in redelivery. Enable deduplication middleware to handle duplicates.
-                if let Err(e) = collection_clone.delete_many(filter).await {
-                    tracing::error!(error = %e, "Failed to bulk-ack/delete MongoDB messages");
+
+                if !errors.is_empty() {
                     return Err(anyhow::anyhow!(
-                        "Failed to bulk-ack/delete MongoDB messages: {}",
-                        e
+                        "Errors occurred during commit: {:?}",
+                        errors
                     ));
-                } else {
-                    trace!(
-                        count = ids_to_delete.len(),
-                        "MongoDB messages acknowledged and deleted"
-                    );
                 }
                 Ok(())
             }) as BoxFuture<'static, anyhow::Result<()>>
