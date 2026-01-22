@@ -171,7 +171,6 @@ pub mod mqtt_helper {
     use mq_bridge::traits::{MessageConsumer, MessagePublisher};
     use std::sync::Arc;
     use tokio::sync::Mutex;
-    use uuid::Uuid;
 
     fn get_config() -> MqttConfig {
         MqttConfig {
@@ -187,7 +186,7 @@ pub mod mqtt_helper {
 
     pub async fn create_publisher() -> Arc<dyn MessagePublisher> {
         let topic = "perf_mqtt_direct";
-        let publisher_id = format!("pub-{}", mq_bridge::next_id.now_v7.to_string());
+        let publisher_id = format!("pub-{}", mq_bridge::next_id::now_v7());
         Arc::new(
             MqttPublisher::new(&get_config(), topic, &publisher_id)
                 .await
@@ -197,7 +196,7 @@ pub mod mqtt_helper {
 
     pub async fn create_consumer() -> Arc<Mutex<dyn MessageConsumer>> {
         let topic = "perf_mqtt_direct";
-        let consumer_id = format!("sub-{}", mq_bridge::next_id.now_v7.to_string());
+        let consumer_id = format!("sub-{}", mq_bridge::next_id::now_v7());
         Arc::new(Mutex::new(
             MqttConsumer::new(&get_config(), topic, &consumer_id)
                 .await
