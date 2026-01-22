@@ -257,10 +257,11 @@ impl MessagePublisher for MongoDbPublisher {
 
         trace!(message_id = %format!("{:032x}", message.message_id), correlation_id = %correlation_id, collection = %self.collection_name, "Publishing request document to MongoDB");
         let doc = message_to_document(&message).map_err(PublisherError::NonRetryable)?;
-        self.collection
-            .insert_one(doc)
-            .await
-            .context("Failed to insert request document into MongoDB")?;
+        self.collection.insert_one(doc).await.map_err(|e| {
+            PublisherError::Retryable(
+                anyhow::anyhow!(e).context("Failed to insert request document into MongoDB"),
+            )
+        })?;
 
         // Now, wait for the response by polling the reply collection.
         let reply_collection = self.db.collection::<Document>(&reply_collection_name);
