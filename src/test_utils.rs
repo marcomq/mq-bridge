@@ -869,7 +869,11 @@ pub async fn measure_single_write_performance(
         tokio::spawn(async move {
             let id = crate::next_id::next_id();
             for i in 0..count {
-                if tx.send(generate_message(id.wrapping_add(i as u128))).await.is_err() {
+                if tx
+                    .send(generate_message(id.wrapping_add(i as u128)))
+                    .await
+                    .is_err()
+                {
                     break;
                 }
             }
