@@ -129,11 +129,16 @@ impl MemoryResponseChannel {
         &self,
         correlation_id: &str,
         sender: oneshot::Sender<CanonicalMessage>,
-    ) {
-        self.waiters
-            .lock()
-            .await
-            .insert(correlation_id.to_string(), sender);
+    ) -> anyhow::Result<()> {
+        let mut waiters = self.waiters.lock().await;
+        if waiters.contains_key(correlation_id) {
+            return Err(anyhow!(
+                "Correlation ID {} already registered",
+                correlation_id
+            ));
+        }
+        waiters.insert(correlation_id.to_string(), sender);
+        Ok(())
     }
 
     pub async fn remove_waiter(
@@ -228,7 +233,10 @@ impl MessagePublisher for MemoryPublisher {
 
             // Register waiter before sending
             let response_channel = get_or_create_response_channel(&self.topic);
-            response_channel.register_waiter(&cid, tx).await;
+            response_channel
+                .register_waiter(&cid, tx)
+                .await
+                .map_err(PublisherError::NonRetryable)?;
 
             // Send the message
             if let Err(e) = self.send_batch(vec![message]).await {

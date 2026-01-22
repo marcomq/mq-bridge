@@ -176,7 +176,7 @@ pub fn generate_test_messages(num_messages: usize) -> Vec<CanonicalMessage> {
     let id = crate::next_id::next_id();
     for i in 0..num_messages {
         let payload = format!(r#"{{"message_num":{},"test_id":"integration"}}"#, i);
-        let msg = CanonicalMessage::new(payload.into_bytes(), Some(i as u128 + id));
+        let msg = CanonicalMessage::new(payload.into_bytes(), Some(id.wrapping_add(i as u128)));
         messages.push(msg);
     }
     messages
@@ -630,7 +630,7 @@ pub async fn measure_write_performance(
             let mut batch = Vec::with_capacity(batch_size);
             let id = crate::next_id::next_id();
             for i in 0..count {
-                batch.push(generate_message(i as u128 + id));
+                batch.push(generate_message(id.wrapping_add(i as u128)));
                 if batch.len() >= batch_size {
                     if tx.send(batch).await.is_err() {
                         eprintln!("Error sending to channel");
@@ -869,7 +869,7 @@ pub async fn measure_single_write_performance(
         tokio::spawn(async move {
             let id = crate::next_id::next_id();
             for i in 0..count {
-                if tx.send(generate_message(i as u128 + id)).await.is_err() {
+                if tx.send(generate_message(id.wrapping_add(i as u128))).await.is_err() {
                     break;
                 }
             }
@@ -974,6 +974,13 @@ pub fn should_run_benchmark(backend_name: &str) -> bool {
             || arg == "--save-baseline"
             || arg == "--load-baseline"
             || arg == "--profile-time"
+            || arg == "--sample-size"
+            || arg == "--measurement-time"
+            || arg == "--warm-up-time"
+            || arg == "--color"
+            || arg == "-j"
+            || arg == "--jobs"
+            || arg == "--encoding"
         {
             args.next();
             continue;
