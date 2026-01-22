@@ -23,7 +23,7 @@ tracing = "0.1"
 bytes = { version = "1", features = ["serde"] }
 async-channel = { version = "2.5" }
 once_cell = { version = "1.21" }
-uuid = { version = "1.19", features = ["v4"] }
+uuid = { version = "1.19" }
 
 # Common TLS dependencies
 rustls = { version = "0.23", features = ["ring"], optional = true }
@@ -92,7 +92,7 @@ full = ["middleware", "mongodb", "kafka", "amqp", "nats", "mqtt", "http", "aws",
 dedup = ["sled"]
 metrics = ["dep:metrics"]
 panic = []
-test-utils = ["dep:tracing-appender", "dep:tracing-subscriber", "dep:serde_yaml_ng", "uuid/v7"]
+test-utils = ["dep:tracing-appender", "dep:tracing-subscriber", "dep:serde_yaml_ng"]
 
 # Generate Schema file
 schema = ["dep:schemars"]
@@ -101,7 +101,7 @@ schema = ["dep:schemars"]
 kafka = ["rdkafka"]
 amqp = ["lapin", "rustls", "rustls-pemfile", "url"]
 nats = ["async-nats", "rustls", "rustls-pemfile"]
-mongodb = ["dep:mongodb", "uuid/v7"]
+mongodb = ["dep:mongodb"]
 mqtt = ["rumqttc", "rustls", "tokio-rustls", "rustls-pemfile", "url"]
 http = ["http-client", "http-server"]
 http-client = ["reqwest", "rustls", "tokio-rustls", "rustls-pemfile"]

@@ -4,7 +4,7 @@ use crate::traits::{
     BatchCommitFunc, BoxFuture, ConsumerError, MessageConsumer, MessageDisposition,
     MessagePublisher, PublisherError, Received, ReceivedBatch, Sent, SentBatch,
 };
-use crate::CanonicalMessage;
+use crate::{next_id, CanonicalMessage};
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -412,7 +412,7 @@ impl KafkaSubscriber {
         let mut client_config = create_common_config(config);
 
         // Generate a unique group ID for the subscriber to ensure it receives a copy of the message (fan-out).
-        let id = subscribe_id.unwrap_or_else(|| Uuid::new_v4().to_string());
+        let id = subscribe_id.unwrap_or_else(next_id::now_v7_string);
         let group_id = format!("event-sub-{}", id);
         client_config.set("group.id", &group_id);
 

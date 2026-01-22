@@ -8,7 +8,7 @@ use crate::traits::{
     BatchCommitFunc, BoxFuture, ConsumerError, MessageConsumer, MessageDisposition,
     MessagePublisher, PublisherError, Received, ReceivedBatch, Sent, SentBatch,
 };
-use crate::CanonicalMessage;
+use crate::{next_id, CanonicalMessage};
 use anyhow::anyhow;
 use async_channel::{bounded, Receiver, Sender};
 use async_trait::async_trait;
@@ -226,7 +226,7 @@ impl MessagePublisher for MemoryPublisher {
             let cid = message
                 .metadata
                 .entry("correlation_id".to_string())
-                .or_insert_with(|| uuid::Uuid::new_v4().to_string())
+                .or_insert_with(next_id::now_v7_string)
                 .clone();
 
             let (tx, rx) = oneshot::channel();
@@ -521,7 +521,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_memory_request_reply_mode() {
-        let topic = format!("mem_rr_topic_{}", uuid::Uuid::new_v4());
+        let topic = format!("mem_rr_topic_{}", next_id::now_v7_string());
         let input_endpoint = Endpoint::new_memory(&topic, 10);
         let output_endpoint = Endpoint::new_response();
         let handler = |mut msg: CanonicalMessage| async move {

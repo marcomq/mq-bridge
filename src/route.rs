@@ -913,7 +913,7 @@ mod tests {
     #[ignore = "Takes too much time for regular tests"]
     async fn test_route_recovery_from_panic() {
         // Use unique topic names to avoid interference from other tests sharing the static memory channels
-        let unique_suffix = uuid::Uuid::now_v7().simple().to_string();
+        let unique_suffix = crate::next_id::now_v7().to_string();
         let in_topic = format!("panic_in_{}", unique_suffix);
         let out_topic = format!("panic_out_{}", unique_suffix);
 

@@ -173,7 +173,7 @@ impl Drop for DockerCompose {
 
 pub fn generate_test_messages(num_messages: usize) -> Vec<CanonicalMessage> {
     let mut messages = Vec::with_capacity(num_messages);
-    let id = crate::next_id::next_id();
+    let id = crate::next_id::now_v7();
     for i in 0..num_messages {
         let payload = format!(r#"{{"message_num":{},"test_id":"integration"}}"#, i);
         let msg = CanonicalMessage::new(payload.into_bytes(), Some(id.wrapping_add(i as u128)));
@@ -628,7 +628,7 @@ pub async fn measure_write_performance(
             };
         tokio::spawn(async move {
             let mut batch = Vec::with_capacity(batch_size);
-            let id = crate::next_id::next_id();
+            let id = crate::next_id::now_v7();
             for i in 0..count {
                 batch.push(generate_message(id.wrapping_add(i as u128)));
                 if batch.len() >= batch_size {
@@ -867,7 +867,7 @@ pub async fn measure_single_write_performance(
                 0
             };
         tokio::spawn(async move {
-            let id = crate::next_id::next_id();
+            let id = crate::next_id::now_v7();
             for i in 0..count {
                 if tx
                     .send(generate_message(id.wrapping_add(i as u128)))

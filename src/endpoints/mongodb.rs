@@ -4,7 +4,7 @@ use crate::traits::{
     BatchCommitFunc, BoxFuture, ConsumerError, MessageConsumer, MessageDisposition,
     MessagePublisher, PublisherError, Received, ReceivedBatch, Sent, SentBatch,
 };
-use crate::CanonicalMessage;
+use crate::{next_id, CanonicalMessage};
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -152,6 +152,7 @@ pub struct MongoDbPublisher {
     collection_name: String,
     request_reply: bool,
     request_timeout: Duration,
+    reply_polling_interval: Duration,
 }
 
 impl MongoDbPublisher {
@@ -207,6 +208,7 @@ impl MongoDbPublisher {
             collection_name: collection_name.to_string(),
             request_reply: config.request_reply,
             request_timeout: Duration::from_millis(config.request_timeout_ms.unwrap_or(30000)),
+            reply_polling_interval: Duration::from_millis(config.reply_polling_ms.unwrap_or(50)),
         })
     }
 }
@@ -238,7 +240,7 @@ impl MessagePublisher for MongoDbPublisher {
         }
 
         // --- Request-Reply Logic ---
-        let correlation_id = uuid::Uuid::now_v7().to_string();
+        let correlation_id = next_id::now_v7_string();
         // Convention: reply collection is named <request_collection>_replies
         let reply_collection_name = format!("{}_replies", self.collection_name);
 
@@ -262,6 +264,7 @@ impl MessagePublisher for MongoDbPublisher {
 
         let timeout = self.request_timeout;
         let start = Instant::now();
+        let mut current_sleep = self.reply_polling_interval;
 
         loop {
             if start.elapsed() > timeout {
@@ -278,8 +281,17 @@ impl MessagePublisher for MongoDbPublisher {
                     })?;
                     return Ok(Sent::Response(response_msg));
                 }
-                Ok(None) => tokio::time::sleep(Duration::from_millis(50)).await,
-                Err(e) => return Err(PublisherError::Retryable(e.into())),
+                Ok(None) => {
+                    tokio::time::sleep(current_sleep).await;
+                    current_sleep = std::cmp::min(
+                        current_sleep + current_sleep / 2,
+                        Duration::from_millis(500),
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Error polling for MongoDB reply. Retrying...");
+                    tokio::time::sleep(current_sleep).await;
+                }
             }
         }
     }
@@ -709,6 +721,13 @@ impl MongoDbConsumer {
 
         let commit = Box::new(move |dispositions: Vec<MessageDisposition>| {
             Box::pin(async move {
+                if dispositions.len() != reply_infos.len() {
+                    tracing::warn!(
+                        "Disposition count mismatch: expected {}, got {}",
+                        reply_infos.len(),
+                        dispositions.len()
+                    );
+                }
                 let mut ids_to_delete = Vec::new();
                 let mut ids_to_unlock = Vec::new();
 
@@ -889,6 +908,8 @@ impl MessageConsumer for MongoDbSubscriber {
 
                 let commit = Box::new(move |dispositions: Vec<MessageDisposition>| {
                     Box::pin(async move {
+                        // Note: The change stream event provides a single message, so we expect a single disposition.
+                        // If multiple dispositions are provided, they will all use the reply context of this single message.
                         for disposition in dispositions {
                             // Only send a reply if the message has a 'reply_to' destination and the disposition is a Reply.
                             // This allows for fire-and-forget patterns (no reply_to) or explicit replies.
