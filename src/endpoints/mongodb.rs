@@ -240,7 +240,11 @@ impl MessagePublisher for MongoDbPublisher {
         }
 
         // --- Request-Reply Logic ---
-        let correlation_id = next_id::now_v7_string();
+        let correlation_id = if let Some(cid) = message.metadata.get("correlation_id") {
+            cid.clone()
+        } else {
+            next_id::now_v7_string()
+        };
         // Convention: reply collection is named <request_collection>_replies
         let reply_collection_name = format!("{}_replies", self.collection_name);
 

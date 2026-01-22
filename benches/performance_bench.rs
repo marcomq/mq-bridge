@@ -187,7 +187,7 @@ pub mod mqtt_helper {
 
     pub async fn create_publisher() -> Arc<dyn MessagePublisher> {
         let topic = "perf_mqtt_direct";
-        let publisher_id = format!("pub-{}", Uuid::new_v4().as_simple());
+        let publisher_id = format!("pub-{}", mq_bridge::next_id.now_v7.to_string());
         Arc::new(
             MqttPublisher::new(&get_config(), topic, &publisher_id)
                 .await
@@ -197,7 +197,7 @@ pub mod mqtt_helper {
 
     pub async fn create_consumer() -> Arc<Mutex<dyn MessageConsumer>> {
         let topic = "perf_mqtt_direct";
-        let consumer_id = format!("sub-{}", Uuid::new_v4().as_simple());
+        let consumer_id = format!("sub-{}", mq_bridge::next_id.now_v7.to_string());
         Arc::new(Mutex::new(
             MqttConsumer::new(&get_config(), topic, &consumer_id)
                 .await
