@@ -12,15 +12,21 @@ use uuid::Uuid;
 thread_local! {
     static RNG: RefCell<SmallRng> = RefCell::new(SmallRng::from_rng(&mut rand::rng()));
     static LAST_MS: Cell<u64> = const { Cell::new(0) };
-    static COUNTER: Cell<u16> = const { Cell::new(0) };
+    static COUNTER: Cell<u32> = const { Cell::new(0) };
 }
 
 /// Generates a unique identifier compatible with UUID v7.
 ///
 /// The identifier is a `u128` value composed of:
 /// - 48 bits: Current timestamp in milliseconds.
-/// - 12 bits: Thread-local counter (increments per millisecond).
-/// - 62 bits: Random number.
+/// -  4 bits: Version (7).
+/// - 12 bits: Counter (High 12 bits of 18).
+/// -  2 bits: Variant (2).
+/// -  6 bits: Counter (Low 6 bits of 18).
+/// - 56 bits: Random number.
+///
+/// This layout effectively provides an 18-bit counter (supporting ~262k IDs/ms)
+/// by utilizing the standard `rand_a` field and the upper bits of `rand_b`.
 ///
 /// **Note on Sorting:**
 /// Since the counter is thread-local and resets every millisecond, IDs generated
@@ -28,28 +34,48 @@ thread_local! {
 /// to be globally monotonic.
 /// This is not random enough for cryptography!
 pub fn now_v7() -> u128 {
-    let current_timestamp = fast_time_ms();
+    let mut current_timestamp = fast_time_ms();
 
-    let next_counter = COUNTER.with(|counter| {
+    let (timestamp, counter) = COUNTER.with(|counter| {
         let last_timestamp = LAST_MS.with(|last| last.get());
-        if last_timestamp != current_timestamp {
+        if current_timestamp > last_timestamp {
             LAST_MS.with(|last| last.set(current_timestamp));
             counter.set(0);
-            0
+            (current_timestamp, 0)
         } else {
-            let inc_counter = counter.get().wrapping_add(1);
-            counter.set(inc_counter);
-            inc_counter
+            // Time hasn't moved forward (or went backward).
+            // We stick to the last timestamp to ensure monotonicity.
+            current_timestamp = last_timestamp;
+
+            let c = counter.get();
+            // If counter is exhausted (18 bits = 262,143), increment timestamp to preserve monotonicity
+            if c >= 0x3FFFF {
+                current_timestamp += 1;
+                LAST_MS.with(|last| last.set(current_timestamp));
+                counter.set(0);
+                (current_timestamp, 0)
+            } else {
+                let inc = c.wrapping_add(1);
+                counter.set(inc);
+                (last_timestamp, inc)
+            }
         }
     });
 
+    // Use 18 bits for counter: 12 in rand_a, 6 in rand_b high.
+    // This allows ~262k IDs per millisecond per thread.
+    let rand_a = (counter >> 6) & 0xFFF;
+    let rand_b_high = counter & 0x3F;
+
     let rand_nr = RNG.with(|random_nr| random_nr.borrow_mut().next_u64());
 
-    let timestamp_part = (current_timestamp as u128) << 80;
+    let timestamp_part = (timestamp as u128) << 80;
     let version_part = 7u128 << 76; // Version 7 (0111)
-    let counter_part = ((next_counter & 0xFFF) as u128) << 64; // 12 bits of counter
+    let counter_part = (rand_a as u128) << 64; // 12 bits of counter
     let variant_part = 2u128 << 62; // Variant 1 (10..)
-    let random_part = (rand_nr as u128) & 0x3FFF_FFFF_FFFF_FFFF; // 62 bits of randomness
+                                    // 56 bits of randomness + 6 bits of counter
+    let rand_b_low = rand_nr & 0x00FF_FFFF_FFFF_FFFF;
+    let random_part = ((rand_b_high as u128) << 56) | (rand_b_low as u128);
 
     timestamp_part | version_part | counter_part | variant_part | random_part
 }
@@ -101,12 +127,11 @@ mod tests {
     }
 
     #[test]
-    /// IDs are not 100% sorted correctly. The sorting fails when having multiple
-    /// threads or when having more than 4096 IDs per ms.
-    /// But the first 4095 should be sorted correctly.
+    /// IDs are sorted correctly per thread.
+    /// Capacity is ~262k IDs per ms (18 bits).
     fn test_next_id_ordering() {
         let mut last_id = 0;
-        for _ in 0..4_095 {
+        for _ in 0..1_000_000 {
             let id = now_v7();
             if last_id != 0 {
                 assert!(
