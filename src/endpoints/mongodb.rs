@@ -199,7 +199,12 @@ impl MongoDbPublisher {
                     .keys(doc! { "created_at": 1 })
                     .options(options)
                     .build();
-                let _ = reply_collection.create_index(model).await;
+                if let Err(e) = reply_collection.create_index(model).await {
+                    warn!(
+                        "Failed to create TTL index on reply collection {} : {}",
+                        reply_collection_name, e
+                    );
+                }
             }
         }
         Ok(Self {
@@ -257,11 +262,20 @@ impl MessagePublisher for MongoDbPublisher {
 
         trace!(message_id = %format!("{:032x}", message.message_id), correlation_id = %correlation_id, collection = %self.collection_name, "Publishing request document to MongoDB");
         let doc = message_to_document(&message).map_err(PublisherError::NonRetryable)?;
-        self.collection.insert_one(doc).await.map_err(|e| {
-            PublisherError::Retryable(
-                anyhow::anyhow!(e).context("Failed to insert request document into MongoDB"),
-            )
-        })?;
+        match self.collection.insert_one(doc).await {
+            Ok(_) => {}
+            Err(e) => {
+                let is_duplicate = matches!(&*e.kind, ErrorKind::Write(mongodb::error::WriteFailure::WriteError(w)) if w.code == 11000);
+                if is_duplicate {
+                    warn!(message_id = %format!("{:032x}", message.message_id), "Duplicate key error inserting request into MongoDB. Treating as idempotent success.");
+                } else {
+                    return Err(PublisherError::Retryable(
+                        anyhow::anyhow!(e)
+                            .context("Failed to insert request document into MongoDB"),
+                    ));
+                }
+            }
+        }
 
         // Now, wait for the response by polling the reply collection.
         let reply_collection = self.db.collection::<Document>(&reply_collection_name);

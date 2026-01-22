@@ -260,8 +260,9 @@ pub mod aws_helper {
     }
 
     pub async fn create_consumer() -> Arc<Mutex<dyn MessageConsumer>> {
+        let url = ensure_queue_exists().await;
         Arc::new(Mutex::new(
-            AwsConsumer::new(&get_endpoint(None)).await.unwrap(),
+            AwsConsumer::new(&get_endpoint(Some(url))).await.unwrap(),
         ))
     }
 }
@@ -298,7 +299,7 @@ pub mod zeromq_helper {
     }
 
     pub async fn create_consumer() -> Arc<Mutex<dyn MessageConsumer>> {
-        let port = PORT.fetch_add(1, Ordering::SeqCst) + 1;
+        let port = PORT.load(Ordering::SeqCst);
         let path = format!("/tmp/mq-bridge-{}.sock", port);
         let _ = std::fs::remove_file(&path);
         let config = ZeroMqEndpoint {
