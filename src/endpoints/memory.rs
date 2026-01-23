@@ -328,11 +328,11 @@ impl MemoryConsumer {
             ..Default::default()
         })
     }
-}
 
-#[async_trait]
-impl MessageConsumer for MemoryConsumer {
-    async fn receive_batch(&mut self, max_messages: usize) -> Result<ReceivedBatch, ConsumerError> {
+    async fn get_buffered_msgs(
+        &mut self,
+        max_messages: usize,
+    ) -> Result<Vec<CanonicalMessage>, ConsumerError> {
         // If the internal buffer has messages, return them first.
         if self.buffer.is_empty() {
             // Buffer is empty. Wait for a new batch from the channel.
@@ -352,7 +352,32 @@ impl MessageConsumer for MemoryConsumer {
         // index and returns the part after the index, leaving the first part.
         let mut messages = self.buffer.split_off(split_at);
         messages.reverse(); // Reverse back to original order.
+        Ok(messages)
+    }
+}
 
+#[async_trait]
+impl MessageConsumer for MemoryConsumer {
+    async fn receive_batch(&mut self, max_messages: usize) -> Result<ReceivedBatch, ConsumerError> {
+        // If the internal buffer has messages, return them first.
+
+        let mut messages = self.get_buffered_msgs(max_messages).await?;
+        while messages.len() < max_messages / 2 {
+            if let Ok(mut next_batch) = self.receiver.try_recv() {
+                if next_batch.len() + messages.len() > max_messages {
+                    let needed = max_messages - messages.len();
+                    let mut to_buffer = next_batch.split_off(needed);
+                    messages.append(&mut next_batch);
+                    self.buffer.append(&mut to_buffer);
+                    self.buffer.reverse();
+                    break;
+                } else {
+                    messages.append(&mut next_batch);
+                }
+            } else {
+                break;
+            }
+        }
         trace!(count = messages.len(), topic = %self.topic, message_ids = ?LazyMessageIds(&messages), "Received batch of memory messages");
         if messages.is_empty() {
             return Ok(ReceivedBatch {
