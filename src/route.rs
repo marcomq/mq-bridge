@@ -626,12 +626,12 @@ impl Route {
     }
 
     pub fn with_concurrency(mut self, concurrency: usize) -> Self {
-        self.concurrency = concurrency;
+        self.concurrency = concurrency.max(1);
         self
     }
 
     pub fn with_batch_size(mut self, batch_size: usize) -> Self {
-        self.batch_size = batch_size;
+        self.batch_size = batch_size.max(1);
         self
     }
 
