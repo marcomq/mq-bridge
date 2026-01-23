@@ -24,7 +24,7 @@ async fn test_memory_to_memory_pipeline() {
 
     let input = Endpoint::new_memory("mem-in", 200);
     let output = Endpoint::new_memory("mem-out", num_messages);
-    let route = Route::new(input, output);
+    let route = Route::new(input, output).with_batch_size(100);
     let in_channel = route.input.channel().unwrap();
     let out_channel = route.output.channel().unwrap();
 

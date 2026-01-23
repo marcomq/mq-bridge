@@ -625,6 +625,16 @@ impl Route {
         Ok(shutdown_rx.is_empty())
     }
 
+    pub fn with_concurrency(mut self, concurrency: usize) -> Self {
+        self.concurrency = concurrency;
+        self
+    }
+
+    pub fn with_batch_size(mut self, batch_size: usize) -> Self {
+        self.batch_size = batch_size;
+        self
+    }
+
     pub fn with_handler(mut self, handler: impl Handler + 'static) -> Self {
         self.output.handler = Some(Arc::new(handler));
         self
