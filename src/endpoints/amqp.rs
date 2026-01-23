@@ -4,8 +4,8 @@ use crate::traits::{
     BoxFuture, ConsumerError, MessageConsumer, MessageDisposition, MessagePublisher,
     PublisherError, ReceivedBatch, Sent, SentBatch,
 };
+use crate::CanonicalMessage;
 use crate::APP_NAME;
-use crate::{next_id, CanonicalMessage};
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;
 use futures::{FutureExt, StreamExt, TryStreamExt};
@@ -307,7 +307,7 @@ impl AmqpSubscriber {
             .await?;
 
         // Declare a temporary, exclusive, auto-delete queue
-        let id = subscribe_id.unwrap_or_else(next_id::now_v7_string);
+        let id = subscribe_id.unwrap_or_else(fast_uuid_v7::gen_id_string);
         let queue_name_str = format!("{}-{}-{}", APP_NAME, queue_or_exchange, id);
         let queue = channel
             .queue_declare(

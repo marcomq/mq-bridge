@@ -30,7 +30,6 @@ pub mod switch;
 pub mod zeromq;
 use crate::middleware::apply_middlewares_to_consumer;
 use crate::models::{Endpoint, EndpointType};
-use crate::next_id;
 use crate::route::get_endpoint_factory;
 use crate::traits::{BoxFuture, MessageConsumer, MessagePublisher};
 use anyhow::{anyhow, Result};
@@ -243,7 +242,7 @@ async fn create_base_consumer(
         }
         EndpointType::Memory(cfg) => {
             if endpoint.mode == crate::models::ConsumerMode::Subscribe {
-                let id = next_id::now_v7_string();
+                let id = fast_uuid_v7::gen_id_str();
                 Ok(boxed(memory::MemorySubscriber::new(cfg, &id)?))
             } else {
                 Ok(boxed(memory::MemoryConsumer::new(cfg)?))

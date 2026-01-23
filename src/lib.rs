@@ -9,7 +9,6 @@ pub mod errors;
 pub mod event_handler;
 pub mod middleware;
 pub mod models;
-pub mod next_id;
 pub mod outcomes;
 pub mod publisher;
 pub mod route;

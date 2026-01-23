@@ -24,6 +24,7 @@ bytes = { version = "1", features = ["serde"] }
 async-channel = { version = "2.5" }
 once_cell = { version = "1.21" }
 uuid = { version = "1.19" }
+fast-uuid-v7 = "0.1"
 
 # Common TLS dependencies
 rustls = { version = "0.23", features = ["ring"], optional = true }

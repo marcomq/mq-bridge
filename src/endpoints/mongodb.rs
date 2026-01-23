@@ -4,7 +4,7 @@ use crate::traits::{
     BatchCommitFunc, BoxFuture, ConsumerError, MessageConsumer, MessageDisposition,
     MessagePublisher, PublisherError, Received, ReceivedBatch, Sent, SentBatch,
 };
-use crate::{next_id, CanonicalMessage};
+use crate::CanonicalMessage;
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -248,7 +248,7 @@ impl MessagePublisher for MongoDbPublisher {
         let correlation_id = if let Some(cid) = message.metadata.get("correlation_id") {
             cid.clone()
         } else {
-            next_id::now_v7_string()
+            fast_uuid_v7::gen_id_string()
         };
         // Convention: reply collection is named <request_collection>_replies
         let reply_collection_name = format!("{}_replies", self.collection_name);

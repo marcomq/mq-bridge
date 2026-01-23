@@ -1887,6 +1887,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "fast-uuid-v7"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e4474f34813ff08308e5a66c692fcd077af964272851c3a72d9217ef784d5409"
+dependencies = [
+ "rand 0.9.2",
+]
+
+[[package]]
 name = "fastrand"
 version = "2.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3114,6 +3123,7 @@ dependencies = [
  "chrono",
  "config",
  "criterion",
+ "fast-uuid-v7",
  "futures",
  "lapin",
  "metrics",

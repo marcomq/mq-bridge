@@ -4,8 +4,8 @@ use crate::traits::{
     BoxFuture, ConsumerError, MessageConsumer, MessageDisposition, MessagePublisher,
     PublisherError, Received, ReceivedBatch, Sent, SentBatch,
 };
+use crate::CanonicalMessage;
 use crate::APP_NAME;
-use crate::{next_id, CanonicalMessage};
 use anyhow::{anyhow, Context};
 use async_channel::{bounded, Receiver, Sender};
 use async_trait::async_trait;
@@ -758,7 +758,7 @@ impl MqttSubscriber {
         topic: &str,
         subscribe_id: Option<String>,
     ) -> anyhow::Result<Self> {
-        let unique_id = subscribe_id.unwrap_or_else(next_id::now_v7_string);
+        let unique_id = subscribe_id.unwrap_or_else(fast_uuid_v7::gen_id_string);
         let client_id = sanitize_for_client_id(&format!("{}-{}", APP_NAME, unique_id));
         let listener = MqttListener::new(config, topic, &client_id, "subscriber").await?;
         Ok(Self(listener))
