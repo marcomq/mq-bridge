@@ -98,10 +98,16 @@ pub async fn test_kafka_performance_direct() {
 
         let result = run_direct_perf_test(
             "Kafka",
-            || async { Arc::new(KafkaPublisher::new(&config, topic).await.unwrap()) },
+            || async { 
+                let mut pub_config = config.clone();
+                pub_config.topic = Some(topic.to_string());
+                Arc::new(KafkaPublisher::new(&pub_config).await.unwrap()) 
+            },
             || async {
+                let mut endpoint = config.clone();
+                endpoint.topic = Some(topic.to_string());
                 Arc::new(tokio::sync::Mutex::new(
-                    KafkaConsumer::new(&config, topic).await.unwrap(),
+                    KafkaConsumer::new(&endpoint).await.unwrap(),
                 ))
             },
         )

@@ -109,8 +109,12 @@ pub struct MqttPublisher {
 }
 
 impl MqttPublisher {
-    pub async fn new(config: &MqttConfig, topic: &str, bridge_id: &str) -> anyhow::Result<Self> {
-        let client_id = sanitize_for_client_id(&format!("{}-{}", APP_NAME, bridge_id));
+    pub async fn new(config: &MqttConfig) -> anyhow::Result<Self> {
+        let topic = config.topic.as_deref().ok_or_else(|| anyhow!("Topic is required for MQTT publisher"))?;
+        let client_id = config.client_id.clone().unwrap_or_else(|| {
+            sanitize_for_client_id(&format!("{}-{}", APP_NAME, fast_uuid_v7::gen_id_string()))
+        });
+
         let (client, eventloop) = create_client_and_eventloop(config, &client_id).await?;
         let qos = parse_qos(config.qos.unwrap_or(1));
         let (stop_tx, stop_rx) = mpsc::channel(1);
@@ -184,8 +188,12 @@ impl MessagePublisher for MqttPublisher {
 pub struct MqttConsumer(MqttListener);
 
 impl MqttConsumer {
-    pub async fn new(config: &MqttConfig, topic: &str, bridge_id: &str) -> anyhow::Result<Self> {
-        let client_id = sanitize_for_client_id(&format!("{}-{}", APP_NAME, bridge_id));
+    pub async fn new(config: &MqttConfig) -> anyhow::Result<Self> {
+        let topic = config.topic.as_deref().ok_or_else(|| anyhow!("Topic is required for MQTT consumer"))?;
+        let client_id = config.client_id.clone().unwrap_or_else(|| {
+            sanitize_for_client_id(&format!("{}-{}", APP_NAME, fast_uuid_v7::gen_id_string()))
+        });
+
         let listener = MqttListener::new(config, topic, &client_id, "consumer").await?;
         warn!("Known issue: Messages might be lost in rare cases if the MQTT broker is restarted while the consumer is running.");
         Ok(Self(listener))
@@ -747,34 +755,5 @@ fn parse_qos(qos: u8) -> QoS {
         1 => QoS::AtLeastOnce,
         2 => QoS::ExactlyOnce,
         _ => QoS::AtLeastOnce,
-    }
-}
-
-pub struct MqttSubscriber(MqttListener);
-
-impl MqttSubscriber {
-    pub async fn new(
-        config: &MqttConfig,
-        topic: &str,
-        subscribe_id: Option<String>,
-    ) -> anyhow::Result<Self> {
-        let unique_id = subscribe_id.unwrap_or_else(fast_uuid_v7::gen_id_string);
-        let client_id = sanitize_for_client_id(&format!("{}-{}", APP_NAME, unique_id));
-        let listener = MqttListener::new(config, topic, &client_id, "subscriber").await?;
-        Ok(Self(listener))
-    }
-}
-
-#[async_trait]
-impl MessageConsumer for MqttSubscriber {
-    async fn receive(&mut self) -> Result<Received, ConsumerError> {
-        self.0.receive().await
-    }
-    async fn receive_batch(&mut self, max_messages: usize) -> Result<ReceivedBatch, ConsumerError> {
-        self.0.receive_batch(max_messages).await
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 }

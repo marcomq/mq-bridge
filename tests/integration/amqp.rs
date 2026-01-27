@@ -84,10 +84,18 @@ pub async fn test_amqp_performance_direct() {
 
         let result = run_direct_perf_test(
             "AMQP",
-            || async { Arc::new(AmqpPublisher::new(&config, queue).await.unwrap()) },
+            || async { 
+                let mut pub_config = config.clone();
+                pub_config.queue = Some(queue.to_string());
+                Arc::new(AmqpPublisher::new(&pub_config).await.unwrap()) 
+            }, 
             || async {
+                let mut endpoint = config.clone();
+                endpoint.queue = Some(queue.to_string());
+                endpoint.subscribe_mode = false;
+
                 Arc::new(tokio::sync::Mutex::new(
-                    AmqpConsumer::new(&config, queue).await.unwrap(),
+                    AmqpConsumer::new(&endpoint).await.unwrap(),
                 ))
             },
         )

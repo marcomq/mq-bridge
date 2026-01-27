@@ -565,6 +565,7 @@ mod tests {
             capacity: Some(10),
             request_reply: true,
             request_timeout_ms: Some(2000),
+            ..Default::default()
         })
         .unwrap();
 

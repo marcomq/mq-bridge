@@ -1,5 +1,5 @@
 use crate::canonical_message::tracing_support::LazyMessageIds;
-use crate::models::AwsEndpoint;
+use crate::models::AwsConfig;
 use crate::traits::{
     BatchCommitFunc, ConsumerError, MessageConsumer, MessageDisposition, MessagePublisher,
     PublisherError, ReceivedBatch, Sent, SentBatch,
@@ -22,10 +22,10 @@ pub struct AwsConsumer {
 }
 
 impl AwsConsumer {
-    pub async fn new(endpoint: &AwsEndpoint) -> anyhow::Result<Self> {
-        let config = load_aws_config(endpoint).await;
-        let client = SqsClient::new(&config);
-        let queue_url = endpoint
+    pub async fn new(config: &AwsConfig) -> anyhow::Result<Self> {
+        let aws_config = load_aws_config(config).await;
+        let client = SqsClient::new(&aws_config);
+        let queue_url = config
             .queue_url
             .clone()
             .ok_or_else(|| anyhow!("queue_url is required for AWS consumer"))?;
@@ -33,8 +33,8 @@ impl AwsConsumer {
         Ok(Self {
             client,
             queue_url,
-            max_messages: endpoint.config.max_messages.unwrap_or(10).clamp(1, 10),
-            wait_time_seconds: endpoint.config.wait_time_seconds.unwrap_or(20).clamp(0, 20),
+            max_messages: config.max_messages.unwrap_or(10).clamp(1, 10),
+            wait_time_seconds: config.wait_time_seconds.unwrap_or(20).clamp(0, 20),
         })
     }
 }
@@ -213,17 +213,17 @@ pub struct AwsPublisher {
 }
 
 impl AwsPublisher {
-    pub async fn new(endpoint: &AwsEndpoint) -> anyhow::Result<Self> {
-        let config = load_aws_config(endpoint).await;
+    pub async fn new(config: &AwsConfig) -> anyhow::Result<Self> {
+        let aws_config = load_aws_config(config).await;
 
-        let (sqs_client, queue_url) = if let Some(url) = &endpoint.queue_url {
-            (Some(SqsClient::new(&config)), Some(url.clone()))
+        let (sqs_client, queue_url) = if let Some(url) = &config.queue_url {
+            (Some(SqsClient::new(&aws_config)), Some(url.clone()))
         } else {
             (None, None)
         };
 
-        let (sns_client, topic_arn) = if let Some(arn) = &endpoint.topic_arn {
-            (Some(SnsClient::new(&config)), Some(arn.clone()))
+        let (sns_client, topic_arn) = if let Some(arn) = &config.topic_arn {
+            (Some(SnsClient::new(&aws_config)), Some(arn.clone()))
         } else {
             (None, None)
         };
@@ -428,22 +428,22 @@ impl MessagePublisher for AwsPublisher {
     }
 }
 
-async fn load_aws_config(endpoint: &AwsEndpoint) -> aws_config::SdkConfig {
+async fn load_aws_config(config: &AwsConfig) -> aws_config::SdkConfig {
     let mut loader = aws_config::defaults(BehaviorVersion::latest());
-    if let Some(region) = &endpoint.config.region {
+    if let Some(region) = &config.region {
         loader = loader.region(aws_config::Region::new(region.clone()));
     }
-    if let Some(url) = &endpoint.config.endpoint_url {
+    if let Some(url) = &config.endpoint_url {
         loader = loader.endpoint_url(url);
     }
 
     if let (Some(access_key), Some(secret_key)) =
-        (&endpoint.config.access_key, &endpoint.config.secret_key)
+        (&config.access_key, &config.secret_key)
     {
         let credentials = Credentials::new(
             access_key.clone(),
             secret_key.clone(),
-            endpoint.config.session_token.clone(),
+            config.session_token.clone(),
             None,
             "static",
         );

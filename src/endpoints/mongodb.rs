@@ -156,7 +156,8 @@ pub struct MongoDbPublisher {
 }
 
 impl MongoDbPublisher {
-    pub async fn new(config: &MongoDbConfig, collection_name: &str) -> anyhow::Result<Self> {
+    pub async fn new(config: &MongoDbConfig) -> anyhow::Result<Self> {
+        let collection_name = config.collection.as_deref().ok_or_else(|| anyhow!("Collection name is required for MongoDB publisher"))?;
         let client = create_client(config).await?;
         let db = client.database(&config.database);
         let collection = db.collection(collection_name);
@@ -396,7 +397,8 @@ pub struct MongoDbConsumer {
 }
 
 impl MongoDbConsumer {
-    pub async fn new(config: &MongoDbConfig, collection_name: &str) -> anyhow::Result<Self> {
+    pub async fn new(config: &MongoDbConfig) -> anyhow::Result<Self> {
+        let collection_name = config.collection.as_deref().ok_or_else(|| anyhow!("Collection name is required for MongoDB consumer"))?;
         let client = create_client(config).await?;
         // The first operation will trigger connection and topology discovery.
         client.list_database_names().await?;
@@ -851,7 +853,8 @@ impl MongoDbSubscriber {
     /// Note that the subscriber will start consuming from the last inserted document if ChangeStreams are not
     /// supported. If the collection is empty, it will start consuming from the next inserted document.
     ///
-    pub async fn new(config: &MongoDbConfig, collection_name: &str) -> anyhow::Result<Self> {
+    pub async fn new(config: &MongoDbConfig) -> anyhow::Result<Self> {
+        let collection_name = config.collection.as_deref().ok_or_else(|| anyhow!("Collection name is required for MongoDB subscriber"))?;
         let client = create_client(config).await?;
         let db = client.database(&config.database);
         let collection = db.collection::<Document>(collection_name);

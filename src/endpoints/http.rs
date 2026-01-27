@@ -60,10 +60,8 @@ impl HttpConsumer {
             request_timeout,
         };
 
-        let listen_address = config
-            .url
-            .as_deref()
-            .ok_or_else(|| anyhow!("'url' is required for http source connection"))?;
+        let listen_address = &config.url;
+
         let addr: SocketAddr = listen_address
             .parse()
             .with_context(|| format!("Invalid listen address: {}", listen_address))?;
@@ -300,15 +298,8 @@ impl HttpPublisher {
 
         Ok(Self {
             client: client_builder.build()?,
-            url: config.url.clone().unwrap_or_default(),
+            url: config.url.clone(),
         })
-    }
-
-    pub fn with_url(&self, url: &str) -> Self {
-        Self {
-            client: self.client.clone(),
-            url: url.to_string(),
-        }
     }
 }
 
@@ -440,14 +431,14 @@ http_route:
 
         match &route.input.endpoint_type {
             EndpointType::Http(cfg) => {
-                assert_eq!(cfg.config.url, Some("127.0.0.1:8080".to_string()));
+                assert_eq!(cfg.url, "127.0.0.1:8080".to_string());
             }
             _ => panic!("Expected HTTP input"),
         }
 
         match &route.output.endpoint_type {
             EndpointType::Http(cfg) => {
-                assert_eq!(cfg.config.url, Some("http://localhost:9090".to_string()));
+                assert_eq!(cfg.url, "http://localhost:9090".to_string());
             }
             _ => panic!("Expected HTTP output"),
         }
@@ -460,7 +451,7 @@ http_route:
         let url = format!("http://{}", addr);
 
         let config = HttpConfig {
-            url: Some(addr.clone()),
+            url: addr.clone(),
             ..Default::default()
         };
 
@@ -471,7 +462,7 @@ http_route:
 
         // Start Publisher (Client)
         let pub_config = HttpConfig {
-            url: Some(url.clone()),
+            url: url.clone(),
             ..Default::default()
         };
         let publisher = HttpPublisher::new(&pub_config)
@@ -508,7 +499,7 @@ http_route:
         let port = get_free_port();
         let addr = format!("127.0.0.1:{}", port);
         let config = HttpConfig {
-            url: Some(addr.clone()),
+            url: addr.clone(),
             ..Default::default()
         };
 
@@ -536,7 +527,7 @@ http_route:
         let port = get_free_port();
         let addr = format!("127.0.0.1:{}", port);
         let http_config = HttpConfig {
-            url: Some(addr.clone()),
+            url: addr.clone(),
             ..Default::default()
         };
         let mut consumer = HttpConsumer::new(&http_config).await.unwrap();
@@ -580,7 +571,7 @@ http_route:
         let port = get_free_port();
         let addr = format!("127.0.0.1:{}", port);
         let http_config = HttpConfig {
-            url: Some(addr.clone()),
+            url: addr.clone(),
             ..Default::default()
         };
         let mut consumer = HttpConsumer::new(&http_config).await.unwrap();
@@ -622,7 +613,7 @@ http_route:
         let port = get_free_port();
         let addr = format!("127.0.0.1:{}", port);
         let http_config = HttpConfig {
-            url: Some(addr.clone()),
+            url: addr.clone(),
             ..Default::default()
         };
         let mut consumer = HttpConsumer::new(&http_config).await.unwrap();

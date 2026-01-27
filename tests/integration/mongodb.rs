@@ -126,17 +126,19 @@ async fn run_mongodb_direct_perf_test_impl(
         let result = run_direct_perf_test(
             &test_name,
             || async {
+                let mut pub_config = config.clone();
+                pub_config.collection = Some(collection_name.clone());
                 Arc::new(
-                    MongoDbPublisher::new(&config, &collection_name)
+                    MongoDbPublisher::new(&pub_config)
                         .await
                         .unwrap(),
                 )
             },
             || async {
+                let mut endpoint = config.clone();
+                endpoint.collection = Some(collection_name.clone());
                 Arc::new(tokio::sync::Mutex::new(
-                    MongoDbConsumer::new(&config, &collection_name)
-                        .await
-                        .unwrap(),
+                    MongoDbConsumer::new(&endpoint).await.unwrap(),
                 ))
             },
         )

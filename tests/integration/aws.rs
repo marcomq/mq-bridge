@@ -106,16 +106,14 @@ pub async fn test_aws_performance_direct() {
     run_test_with_docker("tests/integration/docker-compose/aws.yml", || async {
         ensure_queue_exists().await;
 
-        let config = mq_bridge::models::AwsEndpoint {
+        let config = mq_bridge::models::AwsConfig {
             queue_url: Some("http://localhost:4566/000000000000/test-queue".to_string()),
             topic_arn: None,
-            config: mq_bridge::models::AwsConfig {
-                region: Some("us-east-1".to_string()),
-                endpoint_url: Some("http://localhost:4566".to_string()),
-                access_key: Some("test".to_string()),
-                secret_key: Some("test".to_string()),
-                ..Default::default()
-            },
+            region: Some("us-east-1".to_string()),
+            endpoint_url: Some("http://localhost:4566".to_string()),
+            access_key: Some("test".to_string()),
+            secret_key: Some("test".to_string()),
+            ..Default::default()
         };
 
         let result = run_direct_perf_test(

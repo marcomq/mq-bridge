@@ -1,7 +1,7 @@
-use crate::models::{ZeroMqEndpoint, ZeroMqSocketType};
+use crate::models::{ZeroMqConfig, ZeroMqSocketType};
 use crate::traits::{
     BoxFuture, ConsumerError, MessageConsumer, MessageDisposition, MessagePublisher,
-    PublisherError, Received, ReceivedBatch, SentBatch,
+    PublisherError, ReceivedBatch, SentBatch,
 };
 use crate::CanonicalMessage;
 use anyhow::anyhow;
@@ -30,8 +30,7 @@ pub struct ZeroMqPublisher {
 }
 
 impl ZeroMqPublisher {
-    pub async fn new(endpoint: &ZeroMqEndpoint) -> anyhow::Result<Self> {
-        let config = &endpoint.config;
+    pub async fn new(config: &ZeroMqConfig) -> anyhow::Result<Self> {
         let socket_type = config.socket_type.clone().unwrap_or(ZeroMqSocketType::Push);
         let mut socket = match socket_type {
             ZeroMqSocketType::Push => {
@@ -195,8 +194,7 @@ pub struct ZeroMqConsumer {
 }
 
 impl ZeroMqConsumer {
-    pub async fn new(endpoint: &ZeroMqEndpoint) -> anyhow::Result<Self> {
-        let config = &endpoint.config;
+    pub async fn new(config: &ZeroMqConfig) -> anyhow::Result<Self> {
         let socket_type = config.socket_type.clone().unwrap_or(ZeroMqSocketType::Pull);
         let mut socket = match socket_type {
             ZeroMqSocketType::Pull => {
@@ -215,7 +213,7 @@ impl ZeroMqConsumer {
                 } else {
                     s.connect(&config.url).await?;
                 }
-                let topic = endpoint.topic.as_deref().unwrap_or("");
+                let topic = config.topic.as_deref().unwrap_or("");
                 s.subscribe(topic).await?;
                 ReceiverSocket::Sub(s)
             }
@@ -410,31 +408,6 @@ impl MessageConsumer for ZeroMqConsumer {
     }
 }
 
-pub struct ZeroMqSubscriber(ZeroMqConsumer);
-
-impl ZeroMqSubscriber {
-    pub async fn new(endpoint: &ZeroMqEndpoint) -> anyhow::Result<Self> {
-        let mut endpoint = endpoint.clone();
-        if endpoint.config.socket_type.is_none() {
-            endpoint.config.socket_type = Some(ZeroMqSocketType::Sub);
-        }
-        Ok(Self(ZeroMqConsumer::new(&endpoint).await?))
-    }
-}
-
-#[async_trait]
-impl MessageConsumer for ZeroMqSubscriber {
-    async fn receive(&mut self) -> Result<Received, ConsumerError> {
-        self.0.receive().await
-    }
-    async fn receive_batch(&mut self, max_messages: usize) -> Result<ReceivedBatch, ConsumerError> {
-        self.0.receive_batch(max_messages).await
-    }
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -447,24 +420,18 @@ mod tests {
         let port = 5556;
         let url = format!("tcp://127.0.0.1:{}", port);
 
-        let consumer_config = ZeroMqEndpoint {
-            topic: None,
-            config: ZeroMqConfig {
-                url: url.clone(),
-                socket_type: Some(ZeroMqSocketType::Pull),
-                bind: true,
-                ..Default::default()
-            },
+        let consumer_config = ZeroMqConfig {
+            url: url.clone(),
+            socket_type: Some(ZeroMqSocketType::Pull),
+            bind: true,
+            ..Default::default()
         };
 
-        let publisher_config = ZeroMqEndpoint {
-            topic: None,
-            config: ZeroMqConfig {
-                url: url.clone(),
-                socket_type: Some(ZeroMqSocketType::Push),
-                bind: false,
-                ..Default::default()
-            },
+        let publisher_config = ZeroMqConfig {
+            url: url.clone(),
+            socket_type: Some(ZeroMqSocketType::Push),
+            bind: false,
+            ..Default::default()
         };
 
         let mut consumer = ZeroMqConsumer::new(&consumer_config).await.unwrap();

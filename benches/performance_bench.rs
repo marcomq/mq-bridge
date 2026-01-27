@@ -27,10 +27,12 @@ pub mod nats_helper {
     use std::sync::Arc;
     use tokio::sync::Mutex;
 
-    fn get_config() -> NatsConfig {
+    fn get_config(stream_name: &str, subject: &str) -> NatsConfig {
         NatsConfig {
             url: "nats://localhost:4222".to_string(),
             delayed_ack: false,
+            stream: Some(stream_name.to_string()),
+            subject: Some(subject.to_string()),
             ..Default::default()
         }
     }
@@ -38,7 +40,7 @@ pub mod nats_helper {
         let stream_name = "perf_nats_direct";
         let subject = "perf_nats_direct.subject";
         Arc::new(
-            NatsPublisher::new(&get_config(), stream_name, subject)
+            NatsPublisher::new(&get_config(stream_name, subject))
                 .await
                 .unwrap(),
         )
@@ -48,7 +50,7 @@ pub mod nats_helper {
         let stream_name = "perf_nats_direct";
         let subject = "perf_nats_direct.subject";
         Arc::new(Mutex::new(
-            NatsConsumer::new(&get_config(), stream_name, subject)
+            NatsConsumer::new(&get_config(stream_name, subject))
                 .await
                 .unwrap(),
         ))
@@ -63,18 +65,19 @@ pub mod mongodb_helper {
     use std::sync::Arc;
     use tokio::sync::Mutex;
 
-    fn get_config() -> MongoDbConfig {
+    fn get_config(collection_name: &str) -> MongoDbConfig {
         MongoDbConfig {
             url: "mongodb://localhost:27017".to_string(),
             database: "mq_bridge_test_db".to_string(),
+            collection: Some(collection_name.to_string()),
             ..Default::default()
         }
     }
     pub async fn create_publisher() -> Arc<dyn MessagePublisher> {
         let collection_name = "perf_mongodb_direct";
-        let config = get_config();
+        let config = get_config(collection_name);
         Arc::new(
-            MongoDbPublisher::new(&config, collection_name)
+            MongoDbPublisher::new(&config)
                 .await
                 .unwrap(),
         )
@@ -82,7 +85,7 @@ pub mod mongodb_helper {
 
     pub async fn create_consumer() -> Arc<Mutex<dyn MessageConsumer>> {
         let collection_name = "perf_mongodb_direct";
-        let config = get_config();
+        let config = get_config(collection_name);
 
         // Drop collection before test to ensure clean state
         let client = mongodb::Client::with_uri_str(&config.url).await.unwrap();
@@ -94,7 +97,7 @@ pub mod mongodb_helper {
             .ok();
 
         Arc::new(Mutex::new(
-            MongoDbConsumer::new(&config, collection_name)
+            MongoDbConsumer::new(&config)
                 .await
                 .unwrap(),
         ))
@@ -109,23 +112,24 @@ pub mod amqp_helper {
     use std::sync::Arc;
     use tokio::sync::Mutex;
 
-    fn get_config() -> AmqpConfig {
+    fn get_config(queue: &str) -> AmqpConfig {
         AmqpConfig {
             url: "amqp://guest:guest@localhost:5672/%2f".to_string(),
             delayed_ack: false,
+            queue: Some(queue.to_string()),
             ..Default::default()
         }
     }
 
     pub async fn create_publisher() -> Arc<dyn MessagePublisher> {
         let queue = "perf_test_amqp_direct";
-        Arc::new(AmqpPublisher::new(&get_config(), queue).await.unwrap())
+        Arc::new(AmqpPublisher::new(&get_config(queue)).await.unwrap())
     }
 
     pub async fn create_consumer() -> Arc<Mutex<dyn MessageConsumer>> {
         let queue = "perf_test_amqp_direct";
         Arc::new(Mutex::new(
-            AmqpConsumer::new(&get_config(), queue).await.unwrap(),
+            AmqpConsumer::new(&get_config(queue)).await.unwrap(),
         ))
     }
 }
@@ -138,10 +142,11 @@ pub mod kafka_helper {
     use std::sync::Arc;
     use tokio::sync::Mutex;
 
-    fn get_config() -> KafkaConfig {
+    fn get_config(topic: &str) -> KafkaConfig {
         KafkaConfig {
             url: "localhost:9092".to_string(),
             group_id: Some("perf_test_group_kafka".to_string()),
+            topic: Some(topic.to_string()),
             producer_options: Some(vec![
                 ("queue.buffering.max.ms".to_string(), "50".to_string()), // Linger for 50ms to batch messages
                 ("acks".to_string(), "1".to_string()), // Wait for leader ack, a good balance
@@ -152,13 +157,13 @@ pub mod kafka_helper {
     }
     pub async fn create_publisher() -> Arc<dyn MessagePublisher> {
         let topic = "perf_kafka_direct";
-        Arc::new(KafkaPublisher::new(&get_config(), topic).await.unwrap())
+        Arc::new(KafkaPublisher::new(&get_config(topic)).await.unwrap())
     }
 
     pub async fn create_consumer() -> Arc<Mutex<dyn MessageConsumer>> {
         let topic = "perf_kafka_direct";
         Arc::new(Mutex::new(
-            KafkaConsumer::new(&get_config(), topic).await.unwrap(),
+            KafkaConsumer::new(&get_config(topic)).await.unwrap(),
         ))
     }
 }
@@ -172,7 +177,7 @@ pub mod mqtt_helper {
     use std::sync::Arc;
     use tokio::sync::Mutex;
 
-    fn get_config() -> MqttConfig {
+    fn get_config(topic: &str, client_id: &str) -> MqttConfig {
         MqttConfig {
             url: "tcp://localhost:1883".to_string(),
             queue_capacity: Some(PERF_TEST_MESSAGE_COUNT * 4), // For batch and single
@@ -180,6 +185,8 @@ pub mod mqtt_helper {
             qos: Some(1),
             clean_session: false,
             keep_alive_seconds: Some(60),
+            topic: Some(topic.to_string()),
+            client_id: Some(client_id.to_string()),
             ..Default::default()
         }
     }
@@ -188,7 +195,7 @@ pub mod mqtt_helper {
         let topic = "perf_mqtt_direct";
         let publisher_id = format!("pub-{}", fast_uuid_v7::gen_id());
         Arc::new(
-            MqttPublisher::new(&get_config(), topic, &publisher_id)
+            MqttPublisher::new(&get_config(topic, &publisher_id))
                 .await
                 .unwrap(),
         )
@@ -198,7 +205,7 @@ pub mod mqtt_helper {
         let topic = "perf_mqtt_direct";
         let consumer_id = format!("sub-{}", fast_uuid_v7::gen_id());
         Arc::new(Mutex::new(
-            MqttConsumer::new(&get_config(), topic, &consumer_id)
+            MqttConsumer::new(&get_config(topic, &consumer_id))
                 .await
                 .unwrap(),
         ))
@@ -209,7 +216,7 @@ pub mod mqtt_helper {
 pub mod aws_helper {
     use aws_sdk_sns::config::Credentials;
     use mq_bridge::endpoints::aws::{AwsConsumer, AwsPublisher};
-    use mq_bridge::models::{AwsConfig, AwsEndpoint};
+    use mq_bridge::models::AwsConfig;
     use mq_bridge::traits::{MessageConsumer, MessagePublisher};
     use std::sync::Arc;
     use tokio::sync::Mutex;
@@ -238,31 +245,28 @@ pub mod aws_helper {
         queue_url
     }
 
-    fn get_endpoint(queue_url: Option<String>) -> AwsEndpoint {
-        AwsEndpoint {
+    fn get_config(queue_url: Option<String>) -> AwsConfig {
+        AwsConfig {
             queue_url: Some(queue_url.unwrap_or_else(|| {
                 "http://localhost:4566/000000000000/perf-test-queue".to_string()
             })),
-            topic_arn: None,
-            config: AwsConfig {
-                region: Some("us-east-1".to_string()),
-                endpoint_url: Some("http://localhost:4566".to_string()),
-                access_key: Some("test".to_string()),
-                secret_key: Some("test".to_string()),
-                ..Default::default()
-            },
+            region: Some("us-east-1".to_string()),
+            endpoint_url: Some("http://localhost:4566".to_string()),
+            access_key: Some("test".to_string()),
+            secret_key: Some("test".to_string()),
+            ..Default::default()
         }
     }
 
     pub async fn create_publisher() -> Arc<dyn MessagePublisher> {
         let url = ensure_queue_exists().await;
-        Arc::new(AwsPublisher::new(&get_endpoint(Some(url))).await.unwrap())
+        Arc::new(AwsPublisher::new(&get_config(Some(url))).await.unwrap())
     }
 
     pub async fn create_consumer() -> Arc<Mutex<dyn MessageConsumer>> {
         let url = ensure_queue_exists().await;
         Arc::new(Mutex::new(
-            AwsConsumer::new(&get_endpoint(Some(url))).await.unwrap(),
+            AwsConsumer::new(&get_config(Some(url))).await.unwrap(),
         ))
     }
 }
@@ -271,7 +275,7 @@ pub mod aws_helper {
 pub mod zeromq_helper {
     use super::PERF_TEST_MESSAGE_COUNT;
     use mq_bridge::endpoints::zeromq::{ZeroMqConsumer, ZeroMqPublisher};
-    use mq_bridge::models::{ZeroMqConfig, ZeroMqEndpoint, ZeroMqSocketType};
+    use mq_bridge::models::{ZeroMqConfig, ZeroMqSocketType};
     use mq_bridge::traits::{MessageConsumer, MessagePublisher};
     use once_cell::sync::Lazy;
     use rand::Rng;
@@ -286,14 +290,12 @@ pub mod zeromq_helper {
 
     pub async fn create_publisher() -> Arc<dyn MessagePublisher> {
         let port = PORT.load(Ordering::SeqCst);
-        let config = ZeroMqEndpoint {
+        let config = ZeroMqConfig {
+            url: format!("ipc:///tmp/mq-bridge-{}.sock", port),
+            socket_type: Some(ZeroMqSocketType::Push),
+            bind: false,
+            internal_buffer_size: Some(PERF_TEST_MESSAGE_COUNT + 1),
             topic: None,
-            config: ZeroMqConfig {
-                url: format!("ipc:///tmp/mq-bridge-{}.sock", port),
-                socket_type: Some(ZeroMqSocketType::Push),
-                bind: false,
-                internal_buffer_size: Some(PERF_TEST_MESSAGE_COUNT + 1),
-            },
         };
         Arc::new(ZeroMqPublisher::new(&config).await.unwrap())
     }
@@ -302,14 +304,12 @@ pub mod zeromq_helper {
         let port = PORT.load(Ordering::SeqCst);
         let path = format!("/tmp/mq-bridge-{}.sock", port);
         let _ = std::fs::remove_file(&path);
-        let config = ZeroMqEndpoint {
+        let config = ZeroMqConfig {
+            url: format!("ipc://{}", path),
+            socket_type: Some(ZeroMqSocketType::Pull),
+            bind: true,
+            internal_buffer_size: Some(PERF_TEST_MESSAGE_COUNT + 1),
             topic: None,
-            config: ZeroMqConfig {
-                url: format!("ipc://{}", path),
-                socket_type: Some(ZeroMqSocketType::Pull),
-                bind: true,
-                internal_buffer_size: Some(PERF_TEST_MESSAGE_COUNT + 1),
-            },
         };
         Arc::new(Mutex::new(ZeroMqConsumer::new(&config).await.unwrap()))
     }
@@ -318,46 +318,39 @@ pub mod zeromq_helper {
 #[cfg(feature = "ibm-mq")]
 pub mod ibm_mq_helper {
     use mq_bridge::{
-        models::{IbmMqConfig, IbmMqEndpoint},
+        models::IbmMqConfig,
         traits::{MessageConsumer, MessagePublisher},
     };
     use std::sync::Arc;
     use tokio::sync::Mutex;
 
-    pub fn get_config() -> IbmMqConfig {
+    pub fn get_config(queue: &str) -> IbmMqConfig {
         IbmMqConfig {
             user: Some("app".to_string()),
             password: Some("admin".to_string()),
             queue_manager: "QM1".to_string(),
             connection_name: "localhost(1414)".to_string(),
             channel: "DEV.APP.SVRCONN".to_string(),
+            queue: Some(queue.to_string()),
             ..Default::default()
         }
     }
 
     pub async fn create_publisher() -> Arc<dyn MessagePublisher> {
-        let endpoint_config = IbmMqEndpoint {
-            queue: Some("DEV.QUEUE.1".to_string()),
-            topic: None,
-            config: get_config(),
-        };
+        let config = get_config("DEV.QUEUE.1");
 
         let publisher =
-            mq_bridge::endpoints::ibm_mq::create_ibm_mq_publisher("bench_pub", &endpoint_config)
+            mq_bridge::endpoints::ibm_mq::create_ibm_mq_publisher("bench_pub", &config)
                 .await
                 .expect("Failed to create publisher");
         Arc::new(publisher)
     }
 
     pub async fn create_consumer() -> Arc<Mutex<dyn MessageConsumer>> {
-        let endpoint_config = IbmMqEndpoint {
-            queue: Some("DEV.QUEUE.1".to_string()),
-            topic: None,
-            config: get_config(),
-        };
+        let config = get_config("DEV.QUEUE.1");
 
         let consumer =
-            mq_bridge::endpoints::ibm_mq::create_ibm_mq_consumer("bench_sub", &endpoint_config)
+            mq_bridge::endpoints::ibm_mq::create_ibm_mq_consumer("bench_sub", &config)
                 .await
                 .expect("Failed to create consumer");
         Arc::new(Mutex::new(consumer))

@@ -61,14 +61,14 @@ pub fn check_consumer(
     }
     match &endpoint.endpoint_type {
         #[cfg(feature = "aws")]
-        EndpointType::Aws(_) => ensure_consume_mode("Aws", endpoint.mode.clone()),
+        EndpointType::Aws(_) => Ok(()),
         #[cfg(feature = "kafka")]
         EndpointType::Kafka(_) => Ok(()),
         #[cfg(feature = "nats")]
         EndpointType::Nats(cfg) => {
-            if cfg.stream.is_none() && cfg.config.default_stream.is_none() {
+            if cfg.stream.is_none() {
                 return Err(anyhow!(
-                    "[route:{}] NATS consumer must specify a 'stream' or have a 'default_stream'",
+                    "[route:{}] NATS consumer must specify a 'stream'",
                     route_name
                 ));
             }
@@ -86,7 +86,6 @@ pub fn check_consumer(
         EndpointType::MongoDb(_) => Ok(()),
         #[cfg(any(feature = "http-client", feature = "http-server"))]
         EndpointType::Http(_) => {
-            ensure_consume_mode("Http", endpoint.mode.clone())?;
             #[cfg(not(feature = "http-server"))]
             {
                 Err(anyhow!("HTTP consumer requires the 'http-server' feature"))
@@ -94,7 +93,7 @@ pub fn check_consumer(
             #[cfg(feature = "http-server")]
             Ok(())
         }
-        EndpointType::Static(_) => ensure_consume_mode("Static", endpoint.mode.clone()),
+        EndpointType::Static(_) => Ok(()),
         EndpointType::Memory(_) => Ok(()),
         EndpointType::File(_) => Ok(()),
         EndpointType::Custom { .. } => Ok(()),
@@ -140,96 +139,64 @@ async fn create_base_consumer(
     match &endpoint.endpoint_type {
         #[cfg(feature = "aws")]
         EndpointType::Aws(cfg) => {
-            ensure_consume_mode("Aws", endpoint.mode.clone())?;
             Ok(boxed(aws::AwsConsumer::new(cfg).await?))
         }
         #[cfg(feature = "kafka")]
         EndpointType::Kafka(cfg) => {
-            let topic = cfg.topic.as_deref().unwrap_or(route_name);
-            if endpoint.mode == crate::models::ConsumerMode::Subscribe {
-                Ok(boxed(
-                    kafka::KafkaSubscriber::new(&cfg.config, topic, None).await?,
-                ))
-            } else {
-                Ok(boxed(kafka::KafkaConsumer::new(&cfg.config, topic).await?))
+            let mut config = cfg.clone();
+            if config.topic.is_none() {
+                config.topic = Some(route_name.to_string());
             }
+            Ok(boxed(kafka::KafkaConsumer::new(&config).await?))
         }
         #[cfg(feature = "nats")]
         EndpointType::Nats(cfg) => {
-            let subject = cfg.subject.as_deref().unwrap_or(route_name);
-            let stream_name = cfg
-                .stream
-                .as_deref()
-                .or(cfg.config.default_stream.as_deref())
-                .ok_or_else(|| {
-                    anyhow!(
-                        "[route:{}] NATS consumer must specify a 'stream' or have a 'default_stream'",
-                        route_name
-                    )
-                })?;
-            if endpoint.mode == crate::models::ConsumerMode::Subscribe {
-                Ok(boxed(
-                    nats::NatsSubscriber::new(&cfg.config, stream_name, subject).await?,
-                ))
-            } else {
-                Ok(boxed(
-                    nats::NatsConsumer::new(&cfg.config, stream_name, subject).await?,
-                ))
+            let mut config = cfg.clone();
+            if config.subject.is_none() {
+                config.subject = Some(route_name.to_string());
             }
+            Ok(boxed(nats::NatsConsumer::new(&config).await?))
         }
         #[cfg(feature = "amqp")]
         EndpointType::Amqp(cfg) => {
-            let queue = cfg.queue.as_deref().unwrap_or(route_name);
-            if endpoint.mode == crate::models::ConsumerMode::Subscribe {
-                Ok(boxed(
-                    amqp::AmqpSubscriber::new(&cfg.config, queue, None).await?,
-                ))
-            } else {
-                Ok(boxed(amqp::AmqpConsumer::new(&cfg.config, queue).await?))
+            let mut config = cfg.clone();
+            if config.queue.is_none() {
+                config.queue = Some(route_name.to_string());
             }
+            Ok(boxed(amqp::AmqpConsumer::new(&config).await?))
         }
         #[cfg(feature = "mqtt")]
         EndpointType::Mqtt(cfg) => {
-            let topic = cfg.topic.as_deref().unwrap_or(route_name);
-            if endpoint.mode == crate::models::ConsumerMode::Subscribe {
-                Ok(boxed(
-                    mqtt::MqttSubscriber::new(&cfg.config, topic, None).await?,
-                ))
-            } else {
-                Ok(boxed(
-                    mqtt::MqttConsumer::new(&cfg.config, topic, route_name).await?,
-                ))
+            let mut config = cfg.clone();
+            if config.topic.is_none() {
+                config.topic = Some(route_name.to_string());
             }
+            if config.client_id.is_none() && !config.clean_session {
+                // For persistent sessions, default client_id to route_name if not provided
+                config.client_id = Some(format!("{}-{}", crate::APP_NAME, route_name));
+            }
+            Ok(boxed(mqtt::MqttConsumer::new(&cfg).await?))
         }
         #[cfg(feature = "ibm-mq")]
         EndpointType::IbmMq(cfg) => {
-            if endpoint.mode == crate::models::ConsumerMode::Subscribe {
-                Ok(boxed(ibm_mq::IbmMqSubscriber::new(cfg, route_name).await?))
-            } else {
-                Ok(boxed(ibm_mq::IbmMqConsumer::new(cfg, route_name).await?))
+            let mut config = cfg.clone();
+            if config.queue.is_none() && config.topic.is_none() {
+                config.queue = Some(route_name.to_string());
             }
+            Ok(boxed(ibm_mq::IbmMqConsumer::new(&config).await?))
         }
         #[cfg(feature = "zeromq")]
         EndpointType::ZeroMq(cfg) => {
-            if endpoint.mode == crate::models::ConsumerMode::Subscribe {
-                Ok(boxed(zeromq::ZeroMqSubscriber::new(cfg).await?))
-            } else {
-                Ok(boxed(zeromq::ZeroMqConsumer::new(cfg).await?))
-            }
+            Ok(boxed(zeromq::ZeroMqConsumer::new(cfg).await?))
         }
-        EndpointType::File(path) => {
-            if endpoint.mode == crate::models::ConsumerMode::Subscribe {
-                Ok(boxed(file::FileSubscriber::new(path).await?))
-            } else {
-                Ok(boxed(file::FileConsumer::new(path).await?))
-            }
+        EndpointType::File(cfg) => {
+            Ok(boxed(file::FileConsumer::new(cfg).await?))
         }
         #[cfg(any(feature = "http-client", feature = "http-server"))]
         EndpointType::Http(cfg) => {
-            ensure_consume_mode("Http", endpoint.mode.clone())?;
             #[cfg(feature = "http-server")]
             {
-                Ok(boxed(http::HttpConsumer::new(&cfg.config).await?))
+                Ok(boxed(http::HttpConsumer::new(cfg).await?))
             }
             #[cfg(not(feature = "http-server"))]
             {
@@ -237,31 +204,27 @@ async fn create_base_consumer(
             }
         }
         EndpointType::Static(cfg) => {
-            ensure_consume_mode("Static", endpoint.mode.clone())?;
             Ok(boxed(static_endpoint::StaticRequestConsumer::new(cfg)?))
         }
         EndpointType::Memory(cfg) => {
-            if endpoint.mode == crate::models::ConsumerMode::Subscribe {
-                let id = fast_uuid_v7::gen_id_str();
-                Ok(boxed(memory::MemorySubscriber::new(cfg, &id)?))
-            } else {
-                Ok(boxed(memory::MemoryConsumer::new(cfg)?))
-            }
+            Ok(boxed(memory::MemoryConsumer::new(cfg)?))
         }
         #[cfg(feature = "mongodb")]
         EndpointType::MongoDb(cfg) => {
-            let collection = cfg.collection.as_deref().unwrap_or(route_name);
-            if endpoint.mode == crate::models::ConsumerMode::Subscribe {
-                let mut config = cfg.config.clone();
+            let mut config = cfg.clone();
+            if config.collection.is_none() {
+                config.collection = Some(route_name.to_string());
+            }
+            if config.change_stream {
                 if config.ttl_seconds.is_none() {
                     config.ttl_seconds = Some(86400); // Remove events by default after 24 hours
                 }
                 Ok(boxed(
-                    mongodb::MongoDbSubscriber::new(&config, collection).await?,
+                    mongodb::MongoDbSubscriber::new(&config).await?,
                 ))
             } else {
                 Ok(boxed(
-                    mongodb::MongoDbConsumer::new(&cfg.config, collection).await?,
+                    mongodb::MongoDbConsumer::new(&config).await?,
                 ))
             }
         }
@@ -288,12 +251,6 @@ pub fn check_publisher(
     endpoint: &Endpoint,
     allowed_types: Option<&[&str]>,
 ) -> Result<()> {
-    if endpoint.mode == crate::models::ConsumerMode::Subscribe {
-        tracing::warn!(
-            route = route_name,
-            "Endpoint 'mode' is set to 'subscribe' on an output endpoint. This is likely a configuration error as 'mode' only applies to inputs."
-        );
-    }
     check_publisher_recursive(route_name, endpoint, 0, allowed_types)
 }
 
@@ -429,34 +386,48 @@ async fn create_base_publisher(
         }
         #[cfg(feature = "kafka")]
         EndpointType::Kafka(cfg) => {
-            let topic = cfg.topic.as_deref().unwrap_or(route_name);
+            let mut config = cfg.clone();
+            if config.topic.is_none() {
+                config.topic = Some(route_name.to_string());
+            }
             Ok(
-                Box::new(kafka::KafkaPublisher::new(&cfg.config, topic).await?)
+                Box::new(kafka::KafkaPublisher::new(&config).await?)
                     as Box<dyn MessagePublisher>,
             )
         }
         #[cfg(feature = "nats")]
         EndpointType::Nats(cfg) => {
-            let subject = cfg.subject.as_deref().unwrap_or(route_name);
-            let stream_name = cfg.stream.as_deref().unwrap_or_default();
+            let mut config = cfg.clone();
+            if config.subject.is_none() {
+                config.subject = Some(route_name.to_string());
+            }
             Ok(
-                Box::new(nats::NatsPublisher::new(&cfg.config, stream_name, subject).await?)
+                Box::new(nats::NatsPublisher::new(&config).await?)
                     as Box<dyn MessagePublisher>,
             )
         }
         #[cfg(feature = "amqp")]
         EndpointType::Amqp(cfg) => {
-            let queue = cfg.queue.as_deref().unwrap_or(route_name);
+            let mut config = cfg.clone();
+            if config.queue.is_none() {
+                config.queue = Some(route_name.to_string());
+            }
             Ok(
-                Box::new(amqp::AmqpPublisher::new(&cfg.config, queue).await?)
+                Box::new(amqp::AmqpPublisher::new(&config).await?)
                     as Box<dyn MessagePublisher>,
             )
         }
         #[cfg(feature = "mqtt")]
         EndpointType::Mqtt(cfg) => {
-            let topic = cfg.topic.as_deref().unwrap_or(route_name);
+            let mut config = cfg.clone();
+            if config.topic.is_none() {
+                config.topic = Some(route_name.to_string());
+            }
+            if config.client_id.is_none() {
+                config.client_id = Some(format!("{}-{}", crate::APP_NAME, route_name));
+            }
             Ok(
-                Box::new(mqtt::MqttPublisher::new(&cfg.config, topic, route_name).await?)
+                Box::new(mqtt::MqttPublisher::new(&config).await?)
                     as Box<dyn MessagePublisher>,
             )
         }
@@ -465,13 +436,10 @@ async fn create_base_publisher(
             Ok(Box::new(zeromq::ZeroMqPublisher::new(cfg).await?) as Box<dyn MessagePublisher>)
         }
         #[cfg(any(feature = "http-client", feature = "http-server"))]
-        EndpointType::Http(_cfg) => {
+        EndpointType::Http(cfg) => {
             #[cfg(feature = "reqwest")]
             {
-                let mut sink = http::HttpPublisher::new(&_cfg.config).await?;
-                if let Some(url) = &_cfg.config.url {
-                    sink = sink.with_url(url);
-                }
+                let sink = http::HttpPublisher::new(cfg).await?;
                 Ok(Box::new(sink) as Box<dyn MessagePublisher>)
             }
             #[cfg(not(feature = "reqwest"))]
@@ -481,9 +449,12 @@ async fn create_base_publisher(
         }
         #[cfg(feature = "mongodb")]
         EndpointType::MongoDb(cfg) => {
-            let collection = cfg.collection.as_deref().unwrap_or(route_name);
+            let mut config = cfg.clone();
+            if config.collection.is_none() {
+                config.collection = Some(route_name.to_string());
+            }
             Ok(
-                Box::new(mongodb::MongoDbPublisher::new(&cfg.config, collection).await?)
+                Box::new(mongodb::MongoDbPublisher::new(&config).await?)
                     as Box<dyn MessagePublisher>,
             )
         }
@@ -539,16 +510,6 @@ async fn create_base_publisher(
     Ok(publisher)
 }
 
-fn ensure_consume_mode(endpoint_type: &str, mode: crate::models::ConsumerMode) -> Result<()> {
-    if mode == crate::models::ConsumerMode::Subscribe {
-        return Err(anyhow!(
-            "Endpoint type '{}' does not support 'subscribe' mode",
-            endpoint_type
-        ));
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -585,20 +546,19 @@ mod tests {
     #[tokio::test]
     async fn test_factory_creates_memory_subscriber() {
         let endpoint = Endpoint {
-            mode: crate::models::ConsumerMode::Subscribe,
-            endpoint_type: EndpointType::Memory(MemoryConfig::new("mem".to_string(), None)),
+            endpoint_type: EndpointType::Memory(MemoryConfig::new("mem".to_string(), None).with_subscribe(true)),
             middlewares: vec![],
             handler: None,
         };
 
         let consumer = create_consumer_from_route("test", &endpoint).await.unwrap();
-        // Check if it is a MemorySubscriber
+        // Check if it is a MemoryConsumer (MemorySubscriber was merged)
         let is_subscriber = consumer
             .as_any()
-            .is::<crate::endpoints::memory::MemorySubscriber>();
+            .is::<crate::endpoints::memory::MemoryConsumer>();
         assert!(
             is_subscriber,
-            "Factory should create MemorySubscriber when mode is Subscribe"
+            "Factory should create MemoryConsumer"
         );
     }
 }

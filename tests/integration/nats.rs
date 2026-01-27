@@ -83,17 +83,21 @@ pub async fn test_nats_performance_direct() {
         let result = run_direct_perf_test(
             "NATS",
             || async {
+                let mut pub_config = config.clone();
+                pub_config.subject = Some(subject.to_string());
+                pub_config.stream = Some(stream_name.to_string());
                 Arc::new(
-                    NatsPublisher::new(&config, stream_name, subject)
+                    NatsPublisher::new(&pub_config)
                         .await
                         .unwrap(),
                 )
             },
             || async {
+                let mut endpoint = config.clone();
+                endpoint.subject = Some(subject.to_string());
+                endpoint.stream = Some(stream_name.to_string());
                 Arc::new(tokio::sync::Mutex::new(
-                    NatsConsumer::new(&config, stream_name, subject)
-                        .await
-                        .unwrap(),
+                    NatsConsumer::new(&endpoint).await.unwrap(),
                 ))
             },
         )

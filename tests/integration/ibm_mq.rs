@@ -54,12 +54,11 @@ pub async fn test_ibm_mq_performance_pipeline() {
         let config = get_config();
 
         // Seed the queue
-        let endpoint = IbmMqEndpoint {
-            config: config.clone(),
-            queue: Some(queue_name.to_string()),
-            topic: None,
-        };
-        let publisher = IbmMqPublisher::new(&endpoint, queue_name)
+        let mut endpoint = config.clone();
+        endpoint.queue = Some(queue_name.to_string());
+        endpoint.topic = None;
+
+        let publisher = IbmMqPublisher::new(&endpoint)
             .await
             .expect("Failed to create publisher");
 
@@ -74,10 +73,11 @@ pub async fn test_ibm_mq_performance_pipeline() {
         let input_ep = Endpoint {
             endpoint_type: EndpointType::Custom {
                 name: "ibm_mq".to_string(),
-                config: serde_json::to_value(IbmMqEndpoint {
-                    config: config.clone(),
-                    topic: None,
-                    queue: Some(queue_name.to_string()),
+                config: serde_json::to_value({
+                    let mut c = config.clone();
+                    c.topic = None;
+                    c.queue = Some(queue_name.to_string());
+                    c
                 })
                 .unwrap(),
             },
@@ -163,21 +163,17 @@ pub async fn test_ibm_mq_performance_direct() {
         let result = run_direct_perf_test(
             "IBM-MQ",
             || async {
-                let endpoint = IbmMqEndpoint {
-                    config: config.clone(),
-                    queue: Some(queue.to_string()),
-                    topic: None,
-                };
-                Arc::new(IbmMqPublisher::new(&endpoint, queue).await.unwrap())
+                let mut endpoint = config.clone();
+                endpoint.queue = Some(queue.to_string());
+                endpoint.topic = None;
+                Arc::new(IbmMqPublisher::new(&endpoint).await.unwrap())
             },
             || async {
-                let endpoint = IbmMqEndpoint {
-                    config: config.clone(),
-                    queue: Some(queue.to_string()),
-                    topic: None,
-                };
+                let mut endpoint = config.clone();
+                endpoint.queue = Some(queue.to_string());
+                endpoint.topic = None;
                 Arc::new(tokio::sync::Mutex::new(
-                    IbmMqConsumer::new(&endpoint, queue).await.unwrap(),
+                    IbmMqConsumer::new(&endpoint).await.unwrap(),
                 ))
             },
         )
@@ -195,13 +191,12 @@ pub async fn test_ibm_mq_performance_direct2() {
         let num_messages = 1000;
         let messages = generate_test_messages(num_messages);
 
-        let endpoint = IbmMqEndpoint {
-            config: config.clone(),
-            queue: Some(queue_name.to_string()),
-            topic: None,
-        };
-        let publisher = IbmMqPublisher::new(&endpoint, queue_name).await.unwrap();
-        let mut consumer = IbmMqConsumer::new(&endpoint, queue_name).await.unwrap();
+        let mut endpoint = config.clone();
+        endpoint.queue = Some(queue_name.to_string());
+        endpoint.topic = None;
+
+        let publisher = IbmMqPublisher::new(&endpoint).await.unwrap();
+        let mut consumer = IbmMqConsumer::new(&endpoint).await.unwrap();
 
         println!("--- Starting IBM MQ Direct Performance Test ---");
         let start = Instant::now();
