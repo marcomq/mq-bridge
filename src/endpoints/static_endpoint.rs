@@ -3,8 +3,8 @@
 //  Licensed under MIT License, see License file for more details
 //  git clone https://github.com/marcomq/mq-bridge
 use crate::traits::{
-    into_batch_commit_func, BoxFuture, ConsumerError, MessageConsumer, MessagePublisher,
-    PublisherError, Received, ReceivedBatch, Sent, SentBatch,
+    into_batch_commit_func, BoxFuture, ConsumerError, MessageConsumer, MessageDisposition,
+    MessagePublisher, PublisherError, Received, ReceivedBatch, Sent, SentBatch,
 };
 use crate::CanonicalMessage;
 use anyhow::Context;
@@ -78,7 +78,7 @@ impl MessageConsumer for StaticRequestConsumer {
     async fn receive(&mut self) -> Result<Received, ConsumerError> {
         let message = CanonicalMessage::new(self.content.as_bytes().to_vec(), None);
         trace!(message_id = %format!("{:032x}", message.message_id), "Producing static message");
-        let commit = Box::new(|_response: Option<CanonicalMessage>| {
+        let commit = Box::new(|_disposition: MessageDisposition| {
             Box::pin(async { Ok(()) }) as BoxFuture<'static, anyhow::Result<()>>
         });
         Ok(Received { message, commit })

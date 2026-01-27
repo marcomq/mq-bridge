@@ -16,4 +16,4 @@ Run with full tracing:
 
 ###
 Run only one test, for example aws:
-`MQB_TEST_BACKEND=aws cargo test --test integration_test --features full  -- --ignored --nocapture`
+`MQB_TEST_BACKEND=aws cargo test --test integration_test --features full --release  -- --ignored --nocapture`

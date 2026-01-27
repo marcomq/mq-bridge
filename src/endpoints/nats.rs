@@ -1,8 +1,8 @@
 use crate::canonical_message::tracing_support::LazyMessageIds;
 use crate::models::NatsConfig;
 use crate::traits::{
-    BatchCommitFunc, BoxFuture, ConsumerError, MessageConsumer, MessagePublisher, PublisherError,
-    ReceivedBatch, Sent, SentBatch,
+    BatchCommitFunc, BoxFuture, ConsumerError, MessageConsumer, MessageDisposition,
+    MessagePublisher, PublisherError, ReceivedBatch, Sent, SentBatch,
 };
 use crate::CanonicalMessage;
 use crate::APP_NAME;
@@ -37,9 +37,9 @@ pub struct NatsPublisher {
 impl NatsPublisher {
     pub async fn new(
         config: &NatsConfig,
-        stream_name: &str,
-        subject: &str,
     ) -> anyhow::Result<Self> {
+        let subject = config.subject.as_deref().ok_or_else(|| anyhow!("Subject is required for NATS publisher"))?;
+        let stream_name = config.stream.as_deref().unwrap_or_default();
         let options = build_nats_options(config).await?;
         let nats_client = options.connect(&config.url).await?;
         let core_client = nats_client.clone();
@@ -72,7 +72,7 @@ impl NatsPublisher {
             delayed_ack: config.delayed_ack,
             request_reply: config.request_reply,
             request_timeout: std::time::Duration::from_millis(
-                config.request_timeout_ms.unwrap_or(2000),
+                config.request_timeout_ms.unwrap_or(30_000),
             ),
         })
     }
@@ -207,23 +207,30 @@ use std::any::Any;
 impl NatsConsumer {
     pub async fn new(
         config: &NatsConfig,
-        stream_name: &str,
-        subject: &str,
     ) -> anyhow::Result<Self> {
-        let durable_name = Some(format!(
-            "{}-{}-{}",
-            APP_NAME,
-            stream_name,
-            subject.replace('.', "-")
-        ));
-        let queue_group = Some(format!("{}-{}", APP_NAME, stream_name.replace('.', "-")));
+        let subject = config.subject.as_deref().ok_or_else(|| anyhow!("Subject is required for NATS consumer"))?;
+        let stream_name = config.stream.as_deref()
+            .ok_or_else(|| anyhow!("Stream name is required for NATS consumer"))?;
+
+        let (durable_name, queue_group, deliver_policy) = if config.subscriber_mode {
+            (None, None, jetstream::consumer::DeliverPolicy::New)
+        } else {
+            let durable = format!(
+                "{}-{}-{}",
+                APP_NAME,
+                stream_name,
+                subject.replace('.', "-")
+            );
+            let queue = format!("{}-{}", APP_NAME, stream_name.replace('.', "-"));
+            (Some(durable), Some(queue), jetstream::consumer::DeliverPolicy::All)
+        };
 
         let (core, client) = NatsCore::connect(
             config,
             stream_name,
             subject,
             durable_name,
-            jetstream::consumer::DeliverPolicy::All,
+            deliver_policy,
             queue_group,
         )
         .await?;
@@ -237,56 +244,6 @@ impl NatsConsumer {
 
 #[async_trait]
 impl MessageConsumer for NatsConsumer {
-    async fn receive_batch(&mut self, max_messages: usize) -> Result<ReceivedBatch, ConsumerError> {
-        self.core
-            .receive_batch(max_messages, &self.subject, &self.client)
-            .await
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-}
-
-pub struct NatsSubscriber {
-    core: NatsCore,
-    client: async_nats::Client,
-    subject: String,
-}
-
-impl NatsSubscriber {
-    /// Creates a new NATS event subscriber.
-    ///
-    /// If the `no_jetstream` option is set to `false`, the subscriber will use NATS JetStream for efficient event consumption.
-    /// If the `no_jetstream` option is set to `true`, the subscriber will use NATS Core for event consumption.
-    ///
-    /// The subscriber will subscribe to the specified subject and watch for new events.
-    /// If the `prefetch_count` option is set, the subscriber will prefetch up to that number of events.
-    /// If the `prefetch_count` option is not set, the subscriber will prefetch up to 10000 events.
-    pub async fn new(
-        config: &NatsConfig,
-        stream_name: &str,
-        subject: &str,
-    ) -> anyhow::Result<Self> {
-        let (core, client) = NatsCore::connect(
-            config,
-            stream_name,
-            subject,
-            None,
-            jetstream::consumer::DeliverPolicy::New,
-            None,
-        )
-        .await?;
-        Ok(Self {
-            core,
-            client,
-            subject: subject.to_string(),
-        })
-    }
-}
-
-#[async_trait]
-impl MessageConsumer for NatsSubscriber {
     async fn receive_batch(&mut self, max_messages: usize) -> Result<ReceivedBatch, ConsumerError> {
         self.core
             .receive_batch(max_messages, &self.subject, &self.client)
@@ -522,41 +479,43 @@ impl NatsCore {
 
                 trace!(count = canonical_messages.len(), subject = %subject, message_ids = ?LazyMessageIds(&canonical_messages), "Received batch of NATS JetStream messages");
                 let client = client.clone();
-                let commit_closure: BatchCommitFunc = Box::new(move |responses| {
+                let commit_closure: BatchCommitFunc = Box::new(move |dispositions| {
                     Box::pin(async move {
                         // Handle replies if responses are provided
-                        if let Some(resps) = responses {
-                            if resps.len() != jetstream_messages.len() {
-                                tracing::warn!(
+
+                        if dispositions.len() != jetstream_messages.len() {
+                            tracing::warn!(
                                     "NATS JetStream batch reply count mismatch: received {} messages but got {} responses. Pairing up to the shorter length.",
                                     jetstream_messages.len(),
-                                    resps.len()
+                                    dispositions.len()
                                 );
-                            }
-                            for (msg, resp) in jetstream_messages.iter().zip(resps) {
-                                if let Some(reply) = msg.reply.as_ref() {
-                                    let publish_result = tokio::time::timeout(
-                                        std::time::Duration::from_secs(60),
-                                        client.publish(reply.clone(), resp.payload),
-                                    )
-                                    .await;
+                        }
+                        for (msg, disposition) in jetstream_messages.iter().zip(dispositions) {
+                            // Only send a reply if the NATS message has a reply subject and the disposition is a Reply.
+                            if let (Some(reply), MessageDisposition::Reply(resp)) =
+                                (msg.reply.as_ref(), disposition)
+                            {
+                                let publish_result = tokio::time::timeout(
+                                    std::time::Duration::from_secs(60),
+                                    client.publish(reply.clone(), resp.payload),
+                                )
+                                .await;
 
-                                    match publish_result {
-                                        Err(_) => {
-                                            tracing::error!(
-                                                subject = %reply,
-                                                "Failed to publish NATS reply (timeout)"
-                                            );
-                                        }
-                                        Ok(Err(e)) => {
-                                            tracing::error!(
-                                                subject = %reply,
-                                                error = %e,
-                                                "Failed to publish NATS reply"
-                                            );
-                                        }
-                                        Ok(Ok(_)) => {}
+                                match publish_result {
+                                    Err(_) => {
+                                        tracing::error!(
+                                            subject = %reply,
+                                            "Failed to publish NATS reply (timeout)"
+                                        );
                                     }
+                                    Ok(Err(e)) => {
+                                        tracing::error!(
+                                            subject = %reply,
+                                            error = %e,
+                                            "Failed to publish NATS reply"
+                                        );
+                                    }
+                                    Ok(Ok(_)) => {}
                                 }
                             }
                         }
@@ -620,40 +579,41 @@ impl NatsCore {
                 }
 
                 let client = client.clone();
-                let commit_closure: BatchCommitFunc = Box::new(move |responses| {
+                let commit_closure: BatchCommitFunc = Box::new(move |dispositions| {
                     Box::pin(async move {
-                        if let Some(resps) = responses {
-                            if resps.len() != reply_subjects.len() {
-                                tracing::warn!(
+                        if dispositions.len() != reply_subjects.len() {
+                            tracing::warn!(
                                     "NATS Core batch reply count mismatch: received {} messages but got {} responses. Pairing up to the shorter length.",
                                     reply_subjects.len(),
-                                    resps.len()
+                                    dispositions.len()
                                 );
-                            }
-                            for (reply_opt, resp) in reply_subjects.iter().zip(resps) {
-                                if let Some(reply) = reply_opt {
-                                    let publish_result = tokio::time::timeout(
-                                        std::time::Duration::from_secs(60),
-                                        client.publish(reply.clone(), resp.payload),
-                                    )
-                                    .await;
+                        }
+                        for (reply_opt, disposition) in reply_subjects.iter().zip(dispositions) {
+                            // Only send a reply if the NATS message has a reply subject and the disposition is a Reply.
+                            if let (Some(reply), MessageDisposition::Reply(resp)) =
+                                (reply_opt, disposition)
+                            {
+                                let publish_result = tokio::time::timeout(
+                                    std::time::Duration::from_secs(60),
+                                    client.publish(reply.clone(), resp.payload),
+                                )
+                                .await;
 
-                                    match publish_result {
-                                        Err(_) => {
-                                            tracing::error!(
-                                                subject = %reply,
-                                                "Failed to publish NATS reply (timeout)"
-                                            );
-                                        }
-                                        Ok(Err(e)) => {
-                                            tracing::error!(
-                                                subject = %reply,
-                                                error = %e,
-                                                "Failed to publish NATS reply"
-                                            );
-                                        }
-                                        Ok(Ok(_)) => {}
+                                match publish_result {
+                                    Err(_) => {
+                                        tracing::error!(
+                                            subject = %reply,
+                                            "Failed to publish NATS reply (timeout)"
+                                        );
                                     }
+                                    Ok(Err(e)) => {
+                                        tracing::error!(
+                                            subject = %reply,
+                                            error = %e,
+                                            "Failed to publish NATS reply"
+                                        );
+                                    }
+                                    Ok(Ok(_)) => {}
                                 }
                             }
                         }

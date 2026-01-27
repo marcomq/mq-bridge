@@ -1,8 +1,8 @@
 use crate::canonical_message::tracing_support::LazyMessageIds;
 use crate::models::MongoDbConfig;
 use crate::traits::{
-    BatchCommitFunc, BoxFuture, ConsumerError, MessageConsumer, MessagePublisher, PublisherError,
-    Received, ReceivedBatch, Sent, SentBatch,
+    BatchCommitFunc, BoxFuture, ConsumerError, MessageConsumer, MessageDisposition,
+    MessagePublisher, PublisherError, Received, ReceivedBatch, Sent, SentBatch,
 };
 use crate::CanonicalMessage;
 use anyhow::{anyhow, Context};
@@ -19,7 +19,7 @@ use mongodb::{Client, Collection, Database};
 use serde::{Deserialize, Serialize};
 use std::any::Any;
 use std::collections::HashMap;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 use tracing::{info, trace, warn};
 
 /// A helper struct for deserialization that matches the BSON structure exactly.
@@ -62,11 +62,17 @@ fn document_to_canonical(doc: Document) -> anyhow::Result<CanonicalMessage> {
 }
 
 fn message_to_document(message: &CanonicalMessage) -> anyhow::Result<Document> {
-    if message
-        .metadata
-        .get("mq_bridge.original_format")
-        .map(|s| s.as_str())
-        == Some("raw")
+    // If request-reply metadata is present, we must use the wrapped format to preserve it,
+    // regardless of whether the original format was raw.
+    let force_wrapped = message.metadata.contains_key("correlation_id")
+        || message.metadata.contains_key("reply_to");
+
+    if !force_wrapped
+        && message
+            .metadata
+            .get("mq_bridge.original_format")
+            .map(|s| s.as_str())
+            == Some("raw")
     {
         if let Ok(doc) = serde_json::from_slice::<Document>(&message.payload) {
             return Ok(doc);
@@ -89,18 +95,73 @@ fn message_to_document(message: &CanonicalMessage) -> anyhow::Result<Document> {
     })
 }
 
+fn parse_mongodb_document(doc: Document) -> anyhow::Result<CanonicalMessage> {
+    let is_standard_msg = doc
+        .get("payload")
+        .map(|b| matches!(b, Bson::Binary(_)))
+        .unwrap_or(false);
+
+    if is_standard_msg {
+        if let Ok(raw_msg) = mongodb::bson::from_document::<MongoMessageRaw>(doc.clone()) {
+            if let Ok(msg) = raw_msg.try_into() {
+                return Ok(msg);
+            }
+        }
+    }
+    document_to_canonical(doc)
+}
+
+/// Handle a reply to a MongoDB collection by inserting the response into the collection.
+///
+/// The reply will be inserted into the collection specified by the `reply_to` parameter.
+/// If the `correlation_id` parameter is specified, it will be inserted into the reply document
+/// as a field named `correlation_id` before insertion.
+///
+/// The function will log an error if the reply document cannot be serialized to BSON or if
+/// the insertion into the collection fails.
+async fn handle_reply(
+    db: &Database,
+    reply_to: Option<&String>,
+    correlation_id: Option<&String>,
+    response: CanonicalMessage,
+) -> anyhow::Result<()> {
+    if let Some(coll_name) = reply_to {
+        let mut resp = response;
+        if let Some(cid) = correlation_id {
+            resp.metadata
+                .insert("correlation_id".to_string(), cid.clone());
+        }
+        let doc = message_to_document(&resp).map_err(|e| {
+            tracing::error!(collection = %coll_name, error = %e, "Failed to serialize MongoDB reply");
+            anyhow!("Failed to serialize MongoDB reply: {}", e)
+        })?;
+
+        let reply_coll = db.collection::<Document>(coll_name);
+        if let Err(e) = reply_coll.insert_one(doc).await {
+            tracing::error!(collection = %coll_name, error = %e, "Failed to insert MongoDB reply");
+            return Err(anyhow::anyhow!("Failed to insert MongoDB reply: {}", e,));
+        }
+    }
+    Ok(())
+}
+
 /// A publisher that inserts messages into a MongoDB collection.
 pub struct MongoDbPublisher {
     collection: Collection<Document>,
+    db: Database,
     collection_name: String,
+    request_reply: bool,
+    request_timeout: Duration,
+    reply_polling_interval: Duration,
 }
 
 impl MongoDbPublisher {
-    pub async fn new(config: &MongoDbConfig, collection_name: &str) -> anyhow::Result<Self> {
+    pub async fn new(config: &MongoDbConfig) -> anyhow::Result<Self> {
+        let collection_name = config.collection.as_deref().ok_or_else(|| anyhow!("Collection name is required for MongoDB publisher"))?;
         let client = create_client(config).await?;
         let db = client.database(&config.database);
         let collection = db.collection(collection_name);
-        info!(database = %config.database, collection = %collection_name, "MongoDB publisher connected");
+        info!(database = %config.database, collection = %collection_name, request_reply = %config.request_reply, "MongoDB publisher connected");
 
         if let Some(ttl) = config.ttl_seconds {
             let options = mongodb::options::IndexOptions::builder()
@@ -117,24 +178,142 @@ impl MongoDbPublisher {
                 );
             }
         }
+
+        if config.request_reply {
+            let reply_collection_name = format!("{}_replies", collection_name);
+            let reply_collection = db.collection::<Document>(&reply_collection_name);
+            let index_model = IndexModel::builder()
+                .keys(doc! { "metadata.correlation_id": 1 })
+                .build();
+            if let Err(e) = reply_collection.create_index(index_model).await {
+                warn!(
+                    "Failed to create correlation_id index on reply collection {} : {}",
+                    reply_collection_name, e
+                );
+            }
+            // Also apply TTL to the reply collection if configured, to clean up unconsumed replies.
+            if let Some(ttl) = config.ttl_seconds {
+                let options = mongodb::options::IndexOptions::builder()
+                    .expire_after(Duration::from_secs(ttl))
+                    .build();
+                let model = IndexModel::builder()
+                    .keys(doc! { "created_at": 1 })
+                    .options(options)
+                    .build();
+                if let Err(e) = reply_collection.create_index(model).await {
+                    warn!(
+                        "Failed to create TTL index on reply collection {} : {}",
+                        reply_collection_name, e
+                    );
+                }
+            }
+        }
         Ok(Self {
             collection,
+            db,
             collection_name: collection_name.to_string(),
+            request_reply: config.request_reply,
+            request_timeout: Duration::from_millis(config.request_timeout_ms.unwrap_or(30000)),
+            reply_polling_interval: Duration::from_millis(config.reply_polling_ms.unwrap_or(50)),
         })
     }
 }
 
 #[async_trait]
 impl MessagePublisher for MongoDbPublisher {
-    async fn send(&self, message: CanonicalMessage) -> Result<Sent, PublisherError> {
-        trace!(message_id = %format!("{:032x}", message.message_id), collection = %self.collection_name, "Publishing document to MongoDB");
-        let doc = message_to_document(&message).map_err(PublisherError::NonRetryable)?;
-        self.collection
-            .insert_one(doc)
-            .await
-            .context("Failed to insert document into MongoDB")?;
+    async fn send(&self, mut message: CanonicalMessage) -> Result<Sent, PublisherError> {
+        if !self.request_reply {
+            trace!(message_id = %format!("{:032x}", message.message_id), collection = %self.collection_name, "Publishing document to MongoDB");
+            let doc = message_to_document(&message).map_err(PublisherError::NonRetryable)?;
+            match self.collection.insert_one(doc).await {
+                Ok(_) => {}
+                Err(e) => {
+                    if let ErrorKind::Write(mongodb::error::WriteFailure::WriteError(ref w)) =
+                        *e.kind
+                    {
+                        if w.code == 11000 {
+                            warn!(message_id = %format!("{:032x}", message.message_id), "Duplicate key error inserting into MongoDB. Treating as idempotent success.");
+                            return Ok(Sent::Ack);
+                        }
+                    }
+                    return Err(PublisherError::Retryable(
+                        anyhow::anyhow!(e).context("Failed to insert document into MongoDB"),
+                    ));
+                }
+            }
 
-        Ok(Sent::Ack)
+            return Ok(Sent::Ack);
+        }
+
+        // --- Request-Reply Logic ---
+        let correlation_id = if let Some(cid) = message.metadata.get("correlation_id") {
+            cid.clone()
+        } else {
+            fast_uuid_v7::gen_id_string()
+        };
+        // Convention: reply collection is named <request_collection>_replies
+        let reply_collection_name = format!("{}_replies", self.collection_name);
+
+        message
+            .metadata
+            .insert("correlation_id".to_string(), correlation_id.clone());
+        message
+            .metadata
+            .insert("reply_to".to_string(), reply_collection_name.clone());
+
+        trace!(message_id = %format!("{:032x}", message.message_id), correlation_id = %correlation_id, collection = %self.collection_name, "Publishing request document to MongoDB");
+        let doc = message_to_document(&message).map_err(PublisherError::NonRetryable)?;
+        match self.collection.insert_one(doc).await {
+            Ok(_) => {}
+            Err(e) => {
+                let is_duplicate = matches!(&*e.kind, ErrorKind::Write(mongodb::error::WriteFailure::WriteError(w)) if w.code == 11000);
+                if is_duplicate {
+                    warn!(message_id = %format!("{:032x}", message.message_id), "Duplicate key error inserting request into MongoDB. Treating as idempotent success.");
+                } else {
+                    return Err(PublisherError::Retryable(
+                        anyhow::anyhow!(e)
+                            .context("Failed to insert request document into MongoDB"),
+                    ));
+                }
+            }
+        }
+
+        // Now, wait for the response by polling the reply collection.
+        let reply_collection = self.db.collection::<Document>(&reply_collection_name);
+        let filter = doc! { "metadata.correlation_id": correlation_id.clone() };
+
+        let timeout = self.request_timeout;
+        let start = Instant::now();
+        let mut current_sleep = self.reply_polling_interval;
+
+        loop {
+            if start.elapsed() > timeout {
+                return Err(PublisherError::NonRetryable(anyhow!(
+                    "Request timed out waiting for MongoDB response"
+                )));
+            }
+
+            match reply_collection.find_one_and_delete(filter.clone()).await {
+                Ok(Some(doc)) => {
+                    trace!(correlation_id = %correlation_id, "Received MongoDB response");
+                    let response_msg = parse_mongodb_document(doc).map_err(|e| {
+                        PublisherError::NonRetryable(anyhow!("Failed to parse response: {}", e))
+                    })?;
+                    return Ok(Sent::Response(response_msg));
+                }
+                Ok(None) => {
+                    tokio::time::sleep(current_sleep).await;
+                    current_sleep = std::cmp::min(
+                        current_sleep + current_sleep / 2,
+                        Duration::from_millis(500),
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Error polling for MongoDB reply. Retrying...");
+                    tokio::time::sleep(current_sleep).await;
+                }
+            }
+        }
     }
 
     async fn send_batch(
@@ -143,6 +322,11 @@ impl MessagePublisher for MongoDbPublisher {
     ) -> Result<SentBatch, PublisherError> {
         if messages.is_empty() {
             return Ok(SentBatch::Ack);
+        }
+
+        if self.request_reply {
+            return crate::traits::send_batch_helper(self, messages, |p, m| Box::pin(p.send(m)))
+                .await;
         }
 
         trace!(count = messages.len(), collection = %self.collection_name, message_ids = ?LazyMessageIds(&messages), "Publishing batch of documents to MongoDB");
@@ -213,7 +397,8 @@ pub struct MongoDbConsumer {
 }
 
 impl MongoDbConsumer {
-    pub async fn new(config: &MongoDbConfig, collection_name: &str) -> anyhow::Result<Self> {
+    pub async fn new(config: &MongoDbConfig) -> anyhow::Result<Self> {
+        let collection_name = config.collection.as_deref().ok_or_else(|| anyhow!("Collection name is required for MongoDB consumer"))?;
         let client = create_client(config).await?;
         // The first operation will trigger connection and topology discovery.
         client.list_database_names().await?;
@@ -439,40 +624,37 @@ impl MongoDbConsumer {
                     .cloned()
                     .ok_or_else(|| anyhow!("Document missing _id"))?;
 
-                // Optimization: Avoid cloning the document (which copies the payload) if it looks like a standard message.
-                // We assume that if 'payload' is a Binary, it is a standard message.
-                let is_standard_msg = doc
-                    .get("payload")
-                    .map(|b| matches!(b, Bson::Binary(_)))
-                    .unwrap_or(false);
-                let msg = if is_standard_msg {
-                    match mongodb::bson::from_document::<MongoMessageRaw>(doc.clone()) {
-                        Ok(raw_msg) => raw_msg.try_into().unwrap_or(document_to_canonical(doc)?),
-                        Err(_) => document_to_canonical(doc)?,
-                    }
-                } else {
-                    document_to_canonical(doc)?
-                };
+                let msg = parse_mongodb_document(doc)?;
 
                 let reply_collection_name = msg.metadata.get("reply_to").cloned();
+                let correlation_id = msg.metadata.get("correlation_id").cloned();
                 let db = self.db.clone();
                 let collection_clone = self.collection.clone();
 
-                let commit = Box::new(move |response: Option<CanonicalMessage>| {
+                let commit = Box::new(move |disposition: MessageDisposition| {
                     Box::pin(async move {
-                        if let (Some(resp), Some(coll_name)) = (response, reply_collection_name) {
-                            let doc = message_to_document(&resp).map_err(|e| {
-                                tracing::error!(collection = %coll_name, error = %e, "Failed to serialize MongoDB reply");
-                                anyhow::anyhow!("Failed to serialize MongoDB reply: {}", e)
-                            })?;
-
-                            let reply_coll = db.collection::<Document>(&coll_name);
-                            if let Err(e) = reply_coll.insert_one(doc).await {
-                                tracing::error!(collection = %coll_name, error = %e, "Failed to insert MongoDB reply");
-                                return Err(anyhow::anyhow!(
-                                    "Failed to insert MongoDB reply: {}",
-                                    e
-                                ));
+                        // Only send a reply if the message has a 'reply_to' destination and the disposition is a Reply.
+                        // This allows for fire-and-forget patterns (no reply_to) or explicit replies.
+                        match disposition {
+                            MessageDisposition::Reply(resp) => {
+                                handle_reply(
+                                    &db,
+                                    reply_collection_name.as_ref(),
+                                    correlation_id.as_ref(),
+                                    resp,
+                                )
+                                .await?;
+                            }
+                            MessageDisposition::Ack => {}
+                            MessageDisposition::Nack => {
+                                collection_clone
+                                    .update_one(
+                                        doc! { "_id": id_val.clone() },
+                                        doc! { "$set": { "locked_until": null } },
+                                    )
+                                    .await
+                                    .context("Failed to unlock Nacked message")?;
+                                return Ok(());
                             }
                         }
 
@@ -544,18 +726,11 @@ impl MongoDbConsumer {
                 .cloned()
                 .ok_or_else(|| anyhow!("Document missing _id"))?;
 
-            let is_standard_msg = doc
-                .get("payload")
-                .map(|b| matches!(b, Bson::Binary(_)))
-                .unwrap_or(false);
-            let msg = if is_standard_msg {
-                mongodb::bson::from_document::<MongoMessageRaw>(doc)
-                    .map_err(|e| anyhow!("Failed to parse standard MongoDB message: {}", e))?
-                    .try_into()?
-            } else {
-                document_to_canonical(doc)?
-            };
-            reply_infos.push(msg.metadata.get("reply_to").cloned());
+            let msg = parse_mongodb_document(doc)?;
+            reply_infos.push((
+                msg.metadata.get("reply_to").cloned(),
+                msg.metadata.get("correlation_id").cloned(),
+            ));
             messages.push(msg);
 
             ids.push(id_val);
@@ -565,49 +740,85 @@ impl MongoDbConsumer {
         let collection_clone = self.collection.clone();
         let db = self.db.clone();
 
-        let commit = Box::new(move |responses: Option<Vec<CanonicalMessage>>| {
+        let commit = Box::new(move |dispositions: Vec<MessageDisposition>| {
             Box::pin(async move {
-                if let Some(resps) = responses {
-                    for (reply_coll_opt, resp) in reply_infos.iter().zip(resps) {
-                        if let Some(coll_name) = reply_coll_opt {
-                            let doc = match message_to_document(&resp) {
-                                Ok(d) => d,
+                if dispositions.len() != reply_infos.len() {
+                    tracing::warn!(
+                        "Disposition count mismatch: expected {}, got {}",
+                        reply_infos.len(),
+                        dispositions.len()
+                    );
+                }
+                let mut ids_to_delete = Vec::new();
+                let mut ids_to_unlock = Vec::new();
+                let mut errors = Vec::new();
+
+                for (((reply_coll_opt, correlation_id_opt), disposition), id) in
+                    reply_infos.iter().zip(dispositions).zip(ids.iter())
+                {
+                    // Only send a reply if the message has a 'reply_to' destination and the disposition is a Reply.
+                    // This allows for fire-and-forget patterns (no reply_to) or explicit replies.
+                    match disposition {
+                        MessageDisposition::Reply(resp) => {
+                            match handle_reply(
+                                &db,
+                                reply_coll_opt.as_ref(),
+                                correlation_id_opt.as_ref(),
+                                resp,
+                            )
+                            .await
+                            {
+                                Ok(_) => ids_to_delete.push(id.clone()),
                                 Err(e) => {
-                                    tracing::error!(collection = %coll_name, response_id = %format!("{:032x}", resp.message_id), error = %e, "Failed to serialize MongoDB batch reply");
-                                    return Err(anyhow::anyhow!(
-                                        "Failed to serialize MongoDB batch reply: {}",
-                                        e
-                                    ));
+                                    tracing::error!(id = %id, error = %e, "Failed to send reply");
+                                    errors.push(e);
+                                    ids_to_unlock.push(id.clone());
                                 }
-                            };
-                            let reply_coll = db.collection::<Document>(coll_name);
-                            if let Err(e) = reply_coll.insert_one(doc).await {
-                                tracing::error!(collection = %coll_name, response_id = %format!("{:032x}", resp.message_id), error = %e, "Failed to insert MongoDB batch reply");
-                                return Err(anyhow::anyhow!(
-                                    "Failed to insert MongoDB batch reply: {}",
-                                    e
-                                ));
                             }
+                        }
+                        MessageDisposition::Ack => {
+                            ids_to_delete.push(id.clone());
+                        }
+                        MessageDisposition::Nack => {
+                            ids_to_unlock.push(id.clone());
                         }
                     }
                 }
 
-                if ids.is_empty() {
-                    return Ok(());
+                if !ids_to_unlock.is_empty() {
+                    let filter = doc! { "_id": { "$in": &ids_to_unlock } };
+                    let update = doc! { "$set": { "locked_until": null } };
+                    if let Err(e) = collection_clone.update_many(filter, update).await {
+                        tracing::error!(error = %e, "Failed to unlock Nacked MongoDB messages");
+                        return Err(anyhow::anyhow!(
+                            "Failed to unlock Nacked MongoDB messages: {}",
+                            e
+                        ));
+                    }
                 }
-                let filter = doc! { "_id": { "$in": &ids } };
-                // Ack failure may result in redelivery. Enable deduplication middleware to handle duplicates.
-                if let Err(e) = collection_clone.delete_many(filter).await {
-                    tracing::error!(error = %e, "Failed to bulk-ack/delete MongoDB messages");
+
+                if !ids_to_delete.is_empty() {
+                    let filter = doc! { "_id": { "$in": &ids_to_delete } };
+                    // Ack failure may result in redelivery. Enable deduplication middleware to handle duplicates.
+                    if let Err(e) = collection_clone.delete_many(filter).await {
+                        tracing::error!(error = %e, "Failed to bulk-ack/delete MongoDB messages");
+                        return Err(anyhow::anyhow!(
+                            "Failed to bulk-ack/delete MongoDB messages: {}",
+                            e
+                        ));
+                    } else {
+                        trace!(
+                            count = ids_to_delete.len(),
+                            "MongoDB messages acknowledged and deleted"
+                        );
+                    }
+                }
+
+                if !errors.is_empty() {
                     return Err(anyhow::anyhow!(
-                        "Failed to bulk-ack/delete MongoDB messages: {}",
-                        e
+                        "Errors occurred during commit: {:?}",
+                        errors
                     ));
-                } else {
-                    trace!(
-                        count = ids.len(),
-                        "MongoDB messages acknowledged and deleted"
-                    );
                 }
                 Ok(())
             }) as BoxFuture<'static, anyhow::Result<()>>
@@ -629,6 +840,7 @@ enum SubscriberStream {
 pub struct MongoDbSubscriber {
     inner: tokio::sync::Mutex<SubscriberStream>,
     collection_name: String,
+    db: Database,
 }
 
 impl MongoDbSubscriber {
@@ -641,7 +853,8 @@ impl MongoDbSubscriber {
     /// Note that the subscriber will start consuming from the last inserted document if ChangeStreams are not
     /// supported. If the collection is empty, it will start consuming from the next inserted document.
     ///
-    pub async fn new(config: &MongoDbConfig, collection_name: &str) -> anyhow::Result<Self> {
+    pub async fn new(config: &MongoDbConfig) -> anyhow::Result<Self> {
+        let collection_name = config.collection.as_deref().ok_or_else(|| anyhow!("Collection name is required for MongoDB subscriber"))?;
         let client = create_client(config).await?;
         let db = client.database(&config.database);
         let collection = db.collection::<Document>(collection_name);
@@ -700,6 +913,7 @@ impl MongoDbSubscriber {
         Ok(Self {
             inner: tokio::sync::Mutex::new(inner),
             collection_name: collection_name.to_string(),
+            db,
         })
     }
 }
@@ -720,15 +934,33 @@ impl MessageConsumer for MongoDbSubscriber {
                 let doc = event
                     .full_document
                     .ok_or_else(|| anyhow!("Change stream event missing full_document"))?;
-                let msg = match mongodb::bson::from_document::<MongoMessageRaw>(doc.clone()) {
-                    Ok(raw_msg) => raw_msg.try_into().unwrap_or(document_to_canonical(doc)?),
-                    Err(_) => document_to_canonical(doc)?,
-                };
+                let msg = parse_mongodb_document(doc)?;
 
                 trace!(message_id = %format!("{:032x}", msg.message_id), collection = %self.collection_name, "Received MongoDB change stream event");
+
+                let reply_to = msg.metadata.get("reply_to").cloned();
+                let correlation_id = msg.metadata.get("correlation_id").cloned();
+                let db = self.db.clone();
+
+                let commit = Box::new(move |dispositions: Vec<MessageDisposition>| {
+                    Box::pin(async move {
+                        // Note: The change stream event provides a single message, so we expect a single disposition.
+                        // If multiple dispositions are provided, they will all use the reply context of this single message.
+                        for disposition in dispositions {
+                            // Only send a reply if the message has a 'reply_to' destination and the disposition is a Reply.
+                            // This allows for fire-and-forget patterns (no reply_to) or explicit replies.
+                            if let MessageDisposition::Reply(resp) = disposition {
+                                handle_reply(&db, reply_to.as_ref(), correlation_id.as_ref(), resp)
+                                    .await?;
+                            }
+                        }
+                        Ok(())
+                    }) as BoxFuture<'static, anyhow::Result<()>>
+                });
+
                 Ok(ReceivedBatch {
                     messages: vec![msg],
-                    commit: Box::new(|_| Box::pin(async { Ok(()) })),
+                    commit,
                 })
             }
             SubscriberStream::Polling {
@@ -758,19 +990,45 @@ impl MessageConsumer for MongoDbSubscriber {
                         }
                     }
 
-                    let msg = match mongodb::bson::from_document::<MongoMessageRaw>(doc.clone()) {
-                        Ok(raw_msg) => raw_msg.try_into().unwrap_or(document_to_canonical(doc)?),
-                        Err(_) => document_to_canonical(doc)?,
-                    };
+                    let msg = parse_mongodb_document(doc)?;
                     messages.push(msg);
                 }
 
                 if !messages.is_empty() {
                     trace!(count = messages.len(), collection = %self.collection_name, message_ids = ?LazyMessageIds(&messages), "Received batch of MongoDB documents via polling");
-                    return Ok(ReceivedBatch {
-                        messages,
-                        commit: Box::new(|_| Box::pin(async { Ok(()) })),
+
+                    let reply_infos: Vec<_> = messages
+                        .iter()
+                        .map(|m| {
+                            (
+                                m.metadata.get("reply_to").cloned(),
+                                m.metadata.get("correlation_id").cloned(),
+                            )
+                        })
+                        .collect();
+                    let db = self.db.clone();
+
+                    let commit = Box::new(move |dispositions: Vec<MessageDisposition>| {
+                        Box::pin(async move {
+                            for (disposition, (reply_to, correlation_id)) in
+                                dispositions.into_iter().zip(reply_infos)
+                            {
+                                // Only send a reply if the message has a 'reply_to' destination and the disposition is a Reply.
+                                // This allows for fire-and-forget patterns (no reply_to) or explicit replies.
+                                if let MessageDisposition::Reply(resp) = disposition {
+                                    handle_reply(
+                                        &db,
+                                        reply_to.as_ref(),
+                                        correlation_id.as_ref(),
+                                        resp,
+                                    )
+                                    .await?;
+                                }
+                            }
+                            Ok(())
+                        }) as BoxFuture<'static, anyhow::Result<()>>
                     });
+                    return Ok(ReceivedBatch { messages, commit });
                 }
 
                 tokio::time::sleep(*interval).await;
