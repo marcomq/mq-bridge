@@ -391,6 +391,12 @@ impl MessageConsumer for MemoryConsumer {
         }
 
         let topic = self.topic.clone();
+        let expected_count = messages.len();
+        let correlation_ids: Vec<Option<String>> = messages
+            .iter()
+            .map(|m| m.metadata.get("correlation_id").cloned())
+            .collect();
+
         // This clone is necessary to support NACKs. The commit function needs access
         // to the messages to re-queue them, but the `ReceivedBatch` must also return
         // ownership of the messages to the caller. Without changing the core traits,
@@ -402,6 +408,13 @@ impl MessageConsumer for MemoryConsumer {
         };
         let commit = Box::new(move |dispositions: Vec<MessageDisposition>| {
             Box::pin(async move {
+                if dispositions.len() != expected_count {
+                    return Err(anyhow::anyhow!(
+                        "Memory batch commit received mismatched disposition count: expected {}, got {}",
+                        expected_count,
+                        dispositions.len()
+                    ));
+                }
                 let response_channel = get_or_create_response_channel(&topic);
                 let mut to_requeue = Vec::new();
 
@@ -409,13 +422,9 @@ impl MessageConsumer for MemoryConsumer {
                     match disposition {
                         MessageDisposition::Reply(mut resp) => {
                             if !resp.metadata.contains_key("correlation_id") {
-                                if let Some(msgs) = &messages_for_retry {
-                                    if let Some(orig) = msgs.get(i) {
-                                        if let Some(cid) = orig.metadata.get("correlation_id") {
-                                            resp.metadata
-                                                .insert("correlation_id".to_string(), cid.clone());
-                                        }
-                                    }
+                                if let Some(Some(cid)) = correlation_ids.get(i) {
+                                    resp.metadata
+                                        .insert("correlation_id".to_string(), cid.clone());
                                 }
                             }
 

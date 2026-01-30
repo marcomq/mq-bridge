@@ -92,10 +92,15 @@ fn armature_messaging_test() {
     // Patch armature-messaging source code to be compatible with mq-bridge 0.2.0 breaking changes
     // We need to convert Option<CanonicalMessage> to MessageDisposition using .into()
     let source_path = project_dir.join("src/mq_bridge.rs");
-    if source_path.exists() {
-        println!("Patching {:?} for API compatibility...", source_path);
-        let content = fs::read_to_string(&source_path).expect("Failed to read mq_bridge.rs");
-        let new_content = content
+    assert!(
+        source_path.exists(),
+        "expected mq_bridge.rs at {:?}",
+        source_path
+    );
+
+    println!("Patching {:?} for API compatibility...", source_path);
+    let content = fs::read_to_string(&source_path).expect("Failed to read mq_bridge.rs");
+    let new_content = content
             .replace("(received.commit)(None)", "(received.commit)(None.into())")
             .replace(
                 "(received.commit)(Some(response))",
@@ -114,8 +119,7 @@ fn armature_messaging_test() {
                 "options: mq_bridge::models::RouteOptions { concurrency: 1, batch_size: 128, ..Default::default() },",
             )
             .replace("batch_size: 128,", "");
-        fs::write(&source_path, new_content).expect("Failed to write patched mq_bridge.rs");
-    }
+    fs::write(&source_path, new_content).expect("Failed to write patched mq_bridge.rs");
 
     // 4. Run tests
     println!(
