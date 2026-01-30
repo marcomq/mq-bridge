@@ -108,7 +108,7 @@ impl MqttPublisher {
             .as_deref()
             .ok_or_else(|| anyhow!("Topic is required for MQTT publisher"))?;
         let client_id = config.client_id.clone().unwrap_or_else(|| {
-            sanitize_for_client_id(&format!("{}-{}", APP_NAME, fast_uuid_v7::gen_id_string()))
+            sanitize_for_client_id(&format!("{}-{}", APP_NAME, fast_uuid_v7::gen_id()))
         });
 
         let (client, eventloop) = create_client_and_eventloop(config, &client_id).await?;
@@ -178,7 +178,7 @@ impl MqttConsumer {
             .as_deref()
             .ok_or_else(|| anyhow!("Topic is required for MQTT consumer"))?;
         let client_id = config.client_id.clone().unwrap_or_else(|| {
-            sanitize_for_client_id(&format!("{}-{}", APP_NAME, fast_uuid_v7::gen_id_string()))
+            sanitize_for_client_id(&format!("{}-{}", APP_NAME, fast_uuid_v7::gen_id()))
         });
 
         let listener = MqttListener::new(config, topic, &client_id, "consumer").await?;
