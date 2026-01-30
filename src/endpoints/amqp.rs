@@ -299,7 +299,7 @@ impl AmqpConsumer {
             .await?;
 
         let consumer_tag = if is_subscriber {
-            format!("{}_sub_{}", APP_NAME, Uuid::new_v4())
+            format!("{}_sub_{}", APP_NAME, fast_uuid_v7::gen_id_str())
         } else {
             format!("{}_amqp_consumer", APP_NAME)
         };

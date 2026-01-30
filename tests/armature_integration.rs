@@ -103,8 +103,17 @@ fn armature_messaging_test() {
             )
             .replace(
                 "MemoryConfig {",
-                "MemoryConfig { request_reply: false, request_timeout_ms: None,",
-            );
+                "MemoryConfig { request_reply: false, request_timeout_ms: None, subscribe_mode: false, enable_nack: false,",
+            )
+            .replace(
+                "EndpointType::File(self.topic.clone())",
+                "EndpointType::File(mq_bridge::models::FileConfig { path: self.topic.clone(), subscribe_mode: false })",
+            )
+            .replace(
+                "concurrency: 1,",
+                "options: mq_bridge::models::RouteOptions { concurrency: 1, batch_size: 128, ..Default::default() },",
+            )
+            .replace("batch_size: 128,", "");
         fs::write(&source_path, new_content).expect("Failed to write patched mq_bridge.rs");
     }
 
