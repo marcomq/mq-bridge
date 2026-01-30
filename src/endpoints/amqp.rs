@@ -11,6 +11,7 @@ use async_trait::async_trait;
 use futures::{FutureExt, StreamExt, TryStreamExt};
 use lapin::tcp::{OwnedIdentity, OwnedTLSConfig};
 use lapin::{
+    acker::Acker,
     options::{
         BasicAckOptions, BasicConsumeOptions, BasicPublishOptions, BasicQosOptions,
         ExchangeDeclareOptions, QueueBindOptions, QueueDeclareOptions,
@@ -495,43 +496,8 @@ impl MessageConsumer for AmqpConsumer {
                     ));
                 }
 
-                // Handle replies if responses are provided
-
-                for ((reply_to, correlation_id), disposition) in
-                    reply_infos.iter().zip(dispositions)
-                {
-                    if let (Some(rt), MessageDisposition::Reply(resp)) = (reply_to, disposition) {
-                        let mut props = BasicProperties::default();
-                        if let Some(cid) = correlation_id {
-                            props = props.with_correlation_id(cid.clone().into());
-                        }
-
-                        // Publish response to the default exchange with the routing key set to reply_to
-                        if let Err(e) = channel
-                            .basic_publish(
-                                "", // Default exchange
-                                rt,
-                                BasicPublishOptions::default(),
-                                &resp.payload,
-                                props,
-                            )
-                            .await
-                        {
-                            tracing::error!(reply_to = %rt, error = %e, "Failed to publish AMQP reply");
-                        }
-                    }
-                }
-
-                // Run acks concurrently and collect results.
-                let futures = ackers
-                    .into_iter()
-                    .map(|acker| async move { acker.ack(BasicAckOptions::default()).await });
-                for res in futures::future::join_all(futures).await {
-                    if let Err(e) = res {
-                        return Err(anyhow::anyhow!("Failed to ack AMQP message: {}", e));
-                    }
-                }
-                Ok(())
+                handle_replies(&channel, &reply_infos, &dispositions).await;
+                handle_dispositions(ackers, dispositions).await
             }) as BoxFuture<'static, anyhow::Result<()>>
         });
 
@@ -541,4 +507,61 @@ impl MessageConsumer for AmqpConsumer {
     fn as_any(&self) -> &dyn Any {
         self
     }
+}
+
+async fn handle_replies(
+    channel: &Channel,
+    reply_infos: &[(Option<String>, Option<String>)],
+    dispositions: &[MessageDisposition],
+) {
+    for ((reply_to, correlation_id), disposition) in reply_infos.iter().zip(dispositions.iter()) {
+        if let (Some(rt), MessageDisposition::Reply(resp)) = (reply_to, disposition) {
+            let mut props = BasicProperties::default();
+            if let Some(cid) = correlation_id {
+                props = props.with_correlation_id(cid.clone().into());
+            }
+
+            // Publish response to the default exchange with the routing key set to reply_to
+            if let Err(e) = channel
+                .basic_publish(
+                    "", // Default exchange
+                    rt,
+                    BasicPublishOptions::default(),
+                    &resp.payload,
+                    props,
+                )
+                .await
+            {
+                tracing::error!(reply_to = %rt, error = %e, "Failed to publish AMQP reply");
+            }
+        }
+    }
+}
+
+async fn handle_dispositions(
+    ackers: Vec<Acker>,
+    dispositions: Vec<MessageDisposition>,
+) -> anyhow::Result<()> {
+    let futures = ackers
+        .into_iter()
+        .zip(dispositions)
+        .map(|(acker, disposition)| async move {
+            match disposition {
+                MessageDisposition::Ack | MessageDisposition::Reply(_) => {
+                    acker.ack(BasicAckOptions::default()).await
+                }
+                MessageDisposition::Nack => {
+                    // Nack without requeue. This will drop the message or route it to a DLX if configured.
+                    acker
+                        .nack(lapin::options::BasicNackOptions::default())
+                        .await
+                }
+            }
+        });
+    for res in futures::future::join_all(futures).await {
+        if let Err(e) = res {
+            return Err(anyhow::anyhow!("Failed to ack/nack AMQP message: {}", e));
+        }
+    }
+    Ok(())
 }

@@ -5,7 +5,7 @@
 use crate::canonical_message::tracing_support::LazyMessageIds;
 use crate::models::FileConfig;
 use crate::traits::{
-    into_batch_commit_func, CommitFunc, ConsumerError, MessageConsumer, MessagePublisher,
+    into_batch_commit_func, BatchCommitFunc, CommitFunc, ConsumerError, MessageConsumer, MessagePublisher,
     PublisherError, ReceivedBatch, SentBatch,
 };
 use crate::CanonicalMessage;
@@ -316,10 +316,19 @@ impl FileConsumer {
         let commit_path = path.clone();
         let lines_to_remove = lines_read;
 
-        let commit: CommitFunc = Box::new(move |_| {
+        let commit: BatchCommitFunc = Box::new(move |dispositions: Vec<crate::traits::MessageDisposition>| {
             Box::pin(async move {
-                let mut state = state.lock().await;
+                if dispositions
+                    .iter()
+                    .any(|d| matches!(d, crate::traits::MessageDisposition::Nack))
+                {
+                    let mut state = state.lock().await;
+                    state.in_flight_lines =
+                        state.in_flight_lines.saturating_sub(lines_to_remove);
+                    return Ok(());
+                }
 
+                let mut state = state.lock().await;
                 state.pending_commits.insert(batch_seq, lines_to_remove);
 
                 // Check if we can process any commits in order
@@ -395,7 +404,7 @@ impl FileConsumer {
         }
         Ok(ReceivedBatch {
             messages,
-            commit: into_batch_commit_func(commit),
+            commit,
         })
     }
 }
@@ -540,5 +549,48 @@ mod tests {
         // Verify file is empty
         let content = tokio::fs::read_to_string(&file_path).await.unwrap();
         assert_eq!(content, "");
+    }
+
+    #[tokio::test]
+    async fn test_file_consumer_nack_behavior() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("nack.log");
+        let file_path_str = file_path.to_str().unwrap().to_string();
+
+        // Write 2 lines
+        tokio::fs::write(&file_path, b"msg1\nmsg2\n")
+            .await
+            .unwrap();
+
+        let config = FileConfig {
+            path: file_path_str.clone(),
+            subscribe_mode: false,
+        };
+        let mut consumer = FileConsumer::new(&config).await.unwrap();
+
+        // 1. Receive batch (should get msg1)
+        let batch1 = consumer.receive_batch(1).await.unwrap();
+        assert_eq!(batch1.messages.len(), 1);
+        assert_eq!(batch1.messages[0].payload.as_ref(), b"msg1");
+
+        // 2. Nack the batch
+        (batch1.commit)(vec![crate::traits::MessageDisposition::Nack])
+            .await
+            .unwrap();
+
+        // 3. Receive again - should get msg1 again because it wasn't removed
+        let batch2 = consumer.receive_batch(1).await.unwrap();
+        assert_eq!(batch2.messages.len(), 1);
+        assert_eq!(batch2.messages[0].payload.as_ref(), b"msg1");
+
+        // 4. Ack
+        (batch2.commit)(vec![crate::traits::MessageDisposition::Ack])
+            .await
+            .unwrap();
+
+        // 5. Receive next - should get msg2
+        let batch3 = consumer.receive_batch(1).await.unwrap();
+        assert_eq!(batch3.messages.len(), 1);
+        assert_eq!(batch3.messages[0].payload.as_ref(), b"msg2");
     }
 }

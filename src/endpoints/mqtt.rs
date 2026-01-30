@@ -278,34 +278,15 @@ impl MessageConsumer for MqttListener {
 
         let commit = Box::new(move |disposition: MessageDisposition| {
             Box::pin(async move {
-                if let (MessageDisposition::Reply(resp), Some(rt)) = (disposition, reply_topic) {
-                    trace!(topic = %rt, "Committing MQTT message, sending reply");
-                    let mut msg = resp;
-                    if let Some(cd) = correlation_data {
-                        msg.metadata.insert("correlation_id".to_string(), cd);
+                match disposition {
+                    MessageDisposition::Nack => return Ok(()),
+                    MessageDisposition::Reply(resp) => {
+                        handle_mqtt_reply(&client, reply_topic, correlation_data, resp).await?;
+                        // Fallthrough to Ack
                     }
-                    // Use a timeout to prevent hanging if the client buffer is full or eventloop is stuck
-                    match tokio::time::timeout(
-                        Duration::from_secs(60),
-                        client.publish(&rt, QoS::AtLeastOnce, msg),
-                    )
-                    .await
-                    {
-                        Ok(Err(e)) => {
-                            error!(topic = %rt, error = %e, "Failed to publish MQTT reply");
-                            return Err(anyhow::anyhow!("Failed to publish MQTT reply: {}", e));
-                        }
-                        Ok(Ok(_)) => trace!(topic = %rt, "MQTT reply published to channel"),
-                        Err(_) => {
-                            error!(topic = %rt, "Timed out publishing MQTT reply");
-                            return Err(anyhow::anyhow!(
-                                "Timed out publishing MQTT reply to {}",
-                                rt
-                            ));
-                        }
+                    MessageDisposition::Ack => {
+                        // Fallthrough to Ack
                     }
-                } else {
-                    trace!("MQTT commit called with no response or no reply_topic");
                 }
 
                 // Acknowledge the original message
@@ -354,42 +335,26 @@ impl MessageConsumer for MqttListener {
         let client = self.client.clone();
         let commit = Box::new(move |dispositions: Vec<MessageDisposition>| {
             Box::pin(async move {
-                for ((reply_topic, correlation_data), disposition) in
-                    reply_infos.iter().zip(dispositions)
+                for (((reply_topic, correlation_data), ack), disposition) in reply_infos
+                    .into_iter()
+                    .zip(acks.into_iter())
+                    .zip(dispositions.into_iter())
                 {
-                    if let (Some(rt), MessageDisposition::Reply(resp)) = (reply_topic, disposition)
-                    {
-                        let mut msg = resp;
-                        if let Some(cd) = correlation_data {
-                            msg.metadata
-                                .insert("correlation_id".to_string(), cd.clone());
-                        }
-                        match tokio::time::timeout(
-                            Duration::from_secs(60),
-                            client.publish(rt, QoS::AtLeastOnce, msg),
-                        )
-                        .await
-                        {
-                            Ok(Err(e)) => {
-                                tracing::error!(topic = %rt, error = %e, "Failed to publish MQTT reply");
-                                return Err(anyhow::anyhow!("Failed to publish MQTT reply: {}", e));
-                            }
-                            Ok(Ok(_)) => {}
-                            Err(_) => {
-                                tracing::error!(topic = %rt, "Timed out publishing MQTT reply");
-                                return Err(anyhow::anyhow!(
-                                    "Timed out publishing MQTT reply to {}",
-                                    rt
-                                ));
+                    match disposition {
+                        MessageDisposition::Reply(resp) => {
+                            handle_mqtt_reply(&client, reply_topic, correlation_data, resp).await?;
+                            if let Err(e) = client.ack(&ack).await {
+                                error!("Failed to ack MQTT message in batch: {}", e);
+                                return Err(e.into());
                             }
                         }
-                    }
-                }
-
-                for ack in acks {
-                    if let Err(e) = client.ack(&ack).await {
-                        error!("Failed to ack MQTT message in batch: {}", e);
-                        return Err(e);
+                        MessageDisposition::Ack => {
+                            if let Err(e) = client.ack(&ack).await {
+                                error!("Failed to ack MQTT message in batch: {}", e);
+                                return Err(e.into());
+                            }
+                        }
+                        MessageDisposition::Nack => {}
                     }
                 }
                 Ok(())
@@ -401,6 +366,39 @@ impl MessageConsumer for MqttListener {
     fn as_any(&self) -> &dyn Any {
         self
     }
+}
+
+async fn handle_mqtt_reply(
+    client: &Client,
+    reply_topic: Option<String>,
+    correlation_data: Option<String>,
+    resp: CanonicalMessage,
+) -> anyhow::Result<()> {
+    if let Some(rt) = reply_topic {
+        trace!(topic = %rt, "Committing MQTT message, sending reply");
+        let mut msg = resp;
+        if let Some(cd) = correlation_data {
+            msg.metadata.insert("correlation_id".to_string(), cd);
+        }
+        // Use a timeout to prevent hanging if the client buffer is full or eventloop is stuck
+        match tokio::time::timeout(
+            Duration::from_secs(60),
+            client.publish(&rt, QoS::AtLeastOnce, msg),
+        )
+        .await
+        {
+            Ok(Err(e)) => {
+                error!(topic = %rt, error = %e, "Failed to publish MQTT reply");
+                return Err(anyhow::anyhow!("Failed to publish MQTT reply: {}", e));
+            }
+            Ok(Ok(_)) => trace!(topic = %rt, "MQTT reply published to channel"),
+            Err(_) => {
+                error!(topic = %rt, "Timed out publishing MQTT reply");
+                return Err(anyhow::anyhow!("Timed out publishing MQTT reply to {}", rt));
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn create_client_and_eventloop(

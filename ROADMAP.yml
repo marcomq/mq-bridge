@@ -1,82 +1,20 @@
 - version: "0.2.0"
   breaking_changes: true
   tasks:
-    - title: "Avoid redundant Subscribers and Consumers"
-      id: "A3"
-      description: |
-        IBM MQ and Kafka for example have Subscriber and Consumer mode. However, this is not
-        really relevant here as the mode is configured by topic and queues. Lets remove the endpoint mode 
-        and add one to the configuration if necessary and not implicit.
-      status: "Done"
-      files: ["@src/models.rs", "@src/endoints"]
-    - title: "Avoid using new... with additional parameters"
-      id: "A4"
-      description: |
-        Most interfaces have "new" with topic or queue. This shouldn't be necessary at all.
-        We just need a "new" with just the Configuration as parameters. So we would need to move the parameters
-        from "new" to the configuration
-      status: "Done"
-      files: ["@src/models.rs", "@src/endoints"]
-    - title: "Easier API"
-      id: "A5"
-      description: |
-        Currently, there are helpers that have static functions like Publisher::register.
-        We should use only a single file to make it easier for the end user to find all available helpers.
-
-        Current public constructors and helpers found in endpoints (keep):
-        - MongoDbPublisher::new
-        - MongoDbConsumer::new
-        - MongoDbSubscriber::new
-        - KafkaPublisher::new
-        - KafkaConsumer::new
-
-        Public standalone helpers (current -> change to):
-        - send_batch_helper (keep)
-        - into_commit_func (keep)
-        - into_batch_commit_func (keep)
-        - Publisher::get -> mq_bridge::get_publisher
-        - Publisher::unregister -> mq_bridge::unregister_publisher
-        - Route::get -> mq_bridge::get_route
-        - Route::list -> mq_bridge::list_routes
-        - Route::stop -> mq_bridge::stop_route
-        - register_endpoint_factory -> mq_bridge::extensions::register_endpoint_factory
-        - get_endpoint_factory ->  mq_bridge::extensions::get_endpoint_factory
-        - register_middleware_factory -> mq_bridge::extensions::register_middleware_factory
-        - get_middleware_factory -> mq_bridge::extensions::get_middleware_factory
-        - apply_middlewares_to_consumer -> consumer::apply_middlewares(&self, middlewares, route_name)
-        - apply_middlewares_to_publisher -> publisher::apply_middlewares(&self, middlewares, route_name)
-        - check_consumer -> endpoint::check_consumer(&self, route_name, allowed_types)
-        - create_consumer_from_route -> endpoint::create_consumer(&self, route_name)
-        - check_publisher -> endpoint::check_publisher(&self, route_name, allowed_types)
-        - create_publisher_from_route -> endpoint::create_publisher(&self, route_name)
-        - get_or_create_channel -> mq_bridge::get_or_create_channel
-        - msg! -> keep in mq_bridge::msg!
-
-        The impl of Endpoint should be in endpoint/mod.rs
-
-      status: "Todo"
     - title: "Add encryption middleware as separate crate"
       id: "D7"
       description: |
         Create a new crate `mq-bridge-encryption` that depends on `mq-bridge`.
         Implement `CustomMiddlewareFactory` in the new crate to handle message encryption/decryption configuration and logic.
         This serves as a proof-of-concept for the custom middleware registry (D6).
-      status: "Todo"
+      status: "Postpone"
     - title: "OpenTelemetry Context Propagation"
       id: "E8"
       description: |
         Implement middleware to extract and inject W3C Trace Context (Traceparent) headers from/to message metadata.
         This enables distributed tracing across microservices connected via the bridge.
         @src/middleware.rs
-      status: "Todo"
-    - title: "Explicit Nack Support"
-      id: "F10"
-      description: |
-        Update `MessageConsumer` trait and `CommitFunc` to support explicit Negative Acknowledgement (Nack).
-        This allows consumers to reject messages (e.g., on serialization failure) and have the broker redeliver or DLQ them immediately,
-        instead of waiting for a timeout or connection drop.
-        @src/traits.rs @src/endpoints/
-      status: "Todo"
+      status: "Postpone"
     - title: "SQL Endpoint (sqlx)"
       id: "G11"
       description: |
@@ -84,4 +22,4 @@
         Consumer: Poll table based on cursor (id/timestamp) or queue-like (lock/delete).
         Publisher: Insert message payload/metadata into table.
         @src/endpoints/sql.rs
-      status: "Todo"
+      status: "Postpone"

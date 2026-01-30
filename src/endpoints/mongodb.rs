@@ -755,83 +755,87 @@ impl MongoDbConsumer {
                         dispositions.len()
                     );
                 }
-                let mut ids_to_delete = Vec::new();
-                let mut ids_to_unlock = Vec::new();
-                let mut errors = Vec::new();
-
-                for (((reply_coll_opt, correlation_id_opt), disposition), id) in
-                    reply_infos.iter().zip(dispositions).zip(ids.iter())
-                {
-                    // Only send a reply if the message has a 'reply_to' destination and the disposition is a Reply.
-                    // This allows for fire-and-forget patterns (no reply_to) or explicit replies.
-                    match disposition {
-                        MessageDisposition::Reply(resp) => {
-                            match handle_reply(
-                                &db,
-                                reply_coll_opt.as_ref(),
-                                correlation_id_opt.as_ref(),
-                                resp,
-                            )
-                            .await
-                            {
-                                Ok(_) => ids_to_delete.push(id.clone()),
-                                Err(e) => {
-                                    tracing::error!(id = %id, error = %e, "Failed to send reply");
-                                    errors.push(e);
-                                    ids_to_unlock.push(id.clone());
-                                }
-                            }
-                        }
-                        MessageDisposition::Ack => {
-                            ids_to_delete.push(id.clone());
-                        }
-                        MessageDisposition::Nack => {
-                            ids_to_unlock.push(id.clone());
-                        }
-                    }
-                }
-
-                if !ids_to_unlock.is_empty() {
-                    let filter = doc! { "_id": { "$in": &ids_to_unlock } };
-                    let update = doc! { "$set": { "locked_until": null } };
-                    if let Err(e) = collection_clone.update_many(filter, update).await {
-                        tracing::error!(error = %e, "Failed to unlock Nacked MongoDB messages");
-                        return Err(anyhow::anyhow!(
-                            "Failed to unlock Nacked MongoDB messages: {}",
-                            e
-                        ));
-                    }
-                }
-
-                if !ids_to_delete.is_empty() {
-                    let filter = doc! { "_id": { "$in": &ids_to_delete } };
-                    // Ack failure may result in redelivery. Enable deduplication middleware to handle duplicates.
-                    if let Err(e) = collection_clone.delete_many(filter).await {
-                        tracing::error!(error = %e, "Failed to bulk-ack/delete MongoDB messages");
-                        return Err(anyhow::anyhow!(
-                            "Failed to bulk-ack/delete MongoDB messages: {}",
-                            e
-                        ));
-                    } else {
-                        trace!(
-                            count = ids_to_delete.len(),
-                            "MongoDB messages acknowledged and deleted"
-                        );
-                    }
-                }
-
-                if !errors.is_empty() {
-                    return Err(anyhow::anyhow!(
-                        "Errors occurred during commit: {:?}",
-                        errors
-                    ));
-                }
-                Ok(())
+                process_mongodb_batch_commit(&db, &collection_clone, &reply_infos, &ids, dispositions).await
             }) as BoxFuture<'static, anyhow::Result<()>>
         });
 
         Ok((messages, commit))
     }
+}
+
+async fn process_mongodb_batch_commit(
+    db: &Database,
+    collection: &Collection<Document>,
+    reply_infos: &[(Option<String>, Option<String>)],
+    ids: &[Bson],
+    dispositions: Vec<MessageDisposition>,
+) -> anyhow::Result<()> {
+    let mut ids_to_delete = Vec::new();
+    let mut ids_to_unlock = Vec::new();
+    let mut errors = Vec::new();
+
+    for (((reply_coll_opt, correlation_id_opt), disposition), id) in
+        reply_infos.iter().zip(dispositions).zip(ids.iter())
+    {
+        // Only send a reply if the message has a 'reply_to' destination and the disposition is a Reply.
+        // This allows for fire-and-forget patterns (no reply_to) or explicit replies.
+        match disposition {
+            MessageDisposition::Reply(resp) => {
+                match handle_reply(
+                    db,
+                    reply_coll_opt.as_ref(),
+                    correlation_id_opt.as_ref(),
+                    resp,
+                )
+                .await
+                {
+                    Ok(_) => ids_to_delete.push(id.clone()),
+                    Err(e) => {
+                        tracing::error!(id = %id, error = %e, "Failed to send reply");
+                        errors.push(e);
+                        ids_to_unlock.push(id.clone());
+                    }
+                }
+            }
+            MessageDisposition::Ack => {
+                ids_to_delete.push(id.clone());
+            }
+            MessageDisposition::Nack => {
+                ids_to_unlock.push(id.clone());
+            }
+        }
+    }
+
+    if !ids_to_unlock.is_empty() {
+        let filter = doc! { "_id": { "$in": &ids_to_unlock } };
+        let update = doc! { "$set": { "locked_until": null } };
+        if let Err(e) = collection.update_many(filter, update).await {
+            tracing::error!(error = %e, "Failed to unlock Nacked MongoDB messages");
+            return Err(anyhow::anyhow!(
+                "Failed to unlock Nacked MongoDB messages: {}",
+                e
+            ));
+        }
+    }
+
+    if !ids_to_delete.is_empty() {
+        let filter = doc! { "_id": { "$in": &ids_to_delete } };
+        // Ack failure may result in redelivery. Enable deduplication middleware to handle duplicates.
+        if let Err(e) = collection.delete_many(filter).await {
+            tracing::error!(error = %e, "Failed to bulk-ack/delete MongoDB messages");
+            return Err(anyhow::anyhow!(
+                "Failed to bulk-ack/delete MongoDB messages: {}",
+                e
+            ));
+        } else {
+            trace!(count = ids_to_delete.len(), "MongoDB messages acknowledged and deleted");
+        }
+    }
+
+    if !errors.is_empty() {
+        return Err(anyhow::anyhow!("Errors occurred during commit: {:?}", errors));
+    }
+    Ok(())
 }
 
 enum SubscriberStream {

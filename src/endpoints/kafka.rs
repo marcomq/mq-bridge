@@ -360,10 +360,14 @@ impl MessageConsumer for KafkaConsumer {
         let commit = Box::new(move |disposition: MessageDisposition| {
             Box::pin(async move {
                 // Handle reply
+                if matches!(disposition, MessageDisposition::Nack) {
+                    return Ok(());
+                }
+
                 if let Some(producer) = producer_clone {
-                    if let (MessageDisposition::Reply(resp), Some(rt)) = (disposition, reply_topic)
+                    if let (MessageDisposition::Reply(resp), Some(rt)) = (&disposition, reply_topic)
                     {
-                        let mut record: FutureRecord<'_, (), _> =
+                        let mut record: FutureRecord<'_, (), _> = // '
                             FutureRecord::to(&rt).payload(&resp.payload[..]);
                         let mut headers = OwnedHeaders::new();
                         if let Some(cid) = correlation_id {
@@ -573,39 +577,14 @@ async fn receive_batch_internal(
     let commit = Box::new(move |dispositions: Vec<MessageDisposition>| {
         Box::pin(async move {
             // Handle replies
-            if let Some(prod) = producer {
-                if dispositions.len() != reply_infos.len() {
-                    tracing::warn!(
-                        expected = reply_infos.len(),
-                        actual = dispositions.len(),
-                        "Response count mismatch with received messages"
-                    );
-                }
-                for ((reply_topic, correlation_id), disposition) in
-                    reply_infos.iter().zip(dispositions)
-                {
-                    if let (Some(rt), MessageDisposition::Reply(resp)) = (reply_topic, disposition)
-                    {
-                        let mut record: FutureRecord<'_, (), _> =
-                            FutureRecord::to(rt).payload(&resp.payload[..]);
-                        let mut headers = OwnedHeaders::new();
-                        if let Some(cid) = correlation_id {
-                            headers = headers.insert(rdkafka::message::Header {
-                                key: "correlation_id",
-                                value: Some(cid.as_bytes()),
-                            });
-                        }
-                        record = record.headers(headers);
+            // Check for Nacks before moving dispositions for replies
+            let any_nack = dispositions.iter().any(|d| matches!(d, MessageDisposition::Nack));
 
-                        if let Err((e, _)) = prod.send(record, Duration::from_secs(0)).await {
-                            tracing::error!(topic = %rt, error = %e, "Failed to publish Kafka reply");
-                        }
-                    }
-                }
-            }
+            handle_kafka_replies(producer, &reply_infos, &dispositions).await;
 
-            // Only commit if there are offsets to commit.
-            if messages_len > 0 {
+            // Only commit if there are offsets to commit AND no messages were Nacked.
+            // If any message is Nacked, we skip the commit for the whole batch to ensure at-least-once delivery.
+            if !any_nack && messages_len > 0 {
                 // Ack failure may result in redelivery. Enable deduplication middleware to handle duplicates.
                 if let Err(e) = consumer.commit(&last_offset_tpl, CommitMode::Async) {
                     tracing::error!("Failed to commit Kafka message batch: {:?}", e);
@@ -619,4 +598,38 @@ async fn receive_batch_internal(
         }) as BoxFuture<'static, anyhow::Result<()>>
     }) as BatchCommitFunc;
     Ok(ReceivedBatch { messages, commit })
+}
+
+async fn handle_kafka_replies(
+    producer: Option<FutureProducer>,
+    reply_infos: &[(Option<String>, Option<String>)],
+    dispositions: &[MessageDisposition],
+) {
+    if let Some(prod) = producer {
+        if dispositions.len() != reply_infos.len() {
+            tracing::warn!(
+                expected = reply_infos.len(),
+                actual = dispositions.len(),
+                "Response count mismatch with received messages"
+            );
+        }
+        for ((reply_topic, correlation_id), disposition) in reply_infos.iter().zip(dispositions) {
+            if let (Some(rt), MessageDisposition::Reply(resp)) = (reply_topic, disposition) {
+                let mut record: FutureRecord<'_, (), _> =
+                    FutureRecord::to(rt).payload(&resp.payload[..]);
+                let mut headers = OwnedHeaders::new();
+                if let Some(cid) = correlation_id {
+                    headers = headers.insert(rdkafka::message::Header {
+                        key: "correlation_id",
+                        value: Some(cid.as_bytes()),
+                    });
+                }
+                record = record.headers(headers);
+
+                if let Err((e, _)) = prod.send(record, Duration::from_secs(0)).await {
+                    tracing::error!(topic = %rt, error = %e, "Failed to publish Kafka reply");
+                }
+            }
+        }
+    }
 }

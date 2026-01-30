@@ -250,7 +250,7 @@ async fn create_base_consumer(
                 // For persistent sessions, default client_id to route_name if not provided
                 config.client_id = Some(format!("{}-{}", crate::APP_NAME, route_name));
             }
-            Ok(boxed(mqtt::MqttConsumer::new(&cfg).await?))
+            Ok(boxed(mqtt::MqttConsumer::new(cfg).await?))
         }
         #[cfg(feature = "ibm-mq")]
         EndpointType::IbmMq(cfg) => {

@@ -140,60 +140,12 @@ impl MessageConsumer for AwsConsumer {
         let client = self.client.clone();
         let queue_url = self.queue_url.clone();
 
-        let commit: BatchCommitFunc = Box::new(move |_dispositions: Vec<MessageDisposition>| {
+        let commit: BatchCommitFunc = Box::new(move |dispositions: Vec<MessageDisposition>| {
             let client = client.clone();
             let queue_url = queue_url.clone();
             let handles = receipt_handles.clone();
             Box::pin(async move {
-                let mut entries = Vec::new();
-                for (i, handle_opt) in handles.iter().enumerate() {
-                    if let Some(handle) = handle_opt {
-                        entries.push(
-                            aws_sdk_sqs::types::DeleteMessageBatchRequestEntry::builder()
-                                .id(format!("{}", i))
-                                .receipt_handle(handle)
-                                .build()
-                                .unwrap(),
-                        );
-                    }
-                }
-
-                // SQS batch delete limit is 10
-                for chunk in entries.chunks(10) {
-                    match client
-                        .delete_message_batch()
-                        .queue_url(&queue_url)
-                        .set_entries(Some(chunk.to_vec()))
-                        .send()
-                        .await
-                    {
-                        Ok(resp) => {
-                            if !resp.failed.is_empty() {
-                                let count = resp.failed.len();
-                                error!(queue_url = %queue_url, failed_count = count, "Partial failure deleting SQS messages");
-                                for failure in resp.failed {
-                                    error!(id = ?failure.id, code = ?failure.code, message = ?failure.message, sender_fault = failure.sender_fault, "SQS delete failure detail");
-                                }
-                                return Err(anyhow::anyhow!(
-                                    "SQS delete batch failed for {} messages",
-                                    count
-                                ));
-                            }
-                        }
-                        Err(e) => {
-                            error!(
-                                queue_url = %queue_url,
-                                error = %e,
-                                "Failed to delete SQS message batch"
-                            );
-                            return Err(anyhow::anyhow!(
-                                "Failed to delete SQS message batch: {}",
-                                e
-                            ));
-                        }
-                    }
-                }
-                Ok(())
+                process_aws_batch(&client, &queue_url, &handles, &dispositions).await
             })
         });
 
@@ -203,6 +155,108 @@ impl MessageConsumer for AwsConsumer {
     fn as_any(&self) -> &dyn Any {
         self
     }
+}
+
+async fn process_aws_batch(
+    client: &SqsClient,
+    queue_url: &str,
+    handles: &[Option<String>],
+    dispositions: &[MessageDisposition],
+) -> anyhow::Result<()> {
+    let (delete_entries, nack_entries) = prepare_aws_entries(handles, dispositions);
+
+    process_aws_deletes(client, queue_url, delete_entries).await?;
+    process_aws_nacks(client, queue_url, nack_entries).await?;
+    Ok(())
+}
+
+fn prepare_aws_entries(
+    handles: &[Option<String>],
+    dispositions: &[MessageDisposition],
+) -> (
+    Vec<aws_sdk_sqs::types::DeleteMessageBatchRequestEntry>,
+    Vec<aws_sdk_sqs::types::ChangeMessageVisibilityBatchRequestEntry>,
+) {
+    let mut delete_entries = Vec::new();
+    let mut nack_entries = Vec::new();
+
+    for (i, (handle_opt, disposition)) in handles.iter().zip(dispositions).enumerate() {
+        if let Some(handle) = handle_opt {
+            match disposition {
+                MessageDisposition::Ack | MessageDisposition::Reply(_) => {
+                    delete_entries.push(
+                        aws_sdk_sqs::types::DeleteMessageBatchRequestEntry::builder()
+                            .id(format!("{}", i))
+                            .receipt_handle(handle)
+                            .build()
+                            .unwrap(),
+                    );
+                }
+                MessageDisposition::Nack => {
+                    nack_entries.push(
+                        aws_sdk_sqs::types::ChangeMessageVisibilityBatchRequestEntry::builder()
+                            .id(format!("{}", i))
+                            .receipt_handle(handle)
+                            .visibility_timeout(0)
+                            .build()
+                            .unwrap(),
+                    );
+                }
+            }
+        }
+    }
+    (delete_entries, nack_entries)
+}
+
+async fn process_aws_deletes(
+    client: &SqsClient,
+    queue_url: &str,
+    entries: Vec<aws_sdk_sqs::types::DeleteMessageBatchRequestEntry>,
+) -> anyhow::Result<()> {
+    for chunk in entries.chunks(10) {
+        match client
+            .delete_message_batch()
+            .queue_url(queue_url)
+            .set_entries(Some(chunk.to_vec()))
+            .send()
+            .await
+        {
+            Ok(resp) => {
+                if !resp.failed.is_empty() {
+                    let count = resp.failed.len();
+                    error!(queue_url = %queue_url, failed_count = count, "Partial failure deleting SQS messages");
+                    for failure in resp.failed {
+                        error!(id = ?failure.id, code = ?failure.code, message = ?failure.message, sender_fault = failure.sender_fault, "SQS delete failure detail");
+                    }
+                    return Err(anyhow::anyhow!("SQS delete batch failed for {} messages", count));
+                }
+            }
+            Err(e) => {
+                error!(queue_url = %queue_url, error = %e, "Failed to delete SQS message batch");
+                return Err(anyhow::anyhow!("Failed to delete SQS message batch: {}", e));
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn process_aws_nacks(
+    client: &SqsClient,
+    queue_url: &str,
+    entries: Vec<aws_sdk_sqs::types::ChangeMessageVisibilityBatchRequestEntry>,
+) -> anyhow::Result<()> {
+    for chunk in entries.chunks(10) {
+        if let Err(e) = client
+            .change_message_visibility_batch()
+            .queue_url(queue_url)
+            .set_entries(Some(chunk.to_vec()))
+            .send()
+            .await
+        {
+            error!(queue_url = %queue_url, error = %e, "Failed to change visibility for Nacked SQS messages");
+        }
+    }
+    Ok(())
 }
 
 pub struct AwsPublisher {
