@@ -17,7 +17,6 @@ fn armature_messaging_test() {
     let test_dir = test_dir
         .canonicalize()
         .expect("Failed to canonicalize test dir");
-    dbg!(&test_dir);
 
     let repo_url = "https://github.com/pegasusheavy/armature.git";
     let branch = "develop";
