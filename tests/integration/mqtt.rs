@@ -7,7 +7,6 @@ use mq_bridge::test_utils::{
     run_test_with_docker_controller, setup_logging, PERF_TEST_BATCH_MESSAGE_COUNT,
 };
 use std::sync::Arc;
-use uuid::Uuid;
 const CONFIG_YAML: &str = r#"
 routes:
   memory_to_mqtt:
@@ -86,13 +85,13 @@ pub async fn test_mqtt_performance_direct() {
         let result = run_direct_perf_test(
             "MQTT",
             || async {
-                let publisher_id = format!("pub-{}", fast_uuid_v7::gen_id().to_string());
+                let publisher_id = format!("pub-{}", fast_uuid_v7::gen_id());
                 let mut pub_config = config.clone();
                 pub_config.client_id = Some(publisher_id);
                 Arc::new(MqttPublisher::new(&pub_config).await.unwrap())
             },
             || async {
-                let consumer_id = format!("sub-{}", fast_uuid_v7::gen_id().to_string());
+                let consumer_id = format!("sub-{}", fast_uuid_v7::gen_id());
                 let mut consumer_config = config.clone();
                 consumer_config.client_id = Some(consumer_id);
                 Arc::new(tokio::sync::Mutex::new(
