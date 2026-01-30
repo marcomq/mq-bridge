@@ -5,7 +5,7 @@
 
 use crate::endpoints::{create_consumer_from_route, create_publisher_from_route};
 pub use crate::models::Route;
-use crate::models::{self, Endpoint};
+use crate::models::{Endpoint, RouteOptions};
 use crate::traits::{
     BatchCommitFunc, ConsumerError, Handler, HandlerError, MessageDisposition, PublisherError,
     SentBatch,
@@ -268,7 +268,7 @@ impl Route {
     ) -> anyhow::Result<bool> {
         let (_internal_shutdown_tx, internal_shutdown_rx) = bounded(1);
         let shutdown_rx = shutdown_rx.unwrap_or(internal_shutdown_rx);
-        if self.concurrency == 1 {
+        if self.options.concurrency == 1 {
             self.run_sequentially(name, shutdown_rx, ready_tx).await
         } else {
             self.run_concurrently(name, shutdown_rx, ready_tx).await
@@ -284,22 +284,12 @@ impl Route {
     ) -> anyhow::Result<bool> {
         let publisher = create_publisher_from_route(name, &self.output).await?;
         let mut consumer = create_consumer_from_route(name, &self.input).await?;
-        let max_parallel_commits = self
-            .input
-            .middlewares
-            .iter()
-            .find_map(|m| match m {
-                models::Middleware::CommitConcurrency(c) => Some(c.limit),
-                _ => None,
-            })
-            .unwrap_or(4096);
-
         let (err_tx, err_rx) = bounded(1);
-        let commit_semaphore = Arc::new(Semaphore::new(max_parallel_commits));
+        let commit_semaphore = Arc::new(Semaphore::new(self.options.commit_concurrency_limit));
         let mut commit_tasks = JoinSet::new();
 
         // Sequencer setup to ensure ordered commits even with parallel commit tasks
-        let (seq_tx, sequencer_handle) = spawn_sequencer(max_parallel_commits);
+        let (seq_tx, sequencer_handle) = spawn_sequencer(self.options.commit_concurrency_limit);
         let mut seq_counter = 0u64;
 
         if let Some(tx) = ready_tx {
@@ -313,7 +303,7 @@ impl Route {
                     info!("Shutdown signal received in sequential runner for route '{}'.", name);
                     break Ok(true); // Stopped by shutdown signal
                 }
-                res = consumer.receive_batch(self.batch_size) => {
+                res = consumer.receive_batch(self.options.batch_size) => {
                     let received_batch = match res {
                         Ok(batch) => {
                             if batch.messages.is_empty() {
@@ -420,29 +410,22 @@ impl Route {
         }
         let (err_tx, err_rx) = bounded(1); // For critical, route-stopping errors
                                            // channel capacity: a small buffer proportional to concurrency
-        let work_capacity = self.concurrency.saturating_mul(self.batch_size);
+        let work_capacity = self
+            .options
+            .concurrency
+            .saturating_mul(self.options.batch_size);
         let (work_tx, work_rx) =
             bounded::<(Vec<crate::CanonicalMessage>, BatchCommitFunc)>(work_capacity);
-        let max_parallel_commits = self
-            .input
-            .middlewares
-            .iter()
-            .find_map(|m| match m {
-                models::Middleware::CommitConcurrency(c) => Some(c.limit),
-                _ => None,
-            })
-            .unwrap_or(4096);
-
-        let commit_semaphore = Arc::new(Semaphore::new(max_parallel_commits));
+        let commit_semaphore = Arc::new(Semaphore::new(self.options.commit_concurrency_limit));
 
         // --- Ordered Commit Sequencer ---
         // To prevent data loss with cumulative-ack brokers (Kafka/AMQP), commits must happen in order.
         // We assign a sequence number to each batch and use a sequencer task to enforce order.
-        let (seq_tx, sequencer_handle) = spawn_sequencer(self.concurrency * 2);
+        let (seq_tx, sequencer_handle) = spawn_sequencer(self.options.concurrency * 2);
 
         // --- Worker Pool ---
         let mut join_set = JoinSet::new();
-        for i in 0..self.concurrency {
+        for i in 0..self.options.concurrency {
             let work_rx_clone = work_rx.clone();
             let publisher = Arc::clone(&publisher);
             let err_tx = err_tx.clone();
@@ -552,7 +535,7 @@ impl Route {
                     break;
                 }
 
-                res = consumer.receive_batch(self.batch_size) => {
+                res = consumer.receive_batch(self.options.batch_size) => {
                     let (messages, commit) = match res {
                         Ok(batch) => {
                             if batch.messages.is_empty() {
@@ -603,13 +586,23 @@ impl Route {
         Ok(shutdown_rx.is_empty())
     }
 
+    pub fn with_options(mut self, options: RouteOptions) -> Self {
+        self.options = options;
+        self
+    }
+
     pub fn with_concurrency(mut self, concurrency: usize) -> Self {
-        self.concurrency = concurrency.max(1);
+        self.options.concurrency = concurrency.max(1);
         self
     }
 
     pub fn with_batch_size(mut self, batch_size: usize) -> Self {
-        self.batch_size = batch_size.max(1);
+        self.options.batch_size = batch_size.max(1);
+        self
+    }
+
+    pub fn with_commit_concurrency_limit(mut self, limit: usize) -> Self {
+        self.options.commit_concurrency_limit = limit.max(1);
         self
     }
 

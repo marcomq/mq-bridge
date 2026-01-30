@@ -56,7 +56,6 @@ pub async fn apply_middlewares_to_consumer(
                 tracing::warn!("Retry middleware is ignored on consumers (input endpoints). It is currently publisher-only.");
                 consumer
             }
-            Middleware::CommitConcurrency(_) => consumer, // Configuration only, read by Route
             Middleware::Delay(cfg) => Box::new(DelayConsumer::new(consumer, cfg)),
             #[cfg(feature = "panic")]
             Middleware::RandomPanic(cfg) => Box::new(RandomPanicConsumer::new(consumer, cfg)),
@@ -98,10 +97,6 @@ pub async fn apply_middlewares_to_publisher(
             #[cfg(feature = "dedup")]
             Middleware::Deduplication(_) => {
                 tracing::warn!("Deduplication middleware is ignored on publishers (output endpoints). It should be configured on the input endpoint.");
-                publisher
-            }
-            Middleware::CommitConcurrency(_) => {
-                tracing::warn!("CommitConcurrency middleware is ignored on publishers (output endpoints). It should be configured on the input endpoint.");
                 publisher
             }
             Middleware::Retry(cfg) => Box::new(RetryPublisher::new(publisher, cfg.clone())),

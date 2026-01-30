@@ -171,21 +171,21 @@ let typed_handler = TypeHandler::new()
 You can define and run routes directly in Rust code.
 
 ```rust
-use mq_bridge::models::{Endpoint, CanonicalMessage, Route};
-use mq_bridge::Handled;
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
-use std::time::Duration;
-use tokio::time::timeout;
+use mq_bridge::{models::Endpoint, stop_route, CanonicalMessage, Handled, Route};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
 #[tokio::main]
 async fn main() {
     // Define a route from one in-memory channel to another
-    
-    // 1. Create boolean that is changed in handler
+
+    // 1. Create a boolean that is changed in the handler
     let success = Arc::new(AtomicBool::new(false));
     let success_clone = success.clone();
 
-    // 2. Define Handler
+    // 2. Define the Handler
     let handler = move |mut msg: CanonicalMessage| {
         success_clone.store(true, Ordering::SeqCst);
         msg.set_payload_str(format!("modified {}", msg.get_payload_str()));
@@ -194,8 +194,7 @@ async fn main() {
     // 3. Define Route
     let input = Endpoint::new_memory("route_in", 200);
     let output = Endpoint::new_memory("route_out", 200);
-    let route = Route::new(input, output)
-        .with_handler(handler);
+    let route = Route::new(input, output).with_handler(handler);
 
     // 4. Run (deploys the route in the background)
     route.deploy("test_route").await.unwrap();
@@ -213,7 +212,7 @@ async fn main() {
     assert_eq!(received.message.get_payload_str(), "modified hello");
     assert!(success.load(Ordering::SeqCst));
 
-    Route::stop("test_route").await;
+    stop_route("test_route").await;
 }
 ```
 

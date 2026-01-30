@@ -44,7 +44,7 @@ use tracing::trace;
 /// let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
 /// let route = config.get("kafka_to_nats").unwrap();
 ///
-/// assert_eq!(route.concurrency, 10);
+/// assert_eq!(route.options.concurrency, 10);
 /// // Check input middleware
 /// assert!(route.input.middlewares.iter().any(|m| matches!(m, Middleware::Deduplication(_))));
 /// // Check output endpoint
@@ -61,6 +61,31 @@ pub type PublisherConfig = HashMap<String, Endpoint>;
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Route {
+    /// The input/source endpoint for the route.
+    pub input: Endpoint,
+    /// The output/sink endpoint for the route.
+    #[serde(default = "default_output_endpoint")]
+    pub output: Endpoint,
+    /// (Optional) Fine-tuning options for the route's execution.
+    #[serde(flatten, default)]
+    pub options: RouteOptions,
+}
+
+impl Default for Route {
+    fn default() -> Self {
+        Self {
+            input: Endpoint::null(),
+            output: Endpoint::null(),
+            options: RouteOptions::default(),
+        }
+    }
+}
+
+/// Fine-tuning options for a route's execution.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct RouteOptions {
     /// (Optional) Number of concurrent processing tasks for this route. Defaults to 1.
     #[serde(default = "default_concurrency")]
     #[cfg_attr(feature = "schema", schemars(range(min = 1)))]
@@ -69,20 +94,17 @@ pub struct Route {
     #[serde(default = "default_batch_size")]
     #[cfg_attr(feature = "schema", schemars(range(min = 1)))]
     pub batch_size: usize,
-    /// The input/source endpoint for the route.
-    pub input: Endpoint,
-    /// The output/sink endpoint for the route.
-    #[serde(default = "default_output_endpoint")]
-    pub output: Endpoint,
+    /// (Optional) The maximum number of concurrent commit tasks allowed. Defaults to 4096.
+    #[serde(default = "default_commit_concurrency_limit")]
+    pub commit_concurrency_limit: usize,
 }
 
-impl Default for Route {
+impl Default for RouteOptions {
     fn default() -> Self {
         Self {
             concurrency: default_concurrency(),
             batch_size: default_batch_size(),
-            input: Endpoint::null(),
-            output: Endpoint::null(),
+            commit_concurrency_limit: default_commit_concurrency_limit(),
         }
     }
 }
@@ -93,6 +115,10 @@ pub(crate) fn default_concurrency() -> usize {
 
 pub(crate) fn default_batch_size() -> usize {
     1
+}
+
+pub(crate) fn default_commit_concurrency_limit() -> usize {
+    4096
 }
 
 fn default_output_endpoint() -> Endpoint {
@@ -263,14 +289,7 @@ impl<'de> Deserialize<'de> for Endpoint {
 fn is_known_middleware_name(name: &str) -> bool {
     matches!(
         name,
-        "deduplication"
-            | "metrics"
-            | "dlq"
-            | "commit_concurrency"
-            | "retry"
-            | "random_panic"
-            | "delay"
-            | "custom"
+        "deduplication" | "metrics" | "dlq" | "retry" | "random_panic" | "delay" | "custom"
     )
 }
 
@@ -442,7 +461,6 @@ pub enum Middleware {
     Deduplication(DeduplicationMiddleware),
     Metrics(MetricsMiddleware),
     Dlq(Box<DeadLetterQueueMiddleware>),
-    CommitConcurrency(CommitConcurrencyMiddleware),
     Retry(RetryMiddleware),
     RandomPanic(RandomPanicMiddleware),
     Delay(DelayMiddleware),
@@ -461,15 +479,6 @@ pub struct DeduplicationMiddleware {
     pub sled_path: String,
     /// Time-to-live for deduplication entries in seconds.
     pub ttl_seconds: u64,
-}
-
-/// Configuration for limiting the number of parallel commit tasks of publishers.
-#[derive(Debug, Deserialize, Serialize, Clone)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(deny_unknown_fields)]
-pub struct CommitConcurrencyMiddleware {
-    /// The maximum number of concurrent commit tasks allowed.
-    pub limit: usize,
 }
 
 /// Metrics middleware configuration. It's currently a struct without fields
@@ -1067,7 +1076,7 @@ kafka_to_nats:
         assert_eq!(config.len(), 1);
         let route = config.get("kafka_to_nats").expect("Route should exist");
 
-        assert_eq!(route.concurrency, 10);
+        assert_eq!(route.options.concurrency, 10);
 
         // --- Assert Input ---
         let input = &route.input;
@@ -1106,7 +1115,6 @@ kafka_to_nats:
                     assert!((rp.probability - 0.1).abs() < f64::EPSILON);
                     has_random_panic = true;
                 }
-                Middleware::CommitConcurrency(_) => {}
                 Middleware::Delay(_) => {}
             }
         }
@@ -1204,7 +1212,7 @@ kafka_to_nats:
             .expect("Failed to deserialize config");
 
         // We can't test all values from env, but we can check the ones we set.
-        assert_eq!(config.get("kafka_to_nats").unwrap().concurrency, 10);
+        assert_eq!(config.get("kafka_to_nats").unwrap().options.concurrency, 10);
         if let EndpointType::Kafka(k) = &config.get("kafka_to_nats").unwrap().input.endpoint_type {
             assert_eq!(k.topic, Some("input-topic".to_string()));
             assert!(k.tls.required);

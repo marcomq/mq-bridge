@@ -10,10 +10,11 @@
 
 1. **Route**: A named data pipeline that defines a flow from one `input` endpoint to one `output` endpoint
 2. **Endpoint**: A source (consumer) or sink (publisher) for messages - supports Kafka, NATS, AMQP, MQTT, MongoDB, HTTP, Files, and in-memory channels
-3. **Middleware**: Components that intercept and process messages (retries, DLQ, deduplication, metrics)
-4. **Handler**: Programmatic components for business logic (CommandHandler for 1-to-1 transformations, EventHandler for terminal consumption)
-5. **CanonicalMessage**: The unified message format used throughout the system
-6. **Request-Reply**: Native support for synchronous request-reply pattern on NATS, MongoDB, and Memory endpoints
+3. **Top-Level API**: A set of functions in the `mq_bridge` root for managing routes and publishers (e.g., `get_route`, `stop_route`, `get_publisher`).
+4. **Middleware**: Components that intercept and process messages (retries, DLQ, deduplication, metrics)
+5. **Handler**: Programmatic components for business logic (CommandHandler for 1-to-1 transformations, EventHandler for terminal consumption)
+6. **CanonicalMessage**: The unified message format used throughout the system
+7. **Request-Reply**: Native support for synchronous request-reply pattern on NATS, MongoDB, and Memory endpoints
 
 ### Design Principles
 

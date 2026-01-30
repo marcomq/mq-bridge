@@ -234,11 +234,11 @@ async fn test_route_with_typed_handler_failure_handler() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_commit_concurrency_limit() {
-    use mq_bridge::models::{CommitConcurrencyMiddleware, Endpoint, Middleware, Route};
-    use mq_bridge::traits::{
-        ConsumerError, CustomMiddlewareFactory, MessageConsumer, ReceivedBatch,
-    };
     use mq_bridge::CanonicalMessage;
+    use mq_bridge::{
+        models::{Endpoint, Middleware, Route},
+        traits::{ConsumerError, CustomMiddlewareFactory, MessageConsumer, ReceivedBatch},
+    };
     use std::any::Any;
     use std::sync::Arc;
     use std::time::Duration;
@@ -295,16 +295,14 @@ async fn test_commit_concurrency_limit() {
         });
         mq_bridge::route::register_middleware_factory("slow_commit", factory);
 
-        let input = Endpoint::new_memory(&format!("in_limit_{}", limit), 100)
-            .add_middleware(Middleware::Custom {
+        let input = Endpoint::new_memory(&format!("in_limit_{}", limit), 100).add_middleware(
+            Middleware::Custom {
                 name: "slow_commit".to_string(),
                 config: serde_json::Value::Null,
-            })
-            .add_middleware(Middleware::CommitConcurrency(CommitConcurrencyMiddleware {
-                limit,
-            }));
+            },
+        );
         let output = Endpoint::new_memory(&format!("out_limit_{}", limit), 100);
-        let route = Route::new(input, output);
+        let route = Route::new(input, output).with_commit_concurrency_limit(limit);
 
         let in_channel = route.input.channel().unwrap();
         let out_channel = route.output.channel().unwrap();
