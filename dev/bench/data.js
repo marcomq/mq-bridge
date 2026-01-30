@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1769796271460,
+  "lastUpdate": 1769796548318,
   "repoUrl": "https://github.com/marcomq/mq-bridge",
   "entries": {
     "Rust Benchmark": [
@@ -21151,6 +21151,218 @@ window.BENCHMARK_DATA = {
             "name": "performance/memory_batch_read",
             "value": 40686,
             "range": "± 3946",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "marcomq",
+            "username": "marcomq"
+          },
+          "committer": {
+            "name": "marcomq",
+            "username": "marcomq"
+          },
+          "id": "8b91268423d45da31f1ce3bf348e644493e314de",
+          "message": "[MR] Version 0.2 - refactoring, easier endpoint and middleware plugins",
+          "timestamp": "2026-01-17T20:03:06Z",
+          "url": "https://github.com/marcomq/mq-bridge/pull/14/commits/8b91268423d45da31f1ce3bf348e644493e314de"
+        },
+        "date": 1769796547744,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "performance/aws_single_write",
+            "value": 1390376693,
+            "range": "± 42149032",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/aws_single_read",
+            "value": 2955733030,
+            "range": "± 53758577",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/aws_batch_write",
+            "value": 200686195,
+            "range": "± 5058608",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/aws_batch_read",
+            "value": 322959600,
+            "range": "± 8087512",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/kafka_single_write",
+            "value": 1373847067,
+            "range": "± 189693148",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/kafka_single_read",
+            "value": 5146665,
+            "range": "± 398262",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/kafka_batch_write",
+            "value": 903252178,
+            "range": "± 31541466",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/kafka_batch_read",
+            "value": 3171251,
+            "range": "± 583258",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/amqp_single_write",
+            "value": 24190051,
+            "range": "± 3464447",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/amqp_single_read",
+            "value": 19588695,
+            "range": "± 1627625",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/amqp_batch_write",
+            "value": 20790243,
+            "range": "± 1210866",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/amqp_batch_read",
+            "value": 19276965,
+            "range": "± 3677424",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/nats_single_write",
+            "value": 13761176,
+            "range": "± 2886919",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/nats_single_read",
+            "value": 9817138,
+            "range": "± 294257",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/nats_batch_write",
+            "value": 53911975,
+            "range": "± 10180428",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/nats_batch_read",
+            "value": 8738723,
+            "range": "± 287306",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/mongodb_single_write",
+            "value": 78530370,
+            "range": "± 5536750",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/mongodb_single_read",
+            "value": 531084552,
+            "range": "± 26645627",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/mongodb_batch_write",
+            "value": 5217509,
+            "range": "± 580012",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/mongodb_batch_read",
+            "value": 49153205,
+            "range": "± 2840010",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/mqtt_single_write",
+            "value": 486100,
+            "range": "± 35001",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/mqtt_single_read",
+            "value": 25863663,
+            "range": "± 504024",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/mqtt_batch_write",
+            "value": 292006,
+            "range": "± 15579",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/mqtt_batch_read",
+            "value": 27505761,
+            "range": "± 1328862",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/zeromq_single_write",
+            "value": 3690477,
+            "range": "± 21414",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/zeromq_single_read",
+            "value": 2302250,
+            "range": "± 24614",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/zeromq_batch_write",
+            "value": 348607,
+            "range": "± 13059",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/zeromq_batch_read",
+            "value": 1213635,
+            "range": "± 13461",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/memory_single_write",
+            "value": 398816,
+            "range": "± 20639",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/memory_single_read",
+            "value": 1385979,
+            "range": "± 8980",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/memory_batch_write",
+            "value": 152459,
+            "range": "± 5707",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/memory_batch_read",
+            "value": 39908,
+            "range": "± 1819",
             "unit": "ns/iter"
           }
         ]
