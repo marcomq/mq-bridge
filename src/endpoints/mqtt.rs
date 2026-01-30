@@ -292,6 +292,7 @@ impl MessageConsumer for MqttListener {
                 // Acknowledge the original message
                 if let Err(e) = client.ack(&ack_info).await {
                     error!("Failed to ack MQTT message: {}", e);
+                    return Err(anyhow!("Failed to ack MQTT message: {}", e));
                 }
                 Ok(())
             }) as BoxFuture<'static, anyhow::Result<()>>
@@ -345,7 +346,7 @@ impl MessageConsumer for MqttListener {
                             handle_mqtt_reply(&client, reply_topic, correlation_data, resp).await?;
                             if let Err(e) = client.ack(&ack).await {
                                 error!("Failed to ack MQTT message in batch: {}", e);
-                                return Err(e);
+                                return Err(anyhow!("Failed to ack MQTT message batch: {}", e));
                             }
                         }
                         MessageDisposition::Ack => {
