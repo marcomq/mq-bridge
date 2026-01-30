@@ -345,13 +345,13 @@ impl MessageConsumer for MqttListener {
                             handle_mqtt_reply(&client, reply_topic, correlation_data, resp).await?;
                             if let Err(e) = client.ack(&ack).await {
                                 error!("Failed to ack MQTT message in batch: {}", e);
-                                return Err(e.into());
+                                return Err(e);
                             }
                         }
                         MessageDisposition::Ack => {
                             if let Err(e) = client.ack(&ack).await {
                                 error!("Failed to ack MQTT message in batch: {}", e);
-                                return Err(e.into());
+                                return Err(e);
                             }
                         }
                         MessageDisposition::Nack => {}
