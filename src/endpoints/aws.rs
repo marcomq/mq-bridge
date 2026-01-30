@@ -437,9 +437,7 @@ async fn load_aws_config(config: &AwsConfig) -> aws_config::SdkConfig {
         loader = loader.endpoint_url(url);
     }
 
-    if let (Some(access_key), Some(secret_key)) =
-        (&config.access_key, &config.secret_key)
-    {
+    if let (Some(access_key), Some(secret_key)) = (&config.access_key, &config.secret_key) {
         let credentials = Credentials::new(
             access_key.clone(),
             secret_key.clone(),

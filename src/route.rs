@@ -7,8 +7,8 @@ use crate::endpoints::{create_consumer_from_route, create_publisher_from_route};
 pub use crate::models::Route;
 use crate::models::{self, Endpoint};
 use crate::traits::{
-    BatchCommitFunc, ConsumerError, CustomEndpointFactory, CustomMiddlewareFactory, Handler,
-    HandlerError, MessageDisposition, PublisherError, SentBatch,
+    BatchCommitFunc, ConsumerError, Handler, HandlerError, MessageDisposition, PublisherError,
+    SentBatch,
 };
 use async_channel::{bounded, Sender};
 use serde::de::DeserializeOwned;
@@ -20,6 +20,12 @@ use tokio::{
     task::{JoinHandle, JoinSet},
 };
 use tracing::{debug, error, info, warn};
+
+// Re-export extensions for backward compatibility and internal usage
+pub use crate::extensions::{
+    get_endpoint_factory, get_middleware_factory, register_endpoint_factory,
+    register_middleware_factory,
+};
 
 #[derive(Debug)]
 pub struct RouteHandle((JoinHandle<()>, Sender<()>));
@@ -47,34 +53,6 @@ struct ActiveRoute {
 }
 
 static ROUTE_REGISTRY: OnceLock<RwLock<HashMap<String, ActiveRoute>>> = OnceLock::new();
-static ENDPOINT_REGISTRY: OnceLock<RwLock<HashMap<String, Arc<dyn CustomEndpointFactory>>>> =
-    OnceLock::new();
-static MIDDLEWARE_REGISTRY: OnceLock<RwLock<HashMap<String, Arc<dyn CustomMiddlewareFactory>>>> =
-    OnceLock::new();
-
-pub fn register_endpoint_factory(name: &str, factory: Arc<dyn CustomEndpointFactory>) {
-    let registry = ENDPOINT_REGISTRY.get_or_init(|| RwLock::new(HashMap::new()));
-    let mut map = registry.write().expect("Endpoint registry lock poisoned");
-    map.insert(name.to_string(), factory);
-}
-
-pub fn get_endpoint_factory(name: &str) -> Option<Arc<dyn CustomEndpointFactory>> {
-    let registry = ENDPOINT_REGISTRY.get_or_init(|| RwLock::new(HashMap::new()));
-    let map = registry.read().expect("Endpoint registry lock poisoned");
-    map.get(name).cloned()
-}
-
-pub fn register_middleware_factory(name: &str, factory: Arc<dyn CustomMiddlewareFactory>) {
-    let registry = MIDDLEWARE_REGISTRY.get_or_init(|| RwLock::new(HashMap::new()));
-    let mut map = registry.write().expect("Middleware registry lock poisoned");
-    map.insert(name.to_string(), factory);
-}
-
-pub fn get_middleware_factory(name: &str) -> Option<Arc<dyn CustomMiddlewareFactory>> {
-    let registry = MIDDLEWARE_REGISTRY.get_or_init(|| RwLock::new(HashMap::new()));
-    let map = registry.read().expect("Middleware registry lock poisoned");
-    map.get(name).cloned()
-}
 
 impl Route {
     /// Creates a new route with default concurrency (1) and batch size (128).
@@ -861,6 +839,18 @@ fn map_responses_to_dispositions(
     // Current best effort: Return Ack for everything to avoid hanging, but log that we can't map precisely yet.
     // In a real implementation of F10, `send_batch` should probably return `Vec<Result<Sent, PublisherError>>` to map 1:1.
     vec![MessageDisposition::Ack; total_count]
+}
+
+pub fn get_route(name: &str) -> Option<Route> {
+    Route::get(name)
+}
+
+pub fn list_routes() -> Vec<String> {
+    Route::list()
+}
+
+pub async fn stop_route(name: &str) -> bool {
+    Route::stop(name).await
 }
 
 #[cfg(test)]

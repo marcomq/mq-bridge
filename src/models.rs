@@ -9,10 +9,7 @@ use serde::{
 };
 use std::{collections::HashMap, sync::Arc};
 
-use crate::{
-    endpoints::memory::{get_or_create_channel, MemoryChannel},
-    traits::Handler,
-};
+use crate::traits::Handler;
 use tracing::trace;
 
 /// The top-level configuration is a map of named routes.
@@ -260,55 +257,6 @@ impl<'de> Deserialize<'de> for Endpoint {
         }
 
         deserializer.deserialize_any(EndpointVisitor)
-    }
-}
-
-impl Endpoint {
-    pub fn new(endpoint_type: EndpointType) -> Self {
-        Self {
-            middlewares: Vec::new(),
-            endpoint_type,
-            handler: None,
-        }
-    }
-    /// Creates a new in-memory endpoint with the specified topic and capacity.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use mq_bridge::models::Endpoint;
-    /// let endpoint = Endpoint::new_memory("my_topic", 100);
-    /// ```
-    pub fn new_memory(topic: &str, capacity: usize) -> Self {
-        Self::new(EndpointType::Memory(MemoryConfig::new(
-            topic,
-            Some(capacity),
-        )))
-    }
-    pub fn new_response() -> Self {
-        Self::new(EndpointType::Response(ResponseConfig::default()))
-    }
-    pub fn add_middleware(mut self, middleware: Middleware) -> Self {
-        self.middlewares.push(middleware);
-        self
-    }
-    pub fn add_middlewares(mut self, mut middlewares: Vec<Middleware>) -> Self {
-        self.middlewares.append(&mut middlewares);
-        self
-    }
-    ///
-    /// Returns a reference to the in-memory channel associated with this Endpoint.
-    /// This function will only succeed if the Endpoint is of type EndpointType::Memory.
-    /// If the Endpoint is not a memory endpoint, this function will return an error.
-    /// This function is primarily used for testing purposes where a Queue is needed.
-    pub fn channel(&self) -> anyhow::Result<MemoryChannel> {
-        match &self.endpoint_type {
-            EndpointType::Memory(cfg) => Ok(get_or_create_channel(cfg)),
-            _ => Err(anyhow::anyhow!("channel() called on non-memory Endpoint")),
-        }
-    }
-    pub fn null() -> Self {
-        Self::new(EndpointType::Null)
     }
 }
 
@@ -705,7 +653,10 @@ impl<'de> Deserialize<'de> for FileConfig {
                     }
                 }
                 let path = path.ok_or_else(|| serde::de::Error::missing_field("path"))?;
-                Ok(FileConfig { path, subscribe_mode: !consume })
+                Ok(FileConfig {
+                    path,
+                    subscribe_mode: !consume,
+                })
             }
         }
         deserializer.deserialize_any(FileConfigVisitor)
@@ -785,7 +736,10 @@ impl MemoryConfig {
         }
     }
     pub fn with_subscribe(self, subscribe_mode: bool) -> Self {
-        Self { subscribe_mode, ..self }
+        Self {
+            subscribe_mode,
+            ..self
+        }
     }
 }
 
@@ -1000,6 +954,9 @@ pub struct IbmMqConfig {
     /// (Consumer only) Polling timeout in milliseconds (default: 1000ms). Optional.
     #[serde(default = "default_wait_timeout_ms")]
     pub wait_timeout_ms: i32,
+    /// Internal buffer size for the channel. Defaults to 100.
+    #[serde(default)]
+    pub internal_buffer_size: Option<usize>,
 }
 
 fn default_max_message_size() -> usize {

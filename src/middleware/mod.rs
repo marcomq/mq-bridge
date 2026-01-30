@@ -3,8 +3,8 @@
 //  Licensed under MIT License, see License file for more details
 //  git clone https://github.com/marcomq/mq-bridge
 
+use crate::extensions::get_middleware_factory;
 use crate::models::{Endpoint, Middleware};
-use crate::route::get_middleware_factory;
 use crate::traits::{MessageConsumer, MessagePublisher};
 use anyhow::Result;
 use std::sync::Arc;

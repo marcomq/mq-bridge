@@ -112,13 +112,11 @@ async fn test_nats_request_reply() {
         service_endpoint.subject = Some(subject.to_string());
         service_endpoint.stream = Some("ignored".to_string());
         let service_consumer = NatsConsumer::new(&service_endpoint).await.unwrap();
-        
+
         let mut pub_config = client_config.clone();
         pub_config.subject = Some(subject.to_string());
         pub_config.stream = Some(stream_name.to_string());
-        let publisher = NatsPublisher::new(&pub_config)
-            .await
-            .unwrap();
+        let publisher = NatsPublisher::new(&pub_config).await.unwrap();
 
         tokio::spawn(async move {
             run_service_reply(Box::new(service_consumer), b"pong").await;
@@ -172,9 +170,7 @@ async fn test_mongodb_request_reply_pattern() {
         };
         let mut pub_config = client_config.clone();
         pub_config.collection = Some(req_collection.to_string());
-        let client_publisher = MongoDbPublisher::new(&pub_config)
-            .await
-            .unwrap();
+        let client_publisher = MongoDbPublisher::new(&pub_config).await.unwrap();
 
         // 3. Send request and wait for response
         let request_msg = CanonicalMessage::new(b"mongo_request".to_vec(), None);
@@ -269,9 +265,7 @@ async fn test_mqtt_request_reply() {
         let mut pub_config = config.clone();
         pub_config.topic = Some(req_topic.to_string());
         pub_config.client_id = Some("client_pub".to_string());
-        let client_publisher = MqttPublisher::new(&pub_config)
-            .await
-            .unwrap();
+        let client_publisher = MqttPublisher::new(&pub_config).await.unwrap();
         let mut client_config = config.clone();
         client_config.client_id = Some("client_sub".to_string());
         let mut client_endpoint = client_config;

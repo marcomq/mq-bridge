@@ -128,11 +128,7 @@ async fn run_mongodb_direct_perf_test_impl(
             || async {
                 let mut pub_config = config.clone();
                 pub_config.collection = Some(collection_name.clone());
-                Arc::new(
-                    MongoDbPublisher::new(&pub_config)
-                        .await
-                        .unwrap(),
-                )
+                Arc::new(MongoDbPublisher::new(&pub_config).await.unwrap())
             },
             || async {
                 let mut endpoint = config.clone();

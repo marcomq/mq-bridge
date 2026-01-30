@@ -11,8 +11,8 @@ use crate::{
     canonical_message::CanonicalMessage,
     outcomes::SentBatch,
     traits::{
-        self, ConsumerError, CustomEndpointFactory, MessageConsumer, MessageDisposition,
-        MessagePublisher, PublisherError, ReceivedBatch,
+        self, ConsumerError, MessageConsumer, MessageDisposition, MessagePublisher, PublisherError,
+        ReceivedBatch,
     },
 };
 use mqi::{
@@ -28,31 +28,6 @@ use std::{thread, time::Duration};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{info, warn};
 
-type BatchJob = (
-    Vec<CanonicalMessage>,
-    oneshot::Sender<Result<SentBatch, PublisherError>>,
-);
-
-pub async fn create_ibm_mq_publisher(
-    name: &str,
-    config: &IbmMqConfig,
-) -> anyhow::Result<IbmMqPublisher> {
-    info!("Creating IBM MQ publisher for route {}", name);
-    let mut config = config.clone();
-    if config.queue.is_none() && config.topic.is_none() {
-        config.queue = Some(name.to_string());
-    }
-    Ok(IbmMqPublisher::new(&config).await?)
-}
-
-pub async fn create_ibm_mq_consumer(
-    name: &str,
-    config: &IbmMqConfig,
-) -> anyhow::Result<IbmMqConsumer> {
-    info!("Creating IBM MQ consumer for route {}", name);
-    Ok(IbmMqConsumer::new(config).await?)
-}
-
 macro_rules! connect_mq {
     ($config:expr) => {
         (|| -> anyhow::Result<_> {
@@ -67,6 +42,7 @@ macro_rules! connect_mq {
             MqStr::<32>::try_from(cipher_spec_str).context("Invalid cipher spec")?;
 
         let mq_server_string = format!("{}/TCP/{}", $config.channel, $config.url);
+        let mq_server =
             MqServer::try_from(mq_server_string.as_str()).context("Invalid MQSERVER")?;
 
         let credentials = if let (Some(u), Some(p)) = (usr, pwd) {
@@ -111,15 +87,22 @@ macro_rules! connect_mq {
     };
 }
 
+type BatchJob = (
+    Vec<CanonicalMessage>,
+    oneshot::Sender<Result<SentBatch, PublisherError>>,
+);
+
 pub struct IbmMqPublisher {
     tx: mpsc::Sender<BatchJob>,
 }
 
 impl IbmMqPublisher {
     pub async fn new(config: &IbmMqConfig) -> Result<Self, PublisherError> {
-        let (tx, mut rx) = mpsc::channel::<BatchJob>(100);
+        let buffer_size = config.internal_buffer_size.unwrap_or(100);
+        let (tx, mut rx) = mpsc::channel::<BatchJob>(buffer_size);
         let (init_tx, init_rx) = oneshot::channel();
         let config = config.clone();
+        info!("Starting IBM MQ publisher");
 
         thread::spawn(move || {
             let mut init_tx = Some(init_tx);
@@ -147,7 +130,9 @@ impl IbmMqPublisher {
                         Object::open(qm_ref, &(od, open_options))
                             .map_err(|e| anyhow::anyhow!("MQ open topic failed: {}", e))
                     } else {
-                        let q_name_str = config.queue.as_deref().ok_or_else(|| anyhow::anyhow!("Queue name is required for IBM MQ publisher"))?;
+                        let q_name_str = config.queue.as_deref().ok_or_else(|| {
+                            anyhow::anyhow!("Queue name is required for IBM MQ publisher")
+                        })?;
                         let q_name =
                             MqStr::<48>::try_from(q_name_str).context("Invalid queue name")?;
                         let od = QueueName(q_name);
@@ -263,7 +248,9 @@ enum ConsumerJob {
 async fn spawn_consumer_thread(
     config: IbmMqConfig,
 ) -> Result<mpsc::Sender<ConsumerJob>, ConsumerError> {
-    let (tx, mut rx) = mpsc::channel::<ConsumerJob>(100);
+    info!("Starting IBM MQ consumer thread");
+    let buffer_size = config.internal_buffer_size.unwrap_or(100);
+    let (tx, mut rx) = mpsc::channel::<ConsumerJob>(buffer_size);
     let tx_loop = tx.clone();
     let (init_tx, init_rx) = oneshot::channel();
 
@@ -300,7 +287,9 @@ async fn spawn_consumer_thread(
                         .discard_warning();
                     Ok((Some(sub), obj))
                 } else {
-                    let q_name_str = config.queue.as_deref().ok_or_else(|| anyhow::anyhow!("Queue name is required for IBM MQ consumer"))?;
+                    let q_name_str = config.queue.as_deref().ok_or_else(|| {
+                        anyhow::anyhow!("Queue name is required for IBM MQ consumer")
+                    })?;
                     let q_name = MqStr::<48>::try_from(q_name_str).context("Invalid queue name")?;
                     let od = QueueName(q_name);
                     let open_options =
@@ -494,34 +483,5 @@ impl IbmMqConsumer {
     pub async fn new(config: &IbmMqConfig) -> Result<Self, ConsumerError> {
         let tx = spawn_consumer_thread(config.clone()).await?;
         Ok(Self { tx })
-    }
-}
-
-#[derive(Debug)]
-pub struct IbmMqFactory;
-
-#[async_trait]
-impl CustomEndpointFactory for IbmMqFactory {
-    async fn create_consumer(
-        &self,
-        route_name: &str,
-        config: &serde_json::Value,
-    ) -> anyhow::Result<Box<dyn MessageConsumer>> {
-        let config: IbmMqConfig = serde_json::from_value(config.clone())?;
-        Ok(Box::new(
-            create_ibm_mq_consumer(route_name, &config).await?,
-        ))
-    }
-
-    async fn create_publisher(
-        &self,
-        route_name: &str,
-        config: &serde_json::Value,
-    ) -> anyhow::Result<Box<dyn MessagePublisher>> {
-        let config: IbmMqConfig = serde_json::from_value(config.clone())?;
-        Ok(
-            Box::new(create_ibm_mq_publisher(route_name, &config).await?)
-                as Box<dyn MessagePublisher>,
-        )
     }
 }

@@ -38,13 +38,6 @@ fn to_qos_v5(qos: QoS) -> QoSV5 {
 }
 
 impl Client {
-    async fn disconnect(&self) -> anyhow::Result<()> {
-        match self {
-            Client::V3(client) => client.disconnect().await.map_err(|e| e.into()),
-            Client::V5(client) => client.disconnect().await.map_err(|e| e.into()),
-        }
-    }
-
     async fn ack(&self, ack: &MqttAck) -> anyhow::Result<()> {
         match (self, ack) {
             (Client::V3(c), MqttAck::V3(p)) => c.ack(p).await.map_err(|e| e.into()),
@@ -104,13 +97,16 @@ impl Client {
 pub struct MqttPublisher {
     client: Client,
     topic: String,
-    stop_tx: mpsc::Sender<()>,
+    _stop_tx: mpsc::Sender<()>,
     qos: QoS,
 }
 
 impl MqttPublisher {
     pub async fn new(config: &MqttConfig) -> anyhow::Result<Self> {
-        let topic = config.topic.as_deref().ok_or_else(|| anyhow!("Topic is required for MQTT publisher"))?;
+        let topic = config
+            .topic
+            .as_deref()
+            .ok_or_else(|| anyhow!("Topic is required for MQTT publisher"))?;
         let client_id = config.client_id.clone().unwrap_or_else(|| {
             sanitize_for_client_id(&format!("{}-{}", APP_NAME, fast_uuid_v7::gen_id_string()))
         });
@@ -131,21 +127,9 @@ impl MqttPublisher {
         Ok(Self {
             client,
             topic: topic.to_string(),
-            stop_tx,
+            _stop_tx: stop_tx,
             qos,
         })
-    }
-    pub fn with_topic(&self, topic: &str) -> Self {
-        Self {
-            client: self.client.clone(),
-            topic: topic.to_string(),
-            stop_tx: self.stop_tx.clone(),
-            qos: self.qos,
-        }
-    }
-
-    pub async fn disconnect(&self) -> anyhow::Result<()> {
-        self.client.disconnect().await
     }
 }
 
@@ -189,7 +173,10 @@ pub struct MqttConsumer(MqttListener);
 
 impl MqttConsumer {
     pub async fn new(config: &MqttConfig) -> anyhow::Result<Self> {
-        let topic = config.topic.as_deref().ok_or_else(|| anyhow!("Topic is required for MQTT consumer"))?;
+        let topic = config
+            .topic
+            .as_deref()
+            .ok_or_else(|| anyhow!("Topic is required for MQTT consumer"))?;
         let client_id = config.client_id.clone().unwrap_or_else(|| {
             sanitize_for_client_id(&format!("{}-{}", APP_NAME, fast_uuid_v7::gen_id_string()))
         });

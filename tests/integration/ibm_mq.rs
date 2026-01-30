@@ -1,9 +1,8 @@
 // tests/integration/ibm_mq.rs
 #![allow(dead_code)]
 
-use mq_bridge::endpoints::ibm_mq::{IbmMqConsumer, IbmMqFactory, IbmMqPublisher};
-use mq_bridge::models::{ConsumerMode, Endpoint, EndpointType, IbmMqConfig, IbmMqEndpoint, Route};
-use mq_bridge::route::register_endpoint_factory;
+use mq_bridge::endpoints::ibm_mq::{IbmMqConsumer, IbmMqPublisher};
+use mq_bridge::models::{Endpoint, EndpointType, IbmMqConfig, Route};
 /// This test requires a running IBM MQ instance.
 /// You can use the provided docker-compose file:
 /// `docker-compose -f tests/integration/docker-compose/ibm_mq.yml up -d`
@@ -40,7 +39,7 @@ fn get_config() -> IbmMqConfig {
         user: Some("app".to_string()),
         password: Some("admin".to_string()),
         queue_manager: "QM1".to_string(),
-        connection_name: "localhost(1414)".to_string(),
+        url: "localhost(1414)".to_string(),
         channel: "DEV.APP.SVRCONN".to_string(),
         ..Default::default()
     }
@@ -48,7 +47,6 @@ fn get_config() -> IbmMqConfig {
 
 pub async fn test_ibm_mq_performance_pipeline() {
     setup_logging();
-    register_endpoint_factory("ibm_mq", Arc::new(IbmMqFactory));
     run_test_with_docker("tests/integration/docker-compose/ibm_mq.yml", || async {
         let queue_name = "DEV.QUEUE.1";
         let config = get_config();
@@ -71,17 +69,12 @@ pub async fn test_ibm_mq_performance_pipeline() {
 
         // Setup Pipeline: IBM MQ -> Memory
         let input_ep = Endpoint {
-            endpoint_type: EndpointType::Custom {
-                name: "ibm_mq".to_string(),
-                config: serde_json::to_value({
-                    let mut c = config.clone();
-                    c.topic = None;
-                    c.queue = Some(queue_name.to_string());
-                    c
-                })
-                .unwrap(),
-            },
-            mode: ConsumerMode::Consume,
+            endpoint_type: EndpointType::IbmMq({
+                let mut c = config.clone();
+                c.topic = None;
+                c.queue = Some(queue_name.to_string());
+                c
+            }),
             middlewares: vec![],
             handler: None,
         };
@@ -117,7 +110,6 @@ pub async fn test_ibm_mq_performance_pipeline() {
 
 pub async fn test_ibm_mq_chaos() {
     setup_logging();
-    register_endpoint_factory("ibmmq", Arc::new(IbmMqFactory));
     run_test_with_docker_controller(
         "tests/integration/docker-compose/ibm_mq.yml",
         |controller| async move {
@@ -130,7 +122,7 @@ routes:
     output:
       ibmmq:
         queue_manager: "QM1"
-        connection_name: "localhost(1414)"
+        url: "localhost(1414)"
         channel: "DEV.APP.SVRCONN"
         queue: "DEV.QUEUE.1"
         user: "app"
@@ -139,7 +131,7 @@ routes:
     input:
       ibmmq:
         queue_manager: "QM1"
-        connection_name: "localhost(1414)"
+        url: "localhost(1414)"
         channel: "DEV.APP.SVRCONN"
         queue: "DEV.QUEUE.1"
         user: "app"

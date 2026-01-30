@@ -86,11 +86,7 @@ pub async fn test_nats_performance_direct() {
                 let mut pub_config = config.clone();
                 pub_config.subject = Some(subject.to_string());
                 pub_config.stream = Some(stream_name.to_string());
-                Arc::new(
-                    NatsPublisher::new(&pub_config)
-                        .await
-                        .unwrap(),
-                )
+                Arc::new(NatsPublisher::new(&pub_config).await.unwrap())
             },
             || async {
                 let mut endpoint = config.clone();

@@ -91,14 +91,6 @@ impl KafkaPublisher {
             delayed_ack: config.delayed_ack,
         })
     }
-
-    pub fn with_topic(&self, topic: &str) -> Self {
-        Self {
-            producer: self.producer.clone(),
-            topic: topic.to_string(),
-            delayed_ack: self.delayed_ack,
-        }
-    }
 }
 
 impl Drop for KafkaPublisher {
@@ -257,9 +249,7 @@ pub struct KafkaConsumer {
 use std::any::Any;
 
 impl KafkaConsumer {
-    pub async fn new(
-        config: &KafkaConfig,
-    ) -> anyhow::Result<Self> {
+    pub async fn new(config: &KafkaConfig) -> anyhow::Result<Self> {
         let topic = config.topic.as_deref().unwrap_or("");
         let mut client_config = create_common_config(config);
 
@@ -406,7 +396,13 @@ impl MessageConsumer for KafkaConsumer {
     }
 
     async fn receive_batch(&mut self, max_messages: usize) -> Result<ReceivedBatch, ConsumerError> {
-        receive_batch_internal(&self.consumer, self.producer.as_ref(), max_messages, &self.topic).await
+        receive_batch_internal(
+            &self.consumer,
+            self.producer.as_ref(),
+            max_messages,
+            &self.topic,
+        )
+        .await
     }
 
     fn as_any(&self) -> &dyn Any {

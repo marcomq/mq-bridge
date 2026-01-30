@@ -221,6 +221,51 @@ impl<T: MessagePublisher + ?Sized> MessagePublisher for Box<T> {
     }
 }
 
+/// Factory for creating custom endpoints (consumers and publishers).
+#[async_trait]
+pub trait CustomEndpointFactory: Send + Sync + std::fmt::Debug {
+    async fn create_consumer(
+        &self,
+        _route_name: &str,
+        _config: &serde_json::Value,
+    ) -> anyhow::Result<Box<dyn MessageConsumer>> {
+        Err(anyhow::anyhow!(
+            "This custom endpoint does not support creating consumers"
+        ))
+    }
+    async fn create_publisher(
+        &self,
+        _route_name: &str,
+        _config: &serde_json::Value,
+    ) -> anyhow::Result<Box<dyn MessagePublisher>> {
+        Err(anyhow::anyhow!(
+            "This custom endpoint does not support creating publishers"
+        ))
+    }
+}
+
+/// Factory for creating custom middleware.
+#[async_trait]
+pub trait CustomMiddlewareFactory: Send + Sync + std::fmt::Debug {
+    async fn apply_consumer(
+        &self,
+        consumer: Box<dyn MessageConsumer>,
+        _route_name: &str,
+        _config: &serde_json::Value,
+    ) -> anyhow::Result<Box<dyn MessageConsumer>> {
+        Ok(consumer)
+    }
+
+    async fn apply_publisher(
+        &self,
+        publisher: Box<dyn MessagePublisher>,
+        _route_name: &str,
+        _config: &serde_json::Value,
+    ) -> anyhow::Result<Box<dyn MessagePublisher>> {
+        Ok(publisher)
+    }
+}
+
 /// A helper function to send messages in bulk by calling `send` for each one.
 /// This is useful for `MessagePublisher` implementations that don't have a native bulk sending mechanism.
 /// Requires that "send" is implemented for the publisher. Otherwise causes an infinite loop,
@@ -305,51 +350,6 @@ pub fn into_batch_commit_func(commit: CommitFunc) -> BatchCommitFunc {
         };
         commit(single_disposition)
     })
-}
-
-/// Factory for creating custom endpoints (consumers and publishers).
-#[async_trait]
-pub trait CustomEndpointFactory: Send + Sync + std::fmt::Debug {
-    async fn create_consumer(
-        &self,
-        _route_name: &str,
-        _config: &serde_json::Value,
-    ) -> anyhow::Result<Box<dyn MessageConsumer>> {
-        Err(anyhow::anyhow!(
-            "This custom endpoint does not support creating consumers"
-        ))
-    }
-    async fn create_publisher(
-        &self,
-        _route_name: &str,
-        _config: &serde_json::Value,
-    ) -> anyhow::Result<Box<dyn MessagePublisher>> {
-        Err(anyhow::anyhow!(
-            "This custom endpoint does not support creating publishers"
-        ))
-    }
-}
-
-/// Factory for creating custom middleware.
-#[async_trait]
-pub trait CustomMiddlewareFactory: Send + Sync + std::fmt::Debug {
-    async fn apply_consumer(
-        &self,
-        consumer: Box<dyn MessageConsumer>,
-        _route_name: &str,
-        _config: &serde_json::Value,
-    ) -> anyhow::Result<Box<dyn MessageConsumer>> {
-        Ok(consumer)
-    }
-
-    async fn apply_publisher(
-        &self,
-        publisher: Box<dyn MessagePublisher>,
-        _route_name: &str,
-        _config: &serde_json::Value,
-    ) -> anyhow::Result<Box<dyn MessagePublisher>> {
-        Ok(publisher)
-    }
 }
 
 #[cfg(test)]

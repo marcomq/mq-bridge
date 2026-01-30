@@ -28,12 +28,89 @@ pub mod static_endpoint;
 pub mod switch;
 #[cfg(feature = "zeromq")]
 pub mod zeromq;
+use crate::endpoints::memory::{get_or_create_channel, MemoryChannel};
 use crate::middleware::apply_middlewares_to_consumer;
-use crate::models::{Endpoint, EndpointType};
+use crate::models::{Endpoint, EndpointType, MemoryConfig, Middleware, ResponseConfig};
 use crate::route::get_endpoint_factory;
 use crate::traits::{BoxFuture, MessageConsumer, MessagePublisher};
 use anyhow::{anyhow, Result};
 use std::sync::Arc;
+
+impl Endpoint {
+    pub fn new(endpoint_type: EndpointType) -> Self {
+        Self {
+            middlewares: Vec::new(),
+            endpoint_type,
+            handler: None,
+        }
+    }
+    /// Creates a new in-memory endpoint with the specified topic and capacity.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mq_bridge::models::Endpoint;
+    /// let endpoint = Endpoint::new_memory("my_topic", 100);
+    /// ```
+    pub fn new_memory(topic: &str, capacity: usize) -> Self {
+        Self::new(EndpointType::Memory(MemoryConfig::new(
+            topic,
+            Some(capacity),
+        )))
+    }
+    pub fn new_response() -> Self {
+        Self::new(EndpointType::Response(ResponseConfig::default()))
+    }
+    pub fn add_middleware(mut self, middleware: Middleware) -> Self {
+        self.middlewares.push(middleware);
+        self
+    }
+    pub fn add_middlewares(mut self, mut middlewares: Vec<Middleware>) -> Self {
+        self.middlewares.append(&mut middlewares);
+        self
+    }
+    ///
+    /// Returns a reference to the in-memory channel associated with this Endpoint.
+    /// This function will only succeed if the Endpoint is of type EndpointType::Memory.
+    /// If the Endpoint is not a memory endpoint, this function will return an error.
+    /// This function is primarily used for testing purposes where a Queue is needed.
+    pub fn channel(&self) -> anyhow::Result<MemoryChannel> {
+        match &self.endpoint_type {
+            EndpointType::Memory(cfg) => Ok(get_or_create_channel(cfg)),
+            _ => Err(anyhow::anyhow!("channel() called on non-memory Endpoint")),
+        }
+    }
+    pub fn null() -> Self {
+        Self::new(EndpointType::Null)
+    }
+
+    pub async fn create_consumer(
+        &self,
+        route_name: &str,
+    ) -> anyhow::Result<Box<dyn crate::traits::MessageConsumer>> {
+        crate::endpoints::create_consumer_from_route(route_name, self).await
+    }
+
+    pub async fn create_publisher(&self, _route_name: &str) -> anyhow::Result<crate::Publisher> {
+        crate::Publisher::new(self.clone()).await
+    }
+
+    pub fn check_consumer(
+        &self,
+        route_name: &str,
+        allowed_endpoints: Option<&[&str]>,
+    ) -> anyhow::Result<()> {
+        crate::endpoints::check_consumer(route_name, self, allowed_endpoints)
+    }
+
+    pub fn check_publisher(
+        &self,
+        route_name: &str,
+        allowed_endpoints: Option<&[&str]>,
+    ) -> anyhow::Result<()> {
+        crate::endpoints::check_publisher(route_name, self, allowed_endpoints)
+    }
+}
 
 /// Validates the consumer configuration for a route.
 pub fn check_consumer(
@@ -138,9 +215,7 @@ async fn create_base_consumer(
 
     match &endpoint.endpoint_type {
         #[cfg(feature = "aws")]
-        EndpointType::Aws(cfg) => {
-            Ok(boxed(aws::AwsConsumer::new(cfg).await?))
-        }
+        EndpointType::Aws(cfg) => Ok(boxed(aws::AwsConsumer::new(cfg).await?)),
         #[cfg(feature = "kafka")]
         EndpointType::Kafka(cfg) => {
             let mut config = cfg.clone();
@@ -186,12 +261,8 @@ async fn create_base_consumer(
             Ok(boxed(ibm_mq::IbmMqConsumer::new(&config).await?))
         }
         #[cfg(feature = "zeromq")]
-        EndpointType::ZeroMq(cfg) => {
-            Ok(boxed(zeromq::ZeroMqConsumer::new(cfg).await?))
-        }
-        EndpointType::File(cfg) => {
-            Ok(boxed(file::FileConsumer::new(cfg).await?))
-        }
+        EndpointType::ZeroMq(cfg) => Ok(boxed(zeromq::ZeroMqConsumer::new(cfg).await?)),
+        EndpointType::File(cfg) => Ok(boxed(file::FileConsumer::new(cfg).await?)),
         #[cfg(any(feature = "http-client", feature = "http-server"))]
         EndpointType::Http(cfg) => {
             #[cfg(feature = "http-server")]
@@ -203,12 +274,8 @@ async fn create_base_consumer(
                 Err(anyhow!("HTTP consumer requires the 'http-server' feature"))
             }
         }
-        EndpointType::Static(cfg) => {
-            Ok(boxed(static_endpoint::StaticRequestConsumer::new(cfg)?))
-        }
-        EndpointType::Memory(cfg) => {
-            Ok(boxed(memory::MemoryConsumer::new(cfg)?))
-        }
+        EndpointType::Static(cfg) => Ok(boxed(static_endpoint::StaticRequestConsumer::new(cfg)?)),
+        EndpointType::Memory(cfg) => Ok(boxed(memory::MemoryConsumer::new(cfg)?)),
         #[cfg(feature = "mongodb")]
         EndpointType::MongoDb(cfg) => {
             let mut config = cfg.clone();
@@ -219,13 +286,9 @@ async fn create_base_consumer(
                 if config.ttl_seconds.is_none() {
                     config.ttl_seconds = Some(86400); // Remove events by default after 24 hours
                 }
-                Ok(boxed(
-                    mongodb::MongoDbSubscriber::new(&config).await?,
-                ))
+                Ok(boxed(mongodb::MongoDbSubscriber::new(&config).await?))
             } else {
-                Ok(boxed(
-                    mongodb::MongoDbConsumer::new(&config).await?,
-                ))
+                Ok(boxed(mongodb::MongoDbConsumer::new(&config).await?))
             }
         }
         EndpointType::Custom { name, config } => {
@@ -390,10 +453,7 @@ async fn create_base_publisher(
             if config.topic.is_none() {
                 config.topic = Some(route_name.to_string());
             }
-            Ok(
-                Box::new(kafka::KafkaPublisher::new(&config).await?)
-                    as Box<dyn MessagePublisher>,
-            )
+            Ok(Box::new(kafka::KafkaPublisher::new(&config).await?) as Box<dyn MessagePublisher>)
         }
         #[cfg(feature = "nats")]
         EndpointType::Nats(cfg) => {
@@ -401,10 +461,7 @@ async fn create_base_publisher(
             if config.subject.is_none() {
                 config.subject = Some(route_name.to_string());
             }
-            Ok(
-                Box::new(nats::NatsPublisher::new(&config).await?)
-                    as Box<dyn MessagePublisher>,
-            )
+            Ok(Box::new(nats::NatsPublisher::new(&config).await?) as Box<dyn MessagePublisher>)
         }
         #[cfg(feature = "amqp")]
         EndpointType::Amqp(cfg) => {
@@ -412,10 +469,7 @@ async fn create_base_publisher(
             if config.queue.is_none() {
                 config.queue = Some(route_name.to_string());
             }
-            Ok(
-                Box::new(amqp::AmqpPublisher::new(&config).await?)
-                    as Box<dyn MessagePublisher>,
-            )
+            Ok(Box::new(amqp::AmqpPublisher::new(&config).await?) as Box<dyn MessagePublisher>)
         }
         #[cfg(feature = "mqtt")]
         EndpointType::Mqtt(cfg) => {
@@ -426,10 +480,7 @@ async fn create_base_publisher(
             if config.client_id.is_none() {
                 config.client_id = Some(format!("{}-{}", crate::APP_NAME, route_name));
             }
-            Ok(
-                Box::new(mqtt::MqttPublisher::new(&config).await?)
-                    as Box<dyn MessagePublisher>,
-            )
+            Ok(Box::new(mqtt::MqttPublisher::new(&config).await?) as Box<dyn MessagePublisher>)
         }
         #[cfg(feature = "zeromq")]
         EndpointType::ZeroMq(cfg) => {
@@ -453,10 +504,8 @@ async fn create_base_publisher(
             if config.collection.is_none() {
                 config.collection = Some(route_name.to_string());
             }
-            Ok(
-                Box::new(mongodb::MongoDbPublisher::new(&config).await?)
-                    as Box<dyn MessagePublisher>,
-            )
+            Ok(Box::new(mongodb::MongoDbPublisher::new(&config).await?)
+                as Box<dyn MessagePublisher>)
         }
         EndpointType::File(cfg) => {
             Ok(Box::new(file::FilePublisher::new(cfg).await?) as Box<dyn MessagePublisher>)
@@ -546,7 +595,9 @@ mod tests {
     #[tokio::test]
     async fn test_factory_creates_memory_subscriber() {
         let endpoint = Endpoint {
-            endpoint_type: EndpointType::Memory(MemoryConfig::new("mem".to_string(), None).with_subscribe(true)),
+            endpoint_type: EndpointType::Memory(
+                MemoryConfig::new("mem".to_string(), None).with_subscribe(true),
+            ),
             middlewares: vec![],
             handler: None,
         };
@@ -556,9 +607,6 @@ mod tests {
         let is_subscriber = consumer
             .as_any()
             .is::<crate::endpoints::memory::MemoryConsumer>();
-        assert!(
-            is_subscriber,
-            "Factory should create MemoryConsumer"
-        );
+        assert!(is_subscriber, "Factory should create MemoryConsumer");
     }
 }

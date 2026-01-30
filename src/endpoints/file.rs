@@ -41,7 +41,9 @@ impl FilePublisher {
             .append(true)
             .open(&path)
             .await
-            .with_context(|| format!("Failed to open or create file for writing: {}", config.path))?;
+            .with_context(|| {
+                format!("Failed to open or create file for writing: {}", config.path)
+            })?;
 
         info!(path = %config.path, "File sink opened for appending");
         Ok(Self {
@@ -232,7 +234,8 @@ impl MessageConsumer for FileConsumer {
 }
 
 impl FileConsumer {
-    async fn receive_batch_consume( // Changed from &self to associated function
+    async fn receive_batch_consume(
+        // Changed from &self to associated function
         path: String,
         state: Arc<Mutex<FileConsumerState>>,
         max_messages: usize,
@@ -411,10 +414,13 @@ fn parse_message(buffer: Vec<u8>) -> CanonicalMessage {
 
 #[cfg(test)]
 mod tests {
+    use crate::models::FileConfig;
     use crate::traits::MessageConsumer;
     use crate::traits::MessagePublisher;
-    use crate::models::FileConfig;
-    use crate::{endpoints::file::{FileConsumer, FilePublisher}, CanonicalMessage};
+    use crate::{
+        endpoints::file::{FileConsumer, FilePublisher},
+        CanonicalMessage,
+    };
     use serde_json::json;
     use tempfile::tempdir;
 

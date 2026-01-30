@@ -35,10 +35,11 @@ pub struct NatsPublisher {
 }
 
 impl NatsPublisher {
-    pub async fn new(
-        config: &NatsConfig,
-    ) -> anyhow::Result<Self> {
-        let subject = config.subject.as_deref().ok_or_else(|| anyhow!("Subject is required for NATS publisher"))?;
+    pub async fn new(config: &NatsConfig) -> anyhow::Result<Self> {
+        let subject = config
+            .subject
+            .as_deref()
+            .ok_or_else(|| anyhow!("Subject is required for NATS publisher"))?;
         let stream_name = config.stream.as_deref().unwrap_or_default();
         let options = build_nats_options(config).await?;
         let nats_client = options.connect(&config.url).await?;
@@ -205,24 +206,26 @@ pub struct NatsConsumer {
 use std::any::Any;
 
 impl NatsConsumer {
-    pub async fn new(
-        config: &NatsConfig,
-    ) -> anyhow::Result<Self> {
-        let subject = config.subject.as_deref().ok_or_else(|| anyhow!("Subject is required for NATS consumer"))?;
-        let stream_name = config.stream.as_deref()
+    pub async fn new(config: &NatsConfig) -> anyhow::Result<Self> {
+        let subject = config
+            .subject
+            .as_deref()
+            .ok_or_else(|| anyhow!("Subject is required for NATS consumer"))?;
+        let stream_name = config
+            .stream
+            .as_deref()
             .ok_or_else(|| anyhow!("Stream name is required for NATS consumer"))?;
 
         let (durable_name, queue_group, deliver_policy) = if config.subscriber_mode {
             (None, None, jetstream::consumer::DeliverPolicy::New)
         } else {
-            let durable = format!(
-                "{}-{}-{}",
-                APP_NAME,
-                stream_name,
-                subject.replace('.', "-")
-            );
+            let durable = format!("{}-{}-{}", APP_NAME, stream_name, subject.replace('.', "-"));
             let queue = format!("{}-{}", APP_NAME, stream_name.replace('.', "-"));
-            (Some(durable), Some(queue), jetstream::consumer::DeliverPolicy::All)
+            (
+                Some(durable),
+                Some(queue),
+                jetstream::consumer::DeliverPolicy::All,
+            )
         };
 
         let (core, client) = NatsCore::connect(

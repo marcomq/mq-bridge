@@ -76,11 +76,7 @@ pub mod mongodb_helper {
     pub async fn create_publisher() -> Arc<dyn MessagePublisher> {
         let collection_name = "perf_mongodb_direct";
         let config = get_config(collection_name);
-        Arc::new(
-            MongoDbPublisher::new(&config)
-                .await
-                .unwrap(),
-        )
+        Arc::new(MongoDbPublisher::new(&config).await.unwrap())
     }
 
     pub async fn create_consumer() -> Arc<Mutex<dyn MessageConsumer>> {
@@ -96,11 +92,7 @@ pub mod mongodb_helper {
             .await
             .ok();
 
-        Arc::new(Mutex::new(
-            MongoDbConsumer::new(&config)
-                .await
-                .unwrap(),
-        ))
+        Arc::new(Mutex::new(MongoDbConsumer::new(&config).await.unwrap()))
     }
 }
 
@@ -317,10 +309,9 @@ pub mod zeromq_helper {
 
 #[cfg(feature = "ibm-mq")]
 pub mod ibm_mq_helper {
-    use mq_bridge::{
-        models::IbmMqConfig,
-        traits::{MessageConsumer, MessagePublisher},
-    };
+    use mq_bridge::endpoints::ibm_mq::{IbmMqConsumer, IbmMqPublisher};
+    use mq_bridge::models::IbmMqConfig;
+    use mq_bridge::traits::{MessageConsumer, MessagePublisher};
     use std::sync::Arc;
     use tokio::sync::Mutex;
 
@@ -329,7 +320,7 @@ pub mod ibm_mq_helper {
             user: Some("app".to_string()),
             password: Some("admin".to_string()),
             queue_manager: "QM1".to_string(),
-            connection_name: "localhost(1414)".to_string(),
+            url: "localhost(1414)".to_string(),
             channel: "DEV.APP.SVRCONN".to_string(),
             queue: Some(queue.to_string()),
             ..Default::default()
@@ -338,22 +329,12 @@ pub mod ibm_mq_helper {
 
     pub async fn create_publisher() -> Arc<dyn MessagePublisher> {
         let config = get_config("DEV.QUEUE.1");
-
-        let publisher =
-            mq_bridge::endpoints::ibm_mq::create_ibm_mq_publisher("bench_pub", &config)
-                .await
-                .expect("Failed to create publisher");
-        Arc::new(publisher)
+        Arc::new(IbmMqPublisher::new(&config).await.unwrap())
     }
 
     pub async fn create_consumer() -> Arc<Mutex<dyn MessageConsumer>> {
         let config = get_config("DEV.QUEUE.1");
-
-        let consumer =
-            mq_bridge::endpoints::ibm_mq::create_ibm_mq_consumer("bench_sub", &config)
-                .await
-                .expect("Failed to create consumer");
-        Arc::new(Mutex::new(consumer))
+        Arc::new(Mutex::new(IbmMqConsumer::new(&config).await.unwrap()))
     }
 }
 

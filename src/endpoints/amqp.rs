@@ -33,7 +33,10 @@ pub struct AmqpPublisher {
 
 impl AmqpPublisher {
     pub async fn new(config: &AmqpConfig) -> anyhow::Result<Self> {
-        let queue = config.queue.as_deref().ok_or_else(|| anyhow!("Queue name is required for AMQP publisher"))?;
+        let queue = config
+            .queue
+            .as_deref()
+            .ok_or_else(|| anyhow!("Queue name is required for AMQP publisher"))?;
         let conn = create_amqp_connection(config).await?;
         let channel = conn.create_channel().await?;
         // Enable publisher confirms on this channel to allow waiting for acks.
@@ -218,10 +221,11 @@ pub struct AmqpConsumer {
 }
 
 impl AmqpConsumer {
-    pub async fn new(
-        config: &AmqpConfig,
-    ) -> anyhow::Result<Self> {
-        let queue_or_exchange = config.queue.as_deref().ok_or_else(|| anyhow!("Queue name is required for AMQP consumer"))?;
+    pub async fn new(config: &AmqpConfig) -> anyhow::Result<Self> {
+        let queue_or_exchange = config
+            .queue
+            .as_deref()
+            .ok_or_else(|| anyhow!("Queue name is required for AMQP consumer"))?;
         let conn = create_amqp_connection(config).await?;
         let channel = conn.create_channel().await?;
 
