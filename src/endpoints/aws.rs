@@ -163,6 +163,13 @@ async fn process_aws_batch(
     handles: &[Option<String>],
     dispositions: &[MessageDisposition],
 ) -> anyhow::Result<()> {
+    if handles.len() != dispositions.len() {
+        return Err(anyhow::anyhow!(
+            "AWS batch commit received mismatched disposition count: expected {}, got {}",
+            handles.len(),
+            dispositions.len()
+        ));
+    }
     let (delete_entries, nack_entries) = prepare_aws_entries(handles, dispositions);
 
     process_aws_deletes(client, queue_url, delete_entries).await?;
@@ -257,6 +264,7 @@ async fn process_aws_nacks(
             .await
         {
             error!(queue_url = %queue_url, error = %e, "Failed to change visibility for Nacked SQS messages");
+            return Err(anyhow::anyhow!("Failed to change visibility for Nacked SQS messages: {}", e));
         }
     }
     Ok(())

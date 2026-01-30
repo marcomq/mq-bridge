@@ -407,7 +407,17 @@ impl MessageConsumer for MemoryConsumer {
 
                 for (i, disposition) in dispositions.into_iter().enumerate() {
                     match disposition {
-                        MessageDisposition::Reply(resp) => {
+                        MessageDisposition::Reply(mut resp) => {
+                            if !resp.metadata.contains_key("correlation_id") {
+                                if let Some(msgs) = &messages_for_retry {
+                                    if let Some(orig) = msgs.get(i) {
+                                        if let Some(cid) = orig.metadata.get("correlation_id") {
+                                            resp.metadata.insert("correlation_id".to_string(), cid.clone());
+                                        }
+                                    }
+                                }
+                            }
+
                             // If the receiver is dropped, sending will fail. We can ignore it.
                             let mut handled = false;
                             if let Some(cid) = resp.metadata.get("correlation_id") {
