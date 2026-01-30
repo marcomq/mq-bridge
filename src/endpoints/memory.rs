@@ -389,13 +389,50 @@ impl MessageConsumer for MemoryConsumer {
         }
 
         let topic = self.topic.clone();
+        // This clone is necessary to support NACKs. The commit function needs access
+        // to the messages to re-queue them, but the `ReceivedBatch` must also return
+        // ownership of the messages to the caller. Without changing the core traits,
+        // cloning is the only way to satisfy both owners.
         let messages_for_retry = messages.clone();
         let commit = Box::new(move |dispositions: Vec<MessageDisposition>| {
             Box::pin(async move {
-                let channel = get_or_create_response_channel(&topic);
+                let response_channel = get_or_create_response_channel(&topic);
+                let mut to_requeue = Vec::new();
+
                 for (i, disposition) in dispositions.into_iter().enumerate() {
-                    handle_memory_disposition(&topic, &channel, &messages_for_retry, i, disposition)
-                        .await;
+                    match disposition {
+                        MessageDisposition::Reply(resp) => {
+                            // If the receiver is dropped, sending will fail. We can ignore it.
+                            let mut handled = false;
+                            if let Some(cid) = resp.metadata.get("correlation_id") {
+                                if let Some(tx) = response_channel.remove_waiter(cid).await {
+                                    let _ = tx.send(resp.clone());
+                                    handled = true;
+                                }
+                            }
+                            if !handled {
+                                let _ = response_channel.sender.send(resp).await;
+                            }
+                        }
+                        MessageDisposition::Nack => {
+                            // Re-queue the message if Nacked
+                            if let Some(msg) = messages_for_retry.get(i) {
+                                to_requeue.push(msg.clone());
+                            }
+                        }
+                        MessageDisposition::Ack => {}
+                    }
+                }
+
+                if !to_requeue.is_empty() {
+                    let main_channel = get_or_create_channel(&MemoryConfig {
+                        topic: topic.to_string(),
+                        capacity: None,
+                        ..Default::default()
+                    });
+                    if main_channel.sender.send(to_requeue).await.is_err() {
+                        tracing::error!("Failed to re-queue NACKed messages to memory channel as it was closed.");
+                    }
                 }
                 Ok(())
             }) as BoxFuture<'static, anyhow::Result<()>>
@@ -433,42 +470,6 @@ impl MessageConsumer for MemorySubscriber {
 
     fn as_any(&self) -> &dyn Any {
         self
-    }
-}
-
-async fn handle_memory_disposition(
-    topic: &str,
-    channel: &MemoryResponseChannel,
-    messages_for_retry: &[CanonicalMessage],
-    index: usize,
-    disposition: MessageDisposition,
-) {
-    match disposition {
-        MessageDisposition::Reply(resp) => {
-            // If the receiver is dropped, sending will fail. We can ignore it.
-            let mut handled = false;
-            if let Some(cid) = resp.metadata.get("correlation_id") {
-                if let Some(tx) = channel.remove_waiter(cid).await {
-                    let _ = tx.send(resp.clone());
-                    handled = true;
-                }
-            }
-            if !handled {
-                let _ = channel.sender.send(resp).await;
-            }
-        }
-        MessageDisposition::Nack => {
-            // Re-queue the message if Nacked
-            if let Some(msg) = messages_for_retry.get(index) {
-                let main_channel = get_or_create_channel(&MemoryConfig {
-                    topic: topic.to_string(),
-                    capacity: None,
-                    ..Default::default()
-                });
-                let _ = main_channel.sender.send(vec![msg.clone()]).await;
-            }
-        }
-        MessageDisposition::Ack => {}
     }
 }
 

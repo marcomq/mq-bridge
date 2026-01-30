@@ -220,6 +220,41 @@ impl MongoDbPublisher {
             reply_polling_interval: Duration::from_millis(config.reply_polling_ms.unwrap_or(50)),
         })
     }
+
+    async fn recover_correlation_id_from_duplicate(
+        &self,
+        message: &mut CanonicalMessage,
+    ) -> Result<(), PublisherError> {
+        let id_uuid = mongodb::bson::Uuid::from_bytes(message.message_id.to_be_bytes());
+        let filter = doc! { "_id": id_uuid };
+        match self.collection.find_one(filter).await {
+            Ok(Some(existing_doc)) => {
+                let existing_msg = parse_mongodb_document(existing_doc).map_err(|e| {
+                    PublisherError::NonRetryable(anyhow::anyhow!(
+                        "Failed to parse existing document: {}",
+                        e
+                    ))
+                })?;
+
+                if let Some(cid) = existing_msg.metadata.get("correlation_id") {
+                    message
+                        .metadata
+                        .insert("correlation_id".to_string(), cid.clone());
+                }
+                if let Some(rt) = existing_msg.metadata.get("reply_to") {
+                    message.metadata.insert("reply_to".to_string(), rt.clone());
+                }
+                Ok(())
+            }
+            Ok(None) => Err(PublisherError::Retryable(anyhow::anyhow!(
+                "Duplicate key error but document not found"
+            ))),
+            Err(e) => Err(PublisherError::Retryable(anyhow::anyhow!(
+                "Failed to fetch existing document: {}",
+                e
+            ))),
+        }
+    }
 }
 
 #[async_trait]
@@ -249,7 +284,7 @@ impl MessagePublisher for MongoDbPublisher {
         }
 
         // --- Request-Reply Logic ---
-        let correlation_id = if let Some(cid) = message.metadata.get("correlation_id") {
+        let mut correlation_id = if let Some(cid) = message.metadata.get("correlation_id") {
             cid.clone()
         } else {
             fast_uuid_v7::gen_id_string()
@@ -272,6 +307,11 @@ impl MessagePublisher for MongoDbPublisher {
                 let is_duplicate = matches!(&*e.kind, ErrorKind::Write(mongodb::error::WriteFailure::WriteError(w)) if w.code == 11000);
                 if is_duplicate {
                     warn!(message_id = %format!("{:032x}", message.message_id), "Duplicate key error inserting request into MongoDB. Treating as idempotent success.");
+                    self.recover_correlation_id_from_duplicate(&mut message)
+                        .await?;
+                    if let Some(cid) = message.metadata.get("correlation_id") {
+                        correlation_id = cid.clone();
+                    }
                 } else {
                     return Err(PublisherError::Retryable(
                         anyhow::anyhow!(e)
@@ -755,7 +795,14 @@ impl MongoDbConsumer {
                         dispositions.len()
                     );
                 }
-                process_mongodb_batch_commit(&db, &collection_clone, &reply_infos, &ids, dispositions).await
+                process_mongodb_batch_commit(
+                    &db,
+                    &collection_clone,
+                    &reply_infos,
+                    &ids,
+                    dispositions,
+                )
+                .await
             }) as BoxFuture<'static, anyhow::Result<()>>
         });
 
@@ -828,12 +875,18 @@ async fn process_mongodb_batch_commit(
                 e
             ));
         } else {
-            trace!(count = ids_to_delete.len(), "MongoDB messages acknowledged and deleted");
+            trace!(
+                count = ids_to_delete.len(),
+                "MongoDB messages acknowledged and deleted"
+            );
         }
     }
 
     if !errors.is_empty() {
-        return Err(anyhow::anyhow!("Errors occurred during commit: {:?}", errors));
+        return Err(anyhow::anyhow!(
+            "Errors occurred during commit: {:?}",
+            errors
+        ));
     }
     Ok(())
 }

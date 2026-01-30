@@ -636,7 +636,7 @@ impl<'de> Deserialize<'de> for FileConfig {
             {
                 Ok(FileConfig {
                     path: value.to_string(),
-                    subscribe_mode: true,
+                    subscribe_mode: false,
                 })
             }
             fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>

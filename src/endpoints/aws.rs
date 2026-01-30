@@ -228,7 +228,10 @@ async fn process_aws_deletes(
                     for failure in resp.failed {
                         error!(id = ?failure.id, code = ?failure.code, message = ?failure.message, sender_fault = failure.sender_fault, "SQS delete failure detail");
                     }
-                    return Err(anyhow::anyhow!("SQS delete batch failed for {} messages", count));
+                    return Err(anyhow::anyhow!(
+                        "SQS delete batch failed for {} messages",
+                        count
+                    ));
                 }
             }
             Err(e) => {

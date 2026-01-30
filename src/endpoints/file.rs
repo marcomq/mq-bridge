@@ -5,8 +5,8 @@
 use crate::canonical_message::tracing_support::LazyMessageIds;
 use crate::models::FileConfig;
 use crate::traits::{
-    into_batch_commit_func, BatchCommitFunc, CommitFunc, ConsumerError, MessageConsumer, MessagePublisher,
-    PublisherError, ReceivedBatch, SentBatch,
+    into_batch_commit_func, BatchCommitFunc, CommitFunc, ConsumerError, MessageConsumer,
+    MessagePublisher, PublisherError, ReceivedBatch, SentBatch,
 };
 use crate::CanonicalMessage;
 use anyhow::Context;
@@ -316,96 +316,96 @@ impl FileConsumer {
         let commit_path = path.clone();
         let lines_to_remove = lines_read;
 
-        let commit: BatchCommitFunc = Box::new(move |dispositions: Vec<crate::traits::MessageDisposition>| {
-            Box::pin(async move {
-                if dispositions
-                    .iter()
-                    .any(|d| matches!(d, crate::traits::MessageDisposition::Nack))
-                {
-                    let mut state = state.lock().await;
-                    state.in_flight_lines =
-                        state.in_flight_lines.saturating_sub(lines_to_remove);
-                    return Ok(());
-                }
-
-                let mut state = state.lock().await;
-                state.pending_commits.insert(batch_seq, lines_to_remove);
-
-                // Check if we can process any commits in order
-                let mut total_lines_to_remove = 0;
-                let mut batches_to_process: u64 = 0;
-                let mut current_seq = state.next_commit_seq;
-
-                while let Some(&lines) = state.pending_commits.get(&current_seq) {
-                    total_lines_to_remove += lines;
-                    batches_to_process += 1;
-                    current_seq += 1;
-                }
-
-                if batches_to_process == 0 {
-                    return Ok(());
-                }
-
-                // Read the whole file
-                let file = File::open(&commit_path)
-                    .await
-                    .context("Failed to read file for commit")?;
-                let mut reader = BufReader::new(file);
-
-                let temp_path = format!("{}.tmp", commit_path);
-                let result = async {
-                    let temp_file = File::create(&temp_path)
-                        .await
-                        .context("Failed to create temp file")?;
-                    let mut writer = BufWriter::new(temp_file);
-
-                    let mut lines_skipped = 0;
-
-                    // Skip the first N lines (where N is the batch size we just processed)
-                    // Note: This simple implementation assumes ordered commits.
-                    while lines_skipped < total_lines_to_remove {
-                        let mut skip_buf = Vec::new();
-                        if reader.read_until(b'\n', &mut skip_buf).await? == 0 {
-                            break;
-                        }
-                        lines_skipped += 1;
+        let commit: BatchCommitFunc = Box::new(
+            move |dispositions: Vec<crate::traits::MessageDisposition>| {
+                Box::pin(async move {
+                    if dispositions
+                        .iter()
+                        .any(|d| matches!(d, crate::traits::MessageDisposition::Nack))
+                    {
+                        let mut state = state.lock().await;
+                        state.in_flight_lines =
+                            state.in_flight_lines.saturating_sub(lines_to_remove);
+                        return Ok(());
                     }
 
-                    // Write the rest using streaming copy
-                    io::copy(&mut reader, &mut writer).await?;
-                    writer.flush().await?;
+                    let mut state = state.lock().await;
+                    state.pending_commits.insert(batch_seq, lines_to_remove);
 
-                    // Rewrite the file
-                    fs::rename(&temp_path, &commit_path)
+                    // Check if we can process any commits in order
+                    let mut total_lines_to_remove = 0;
+                    let mut batches_to_process: u64 = 0;
+                    let mut current_seq = state.next_commit_seq;
+
+                    while let Some(&lines) = state.pending_commits.get(&current_seq) {
+                        total_lines_to_remove += lines;
+                        batches_to_process += 1;
+                        current_seq += 1;
+                    }
+
+                    if batches_to_process == 0 {
+                        return Ok(());
+                    }
+
+                    // Read the whole file
+                    let file = File::open(&commit_path)
                         .await
-                        .context("Failed to replace file for commit")?;
+                        .context("Failed to read file for commit")?;
+                    let mut reader = BufReader::new(file);
+
+                    let temp_path = format!("{}.tmp", commit_path);
+                    let result = async {
+                        let temp_file = File::create(&temp_path)
+                            .await
+                            .context("Failed to create temp file")?;
+                        let mut writer = BufWriter::new(temp_file);
+
+                        let mut lines_skipped = 0;
+
+                        // Skip the first N lines (where N is the batch size we just processed)
+                        // Note: This simple implementation assumes ordered commits.
+                        while lines_skipped < total_lines_to_remove {
+                            let mut skip_buf = Vec::new();
+                            if reader.read_until(b'\n', &mut skip_buf).await? == 0 {
+                                break;
+                            }
+                            lines_skipped += 1;
+                        }
+
+                        // Write the rest using streaming copy
+                        io::copy(&mut reader, &mut writer).await?;
+                        writer.flush().await?;
+
+                        // Rewrite the file
+                        fs::rename(&temp_path, &commit_path)
+                            .await
+                            .context("Failed to replace file for commit")?;
+                        Ok(())
+                    }
+                    .await;
+
+                    if let Err(e) = result {
+                        let _ = fs::remove_file(&temp_path).await;
+                        return Err(e);
+                    }
+
+                    // Update state
+                    state.in_flight_lines =
+                        state.in_flight_lines.saturating_sub(total_lines_to_remove);
+                    let start_seq = state.next_commit_seq;
+                    state.next_commit_seq += batches_to_process;
+                    for i in 0..batches_to_process {
+                        state.pending_commits.remove(&(start_seq + i));
+                    }
                     Ok(())
-                }
-                .await;
-
-                if let Err(e) = result {
-                    let _ = fs::remove_file(&temp_path).await;
-                    return Err(e);
-                }
-
-                // Update state
-                state.in_flight_lines = state.in_flight_lines.saturating_sub(total_lines_to_remove);
-                let start_seq = state.next_commit_seq;
-                state.next_commit_seq += batches_to_process;
-                for i in 0..batches_to_process {
-                    state.pending_commits.remove(&(start_seq + i));
-                }
-                Ok(())
-            })
-        });
+                })
+            },
+        );
 
         if let Some(first) = messages.first() {
             trace!(message_id = %format!("{:032x}", first.message_id), path = %path, "Received message from file");
         }
-        Ok(ReceivedBatch {
-            messages,
-            commit,
-        })
+        Ok(ReceivedBatch { messages, commit })
     }
 }
 
@@ -558,9 +558,7 @@ mod tests {
         let file_path_str = file_path.to_str().unwrap().to_string();
 
         // Write 2 lines
-        tokio::fs::write(&file_path, b"msg1\nmsg2\n")
-            .await
-            .unwrap();
+        tokio::fs::write(&file_path, b"msg1\nmsg2\n").await.unwrap();
 
         let config = FileConfig {
             path: file_path_str.clone(),

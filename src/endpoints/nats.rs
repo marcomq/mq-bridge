@@ -40,7 +40,14 @@ impl NatsPublisher {
             .subject
             .as_deref()
             .ok_or_else(|| anyhow!("Subject is required for NATS publisher"))?;
-        let stream_name = config.stream.as_deref().unwrap_or_default();
+        let stream_name = if !config.no_jetstream {
+            config
+                .stream
+                .as_deref()
+                .ok_or_else(|| anyhow!("stream must be provided when JetStream is enabled"))?
+        } else {
+            config.stream.as_deref().unwrap_or_default()
+        };
         let options = build_nats_options(config).await?;
         let nats_client = options.connect(&config.url).await?;
         let core_client = nats_client.clone();
@@ -665,23 +672,27 @@ async fn handle_jetstream_acks(
     messages: Vec<async_nats::jetstream::Message>,
     dispositions: Vec<MessageDisposition>,
 ) -> anyhow::Result<()> {
-    let ack_futures = messages.into_iter().zip(dispositions).map(
-        |(message, disposition)| async move {
-            match disposition {
-                MessageDisposition::Ack | MessageDisposition::Reply(_) => message
-                    .ack()
-                    .await
-                    .map_err(|e| anyhow!("Failed to ACK NATS message: {}", e)),
-                MessageDisposition::Nack => message
-                    .ack_with(async_nats::jetstream::AckKind::Nak(None))
-                    .await
-                    .map_err(|e| anyhow!("Failed to NAK NATS message: {}", e)),
-            }
-        },
-    );
+    let ack_futures =
+        messages
+            .into_iter()
+            .zip(dispositions)
+            .map(|(message, disposition)| async move {
+                match disposition {
+                    MessageDisposition::Ack | MessageDisposition::Reply(_) => message
+                        .ack()
+                        .await
+                        .map_err(|e| anyhow!("Failed to ACK NATS message: {}", e)),
+                    MessageDisposition::Nack => message
+                        .ack_with(async_nats::jetstream::AckKind::Nak(None))
+                        .await
+                        .map_err(|e| anyhow!("Failed to NAK NATS message: {}", e)),
+                }
+            });
 
-    let results: Vec<Result<(), anyhow::Error>> =
-        futures::stream::iter(ack_futures).buffer_unordered(100).collect().await;
+    let results: Vec<Result<(), anyhow::Error>> = futures::stream::iter(ack_futures)
+        .buffer_unordered(100)
+        .collect()
+        .await;
 
     for res in results {
         if let Err(e) = res {

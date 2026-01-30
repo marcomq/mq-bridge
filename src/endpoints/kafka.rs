@@ -578,7 +578,9 @@ async fn receive_batch_internal(
         Box::pin(async move {
             // Handle replies
             // Check for Nacks before moving dispositions for replies
-            let any_nack = dispositions.iter().any(|d| matches!(d, MessageDisposition::Nack));
+            let any_nack = dispositions
+                .iter()
+                .any(|d| matches!(d, MessageDisposition::Nack));
 
             handle_kafka_replies(producer, &reply_infos, &dispositions).await;
 
