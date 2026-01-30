@@ -734,6 +734,9 @@ pub struct MemoryConfig {
     /// (Consumer only) If true, act as a **Subscriber** (fan-out). Defaults to false (queue).
     #[serde(default)]
     pub subscribe_mode: bool,
+    /// (Consumer only) If true, enables NACK support (re-queuing), which requires cloning messages. Defaults to false.
+    #[serde(default)]
+    pub enable_nack: bool,
 }
 
 impl MemoryConfig {

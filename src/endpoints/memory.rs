@@ -300,6 +300,7 @@ pub struct MemoryConsumer {
     receiver: Receiver<Vec<CanonicalMessage>>,
     // Internal buffer to hold messages from a received batch.
     buffer: Vec<CanonicalMessage>,
+    enable_nack: bool,
 }
 
 impl MemoryConsumer {
@@ -309,6 +310,7 @@ impl MemoryConsumer {
             topic: config.topic.clone(),
             receiver: channel.receiver.clone(),
             buffer: Vec::new(),
+            enable_nack: config.enable_nack,
         })
     }
 
@@ -393,7 +395,11 @@ impl MessageConsumer for MemoryConsumer {
         // to the messages to re-queue them, but the `ReceivedBatch` must also return
         // ownership of the messages to the caller. Without changing the core traits,
         // cloning is the only way to satisfy both owners.
-        let messages_for_retry = messages.clone();
+        let messages_for_retry = if self.enable_nack {
+            Some(messages.clone())
+        } else {
+            None
+        };
         let commit = Box::new(move |dispositions: Vec<MessageDisposition>| {
             Box::pin(async move {
                 let response_channel = get_or_create_response_channel(&topic);
@@ -416,8 +422,10 @@ impl MessageConsumer for MemoryConsumer {
                         }
                         MessageDisposition::Nack => {
                             // Re-queue the message if Nacked
-                            if let Some(msg) = messages_for_retry.get(i) {
-                                to_requeue.push(msg.clone());
+                            if let Some(msgs) = &messages_for_retry {
+                                if let Some(msg) = msgs.get(i) {
+                                    to_requeue.push(msg.clone());
+                                }
                             }
                         }
                         MessageDisposition::Ack => {}
@@ -608,7 +616,13 @@ mod tests {
     #[tokio::test]
     async fn test_memory_nack_requeue() {
         let topic = format!("test_nack_requeue_{}", fast_uuid_v7::gen_id_str());
-        let mut consumer = MemoryConsumer::new_local(&topic, 10);
+        let config = MemoryConfig {
+            topic: topic.clone(),
+            capacity: Some(10),
+            enable_nack: true,
+            ..Default::default()
+        };
+        let mut consumer = MemoryConsumer::new(&config).unwrap();
         let publisher = MemoryPublisher::new_local(&topic, 10);
 
         let msg = CanonicalMessage::from("to_be_nacked");
