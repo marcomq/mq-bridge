@@ -412,7 +412,8 @@ impl MessageConsumer for MemoryConsumer {
                                 if let Some(msgs) = &messages_for_retry {
                                     if let Some(orig) = msgs.get(i) {
                                         if let Some(cid) = orig.metadata.get("correlation_id") {
-                                            resp.metadata.insert("correlation_id".to_string(), cid.clone());
+                                            resp.metadata
+                                                .insert("correlation_id".to_string(), cid.clone());
                                         }
                                     }
                                 }

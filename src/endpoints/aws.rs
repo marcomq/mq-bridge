@@ -264,7 +264,10 @@ async fn process_aws_nacks(
             .await
         {
             error!(queue_url = %queue_url, error = %e, "Failed to change visibility for Nacked SQS messages");
-            return Err(anyhow::anyhow!("Failed to change visibility for Nacked SQS messages: {}", e));
+            return Err(anyhow::anyhow!(
+                "Failed to change visibility for Nacked SQS messages: {}",
+                e
+            ));
         }
     }
     Ok(())
