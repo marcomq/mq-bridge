@@ -289,7 +289,14 @@ impl<'de> Deserialize<'de> for Endpoint {
 fn is_known_middleware_name(name: &str) -> bool {
     matches!(
         name,
-        "deduplication" | "metrics" | "dlq" | "retry" | "random_panic" | "delay" | "custom"
+        "deduplication"
+            | "metrics"
+            | "dlq"
+            | "retry"
+            | "random_panic"
+            | "delay"
+            | "weak_join"
+            | "custom"
     )
 }
 
@@ -464,6 +471,7 @@ pub enum Middleware {
     Retry(RetryMiddleware),
     RandomPanic(RandomPanicMiddleware),
     Delay(DelayMiddleware),
+    WeakJoin(WeakJoinMiddleware),
     Custom {
         name: String,
         config: serde_json::Value,
@@ -522,6 +530,18 @@ pub struct RetryMiddleware {
 pub struct DelayMiddleware {
     /// Delay duration in milliseconds.
     pub delay_ms: u64,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct WeakJoinMiddleware {
+    /// The metadata key to group messages by (e.g., "correlation_id").
+    pub group_by: String,
+    /// The number of messages to wait for.
+    pub expected_count: usize,
+    /// Timeout in milliseconds.
+    pub timeout_ms: u64,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -1119,6 +1139,7 @@ kafka_to_nats:
                     has_random_panic = true;
                 }
                 Middleware::Delay(_) => {}
+                Middleware::WeakJoin(_) => {}
             }
         }
 

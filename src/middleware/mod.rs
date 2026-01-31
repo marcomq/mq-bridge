@@ -18,6 +18,7 @@ mod metrics;
 #[cfg(feature = "panic")]
 mod random_panic;
 mod retry;
+mod weak_join;
 
 #[cfg(feature = "dedup")]
 use deduplication::DeduplicationConsumer;
@@ -28,6 +29,7 @@ use metrics::{MetricsConsumer, MetricsPublisher};
 #[cfg(feature = "panic")]
 use random_panic::{RandomPanicConsumer, RandomPanicPublisher};
 use retry::RetryPublisher;
+use weak_join::WeakJoinConsumer;
 
 /// Wraps a `MessageConsumer` with the middlewares specified in the endpoint configuration.
 ///
@@ -59,6 +61,7 @@ pub async fn apply_middlewares_to_consumer(
             Middleware::Delay(cfg) => Box::new(DelayConsumer::new(consumer, cfg)),
             #[cfg(feature = "panic")]
             Middleware::RandomPanic(cfg) => Box::new(RandomPanicConsumer::new(consumer, cfg)),
+            Middleware::WeakJoin(cfg) => Box::new(WeakJoinConsumer::new(consumer, cfg)),
             Middleware::Custom { name, config } => {
                 let factory = get_middleware_factory(name).ok_or_else(|| {
                     anyhow::anyhow!("Custom middleware factory '{}' not found", name)
