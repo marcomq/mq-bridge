@@ -1,11 +1,11 @@
 #![allow(dead_code)]
 
-use super::common::{
+use mq_bridge::endpoints::kafka::{KafkaConsumer, KafkaPublisher};
+use mq_bridge::test_utils::{
     add_performance_result, run_chaos_pipeline_test, run_direct_perf_test,
     run_performance_pipeline_test, run_pipeline_test, run_test_with_docker,
     run_test_with_docker_controller, setup_logging, PERF_TEST_MESSAGE_COUNT,
 };
-use mq_bridge::endpoints::kafka::{KafkaConsumer, KafkaPublisher};
 use std::sync::Arc;
 
 const CONFIG_YAML: &str = r#"
@@ -85,7 +85,7 @@ pub async fn test_kafka_performance_direct() {
     run_test_with_docker("tests/integration/docker-compose/kafka.yml", || async {
         let topic = "perf_test_kafka_direct";
         let config = mq_bridge::models::KafkaConfig {
-            brokers: "localhost:9092".to_string(),
+            url: "localhost:9092".to_string(),
             group_id: Some("perf_test_group_kafka".to_string()),
             producer_options: Some(vec![
                 ("queue.buffering.max.ms".to_string(), "50".to_string()), // Linger for 50ms to batch messages
@@ -98,10 +98,16 @@ pub async fn test_kafka_performance_direct() {
 
         let result = run_direct_perf_test(
             "Kafka",
-            || async { Arc::new(KafkaPublisher::new(&config, topic).await.unwrap()) },
             || async {
+                let mut pub_config = config.clone();
+                pub_config.topic = Some(topic.to_string());
+                Arc::new(KafkaPublisher::new(&pub_config).await.unwrap())
+            },
+            || async {
+                let mut endpoint = config.clone();
+                endpoint.topic = Some(topic.to_string());
                 Arc::new(tokio::sync::Mutex::new(
-                    KafkaConsumer::new(&config, topic).await.unwrap(),
+                    KafkaConsumer::new(&endpoint).await.unwrap(),
                 ))
             },
         )

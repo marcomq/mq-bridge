@@ -4,7 +4,8 @@
 //  git clone https://github.com/marcomq/mq-bridge
 use crate::models::DeduplicationMiddleware;
 use crate::traits::{
-    into_batch_commit_func, ConsumerError, MessageConsumer, Received, ReceivedBatch,
+    into_batch_commit_func, ConsumerError, MessageConsumer, MessageDisposition, Received,
+    ReceivedBatch,
 };
 use anyhow::Context;
 use async_trait::async_trait;
@@ -148,7 +149,7 @@ impl MessageConsumer for DeduplicationConsumer {
 
             if is_duplicate {
                 info!(message_id = %message_id_hex, "Duplicate message detected and skipped");
-                if let Err(e) = original_commit(None).await {
+                if let Err(e) = original_commit(MessageDisposition::Ack).await {
                     warn!("Failed to commit skipped duplicate message: {}", e);
                 }
                 continue;
@@ -158,9 +159,9 @@ impl MessageConsumer for DeduplicationConsumer {
             let key_clone = key.clone();
 
             // Wrap commit to update DB to "processed" state
-            let commit = Box::new(move |response| {
+            let commit = Box::new(move |disposition: MessageDisposition| {
                 Box::pin(async move {
-                    original_commit(response).await?;
+                    original_commit(disposition).await?;
 
                     // Update the pending marker to the final processed value
                     if let Err(e) = db.insert(&key_clone, processed_val) {
@@ -262,7 +263,7 @@ impl MessageConsumer for DeduplicationConsumer {
 mod tests {
     use super::*;
     use crate::endpoints::memory::MemoryConsumer;
-    use crate::models::{DeduplicationMiddleware, MemoryConfig};
+    use crate::models::DeduplicationMiddleware;
     use crate::CanonicalMessage;
     use tempfile::tempdir;
 
@@ -276,11 +277,7 @@ mod tests {
             ttl_seconds: 60,
         };
 
-        let mem_cfg = MemoryConfig {
-            topic: "dedup_topic".to_string(),
-            capacity: Some(10),
-        };
-        let mem_consumer = MemoryConsumer::new(&mem_cfg).unwrap();
+        let mem_consumer = MemoryConsumer::new_local("dedup_topic", 10);
         let channel = mem_consumer.channel();
 
         // 1. Send a message
@@ -301,11 +298,11 @@ mod tests {
         // First receive: Should be msg1 (ID 100)
         let rec1 = dedup_consumer.receive().await.unwrap();
         assert_eq!(rec1.message.message_id, 100);
-        let _ = (rec1.commit)(None).await;
+        let _ = (rec1.commit)(crate::traits::MessageDisposition::Ack).await;
 
         // Second receive: Should be msg3 (ID 101). msg2 (ID 100) is skipped internally.
         let rec2 = dedup_consumer.receive().await.unwrap();
         assert_eq!(rec2.message.message_id, 101);
-        let _ = (rec2.commit)(None).await;
+        let _ = (rec2.commit)(crate::traits::MessageDisposition::Ack).await;
     }
 }

@@ -165,7 +165,7 @@ mod tests {
         assert_eq!(output_msgs.len(), 1);
         assert_eq!(output_msgs[0].payload.to_vec(), b"processed_test_data");
 
-        let _ = (received.commit)(None).await;
+        let _ = (received.commit)(crate::traits::MessageDisposition::Ack).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]

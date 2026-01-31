@@ -1,11 +1,11 @@
 #![allow(dead_code)]
 
-use super::common::{
+use mq_bridge::endpoints::amqp::{AmqpConsumer, AmqpPublisher};
+use mq_bridge::test_utils::{
     add_performance_result, run_chaos_pipeline_test, run_direct_perf_test,
     run_performance_pipeline_test, run_pipeline_test, run_test_with_docker,
     run_test_with_docker_controller, setup_logging, PERF_TEST_MESSAGE_COUNT,
 };
-use mq_bridge::endpoints::amqp::{AmqpConsumer, AmqpPublisher};
 use std::sync::Arc;
 
 const CONFIG_YAML: &str = r#"
@@ -84,10 +84,18 @@ pub async fn test_amqp_performance_direct() {
 
         let result = run_direct_perf_test(
             "AMQP",
-            || async { Arc::new(AmqpPublisher::new(&config, queue).await.unwrap()) },
             || async {
+                let mut pub_config = config.clone();
+                pub_config.queue = Some(queue.to_string());
+                Arc::new(AmqpPublisher::new(&pub_config).await.unwrap())
+            },
+            || async {
+                let mut endpoint = config.clone();
+                endpoint.queue = Some(queue.to_string());
+                endpoint.subscribe_mode = false;
+
                 Arc::new(tokio::sync::Mutex::new(
-                    AmqpConsumer::new(&config, queue).await.unwrap(),
+                    AmqpConsumer::new(&endpoint).await.unwrap(),
                 ))
             },
         )

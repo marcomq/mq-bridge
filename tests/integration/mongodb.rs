@@ -1,14 +1,14 @@
 #![allow(dead_code)]
 use std::sync::Arc;
 
-use crate::integration::common::PERF_TEST_MESSAGE_COUNT;
+use mq_bridge::test_utils::PERF_TEST_MESSAGE_COUNT;
 
-use super::common::{
+use mq_bridge::endpoints::mongodb::{MongoDbConsumer, MongoDbPublisher};
+use mq_bridge::test_utils::{
     add_performance_result, run_chaos_pipeline_test, run_direct_perf_test,
     run_performance_pipeline_test, run_pipeline_test, run_test_with_docker,
     run_test_with_docker_controller, setup_logging,
 };
-use mq_bridge::endpoints::mongodb::{MongoDbConsumer, MongoDbPublisher};
 const CONFIG_YAML: &str = r#"
 routes:
   memory_to_mongodb:
@@ -126,17 +126,15 @@ async fn run_mongodb_direct_perf_test_impl(
         let result = run_direct_perf_test(
             &test_name,
             || async {
-                Arc::new(
-                    MongoDbPublisher::new(&config, &collection_name)
-                        .await
-                        .unwrap(),
-                )
+                let mut pub_config = config.clone();
+                pub_config.collection = Some(collection_name.clone());
+                Arc::new(MongoDbPublisher::new(&pub_config).await.unwrap())
             },
             || async {
+                let mut endpoint = config.clone();
+                endpoint.collection = Some(collection_name.clone());
                 Arc::new(tokio::sync::Mutex::new(
-                    MongoDbConsumer::new(&config, &collection_name)
-                        .await
-                        .unwrap(),
+                    MongoDbConsumer::new(&endpoint).await.unwrap(),
                 ))
             },
         )

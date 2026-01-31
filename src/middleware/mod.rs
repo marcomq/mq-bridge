@@ -3,6 +3,7 @@
 //  Licensed under MIT License, see License file for more details
 //  git clone https://github.com/marcomq/mq-bridge
 
+use crate::extensions::get_middleware_factory;
 use crate::models::{Endpoint, Middleware};
 use crate::traits::{MessageConsumer, MessagePublisher};
 use anyhow::Result;
@@ -17,6 +18,7 @@ mod metrics;
 #[cfg(feature = "panic")]
 mod random_panic;
 mod retry;
+mod weak_join;
 
 #[cfg(feature = "dedup")]
 use deduplication::DeduplicationConsumer;
@@ -27,6 +29,7 @@ use metrics::{MetricsConsumer, MetricsPublisher};
 #[cfg(feature = "panic")]
 use random_panic::{RandomPanicConsumer, RandomPanicPublisher};
 use retry::RetryPublisher;
+use weak_join::WeakJoinConsumer;
 
 /// Wraps a `MessageConsumer` with the middlewares specified in the endpoint configuration.
 ///
@@ -47,13 +50,24 @@ pub async fn apply_middlewares_to_consumer(
             Middleware::Metrics(cfg) => {
                 Box::new(MetricsConsumer::new(consumer, cfg, route_name, "input"))
             }
-            Middleware::Dlq(_) => consumer, // DLQ is a publisher-only middleware
-            Middleware::Retry(_) => consumer, // Retry is currently publisher-only
-            Middleware::CommitConcurrency(_) => consumer, // Configuration only, read by Route
+            Middleware::Dlq(_) => {
+                tracing::warn!("Dlq middleware is ignored on consumers (input endpoints). It is currently publisher-only.");
+                consumer
+            }
+            Middleware::Retry(_) => {
+                tracing::warn!("Retry middleware is ignored on consumers (input endpoints). It is currently publisher-only.");
+                consumer
+            }
             Middleware::Delay(cfg) => Box::new(DelayConsumer::new(consumer, cfg)),
             #[cfg(feature = "panic")]
             Middleware::RandomPanic(cfg) => Box::new(RandomPanicConsumer::new(consumer, cfg)),
-            Middleware::Custom(factory) => factory.apply_consumer(consumer, route_name).await?,
+            Middleware::WeakJoin(cfg) => Box::new(WeakJoinConsumer::new(consumer, cfg)),
+            Middleware::Custom { name, config } => {
+                let factory = get_middleware_factory(name).ok_or_else(|| {
+                    anyhow::anyhow!("Custom middleware factory '{}' not found", name)
+                })?;
+                factory.apply_consumer(consumer, route_name, config).await?
+            }
             #[allow(unreachable_patterns)]
             _ => {
                 return Err(anyhow::anyhow!(
@@ -84,16 +98,22 @@ pub async fn apply_middlewares_to_publisher(
             }
             // This middleware is consumer-only
             #[cfg(feature = "dedup")]
-            Middleware::Deduplication(_) => publisher,
-            Middleware::CommitConcurrency(_) => {
-                tracing::warn!("CommitConcurrency middleware is ignored on publishers (output endpoints). It should be configured on the input endpoint.");
+            Middleware::Deduplication(_) => {
+                tracing::warn!("Deduplication middleware is ignored on publishers (output endpoints). It should be configured on the input endpoint.");
                 publisher
             }
             Middleware::Retry(cfg) => Box::new(RetryPublisher::new(publisher, cfg.clone())),
             Middleware::Delay(cfg) => Box::new(DelayPublisher::new(publisher, cfg)),
             #[cfg(feature = "panic")]
             Middleware::RandomPanic(cfg) => Box::new(RandomPanicPublisher::new(publisher, cfg)),
-            Middleware::Custom(factory) => factory.apply_publisher(publisher, route_name).await?,
+            Middleware::Custom { name, config } => {
+                let factory = get_middleware_factory(name).ok_or_else(|| {
+                    anyhow::anyhow!("Custom middleware factory '{}' not found", name)
+                })?;
+                factory
+                    .apply_publisher(publisher, route_name, config)
+                    .await?
+            }
             #[allow(unreachable_patterns)]
             _ => {
                 return Err(anyhow::anyhow!(

@@ -2,7 +2,6 @@
 
 [![Crates.io](https://img.shields.io/crates/v/mq-bridge.svg)](https://crates.io/crates/mq-bridge)
 [![Docs.rs](https://docs.rs/mq-bridge/badge.svg)](https://docs.rs/mq-bridge)
-[![CI](https://github.com/marcomq/mq-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/marcomq/mq-bridge/actions)
 [![Benchmark](https://github.com/marcomq/mq-bridge/actions/workflows/benchmark.yml/badge.svg)](https://marcomq.github.io/mq-bridge/dev/bench/)
 ![Linux](https://img.shields.io/badge/Linux-supported-green?logo=linux)
 ![Windows](https://img.shields.io/badge/Windows-supported-green?logo=windows)
@@ -171,21 +170,21 @@ let typed_handler = TypeHandler::new()
 You can define and run routes directly in Rust code.
 
 ```rust
-use mq_bridge::models::{Endpoint, CanonicalMessage, Route};
-use mq_bridge::Handled;
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
-use std::time::Duration;
-use tokio::time::timeout;
+use mq_bridge::{models::Endpoint, stop_route, CanonicalMessage, Handled, Route};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
 #[tokio::main]
 async fn main() {
     // Define a route from one in-memory channel to another
-    
-    // 1. Create boolean that is changed in handler
+
+    // 1. Create a boolean that is changed in the handler
     let success = Arc::new(AtomicBool::new(false));
     let success_clone = success.clone();
 
-    // 2. Define Handler
+    // 2. Define the Handler
     let handler = move |mut msg: CanonicalMessage| {
         success_clone.store(true, Ordering::SeqCst);
         msg.set_payload_str(format!("modified {}", msg.get_payload_str()));
@@ -194,8 +193,7 @@ async fn main() {
     // 3. Define Route
     let input = Endpoint::new_memory("route_in", 200);
     let output = Endpoint::new_memory("route_out", 200);
-    let route = Route::new(input, output)
-        .with_handler(handler);
+    let route = Route::new(input, output).with_handler(handler);
 
     // 4. Run (deploys the route in the background)
     route.deploy("test_route").await.unwrap();
@@ -213,7 +211,7 @@ async fn main() {
     assert_eq!(received.message.get_payload_str(), "modified hello");
     assert!(success.load(Ordering::SeqCst));
 
-    Route::stop("test_route").await;
+    stop_route("test_route").await;
 }
 ```
 
@@ -235,20 +233,21 @@ The recommended approach for request-response is to use the dedicated `response`
 
 This model inherently solves the correlation problem. The response is part of the same execution context as the request, so there's no risk of mixing up responses between different concurrent requests.
 
-#### Example: HTTP API Gateway
+#### Example: MongoDB Request-Response
 
-Consider a route that exposes an HTTP endpoint. For each request, it executes a handler to produce a result and returns it to the client.
+Consider a scenario where a service writes a request document to MongoDB and waits for a reply. This library picks up the document, processes it via a handler, and writes the result back to a reply collection.
 
 **YAML Configuration (`mq-bridge.yaml`):**
 ```yaml
-api_gateway:
-  concurrency: 10 # Handle up to 10 requests concurrently
+mongo_responder:
   input:
-    http:
-      url: "0.0.0.0:8080"
+    mongodb:
+      url: "mongodb://localhost:27017"
+      database: "app_db"
+      collection: "requests"
   output:
-    # The 'response' endpoint sends the processed message back to the HTTP client.
-    # A handler must be attached programmatically to generate the response.
+    # The 'response' endpoint sends the processed message back to the 'requests_replies' collection
+    # (or whatever reply_to was set to by the sender).
     response: {}
 ```
 

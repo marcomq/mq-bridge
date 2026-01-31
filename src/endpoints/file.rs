@@ -3,9 +3,10 @@
 //  Licensed under MIT License, see License file for more details
 //  git clone https://github.com/marcomq/mq-bridge
 use crate::canonical_message::tracing_support::LazyMessageIds;
+use crate::models::FileConfig;
 use crate::traits::{
-    into_batch_commit_func, CommitFunc, ConsumerError, MessageConsumer, MessagePublisher,
-    PublisherError, ReceivedBatch, SentBatch,
+    into_batch_commit_func, BatchCommitFunc, CommitFunc, ConsumerError, MessageConsumer,
+    MessagePublisher, PublisherError, ReceivedBatch, SentBatch,
 };
 use crate::CanonicalMessage;
 use anyhow::Context;
@@ -27,8 +28,8 @@ pub struct FilePublisher {
 }
 
 impl FilePublisher {
-    pub async fn new(path_str: &str) -> anyhow::Result<Self> {
-        let path = Path::new(&path_str);
+    pub async fn new(config: &FileConfig) -> anyhow::Result<Self> {
+        let path = Path::new(&config.path);
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await.with_context(|| {
                 format!("Failed to create parent directory for file: {:?}", parent)
@@ -40,12 +41,14 @@ impl FilePublisher {
             .append(true)
             .open(&path)
             .await
-            .with_context(|| format!("Failed to open or create file for writing: {}", path_str))?;
+            .with_context(|| {
+                format!("Failed to open or create file for writing: {}", config.path)
+            })?;
 
-        info!(path = %path_str, "File sink opened for appending");
+        info!(path = %config.path, "File sink opened for appending");
         Ok(Self {
             writer: Arc::new(Mutex::new(BufWriter::new(file))),
-            path: path_str.to_string(),
+            path: config.path.clone(),
         })
     }
 }
@@ -120,85 +123,6 @@ impl MessagePublisher for FilePublisher {
     }
 }
 
-/// A subscriber that reads messages from a file, one line at a time.
-/// It keeps the file open and tails it.
-pub struct FileSubscriber {
-    path: String,
-    reader: BufReader<File>,
-}
-
-impl FileSubscriber {
-    pub async fn new(path: &str) -> anyhow::Result<Self> {
-        let file = OpenOptions::new()
-            .read(true)
-            .open(path)
-            .await
-            .with_context(|| format!("Failed to open file for reading: {}", path))?;
-
-        info!(path = %path, "File subscriber opened");
-        Ok(Self {
-            path: path.to_string(),
-            reader: BufReader::new(file),
-        })
-    }
-}
-
-#[async_trait]
-impl MessageConsumer for FileSubscriber {
-    #[instrument(skip(self), fields(path = %self.path), err(level = "debug"))]
-    async fn receive_batch(&mut self, max_messages: usize) -> Result<ReceivedBatch, ConsumerError> {
-        let mut messages = Vec::new();
-
-        // 1. Wait for the first message
-        loop {
-            let mut buffer = Vec::new();
-            let bytes_read = self
-                .reader
-                .read_until(b'\n', &mut buffer)
-                .await
-                .context("Failed to read from file source")?;
-
-            if bytes_read > 0 {
-                if buffer.ends_with(b"\n") {
-                    buffer.pop();
-                }
-                messages.push(parse_message(buffer));
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        }
-
-        // 2. Try to read more messages to fill the batch
-        while messages.len() < max_messages {
-            let mut buffer = Vec::new();
-            let bytes_read = self
-                .reader
-                .read_until(b'\n', &mut buffer)
-                .await
-                .context("Failed to read from file source")?;
-
-            if bytes_read == 0 {
-                break;
-            }
-            if buffer.ends_with(b"\n") {
-                buffer.pop();
-            }
-            messages.push(parse_message(buffer));
-        }
-
-        let commit: CommitFunc = Box::new(move |_| Box::pin(async move { Ok(()) }));
-
-        Ok(ReceivedBatch {
-            messages,
-            commit: into_batch_commit_func(commit),
-        })
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-}
-
 struct FileConsumerState {
     in_flight_lines: usize,
     next_batch_seq: u64,
@@ -206,24 +130,43 @@ struct FileConsumerState {
     pending_commits: std::collections::BTreeMap<u64, usize>,
 }
 
+enum ConsumerMode {
+    Consume(Arc<Mutex<FileConsumerState>>),
+    Subscribe(BufReader<File>),
+}
+
 /// A consumer that reads messages from a file and removes them upon commit.
 pub struct FileConsumer {
     path: String,
-    state: Arc<Mutex<FileConsumerState>>,
+    mode: ConsumerMode,
 }
 
 impl FileConsumer {
-    pub async fn new(path: &str) -> anyhow::Result<Self> {
-        info!(path = %path, "File consumer opened");
-        Ok(Self {
-            path: path.to_string(),
-            state: Arc::new(Mutex::new(FileConsumerState {
-                in_flight_lines: 0,
-                next_batch_seq: 0,
-                next_commit_seq: 0,
-                pending_commits: std::collections::BTreeMap::new(),
-            })),
-        })
+    pub async fn new(config: &FileConfig) -> anyhow::Result<Self> {
+        if config.subscribe_mode {
+            let file = OpenOptions::new()
+                .read(true)
+                .open(&config.path)
+                .await
+                .with_context(|| format!("Failed to open file for reading: {}", config.path))?;
+
+            info!(path = %config.path, "File consumer opened in subscribe (tail) mode");
+            Ok(Self {
+                path: config.path.clone(),
+                mode: ConsumerMode::Subscribe(BufReader::new(file)),
+            })
+        } else {
+            info!(path = %config.path, "File consumer opened in consume (delete) mode");
+            Ok(Self {
+                path: config.path.clone(),
+                mode: ConsumerMode::Consume(Arc::new(Mutex::new(FileConsumerState {
+                    in_flight_lines: 0,
+                    next_batch_seq: 0,
+                    next_commit_seq: 0,
+                    pending_commits: std::collections::BTreeMap::new(),
+                }))),
+            })
+        }
     }
 }
 
@@ -231,16 +174,82 @@ impl FileConsumer {
 impl MessageConsumer for FileConsumer {
     #[instrument(skip(self), fields(path = %self.path), err(level = "debug"))]
     async fn receive_batch(&mut self, max_messages: usize) -> Result<ReceivedBatch, ConsumerError> {
+        match &mut self.mode {
+            ConsumerMode::Subscribe(reader) => {
+                let mut messages = Vec::new();
+
+                // 1. Wait for the first message
+                loop {
+                    let mut buffer = Vec::new();
+                    let bytes_read = reader
+                        .read_until(b'\n', &mut buffer)
+                        .await
+                        .context("Failed to read from file source")?;
+
+                    if bytes_read > 0 {
+                        if buffer.ends_with(b"\n") {
+                            buffer.pop();
+                        }
+                        messages.push(parse_message(buffer));
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+
+                // 2. Try to read more messages to fill the batch
+                while messages.len() < max_messages {
+                    let mut buffer = Vec::new();
+                    let bytes_read = reader
+                        .read_until(b'\n', &mut buffer)
+                        .await
+                        .context("Failed to read from file source")?;
+
+                    if bytes_read == 0 {
+                        break;
+                    }
+                    if buffer.ends_with(b"\n") {
+                        buffer.pop();
+                    }
+                    messages.push(parse_message(buffer));
+                }
+
+                let commit: CommitFunc = Box::new(move |_| Box::pin(async move { Ok(()) }));
+
+                Ok(ReceivedBatch {
+                    messages,
+                    commit: into_batch_commit_func(commit),
+                })
+            }
+            ConsumerMode::Consume(state) => {
+                let path = self.path.clone();
+                let state = state.clone();
+                Self::receive_batch_consume(path, state, max_messages).await
+            }
+        }
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+impl FileConsumer {
+    async fn receive_batch_consume(
+        // Changed from &self to associated function
+        path: String,
+        state: Arc<Mutex<FileConsumerState>>,
+        max_messages: usize,
+    ) -> Result<ReceivedBatch, ConsumerError> {
         let mut messages = Vec::new();
         let mut lines_read = 0;
         let batch_seq;
 
         // 1. Wait for the first message
         loop {
-            let mut state = self.state.lock().await;
+            let mut state = state.lock().await;
             let file = OpenOptions::new()
                 .read(true)
-                .open(&self.path)
+                .open(&path)
                 .await
                 .context("Failed to open file for reading")?;
             let mut reader = BufReader::new(file);
@@ -304,95 +313,99 @@ impl MessageConsumer for FileConsumer {
         }
 
         // In Consume mode, we remove the processed lines from the file.
-        let path = self.path.clone();
-        let state = self.state.clone();
+        let commit_path = path.clone();
         let lines_to_remove = lines_read;
 
-        let commit: CommitFunc = Box::new(move |_| {
-            Box::pin(async move {
-                let mut state = state.lock().await;
-
-                state.pending_commits.insert(batch_seq, lines_to_remove);
-
-                // Check if we can process any commits in order
-                let mut total_lines_to_remove = 0;
-                let mut batches_to_process: u64 = 0;
-                let mut current_seq = state.next_commit_seq;
-
-                while let Some(&lines) = state.pending_commits.get(&current_seq) {
-                    total_lines_to_remove += lines;
-                    batches_to_process += 1;
-                    current_seq += 1;
-                }
-
-                if batches_to_process == 0 {
-                    return Ok(());
-                }
-
-                // Read the whole file
-                let file = File::open(&path)
-                    .await
-                    .context("Failed to read file for commit")?;
-                let mut reader = BufReader::new(file);
-
-                let temp_path = format!("{}.tmp", path);
-                let result = async {
-                    let temp_file = File::create(&temp_path)
-                        .await
-                        .context("Failed to create temp file")?;
-                    let mut writer = BufWriter::new(temp_file);
-
-                    let mut lines_skipped = 0;
-
-                    // Skip the first N lines (where N is the batch size we just processed)
-                    // Note: This simple implementation assumes ordered commits.
-                    while lines_skipped < total_lines_to_remove {
-                        let mut skip_buf = Vec::new();
-                        if reader.read_until(b'\n', &mut skip_buf).await? == 0 {
-                            break;
-                        }
-                        lines_skipped += 1;
+        let commit: BatchCommitFunc = Box::new(
+            move |dispositions: Vec<crate::traits::MessageDisposition>| {
+                Box::pin(async move {
+                    if dispositions
+                        .iter()
+                        .any(|d| matches!(d, crate::traits::MessageDisposition::Nack))
+                    {
+                        let mut state = state.lock().await;
+                        state.in_flight_lines =
+                            state.in_flight_lines.saturating_sub(lines_to_remove);
+                        return Ok(());
                     }
 
-                    // Write the rest using streaming copy
-                    io::copy(&mut reader, &mut writer).await?;
-                    writer.flush().await?;
+                    let mut state = state.lock().await;
+                    state.pending_commits.insert(batch_seq, lines_to_remove);
 
-                    // Rewrite the file
-                    fs::rename(&temp_path, &path)
+                    // Check if we can process any commits in order
+                    let mut total_lines_to_remove = 0;
+                    let mut batches_to_process: u64 = 0;
+                    let mut current_seq = state.next_commit_seq;
+
+                    while let Some(&lines) = state.pending_commits.get(&current_seq) {
+                        total_lines_to_remove += lines;
+                        batches_to_process += 1;
+                        current_seq += 1;
+                    }
+
+                    if batches_to_process == 0 {
+                        return Ok(());
+                    }
+
+                    // Read the whole file
+                    let file = File::open(&commit_path)
                         .await
-                        .context("Failed to replace file for commit")?;
+                        .context("Failed to read file for commit")?;
+                    let mut reader = BufReader::new(file);
+
+                    let temp_path = format!("{}.tmp", commit_path);
+                    let result = async {
+                        let temp_file = File::create(&temp_path)
+                            .await
+                            .context("Failed to create temp file")?;
+                        let mut writer = BufWriter::new(temp_file);
+
+                        let mut lines_skipped = 0;
+
+                        // Skip the first N lines (where N is the batch size we just processed)
+                        // Note: This simple implementation assumes ordered commits.
+                        while lines_skipped < total_lines_to_remove {
+                            let mut skip_buf = Vec::new();
+                            if reader.read_until(b'\n', &mut skip_buf).await? == 0 {
+                                break;
+                            }
+                            lines_skipped += 1;
+                        }
+
+                        // Write the rest using streaming copy
+                        io::copy(&mut reader, &mut writer).await?;
+                        writer.flush().await?;
+
+                        // Rewrite the file
+                        fs::rename(&temp_path, &commit_path)
+                            .await
+                            .context("Failed to replace file for commit")?;
+                        Ok(())
+                    }
+                    .await;
+
+                    if let Err(e) = result {
+                        let _ = fs::remove_file(&temp_path).await;
+                        return Err(e);
+                    }
+
+                    // Update state
+                    state.in_flight_lines =
+                        state.in_flight_lines.saturating_sub(total_lines_to_remove);
+                    let start_seq = state.next_commit_seq;
+                    state.next_commit_seq += batches_to_process;
+                    for i in 0..batches_to_process {
+                        state.pending_commits.remove(&(start_seq + i));
+                    }
                     Ok(())
-                }
-                .await;
-
-                if let Err(e) = result {
-                    let _ = fs::remove_file(&temp_path).await;
-                    return Err(e);
-                }
-
-                // Update state
-                state.in_flight_lines = state.in_flight_lines.saturating_sub(total_lines_to_remove);
-                let start_seq = state.next_commit_seq;
-                state.next_commit_seq += batches_to_process;
-                for i in 0..batches_to_process {
-                    state.pending_commits.remove(&(start_seq + i));
-                }
-                Ok(())
-            })
-        });
+                })
+            },
+        );
 
         if let Some(first) = messages.first() {
-            trace!(message_id = %format!("{:032x}", first.message_id), path = %self.path, "Received message from file");
+            trace!(message_id = %format!("{:032x}", first.message_id), path = %path, "Received message from file");
         }
-        Ok(ReceivedBatch {
-            messages,
-            commit: into_batch_commit_func(commit),
-        })
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
+        Ok(ReceivedBatch { messages, commit })
     }
 }
 
@@ -410,10 +423,11 @@ fn parse_message(buffer: Vec<u8>) -> CanonicalMessage {
 
 #[cfg(test)]
 mod tests {
+    use crate::models::FileConfig;
     use crate::traits::MessageConsumer;
     use crate::traits::MessagePublisher;
     use crate::{
-        endpoints::file::{FileConsumer, FilePublisher, FileSubscriber},
+        endpoints::file::{FileConsumer, FilePublisher},
         CanonicalMessage,
     };
     use serde_json::json;
@@ -427,7 +441,11 @@ mod tests {
         let file_path_str = file_path.to_str().unwrap().to_string();
 
         // 2. Create a FileSink
-        let sink = FilePublisher::new(&file_path_str).await.unwrap();
+        let config = FileConfig {
+            path: file_path_str.clone(),
+            subscribe_mode: false,
+        };
+        let sink = FilePublisher::new(&config).await.unwrap();
 
         let msg1 = CanonicalMessage::from_json(json!({"hello": "world"})).unwrap();
         let msg2 = CanonicalMessage::from_json(json!({"foo": "bar"})).unwrap();
@@ -441,19 +459,20 @@ mod tests {
         drop(sink);
 
         // 4. Create a FileConsumer to read from the same file
-        let mut source = FileSubscriber::new(&file_path_str).await.unwrap();
+        let mut source = FileConsumer::new(&config).await.unwrap();
 
         // 5. Receive the messages and verify them
         let received1 = source.receive().await.unwrap();
-        let _ = (received1.commit)(None).await; // Commit is a no-op, but we should call it
+        let _ = (received1.commit)(crate::traits::MessageDisposition::Ack).await; // Commit is a no-op, but we should call it
 
         assert_eq!(received1.message.message_id, msg1.message_id);
         assert_eq!(received1.message.payload, msg1.payload);
 
         let batch = source.receive_batch(1).await.unwrap();
         let (received_msgs, commit2) = (batch.messages, batch.commit);
+        let len = received_msgs.len();
         let received_msg2 = received_msgs.into_iter().next().unwrap();
-        let _ = commit2(None).await;
+        let _ = commit2(vec![crate::traits::MessageDisposition::Ack; len]).await;
         assert_eq!(received_msg2.message_id, msg2.message_id);
         assert_eq!(received_msg2.payload, msg2.payload);
 
@@ -472,7 +491,11 @@ mod tests {
         let nested_dir_path = dir.path().join("nested");
         let file_path = nested_dir_path.join("test.log");
 
-        let sink_result = FilePublisher::new(file_path.to_str().unwrap()).await;
+        let config = FileConfig {
+            path: file_path.to_str().unwrap().to_string(),
+            subscribe_mode: false,
+        };
+        let sink_result = FilePublisher::new(&config).await;
 
         assert!(sink_result.is_ok());
         assert!(nested_dir_path.exists());
@@ -490,14 +513,20 @@ mod tests {
             .await
             .unwrap();
 
-        let mut consumer = FileConsumer::new(&file_path_str).await.unwrap();
+        let config = FileConfig {
+            path: file_path_str,
+            subscribe_mode: false,
+        };
+        let mut consumer = FileConsumer::new(&config).await.unwrap();
 
         // Receive first message
         let received1 = consumer.receive().await.unwrap();
         assert_eq!(received1.message.payload.as_ref(), b"line1");
 
         // Commit first message (should remove line1)
-        (received1.commit)(None).await.unwrap();
+        (received1.commit)(crate::traits::MessageDisposition::Ack)
+            .await
+            .unwrap();
 
         // Verify file content
         let content = tokio::fs::read_to_string(&file_path).await.unwrap();
@@ -506,15 +535,60 @@ mod tests {
         // Receive second message
         let received2 = consumer.receive().await.unwrap();
         assert_eq!(received2.message.payload.as_ref(), b"line2");
-        (received2.commit)(None).await.unwrap();
+        (received2.commit)(crate::traits::MessageDisposition::Ack)
+            .await
+            .unwrap();
 
         // Receive third message
         let received3 = consumer.receive().await.unwrap();
         assert_eq!(received3.message.payload.as_ref(), b"line3");
-        (received3.commit)(None).await.unwrap();
+        (received3.commit)(crate::traits::MessageDisposition::Ack)
+            .await
+            .unwrap();
 
         // Verify file is empty
         let content = tokio::fs::read_to_string(&file_path).await.unwrap();
         assert_eq!(content, "");
+    }
+
+    #[tokio::test]
+    async fn test_file_consumer_nack_behavior() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("nack.log");
+        let file_path_str = file_path.to_str().unwrap().to_string();
+
+        // Write 2 lines
+        tokio::fs::write(&file_path, b"msg1\nmsg2\n").await.unwrap();
+
+        let config = FileConfig {
+            path: file_path_str.clone(),
+            subscribe_mode: false,
+        };
+        let mut consumer = FileConsumer::new(&config).await.unwrap();
+
+        // 1. Receive batch (should get msg1)
+        let batch1 = consumer.receive_batch(1).await.unwrap();
+        assert_eq!(batch1.messages.len(), 1);
+        assert_eq!(batch1.messages[0].payload.as_ref(), b"msg1");
+
+        // 2. Nack the batch
+        (batch1.commit)(vec![crate::traits::MessageDisposition::Nack])
+            .await
+            .unwrap();
+
+        // 3. Receive again - should get msg1 again because it wasn't removed
+        let batch2 = consumer.receive_batch(1).await.unwrap();
+        assert_eq!(batch2.messages.len(), 1);
+        assert_eq!(batch2.messages[0].payload.as_ref(), b"msg1");
+
+        // 4. Ack
+        (batch2.commit)(vec![crate::traits::MessageDisposition::Ack])
+            .await
+            .unwrap();
+
+        // 5. Receive next - should get msg2
+        let batch3 = consumer.receive_batch(1).await.unwrap();
+        assert_eq!(batch3.messages.len(), 1);
+        assert_eq!(batch3.messages[0].payload.as_ref(), b"msg2");
     }
 }

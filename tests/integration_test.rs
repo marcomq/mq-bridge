@@ -18,7 +18,7 @@ fn should_run(test_name: &str) -> bool {
 #[ignore = "requires docker compose, takes long time to run"] // This is a performance test, run it explicitly
 async fn test_all_performance_direct() {
     // This instance will print the summary table when it's dropped at the end of the test.
-    let _summary_printer = integration::common::PerformanceSummaryPrinter;
+    let _summary_printer = mq_bridge::test_utils::PerformanceSummaryPrinter;
 
     println!("--- Running All Direct Performance Tests ---");
     println!("Tests are run sequentially to ensure accurate measurements.");
@@ -71,7 +71,7 @@ async fn test_all_performance_direct() {
     }
     #[cfg(feature = "ibm-mq")]
     {
-        if should_run("ibm_mq") {
+        if should_run("ibm-mq") {
             println!("\n\n>>> Starting IBM MQ Direct Performance Test...");
             integration::ibm_mq::test_ibm_mq_performance_direct().await;
         }
@@ -134,7 +134,7 @@ async fn test_all_chaos() {
 
     #[cfg(feature = "ibm-mq")]
     {
-        if should_run("ibm_mq") {
+        if should_run("ibm-mq") {
             println!("\n\n>>> Starting IBM MQ Chaos Test...");
             integration::ibm_mq::test_ibm_mq_chaos().await;
         }

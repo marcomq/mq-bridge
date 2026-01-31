@@ -5,8 +5,8 @@
 use crate::canonical_message::tracing_support::LazyMessageIds;
 use crate::models::MemoryConfig;
 use crate::traits::{
-    BoxFuture, ConsumerError, MessageConsumer, MessagePublisher, PublisherError, Received,
-    ReceivedBatch, SentBatch,
+    BatchCommitFunc, BoxFuture, ConsumerError, MessageConsumer, MessageDisposition,
+    MessagePublisher, PublisherError, Received, ReceivedBatch, Sent, SentBatch,
 };
 use crate::CanonicalMessage;
 use anyhow::anyhow;
@@ -15,7 +15,8 @@ use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use std::any::Any;
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+use tokio::sync::oneshot;
 use tracing::{info, trace};
 
 /// A map to hold memory channels for the duration of the bridge setup.
@@ -92,12 +93,17 @@ impl MemoryChannel {
 pub struct MemoryResponseChannel {
     pub sender: Sender<CanonicalMessage>,
     pub receiver: Receiver<CanonicalMessage>,
+    waiters: Arc<tokio::sync::Mutex<HashMap<String, oneshot::Sender<CanonicalMessage>>>>,
 }
 
 impl MemoryResponseChannel {
     pub fn new(capacity: usize) -> Self {
         let (sender, receiver) = bounded(capacity);
-        Self { sender, receiver }
+        Self {
+            sender,
+            receiver,
+            waiters: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+        }
     }
 
     pub fn close(&self) {
@@ -117,6 +123,29 @@ impl MemoryResponseChannel {
             .recv()
             .await
             .map_err(|e| anyhow!("Error receiving response: {}", e))
+    }
+
+    pub async fn register_waiter(
+        &self,
+        correlation_id: &str,
+        sender: oneshot::Sender<CanonicalMessage>,
+    ) -> anyhow::Result<()> {
+        let mut waiters = self.waiters.lock().await;
+        if waiters.contains_key(correlation_id) {
+            return Err(anyhow!(
+                "Correlation ID {} already registered",
+                correlation_id
+            ));
+        }
+        waiters.insert(correlation_id.to_string(), sender);
+        Ok(())
+    }
+
+    pub async fn remove_waiter(
+        &self,
+        correlation_id: &str,
+    ) -> Option<oneshot::Sender<CanonicalMessage>> {
+        self.waiters.lock().await.remove(correlation_id)
     }
 }
 
@@ -149,6 +178,8 @@ pub fn get_or_create_response_channel(topic: &str) -> MemoryResponseChannel {
 pub struct MemoryPublisher {
     topic: String,
     sender: Sender<Vec<CanonicalMessage>>,
+    request_reply: bool,
+    request_timeout: std::time::Duration,
 }
 
 impl MemoryPublisher {
@@ -157,13 +188,22 @@ impl MemoryPublisher {
         Ok(Self {
             topic: config.topic.clone(),
             sender: channel.sender.clone(),
+            request_reply: config.request_reply,
+            request_timeout: std::time::Duration::from_millis(
+                config.request_timeout_ms.unwrap_or(30000),
+            ),
         })
     }
 
+    /// Creates a new local memory publisher.
+    ///
+    /// This method creates a new in-memory publisher with the specified topic and capacity.
+    /// The publisher will send messages to the in-memory channel for the specified topic.
     pub fn new_local(topic: &str, capacity: usize) -> Self {
         Self::new(&MemoryConfig {
             topic: topic.to_string(),
             capacity: Some(capacity),
+            ..Default::default()
         })
         .expect("Failed to create local memory publisher")
     }
@@ -174,12 +214,64 @@ impl MemoryPublisher {
         get_or_create_channel(&MemoryConfig {
             topic: self.topic.clone(),
             capacity: None,
+            ..Default::default()
         })
     }
 }
 
 #[async_trait]
 impl MessagePublisher for MemoryPublisher {
+    async fn send(&self, mut message: CanonicalMessage) -> Result<Sent, PublisherError> {
+        if self.request_reply {
+            let cid = message
+                .metadata
+                .entry("correlation_id".to_string())
+                .or_insert_with(fast_uuid_v7::gen_id_string)
+                .clone();
+
+            let (tx, rx) = oneshot::channel();
+
+            // Register waiter before sending
+            let response_channel = get_or_create_response_channel(&self.topic);
+            response_channel
+                .register_waiter(&cid, tx)
+                .await
+                .map_err(PublisherError::NonRetryable)?;
+
+            // Send the message
+            if let Err(e) = self.send_batch(vec![message]).await {
+                response_channel.remove_waiter(&cid).await;
+                return Err(e);
+            }
+
+            // Wait for the response
+            let response = match tokio::time::timeout(self.request_timeout, rx).await {
+                Ok(Ok(resp)) => resp,
+                Ok(Err(e)) => {
+                    response_channel.remove_waiter(&cid).await;
+                    return Err(anyhow!(
+                        "Failed to receive response for correlation_id {}: {}",
+                        cid,
+                        e
+                    )
+                    .into());
+                }
+                Err(_) => {
+                    response_channel.remove_waiter(&cid).await;
+                    return Err(PublisherError::Retryable(anyhow!(
+                        "Request timed out waiting for response for correlation_id {}",
+                        cid
+                    )));
+                }
+            };
+
+            Ok(Sent::Response(response))
+        } else {
+            self.send_batch(vec![message]).await?;
+            Ok(Sent::Ack)
+        }
+    }
+
     async fn send_batch(
         &self,
         messages: Vec<CanonicalMessage>,
@@ -208,6 +300,7 @@ pub struct MemoryConsumer {
     receiver: Receiver<Vec<CanonicalMessage>>,
     // Internal buffer to hold messages from a received batch.
     buffer: Vec<CanonicalMessage>,
+    enable_nack: bool,
 }
 
 impl MemoryConsumer {
@@ -217,6 +310,7 @@ impl MemoryConsumer {
             topic: config.topic.clone(),
             receiver: channel.receiver.clone(),
             buffer: Vec::new(),
+            enable_nack: config.enable_nack,
         })
     }
 
@@ -224,6 +318,7 @@ impl MemoryConsumer {
         Self::new(&MemoryConfig {
             topic: topic.to_string(),
             capacity: Some(capacity),
+            ..Default::default()
         })
         .expect("Failed to create local memory consumer")
     }
@@ -232,13 +327,14 @@ impl MemoryConsumer {
         get_or_create_channel(&MemoryConfig {
             topic: self.topic.clone(),
             capacity: None,
+            ..Default::default()
         })
     }
-}
 
-#[async_trait]
-impl MessageConsumer for MemoryConsumer {
-    async fn receive_batch(&mut self, max_messages: usize) -> Result<ReceivedBatch, ConsumerError> {
+    async fn get_buffered_msgs(
+        &mut self,
+        max_messages: usize,
+    ) -> Result<Vec<CanonicalMessage>, ConsumerError> {
         // If the internal buffer has messages, return them first.
         if self.buffer.is_empty() {
             // Buffer is empty. Wait for a new batch from the channel.
@@ -258,7 +354,32 @@ impl MessageConsumer for MemoryConsumer {
         // index and returns the part after the index, leaving the first part.
         let mut messages = self.buffer.split_off(split_at);
         messages.reverse(); // Reverse back to original order.
+        Ok(messages)
+    }
+}
 
+#[async_trait]
+impl MessageConsumer for MemoryConsumer {
+    async fn receive_batch(&mut self, max_messages: usize) -> Result<ReceivedBatch, ConsumerError> {
+        // If the internal buffer has messages, return them first.
+
+        let mut messages = self.get_buffered_msgs(max_messages).await?;
+        while messages.len() < max_messages / 2 {
+            if let Ok(mut next_batch) = self.receiver.try_recv() {
+                if next_batch.len() + messages.len() > max_messages {
+                    let needed = max_messages - messages.len();
+                    let mut to_buffer = next_batch.split_off(needed);
+                    messages.append(&mut next_batch);
+                    self.buffer.append(&mut to_buffer);
+                    self.buffer.reverse();
+                    break;
+                } else {
+                    messages.append(&mut next_batch);
+                }
+            } else {
+                break;
+            }
+        }
         trace!(count = messages.len(), topic = %self.topic, message_ids = ?LazyMessageIds(&messages), "Received batch of memory messages");
         if messages.is_empty() {
             return Ok(ReceivedBatch {
@@ -270,18 +391,80 @@ impl MessageConsumer for MemoryConsumer {
         }
 
         let topic = self.topic.clone();
-        let commit = Box::new(move |responses: Option<Vec<CanonicalMessage>>| {
+        let expected_count = messages.len();
+        let correlation_ids: Vec<Option<String>> = messages
+            .iter()
+            .map(|m| m.metadata.get("correlation_id").cloned())
+            .collect();
+
+        // This clone is necessary to support NACKs. The commit function needs access
+        // to the messages to re-queue them, but the `ReceivedBatch` must also return
+        // ownership of the messages to the caller. Without changing the core traits,
+        // cloning is the only way to satisfy both owners.
+        let messages_for_retry = if self.enable_nack {
+            Some(messages.clone())
+        } else {
+            None
+        };
+        let commit = Box::new(move |dispositions: Vec<MessageDisposition>| {
             Box::pin(async move {
-                if let Some(resps) = responses {
-                    let channel = get_or_create_response_channel(&topic);
-                    for resp in resps {
-                        // If the receiver is dropped, sending will fail. We can ignore it.
-                        let _ = channel.sender.send(resp).await;
+                if dispositions.len() != expected_count {
+                    return Err(anyhow::anyhow!(
+                        "Memory batch commit received mismatched disposition count: expected {}, got {}",
+                        expected_count,
+                        dispositions.len()
+                    ));
+                }
+                let response_channel = get_or_create_response_channel(&topic);
+                let mut to_requeue = Vec::new();
+
+                for (i, disposition) in dispositions.into_iter().enumerate() {
+                    match disposition {
+                        MessageDisposition::Reply(mut resp) => {
+                            if !resp.metadata.contains_key("correlation_id") {
+                                if let Some(Some(cid)) = correlation_ids.get(i) {
+                                    resp.metadata
+                                        .insert("correlation_id".to_string(), cid.clone());
+                                }
+                            }
+
+                            // If the receiver is dropped, sending will fail. We can ignore it.
+                            let mut handled = false;
+                            if let Some(cid) = resp.metadata.get("correlation_id") {
+                                if let Some(tx) = response_channel.remove_waiter(cid).await {
+                                    let _ = tx.send(resp.clone());
+                                    handled = true;
+                                }
+                            }
+                            if !handled {
+                                let _ = response_channel.sender.send(resp).await;
+                            }
+                        }
+                        MessageDisposition::Nack => {
+                            // Re-queue the message if Nacked
+                            if let Some(msgs) = &messages_for_retry {
+                                if let Some(msg) = msgs.get(i) {
+                                    to_requeue.push(msg.clone());
+                                }
+                            }
+                        }
+                        MessageDisposition::Ack => {}
+                    }
+                }
+
+                if !to_requeue.is_empty() {
+                    let main_channel = get_or_create_channel(&MemoryConfig {
+                        topic: topic.to_string(),
+                        capacity: None,
+                        ..Default::default()
+                    });
+                    if main_channel.sender.send(to_requeue).await.is_err() {
+                        tracing::error!("Failed to re-queue NACKed messages to memory channel as it was closed.");
                     }
                 }
                 Ok(())
             }) as BoxFuture<'static, anyhow::Result<()>>
-        });
+        }) as BatchCommitFunc;
         Ok(ReceivedBatch { messages, commit })
     }
 
@@ -321,11 +504,11 @@ impl MessageConsumer for MemorySubscriber {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{Endpoint, EndpointType, ResponseConfig, Route};
+    use crate::models::{Endpoint, Route};
     use crate::traits::Handled;
     use crate::CanonicalMessage;
     use serde_json::json;
-    use tokio::time::{sleep, timeout};
+    use tokio::time::sleep;
 
     #[tokio::test]
     async fn test_memory_channel_integration() {
@@ -340,7 +523,7 @@ mod tests {
         sleep(std::time::Duration::from_millis(10)).await;
         // Receive it with the consumer
         let received = consumer.receive().await.unwrap();
-        let _ = (received.commit)(None).await;
+        let _ = (received.commit)(MessageDisposition::Ack).await;
         assert_eq!(received.message.payload, msg.payload);
         assert_eq!(consumer.channel().len(), 0);
     }
@@ -366,17 +549,17 @@ mod tests {
 
         // 5. Receive the messages and verify them
         let received1 = consumer.receive().await.unwrap();
-        let _ = (received1.commit)(None).await;
+        let _ = (received1.commit)(MessageDisposition::Ack).await;
         assert_eq!(received1.message.payload, msg1.payload);
 
         let batch2 = consumer.receive_batch(1).await.unwrap();
         let (received_msg2, commit2) = (batch2.messages, batch2.commit);
-        let _ = commit2(None).await;
+        let _ = commit2(vec![MessageDisposition::Ack; received_msg2.len()]).await;
         assert_eq!(received_msg2.len(), 1);
         assert_eq!(received_msg2.first().unwrap().payload, msg2.payload);
         let batch3 = consumer.receive_batch(2).await.unwrap();
         let (received_msg3, commit3) = (batch3.messages, batch3.commit);
-        let _ = commit3(None).await;
+        let _ = commit3(vec![MessageDisposition::Ack; received_msg3.len()]).await;
         assert_eq!(received_msg3.first().unwrap().payload, msg3.payload);
 
         // 6. Verify that the channel is now empty
@@ -392,6 +575,7 @@ mod tests {
         let cfg = MemoryConfig {
             topic: "base_topic".to_string(),
             capacity: Some(10),
+            ..Default::default()
         };
         let subscriber_id = "sub1";
         let mut subscriber = MemorySubscriber::new(&cfg, subscriber_id).unwrap();
@@ -401,6 +585,7 @@ mod tests {
         let pub_cfg = MemoryConfig {
             topic: format!("base_topic-{}", subscriber_id),
             capacity: Some(10),
+            ..Default::default()
         };
         let publisher = MemoryPublisher::new(&pub_cfg).unwrap();
 
@@ -412,49 +597,79 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn test_memory_request_response_flow() {
-        // 1. Define a route from a memory input to a `response` output.
-        let topic = "mem_req_res_topic";
-        let input_endpoint = Endpoint::new_memory(topic, 10);
-        let output_endpoint = Endpoint::new(EndpointType::Response(ResponseConfig::default()));
-
-        // 2. The route needs a handler to process the request and create a response message.
+    async fn test_memory_request_reply_mode() {
+        let topic = format!("mem_rr_topic_{}", fast_uuid_v7::gen_id_str());
+        let input_endpoint = Endpoint::new_memory(&topic, 10);
+        let output_endpoint = Endpoint::new_response();
         let handler = |mut msg: CanonicalMessage| async move {
             let request_payload = msg.get_payload_str();
-            let response_payload = format!("response to {}", request_payload);
+            let response_payload = format!("reply to {}", request_payload);
             msg.set_payload_str(response_payload);
             Ok(Handled::Publish(msg))
         };
 
         let route = Route::new(input_endpoint, output_endpoint).with_handler(handler);
+        route.deploy("mem_rr_test").await.unwrap();
 
-        // 3. Get the input channel for the route's memory endpoint.
-        let input_channel = route.input.channel().unwrap();
-
-        // 4. Get the *response* channel for the route's memory endpoint topic.
-        let response_channel = get_or_create_response_channel(topic);
-
-        // 5. Run the route in the background.
-        route.deploy("mem_req_res_test").await.unwrap();
-
-        // 6. Send a request message to the input channel.
-        let request_message = CanonicalMessage::from("my request");
-        input_channel.send_message(request_message).await.unwrap();
-
-        // 7. Wait for a response message on the response channel.
-        let response_message = timeout(
-            std::time::Duration::from_secs(2),
-            response_channel.wait_for_response(),
-        )
-        .await
-        .expect("Timed out waiting for response")
+        // Create a publisher with request_reply = true
+        let publisher = MemoryPublisher::new(&MemoryConfig {
+            topic: topic.clone(),
+            capacity: Some(10),
+            request_reply: true,
+            request_timeout_ms: Some(2000),
+            ..Default::default()
+        })
         .unwrap();
 
-        // 8. Assert the response is correct.
-        assert_eq!(response_message.get_payload_str(), "response to my request");
+        let result = publisher.send("direct request".into()).await.unwrap();
 
-        // 9. Clean up (stop the route).
-        input_channel.close();
-        Route::stop("mem_req_res_test").await;
+        if let Sent::Response(response_msg) = result {
+            assert_eq!(response_msg.get_payload_str(), "reply to direct request");
+        } else {
+            panic!("Expected Sent::Response, got {:?}", result);
+        }
+
+        // Clean up
+        Route::stop("mem_rr_test").await;
+    }
+
+    #[tokio::test]
+    async fn test_memory_nack_requeue() {
+        let topic = format!("test_nack_requeue_{}", fast_uuid_v7::gen_id_str());
+        let config = MemoryConfig {
+            topic: topic.clone(),
+            capacity: Some(10),
+            enable_nack: true,
+            ..Default::default()
+        };
+        let mut consumer = MemoryConsumer::new(&config).unwrap();
+        let publisher = MemoryPublisher::new_local(&topic, 10);
+
+        let msg = CanonicalMessage::from("to_be_nacked");
+        publisher.send(msg).await.unwrap();
+
+        // 1. Receive and Nack
+        let received1 = consumer.receive().await.unwrap();
+        assert_eq!(received1.message.get_payload_str(), "to_be_nacked");
+        (received1.commit)(crate::traits::MessageDisposition::Nack)
+            .await
+            .unwrap();
+
+        // 2. Receive again (should be re-queued)
+        let received2 = tokio::time::timeout(std::time::Duration::from_secs(1), consumer.receive())
+            .await
+            .expect("Timed out waiting for re-queued message")
+            .unwrap();
+        assert_eq!(received2.message.get_payload_str(), "to_be_nacked");
+
+        // 3. Ack
+        (received2.commit)(crate::traits::MessageDisposition::Ack)
+            .await
+            .unwrap();
+
+        // 4. Verify empty
+        let result =
+            tokio::time::timeout(std::time::Duration::from_millis(100), consumer.receive()).await;
+        assert!(result.is_err(), "Channel should be empty");
     }
 }

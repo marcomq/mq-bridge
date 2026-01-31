@@ -1,8 +1,8 @@
 use crate::canonical_message::tracing_support::LazyMessageIds;
 use crate::models::{MqttConfig, MqttProtocol};
 use crate::traits::{
-    BoxFuture, ConsumerError, MessageConsumer, MessagePublisher, PublisherError, Received,
-    ReceivedBatch, Sent, SentBatch,
+    BoxFuture, ConsumerError, MessageConsumer, MessageDisposition, MessagePublisher,
+    PublisherError, Received, ReceivedBatch, Sent, SentBatch,
 };
 use crate::CanonicalMessage;
 use crate::APP_NAME;
@@ -22,7 +22,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, trace, warn};
-use uuid::Uuid;
 
 #[derive(Clone)]
 pub enum Client {
@@ -39,13 +38,6 @@ fn to_qos_v5(qos: QoS) -> QoSV5 {
 }
 
 impl Client {
-    async fn disconnect(&self) -> anyhow::Result<()> {
-        match self {
-            Client::V3(client) => client.disconnect().await.map_err(|e| e.into()),
-            Client::V5(client) => client.disconnect().await.map_err(|e| e.into()),
-        }
-    }
-
     async fn ack(&self, ack: &MqttAck) -> anyhow::Result<()> {
         match (self, ack) {
             (Client::V3(c), MqttAck::V3(p)) => c.ack(p).await.map_err(|e| e.into()),
@@ -105,13 +97,20 @@ impl Client {
 pub struct MqttPublisher {
     client: Client,
     topic: String,
-    stop_tx: mpsc::Sender<()>,
+    _stop_tx: mpsc::Sender<()>,
     qos: QoS,
 }
 
 impl MqttPublisher {
-    pub async fn new(config: &MqttConfig, topic: &str, bridge_id: &str) -> anyhow::Result<Self> {
-        let client_id = sanitize_for_client_id(&format!("{}-{}", APP_NAME, bridge_id));
+    pub async fn new(config: &MqttConfig) -> anyhow::Result<Self> {
+        let topic = config
+            .topic
+            .as_deref()
+            .ok_or_else(|| anyhow!("Topic is required for MQTT publisher"))?;
+        let client_id = config.client_id.clone().unwrap_or_else(|| {
+            sanitize_for_client_id(&format!("{}-{}", APP_NAME, fast_uuid_v7::gen_id()))
+        });
+
         let (client, eventloop) = create_client_and_eventloop(config, &client_id).await?;
         let qos = parse_qos(config.qos.unwrap_or(1));
         let (stop_tx, stop_rx) = mpsc::channel(1);
@@ -128,21 +127,9 @@ impl MqttPublisher {
         Ok(Self {
             client,
             topic: topic.to_string(),
-            stop_tx,
+            _stop_tx: stop_tx,
             qos,
         })
-    }
-    pub fn with_topic(&self, topic: &str) -> Self {
-        Self {
-            client: self.client.clone(),
-            topic: topic.to_string(),
-            stop_tx: self.stop_tx.clone(),
-            qos: self.qos,
-        }
-    }
-
-    pub async fn disconnect(&self) -> anyhow::Result<()> {
-        self.client.disconnect().await
     }
 }
 
@@ -185,8 +172,15 @@ impl MessagePublisher for MqttPublisher {
 pub struct MqttConsumer(MqttListener);
 
 impl MqttConsumer {
-    pub async fn new(config: &MqttConfig, topic: &str, bridge_id: &str) -> anyhow::Result<Self> {
-        let client_id = sanitize_for_client_id(&format!("{}-{}", APP_NAME, bridge_id));
+    pub async fn new(config: &MqttConfig) -> anyhow::Result<Self> {
+        let topic = config
+            .topic
+            .as_deref()
+            .ok_or_else(|| anyhow!("Topic is required for MQTT consumer"))?;
+        let client_id = config.client_id.clone().unwrap_or_else(|| {
+            sanitize_for_client_id(&format!("{}-{}", APP_NAME, fast_uuid_v7::gen_id()))
+        });
+
         let listener = MqttListener::new(config, topic, &client_id, "consumer").await?;
         warn!("Known issue: Messages might be lost in rare cases if the MQTT broker is restarted while the consumer is running.");
         Ok(Self(listener))
@@ -282,41 +276,23 @@ impl MessageConsumer for MqttListener {
         let correlation_data = message.metadata.get("correlation_id").cloned();
         let ack_info = internal.ack;
 
-        let commit = Box::new(move |response: Option<CanonicalMessage>| {
+        let commit = Box::new(move |disposition: MessageDisposition| {
             Box::pin(async move {
-                if let (Some(resp), Some(rt)) = (response, reply_topic) {
-                    trace!(topic = %rt, "Committing MQTT message, sending reply");
-                    let mut msg = resp;
-                    if let Some(cd) = correlation_data {
-                        msg.metadata.insert("correlation_id".to_string(), cd);
+                match disposition {
+                    MessageDisposition::Nack => return Ok(()),
+                    MessageDisposition::Reply(resp) => {
+                        handle_mqtt_reply(&client, reply_topic, correlation_data, resp).await?;
+                        // Fallthrough to Ack
                     }
-                    // Use a timeout to prevent hanging if the client buffer is full or eventloop is stuck
-                    match tokio::time::timeout(
-                        Duration::from_secs(60),
-                        client.publish(&rt, QoS::AtLeastOnce, msg),
-                    )
-                    .await
-                    {
-                        Ok(Err(e)) => {
-                            error!(topic = %rt, error = %e, "Failed to publish MQTT reply");
-                            return Err(anyhow::anyhow!("Failed to publish MQTT reply: {}", e));
-                        }
-                        Ok(Ok(_)) => trace!(topic = %rt, "MQTT reply published to channel"),
-                        Err(_) => {
-                            error!(topic = %rt, "Timed out publishing MQTT reply");
-                            return Err(anyhow::anyhow!(
-                                "Timed out publishing MQTT reply to {}",
-                                rt
-                            ));
-                        }
+                    MessageDisposition::Ack => {
+                        // Fallthrough to Ack
                     }
-                } else {
-                    trace!("MQTT commit called with no response or no reply_topic");
                 }
 
                 // Acknowledge the original message
                 if let Err(e) = client.ack(&ack_info).await {
                     error!("Failed to ack MQTT message: {}", e);
+                    return Err(anyhow!("Failed to ack MQTT message: {}", e));
                 }
                 Ok(())
             }) as BoxFuture<'static, anyhow::Result<()>>
@@ -358,46 +334,28 @@ impl MessageConsumer for MqttListener {
         }
 
         let client = self.client.clone();
-        let commit = Box::new(move |responses: Option<Vec<CanonicalMessage>>| {
+        let commit = Box::new(move |dispositions: Vec<MessageDisposition>| {
             Box::pin(async move {
-                if let Some(resps) = responses {
-                    for ((reply_topic, correlation_data), resp) in reply_infos.iter().zip(resps) {
-                        if let Some(rt) = reply_topic {
-                            let mut msg = resp;
-                            if let Some(cd) = correlation_data {
-                                msg.metadata
-                                    .insert("correlation_id".to_string(), cd.clone());
-                            }
-                            match tokio::time::timeout(
-                                Duration::from_secs(60),
-                                client.publish(rt, QoS::AtLeastOnce, msg),
-                            )
-                            .await
-                            {
-                                Ok(Err(e)) => {
-                                    tracing::error!(topic = %rt, error = %e, "Failed to publish MQTT reply");
-                                    return Err(anyhow::anyhow!(
-                                        "Failed to publish MQTT reply: {}",
-                                        e
-                                    ));
-                                }
-                                Ok(Ok(_)) => {}
-                                Err(_) => {
-                                    tracing::error!(topic = %rt, "Timed out publishing MQTT reply");
-                                    return Err(anyhow::anyhow!(
-                                        "Timed out publishing MQTT reply to {}",
-                                        rt
-                                    ));
-                                }
+                for (((reply_topic, correlation_data), ack), disposition) in reply_infos
+                    .into_iter()
+                    .zip(acks.into_iter())
+                    .zip(dispositions.into_iter())
+                {
+                    match disposition {
+                        MessageDisposition::Reply(resp) => {
+                            handle_mqtt_reply(&client, reply_topic, correlation_data, resp).await?;
+                            if let Err(e) = client.ack(&ack).await {
+                                error!("Failed to ack MQTT message in batch: {}", e);
+                                return Err(anyhow!("Failed to ack MQTT message batch: {}", e));
                             }
                         }
-                    }
-                }
-
-                for ack in acks {
-                    if let Err(e) = client.ack(&ack).await {
-                        error!("Failed to ack MQTT message in batch: {}", e);
-                        return Err(e);
+                        MessageDisposition::Ack => {
+                            if let Err(e) = client.ack(&ack).await {
+                                error!("Failed to ack MQTT message in batch: {}", e);
+                                return Err(e);
+                            }
+                        }
+                        MessageDisposition::Nack => {}
                     }
                 }
                 Ok(())
@@ -409,6 +367,39 @@ impl MessageConsumer for MqttListener {
     fn as_any(&self) -> &dyn Any {
         self
     }
+}
+
+async fn handle_mqtt_reply(
+    client: &Client,
+    reply_topic: Option<String>,
+    correlation_data: Option<String>,
+    resp: CanonicalMessage,
+) -> anyhow::Result<()> {
+    if let Some(rt) = reply_topic {
+        trace!(topic = %rt, "Committing MQTT message, sending reply");
+        let mut msg = resp;
+        if let Some(cd) = correlation_data {
+            msg.metadata.insert("correlation_id".to_string(), cd);
+        }
+        // Use a timeout to prevent hanging if the client buffer is full or eventloop is stuck
+        match tokio::time::timeout(
+            Duration::from_secs(60),
+            client.publish(&rt, QoS::AtLeastOnce, msg),
+        )
+        .await
+        {
+            Ok(Err(e)) => {
+                error!(topic = %rt, error = %e, "Failed to publish MQTT reply");
+                return Err(anyhow::anyhow!("Failed to publish MQTT reply: {}", e));
+            }
+            Ok(Ok(_)) => trace!(topic = %rt, "MQTT reply published to channel"),
+            Err(_) => {
+                error!(topic = %rt, "Timed out publishing MQTT reply");
+                return Err(anyhow::anyhow!("Timed out publishing MQTT reply to {}", rt));
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn create_client_and_eventloop(
@@ -750,34 +741,5 @@ fn parse_qos(qos: u8) -> QoS {
         1 => QoS::AtLeastOnce,
         2 => QoS::ExactlyOnce,
         _ => QoS::AtLeastOnce,
-    }
-}
-
-pub struct MqttSubscriber(MqttListener);
-
-impl MqttSubscriber {
-    pub async fn new(
-        config: &MqttConfig,
-        topic: &str,
-        subscribe_id: Option<String>,
-    ) -> anyhow::Result<Self> {
-        let unique_id = subscribe_id.unwrap_or_else(|| Uuid::new_v4().to_string());
-        let client_id = sanitize_for_client_id(&format!("{}-{}", APP_NAME, unique_id));
-        let listener = MqttListener::new(config, topic, &client_id, "subscriber").await?;
-        Ok(Self(listener))
-    }
-}
-
-#[async_trait]
-impl MessageConsumer for MqttSubscriber {
-    async fn receive(&mut self) -> Result<Received, ConsumerError> {
-        self.0.receive().await
-    }
-    async fn receive_batch(&mut self, max_messages: usize) -> Result<ReceivedBatch, ConsumerError> {
-        self.0.receive_batch(max_messages).await
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 }

@@ -1,13 +1,12 @@
 #![allow(dead_code)]
 
-use super::common::{
+use mq_bridge::endpoints::mqtt::{MqttConsumer, MqttPublisher};
+use mq_bridge::test_utils::{
     add_performance_result, run_chaos_pipeline_test, run_direct_perf_test,
     run_performance_pipeline_test, run_pipeline_test, run_test_with_docker,
     run_test_with_docker_controller, setup_logging, PERF_TEST_BATCH_MESSAGE_COUNT,
 };
-use mq_bridge::endpoints::mqtt::{MqttConsumer, MqttPublisher};
 use std::sync::Arc;
-use uuid::Uuid;
 const CONFIG_YAML: &str = r#"
 routes:
   memory_to_mqtt:
@@ -79,25 +78,24 @@ pub async fn test_mqtt_performance_direct() {
             url: "mqtt://localhost:1883".to_string(),
             // Increase the client's incoming message buffer to hold all messages from the test run.
             queue_capacity: Some(PERF_TEST_BATCH_MESSAGE_COUNT * 2), // For batch and single
+            topic: Some(topic.to_string()),
             ..Default::default()
         };
 
         let result = run_direct_perf_test(
             "MQTT",
             || async {
-                let publisher_id = format!("pub-{}", Uuid::new_v4().as_simple());
-                Arc::new(
-                    MqttPublisher::new(&config, topic, &publisher_id)
-                        .await
-                        .unwrap(),
-                )
+                let publisher_id = format!("pub-{}", fast_uuid_v7::gen_id());
+                let mut pub_config = config.clone();
+                pub_config.client_id = Some(publisher_id);
+                Arc::new(MqttPublisher::new(&pub_config).await.unwrap())
             },
             || async {
-                let consumer_id = format!("sub-{}", Uuid::new_v4().as_simple());
+                let consumer_id = format!("sub-{}", fast_uuid_v7::gen_id());
+                let mut consumer_config = config.clone();
+                consumer_config.client_id = Some(consumer_id);
                 Arc::new(tokio::sync::Mutex::new(
-                    MqttConsumer::new(&config, topic, &consumer_id)
-                        .await
-                        .unwrap(),
+                    MqttConsumer::new(&consumer_config).await.unwrap(),
                 ))
             },
         )
