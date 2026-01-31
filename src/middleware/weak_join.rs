@@ -12,6 +12,7 @@ use tokio::sync::Mutex;
 struct JoinState {
     // Key -> (CreationTime, Messages)
     pending: HashMap<String, (Instant, Vec<CanonicalMessage>)>,
+    ready_buffer: Vec<CanonicalMessage>,
 }
 
 pub struct WeakJoinConsumer {
@@ -27,6 +28,7 @@ impl WeakJoinConsumer {
             config: config.clone(),
             state: Arc::new(Mutex::new(JoinState {
                 pending: HashMap::new(),
+                ready_buffer: Vec::new(),
             })),
         }
     }
@@ -74,7 +76,16 @@ impl WeakJoinConsumer {
 #[async_trait]
 impl MessageConsumer for WeakJoinConsumer {
     async fn receive_batch(&mut self, max_messages: usize) -> Result<ReceivedBatch, ConsumerError> {
-        let state = self.state.lock().await;
+        let mut state = self.state.lock().await;
+
+        if !state.ready_buffer.is_empty() {
+            let count = std::cmp::min(state.ready_buffer.len(), max_messages);
+            let messages: Vec<_> = state.ready_buffer.drain(0..count).collect();
+            return Ok(ReceivedBatch {
+                messages,
+                commit: Box::new(|_| Box::pin(async { Ok(()) })),
+            });
+        }
 
         let now = Instant::now();
         let timeout_duration = Duration::from_millis(self.config.timeout_ms);
@@ -98,7 +109,9 @@ impl MessageConsumer for WeakJoinConsumer {
                         // Weak join: Ack immediately to avoid complex disposition mapping
                         let count = batch.messages.len();
                         if count > 0 {
-                            let _ = (batch.commit)(vec![MessageDisposition::Ack; count]).await;
+                            if let Err(e) = (batch.commit)(vec![MessageDisposition::Ack; count]).await {
+                                return Err(ConsumerError::Connection(e));
+                            }
                         }
 
                         let mut state = self.state.lock().await;
@@ -124,6 +137,11 @@ impl MessageConsumer for WeakJoinConsumer {
                         }
                         self.check_timeouts(&mut state, &mut ready_messages);
 
+                        if ready_messages.len() > max_messages {
+                            let overflow = ready_messages.split_off(max_messages);
+                            state.ready_buffer.extend(overflow);
+                        }
+
                         Ok(ReceivedBatch {
                             messages: ready_messages,
                             commit: Box::new(|_| Box::pin(async { Ok(()) })),
@@ -136,6 +154,11 @@ impl MessageConsumer for WeakJoinConsumer {
                 let mut state = self.state.lock().await;
                 let mut ready_messages = Vec::new();
                 self.check_timeouts(&mut state, &mut ready_messages);
+
+                if ready_messages.len() > max_messages {
+                    let overflow = ready_messages.split_off(max_messages);
+                    state.ready_buffer.extend(overflow);
+                }
 
                 Ok(ReceivedBatch {
                     messages: ready_messages,

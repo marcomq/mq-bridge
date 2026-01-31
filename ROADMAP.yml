@@ -23,3 +23,29 @@
         Publisher: Insert message payload/metadata into table.
         @src/endpoints/sql.rs
       status: "Postpone"
+    - title: "Reliable Event Store & Handlers"
+      id: "H12"
+      description: |
+        Implement a robust, in-memory event store to replace fire-and-forget handlers in `src/event_handler.rs`.
+        
+        Constraints:
+        - Use `CanonicalMessage` for events.
+        - Do not modify `canonical_message.rs` or existing endpoints.
+        - `src/endpoints/memory.rs` serves as a reference for channel/locking patterns.
+        
+        Subtasks:
+        1. Event Store Implementation (`src/event_store.rs`):
+           - Struct `StoredEvent` is an alias for `CanonicalMessage` with `offset` (u64) and `stored_at` in the metadata.
+           - Endpoints handle the actual event storage. event_store.rs also removes events based when not needed anymore.
+           - Features: Append-only log, subscriber state tracking (offset, liveness), and Garbage Collection based on min-ack.
+           - Retention policies: Max size/time for secondary GC.
+        2. Update `src/event_handler.rs`:
+           - Integrate `EventStore` into `EventPublisher`.
+           - Allow multiple subscribers to register and consume events reliably.
+        3. Subscriber Logic:
+           - Implement logic to poll/notify subscribers of new events.
+           - Handle subscriber timeouts (heartbeats) to prevent GC blocking.
+           - Subscriber state is tracked in a hashmap.
+           - Primary GC is based on the minimum last_ack_offset across all subscribers.
+           - (later) Support removal of dead subscribers (e.g., via heartbeat or lease expiry).
+      status: "Pending"

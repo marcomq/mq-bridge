@@ -665,6 +665,7 @@ impl<'de> Deserialize<'de> for FileConfig {
             {
                 let mut path = None;
                 let mut consume = true;
+                let mut subscribe_mode = None;
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
                         "path" => {
@@ -676,6 +677,12 @@ impl<'de> Deserialize<'de> for FileConfig {
                         "consume" => {
                             consume = map.next_value()?;
                         }
+                        "subscribe_mode" => {
+                            if subscribe_mode.is_some() {
+                                return Err(serde::de::Error::duplicate_field("subscribe_mode"));
+                            }
+                            subscribe_mode = Some(map.next_value()?);
+                        }
                         _ => {
                             let _ = map.next_value::<serde::de::IgnoredAny>()?;
                         }
@@ -684,7 +691,7 @@ impl<'de> Deserialize<'de> for FileConfig {
                 let path = path.ok_or_else(|| serde::de::Error::missing_field("path"))?;
                 Ok(FileConfig {
                     path,
-                    subscribe_mode: !consume,
+                    subscribe_mode: subscribe_mode.unwrap_or(!consume),
                 })
             }
         }
