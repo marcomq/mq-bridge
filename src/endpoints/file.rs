@@ -154,9 +154,11 @@ async fn create_file_event_store(config: &FileConfig) -> anyhow::Result<Arc<Even
     let path_clone = path.clone();
     let file_op_lock_clone = file_op_lock.clone();
 
-    let mut retention = RetentionPolicy::default();
+    let retention = RetentionPolicy {
+        gc_interval: std::time::Duration::ZERO,
+        ..Default::default()
+    };
     // Use immediate GC for file stores to ensure files are truncated promptly on ack.
-    retention.gc_interval = std::time::Duration::ZERO;
 
     // 1. Create EventStore with on_drop callback
     let store = Arc::new(

@@ -48,4 +48,4 @@
            - Subscriber state is tracked in a hashmap.
            - Primary GC is based on the minimum last_ack_offset across all subscribers.
            - (later) Support removal of dead subscribers (e.g., via heartbeat or lease expiry).
-      status: "Pending"
+      status: "Done"

@@ -407,11 +407,13 @@ impl EventStore {
             }
 
             // Condition 2: Max age exceeded (Secondary GC)
-            if !remove && max_age.is_some() {
-                let event_time = UNIX_EPOCH + Duration::from_millis(event.stored_at);
-                if let Ok(age) = now.duration_since(event_time) {
-                    if age > max_age.unwrap() {
-                        remove = true;
+            if !remove {
+                if let Some(max_age) = max_age {
+                    let event_time = UNIX_EPOCH + Duration::from_millis(event.stored_at);
+                    if let Ok(age) = now.duration_since(event_time) {
+                        if age > max_age {
+                            remove = true;
+                        }
                     }
                 }
             }
