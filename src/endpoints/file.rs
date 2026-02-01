@@ -543,7 +543,7 @@ mod tests {
         // Verify file is empty
         for _ in 0..20 {
             content = tokio::fs::read_to_string(&file_path).await.unwrap();
-            if content == "" {
+            if content.is_empty() {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
