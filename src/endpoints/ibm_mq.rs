@@ -342,6 +342,9 @@ async fn spawn_consumer_thread(
                                 Ok(opt) => {
                                     if let Some((data, _format)) = opt {
                                         messages.push(CanonicalMessage::new(data.to_vec(), None));
+                                        // zeroing buffer to avoid leaking sensitive data
+                                        let buffer_len = data.len();
+                                        buffer[..buffer_len].fill(0);
                                     }
                                 }
 
