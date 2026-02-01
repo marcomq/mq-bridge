@@ -132,6 +132,7 @@ impl MessagePublisher for FilePublisher {
     }
 
     async fn flush(&self) -> anyhow::Result<()> {
+        let _file_guard = self.file_lock.lock().await;
         let mut writer = self.writer.lock().await;
         writer.flush().await?;
         Ok(())
