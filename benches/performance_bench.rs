@@ -96,6 +96,46 @@ pub mod mongodb_helper {
     }
 }
 
+#[cfg(feature = "mongodb")]
+pub mod mongodb_subscriber_helper {
+    use mq_bridge::endpoints::mongodb::{MongoDbPublisher, MongoDbSubscriber};
+    use mq_bridge::models::MongoDbConfig;
+    use mq_bridge::traits::{MessageConsumer, MessagePublisher};
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    fn get_config(collection_name: &str) -> MongoDbConfig {
+        MongoDbConfig {
+            url: "mongodb://localhost:27017".to_string(),
+            database: "mq_bridge_test_db".to_string(),
+            collection: Some(collection_name.to_string()),
+            change_stream: true,
+            ..Default::default()
+        }
+    }
+    pub async fn create_publisher() -> Arc<dyn MessagePublisher> {
+        let collection_name = "perf_mongodb_sub_direct";
+        let config = get_config(collection_name);
+        Arc::new(MongoDbPublisher::new(&config).await.unwrap())
+    }
+
+    pub async fn create_consumer() -> Arc<Mutex<dyn MessageConsumer>> {
+        let collection_name = "perf_mongodb_sub_direct";
+        let config = get_config(collection_name);
+
+        // Drop collection before test
+        let client = mongodb::Client::with_uri_str(&config.url).await.unwrap();
+        client
+            .database(&config.database)
+            .collection::<mongodb::bson::Document>(collection_name)
+            .drop()
+            .await
+            .ok();
+
+        Arc::new(Mutex::new(MongoDbSubscriber::new(&config).await.unwrap()))
+    }
+}
+
 #[cfg(feature = "amqp")]
 pub mod amqp_helper {
     use mq_bridge::endpoints::amqp::{AmqpConsumer, AmqpPublisher};
@@ -360,6 +400,56 @@ pub mod memory_helper {
     }
 }
 
+pub mod memory_subscriber_helper {
+    use super::PERF_TEST_MESSAGE_COUNT;
+    use mq_bridge::endpoints::memory::{MemoryPublisher, MemorySubscriber};
+    use mq_bridge::models::MemoryConfig;
+    use mq_bridge::traits::{MessageConsumer, MessagePublisher};
+    use once_cell::sync::Lazy;
+    use std::sync::Arc;
+    use std::sync::Mutex as StdMutex;
+    use tokio::sync::Mutex;
+
+    // Shared state to coordinate topic name between consumer and publisher creation.
+    // create_consumer is called first by the benchmark macro, so it generates the topic.
+    static CURRENT_TOPIC: Lazy<StdMutex<String>> =
+        Lazy::new(|| StdMutex::new("perf_memory_sub_bench_init".to_string()));
+
+    pub async fn create_publisher() -> Arc<dyn MessagePublisher> {
+        let topic = {
+            let lock = CURRENT_TOPIC.lock().unwrap();
+            lock.clone()
+        };
+
+        let config = MemoryConfig {
+            topic,
+            capacity: Some(PERF_TEST_MESSAGE_COUNT * 2),
+            subscribe_mode: true,
+            ..Default::default()
+        };
+        Arc::new(MemoryPublisher::new(&config).unwrap())
+    }
+
+    pub async fn create_consumer() -> Arc<Mutex<dyn MessageConsumer>> {
+        let topic = format!("perf_memory_sub_bench_{}", fast_uuid_v7::gen_id());
+        {
+            let mut lock = CURRENT_TOPIC.lock().unwrap();
+            *lock = topic.clone();
+        }
+
+        let config = MemoryConfig {
+            topic,
+            capacity: Some(PERF_TEST_MESSAGE_COUNT * 2),
+            subscribe_mode: true,
+            ..Default::default()
+        };
+        let subscriber_id = format!("sub-{}", fast_uuid_v7::gen_id());
+        Arc::new(Mutex::new(
+            MemorySubscriber::new(&config, &subscriber_id).unwrap(),
+        ))
+    }
+}
+
 fn performance_benchmarks(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
 
@@ -427,6 +517,17 @@ fn performance_benchmarks(c: &mut Criterion) {
         PERF_TEST_CONCURRENCY
     );
     bench_backend!(
+        "mongodb",
+        "mongodb_subscriber",
+        "tests/integration/docker-compose/mongodb.yml",
+        mongodb_subscriber_helper,
+        group,
+        &rt,
+        &BENCH_RESULTS,
+        PERF_TEST_MESSAGE_COUNT,
+        PERF_TEST_CONCURRENCY
+    );
+    bench_backend!(
         "mqtt",
         "mqtt",
         "tests/integration/docker-compose/mqtt.yml",
@@ -462,6 +563,15 @@ fn performance_benchmarks(c: &mut Criterion) {
     bench_backend!(
         "memory",
         memory_helper,
+        group,
+        &rt,
+        &BENCH_RESULTS,
+        PERF_TEST_MESSAGE_COUNT,
+        PERF_TEST_CONCURRENCY
+    );
+    bench_backend!(
+        "memory_subscriber",
+        memory_subscriber_helper,
         group,
         &rt,
         &BENCH_RESULTS,

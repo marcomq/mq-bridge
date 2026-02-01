@@ -318,6 +318,10 @@ impl Route {
                         Err(ConsumerError::Connection(e)) => {
                             // Propagate error to trigger reconnect by the outer loop
                             break Err(e);
+                        },
+                        Err(ConsumerError::Gap { requested, base }) => {
+                            // Propagate gap error to trigger reconnect by the outer loop
+                            break Err(anyhow::anyhow!("Consumer gap: requested offset {requested} but earliest available is {base}"));
                         }
                     };
                     debug!("Received a batch of {} messages sequentially", received_batch.messages.len());
@@ -550,6 +554,10 @@ impl Route {
                         Err(ConsumerError::Connection(e)) => {
                             // Propagate error to trigger reconnect by the outer loop
                             return Err(e);
+                        }
+                        Err(ConsumerError::Gap { requested, base }) => {
+                            // Propagate gap error to trigger reconnect by the outer loop
+                            return Err(ConsumerError::Gap { requested, base }.into());
                         }
                     };
                     debug!("Received a batch of {} messages concurrently", messages.len());

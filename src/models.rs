@@ -637,6 +637,9 @@ pub struct FileConfig {
     /// If false (default), acts in Consumer mode, reading lines and removing them from the file (queue behavior).
     #[serde(default)]
     pub subscribe_mode: bool,
+    /// (Consumer only) If true, lines are removed from the file after being processed by all subscribers.
+    /// Defaults to true if subscribe_mode is false, and false if subscribe_mode is true.
+    pub delete: Option<bool>,
 }
 
 impl<'de> Deserialize<'de> for FileConfig {
@@ -657,6 +660,7 @@ impl<'de> Deserialize<'de> for FileConfig {
                 Ok(FileConfig {
                     path: value.to_string(),
                     subscribe_mode: false,
+                    delete: None,
                 })
             }
             fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
@@ -666,6 +670,7 @@ impl<'de> Deserialize<'de> for FileConfig {
                 let mut path = None;
                 let mut consume = true;
                 let mut subscribe_mode = None;
+                let mut delete = None;
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
                         "path" => {
@@ -683,6 +688,12 @@ impl<'de> Deserialize<'de> for FileConfig {
                             }
                             subscribe_mode = Some(map.next_value()?);
                         }
+                        "delete" => {
+                            if delete.is_some() {
+                                return Err(serde::de::Error::duplicate_field("delete"));
+                            }
+                            delete = Some(map.next_value()?);
+                        }
                         _ => {
                             let _ = map.next_value::<serde::de::IgnoredAny>()?;
                         }
@@ -692,6 +703,7 @@ impl<'de> Deserialize<'de> for FileConfig {
                 Ok(FileConfig {
                     path,
                     subscribe_mode: subscribe_mode.unwrap_or(!consume),
+                    delete,
                 })
             }
         }
@@ -855,6 +867,8 @@ pub struct MongoDbConfig {
     pub request_timeout_ms: Option<u64>,
     /// (Publisher only) TTL in seconds for documents created by the publisher. If set, a TTL index is created.
     pub ttl_seconds: Option<u64>,
+    /// (Publisher only) If set, creates a capped collection with this size in bytes.
+    pub capped_size_bytes: Option<i64>,
 }
 
 // --- MQTT Specific Configuration ---

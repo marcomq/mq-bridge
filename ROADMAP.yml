@@ -29,8 +29,8 @@
         Implement a robust, in-memory event store to replace fire-and-forget handlers in `src/event_handler.rs`.
         
         Constraints:
-        - Use `CanonicalMessage` for events.
-        - Do not modify `canonical_message.rs` or existing endpoints.
+        - Use `CanonicalMessage` for events. Use metadata for specific required storage.
+        - Do NOT modify `canonical_message.rs` or existing endpoints.
         - `src/endpoints/memory.rs` serves as a reference for channel/locking patterns.
         
         Subtasks:

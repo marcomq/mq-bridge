@@ -1,4 +1,5 @@
 use crate::canonical_message::tracing_support::LazyMessageIds;
+use crate::event_store::{EventStore, EventStoreConsumer};
 use crate::models::MongoDbConfig;
 use crate::traits::{
     BatchCommitFunc, BoxFuture, ConsumerError, MessageConsumer, MessageDisposition,
@@ -12,14 +13,17 @@ use mongodb::{
     bson::{doc, to_document, Binary, Bson, Document},
     change_stream::ChangeStream,
     error::ErrorKind,
-    options::FindOneAndUpdateOptions,
+    options::{CreateCollectionOptions, FindOneAndUpdateOptions},
 };
 use mongodb::{change_stream::event::ChangeStreamEvent, IndexModel};
 use mongodb::{Client, Collection, Database};
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::any::Any;
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant, SystemTime};
+use tokio::sync::mpsc;
 use tracing::{info, trace, warn};
 
 /// A helper struct for deserialization that matches the BSON structure exactly.
@@ -163,6 +167,21 @@ impl MongoDbPublisher {
             .ok_or_else(|| anyhow!("Collection name is required for MongoDB publisher"))?;
         let client = create_client(config).await?;
         let db = client.database(&config.database);
+
+        if let Some(capped_size) = config.capped_size_bytes {
+            let collections = db
+                .list_collection_names(doc! { "name": collection_name })
+                .await?;
+            if collections.is_empty() {
+                info!(collection = %collection_name, size = %capped_size, "Creating capped collection");
+                let options = CreateCollectionOptions::builder()
+                    .capped(true)
+                    .size_in_bytes(capped_size)
+                    .build();
+                db.create_collection(collection_name, options).await?;
+            }
+        }
+
         let collection = db.collection(collection_name);
         info!(database = %config.database, collection = %collection_name, request_reply = %config.request_reply, "MongoDB publisher connected");
 
@@ -891,19 +910,17 @@ async fn process_mongodb_batch_commit(
     Ok(())
 }
 
-enum SubscriberStream {
-    ChangeStream(Box<ChangeStream<ChangeStreamEvent<Document>>>),
-    Polling {
-        collection: Collection<Document>,
-        last_id: Option<mongodb::bson::Uuid>,
-        interval: Duration,
-    },
+struct MongoEventStoreGuard {
+    store: Arc<EventStore>,
+    _shutdown_tx: mpsc::Sender<()>,
 }
 
+static MONGO_EVENT_STORES: Lazy<Mutex<HashMap<String, Weak<MongoEventStoreGuard>>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
 pub struct MongoDbSubscriber {
-    inner: tokio::sync::Mutex<SubscriberStream>,
-    collection_name: String,
-    db: Database,
+    inner: EventStoreConsumer,
+    _guard: Arc<MongoEventStoreGuard>,
 }
 
 impl MongoDbSubscriber {
@@ -921,185 +938,126 @@ impl MongoDbSubscriber {
             .collection
             .as_deref()
             .ok_or_else(|| anyhow!("Collection name is required for MongoDB subscriber"))?;
-        let client = create_client(config).await?;
-        let db = client.database(&config.database);
-        let collection = db.collection::<Document>(collection_name);
 
-        if let Some(ttl) = config.ttl_seconds {
-            let options = mongodb::options::IndexOptions::builder()
-                .expire_after(Duration::from_secs(ttl))
-                .build();
-            let model = IndexModel::builder()
-                .keys(doc! { "created_at": 1 })
-                .options(options)
-                .build();
-            if let Err(e) = collection.create_index(model).await {
-                warn!(
-                    "Failed to create TTL index on subscriber collection {} : {}",
-                    collection_name, e
-                );
+        let key = format!("{}/{}", config.database, collection_name);
+        let store = {
+            let mut stores = MONGO_EVENT_STORES.lock().unwrap();
+            stores.retain(|_, v| v.strong_count() > 0);
+
+            if let Some(weak) = stores.get(&key) {
+                weak.upgrade()
+            } else {
+                None
             }
-        }
-
-        // Watch for inserts to treat them as new events.
-        let pipeline = [doc! { "$match": { "operationType": "insert" } }];
-        let change_stream_result = collection.watch().pipeline(pipeline).await;
-
-        let inner = match change_stream_result {
-            Ok(stream) => {
-                info!(database = %config.database, collection = %collection_name, "MongoDB subscriber watching for events (Change Stream)");
-                SubscriberStream::ChangeStream(Box::new(stream))
-            }
-            Err(e) if matches!(*e.kind, ErrorKind::Command(ref cmd_err) if cmd_err.code == 40573) =>
-            {
-                info!("MongoDB is a single instance (ChangeStream support check failed). Falling back to polling for subscriber.");
-
-                // Find the last ID to start consuming from "now"
-                let last_doc = collection
-                    .find_one(doc! {})
-                    .sort(doc! { "_id": -1 })
-                    .await?;
-
-                let mut last_id = None;
-                if let Some(last_doc) = last_doc {
-                    if let Some(Bson::Binary(binary)) = last_doc.get("_id") {
-                        if let Ok(uuid) = binary.to_uuid() {
-                            last_id = Some(uuid);
-                        }
-                    }
-                }
-                SubscriberStream::Polling {
-                    collection,
-                    last_id,
-                    interval: Duration::from_millis(config.polling_interval_ms.unwrap_or(100)),
-                }
-            }
-            Err(e) => return Err(e.into()),
         };
+
+        let guard = if let Some(g) = store {
+            g
+        } else {
+            let new_guard = create_mongo_backed_event_store(config).await?;
+            let mut stores = MONGO_EVENT_STORES.lock().unwrap();
+            let existing = stores.get(&key).and_then(|w| w.upgrade());
+            if let Some(g) = existing {
+                g
+            } else {
+                stores.insert(key, Arc::downgrade(&new_guard));
+                new_guard
+            }
+        };
+
+        // Generate a unique subscriber ID for this instance
+        let subscriber_id = format!("mongo-sub-{}", fast_uuid_v7::gen_id_str());
         Ok(Self {
-            inner: tokio::sync::Mutex::new(inner),
-            collection_name: collection_name.to_string(),
-            db,
+            inner: guard.store.consumer(subscriber_id),
+            _guard: guard,
         })
     }
+}
+
+async fn create_mongo_backed_event_store(
+    config: &MongoDbConfig,
+) -> anyhow::Result<Arc<MongoEventStoreGuard>> {
+    let collection_name = config
+        .collection
+        .as_deref()
+        .ok_or_else(|| anyhow!("missing MongoDbConfig.collection"))?;
+    let client = create_client(config).await?;
+    let db = client.database(&config.database);
+    let collection = db.collection::<Document>(collection_name);
+
+    // 1. Create EventStore. We do NOT delete events from MongoDB here, as that would
+    // prevent other subscribers (on other machines) from receiving them.
+    // Cleanup should be handled by MongoDB TTL indexes.
+    let store = Arc::new(EventStore::new(Default::default()));
+
+    // 2. Spawn a background task to feed the EventStore from MongoDB
+    let store_clone = store.clone();
+    let collection_clone = collection.clone();
+    let polling_interval = Duration::from_millis(config.polling_interval_ms.unwrap_or(100));
+    let (shutdown_tx, mut shutdown_rx) = mpsc::channel(1);
+
+    tokio::spawn(async move {
+        let mut last_id: Option<mongodb::bson::Uuid> = None;
+
+        // Initial scan: Find the last ID to avoid re-reading everything if we wanted "tail" behavior?
+        // But here we want "queue" behavior (process everything present), so we start from beginning.
+        // If the collection is large, this might take time to catch up.
+
+        loop {
+            tokio::select! {
+                _ = shutdown_rx.recv() => {
+                    trace!("MongoDB event store feeder shutting down");
+                    break;
+                }
+                _ = async {
+                    let mut filter = doc! {};
+                    if let Some(id) = last_id {
+                        filter = doc! { "_id": { "$gt": id } };
+                    }
+
+                    // We fetch in batches
+                    let mut cursor = match collection_clone.find(filter).sort(doc! { "_id": 1 }).limit(100).await {
+                        Ok(c) => c,
+                        Err(e) => {
+                            tracing::error!("Error querying MongoDB for events: {}", e);
+                            tokio::time::sleep(Duration::from_secs(5)).await;
+                            return;
+                        }
+                    };
+
+                    let mut count = 0;
+                    while let Some(result) = cursor.next().await {
+                        if let Ok(doc) = result {
+                            if let Some(Bson::Binary(binary)) = doc.get("_id") {
+                                if let Ok(uuid) = binary.to_uuid() {
+                                    last_id = Some(uuid);
+                                }
+                            }
+                            if let Ok(msg) = parse_mongodb_document(doc) {
+                                store_clone.append(msg).await;
+                                count += 1;
+                            }
+                        }
+                    }
+
+                    if count == 0 {
+                        tokio::time::sleep(polling_interval).await;
+                    }
+                } => {}
+            }
+        }
+    });
+
+    Ok(Arc::new(MongoEventStoreGuard {
+        store,
+        _shutdown_tx: shutdown_tx,
+    }))
 }
 
 #[async_trait]
 impl MessageConsumer for MongoDbSubscriber {
     async fn receive_batch(&mut self, max_messages: usize) -> Result<ReceivedBatch, ConsumerError> {
-        let mut inner = self.inner.lock().await;
-
-        match &mut *inner {
-            SubscriberStream::ChangeStream(stream) => {
-                let event = stream
-                    .next()
-                    .await
-                    .ok_or(ConsumerError::EndOfStream)?
-                    .context("Error reading from MongoDB change stream")?;
-
-                let doc = event
-                    .full_document
-                    .ok_or_else(|| anyhow!("Change stream event missing full_document"))?;
-                let msg = parse_mongodb_document(doc)?;
-
-                trace!(message_id = %format!("{:032x}", msg.message_id), collection = %self.collection_name, "Received MongoDB change stream event");
-
-                let reply_to = msg.metadata.get("reply_to").cloned();
-                let correlation_id = msg.metadata.get("correlation_id").cloned();
-                let db = self.db.clone();
-
-                let commit = Box::new(move |dispositions: Vec<MessageDisposition>| {
-                    Box::pin(async move {
-                        // Note: The change stream event provides a single message, so we expect a single disposition.
-                        // If multiple dispositions are provided, they will all use the reply context of this single message.
-                        for disposition in dispositions {
-                            // Only send a reply if the message has a 'reply_to' destination and the disposition is a Reply.
-                            // This allows for fire-and-forget patterns (no reply_to) or explicit replies.
-                            if let MessageDisposition::Reply(resp) = disposition {
-                                handle_reply(&db, reply_to.as_ref(), correlation_id.as_ref(), resp)
-                                    .await?;
-                            }
-                        }
-                        Ok(())
-                    }) as BoxFuture<'static, anyhow::Result<()>>
-                });
-
-                Ok(ReceivedBatch {
-                    messages: vec![msg],
-                    commit,
-                })
-            }
-            SubscriberStream::Polling {
-                collection,
-                last_id,
-                interval,
-            } => loop {
-                let mut filter = doc! {};
-                if let Some(id) = last_id {
-                    filter = doc! { "_id": { "$gt": id } };
-                }
-
-                let mut cursor = collection
-                    .find(filter)
-                    .sort(doc! { "_id": 1 })
-                    .limit(max_messages as i64)
-                    .await
-                    .map_err(|e| ConsumerError::Connection(e.into()))?;
-
-                let mut messages = Vec::new();
-                while let Some(doc_result) = cursor.next().await {
-                    let doc = doc_result.map_err(|e| ConsumerError::Connection(e.into()))?;
-
-                    if let Some(Bson::Binary(binary)) = doc.get("_id") {
-                        if let Ok(uuid) = binary.to_uuid() {
-                            *last_id = Some(uuid);
-                        }
-                    }
-
-                    let msg = parse_mongodb_document(doc)?;
-                    messages.push(msg);
-                }
-
-                if !messages.is_empty() {
-                    trace!(count = messages.len(), collection = %self.collection_name, message_ids = ?LazyMessageIds(&messages), "Received batch of MongoDB documents via polling");
-
-                    let reply_infos: Vec<_> = messages
-                        .iter()
-                        .map(|m| {
-                            (
-                                m.metadata.get("reply_to").cloned(),
-                                m.metadata.get("correlation_id").cloned(),
-                            )
-                        })
-                        .collect();
-                    let db = self.db.clone();
-
-                    let commit = Box::new(move |dispositions: Vec<MessageDisposition>| {
-                        Box::pin(async move {
-                            for (disposition, (reply_to, correlation_id)) in
-                                dispositions.into_iter().zip(reply_infos)
-                            {
-                                // Only send a reply if the message has a 'reply_to' destination and the disposition is a Reply.
-                                // This allows for fire-and-forget patterns (no reply_to) or explicit replies.
-                                if let MessageDisposition::Reply(resp) = disposition {
-                                    handle_reply(
-                                        &db,
-                                        reply_to.as_ref(),
-                                        correlation_id.as_ref(),
-                                        resp,
-                                    )
-                                    .await?;
-                                }
-                            }
-                            Ok(())
-                        }) as BoxFuture<'static, anyhow::Result<()>>
-                    });
-                    return Ok(ReceivedBatch { messages, commit });
-                }
-
-                tokio::time::sleep(*interval).await;
-            },
-        }
+        self.inner.receive_batch(max_messages).await
     }
 
     fn as_any(&self) -> &dyn Any {

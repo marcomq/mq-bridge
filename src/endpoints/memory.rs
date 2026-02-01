@@ -3,6 +3,9 @@
 //  Licensed under MIT License, see License file for more details
 //  git clone https://github.com/marcomq/mq-bridge
 use crate::canonical_message::tracing_support::LazyMessageIds;
+use crate::event_store::{
+    event_store_exists, get_or_create_event_store, EventStore, EventStoreConsumer,
+};
 use crate::models::MemoryConfig;
 use crate::traits::{
     BatchCommitFunc, BoxFuture, ConsumerError, MessageConsumer, MessageDisposition,
@@ -173,21 +176,50 @@ pub fn get_or_create_response_channel(topic: &str) -> MemoryResponseChannel {
         .clone()
 }
 
+fn memory_channel_exists(topic: &str) -> bool {
+    let channels = RUNTIME_MEMORY_CHANNELS.lock().unwrap();
+    channels.contains_key(topic)
+}
+
 /// A sink that sends messages to an in-memory channel.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct MemoryPublisher {
     topic: String,
-    sender: Sender<Vec<CanonicalMessage>>,
+    backend: PublisherBackend,
     request_reply: bool,
     request_timeout: std::time::Duration,
 }
 
+#[derive(Debug, Clone)]
+enum PublisherBackend {
+    Queue(Sender<Vec<CanonicalMessage>>),
+    Log(Arc<EventStore>),
+}
+
 impl MemoryPublisher {
     pub fn new(config: &MemoryConfig) -> anyhow::Result<Self> {
-        let channel = get_or_create_channel(config);
+        let channel_exists = memory_channel_exists(&config.topic);
+        let store_exists = event_store_exists(&config.topic);
+
+        let backend = if config.subscribe_mode {
+            if channel_exists {
+                return Err(anyhow!("Topic '{}' is already active as a Queue (MemoryChannel), but Subscriber mode (EventStore) was requested.", config.topic));
+            }
+            let store = get_or_create_event_store(&config.topic);
+            PublisherBackend::Log(store)
+        } else if store_exists {
+            // Adaptive behavior: If an EventStore already exists, we publish to it even if
+            // subscribe_mode wasn't explicitly set. This prevents split-brain scenarios.
+            let store = get_or_create_event_store(&config.topic);
+            PublisherBackend::Log(store)
+        } else {
+            let channel = get_or_create_channel(config);
+            PublisherBackend::Queue(channel.sender)
+        };
+
         Ok(Self {
             topic: config.topic.clone(),
-            sender: channel.sender.clone(),
+            backend,
             request_reply: config.request_reply,
             request_timeout: std::time::Duration::from_millis(
                 config.request_timeout_ms.unwrap_or(30000),
@@ -222,53 +254,62 @@ impl MemoryPublisher {
 #[async_trait]
 impl MessagePublisher for MemoryPublisher {
     async fn send(&self, mut message: CanonicalMessage) -> Result<Sent, PublisherError> {
-        if self.request_reply {
-            let cid = message
-                .metadata
-                .entry("correlation_id".to_string())
-                .or_insert_with(fast_uuid_v7::gen_id_string)
-                .clone();
-
-            let (tx, rx) = oneshot::channel();
-
-            // Register waiter before sending
-            let response_channel = get_or_create_response_channel(&self.topic);
-            response_channel
-                .register_waiter(&cid, tx)
-                .await
-                .map_err(PublisherError::NonRetryable)?;
-
-            // Send the message
-            if let Err(e) = self.send_batch(vec![message]).await {
-                response_channel.remove_waiter(&cid).await;
-                return Err(e);
+        match &self.backend {
+            PublisherBackend::Log(store) => {
+                store.append(message).await;
+                Ok(Sent::Ack)
             }
+            PublisherBackend::Queue(sender) => {
+                if self.request_reply {
+                    let cid = message
+                        .metadata
+                        .entry("correlation_id".to_string())
+                        .or_insert_with(fast_uuid_v7::gen_id_string)
+                        .clone();
 
-            // Wait for the response
-            let response = match tokio::time::timeout(self.request_timeout, rx).await {
-                Ok(Ok(resp)) => resp,
-                Ok(Err(e)) => {
-                    response_channel.remove_waiter(&cid).await;
-                    return Err(anyhow!(
-                        "Failed to receive response for correlation_id {}: {}",
-                        cid,
-                        e
-                    )
-                    .into());
-                }
-                Err(_) => {
-                    response_channel.remove_waiter(&cid).await;
-                    return Err(PublisherError::Retryable(anyhow!(
-                        "Request timed out waiting for response for correlation_id {}",
-                        cid
-                    )));
-                }
-            };
+                    let (tx, rx) = oneshot::channel();
 
-            Ok(Sent::Response(response))
-        } else {
-            self.send_batch(vec![message]).await?;
-            Ok(Sent::Ack)
+                    // Register waiter before sending
+                    let response_channel = get_or_create_response_channel(&self.topic);
+                    response_channel
+                        .register_waiter(&cid, tx)
+                        .await
+                        .map_err(PublisherError::NonRetryable)?;
+
+                    // Send the message
+                    // We use the internal sender directly to avoid recursion or cloning issues
+                    if let Err(e) = sender.send(vec![message]).await {
+                        response_channel.remove_waiter(&cid).await;
+                        return Err(anyhow!("Failed to send to memory channel: {}", e).into());
+                    }
+
+                    // Wait for the response
+                    let response = match tokio::time::timeout(self.request_timeout, rx).await {
+                        Ok(Ok(resp)) => resp,
+                        Ok(Err(e)) => {
+                            response_channel.remove_waiter(&cid).await;
+                            return Err(anyhow!(
+                                "Failed to receive response for correlation_id {}: {}",
+                                cid,
+                                e
+                            )
+                            .into());
+                        }
+                        Err(_) => {
+                            response_channel.remove_waiter(&cid).await;
+                            return Err(PublisherError::Retryable(anyhow!(
+                                "Request timed out waiting for response for correlation_id {}",
+                                cid
+                            )));
+                        }
+                    };
+
+                    Ok(Sent::Response(response))
+                } else {
+                    self.send_batch(vec![message]).await?;
+                    Ok(Sent::Ack)
+                }
+            }
         }
     }
 
@@ -276,17 +317,30 @@ impl MessagePublisher for MemoryPublisher {
         &self,
         messages: Vec<CanonicalMessage>,
     ) -> Result<SentBatch, PublisherError> {
-        trace!(
-            topic = %self.topic,
-            message_ids = ?LazyMessageIds(&messages),
-            "Sending batch to memory channel. Current batch count: {}",
-            self.sender.len()
-        );
-        self.sender
-            .send(messages)
-            .await
-            .map_err(|e| anyhow!("Failed to send to memory channel: {}", e))?;
-        Ok(SentBatch::Ack)
+        match &self.backend {
+            PublisherBackend::Log(store) => {
+                trace!(
+                    topic = %self.topic,
+                    message_ids = ?LazyMessageIds(&messages),
+                    "Appending batch to event store"
+                );
+                store.append_batch(messages).await;
+                Ok(SentBatch::Ack)
+            }
+            PublisherBackend::Queue(sender) => {
+                trace!(
+                    topic = %self.topic,
+                    message_ids = ?LazyMessageIds(&messages),
+                    "Sending batch to memory channel. Current batch count: {}",
+                    sender.len()
+                );
+                sender
+                    .send(messages)
+                    .await
+                    .map_err(|e| anyhow!("Failed to send to memory channel: {}", e))?;
+                Ok(SentBatch::Ack)
+            }
+        }
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -294,8 +348,9 @@ impl MessagePublisher for MemoryPublisher {
     }
 }
 
-/// A source that reads messages from an in-memory channel.
-pub struct MemoryConsumer {
+/// A queue-based consumer (legacy behavior).
+#[derive(Debug)]
+pub struct MemoryQueueConsumer {
     topic: String,
     receiver: Receiver<Vec<CanonicalMessage>>,
     // Internal buffer to hold messages from a received batch.
@@ -303,7 +358,46 @@ pub struct MemoryConsumer {
     enable_nack: bool,
 }
 
+/// A source that reads messages from an in-memory channel or event store.
+#[derive(Debug)]
+pub enum MemoryConsumer {
+    Queue(MemoryQueueConsumer),
+    Log {
+        consumer: EventStoreConsumer,
+        topic: String,
+    },
+}
+
 impl MemoryConsumer {
+    pub fn new(config: &MemoryConfig) -> anyhow::Result<Self> {
+        let channel_exists = memory_channel_exists(&config.topic);
+        let store_exists = event_store_exists(&config.topic);
+
+        if config.subscribe_mode {
+            if channel_exists {
+                return Err(anyhow!("Topic '{}' is already active as a Queue (MemoryChannel), but Subscriber mode (EventStore) was requested.", config.topic));
+            }
+            let store = get_or_create_event_store(&config.topic);
+            // For subscriber mode, we generate a unique ID if one isn't implicit in the usage.
+            // However, MemorySubscriber struct usually handles the ID.
+            // If MemoryConsumer is used directly with subscribe_mode=true, we assume a default ID or ephemeral.
+            let subscriber_id = format!("{}-consumer", config.topic);
+            let consumer = store.consumer(subscriber_id);
+            Ok(Self::Log {
+                consumer,
+                topic: config.topic.clone(),
+            })
+        } else {
+            if store_exists {
+                return Err(anyhow!("Topic '{}' is already active as a Subscriber Log (EventStore), but Queue mode (MemoryChannel) was requested.", config.topic));
+            }
+            let queue = MemoryQueueConsumer::new(config)?;
+            Ok(Self::Queue(queue))
+        }
+    }
+}
+
+impl MemoryQueueConsumer {
     pub fn new(config: &MemoryConfig) -> anyhow::Result<Self> {
         let channel = get_or_create_channel(config);
         Ok(Self {
@@ -311,23 +405,6 @@ impl MemoryConsumer {
             receiver: channel.receiver.clone(),
             buffer: Vec::new(),
             enable_nack: config.enable_nack,
-        })
-    }
-
-    pub fn new_local(topic: &str, capacity: usize) -> Self {
-        Self::new(&MemoryConfig {
-            topic: topic.to_string(),
-            capacity: Some(capacity),
-            ..Default::default()
-        })
-        .expect("Failed to create local memory consumer")
-    }
-
-    pub fn channel(&self) -> MemoryChannel {
-        get_or_create_channel(&MemoryConfig {
-            topic: self.topic.clone(),
-            capacity: None,
-            ..Default::default()
         })
     }
 
@@ -359,7 +436,7 @@ impl MemoryConsumer {
 }
 
 #[async_trait]
-impl MessageConsumer for MemoryConsumer {
+impl MessageConsumer for MemoryQueueConsumer {
     async fn receive_batch(&mut self, max_messages: usize) -> Result<ReceivedBatch, ConsumerError> {
         // If the internal buffer has messages, return them first.
 
@@ -473,6 +550,41 @@ impl MessageConsumer for MemoryConsumer {
     }
 }
 
+#[async_trait]
+impl MessageConsumer for MemoryConsumer {
+    async fn receive_batch(&mut self, max_messages: usize) -> Result<ReceivedBatch, ConsumerError> {
+        match self {
+            Self::Queue(q) => q.receive_batch(max_messages).await,
+            Self::Log { consumer, .. } => consumer.receive_batch(max_messages).await,
+        }
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+impl MemoryConsumer {
+    pub fn new_local(topic: &str, capacity: usize) -> Self {
+        Self::new(&MemoryConfig {
+            topic: topic.to_string(),
+            capacity: Some(capacity),
+            ..Default::default()
+        })
+        .expect("Failed to create local memory consumer")
+    }
+    pub fn channel(&self) -> MemoryChannel {
+        let topic = match self {
+            Self::Queue(q) => &q.topic,
+            Self::Log { topic, .. } => topic,
+        };
+        get_or_create_channel(&MemoryConfig {
+            topic: topic.clone(),
+            ..Default::default()
+        })
+    }
+}
+
 pub struct MemorySubscriber {
     consumer: MemoryConsumer,
 }
@@ -481,7 +593,18 @@ impl MemorySubscriber {
     pub fn new(config: &MemoryConfig, id: &str) -> anyhow::Result<Self> {
         let mut sub_config = config.clone();
         sub_config.topic = format!("{}-{}", config.topic, id);
-        let consumer = MemoryConsumer::new(&sub_config)?;
+        // If subscribe_mode is true, we use EventStore with the original topic but unique subscriber ID.
+        // If false (legacy), we use the suffixed topic queue.
+        let consumer = if config.subscribe_mode {
+            let store = get_or_create_event_store(&config.topic);
+            MemoryConsumer::Log {
+                consumer: store.consumer(id.to_string()),
+                topic: config.topic.clone(),
+            }
+        } else {
+            sub_config.topic = format!("{}-{}", config.topic, id);
+            MemoryConsumer::new(&sub_config)?
+        };
         Ok(Self { consumer })
     }
 }
@@ -506,7 +629,7 @@ mod tests {
     use super::*;
     use crate::models::{Endpoint, Route};
     use crate::traits::Handled;
-    use crate::CanonicalMessage;
+    use crate::{msg, CanonicalMessage};
     use serde_json::json;
     use tokio::time::sleep;
 
@@ -515,7 +638,7 @@ mod tests {
         let mut consumer = MemoryConsumer::new_local("test-mem1", 10);
         let publisher = MemoryPublisher::new_local("test-mem1", 10);
 
-        let msg = CanonicalMessage::from_json(json!({"hello": "memory"})).unwrap();
+        let msg = msg!(json!({"hello": "memory"}));
 
         // Send a message via the publisher
         publisher.send(msg.clone()).await.unwrap();
@@ -671,5 +794,155 @@ mod tests {
         let result =
             tokio::time::timeout(std::time::Duration::from_millis(100), consumer.receive()).await;
         assert!(result.is_err(), "Channel should be empty");
+    }
+
+    #[tokio::test]
+    async fn test_memory_event_store_integration() {
+        let topic = "event_store_test";
+        // Publisher with subscribe_mode=true enables EventStore writing
+        let pub_config = MemoryConfig {
+            topic: topic.to_string(),
+            subscribe_mode: true,
+            ..Default::default()
+        };
+        let publisher = MemoryPublisher::new(&pub_config).unwrap();
+
+        // Subscriber 1
+        let mut sub1 = MemorySubscriber::new(&pub_config, "sub1").unwrap();
+        // Subscriber 2
+        let mut sub2 = MemorySubscriber::new(&pub_config, "sub2").unwrap();
+
+        publisher.send("event1".into()).await.unwrap();
+
+        let msg1 = sub1.receive().await.unwrap();
+        assert_eq!(msg1.message.get_payload_str(), "event1");
+        (msg1.commit)(MessageDisposition::Ack).await.unwrap();
+
+        let msg2 = sub2.receive().await.unwrap();
+        assert_eq!(msg2.message.get_payload_str(), "event1");
+    }
+
+    #[tokio::test]
+    async fn test_memory_no_subscribers_persistence() {
+        let topic = format!("no_subs_{}", fast_uuid_v7::gen_id_str());
+        let pub_config = MemoryConfig {
+            topic: topic.clone(),
+            subscribe_mode: true,
+            ..Default::default()
+        };
+
+        // 1. Create Publisher (Log mode)
+        let publisher = MemoryPublisher::new(&pub_config).unwrap();
+
+        // 2. Publish messages with no subscribers
+        publisher.send("msg1".into()).await.unwrap();
+        publisher.send("msg2".into()).await.unwrap();
+
+        // 3. Create Subscriber (Late joiner)
+        let sub_config = MemoryConfig {
+            topic: topic.clone(),
+            subscribe_mode: true,
+            ..Default::default()
+        };
+        let mut subscriber = MemorySubscriber::new(&sub_config, "late_sub").unwrap();
+
+        // 4. Verify messages are received
+        let received1 = subscriber.receive().await.unwrap();
+        assert_eq!(received1.message.get_payload_str(), "msg1");
+        (received1.commit)(MessageDisposition::Ack).await.unwrap();
+
+        let received2 = subscriber.receive().await.unwrap();
+        assert_eq!(received2.message.get_payload_str(), "msg2");
+        (received2.commit)(MessageDisposition::Ack).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_memory_mixed_mode_error() {
+        let topic_q = format!("mixed_q_{}", fast_uuid_v7::gen_id_str());
+        let topic_l = format!("mixed_l_{}", fast_uuid_v7::gen_id_str());
+
+        // Case 1: Active Queue, try to create Log Consumer
+        let _pub_q = MemoryPublisher::new_local(&topic_q, 10); // Creates Queue backend
+
+        let log_conf = MemoryConfig {
+            topic: topic_q.clone(),
+            subscribe_mode: true,
+            ..Default::default()
+        };
+        let err = MemoryConsumer::new(&log_conf);
+        assert!(err.is_err());
+        assert!(err
+            .unwrap_err()
+            .to_string()
+            .contains("already active as a Queue"));
+
+        // Case 2: Active Log, try to create Queue Consumer
+        let log_pub_conf = MemoryConfig {
+            topic: topic_l.clone(),
+            subscribe_mode: true,
+            ..Default::default()
+        };
+        let _pub_l = MemoryPublisher::new(&log_pub_conf).unwrap(); // Creates Log backend
+
+        let queue_conf = MemoryConfig {
+            topic: topic_l.clone(),
+            subscribe_mode: false,
+            ..Default::default()
+        };
+        let err = MemoryConsumer::new(&queue_conf);
+        assert!(err.is_err());
+        assert!(err
+            .unwrap_err()
+            .to_string()
+            .contains("already active as a Subscriber Log"));
+    }
+
+    #[tokio::test]
+    async fn test_memory_publisher_mixed_mode_error() {
+        let topic_q = format!("pub_mixed_q_{}", fast_uuid_v7::gen_id_str());
+
+        // 1. Create a Queue Consumer to establish the channel
+        let _cons_q = MemoryConsumer::new_local(&topic_q, 10);
+
+        // 2. Try to create a Log Publisher on the same topic
+        let log_conf = MemoryConfig {
+            topic: topic_q.clone(),
+            subscribe_mode: true,
+            ..Default::default()
+        };
+        let err = MemoryPublisher::new(&log_conf);
+        assert!(err.is_err());
+        assert!(err
+            .unwrap_err()
+            .to_string()
+            .contains("already active as a Queue"));
+    }
+
+    #[tokio::test]
+    async fn test_memory_publisher_adaptive_behavior() {
+        let topic = format!("adaptive_{}", fast_uuid_v7::gen_id_str());
+
+        // 1. Create a Log Consumer (Subscriber) to establish the EventStore
+        let sub_config = MemoryConfig {
+            topic: topic.clone(),
+            subscribe_mode: true,
+            ..Default::default()
+        };
+        let mut subscriber = MemorySubscriber::new(&sub_config, "sub1").unwrap();
+
+        // 2. Create a Publisher WITHOUT subscribe_mode explicitly set
+        let pub_config = MemoryConfig {
+            topic: topic.clone(),
+            subscribe_mode: false, // Default is false
+            ..Default::default()
+        };
+        // This should succeed and adapt to Log mode because the store exists
+        let publisher = MemoryPublisher::new(&pub_config).unwrap();
+
+        // 3. Verify it publishes to the store (subscriber receives it)
+        publisher.send("adaptive_msg".into()).await.unwrap();
+
+        let received = subscriber.receive().await.unwrap();
+        assert_eq!(received.message.get_payload_str(), "adaptive_msg");
     }
 }

@@ -65,29 +65,33 @@ It may still be possible that there are issues with
 
 ## Endpoint Behavior
 
-Different backends and modes (`consumer` vs `subscriber`) have different persistence guarantees.
+`mq-bridge` endpoints generally default to a **Consumer** pattern (Queue), where messages are persisted (if supported by the backend) and distributed among workers.
 
-| Backend | Mode | Persistence | Description |
+To achieve **Subscriber** (Pub/Sub) behavior—where messages are broadcast to all active instances—you must configure the specific backend accordingly. There is no global "subscriber mode" toggle; it is determined by the configuration of the endpoint.
+
+| Backend | Default Behavior (Queue) | Configuration for Subscriber (Pub/Sub) | Response Support |
 | :--- | :--- | :--- | :--- |
-| **Kafka** | Consumer | Persistent | Uses consumer groups. Resumes from last committed offset. |
-| | Subscriber | Ephemeral* | Unique group ID per instance. Starts at `latest`. (*Persistent if `subscribe_id` is set). |
-| **NATS** | Consumer | Persistent | Uses JetStream durable consumers. |
-| | Subscriber | Ephemeral | Uses ephemeral consumers. Receives only new messages. |
-| **AMQP** | Consumer | Persistent | Uses durable queues. |
-| | Subscriber | Ephemeral | Uses temporary, auto-delete queues. |
-| **MQTT** | Consumer | Configurable | Depends on `clean_session`. |
-| | Subscriber | Ephemeral | Unique Client ID per instance. |
-| **IBM MQ** | Consumer | Persistent | Reads from a defined queue. |
-| | Subscriber | Ephemeral | Uses non-durable managed subscriptions. |
-| **MongoDB** | Consumer | Persistent | Documents stored until acknowledged. |
-| | Subscriber | Ephemeral | Change Streams / Polling from current time. |
-| **AWS** | Consumer | Persistent | Uses SQS queues. |
-| | Subscriber | - | Not supported. |
-| **Memory** | All | Ephemeral | Lost on restart. |
-| **File** | All | Persistent | Stored on disk. |
-| **HTTP** | All | Ephemeral | Direct request/response. |
-| **ZeroMQ** | Consumer | Ephemeral | Uses PULL/REP sockets. |
-| | Subscriber | Ephemeral | Uses SUB sockets. |
+| **Kafka** | Persistent (Consumer Group) | Omit `group_id` (generates unique ID) | No |
+| **NATS** | Persistent (JetStream Durable) | Set `subscriber_mode: true` | Yes |
+| **AMQP** | Persistent (Durable Queue) | Set `subscribe_mode: true` | No |
+| **MQTT** | Persistent Session | Set `clean_session: true` | No |
+| **IBM MQ** | Persistent Queue | Set `topic` instead of `queue` | No |
+| **MongoDB** | Persistent (Collection) | Set `change_stream: true` | Yes |
+| **AWS** | Persistent (SQS) | Not supported directly (Use SNS->SQS) | No |
+| **Memory** | Ephemeral (Channel) | Set `subscribe_mode: true` | Yes |
+| **File** | Persistent (Delete after read) | Set `subscribe_mode: true` (Tail) | No |
+| **HTTP** | Ephemeral (Request) | N/A | Yes (Implicit) |
+| **ZeroMQ** | Ephemeral (PULL) | Set `socket_type: "sub"` | No |
+
+### Response Mode
+The `response` output endpoint allows sending a reply back to the requester. This is useful for synchronous request-reply patterns (e.g., HTTP-to-NATS-to-HTTP).
+
+*   **Availability**: Only available if the **Input** endpoint supports request-reply (HTTP, NATS, Memory, MongoDB).
+*   **Configuration**: Use `response: {}` as the output endpoint.
+*   **Caveats**:
+    *   If the input does not support responses (e.g., File, Kafka), the message sent to `response` will be dropped.
+    *   Ensure timeouts are configured correctly on the requester side, as the bridge processing time adds latency.
+    *   Middleware that drops metadata (like `correlation_id`) may break the response chain.
 
 ## Usage
 

@@ -3,19 +3,22 @@
 //  Licensed under MIT License, see License file for more details
 //  git clone https://github.com/marcomq/mq-bridge
 use crate::canonical_message::tracing_support::LazyMessageIds;
+use crate::event_store::{EventStore, EventStoreConsumer, RetentionPolicy};
 use crate::models::FileConfig;
 use crate::traits::{
-    into_batch_commit_func, BatchCommitFunc, CommitFunc, ConsumerError, MessageConsumer,
-    MessagePublisher, PublisherError, ReceivedBatch, SentBatch,
+    ConsumerError, MessageConsumer, MessagePublisher, PublisherError, ReceivedBatch, SentBatch,
 };
 use crate::CanonicalMessage;
 use anyhow::Context;
 use async_trait::async_trait;
+use once_cell::sync::Lazy;
 use std::any::Any;
+use std::collections::HashMap;
+use std::io::SeekFrom;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use tokio::fs::{self, File, OpenOptions};
-use tokio::io::{self, AsyncBufReadExt, BufReader};
+use tokio::io::{self, AsyncBufReadExt, AsyncSeekExt, BufReader};
 use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::sync::Mutex;
 use tracing::{info, instrument, trace};
@@ -123,289 +126,266 @@ impl MessagePublisher for FilePublisher {
     }
 }
 
-struct FileConsumerState {
-    in_flight_lines: usize,
-    next_batch_seq: u64,
-    next_commit_seq: u64,
-    pending_commits: std::collections::BTreeMap<u64, usize>,
+static FILE_EVENT_STORES: Lazy<Mutex<HashMap<String, Weak<EventStore>>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+struct FileFeedState {
+    /// For Consume mode: number of lines currently buffered in EventStore.
+    /// We skip this many lines from the start of the file when reading.
+    lines_in_memory: usize,
+    /// For Subscribe mode: the file offset (bytes) where we stopped reading.
+    last_position: u64,
 }
 
-enum ConsumerMode {
-    Consume(Arc<Mutex<FileConsumerState>>),
-    Subscribe(BufReader<File>),
+async fn create_file_event_store(config: &FileConfig) -> anyhow::Result<Arc<EventStore>> {
+    let path = config.path.clone();
+    let should_delete = config.delete.unwrap_or(!config.subscribe_mode);
+
+    // Shared state to coordinate the reader and the drop (delete) logic.
+    let feed_state = Arc::new(tokio::sync::Mutex::new(FileFeedState {
+        lines_in_memory: 0,
+        last_position: 0,
+    }));
+
+    // Lock to serialize file modification operations
+    let file_op_lock = Arc::new(tokio::sync::Mutex::new(()));
+
+    let feed_state_clone = feed_state.clone();
+    let path_clone = path.clone();
+    let file_op_lock_clone = file_op_lock.clone();
+
+    let mut retention = RetentionPolicy::default();
+    // Use immediate GC for file stores to ensure files are truncated promptly on ack.
+    retention.gc_interval = std::time::Duration::ZERO;
+
+    // 1. Create EventStore with on_drop callback
+    let store = Arc::new(
+        EventStore::new(retention).with_drop_callback(move |events| {
+            if !should_delete {
+                // If deletion is disabled, we don't modify the file.
+                return;
+            }
+            let count = events.len();
+            if count == 0 {
+                return;
+            }
+            let state = feed_state_clone.clone();
+            let path = path_clone.clone();
+            let file_op_lock = file_op_lock_clone.clone();
+
+            // Spawn a task to rewrite the file, removing the dropped lines.
+            // We use the mutex to ensure we don't race with the reader or other drops.
+            tokio::spawn(async move {
+                // Serialize file operations to prevent race conditions between multiple GCs
+                let _guard = file_op_lock.lock().await;
+
+                if let Err(e) = remove_lines_from_file(&path, count).await {
+                    tracing::error!("Failed to remove lines from file {}: {}", path, e);
+                } else {
+                    let mut state = state.lock().await;
+                    state.lines_in_memory = state.lines_in_memory.saturating_sub(count);
+                    trace!(
+                        "Removed {} lines from {}, remaining in memory: {}",
+                        count,
+                        path,
+                        state.lines_in_memory
+                    );
+                }
+            });
+        }),
+    );
+
+    // 2. Spawn background reader task
+    let store_weak = Arc::downgrade(&store);
+    let path_clone = path.clone();
+    let feed_state_clone = feed_state.clone();
+    let file_op_lock_clone = file_op_lock.clone();
+
+    tokio::spawn(async move {
+        loop {
+            // Check if the store is still alive
+            let store_clone = match store_weak.upgrade() {
+                Some(s) => s,
+                None => break, // Exit if EventStore is dropped
+            };
+
+            // Acquire file op lock first to coordinate with GC
+            let _file_guard = file_op_lock_clone.lock().await;
+
+            let mut state = feed_state_clone.lock().await;
+
+            // Open file
+            let file_res = OpenOptions::new().read(true).open(&path_clone).await;
+            let mut file = match file_res {
+                Ok(f) => f,
+                Err(e) => {
+                    tracing::error!("Failed to open file {}: {}", path_clone, e);
+                    drop(state);
+                    drop(_file_guard);
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    continue;
+                }
+            };
+
+            // Position the reader
+            if !should_delete {
+                if let Err(e) = file.seek(SeekFrom::Start(state.last_position)).await {
+                    tracing::error!("Failed to seek in file {}: {}", path_clone, e);
+                }
+            } else {
+                // In consume mode, we skip lines that are already buffered in memory
+                // because they are still in the file (until dropped).
+                let mut reader = BufReader::new(file);
+                let mut lines_skipped = 0;
+                let mut error = false;
+                while lines_skipped < state.lines_in_memory {
+                    let mut buf = Vec::new();
+                    match reader.read_until(b'\n', &mut buf).await {
+                        Ok(0) => break, // EOF
+                        Ok(_) => lines_skipped += 1,
+                        Err(e) => {
+                            tracing::error!("Error skipping lines in {}: {}", path_clone, e);
+                            error = true;
+                            break;
+                        }
+                    }
+                }
+                if error {
+                    drop(state);
+                    drop(_file_guard);
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    continue;
+                }
+                file = reader.into_inner();
+            }
+
+            // Read new lines
+            let mut reader = BufReader::new(file);
+            let mut lines_read = 0;
+            loop {
+                let mut buffer = Vec::new();
+                match reader.read_until(b'\n', &mut buffer).await {
+                    Ok(0) => break, // EOF
+                    Ok(n) => {
+                        if buffer.ends_with(b"\n") {
+                            buffer.pop();
+                        }
+                        let msg = parse_message(buffer);
+                        store_clone.append(msg).await;
+                        lines_read += 1;
+
+                        if !should_delete {
+                            state.last_position += n as u64;
+                        } else {
+                            state.lines_in_memory += 1;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("Error reading from {}: {}", path_clone, e);
+                        break;
+                    }
+                }
+            }
+
+            drop(state); // Release lock before sleeping
+            drop(_file_guard);
+
+            // If we didn't read anything, sleep a bit (polling)
+            if lines_read == 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        }
+    });
+
+    Ok(store)
+}
+
+async fn remove_lines_from_file(path: &str, count: usize) -> anyhow::Result<()> {
+    let unique_id = fast_uuid_v7::gen_id_str();
+    let temp_path = format!("{}.{}.tmp", path, unique_id);
+
+    let file = File::open(path).await?;
+    let mut reader = BufReader::new(file);
+    let temp_file = File::create(&temp_path).await?;
+    let mut writer = BufWriter::new(temp_file);
+
+    let mut lines_skipped = 0;
+    while lines_skipped < count {
+        let mut buf = Vec::new();
+        if reader.read_until(b'\n', &mut buf).await? == 0 {
+            break;
+        }
+        lines_skipped += 1;
+    }
+
+    if let Err(e) = io::copy(&mut reader, &mut writer).await {
+        let _ = fs::remove_file(&temp_path).await;
+        return Err(e.into());
+    }
+
+    writer.flush().await?;
+    let temp_file = writer.into_inner();
+    temp_file.sync_all().await?;
+    drop(temp_file); // Close writer handle
+    drop(reader); // Close reader handle
+
+    fs::rename(&temp_path, path).await?;
+
+    // Sync parent directory to ensure rename is durable
+    if let Some(parent) = Path::new(path).parent() {
+        if let Ok(parent_dir) = File::open(parent).await {
+            let _ = parent_dir.sync_all().await;
+        }
+    }
+
+    Ok(())
 }
 
 /// A consumer that reads messages from a file and removes them upon commit.
 pub struct FileConsumer {
-    path: String,
-    mode: ConsumerMode,
+    inner: EventStoreConsumer,
 }
 
 impl FileConsumer {
     pub async fn new(config: &FileConfig) -> anyhow::Result<Self> {
-        if config.subscribe_mode {
-            let file = OpenOptions::new()
-                .read(true)
-                .open(&config.path)
-                .await
-                .with_context(|| format!("Failed to open file for reading: {}", config.path))?;
+        let key = config.path.clone();
+        let store = {
+            let mut stores = FILE_EVENT_STORES.lock().await;
+            // Cleanup expired entries
+            stores.retain(|_, v| v.strong_count() > 0);
 
-            info!(path = %config.path, "File consumer opened in subscribe (tail) mode");
-            Ok(Self {
-                path: config.path.clone(),
-                mode: ConsumerMode::Subscribe(BufReader::new(file)),
-            })
-        } else {
-            info!(path = %config.path, "File consumer opened in consume (delete) mode");
-            Ok(Self {
-                path: config.path.clone(),
-                mode: ConsumerMode::Consume(Arc::new(Mutex::new(FileConsumerState {
-                    in_flight_lines: 0,
-                    next_batch_seq: 0,
-                    next_commit_seq: 0,
-                    pending_commits: std::collections::BTreeMap::new(),
-                }))),
-            })
-        }
+            if let Some(weak) = stores.get(&key) {
+                if let Some(store) = weak.upgrade() {
+                    store
+                } else {
+                    let store = create_file_event_store(config).await?;
+                    stores.insert(key, Arc::downgrade(&store));
+                    store
+                }
+            } else {
+                let store = create_file_event_store(config).await?;
+                stores.insert(key, Arc::downgrade(&store));
+                store
+            }
+        };
+
+        let subscriber_id = format!("file-sub-{}", fast_uuid_v7::gen_id_str());
+        info!(path = %config.path, mode = ?if config.subscribe_mode { "subscribe" } else { "consume" }, "File consumer connected");
+
+        Ok(Self {
+            inner: store.consumer(subscriber_id),
+        })
     }
 }
 
 #[async_trait]
 impl MessageConsumer for FileConsumer {
-    #[instrument(skip(self), fields(path = %self.path), err(level = "debug"))]
     async fn receive_batch(&mut self, max_messages: usize) -> Result<ReceivedBatch, ConsumerError> {
-        match &mut self.mode {
-            ConsumerMode::Subscribe(reader) => {
-                let mut messages = Vec::new();
-
-                // 1. Wait for the first message
-                loop {
-                    let mut buffer = Vec::new();
-                    let bytes_read = reader
-                        .read_until(b'\n', &mut buffer)
-                        .await
-                        .context("Failed to read from file source")?;
-
-                    if bytes_read > 0 {
-                        if buffer.ends_with(b"\n") {
-                            buffer.pop();
-                        }
-                        messages.push(parse_message(buffer));
-                        break;
-                    }
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                }
-
-                // 2. Try to read more messages to fill the batch
-                while messages.len() < max_messages {
-                    let mut buffer = Vec::new();
-                    let bytes_read = reader
-                        .read_until(b'\n', &mut buffer)
-                        .await
-                        .context("Failed to read from file source")?;
-
-                    if bytes_read == 0 {
-                        break;
-                    }
-                    if buffer.ends_with(b"\n") {
-                        buffer.pop();
-                    }
-                    messages.push(parse_message(buffer));
-                }
-
-                let commit: CommitFunc = Box::new(move |_| Box::pin(async move { Ok(()) }));
-
-                Ok(ReceivedBatch {
-                    messages,
-                    commit: into_batch_commit_func(commit),
-                })
-            }
-            ConsumerMode::Consume(state) => {
-                let path = self.path.clone();
-                let state = state.clone();
-                Self::receive_batch_consume(path, state, max_messages).await
-            }
-        }
+        self.inner.receive_batch(max_messages).await
     }
 
     fn as_any(&self) -> &dyn Any {
         self
-    }
-}
-
-impl FileConsumer {
-    async fn receive_batch_consume(
-        // Changed from &self to associated function
-        path: String,
-        state: Arc<Mutex<FileConsumerState>>,
-        max_messages: usize,
-    ) -> Result<ReceivedBatch, ConsumerError> {
-        let mut messages = Vec::new();
-        let mut lines_read = 0;
-        let batch_seq;
-
-        // 1. Wait for the first message
-        loop {
-            let mut state = state.lock().await;
-            let file = OpenOptions::new()
-                .read(true)
-                .open(&path)
-                .await
-                .context("Failed to open file for reading")?;
-            let mut reader = BufReader::new(file);
-            let mut current_line = 0;
-
-            // Skip lines that are currently being processed
-            while current_line < state.in_flight_lines {
-                let mut skip_buf = Vec::new();
-                if reader
-                    .read_until(b'\n', &mut skip_buf)
-                    .await
-                    .context("Failed to skip in-flight line")?
-                    == 0
-                {
-                    break;
-                }
-                current_line += 1;
-            }
-
-            // Try to read the first message
-            let mut buffer = Vec::new();
-            let n = reader
-                .read_until(b'\n', &mut buffer)
-                .await
-                .context("Failed to read next line")?;
-
-            if n > 0 {
-                lines_read += 1;
-                if buffer.ends_with(b"\n") {
-                    buffer.pop();
-                }
-                messages.push(parse_message(buffer));
-
-                // 2. Try to read more messages to fill the batch
-                while messages.len() < max_messages {
-                    let mut buffer = Vec::new();
-                    let n = reader
-                        .read_until(b'\n', &mut buffer)
-                        .await
-                        .context("Failed to read next line")?;
-                    if n == 0 {
-                        break;
-                    }
-                    lines_read += 1;
-                    if buffer.ends_with(b"\n") {
-                        buffer.pop();
-                    }
-                    messages.push(parse_message(buffer));
-                }
-
-                batch_seq = state.next_batch_seq;
-                state.next_batch_seq += 1;
-                state.in_flight_lines += lines_read;
-                drop(state);
-                break;
-            }
-
-            // Keep lock held while sleeping to prevent concurrent readers
-            // from reading overlapping lines
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        }
-
-        // In Consume mode, we remove the processed lines from the file.
-        let commit_path = path.clone();
-        let lines_to_remove = lines_read;
-
-        let commit: BatchCommitFunc = Box::new(
-            move |dispositions: Vec<crate::traits::MessageDisposition>| {
-                Box::pin(async move {
-                    if dispositions
-                        .iter()
-                        .any(|d| matches!(d, crate::traits::MessageDisposition::Nack))
-                    {
-                        let mut state = state.lock().await;
-                        state.in_flight_lines =
-                            state.in_flight_lines.saturating_sub(lines_to_remove);
-                        return Ok(());
-                    }
-
-                    let mut state = state.lock().await;
-                    state.pending_commits.insert(batch_seq, lines_to_remove);
-
-                    // Check if we can process any commits in order
-                    let mut total_lines_to_remove = 0;
-                    let mut batches_to_process: u64 = 0;
-                    let mut current_seq = state.next_commit_seq;
-
-                    while let Some(&lines) = state.pending_commits.get(&current_seq) {
-                        total_lines_to_remove += lines;
-                        batches_to_process += 1;
-                        current_seq += 1;
-                    }
-
-                    if batches_to_process == 0 {
-                        return Ok(());
-                    }
-
-                    // Read the whole file
-                    let file = File::open(&commit_path)
-                        .await
-                        .context("Failed to read file for commit")?;
-                    let mut reader = BufReader::new(file);
-
-                    let temp_path = format!("{}.tmp", commit_path);
-                    let result = async {
-                        let temp_file = File::create(&temp_path)
-                            .await
-                            .context("Failed to create temp file")?;
-                        let mut writer = BufWriter::new(temp_file);
-
-                        let mut lines_skipped = 0;
-
-                        // Skip the first N lines (where N is the batch size we just processed)
-                        // Note: This simple implementation assumes ordered commits.
-                        while lines_skipped < total_lines_to_remove {
-                            let mut skip_buf = Vec::new();
-                            if reader.read_until(b'\n', &mut skip_buf).await? == 0 {
-                                break;
-                            }
-                            lines_skipped += 1;
-                        }
-
-                        // Write the rest using streaming copy
-                        io::copy(&mut reader, &mut writer).await?;
-                        writer.flush().await?;
-
-                        // Rewrite the file
-                        fs::rename(&temp_path, &commit_path)
-                            .await
-                            .context("Failed to replace file for commit")?;
-                        Ok(())
-                    }
-                    .await;
-
-                    if let Err(e) = result {
-                        let _ = fs::remove_file(&temp_path).await;
-                        return Err(e);
-                    }
-
-                    // Update state
-                    state.in_flight_lines =
-                        state.in_flight_lines.saturating_sub(total_lines_to_remove);
-                    let start_seq = state.next_commit_seq;
-                    state.next_commit_seq += batches_to_process;
-                    for i in 0..batches_to_process {
-                        state.pending_commits.remove(&(start_seq + i));
-                    }
-                    Ok(())
-                })
-            },
-        );
-
-        if let Some(first) = messages.first() {
-            trace!(message_id = %format!("{:032x}", first.message_id), path = %path, "Received message from file");
-        }
-        Ok(ReceivedBatch { messages, commit })
     }
 }
 
@@ -432,6 +412,8 @@ mod tests {
     };
     use serde_json::json;
     use tempfile::tempdir;
+    use tokio::fs::OpenOptions;
+    use tokio::io::AsyncWriteExt;
 
     #[tokio::test]
     async fn test_file_sink_and_source_integration() {
@@ -444,6 +426,7 @@ mod tests {
         let config = FileConfig {
             path: file_path_str.clone(),
             subscribe_mode: false,
+            delete: None,
         };
         let sink = FilePublisher::new(&config).await.unwrap();
 
@@ -494,6 +477,7 @@ mod tests {
         let config = FileConfig {
             path: file_path.to_str().unwrap().to_string(),
             subscribe_mode: false,
+            delete: None,
         };
         let sink_result = FilePublisher::new(&config).await;
 
@@ -516,6 +500,7 @@ mod tests {
         let config = FileConfig {
             path: file_path_str,
             subscribe_mode: false,
+            delete: None,
         };
         let mut consumer = FileConsumer::new(&config).await.unwrap();
 
@@ -528,8 +513,15 @@ mod tests {
             .await
             .unwrap();
 
-        // Verify file content
-        let content = tokio::fs::read_to_string(&file_path).await.unwrap();
+        // Verify file content - wait for async deletion
+        let mut content = String::new();
+        for _ in 0..20 {
+            content = tokio::fs::read_to_string(&file_path).await.unwrap();
+            if content == "line2\nline3\n" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
         assert_eq!(content, "line2\nline3\n");
 
         // Receive second message
@@ -547,7 +539,13 @@ mod tests {
             .unwrap();
 
         // Verify file is empty
-        let content = tokio::fs::read_to_string(&file_path).await.unwrap();
+        for _ in 0..20 {
+            content = tokio::fs::read_to_string(&file_path).await.unwrap();
+            if content == "" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
         assert_eq!(content, "");
     }
 
@@ -563,6 +561,7 @@ mod tests {
         let config = FileConfig {
             path: file_path_str.clone(),
             subscribe_mode: false,
+            delete: None,
         };
         let mut consumer = FileConsumer::new(&config).await.unwrap();
 
@@ -590,5 +589,90 @@ mod tests {
         let batch3 = consumer.receive_batch(1).await.unwrap();
         assert_eq!(batch3.messages.len(), 1);
         assert_eq!(batch3.messages[0].payload.as_ref(), b"msg2");
+    }
+
+    #[tokio::test]
+    async fn test_file_consumer_consume_no_delete() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("consume_no_delete.log");
+        let file_path_str = file_path.to_str().unwrap().to_string();
+
+        // Write 3 lines
+        tokio::fs::write(&file_path, b"line1\nline2\nline3\n")
+            .await
+            .unwrap();
+
+        let config = FileConfig {
+            path: file_path_str.clone(),
+            subscribe_mode: false,
+            delete: Some(false),
+        };
+        let mut consumer = FileConsumer::new(&config).await.unwrap();
+
+        // Receive first message
+        let received1 = consumer.receive().await.unwrap();
+        assert_eq!(received1.message.payload.as_ref(), b"line1");
+
+        // Commit first message (should NOT remove line1)
+        (received1.commit)(crate::traits::MessageDisposition::Ack)
+            .await
+            .unwrap();
+
+        // Give some time for any potential (but unwanted) background deletion to happen
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Verify file content remains unchanged
+        let content = tokio::fs::read_to_string(&file_path).await.unwrap();
+        assert_eq!(content, "line1\nline2\nline3\n");
+
+        // Receive second message
+        let received2 = consumer.receive().await.unwrap();
+        assert_eq!(received2.message.payload.as_ref(), b"line2");
+    }
+
+    #[tokio::test]
+    async fn test_file_consumer_subscribe_mode() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("subscribe.log");
+        let file_path_str = file_path.to_str().unwrap().to_string();
+
+        // Write initial content
+        tokio::fs::write(&file_path, b"line1\n").await.unwrap();
+
+        let config = FileConfig {
+            path: file_path_str.clone(),
+            subscribe_mode: true,
+            delete: None,
+        };
+
+        let mut consumer = FileConsumer::new(&config).await.unwrap();
+
+        // Receive existing line
+        let received1 = consumer.receive().await.unwrap();
+        assert_eq!(received1.message.payload.as_ref(), b"line1");
+        (received1.commit)(crate::traits::MessageDisposition::Ack)
+            .await
+            .unwrap();
+
+        // Append new line
+        {
+            let mut file = OpenOptions::new()
+                .append(true)
+                .open(&file_path)
+                .await
+                .unwrap();
+            file.write_all(b"line2\n").await.unwrap();
+        }
+
+        // Receive new line
+        let received2 = consumer.receive().await.unwrap();
+        assert_eq!(received2.message.payload.as_ref(), b"line2");
+        (received2.commit)(crate::traits::MessageDisposition::Ack)
+            .await
+            .unwrap();
+
+        // Verify file content is unchanged
+        let content = tokio::fs::read_to_string(&file_path).await.unwrap();
+        assert_eq!(content, "line1\nline2\n");
     }
 }

@@ -220,20 +220,22 @@ pub mod macro_support {
 macro_rules! msg {
     ($payload:expr $(, $key:expr => $val:expr)* $(,)?) => {
         {
+            #[allow(unused_imports)]
             use $crate::canonical_message::macro_support::{Wrap, Fallback};
-            let mut msg = Wrap($payload).convert();
+            #[allow(unused_mut)]
+            let mut message = Wrap($payload).convert();
             $(
-                msg = msg.with_metadata_kv($key, $val);
+                message = message.with_metadata_kv($key, $val);
             )*
-            msg
+            message
         }
     };
     ($payload:expr, $kind:expr $(,)?) => {
         {
             use $crate::canonical_message::macro_support::{Wrap, Fallback};
-            let mut msg = Wrap($payload).convert();
-            msg = msg.with_type_key($kind);
-            msg
+            let mut message = Wrap($payload).convert();
+            message = message.with_type_key($kind);
+            message
         }
     };
 }
