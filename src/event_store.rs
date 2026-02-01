@@ -131,29 +131,36 @@ impl EventStore {
         let mut events = self.events.write().unwrap();
         events.push_back(stored);
 
+        let mut removed = Vec::new();
+        let mut remove_count = 0;
+        let mut total_dropped = 0;
+        let mut max_count = 0;
+
         // Enforce max_count immediately
         if let Some(max) = self.retention_policy.max_count {
+            max_count = max;
             if events.len() > max {
-                let remove_count = events.len() - max;
-                let removed: Vec<StoredEvent> = events.drain(0..remove_count).collect();
+                remove_count = events.len() - max;
+                removed = events.drain(0..remove_count).collect();
                 self.base_offset
                     .fetch_add(remove_count as u64, Ordering::SeqCst);
-                let total_dropped = self
+                total_dropped = self
                     .dropped_events
                     .fetch_add(remove_count as u64, Ordering::SeqCst)
                     + remove_count as u64;
-
-                if let Some(cb) = &self.on_drop {
-                    cb(removed);
-                }
-
-                warn!(
-                    "Retention policy enforced (max_count={}): dropped {} events (total dropped: {}). Slow subscribers may miss events.",
-                    max, remove_count, total_dropped
-                );
             }
         }
         drop(events);
+
+        if remove_count > 0 {
+            if let Some(cb) = &self.on_drop {
+                cb(removed);
+            }
+            warn!(
+                "Retention policy enforced (max_count={}): dropped {} events (total dropped: {}). Slow subscribers may miss events.",
+                max_count, remove_count, total_dropped
+            );
+        }
 
         trace!("Appended event offset {}", offset);
         // Notify waiting subscribers
@@ -190,29 +197,36 @@ impl EventStore {
 
         let last_offset = start_offset + count - 1;
 
+        let mut removed = Vec::new();
+        let mut remove_count = 0;
+        let mut total_dropped = 0;
+        let mut max_count = 0;
+
         // Enforce max_count immediately
         if let Some(max) = self.retention_policy.max_count {
+            max_count = max;
             if events.len() > max {
-                let remove_count = events.len() - max;
-                let removed: Vec<StoredEvent> = events.drain(0..remove_count).collect();
+                remove_count = events.len() - max;
+                removed = events.drain(0..remove_count).collect();
                 self.base_offset
                     .fetch_add(remove_count as u64, Ordering::SeqCst);
-                let total_dropped = self
+                total_dropped = self
                     .dropped_events
                     .fetch_add(remove_count as u64, Ordering::SeqCst)
                     + remove_count as u64;
-
-                if let Some(cb) = &self.on_drop {
-                    cb(removed);
-                }
-
-                warn!(
-                    "Retention policy enforced (max_count={}): dropped {} events (total dropped: {}). Slow subscribers may miss events.",
-                    max, remove_count, total_dropped
-                );
             }
         }
         drop(events);
+
+        if remove_count > 0 {
+            if let Some(cb) = &self.on_drop {
+                cb(removed);
+            }
+            warn!(
+                "Retention policy enforced (max_count={}): dropped {} events (total dropped: {}). Slow subscribers may miss events.",
+                max_count, remove_count, total_dropped
+            );
+        }
 
         trace!("Appended batch up to offset {}", last_offset);
         // Notify waiting subscribers
@@ -425,12 +439,16 @@ impl EventStore {
             }
         }
 
+        let mut removed = Vec::new();
         if remove_count > 0 {
             debug!("GC removing {} events", remove_count);
-            let removed: Vec<StoredEvent> = events.drain(0..remove_count).collect();
+            removed = events.drain(0..remove_count).collect();
             self.base_offset
                 .fetch_add(remove_count as u64, Ordering::SeqCst);
+        }
+        drop(events);
 
+        if remove_count > 0 {
             if let Some(cb) = &self.on_drop {
                 cb(removed);
             }

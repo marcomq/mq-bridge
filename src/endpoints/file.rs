@@ -16,7 +16,7 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::io::SeekFrom;
 use std::path::Path;
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, Mutex as StdMutex, Weak};
 use tokio::fs::{self, File, OpenOptions};
 use tokio::io::{self, AsyncBufReadExt, AsyncSeekExt, BufReader};
 use tokio::io::{AsyncWriteExt, BufWriter};
@@ -24,10 +24,22 @@ use tokio::sync::Mutex;
 use tracing::{info, instrument, trace};
 
 /// A sink that writes messages to a file, one per line.
+static FILE_LOCKS: Lazy<StdMutex<HashMap<String, Arc<Mutex<()>>>>> =
+    Lazy::new(|| StdMutex::new(HashMap::new()));
+
+fn get_file_lock(path: &str) -> Arc<Mutex<()>> {
+    let mut locks = FILE_LOCKS.lock().unwrap();
+    locks
+        .entry(path.to_string())
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone()
+}
+
 #[derive(Clone)]
 pub struct FilePublisher {
     writer: Arc<Mutex<BufWriter<File>>>,
     path: String,
+    file_lock: Arc<Mutex<()>>,
 }
 
 impl FilePublisher {
@@ -48,10 +60,13 @@ impl FilePublisher {
                 format!("Failed to open or create file for writing: {}", config.path)
             })?;
 
+        let file_lock = get_file_lock(&config.path);
+
         info!(path = %config.path, "File sink opened for appending");
         Ok(Self {
             writer: Arc::new(Mutex::new(BufWriter::new(file))),
             path: config.path.clone(),
+            file_lock,
         })
     }
 }
@@ -68,6 +83,7 @@ impl MessagePublisher for FilePublisher {
         }
 
         trace!(count = messages.len(), path = %self.path, message_ids = ?LazyMessageIds(&messages), "Writing batch to file");
+        let _file_guard = self.file_lock.lock().await;
         let mut writer = self.writer.lock().await;
         let mut failed_messages = Vec::new();
 
@@ -148,7 +164,7 @@ async fn create_file_event_store(config: &FileConfig) -> anyhow::Result<Arc<Even
     }));
 
     // Lock to serialize file modification operations
-    let file_op_lock = Arc::new(tokio::sync::Mutex::new(()));
+    let file_op_lock = get_file_lock(&path);
 
     let feed_state_clone = feed_state.clone();
     let path_clone = path.clone();
