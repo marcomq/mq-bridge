@@ -13,7 +13,7 @@ use mongodb::{
     bson::{doc, to_document, Binary, Bson, Document},
     change_stream::ChangeStream,
     error::ErrorKind,
-    options::{CreateCollectionOptions, FindOneAndUpdateOptions},
+    options::FindOneAndUpdateOptions,
 };
 use mongodb::{change_stream::event::ChangeStreamEvent, IndexModel};
 use mongodb::{Client, Collection, Database};
@@ -170,15 +170,15 @@ impl MongoDbPublisher {
 
         if let Some(capped_size) = config.capped_size_bytes {
             let collections = db
-                .list_collection_names(doc! { "name": collection_name })
+                .list_collection_names()
+                .filter(doc! { "name": collection_name })
                 .await?;
             if collections.is_empty() {
                 info!(collection = %collection_name, size = %capped_size, "Creating capped collection");
-                let options = CreateCollectionOptions::builder()
+                db.create_collection(collection_name)
                     .capped(true)
-                    .size_in_bytes(capped_size)
-                    .build();
-                db.create_collection(collection_name, options).await?;
+                    .size(capped_size as u64)
+                    .await?;
             }
         }
 
