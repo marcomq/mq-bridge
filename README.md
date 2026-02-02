@@ -163,10 +163,21 @@ let typed_handler = TypeHandler::new()
     });
 
 // 3. Attach the handler to a route
-// let route = Route { ... }.with_handler(typed_handler);
+let route = Route::new(input, output).with_handler(typed_handler);
 
-// 4. A message with metadata `kind: "create_user"` will be deserialized
-//    into a `CreateUser` struct and passed to the first handler.
+// 4. To send a message to the route's input, create a publisher for that endpoint.
+//    In a real application, you would create this publisher once and reuse it.
+let input_publisher = Publisher::new(route.input.clone()).await.unwrap();
+
+// 5. Create a typed command, serialize it, and send it via the publisher.
+let command = CreateUser { id: 1, username: "test".to_string() };
+let message = CanonicalMessage::from_type(&command)
+    .unwrap()
+    .with_type_key("create_user"); // This sets the `kind` metadata field.
+input_publisher.send(message).await.expect("Failed to send message");
+
+// The running route will receive the message, see the `kind: "create_user"` metadata,
+// deserialize the payload into a `CreateUser` struct, and pass it to your registered handler.
 ```
 
 ### Programmatic Usage
@@ -352,6 +363,7 @@ webhook_to_mongo:
       url: "mongodb://localhost:27017"
       database: "app_db"
       collection: "webhooks"
+      format: "json" # a bit slower, but better readability
 
 # Route 3: File to AMQP (RabbitMQ)
 file_ingest:

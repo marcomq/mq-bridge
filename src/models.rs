@@ -829,6 +829,16 @@ pub struct AmqpConfig {
     pub delayed_ack: bool,
 }
 
+#[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum MongoDbFormat {
+    #[default]
+    Normal,
+    Json,
+    Raw,
+}
+
 // --- MongoDB Specific Configuration ---
 
 /// General MongoDB connection configuration.
@@ -857,7 +867,6 @@ pub struct MongoDbConfig {
     /// (Publisher only) Polling interval in milliseconds for the publisher when waiting for a reply. Defaults to 50ms.
     pub reply_polling_ms: Option<u64>,
     /// (Publisher only) If true, the publisher will wait for a response in a dedicated collection. Defaults to false.
-
     #[serde(default)]
     pub request_reply: bool,
     /// (Consumer only) If true, use Change Streams (**Subscriber mode**). Defaults to false (polling/consumer mode).
@@ -869,6 +878,9 @@ pub struct MongoDbConfig {
     pub ttl_seconds: Option<u64>,
     /// (Publisher only) If set, creates a capped collection with this size in bytes.
     pub capped_size_bytes: Option<i64>,
+    /// Format for storing messages. Defaults to Normal.
+    #[serde(default)]
+    pub format: MongoDbFormat,
 }
 
 // --- MQTT Specific Configuration ---

@@ -260,16 +260,12 @@ impl KafkaConsumer {
             let id = fast_uuid_v7::gen_id_string();
             let group_id = format!("event-sub-{}", id);
             client_config.set("group.id", &group_id);
-            client_config
-                .set("auto.offset.reset", "latest") // Start reading from the latest message
-                .set("enable.auto.commit", "false");
+            client_config.set("auto.offset.reset", "latest"); // Start reading from the latest message
             info!(topic = %topic, group_id = %group_id, "Kafka event subscriber started");
         } else if let Some(group_id) = &config.group_id {
             // Consumer mode: shared group ID, start from earliest.
             client_config.set("group.id", group_id);
-            client_config
-                .set("auto.offset.reset", "earliest")
-                .set("enable.auto.commit", "false");
+            client_config.set("auto.offset.reset", "earliest");
             info!(topic = %topic, group_id = %group_id, "Kafka source subscribed");
         } else {
             return Err(anyhow!(
@@ -278,9 +274,10 @@ impl KafkaConsumer {
         }
 
         client_config
-            // --- Performance Tuning for Consumers ---
+            // good defaults
             .set("fetch.min.bytes", "1") // Start fetching immediately
-            .set("socket.connection.setup.timeout.ms", "30000"); // 30 seconds
+            .set("socket.connection.setup.timeout.ms", "30000") // 30 seconds
+            .set("enable.auto.commit", "false");
 
         // Apply custom consumer options
         if let Some(options) = &config.consumer_options {

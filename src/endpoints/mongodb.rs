@@ -1,6 +1,6 @@
 use crate::canonical_message::tracing_support::LazyMessageIds;
 use crate::event_store::{EventStore, EventStoreConsumer};
-use crate::models::MongoDbConfig;
+use crate::models::{MongoDbConfig, MongoDbFormat};
 use crate::traits::{
     BatchCommitFunc, BoxFuture, ConsumerError, MessageConsumer, MessageDisposition,
     MessagePublisher, PublisherError, Received, ReceivedBatch, Sent, SentBatch,
@@ -10,10 +10,11 @@ use anyhow::{anyhow, Context};
 use async_trait::async_trait;
 use futures::StreamExt;
 use mongodb::{
-    bson::{doc, to_document, Binary, Bson, Document},
+    bson::{doc, to_document, Bson, Document},
     change_stream::ChangeStream,
     error::ErrorKind,
     options::FindOneAndUpdateOptions,
+    options::FindOneOptions,
 };
 use mongodb::{change_stream::event::ChangeStreamEvent, IndexModel};
 use mongodb::{Client, Collection, Database};
@@ -32,7 +33,7 @@ use tracing::{info, trace, warn};
 struct MongoMessageRaw {
     #[serde(rename = "_id")]
     id: mongodb::bson::Uuid,
-    payload: Binary,
+    payload: Bson,
     metadata: Option<Document>,
 }
 
@@ -49,9 +50,25 @@ impl TryFrom<MongoMessageRaw> for CanonicalMessage {
 
         let message_id = u128::from_be_bytes(raw.id.bytes());
 
+        let payload = match raw.payload {
+            Bson::Binary(bin) => bin.bytes.into(),
+            Bson::Document(doc) => {
+                let json = serde_json::to_vec(&doc)?;
+                json.into()
+            }
+            Bson::Array(arr) => {
+                let json = serde_json::to_vec(&arr)?;
+                json.into()
+            }
+            _ => {
+                let json_val: serde_json::Value = mongodb::bson::from_bson(raw.payload)?;
+                serde_json::to_vec(&json_val)?.into()
+            }
+        };
+
         Ok(CanonicalMessage {
             message_id,
-            payload: raw.payload.bytes.into(),
+            payload,
             metadata,
         })
     }
@@ -65,18 +82,17 @@ fn document_to_canonical(doc: Document) -> anyhow::Result<CanonicalMessage> {
     Ok(msg)
 }
 
-fn message_to_document(message: &CanonicalMessage) -> anyhow::Result<Document> {
+fn message_to_document(
+    message: &CanonicalMessage,
+    format: &MongoDbFormat,
+) -> anyhow::Result<Document> {
     // If request-reply metadata is present, we must use the wrapped format to preserve it,
     // regardless of whether the original format was raw.
     let force_wrapped = message.metadata.contains_key("correlation_id")
         || message.metadata.contains_key("reply_to");
 
     if !force_wrapped
-        && message
-            .metadata
-            .get("mq_bridge.original_format")
-            .map(|s| s.as_str())
-            == Some("raw")
+        && matches!(format, MongoDbFormat::Raw)
     {
         if let Ok(doc) = serde_json::from_slice::<Document>(&message.payload) {
             return Ok(doc);
@@ -85,31 +101,48 @@ fn message_to_document(message: &CanonicalMessage) -> anyhow::Result<Document> {
     }
 
     let id_uuid = mongodb::bson::Uuid::from_bytes(message.message_id.to_be_bytes());
-    let metadata =
-        to_document(&message.metadata).context("Failed to serialize metadata to BSON document")?;
+
+    let mut metadata = message.metadata.clone();
+    let payload_bson = if matches!(format, MongoDbFormat::Json) {
+        if let Ok(json_val) = serde_json::from_slice::<serde_json::Value>(&message.payload) {
+            if let Ok(bson_val) = mongodb::bson::to_bson(&json_val) {
+                metadata.insert("type".to_string(), "json".to_string());
+                bson_val
+            } else {
+                Bson::Binary(mongodb::bson::Binary {
+                    subtype: mongodb::bson::spec::BinarySubtype::Generic,
+                    bytes: message.payload.to_vec(),
+                })
+            }
+        } else {
+            Bson::Binary(mongodb::bson::Binary {
+                subtype: mongodb::bson::spec::BinarySubtype::Generic,
+                bytes: message.payload.to_vec(),
+            })
+        }
+    } else {
+        Bson::Binary(mongodb::bson::Binary {
+            subtype: mongodb::bson::spec::BinarySubtype::Generic,
+            bytes: message.payload.to_vec(),
+        })
+    };
+
+    let metadata_doc =
+        to_document(&metadata).context("Failed to serialize metadata to BSON document")?;
 
     Ok(doc! {
         "_id": id_uuid,
-        "payload": Bson::Binary(mongodb::bson::Binary {
-            subtype: mongodb::bson::spec::BinarySubtype::Generic,
-            bytes: message.payload.to_vec() }),
-        "metadata": metadata,
+        "payload": payload_bson,
+        "metadata": metadata_doc,
         "locked_until": null,
         "created_at": mongodb::bson::DateTime::now()
     })
 }
 
 fn parse_mongodb_document(doc: Document) -> anyhow::Result<CanonicalMessage> {
-    let is_standard_msg = doc
-        .get("payload")
-        .map(|b| matches!(b, Bson::Binary(_)))
-        .unwrap_or(false);
-
-    if is_standard_msg {
-        if let Ok(raw_msg) = mongodb::bson::from_document::<MongoMessageRaw>(doc.clone()) {
-            if let Ok(msg) = raw_msg.try_into() {
-                return Ok(msg);
-            }
+    if let Ok(raw_msg) = mongodb::bson::from_document::<MongoMessageRaw>(doc.clone()) {
+        if let Ok(msg) = raw_msg.try_into() {
+            return Ok(msg);
         }
     }
     document_to_canonical(doc)
@@ -135,7 +168,7 @@ async fn handle_reply(
             resp.metadata
                 .insert("correlation_id".to_string(), cid.clone());
         }
-        let doc = message_to_document(&resp).map_err(|e| {
+        let doc = message_to_document(&resp, &MongoDbFormat::Normal).map_err(|e| {
             tracing::error!(collection = %coll_name, error = %e, "Failed to serialize MongoDB reply");
             anyhow!("Failed to serialize MongoDB reply: {}", e)
         })?;
@@ -157,6 +190,7 @@ pub struct MongoDbPublisher {
     request_reply: bool,
     request_timeout: Duration,
     reply_polling_interval: Duration,
+    format: MongoDbFormat,
 }
 
 impl MongoDbPublisher {
@@ -237,6 +271,7 @@ impl MongoDbPublisher {
             request_reply: config.request_reply,
             request_timeout: Duration::from_millis(config.request_timeout_ms.unwrap_or(30000)),
             reply_polling_interval: Duration::from_millis(config.reply_polling_ms.unwrap_or(50)),
+            format: config.format.clone(),
         })
     }
 
@@ -281,7 +316,8 @@ impl MessagePublisher for MongoDbPublisher {
     async fn send(&self, mut message: CanonicalMessage) -> Result<Sent, PublisherError> {
         if !self.request_reply {
             trace!(message_id = %format!("{:032x}", message.message_id), collection = %self.collection_name, "Publishing document to MongoDB");
-            let doc = message_to_document(&message).map_err(PublisherError::NonRetryable)?;
+            let doc = message_to_document(&message, &self.format)
+                .map_err(PublisherError::NonRetryable)?;
             match self.collection.insert_one(doc).await {
                 Ok(_) => {}
                 Err(e) => {
@@ -319,7 +355,8 @@ impl MessagePublisher for MongoDbPublisher {
             .insert("reply_to".to_string(), reply_collection_name.clone());
 
         trace!(message_id = %format!("{:032x}", message.message_id), correlation_id = %correlation_id, collection = %self.collection_name, "Publishing request document to MongoDB");
-        let doc = message_to_document(&message).map_err(PublisherError::NonRetryable)?;
+        let doc =
+            message_to_document(&message, &self.format).map_err(PublisherError::NonRetryable)?;
         match self.collection.insert_one(doc).await {
             Ok(_) => {}
             Err(e) => {
@@ -396,7 +433,7 @@ impl MessagePublisher for MongoDbPublisher {
         let mut failed_messages = Vec::new();
 
         for message in &messages {
-            match message_to_document(message) {
+            match message_to_document(message, &self.format) {
                 Ok(doc) => docs.push(doc),
                 Err(e) => {
                     failed_messages.push((message.clone(), PublisherError::NonRetryable(e)));
@@ -999,6 +1036,21 @@ async fn create_mongo_backed_event_store(
     tokio::spawn(async move {
         let mut last_id: Option<mongodb::bson::Uuid> = None;
 
+        // Start from the latest message
+        let find_options = FindOneOptions::builder().sort(doc! { "_id": -1 }).build();
+
+        if let Ok(Some(doc)) = collection_clone
+            .find_one(doc! {})
+            .with_options(find_options)
+            .await
+        {
+            if let Some(Bson::Binary(binary)) = doc.get("_id") {
+                if let Ok(uuid) = binary.to_uuid() {
+                    last_id = Some(uuid);
+                    info!(last_id = %uuid, "Starting MongoDB subscriber from latest message");
+                }
+            }
+        }
         // Initial scan: Find the last ID to avoid re-reading everything if we wanted "tail" behavior?
         // But here we want "queue" behavior (process everything present), so we start from beginning.
         // If the collection is large, this might take time to catch up.
