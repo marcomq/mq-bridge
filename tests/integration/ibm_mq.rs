@@ -36,7 +36,7 @@ use std::time::Instant;
 
 fn get_config() -> IbmMqConfig {
     IbmMqConfig {
-        user: Some("app".to_string()),
+        username: Some("app".to_string()),
         password: Some("admin".to_string()),
         queue_manager: "QM1".to_string(),
         url: "localhost(1414)".to_string(),
