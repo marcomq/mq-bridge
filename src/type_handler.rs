@@ -346,9 +346,7 @@ mod tests {
         let command_handler =
             TypeHandler::new().add("submit_order", |cmd: SubmitOrder| async move {
                 let evt = OrderSubmitted { id: cmd.id };
-                Ok(Handled::Publish(
-                    msg!(&evt, "order_submitted"),
-                ))
+                Ok(Handled::Publish(msg!(&evt, "order_submitted")))
             });
 
         // 2. Event Handler (Read Side)

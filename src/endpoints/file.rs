@@ -29,6 +29,7 @@ static FILE_LOCKS: Lazy<StdMutex<HashMap<String, Arc<Mutex<()>>>>> =
 
 fn get_file_lock(path: &str) -> Arc<Mutex<()>> {
     let mut locks = FILE_LOCKS.lock().unwrap();
+    locks.retain(|_, v| Arc::strong_count(v) > 1);
     locks
         .entry(path.to_string())
         .or_insert_with(|| Arc::new(Mutex::new(())))
@@ -379,25 +380,27 @@ pub struct FileConsumer {
 impl FileConsumer {
     pub async fn new(config: &FileConfig) -> anyhow::Result<Self> {
         let should_delete = config.delete.unwrap_or(!config.subscribe_mode);
-        let key = format!("{}|{}|{}", config.path, config.subscribe_mode, should_delete);
-        let store = {
+        let key = format!(
+            "{}|{}|{}",
+            config.path, config.subscribe_mode, should_delete
+        );
+        let store = if let Some(store) = {
             let mut stores = FILE_EVENT_STORES.lock().await;
-            // Cleanup expired entries
             stores.retain(|_, v| v.strong_count() > 0);
-
-            if let Some(weak) = stores.get(&key) {
-                if let Some(store) = weak.upgrade() {
-                    store
-                } else {
-                    let store = create_file_event_store(config).await?;
-                    stores.insert(key, Arc::downgrade(&store));
-                    store
-                }
-            } else {
-                let store = create_file_event_store(config).await?;
-                stores.insert(key, Arc::downgrade(&store));
-                store
-            }
+            stores.get(&key).and_then(|w| w.upgrade())
+        } {
+            store
+        } else {
+            let created = create_file_event_store(config).await?;
+            let mut stores = FILE_EVENT_STORES.lock().await;
+            let store = stores
+                .get(&key)
+                .and_then(|w| w.upgrade())
+                .unwrap_or_else(|| {
+                    stores.insert(key.clone(), Arc::downgrade(&created));
+                    created
+                });
+            store
         };
 
         let subscriber_id = format!("file-sub-{}", fast_uuid_v7::gen_id_str());
@@ -434,13 +437,11 @@ fn parse_message(buffer: Vec<u8>) -> CanonicalMessage {
 
 #[cfg(test)]
 mod tests {
+    use crate::endpoints::file::{FileConsumer, FilePublisher};
     use crate::models::FileConfig;
     use crate::msg;
     use crate::traits::MessageConsumer;
     use crate::traits::MessagePublisher;
-    use crate::{
-        endpoints::file::{FileConsumer, FilePublisher},
-    };
     use serde_json::json;
     use tempfile::tempdir;
     use tokio::fs::OpenOptions;
