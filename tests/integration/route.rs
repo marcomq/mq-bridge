@@ -6,7 +6,7 @@ use std::sync::{
 
 use mq_bridge::{
     models::{Endpoint, Middleware, RetryMiddleware},
-    CanonicalMessage, Handled, Route,
+    msg, CanonicalMessage, Handled, Route,
 };
 use serde::{Deserialize, Serialize};
 
@@ -42,9 +42,7 @@ async fn test_route_with_typed_handler_success() {
         content: "hello".into(),
     };
 
-    let canonical_message = CanonicalMessage::from_type(&message)
-        .unwrap()
-        .with_type_key("my_message");
+    let canonical_message = msg!(&message, "my_message");
 
     route
         .deploy("test_route_with_typed_handler_success")
@@ -118,9 +116,8 @@ async fn test_retryable_error_without_middleware_crashes_route() {
         id: 1,
         content: "retry".into(),
     };
-    let canonical_message = CanonicalMessage::from_type(&message)
-        .unwrap()
-        .with_type_key("my_message");
+
+    let canonical_message = msg!(&message, "my_message");
 
     in_channel.send_message(canonical_message).await.unwrap();
     in_channel.close();
@@ -169,9 +166,7 @@ async fn test_retryable_error_with_middleware_succeeds() {
         id: 1,
         content: "retry".into(),
     };
-    let canonical_message = CanonicalMessage::from_type(&message)
-        .unwrap()
-        .with_type_key("my_message");
+    let canonical_message = msg!(&message, "my_message");
 
     route
         .deploy("test_retryable_error_with_middleware_succeeds")
@@ -216,9 +211,7 @@ async fn test_route_with_typed_handler_failure_handler() {
         content: "world".into(),
     };
 
-    let canonical_message = CanonicalMessage::from_type(&message)
-        .unwrap()
-        .with_type_key("my_message");
+    let canonical_message = msg!(&message, "my_message");
 
     in_channel.send_message(canonical_message).await.unwrap();
     in_channel.close();

@@ -91,9 +91,7 @@ fn message_to_document(
     let force_wrapped = message.metadata.contains_key("correlation_id")
         || message.metadata.contains_key("reply_to");
 
-    if !force_wrapped
-        && matches!(format, MongoDbFormat::Raw)
-    {
+    if !force_wrapped && matches!(format, MongoDbFormat::Raw) {
         if let Ok(doc) = serde_json::from_slice::<Document>(&message.payload) {
             return Ok(doc);
         }

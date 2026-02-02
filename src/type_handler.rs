@@ -162,6 +162,7 @@ impl Handler for TypeHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::msg;
     use serde::{Deserialize, Serialize};
 
     #[derive(Serialize, Deserialize)]
@@ -176,11 +177,12 @@ mod tests {
             Ok(Handled::Ack)
         });
 
-        let msg = CanonicalMessage::from_type(&TestMsg {
-            val: "hello".into(),
-        })
-        .unwrap()
-        .with_type_key("test_a");
+        let msg = msg!(
+            &TestMsg {
+                val: "hello".into(),
+            },
+            "test_a"
+        );
 
         let res = handler.handle(msg).await;
         assert!(res.is_ok());
@@ -211,8 +213,7 @@ mod tests {
     #[tokio::test]
     async fn test_typed_handler_no_match_error() {
         let handler = TypeHandler::new();
-        let msg = CanonicalMessage::new(b"{}".to_vec(), None)
-            .with_metadata(HashMap::from([("kind".to_string(), "unknown".to_string())]));
+        let msg = msg!(b"{}".to_vec(), "unknown");
 
         let res = handler.handle(msg).await;
         assert!(res.is_err());
@@ -229,8 +230,7 @@ mod tests {
         let fallback = Arc::new(|_: CanonicalMessage| async { Ok(Handled::Ack) });
         let handler = TypeHandler::new().with_fallback(fallback);
 
-        let msg = CanonicalMessage::new(b"{}".to_vec(), None)
-            .with_metadata(HashMap::from([("kind".to_string(), "unknown".to_string())]));
+        let msg = msg!(b"{}".to_vec(), "unknown");
 
         let res = handler.handle(msg).await;
         assert!(matches!(res, Ok(Handled::Ack)));
@@ -290,11 +290,7 @@ mod tests {
             // Execute business logic...
             // Emit event
             let evt = OrderSubmitted { id: cmd.id };
-            Ok(Handled::Publish(
-                CanonicalMessage::from_type(&evt)
-                    .unwrap()
-                    .with_type_key("order_submitted"),
-            ))
+            Ok(Handled::Publish(msg!(&evt, "order_submitted")))
         });
 
         // 2. Event Handler (Read Side / Projection)
@@ -307,9 +303,7 @@ mod tests {
 
         // Simulate incoming command
         let cmd = SubmitOrder { id: 101 };
-        let cmd_msg = CanonicalMessage::from_type(&cmd)
-            .unwrap()
-            .with_type_key("submit_order");
+        let cmd_msg = msg!(&cmd, "submit_order");
 
         // Process command
         let result = command_bus.handle(cmd_msg).await.unwrap();
@@ -353,9 +347,7 @@ mod tests {
             TypeHandler::new().add("submit_order", |cmd: SubmitOrder| async move {
                 let evt = OrderSubmitted { id: cmd.id };
                 Ok(Handled::Publish(
-                    CanonicalMessage::from_type(&evt)
-                        .unwrap()
-                        .with_type_key("order_submitted"),
+                    msg!(&evt, "order_submitted"),
                 ))
             });
 

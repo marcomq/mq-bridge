@@ -248,6 +248,17 @@ async fn create_file_event_store(config: &FileConfig) -> anyhow::Result<Arc<Even
 
             // Position the reader
             if !should_delete {
+                if let Ok(metadata) = file.metadata().await {
+                    if metadata.len() < state.last_position {
+                        tracing::warn!(
+                            "File {} was truncated (size {} < pos {}). Resetting position to 0.",
+                            path_clone,
+                            metadata.len(),
+                            state.last_position
+                        );
+                        state.last_position = 0;
+                    }
+                }
                 if let Err(e) = file.seek(SeekFrom::Start(state.last_position)).await {
                     tracing::error!("Failed to seek in file {}: {}", path_clone, e);
                 }
@@ -367,7 +378,8 @@ pub struct FileConsumer {
 
 impl FileConsumer {
     pub async fn new(config: &FileConfig) -> anyhow::Result<Self> {
-        let key = config.path.clone();
+        let should_delete = config.delete.unwrap_or(!config.subscribe_mode);
+        let key = format!("{}|{}|{}", config.path, config.subscribe_mode, should_delete);
         let store = {
             let mut stores = FILE_EVENT_STORES.lock().await;
             // Cleanup expired entries
@@ -423,11 +435,11 @@ fn parse_message(buffer: Vec<u8>) -> CanonicalMessage {
 #[cfg(test)]
 mod tests {
     use crate::models::FileConfig;
+    use crate::msg;
     use crate::traits::MessageConsumer;
     use crate::traits::MessagePublisher;
     use crate::{
         endpoints::file::{FileConsumer, FilePublisher},
-        CanonicalMessage,
     };
     use serde_json::json;
     use tempfile::tempdir;
@@ -449,8 +461,8 @@ mod tests {
         };
         let sink = FilePublisher::new(&config).await.unwrap();
 
-        let msg1 = CanonicalMessage::from_json(json!({"hello": "world"})).unwrap();
-        let msg2 = CanonicalMessage::from_json(json!({"foo": "bar"})).unwrap();
+        let msg1 = msg!(json!({"hello": "world"}));
+        let msg2 = msg!(json!({"foo": "bar"}));
 
         sink.send_batch(vec![msg1.clone(), msg2.clone()])
             .await

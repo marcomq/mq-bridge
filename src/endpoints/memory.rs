@@ -656,9 +656,9 @@ mod tests {
         let mut consumer = MemoryConsumer::new_local("test-mem2", 10);
         let publisher = MemoryPublisher::new_local("test-mem2", 10);
 
-        let msg1 = CanonicalMessage::from_json(json!({"message": "one"})).unwrap();
-        let msg2 = CanonicalMessage::from_json(json!({"message": "two"})).unwrap();
-        let msg3 = CanonicalMessage::from_json(json!({"message": "three"})).unwrap();
+        let msg1 = msg!(json!({"message": "one"}));
+        let msg2 = msg!(json!({"message": "two"}));
+        let msg3 = msg!(json!({"message": "three"}));
 
         // 3. Send messages via the publisher
         publisher
@@ -712,8 +712,7 @@ mod tests {
         };
         let publisher = MemoryPublisher::new(&pub_cfg).unwrap();
 
-        let msg = CanonicalMessage::from("hello subscriber");
-        publisher.send(msg).await.unwrap();
+        publisher.send("hello subscriber".into()).await.unwrap();
 
         let received = subscriber.receive().await.unwrap();
         assert_eq!(received.message.get_payload_str(), "hello subscriber");
@@ -768,8 +767,7 @@ mod tests {
         let mut consumer = MemoryConsumer::new(&config).unwrap();
         let publisher = MemoryPublisher::new_local(&topic, 10);
 
-        let msg = CanonicalMessage::from("to_be_nacked");
-        publisher.send(msg).await.unwrap();
+        publisher.send("to_be_nacked".into()).await.unwrap();
 
         // 1. Receive and Nack
         let received1 = consumer.receive().await.unwrap();

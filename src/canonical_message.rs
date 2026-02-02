@@ -232,6 +232,7 @@ macro_rules! msg {
     };
     ($payload:expr, $kind:expr $(,)?) => {
         {
+            #[allow(unused_imports)]
             use $crate::canonical_message::macro_support::{Wrap, Fallback};
             let mut message = Wrap($payload).convert();
             message = message.with_type_key($kind);

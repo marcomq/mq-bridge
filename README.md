@@ -171,9 +171,7 @@ let input_publisher = Publisher::new(route.input.clone()).await.unwrap();
 
 // 5. Create a typed command, serialize it, and send it via the publisher.
 let command = CreateUser { id: 1, username: "test".to_string() };
-let message = CanonicalMessage::from_type(&command)
-    .unwrap()
-    .with_type_key("create_user"); // This sets the `kind` metadata field.
+let message = msg!(&command, "create_user"); // This sets the `kind` metadata field.
 input_publisher.send(message).await.expect("Failed to send message");
 
 // The running route will receive the message, see the `kind: "create_user"` metadata,
@@ -308,8 +306,7 @@ let command_bus = TypeHandler::new()
         // Emit event
         let evt = OrderSubmitted { id: cmd.id };
         Ok(Handled::Publish(
-            CanonicalMessage::from_type(evt).unwrap()
-                .with_type_key("order_submitted")
+            msg!(evt, "order_submitted")
         ))
 });
 
