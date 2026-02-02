@@ -404,7 +404,7 @@ impl FileConsumer {
         };
 
         let subscriber_id = format!("file-sub-{}", fast_uuid_v7::gen_id_str());
-        info!(path = %config.path, mode = ?if config.subscribe_mode { "subscribe" } else { "consume" }, "File consumer connected");
+        info!(path = %config.path, mode = ?if config.subscribe_mode { "subscribe" } else { "consume" }, subscriber_id = %subscriber_id, "File consumer connected");
 
         Ok(Self {
             inner: store.consumer(subscriber_id),

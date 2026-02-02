@@ -3,6 +3,8 @@
 //  Licensed under MIT License, see License file for more details
 //  git clone https://github.com/marcomq/mq-bridge
 
+#[cfg(feature = "reqwest")]
+use crate::canonical_message::tracing_support::LazyMessageIds;
 use crate::models::HttpConfig;
 use crate::traits::{
     BoxFuture, ConsumerError, MessageConsumer, MessagePublisher, ReceivedBatch, Sent,
@@ -361,6 +363,12 @@ impl MessagePublisher for HttpPublisher {
         if messages.is_empty() {
             return Ok(SentBatch::Ack);
         }
+        trace!(
+            count = messages.len(),
+            url = %self.url,
+            message_ids = ?LazyMessageIds(&messages),
+            "Publishing batch of HTTP requests"
+        );
 
         let send_futures = messages.into_iter().map(|message| {
             // Clone the message for the error case.

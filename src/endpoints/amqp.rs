@@ -303,6 +303,7 @@ impl AmqpConsumer {
         } else {
             format!("{}_amqp_consumer", APP_NAME)
         };
+        info!(queue = %queue_name, consumer_tag = %consumer_tag, "Starting AMQP consumer");
 
         let consumer = channel
             .basic_consume(

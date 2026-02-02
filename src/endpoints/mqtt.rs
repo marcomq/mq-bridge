@@ -55,15 +55,18 @@ impl Client {
         match self {
             Client::V5(client) => {
                 let mut props = PublishProperties::default();
-                if !message.metadata.is_empty() {
-                    if let Some(rt) = message.metadata.get("reply_to") {
-                        props.response_topic = Some(rt.clone());
-                    }
-                    if let Some(cd) = message.metadata.get("correlation_id") {
-                        props.correlation_data = Some(cd.as_bytes().to_vec().into());
-                    }
-                    props.user_properties = message.metadata.into_iter().collect();
+                if let Some(rt) = message.metadata.get("reply_to") {
+                    props.response_topic = Some(rt.clone());
                 }
+                if let Some(cd) = message.metadata.get("correlation_id") {
+                    props.correlation_data = Some(cd.as_bytes().to_vec().into());
+                }
+                let mut user_properties: Vec<(String, String)> = message.metadata.into_iter().collect();
+                user_properties.push((
+                    "mq_bridge.message_id".to_string(),
+                    format!("{:032x}", message.message_id),
+                ));
+                props.user_properties = user_properties;
                 client
                     .publish_with_properties(topic, to_qos_v5(qos), false, message.payload, props)
                     .await
@@ -251,7 +254,7 @@ impl MqttListener {
         ));
 
         client.subscribe(topic, qos).await?;
-        info!("MQTT subscribed to {}", topic);
+        info!(topic = %topic, client_id = %client_id, "MQTT subscribed");
 
         Ok(Self {
             client,
@@ -593,6 +596,11 @@ fn publish_to_canonical_message_v5(p: &PublishV5) -> CanonicalMessage {
     if let Some(props) = &p.properties {
         let mut metadata = std::collections::HashMap::new();
         for (key, value) in &props.user_properties {
+            if key == "mq_bridge.message_id" {
+                if let Ok(id) = u128::from_str_radix(value, 16) {
+                    canonical_message.message_id = id;
+                }
+            }
             metadata.insert(key.clone(), value.clone());
         }
         if let Some(rt) = &props.response_topic {

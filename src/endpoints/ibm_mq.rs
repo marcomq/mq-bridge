@@ -3,6 +3,7 @@
 //  Licensed under MIT License, see License file for more details
 //  git clone https://github.com/marcomq/mq-bridge
 
+use crate::canonical_message::tracing_support::LazyMessageIds;
 use crate::models::IbmMqConfig;
 use anyhow::Context;
 use async_trait::async_trait;
@@ -26,7 +27,7 @@ use mqi::{
 };
 use std::{thread, time::Duration};
 use tokio::sync::{mpsc, oneshot};
-use tracing::{info, warn};
+use tracing::{info, trace, warn};
 
 macro_rules! connect_mq {
     ($config:expr) => {
@@ -217,6 +218,7 @@ impl MessagePublisher for IbmMqPublisher {
         &self,
         messages: Vec<CanonicalMessage>,
     ) -> Result<SentBatch, PublisherError> {
+        trace!(count = messages.len(), message_ids = ?LazyMessageIds(&messages), "Publishing batch of IBM MQ messages");
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx.send((messages, reply_tx)).await.map_err(|_| {
             PublisherError::Retryable(anyhow::anyhow!("MQ publisher thread disconnected"))
@@ -366,6 +368,7 @@ async fn spawn_consumer_thread(
                         }
 
                         if !messages.is_empty() {
+                            trace!(count = messages.len(), message_ids = ?LazyMessageIds(&messages), "Received batch of IBM MQ messages");
                             if error.is_some() {
                                 connection_error = true;
                             }

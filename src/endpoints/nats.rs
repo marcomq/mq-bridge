@@ -95,7 +95,7 @@ impl MessagePublisher for NatsPublisher {
             payload_size = message.payload.len(),
             "Publishing NATS message"
         );
-        let headers = if !message.metadata.is_empty() {
+        let mut headers = if !message.metadata.is_empty() {
             let mut headers = HeaderMap::new();
             for (key, value) in &message.metadata {
                 headers.insert(key.as_str(), value.as_str());
@@ -104,6 +104,10 @@ impl MessagePublisher for NatsPublisher {
         } else {
             HeaderMap::new()
         };
+        headers.insert(
+            "mq_bridge.message_id",
+            format!("{:032x}", message.message_id).as_str(),
+        );
 
         if self.request_reply {
             let response = tokio::time::timeout(
@@ -421,7 +425,7 @@ impl NatsCore {
                 .await?;
 
             let stream = consumer.messages().await?;
-            info!(stream = %stream_name, subject = %subject, "NATS JetStream subscribed");
+            info!(stream = %stream_name, subject = %subject, durable = ?durable_name, "NATS JetStream subscribed");
             Ok((NatsCore::JetStream(Box::new(stream)), client_clone))
         } else {
             info!(subject = %subject, "NATS endpoint is in Core mode.");
@@ -596,7 +600,19 @@ fn create_nats_canonical_message(
     sequence: Option<u64>,
 ) -> CanonicalMessage {
     // The most reliable ID is the JetStream sequence number.
-    let mut message_id: Option<u128> = sequence.map(|s| s as u128);
+    let mut message_id: Option<u128> = None;
+
+    if let Some(headers) = &message.headers {
+        if let Some(val) = headers.get("mq_bridge.message_id") {
+            if let Ok(id) = u128::from_str_radix(val.as_str(), 16) {
+                message_id = Some(id);
+            }
+        }
+    }
+
+    if message_id.is_none() {
+        message_id = sequence.map(|s| s as u128);
+    }
 
     // If no sequence is available (e.g., Core NATS), fall back to the Nats-Msg-Id header.
     if message_id.is_none() {

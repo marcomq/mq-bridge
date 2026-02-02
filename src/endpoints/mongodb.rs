@@ -792,7 +792,7 @@ impl MongoDbConsumer {
         }
     }
 
-    /// Retrieves documents by their ObjectIds.
+    /// Retrieves documents by their IDs.
     async fn get_documents_by_ids(
         &self,
         claimed_ids: &[mongodb::bson::Uuid],
@@ -1002,6 +1002,7 @@ impl MongoDbSubscriber {
 
         // Generate a unique subscriber ID for this instance
         let subscriber_id = format!("mongo-sub-{}", fast_uuid_v7::gen_id_str());
+        info!(collection = %collection_name, subscriber_id = %subscriber_id, "MongoDB subscriber connected");
         Ok(Self {
             inner: guard.store.consumer(subscriber_id),
             _guard: guard,

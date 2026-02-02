@@ -113,16 +113,21 @@ impl MessagePublisher for KafkaPublisher {
         );
         let mut record = FutureRecord::to(&self.topic).payload(&message.payload[..]);
 
+        let mut headers = OwnedHeaders::new();
+        headers = headers.insert(rdkafka::message::Header {
+            key: "mq_bridge.message_id",
+            value: Some(format!("{:032x}", message.message_id).as_bytes()),
+        });
+
         if !message.metadata.is_empty() {
-            let mut headers = OwnedHeaders::new();
             for (key, value) in &message.metadata {
                 headers = headers.insert(rdkafka::message::Header {
                     key,
                     value: Some(value.as_bytes()),
                 });
             }
-            record = record.headers(headers);
         }
+        record = record.headers(headers);
 
         let key = message.message_id.to_be_bytes().to_vec();
         record = record.key(&key);
@@ -173,6 +178,11 @@ impl MessagePublisher for KafkaPublisher {
             record = record.key(&key_bytes);
 
             let mut headers = OwnedHeaders::new();
+            headers = headers.insert(rdkafka::message::Header {
+                key: "mq_bridge.message_id",
+                value: Some(format!("{:032x}", message.message_id).as_bytes()),
+            });
+
             if !message.metadata.is_empty() {
                 for (key, value) in &message.metadata {
                     headers = headers.insert(rdkafka::message::Header {
@@ -180,8 +190,8 @@ impl MessagePublisher for KafkaPublisher {
                         value: Some(value.as_bytes()),
                     });
                 }
-                record = record.headers(headers);
             }
+            record = record.headers(headers);
 
             match self.producer.send_result(record) {
                 Ok(fut) => delivery_futures.push((message, fut)),

@@ -2,6 +2,7 @@
 //  © Copyright 2026, by Marco Mengelkoch
 //  Licensed under MIT License, see License file for more details
 
+use crate::canonical_message::tracing_support::LazyMessageIds;
 use crate::traits::{
     BatchCommitFunc, ConsumerError, MessageConsumer, MessageDisposition, ReceivedBatch,
 };
@@ -511,6 +512,7 @@ impl MessageConsumer for EventStoreConsumer {
 
         // Convert to CanonicalMessage for the consumer
         let events: Vec<CanonicalMessage> = stored_events.into_iter().map(|e| e.message).collect();
+        trace!(count = events.len(), subscriber_id = %self.subscriber_id, message_ids = ?LazyMessageIds(&events), "Received batch of events from store");
 
         let store = self.store.clone();
         let subscriber_id = self.subscriber_id.clone();

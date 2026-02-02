@@ -1005,7 +1005,7 @@ pub struct IbmMqConfig {
     /// Required. Server Connection (SVRCONN) Channel name defined on the QM.
     pub channel: String,
     /// Username for authentication. Optional; required if the channel enforces authentication.
-    pub user: Option<String>,
+    pub username: Option<String>,
     /// Password for authentication. Optional; required if the channel enforces authentication.
     pub password: Option<String>,
     /// TLS CipherSpec (e.g., `ANY_TLS12`). Optional; required for encrypted connections.

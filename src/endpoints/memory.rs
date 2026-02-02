@@ -210,6 +210,7 @@ impl MemoryPublisher {
         } else if store_exists {
             // Adaptive behavior: If an EventStore already exists, we publish to it even if
             // subscribe_mode wasn't explicitly set. This prevents split-brain scenarios.
+            tracing::debug!(topic = %config.topic, "Adapting publisher to Log mode due to existing EventStore");
             let store = get_or_create_event_store(&config.topic);
             PublisherBackend::Log(store)
         } else {
@@ -382,6 +383,7 @@ impl MemoryConsumer {
             // However, MemorySubscriber struct usually handles the ID.
             // If MemoryConsumer is used directly with subscribe_mode=true, we assume a default ID or ephemeral.
             let subscriber_id = format!("{}-consumer", config.topic);
+            info!(topic = %config.topic, subscriber_id = %subscriber_id, "Memory consumer (Log mode) connected");
             let consumer = store.consumer(subscriber_id);
             Ok(Self::Log {
                 consumer,
@@ -389,6 +391,10 @@ impl MemoryConsumer {
             })
         } else {
             if store_exists {
+                // Unlike the Publisher, we cannot silently adapt to Log mode here.
+                // The EventStore implementation currently supports Pub/Sub (broadcast) only.
+                // Adapting would result in this consumer receiving all messages, violating
+                // the expected Queue (competing consumer) semantics requested by `subscribe_mode: false`.
                 return Err(anyhow!("Topic '{}' is already active as a Subscriber Log (EventStore), but Queue mode (MemoryChannel) was requested.", config.topic));
             }
             let queue = MemoryQueueConsumer::new(config)?;
@@ -592,7 +598,6 @@ pub struct MemorySubscriber {
 impl MemorySubscriber {
     pub fn new(config: &MemoryConfig, id: &str) -> anyhow::Result<Self> {
         let mut sub_config = config.clone();
-        sub_config.topic = format!("{}-{}", config.topic, id);
         // If subscribe_mode is true, we use EventStore with the original topic but unique subscriber ID.
         // If false (legacy), we use the suffixed topic queue.
         let consumer = if config.subscribe_mode {

@@ -1,3 +1,4 @@
+use crate::canonical_message::tracing_support::LazyMessageIds;
 use crate::models::{ZeroMqConfig, ZeroMqSocketType};
 use crate::traits::{
     BoxFuture, ConsumerError, MessageConsumer, MessageDisposition, MessagePublisher,
@@ -11,6 +12,7 @@ use std::any::Any;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use tokio::sync::oneshot;
+use tracing::trace;
 use zeromq::{Socket, SocketRecv, SocketSend, ZmqMessage};
 
 enum SenderSocket {
@@ -118,6 +120,7 @@ impl MessagePublisher for ZeroMqPublisher {
         &self,
         messages: Vec<CanonicalMessage>,
     ) -> Result<SentBatch, PublisherError> {
+        trace!(count = messages.len(), message_ids = ?LazyMessageIds(&messages), "Publishing batch of ZeroMQ messages");
         let payload =
             serde_json::to_vec(&messages).map_err(|e| PublisherError::NonRetryable(anyhow!(e)))?;
         let zmq_msg = ZmqMessage::from(bytes::Bytes::from(payload));
@@ -370,6 +373,7 @@ impl MessageConsumer for ZeroMqConsumer {
             contexts.push(buffered.reply_context);
         }
 
+        trace!(count = messages.len(), message_ids = ?LazyMessageIds(&messages), "Received batch of ZeroMQ messages");
         let commit = Box::new(move |dispositions: Vec<MessageDisposition>| {
             Box::pin(async move {
                 for (i, ctx_opt) in contexts.into_iter().enumerate() {
