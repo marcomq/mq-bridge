@@ -61,7 +61,8 @@ impl Client {
                 if let Some(cd) = message.metadata.get("correlation_id") {
                     props.correlation_data = Some(cd.as_bytes().to_vec().into());
                 }
-                let mut user_properties: Vec<(String, String)> = message.metadata.into_iter().collect();
+                let mut user_properties: Vec<(String, String)> =
+                    message.metadata.into_iter().collect();
                 user_properties.push((
                     "mq_bridge.message_id".to_string(),
                     format!("{:032x}", message.message_id),

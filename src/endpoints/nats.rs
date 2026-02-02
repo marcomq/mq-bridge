@@ -425,7 +425,7 @@ impl NatsCore {
                 .await?;
 
             let stream = consumer.messages().await?;
-            info!(stream = %stream_name, subject = %subject, durable = ?durable_name, "NATS JetStream subscribed");
+            info!(stream = %stream_name, subject = %subject, "NATS JetStream subscribed");
             Ok((NatsCore::JetStream(Box::new(stream)), client_clone))
         } else {
             info!(subject = %subject, "NATS endpoint is in Core mode.");

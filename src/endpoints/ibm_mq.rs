@@ -32,7 +32,7 @@ use tracing::{info, trace, warn};
 macro_rules! connect_mq {
     ($config:expr) => {
         (|| -> anyhow::Result<_> {
-        let usr = $config.user.as_deref();
+        let usr = $config.username.as_deref();
         let pwd = $config.password.as_deref();
 
         let qm_name = MqStr::<48>::try_from($config.queue_manager.as_str())
