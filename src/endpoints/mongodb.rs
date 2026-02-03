@@ -1,5 +1,4 @@
 use crate::canonical_message::tracing_support::LazyMessageIds;
-use crate::event_store::{EventStore, EventStoreConsumer};
 use crate::models::{MongoDbConfig, MongoDbFormat};
 use crate::traits::{
     BatchCommitFunc, BoxFuture, ConsumerError, MessageConsumer, MessageDisposition,
@@ -13,18 +12,16 @@ use mongodb::{
     bson::{doc, to_document, Bson, Document},
     change_stream::ChangeStream,
     error::ErrorKind,
-    options::FindOneAndUpdateOptions,
-    options::FindOneOptions,
+    options::{FindOneAndUpdateOptions, FindOptions, ReturnDocument, UpdateOptions},
 };
 use mongodb::{change_stream::event::ChangeStreamEvent, IndexModel};
 use mongodb::{Client, Collection, Database};
-use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::any::Any;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
-use tokio::sync::mpsc;
 use tracing::{info, trace, warn};
 
 /// A helper struct for deserialization that matches the BSON structure exactly.
@@ -215,6 +212,21 @@ impl MongoDbPublisher {
         }
 
         let collection = db.collection(collection_name);
+        // Ensure unique index on seq. The sequencer doc has 'seq_counter', so it won't conflict.
+        let index_options = mongodb::options::IndexOptions::builder()
+            .unique(true)
+            .sparse(true) // Only index documents that have the seq field
+            .build();
+        let index_model = IndexModel::builder()
+            .keys(doc! { "seq": 1 })
+            .options(index_options)
+            .build();
+        if let Err(e) = collection.create_index(index_model).await {
+            warn!(
+                "Failed to create seq index on collection {}: {}",
+                collection_name, e
+            );
+        }
         info!(database = %config.database, collection = %collection_name, request_reply = %config.request_reply, "MongoDB publisher connected");
 
         if let Some(ttl) = config.ttl_seconds {
@@ -313,9 +325,37 @@ impl MongoDbPublisher {
 impl MessagePublisher for MongoDbPublisher {
     async fn send(&self, mut message: CanonicalMessage) -> Result<Sent, PublisherError> {
         if !self.request_reply {
-            trace!(message_id = %format!("{:032x}", message.message_id), collection = %self.collection_name, "Publishing document to MongoDB");
-            let doc = message_to_document(&message, &self.format)
+            trace!(message_id = %format!("{:032x}", message.message_id), collection = %self.collection_name, "Publishing sequenced document to MongoDB");
+            let mut doc = message_to_document(&message, &self.format)
                 .map_err(PublisherError::NonRetryable)?;
+
+            // Atomically increment a sequence counter. This is safe without a transaction for just getting a sequence number.
+            // If the subsequent insert fails, a sequence number might be "lost", creating a gap.
+            let filter = doc! { "_id": "sequencer" };
+            let update = doc! { "$inc": { "seq_counter": 1_i64 } };
+            let options = FindOneAndUpdateOptions::builder()
+                .upsert(true)
+                .return_document(ReturnDocument::After)
+                .build();
+
+            let counter_doc = self
+                .collection
+                .find_one_and_update(filter, update)
+                .with_options(options)
+                .await
+                .map_err(|e| PublisherError::Retryable(anyhow!(e)))?;
+            let seq = counter_doc
+                .ok_or_else(|| {
+                    PublisherError::Retryable(anyhow!(
+                        "Sequencer document not returned after upsert"
+                    ))
+                })?
+                .get_i64("seq_counter")
+                .map_err(|e| {
+                    PublisherError::Retryable(anyhow!("Invalid seq_counter in sequencer: {}", e))
+                })?;
+            doc.insert("seq", seq);
+
             match self.collection.insert_one(doc).await {
                 Ok(_) => {}
                 Err(e) => {
@@ -429,12 +469,16 @@ impl MessagePublisher for MongoDbPublisher {
         trace!(count = messages.len(), collection = %self.collection_name, message_ids = ?LazyMessageIds(&messages), "Publishing batch of documents to MongoDB");
         let mut docs = Vec::with_capacity(messages.len());
         let mut failed_messages = Vec::new();
+        let mut valid_messages = Vec::with_capacity(messages.len());
 
-        for message in &messages {
-            match message_to_document(message, &self.format) {
-                Ok(doc) => docs.push(doc),
+        for message in messages {
+            match message_to_document(&message, &self.format) {
+                Ok(doc) => {
+                    docs.push(doc);
+                    valid_messages.push(message);
+                }
                 Err(e) => {
-                    failed_messages.push((message.clone(), PublisherError::NonRetryable(e)));
+                    failed_messages.push((message, PublisherError::NonRetryable(e)));
                 }
             }
         }
@@ -450,18 +494,40 @@ impl MessagePublisher for MongoDbPublisher {
             }
         }
 
-        // Use ordered: false to attempt inserting all documents even if some fail (e.g. duplicates).
-        // This improves throughput.
-        let options = mongodb::options::InsertManyOptions::builder()
-            .ordered(false)
+        // Atomically increment a sequence counter for the batch. This is safe without a transaction.
+        // If the subsequent insert fails, sequence numbers might be "lost", creating gaps.
+        let filter = doc! { "_id": "sequencer" };
+        let update = doc! { "$inc": { "seq_counter": docs.len() as i64 } };
+        let options = FindOneAndUpdateOptions::builder()
+            .upsert(true)
+            .return_document(ReturnDocument::After)
+            .write_concern(
+                mongodb::options::WriteConcern::builder()
+                    .w(mongodb::options::Acknowledgment::Majority)
+                    .build(),
+            )
             .build();
-
-        match self
+        let counter_doc = self
             .collection
-            .insert_many(docs)
+            .find_one_and_update(filter, update)
             .with_options(options)
             .await
-        {
+            .map_err(|e| PublisherError::Retryable(anyhow!(e)))?;
+        let end_seq = counter_doc
+            .ok_or_else(|| {
+                PublisherError::Retryable(anyhow!("Sequencer document not returned after upsert"))
+            })?
+            .get_i64("seq_counter")
+            .map_err(|e| {
+                PublisherError::Retryable(anyhow!("Invalid seq_counter in sequencer: {}", e))
+            })?;
+        let start_seq = end_seq - docs.len() as i64 + 1;
+
+        for (i, doc) in docs.iter_mut().enumerate() {
+            doc.insert("seq", start_seq + i as i64);
+        }
+
+        match self.collection.insert_many(docs).await {
             Ok(_) => {
                 if failed_messages.is_empty() {
                     Ok(SentBatch::Ack)
@@ -472,10 +538,69 @@ impl MessagePublisher for MongoDbPublisher {
                     })
                 }
             }
-            Err(e) => Err(PublisherError::Retryable(anyhow::anyhow!(
-                "MongoDB bulk write failed: {}",
-                e
-            ))),
+            Err(e) => {
+                if let ErrorKind::InsertMany(ref err) = *e.kind {
+                    let mut errors_by_index = HashMap::new();
+                    if let Some(write_errors) = &err.write_errors {
+                        for we in write_errors {
+                            errors_by_index.insert(we.index, we);
+                        }
+                    }
+
+                    // If we have a write concern error, assume all failed to be safe (potential rollback).
+                    // Since we have unique indexes, retrying is idempotent.
+                    if err.write_concern_error.is_some() {
+                        warn!("MongoDB write concern error detected. Retrying entire batch.");
+                        for msg in valid_messages {
+                            failed_messages.push((
+                                msg,
+                                PublisherError::Retryable(anyhow::anyhow!(
+                                    "MongoDB write concern error"
+                                )),
+                            ));
+                        }
+                        return Ok(SentBatch::Partial {
+                            responses: None,
+                            failed: failed_messages,
+                        });
+                    }
+
+                    let mut stop_processing = false;
+
+                    for (i, msg) in valid_messages.into_iter().enumerate() {
+                        if stop_processing {
+                            failed_messages.push((
+                                msg,
+                                PublisherError::Retryable(anyhow::anyhow!(
+                                    "Message not inserted (skipped due to previous error)"
+                                )),
+                            ));
+                            continue;
+                        }
+
+                        if let Some(w) = errors_by_index.get(&i) {
+                            if w.code == 11000 {
+                                // Duplicate key error. Treat as success (idempotent), but it stops execution in ordered mode.
+                                stop_processing = true;
+                            } else {
+                                let error = PublisherError::Retryable(anyhow::anyhow!(
+                                    "MongoDB write error: {:?}",
+                                    w
+                                ));
+                                failed_messages.push((msg, error));
+                                stop_processing = true;
+                            }
+                        }
+                    }
+
+                    Ok(SentBatch::Partial {
+                        responses: None,
+                        failed: failed_messages,
+                    })
+                } else {
+                    Err(PublisherError::Retryable(anyhow!(e)))
+                }
+            }
         }
     }
 
@@ -484,7 +609,7 @@ impl MessagePublisher for MongoDbPublisher {
     }
 }
 
-/// A consumer that receives messages from a MongoDB collection, treating it like a queue.
+/// A consumer that receives messages from a MongoDB collection, treating it like a queue (locking).
 pub struct MongoDbConsumer {
     collection: Collection<Document>,
     db: Database,
@@ -549,9 +674,6 @@ impl MessageConsumer for MongoDbConsumer {
     async fn receive(&mut self) -> Result<Received, ConsumerError> {
         loop {
             // Always try to poll for a single document first using the efficient atomic operation.
-            // This works for both standalone and replica sets and ensures we drain backlogs fast.
-            // Unlike receive_batch which uses a 3-step process (find, update, find),
-            // try_claim_document uses find_one_and_update which is a single round-trip.
             if let Some(claimed) = self.try_claim_document(doc! {}).await? {
                 return Ok(claimed);
             }
@@ -572,15 +694,14 @@ impl MessageConsumer for MongoDbConsumer {
                 }
             }
 
-            // --- Polling Path (Standalone) ---
+            // Standalone: Sleep for polling interval.
             tokio::time::sleep(self.polling_interval).await;
         }
     }
 
     async fn receive_batch(&mut self, max_messages: usize) -> Result<ReceivedBatch, ConsumerError> {
         loop {
-            // Always try to poll for a batch first. This ensures high throughput for backlogs
-            // and works for both standalone (polling) and replica sets (hybrid).
+            // Always try to poll for a batch first.
             let now = SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .context("System time is before UNIX EPOCH")?
@@ -625,16 +746,19 @@ impl MongoDbConsumer {
     /// Creates a BSON document filter to find available (unlocked) messages.
     fn available_message_filter(now: i64) -> Document {
         doc! {
-            "$or": [
-                { "locked_until": { "$exists": false } },
-                { "locked_until": null },
-                { "locked_until": { "$lt": now } }
+            "$and": [
+                { "$or": [
+                    { "locked_until": { "$exists": false } },
+                    { "locked_until": null },
+                    { "locked_until": { "$lt": now } }
+                ] },
+                { "seq_counter": { "$exists": false } },
+                { "last_seq": { "$exists": false } }
             ]
         }
     }
 
     /// Atomically finds and claims one or more documents.
-    /// This is the core logic for both single and batch receives in polling mode.
     async fn find_and_claim_documents(
         &self,
         extra_filter: Document,
@@ -674,8 +798,6 @@ impl MongoDbConsumer {
         }
 
         // 2. Attempt to atomically claim the batch of documents.
-        // We re-apply the `locked_until` filter to prevent a race condition
-        // where another consumer locks the documents between our find and update.
         let mut update_filter = doc! { "_id": { "$in": &ids_to_claim } };
         update_filter.extend(base_filter);
 
@@ -686,15 +808,11 @@ impl MongoDbConsumer {
         if update_result.modified_count > 0 {
             self.get_documents_by_ids(&ids_to_claim).await
         } else {
-            // This means another consumer claimed the documents in a race.
-            // Return an empty vec, and the caller will loop to try again.
             Ok(Vec::new())
         }
     }
 
     /// Atomically finds and locks a document matching the filter.
-    /// If the filter is empty, it finds any available document.
-    /// If a document is successfully claimed, it returns the message and commit function.
     async fn try_claim_document(&self, extra_filter: Document) -> anyhow::Result<Option<Received>> {
         let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)?
@@ -733,8 +851,6 @@ impl MongoDbConsumer {
 
                 let commit = Box::new(move |disposition: MessageDisposition| {
                     Box::pin(async move {
-                        // Only send a reply if the message has a 'reply_to' destination and the disposition is a Reply.
-                        // This allows for fire-and-forget patterns (no reply_to) or explicit replies.
                         match disposition {
                             MessageDisposition::Reply(resp) => {
                                 handle_reply(
@@ -770,7 +886,6 @@ impl MongoDbConsumer {
                                 }
                             }
                             Err(e) => {
-                                // Ack failure may result in redelivery. Enable deduplication middleware to handle duplicates.
                                 tracing::error!(mongodb_id = %id_val, error = %e, "Failed to ack/delete MongoDB message");
                                 return Err(anyhow::anyhow!(
                                     "Failed to ack/delete MongoDB message: {}",
@@ -945,17 +1060,13 @@ async fn process_mongodb_batch_commit(
     Ok(())
 }
 
-struct MongoEventStoreGuard {
-    store: Arc<EventStore>,
-    _shutdown_tx: mpsc::Sender<()>,
-}
-
-static MONGO_EVENT_STORES: Lazy<Mutex<HashMap<String, Weak<MongoEventStoreGuard>>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
-
+/// A subscriber that reads messages from a MongoDB collection using a monotonic sequence number.
+/// This replaces the old EventStore-based implementation.
 pub struct MongoDbSubscriber {
-    inner: EventStoreConsumer,
-    _guard: Arc<MongoEventStoreGuard>,
+    collection: Collection<Document>,
+    polling_interval: Duration,
+    cursor_id: Option<String>,
+    last_seq: Arc<AtomicI64>,
 }
 
 impl MongoDbSubscriber {
@@ -973,142 +1084,114 @@ impl MongoDbSubscriber {
             .collection
             .as_deref()
             .ok_or_else(|| anyhow!("Collection name is required for MongoDB subscriber"))?;
+        let client = create_client(config).await?;
+        let db = client.database(&config.database);
+        let collection: Collection<Document> = db.collection(collection_name);
 
-        let key = format!("{}/{}", config.database, collection_name);
-        let store = {
-            let mut stores = MONGO_EVENT_STORES.lock().unwrap();
-            stores.retain(|_, v| v.strong_count() > 0);
-
-            if let Some(weak) = stores.get(&key) {
-                weak.upgrade()
-            } else {
-                None
+        let mut last_seq = 0;
+        if let Some(cid) = &config.cursor_id {
+            let cursor_doc_id = format!("cursor:{}", cid);
+            if let Ok(Some(doc)) = collection.find_one(doc! { "_id": cursor_doc_id }).await {
+                last_seq = doc.get_i64("last_seq").unwrap_or(0);
             }
-        };
-
-        let guard = if let Some(g) = store {
-            g
         } else {
-            let new_guard = create_mongo_backed_event_store(config).await?;
-            let mut stores = MONGO_EVENT_STORES.lock().unwrap();
-            let existing = stores.get(&key).and_then(|w| w.upgrade());
-            if let Some(g) = existing {
-                g
-            } else {
-                stores.insert(key, Arc::downgrade(&new_guard));
-                new_guard
+            // Ephemeral mode: start from current sequencer value
+            if let Ok(Some(doc)) = collection.find_one(doc! { "_id": "sequencer" }).await {
+                last_seq = doc.get_i64("seq_counter").unwrap_or(0);
             }
-        };
+        }
+        info!(collection = %collection_name, cursor_id = ?config.cursor_id, start_seq = %last_seq, "MongoDB sequenced subscriber initialized");
 
-        // Generate a unique subscriber ID for this instance
-        let subscriber_id = format!("mongo-sub-{}", fast_uuid_v7::gen_id_str());
-        info!(collection = %collection_name, subscriber_id = %subscriber_id, "MongoDB subscriber connected");
         Ok(Self {
-            inner: guard.store.consumer(subscriber_id),
-            _guard: guard,
+            collection,
+            polling_interval: Duration::from_millis(config.polling_interval_ms.unwrap_or(100)),
+            cursor_id: config.cursor_id.clone(),
+            last_seq: Arc::new(AtomicI64::new(last_seq)),
         })
     }
-}
-
-async fn create_mongo_backed_event_store(
-    config: &MongoDbConfig,
-) -> anyhow::Result<Arc<MongoEventStoreGuard>> {
-    let collection_name = config
-        .collection
-        .as_deref()
-        .ok_or_else(|| anyhow!("missing MongoDbConfig.collection"))?;
-    let client = create_client(config).await?;
-    let db = client.database(&config.database);
-    let collection = db.collection::<Document>(collection_name);
-
-    // 1. Create EventStore. We do NOT delete events from MongoDB here, as that would
-    // prevent other subscribers (on other machines) from receiving them.
-    // Cleanup should be handled by MongoDB TTL indexes.
-    let store = Arc::new(EventStore::new(Default::default()));
-
-    // 2. Spawn a background task to feed the EventStore from MongoDB
-    let store_clone = store.clone();
-    let collection_clone = collection.clone();
-    let polling_interval = Duration::from_millis(config.polling_interval_ms.unwrap_or(100));
-    let (shutdown_tx, mut shutdown_rx) = mpsc::channel(1);
-
-    tokio::spawn(async move {
-        let mut last_id: Option<mongodb::bson::Uuid> = None;
-
-        // Start from the latest message
-        let find_options = FindOneOptions::builder().sort(doc! { "_id": -1 }).build();
-
-        if let Ok(Some(doc)) = collection_clone
-            .find_one(doc! {})
-            .with_options(find_options)
-            .await
-        {
-            if let Some(Bson::Binary(binary)) = doc.get("_id") {
-                if let Ok(uuid) = binary.to_uuid() {
-                    last_id = Some(uuid);
-                    info!(last_id = %uuid, "Starting MongoDB subscriber from latest message");
-                }
-            }
-        }
-        // Initial scan: Find the last ID to avoid re-reading everything if we wanted "tail" behavior?
-        // But here we want "queue" behavior (process everything present), so we start from beginning.
-        // If the collection is large, this might take time to catch up.
-
-        loop {
-            tokio::select! {
-                _ = shutdown_rx.recv() => {
-                    trace!("MongoDB event store feeder shutting down");
-                    break;
-                }
-                _ = async {
-                    let mut filter = doc! {};
-                    if let Some(id) = last_id {
-                        filter = doc! { "_id": { "$gt": id } };
-                    }
-
-                    // We fetch in batches
-                    let mut cursor = match collection_clone.find(filter).sort(doc! { "_id": 1 }).limit(100).await {
-                        Ok(c) => c,
-                        Err(e) => {
-                            tracing::error!("Error querying MongoDB for events: {}", e);
-                            tokio::time::sleep(Duration::from_secs(5)).await;
-                            return;
-                        }
-                    };
-
-                    let mut count = 0;
-                    while let Some(result) = cursor.next().await {
-                        if let Ok(doc) = result {
-                            if let Some(Bson::Binary(binary)) = doc.get("_id") {
-                                if let Ok(uuid) = binary.to_uuid() {
-                                    last_id = Some(uuid);
-                                }
-                            }
-                            if let Ok(msg) = parse_mongodb_document(doc) {
-                                store_clone.append(msg).await;
-                                count += 1;
-                            }
-                        }
-                    }
-
-                    if count == 0 {
-                        tokio::time::sleep(polling_interval).await;
-                    }
-                } => {}
-            }
-        }
-    });
-
-    Ok(Arc::new(MongoEventStoreGuard {
-        store,
-        _shutdown_tx: shutdown_tx,
-    }))
 }
 
 #[async_trait]
 impl MessageConsumer for MongoDbSubscriber {
     async fn receive_batch(&mut self, max_messages: usize) -> Result<ReceivedBatch, ConsumerError> {
-        self.inner.receive_batch(max_messages).await
+        loop {
+            // Filter for events with seq > last_seq.
+            // Crucially, we must filter out the sequencer and cursor documents which might be in the same collection.
+            // Events have a 'payload' field, while sequencer/cursors do not.
+            let last_seq = self.last_seq.load(Ordering::Relaxed);
+            let filter = doc! {
+                "seq": { "$gt": last_seq },
+                "payload": { "$exists": true }
+            };
+            let find_options = FindOptions::builder()
+                .sort(doc! { "seq": 1 })
+                .limit(max_messages as i64)
+                .build();
+
+            let mut cursor = self
+                .collection
+                .find(filter)
+                .with_options(find_options)
+                .await
+                .map_err(|e| ConsumerError::Connection(e.into()))?;
+
+            let mut messages = Vec::new();
+            let mut seqs = Vec::new();
+
+            while let Some(result) = cursor.next().await {
+                if let Ok(doc) = result {
+                    if let Ok(seq) = doc.get_i64("seq") {
+                        if let Ok(msg) = parse_mongodb_document(doc) {
+                            messages.push(msg);
+                            seqs.push(seq);
+                        }
+                    }
+                }
+            }
+
+            if !messages.is_empty() {
+                let collection = self.collection.clone();
+                let cursor_id = self.cursor_id.clone();
+                let last_seq_arc = self.last_seq.clone();
+
+                let commit = Box::new(move |dispositions: Vec<MessageDisposition>| {
+                    Box::pin(async move {
+                        let mut highest_acked = 0;
+                        for (disp, seq) in dispositions.iter().zip(seqs.iter()) {
+                            if matches!(
+                                disp,
+                                MessageDisposition::Ack | MessageDisposition::Reply(_)
+                            ) {
+                                highest_acked = *seq;
+                            } else {
+                                break; // Stop at first Nack
+                            }
+                        }
+
+                        if highest_acked > 0 {
+                            last_seq_arc.store(highest_acked, Ordering::SeqCst);
+                            // Only persist if we have a cursor_id
+                            if let Some(cid) = cursor_id {
+                                let cursor_doc_id = format!("cursor:{}", cid);
+                                if let Err(e) = collection
+                                    .update_one(
+                                        doc! { "_id": cursor_doc_id },
+                                        doc! { "$set": { "last_seq": highest_acked } },
+                                    )
+                                    .with_options(UpdateOptions::builder().upsert(true).build())
+                                    .await
+                                {
+                                    tracing::warn!(cursor_id = %cid, error = %e, "Failed to persist cursor position. Messages may be reprocessed on restart.");
+                                }
+                            }
+                        }
+                        Ok(())
+                    }) as BoxFuture<'static, anyhow::Result<()>>
+                });
+                return Ok(ReceivedBatch { messages, commit });
+            }
+            tokio::time::sleep(self.polling_interval).await;
+        }
     }
 
     fn as_any(&self) -> &dyn Any {

@@ -881,6 +881,8 @@ pub struct MongoDbConfig {
     /// Format for storing messages. Defaults to Normal.
     #[serde(default)]
     pub format: MongoDbFormat,
+    /// The ID used for the cursor in sequenced mode. If not provided, consumption starts from the current sequence (ephemeral).
+    pub cursor_id: Option<String>,
 }
 
 // --- MQTT Specific Configuration ---

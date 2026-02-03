@@ -675,11 +675,13 @@ pub async fn measure_write_performance(
                             responses: _,
                             failed,
                         }) => {
+                            let success_count = current_batch_size - failed.len();
+                            if success_count > 0 {
+                                final_count_clone
+                                    .fetch_add(success_count, std::sync::atomic::Ordering::Relaxed);
+                            }
+
                             if failed.is_empty() {
-                                final_count_clone.fetch_add(
-                                    current_batch_size,
-                                    std::sync::atomic::Ordering::Relaxed,
-                                );
                                 break; // All sent successfully
                             } else {
                                 let (retryable, non_retryable): (Vec<_>, Vec<_>) = failed
@@ -809,7 +811,7 @@ pub async fn measure_read_performance(
         let mut consumer_guard = consumer_clone.lock().await;
         let receive_future = consumer_guard.receive_batch(missing);
 
-        match tokio::time::timeout(Duration::from_secs(10), receive_future).await {
+        match tokio::time::timeout(Duration::from_secs(20), receive_future).await {
             Ok(Ok(batch)) if !batch.messages.is_empty() => {
                 final_count += batch.messages.len();
                 let commit = batch.commit;
@@ -827,8 +829,12 @@ pub async fn measure_read_performance(
                 eprintln!("Error receiving message: {}. Stopping read.", e);
                 break;
             }
+            Err(_) => {
+                eprintln!("Timeout waiting for messages. Stopping read.");
+                break;
+            }
             _ => {
-                // Timeout or empty batch, assume we are done.
+                // Empty batch, assume we are done.
                 break;
             }
         }
@@ -934,24 +940,30 @@ pub async fn measure_single_read_performance(
         }
         let mut consumer_guard = consumer.lock().await;
         let receive_future = consumer_guard.receive();
-        if let Ok(Ok(Received {
-            message: _msg,
-            commit,
-        })) = tokio::time::timeout(Duration::from_secs(10), receive_future).await
-        {
-            final_count += 1;
-            let permit = commit_semaphore
-                .clone()
-                .acquire_owned()
-                .await
-                .expect("Semaphore closed");
-            tokio::spawn(async move {
-                let _ = commit(MessageDisposition::Ack).await;
-                drop(permit);
-            });
-        } else {
-            eprintln!("Failed to receive message or timed out. Stopping read.");
-            break;
+        match tokio::time::timeout(Duration::from_secs(20), receive_future).await {
+            Ok(Ok(Received {
+                message: _msg,
+                commit,
+            })) => {
+                final_count += 1;
+                let permit = commit_semaphore
+                    .clone()
+                    .acquire_owned()
+                    .await
+                    .expect("Semaphore closed");
+                tokio::spawn(async move {
+                    let _ = commit(MessageDisposition::Ack).await;
+                    drop(permit);
+                });
+            }
+            Err(_) => {
+                eprintln!("Timeout waiting for single message. Stopping read.");
+                break;
+            }
+            Ok(Err(e)) => {
+                eprintln!("Failed to receive message: {}. Stopping read.", e);
+                break;
+            }
         }
     }
 
