@@ -1,70 +1,38 @@
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
-use mq_bridge::traits::{MessageConsumer, MessagePublisher};
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::Duration;
 use tokio::runtime::Runtime;
 use tokio::sync::Mutex;
 
 // Include the integration module from the tests directory so we can reuse the test logic.
 #[path = "../tests/integration/mod.rs"]
-mod integration;
+mod integration; // Still needed for backend modules like kafka, nats etc.
 
-use integration::common::{
-    format_pretty, measure_read_performance, measure_single_read_performance,
-    measure_single_write_performance, measure_write_performance, DockerCompose, PerformanceResult,
-    PERF_TEST_CONCURRENCY,
-};
+use mq_bridge::bench_backend;
+use mq_bridge::test_utils::{print_benchmark_results, PerformanceResult, PERF_TEST_CONCURRENCY};
 
 const PERF_TEST_MESSAGE_COUNT: usize = 1000;
-const DEFAULT_SLEEP: Duration = Duration::from_millis(1);
-const DEFAULT_INIT_SLEEP: Duration = Duration::from_millis(100);
 
 static BENCH_RESULTS: Lazy<Mutex<HashMap<String, PerformanceResult>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
-fn should_run(backend_name: &str) -> bool {
-    let mut filters = Vec::new();
-    let mut args = std::env::args().skip(1);
-    while let Some(arg) = args.next() {
-        // Only skip values for flags that are known to take values
-        if arg == "--output-format"
-            || arg == "--baseline"
-            || arg == "--save-baseline"
-            || arg == "--load-baseline"
-            || arg == "--profile-time"
-        {
-            args.next();
-            continue;
-        }
-        if arg.starts_with("--") {
-            continue;
-        }
-        if !arg.starts_with('-') {
-            filters.push(arg);
-        }
-    }
-    if filters.is_empty() {
-        return true;
-    }
-    filters
-        .iter()
-        .any(|arg| backend_name.contains(arg) || arg.contains(backend_name))
-}
-
 // --- Helper Modules for Backend Setup ---
 
 #[cfg(feature = "nats")]
-mod nats_helper {
-    use super::*;
+pub mod nats_helper {
     use mq_bridge::endpoints::nats::{NatsConsumer, NatsPublisher};
     use mq_bridge::models::NatsConfig;
+    use mq_bridge::traits::{MessageConsumer, MessagePublisher};
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
 
-    fn get_config() -> NatsConfig {
+    fn get_config(stream_name: &str, subject: &str) -> NatsConfig {
         NatsConfig {
             url: "nats://localhost:4222".to_string(),
             delayed_ack: false,
+            stream: Some(stream_name.to_string()),
+            subject: Some(subject.to_string()),
             ..Default::default()
         }
     }
@@ -72,7 +40,7 @@ mod nats_helper {
         let stream_name = "perf_nats_direct";
         let subject = "perf_nats_direct.subject";
         Arc::new(
-            NatsPublisher::new(&get_config(), stream_name, subject)
+            NatsPublisher::new(&get_config(stream_name, subject))
                 .await
                 .unwrap(),
         )
@@ -82,7 +50,7 @@ mod nats_helper {
         let stream_name = "perf_nats_direct";
         let subject = "perf_nats_direct.subject";
         Arc::new(Mutex::new(
-            NatsConsumer::new(&get_config(), stream_name, subject)
+            NatsConsumer::new(&get_config(stream_name, subject))
                 .await
                 .unwrap(),
         ))
@@ -90,21 +58,30 @@ mod nats_helper {
 }
 
 #[cfg(feature = "mongodb")]
-mod mongodb_helper {
-    use super::*;
+pub mod mongodb_helper {
     use mq_bridge::endpoints::mongodb::{MongoDbConsumer, MongoDbPublisher};
     use mq_bridge::models::MongoDbConfig;
+    use mq_bridge::traits::{MessageConsumer, MessagePublisher};
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
 
-    fn get_config() -> MongoDbConfig {
+    fn get_config(collection_name: &str) -> MongoDbConfig {
         MongoDbConfig {
             url: "mongodb://localhost:27017".to_string(),
             database: "mq_bridge_test_db".to_string(),
+            collection: Some(collection_name.to_string()),
             ..Default::default()
         }
     }
     pub async fn create_publisher() -> Arc<dyn MessagePublisher> {
         let collection_name = "perf_mongodb_direct";
-        let config = get_config();
+        let config = get_config(collection_name);
+        Arc::new(MongoDbPublisher::new(&config).await.unwrap())
+    }
+
+    pub async fn create_consumer() -> Arc<Mutex<dyn MessageConsumer>> {
+        let collection_name = "perf_mongodb_direct";
+        let config = get_config(collection_name);
 
         // Drop collection before test to ensure clean state
         let client = mongodb::Client::with_uri_str(&config.url).await.unwrap();
@@ -115,59 +92,93 @@ mod mongodb_helper {
             .await
             .ok();
 
-        Arc::new(
-            MongoDbPublisher::new(&config, collection_name)
-                .await
-                .unwrap(),
-        )
+        Arc::new(Mutex::new(MongoDbConsumer::new(&config).await.unwrap()))
+    }
+}
+
+#[cfg(feature = "mongodb")]
+pub mod mongodb_subscriber_helper {
+    use mq_bridge::endpoints::mongodb::{MongoDbPublisher, MongoDbSubscriber};
+    use mq_bridge::models::MongoDbConfig;
+    use mq_bridge::traits::{MessageConsumer, MessagePublisher};
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    fn get_config(collection_name: &str) -> MongoDbConfig {
+        MongoDbConfig {
+            url: "mongodb://localhost:27017".to_string(),
+            database: "mq_bridge_test_db".to_string(),
+            collection: Some(collection_name.to_string()),
+            change_stream: true,
+            ..Default::default()
+        }
+    }
+    pub async fn create_publisher() -> Arc<dyn MessagePublisher> {
+        let collection_name = "perf_mongodb_sub_direct";
+        let config = get_config(collection_name);
+        Arc::new(MongoDbPublisher::new(&config).await.unwrap())
     }
 
     pub async fn create_consumer() -> Arc<Mutex<dyn MessageConsumer>> {
-        let collection_name = "perf_mongodb_direct";
-        Arc::new(Mutex::new(
-            MongoDbConsumer::new(&get_config(), collection_name)
-                .await
-                .unwrap(),
-        ))
+        let collection_name = "perf_mongodb_sub_direct";
+        let config = get_config(collection_name);
+
+        // Drop collection before test
+        let client = mongodb::Client::with_uri_str(&config.url).await.unwrap();
+        client
+            .database(&config.database)
+            .collection::<mongodb::bson::Document>(collection_name)
+            .drop()
+            .await
+            .ok();
+
+        Arc::new(Mutex::new(MongoDbSubscriber::new(&config).await.unwrap()))
     }
 }
 
 #[cfg(feature = "amqp")]
-mod amqp_helper {
-    use super::*;
+pub mod amqp_helper {
     use mq_bridge::endpoints::amqp::{AmqpConsumer, AmqpPublisher};
     use mq_bridge::models::AmqpConfig;
-    fn get_config() -> AmqpConfig {
+    use mq_bridge::traits::{MessageConsumer, MessagePublisher};
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    fn get_config(queue: &str) -> AmqpConfig {
         AmqpConfig {
             url: "amqp://guest:guest@localhost:5672/%2f".to_string(),
             delayed_ack: false,
+            queue: Some(queue.to_string()),
             ..Default::default()
         }
     }
 
     pub async fn create_publisher() -> Arc<dyn MessagePublisher> {
         let queue = "perf_test_amqp_direct";
-        Arc::new(AmqpPublisher::new(&get_config(), queue).await.unwrap())
+        Arc::new(AmqpPublisher::new(&get_config(queue)).await.unwrap())
     }
 
     pub async fn create_consumer() -> Arc<Mutex<dyn MessageConsumer>> {
         let queue = "perf_test_amqp_direct";
         Arc::new(Mutex::new(
-            AmqpConsumer::new(&get_config(), queue).await.unwrap(),
+            AmqpConsumer::new(&get_config(queue)).await.unwrap(),
         ))
     }
 }
 
 #[cfg(feature = "kafka")]
-mod kafka_helper {
-    use super::*;
+pub mod kafka_helper {
     use mq_bridge::endpoints::kafka::{KafkaConsumer, KafkaPublisher};
     use mq_bridge::models::KafkaConfig;
+    use mq_bridge::traits::{MessageConsumer, MessagePublisher};
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
 
-    fn get_config() -> KafkaConfig {
+    fn get_config(topic: &str) -> KafkaConfig {
         KafkaConfig {
-            brokers: "localhost:9092".to_string(),
+            url: "localhost:9092".to_string(),
             group_id: Some("perf_test_group_kafka".to_string()),
+            topic: Some(topic.to_string()),
             producer_options: Some(vec![
                 ("queue.buffering.max.ms".to_string(), "50".to_string()), // Linger for 50ms to batch messages
                 ("acks".to_string(), "1".to_string()), // Wait for leader ack, a good balance
@@ -178,24 +189,27 @@ mod kafka_helper {
     }
     pub async fn create_publisher() -> Arc<dyn MessagePublisher> {
         let topic = "perf_kafka_direct";
-        Arc::new(KafkaPublisher::new(&get_config(), topic).await.unwrap())
+        Arc::new(KafkaPublisher::new(&get_config(topic)).await.unwrap())
     }
 
     pub async fn create_consumer() -> Arc<Mutex<dyn MessageConsumer>> {
         let topic = "perf_kafka_direct";
         Arc::new(Mutex::new(
-            KafkaConsumer::new(&get_config(), topic).await.unwrap(),
+            KafkaConsumer::new(&get_config(topic)).await.unwrap(),
         ))
     }
 }
 
 #[cfg(feature = "mqtt")]
-mod mqtt_helper {
-    use super::*;
+pub mod mqtt_helper {
+    use super::PERF_TEST_MESSAGE_COUNT;
     use mq_bridge::endpoints::mqtt::{MqttConsumer, MqttPublisher};
     use mq_bridge::models::MqttConfig;
-    use uuid::Uuid;
-    fn get_config() -> MqttConfig {
+    use mq_bridge::traits::{MessageConsumer, MessagePublisher};
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    fn get_config(topic: &str, client_id: &str) -> MqttConfig {
         MqttConfig {
             url: "tcp://localhost:1883".to_string(),
             queue_capacity: Some(PERF_TEST_MESSAGE_COUNT * 4), // For batch and single
@@ -203,15 +217,17 @@ mod mqtt_helper {
             qos: Some(1),
             clean_session: false,
             keep_alive_seconds: Some(60),
+            topic: Some(topic.to_string()),
+            client_id: Some(client_id.to_string()),
             ..Default::default()
         }
     }
 
     pub async fn create_publisher() -> Arc<dyn MessagePublisher> {
         let topic = "perf_mqtt_direct";
-        let publisher_id = format!("pub-{}", Uuid::new_v4().as_simple());
+        let publisher_id = format!("pub-{}", fast_uuid_v7::gen_id());
         Arc::new(
-            MqttPublisher::new(&get_config(), topic, &publisher_id)
+            MqttPublisher::new(&get_config(topic, &publisher_id))
                 .await
                 .unwrap(),
         )
@@ -219,9 +235,9 @@ mod mqtt_helper {
 
     pub async fn create_consumer() -> Arc<Mutex<dyn MessageConsumer>> {
         let topic = "perf_mqtt_direct";
-        let consumer_id = format!("sub-{}", Uuid::new_v4().as_simple());
+        let consumer_id = format!("sub-{}", fast_uuid_v7::gen_id());
         Arc::new(Mutex::new(
-            MqttConsumer::new(&get_config(), topic, &consumer_id)
+            MqttConsumer::new(&get_config(topic, &consumer_id))
                 .await
                 .unwrap(),
         ))
@@ -229,11 +245,13 @@ mod mqtt_helper {
 }
 
 #[cfg(feature = "aws")]
-mod aws_helper {
-    use super::*;
+pub mod aws_helper {
     use aws_sdk_sns::config::Credentials;
     use mq_bridge::endpoints::aws::{AwsConsumer, AwsPublisher};
-    use mq_bridge::models::{AwsConfig, AwsEndpoint};
+    use mq_bridge::models::AwsConfig;
+    use mq_bridge::traits::{MessageConsumer, MessagePublisher};
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
 
     async fn ensure_queue_exists() -> String {
         let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
@@ -259,41 +277,43 @@ mod aws_helper {
         queue_url
     }
 
-    fn get_endpoint(queue_url: Option<String>) -> AwsEndpoint {
-        AwsEndpoint {
+    fn get_config(queue_url: Option<String>) -> AwsConfig {
+        AwsConfig {
             queue_url: Some(queue_url.unwrap_or_else(|| {
                 "http://localhost:4566/000000000000/perf-test-queue".to_string()
             })),
-            topic_arn: None,
-            config: AwsConfig {
-                region: Some("us-east-1".to_string()),
-                endpoint_url: Some("http://localhost:4566".to_string()),
-                access_key: Some("test".to_string()),
-                secret_key: Some("test".to_string()),
-                ..Default::default()
-            },
+            region: Some("us-east-1".to_string()),
+            endpoint_url: Some("http://localhost:4566".to_string()),
+            access_key: Some("test".to_string()),
+            secret_key: Some("test".to_string()),
+            ..Default::default()
         }
     }
 
     pub async fn create_publisher() -> Arc<dyn MessagePublisher> {
         let url = ensure_queue_exists().await;
-        Arc::new(AwsPublisher::new(&get_endpoint(Some(url))).await.unwrap())
+        Arc::new(AwsPublisher::new(&get_config(Some(url))).await.unwrap())
     }
 
     pub async fn create_consumer() -> Arc<Mutex<dyn MessageConsumer>> {
+        let url = ensure_queue_exists().await;
         Arc::new(Mutex::new(
-            AwsConsumer::new(&get_endpoint(None)).await.unwrap(),
+            AwsConsumer::new(&get_config(Some(url))).await.unwrap(),
         ))
     }
 }
 
 #[cfg(feature = "zeromq")]
-mod zeromq_helper {
-    use super::*;
+pub mod zeromq_helper {
+    use super::PERF_TEST_MESSAGE_COUNT;
     use mq_bridge::endpoints::zeromq::{ZeroMqConsumer, ZeroMqPublisher};
-    use mq_bridge::models::{ZeroMqConfig, ZeroMqEndpoint, ZeroMqSocketType};
+    use mq_bridge::models::{ZeroMqConfig, ZeroMqSocketType};
+    use mq_bridge::traits::{MessageConsumer, MessagePublisher};
+    use once_cell::sync::Lazy;
     use rand::Rng;
     use std::sync::atomic::{AtomicU16, Ordering};
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
 
     static PORT: Lazy<AtomicU16> = Lazy::new(|| {
         let mut rng = rand::rng();
@@ -302,59 +322,131 @@ mod zeromq_helper {
 
     pub async fn create_publisher() -> Arc<dyn MessagePublisher> {
         let port = PORT.load(Ordering::SeqCst);
-        let config = ZeroMqEndpoint {
+        let config = ZeroMqConfig {
+            url: format!("ipc:///tmp/mq-bridge-{}.sock", port),
+            socket_type: Some(ZeroMqSocketType::Push),
+            bind: false,
+            internal_buffer_size: Some(PERF_TEST_MESSAGE_COUNT + 1),
             topic: None,
-            config: ZeroMqConfig {
-                url: format!("ipc:///tmp/mq-bridge-{}.sock", port),
-                socket_type: Some(ZeroMqSocketType::Push),
-                bind: false,
-                internal_buffer_size: Some(PERF_TEST_MESSAGE_COUNT + 1),
-            },
         };
         Arc::new(ZeroMqPublisher::new(&config).await.unwrap())
     }
 
     pub async fn create_consumer() -> Arc<Mutex<dyn MessageConsumer>> {
-        let port = PORT.fetch_add(1, Ordering::SeqCst) + 1;
+        let port = PORT.load(Ordering::SeqCst);
         let path = format!("/tmp/mq-bridge-{}.sock", port);
         let _ = std::fs::remove_file(&path);
-        let config = ZeroMqEndpoint {
+        let config = ZeroMqConfig {
+            url: format!("ipc://{}", path),
+            socket_type: Some(ZeroMqSocketType::Pull),
+            bind: true,
+            internal_buffer_size: Some(PERF_TEST_MESSAGE_COUNT + 1),
             topic: None,
-            config: ZeroMqConfig {
-                url: format!("ipc://{}", path),
-                socket_type: Some(ZeroMqSocketType::Pull),
-                bind: true,
-                internal_buffer_size: Some(PERF_TEST_MESSAGE_COUNT + 1),
-            },
         };
         Arc::new(Mutex::new(ZeroMqConsumer::new(&config).await.unwrap()))
     }
 }
 
-mod memory_helper {
-    use super::*;
-    use mq_bridge::endpoints::memory::{MemoryConsumer, MemoryPublisher};
-    use mq_bridge::models::MemoryConfig;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(feature = "ibm-mq")]
+pub mod ibm_mq_helper {
+    use mq_bridge::endpoints::ibm_mq::{IbmMqConsumer, IbmMqPublisher};
+    use mq_bridge::models::IbmMqConfig;
+    use mq_bridge::traits::{MessageConsumer, MessagePublisher};
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
 
-    static TOPIC_ID: Lazy<AtomicUsize> = Lazy::new(|| AtomicUsize::new(0));
+    pub fn get_config(queue: &str) -> IbmMqConfig {
+        IbmMqConfig {
+            username: Some("app".to_string()),
+            password: Some("admin".to_string()),
+            queue_manager: "QM1".to_string(),
+            url: "localhost(1414)".to_string(),
+            channel: "DEV.APP.SVRCONN".to_string(),
+            queue: Some(queue.to_string()),
+            ..Default::default()
+        }
+    }
 
     pub async fn create_publisher() -> Arc<dyn MessagePublisher> {
-        let id = TOPIC_ID.load(Ordering::SeqCst);
+        let config = get_config("DEV.QUEUE.1");
+        Arc::new(IbmMqPublisher::new(&config).await.unwrap())
+    }
+
+    pub async fn create_consumer() -> Arc<Mutex<dyn MessageConsumer>> {
+        let config = get_config("DEV.QUEUE.1");
+        Arc::new(Mutex::new(IbmMqConsumer::new(&config).await.unwrap()))
+    }
+}
+
+pub mod memory_helper {
+    use super::PERF_TEST_MESSAGE_COUNT;
+    use mq_bridge::endpoints::memory::{MemoryConsumer, MemoryPublisher};
+    use mq_bridge::traits::{MessageConsumer, MessagePublisher};
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    pub async fn create_publisher() -> Arc<dyn MessagePublisher> {
+        Arc::new(MemoryPublisher::new_local(
+            "perf_memory_bench",
+            PERF_TEST_MESSAGE_COUNT * 2,
+        ))
+    }
+
+    pub async fn create_consumer() -> Arc<Mutex<dyn MessageConsumer>> {
+        Arc::new(Mutex::new(MemoryConsumer::new_local(
+            "perf_memory_bench",
+            PERF_TEST_MESSAGE_COUNT * 2,
+        )))
+    }
+}
+
+pub mod memory_subscriber_helper {
+    use super::PERF_TEST_MESSAGE_COUNT;
+    use mq_bridge::endpoints::memory::{MemoryPublisher, MemorySubscriber};
+    use mq_bridge::models::MemoryConfig;
+    use mq_bridge::traits::{MessageConsumer, MessagePublisher};
+    use once_cell::sync::Lazy;
+    use std::sync::Arc;
+    use std::sync::Mutex as StdMutex;
+    use tokio::sync::Mutex;
+
+    // Shared state to coordinate topic name between consumer and publisher creation.
+    // create_consumer is called first by the benchmark macro, so it generates the topic.
+    static CURRENT_TOPIC: Lazy<StdMutex<String>> =
+        Lazy::new(|| StdMutex::new("perf_memory_sub_bench_init".to_string()));
+
+    pub async fn create_publisher() -> Arc<dyn MessagePublisher> {
+        let topic = {
+            let lock = CURRENT_TOPIC.lock().unwrap();
+            lock.clone()
+        };
+
         let config = MemoryConfig {
-            topic: format!("perf_memory_{}", id),
+            topic,
             capacity: Some(PERF_TEST_MESSAGE_COUNT * 2),
+            subscribe_mode: true,
+            ..Default::default()
         };
         Arc::new(MemoryPublisher::new(&config).unwrap())
     }
 
     pub async fn create_consumer() -> Arc<Mutex<dyn MessageConsumer>> {
-        let id = TOPIC_ID.fetch_add(1, Ordering::SeqCst) + 1;
+        let topic = format!("perf_memory_sub_bench_{}", fast_uuid_v7::gen_id());
+        {
+            let mut lock = CURRENT_TOPIC.lock().unwrap();
+            *lock = topic.clone();
+        }
+
         let config = MemoryConfig {
-            topic: format!("perf_memory_{}", id),
+            topic,
             capacity: Some(PERF_TEST_MESSAGE_COUNT * 2),
+            subscribe_mode: true,
+            ..Default::default()
         };
-        Arc::new(Mutex::new(MemoryConsumer::new(&config).unwrap()))
+        let subscriber_id = format!("sub-{}", fast_uuid_v7::gen_id());
+        Arc::new(Mutex::new(
+            MemorySubscriber::new(&config, &subscriber_id).unwrap(),
+        ))
     }
 }
 
@@ -369,278 +461,127 @@ fn performance_benchmarks(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(10));
     group.warm_up_time(Duration::from_secs(1));
 
-    macro_rules! run_benchmarks {
-        ($name:literal) => {
-            group.bench_function(concat!($name, "_single_write"), |b| {
-                b.to_async(&rt).iter_custom(|iters| async move {
-                    let mut total = Duration::ZERO;
-                    // Create consumer first to support brokerless protocols like ZeroMQ
-                    let consumer = backend::create_consumer().await;
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                    let publisher = backend::create_publisher().await;
-                    tokio::time::sleep(DEFAULT_INIT_SLEEP).await;
-                    for _ in 0..iters {
-                        let duration = measure_single_write_performance(
-                            concat!($name, "_single_write"),
-                            Arc::clone(&publisher),
-                            PERF_TEST_MESSAGE_COUNT,
-                            PERF_TEST_CONCURRENCY,
-                        )
-                        .await;
-                        total += duration;
-                        tokio::time::sleep(DEFAULT_SLEEP).await;
-                        measure_read_performance(
-                            "cleanup",
-                            Arc::clone(&consumer),
-                            PERF_TEST_MESSAGE_COUNT,
-                        )
-                        .await;
-                        tokio::time::sleep(DEFAULT_SLEEP).await;
-                    }
-                    let msgs_per_sec =
-                        (iters as f64 * PERF_TEST_MESSAGE_COUNT as f64) / total.as_secs_f64();
-                    {
-                        let mut results = BENCH_RESULTS.lock().await;
-                        let stats = results.entry($name.to_string()).or_default();
-                        stats.single_write_performance = msgs_per_sec;
-                    }
-                    println!(
-                        "\n{} single_write: {} iters, total time {:?}, {:.2} msgs/sec",
-                        $name, iters, total, msgs_per_sec
-                    );
-                    total
-                })
-            });
-
-            group.bench_function(concat!($name, "_single_read"), |b| {
-                b.to_async(&rt).iter_custom(|iters| async move {
-                    let mut total = Duration::ZERO;
-                    let consumer = backend::create_consumer().await;
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                    let publisher = backend::create_publisher().await;
-                    tokio::time::sleep(DEFAULT_INIT_SLEEP).await;
-                    for _ in 0..iters {
-                        measure_write_performance(
-                            "setup_fill",
-                            Arc::clone(&publisher),
-                            PERF_TEST_MESSAGE_COUNT,
-                            PERF_TEST_CONCURRENCY,
-                        )
-                        .await;
-                        tokio::time::sleep(DEFAULT_SLEEP).await;
-
-                        let duration = measure_single_read_performance(
-                            concat!($name, "_single_read"),
-                            Arc::clone(&consumer),
-                            PERF_TEST_MESSAGE_COUNT,
-                        )
-                        .await;
-                        tokio::time::sleep(DEFAULT_SLEEP).await;
-                        total += duration;
-                    }
-                    let msgs_per_sec =
-                        (iters as f64 * PERF_TEST_MESSAGE_COUNT as f64) / total.as_secs_f64();
-                    {
-                        let mut results = BENCH_RESULTS.lock().await;
-                        let stats = results.entry($name.to_string()).or_default();
-                        stats.single_read_performance = msgs_per_sec;
-                    }
-                    println!(
-                        "\n{} single_read: {} iters, total time {:?}, {:.2} msgs/sec",
-                        $name, iters, total, msgs_per_sec
-                    );
-                    total
-                })
-            });
-
-            group.bench_function(concat!($name, "_batch_write"), |b| {
-                b.to_async(&rt).iter_custom(|iters| async move {
-                    let mut total = Duration::ZERO;
-                    let consumer = backend::create_consumer().await;
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                    let publisher = backend::create_publisher().await;
-                    tokio::time::sleep(DEFAULT_INIT_SLEEP).await;
-                    for _ in 0..iters {
-                        let duration = measure_write_performance(
-                            concat!($name, "_batch_write"),
-                            Arc::clone(&publisher),
-                            PERF_TEST_MESSAGE_COUNT,
-                            PERF_TEST_CONCURRENCY,
-                        )
-                        .await;
-                        tokio::time::sleep(DEFAULT_SLEEP).await;
-                        total += duration;
-
-                        measure_read_performance(
-                            "cleanup",
-                            Arc::clone(&consumer),
-                            PERF_TEST_MESSAGE_COUNT,
-                        )
-                        .await;
-                        tokio::time::sleep(DEFAULT_SLEEP).await;
-                    }
-                    let msgs_per_sec =
-                        (iters as f64 * PERF_TEST_MESSAGE_COUNT as f64) / total.as_secs_f64();
-                    {
-                        let mut results = BENCH_RESULTS.lock().await;
-                        let stats = results.entry($name.to_string()).or_default();
-                        stats.write_performance = msgs_per_sec;
-                    }
-                    println!(
-                        "\n{} batch_write: {} iters, total time {:?}, {:.2} msgs/sec",
-                        $name, iters, total, msgs_per_sec
-                    );
-                    total
-                })
-            });
-
-            group.bench_function(concat!($name, "_batch_read"), |b| {
-                b.to_async(&rt).iter_custom(|iters| async move {
-                    let mut total = Duration::ZERO;
-                    let consumer = backend::create_consumer().await;
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                    let publisher = backend::create_publisher().await;
-                    tokio::time::sleep(DEFAULT_INIT_SLEEP).await;
-                    for _ in 0..iters {
-                        measure_write_performance(
-                            "setup_fill",
-                            Arc::clone(&publisher),
-                            PERF_TEST_MESSAGE_COUNT,
-                            PERF_TEST_CONCURRENCY,
-                        )
-                        .await;
-                        tokio::time::sleep(DEFAULT_SLEEP).await;
-
-                        let duration = measure_read_performance(
-                            concat!($name, "_batch_read"),
-                            Arc::clone(&consumer),
-                            PERF_TEST_MESSAGE_COUNT,
-                        )
-                        .await;
-                        tokio::time::sleep(DEFAULT_SLEEP).await;
-                        total += duration;
-                    }
-                    let msgs_per_sec =
-                        (iters as f64 * PERF_TEST_MESSAGE_COUNT as f64) / total.as_secs_f64();
-                    {
-                        let mut results = BENCH_RESULTS.lock().await;
-                        let stats = results.entry($name.to_string()).or_default();
-                        stats.read_performance = msgs_per_sec;
-                    }
-                    println!(
-                        "\n{} batch_read: {} iters, total time {:?}, {:.2} msgs/sec",
-                        $name, iters, total, msgs_per_sec
-                    );
-                    total
-                })
-            });
-        };
-    }
-
-    macro_rules! bench_backend {
-        ($feature:literal, $name:literal, $compose_file:literal, $helper:path) => {
-            #[cfg(feature = $feature)]
-            if should_run($name) {
-                use $helper as backend;
-
-                // Start the Docker environment for this backend.
-                // The DockerCompose struct handles `docker-compose up` on creation and `down` on drop.
-                let _docker = DockerCompose::new($compose_file);
-                _docker.down();
-                _docker.up();
-
-                run_benchmarks!($name);
-                _docker.down();
-            }
-        };
-        ($feature:literal, $name:literal, $helper:path) => {
-            #[cfg(feature = $feature)]
-            if should_run($name) {
-                use $helper as backend;
-                // No docker setup
-                run_benchmarks!($name);
-            }
-        };
-        ($name:literal, $helper:path) => {
-            if should_run($name) {
-                use $helper as backend;
-                // No docker setup, no feature gate
-                run_benchmarks!($name);
-            }
-        };
-    }
-
     bench_backend!(
         "aws",
         "aws",
         "tests/integration/docker-compose/aws.yml",
-        aws_helper
+        aws_helper,
+        group,
+        &rt,
+        &BENCH_RESULTS,
+        PERF_TEST_MESSAGE_COUNT,
+        PERF_TEST_CONCURRENCY
     );
     bench_backend!(
         "kafka",
         "kafka",
         "tests/integration/docker-compose/kafka.yml",
-        kafka_helper
+        kafka_helper,
+        group,
+        &rt,
+        &BENCH_RESULTS,
+        PERF_TEST_MESSAGE_COUNT,
+        PERF_TEST_CONCURRENCY
     );
     bench_backend!(
         "amqp",
         "amqp",
         "tests/integration/docker-compose/amqp.yml",
-        amqp_helper
+        amqp_helper,
+        group,
+        &rt,
+        &BENCH_RESULTS,
+        PERF_TEST_MESSAGE_COUNT,
+        PERF_TEST_CONCURRENCY
     );
     bench_backend!(
         "nats",
         "nats",
         "tests/integration/docker-compose/nats.yml",
-        nats_helper
+        nats_helper,
+        group,
+        &rt,
+        &BENCH_RESULTS,
+        PERF_TEST_MESSAGE_COUNT,
+        PERF_TEST_CONCURRENCY
     );
     bench_backend!(
         "mongodb",
         "mongodb",
         "tests/integration/docker-compose/mongodb.yml",
-        mongodb_helper
+        mongodb_helper,
+        group,
+        &rt,
+        &BENCH_RESULTS,
+        PERF_TEST_MESSAGE_COUNT,
+        PERF_TEST_CONCURRENCY
+    );
+    bench_backend!(
+        "mongodb",
+        "mongodb_subscriber",
+        "tests/integration/docker-compose/mongodb.yml",
+        mongodb_subscriber_helper,
+        group,
+        &rt,
+        &BENCH_RESULTS,
+        PERF_TEST_MESSAGE_COUNT,
+        PERF_TEST_CONCURRENCY
     );
     bench_backend!(
         "mqtt",
         "mqtt",
         "tests/integration/docker-compose/mqtt.yml",
-        mqtt_helper
+        mqtt_helper,
+        group,
+        &rt,
+        &BENCH_RESULTS,
+        PERF_TEST_MESSAGE_COUNT,
+        PERF_TEST_CONCURRENCY
     );
 
-    bench_backend!("zeromq", "zeromq", zeromq_helper);
-    bench_backend!("memory", memory_helper);
+    bench_backend!(
+        "zeromq",
+        "zeromq",
+        zeromq_helper,
+        group,
+        &rt,
+        &BENCH_RESULTS,
+        PERF_TEST_MESSAGE_COUNT,
+        PERF_TEST_CONCURRENCY
+    );
+    bench_backend!(
+        "ibm-mq",
+        "ibm-mq",
+        "tests/integration/docker-compose/ibm_mq.yml",
+        ibm_mq_helper,
+        group,
+        &rt,
+        &BENCH_RESULTS,
+        PERF_TEST_MESSAGE_COUNT,
+        PERF_TEST_CONCURRENCY
+    );
+    bench_backend!(
+        "memory",
+        memory_helper,
+        group,
+        &rt,
+        &BENCH_RESULTS,
+        PERF_TEST_MESSAGE_COUNT,
+        PERF_TEST_CONCURRENCY
+    );
+    bench_backend!(
+        "memory_subscriber",
+        memory_subscriber_helper,
+        group,
+        &rt,
+        &BENCH_RESULTS,
+        PERF_TEST_MESSAGE_COUNT,
+        PERF_TEST_CONCURRENCY
+    );
 
     // Print consolidated results
     let results = BENCH_RESULTS.blocking_lock();
-    if !results.is_empty() {
-        println!("\n\n--- Consolidated Performance Test Results (msgs/sec) ---");
-        println!(
-            "\n\n--- Batch = {} msgs, Single = {} msgs ---",
-            format_pretty(PERF_TEST_MESSAGE_COUNT),
-            format_pretty(PERF_TEST_MESSAGE_COUNT)
-        );
-        println!(
-            "{:<25} | {:>15} | {:>15} | {:>15} | {:>15}",
-            "Test Name", "Write (Batch)", "Read (Batch)", "Write (Single)", "Read (Single)"
-        );
-        println!(
-            "{:-<25}-|-{:->15}-|-{:->15}-|-{:->15}-|-{:->15}",
-            "", "", "", "", ""
-        );
-        let mut sorted_results: Vec<_> = results.iter().collect();
-        sorted_results.sort_by_key(|(name, _)| *name);
-        for (name, stats) in sorted_results {
-            println!(
-                "{:<25} | {:>15} | {:>15} | {:>15} | {:>15}",
-                format!("{} Direct", name),
-                format_pretty(stats.write_performance),
-                format_pretty(stats.read_performance),
-                format_pretty(stats.single_write_performance),
-                format_pretty(stats.single_read_performance)
-            );
-        }
-        println!("---------------------------------------------------------------------------------------\n");
-    }
+    print_benchmark_results(&results, PERF_TEST_MESSAGE_COUNT);
     group.finish();
 }
 

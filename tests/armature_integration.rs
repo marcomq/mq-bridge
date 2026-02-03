@@ -1,13 +1,12 @@
 use std::env;
 use std::fs;
-use std::path::PathBuf;
 use std::process::Command;
 
 #[test]
 #[ignore = "Requires git, internet access, and takes time. Runs downstream integration tests."]
 fn armature_messaging_test() {
-    // Define paths: Use target directory so it is cleaned up by cargo clean and ignored by git
-    let target_dir = PathBuf::from("target/tmp_integration");
+    // Define paths: Use system temp dir to avoid locking/conflicts with local target dir
+    let target_dir = env::temp_dir().join("mq_bridge_integration_test");
     let test_dir = target_dir.join("armature_test");
 
     // Clean up previous run
@@ -15,6 +14,9 @@ fn armature_messaging_test() {
         fs::remove_dir_all(&test_dir).expect("Failed to clean up previous test run");
     }
     fs::create_dir_all(&test_dir).expect("Failed to create test directory");
+    let test_dir = test_dir
+        .canonicalize()
+        .expect("Failed to canonicalize test dir");
 
     let repo_url = "https://github.com/pegasusheavy/armature.git";
     let branch = "develop";
@@ -23,17 +25,44 @@ fn armature_messaging_test() {
     // 1. Clone Repo
     println!("Cloning {} (branch: {})...", repo_url, branch);
     let status = Command::new("git")
-        .args(["clone", "--branch", branch, "--depth", "1", repo_url, "."])
+        .args([
+            "clone",
+            "--depth",
+            "1",
+            "--filter=blob:none",
+            "--no-checkout",
+            "--branch",
+            branch,
+            repo_url,
+            ".",
+        ])
         .current_dir(&test_dir)
         .status()
         .expect("Failed to execute git clone");
     assert!(status.success(), "Failed to clone armature repo");
+
+    let status = Command::new("git")
+        .args(["sparse-checkout", "set", "--no-cone", "/*", "!/benchmarks"])
+        .current_dir(&test_dir)
+        .status()
+        .expect("Failed to set sparse-checkout");
+    assert!(status.success(), "Failed to set sparse-checkout");
+
+    let status = Command::new("git")
+        .args(["checkout"])
+        .current_dir(&test_dir)
+        .status()
+        .expect("Failed to checkout");
+    assert!(status.success(), "Failed to checkout armature repo");
 
     let project_dir = test_dir.join(subdirectory);
     assert!(
         project_dir.exists(),
         "armature-messaging directory not found in cloned repo"
     );
+    let project_dir = project_dir
+        .canonicalize()
+        .expect("Failed to canonicalize project dir");
 
     // 2. Get absolute path to current mq-bridge
     let mq_bridge_path = env::current_dir()
@@ -59,14 +88,52 @@ fn armature_messaging_test() {
         .expect("Failed to execute cargo add");
     assert!(status.success(), "Failed to patch mq-bridge dependency");
 
+    // Patch armature-messaging source code to be compatible with mq-bridge 0.2.0 breaking changes
+    // We need to convert Option<CanonicalMessage> to MessageDisposition using .into()
+    let source_path = project_dir.join("src/mq_bridge.rs");
+    assert!(
+        source_path.exists(),
+        "expected mq_bridge.rs at {:?}",
+        source_path
+    );
+
+    println!("Patching {:?} for API compatibility...", source_path);
+    let content = fs::read_to_string(&source_path).expect("Failed to read mq_bridge.rs");
+    let new_content = content
+            .replace("(received.commit)(None)", "(received.commit)(None.into())")
+            .replace(
+                "(received.commit)(Some(response))",
+                "(received.commit)(Some(response).into())",
+            )
+            .replace(
+                "MemoryConfig {",
+                "MemoryConfig { request_reply: false, request_timeout_ms: None, subscribe_mode: false, enable_nack: false,",
+            )
+            .replace(
+                "EndpointType::File(self.topic.clone())",
+                "EndpointType::File(mq_bridge::models::FileConfig { path: self.topic.clone(), subscribe_mode: false, delete: None })",
+            )
+            .replace(
+                "concurrency: 1,",
+                "options: mq_bridge::models::RouteOptions { concurrency: 1, batch_size: 128, ..Default::default() },",
+            )
+            .replace("batch_size: 128,", "");
+    fs::write(&source_path, new_content).expect("Failed to write patched mq_bridge.rs");
+
     // 4. Run tests
-    println!("Running armature-messaging tests...");
+    println!(
+        "Running armature-messaging tests in {:?} using {}...",
+        project_dir, cargo_bin
+    );
+    assert!(project_dir.exists(), "Project directory missing");
     let status = Command::new(&cargo_bin)
         .arg("test")
         .arg("--features=mq-bridge-full")
         .arg("--")
         .arg("--ignored")
         .current_dir(&project_dir)
+        .env("CARGO_TARGET_DIR", "target")
+        .env_remove("RUSTC_WRAPPER")
         .status()
         .expect("Failed to execute cargo test");
 

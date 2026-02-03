@@ -1,7 +1,7 @@
 use mq_bridge::models::{Endpoint, Route};
 use std::time::Instant;
 
-use crate::integration::common::format_pretty;
+use mq_bridge::test_utils::format_pretty;
 
 mod integration;
 
@@ -11,7 +11,7 @@ mod integration;
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "Performance test"] // This is a performance test, run it explicitly
 async fn test_memory_to_memory_pipeline() {
-    integration::common::setup_logging();
+    mq_bridge::test_utils::setup_logging();
 
     println!("--- Generating Test messages ---");
     let num_messages = if cfg!(debug_assertions) {
@@ -20,11 +20,11 @@ async fn test_memory_to_memory_pipeline() {
         10_000_000
     };
 
-    let messages_to_send = integration::common::generate_test_messages(num_messages);
+    let messages_to_send = mq_bridge::test_utils::generate_test_messages(num_messages);
 
     let input = Endpoint::new_memory("mem-in", 200);
     let output = Endpoint::new_memory("mem-out", num_messages);
-    let route = Route::new(input, output);
+    let route = Route::new(input, output).with_batch_size(100);
     let in_channel = route.input.channel().unwrap();
     let out_channel = route.output.channel().unwrap();
 

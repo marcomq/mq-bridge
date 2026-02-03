@@ -1,8 +1,8 @@
 use crate::canonical_message::tracing_support::LazyMessageIds;
 use crate::models::KafkaConfig;
 use crate::traits::{
-    BoxFuture, ConsumerError, MessageConsumer, MessagePublisher, PublisherError, Received,
-    ReceivedBatch, Sent, SentBatch,
+    BatchCommitFunc, BoxFuture, ConsumerError, MessageConsumer, MessageDisposition,
+    MessagePublisher, PublisherError, Received, ReceivedBatch, Sent, SentBatch,
 };
 use crate::CanonicalMessage;
 use anyhow::{anyhow, Context};
@@ -30,7 +30,8 @@ pub struct KafkaPublisher {
 }
 
 impl KafkaPublisher {
-    pub async fn new(config: &KafkaConfig, topic: &str) -> anyhow::Result<Self> {
+    pub async fn new(config: &KafkaConfig) -> anyhow::Result<Self> {
+        let topic = config.topic.as_deref().unwrap_or("");
         if config.delayed_ack {
             tracing::warn!("Kafka 'delayed_ack' is enabled. Messages are acknowledged before broker confirmation. This carries a risk of data loss in the event of a crash.");
         }
@@ -90,14 +91,6 @@ impl KafkaPublisher {
             delayed_ack: config.delayed_ack,
         })
     }
-
-    pub fn with_topic(&self, topic: &str) -> Self {
-        Self {
-            producer: self.producer.clone(),
-            topic: topic.to_string(),
-            delayed_ack: self.delayed_ack,
-        }
-    }
 }
 
 impl Drop for KafkaPublisher {
@@ -120,16 +113,21 @@ impl MessagePublisher for KafkaPublisher {
         );
         let mut record = FutureRecord::to(&self.topic).payload(&message.payload[..]);
 
+        let mut headers = OwnedHeaders::new();
+        headers = headers.insert(rdkafka::message::Header {
+            key: "mq_bridge.message_id",
+            value: Some(format!("{:032x}", message.message_id).as_bytes()),
+        });
+
         if !message.metadata.is_empty() {
-            let mut headers = OwnedHeaders::new();
             for (key, value) in &message.metadata {
                 headers = headers.insert(rdkafka::message::Header {
                     key,
                     value: Some(value.as_bytes()),
                 });
             }
-            record = record.headers(headers);
         }
+        record = record.headers(headers);
 
         let key = message.message_id.to_be_bytes().to_vec();
         record = record.key(&key);
@@ -180,6 +178,11 @@ impl MessagePublisher for KafkaPublisher {
             record = record.key(&key_bytes);
 
             let mut headers = OwnedHeaders::new();
+            headers = headers.insert(rdkafka::message::Header {
+                key: "mq_bridge.message_id",
+                value: Some(format!("{:032x}", message.message_id).as_bytes()),
+            });
+
             if !message.metadata.is_empty() {
                 for (key, value) in &message.metadata {
                     headers = headers.insert(rdkafka::message::Header {
@@ -187,8 +190,8 @@ impl MessagePublisher for KafkaPublisher {
                         value: Some(value.as_bytes()),
                     });
                 }
-                record = record.headers(headers);
             }
+            record = record.headers(headers);
 
             match self.producer.send_result(record) {
                 Ok(fut) => delivery_futures.push((message, fut)),
@@ -250,24 +253,41 @@ impl MessagePublisher for KafkaPublisher {
 pub struct KafkaConsumer {
     // The consumer needs to be stored to keep the connection alive.
     consumer: Arc<StreamConsumer>,
-    producer: FutureProducer,
+    producer: Option<FutureProducer>,
     topic: String,
 }
 use std::any::Any;
 
 impl KafkaConsumer {
-    pub async fn new(config: &KafkaConfig, topic: &str) -> anyhow::Result<Self> {
-        use std::sync::Arc;
+    pub async fn new(config: &KafkaConfig) -> anyhow::Result<Self> {
+        let topic = config.topic.as_deref().unwrap_or("");
         let mut client_config = create_common_config(config);
-        if let Some(group_id) = &config.group_id {
+
+        let is_subscriber = config.group_id.is_none();
+
+        if is_subscriber {
+            // Subscriber mode: unique group ID, start from latest.
+            let id = fast_uuid_v7::gen_id_string();
+            let group_id = format!("event-sub-{}", id);
+            client_config.set("group.id", &group_id);
+            client_config.set("auto.offset.reset", "latest"); // Start reading from the latest message
+            info!(topic = %topic, group_id = %group_id, "Kafka event subscriber started");
+        } else if let Some(group_id) = &config.group_id {
+            // Consumer mode: shared group ID, start from earliest.
             client_config.set("group.id", group_id);
+            client_config.set("auto.offset.reset", "earliest");
+            info!(topic = %topic, group_id = %group_id, "Kafka source subscribed");
+        } else {
+            return Err(anyhow!(
+                "Kafka configuration must have either a 'group_id' (for consumer) or be configured as a subscriber"
+            ));
         }
+
         client_config
-            .set("enable.auto.commit", "false")
-            .set("auto.offset.reset", "earliest")
-            // --- Performance Tuning for Consumers ---
+            // good defaults
             .set("fetch.min.bytes", "1") // Start fetching immediately
-            .set("socket.connection.setup.timeout.ms", "30000"); // 30 seconds
+            .set("socket.connection.setup.timeout.ms", "30000") // 30 seconds
+            .set("enable.auto.commit", "false");
 
         // Apply custom consumer options
         if let Some(options) = &config.consumer_options {
@@ -278,31 +298,34 @@ impl KafkaConsumer {
 
         let consumer: StreamConsumer = client_config.create()?;
         if !topic.is_empty() {
-            consumer.subscribe(&[topic])?;
-
-            info!(topic = %topic, "Kafka source subscribed");
+            consumer.subscribe(&[topic])?
         }
 
         // Wrap the consumer in an Arc to allow it to be shared.
         let consumer = Arc::new(consumer);
 
-        // Create a producer for sending replies
-        let mut producer_config = create_common_config(config);
-        // Apply similar defaults as KafkaPublisher for reliability
-        producer_config
-            .set("linger.ms", "100")
-            .set("batch.num.messages", "10000")
-            .set("compression.type", "lz4")
-            .set("acks", "all")
-            .set("retries", "3")
-            .set("request.timeout.ms", "30000");
-        // Apply custom producer options, allowing overrides of defaults
-        if let Some(options) = &config.producer_options {
-            for (key, value) in options {
-                producer_config.set(key, value);
+        // Create a producer for sending replies, but only for consumers, not subscribers.
+        let producer = if !is_subscriber {
+            let mut producer_config = create_common_config(config);
+            // Apply similar defaults as KafkaPublisher for reliability
+            producer_config
+                .set("linger.ms", "100")
+                .set("batch.num.messages", "10000")
+                .set("compression.type", "lz4")
+                .set("acks", "all")
+                .set("retries", "3")
+                .set("request.timeout.ms", "30000");
+            // Apply custom producer options, allowing overrides of defaults
+            if let Some(options) = &config.producer_options {
+                for (key, value) in options {
+                    producer_config.set(key, value);
+                }
             }
-        }
-        let producer: FutureProducer = producer_config.create()?;
+            let producer: FutureProducer = producer_config.create()?;
+            Some(producer)
+        } else {
+            None
+        };
 
         Ok(Self {
             consumer,
@@ -338,31 +361,38 @@ impl MessageConsumer for KafkaConsumer {
 
         // The commit function for Kafka needs to commit the offset of the processed message.
         // We can't move `self.consumer` into the closure, but we can commit by position.
-        let consumer = self.consumer.clone();
-        let producer = self.producer.clone();
+        let consumer_clone = self.consumer.clone();
+        let producer_clone = self.producer.clone();
 
-        let commit = Box::new(move |response: Option<CanonicalMessage>| {
+        let commit = Box::new(move |disposition: MessageDisposition| {
             Box::pin(async move {
                 // Handle reply
-                if let (Some(resp), Some(rt)) = (response, reply_topic) {
-                    let mut record: FutureRecord<'_, (), _> =
-                        FutureRecord::to(&rt).payload(&resp.payload[..]);
-                    let mut headers = OwnedHeaders::new();
-                    if let Some(cid) = correlation_id {
-                        headers = headers.insert(rdkafka::message::Header {
-                            key: "correlation_id",
-                            value: Some(cid.as_bytes()),
-                        });
-                    }
-                    record = record.headers(headers);
+                if matches!(disposition, MessageDisposition::Nack) {
+                    return Ok(());
+                }
 
-                    if let Err((e, _)) = producer.send(record, Duration::from_secs(0)).await {
-                        tracing::error!(topic = %rt, error = %e, "Failed to publish Kafka reply");
+                if let Some(producer) = producer_clone {
+                    if let (MessageDisposition::Reply(resp), Some(rt)) = (&disposition, reply_topic)
+                    {
+                        let mut record: FutureRecord<'_, (), _> = // '
+                            FutureRecord::to(&rt).payload(&resp.payload[..]);
+                        let mut headers = OwnedHeaders::new();
+                        if let Some(cid) = correlation_id {
+                            headers = headers.insert(rdkafka::message::Header {
+                                key: "correlation_id",
+                                value: Some(cid.as_bytes()),
+                            });
+                        }
+                        record = record.headers(headers);
+
+                        if let Err((e, _)) = producer.send(record, Duration::from_secs(0)).await {
+                            tracing::error!(topic = %rt, error = %e, "Failed to publish Kafka reply");
+                        }
                     }
                 }
 
                 // Ack failure may result in redelivery. Enable deduplication middleware to handle duplicates.
-                if let Err(e) = consumer.commit(&tpl, CommitMode::Async) {
+                if let Err(e) = consumer_clone.commit(&tpl, CommitMode::Async) {
                     tracing::error!("Failed to commit Kafka message: {:?}", e);
                     return Err(anyhow::anyhow!("Failed to commit Kafka message: {:?}", e));
                 }
@@ -377,85 +407,13 @@ impl MessageConsumer for KafkaConsumer {
     }
 
     async fn receive_batch(&mut self, max_messages: usize) -> Result<ReceivedBatch, ConsumerError> {
-        receive_batch_internal(&self.consumer, &self.producer, max_messages, &self.topic).await
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-}
-
-pub struct KafkaSubscriber {
-    consumer: Arc<StreamConsumer>,
-    topic: String,
-}
-
-impl KafkaSubscriber {
-    /// Creates a new Kafka subscriber.
-    ///
-    /// The subscriber will use the provided `KafkaConfig` to connect to the Kafka cluster.
-    /// It will subscribe to the provided `topic` and start consuming messages from the latest offset.
-    ///
-    /// The subscriber will use a unique group ID, which is generated using a UUID.
-    /// This ensures that the subscriber will receive a copy of the message, even if there are other subscribers with the same group ID.
-    ///
-    /// The subscriber will commit the last offset of the consumed messages batch asynchronously.
-    /// This allows the subscriber to continue consuming messages without waiting for the previous batch to be committed.
-    ///
-    /// The subscriber will stop consuming messages when the stream is closed.
-    /// To stop consuming messages, call `drop()` on the subscriber.
-    pub async fn new(
-        config: &KafkaConfig,
-        topic: &str,
-        subscribe_id: Option<String>,
-    ) -> anyhow::Result<Self> {
-        let mut client_config = create_common_config(config);
-
-        // Generate a unique group ID for the subscriber to ensure it receives a copy of the message (fan-out).
-        let id = subscribe_id.unwrap_or_else(|| Uuid::new_v4().to_string());
-        let group_id = format!("event-sub-{}", id);
-        client_config.set("group.id", &group_id);
-
-        client_config
-            .set("enable.auto.commit", "false")
-            .set("auto.offset.reset", "latest") // Start reading from the latest message
-            .set("fetch.min.bytes", "1")
-            .set("socket.connection.setup.timeout.ms", "30000");
-
-        if let Some(options) = &config.consumer_options {
-            for (key, value) in options {
-                client_config.set(key, value);
-            }
-        }
-
-        let consumer: StreamConsumer = client_config.create()?;
-        if !topic.is_empty() {
-            consumer.subscribe(&[topic])?;
-            info!(topic = %topic, group_id = %group_id, "Kafka event subscriber started");
-        }
-
-        Ok(Self {
-            consumer: Arc::new(consumer),
-            topic: topic.to_string(),
-        })
-    }
-}
-
-impl Drop for KafkaSubscriber {
-    fn drop(&mut self) {
-        self.consumer.unsubscribe();
-    }
-}
-
-#[async_trait]
-impl MessageConsumer for KafkaSubscriber {
-    async fn receive_batch(&mut self, max_messages: usize) -> Result<ReceivedBatch, ConsumerError> {
-        // Subscribers generally don't reply, but we pass a dummy producer or handle it if we wanted to.
-        // For now, we can reuse the internal logic but we need a producer.
-        // Since Subscriber struct doesn't have one, we can't support replies easily here without changing Subscriber.
-        // Given the context, let's just not support replies for Subscribers (which is standard).
-        // We need to adapt receive_batch_internal to make producer optional.
-        receive_batch_internal(&self.consumer, None, max_messages, &self.topic).await
+        receive_batch_internal(
+            &self.consumer,
+            self.producer.as_ref(),
+            max_messages,
+            &self.topic,
+        )
+        .await
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -553,7 +511,7 @@ fn process_message(
 
 fn create_common_config(config: &KafkaConfig) -> ClientConfig {
     let mut client_config = ClientConfig::new();
-    client_config.set("bootstrap.servers", &config.brokers);
+    client_config.set("bootstrap.servers", &config.url);
 
     if config.tls.required {
         client_config.set("security.protocol", "ssl");
@@ -623,39 +581,19 @@ async fn receive_batch_internal(
     let consumer = consumer.clone();
     let producer = producer.into().cloned();
 
-    let commit = Box::new(move |responses: Option<Vec<CanonicalMessage>>| {
+    let commit = Box::new(move |dispositions: Vec<MessageDisposition>| {
         Box::pin(async move {
             // Handle replies
-            if let (Some(resps), Some(prod)) = (responses, producer) {
-                if resps.len() != reply_infos.len() {
-                    tracing::warn!(
-                        expected = reply_infos.len(),
-                        actual = resps.len(),
-                        "Response count mismatch with received messages"
-                    );
-                }
-                for ((reply_topic, correlation_id), resp) in reply_infos.iter().zip(resps) {
-                    if let Some(rt) = reply_topic {
-                        let mut record: FutureRecord<'_, (), _> =
-                            FutureRecord::to(rt).payload(&resp.payload[..]);
-                        let mut headers = OwnedHeaders::new();
-                        if let Some(cid) = correlation_id {
-                            headers = headers.insert(rdkafka::message::Header {
-                                key: "correlation_id",
-                                value: Some(cid.as_bytes()),
-                            });
-                        }
-                        record = record.headers(headers);
+            // Check for Nacks before moving dispositions for replies
+            let any_nack = dispositions
+                .iter()
+                .any(|d| matches!(d, MessageDisposition::Nack));
 
-                        if let Err((e, _)) = prod.send(record, Duration::from_secs(0)).await {
-                            tracing::error!(topic = %rt, error = %e, "Failed to publish Kafka reply");
-                        }
-                    }
-                }
-            }
+            handle_kafka_replies(producer, &reply_infos, &dispositions).await;
 
-            // Only commit if there are offsets to commit.
-            if messages_len > 0 {
+            // Only commit if there are offsets to commit AND no messages were Nacked.
+            // If any message is Nacked, we skip the commit for the whole batch to ensure at-least-once delivery.
+            if !any_nack && messages_len > 0 {
                 // Ack failure may result in redelivery. Enable deduplication middleware to handle duplicates.
                 if let Err(e) = consumer.commit(&last_offset_tpl, CommitMode::Async) {
                     tracing::error!("Failed to commit Kafka message batch: {:?}", e);
@@ -667,6 +605,40 @@ async fn receive_batch_internal(
             }
             Ok(())
         }) as BoxFuture<'static, anyhow::Result<()>>
-    });
+    }) as BatchCommitFunc;
     Ok(ReceivedBatch { messages, commit })
+}
+
+async fn handle_kafka_replies(
+    producer: Option<FutureProducer>,
+    reply_infos: &[(Option<String>, Option<String>)],
+    dispositions: &[MessageDisposition],
+) {
+    if let Some(prod) = producer {
+        if dispositions.len() != reply_infos.len() {
+            tracing::warn!(
+                expected = reply_infos.len(),
+                actual = dispositions.len(),
+                "Response count mismatch with received messages"
+            );
+        }
+        for ((reply_topic, correlation_id), disposition) in reply_infos.iter().zip(dispositions) {
+            if let (Some(rt), MessageDisposition::Reply(resp)) = (reply_topic, disposition) {
+                let mut record: FutureRecord<'_, (), _> =
+                    FutureRecord::to(rt).payload(&resp.payload[..]);
+                let mut headers = OwnedHeaders::new();
+                if let Some(cid) = correlation_id {
+                    headers = headers.insert(rdkafka::message::Header {
+                        key: "correlation_id",
+                        value: Some(cid.as_bytes()),
+                    });
+                }
+                record = record.headers(headers);
+
+                if let Err((e, _)) = prod.send(record, Duration::from_secs(0)).await {
+                    tracing::error!(topic = %rt, error = %e, "Failed to publish Kafka reply");
+                }
+            }
+        }
+    }
 }

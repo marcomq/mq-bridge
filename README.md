@@ -2,7 +2,6 @@
 
 [![Crates.io](https://img.shields.io/crates/v/mq-bridge.svg)](https://crates.io/crates/mq-bridge)
 [![Docs.rs](https://docs.rs/mq-bridge/badge.svg)](https://docs.rs/mq-bridge)
-[![CI](https://github.com/marcomq/mq-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/marcomq/mq-bridge/actions)
 [![Benchmark](https://github.com/marcomq/mq-bridge/actions/workflows/benchmark.yml/badge.svg)](https://marcomq.github.io/mq-bridge/dev/bench/)
 ![Linux](https://img.shields.io/badge/Linux-supported-green?logo=linux)
 ![Windows](https://img.shields.io/badge/Windows-supported-green?logo=windows)
@@ -66,29 +65,33 @@ It may still be possible that there are issues with
 
 ## Endpoint Behavior
 
-Different backends and modes (`consumer` vs `subscriber`) have different persistence guarantees.
+`mq-bridge` endpoints generally default to a **Consumer** pattern (Queue), where messages are persisted (if supported by the backend) and distributed among workers.
 
-| Backend | Mode | Persistence | Description |
+To achieve **Subscriber** (Pub/Sub) behavior—where messages are broadcast to all active instances—you must configure the specific backend accordingly. There is no global "subscriber mode" toggle; it is determined by the configuration of the endpoint.
+
+| Backend | Default Behavior (Queue) | Configuration for Subscriber (Pub/Sub) | Response Support |
 | :--- | :--- | :--- | :--- |
-| **Kafka** | Consumer | Persistent | Uses consumer groups. Resumes from last committed offset. |
-| | Subscriber | Ephemeral* | Unique group ID per instance. Starts at `latest`. (*Persistent if `subscribe_id` is set). |
-| **NATS** | Consumer | Persistent | Uses JetStream durable consumers. |
-| | Subscriber | Ephemeral | Uses ephemeral consumers. Receives only new messages. |
-| **AMQP** | Consumer | Persistent | Uses durable queues. |
-| | Subscriber | Ephemeral | Uses temporary, auto-delete queues. |
-| **MQTT** | Consumer | Configurable | Depends on `clean_session`. |
-| | Subscriber | Ephemeral | Unique Client ID per instance. |
-| **IBM MQ** | Consumer | Persistent | Reads from a defined queue. |
-| | Subscriber | Ephemeral | Uses non-durable managed subscriptions. |
-| **MongoDB** | Consumer | Persistent | Documents stored until acknowledged. |
-| | Subscriber | Ephemeral | Change Streams / Polling from current time. |
-| **AWS** | Consumer | Persistent | Uses SQS queues. |
-| | Subscriber | - | Not supported. |
-| **Memory** | All | Ephemeral | Lost on restart. |
-| **File** | All | Persistent | Stored on disk. |
-| **HTTP** | All | Ephemeral | Direct request/response. |
-| **ZeroMQ** | Consumer | Ephemeral | Uses PULL/REP sockets. |
-| | Subscriber | Ephemeral | Uses SUB sockets. |
+| **Kafka** | Persistent (Consumer Group) | Omit `group_id` (generates unique ID) | No |
+| **NATS** | Persistent (JetStream Durable) | Set `subscriber_mode: true` | Yes |
+| **AMQP** | Persistent (Durable Queue) | Set `subscribe_mode: true` | No |
+| **MQTT** | Persistent Session | Set `clean_session: true` | No |
+| **IBM MQ** | Persistent Queue | Set `topic` instead of `queue` | No |
+| **MongoDB** | Persistent (Collection) | Set `change_stream: true` | Yes |
+| **AWS** | Persistent (SQS) | Not supported directly (Use SNS->SQS) | No |
+| **Memory** | Ephemeral (Channel) | Set `subscribe_mode: true` | Yes |
+| **File** | Persistent (Delete after read) | Set `subscribe_mode: true` (Tail) | No |
+| **HTTP** | Ephemeral (Request) | N/A | Yes (Implicit) |
+| **ZeroMQ** | Ephemeral (PULL) | Set `socket_type: "sub"` | No |
+
+### Response Mode
+The `response` output endpoint allows sending a reply back to the requester. This is useful for synchronous request-reply patterns (e.g., HTTP-to-NATS-to-HTTP).
+
+*   **Availability**: Only available if the **Input** endpoint supports request-reply (HTTP, NATS, Memory, MongoDB).
+*   **Configuration**: Use `response: {}` as the output endpoint.
+*   **Caveats**:
+    *   If the input does not support responses (e.g., File, Kafka), the message sent to `response` will be dropped.
+    *   Ensure timeouts are configured correctly on the requester side, as the bridge processing time adds latency.
+    *   Middleware that drops metadata (like `correlation_id`) may break the response chain.
 
 ## Usage
 
@@ -160,10 +163,19 @@ let typed_handler = TypeHandler::new()
     });
 
 // 3. Attach the handler to a route
-// let route = Route { ... }.with_handler(typed_handler);
+let route = Route::new(input, output).with_handler(typed_handler);
 
-// 4. A message with metadata `kind: "create_user"` will be deserialized
-//    into a `CreateUser` struct and passed to the first handler.
+// 4. To send a message to the route's input, create a publisher for that endpoint.
+//    In a real application, you would create this publisher once and reuse it.
+let input_publisher = Publisher::new(route.input.clone()).await.unwrap();
+
+// 5. Create a typed command, serialize it, and send it via the publisher.
+let command = CreateUser { id: 1, username: "test".to_string() };
+let message = msg!(&command, "create_user"); // This sets the `kind` metadata field.
+input_publisher.send(message).await.expect("Failed to send message");
+
+// The running route will receive the message, see the `kind: "create_user"` metadata,
+// deserialize the payload into a `CreateUser` struct, and pass it to your registered handler.
 ```
 
 ### Programmatic Usage
@@ -171,21 +183,21 @@ let typed_handler = TypeHandler::new()
 You can define and run routes directly in Rust code.
 
 ```rust
-use mq_bridge::models::{Endpoint, CanonicalMessage, Route};
-use mq_bridge::Handled;
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
-use std::time::Duration;
-use tokio::time::timeout;
+use mq_bridge::{models::Endpoint, stop_route, CanonicalMessage, Handled, Route};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
 #[tokio::main]
 async fn main() {
     // Define a route from one in-memory channel to another
-    
-    // 1. Create boolean that is changed in handler
+
+    // 1. Create a boolean that is changed in the handler
     let success = Arc::new(AtomicBool::new(false));
     let success_clone = success.clone();
 
-    // 2. Define Handler
+    // 2. Define the Handler
     let handler = move |mut msg: CanonicalMessage| {
         success_clone.store(true, Ordering::SeqCst);
         msg.set_payload_str(format!("modified {}", msg.get_payload_str()));
@@ -194,8 +206,7 @@ async fn main() {
     // 3. Define Route
     let input = Endpoint::new_memory("route_in", 200);
     let output = Endpoint::new_memory("route_out", 200);
-    let route = Route::new(input, output)
-        .with_handler(handler);
+    let route = Route::new(input, output).with_handler(handler);
 
     // 4. Run (deploys the route in the background)
     route.deploy("test_route").await.unwrap();
@@ -213,7 +224,7 @@ async fn main() {
     assert_eq!(received.message.get_payload_str(), "modified hello");
     assert!(success.load(Ordering::SeqCst));
 
-    Route::stop("test_route").await;
+    stop_route("test_route").await;
 }
 ```
 
@@ -235,20 +246,21 @@ The recommended approach for request-response is to use the dedicated `response`
 
 This model inherently solves the correlation problem. The response is part of the same execution context as the request, so there's no risk of mixing up responses between different concurrent requests.
 
-#### Example: HTTP API Gateway
+#### Example: MongoDB Request-Response
 
-Consider a route that exposes an HTTP endpoint. For each request, it executes a handler to produce a result and returns it to the client.
+Consider a scenario where a service writes a request document to MongoDB and waits for a reply. This library picks up the document, processes it via a handler, and writes the result back to a reply collection.
 
 **YAML Configuration (`mq-bridge.yaml`):**
 ```yaml
-api_gateway:
-  concurrency: 10 # Handle up to 10 requests concurrently
+mongo_responder:
   input:
-    http:
-      url: "0.0.0.0:8080"
+    mongodb:
+      url: "mongodb://localhost:27017"
+      database: "app_db"
+      collection: "requests"
   output:
-    # The 'response' endpoint sends the processed message back to the HTTP client.
-    # A handler must be attached programmatically to generate the response.
+    # The 'response' endpoint sends the processed message back to the 'requests_replies' collection
+    # (or whatever reply_to was set to by the sender).
     response: {}
 ```
 
@@ -294,8 +306,7 @@ let command_bus = TypeHandler::new()
         // Emit event
         let evt = OrderSubmitted { id: cmd.id };
         Ok(Handled::Publish(
-            CanonicalMessage::from_type(evt).unwrap()
-                .with_type_key("order_submitted")
+            msg!(evt, "order_submitted")
         ))
 });
 
@@ -349,6 +360,7 @@ webhook_to_mongo:
       url: "mongodb://localhost:27017"
       database: "app_db"
       collection: "webhooks"
+      format: "json" # a bit slower, but better readability
 
 # Route 3: File to AMQP (RabbitMQ)
 file_ingest:

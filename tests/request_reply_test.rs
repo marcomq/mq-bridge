@@ -1,7 +1,7 @@
 #![allow(unused_imports, dead_code)]
 mod integration;
 
-use integration::common::{run_test_with_docker, setup_logging};
+use mq_bridge::test_utils::{run_test_with_docker, setup_logging};
 use mq_bridge::traits::{MessageConsumer, MessagePublisher};
 use mq_bridge::CanonicalMessage;
 
@@ -11,7 +11,7 @@ async fn run_service_reply(mut consumer: Box<dyn MessageConsumer>, response_payl
     match tokio::time::timeout(std::time::Duration::from_secs(5), receive_future).await {
         Ok(Ok(received)) => {
             let response = CanonicalMessage::new(response_payload.to_vec(), None);
-            let _ = (received.commit)(Some(response)).await;
+            let _ = (received.commit)(mq_bridge::traits::MessageDisposition::Reply(response)).await;
         }
         Ok(Err(e)) => panic!("Service consumer failed to receive: {:?}", e),
         Err(_) => panic!("Service consumer receive timed out"),
@@ -29,21 +29,29 @@ async fn test_kafka_request_reply() {
         let reply_topic = "test_req_rep_reply_topic";
 
         let config = mq_bridge::models::KafkaConfig {
-            brokers: "localhost:9092".to_string(),
+            url: "localhost:9092".to_string(),
             group_id: Some("req_rep_group".to_string()),
             producer_options: Some(vec![("acks".to_string(), "1".to_string())]),
             ..Default::default()
         };
 
-        let client_publisher = KafkaPublisher::new(&config, request_topic).await.unwrap();
-        let _ = KafkaPublisher::new(&config, reply_topic).await.unwrap();
-        let service_consumer = KafkaConsumer::new(&config, request_topic).await.unwrap();
+        let mut req_config = config.clone();
+        req_config.topic = Some(request_topic.to_string());
+        let client_publisher = KafkaPublisher::new(&req_config).await.unwrap();
+
+        let mut rep_config = config.clone();
+        rep_config.topic = Some(reply_topic.to_string());
+        let _ = KafkaPublisher::new(&rep_config).await.unwrap();
+
+        let mut service_endpoint = config.clone();
+        service_endpoint.topic = Some(request_topic.to_string());
+        let service_consumer = KafkaConsumer::new(&service_endpoint).await.unwrap();
 
         let mut reply_config = config.clone();
         reply_config.group_id = Some("reply_group".to_string());
-        let mut client_consumer = KafkaConsumer::new(&reply_config, reply_topic)
-            .await
-            .unwrap();
+        let mut client_endpoint = reply_config;
+        client_endpoint.topic = Some(reply_topic.to_string());
+        let mut client_consumer = KafkaConsumer::new(&client_endpoint).await.unwrap();
 
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
@@ -100,12 +108,15 @@ async fn test_nats_request_reply() {
             ..Default::default()
         };
 
-        let service_consumer = NatsConsumer::new(&service_config, "ignored", subject)
-            .await
-            .unwrap();
-        let publisher = NatsPublisher::new(&client_config, stream_name, subject)
-            .await
-            .unwrap();
+        let mut service_endpoint = service_config;
+        service_endpoint.subject = Some(subject.to_string());
+        service_endpoint.stream = Some("ignored".to_string());
+        let service_consumer = NatsConsumer::new(&service_endpoint).await.unwrap();
+
+        let mut pub_config = client_config.clone();
+        pub_config.subject = Some(subject.to_string());
+        pub_config.stream = Some(stream_name.to_string());
+        let publisher = NatsPublisher::new(&pub_config).await.unwrap();
 
         tokio::spawn(async move {
             run_service_reply(Box::new(service_consumer), b"pong").await;
@@ -128,52 +139,50 @@ async fn test_nats_request_reply() {
 #[cfg(feature = "mongodb")]
 #[tokio::test]
 #[ignore]
-async fn test_mongodb_request_reply() {
+async fn test_mongodb_request_reply_pattern() {
     use mq_bridge::endpoints::mongodb::{MongoDbConsumer, MongoDbPublisher};
+    use mq_bridge::traits::Sent;
     setup_logging();
     run_test_with_docker("tests/integration/docker-compose/mongodb.yml", || async {
-        let req_collection = "req_collection";
-        let reply_collection = "reply_collection";
+        let req_collection = "req_rep_collection";
         let db_name = "mq_bridge_test_req_rep";
 
-        let config = mq_bridge::models::MongoDbConfig {
+        // 1. Setup the "service" side (the consumer that replies)
+        let service_config = mq_bridge::models::MongoDbConfig {
             url: "mongodb://localhost:27017".to_string(),
             database: db_name.to_string(),
             ..Default::default()
         };
-
-        let publisher = MongoDbPublisher::new(&config, req_collection)
-            .await
-            .unwrap();
-        let consumer = MongoDbConsumer::new(&config, req_collection).await.unwrap();
+        let mut service_endpoint = service_config;
+        service_endpoint.collection = Some(req_collection.to_string());
+        let service_consumer = MongoDbConsumer::new(&service_endpoint).await.unwrap();
 
         tokio::spawn(async move {
-            run_service_reply(Box::new(consumer), b"response_payload").await;
+            run_service_reply(Box::new(service_consumer), b"mongo_response").await;
         });
 
-        let mut msg = CanonicalMessage::new(b"request_payload".to_vec(), None);
-        msg.metadata
-            .insert("reply_to".to_string(), reply_collection.to_string());
-        publisher.send(msg).await.unwrap();
+        // 2. Setup the "client" side (the publisher that sends and waits)
+        let client_config = mq_bridge::models::MongoDbConfig {
+            url: "mongodb://localhost:27017".to_string(),
+            database: db_name.to_string(),
+            request_reply: true, // Enable request-reply mode
+            ..Default::default()
+        };
+        let mut pub_config = client_config.clone();
+        pub_config.collection = Some(req_collection.to_string());
+        let client_publisher = MongoDbPublisher::new(&pub_config).await.unwrap();
 
-        // Verify reply in DB
-        let client = mongodb::Client::with_uri_str(&config.url).await.unwrap();
-        let db = client.database(db_name);
-        let coll = db.collection::<mongodb::bson::Document>(reply_collection);
+        // 3. Send request and wait for response
+        let request_msg = CanonicalMessage::new(b"mongo_request".to_vec(), None);
+        let result = client_publisher.send(request_msg).await.unwrap();
 
-        let mut found = false;
-        for _ in 0..20 {
-            if let Ok(Some(doc)) = coll.find_one(mongodb::bson::doc! {}).await {
-                if let Ok(binary) = doc.get_binary_generic("payload") {
-                    if binary == b"response_payload" {
-                        found = true;
-                        break;
-                    }
-                }
+        // 4. Assert the response
+        match result {
+            Sent::Response(resp) => {
+                assert_eq!(resp.get_payload_str(), "mongo_response");
             }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            _ => panic!("Expected Sent::Response, got {:?}", result),
         }
-        assert!(found, "Reply not found in collection");
         println!("MongoDB Request-Reply test passed!");
     })
     .await;
@@ -194,9 +203,17 @@ async fn test_amqp_request_reply() {
             ..Default::default()
         };
 
-        let client_publisher = AmqpPublisher::new(&config, req_queue).await.unwrap();
-        let mut client_consumer = AmqpConsumer::new(&config, reply_queue).await.unwrap();
-        let service_consumer = AmqpConsumer::new(&config, req_queue).await.unwrap();
+        let mut pub_config = config.clone();
+        pub_config.queue = Some(req_queue.to_string());
+        let client_publisher = AmqpPublisher::new(&pub_config).await.unwrap();
+        let mut client_endpoint = config.clone();
+        client_endpoint.queue = Some(reply_queue.to_string());
+        client_endpoint.subscribe_mode = false;
+        let mut client_consumer = AmqpConsumer::new(&client_endpoint).await.unwrap();
+        let mut service_endpoint = config.clone();
+        service_endpoint.queue = Some(req_queue.to_string());
+        service_endpoint.subscribe_mode = false;
+        let service_consumer = AmqpConsumer::new(&service_endpoint).await.unwrap();
 
         tokio::spawn(async move {
             run_service_reply(Box::new(service_consumer), b"response").await;
@@ -245,15 +262,21 @@ async fn test_mqtt_request_reply() {
             ..Default::default()
         };
 
-        let client_publisher = MqttPublisher::new(&config, req_topic, "client_pub")
-            .await
-            .unwrap();
-        let mut client_consumer = MqttConsumer::new(&config, reply_topic, "client_sub")
-            .await
-            .unwrap();
-        let service_consumer = MqttConsumer::new(&config, req_topic, "service_sub")
-            .await
-            .unwrap();
+        let mut pub_config = config.clone();
+        pub_config.topic = Some(req_topic.to_string());
+        pub_config.client_id = Some("client_pub".to_string());
+        let client_publisher = MqttPublisher::new(&pub_config).await.unwrap();
+        let mut client_config = config.clone();
+        client_config.client_id = Some("client_sub".to_string());
+        let mut client_endpoint = client_config;
+        client_endpoint.topic = Some(reply_topic.to_string());
+        let mut client_consumer = MqttConsumer::new(&client_endpoint).await.unwrap();
+
+        let mut service_config = config.clone();
+        service_config.client_id = Some("service_sub".to_string());
+        let mut service_endpoint = service_config;
+        service_endpoint.topic = Some(req_topic.to_string());
+        let service_consumer = MqttConsumer::new(&service_endpoint).await.unwrap();
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 

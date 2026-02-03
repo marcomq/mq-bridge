@@ -22,7 +22,7 @@ pub struct CanonicalMessage {
 impl CanonicalMessage {
     pub fn new(payload: Vec<u8>, message_id: Option<u128>) -> Self {
         Self {
-            message_id: message_id.unwrap_or_else(|| Uuid::now_v7().as_u128()),
+            message_id: message_id.unwrap_or_else(fast_uuid_v7::gen_id),
             payload: Bytes::from(payload),
             metadata: HashMap::new(),
         }
@@ -30,7 +30,7 @@ impl CanonicalMessage {
 
     pub fn new_bytes(payload: Bytes, message_id: Option<u128>) -> Self {
         Self {
-            message_id: message_id.unwrap_or_else(|| Uuid::now_v7().as_u128()),
+            message_id: message_id.unwrap_or_else(fast_uuid_v7::gen_id),
             payload,
             metadata: HashMap::new(),
         }
@@ -104,6 +104,12 @@ impl CanonicalMessage {
 
     pub fn with_type_key(mut self, kind: impl Into<String>) -> Self {
         self.metadata.insert(KIND_KEY.into(), kind.into());
+        self
+    }
+
+    pub fn with_raw_format(mut self) -> Self {
+        self.metadata
+            .insert("mq_bridge.original_format".to_string(), "raw".to_string());
         self
     }
 }
@@ -214,20 +220,23 @@ pub mod macro_support {
 macro_rules! msg {
     ($payload:expr $(, $key:expr => $val:expr)* $(,)?) => {
         {
+            #[allow(unused_imports)]
             use $crate::canonical_message::macro_support::{Wrap, Fallback};
-            let mut msg = Wrap($payload).convert();
+            #[allow(unused_mut)]
+            let mut message = Wrap($payload).convert();
             $(
-                msg = msg.with_metadata_kv($key, $val);
+                message = message.with_metadata_kv($key, $val);
             )*
-            msg
+            message
         }
     };
     ($payload:expr, $kind:expr $(,)?) => {
         {
+            #[allow(unused_imports)]
             use $crate::canonical_message::macro_support::{Wrap, Fallback};
-            let mut msg = Wrap($payload).convert();
-            msg = msg.with_type_key($kind);
-            msg
+            let mut message = Wrap($payload).convert();
+            message = message.with_type_key($kind);
+            message
         }
     };
 }

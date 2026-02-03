@@ -1,6 +1,8 @@
 // tests/integration/ibm_mq.rs
 #![allow(dead_code)]
 
+use mq_bridge::endpoints::ibm_mq::{IbmMqConsumer, IbmMqPublisher};
+use mq_bridge::models::{Endpoint, EndpointType, IbmMqConfig, Route};
 /// This test requires a running IBM MQ instance.
 /// You can use the provided docker-compose file:
 /// `docker-compose -f tests/integration/docker-compose/ibm_mq.yml up -d`
@@ -24,22 +26,20 @@
 /// `SET CHLAUTH('DEV.APP.SVRCONN') TYPE(ADDRESSMAP) ADDRESS('*') USERSRC(CHANNEL) CHCKCLNT(ASQMGR) ACTION(ADD)`
 /// `ALTER AUTHINFO(SYSTEM.DEFAULT.AUTHINFO.IDPWOS) AUTHTYPE(IDPWOS) ADOPTCTX(YES)`
 /// `REFRESH SECURITY(*)`
-use crate::integration::common::{
+use mq_bridge::test_utils::{
     add_performance_result, generate_test_messages, run_chaos_pipeline_test, run_direct_perf_test,
     run_test_with_docker, run_test_with_docker_controller, setup_logging,
 };
-use mq_bridge::endpoints::ibm_mq::{IbmMqConsumer, IbmMqPublisher};
-use mq_bridge::models::{ConsumerMode, Endpoint, EndpointType, IbmMqConfig, IbmMqEndpoint, Route};
 use mq_bridge::traits::{MessageConsumer, MessagePublisher};
 use std::sync::Arc;
 use std::time::Instant;
 
 fn get_config() -> IbmMqConfig {
     IbmMqConfig {
-        user: Some("app".to_string()),
+        username: Some("app".to_string()),
         password: Some("admin".to_string()),
         queue_manager: "QM1".to_string(),
-        connection_name: "localhost(1414)".to_string(),
+        url: "localhost(1414)".to_string(),
         channel: "DEV.APP.SVRCONN".to_string(),
         ..Default::default()
     }
@@ -52,7 +52,11 @@ pub async fn test_ibm_mq_performance_pipeline() {
         let config = get_config();
 
         // Seed the queue
-        let publisher = IbmMqPublisher::new(config.clone(), queue_name.to_string())
+        let mut endpoint = config.clone();
+        endpoint.queue = Some(queue_name.to_string());
+        endpoint.topic = None;
+
+        let publisher = IbmMqPublisher::new(&endpoint)
             .await
             .expect("Failed to create publisher");
 
@@ -65,20 +69,20 @@ pub async fn test_ibm_mq_performance_pipeline() {
 
         // Setup Pipeline: IBM MQ -> Memory
         let input_ep = Endpoint {
-            endpoint_type: EndpointType::IbmMq(IbmMqEndpoint {
-                config: config.clone(),
-                topic: None,
-                queue: Some(queue_name.to_string()),
+            endpoint_type: EndpointType::IbmMq({
+                let mut c = config.clone();
+                c.topic = None;
+                c.queue = Some(queue_name.to_string());
+                c
             }),
-            mode: ConsumerMode::Consume,
             middlewares: vec![],
             handler: None,
         };
         let output_ep = Endpoint::new_memory("mem_out", num_messages);
 
-        let mut route = Route::new(input_ep, output_ep);
-        route.concurrency = 4;
-        route.batch_size = 128;
+        let route = Route::new(input_ep, output_ep)
+            .with_concurrency(4)
+            .with_batch_size(128);
         let out_channel = route.output.channel().unwrap();
 
         // Run route in background
@@ -118,19 +122,19 @@ routes:
     output:
       ibmmq:
         queue_manager: "QM1"
-        connection_name: "localhost(1414)"
+        url: "localhost(1414)"
         channel: "DEV.APP.SVRCONN"
         queue: "DEV.QUEUE.1"
-        user: "app"
+        username: "app"
         password: "admin"
   ibm_mq_to_memory:
     input:
       ibmmq:
         queue_manager: "QM1"
-        connection_name: "localhost(1414)"
+        url: "localhost(1414)"
         channel: "DEV.APP.SVRCONN"
         queue: "DEV.QUEUE.1"
-        user: "app"
+        username: "app"
         password: "admin"
     output:
       memory:
@@ -151,17 +155,17 @@ pub async fn test_ibm_mq_performance_direct() {
         let result = run_direct_perf_test(
             "IBM-MQ",
             || async {
-                Arc::new(
-                    IbmMqPublisher::new(config.clone(), queue.to_string())
-                        .await
-                        .unwrap(),
-                )
+                let mut endpoint = config.clone();
+                endpoint.queue = Some(queue.to_string());
+                endpoint.topic = None;
+                Arc::new(IbmMqPublisher::new(&endpoint).await.unwrap())
             },
             || async {
+                let mut endpoint = config.clone();
+                endpoint.queue = Some(queue.to_string());
+                endpoint.topic = None;
                 Arc::new(tokio::sync::Mutex::new(
-                    IbmMqConsumer::new(config.clone(), queue.to_string())
-                        .await
-                        .unwrap(),
+                    IbmMqConsumer::new(&endpoint).await.unwrap(),
                 ))
             },
         )
@@ -178,12 +182,13 @@ pub async fn test_ibm_mq_performance_direct2() {
         let config = get_config();
         let num_messages = 1000;
         let messages = generate_test_messages(num_messages);
-        let publisher = IbmMqPublisher::new(config.clone(), queue_name.to_string())
-            .await
-            .unwrap();
-        let mut consumer = IbmMqConsumer::new(config.clone(), queue_name.to_string())
-            .await
-            .unwrap();
+
+        let mut endpoint = config.clone();
+        endpoint.queue = Some(queue_name.to_string());
+        endpoint.topic = None;
+
+        let publisher = IbmMqPublisher::new(&endpoint).await.unwrap();
+        let mut consumer = IbmMqConsumer::new(&endpoint).await.unwrap();
 
         println!("--- Starting IBM MQ Direct Performance Test ---");
         let start = Instant::now();

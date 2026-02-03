@@ -1,50 +1,51 @@
-- version: "0.1"
-  breaking_changes: false
-  tasks:
-
 - version: "0.2.0"
   breaking_changes: true
   tasks:
-    - title: "Refactor Http Endpoint"
-      id: "A1"
-      description: "Refactor Http Endpoint so that the response is similar as in Nats"
-      status: "Todo"
-    - title: "Route::run return type"
-      id: "B2"
-      description: "Make Route::run respond a RouteHandle"
-      status: "Todo"
-    - title: "Rename kafka.brokers"
-      id: "C3"
-      description: "Rename kafka.brokers to kafka.url"
-      status: "Todo"
-    - title: "Add registry for custom endpoints"
-      id: "D4"
-      description: |
-        Breaking Change: Refactor `EndpointType::Custom` to store a config struct (type_name + serde_json::Value) instead of a factory trait object.
-        Update `EndpointVisitor` deserialization to fallback to `EndpointType::Custom` when encountering unknown keys in the config map.
-        Implement a global `EndpointRegistry` (singleton) to register `CustomEndpointFactory` implementations by name.
-        Resolve the factory at runtime during Route initialization to instantiate the actual endpoint.
-      status: "Todo"
-    - title: "Extract IBM MQ endpoint to separate crate"
-      id: "D5"
-      description: |
-        Breaking Change: Remove `IbmMq` variant from `EndpointType` in `mq-bridge` core.
-        Create a new crate `mq-bridge-ibm-mq` that depends on `mq-bridge`.
-        Implement `CustomEndpointFactory` in the new crate to handle IBM MQ configuration and initialization.
-        This serves as a proof-of-concept for the plugin system (D4).
-      status: "Todo"
-    - title: "Add registry for custom middleware"
-      id: "D6"
-      description: |
-        Breaking Change: Refactor `Middleware::Custom` to store a config struct (type_name + serde_json::Value) instead of a factory trait object.
-        Implement custom `Deserialize` logic for `Middleware` to map unknown keys to `Middleware::Custom`.
-        Implement a global `MiddlewareRegistry` to register `CustomMiddlewareFactory` implementations.
-        Resolve the factory at runtime to instantiate the middleware.
-      status: "Todo"
     - title: "Add encryption middleware as separate crate"
       id: "D7"
       description: |
         Create a new crate `mq-bridge-encryption` that depends on `mq-bridge`.
         Implement `CustomMiddlewareFactory` in the new crate to handle message encryption/decryption configuration and logic.
         This serves as a proof-of-concept for the custom middleware registry (D6).
-      status: "Todo"
+      status: "Postpone"
+    - title: "OpenTelemetry Context Propagation"
+      id: "E8"
+      description: |
+        Implement middleware to extract and inject W3C Trace Context (Traceparent) headers from/to message metadata.
+        This enables distributed tracing across microservices connected via the bridge.
+        @src/middleware.rs
+      status: "Postpone"
+    - title: "SQL Endpoint (sqlx)"
+      id: "G11"
+      description: |
+        Implement a generic SQL endpoint using `sqlx` supporting Postgres, MySQL, and SQLite.
+        Consumer: Poll table based on cursor (id/timestamp) or queue-like (lock/delete).
+        Publisher: Insert message payload/metadata into table.
+        @src/endpoints/sql.rs
+      status: "Postpone"
+    - title: "Reliable Event Store & Handlers"
+      id: "H12"
+      description: |
+        Implement a robust, in-memory event store to replace fire-and-forget handlers in `src/event_handler.rs`.
+        
+        Constraints:
+        - Use `CanonicalMessage` for events. Use metadata for specific required storage.
+        - Do NOT modify `canonical_message.rs` or existing endpoints.
+        - `src/endpoints/memory.rs` serves as a reference for channel/locking patterns.
+        
+        Subtasks:
+        1. Event Store Implementation (`src/event_store.rs`):
+           - Struct `StoredEvent` is an alias for `CanonicalMessage` with `offset` (u64) and `stored_at` in the metadata.
+           - Endpoints handle the actual event storage. event_store.rs also removes events based when not needed anymore.
+           - Features: Append-only log, subscriber state tracking (offset, liveness), and Garbage Collection based on min-ack.
+           - Retention policies: Max size/time for secondary GC.
+        2. Update `src/event_handler.rs`:
+           - Integrate `EventStore` into `EventPublisher`.
+           - Allow multiple subscribers to register and consume events reliably.
+        3. Subscriber Logic:
+           - Implement logic to poll/notify subscribers of new events.
+           - Handle subscriber timeouts (heartbeats) to prevent GC blocking.
+           - Subscriber state is tracked in a hashmap.
+           - Primary GC is based on the minimum last_ack_offset across all subscribers.
+           - (later) Support removal of dead subscribers (e.g., via heartbeat or lease expiry).
+      status: "Done"

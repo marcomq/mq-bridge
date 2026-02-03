@@ -1,11 +1,11 @@
 #![allow(dead_code)]
 
-use super::common::{
+use mq_bridge::endpoints::aws::{AwsConsumer, AwsPublisher};
+use mq_bridge::test_utils::{
     add_performance_result, run_chaos_pipeline_test, run_direct_perf_test,
     run_performance_pipeline_test, run_pipeline_test, run_test_with_docker,
     run_test_with_docker_controller, setup_logging, PERF_TEST_MESSAGE_COUNT,
 };
-use mq_bridge::endpoints::aws::{AwsConsumer, AwsPublisher};
 use std::sync::Arc;
 
 const CONFIG_YAML: &str = r#"
@@ -106,16 +106,14 @@ pub async fn test_aws_performance_direct() {
     run_test_with_docker("tests/integration/docker-compose/aws.yml", || async {
         ensure_queue_exists().await;
 
-        let config = mq_bridge::models::AwsEndpoint {
+        let config = mq_bridge::models::AwsConfig {
             queue_url: Some("http://localhost:4566/000000000000/test-queue".to_string()),
             topic_arn: None,
-            config: mq_bridge::models::AwsConfig {
-                region: Some("us-east-1".to_string()),
-                endpoint_url: Some("http://localhost:4566".to_string()),
-                access_key: Some("test".to_string()),
-                secret_key: Some("test".to_string()),
-                ..Default::default()
-            },
+            region: Some("us-east-1".to_string()),
+            endpoint_url: Some("http://localhost:4566".to_string()),
+            access_key: Some("test".to_string()),
+            secret_key: Some("test".to_string()),
+            ..Default::default()
         };
 
         let result = run_direct_perf_test(

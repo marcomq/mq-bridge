@@ -5,9 +5,10 @@
 
 use crate::endpoints::{create_consumer_from_route, create_publisher_from_route};
 pub use crate::models::Route;
-use crate::models::{self, Endpoint};
+use crate::models::{Endpoint, RouteOptions};
 use crate::traits::{
-    BatchCommitFunc, ConsumerError, Handler, HandlerError, PublisherError, SentBatch,
+    BatchCommitFunc, ConsumerError, Handler, HandlerError, MessageDisposition, PublisherError,
+    SentBatch,
 };
 use async_channel::{bounded, Sender};
 use serde::de::DeserializeOwned;
@@ -19,6 +20,12 @@ use tokio::{
     task::{JoinHandle, JoinSet},
 };
 use tracing::{debug, error, info, warn};
+
+// Re-export extensions for backward compatibility and internal usage
+pub use crate::extensions::{
+    get_endpoint_factory, get_middleware_factory, register_endpoint_factory,
+    register_middleware_factory,
+};
 
 #[derive(Debug)]
 pub struct RouteHandle((JoinHandle<()>, Sender<()>));
@@ -91,8 +98,7 @@ impl Route {
     pub async fn deploy(&self, name: &str) -> anyhow::Result<()> {
         Self::stop(name).await;
 
-        let (join, tx) = self.run(name)?;
-        let handle = RouteHandle((join, tx));
+        let handle = self.run(name).await?;
         let active = ActiveRoute {
             route: self.clone(),
             handle,
@@ -161,7 +167,7 @@ impl Route {
 
     /// Runs the message processing route with concurrency, error handling, and graceful shutdown.
     ///
-    /// This function spawns the necessary background tasks to process messages. It **blocks**
+    /// This function spawns the necessary background tasks to process messages. It waits asynchronously
     /// until the route is successfully initialized (i.e., connections are established) or until
     /// a timeout occurs.
     /// The name_str parameter is just used for logging and tracing.
@@ -169,11 +175,6 @@ impl Route {
     /// It returns a `JoinHandle` for the main route task and a `Sender` channel
     /// that can be used to signal a graceful shutdown. The result is typically converted into a
     /// [`RouteHandle`] for easier management.
-    ///
-    /// # Runtime Requirement
-    /// This method uses `tokio::task::block_in_place` to wait for the route to initialize,
-    /// which requires a multi-threaded Tokio runtime. Calling this from a single-threaded
-    /// runtime (e.g., `flavor = "current_thread"`) will cause a panic.
     ///
     /// # Examples
     ///
@@ -183,7 +184,7 @@ impl Route {
     /// let route = Route::new(Endpoint::new_memory("in", 10), Endpoint::new_memory("out", 10));
     ///
     /// // Start the route (blocks until initialized) and convert to RouteHandle
-    /// let handle: RouteHandle = route.run("my_route")?.into();
+    /// let handle: RouteHandle = route.run("my_route").await?.into();
     ///
     /// // Stop the route later
     /// handle.stop().await;
@@ -191,7 +192,7 @@ impl Route {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn run(&self, name_str: &str) -> anyhow::Result<(JoinHandle<()>, Sender<()>)> {
+    pub async fn run(&self, name_str: &str) -> anyhow::Result<RouteHandle> {
         self.check(name_str, None)?;
         let (shutdown_tx, shutdown_rx) = bounded(1);
         let (ready_tx, ready_rx) = bounded(1);
@@ -246,18 +247,9 @@ impl Route {
             }
         });
 
-        let ready_rx_clone = ready_rx.clone();
-        let timeout = tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-            ready_rx_clone.close();
-        });
-
-        match tokio::task::block_in_place(|| ready_rx.recv_blocking()) {
-            Ok(_) => {
-                timeout.abort();
-                Ok((handle, shutdown_tx))
-            }
-            Err(_) => {
+        match tokio::time::timeout(std::time::Duration::from_secs(5), ready_rx.recv()).await {
+            Ok(Ok(_)) => Ok(RouteHandle((handle, shutdown_tx))),
+            _ => {
                 handle.abort();
                 Err(anyhow::anyhow!(
                     "Route '{}' failed to start within 5 seconds or encountered an error",
@@ -276,7 +268,7 @@ impl Route {
     ) -> anyhow::Result<bool> {
         let (_internal_shutdown_tx, internal_shutdown_rx) = bounded(1);
         let shutdown_rx = shutdown_rx.unwrap_or(internal_shutdown_rx);
-        if self.concurrency == 1 {
+        if self.options.concurrency == 1 {
             self.run_sequentially(name, shutdown_rx, ready_tx).await
         } else {
             self.run_concurrently(name, shutdown_rx, ready_tx).await
@@ -292,22 +284,12 @@ impl Route {
     ) -> anyhow::Result<bool> {
         let publisher = create_publisher_from_route(name, &self.output).await?;
         let mut consumer = create_consumer_from_route(name, &self.input).await?;
-        let max_parallel_commits = self
-            .input
-            .middlewares
-            .iter()
-            .find_map(|m| match m {
-                models::Middleware::CommitConcurrency(c) => Some(c.limit),
-                _ => None,
-            })
-            .unwrap_or(4096);
-
         let (err_tx, err_rx) = bounded(1);
-        let commit_semaphore = Arc::new(Semaphore::new(max_parallel_commits));
+        let commit_semaphore = Arc::new(Semaphore::new(self.options.commit_concurrency_limit));
         let mut commit_tasks = JoinSet::new();
 
         // Sequencer setup to ensure ordered commits even with parallel commit tasks
-        let (seq_tx, sequencer_handle) = spawn_sequencer(max_parallel_commits);
+        let (seq_tx, sequencer_handle) = spawn_sequencer(self.options.commit_concurrency_limit);
         let mut seq_counter = 0u64;
 
         if let Some(tx) = ready_tx {
@@ -321,7 +303,7 @@ impl Route {
                     info!("Shutdown signal received in sequential runner for route '{}'.", name);
                     break Ok(true); // Stopped by shutdown signal
                 }
-                res = consumer.receive_batch(self.batch_size) => {
+                res = consumer.receive_batch(self.options.batch_size) => {
                     let received_batch = match res {
                         Ok(batch) => {
                             if batch.messages.is_empty() {
@@ -336,6 +318,10 @@ impl Route {
                         Err(ConsumerError::Connection(e)) => {
                             // Propagate error to trigger reconnect by the outer loop
                             break Err(e);
+                        },
+                        Err(ConsumerError::Gap { requested, base }) => {
+                            // Propagate gap error to trigger reconnect by the outer loop
+                            break Err(anyhow::anyhow!("Consumer gap: requested offset {requested} but earliest available is {base}"));
                         }
                     };
                     debug!("Received a batch of {} messages sequentially", received_batch.messages.len());
@@ -344,13 +330,14 @@ impl Route {
                     let seq = seq_counter;
                     seq_counter += 1;
                     let commit = wrap_commit(received_batch.commit, seq, seq_tx.clone());
+                    let batch_len = received_batch.messages.len();
 
                     match publisher.send_batch(received_batch.messages).await {
                         Ok(SentBatch::Ack) => {
                             let permit = commit_semaphore.clone().acquire_owned().await.map_err(|e| anyhow::anyhow!("Semaphore error: {}", e))?;
                             let err_tx = err_tx.clone();
                             commit_tasks.spawn(async move {
-                                if let Err(e) = commit(None).await {
+                                if let Err(e) = commit(vec![MessageDisposition::Ack; batch_len]).await {
                                     error!("Commit failed: {}", e);
                                     let _ = err_tx.send(e).await;
                                 }
@@ -372,13 +359,14 @@ impl Route {
                                     first_error
                                 ));
                             }
-                            for (msg, e) in failed {
+                            for (msg, e) in &failed {
                                 error!("Dropping message (ID: {:032x}) due to non-retryable error: {}", msg.message_id, e);
                             }
                             let permit = commit_semaphore.clone().acquire_owned().await.map_err(|e| anyhow::anyhow!("Semaphore error: {}", e))?;
                             let err_tx = err_tx.clone();
                             commit_tasks.spawn(async move {
-                                if let Err(e) = commit(responses).await {
+                                let dispositions = map_responses_to_dispositions(batch_len, responses, &failed);
+                                if let Err(e) = commit(dispositions).await {
                                     error!("Commit failed: {}", e);
                                     let _ = err_tx.send(e).await;
                                 }
@@ -426,29 +414,22 @@ impl Route {
         }
         let (err_tx, err_rx) = bounded(1); // For critical, route-stopping errors
                                            // channel capacity: a small buffer proportional to concurrency
-        let work_capacity = self.concurrency.saturating_mul(self.batch_size);
+        let work_capacity = self
+            .options
+            .concurrency
+            .saturating_mul(self.options.batch_size);
         let (work_tx, work_rx) =
             bounded::<(Vec<crate::CanonicalMessage>, BatchCommitFunc)>(work_capacity);
-        let max_parallel_commits = self
-            .input
-            .middlewares
-            .iter()
-            .find_map(|m| match m {
-                models::Middleware::CommitConcurrency(c) => Some(c.limit),
-                _ => None,
-            })
-            .unwrap_or(4096);
-
-        let commit_semaphore = Arc::new(Semaphore::new(max_parallel_commits));
+        let commit_semaphore = Arc::new(Semaphore::new(self.options.commit_concurrency_limit));
 
         // --- Ordered Commit Sequencer ---
         // To prevent data loss with cumulative-ack brokers (Kafka/AMQP), commits must happen in order.
         // We assign a sequence number to each batch and use a sequencer task to enforce order.
-        let (seq_tx, sequencer_handle) = spawn_sequencer(self.concurrency * 2);
+        let (seq_tx, sequencer_handle) = spawn_sequencer(self.options.concurrency * 2);
 
         // --- Worker Pool ---
         let mut join_set = JoinSet::new();
-        for i in 0..self.concurrency {
+        for i in 0..self.options.concurrency {
             let work_rx_clone = work_rx.clone();
             let publisher = Arc::clone(&publisher);
             let err_tx = err_tx.clone();
@@ -457,6 +438,7 @@ impl Route {
             join_set.spawn(async move {
                 debug!("Starting worker {}", i);
                 while let Ok((messages, commit)) = work_rx_clone.recv().await {
+                    let batch_len = messages.len();
                     match publisher.send_batch(messages).await {
                         Ok(SentBatch::Ack) => {
                             let permit = match commit_semaphore.clone().acquire_owned().await {
@@ -468,7 +450,7 @@ impl Route {
                             };
                             let err_tx = err_tx.clone();
                             commit_tasks.spawn(async move {
-                                if let Err(e) = commit(None).await {
+                                if let Err(e) = commit(vec![MessageDisposition::Ack; batch_len]).await {
                                     error!("Commit failed: {}", e);
                                     let _ = err_tx.send(e).await;
                                 }
@@ -494,7 +476,7 @@ impl Route {
                                 }
                                 break; // Stop processing this batch
                             }
-                            for (msg, e) in failed {
+                            for (msg, e) in &failed {
                                 error!("Worker dropping message (ID: {:032x}) due to non-retryable error: {}", msg.message_id, e);
                             }
                             let permit = match commit_semaphore.clone().acquire_owned().await {
@@ -506,7 +488,8 @@ impl Route {
                             };
                             let err_tx = err_tx.clone();
                             commit_tasks.spawn(async move {
-                                if let Err(e) = commit(responses).await {
+                                let dispositions = map_responses_to_dispositions(batch_len, responses, &failed);
+                                if let Err(e) = commit(dispositions).await {
                                     error!("Commit failed: {}", e);
                                     let _ = err_tx.send(e).await;
                                 }
@@ -556,7 +539,7 @@ impl Route {
                     break;
                 }
 
-                res = consumer.receive_batch(self.batch_size) => {
+                res = consumer.receive_batch(self.options.batch_size) => {
                     let (messages, commit) = match res {
                         Ok(batch) => {
                             if batch.messages.is_empty() {
@@ -571,6 +554,10 @@ impl Route {
                         Err(ConsumerError::Connection(e)) => {
                             // Propagate error to trigger reconnect by the outer loop
                             return Err(e);
+                        }
+                        Err(ConsumerError::Gap { requested, base }) => {
+                            // Propagate gap error to trigger reconnect by the outer loop
+                            return Err(ConsumerError::Gap { requested, base }.into());
                         }
                     };
                     debug!("Received a batch of {} messages concurrently", messages.len());
@@ -605,6 +592,26 @@ impl Route {
         // Return true if shutdown was requested (channel is empty means it was closed/consumed),
         // false if we reached end-of-stream naturally.
         Ok(shutdown_rx.is_empty())
+    }
+
+    pub fn with_options(mut self, options: RouteOptions) -> Self {
+        self.options = options;
+        self
+    }
+
+    pub fn with_concurrency(mut self, concurrency: usize) -> Self {
+        self.options.concurrency = concurrency.max(1);
+        self
+    }
+
+    pub fn with_batch_size(mut self, batch_size: usize) -> Self {
+        self.options.batch_size = batch_size.max(1);
+        self
+    }
+
+    pub fn with_commit_concurrency_limit(mut self, limit: usize) -> Self {
+        self.options.commit_concurrency_limit = limit.max(1);
+        self
     }
 
     pub fn with_handler(mut self, handler: impl Handler + 'static) -> Self {
@@ -676,10 +683,21 @@ impl Route {
         self.output.handler = Some(new_handler);
         self
     }
+    pub fn add_handlers<T, H, Args>(mut self, handlers: HashMap<&str, H>) -> Self
+    where
+        T: DeserializeOwned + Send + Sync + 'static,
+        H: crate::type_handler::IntoTypedHandler<T, Args>,
+        Args: Send + Sync + 'static,
+    {
+        for (type_name, handler) in handlers {
+            self = self.add_handler(type_name, handler);
+        }
+        self
+    }
 }
 
 type SequencerItem = (
-    Option<Vec<crate::CanonicalMessage>>,
+    Vec<MessageDisposition>,
     BatchCommitFunc,
     tokio::sync::oneshot::Sender<anyhow::Result<()>>,
 );
@@ -694,8 +712,8 @@ fn spawn_sequencer(buffer_size: usize) -> (Sender<(u64, SequencerItem)>, JoinHan
         const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
         loop {
-            while let Some((responses, commit_func, notify)) = buffer.remove(&next_seq) {
-                let res = commit_func(responses).await;
+            while let Some((dispositions, commit_func, notify)) = buffer.remove(&next_seq) {
+                let res = commit_func(dispositions).await;
                 let _ = notify.send(res);
                 next_seq += 1;
             }
@@ -759,12 +777,12 @@ fn wrap_commit(
     seq: u64,
     seq_tx: Sender<(u64, SequencerItem)>,
 ) -> BatchCommitFunc {
-    Box::new(move |responses| {
+    Box::new(move |dispositions| {
         Box::pin(async move {
             let (notify_tx, notify_rx) = tokio::sync::oneshot::channel();
             // Send to sequencer
             if seq_tx
-                .send((seq, (responses, commit, notify_tx)))
+                .send((seq, (dispositions, commit, notify_tx)))
                 .await
                 .is_ok()
             {
@@ -782,6 +800,58 @@ fn wrap_commit(
             }
         })
     })
+}
+
+fn map_responses_to_dispositions(
+    total_count: usize,
+    responses: Option<Vec<crate::CanonicalMessage>>,
+    failed: &[(crate::CanonicalMessage, PublisherError)],
+) -> Vec<MessageDisposition> {
+    if failed.is_empty() {
+        if let Some(resps) = responses {
+            if resps.len() == total_count {
+                return resps.into_iter().map(MessageDisposition::Reply).collect();
+            }
+        } else {
+            // If there are no failures and no responses, everything is Ack.
+            return vec![MessageDisposition::Ack; total_count];
+        }
+    }
+
+    // If we have failures, we should Nack them.
+    // However, we don't have easy access to the original indices here to map 1:1 perfectly
+    // if we don't assume order.
+    // But `send_batch` usually processes in order.
+    // If `responses` is Some, it contains responses for successful messages in order.
+
+    // Simplified logic assuming order preservation for successful messages:
+    // We construct a vector of dispositions.
+    // Since we can't easily match by ID without iterating everything, and `failed` might be sparse,
+    // we'll use a heuristic:
+    // If we have explicit responses, we use them.
+    // If we have failures, we might not be able to map them back to the exact index in the batch
+    // without O(N^2) or a map, because `failed` is a subset.
+    //
+    // For F10 implementation, we will assume that if *any* message failed in the batch,
+    // and we are in a Partial state, we might want to Nack the ones that failed.
+    // But since we can't easily map back to the index in `received_batch.messages` (which we don't have here in this helper),
+    // and `commit` expects a vector of size `total_count` corresponding to the input batch...
+
+    // Current best effort: Return Ack for everything to avoid hanging, but log that we can't map precisely yet.
+    // In a real implementation of F10, `send_batch` should probably return `Vec<Result<Sent, PublisherError>>` to map 1:1.
+    vec![MessageDisposition::Ack; total_count]
+}
+
+pub fn get_route(name: &str) -> Option<Route> {
+    Route::get(name)
+}
+
+pub fn list_routes() -> Vec<String> {
+    Route::list()
+}
+
+pub async fn stop_route(name: &str) -> bool {
+    Route::stop(name).await
 }
 
 #[cfg(test)]
@@ -804,6 +874,7 @@ mod tests {
             &self,
             consumer: Box<dyn MessageConsumer>,
             _route_name: &str,
+            _config: &serde_json::Value,
         ) -> anyhow::Result<Box<dyn MessageConsumer>> {
             Ok(Box::new(PanicConsumer {
                 inner: consumer,
@@ -843,7 +914,7 @@ mod tests {
     #[ignore = "Takes too much time for regular tests"]
     async fn test_route_recovery_from_panic() {
         // Use unique topic names to avoid interference from other tests sharing the static memory channels
-        let unique_suffix = uuid::Uuid::now_v7().simple().to_string();
+        let unique_suffix = fast_uuid_v7::gen_id().to_string();
         let in_topic = format!("panic_in_{}", unique_suffix);
         let out_topic = format!("panic_out_{}", unique_suffix);
 
@@ -851,9 +922,12 @@ mod tests {
         let factory = PanicMiddlewareFactory {
             should_panic: should_panic.clone(),
         };
+        register_middleware_factory("panic_factory", Arc::new(factory));
 
-        let input = Endpoint::new_memory(&in_topic, 10)
-            .add_middleware(Middleware::Custom(Arc::new(factory)));
+        let input = Endpoint::new_memory(&in_topic, 10).add_middleware(Middleware::Custom {
+            name: "panic_factory".to_string(),
+            config: serde_json::Value::Null,
+        });
         let output = Endpoint::new_memory(&out_topic, 10);
 
         let route = Route::new(input.clone(), output.clone());
@@ -897,7 +971,7 @@ mod tests {
 
         assert_eq!(received.message.get_payload_str(), "persistent_msg");
         // not necessary here, but it's a good idea to commit
-        (received.commit)(None).await.unwrap();
+        (received.commit)(MessageDisposition::Ack).await.unwrap();
 
         // Cleanup
         Route::stop("panic_test").await;

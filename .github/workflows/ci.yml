@@ -55,8 +55,8 @@ jobs:
           - "nats"
           - "mqtt"
           - "mongodb"
-          - "http"
-          - "aws"
+          # - "http" # needs too long, already included in full
+          # - "aws"  # needs too long, already included in full
           - "zeromq"
     steps:
       - uses: actions/checkout@v4

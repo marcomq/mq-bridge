@@ -15,6 +15,5 @@ pub mod nats;
 #[cfg(feature = "zeromq")]
 pub mod zeromq;
 
-pub mod common;
 pub mod memory;
 pub mod route;

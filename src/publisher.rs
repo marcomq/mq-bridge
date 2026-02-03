@@ -60,6 +60,16 @@ impl Publisher {
     }
 }
 
+pub fn get_publisher(name: &str) -> Option<Publisher> {
+    Publisher::get(name)
+}
+
+pub fn unregister_publisher(name: &str) -> Option<Publisher> {
+    Publisher::unregister(name)
+}
+
+pub use crate::middleware::apply_middlewares_to_publisher as apply_middlewares;
+
 #[cfg(test)]
 mod tests {
     use super::*;

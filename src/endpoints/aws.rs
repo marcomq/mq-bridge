@@ -1,8 +1,8 @@
 use crate::canonical_message::tracing_support::LazyMessageIds;
-use crate::models::AwsEndpoint;
+use crate::models::AwsConfig;
 use crate::traits::{
-    BatchCommitFunc, ConsumerError, MessageConsumer, MessagePublisher, PublisherError,
-    ReceivedBatch, Sent, SentBatch,
+    BatchCommitFunc, ConsumerError, MessageConsumer, MessageDisposition, MessagePublisher,
+    PublisherError, ReceivedBatch, Sent, SentBatch,
 };
 use crate::CanonicalMessage;
 use anyhow::{anyhow, Context};
@@ -22,10 +22,10 @@ pub struct AwsConsumer {
 }
 
 impl AwsConsumer {
-    pub async fn new(endpoint: &AwsEndpoint) -> anyhow::Result<Self> {
-        let config = load_aws_config(endpoint).await;
-        let client = SqsClient::new(&config);
-        let queue_url = endpoint
+    pub async fn new(config: &AwsConfig) -> anyhow::Result<Self> {
+        let aws_config = load_aws_config(config).await;
+        let client = SqsClient::new(&aws_config);
+        let queue_url = config
             .queue_url
             .clone()
             .ok_or_else(|| anyhow!("queue_url is required for AWS consumer"))?;
@@ -33,8 +33,8 @@ impl AwsConsumer {
         Ok(Self {
             client,
             queue_url,
-            max_messages: endpoint.config.max_messages.unwrap_or(10).clamp(1, 10),
-            wait_time_seconds: endpoint.config.wait_time_seconds.unwrap_or(20).clamp(0, 20),
+            max_messages: config.max_messages.unwrap_or(10).clamp(1, 10),
+            wait_time_seconds: config.wait_time_seconds.unwrap_or(20).clamp(0, 20),
         })
     }
 }
@@ -140,60 +140,12 @@ impl MessageConsumer for AwsConsumer {
         let client = self.client.clone();
         let queue_url = self.queue_url.clone();
 
-        let commit: BatchCommitFunc = Box::new(move |_results| {
+        let commit: BatchCommitFunc = Box::new(move |dispositions: Vec<MessageDisposition>| {
             let client = client.clone();
             let queue_url = queue_url.clone();
             let handles = receipt_handles.clone();
             Box::pin(async move {
-                let mut entries = Vec::new();
-                for (i, handle_opt) in handles.iter().enumerate() {
-                    if let Some(handle) = handle_opt {
-                        entries.push(
-                            aws_sdk_sqs::types::DeleteMessageBatchRequestEntry::builder()
-                                .id(format!("{}", i))
-                                .receipt_handle(handle)
-                                .build()
-                                .unwrap(),
-                        );
-                    }
-                }
-
-                // SQS batch delete limit is 10
-                for chunk in entries.chunks(10) {
-                    match client
-                        .delete_message_batch()
-                        .queue_url(&queue_url)
-                        .set_entries(Some(chunk.to_vec()))
-                        .send()
-                        .await
-                    {
-                        Ok(resp) => {
-                            if !resp.failed.is_empty() {
-                                let count = resp.failed.len();
-                                error!(queue_url = %queue_url, failed_count = count, "Partial failure deleting SQS messages");
-                                for failure in resp.failed {
-                                    error!(id = ?failure.id, code = ?failure.code, message = ?failure.message, sender_fault = failure.sender_fault, "SQS delete failure detail");
-                                }
-                                return Err(anyhow::anyhow!(
-                                    "SQS delete batch failed for {} messages",
-                                    count
-                                ));
-                            }
-                        }
-                        Err(e) => {
-                            error!(
-                                queue_url = %queue_url,
-                                error = %e,
-                                "Failed to delete SQS message batch"
-                            );
-                            return Err(anyhow::anyhow!(
-                                "Failed to delete SQS message batch: {}",
-                                e
-                            ));
-                        }
-                    }
-                }
-                Ok(())
+                process_aws_batch(&client, &queue_url, &handles, &dispositions).await
             })
         });
 
@@ -205,6 +157,122 @@ impl MessageConsumer for AwsConsumer {
     }
 }
 
+async fn process_aws_batch(
+    client: &SqsClient,
+    queue_url: &str,
+    handles: &[Option<String>],
+    dispositions: &[MessageDisposition],
+) -> anyhow::Result<()> {
+    if handles.len() != dispositions.len() {
+        return Err(anyhow::anyhow!(
+            "AWS batch commit received mismatched disposition count: expected {}, got {}",
+            handles.len(),
+            dispositions.len()
+        ));
+    }
+    let (delete_entries, nack_entries) = prepare_aws_entries(handles, dispositions);
+
+    process_aws_deletes(client, queue_url, delete_entries).await?;
+    process_aws_nacks(client, queue_url, nack_entries).await?;
+    Ok(())
+}
+
+fn prepare_aws_entries(
+    handles: &[Option<String>],
+    dispositions: &[MessageDisposition],
+) -> (
+    Vec<aws_sdk_sqs::types::DeleteMessageBatchRequestEntry>,
+    Vec<aws_sdk_sqs::types::ChangeMessageVisibilityBatchRequestEntry>,
+) {
+    let mut delete_entries = Vec::new();
+    let mut nack_entries = Vec::new();
+
+    for (i, (handle_opt, disposition)) in handles.iter().zip(dispositions).enumerate() {
+        if let Some(handle) = handle_opt {
+            match disposition {
+                MessageDisposition::Ack | MessageDisposition::Reply(_) => {
+                    delete_entries.push(
+                        aws_sdk_sqs::types::DeleteMessageBatchRequestEntry::builder()
+                            .id(format!("{}", i))
+                            .receipt_handle(handle)
+                            .build()
+                            .unwrap(),
+                    );
+                }
+                MessageDisposition::Nack => {
+                    nack_entries.push(
+                        aws_sdk_sqs::types::ChangeMessageVisibilityBatchRequestEntry::builder()
+                            .id(format!("{}", i))
+                            .receipt_handle(handle)
+                            .visibility_timeout(0)
+                            .build()
+                            .unwrap(),
+                    );
+                }
+            }
+        }
+    }
+    (delete_entries, nack_entries)
+}
+
+async fn process_aws_deletes(
+    client: &SqsClient,
+    queue_url: &str,
+    entries: Vec<aws_sdk_sqs::types::DeleteMessageBatchRequestEntry>,
+) -> anyhow::Result<()> {
+    for chunk in entries.chunks(10) {
+        match client
+            .delete_message_batch()
+            .queue_url(queue_url)
+            .set_entries(Some(chunk.to_vec()))
+            .send()
+            .await
+        {
+            Ok(resp) => {
+                if !resp.failed.is_empty() {
+                    let count = resp.failed.len();
+                    error!(queue_url = %queue_url, failed_count = count, "Partial failure deleting SQS messages");
+                    for failure in resp.failed {
+                        error!(id = ?failure.id, code = ?failure.code, message = ?failure.message, sender_fault = failure.sender_fault, "SQS delete failure detail");
+                    }
+                    return Err(anyhow::anyhow!(
+                        "SQS delete batch failed for {} messages",
+                        count
+                    ));
+                }
+            }
+            Err(e) => {
+                error!(queue_url = %queue_url, error = %e, "Failed to delete SQS message batch");
+                return Err(anyhow::anyhow!("Failed to delete SQS message batch: {}", e));
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn process_aws_nacks(
+    client: &SqsClient,
+    queue_url: &str,
+    entries: Vec<aws_sdk_sqs::types::ChangeMessageVisibilityBatchRequestEntry>,
+) -> anyhow::Result<()> {
+    for chunk in entries.chunks(10) {
+        if let Err(e) = client
+            .change_message_visibility_batch()
+            .queue_url(queue_url)
+            .set_entries(Some(chunk.to_vec()))
+            .send()
+            .await
+        {
+            error!(queue_url = %queue_url, error = %e, "Failed to change visibility for Nacked SQS messages");
+            return Err(anyhow::anyhow!(
+                "Failed to change visibility for Nacked SQS messages: {}",
+                e
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub struct AwsPublisher {
     sqs_client: Option<SqsClient>,
     sns_client: Option<SnsClient>,
@@ -213,17 +281,17 @@ pub struct AwsPublisher {
 }
 
 impl AwsPublisher {
-    pub async fn new(endpoint: &AwsEndpoint) -> anyhow::Result<Self> {
-        let config = load_aws_config(endpoint).await;
+    pub async fn new(config: &AwsConfig) -> anyhow::Result<Self> {
+        let aws_config = load_aws_config(config).await;
 
-        let (sqs_client, queue_url) = if let Some(url) = &endpoint.queue_url {
-            (Some(SqsClient::new(&config)), Some(url.clone()))
+        let (sqs_client, queue_url) = if let Some(url) = &config.queue_url {
+            (Some(SqsClient::new(&aws_config)), Some(url.clone()))
         } else {
             (None, None)
         };
 
-        let (sns_client, topic_arn) = if let Some(arn) = &endpoint.topic_arn {
-            (Some(SnsClient::new(&config)), Some(arn.clone()))
+        let (sns_client, topic_arn) = if let Some(arn) = &config.topic_arn {
+            (Some(SnsClient::new(&aws_config)), Some(arn.clone()))
         } else {
             (None, None)
         };
@@ -428,22 +496,20 @@ impl MessagePublisher for AwsPublisher {
     }
 }
 
-async fn load_aws_config(endpoint: &AwsEndpoint) -> aws_config::SdkConfig {
+async fn load_aws_config(config: &AwsConfig) -> aws_config::SdkConfig {
     let mut loader = aws_config::defaults(BehaviorVersion::latest());
-    if let Some(region) = &endpoint.config.region {
+    if let Some(region) = &config.region {
         loader = loader.region(aws_config::Region::new(region.clone()));
     }
-    if let Some(url) = &endpoint.config.endpoint_url {
+    if let Some(url) = &config.endpoint_url {
         loader = loader.endpoint_url(url);
     }
 
-    if let (Some(access_key), Some(secret_key)) =
-        (&endpoint.config.access_key, &endpoint.config.secret_key)
-    {
+    if let (Some(access_key), Some(secret_key)) = (&config.access_key, &config.secret_key) {
         let credentials = Credentials::new(
             access_key.clone(),
             secret_key.clone(),
-            endpoint.config.session_token.clone(),
+            config.session_token.clone(),
             None,
             "static",
         );

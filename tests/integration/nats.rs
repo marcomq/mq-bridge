@@ -1,12 +1,12 @@
 #![allow(dead_code)]
 use std::sync::Arc;
 
-use super::common::{
+use mq_bridge::endpoints::nats::{NatsConsumer, NatsPublisher};
+use mq_bridge::test_utils::{
     add_performance_result, run_chaos_pipeline_test, run_direct_perf_test,
     run_performance_pipeline_test, run_pipeline_test, run_test_with_docker,
     run_test_with_docker_controller, setup_logging, PERF_TEST_MESSAGE_COUNT,
 };
-use mq_bridge::endpoints::nats::{NatsConsumer, NatsPublisher};
 const CONFIG_YAML: &str = r#"
 routes:
   memory_to_nats:
@@ -83,17 +83,17 @@ pub async fn test_nats_performance_direct() {
         let result = run_direct_perf_test(
             "NATS",
             || async {
-                Arc::new(
-                    NatsPublisher::new(&config, stream_name, subject)
-                        .await
-                        .unwrap(),
-                )
+                let mut pub_config = config.clone();
+                pub_config.subject = Some(subject.to_string());
+                pub_config.stream = Some(stream_name.to_string());
+                Arc::new(NatsPublisher::new(&pub_config).await.unwrap())
             },
             || async {
+                let mut endpoint = config.clone();
+                endpoint.subject = Some(subject.to_string());
+                endpoint.stream = Some(stream_name.to_string());
                 Arc::new(tokio::sync::Mutex::new(
-                    NatsConsumer::new(&config, stream_name, subject)
-                        .await
-                        .unwrap(),
+                    NatsConsumer::new(&endpoint).await.unwrap(),
                 ))
             },
         )

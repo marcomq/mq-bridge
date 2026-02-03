@@ -9,10 +9,8 @@ use serde::{
 };
 use std::{collections::HashMap, sync::Arc};
 
-use crate::{
-    endpoints::memory::{get_or_create_channel, MemoryChannel},
-    traits::{CustomEndpointFactory, CustomMiddlewareFactory, Handler},
-};
+use crate::traits::Handler;
+use tracing::trace;
 
 /// The top-level configuration is a map of named routes.
 /// The key is the route name (e.g., "kafka_to_nats").
@@ -35,7 +33,7 @@ use crate::{
 ///       - metrics: {}
 ///     kafka:
 ///       topic: "input-topic"
-///       brokers: "localhost:9092"
+///       url: "localhost:9092"
 ///       group_id: "my-consumer-group"
 ///   output:
 ///     nats:
@@ -46,7 +44,7 @@ use crate::{
 /// let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
 /// let route = config.get("kafka_to_nats").unwrap();
 ///
-/// assert_eq!(route.concurrency, 10);
+/// assert_eq!(route.options.concurrency, 10);
 /// // Check input middleware
 /// assert!(route.input.middlewares.iter().any(|m| matches!(m, Middleware::Deduplication(_))));
 /// // Check output endpoint
@@ -63,6 +61,31 @@ pub type PublisherConfig = HashMap<String, Endpoint>;
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Route {
+    /// The input/source endpoint for the route.
+    pub input: Endpoint,
+    /// The output/sink endpoint for the route.
+    #[serde(default = "default_output_endpoint")]
+    pub output: Endpoint,
+    /// (Optional) Fine-tuning options for the route's execution.
+    #[serde(flatten, default)]
+    pub options: RouteOptions,
+}
+
+impl Default for Route {
+    fn default() -> Self {
+        Self {
+            input: Endpoint::null(),
+            output: Endpoint::null(),
+            options: RouteOptions::default(),
+        }
+    }
+}
+
+/// Fine-tuning options for a route's execution.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct RouteOptions {
     /// (Optional) Number of concurrent processing tasks for this route. Defaults to 1.
     #[serde(default = "default_concurrency")]
     #[cfg_attr(feature = "schema", schemars(range(min = 1)))]
@@ -71,20 +94,17 @@ pub struct Route {
     #[serde(default = "default_batch_size")]
     #[cfg_attr(feature = "schema", schemars(range(min = 1)))]
     pub batch_size: usize,
-    /// The input/source endpoint for the route.
-    pub input: Endpoint,
-    /// The output/sink endpoint for the route.
-    #[serde(default = "default_output_endpoint")]
-    pub output: Endpoint,
+    /// (Optional) The maximum number of concurrent commit tasks allowed. Defaults to 4096.
+    #[serde(default = "default_commit_concurrency_limit")]
+    pub commit_concurrency_limit: usize,
 }
 
-impl Default for Route {
+impl Default for RouteOptions {
     fn default() -> Self {
         Self {
             concurrency: default_concurrency(),
             batch_size: default_batch_size(),
-            input: Endpoint::null(),
-            output: Endpoint::null(),
+            commit_concurrency_limit: default_commit_concurrency_limit(),
         }
     }
 }
@@ -97,13 +117,14 @@ pub(crate) fn default_batch_size() -> usize {
     1
 }
 
+pub(crate) fn default_commit_concurrency_limit() -> usize {
+    4096
+}
+
 fn default_output_endpoint() -> Endpoint {
     Endpoint::new(EndpointType::Null)
 }
 
-fn default_dlq_retry_attempts() -> usize {
-    3
-}
 fn default_retry_attempts() -> usize {
     3
 }
@@ -120,6 +141,28 @@ fn default_clean_session() -> bool {
     false
 }
 
+fn is_known_endpoint_name(name: &str) -> bool {
+    matches!(
+        name,
+        "aws"
+            | "kafka"
+            | "nats"
+            | "file"
+            | "static"
+            | "memory"
+            | "amqp"
+            | "mongodb"
+            | "mqtt"
+            | "http"
+            | "ibm-mq"
+            | "ibmmq"
+            | "zeromq"
+            | "fanout"
+            | "switch"
+            | "response"
+    )
+}
+
 /// Represents a connection point for messages, which can be a source (input) or a sink (output).
 #[derive(Serialize, Clone, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -128,10 +171,6 @@ pub struct Endpoint {
     /// (Optional) A list of middlewares to apply to the endpoint.
     #[serde(default)]
     pub middlewares: Vec<Middleware>,
-
-    /// (Consumer only) The processing mode for the endpoint.
-    #[serde(default)]
-    pub mode: ConsumerMode,
 
     /// The specific endpoint implementation, determined by the configuration key (e.g., "kafka", "nats").
     #[serde(flatten)]
@@ -147,7 +186,6 @@ impl std::fmt::Debug for Endpoint {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Endpoint")
             .field("middlewares", &self.middlewares)
-            .field("mode", &self.mode)
             .field("endpoint_type", &self.endpoint_type)
             .field(
                 "handler",
@@ -190,22 +228,43 @@ impl<'de> Deserialize<'de> for Endpoint {
                 // This allows us to separate the `middlewares` field from the rest.
                 let mut temp_map = serde_json::Map::new();
                 let mut middlewares_val = None;
-                let mut mode_val = None;
 
                 while let Some((key, value)) = map.next_entry::<String, serde_json::Value>()? {
                     if key == "middlewares" {
                         middlewares_val = Some(value);
-                    } else if key == "mode" {
-                        mode_val = Some(value);
                     } else {
                         temp_map.insert(key, value);
                     }
                 }
 
                 // Deserialize the rest of the map into the flattened EndpointType.
-                let endpoint_type: EndpointType =
-                    serde_json::from_value(serde_json::Value::Object(temp_map))
-                        .map_err(serde::de::Error::custom)?;
+                let temp_val = serde_json::Value::Object(temp_map);
+                let endpoint_type: EndpointType = match serde_json::from_value(temp_val.clone()) {
+                    Ok(et) => et,
+                    Err(original_err) => {
+                        if let serde_json::Value::Object(map) = &temp_val {
+                            if map.len() == 1 {
+                                let (name, config) = map.iter().next().unwrap();
+                                if is_known_endpoint_name(name) {
+                                    return Err(serde::de::Error::custom(original_err));
+                                }
+                                trace!("Falling back to Custom endpoint for key: {}", name);
+                                EndpointType::Custom {
+                                    name: name.clone(),
+                                    config: config.clone(),
+                                }
+                            } else if map.is_empty() {
+                                EndpointType::Null
+                            } else {
+                                return Err(serde::de::Error::custom(
+                                    "Invalid endpoint configuration: multiple keys found or unknown endpoint type",
+                                ));
+                            }
+                        } else {
+                            return Err(serde::de::Error::custom("Invalid endpoint configuration"));
+                        }
+                    }
+                };
 
                 // Deserialize the extracted middlewares value using the existing helper logic.
                 let middlewares = match middlewares_val {
@@ -215,13 +274,8 @@ impl<'de> Deserialize<'de> for Endpoint {
                     None => Vec::new(),
                 };
 
-                let mode = match mode_val {
-                    Some(val) => serde_json::from_value(val).map_err(serde::de::Error::custom)?,
-                    None => ConsumerMode::default(),
-                };
                 Ok(Endpoint {
                     middlewares,
-                    mode,
                     endpoint_type,
                     handler: None,
                 })
@@ -232,55 +286,26 @@ impl<'de> Deserialize<'de> for Endpoint {
     }
 }
 
-impl Endpoint {
-    pub fn new(endpoint_type: EndpointType) -> Self {
-        Self {
-            middlewares: Vec::new(),
-            mode: ConsumerMode::default(),
-            endpoint_type,
-            handler: None,
-        }
-    }
-    /// Creates a new in-memory endpoint with the specified topic and capacity.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use mq_bridge::models::Endpoint;
-    /// let endpoint = Endpoint::new_memory("my_topic", 100);
-    /// ```
-    pub fn new_memory(topic: &str, capacity: usize) -> Self {
-        Self::new(EndpointType::Memory(MemoryConfig {
-            topic: topic.to_string(),
-            capacity: Some(capacity),
-        }))
-    }
-    pub fn add_middleware(mut self, middleware: Middleware) -> Self {
-        self.middlewares.push(middleware);
-        self
-    }
-    ///
-    /// Returns a reference to the in-memory channel associated with this Endpoint.
-    /// This function will only succeed if the Endpoint is of type EndpointType::Memory.
-    /// If the Endpoint is not a memory endpoint, this function will return an error.
-    /// This function is primarily used for testing purposes where a Queue is needed.
-    pub fn channel(&self) -> anyhow::Result<MemoryChannel> {
-        match &self.endpoint_type {
-            EndpointType::Memory(cfg) => Ok(get_or_create_channel(cfg)),
-            _ => Err(anyhow::anyhow!("channel() called on non-memory Endpoint")),
-        }
-    }
-    pub fn null() -> Self {
-        Self::new(EndpointType::Null)
-    }
+fn is_known_middleware_name(name: &str) -> bool {
+    matches!(
+        name,
+        "deduplication"
+            | "metrics"
+            | "dlq"
+            | "retry"
+            | "random_panic"
+            | "delay"
+            | "weak_join"
+            | "custom"
+    )
 }
 
 /// Deserialize middlewares from a generic serde_json::Value.
 ///
 /// This logic was extracted from `deserialize_middlewares_from_map_or_seq` to be reused by the custom `Endpoint` deserializer.
 fn deserialize_middlewares_from_value(value: serde_json::Value) -> anyhow::Result<Vec<Middleware>> {
-    Ok(match value {
-        serde_json::Value::Array(arr) => serde_json::from_value(serde_json::Value::Array(arr))?,
+    let arr = match value {
+        serde_json::Value::Array(arr) => arr,
         serde_json::Value::Object(map) => {
             let mut middlewares: Vec<_> = map
                 .into_iter()
@@ -290,11 +315,63 @@ fn deserialize_middlewares_from_value(value: serde_json::Value) -> anyhow::Resul
                 .collect();
             middlewares.sort_by_key(|(index, _)| *index);
 
-            let sorted_values = middlewares.into_iter().map(|(_, value)| value).collect();
-            serde_json::from_value(serde_json::Value::Array(sorted_values))?
+            middlewares.into_iter().map(|(_, value)| value).collect()
         }
         _ => return Err(anyhow::anyhow!("Expected an array or object")),
-    })
+    };
+
+    let mut middlewares = Vec::new();
+    for item in arr {
+        // Check if it is a map with a single key that matches a known middleware
+        let known_name = if let serde_json::Value::Object(map) = &item {
+            if map.len() == 1 {
+                let (name, _) = map.iter().next().unwrap();
+                if is_known_middleware_name(name) {
+                    Some(name.clone())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if let Some(name) = known_name {
+            match serde_json::from_value::<Middleware>(item.clone()) {
+                Ok(m) => middlewares.push(m),
+                Err(e) => {
+                    return Err(anyhow::anyhow!(
+                        "Failed to deserialize known middleware '{}': {}",
+                        name,
+                        e
+                    ))
+                }
+            }
+        } else if let Ok(m) = serde_json::from_value::<Middleware>(item.clone()) {
+            middlewares.push(m);
+        } else if let serde_json::Value::Object(map) = &item {
+            if map.len() == 1 {
+                let (name, config) = map.iter().next().unwrap();
+                middlewares.push(Middleware::Custom {
+                    name: name.clone(),
+                    config: config.clone(),
+                });
+            } else {
+                return Err(anyhow::anyhow!(
+                    "Invalid middleware configuration: {:?}",
+                    item
+                ));
+            }
+        } else {
+            return Err(anyhow::anyhow!(
+                "Invalid middleware configuration: {:?}",
+                item
+            ));
+        }
+    }
+    Ok(middlewares)
 }
 
 /// An enumeration of all supported endpoint types.
@@ -322,23 +399,25 @@ fn deserialize_middlewares_from_value(value: serde_json::Value) -> anyhow::Resul
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum EndpointType {
-    Aws(AwsEndpoint),
-    Kafka(KafkaEndpoint),
-    Nats(NatsEndpoint),
-    File(String),
+    Aws(AwsConfig),
+    Kafka(KafkaConfig),
+    Nats(NatsConfig),
+    File(FileConfig),
     Static(String),
     Memory(MemoryConfig),
-    Amqp(AmqpEndpoint),
-    MongoDb(MongoDbEndpoint),
-    Mqtt(MqttEndpoint),
-    IbmMq(IbmMqEndpoint),
-    Http(HttpEndpoint),
-    ZeroMq(ZeroMqEndpoint),
+    Amqp(AmqpConfig),
+    MongoDb(MongoDbConfig),
+    Mqtt(MqttConfig),
+    Http(HttpConfig),
+    IbmMq(IbmMqConfig),
+    ZeroMq(ZeroMqConfig),
     Fanout(Vec<Endpoint>),
     Switch(SwitchConfig),
     Response(ResponseConfig),
-    #[serde(skip)]
-    Custom(Arc<dyn CustomEndpointFactory>),
+    Custom {
+        name: String,
+        config: serde_json::Value,
+    },
     #[default]
     Null,
 }
@@ -355,13 +434,13 @@ impl EndpointType {
             EndpointType::Amqp(_) => "amqp",
             EndpointType::MongoDb(_) => "mongodb",
             EndpointType::Mqtt(_) => "mqtt",
-            EndpointType::IbmMq(_) => "ibm_mq",
             EndpointType::Http(_) => "http",
+            EndpointType::IbmMq(_) => "ibmmq",
             EndpointType::ZeroMq(_) => "zeromq",
             EndpointType::Fanout(_) => "fanout",
             EndpointType::Switch(_) => "switch",
             EndpointType::Response(_) => "response",
-            EndpointType::Custom(_) => "custom",
+            EndpointType::Custom { .. } => "custom",
             EndpointType::Null => "null",
         }
     }
@@ -375,7 +454,7 @@ impl EndpointType {
                 | EndpointType::Fanout(_)
                 | EndpointType::Switch(_)
                 | EndpointType::Response(_)
-                | EndpointType::Custom(_)
+                | EndpointType::Custom { .. }
                 | EndpointType::Null
         )
     }
@@ -389,12 +468,14 @@ pub enum Middleware {
     Deduplication(DeduplicationMiddleware),
     Metrics(MetricsMiddleware),
     Dlq(Box<DeadLetterQueueMiddleware>),
-    CommitConcurrency(CommitConcurrencyMiddleware),
     Retry(RetryMiddleware),
     RandomPanic(RandomPanicMiddleware),
     Delay(DelayMiddleware),
-    #[serde(skip)]
-    Custom(Arc<dyn CustomMiddlewareFactory>),
+    WeakJoin(WeakJoinMiddleware),
+    Custom {
+        name: String,
+        config: serde_json::Value,
+    },
 }
 
 /// Deduplication middleware configuration.
@@ -408,15 +489,6 @@ pub struct DeduplicationMiddleware {
     pub ttl_seconds: u64,
 }
 
-/// Configuration for limiting the number of parallel commit tasks of publishers.
-#[derive(Debug, Deserialize, Serialize, Clone)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(deny_unknown_fields)]
-pub struct CommitConcurrencyMiddleware {
-    /// The maximum number of concurrent commit tasks allowed.
-    pub limit: usize,
-}
-
 /// Metrics middleware configuration. It's currently a struct without fields
 /// but can be extended later. Its presence in the config enables the middleware.
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -424,28 +496,17 @@ pub struct CommitConcurrencyMiddleware {
 #[serde(deny_unknown_fields)]
 pub struct MetricsMiddleware {}
 
-/// Dead-Letter Queue (DLQ) middleware configuration.
-#[derive(Debug, Deserialize, Serialize, Clone)]
+/// Dead-Letter Queue (DLQ) middleware configuration. It is recommended that the
+/// endpoint is also using a retry to avoid message loss
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct DeadLetterQueueMiddleware {
     /// The endpoint to send failed messages to.
     pub endpoint: Endpoint,
-    /// Number of retry attempts for the DLQ send. Defaults to 3.
-    #[serde(default = "default_dlq_retry_attempts")]
-    pub dlq_retry_attempts: usize,
-    /// Initial retry interval in milliseconds. Defaults to 100ms.
-    #[serde(default = "default_initial_interval_ms")]
-    pub dlq_initial_interval_ms: u64,
-    /// Maximum retry interval in milliseconds. Defaults to 5000ms.
-    #[serde(default = "default_max_interval_ms")]
-    pub dlq_max_interval_ms: u64,
-    /// Multiplier for exponential backoff. Defaults to 2.0.
-    #[serde(default = "default_multiplier")]
-    pub dlq_multiplier: f64,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct RetryMiddleware {
@@ -474,6 +535,18 @@ pub struct DelayMiddleware {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
+pub struct WeakJoinMiddleware {
+    /// The metadata key to group messages by (e.g., "correlation_id").
+    pub group_by: String,
+    /// The number of messages to wait for.
+    pub expected_count: usize,
+    /// Timeout in milliseconds.
+    pub timeout_ms: u64,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub struct RandomPanicMiddleware {
     /// Probability of panic (0.0 to 1.0).
     #[serde(deserialize_with = "deserialize_probability")]
@@ -494,23 +567,14 @@ where
 }
 
 // --- AWS Specific Configuration ---
-#[derive(Debug, Deserialize, Serialize, Clone)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(deny_unknown_fields)]
-pub struct AwsEndpoint {
-    /// The SQS queue URL.
-    pub queue_url: Option<String>,
-    /// The SNS topic ARN.
-    pub topic_arn: Option<String>,
-    /// AWS connection configuration.
-    #[serde(flatten)]
-    pub config: AwsConfig,
-}
-
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct AwsConfig {
+    /// The SQS queue URL. Required for Consumer. Optional for Publisher if `topic_arn` is set.
+    pub queue_url: Option<String>,
+    /// (Publisher only) The SNS topic ARN.
+    pub topic_arn: Option<String>,
     /// AWS Region (e.g., "us-east-1").
     pub region: Option<String>,
     /// Custom endpoint URL (e.g., for LocalStack).
@@ -521,37 +585,26 @@ pub struct AwsConfig {
     pub secret_key: Option<String>,
     /// AWS Session Token.
     pub session_token: Option<String>,
-    /// Maximum number of messages to receive in a batch (1-10).
+    /// (Consumer only) Maximum number of messages to receive in a batch (1-10).
     #[cfg_attr(feature = "schema", schemars(range(min = 1, max = 10)))]
     pub max_messages: Option<i32>,
-    /// Wait time for long polling in seconds (0-20).
+    /// (Consumer only) Wait time for long polling in seconds (0-20).
     #[cfg_attr(feature = "schema", schemars(range(min = 0, max = 20)))]
     pub wait_time_seconds: Option<i32>,
 }
 
 // --- Kafka Specific Configuration ---
 
-/// Kafka endpoint configuration, combining connection and topic details.
-#[derive(Debug, Deserialize, Serialize, Clone)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(deny_unknown_fields)]
-pub struct KafkaEndpoint {
-    /// The Kafka topic to produce to or consume from.
-    pub topic: Option<String>,
-    /// Kafka connection configuration.
-    #[serde(flatten)]
-    pub config: KafkaConfig,
-}
-
 /// General Kafka connection configuration.
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct KafkaConfig {
-    // pub url: String // use "pub brokers: String" here.
-    /// Comma-separated list of Kafka broker URLs. Can also be specified using the alias 'url'.
-    #[serde(alias = "url")]
-    pub brokers: String,
+    /// Comma-separated list of Kafka broker URLs.
+    #[serde(alias = "brokers")]
+    pub url: String,
+    /// The Kafka topic to produce to or consume from.
+    pub topic: Option<String>,
     /// Optional username for SASL authentication.
     pub username: Option<String>,
     /// Optional password for SASL authentication.
@@ -559,33 +612,106 @@ pub struct KafkaConfig {
     /// TLS configuration.
     #[serde(default)]
     pub tls: TlsConfig,
-    /// Consumer group ID. Required for consumers.
+    /// (Consumer only) Consumer group ID.
+    /// If not provided, the consumer acts in **Subscriber mode**: it generates a unique, ephemeral group ID and starts consuming from the latest offset.
     pub group_id: Option<String>,
     /// (Publisher only) If true, do not wait for an acknowledgement when sending to broker. Defaults to false.
     #[serde(default)]
     pub delayed_ack: bool,
-    /// Additional librdkafka producer configuration options (key-value pairs).
+    /// (Publisher only) Additional librdkafka producer configuration options (key-value pairs).
     #[serde(default)]
     pub producer_options: Option<Vec<(String, String)>>,
-    /// Additional librdkafka consumer configuration options (key-value pairs).
+    /// (Consumer only) Additional librdkafka consumer configuration options (key-value pairs).
     #[serde(default)]
     pub consumer_options: Option<Vec<(String, String)>>,
 }
 
-// --- NATS Specific Configuration ---
+// --- File Specific Configuration ---
 
-/// NATS endpoint configuration, combining connection and subject details.
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Serialize, Clone)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(deny_unknown_fields)]
-pub struct NatsEndpoint {
-    /// The NATS subject to publish to or subscribe to.
-    pub subject: Option<String>,
-    /// The JetStream stream name (optional).
-    pub stream: Option<String>,
-    #[serde(flatten)]
-    pub config: NatsConfig,
+pub struct FileConfig {
+    /// Path to the file.
+    pub path: String,
+    /// (Consumer only) If true, acts in **Subscriber mode** (like `tail -f`), reading new lines as they are written.
+    /// If false (default), acts in Consumer mode, reading lines and removing them from the file (queue behavior).
+    #[serde(default)]
+    pub subscribe_mode: bool,
+    /// (Consumer only) If true, lines are removed from the file after being processed by all subscribers.
+    /// Defaults to true if subscribe_mode is false, and false if subscribe_mode is true.
+    pub delete: Option<bool>,
 }
+
+impl<'de> Deserialize<'de> for FileConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct FileConfigVisitor;
+        impl<'de> Visitor<'de> for FileConfigVisitor {
+            type Value = FileConfig;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("string or map")
+            }
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(FileConfig {
+                    path: value.to_string(),
+                    subscribe_mode: false,
+                    delete: None,
+                })
+            }
+            fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
+            where
+                M: MapAccess<'de>,
+            {
+                let mut path = None;
+                let mut consume = true;
+                let mut subscribe_mode = None;
+                let mut delete = None;
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "path" => {
+                            if path.is_some() {
+                                return Err(serde::de::Error::duplicate_field("path"));
+                            }
+                            path = Some(map.next_value()?);
+                        }
+                        "consume" => {
+                            consume = map.next_value()?;
+                        }
+                        "subscribe_mode" => {
+                            if subscribe_mode.is_some() {
+                                return Err(serde::de::Error::duplicate_field("subscribe_mode"));
+                            }
+                            subscribe_mode = Some(map.next_value()?);
+                        }
+                        "delete" => {
+                            if delete.is_some() {
+                                return Err(serde::de::Error::duplicate_field("delete"));
+                            }
+                            delete = Some(map.next_value()?);
+                        }
+                        _ => {
+                            let _ = map.next_value::<serde::de::IgnoredAny>()?;
+                        }
+                    }
+                }
+                let path = path.ok_or_else(|| serde::de::Error::missing_field("path"))?;
+                Ok(FileConfig {
+                    path,
+                    subscribe_mode: subscribe_mode.unwrap_or(!consume),
+                    delete,
+                })
+            }
+        }
+        deserializer.deserialize_any(FileConfigVisitor)
+    }
+}
+
+// --- NATS Specific Configuration ---
 
 /// General NATS connection configuration.
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
@@ -594,6 +720,10 @@ pub struct NatsEndpoint {
 pub struct NatsConfig {
     /// Comma-separated list of NATS server URLs (e.g., "nats://localhost:4222,nats://localhost:4223").
     pub url: String,
+    /// The NATS subject to publish to or subscribe to.
+    pub subject: Option<String>,
+    /// (Consumer only). The JetStream stream name. Required for Consumers.
+    pub stream: Option<String>,
     /// Optional username for authentication.
     pub username: Option<String>,
     /// Optional password for authentication.
@@ -604,11 +734,11 @@ pub struct NatsConfig {
     /// Optional token for authentication.
     pub token: Option<String>,
     /// (Publisher only) If true, the publisher uses the request-reply pattern.
-    /// It sends a request and waits for a response (using `core_client.request_with_headers()`)
-    /// with timeout handling. Defaults to false.
+    /// It sends a request and waits for a response (using `core_client.request_with_headers()`).
+    /// Defaults to false.
     #[serde(default)]
     pub request_reply: bool,
-    /// Timeout for request-reply operations in milliseconds. Defaults to 2000ms.
+    /// (Publisher only) Timeout for request-reply operations in milliseconds. Defaults to 30000ms.
     pub request_timeout_ms: Option<u64>,
     /// (Publisher only) If true, do not wait for an acknowledgement when sending to broker. Defaults to false.
     #[serde(default)]
@@ -616,23 +746,15 @@ pub struct NatsConfig {
     /// If no_jetstream: true, use Core NATS (fire-and-forget) instead of JetStream. Defaults to false.
     #[serde(default)]
     pub no_jetstream: bool,
-    /// The default stream name to use if not specified in the endpoint configuration.
-    pub default_stream: Option<String>,
-    /// Maximum number of messages in the stream (if created by the bridge). Defaults to 1,000,000.
+    /// (Consumer only) If true, use ephemeral **Subscriber mode**. Defaults to false (durable consumer).
+    #[serde(default)]
+    pub subscriber_mode: bool,
+    /// (Publisher only) Maximum number of messages in the stream (if created by the bridge). Defaults to 1,000,000.
     pub stream_max_messages: Option<i64>,
-    /// Maximum total bytes in the stream (if created by the bridge). Defaults to 1GB.
+    /// (Publisher only) Maximum total bytes in the stream (if created by the bridge). Defaults to 1GB.
     pub stream_max_bytes: Option<i64>,
-    /// Number of messages to prefetch from the consumer. Defaults to 10000.
+    /// (Consumer only) Number of messages to prefetch from the consumer. Defaults to 10000.
     pub prefetch_count: Option<usize>,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(rename_all = "lowercase")]
-pub enum ConsumerMode {
-    #[default]
-    Consume,
-    Subscribe,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
@@ -641,23 +763,38 @@ pub enum ConsumerMode {
 pub struct MemoryConfig {
     /// The topic name for the in-memory channel.
     pub topic: String,
-    /// The capacity of the channel.
+    /// The capacity of the channel. Defaults to 100.
     pub capacity: Option<usize>,
+    /// (Publisher only) If true, send() waits for a response.
+    #[serde(default)]
+    pub request_reply: bool,
+    /// (Publisher only) Timeout for request-reply operations in milliseconds. Defaults to 30000ms.
+    pub request_timeout_ms: Option<u64>,
+    /// (Consumer only) If true, act as a **Subscriber** (fan-out). Defaults to false (queue).
+    #[serde(default)]
+    pub subscribe_mode: bool,
+    /// (Consumer only) If true, enables NACK support (re-queuing), which requires cloning messages. Defaults to false.
+    #[serde(default)]
+    pub enable_nack: bool,
+}
+
+impl MemoryConfig {
+    pub fn new(topic: impl Into<String>, capacity: Option<usize>) -> Self {
+        Self {
+            topic: topic.into(),
+            capacity,
+            ..Default::default()
+        }
+    }
+    pub fn with_subscribe(self, subscribe_mode: bool) -> Self {
+        Self {
+            subscribe_mode,
+            ..self
+        }
+    }
 }
 
 // --- AMQP Specific Configuration ---
-
-/// AMQP endpoint configuration, combining connection and queue details.
-#[derive(Debug, Deserialize, Serialize, Clone)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(deny_unknown_fields)]
-pub struct AmqpEndpoint {
-    /// The AMQP queue name.
-    pub queue: Option<String>,
-    /// AMQP connection configuration.
-    #[serde(flatten)]
-    pub config: AmqpConfig,
-}
 
 /// General AMQP connection configuration.
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
@@ -668,6 +805,11 @@ pub struct AmqpConfig {
     /// For high availability, provide the address of a load balancer or use DNS resolution
     /// that points to multiple brokers. Example: "amqp://localhost:5672/vhost".
     pub url: String,
+    /// The AMQP queue name.
+    pub queue: Option<String>,
+    /// (Consumer only) If true, act as a **Subscriber** (fan-out). Defaults to false.
+    #[serde(default)]
+    pub subscribe_mode: bool,
     /// Optional username for authentication.
     pub username: Option<String>,
     /// Optional password for authentication.
@@ -677,9 +819,9 @@ pub struct AmqpConfig {
     pub tls: TlsConfig,
     /// The exchange to publish to or bind the queue to.
     pub exchange: Option<String>,
-    /// Number of messages to prefetch. Defaults to 100.
+    /// (Consumer only) Number of messages to prefetch. Defaults to 100.
     pub prefetch_count: Option<u16>,
-    /// If true, declare queues as non-durable (transient). Defaults to false.
+    /// If true, declare queues as non-durable (transient). Defaults to false. Affects both Consumer (queue durability) and Publisher (message persistence).
     #[serde(default)]
     pub no_persistence: bool,
     /// (Publisher only) If true, do not wait for an acknowledgement when sending to broker. Defaults to false.
@@ -687,19 +829,17 @@ pub struct AmqpConfig {
     pub delayed_ack: bool,
 }
 
-// --- MongoDB Specific Configuration ---
-
-/// MongoDB endpoint configuration.
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(deny_unknown_fields)]
-pub struct MongoDbEndpoint {
-    /// The MongoDB collection name.
-    pub collection: Option<String>,
-    /// MongoDB connection configuration.
-    #[serde(flatten)]
-    pub config: MongoDbConfig,
+#[serde(rename_all = "lowercase")]
+pub enum MongoDbFormat {
+    #[default]
+    Normal,
+    Json,
+    Raw,
 }
+
+// --- MongoDB Specific Configuration ---
 
 /// General MongoDB connection configuration.
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
@@ -709,6 +849,8 @@ pub struct MongoDbConfig {
     /// MongoDB connection string URI. Can contain a comma-separated list of hosts for a replica set.
     /// Credentials provided via the separate `username` and `password` fields take precedence over any credentials embedded in the URL.
     pub url: String,
+    /// The MongoDB collection name.
+    pub collection: Option<String>,
     /// Optional username. Takes precedence over any credentials embedded in the `url`.
     /// Use embedded URL credentials for simple one-off connections but prefer explicit username/password fields (or environment-sourced secrets) for clarity and secret management in production.
     pub username: Option<String>,
@@ -720,25 +862,30 @@ pub struct MongoDbConfig {
     pub tls: TlsConfig,
     /// The database name.
     pub database: String,
-    /// Polling interval in milliseconds for the consumer (when not using Change Streams). Defaults to 100ms.
+    /// (Consumer only) Polling interval in milliseconds for the consumer (when not using Change Streams). Defaults to 100ms.
     pub polling_interval_ms: Option<u64>,
-    /// TTL in seconds for documents created by the publisher. If set, a TTL index is created.
+    /// (Publisher only) Polling interval in milliseconds for the publisher when waiting for a reply. Defaults to 50ms.
+    pub reply_polling_ms: Option<u64>,
+    /// (Publisher only) If true, the publisher will wait for a response in a dedicated collection. Defaults to false.
+    #[serde(default)]
+    pub request_reply: bool,
+    /// (Consumer only) If true, use Change Streams (**Subscriber mode**). Defaults to false (polling/consumer mode).
+    #[serde(default)]
+    pub change_stream: bool,
+    /// (Publisher only) Timeout for request-reply operations in milliseconds. Defaults to 30000ms.
+    pub request_timeout_ms: Option<u64>,
+    /// (Publisher only) TTL in seconds for documents created by the publisher. If set, a TTL index is created.
     pub ttl_seconds: Option<u64>,
+    /// (Publisher only) If set, creates a capped collection with this size in bytes.
+    pub capped_size_bytes: Option<i64>,
+    /// Format for storing messages. Defaults to Normal.
+    #[serde(default)]
+    pub format: MongoDbFormat,
+    /// The ID used for the cursor in sequenced mode. If not provided, consumption starts from the current sequence (ephemeral).
+    pub cursor_id: Option<String>,
 }
 
 // --- MQTT Specific Configuration ---
-
-/// MQTT endpoint configuration.
-#[derive(Debug, Deserialize, Serialize, Clone)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(deny_unknown_fields)]
-pub struct MqttEndpoint {
-    /// The MQTT topic.
-    pub topic: Option<String>,
-    /// MQTT connection configuration.
-    #[serde(flatten)]
-    pub config: MqttConfig,
-}
 
 /// General MQTT connection configuration.
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
@@ -747,6 +894,8 @@ pub struct MqttEndpoint {
 pub struct MqttConfig {
     /// MQTT broker URL (e.g., "tcp://localhost:1883"). Does not support multiple hosts.
     pub url: String,
+    /// The MQTT topic.
+    pub topic: Option<String>,
     /// Optional username for authentication.
     pub username: Option<String>,
     /// Optional password for authentication.
@@ -754,13 +903,15 @@ pub struct MqttConfig {
     /// TLS configuration.
     #[serde(default)]
     pub tls: TlsConfig,
+    /// Optional client ID. If not provided, one is generated or derived from route name.
+    pub client_id: Option<String>,
     /// Capacity of the internal channel for incoming messages. Defaults to 100.
     pub queue_capacity: Option<usize>,
     /// Maximum number of inflight messages.
     pub max_inflight: Option<u16>,
     /// Quality of Service level (0, 1, or 2). Defaults to 1.
     pub qos: Option<u8>,
-    /// If true, start with a clean session. Defaults to false (persistent session).
+    /// (Consumer only) If true, start with a clean session. Defaults to false (persistent session). Setting this to true effectively enables **Subscriber mode** (ephemeral).
     #[serde(default = "default_clean_session")]
     pub clean_session: bool,
     /// Keep-alive interval in seconds. Defaults to 20.
@@ -770,7 +921,7 @@ pub struct MqttConfig {
     pub protocol: MqttProtocol,
     /// Session expiry interval in seconds (MQTT v5 only).
     pub session_expiry_interval: Option<u32>,
-    /// If true, messages are acknowledged immediately upon receipt (auto-ack).
+    /// (Publisher only) If true, messages are acknowledged immediately upon receipt (auto-ack).
     /// If false (default), messages are acknowledged after processing (manual-ack).
     #[serde(default)]
     pub delayed_ack: bool,
@@ -785,55 +936,7 @@ pub enum MqttProtocol {
     V3,
 }
 
-// --- IBM MQ Specific Configuration ---
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(deny_unknown_fields)]
-pub struct IbmMqEndpoint {
-    /// The IBM MQ queue name.
-    pub queue: Option<String>,
-    /// The IBM MQ topic string.
-    pub topic: Option<String>,
-    /// IBM MQ connection configuration.
-    #[serde(flatten)]
-    pub config: IbmMqConfig,
-}
-
-/// General IBM MQ connection configuration.
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(deny_unknown_fields)]
-pub struct IbmMqConfig {
-    /// Comma-separated list of IBM MQ connection names (e.g., "localhost(1414),otherhost(1414)").
-    pub connection_name: String,
-    /// The queue manager name.
-    pub queue_manager: String,
-    /// The channel name.
-    pub channel: String,
-    /// Optional username for authentication.
-    pub user: Option<String>,
-    /// Optional password for authentication.
-    pub password: Option<String>,
-    /// Cipher spec for TLS connection.
-    pub cipher_spec: Option<String>,
-    /// TLS configuration.
-    #[serde(default)]
-    pub tls: TlsConfig,
-}
-
 // --- ZeroMQ Specific Configuration ---
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(deny_unknown_fields)]
-pub struct ZeroMqEndpoint {
-    /// The ZeroMQ topic (for PUB/SUB sockets).
-    pub topic: Option<String>,
-    /// ZeroMQ connection configuration.
-    #[serde(flatten)]
-    pub config: ZeroMqConfig,
-}
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -844,6 +947,8 @@ pub struct ZeroMqConfig {
     /// The socket type (PUSH, PULL, PUB, SUB, REQ, REP).
     #[serde(default)]
     pub socket_type: Option<ZeroMqSocketType>,
+    /// (Consumer only) The ZeroMQ topic (for SUB sockets).
+    pub topic: Option<String>,
     /// If true, bind to the address. If false, connect.
     #[serde(default)]
     pub bind: bool,
@@ -866,32 +971,67 @@ pub enum ZeroMqSocketType {
 
 // --- HTTP Specific Configuration ---
 
-/// HTTP endpoint configuration.
-#[derive(Debug, Deserialize, Serialize, Clone)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(deny_unknown_fields)]
-pub struct HttpEndpoint {
-    /// HTTP connection configuration.
-    #[serde(flatten)]
-    pub config: HttpConfig,
-}
-
 /// General HTTP connection configuration.
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct HttpConfig {
     /// For consumers, the listen address (e.g., "0.0.0.0:8080"). For publishers, the target URL.
-    pub url: Option<String>,
+    pub url: String,
     /// TLS configuration.
     #[serde(default)]
     pub tls: TlsConfig,
-    /// (Consumer only) Optional endpoint to send the response to.
-    pub response_out: Option<Box<Endpoint>>,
     /// (Consumer only) Number of worker threads to use. Defaults to 0 for unlimited.
     pub workers: Option<usize>,
     /// (Consumer only) Header key to extract the message ID from. Defaults to "message-id".
     pub message_id_header: Option<String>,
+    /// (Consumer only) Timeout for request-reply operations in milliseconds. Defaults to 30000ms.
+    pub request_timeout_ms: Option<u64>,
+}
+
+// --- IBM MQ Specific Configuration ---
+
+/// Connection settings for the IBM MQ Queue Manager.
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct IbmMqConfig {
+    /// Required. Connection URL in `host(port)` format. Supports comma-separated list for failover (e.g., `host1(1414),host2(1414)`).
+    pub url: String,
+    /// Target Queue name for point-to-point messaging. Optional if `topic` is set; defaults to route name if omitted.
+    pub queue: Option<String>,
+    /// Target Topic string for Publish/Subscribe. If set, enables **Subscriber mode** (Consumer) or publishes to a topic (Publisher). Optional if `queue` is set.
+    pub topic: Option<String>,
+    /// Required. Name of the Queue Manager to connect to (e.g., `QM1`).
+    pub queue_manager: String,
+    /// Required. Server Connection (SVRCONN) Channel name defined on the QM.
+    pub channel: String,
+    /// Username for authentication. Optional; required if the channel enforces authentication.
+    pub username: Option<String>,
+    /// Password for authentication. Optional; required if the channel enforces authentication.
+    pub password: Option<String>,
+    /// TLS CipherSpec (e.g., `ANY_TLS12`). Optional; required for encrypted connections.
+    pub cipher_spec: Option<String>,
+    /// TLS configuration settings (e.g., keystore paths). Optional.
+    #[serde(default)]
+    pub tls: TlsConfig,
+    /// Maximum message size in bytes (default: 4MB). Optional.
+    #[serde(default = "default_max_message_size")]
+    pub max_message_size: usize,
+    /// (Consumer only) Polling timeout in milliseconds (default: 1000ms). Optional.
+    #[serde(default = "default_wait_timeout_ms")]
+    pub wait_timeout_ms: i32,
+    /// Internal buffer size for the channel. Defaults to 100.
+    #[serde(default)]
+    pub internal_buffer_size: Option<usize>,
+}
+
+fn default_max_message_size() -> usize {
+    4 * 1024 * 1024 // 4MB default
+}
+
+fn default_wait_timeout_ms() -> i32 {
+    1000 // 1 second default
 }
 
 // --- Switch/Router Configuration ---
@@ -912,7 +1052,9 @@ pub struct SwitchConfig {
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
-pub struct ResponseConfig {}
+pub struct ResponseConfig {
+    // This struct is a marker and currently has no fields.
+}
 
 // --- Common Configuration ---
 
@@ -971,7 +1113,7 @@ kafka_to_nats:
               url: "nats://localhost:4222"
     kafka:
       topic: "input-topic"
-      brokers: "localhost:9092"
+      url: "localhost:9092"
       group_id: "my-consumer-group"
       tls:
         required: true
@@ -992,7 +1134,7 @@ kafka_to_nats:
         assert_eq!(config.len(), 1);
         let route = config.get("kafka_to_nats").expect("Route should exist");
 
-        assert_eq!(route.concurrency, 10);
+        assert_eq!(route.options.concurrency, 10);
 
         // --- Assert Input ---
         let input = &route.input;
@@ -1013,12 +1155,12 @@ kafka_to_nats:
                 Middleware::Metrics(_) => {
                     has_metrics = true;
                 }
-                Middleware::Custom(_) => {}
+                Middleware::Custom { .. } => {}
                 Middleware::Dlq(dlq) => {
                     assert!(dlq.endpoint.middlewares.is_empty());
                     if let EndpointType::Nats(nats_cfg) = &dlq.endpoint.endpoint_type {
                         assert_eq!(nats_cfg.subject, Some("dlq-subject".to_string()));
-                        assert_eq!(nats_cfg.config.url, "nats://localhost:4222");
+                        assert_eq!(nats_cfg.url, "nats://localhost:4222");
                     }
                     has_dlq = true;
                 }
@@ -1031,16 +1173,16 @@ kafka_to_nats:
                     assert!((rp.probability - 0.1).abs() < f64::EPSILON);
                     has_random_panic = true;
                 }
-                Middleware::CommitConcurrency(_) => {}
                 Middleware::Delay(_) => {}
+                Middleware::WeakJoin(_) => {}
             }
         }
 
         if let EndpointType::Kafka(kafka) = &input.endpoint_type {
             assert_eq!(kafka.topic, Some("input-topic".to_string()));
-            assert_eq!(kafka.config.brokers, "localhost:9092");
-            assert_eq!(kafka.config.group_id, Some("my-consumer-group".to_string()));
-            let tls = &kafka.config.tls;
+            assert_eq!(kafka.url, "localhost:9092");
+            assert_eq!(kafka.group_id, Some("my-consumer-group".to_string()));
+            let tls = &kafka.tls;
             assert!(tls.required);
             assert_eq!(tls.ca_file.as_deref(), Some("/path_to_ca"));
             assert!(tls.accept_invalid_certs);
@@ -1060,7 +1202,7 @@ kafka_to_nats:
 
         if let EndpointType::Nats(nats) = &output.endpoint_type {
             assert_eq!(nats.subject, Some("output-subject".to_string()));
-            assert_eq!(nats.config.url, "nats://localhost:4222");
+            assert_eq!(nats.url, "nats://localhost:4222");
         } else {
             panic!("Output endpoint should be NATS");
         }
@@ -1082,10 +1224,7 @@ kafka_to_nats:
         unsafe {
             std::env::set_var("MQB__KAFKA_TO_NATS__CONCURRENCY", "10");
             std::env::set_var("MQB__KAFKA_TO_NATS__INPUT__KAFKA__TOPIC", "input-topic");
-            std::env::set_var(
-                "MQB__KAFKA_TO_NATS__INPUT__KAFKA__BROKERS",
-                "localhost:9092",
-            );
+            std::env::set_var("MQB__KAFKA_TO_NATS__INPUT__KAFKA__URL", "localhost:9092");
             std::env::set_var(
                 "MQB__KAFKA_TO_NATS__INPUT__KAFKA__GROUP_ID",
                 "my-consumer-group",
@@ -1132,10 +1271,10 @@ kafka_to_nats:
             .expect("Failed to deserialize config");
 
         // We can't test all values from env, but we can check the ones we set.
-        assert_eq!(config.get("kafka_to_nats").unwrap().concurrency, 10);
+        assert_eq!(config.get("kafka_to_nats").unwrap().options.concurrency, 10);
         if let EndpointType::Kafka(k) = &config.get("kafka_to_nats").unwrap().input.endpoint_type {
             assert_eq!(k.topic, Some("input-topic".to_string()));
-            assert!(k.config.tls.required);
+            assert!(k.tls.required);
         } else {
             panic!("Expected Kafka endpoint");
         }

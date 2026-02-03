@@ -21,6 +21,10 @@ pub enum ConsumerError {
     #[error("consumer connection error: {0}")]
     Connection(#[source] anyhow::Error),
 
+    /// A consumer gap was detected: the requested events were already garbage-collected.
+    #[error("consumer gap: requested offset {requested} but earliest available is {base}")]
+    Gap { requested: u64, base: u64 },
+
     /// The consumer has reached the end of the stream and has shut down gracefully.
     #[error("consumer reached end of stream")]
     EndOfStream,

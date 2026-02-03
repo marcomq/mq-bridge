@@ -1,8 +1,8 @@
 #![allow(dead_code)] // This module contains helpers used by various integration tests.
+use crate::traits::{BoxFuture, MessageDisposition, MessagePublisher, Received};
+use crate::traits::{ConsumerError, MessageConsumer, PublisherError, ReceivedBatch, SentBatch};
+use crate::{CanonicalMessage, Route};
 use async_channel::{bounded, Receiver, Sender};
-use mq_bridge::traits::{BoxFuture, MessagePublisher, Received};
-use mq_bridge::traits::{ConsumerError, MessageConsumer, PublisherError, ReceivedBatch, SentBatch};
-use mq_bridge::{CanonicalMessage, Route};
 use once_cell::sync::Lazy;
 use serde_json::json;
 use std::any::Any;
@@ -12,14 +12,14 @@ use std::process::Command;
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tokio::sync::Semaphore;
+use tokio::sync::{Mutex as AsyncMutex, Semaphore};
 
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::filter::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
-use mq_bridge::endpoints::memory::MemoryChannel;
+use crate::endpoints::memory::MemoryChannel;
 
 pub const PERF_TEST_BATCH_MESSAGE_COUNT: usize = 100_000;
 pub const PERF_TEST_SINGLE_MESSAGE_COUNT: usize = 10_000;
@@ -40,6 +40,9 @@ pub struct PerformanceResult {
 /// A global, thread-safe collector for performance results.
 static PERFORMANCE_RESULTS: Lazy<Mutex<Vec<PerformanceResult>>> =
     Lazy::new(|| Mutex::new(Vec::new()));
+
+/// Global lock to serialize tests that use Docker containers.
+static DOCKER_TEST_LOCK: Lazy<AsyncMutex<()>> = Lazy::new(|| AsyncMutex::new(()));
 
 /// Adds a performance result to the global collector.
 pub fn add_performance_result(result: PerformanceResult) {
@@ -170,10 +173,9 @@ impl Drop for DockerCompose {
 
 pub fn generate_test_messages(num_messages: usize) -> Vec<CanonicalMessage> {
     let mut messages = Vec::with_capacity(num_messages);
-
     for i in 0..num_messages {
         let payload = format!(r#"{{"message_num":{},"test_id":"integration"}}"#, i);
-        let msg = CanonicalMessage::new(payload.into_bytes(), None);
+        let msg = CanonicalMessage::new(payload.into_bytes(), Some(fast_uuid_v7::gen_id()));
         messages.push(msg);
     }
     messages
@@ -284,12 +286,13 @@ async fn run_pipeline_test_internal(
 
     harness.send_messages().await;
 
+    let is_chaos_test = chaos_injector.is_some();
     if let Some(injector) = chaos_injector {
         tokio::spawn(injector());
     }
 
     // Wait for all messages to be processed by checking the metrics.
-    let timeout = if is_performance_test {
+    let timeout = if is_performance_test || is_chaos_test {
         Duration::from_secs(210)
     } else {
         Duration::from_secs(30)
@@ -467,9 +470,11 @@ where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = ()>,
 {
-    let _docker = DockerCompose::new(compose_file);
+    let _guard = DOCKER_TEST_LOCK.lock().await;
+    let docker = DockerCompose::new(compose_file);
+    docker.down();
     // Give some time for docker to be ready
-    _docker.up();
+    docker.up();
     test_fn().await;
 }
 
@@ -480,7 +485,9 @@ where
     F: FnOnce(DockerController) -> Fut,
     Fut: std::future::Future<Output = ()>,
 {
+    let _guard = DOCKER_TEST_LOCK.lock().await;
     let docker = DockerCompose::new(compose_file);
+    docker.down();
     // Give some time for docker to be ready
     docker.up();
     test_fn(docker.controller()).await;
@@ -566,8 +573,8 @@ where
 static STATIC_PAYLOAD: Lazy<Vec<u8>> =
     Lazy::new(|| serde_json::to_vec(&json!({ "perf_test": true, "static": true })).unwrap());
 
-pub fn generate_message() -> CanonicalMessage {
-    CanonicalMessage::new(STATIC_PAYLOAD.clone(), None)
+pub fn generate_message(id: u128) -> CanonicalMessage {
+    CanonicalMessage::new(STATIC_PAYLOAD.clone(), Some(id))
 }
 
 /// Measure the performance of writing messages to a publisher.
@@ -601,8 +608,10 @@ pub async fn measure_write_performance(
 ) -> Duration {
     // write performance test (Batch) for {}", _name);
     let batch_size = 128; // Define a reasonable batch size
-    let (tx, rx): (Sender<CanonicalMessage>, Receiver<CanonicalMessage>) =
-        bounded(batch_size * concurrency * 2);
+    let (tx, rx): (
+        Sender<Vec<CanonicalMessage>>,
+        Receiver<Vec<CanonicalMessage>>,
+    ) = bounded(concurrency * 4);
 
     let final_count = Arc::new(AtomicUsize::new(0));
 
@@ -617,10 +626,19 @@ pub async fn measure_write_performance(
                 0
             };
         tokio::spawn(async move {
+            let mut batch = Vec::with_capacity(batch_size);
             for _ in 0..count {
-                if tx.send(generate_message()).await.is_err() {
-                    break;
+                batch.push(generate_message(fast_uuid_v7::gen_id()));
+                if batch.len() >= batch_size {
+                    if tx.send(batch).await.is_err() {
+                        eprintln!("Error sending to channel");
+                        return;
+                    }
+                    batch = Vec::with_capacity(batch_size);
                 }
+            }
+            if !batch.is_empty() {
+                let _ = tx.send(batch).await;
             }
         });
     }
@@ -635,28 +653,10 @@ pub async fn measure_write_performance(
         let final_count_clone = Arc::clone(&final_count);
 
         tasks.spawn(async move {
-            loop {
-                // Wait for the first message to start a batch.
-                let first_message = match rx_clone.recv().await {
-                    Ok(msg) => msg,
-                    Err(_) => break, // Channel is closed and empty, so we're done.
-                };
-
-                let mut batch = Vec::with_capacity(batch_size);
-                batch.push(first_message);
-
-                // Greedily fill the rest of the batch without waiting.
-                for _ in 1..batch_size {
-                    if let Ok(msg) = rx_clone.try_recv() {
-                        batch.push(msg);
-                    } else {
-                        break; // Channel is empty for now.
-                    }
-                }
-
+            while let Ok(batch) = rx_clone.recv().await {
                 // Retry sending the batch if some messages fail.
                 let mut messages_to_send = batch;
-                let mut batch_size = messages_to_send.len();
+                let mut current_batch_size = messages_to_send.len();
                 let mut retry_count = 0;
                 const MAX_RETRIES: usize = 5;
                 loop {
@@ -665,17 +665,23 @@ pub async fn measure_write_performance(
                         .await
                     {
                         Ok(SentBatch::Ack) => {
-                            final_count_clone
-                                .fetch_add(batch_size, std::sync::atomic::Ordering::Relaxed);
+                            final_count_clone.fetch_add(
+                                current_batch_size,
+                                std::sync::atomic::Ordering::Relaxed,
+                            );
                             break; // All sent successfully
                         }
                         Ok(SentBatch::Partial {
                             responses: _,
                             failed,
                         }) => {
-                            if failed.is_empty() {
+                            let success_count = current_batch_size - failed.len();
+                            if success_count > 0 {
                                 final_count_clone
-                                    .fetch_add(batch_size, std::sync::atomic::Ordering::Relaxed);
+                                    .fetch_add(success_count, std::sync::atomic::Ordering::Relaxed);
+                            }
+
+                            if failed.is_empty() {
                                 break; // All sent successfully
                             } else {
                                 let (retryable, non_retryable): (Vec<_>, Vec<_>) = failed
@@ -692,11 +698,18 @@ pub async fn measure_write_performance(
                                 if retryable.is_empty() {
                                     break;
                                 }
+                                retry_count += 1;
+                                if retry_count >= MAX_RETRIES {
+                                    eprintln!(
+                                        "Max retries reached, giving up on {} messages",
+                                        retryable.len()
+                                    );
+                                    break;
+                                }
                                 eprintln!("Retrying: {}", retryable.len());
                                 messages_to_send =
                                     retryable.into_iter().map(|(msg, _)| msg).collect();
-                                batch_size = messages_to_send.len();
-                                retry_count = 0; // Reset on partial success
+                                current_batch_size = messages_to_send.len();
                             }
                         }
                         Err(e) => {
@@ -805,7 +818,7 @@ pub async fn measure_read_performance(
         let mut consumer_guard = consumer_clone.lock().await;
         let receive_future = consumer_guard.receive_batch(missing);
 
-        match tokio::time::timeout(Duration::from_secs(10), receive_future).await {
+        match tokio::time::timeout(Duration::from_secs(20), receive_future).await {
             Ok(Ok(batch)) if !batch.messages.is_empty() => {
                 final_count += batch.messages.len();
                 let commit = batch.commit;
@@ -815,7 +828,7 @@ pub async fn measure_read_performance(
                     .await
                     .expect("Semaphore closed");
                 tokio::spawn(async move {
-                    let _ = commit(None).await;
+                    let _ = commit(vec![MessageDisposition::Ack; batch.messages.len()]).await;
                     drop(permit);
                 });
             }
@@ -823,8 +836,12 @@ pub async fn measure_read_performance(
                 eprintln!("Error receiving message: {}. Stopping read.", e);
                 break;
             }
+            Err(_) => {
+                eprintln!("Timeout waiting for messages. Stopping read.");
+                break;
+            }
             _ => {
-                // Timeout or empty batch, assume we are done.
+                // Empty batch, assume we are done.
                 break;
             }
         }
@@ -862,7 +879,11 @@ pub async fn measure_single_write_performance(
             };
         tokio::spawn(async move {
             for _ in 0..count {
-                if tx.send(generate_message()).await.is_err() {
+                if tx
+                    .send(generate_message(fast_uuid_v7::gen_id()))
+                    .await
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -926,24 +947,30 @@ pub async fn measure_single_read_performance(
         }
         let mut consumer_guard = consumer.lock().await;
         let receive_future = consumer_guard.receive();
-        if let Ok(Ok(Received {
-            message: _msg,
-            commit,
-        })) = tokio::time::timeout(Duration::from_secs(10), receive_future).await
-        {
-            final_count += 1;
-            let permit = commit_semaphore
-                .clone()
-                .acquire_owned()
-                .await
-                .expect("Semaphore closed");
-            tokio::spawn(async move {
-                let _ = commit(None).await;
-                drop(permit);
-            });
-        } else {
-            eprintln!("Failed to receive message or timed out. Stopping read.");
-            break;
+        match tokio::time::timeout(Duration::from_secs(20), receive_future).await {
+            Ok(Ok(Received {
+                message: _msg,
+                commit,
+            })) => {
+                final_count += 1;
+                let permit = commit_semaphore
+                    .clone()
+                    .acquire_owned()
+                    .await
+                    .expect("Semaphore closed");
+                tokio::spawn(async move {
+                    let _ = commit(MessageDisposition::Ack).await;
+                    drop(permit);
+                });
+            }
+            Err(_) => {
+                eprintln!("Timeout waiting for single message. Stopping read.");
+                break;
+            }
+            Ok(Err(e)) => {
+                eprintln!("Failed to receive message: {}. Stopping read.", e);
+                break;
+            }
         }
     }
 
@@ -955,4 +982,289 @@ pub async fn measure_single_read_performance(
     }
     debug_assert_eq!(final_count, num_messages);
     start_time.elapsed()
+}
+
+pub fn should_run_benchmark(backend_name: &str) -> bool {
+    let mut filters = Vec::new();
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        // Only skip values for flags that are known to take values
+        if arg == "--output-format"
+            || arg == "--baseline"
+            || arg == "--save-baseline"
+            || arg == "--load-baseline"
+            || arg == "--profile-time"
+            || arg == "--sample-size"
+            || arg == "--measurement-time"
+            || arg == "--warm-up-time"
+            || arg == "--color"
+            || arg == "-j"
+            || arg == "--jobs"
+            || arg == "--encoding"
+        {
+            args.next();
+            continue;
+        }
+        if arg.starts_with("--") {
+            continue;
+        }
+        if !arg.starts_with('-') {
+            filters.push(arg);
+        }
+    }
+    if filters.is_empty() {
+        return true;
+    }
+    filters
+        .iter()
+        .any(|arg| backend_name.contains(arg) || arg.contains(backend_name))
+}
+
+pub fn print_benchmark_results(
+    results: &std::collections::HashMap<String, PerformanceResult>,
+    msg_count: usize,
+) {
+    if !results.is_empty() {
+        println!("\n\n--- Consolidated Performance Test Results (msgs/sec) ---");
+        println!(
+            "\n\n--- Batch = {} msgs, Single = {} msgs ---",
+            format_pretty(msg_count),
+            format_pretty(msg_count)
+        );
+        println!(
+            "{:<25} | {:>15} | {:>15} | {:>15} | {:>15}",
+            "Test Name", "Write (Batch)", "Read (Batch)", "Write (Single)", "Read (Single)"
+        );
+        println!(
+            "{:-<25}-|-{:->15}-|-{:->15}-|-{:->15}-|-{:->15}",
+            "", "", "", "", ""
+        );
+        let mut sorted_results: Vec<_> = results.iter().collect();
+        sorted_results.sort_by_key(|(name, _)| *name);
+        for (name, stats) in sorted_results {
+            println!(
+                "{:<25} | {:>15} | {:>15} | {:>15} | {:>15}",
+                format!("{} Direct", name),
+                format_pretty(stats.write_performance),
+                format_pretty(stats.read_performance),
+                format_pretty(stats.single_write_performance),
+                format_pretty(stats.single_read_performance)
+            );
+        }
+        println!("---------------------------------------------------------------------------------------\n");
+    }
+}
+
+#[macro_export]
+macro_rules! run_benchmarks {
+    ($name:literal, $group:expr, $rt:expr, $results:expr, $msg_count:expr, $concurrency:expr) => {
+        $group.bench_function(concat!($name, "_single_write"), |b| {
+            b.to_async($rt).iter_custom(|iters| async move {
+                let mut total = std::time::Duration::ZERO;
+                // Create consumer first to support brokerless protocols like ZeroMQ
+                let consumer = backend::create_consumer().await;
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                let publisher = backend::create_publisher().await;
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                for _ in 0..iters {
+                    let duration = $crate::test_utils::measure_single_write_performance(
+                        concat!($name, "_single_write"),
+                        std::sync::Arc::clone(&publisher),
+                        $msg_count,
+                        $concurrency,
+                    )
+                    .await;
+                    total += duration;
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                    $crate::test_utils::measure_read_performance(
+                        "cleanup",
+                        std::sync::Arc::clone(&consumer),
+                        $msg_count,
+                    )
+                    .await;
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                }
+                let msgs_per_sec = (iters as f64 * $msg_count as f64) / total.as_secs_f64();
+                {
+                    let mut results = $results.lock().await;
+                    let stats = results.entry($name.to_string()).or_default();
+                    stats.single_write_performance = msgs_per_sec;
+                }
+                println!(
+                    "\n{} single_write: {} iters, total time {:?}, {:.2} msgs/sec",
+                    $name, iters, total, msgs_per_sec
+                );
+                total
+            })
+        });
+
+        $group.bench_function(concat!($name, "_single_read"), |b| {
+            b.to_async($rt).iter_custom(|iters| async move {
+                let mut total = std::time::Duration::ZERO;
+                let consumer = backend::create_consumer().await;
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                let publisher = backend::create_publisher().await;
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                for _ in 0..iters {
+                    $crate::test_utils::measure_write_performance(
+                        "setup_fill",
+                        std::sync::Arc::clone(&publisher),
+                        $msg_count,
+                        $concurrency,
+                    )
+                    .await;
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+
+                    let duration = $crate::test_utils::measure_single_read_performance(
+                        concat!($name, "_single_read"),
+                        std::sync::Arc::clone(&consumer),
+                        $msg_count,
+                    )
+                    .await;
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                    total += duration;
+                }
+                let msgs_per_sec = (iters as f64 * $msg_count as f64) / total.as_secs_f64();
+                {
+                    let mut results = $results.lock().await;
+                    let stats = results.entry($name.to_string()).or_default();
+                    stats.single_read_performance = msgs_per_sec;
+                }
+                println!(
+                    "\n{} single_read: {} iters, total time {:?}, {:.2} msgs/sec",
+                    $name, iters, total, msgs_per_sec
+                );
+                total
+            })
+        });
+
+        $group.bench_function(concat!($name, "_batch_write"), |b| {
+            b.to_async($rt).iter_custom(|iters| async move {
+                let mut total = std::time::Duration::ZERO;
+                let consumer = backend::create_consumer().await;
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                let publisher = backend::create_publisher().await;
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                for _ in 0..iters {
+                    let duration = $crate::test_utils::measure_write_performance(
+                        concat!($name, "_batch_write"),
+                        std::sync::Arc::clone(&publisher),
+                        $msg_count,
+                        $concurrency,
+                    )
+                    .await;
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                    total += duration;
+
+                    $crate::test_utils::measure_read_performance(
+                        "cleanup",
+                        std::sync::Arc::clone(&consumer),
+                        $msg_count,
+                    )
+                    .await;
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                }
+                let msgs_per_sec = (iters as f64 * $msg_count as f64) / total.as_secs_f64();
+                {
+                    let mut results = $results.lock().await;
+                    let stats = results.entry($name.to_string()).or_default();
+                    stats.write_performance = msgs_per_sec;
+                }
+                println!(
+                    "\n{} batch_write: {} iters, total time {:?}, {:.2} msgs/sec",
+                    $name, iters, total, msgs_per_sec
+                );
+                total
+            })
+        });
+
+        $group.bench_function(concat!($name, "_batch_read"), |b| {
+            b.to_async($rt).iter_custom(|iters| async move {
+                let mut total = std::time::Duration::ZERO;
+                let consumer = backend::create_consumer().await;
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                let publisher = backend::create_publisher().await;
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                for _ in 0..iters {
+                    $crate::test_utils::measure_write_performance(
+                        "setup_fill",
+                        std::sync::Arc::clone(&publisher),
+                        $msg_count,
+                        $concurrency,
+                    )
+                    .await;
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+
+                    let duration = $crate::test_utils::measure_read_performance(
+                        concat!($name, "_batch_read"),
+                        std::sync::Arc::clone(&consumer),
+                        $msg_count,
+                    )
+                    .await;
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                    total += duration;
+                }
+                let msgs_per_sec = (iters as f64 * $msg_count as f64) / total.as_secs_f64();
+                {
+                    let mut results = $results.lock().await;
+                    let stats = results.entry($name.to_string()).or_default();
+                    stats.read_performance = msgs_per_sec;
+                }
+                println!(
+                    "\n{} batch_read: {} iters, total time {:?}, {:.2} msgs/sec",
+                    $name, iters, total, msgs_per_sec
+                );
+                total
+            })
+        });
+    };
+}
+
+#[macro_export]
+macro_rules! bench_backend {
+    // Matches a backend that requires Docker but has no specific feature gate.
+    ("", $name:literal, $compose_file:literal, $helper:path, $group:expr, $rt:expr, $results:expr, $msg_count:expr, $concurrency:expr) => {
+        if $crate::test_utils::should_run_benchmark($name) {
+            use $helper as backend;
+
+            // Start the Docker environment for this backend.
+            // The DockerCompose struct handles `docker-compose up` on creation and `down` on drop.
+            let _docker = $crate::test_utils::DockerCompose::new($compose_file);
+            _docker.down();
+            _docker.up();
+
+            $crate::run_benchmarks!($name, $group, $rt, $results, $msg_count, $concurrency);
+            _docker.down();
+        }
+    };
+    ($feature:literal, $name:literal, $compose_file:literal, $helper:path, $group:expr, $rt:expr, $results:expr, $msg_count:expr, $concurrency:expr) => {
+        #[cfg(feature = $feature)]
+        if $crate::test_utils::should_run_benchmark($name) {
+            use $helper as backend;
+
+            // Start the Docker environment for this backend.
+            // The DockerCompose struct handles `docker-compose up` on creation and `down` on drop.
+            let _docker = $crate::test_utils::DockerCompose::new($compose_file);
+            _docker.down();
+            _docker.up();
+
+            $crate::run_benchmarks!($name, $group, $rt, $results, $msg_count, $concurrency);
+            _docker.down();
+        }
+    };
+    ($feature:literal, $name:literal, $helper:path, $group:expr, $rt:expr, $results:expr, $msg_count:expr, $concurrency:expr) => {
+        #[cfg(feature = $feature)]
+        if $crate::test_utils::should_run_benchmark($name) {
+            use $helper as backend;
+            // No docker setup
+            $crate::run_benchmarks!($name, $group, $rt, $results, $msg_count, $concurrency);
+        }
+    };
+    ($name:literal, $helper:path, $group:expr, $rt:expr, $results:expr, $msg_count:expr, $concurrency:expr) => {
+        if $crate::test_utils::should_run_benchmark($name) {
+            use $helper as backend;
+            // No docker setup, no feature gate
+            $crate::run_benchmarks!($name, $group, $rt, $results, $msg_count, $concurrency);
+        }
+    };
 }

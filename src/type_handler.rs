@@ -162,6 +162,7 @@ impl Handler for TypeHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::msg;
     use serde::{Deserialize, Serialize};
 
     #[derive(Serialize, Deserialize)]
@@ -176,11 +177,12 @@ mod tests {
             Ok(Handled::Ack)
         });
 
-        let msg = CanonicalMessage::from_type(&TestMsg {
-            val: "hello".into(),
-        })
-        .unwrap()
-        .with_type_key("test_a");
+        let msg = msg!(
+            &TestMsg {
+                val: "hello".into(),
+            },
+            "test_a"
+        );
 
         let res = handler.handle(msg).await;
         assert!(res.is_ok());
@@ -211,8 +213,7 @@ mod tests {
     #[tokio::test]
     async fn test_typed_handler_no_match_error() {
         let handler = TypeHandler::new();
-        let msg = CanonicalMessage::new(b"{}".to_vec(), None)
-            .with_metadata(HashMap::from([("kind".to_string(), "unknown".to_string())]));
+        let msg = msg!(b"{}".to_vec(), "unknown");
 
         let res = handler.handle(msg).await;
         assert!(res.is_err());
@@ -229,8 +230,7 @@ mod tests {
         let fallback = Arc::new(|_: CanonicalMessage| async { Ok(Handled::Ack) });
         let handler = TypeHandler::new().with_fallback(fallback);
 
-        let msg = CanonicalMessage::new(b"{}".to_vec(), None)
-            .with_metadata(HashMap::from([("kind".to_string(), "unknown".to_string())]));
+        let msg = msg!(b"{}".to_vec(), "unknown");
 
         let res = handler.handle(msg).await;
         assert!(matches!(res, Ok(Handled::Ack)));
@@ -290,11 +290,7 @@ mod tests {
             // Execute business logic...
             // Emit event
             let evt = OrderSubmitted { id: cmd.id };
-            Ok(Handled::Publish(
-                CanonicalMessage::from_type(&evt)
-                    .unwrap()
-                    .with_type_key("order_submitted"),
-            ))
+            Ok(Handled::Publish(msg!(&evt, "order_submitted")))
         });
 
         // 2. Event Handler (Read Side / Projection)
@@ -307,9 +303,7 @@ mod tests {
 
         // Simulate incoming command
         let cmd = SubmitOrder { id: 101 };
-        let cmd_msg = CanonicalMessage::from_type(&cmd)
-            .unwrap()
-            .with_type_key("submit_order");
+        let cmd_msg = msg!(&cmd, "submit_order");
 
         // Process command
         let result = command_bus.handle(cmd_msg).await.unwrap();
@@ -331,8 +325,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_cqrs_integration_with_routes() {
-        use crate::endpoints::memory::get_or_create_channel;
-        use crate::models::{Endpoint, EndpointType, MemoryConfig, Route};
+        use crate::models::{Endpoint, Route};
         use std::sync::atomic::{AtomicU32, Ordering};
 
         #[derive(Serialize, Deserialize)]
@@ -353,11 +346,7 @@ mod tests {
         let command_handler =
             TypeHandler::new().add("submit_order", |cmd: SubmitOrder| async move {
                 let evt = OrderSubmitted { id: cmd.id };
-                Ok(Handled::Publish(
-                    CanonicalMessage::from_type(&evt)
-                        .unwrap()
-                        .with_type_key("order_submitted"),
-                ))
+                Ok(Handled::Publish(msg!(&evt, "order_submitted")))
             });
 
         // 2. Event Handler (Read Side)
@@ -371,22 +360,9 @@ mod tests {
             });
 
         // 3. Define Endpoints & Routes
-        let cmd_in_cfg = MemoryConfig {
-            topic: "cmd_in".to_string(),
-            capacity: Some(10),
-        };
-        let event_bus_cfg = MemoryConfig {
-            topic: "event_bus".to_string(),
-            capacity: Some(10),
-        };
-        let proj_out_cfg = MemoryConfig {
-            topic: "proj_out".to_string(),
-            capacity: Some(10),
-        };
-
-        let cmd_in_ep = Endpoint::new(EndpointType::Memory(cmd_in_cfg.clone()));
-        let event_bus_ep = Endpoint::new(EndpointType::Memory(event_bus_cfg.clone()));
-        let proj_out_ep = Endpoint::new(EndpointType::Memory(proj_out_cfg.clone()));
+        let cmd_in_ep = Endpoint::new_memory("cmd_in", 10);
+        let event_bus_ep = Endpoint::new_memory("event_bus", 10);
+        let proj_out_ep = Endpoint::new_memory("proj_out", 10);
 
         let command_route =
             Route::new(cmd_in_ep.clone(), event_bus_ep.clone()).with_handler(command_handler);
@@ -404,7 +380,7 @@ mod tests {
             tokio::spawn(async move { event_route.run_until_err("event_route", None, None).await });
 
         // 5. Send Command
-        let cmd_channel = get_or_create_channel(&cmd_in_cfg);
+        let cmd_channel = cmd_in_ep.channel().unwrap();
         let cmd = SubmitOrder { id: 777 };
         let msg = CanonicalMessage::from_type(&cmd)
             .unwrap()
@@ -422,8 +398,7 @@ mod tests {
 
         // Cleanup
         cmd_channel.close();
-        let event_channel = get_or_create_channel(&event_bus_cfg);
-        event_channel.close();
+        event_bus_ep.channel().unwrap().close();
 
         let _ = h1.await;
         let _ = h2.await;

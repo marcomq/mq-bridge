@@ -10,13 +10,11 @@ use crate::CanonicalMessage;
 use async_trait::async_trait;
 use std::any::Any;
 use std::sync::Arc;
-use std::time::Duration;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 
 pub struct DlqPublisher {
     inner: Box<dyn MessagePublisher>,
     dlq_publisher: Arc<dyn MessagePublisher>,
-    config: DeadLetterQueueMiddleware,
 }
 
 impl DlqPublisher {
@@ -25,10 +23,7 @@ impl DlqPublisher {
         config: &DeadLetterQueueMiddleware,
         route_name: &str,
     ) -> anyhow::Result<Self> {
-        info!(
-            "DLQ Middleware enabled for route '{}' with {} retry attempts",
-            route_name, config.dlq_retry_attempts
-        );
+        info!("DLQ Middleware enabled for route '{}'", route_name);
         // Box::pin is used here to break the recursive async type definition.
         // create_publisher -> apply_middlewares -> DlqPublisher::new -> create_publisher
         let dlq_publisher =
@@ -36,56 +31,7 @@ impl DlqPublisher {
         Ok(Self {
             inner,
             dlq_publisher,
-            config: config.clone(),
         })
-    }
-
-    fn next_backoff(&self, current: u64) -> u64 {
-        let next = (current as f64 * self.config.dlq_multiplier) as u64;
-        std::cmp::min(next, self.config.dlq_max_interval_ms)
-    }
-
-    /// Attempt to send a message to the DLQ with configurable retries and exponential backoff.
-    /// Returns the primary send error if DLQ retries fail, ensuring the caller can retry the primary route.
-    async fn send_to_dlq_with_retry(
-        &self,
-        message: CanonicalMessage,
-        primary_error: &str,
-    ) -> anyhow::Result<()> {
-        let mut attempt = 0;
-        let mut backoff_ms = self.config.dlq_initial_interval_ms;
-
-        loop {
-            attempt += 1;
-            match self.dlq_publisher.send(message.clone()).await {
-                Ok(_) => {
-                    debug!("Message successfully sent to DLQ on attempt {}", attempt);
-                    return Ok(());
-                }
-                Err(e) if attempt < self.config.dlq_retry_attempts => {
-                    warn!(
-                        "DLQ send failed on attempt {} of {}: {}. Retrying in {}ms...",
-                        attempt, self.config.dlq_retry_attempts, e, backoff_ms
-                    );
-                    tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
-                    backoff_ms = self.next_backoff(backoff_ms);
-                }
-                Err(dlq_error) => {
-                    // Final retry exhausted; log comprehensively and return original error
-                    error!(
-                        "DLQ send failed after {} attempts: {}. Original primary send error: {}",
-                        attempt, dlq_error, primary_error
-                    );
-                    // Return the original primary error so the caller can retry the route
-                    return Err(anyhow::anyhow!(
-                        "Primary send failed: {}. DLQ send also failed after {} retries: {}",
-                        primary_error,
-                        self.config.dlq_retry_attempts,
-                        dlq_error
-                    ));
-                }
-            }
-        }
     }
 }
 
@@ -98,16 +44,23 @@ impl MessagePublisher for DlqPublisher {
                 let error_msg = e.to_string();
                 error!("Failed to send message: {}", error_msg);
 
-                // Attempt to send the message to the DLQ with retry/backoff logic.
-                match self.send_to_dlq_with_retry(message, &error_msg).await {
-                    Ok(()) => {
+                // Attempt to send the message to the DLQ.
+                // If this fails, we immediately return the original error.
+                // Use a retry middleware if you want to retry sending the message to the DLQ.
+                match self.dlq_publisher.send(message).await {
+                    Ok(_) => {
                         // Message successfully sent to DLQ. We return Ok(None) to signal that
                         // the message was "handled" (by the DLQ) and should be committed upstream.
                         Ok(Sent::Ack)
                     }
                     Err(dlq_combined_error) => {
                         // DLQ send failed; propagate the combined error that includes both contexts
-                        Err(dlq_combined_error.into())
+                        Err(anyhow::anyhow!(
+                            "Primary send failed: {}. DLQ send also failed: {}",
+                            error_msg,
+                            dlq_combined_error
+                        )
+                        .into())
                     }
                 }
             }
@@ -130,63 +83,37 @@ impl MessagePublisher for DlqPublisher {
                     failed.len()
                 );
 
-                // --- Retry logic for bulk DLQ send ---
-                let mut attempt = 0;
-                let mut backoff_ms = self.config.dlq_initial_interval_ms;
-                let mut messages_to_retry: Vec<CanonicalMessage> =
+                let messages_to_retry: Vec<CanonicalMessage> =
                     failed.iter().map(|(msg, _)| msg.clone()).collect();
 
-                loop {
-                    attempt += 1;
-                    match self
-                        .dlq_publisher
-                        .send_batch(messages_to_retry.clone())
-                        .await
-                    {
-                        Ok(outcome) => {
-                            let dlq_failed = match outcome {
-                                SentBatch::Ack => Vec::new(),
-                                SentBatch::Partial { failed, .. } => failed,
-                            };
-
-                            if dlq_failed.is_empty() {
-                                debug!(
-                                    "Batch of {} messages successfully sent to DLQ on attempt {}.",
-                                    failed.len(),
-                                    attempt
-                                );
-                                return Ok(SentBatch::Partial {
-                                    responses,
-                                    failed: Vec::new(),
-                                });
-                            }
-
-                            if attempt < self.config.dlq_retry_attempts {
-                                warn!(
-                                    "DLQ bulk send partially failed on attempt {} of {}: {} of {} messages failed. Retrying in {}ms...",
-                                    attempt, self.config.dlq_retry_attempts, dlq_failed.len(), messages_to_retry.len(), backoff_ms
-                                );
-                                messages_to_retry =
-                                    dlq_failed.into_iter().map(|(msg, _)| msg).collect();
-                                tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
-                                backoff_ms = self.next_backoff(backoff_ms);
-                            } else {
-                                error!("DLQ bulk send failed after {} attempts. {} messages could not be sent to DLQ. Original primary send error: {}", attempt, dlq_failed.len(), error_msg);
-                                return Err(anyhow::anyhow!("Primary send failed: {}. DLQ bulk send also failed after {} retries, with {} messages remaining.", error_msg, self.config.dlq_retry_attempts, dlq_failed.len()).into());
-                            }
-                        }
-                        Err(e) if attempt < self.config.dlq_retry_attempts => {
-                            warn!(
-                                "DLQ bulk send failed on attempt {} of {}: {}. Retrying in {}ms...",
-                                attempt, self.config.dlq_retry_attempts, e, backoff_ms
-                            );
-                            tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
-                            backoff_ms = self.next_backoff(backoff_ms);
-                        }
-                        Err(dlq_error) => {
-                            error!("DLQ bulk send failed after {} attempts: {}. Original primary send error: {}", attempt, dlq_error, error_msg);
-                            return Err(anyhow::anyhow!("Primary send failed: {}. DLQ bulk send also failed after {} retries: {}", error_msg, self.config.dlq_retry_attempts, dlq_error).into());
-                        }
+                match self.dlq_publisher.send_batch(messages_to_retry).await {
+                    Ok(SentBatch::Ack) => Ok(SentBatch::Partial {
+                        responses,
+                        failed: Vec::new(),
+                    }),
+                    Ok(SentBatch::Partial {
+                        failed: dlq_failed, ..
+                    }) => {
+                        error!(
+                            "DLQ bulk send partially failed. {} messages could not be sent to DLQ.",
+                            dlq_failed.len()
+                        );
+                        Ok(SentBatch::Partial {
+                            responses,
+                            failed: dlq_failed,
+                        })
+                    }
+                    Err(dlq_error) => {
+                        error!(
+                            "DLQ bulk send failed: {}. Original primary send error: {}",
+                            dlq_error, error_msg
+                        );
+                        Err(anyhow::anyhow!(
+                            "Primary send failed: {}. DLQ bulk send also failed: {}",
+                            error_msg,
+                            dlq_error
+                        )
+                        .into())
                     }
                 }
             }
@@ -197,52 +124,35 @@ impl MessagePublisher for DlqPublisher {
                     messages.len()
                 );
 
-                // Attempt to send all messages to the DLQ with retry logic
-                let mut attempt = 0;
-                let mut backoff_ms = self.config.dlq_initial_interval_ms;
-                let mut messages_to_retry = messages.clone();
-
-                loop {
-                    attempt += 1;
-                    match self
-                        .dlq_publisher
-                        .send_batch(messages_to_retry.clone())
-                        .await
-                    {
-                        Ok(SentBatch::Ack) => {
-                            debug!("Batch of {} messages successfully sent to DLQ on attempt {} after complete primary failure.", messages.len(), attempt);
-                            return Ok(SentBatch::Ack);
-                        }
+                // Attempt to send all messages to the DLQ
+                match self.dlq_publisher.send_batch(messages).await {
+                    Ok(SentBatch::Ack) => {
+                        debug!("Batch successfully sent to DLQ after complete primary failure.");
+                        Ok(SentBatch::Ack)
+                    }
+                    Ok(SentBatch::Partial {
+                        failed: dlq_failed, ..
+                    }) => {
+                        error!(
+                            "DLQ bulk send partially failed. {} messages could not be sent to DLQ.",
+                            dlq_failed.len()
+                        );
                         Ok(SentBatch::Partial {
-                            failed: dlq_failed, ..
-                        }) if attempt < self.config.dlq_retry_attempts => {
-                            warn!(
-                                "DLQ bulk send partially failed on attempt {} of {}: {} of {} messages failed. Retrying in {}ms...",
-                                attempt, self.config.dlq_retry_attempts, dlq_failed.len(), messages_to_retry.len(), backoff_ms
-                            );
-                            messages_to_retry =
-                                dlq_failed.into_iter().map(|(msg, _)| msg).collect();
-                            tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
-                            backoff_ms = self.next_backoff(backoff_ms);
-                        }
-                        Err(dlq_error) if attempt < self.config.dlq_retry_attempts => {
-                            warn!(
-                                "DLQ bulk send failed on attempt {} of {}: {}. Retrying in {}ms...",
-                                attempt, self.config.dlq_retry_attempts, dlq_error, backoff_ms
-                            );
-                            tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
-                            backoff_ms = self.next_backoff(backoff_ms);
-                        }
-                        Err(dlq_error) => {
-                            error!("DLQ bulk send failed after {} attempts: {}. Original primary send error: {}", attempt, dlq_error, error_msg);
-                            return Err(anyhow::anyhow!("Primary send failed: {}. DLQ bulk send also failed after {} retries: {}", error_msg, self.config.dlq_retry_attempts, dlq_error).into());
-                        }
-                        Ok(SentBatch::Partial {
-                            failed: dlq_failed, ..
-                        }) => {
-                            error!("DLQ bulk send failed after {} attempts. {} messages could not be sent to DLQ. Original primary send error: {}", attempt, dlq_failed.len(), error_msg);
-                            return Err(anyhow::anyhow!("Primary send failed: {}. DLQ bulk send also failed after {} retries, with {} messages remaining.", error_msg, self.config.dlq_retry_attempts, dlq_failed.len()).into());
-                        }
+                            responses: None,
+                            failed: dlq_failed,
+                        })
+                    }
+                    Err(dlq_error) => {
+                        error!(
+                            "DLQ bulk send failed: {}. Original primary send error: {}",
+                            dlq_error, error_msg
+                        );
+                        Err(anyhow::anyhow!(
+                            "Primary send failed: {}. DLQ bulk send also failed: {}",
+                            error_msg,
+                            dlq_error
+                        )
+                        .into())
                     }
                 }
             }
@@ -252,5 +162,157 @@ impl MessagePublisher for DlqPublisher {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::middleware::retry::RetryPublisher;
+    use crate::models::RetryMiddleware;
+    use crate::CanonicalMessage;
+    use async_trait::async_trait;
+    use std::sync::Mutex;
+
+    #[derive(Clone)]
+    struct MockFailingPublisher {
+        calls: Arc<Mutex<usize>>,
+    }
+
+    #[async_trait]
+    impl MessagePublisher for MockFailingPublisher {
+        async fn send(&self, _msg: CanonicalMessage) -> Result<Sent, PublisherError> {
+            *self.calls.lock().unwrap() += 1;
+            Err(PublisherError::Retryable(anyhow::anyhow!("Always fails")))
+        }
+
+        async fn send_batch(
+            &self,
+            _messages: Vec<CanonicalMessage>,
+        ) -> Result<SentBatch, PublisherError> {
+            Ok(SentBatch::Ack)
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    #[derive(Clone)]
+    struct MockSuccessPublisher {
+        calls: Arc<Mutex<usize>>,
+    }
+
+    #[async_trait]
+    impl MessagePublisher for MockSuccessPublisher {
+        async fn send(&self, _msg: CanonicalMessage) -> Result<Sent, PublisherError> {
+            *self.calls.lock().unwrap() += 1;
+            Ok(Sent::Ack)
+        }
+
+        async fn send_batch(
+            &self,
+            _messages: Vec<CanonicalMessage>,
+        ) -> Result<SentBatch, PublisherError> {
+            Ok(SentBatch::Ack)
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    #[tokio::test]
+    async fn test_retry_before_dlq() {
+        let target_calls = Arc::new(Mutex::new(0));
+        let failing_target = MockFailingPublisher {
+            calls: target_calls.clone(),
+        };
+
+        // Retry wrapper: max_attempts 4 means it tries 4 times total
+        let retry_config = RetryMiddleware {
+            max_attempts: 4,
+            initial_interval_ms: 1,
+            max_interval_ms: 10,
+            multiplier: 1.0,
+        };
+        let retry_publisher = RetryPublisher::new(Box::new(failing_target), retry_config);
+
+        let dlq_calls = Arc::new(Mutex::new(0));
+        let dlq_target = MockSuccessPublisher {
+            calls: dlq_calls.clone(),
+        };
+
+        // DLQ wrapper: wraps the retry publisher
+        let dlq_middleware = DlqPublisher {
+            inner: Box::new(retry_publisher),
+            dlq_publisher: Arc::new(dlq_target),
+        };
+
+        let msg = CanonicalMessage::new(b"test".to_vec(), None);
+
+        // Execute
+        let result = dlq_middleware.send(msg).await;
+
+        // Assertions
+        assert!(result.is_ok(), "DLQ should handle the failure");
+        assert_eq!(
+            *target_calls.lock().unwrap(),
+            4,
+            "Target should be called 4 times (max_attempts)"
+        );
+        assert_eq!(
+            *dlq_calls.lock().unwrap(),
+            1,
+            "DLQ should be called exactly once after retries fail"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dlq_integration_with_memory() {
+        use crate::endpoints::memory::MemoryPublisher;
+
+        // 1. Setup DLQ destination (Memory)
+        let dlq_topic = "dlq_topic";
+        let dlq_publisher = MemoryPublisher::new_local(dlq_topic, 10);
+        let dlq_channel = dlq_publisher.channel();
+
+        // 2. Setup Failing Primary (Mock)
+        let target_calls = Arc::new(Mutex::new(0));
+        let failing_target = MockFailingPublisher {
+            calls: target_calls.clone(),
+        };
+
+        // 3. Setup Retry (max_attempts = 3)
+        let retry_config = RetryMiddleware {
+            max_attempts: 3,
+            initial_interval_ms: 1,
+            max_interval_ms: 10,
+            multiplier: 1.0,
+        };
+        let retry_publisher = RetryPublisher::new(Box::new(failing_target), retry_config);
+
+        // 4. Setup DLQ Middleware
+        let dlq_middleware = DlqPublisher {
+            inner: Box::new(retry_publisher),
+            dlq_publisher: Arc::new(dlq_publisher),
+        };
+
+        let msg_payload = b"failed_message";
+        let msg = CanonicalMessage::new(msg_payload.to_vec(), None);
+
+        // 5. Send
+        let result = dlq_middleware.send(msg).await;
+
+        // 6. Verify
+        assert!(result.is_ok(), "Send should succeed (handled by DLQ)");
+
+        // Check retries happened
+        assert_eq!(*target_calls.lock().unwrap(), 3); // max_attempts
+
+        // Check message is in DLQ memory channel
+        let dlq_msgs = dlq_channel.drain_messages();
+        assert_eq!(dlq_msgs.len(), 1);
+        assert_eq!(dlq_msgs[0].payload, msg_payload.as_slice());
     }
 }
