@@ -357,7 +357,7 @@ pub mod ibm_mq_helper {
 
     pub fn get_config(queue: &str) -> IbmMqConfig {
         IbmMqConfig {
-            user: Some("app".to_string()),
+            username: Some("app".to_string()),
             password: Some("admin".to_string()),
             queue_manager: "QM1".to_string(),
             url: "localhost(1414)".to_string(),
