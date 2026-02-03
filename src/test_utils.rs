@@ -698,11 +698,18 @@ pub async fn measure_write_performance(
                                 if retryable.is_empty() {
                                     break;
                                 }
+                                retry_count += 1;
+                                if retry_count >= MAX_RETRIES {
+                                    eprintln!(
+                                        "Max retries reached, giving up on {} messages",
+                                        retryable.len()
+                                    );
+                                    break;
+                                }
                                 eprintln!("Retrying: {}", retryable.len());
                                 messages_to_send =
                                     retryable.into_iter().map(|(msg, _)| msg).collect();
                                 current_batch_size = messages_to_send.len();
-                                retry_count = 0; // Reset on partial success
                             }
                         }
                         Err(e) => {

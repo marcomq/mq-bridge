@@ -125,7 +125,7 @@ routes:
         url: "localhost(1414)"
         channel: "DEV.APP.SVRCONN"
         queue: "DEV.QUEUE.1"
-        user: "app"
+        username: "app"
         password: "admin"
   ibm_mq_to_memory:
     input:
@@ -134,7 +134,7 @@ routes:
         url: "localhost(1414)"
         channel: "DEV.APP.SVRCONN"
         queue: "DEV.QUEUE.1"
-        user: "app"
+        username: "app"
         password: "admin"
     output:
       memory:
