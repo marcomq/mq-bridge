@@ -1144,6 +1144,8 @@ impl MessageConsumer for MongoDbSubscriber {
                         if let Ok(msg) = parse_mongodb_document(doc) {
                             messages.push(msg);
                             seqs.push(seq);
+                            // from here on, we will not received this seq anymore
+                            self.last_seq.store(seq, Ordering::Relaxed);
                         }
                     }
                 }
@@ -1152,7 +1154,6 @@ impl MessageConsumer for MongoDbSubscriber {
             if !messages.is_empty() {
                 let collection = self.collection.clone();
                 let cursor_id = self.cursor_id.clone();
-                let last_seq_arc = self.last_seq.clone();
 
                 let commit = Box::new(move |dispositions: Vec<MessageDisposition>| {
                     Box::pin(async move {
@@ -1169,7 +1170,6 @@ impl MessageConsumer for MongoDbSubscriber {
                         }
 
                         if highest_acked > 0 {
-                            last_seq_arc.store(highest_acked, Ordering::SeqCst);
                             // Only persist if we have a cursor_id
                             if let Some(cid) = cursor_id {
                                 let cursor_doc_id = format!("cursor:{}", cid);
