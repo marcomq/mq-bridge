@@ -18,6 +18,7 @@ use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use std::any::Any;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::oneshot;
 use tracing::{info, trace, warn};
@@ -148,6 +149,7 @@ impl MemoryResponseChannel {
         &self,
         correlation_id: &str,
     ) -> Option<oneshot::Sender<CanonicalMessage>> {
+        // Note: For multi-reply/streaming, a oneshot is insufficient for E2E streaming.
         self.waiters.lock().await.remove(correlation_id)
     }
 }
@@ -587,73 +589,75 @@ impl MessageConsumer for MemoryQueueConsumer {
         }
 
         let topic = self.topic.clone();
-        let expected_count = messages.len();
         let correlation_ids: Vec<Option<String>> = messages
             .iter()
             .map(|m| m.metadata.get("correlation_id").cloned())
             .collect();
 
         // Guard to requeue messages if the batch is dropped without commit/nack.
-        let mut guard = if self.enable_nack {
-            Some(RequeueGuard {
+        let guard = if self.enable_nack {
+            Arc::new(std::sync::Mutex::new(Some(RequeueGuard {
                 topic: self.topic.clone(),
                 messages: messages.clone(),
-            })
+            })))
         } else {
-            None
+            Arc::new(std::sync::Mutex::new(None))
         };
 
+        let messages_len = messages.len();
+        let messages_for_retry = Arc::new(messages.clone());
+        let broker_acked = Arc::new(AtomicBool::new(false));
+
         let commit = Box::new(move |dispositions: Vec<MessageDisposition>| {
+            let guard = guard.clone();
+            let messages_for_retry = messages_for_retry.clone();
+            let broker_acked = broker_acked.clone();
+            let topic = topic.clone();
+            let correlation_ids = correlation_ids.clone();
+
             Box::pin(async move {
-                if dispositions.len() != expected_count {
+                if dispositions.len() != messages_len {
                     return Err(anyhow::anyhow!(
                         "Memory batch commit received mismatched disposition count: expected {}, got {}",
-                        expected_count,
+                        messages_len,
                         dispositions.len()
                     ));
                 }
 
-                // Clone messages from guard to keep it armed during async operations
-                let messages_for_retry = if let Some(g) = &guard {
-                    g.messages.clone()
-                } else {
-                    Vec::new()
-                };
-
                 let response_channel = get_or_create_response_channel(&topic);
-                let mut to_requeue = Vec::new();
 
-                for (i, disposition) in dispositions.into_iter().enumerate() {
+                for (i, disposition) in dispositions.iter().cloned().enumerate() {
                     match disposition {
                         MessageDisposition::Reply(resp) => {
                             handle_memory_reply(resp, i, &correlation_ids, &response_channel).await;
                         }
-                        MessageDisposition::Nack => {
+                        _ => {}
+                    }
+                }
+
+                // Only perform the broker-level Ack/Nack once
+                if !broker_acked.swap(true, Ordering::SeqCst) {
+                    let mut to_requeue = Vec::new();
+                    for (i, disposition) in dispositions.into_iter().enumerate() {
+                        if matches!(disposition, MessageDisposition::Nack) {
                             if let Some(msg) = messages_for_retry.get(i) {
-                                warn!("Requeueing nacked message {}", i);
                                 to_requeue.push(msg.clone());
-                            } else {
-                                warn!("Nack for index {} but no message in retry buffer!", i);
                             }
                         }
-                        MessageDisposition::Ack => {}
                     }
-                }
 
-                if !to_requeue.is_empty() {
-                    let main_channel = get_or_create_channel(&MemoryConfig {
-                        topic: topic.to_string(),
-                        capacity: None,
-                        ..Default::default()
-                    });
-                    if main_channel.sender.send(to_requeue).await.is_err() {
-                        tracing::error!("Failed to re-queue NACKed messages to memory channel as it was closed.");
+                    if !to_requeue.is_empty() {
+                        let main_channel = get_or_create_channel(&MemoryConfig {
+                            topic: topic.to_string(),
+                            ..Default::default()
+                        });
+                        let _ = main_channel.sender.send(to_requeue).await;
                     }
-                }
 
-                // Disarm the guard after all awaits are finished.
-                if let Some(g) = &mut guard {
-                    std::mem::take(&mut g.messages);
+                    // Disarm the guard after broker logic is done
+                    if let Some(mut g) = guard.lock().unwrap().take() {
+                        g.messages.clear();
+                    }
                 }
 
                 Ok(())
@@ -696,6 +700,10 @@ async fn handle_memory_reply(
         if let Some(tx) = response_channel.remove_waiter(cid).await {
             let _ = tx.send(resp);
             return;
+        } else {
+            // If we are here, it means this is a subsequent chunk of a stream
+            // or the requester timed out. We log it and send it to the general channel.
+            trace!(correlation_id = %cid, "Received additional reply/chunk for already completed or timed-out request");
         }
     }
     let _ = response_channel.sender.send(resp).await;

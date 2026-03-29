@@ -555,23 +555,28 @@ impl NatsCore {
 
                 trace!(count = canonical_messages.len(), subject = %subject, message_ids = ?LazyMessageIds(&canonical_messages), "Received batch of NATS JetStream messages");
                 let client = client.clone();
+                let messages_len = jetstream_messages.len();
+                let jetstream_messages = Arc::new(std::sync::Mutex::new(Some(jetstream_messages)));
                 let commit_closure: BatchCommitFunc = Box::new(move |dispositions| {
+                    let client = client.clone();
+                    let jetstream_messages = jetstream_messages.clone();
                     Box::pin(async move {
                         // Handle replies if responses are provided
-
-                        if dispositions.len() != jetstream_messages.len() {
-                            tracing::warn!(
-                                    "NATS JetStream batch reply count mismatch: received {} messages but got {} responses. Pairing up to the shorter length.",
-                                    jetstream_messages.len(),
-                                    dispositions.len()
-                                );
+                        let msgs = {
+                            let mut guard = jetstream_messages.lock().unwrap();
+                            guard.take()
+                        };
+                        if let Some(msgs) = msgs {
+                            if dispositions.len() != messages_len {
+                                tracing::warn!(
+                                        "NATS JetStream batch reply count mismatch: received {} messages but got {} responses.",
+                                        messages_len,
+                                        dispositions.len()
+                                    );
+                            }
+                            handle_jetstream_replies(&client, &msgs, &dispositions).await;
+                            handle_jetstream_acks(msgs.to_vec(), dispositions).await?;
                         }
-                        handle_jetstream_replies(&client, &jetstream_messages, &dispositions).await;
-
-                        // Acknowledge messages concurrently.
-                        // A concurrency limit of 100 is chosen to balance parallelism
-                        // with not overwhelming the NATS server or spawning too many tasks.
-                        handle_jetstream_acks(jetstream_messages, dispositions).await?;
                         Ok(())
                     }) as BoxFuture<'static, anyhow::Result<()>>
                 });
@@ -605,7 +610,10 @@ impl NatsCore {
                 }
 
                 let client = client.clone();
+                let reply_subjects = Arc::new(reply_subjects);
                 let commit_closure: BatchCommitFunc = Box::new(move |dispositions| {
+                    let client = client.clone();
+                    let reply_subjects = reply_subjects.clone();
                     Box::pin(async move {
                         if dispositions.len() != reply_subjects.len() {
                             tracing::warn!(

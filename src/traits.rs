@@ -10,6 +10,7 @@ use async_trait::async_trait;
 pub use futures::future::BoxFuture;
 use std::any::Any;
 use std::sync::Arc;
+use tokio::sync::mpsc;
 use tracing::warn;
 
 /// The disposition of a processed message.
@@ -43,6 +44,47 @@ impl From<Handled> for MessageDisposition {
             Handled::Ack => MessageDisposition::Ack,
             Handled::Publish(msg) => MessageDisposition::Reply(msg),
         }
+    }
+}
+
+/// A callback mechanism for handlers to send multiple responses asynchronously.
+///
+/// Handlers that implement `StreamingHandler` receive a `Yielder` and can call
+/// `yielder.send()` multiple times to produce a stream of responses.
+#[derive(Clone)]
+pub struct Yielder {
+    sender: mpsc::Sender<MessageDisposition>,
+    original_message_id: u128,
+    original_correlation_id: Option<String>,
+}
+
+impl Yielder {
+    pub fn new(
+        sender: mpsc::Sender<MessageDisposition>,
+        original_message_id: u128,
+        original_correlation_id: Option<String>,
+    ) -> Self {
+        Self {
+            sender,
+            original_message_id,
+            original_correlation_id,
+        }
+    }
+
+    /// Sends a message as part of the stream of responses.
+    pub async fn send(&self, mut msg: CanonicalMessage) -> anyhow::Result<()> {
+        // Ensure yielded messages maintain correlation with the original request
+        msg.metadata
+            .entry("correlation_id".to_string())
+            .or_insert_with(|| {
+                self.original_correlation_id
+                    .clone()
+                    .unwrap_or_else(|| format!("{:032x}", self.original_message_id))
+            });
+        self.sender
+            .send(MessageDisposition::Reply(msg))
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to send yielded message: {}", e))
     }
 }
 
@@ -97,14 +139,45 @@ impl<T: AsyncHandler> Handler for SimpleHandler<T> {
     }
 }
 
+/// A trait for handlers that can yield multiple responses for a single input message.
+///
+/// This trait is separate from `Handler` to avoid breaking changes to existing handlers.
+#[async_trait]
+pub trait StreamingHandler: Send + Sync + 'static {
+    async fn handle_stream(
+        &self,
+        msg: CanonicalMessage,
+        yielder: Yielder,
+    ) -> Result<Handled, HandlerError>;
+}
+
+#[async_trait]
+impl<F, Fut> StreamingHandler for F
+where
+    F: Fn(CanonicalMessage, Yielder) -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = Result<Handled, HandlerError>> + Send,
+{
+    async fn handle_stream(
+        &self,
+        msg: CanonicalMessage,
+        yielder: Yielder,
+    ) -> Result<Handled, HandlerError> {
+        self(msg, yielder).await
+    }
+}
+
 /// A closure that can be called to commit the message.
 /// It returns a `BoxFuture` to allow for async commit operations.
-pub type CommitFunc =
-    Box<dyn FnOnce(MessageDisposition) -> BoxFuture<'static, anyhow::Result<()>> + Send + 'static>;
+pub type CommitFunc = Box<
+    dyn Fn(MessageDisposition) -> BoxFuture<'static, anyhow::Result<()>> + Send + Sync + 'static,
+>;
 
 /// A closure for committing a batch of messages.
 pub type BatchCommitFunc = Box<
-    dyn FnOnce(Vec<MessageDisposition>) -> BoxFuture<'static, anyhow::Result<()>> + Send + 'static,
+    dyn Fn(Vec<MessageDisposition>) -> BoxFuture<'static, anyhow::Result<()>>
+        + Send
+        + Sync
+        + 'static,
 >;
 
 /// Status information about an endpoint (Consumer or Publisher).

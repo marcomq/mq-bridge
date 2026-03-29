@@ -263,6 +263,7 @@ impl<'de> Deserialize<'de> for Endpoint {
                 }
 
                 // Deserialize the rest of the map into the flattened EndpointType.
+                // We need to handle the Box<EndpointType> here.
                 let temp_val = serde_json::Value::Object(temp_map);
                 let endpoint_type: EndpointType = match serde_json::from_value(temp_val.clone()) {
                     Ok(et) => et,
@@ -300,8 +301,8 @@ impl<'de> Deserialize<'de> for Endpoint {
                 };
 
                 Ok(Endpoint {
-                    middlewares,
-                    endpoint_type,
+                    middlewares,   // Middlewares are handled separately
+                    endpoint_type, // EndpointType is handled by the custom deserializer
                     handler: None,
                 })
             }
@@ -443,6 +444,7 @@ pub enum EndpointType {
     Fanout(Vec<Endpoint>),
     Switch(SwitchConfig),
     Response(ResponseConfig),
+    StreamingHandler(Box<StreamingHandlerConfig>),
     Reader(Box<Endpoint>),
     Custom {
         name: String,
@@ -474,6 +476,7 @@ impl EndpointType {
             EndpointType::Fanout(_) => "fanout",
             EndpointType::Switch(_) => "switch",
             EndpointType::Response(_) => "response",
+            EndpointType::StreamingHandler(_) => "streaming_handler",
             EndpointType::Reader(_) => "reader",
             EndpointType::Custom { .. } => "custom",
             EndpointType::Null => "null",
@@ -1611,6 +1614,20 @@ pub struct SwitchConfig {
     pub default: Option<Box<Endpoint>>,
 }
 
+/// Configuration for a Streaming Handler endpoint.
+///
+/// This endpoint allows a handler to yield multiple responses for a single input message.
+/// The yielded messages are then sent to the `output` endpoint.
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct StreamingHandlerConfig {
+    /// The output endpoint where the yielded messages will be sent.
+    /// This could be a `response` endpoint for HTTP streaming, or a `fanout` for multiple destinations.
+    pub output: Endpoint,
+    // In a more advanced version, you might add a 'handler_name' field to reference a globally registered StreamingHandler.
+}
+
 // --- Response Endpoint Configuration ---
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -1817,6 +1834,12 @@ impl SecretExtractor for EndpointType {
                 if let Some(default) = &mut cfg.default {
                     default.extract_secrets(&format!("{}__{}", prefix, "SWITCH__DEFAULT"), secrets);
                 }
+            }
+            EndpointType::StreamingHandler(cfg) => {
+                cfg.output.extract_secrets(
+                    &format!("{}__{}", prefix, "STREAMING_HANDLER__OUTPUT"),
+                    secrets,
+                );
             }
             EndpointType::Reader(ep) => {
                 ep.extract_secrets(&format!("{}__{}", prefix, "READER"), secrets)

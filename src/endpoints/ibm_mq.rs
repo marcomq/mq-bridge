@@ -700,11 +700,16 @@ impl MessageConsumer for IbmMqConsumer {
             return Ok(batch);
         }
 
-        let original_commit = batch.commit;
+        let original_commit: Arc<traits::BatchCommitFunc> = Arc::from(batch.commit);
+        let permit = Arc::new(std::sync::Mutex::new(Some(permit)));
         let wrapped_commit = Box::new(move |dispositions| {
+            let original_commit = original_commit.clone();
+            let permit = permit.clone();
             Box::pin(async move {
                 let result = original_commit(dispositions).await;
-                drop(permit); // Release the permit, allowing the next receive_batch to proceed.
+                if let Some(p) = permit.lock().unwrap().take() {
+                    drop(p); // Release the permit, allowing the next receive_batch to proceed.
+                }
                 result
             }) as traits::BoxFuture<'static, anyhow::Result<()>>
         });

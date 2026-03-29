@@ -892,6 +892,8 @@ impl MessageConsumer for FileConsumer {
 
                     Box::new(
                         move |dispositions: Vec<crate::traits::MessageDisposition>| {
+                            let offset_file = offset_file.clone();
+                            let captured_messages = captured_messages.clone();
                             Box::pin(async move {
                                 let max_offset = dispositions
                                     .iter()
@@ -963,11 +965,17 @@ impl MessageConsumer for FileConsumer {
                 let lock = c.file_lock.clone();
                 let buffer_clone = c.buffer.clone();
                 let lines_mem = c.lines_in_memory.clone();
-                let batch_for_commit = batch.clone();
+                let batch_for_commit = Arc::new(batch.clone());
                 let delimiter = c.delimiter.clone();
 
                 let commit = Box::new(
                     move |dispositions: Vec<crate::traits::MessageDisposition>| {
+                        let batch_for_commit = batch_for_commit.clone();
+                        let path = path.clone();
+                        let lock = lock.clone();
+                        let buffer_clone = buffer_clone.clone();
+                        let lines_mem = lines_mem.clone();
+                        let delimiter = delimiter.clone();
                         Box::pin(async move {
                             let mut leading_acks = 0;
                             let mut nacked_msgs = Vec::new();

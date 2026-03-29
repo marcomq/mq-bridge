@@ -32,6 +32,7 @@ pub mod sled;
 #[cfg(feature = "sqlx")]
 pub mod sqlx;
 pub mod static_endpoint;
+pub mod streaming_handler;
 pub mod switch;
 #[cfg(feature = "zeromq")]
 pub mod zeromq;
@@ -40,6 +41,7 @@ use crate::middleware::apply_middlewares_to_consumer;
 use crate::models::{Endpoint, EndpointType, MemoryConfig, Middleware, ResponseConfig};
 use crate::route::get_endpoint_factory;
 use crate::traits::{BoxFuture, MessageConsumer, MessagePublisher};
+use crate::CanonicalMessage;
 use anyhow::{anyhow, Result};
 use std::sync::Arc;
 
@@ -1109,6 +1111,9 @@ async fn create_base_publisher(
             }
             Ok(Box::new(fanout::FanoutPublisher::new(publishers)) as Box<dyn MessagePublisher>)
         }
+        EndpointType::StreamingHandler(cfg) => {
+            Ok(create_streaming_handler_publisher(route_name, endpoint_type, depth, cfg).await?)
+        }
         EndpointType::Switch(cfg) => {
             let mut cases = std::collections::HashMap::new();
             for (key, endpoint) in &cfg.cases {
@@ -1158,6 +1163,40 @@ async fn create_base_publisher(
         )),
     }?;
     Ok(publisher)
+}
+
+async fn create_streaming_handler_publisher(
+    route_name: &str,
+    _endpoint_type: &EndpointType,
+    depth: usize,
+    config: &crate::models::StreamingHandlerConfig,
+) -> Result<Box<dyn MessagePublisher>> {
+    let inner_publisher =
+        create_publisher_with_depth(route_name.to_string(), config.output.clone(), depth + 1)
+            .await?;
+
+    // This is where you'd resolve the actual StreamingHandler implementation.
+    // For now, we'll use a placeholder or assume a default.
+    // In a real scenario, you might have a factory for StreamingHandlers.
+    let handler: Arc<dyn crate::traits::StreamingHandler> = Arc::new(
+        crate::type_handler::TypeHandler::new() // Reuse TypeHandler for dispatching to streaming handlers.
+            .add_streaming_handler(
+                "default",
+                |msg: CanonicalMessage,
+                 _ctx: crate::MessageContext,
+                 yielder: crate::traits::Yielder| async move {
+                    // Default behavior: just pass the message through
+                    yielder.send(msg).await?;
+                    Ok(crate::outcomes::Handled::Ack)
+                },
+            ),
+    );
+
+    Ok(Box::new(streaming_handler::StreamingHandlerPublisher::new(
+        // No longer generic
+        handler,
+        inner_publisher,
+    )) as Box<dyn MessagePublisher>)
 }
 
 #[cfg(test)]

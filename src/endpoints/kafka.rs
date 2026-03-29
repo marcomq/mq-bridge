@@ -394,10 +394,16 @@ impl MessageConsumer for KafkaConsumer {
 
         // The commit function for Kafka needs to commit the offset of the processed message.
         // We can't move `self.consumer` into the closure, but we can commit by position.
+        let tpl = Arc::new(std::sync::Mutex::new(Some(tpl)));
         let consumer_clone = self.consumer.clone();
         let producer_clone = self.producer.clone();
 
         let commit = Box::new(move |disposition: MessageDisposition| {
+            let tpl = tpl.clone();
+            let consumer_clone = consumer_clone.clone();
+            let producer_clone = producer_clone.clone();
+            let reply_topic = reply_topic.clone();
+            let correlation_id = correlation_id.clone();
             Box::pin(async move {
                 // Handle reply
                 if matches!(disposition, MessageDisposition::Nack) {
@@ -425,9 +431,11 @@ impl MessageConsumer for KafkaConsumer {
                 }
 
                 // Ack failure may result in redelivery. Enable deduplication middleware to handle duplicates.
-                if let Err(e) = consumer_clone.commit(&tpl, CommitMode::Async) {
-                    tracing::error!("Failed to commit Kafka message: {:?}", e);
-                    return Err(anyhow!("Failed to commit Kafka message: {:?}", e));
+                if let Some(tpl_data) = tpl.lock().unwrap().take() {
+                    if let Err(e) = consumer_clone.commit(&tpl_data, CommitMode::Async) {
+                        tracing::error!("Failed to commit Kafka message: {:?}", e);
+                        return Err(anyhow!("Failed to commit Kafka message: {:?}", e));
+                    }
                 }
                 Ok(())
             }) as BoxFuture<'static, anyhow::Result<()>>
@@ -689,7 +697,13 @@ async fn receive_batch_internal(
     let consumer = consumer.clone();
     let producer = producer.into().cloned();
 
+    let last_offset_tpl = Arc::new(std::sync::Mutex::new(Some(last_offset_tpl)));
+
     let commit = Box::new(move |dispositions: Vec<MessageDisposition>| {
+        let consumer = consumer.clone();
+        let producer = producer.clone();
+        let reply_infos = reply_infos.clone();
+        let last_offset_tpl = last_offset_tpl.clone();
         Box::pin(async move {
             // Handle replies
             // Check for Nacks before moving dispositions for replies
@@ -697,18 +711,20 @@ async fn receive_batch_internal(
                 .iter()
                 .any(|d| matches!(d, MessageDisposition::Nack));
 
-            handle_kafka_replies(producer, &reply_infos, dispositions).await;
+            handle_kafka_replies(producer, &reply_infos, dispositions.clone()).await;
 
             // Only commit if there are offsets to commit AND no messages were Nacked.
             // If any message is Nacked, we skip the commit for the whole batch to ensure at-least-once delivery.
             if !any_nack && messages_len > 0 {
                 // Ack failure may result in redelivery. Enable deduplication middleware to handle duplicates.
-                if let Err(e) = consumer.commit(&last_offset_tpl, CommitMode::Async) {
-                    tracing::error!("Failed to commit Kafka message batch: {:?}", e);
-                    return Err(anyhow::anyhow!(
-                        "Failed to commit Kafka message batch: {:?}",
-                        e
-                    ));
+                if let Some(tpl) = last_offset_tpl.lock().unwrap().take() {
+                    if let Err(e) = consumer.commit(&tpl, CommitMode::Async) {
+                        tracing::error!("Failed to commit Kafka message batch: {:?}", e);
+                        return Err(anyhow::anyhow!(
+                            "Failed to commit Kafka message batch: {:?}",
+                            e
+                        ));
+                    }
                 }
             }
             Ok(())

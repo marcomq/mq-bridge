@@ -1,10 +1,11 @@
-use crate::traits::{Handled, Handler, HandlerError};
+use crate::traits::{Handled, Handler, HandlerError, StreamingHandler, Yielder};
 use crate::{CanonicalMessage, MessageContext};
 use async_trait::async_trait;
 use serde::de::DeserializeOwned;
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
+use tracing::warn;
 
 /// A handler that dispatches messages to other handlers based on a metadata field (e.g., "type").
 ///
@@ -26,6 +27,7 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct TypeHandler {
     pub(crate) handlers: HashMap<String, Arc<dyn Handler>>,
+    pub(crate) streaming_handlers: HashMap<String, Arc<dyn StreamingHandler>>,
     pub(crate) type_key: String, // will be the key in msg metadata, default is "kind"
     pub(crate) fallback: Option<Arc<dyn Handler>>,
 }
@@ -73,6 +75,7 @@ impl TypeHandler {
     pub fn new() -> Self {
         Self {
             handlers: HashMap::new(),
+            streaming_handlers: HashMap::new(),
             type_key: KIND_KEY.into(),
             fallback: None,
         }
@@ -127,6 +130,34 @@ impl TypeHandler {
             .insert(type_name.to_string(), Arc::new(wrapper));
         self
     }
+
+    /// Registers a typed streaming handler function.
+    ///
+    /// The handler can accept:
+    /// - `fn(T, MessageContext, Yielder) -> Future<Output = Result<Handled, HandlerError>>`
+    ///
+    /// This method is intended for use with `StreamingHandlerPublisher`.
+    pub fn add_streaming_handler<T, F, Fut>(mut self, type_name: &str, handler: F) -> Self
+    where
+        T: DeserializeOwned + Send + Sync + 'static,
+        F: Fn(T, MessageContext, Yielder) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<Handled, HandlerError>> + Send + 'static,
+    {
+        let handler = Arc::new(handler);
+        let wrapper = move |msg: CanonicalMessage, yielder: Yielder| {
+            let handler = handler.clone();
+            async move {
+                let data = msg.parse::<T>().map_err(|e| {
+                    HandlerError::NonRetryable(anyhow::anyhow!("Deserialization failed: {}", e))
+                })?;
+                let ctx = MessageContext::from(msg);
+                handler(data, ctx, yielder).await
+            }
+        };
+        self.streaming_handlers
+            .insert(type_name.to_string(), Arc::new(wrapper));
+        self
+    }
 }
 
 #[async_trait]
@@ -156,6 +187,40 @@ impl Handler for TypeHandler {
         let mut th = self.clone();
         th.handlers.insert(type_name.to_string(), handler);
         Some(Arc::new(th))
+    }
+}
+
+#[async_trait]
+impl StreamingHandler for TypeHandler {
+    async fn handle_stream(
+        &self,
+        msg: CanonicalMessage,
+        yielder: Yielder,
+    ) -> Result<Handled, HandlerError> {
+        if let Some(type_val) = msg.metadata.get(&self.type_key) {
+            if let Some(handler) = self.streaming_handlers.get(type_val) {
+                return handler.handle_stream(msg, yielder).await;
+            }
+
+            if let Some(handler) = self.handlers.get(type_val) {
+                // This is a bit of a hack: we need to pass the yielder to the underlying handler.
+                // The current `Handler` trait doesn't support this.
+                // For now, we'll assume a non-streaming fallback for regular handlers.
+                // A proper solution would involve a different registration for streaming handlers.
+                warn!("TypeHandler received a streaming request but is dispatching to a non-streaming handler. Yielder will not be used.");
+                return handler.handle(msg).await;
+            }
+        }
+
+        if let Some(fallback) = &self.fallback {
+            warn!("TypeHandler received a streaming request but is dispatching to a non-streaming fallback. Yielder will not be available.");
+            return fallback.handle(msg).await;
+        }
+
+        Err(HandlerError::NonRetryable(anyhow::anyhow!(
+            "No streaming handler registered for type: '{:?}' and no fallback provided",
+            msg.metadata.get(&self.type_key)
+        )))
     }
 }
 

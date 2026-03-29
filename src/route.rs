@@ -904,12 +904,19 @@ fn wrap_commit(
     seq: u64,
     seq_tx: Sender<(u64, SequencerItem)>,
 ) -> BatchCommitFunc {
+    let commit: Arc<BatchCommitFunc> = Arc::from(commit);
     Box::new(move |dispositions| {
+        let commit = commit.clone();
+        let seq_tx = seq_tx.clone();
         Box::pin(async move {
             let (notify_tx, notify_rx) = tokio::sync::oneshot::channel();
             // Send to sequencer
+            let commit_wrapper: BatchCommitFunc = Box::new(move |d| {
+                let commit = commit.clone();
+                commit(d)
+            });
             if seq_tx
-                .send((seq, (dispositions, commit, notify_tx)))
+                .send((seq, (dispositions, commit_wrapper, notify_tx)))
                 .await
                 .is_ok()
             {

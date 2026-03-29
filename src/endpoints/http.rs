@@ -50,7 +50,7 @@ fn streamed<S>(stream: S) -> BoxBody
 where
     S: futures::Stream<Item = Result<Frame<Bytes>, anyhow::Error>> + Send + Sync + 'static,
 {
-    StreamBody::new(stream).boxed()
+    http_body_util::BodyExt::boxed(StreamBody::new(stream))
 }
 
 /// A source that listens for incoming HTTP requests using hyper.
@@ -353,12 +353,14 @@ impl MessageConsumer for HttpConsumer {
             }
         }
 
+        let commits = Arc::new(commits);
         // Create a batch commit that handles all collected messages
         let batch_commit: crate::traits::BatchCommitFunc =
             Box::new(move |dispositions: Vec<MessageDisposition>| {
+                let commits = commits.clone();
                 Box::pin(async move {
                     // Commit each message with its corresponding disposition
-                    for (commit, disposition) in commits.into_iter().zip(dispositions.into_iter()) {
+                    for (commit, disposition) in commits.iter().zip(dispositions.into_iter()) {
                         commit(disposition).await?;
                     }
                     Ok(())
@@ -499,16 +501,18 @@ async fn handle_request(
         .map_err(|e| anyhow!("Failed to decompress request body: {}", e))?;
 
     let mut message = CanonicalMessage::new(payload, message_id);
+    let message_id_val = message.message_id;
     trace!(message_id = %format!("{:032x}", message.message_id), "Received HTTP request");
 
     message.metadata = metadata;
 
     let fire_and_forget = state.fire_and_forget;
-    let (ack_tx, ack_rx) = tokio::sync::oneshot::channel::<MessageDisposition>();
+    let (ack_tx, mut ack_rx) = tokio::sync::mpsc::channel::<MessageDisposition>(32);
     let commit = Box::new(move |disposition: MessageDisposition| {
+        let tx = ack_tx.clone();
         Box::pin(async move {
-            if ack_tx.send(disposition).is_err() && !fire_and_forget {
-                trace!("HTTP handler was no longer waiting for commit disposition");
+            if tx.send(disposition).await.is_err() && !fire_and_forget {
+                trace!(message_id = %format!("{:032x}", message_id_val), "HTTP handler was no longer waiting for commit disposition");
             }
             Ok(())
         }) as BoxFuture<'static, anyhow::Result<()>>
@@ -537,26 +541,74 @@ async fn handle_request(
 
     let timeout_duration = state.request_timeout;
     let custom_headers = state.custom_headers.clone();
-    match tokio::time::timeout(timeout_duration, ack_rx).await {
-        Ok(Ok(disposition)) => make_response(
-            disposition,
-            state.compression_enabled,
-            state.compression_threshold_bytes,
-            custom_headers,
-        ),
-        Ok(Err(_)) => {
-            let mut builder = Response::builder().status(StatusCode::INTERNAL_SERVER_ERROR);
-            for (header_name, header_value) in &custom_headers {
-                builder = builder.header(header_name.as_str(), header_value.as_str());
-            }
-            Ok(builder.body(full("Pipeline closed")).unwrap())
-        }
+
+    let first_disposition = match tokio::time::timeout(timeout_duration, ack_rx.recv()).await {
+        Ok(Some(d)) => Some(d),
+        Ok(None) => None,
         Err(_) => {
             let mut builder = Response::builder().status(StatusCode::GATEWAY_TIMEOUT);
             for (header_name, header_value) in &custom_headers {
                 builder = builder.header(header_name.as_str(), header_value.as_str());
             }
-            Ok(builder.body(full("Request timed out")).unwrap())
+            return Ok(builder.body(full("Request timed out")).unwrap());
+        }
+    };
+
+    match first_disposition {
+        Some(disposition) => {
+            let is_streaming = match &disposition {
+                MessageDisposition::Reply(msg) => msg.metadata.iter().any(|(k, v)| {
+                    (k.eq_ignore_ascii_case("content-type") && v.contains("text/event-stream"))
+                        || (k.eq_ignore_ascii_case("transfer-encoding") && v.contains("chunked"))
+                }),
+                _ => false,
+            };
+
+            let first_chunk = if is_streaming {
+                match &disposition {
+                    MessageDisposition::Reply(msg) => Some(msg.payload.clone()),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+
+            let mut response = make_response(
+                disposition,
+                state.compression_enabled,
+                state.compression_threshold_bytes,
+                custom_headers,
+            )?;
+
+            if is_streaming {
+                // Hijack the body and replace it with an async stream fed by the mpsc channel
+                let stream =
+                    futures::stream::unfold((first_chunk, ack_rx), |(first, mut rx)| async move {
+                        if let Some(payload) = first {
+                            return Some((
+                                Ok::<_, anyhow::Error>(Frame::data(payload)),
+                                (None, rx),
+                            ));
+                        }
+                        rx.recv().await.and_then(|d| match d {
+                            MessageDisposition::Reply(m) => Some((
+                                Ok::<_, anyhow::Error>(Frame::data(m.payload.clone())),
+                                (None, rx),
+                            )),
+                            _ => None,
+                        })
+                    });
+                *response.body_mut() = streamed(stream);
+            }
+
+            Ok(response)
+        }
+        None => {
+            let mut builder = Response::builder().status(StatusCode::INTERNAL_SERVER_ERROR);
+            for (header_name, header_value) in &custom_headers {
+                builder = builder.header(header_name.as_str(), header_value.as_str());
+            }
+            Ok(builder.body(full("Pipeline closed")).unwrap())
         }
     }
 }
@@ -1327,5 +1379,62 @@ http_route:
         });
 
         tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    #[tokio::test]
+    async fn test_http_streaming_chunked_response() {
+        let port = get_free_port();
+        let addr = format!("127.0.0.1:{}", port);
+        let config = HttpConfig {
+            url: addr.clone(),
+            ..Default::default()
+        };
+
+        let mut consumer = HttpConsumer::new(&config)
+            .await
+            .expect("Failed to create consumer");
+
+        // Client task: Uses the internal HttpPublisher to act as a client
+        let client_addr = format!("http://{}", addr);
+        let client_task = tokio::spawn(async move {
+            let pub_config = HttpConfig {
+                url: client_addr,
+                ..Default::default()
+            };
+            let publisher = HttpPublisher::new(&pub_config).await.unwrap();
+            publisher
+                .send(CanonicalMessage::new(b"request".to_vec(), None))
+                .await
+        });
+
+        // Server logic: Receive message and send two separate replies
+        let received = consumer.receive().await.expect("Failed to receive");
+
+        // Part 1: Initial response with chunked encoding metadata
+        let mut msg1 = CanonicalMessage::new(b"chunk1".to_vec(), None);
+        msg1.metadata
+            .insert("transfer-encoding".to_string(), "chunked".to_string());
+        (received.commit)(MessageDisposition::Reply(msg1))
+            .await
+            .expect("First commit failed");
+
+        // Part 2: Second chunk
+        let msg2 = CanonicalMessage::new(b"chunk2".to_vec(), None);
+        (received.commit)(MessageDisposition::Reply(msg2))
+            .await
+            .expect("Second commit failed");
+
+        // Finish the stream
+        (received.commit)(MessageDisposition::Ack)
+            .await
+            .expect("Final ack failed");
+
+        let response = client_task.await.unwrap().expect("Client request failed");
+        if let Sent::Response(resp) = response {
+            // The HttpPublisher aggregates the chunks back into one payload
+            assert_eq!(resp.payload.as_ref(), b"chunk1chunk2");
+        } else {
+            panic!("Expected Sent::Response");
+        }
     }
 }

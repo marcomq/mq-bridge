@@ -525,6 +525,9 @@ impl MessageConsumer for EventStoreConsumer {
         let last_offset_arc = self.last_offset.clone();
 
         let commit: BatchCommitFunc = Box::new(move |dispositions| {
+            let store = store.clone();
+            let subscriber_id = subscriber_id.clone();
+            let last_offset_arc = last_offset_arc.clone();
             Box::pin(async move {
                 if dispositions
                     .iter()

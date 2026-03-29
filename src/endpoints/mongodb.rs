@@ -916,6 +916,11 @@ impl MongoDbConsumer {
                 let collection_clone = self.collection.clone();
 
                 let commit = Box::new(move |disposition: MessageDisposition| {
+                    let db = db.clone();
+                    let collection_clone = collection_clone.clone();
+                    let id_val = id_val.clone();
+                    let reply_collection_name = reply_collection_name.clone();
+                    let correlation_id = correlation_id.clone();
                     Box::pin(async move {
                         match disposition {
                             MessageDisposition::Reply(resp) => {
@@ -1021,7 +1026,13 @@ impl MongoDbConsumer {
         let collection_clone = self.collection.clone();
         let db = self.db.clone();
 
+        let reply_infos = Arc::new(reply_infos);
+        let ids = Arc::new(ids);
         let commit = Box::new(move |dispositions: Vec<MessageDisposition>| {
+            let db = db.clone();
+            let collection_clone = collection_clone.clone();
+            let reply_infos = reply_infos.clone();
+            let ids = ids.clone();
             Box::pin(async move {
                 if dispositions.len() != reply_infos.len() {
                     tracing::warn!(
@@ -1229,6 +1240,9 @@ impl MessageConsumer for MongoDbSubscriber {
                 let cursor_id = self.cursor_id.clone();
 
                 let commit = Box::new(move |dispositions: Vec<MessageDisposition>| {
+                    let collection = collection.clone();
+                    let cursor_id = cursor_id.clone();
+                    let seqs = seqs.clone();
                     Box::pin(async move {
                         let mut highest_acked = 0;
                         for (disp, seq) in dispositions.iter().zip(seqs.iter()) {

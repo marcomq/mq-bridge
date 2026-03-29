@@ -397,9 +397,11 @@ impl MessageConsumer for ZeroMqConsumer {
         }
 
         trace!(count = messages.len(), message_ids = ?LazyMessageIds(&messages), "Received batch of ZeroMQ messages");
+        let contexts = Arc::new(contexts);
         let commit = Box::new(move |dispositions: Vec<MessageDisposition>| {
+            let contexts = contexts.clone();
             Box::pin(async move {
-                for (i, ctx_opt) in contexts.into_iter().enumerate() {
+                for (i, ctx_opt) in contexts.iter().enumerate() {
                     if let Some(ctx) = ctx_opt {
                         let resp = match dispositions.get(i) {
                             Some(MessageDisposition::Reply(r)) => Some(r.clone()),

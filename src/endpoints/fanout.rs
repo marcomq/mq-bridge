@@ -1,4 +1,4 @@
-use crate::traits::{EndpointStatus, MessagePublisher, PublisherError, Sent, SentBatch};
+use crate::traits::{EndpointStatus, MessagePublisher, PublisherError, SentBatch};
 use crate::CanonicalMessage;
 use async_trait::async_trait;
 use std::any::Any;
@@ -9,6 +9,10 @@ pub struct FanoutPublisher {
 }
 
 impl FanoutPublisher {
+    /// Creates a new `FanoutPublisher`.
+    ///
+    /// Messages sent to this publisher will be cloned and sent to each of the provided
+    /// `MessagePublisher` instances.
     pub fn new(publishers: Vec<Arc<dyn MessagePublisher>>) -> Self {
         Self { publishers }
     }
@@ -16,17 +20,10 @@ impl FanoutPublisher {
 
 #[async_trait]
 impl MessagePublisher for FanoutPublisher {
-    async fn send(&self, message: CanonicalMessage) -> Result<Sent, PublisherError> {
-        for publisher in &self.publishers {
-            // We must clone the message for each publisher.
-            publisher.send(message.clone()).await?;
-        }
-        Ok(Sent::Ack)
-    }
-
     async fn send_batch(
         &self,
-        messages: Vec<CanonicalMessage>,
+        messages: Vec<CanonicalMessage>, // This `messages` vector represents a single logical batch from the caller.
+                                         // Each element in this vector will be sent to *each* sub-publisher.
     ) -> Result<SentBatch, PublisherError> {
         use futures::future::join_all;
 
@@ -34,22 +31,50 @@ impl MessagePublisher for FanoutPublisher {
             return Ok(SentBatch::Ack);
         }
 
-        // Send the batch to all publishers concurrently.
-        let batch_sends = self.publishers.iter().map(|p| {
-            // Each publisher gets a clone of the entire batch. This can be memory-intensive.
-            p.send_batch(messages.clone())
-        });
+        let mut all_responses = Vec::new();
+        let mut all_failed = Vec::new();
 
-        let results = join_all(batch_sends).await;
+        // Collect futures for sending the cloned batch to all publishers concurrently.
+        let futures: Vec<_> = self
+            .publishers
+            .iter()
+            .map(|p| p.send_batch(messages.clone())) // Clone the entire batch for each sub-publisher
+            .collect();
 
-        // For fan-out, we consider the batch successful if it was successfully sent to *all* publishers.
-        // If any publisher returns a hard error, we propagate it.
-        // We don't currently aggregate partial failures from different fan-out destinations.
+        // Await all sends concurrently.
+        let results = join_all(futures).await;
+
         for result in results {
-            result?;
+            match result {
+                Ok(SentBatch::Ack) => {
+                    // This sub-publisher successfully processed the batch without returning specific responses.
+                }
+                Ok(SentBatch::Partial { responses, failed }) => {
+                    if let Some(resps) = responses {
+                        all_responses.extend(resps);
+                    }
+                    all_failed.extend(failed);
+                }
+                Err(e) => {
+                    // If any sub-publisher returns a hard error, we propagate it immediately.
+                    // This means the entire fan-out operation failed.
+                    return Err(e);
+                }
+            }
         }
 
-        Ok(SentBatch::Ack)
+        if all_failed.is_empty() && all_responses.is_empty() {
+            Ok(SentBatch::Ack)
+        } else {
+            Ok(SentBatch::Partial {
+                responses: if all_responses.is_empty() {
+                    None
+                } else {
+                    Some(all_responses)
+                },
+                failed: all_failed,
+            })
+        }
     }
 
     async fn status(&self) -> EndpointStatus {

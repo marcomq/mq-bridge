@@ -307,6 +307,7 @@ struct MqttInternalMessage {
     ack: MqttAck,
 }
 
+#[derive(Clone)]
 enum MqttAck {
     V3(PublishV3),
     V5(PublishV5),
@@ -376,6 +377,10 @@ impl MessageConsumer for MqttListener {
         let ack_info = internal.ack;
 
         let commit = Box::new(move |disposition: MessageDisposition| {
+            let ack_info = ack_info.clone();
+            let client = client.clone();
+            let reply_topic = reply_topic.clone();
+            let correlation_data = correlation_data.clone();
             Box::pin(async move {
                 match disposition {
                     MessageDisposition::Nack => return Ok(()),
@@ -433,23 +438,34 @@ impl MessageConsumer for MqttListener {
         }
 
         let client = self.client.clone();
+        let reply_infos = Arc::new(reply_infos);
+        let acks = Arc::new(acks);
         let commit = Box::new(move |dispositions: Vec<MessageDisposition>| {
+            let client = client.clone();
+            let reply_infos = reply_infos.clone();
+            let acks = acks.clone();
             Box::pin(async move {
                 for (((reply_topic, correlation_data), ack), disposition) in reply_infos
-                    .into_iter()
-                    .zip(acks.into_iter())
+                    .iter()
+                    .zip(acks.iter())
                     .zip(dispositions.into_iter())
                 {
                     match disposition {
                         MessageDisposition::Reply(resp) => {
-                            handle_mqtt_reply(&client, reply_topic, correlation_data, resp).await?;
-                            if let Err(e) = client.ack(&ack).await {
+                            handle_mqtt_reply(
+                                &client,
+                                reply_topic.clone(),
+                                correlation_data.clone(),
+                                resp,
+                            )
+                            .await?;
+                            if let Err(e) = client.ack(ack).await {
                                 error!("Failed to ack MQTT message in batch: {}", e);
                                 return Err(anyhow!("Failed to ack MQTT message batch: {}", e));
                             }
                         }
                         MessageDisposition::Ack => {
-                            if let Err(e) = client.ack(&ack).await {
+                            if let Err(e) = client.ack(ack).await {
                                 error!("Failed to ack MQTT message in batch: {}", e);
                                 return Err(e);
                             }
