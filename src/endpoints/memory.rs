@@ -625,11 +625,8 @@ impl MessageConsumer for MemoryQueueConsumer {
                 let response_channel = get_or_create_response_channel(&topic);
 
                 for (i, disposition) in dispositions.iter().cloned().enumerate() {
-                    match disposition {
-                        MessageDisposition::Reply(resp) => {
-                            handle_memory_reply(resp, i, &correlation_ids, &response_channel).await;
-                        }
-                        _ => {}
+                    if let MessageDisposition::Reply(resp) = disposition {
+                        handle_memory_reply(resp, i, &correlation_ids, &response_channel).await;
                     }
                 }
 

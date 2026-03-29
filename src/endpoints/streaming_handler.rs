@@ -88,7 +88,7 @@ impl MessagePublisher for StreamingHandlerPublisher {
                 inner_publisher_clone.send(msg).await
             }
             Ok(Handled::Ack) => Ok(Sent::Ack),
-            Err(e) => Err(e.into()), // Convert HandlerError to PublisherError
+            Err(e) => Err(e), // Convert HandlerError to PublisherError
         }
     }
 

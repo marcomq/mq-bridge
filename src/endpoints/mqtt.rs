@@ -199,9 +199,9 @@ impl MessagePublisher for MqttPublisher {
 
         let mut first_error: Option<anyhow::Error> = None;
         let mut failed_messages = Vec::new();
-        let mut messages_iter = messages.into_iter();
+        let messages_iter = messages.into_iter();
 
-        while let Some(message) = messages_iter.next() {
+        for message in messages_iter {
             // If an error has already occurred, we can stop trying to publish and mark remainder for retry.
             if first_error.is_some() {
                 failed_messages.push((
