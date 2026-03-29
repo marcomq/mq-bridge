@@ -594,6 +594,7 @@ impl MessageConsumer for MemoryQueueConsumer {
             .map(|m| m.metadata.get("correlation_id").cloned())
             .collect();
 
+        let messages_len = messages.len();
         // Guard to requeue messages if the batch is dropped without commit/nack.
         let guard = if self.enable_nack {
             Arc::new(std::sync::Mutex::new(Some(RequeueGuard {
@@ -604,13 +605,10 @@ impl MessageConsumer for MemoryQueueConsumer {
             Arc::new(std::sync::Mutex::new(None))
         };
 
-        let messages_len = messages.len();
-        let messages_for_retry = Arc::new(messages.clone());
         let broker_acked = Arc::new(AtomicBool::new(false));
 
         let commit = Box::new(move |dispositions: Vec<MessageDisposition>| {
             let guard = guard.clone();
-            let messages_for_retry = messages_for_retry.clone();
             let broker_acked = broker_acked.clone();
             let topic = topic.clone();
             let correlation_ids = correlation_ids.clone();
@@ -638,12 +636,15 @@ impl MessageConsumer for MemoryQueueConsumer {
                 // Only perform the broker-level Ack/Nack once
                 if !broker_acked.swap(true, Ordering::SeqCst) {
                     let mut to_requeue = Vec::new();
-                    for (i, disposition) in dispositions.into_iter().enumerate() {
-                        if matches!(disposition, MessageDisposition::Nack) {
-                            if let Some(msg) = messages_for_retry.get(i) {
-                                to_requeue.push(msg.clone());
+                    if let Some(mut g) = guard.lock().unwrap().take() {
+                        for (i, disposition) in dispositions.into_iter().enumerate() {
+                            if matches!(disposition, MessageDisposition::Nack) {
+                                if let Some(msg) = g.messages.get(i) {
+                                    to_requeue.push(msg.clone());
+                                }
                             }
                         }
+                        g.messages.clear();
                     }
 
                     if !to_requeue.is_empty() {
@@ -652,11 +653,6 @@ impl MessageConsumer for MemoryQueueConsumer {
                             ..Default::default()
                         });
                         let _ = main_channel.sender.send(to_requeue).await;
-                    }
-
-                    // Disarm the guard after broker logic is done
-                    if let Some(mut g) = guard.lock().unwrap().take() {
-                        g.messages.clear();
                     }
                 }
 

@@ -353,15 +353,20 @@ impl MessageConsumer for HttpConsumer {
             }
         }
 
-        let commits = Arc::new(commits);
+        let commits = Arc::new(std::sync::Mutex::new(Some(commits)));
         // Create a batch commit that handles all collected messages
         let batch_commit: crate::traits::BatchCommitFunc =
             Box::new(move |dispositions: Vec<MessageDisposition>| {
-                let commits = commits.clone();
+                let commits_mutex = commits.clone();
                 Box::pin(async move {
-                    // Commit each message with its corresponding disposition
-                    for (commit, disposition) in commits.iter().zip(dispositions.into_iter()) {
-                        commit(disposition).await?;
+                    let commits_vec = commits_mutex.lock().unwrap().take();
+                    if let Some(commits_vec) = commits_vec {
+                        // Commit each message with its corresponding disposition
+                        for (commit, disposition) in
+                            commits_vec.into_iter().zip(dispositions.into_iter())
+                        {
+                            commit(disposition).await?;
+                        }
                     }
                     Ok(())
                 }) as crate::traits::BoxFuture<'static, anyhow::Result<()>>
@@ -494,13 +499,12 @@ async fn handle_request(
 
     // Read body after extracting metadata
     let body_bytes = req.collect().await?.to_bytes();
-    let body_bytes_raw = body_bytes.to_vec();
 
     // Decompress if needed
-    let payload = decompress_if_needed(&body_bytes_raw, content_encoding.as_deref())
+    let payload = decompress_if_needed(body_bytes, content_encoding.as_deref())
         .map_err(|e| anyhow!("Failed to decompress request body: {}", e))?;
 
-    let mut message = CanonicalMessage::new(payload, message_id);
+    let mut message = CanonicalMessage::new_bytes(payload, message_id);
     let message_id_val = message.message_id;
     trace!(message_id = %format!("{:032x}", message.message_id), "Received HTTP request");
 
@@ -556,21 +560,14 @@ async fn handle_request(
 
     match first_disposition {
         Some(disposition) => {
-            let is_streaming = match &disposition {
-                MessageDisposition::Reply(msg) => msg.metadata.iter().any(|(k, v)| {
+            let (is_streaming, first_chunk) = if let MessageDisposition::Reply(msg) = &disposition {
+                let streaming = msg.metadata.iter().any(|(k, v)| {
                     (k.eq_ignore_ascii_case("content-type") && v.contains("text/event-stream"))
                         || (k.eq_ignore_ascii_case("transfer-encoding") && v.contains("chunked"))
-                }),
-                _ => false,
-            };
-
-            let first_chunk = if is_streaming {
-                match &disposition {
-                    MessageDisposition::Reply(msg) => Some(msg.payload.clone()),
-                    _ => None,
-                }
+                });
+                (streaming, streaming.then(|| msg.payload.clone()))
             } else {
-                None
+                (false, None)
             };
 
             let mut response = make_response(
@@ -578,6 +575,7 @@ async fn handle_request(
                 state.compression_enabled,
                 state.compression_threshold_bytes,
                 custom_headers,
+                is_streaming,
             )?;
 
             if is_streaming {
@@ -591,10 +589,9 @@ async fn handle_request(
                             ));
                         }
                         rx.recv().await.and_then(|d| match d {
-                            MessageDisposition::Reply(m) => Some((
-                                Ok::<_, anyhow::Error>(Frame::data(m.payload.clone())),
-                                (None, rx),
-                            )),
+                            MessageDisposition::Reply(msg) => {
+                                Some((Ok::<_, anyhow::Error>(Frame::data(msg.payload)), (None, rx)))
+                            }
                             _ => None,
                         })
                     });
@@ -618,6 +615,7 @@ fn make_response(
     compression_enabled: bool,
     compression_threshold_bytes: usize,
     custom_headers: HashMap<String, String>,
+    is_streaming: bool,
 ) -> anyhow::Result<Response<BoxBody>> {
     match disposition {
         MessageDisposition::Reply(mut msg) => {
@@ -629,11 +627,6 @@ fn make_response(
                 .unwrap_or(StatusCode::OK);
 
             let mut builder = Response::builder().status(status);
-
-            let is_streaming = msg.metadata.iter().any(|(k, v)| {
-                (k.eq_ignore_ascii_case("content-type") && v.contains("text/event-stream"))
-                    || (k.eq_ignore_ascii_case("transfer-encoding") && v.contains("chunked"))
-            });
 
             for (key, value) in &msg.metadata {
                 if !key.eq_ignore_ascii_case("content-encoding")
@@ -652,12 +645,16 @@ fn make_response(
                 builder = builder.header("content-type", "application/octet-stream");
             }
 
-            // Compress payload if enabled and beneficial
-            let (payload, was_compressed) = compress_if_needed(
-                &msg.payload,
-                compression_enabled,
-                compression_threshold_bytes,
-            )?;
+            // Compress payload if enabled and beneficial, but skip for streaming as body is replaced
+            let (payload, was_compressed) = if is_streaming {
+                (msg.payload, false)
+            } else {
+                compress_if_needed(
+                    msg.payload,
+                    compression_enabled,
+                    compression_threshold_bytes,
+                )?
+            };
 
             if was_compressed {
                 builder = builder.header("Content-Encoding", "gzip");
@@ -669,9 +666,10 @@ fn make_response(
             }
 
             if is_streaming {
-                let stream = futures::stream::once(async move {
-                    Ok::<_, anyhow::Error>(Frame::data(Bytes::from(payload)))
-                });
+                let stream =
+                    futures::stream::once(
+                        async move { Ok::<_, anyhow::Error>(Frame::data(payload)) },
+                    );
                 Ok(builder.body(streamed(stream)).unwrap())
             } else {
                 Ok(builder.body(full(payload)).unwrap())
@@ -781,9 +779,8 @@ impl HttpPublisher {
     }
 }
 
-#[async_trait]
-impl MessagePublisher for HttpPublisher {
-    async fn send(&self, message: CanonicalMessage) -> Result<Sent, PublisherError> {
+impl HttpPublisher {
+    async fn send_internal(&self, message: &CanonicalMessage) -> Result<Sent, PublisherError> {
         trace!(
             message_id = %format!("{:032x}", message.message_id),
             url = %self.url,
@@ -862,7 +859,7 @@ impl MessagePublisher for HttpPublisher {
 
         // Compress payload if enabled and beneficial
         let (payload, was_compressed) = compress_if_needed(
-            &message.payload,
+            message.payload.clone(),
             self.compression_enabled,
             self.compression_threshold_bytes,
         )
@@ -874,7 +871,7 @@ impl MessagePublisher for HttpPublisher {
             request_builder = request_builder.header("Content-Encoding", "gzip");
         }
 
-        let body = http_body_util::Full::from(Bytes::from(payload));
+        let body = http_body_util::Full::from(payload);
         let request = request_builder.body(body).map_err(|e| {
             PublisherError::NonRetryable(anyhow::anyhow!("Failed to build request: {}", e))
         })?;
@@ -909,8 +906,8 @@ impl MessagePublisher for HttpPublisher {
             }
         }
 
-        let response_bytes_raw = match response.into_body().collect().await {
-            Ok(collected) => collected.to_bytes().to_vec(),
+        let response_bytes_raw: Bytes = match response.into_body().collect().await {
+            Ok(collected) => collected.to_bytes(),
             Err(e) => {
                 return Err(PublisherError::Retryable(anyhow::anyhow!(
                     "Failed to read HTTP response body: {}",
@@ -920,7 +917,7 @@ impl MessagePublisher for HttpPublisher {
         };
 
         // Decompress response if needed
-        let response_bytes = decompress_if_needed(&response_bytes_raw, content_encoding.as_deref())
+        let response_bytes = decompress_if_needed(response_bytes_raw, content_encoding.as_deref())
             .map_err(|e| {
                 PublisherError::Retryable(anyhow::anyhow!("Failed to decompress response: {}", e))
             })?;
@@ -954,7 +951,8 @@ impl MessagePublisher for HttpPublisher {
             "HTTP request succeeded"
         );
 
-        let mut response_message = CanonicalMessage::new(response_bytes, Some(message.message_id));
+        let mut response_message =
+            CanonicalMessage::new_bytes(response_bytes, Some(message.message_id));
         response_message.metadata = response_metadata;
         Ok(Sent::Response(response_message))
     }
@@ -976,9 +974,10 @@ impl MessagePublisher for HttpPublisher {
             "Publishing batch of HTTP requests"
         );
 
+        let this = self.clone();
         let send_futures = messages.into_iter().map(|message| {
-            let msg_for_error = message.clone();
-            async move { self.send(message).await.map_err(|e| (msg_for_error, e)) }
+            let this = this.clone();
+            async move { this.send_internal(&message).await.map_err(|e| (message, e)) }
         });
 
         let mut stream = futures::stream::iter(send_futures).buffered(self.batch_concurrency);
@@ -1008,6 +1007,20 @@ impl MessagePublisher for HttpPublisher {
                 failed,
             })
         }
+    }
+}
+
+#[async_trait]
+impl MessagePublisher for HttpPublisher {
+    async fn send(&self, message: CanonicalMessage) -> Result<Sent, PublisherError> {
+        self.send_internal(&message).await
+    }
+
+    async fn send_batch(
+        &self,
+        messages: Vec<CanonicalMessage>,
+    ) -> Result<SentBatch, PublisherError> {
+        self.send_batch(messages).await
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -1131,42 +1144,42 @@ fn load_private_key(path: &str) -> anyhow::Result<PrivateKeyDer<'static>> {
 /// Returns (compressed_data, was_compressed).
 #[cfg(feature = "http")]
 fn compress_if_needed(
-    data: &[u8],
+    data: Bytes,
     compression_enabled: bool,
     threshold: usize,
-) -> anyhow::Result<(Vec<u8>, bool)> {
+) -> anyhow::Result<(Bytes, bool)> {
     if !compression_enabled || data.len() < threshold {
-        return Ok((data.to_vec(), false));
+        return Ok((data, false));
     }
 
     use flate2::Compression;
     use std::io::Write;
 
     let mut encoder = flate2::write::GzEncoder::new(Vec::new(), Compression::fast());
-    encoder.write_all(data)?;
+    encoder.write_all(&data)?;
     let compressed = encoder.finish()?;
 
     // Only use compression if it actually saves space
     if compressed.len() < data.len() {
-        Ok((compressed, true))
+        Ok((Bytes::from(compressed), true))
     } else {
-        Ok((data.to_vec(), false))
+        Ok((data, false))
     }
 }
 
 /// Decompresses gzip data if the Content-Encoding header indicates it.
 #[cfg(feature = "http")]
-fn decompress_if_needed(data: &[u8], content_encoding: Option<&str>) -> anyhow::Result<Vec<u8>> {
+fn decompress_if_needed(data: Bytes, content_encoding: Option<&str>) -> anyhow::Result<Bytes> {
     if let Some(encoding) = content_encoding {
         if encoding.to_lowercase().contains("gzip") {
             use std::io::Read;
-            let mut decoder = flate2::read::GzDecoder::new(data);
+            let mut decoder = flate2::read::GzDecoder::new(&data[..]);
             let mut decompressed = Vec::new();
             decoder.read_to_end(&mut decompressed)?;
-            return Ok(decompressed);
+            return Ok(Bytes::from(decompressed));
         }
     }
-    Ok(data.to_vec())
+    Ok(data)
 }
 
 /// Encodes data as base64 for HTTP Basic Authentication.

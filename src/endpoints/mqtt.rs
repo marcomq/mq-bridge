@@ -53,7 +53,7 @@ impl Client {
         &self,
         topic: &str,
         qos: QoS,
-        message: CanonicalMessage,
+        message: &CanonicalMessage,
     ) -> anyhow::Result<()> {
         match self {
             Client::V5(client) => {
@@ -64,28 +64,37 @@ impl Client {
                 if let Some(cd) = message.metadata.get("correlation_id") {
                     props.correlation_data = Some(cd.as_bytes().to_vec().into());
                 }
-                let mut user_properties: Vec<(String, String)> =
-                    message.metadata.into_iter().collect();
+                let mut user_properties: Vec<(String, String)> = message
+                    .metadata
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
                 user_properties.push((
                     "mq_bridge.message_id".to_string(),
                     format!("{:032x}", message.message_id),
                 ));
                 props.user_properties = user_properties;
                 client
-                    .publish_with_properties(topic, to_qos_v5(qos), false, message.payload, props)
+                    .publish_with_properties(
+                        topic,
+                        to_qos_v5(qos),
+                        false,
+                        message.payload.clone(),
+                        props,
+                    )
                     .await
                     .map_err(|e| e.into())
             }
             Client::V3(client) => {
                 let payload = if !message.metadata.is_empty() {
-                    serde_json::to_vec(&message)?
+                    serde_json::to_vec(message)?
                 } else {
-                    message.payload.into()
+                    message.payload.to_vec()
                 };
                 client
                     .publish(topic, qos, false, payload)
                     .await
-                    .map_err(|e| e.into())
+                    .map_err(|e| anyhow::anyhow!(e))
             }
         }
     }
@@ -166,7 +175,7 @@ impl MessagePublisher for MqttPublisher {
         );
 
         let client = self.state.read().await.client.clone();
-        let publish_future = client.publish(&self.topic, self.qos, message);
+        let publish_future = client.publish(&self.topic, self.qos, &message);
 
         // We use a longer timeout here (10s) to allow for transient connection drops/reconnects
         // without immediately failing the batch, while still preventing indefinite hangs.
@@ -184,30 +193,39 @@ impl MessagePublisher for MqttPublisher {
         &self,
         messages: Vec<CanonicalMessage>,
     ) -> Result<SentBatch, PublisherError> {
+        let total_count = messages.len();
         trace!(count = messages.len(), topic = %self.topic, message_ids = ?LazyMessageIds(&messages), "Publishing batch of MQTT messages");
         let client = self.state.read().await.client.clone();
 
         let mut first_error: Option<anyhow::Error> = None;
+        let mut failed_messages = Vec::new();
+        let mut messages_iter = messages.into_iter();
 
-        for message in &messages {
-            // If an error has already occurred, we can stop trying to publish.
+        while let Some(message) = messages_iter.next() {
+            // If an error has already occurred, we can stop trying to publish and mark remainder for retry.
             if first_error.is_some() {
-                break;
+                failed_messages.push((
+                    message,
+                    PublisherError::Retryable(anyhow!("Batch failed due to connection issue")),
+                ));
+                continue;
             }
 
-            let publish_future = client.publish(&self.topic, self.qos, message.clone());
+            let publish_future = client.publish(&self.topic, self.qos, &message);
 
             match tokio::time::timeout(Duration::from_secs(10), publish_future).await {
                 Ok(Ok(_)) => {
                     // Successfully enqueued
                 }
                 Ok(Err(e)) => {
-                    // Enqueueing failed.
                     first_error = Some(anyhow!("Failed to publish MQTT message in batch: {}", e));
+                    failed_messages
+                        .push((message, PublisherError::Retryable(anyhow!("Batch failed"))));
                 }
                 Err(_) => {
-                    // Timeout.
                     first_error = Some(anyhow!("MQTT publish timed out in batch"));
+                    failed_messages
+                        .push((message, PublisherError::Retryable(anyhow!("Batch failed"))));
                 }
             }
         }
@@ -215,19 +233,8 @@ impl MessagePublisher for MqttPublisher {
         if let Some(e) = first_error {
             warn!(
                 "MQTT batch send failed, marking all {} messages for retry. First error: {}",
-                messages.len(),
-                e
+                total_count, e
             );
-            let failed_messages = messages
-                .into_iter()
-                .map(|m| {
-                    (
-                        m,
-                        PublisherError::Retryable(anyhow!("Batch failed due to connection issue")),
-                    )
-                })
-                .collect();
-
             Ok(SentBatch::Partial {
                 responses: None,
                 failed: failed_messages,
@@ -515,7 +522,7 @@ async fn handle_mqtt_reply(
         // Use a timeout to prevent hanging if the client buffer is full or eventloop is stuck
         match tokio::time::timeout(
             Duration::from_secs(60),
-            client.publish(&rt, QoS::AtLeastOnce, msg),
+            client.publish(&rt, QoS::AtLeastOnce, &msg),
         )
         .await
         {

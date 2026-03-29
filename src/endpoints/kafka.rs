@@ -698,20 +698,21 @@ async fn receive_batch_internal(
     let producer = producer.into().cloned();
 
     let last_offset_tpl = Arc::new(std::sync::Mutex::new(Some(last_offset_tpl)));
+    let reply_infos_mutex = Arc::new(std::sync::Mutex::new(Some(reply_infos)));
 
     let commit = Box::new(move |dispositions: Vec<MessageDisposition>| {
         let consumer = consumer.clone();
         let producer = producer.clone();
-        let reply_infos = reply_infos.clone();
+        let reply_infos_mutex = reply_infos_mutex.clone();
         let last_offset_tpl = last_offset_tpl.clone();
         Box::pin(async move {
             // Handle replies
-            // Check for Nacks before moving dispositions for replies
+            let reply_infos = reply_infos_mutex.lock().unwrap().take().unwrap_or_default();
             let any_nack = dispositions
                 .iter()
                 .any(|d| matches!(d, MessageDisposition::Nack));
 
-            handle_kafka_replies(producer, &reply_infos, dispositions.clone()).await;
+            handle_kafka_replies(producer, &reply_infos, dispositions).await;
 
             // Only commit if there are offsets to commit AND no messages were Nacked.
             // If any message is Nacked, we skip the commit for the whole batch to ensure at-least-once delivery.

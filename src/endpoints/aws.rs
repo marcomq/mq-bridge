@@ -139,12 +139,14 @@ impl MessageConsumer for AwsConsumer {
 
         let client = self.client.clone();
         let queue_url = self.queue_url.clone();
+        let handles_mutex = Arc::new(std::sync::Mutex::new(Some(receipt_handles)));
 
         let commit: BatchCommitFunc = Box::new(move |dispositions: Vec<MessageDisposition>| {
             let client = client.clone();
             let queue_url = queue_url.clone();
-            let handles = receipt_handles.clone();
+            let handles_mutex = handles_mutex.clone();
             Box::pin(async move {
+                let handles = handles_mutex.lock().unwrap().take().unwrap_or_default();
                 process_aws_batch(&client, &queue_url, &handles, &dispositions).await
             })
         });

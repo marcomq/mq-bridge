@@ -401,10 +401,10 @@ impl MessageConsumer for ZeroMqConsumer {
         let commit = Box::new(move |dispositions: Vec<MessageDisposition>| {
             let contexts = contexts.clone();
             Box::pin(async move {
-                for (i, ctx_opt) in contexts.iter().enumerate() {
+                for (ctx_opt, disposition) in contexts.iter().zip(dispositions.into_iter()) {
                     if let Some(ctx) = ctx_opt {
-                        let resp = match dispositions.get(i) {
-                            Some(MessageDisposition::Reply(r)) => Some(r.clone()),
+                        let resp = match disposition {
+                            MessageDisposition::Reply(r) => Some(r),
                             _ => None,
                         };
 

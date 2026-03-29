@@ -101,11 +101,13 @@ fn message_to_document(
 
     let id_uuid = mongodb::bson::Uuid::from_bytes(message.message_id.to_be_bytes());
 
-    let mut metadata = message.metadata.clone();
+    let mut metadata_doc =
+        to_document(&message.metadata).context("Failed to serialize metadata to BSON document")?;
+
     let payload_bson = if matches!(format, MongoDbFormat::Json) {
         if let Ok(json_val) = serde_json::from_slice::<serde_json::Value>(&message.payload) {
             if let Ok(bson_val) = mongodb::bson::to_bson(&json_val) {
-                metadata.insert("type".to_string(), "json".to_string());
+                metadata_doc.insert("type", "json");
                 bson_val
             } else {
                 Bson::Binary(mongodb::bson::Binary {
@@ -122,7 +124,7 @@ fn message_to_document(
         }
     } else if matches!(format, MongoDbFormat::Text) {
         if let Ok(text) = std::str::from_utf8(&message.payload) {
-            metadata.insert("type".to_string(), "text".to_string());
+            metadata_doc.insert("type", "text");
             Bson::String(text.to_string())
         } else {
             Bson::Binary(mongodb::bson::Binary {
@@ -136,9 +138,6 @@ fn message_to_document(
             bytes: message.payload.to_vec(),
         })
     };
-
-    let metadata_doc =
-        to_document(&metadata).context("Failed to serialize metadata to BSON document")?;
 
     Ok(doc! {
         "_id": id_uuid,
@@ -1026,29 +1025,22 @@ impl MongoDbConsumer {
         let collection_clone = self.collection.clone();
         let db = self.db.clone();
 
-        let reply_infos = Arc::new(reply_infos);
-        let ids = Arc::new(ids);
+        let commit_data = Arc::new(std::sync::Mutex::new(Some((reply_infos, ids))));
         let commit = Box::new(move |dispositions: Vec<MessageDisposition>| {
             let db = db.clone();
             let collection_clone = collection_clone.clone();
-            let reply_infos = reply_infos.clone();
-            let ids = ids.clone();
+            let commit_data = commit_data.clone();
             Box::pin(async move {
-                if dispositions.len() != reply_infos.len() {
+                let (reply_infos, ids) = commit_data.lock().unwrap().take().unwrap_or_default();
+                if !dispositions.is_empty() && dispositions.len() != reply_infos.len() {
                     tracing::warn!(
                         "Disposition count mismatch: expected {}, got {}",
                         reply_infos.len(),
                         dispositions.len()
                     );
                 }
-                process_mongodb_batch_commit(
-                    &db,
-                    &collection_clone,
-                    &reply_infos,
-                    &ids,
-                    dispositions,
-                )
-                .await
+                process_mongodb_batch_commit(&db, &collection_clone, reply_infos, ids, dispositions)
+                    .await
             }) as BoxFuture<'static, anyhow::Result<()>>
         });
 
@@ -1059,16 +1051,18 @@ impl MongoDbConsumer {
 async fn process_mongodb_batch_commit(
     db: &Database,
     collection: &Collection<Document>,
-    reply_infos: &[(Option<String>, Option<String>)],
-    ids: &[Bson],
+    reply_infos: Vec<(Option<String>, Option<String>)>,
+    ids: Vec<Bson>,
     dispositions: Vec<MessageDisposition>,
 ) -> anyhow::Result<()> {
     let mut ids_to_delete = Vec::new();
     let mut ids_to_unlock = Vec::new();
     let mut errors = Vec::new();
 
-    for (((reply_coll_opt, correlation_id_opt), disposition), id) in
-        reply_infos.iter().zip(dispositions).zip(ids.iter())
+    for (((reply_coll_opt, correlation_id_opt), disposition), id) in reply_infos
+        .into_iter()
+        .zip(dispositions)
+        .zip(ids.into_iter())
     {
         // Only send a reply if the message has a 'reply_to' destination and the disposition is a Reply.
         // This allows for fire-and-forget patterns (no reply_to) or explicit replies.
@@ -1081,18 +1075,18 @@ async fn process_mongodb_batch_commit(
             )
             .await
             {
-                Ok(_) => ids_to_delete.push(id.clone()),
+                Ok(_) => ids_to_delete.push(id),
                 Err(e) => {
                     tracing::error!(id = %id, error = %e, "Failed to send reply");
                     errors.push(e);
-                    ids_to_unlock.push(id.clone());
+                    ids_to_unlock.push(id);
                 }
             },
             MessageDisposition::Ack => {
-                ids_to_delete.push(id.clone());
+                ids_to_delete.push(id);
             }
             MessageDisposition::Nack => {
-                ids_to_unlock.push(id.clone());
+                ids_to_unlock.push(id);
             }
         }
     }
@@ -1238,12 +1232,14 @@ impl MessageConsumer for MongoDbSubscriber {
             if !messages.is_empty() {
                 let collection = self.collection.clone();
                 let cursor_id = self.cursor_id.clone();
+                let seqs_mutex = Arc::new(std::sync::Mutex::new(Some(seqs)));
 
                 let commit = Box::new(move |dispositions: Vec<MessageDisposition>| {
                     let collection = collection.clone();
                     let cursor_id = cursor_id.clone();
-                    let seqs = seqs.clone();
+                    let seqs_mutex = seqs_mutex.clone();
                     Box::pin(async move {
+                        let seqs = seqs_mutex.lock().unwrap().take().unwrap_or_default();
                         let mut highest_acked = 0;
                         for (disp, seq) in dispositions.iter().zip(seqs.iter()) {
                             if matches!(

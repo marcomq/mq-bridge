@@ -888,22 +888,26 @@ impl MessageConsumer for FileConsumer {
                     &c.offset_file
                 {
                     let offset_file = offset_file.clone();
-                    let captured_messages = messages.clone();
+                    let offsets: Vec<Option<u64>> = messages
+                        .iter()
+                        .map(|m| {
+                            m.metadata
+                                .get("file_offset")
+                                .and_then(|s| s.parse::<u64>().ok())
+                        })
+                        .collect();
 
                     Box::new(
                         move |dispositions: Vec<crate::traits::MessageDisposition>| {
                             let offset_file = offset_file.clone();
-                            let captured_messages = captured_messages.clone();
+                            let offsets = offsets.clone();
                             Box::pin(async move {
                                 let max_offset = dispositions
                                     .iter()
-                                    .zip(captured_messages.iter())
-                                    .filter_map(|(d, m)| match d {
+                                    .zip(offsets.iter())
+                                    .filter_map(|(d, offset)| match d {
                                         crate::traits::MessageDisposition::Ack
-                                        | crate::traits::MessageDisposition::Reply(_) => m
-                                            .metadata
-                                            .get("file_offset")
-                                            .and_then(|s| s.parse::<u64>().ok()),
+                                        | crate::traits::MessageDisposition::Reply(_) => *offset,
                                         _ => None,
                                     })
                                     .max();
@@ -965,12 +969,12 @@ impl MessageConsumer for FileConsumer {
                 let lock = c.file_lock.clone();
                 let buffer_clone = c.buffer.clone();
                 let lines_mem = c.lines_in_memory.clone();
-                let batch_for_commit = Arc::new(batch.clone());
+                let nack_buffer = Arc::new(Mutex::new(Some(batch.clone())));
                 let delimiter = c.delimiter.clone();
 
                 let commit = Box::new(
                     move |dispositions: Vec<crate::traits::MessageDisposition>| {
-                        let batch_for_commit = batch_for_commit.clone();
+                        let nack_buffer = nack_buffer.clone();
                         let path = path.clone();
                         let lock = lock.clone();
                         let buffer_clone = buffer_clone.clone();
@@ -981,22 +985,22 @@ impl MessageConsumer for FileConsumer {
                             let mut nacked_msgs = Vec::new();
                             let mut encountered_nack = false;
 
-                            for (i, d) in dispositions.iter().enumerate() {
-                                if encountered_nack {
-                                    if let Some(msg) = batch_for_commit.get(i) {
-                                        nacked_msgs.push(msg.clone());
+                            if let Some(original_batch) = nack_buffer.lock().await.take() {
+                                for (d, msg) in
+                                    dispositions.into_iter().zip(original_batch.into_iter())
+                                {
+                                    if encountered_nack {
+                                        nacked_msgs.push(msg);
+                                        continue;
                                     }
-                                    continue;
-                                }
-                                match d {
-                                    crate::traits::MessageDisposition::Ack
-                                    | crate::traits::MessageDisposition::Reply(_) => {
-                                        leading_acks += 1;
-                                    }
-                                    crate::traits::MessageDisposition::Nack => {
-                                        encountered_nack = true;
-                                        if let Some(msg) = batch_for_commit.get(i) {
-                                            nacked_msgs.push(msg.clone());
+                                    match d {
+                                        crate::traits::MessageDisposition::Ack
+                                        | crate::traits::MessageDisposition::Reply(_) => {
+                                            leading_acks += 1;
+                                        }
+                                        crate::traits::MessageDisposition::Nack => {
+                                            encountered_nack = true;
+                                            nacked_msgs.push(msg);
                                         }
                                     }
                                 }
