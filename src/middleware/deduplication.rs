@@ -155,11 +155,17 @@ impl MessageConsumer for DeduplicationConsumer {
                 continue;
             }
 
+            let original_commit = Arc::new(original_commit);
             let db = self.db.clone();
             let key_clone = key.clone();
 
             // Wrap commit to update DB to "processed" state
             let commit = Box::new(move |disposition: MessageDisposition| {
+                let original_commit = original_commit.clone();
+                let db = db.clone();
+                let key_clone = key_clone.clone();
+                let processed_val = processed_val.clone();
+
                 Box::pin(async move {
                     original_commit(disposition).await?;
 

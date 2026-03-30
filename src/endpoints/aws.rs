@@ -12,6 +12,7 @@ use aws_sdk_sns::config::Credentials;
 use aws_sdk_sns::Client as SnsClient;
 use aws_sdk_sqs::Client as SqsClient;
 use std::any::Any;
+use std::sync::Arc;
 use tracing::{error, trace};
 
 pub struct AwsConsumer {
@@ -139,14 +140,13 @@ impl MessageConsumer for AwsConsumer {
 
         let client = self.client.clone();
         let queue_url = self.queue_url.clone();
-        let handles_mutex = Arc::new(std::sync::Mutex::new(Some(receipt_handles)));
+        let handles = Arc::new(receipt_handles);
 
         let commit: BatchCommitFunc = Box::new(move |dispositions: Vec<MessageDisposition>| {
             let client = client.clone();
             let queue_url = queue_url.clone();
-            let handles_mutex = handles_mutex.clone();
+            let handles = handles.clone();
             Box::pin(async move {
-                let handles = handles_mutex.lock().unwrap().take().unwrap_or_default();
                 process_aws_batch(&client, &queue_url, &handles, &dispositions).await
             })
         });

@@ -1025,13 +1025,14 @@ impl MongoDbConsumer {
         let collection_clone = self.collection.clone();
         let db = self.db.clone();
 
-        let commit_data = Arc::new(std::sync::Mutex::new(Some((reply_infos, ids))));
+        let reply_infos = Arc::new(reply_infos);
+        let ids = Arc::new(ids);
         let commit = Box::new(move |dispositions: Vec<MessageDisposition>| {
             let db = db.clone();
             let collection_clone = collection_clone.clone();
-            let commit_data = commit_data.clone();
+            let reply_infos = reply_infos.clone();
+            let ids = ids.clone();
             Box::pin(async move {
-                let (reply_infos, ids) = commit_data.lock().unwrap().take().unwrap_or_default();
                 if !dispositions.is_empty() && dispositions.len() != reply_infos.len() {
                     tracing::warn!(
                         "Disposition count mismatch: expected {}, got {}",
@@ -1039,8 +1040,14 @@ impl MongoDbConsumer {
                         dispositions.len()
                     );
                 }
-                process_mongodb_batch_commit(&db, &collection_clone, reply_infos, ids, dispositions)
-                    .await
+                process_mongodb_batch_commit(
+                    &db,
+                    &collection_clone,
+                    &reply_infos,
+                    &ids,
+                    dispositions,
+                )
+                .await
             }) as BoxFuture<'static, anyhow::Result<()>>
         });
 
@@ -1051,18 +1058,16 @@ impl MongoDbConsumer {
 async fn process_mongodb_batch_commit(
     db: &Database,
     collection: &Collection<Document>,
-    reply_infos: Vec<(Option<String>, Option<String>)>,
-    ids: Vec<Bson>,
+    reply_infos: &[(Option<String>, Option<String>)],
+    ids: &[Bson],
     dispositions: Vec<MessageDisposition>,
 ) -> anyhow::Result<()> {
     let mut ids_to_delete = Vec::new();
     let mut ids_to_unlock = Vec::new();
     let mut errors = Vec::new();
 
-    for (((reply_coll_opt, correlation_id_opt), disposition), id) in reply_infos
-        .into_iter()
-        .zip(dispositions)
-        .zip(ids.into_iter())
+    for (((reply_coll_opt, correlation_id_opt), disposition), id) in
+        reply_infos.iter().zip(dispositions).zip(ids.iter())
     {
         // Only send a reply if the message has a 'reply_to' destination and the disposition is a Reply.
         // This allows for fire-and-forget patterns (no reply_to) or explicit replies.
@@ -1232,14 +1237,13 @@ impl MessageConsumer for MongoDbSubscriber {
             if !messages.is_empty() {
                 let collection = self.collection.clone();
                 let cursor_id = self.cursor_id.clone();
-                let seqs_mutex = Arc::new(std::sync::Mutex::new(Some(seqs)));
+                let seqs = Arc::new(seqs);
 
                 let commit = Box::new(move |dispositions: Vec<MessageDisposition>| {
                     let collection = collection.clone();
                     let cursor_id = cursor_id.clone();
-                    let seqs_mutex = seqs_mutex.clone();
+                    let seqs = seqs.clone();
                     Box::pin(async move {
-                        let seqs = seqs_mutex.lock().unwrap().take().unwrap_or_default();
                         let mut highest_acked = 0;
                         for (disp, seq) in dispositions.iter().zip(seqs.iter()) {
                             if matches!(

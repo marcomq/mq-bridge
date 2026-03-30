@@ -18,7 +18,7 @@ use sled::{Db, IVec, Tree};
 use std::any::Any;
 use std::collections::HashMap;
 use std::ops::Bound;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tracing::trace;
 
@@ -274,6 +274,11 @@ impl MessageConsumer for SledConsumer {
                 let value_clone = value.to_vec();
 
                 let commit = Box::new(move |disposition: MessageDisposition| {
+                    let tree = tree.clone();
+                    let inflight_tree = inflight_tree.clone();
+                    let key_clone = key_clone.clone();
+                    let value_clone = value_clone.clone();
+
                     Box::pin(async move {
                         if delete {
                             match disposition {
@@ -339,11 +344,14 @@ impl MessageConsumer for SledConsumer {
             }
         }
 
+        let commits_mutex = Arc::new(Mutex::new(Some(commits)));
         Ok(ReceivedBatch {
             messages,
             commit: Box::new(move |dispositions| {
+                let commits_mutex = commits_mutex.clone();
                 Box::pin(async move {
-                    for (commit, disposition) in commits.into_iter().zip(dispositions) {
+                    let commits_vec = commits_mutex.lock().unwrap().take().unwrap_or_default();
+                    for (commit, disposition) in commits_vec.into_iter().zip(dispositions) {
                         commit(disposition).await?;
                     }
                     Ok(())

@@ -263,7 +263,6 @@ impl<'de> Deserialize<'de> for Endpoint {
                 }
 
                 // Deserialize the rest of the map into the flattened EndpointType.
-                // We need to handle the Box<EndpointType> here.
                 let temp_val = serde_json::Value::Object(temp_map);
                 let endpoint_type: EndpointType = match serde_json::from_value(temp_val.clone()) {
                     Ok(et) => et,
@@ -301,8 +300,8 @@ impl<'de> Deserialize<'de> for Endpoint {
                 };
 
                 Ok(Endpoint {
-                    middlewares,   // Middlewares are handled separately
-                    endpoint_type, // EndpointType is handled by the custom deserializer
+                    middlewares,
+                    endpoint_type,
                     handler: None,
                 })
             }

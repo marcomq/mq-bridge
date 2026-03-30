@@ -70,7 +70,7 @@ struct HttpConsumerState {
     basic_auth: Option<(String, String)>,
     compression_enabled: bool,
     compression_threshold_bytes: usize,
-    custom_headers: HashMap<String, String>,
+    custom_headers: Arc<HashMap<String, String>>,
 }
 
 /// A `hyper::Service` that can be nested into other services (like Axum).
@@ -179,7 +179,7 @@ fn setup_http_state_and_channel(
         basic_auth: config.basic_auth.clone(),
         compression_enabled: config.compression_enabled,
         compression_threshold_bytes,
-        custom_headers: config.custom_headers.clone(),
+        custom_headers: Arc::new(config.custom_headers.clone()),
     };
     Ok((request_rx, state, buffer_size))
 }
@@ -353,20 +353,15 @@ impl MessageConsumer for HttpConsumer {
             }
         }
 
-        let commits = Arc::new(std::sync::Mutex::new(Some(commits)));
+        let commits = Arc::new(commits);
         // Create a batch commit that handles all collected messages
         let batch_commit: crate::traits::BatchCommitFunc =
             Box::new(move |dispositions: Vec<MessageDisposition>| {
-                let commits_mutex = commits.clone();
+                let commits_vec = commits.clone();
                 Box::pin(async move {
-                    let commits_vec = commits_mutex.lock().unwrap().take();
-                    if let Some(commits_vec) = commits_vec {
-                        // Commit each message with its corresponding disposition
-                        for (commit, disposition) in
-                            commits_vec.into_iter().zip(dispositions.into_iter())
-                        {
-                            commit(disposition).await?;
-                        }
+                    // Commit each message with its corresponding disposition
+                    for (commit, disposition) in commits_vec.iter().zip(dispositions.into_iter()) {
+                        commit(disposition).await?;
                     }
                     Ok(())
                 }) as crate::traits::BoxFuture<'static, anyhow::Result<()>>
@@ -525,7 +520,7 @@ async fn handle_request(
     if let Err(e) = state.tx.send((message, commit)).await {
         tracing::error!("Failed to send request to bridge: {}", e);
         let mut builder = Response::builder().status(StatusCode::INTERNAL_SERVER_ERROR);
-        for (header_name, header_value) in &state.custom_headers {
+        for (header_name, header_value) in state.custom_headers.as_ref() {
             builder = builder.header(header_name.as_str(), header_value.as_str());
         }
         return Ok(builder
@@ -535,7 +530,7 @@ async fn handle_request(
 
     if state.fire_and_forget {
         let mut builder = Response::builder().status(StatusCode::ACCEPTED);
-        for (header_name, header_value) in &state.custom_headers {
+        for (header_name, header_value) in state.custom_headers.as_ref() {
             builder = builder.header(header_name.as_str(), header_value.as_str());
         }
         return Ok(builder
@@ -544,14 +539,14 @@ async fn handle_request(
     }
 
     let timeout_duration = state.request_timeout;
-    let custom_headers = state.custom_headers.clone();
+    let custom_headers = state.custom_headers;
 
     let first_disposition = match tokio::time::timeout(timeout_duration, ack_rx.recv()).await {
         Ok(Some(d)) => Some(d),
         Ok(None) => None,
         Err(_) => {
             let mut builder = Response::builder().status(StatusCode::GATEWAY_TIMEOUT);
-            for (header_name, header_value) in &custom_headers {
+            for (header_name, header_value) in custom_headers.as_ref() {
                 builder = builder.header(header_name.as_str(), header_value.as_str());
             }
             return Ok(builder.body(full("Request timed out")).unwrap());
@@ -574,7 +569,7 @@ async fn handle_request(
                 disposition,
                 state.compression_enabled,
                 state.compression_threshold_bytes,
-                custom_headers,
+                &custom_headers,
                 is_streaming,
             )?;
 
@@ -602,7 +597,7 @@ async fn handle_request(
         }
         None => {
             let mut builder = Response::builder().status(StatusCode::INTERNAL_SERVER_ERROR);
-            for (header_name, header_value) in &custom_headers {
+            for (header_name, header_value) in custom_headers.as_ref() {
                 builder = builder.header(header_name.as_str(), header_value.as_str());
             }
             Ok(builder.body(full("Pipeline closed")).unwrap())
@@ -614,7 +609,7 @@ fn make_response(
     disposition: MessageDisposition,
     compression_enabled: bool,
     compression_threshold_bytes: usize,
-    custom_headers: HashMap<String, String>,
+    custom_headers: &HashMap<String, String>,
     is_streaming: bool,
 ) -> anyhow::Result<Response<BoxBody>> {
     match disposition {
@@ -645,46 +640,42 @@ fn make_response(
                 builder = builder.header("content-type", "application/octet-stream");
             }
 
-            // Compress payload if enabled and beneficial, but skip for streaming as body is replaced
-            let (payload, was_compressed) = if is_streaming {
-                (msg.payload, false)
+            let payload = if is_streaming {
+                // Skip processing body if streaming, as handle_request will replace it anyway
+                msg.payload
             } else {
-                compress_if_needed(
+                let (p, compressed) = compress_if_needed(
                     msg.payload,
                     compression_enabled,
                     compression_threshold_bytes,
-                )?
+                )?;
+                if compressed {
+                    builder = builder.header("Content-Encoding", "gzip");
+                }
+                p
             };
 
-            if was_compressed {
-                builder = builder.header("Content-Encoding", "gzip");
-            }
-
             // Add custom headers to response
-            for (header_name, header_value) in &custom_headers {
+            for (header_name, header_value) in custom_headers {
                 builder = builder.header(header_name.as_str(), header_value.as_str());
             }
 
             if is_streaming {
-                let stream =
-                    futures::stream::once(
-                        async move { Ok::<_, anyhow::Error>(Frame::data(payload)) },
-                    );
-                Ok(builder.body(streamed(stream)).unwrap())
+                Ok(builder.body(full(Bytes::new())).unwrap())
             } else {
                 Ok(builder.body(full(payload)).unwrap())
             }
         }
         MessageDisposition::Ack => {
             let mut builder = Response::builder().status(StatusCode::ACCEPTED);
-            for (header_name, header_value) in &custom_headers {
+            for (header_name, header_value) in custom_headers {
                 builder = builder.header(header_name.as_str(), header_value.as_str());
             }
             Ok(builder.body(full("Message processed")).unwrap())
         }
         MessageDisposition::Nack => {
             let mut builder = Response::builder().status(StatusCode::INTERNAL_SERVER_ERROR);
-            for (header_name, header_value) in &custom_headers {
+            for (header_name, header_value) in custom_headers {
                 builder = builder.header(header_name.as_str(), header_value.as_str());
             }
             Ok(builder.body(full("Message processing failed")).unwrap())

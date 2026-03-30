@@ -614,7 +614,7 @@ impl MessageConsumer for AmqpConsumer {
         trace!(count = messages_len, queue = %self.queue, message_ids = ?LazyMessageIds(&messages), "Received batch of AMQP messages");
         let channel = self.channel.clone();
         let is_poisoned = self.is_poisoned.clone();
-        let ackers = Arc::new(std::sync::Mutex::new(Some(ackers)));
+        let ackers = Arc::new(ackers);
         let reply_infos = Arc::new(reply_infos);
         let commit: BatchCommitFunc = Box::new(move |dispositions: Vec<MessageDisposition>| {
             let channel = channel.clone();
@@ -635,18 +635,9 @@ impl MessageConsumer for AmqpConsumer {
                     ));
                 }
 
-                let acker = {
-                    let mut guard = ackers.lock().unwrap();
-                    guard.take()
-                };
-
                 let commit_op = async {
                     handle_replies(&channel, &reply_infos, &dispositions).await;
-                    if let Some(a) = acker {
-                        handle_dispositions(a, dispositions).await
-                    } else {
-                        Ok(())
-                    }
+                    handle_dispositions(ackers.to_vec(), dispositions).await
                 };
 
                 let result = match tokio::time::timeout(Duration::from_secs(5), commit_op).await {

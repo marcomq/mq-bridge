@@ -364,7 +364,7 @@ impl<T: MessagePublisher + ?Sized> MessagePublisher for Box<T> {
 
 /// Factory for creating custom endpoints (consumers and publishers).
 #[async_trait]
-pub trait CustomEndpointFactory: Send + Sync + std::fmt::Debug {
+pub trait CustomEndpointFactory: Send + Sync {
     async fn create_consumer(
         &self,
         _route_name: &str,

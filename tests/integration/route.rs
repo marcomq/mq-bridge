@@ -5,7 +5,7 @@ use std::sync::{
 };
 
 use mq_bridge::{
-    models::{Endpoint, Middleware, RetryMiddleware},
+    models::{Endpoint, EndpointType, Middleware, RetryMiddleware},
     msg, CanonicalMessage, Handled, Route,
 };
 use serde::{Deserialize, Serialize};
