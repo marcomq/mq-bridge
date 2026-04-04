@@ -1,5 +1,4 @@
 #![allow(unused_imports, dead_code)]
-mod integration;
 
 use mq_bridge::test_utils::{run_test_with_docker, setup_logging};
 use mq_bridge::traits::{MessageConsumer, MessagePublisher};
@@ -21,7 +20,7 @@ async fn run_service_reply(mut consumer: Box<dyn MessageConsumer>, response_payl
 #[cfg(feature = "kafka")]
 #[tokio::test]
 #[ignore]
-async fn test_kafka_request_reply() {
+pub async fn test_kafka_request_reply() {
     use mq_bridge::endpoints::kafka::{KafkaConsumer, KafkaPublisher};
     setup_logging();
     run_test_with_docker("tests/integration/docker-compose/kafka.yml", || async {
@@ -88,7 +87,7 @@ async fn test_kafka_request_reply() {
 #[cfg(feature = "nats")]
 #[tokio::test]
 #[ignore]
-async fn test_nats_request_reply() {
+pub async fn test_nats_request_reply() {
     use mq_bridge::endpoints::nats::{NatsConsumer, NatsPublisher};
     use mq_bridge::traits::Sent;
     setup_logging();
@@ -139,7 +138,7 @@ async fn test_nats_request_reply() {
 #[cfg(feature = "mongodb")]
 #[tokio::test]
 #[ignore]
-async fn test_mongodb_request_reply_pattern() {
+pub async fn test_mongodb_request_reply_pattern() {
     use mq_bridge::endpoints::mongodb::{MongoDbConsumer, MongoDbPublisher};
     use mq_bridge::traits::Sent;
     setup_logging();
@@ -191,7 +190,7 @@ async fn test_mongodb_request_reply_pattern() {
 #[cfg(feature = "amqp")]
 #[tokio::test]
 #[ignore]
-async fn test_amqp_request_reply() {
+pub async fn test_amqp_request_reply() {
     use mq_bridge::endpoints::amqp::{AmqpConsumer, AmqpPublisher};
     setup_logging();
     run_test_with_docker("tests/integration/docker-compose/amqp.yml", || async {
@@ -249,7 +248,7 @@ async fn test_amqp_request_reply() {
 #[cfg(feature = "mqtt")]
 #[tokio::test]
 #[ignore]
-async fn test_mqtt_request_reply() {
+pub async fn test_mqtt_request_reply() {
     use mq_bridge::endpoints::mqtt::{MqttConsumer, MqttPublisher};
     setup_logging();
     run_test_with_docker("tests/integration/docker-compose/mqtt.yml", || async {

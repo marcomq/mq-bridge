@@ -8,8 +8,8 @@ use crate::event_store::{
 };
 use crate::models::MemoryConfig;
 use crate::traits::{
-    BatchCommitFunc, BoxFuture, ConsumerError, EndpointStatus, MessageConsumer, MessageDisposition,
-    MessagePublisher, PublisherError, Received, ReceivedBatch, Sent, SentBatch,
+    BatchCommitFunc, BoxFuture, CommitDisposition, ConsumerError, EndpointStatus, MessageConsumer,
+    MessageDisposition, MessagePublisher, PublisherError, Received, ReceivedBatch, Sent, SentBatch,
 };
 use crate::CanonicalMessage;
 use anyhow::anyhow;
@@ -607,13 +607,17 @@ impl MessageConsumer for MemoryQueueConsumer {
 
         let broker_acked = Arc::new(AtomicBool::new(false));
 
-        let commit = Box::new(move |dispositions: Vec<MessageDisposition>| {
+        let commit = Box::new(move |disposition: CommitDisposition| {
             let guard = guard.clone();
             let broker_acked = broker_acked.clone();
             let topic = topic.clone();
             let correlation_ids = correlation_ids.clone();
 
             Box::pin(async move {
+                let dispositions = match disposition {
+                    CommitDisposition::All(d) => vec![d; messages_len],
+                    CommitDisposition::Individual(v) => v,
+                };
                 if dispositions.len() != messages_len {
                     return Err(anyhow::anyhow!(
                         "Memory batch commit received mismatched disposition count: expected {}, got {}",
@@ -625,8 +629,15 @@ impl MessageConsumer for MemoryQueueConsumer {
                 let response_channel = get_or_create_response_channel(&topic);
 
                 for (i, disposition) in dispositions.iter().cloned().enumerate() {
-                    if let MessageDisposition::Reply(resp) = disposition {
-                        handle_memory_reply(resp, i, &correlation_ids, &response_channel).await;
+                    match disposition {
+                        MessageDisposition::Reply(resp) => {
+                            handle_memory_reply(resp, i, &correlation_ids, &response_channel).await;
+                        }
+                        MessageDisposition::ReplyBatch(msgs) => {
+                            handle_memory_reply_batch(msgs, i, &correlation_ids, &response_channel)
+                                .await;
+                        }
+                        _ => {}
                     }
                 }
 
@@ -673,6 +684,66 @@ impl MessageConsumer for MemoryQueueConsumer {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+}
+
+async fn handle_memory_reply_batch(
+    mut msgs: Vec<CanonicalMessage>,
+    index: usize,
+    correlation_ids: &[Option<String>],
+    response_channel: &MemoryResponseChannel,
+) {
+    if msgs.is_empty() {
+        return;
+    }
+    for resp in msgs.iter_mut() {
+        if !resp.metadata.contains_key("correlation_id") {
+            if let Some(Some(cid)) = correlation_ids.get(index) {
+                resp.metadata
+                    .insert("correlation_id".to_string(), cid.clone());
+            }
+        }
+    }
+
+    if let Some(cid) = msgs[0].metadata.get("correlation_id") {
+        if let Some(tx) = response_channel.remove_waiter(cid).await {
+            if msgs.len() == 1 {
+                let _ = tx.send(msgs.pop().unwrap());
+            } else {
+                // Bundle multiple responses into a single JSON array message for the oneshot waiter
+                match serde_json::to_vec(&msgs) {
+                    Ok(bundled_payload) => {
+                        let mut bundle =
+                            CanonicalMessage::new(bundled_payload, Some(msgs[0].message_id));
+                        bundle.metadata = msgs[0].metadata.clone();
+                        bundle
+                            .metadata
+                            .insert("mq_bridge.bundled".to_string(), "true".to_string());
+                        let _ = tx.send(bundle);
+                    }
+                    Err(e) => {
+                        tracing::error!(message_id = %format!("{:032x}", msgs[0].message_id), error = %e, "Failed to serialize reply batch for memory channel bundle");
+                        // Send an error message to the waiter instead of timing out
+                        let mut err_msg = CanonicalMessage::new(
+                            format!("Failed to bundle reply batch: {}", e).into_bytes(),
+                            Some(msgs[0].message_id),
+                        );
+                        err_msg.metadata = msgs[0].metadata.clone();
+                        err_msg
+                            .metadata
+                            .insert("mq_bridge.error".to_string(), "true".to_string());
+                        let _ = tx.send(err_msg);
+                    }
+                }
+            }
+            return;
+        } else {
+            trace!(correlation_id = %cid, count = msgs.len(), "Received additional reply batch for already completed or timed-out request");
+        }
+    }
+
+    for resp in msgs {
+        let _ = response_channel.sender.send(resp).await;
     }
 }
 
@@ -835,12 +906,12 @@ mod tests {
 
         let batch2 = consumer.receive_batch(1).await.unwrap();
         let (received_msg2, commit2) = (batch2.messages, batch2.commit);
-        let _ = commit2(vec![MessageDisposition::Ack; received_msg2.len()]).await;
+        let _ = commit2(CommitDisposition::All(MessageDisposition::Ack)).await;
         assert_eq!(received_msg2.len(), 1);
         assert_eq!(received_msg2.first().unwrap().payload, msg2.payload);
         let batch3 = consumer.receive_batch(2).await.unwrap();
         let (received_msg3, commit3) = (batch3.messages, batch3.commit);
-        let _ = commit3(vec![MessageDisposition::Ack; received_msg3.len()]).await;
+        let _ = commit3(CommitDisposition::All(MessageDisposition::Ack)).await;
         assert_eq!(received_msg3.first().unwrap().payload, msg3.payload);
 
         // 6. Verify that the channel is now empty

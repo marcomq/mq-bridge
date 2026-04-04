@@ -2,6 +2,7 @@
 // cargo test --test integration_test -- --ignored --nocapture --test-threads=1
 
 mod integration;
+mod request_reply_test;
 
 #[allow(dead_code)]
 fn should_run(test_name: &str) -> bool {
@@ -12,6 +13,60 @@ fn should_run(test_name: &str) -> bool {
         return true;
     }
     test_name.to_lowercase().contains(&filter)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires docker compose"]
+async fn test_all_subscriber_logic() {
+   println!("--- Running All Subscriber and Request-Reply Logic Tests ---");
+
+    // --- Subscriber Logic ---
+    #[cfg(feature = "ibm-mq")]
+    {
+        if should_run("ibm-mq") {
+            println!("\n\n>>> Starting IBM MQ Subscriber Logic Test...");
+            integration::ibm_mq::test_ibm_mq_subscriber_logic().await;
+        }
+    }
+    #[cfg(feature = "kafka")]
+    {
+        if should_run("kafka") {
+            println!("\n\n>>> Starting Kafka Subscriber Logic Test...");
+            integration::kafka::test_kafka_subscriber_logic().await;
+        }
+    }
+    #[cfg(feature = "mongodb")]
+    {
+        if should_run("mongodb") {
+            println!("\n\n>>> Starting MongoDB Subscriber Logic Test...");
+            integration::mongodb::test_mongodb_subscriber_logic().await;
+        }
+    }
+    #[cfg(feature = "amqp")]
+    {
+        if should_run("amqp") {
+            println!("\n\n>>> Starting AMQP Subscriber Logic Test...");
+            integration::amqp::test_amqp_subscriber_logic().await;
+        }
+    }
+    #[cfg(feature = "nats")]
+    {
+        if should_run("nats") {
+            println!("\n\n>>> Starting NATS Subscriber Logic Test...");
+            integration::nats::test_nats_subscriber_logic().await;
+        }
+    }
+    #[cfg(feature = "mqtt")]
+    {
+        if should_run("mqtt") {
+            println!("\n\n>>> Starting MQTT Subscriber Logic Test...");
+            integration::mqtt::test_mqtt_subscriber_logic().await;
+        }
+    }
+    if should_run("file") {
+        println!("\n\n>>> Starting File Subscriber Logic Test...");
+        integration::file::test_file_subscriber_logic().await;
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -29,6 +29,7 @@ use mq_bridge::models::{Endpoint, EndpointType, IbmMqConfig, Route};
 use mq_bridge::test_utils::{
     add_performance_result, generate_test_messages, run_chaos_pipeline_test, run_direct_perf_test,
     run_test_with_docker, run_test_with_docker_controller, setup_logging,
+    verify_subscriber_logic,
 };
 use mq_bridge::traits::{MessageConsumer, MessagePublisher};
 use std::sync::Arc;
@@ -43,6 +44,35 @@ fn get_config() -> IbmMqConfig {
         channel: "DEV.APP.SVRCONN".to_string(),
         ..Default::default()
     }
+}
+
+fn get_config() -> IbmMqConfig {
+    IbmMqConfig {
+        username: Some("app".to_string()),
+        password: Some("admin".to_string()),
+        queue_manager: "QM1".to_string(),
+        url: "localhost(1414)".to_string(),
+        channel: "DEV.APP.SVRCONN".to_string(),
+        ..Default::default()
+    }
+}
+
+pub async fn test_ibm_mq_subscriber_logic() {
+    setup_logging();
+    run_test_with_docker("tests/integration/docker-compose/ibm_mq.yml", || async {
+        let topic_name = "DEV.BASE.TOPIC";
+        let mut config = get_config();
+        config.topic = Some(topic_name.to_string());
+        config.queue = None;
+
+        let publisher = Arc::new(IbmMqPublisher::new(&config).await.unwrap());
+        let sub1 = Arc::new(tokio::sync::Mutex::new(IbmMqConsumer::new(&config).await.unwrap()));
+        let sub2 = Arc::new(tokio::sync::Mutex::new(IbmMqConsumer::new(&config).await.unwrap()));
+
+        verify_subscriber_logic(publisher, sub1, sub2).await;
+        println!("IBM MQ Subscriber logic test passed!");
+    })
+    .await;
 }
 
 pub async fn test_ibm_mq_performance_pipeline() {

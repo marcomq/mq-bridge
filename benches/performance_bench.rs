@@ -544,7 +544,7 @@ pub mod http_helper {
     use mq_bridge::endpoints::http::{HttpConsumer, HttpPublisher};
     use mq_bridge::endpoints::memory::MemoryConsumer;
     use mq_bridge::models::HttpConfig;
-    use mq_bridge::traits::{ConsumerError, MessageConsumer, MessageDisposition, MessagePublisher};
+    use mq_bridge::traits::{CommitDisposition, ConsumerError, MessageConsumer, MessageDisposition, MessagePublisher};
     use once_cell::sync::Lazy;
     use std::net::TcpListener;
     use std::sync::Arc;
@@ -618,7 +618,7 @@ pub mod http_helper {
                         break; // Memory consumer closed
                     }
                     // Ack immediately to unblock HTTP response
-                    let _ = (batch.commit)(vec![MessageDisposition::Ack; count]).await;
+                    let _ = (batch.commit)(CommitDisposition::All(MessageDisposition::Ack)).await;
                 }
             }
         });

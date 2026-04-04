@@ -1,6 +1,7 @@
 use crate::errors::PublisherError;
 use crate::traits::{BatchCommitFunc, CommitFunc};
 use crate::CanonicalMessage;
+use std::sync::Arc;
 
 /// The outcome of a successful command handling operation.
 #[derive(Debug)]
@@ -13,24 +14,59 @@ pub enum Handled {
 }
 
 /// The outcome of a successful single message publishing operation.
-#[derive(Debug)]
 pub enum Sent {
     /// Message was successfully sent, no response was generated.
     Ack,
     /// Message was successfully sent and a response was generated.
     Response(CanonicalMessage),
+    /// Message was successfully sent and multiple responses were generated.
+    /// Optionally includes a deferred commit handle.
+    Responses(Vec<CanonicalMessage>, Option<Arc<BatchCommitFunc>>),
+}
+
+impl std::fmt::Debug for Sent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Ack => write!(f, "Ack"),
+            Self::Response(msg) => f.debug_tuple("Response").field(msg).finish(),
+            Self::Responses(msgs, commit) => f
+                .debug_tuple("Responses")
+                .field(msgs)
+                .field(&commit.as_ref().map(|_| "<BatchCommitFunc>"))
+                .finish(),
+        }
+    }
 }
 
 /// The outcome of a successful batch message publishing operation.
-#[derive(Debug)]
 pub enum SentBatch {
     /// All messages in the batch were sent successfully. No responses were generated.
     Ack,
     /// The batch operation resulted in a mix of successes and/or failures.
+    /// Optionally includes a deferred commit handle.
     Partial {
         responses: Option<Vec<CanonicalMessage>>,
         failed: Vec<(CanonicalMessage, PublisherError)>,
+        commit: Option<Arc<BatchCommitFunc>>,
     },
+}
+
+impl std::fmt::Debug for SentBatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Ack => write!(f, "Ack"),
+            Self::Partial {
+                responses,
+                failed,
+                commit,
+            } => f
+                .debug_struct("Partial")
+                .field("responses", responses)
+                .field("failed", failed)
+                .field("commit", &commit.as_ref().map(|_| "<BatchCommitFunc>"))
+                .finish(),
+        }
+    }
 }
 
 /// A successfully received single message.

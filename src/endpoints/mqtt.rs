@@ -1,8 +1,8 @@
 use crate::canonical_message::tracing_support::LazyMessageIds;
 use crate::models::{MqttConfig, MqttProtocol};
 use crate::traits::{
-    BoxFuture, ConsumerError, MessageConsumer, MessageDisposition, MessagePublisher,
-    PublisherError, Received, ReceivedBatch, Sent, SentBatch,
+    BoxFuture, CommitDisposition, ConsumerError, MessageConsumer, MessageDisposition,
+    MessagePublisher, PublisherError, Received, ReceivedBatch, Sent, SentBatch,
 };
 use crate::CanonicalMessage;
 use crate::APP_NAME;
@@ -238,6 +238,7 @@ impl MessagePublisher for MqttPublisher {
             Ok(SentBatch::Partial {
                 responses: None,
                 failed: failed_messages,
+                commit: None,
             })
         } else {
             Ok(SentBatch::Ack)
@@ -395,6 +396,18 @@ impl MessageConsumer for MqttListener {
                         handle_mqtt_reply(&client, reply_topic, correlation_data, resp).await?;
                         // Fallthrough to Ack
                     }
+                    MessageDisposition::ReplyBatch(msgs) => {
+                        for resp in msgs {
+                            handle_mqtt_reply(
+                                &client,
+                                reply_topic.clone(),
+                                correlation_data.clone(),
+                                resp,
+                            )
+                            .await?;
+                        }
+                        // Fallthrough to Ack
+                    }
                     MessageDisposition::Ack => {
                         // Fallthrough to Ack
                     }
@@ -447,11 +460,16 @@ impl MessageConsumer for MqttListener {
         let client = self.client.clone();
         let reply_infos = Arc::new(reply_infos);
         let acks = Arc::new(acks);
-        let commit = Box::new(move |dispositions: Vec<MessageDisposition>| {
+        let commit = Box::new(move |disposition: CommitDisposition| {
             let client = client.clone();
             let reply_infos = reply_infos.clone();
             let acks = acks.clone();
             Box::pin(async move {
+                let messages_len = reply_infos.len();
+                let dispositions = match disposition {
+                    CommitDisposition::All(d) => vec![d; messages_len],
+                    CommitDisposition::Individual(v) => v,
+                };
                 for (((reply_topic, correlation_data), ack), disposition) in reply_infos
                     .iter()
                     .zip(acks.iter())
@@ -466,18 +484,27 @@ impl MessageConsumer for MqttListener {
                                 resp,
                             )
                             .await?;
-                            if let Err(e) = client.ack(ack).await {
-                                error!("Failed to ack MQTT message in batch: {}", e);
-                                return Err(anyhow!("Failed to ack MQTT message batch: {}", e));
+                        }
+                        MessageDisposition::ReplyBatch(msgs) => {
+                            for resp in msgs {
+                                handle_mqtt_reply(
+                                    &client,
+                                    reply_topic.clone(),
+                                    correlation_data.clone(),
+                                    resp,
+                                )
+                                .await?;
                             }
                         }
-                        MessageDisposition::Ack => {
-                            if let Err(e) = client.ack(ack).await {
-                                error!("Failed to ack MQTT message in batch: {}", e);
-                                return Err(e);
-                            }
+                        MessageDisposition::Ack => {}
+                        MessageDisposition::Nack => {
+                            continue;
                         }
-                        MessageDisposition::Nack => {}
+                    }
+                    // Shared Ack for success paths
+                    if let Err(e) = client.ack(ack).await {
+                        error!("Failed to ack MQTT message in batch: {}", e);
+                        return Err(anyhow!("Failed to ack MQTT message batch: {}", e));
                     }
                 }
                 Ok(())

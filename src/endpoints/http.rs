@@ -6,7 +6,8 @@
 use crate::canonical_message::tracing_support::LazyMessageIds;
 use crate::models::{HttpConfig, TlsConfig};
 use crate::traits::{
-    BoxFuture, ConsumerError, MessageConsumer, MessagePublisher, ReceivedBatch, Sent,
+    BoxFuture, CommitDisposition, ConsumerError, MessageConsumer, MessagePublisher, ReceivedBatch,
+    Sent,
 };
 use crate::traits::{CommitFunc, MessageDisposition, PublisherError, SentBatch};
 use crate::CanonicalMessage;
@@ -356,9 +357,13 @@ impl MessageConsumer for HttpConsumer {
         let commits = Arc::new(commits);
         // Create a batch commit that handles all collected messages
         let batch_commit: crate::traits::BatchCommitFunc =
-            Box::new(move |dispositions: Vec<MessageDisposition>| {
+            Box::new(move |disposition: CommitDisposition| {
                 let commits_vec = commits.clone();
                 Box::pin(async move {
+                    let dispositions = match disposition {
+                        CommitDisposition::All(d) => vec![d; commits_vec.len()],
+                        CommitDisposition::Individual(v) => v,
+                    };
                     // Commit each message with its corresponding disposition
                     for (commit, disposition) in commits_vec.iter().zip(dispositions.into_iter()) {
                         commit(disposition).await?;
@@ -507,11 +512,47 @@ async fn handle_request(
 
     let fire_and_forget = state.fire_and_forget;
     let (ack_tx, mut ack_rx) = tokio::sync::mpsc::channel::<MessageDisposition>(32);
+
+    // The ReplyRegistry is used for any HTTP request that is NOT fire_and_forget,
+    // to enable low-latency responses by bypassing the sequencer.
+    // The 'streamable' check is only for how the HTTP response body is constructed.
+    let expects_reply = !fire_and_forget;
+    if expects_reply {
+        message.metadata.insert(
+            crate::traits::REPLY_PATH_KEY.to_string(),
+            "true".to_string(),
+        );
+        crate::traits::ReplyRegistry::register(
+            message_id_val,
+            crate::traits::ReplySender::new(ack_tx.clone()),
+        );
+    }
+
+    struct ReplyRegistryGuard(u128);
+    impl Drop for ReplyRegistryGuard {
+        fn drop(&mut self) {
+            crate::traits::ReplyRegistry::unregister(self.0);
+        }
+    }
+    let _guard = expects_reply.then(|| Arc::new(ReplyRegistryGuard(message_id_val)));
+
     let commit = Box::new(move |disposition: MessageDisposition| {
         let tx = ack_tx.clone();
         Box::pin(async move {
-            if tx.send(disposition).await.is_err() && !fire_and_forget {
-                trace!(message_id = %format!("{:032x}", message_id_val), "HTTP handler was no longer waiting for commit disposition");
+            match disposition {
+                MessageDisposition::ReplyBatch(msgs) => {
+                    for msg in msgs {
+                        // If a batch comes back, make sure we trigger streaming if not already active
+                        if tx.send(MessageDisposition::Reply(msg)).await.is_err() {
+                            trace!(message_id = %format!("{:032x}", message_id_val), "HTTP handler was no longer waiting for commit disposition (batch)");
+                        }
+                    }
+                }
+                other => {
+                    if tx.send(other).await.is_err() {
+                        trace!(message_id = %format!("{:032x}", message_id_val), "HTTP handler was no longer waiting for commit disposition");
+                    }
+                }
             }
             Ok(())
         }) as BoxFuture<'static, anyhow::Result<()>>
@@ -555,15 +596,35 @@ async fn handle_request(
 
     match first_disposition {
         Some(disposition) => {
-            let (is_streaming, first_chunk) = if let MessageDisposition::Reply(msg) = &disposition {
-                let streaming = msg.metadata.iter().any(|(k, v)| {
+            let mut is_streaming = false;
+            let mut first_chunk = None;
+
+            // Check if the *response* disposition itself indicates streaming
+            if let MessageDisposition::Reply(msg) = &disposition {
+                // Only a Reply can be streamed
+                let is_response_streamable = msg.metadata.iter().any(|(k, v)| {
                     (k.eq_ignore_ascii_case("content-type") && v.contains("text/event-stream"))
                         || (k.eq_ignore_ascii_case("transfer-encoding") && v.contains("chunked"))
                 });
-                (streaming, streaming.then(|| msg.payload.clone()))
-            } else {
-                (false, None)
-            };
+                is_streaming = is_response_streamable;
+                first_chunk = is_response_streamable.then(|| msg.payload.clone());
+            }
+
+            // If we have more messages pending in the channel immediately, force streaming mode.
+            // This should only happen if the main disposition is a Reply, so that make_response
+            // generates a status code consistent with a response body.
+            if !is_streaming
+                && !ack_rx.is_empty()
+                && matches!(disposition, MessageDisposition::Reply(_))
+            {
+                is_streaming = true;
+                // Streaming is only forced for Reply dispositions so that make_response
+                // uses a status code and headers consistent with a response body.
+                debug_assert!(matches!(disposition, MessageDisposition::Reply(_)));
+                if let MessageDisposition::Reply(msg) = &disposition {
+                    first_chunk = Some(msg.payload.clone());
+                }
+            }
 
             let mut response = make_response(
                 disposition,
@@ -575,21 +636,25 @@ async fn handle_request(
 
             if is_streaming {
                 // Hijack the body and replace it with an async stream fed by the mpsc channel
-                let stream =
-                    futures::stream::unfold((first_chunk, ack_rx), |(first, mut rx)| async move {
+                let guard_clone = _guard.clone();
+                let stream = futures::stream::unfold(
+                    (first_chunk, ack_rx, guard_clone),
+                    |(first, mut rx, guard)| async move {
                         if let Some(payload) = first {
                             return Some((
                                 Ok::<_, anyhow::Error>(Frame::data(payload)),
-                                (None, rx),
+                                (None, rx, guard),
                             ));
                         }
                         rx.recv().await.and_then(|d| match d {
-                            MessageDisposition::Reply(msg) => {
-                                Some((Ok::<_, anyhow::Error>(Frame::data(msg.payload)), (None, rx)))
-                            }
+                            MessageDisposition::Reply(msg) => Some((
+                                Ok::<_, anyhow::Error>(Frame::data(msg.payload)),
+                                (None, rx, guard),
+                            )),
                             _ => None,
                         })
-                    });
+                    },
+                );
                 *response.body_mut() = streamed(stream);
             }
 
@@ -680,6 +745,11 @@ fn make_response(
             }
             Ok(builder.body(full("Message processing failed")).unwrap())
         }
+        // MessageDisposition::ReplyBatch is unreachable here because the HTTP commit closure
+        // expands ReplyBatch into individual Reply messages sent to the response channel.
+        // make_response is only called for the initial disposition received, which is
+        // guaranteed to be Reply, Ack, or Nack.
+        MessageDisposition::ReplyBatch(_) => unreachable!("ReplyBatch should have been expanded by the commit closure before reaching make_response"),
     }
 }
 
@@ -979,6 +1049,19 @@ impl HttpPublisher {
         while let Some(result) = stream.next().await {
             match result {
                 Ok(Sent::Response(resp)) => responses.push(resp),
+                Ok(Sent::Responses(resps, commit)) => {
+                    responses.extend(resps);
+                    if let Some(c) = commit {
+                        c(CommitDisposition::All(MessageDisposition::Ack))
+                            .await
+                            .map_err(|e| {
+                                PublisherError::Retryable(anyhow::anyhow!(
+                                    "Failed to commit responses in HTTP batch: {}",
+                                    e
+                                ))
+                            })?;
+                    }
+                }
                 Ok(Sent::Ack) => {}
                 Err((msg, e)) => {
                     failed.push((msg, e));
@@ -996,6 +1079,7 @@ impl HttpPublisher {
                     Some(responses)
                 },
                 failed,
+                commit: None,
             })
         }
     }
@@ -1183,7 +1267,10 @@ fn base64_encode(data: &[u8]) -> String {
 mod tests {
     use super::*;
     use crate::endpoints::create_publisher_from_route;
+    use crate::models::Endpoint;
     use crate::models::{Config, EndpointType};
+    use crate::route::Route;
+    use crate::traits::Yielder;
     use std::time::Duration;
 
     fn get_free_port() -> u16 {
@@ -1292,19 +1379,21 @@ http_route:
             url: addr.clone(),
             ..Default::default()
         };
-        let mut consumer = HttpConsumer::new(&http_config).await.unwrap();
+        let consumer = HttpConsumer::new(&http_config).await.unwrap();
 
         let static_content = "This is a static response";
-        let static_publisher =
+        let _static_publisher =
             crate::endpoints::static_endpoint::StaticEndpointPublisher::new(static_content)
                 .unwrap();
 
         tokio::spawn(async move {
+            let mut consumer = consumer;
             if let Ok(received) = consumer.receive().await {
                 let static_response_outcome =
-                    static_publisher.send(received.message).await.unwrap();
+                    _static_publisher.send(received.message).await.unwrap();
                 let disposition = match static_response_outcome {
                     Sent::Response(msg) => crate::traits::MessageDisposition::Reply(msg),
+                    Sent::Responses(msgs, _) => crate::traits::MessageDisposition::ReplyBatch(msgs),
                     Sent::Ack => crate::traits::MessageDisposition::Ack,
                 };
                 let _ = (received.commit)(disposition).await;
@@ -1322,19 +1411,21 @@ http_route:
             url: addr.clone(),
             ..Default::default()
         };
-        let mut consumer = HttpConsumer::new(&http_config).await.unwrap();
+        let consumer = HttpConsumer::new(&http_config).await.unwrap();
 
         let response_endpoint =
             crate::models::Endpoint::new(EndpointType::Response(crate::models::ResponseConfig {}));
-        let publisher = create_publisher_from_route("test_response", &response_endpoint)
+        let _publisher = create_publisher_from_route("test_response", &response_endpoint)
             .await
             .unwrap();
 
         tokio::spawn(async move {
+            let mut consumer = consumer;
             if let Ok(received) = consumer.receive().await {
-                let outcome = publisher.send(received.message).await.unwrap();
+                let outcome = _publisher.send(received.message).await.unwrap();
                 let disposition = match outcome {
                     Sent::Response(msg) => crate::traits::MessageDisposition::Reply(msg),
+                    Sent::Responses(msgs, _) => crate::traits::MessageDisposition::ReplyBatch(msgs),
                     Sent::Ack => crate::traits::MessageDisposition::Ack,
                 };
                 let _ = (received.commit)(disposition).await;
@@ -1354,7 +1445,7 @@ http_route:
             url: addr.clone(),
             ..Default::default()
         };
-        let mut consumer = HttpConsumer::new(&http_config).await.unwrap();
+        let consumer = HttpConsumer::new(&http_config).await.unwrap();
 
         let mut response_endpoint =
             crate::models::Endpoint::new(EndpointType::Response(crate::models::ResponseConfig {}));
@@ -1366,16 +1457,18 @@ http_route:
         };
         response_endpoint.handler = Some(std::sync::Arc::new(handler));
 
-        let publisher =
+        let _publisher =
             create_publisher_from_route("test_response_handler_status", &response_endpoint)
                 .await
                 .unwrap();
 
         tokio::spawn(async move {
+            let mut consumer = consumer;
             if let Ok(received) = consumer.receive().await {
-                let outcome = publisher.send(received.message).await.unwrap();
+                let outcome = _publisher.send(received.message).await.unwrap();
                 let disposition = match outcome {
                     Sent::Response(msg) => crate::traits::MessageDisposition::Reply(msg),
+                    Sent::Responses(msgs, _) => crate::traits::MessageDisposition::ReplyBatch(msgs),
                     Sent::Ack => crate::traits::MessageDisposition::Ack,
                 };
                 let _ = (received.commit)(disposition).await;
@@ -1440,5 +1533,54 @@ http_route:
         } else {
             panic!("Expected Sent::Response");
         }
+    }
+
+    #[tokio::test]
+    async fn test_http_realtime_streaming() {
+        let port = get_free_port();
+        let addr = format!("127.0.0.1:{}", port);
+        let config = HttpConfig {
+            url: addr.clone(),
+            ..Default::default()
+        };
+
+        let mut _consumer = HttpConsumer::new(&config).await.unwrap();
+
+        // Handler yields 3 messages with delays
+        let handler = |_msg: CanonicalMessage, yielder: Yielder| async move {
+            for i in 1..=3 {
+                let mut resp = CanonicalMessage::from(format!("chunk{}", i));
+                if i == 1 {
+                    resp.metadata
+                        .insert("content-type".into(), "text/event-stream".into());
+                }
+                yielder.send(resp).await.unwrap();
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            Ok(())
+        };
+
+        let _route =
+            Route::new(Endpoint::null(), Endpoint::new_response()).with_streaming_handler(handler);
+        tokio::spawn(async move {
+            let received = _consumer.receive().await.unwrap();
+            let publisher = _route.create_publisher().await.unwrap();
+            let outcome = publisher.send(received.message).await.unwrap();
+            let disposition = match outcome {
+                Sent::Response(msg) => MessageDisposition::Reply(msg),
+                Sent::Responses(msgs, _) => MessageDisposition::ReplyBatch(msgs),
+                Sent::Ack => MessageDisposition::Ack,
+            };
+            (received.commit)(disposition).await.unwrap();
+        });
+
+        let client = reqwest::Client::new();
+        let mut res = client.get(format!("http://{}", addr)).send().await.unwrap();
+        let mut count = 0;
+        while let Some(chunk) = res.chunk().await.unwrap() {
+            count += 1;
+            assert_eq!(chunk, format!("chunk{}", count));
+        }
+        assert_eq!(count, 3);
     }
 }

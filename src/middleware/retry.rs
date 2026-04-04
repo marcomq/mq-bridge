@@ -93,10 +93,13 @@ impl MessagePublisher for RetryPublisher {
                                 Some(all_responses)
                             },
                             failed: all_failed,
+                            commit: None,
                         })
                     };
                 }
-                Ok(SentBatch::Partial { responses, failed }) => {
+                Ok(SentBatch::Partial {
+                    responses, failed, ..
+                }) => {
                     if let Some(resps) = responses {
                         all_responses.extend(resps);
                     }
@@ -115,6 +118,7 @@ impl MessagePublisher for RetryPublisher {
                                 Some(all_responses)
                             },
                             failed: all_failed,
+                            commit: None,
                         });
                     }
                     if attempt >= self.config.max_attempts {
@@ -134,6 +138,7 @@ impl MessagePublisher for RetryPublisher {
                                 Some(all_responses)
                             },
                             failed: all_failed,
+                            commit: None,
                         });
                     }
                     warn!("Batch send partially failed (attempt {}/{}): {} messages failed. Retrying...", attempt, self.config.max_attempts, retryable.len());

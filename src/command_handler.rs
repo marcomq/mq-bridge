@@ -3,7 +3,7 @@
 //  Licensed under MIT License, see License file for more details
 //  git clone https://github.com/marcomq/mq-bridge
 
-use crate::traits::{send_batch_helper, Handler, MessagePublisher};
+use crate::traits::{send_batch_helper, Handler, MessageDisposition, MessagePublisher};
 use crate::traits::{Handled, HandlerError};
 use crate::CanonicalMessage;
 use async_trait::async_trait;
@@ -44,6 +44,7 @@ impl MessagePublisher for CommandPublisher {
     async fn send(&self, message: CanonicalMessage) -> Result<Sent, PublisherError> {
         let inbound_correlation_id = message.metadata.get("correlation_id").cloned();
         let original_id = message.message_id;
+        let has_reply_path = message.metadata.contains_key(crate::traits::REPLY_PATH_KEY);
         match self.handler.handle(message).await {
             Ok(Handled::Publish(mut response_msg)) => {
                 // For internal correlation, set the response message's ID to the original.
@@ -55,6 +56,12 @@ impl MessagePublisher for CommandPublisher {
                     .metadata
                     .entry("correlation_id".to_string())
                     .or_insert(fallback_correlation_id);
+                if has_reply_path {
+                    response_msg.metadata.insert(
+                        crate::traits::REPLY_PATH_KEY.to_string(),
+                        "true".to_string(),
+                    );
+                }
                 self.inner.send(response_msg).await
             }
             Ok(Handled::Ack) => Ok(Sent::Ack),
@@ -66,9 +73,12 @@ impl MessagePublisher for CommandPublisher {
         &self,
         messages: Vec<CanonicalMessage>,
     ) -> Result<SentBatch, PublisherError> {
-        send_batch_helper(self, messages, |publisher, message| {
-            Box::pin(publisher.send(message))
-        })
+        send_batch_helper(
+            self,
+            messages,
+            MessageDisposition::Ack,
+            |publisher, message| Box::pin(publisher.send(message)),
+        )
         .await
     }
 

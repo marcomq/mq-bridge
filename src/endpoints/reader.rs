@@ -1,6 +1,6 @@
 use crate::traits::{
-    ConsumerError, MessageConsumer, MessageDisposition, MessagePublisher, PublisherError, Sent,
-    SentBatch,
+    ConsumerError, MessageConsumer, MessagePublisher, PublisherError, Sent, SentBatch,
+    READER_MAX_MESSAGES_KEY,
 };
 use crate::CanonicalMessage;
 use async_trait::async_trait;
@@ -22,22 +22,35 @@ impl ReaderPublisher {
 
 #[async_trait]
 impl MessagePublisher for ReaderPublisher {
-    async fn send(&self, _message: CanonicalMessage) -> Result<Sent, PublisherError> {
+    async fn send(&self, trigger: CanonicalMessage) -> Result<Sent, PublisherError> {
         let mut consumer = self.consumer.lock().await;
         // We ignore the incoming message payload and just read from the consumer.
         // The incoming message acts purely as a trigger.
-        match consumer.receive().await {
-            Ok(received) => {
-                // We must commit the message immediately because the Publisher interface
-                // doesn't support passing the commit responsibility back to the caller
-                // in a way that aligns with the input's commit lifecycle.
-                if let Err(e) = (received.commit)(MessageDisposition::Ack).await {
-                    return Err(PublisherError::Retryable(anyhow::anyhow!(
-                        "Failed to commit message in ReaderPublisher: {}",
-                        e
-                    )));
+        let requested_count = trigger
+            .metadata
+            .get(READER_MAX_MESSAGES_KEY)
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(1000);
+
+        match consumer.receive_batch(requested_count).await {
+            Ok(batch) => {
+                let mut msgs = batch.messages;
+                let count = msgs.len();
+
+                if let Some(reply_path) = trigger.metadata.get(crate::traits::REPLY_PATH_KEY) {
+                    for msg in msgs.iter_mut() {
+                        msg.metadata.insert(
+                            crate::traits::REPLY_PATH_KEY.to_string(),
+                            reply_path.clone(),
+                        );
+                    }
                 }
-                Ok(Sent::Response(received.message))
+
+                if count == 0 {
+                    Ok(Sent::Ack)
+                } else {
+                    Ok(Sent::Responses(msgs, Some(Arc::new(batch.commit))))
+                }
             }
             Err(e) => match e {
                 ConsumerError::EndOfStream => Err(PublisherError::NonRetryable(anyhow::anyhow!(e))),
@@ -55,22 +68,31 @@ impl MessagePublisher for ReaderPublisher {
             return Ok(SentBatch::Ack);
         }
 
+        // Use the first trigger message to find the reply path
+        let reply_path = messages[0]
+            .metadata
+            .get(crate::traits::REPLY_PATH_KEY)
+            .cloned();
+
         let mut consumer = self.consumer.lock().await;
         match consumer.receive_batch(count).await {
             Ok(batch) => {
-                let received_count = batch.messages.len();
-                if received_count > 0 {
-                    if let Err(e) =
-                        (batch.commit)(vec![MessageDisposition::Ack; received_count]).await
-                    {
-                        return Err(PublisherError::Retryable(anyhow::anyhow!(
-                            "Failed to commit batch in ReaderPublisher: {}",
-                            e
-                        )));
+                let mut msgs = batch.messages;
+                if msgs.is_empty() {
+                    Ok(SentBatch::Ack)
+                } else {
+                    if let Some(rp) = reply_path {
+                        for msg in msgs.iter_mut() {
+                            msg.metadata
+                                .insert(crate::traits::REPLY_PATH_KEY.to_string(), rp.clone());
+                        }
                     }
+                    Ok(SentBatch::Partial {
+                        responses: Some(msgs),
+                        failed: vec![],
+                        commit: Some(Arc::new(batch.commit)),
+                    })
                 }
-
-                Ok(SentBatch::Ack)
             }
             Err(e) => match e {
                 ConsumerError::EndOfStream => Err(PublisherError::NonRetryable(anyhow::anyhow!(e))),

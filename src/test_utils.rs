@@ -1,5 +1,5 @@
 #![allow(dead_code)] // This module contains helpers used by various integration tests.
-use crate::traits::{BoxFuture, MessageDisposition, MessagePublisher, Received};
+use crate::traits::{BoxFuture, CommitDisposition, MessageDisposition, MessagePublisher, Received};
 use crate::traits::{ConsumerError, MessageConsumer, PublisherError, ReceivedBatch, SentBatch};
 use crate::{CanonicalMessage, Route};
 use async_channel::{bounded, Receiver, Sender};
@@ -583,6 +583,29 @@ where
     }
 }
 
+/// Verifies that multiple subscribers receive the same message (Broadcast/Pub-Sub logic).
+pub async fn verify_subscriber_logic(
+    publisher: Arc<dyn MessagePublisher>,
+    sub1: Arc<AsyncMutex<dyn MessageConsumer>>,
+    sub2: Arc<AsyncMutex<dyn MessageConsumer>>,
+) {
+    let payload = format!("broadcast-{}", fast_uuid_v7::gen_id());
+    publisher.send(payload.as_str().into()).await.unwrap();
+
+    let res1 = tokio::time::timeout(Duration::from_secs(10), async {
+        let mut guard = sub1.lock().await;
+        guard.receive().await
+    }).await.expect("sub1 timeout").unwrap();
+    
+    let res2 = tokio::time::timeout(Duration::from_secs(10), async {
+        let mut guard = sub2.lock().await;
+        guard.receive().await
+    }).await.expect("sub2 timeout").unwrap();
+
+    assert_eq!(res1.message.get_payload_str(), payload);
+    assert_eq!(res2.message.get_payload_str(), payload);
+}
+
 static STATIC_PAYLOAD: Lazy<Vec<u8>> =
     Lazy::new(|| serde_json::to_vec(&json!({ "perf_test": true, "static": true })).unwrap());
 
@@ -661,24 +684,24 @@ pub async fn measure_write_performance(
     let mut tasks = tokio::task::JoinSet::new();
 
     for _ in 0..concurrency {
-        let rx_clone = rx.clone();
-        let publisher_clone = publisher.clone();
-        let final_count_clone = Arc::clone(&final_count);
+        let _rx_clone = rx.clone();
+        let _publisher_clone = publisher.clone();
+        let _final_count_clone = Arc::clone(&final_count);
 
         tasks.spawn(async move {
-            while let Ok(batch) = rx_clone.recv().await {
+            while let Ok(batch) = _rx_clone.recv().await {
                 // Retry sending the batch if some messages fail.
                 let mut messages_to_send = batch;
                 let mut current_batch_size = messages_to_send.len();
                 let mut retry_count = 0;
                 const MAX_RETRIES: usize = 5;
                 loop {
-                    match publisher_clone
+                    match _publisher_clone
                         .send_batch(std::mem::take(&mut messages_to_send))
                         .await
                     {
                         Ok(SentBatch::Ack) => {
-                            final_count_clone.fetch_add(
+                            _final_count_clone.fetch_add(
                                 current_batch_size,
                                 std::sync::atomic::Ordering::Relaxed,
                             );
@@ -687,10 +710,11 @@ pub async fn measure_write_performance(
                         Ok(SentBatch::Partial {
                             responses: _,
                             failed,
+                            ..
                         }) => {
                             let success_count = current_batch_size - failed.len();
                             if success_count > 0 {
-                                final_count_clone
+                                _final_count_clone
                                     .fetch_add(success_count, std::sync::atomic::Ordering::Relaxed);
                             }
 
@@ -702,7 +726,7 @@ pub async fn measure_write_performance(
                                     .partition(|(_, e)| matches!(e, PublisherError::Retryable(_)));
 
                                 if !non_retryable.is_empty() {
-                                    final_count_clone.fetch_add(
+                                    _final_count_clone.fetch_add(
                                         non_retryable.len(),
                                         std::sync::atomic::Ordering::Relaxed,
                                     );
@@ -841,7 +865,7 @@ pub async fn measure_read_performance(
                     .await
                     .expect("Semaphore closed");
                 tokio::spawn(async move {
-                    let _ = commit(vec![MessageDisposition::Ack; batch.messages.len()]).await;
+                    let _ = commit(CommitDisposition::All(MessageDisposition::Ack)).await;
                     drop(permit);
                 });
             }

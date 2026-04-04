@@ -1,5 +1,7 @@
 use crate::models::WeakJoinMiddleware;
-use crate::traits::{ConsumerError, MessageConsumer, MessageDisposition, ReceivedBatch};
+use crate::traits::{
+    CommitDisposition, ConsumerError, MessageConsumer, MessageDisposition, ReceivedBatch,
+};
 use crate::CanonicalMessage;
 use async_trait::async_trait;
 use serde_json::Value;
@@ -109,7 +111,7 @@ impl MessageConsumer for WeakJoinConsumer {
                         // Weak join: Ack immediately to avoid complex disposition mapping
                         let count = batch.messages.len();
                         if count > 0 {
-                            if let Err(e) = (batch.commit)(vec![MessageDisposition::Ack; count]).await {
+                            if let Err(e) = (batch.commit)(CommitDisposition::All(MessageDisposition::Ack)).await {
                                 return Err(ConsumerError::Connection(e));
                             }
                         }

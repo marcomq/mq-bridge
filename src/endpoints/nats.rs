@@ -1,8 +1,8 @@
 use crate::canonical_message::tracing_support::LazyMessageIds;
 use crate::models::NatsConfig;
 use crate::traits::{
-    BatchCommitFunc, BoxFuture, ConsumerError, EndpointStatus, MessageConsumer, MessageDisposition,
-    MessagePublisher, PublisherError, ReceivedBatch, Sent, SentBatch,
+    BatchCommitFunc, BoxFuture, CommitDisposition, ConsumerError, EndpointStatus, MessageConsumer,
+    MessageDisposition, MessagePublisher, PublisherError, ReceivedBatch, Sent, SentBatch,
 };
 use crate::CanonicalMessage;
 use crate::APP_NAME;
@@ -177,19 +177,30 @@ impl MessagePublisher for NatsPublisher {
 
         if self.request_reply {
             // For request-reply, we must send individually and gather responses.
-            return crate::traits::send_batch_helper(self, messages, |p, m| Box::pin(p.send(m)))
-                .await;
+            return crate::traits::send_batch_helper(
+                self,
+                messages,
+                MessageDisposition::Ack,
+                |p, m| Box::pin(p.send(m)),
+            )
+            .await;
         }
 
         match &self.client {
             NatsClient::JetStream(_jetstream) => {
                 // Use send_batch_helper to send messages sequentially.
                 // This avoids overwhelming the NATS client buffer with too many in-flight messages when using JetStream with acks.
-                crate::traits::send_batch_helper(self, messages, |p, m| Box::pin(p.send(m))).await
+                crate::traits::send_batch_helper(self, messages, MessageDisposition::Ack, |p, m| {
+                    Box::pin(p.send(m))
+                })
+                .await
             }
             NatsClient::Core(_) => {
                 // Core NATS is fire-and-forget, so the helper is efficient enough.
-                crate::traits::send_batch_helper(self, messages, |p, m| Box::pin(p.send(m))).await
+                crate::traits::send_batch_helper(self, messages, MessageDisposition::Ack, |p, m| {
+                    Box::pin(p.send(m))
+                })
+                .await
             }
         }
     }
@@ -557,7 +568,7 @@ impl NatsCore {
                 let client = client.clone();
                 let messages_len = jetstream_messages.len();
                 let jetstream_messages = Arc::new(std::sync::Mutex::new(Some(jetstream_messages)));
-                let commit_closure: BatchCommitFunc = Box::new(move |dispositions| {
+                let commit_closure: BatchCommitFunc = Box::new(move |disposition| {
                     let client = client.clone();
                     let jetstream_messages = jetstream_messages.clone();
                     Box::pin(async move {
@@ -567,6 +578,10 @@ impl NatsCore {
                             guard.take()
                         };
                         if let Some(msgs) = msgs {
+                            let dispositions = match disposition {
+                                CommitDisposition::All(d) => vec![d; messages_len],
+                                CommitDisposition::Individual(v) => v,
+                            };
                             if dispositions.len() != messages_len {
                                 tracing::warn!(
                                         "NATS JetStream batch reply count mismatch: received {} messages but got {} responses.",
@@ -611,10 +626,15 @@ impl NatsCore {
 
                 let client = client.clone();
                 let reply_subjects = Arc::new(reply_subjects);
-                let commit_closure: BatchCommitFunc = Box::new(move |dispositions| {
+                let commit_closure: BatchCommitFunc = Box::new(move |disposition| {
                     let client = client.clone();
                     let reply_subjects = reply_subjects.clone();
                     Box::pin(async move {
+                        let subjects_len = reply_subjects.len();
+                        let dispositions = match disposition {
+                            CommitDisposition::All(d) => vec![d; subjects_len],
+                            CommitDisposition::Individual(v) => v,
+                        };
                         if dispositions.len() != reply_subjects.len() {
                             tracing::warn!(
                                     "NATS Core batch reply count mismatch: received {} messages but got {} responses. Pairing up to the shorter length.",
@@ -735,12 +755,15 @@ async fn handle_jetstream_replies(
     for (msg, disposition) in messages.iter().zip(dispositions.iter()) {
         // Only send a reply if the NATS message has a reply subject and the disposition is a Reply.
         if let Some(reply) = msg.reply.as_ref() {
-            let payload = match disposition {
-                MessageDisposition::Reply(resp) => Some(resp.payload.clone()),
-                _ => None,
+            let payloads = match disposition {
+                MessageDisposition::Reply(resp) => vec![resp.payload.clone()],
+                MessageDisposition::ReplyBatch(msgs) => {
+                    msgs.iter().map(|m| m.payload.clone()).collect()
+                }
+                _ => Vec::new(),
             };
 
-            if let Some(p) = payload {
+            for p in payloads {
                 let publish_result = tokio::time::timeout(
                     std::time::Duration::from_secs(60),
                     client.publish(reply.clone(), p),
@@ -771,7 +794,9 @@ async fn handle_jetstream_acks(
             .zip(dispositions)
             .map(|(message, disposition)| async move {
                 match disposition {
-                    MessageDisposition::Ack | MessageDisposition::Reply(_) => message
+                    MessageDisposition::Ack
+                    | MessageDisposition::Reply(_)
+                    | MessageDisposition::ReplyBatch(_) => message
                         .ack()
                         .await
                         .map_err(|e| anyhow!("Failed to ACK NATS message: {}", e)),

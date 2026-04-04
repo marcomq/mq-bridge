@@ -13,6 +13,32 @@ pub struct ResponsePublisher;
 #[async_trait]
 impl MessagePublisher for ResponsePublisher {
     async fn send(&self, message: CanonicalMessage) -> Result<Sent, PublisherError> {
+        if message.metadata.contains_key(crate::traits::REPLY_PATH_KEY) {
+            match crate::traits::ReplyRegistry::get(message.message_id) {
+                Some(sender) => {
+                    if let Err(e) = sender
+                        .send(crate::traits::MessageDisposition::Reply(message.clone()))
+                        .await
+                    {
+                        tracing::warn!(
+                            message_id = %format!("{:032x}", message.message_id),
+                            "Failed to invoke reply callback in ResponsePublisher: {}",
+                            e
+                        );
+                        return Err(PublisherError::Retryable(e));
+                    }
+                    // Registry entry is only removed after successful send to the reply path.
+                    crate::traits::ReplyRegistry::unregister(message.message_id);
+                    return Ok(Sent::Ack);
+                }
+                None => {
+                    tracing::debug!(
+                        message_id = %format!("{:032x}", message.message_id),
+                        "Reply path key is present but sender not found in registry (possibly already processed or timed out)"
+                    );
+                }
+            }
+        }
         Ok(Sent::Response(message))
     }
 
@@ -24,6 +50,7 @@ impl MessagePublisher for ResponsePublisher {
         Ok(SentBatch::Partial {
             responses: Some(messages),
             failed: Vec::new(),
+            commit: None,
         })
     }
 

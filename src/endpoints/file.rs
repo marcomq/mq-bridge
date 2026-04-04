@@ -6,7 +6,8 @@ use crate::canonical_message::tracing_support::LazyMessageIds;
 use crate::event_store::{EventStore, EventStoreConsumer, RetentionPolicy};
 use crate::models::{FileConfig, FileConsumerMode, FileFormat};
 use crate::traits::{
-    ConsumerError, MessageConsumer, MessagePublisher, PublisherError, ReceivedBatch, SentBatch,
+    CommitDisposition, ConsumerError, MessageConsumer, MessagePublisher, PublisherError,
+    ReceivedBatch, SentBatch, ORIGINAL_FORMAT_KEY,
 };
 use crate::CanonicalMessage;
 use anyhow::Context;
@@ -157,12 +158,7 @@ impl MessagePublisher for FilePublisher {
             let serialized_msg = match self.format {
                 FileFormat::Raw => Ok(msg.payload.to_vec()),
                 FileFormat::Normal => {
-                    if msg
-                        .metadata
-                        .get("mq_bridge.original_format")
-                        .map(|s| s.as_str())
-                        == Some("raw")
-                    {
+                    if msg.metadata.get(ORIGINAL_FORMAT_KEY).map(|s| s.as_str()) == Some("raw") {
                         // If the message was originally raw, pass its payload through directly
                         // to support raw file-to-file copies without re-wrapping.
                         Ok(msg.payload.to_vec())
@@ -234,6 +230,7 @@ impl MessagePublisher for FilePublisher {
             Ok(SentBatch::Partial {
                 responses: None,
                 failed: failed_messages,
+                commit: None,
             })
         }
     }
@@ -897,43 +894,46 @@ impl MessageConsumer for FileConsumer {
                         })
                         .collect();
 
-                    Box::new(
-                        move |dispositions: Vec<crate::traits::MessageDisposition>| {
-                            let offset_file = offset_file.clone();
-                            let offsets = offsets.clone();
-                            Box::pin(async move {
-                                let max_offset = dispositions
-                                    .iter()
-                                    .zip(offsets.iter())
-                                    .filter_map(|(d, offset)| match d {
-                                        crate::traits::MessageDisposition::Ack
-                                        | crate::traits::MessageDisposition::Reply(_) => *offset,
-                                        _ => None,
-                                    })
-                                    .max();
+                    Box::new(move |disposition: CommitDisposition| {
+                        let offset_file = offset_file.clone();
+                        let offsets = offsets.clone();
+                        Box::pin(async move {
+                            let dispositions = match disposition {
+                                CommitDisposition::All(d) => vec![d; offsets.len()],
+                                CommitDisposition::Individual(v) => v,
+                            };
+                            let max_offset = dispositions
+                                .iter()
+                                .zip(offsets.iter())
+                                .filter_map(|(d, offset)| match d {
+                                    crate::traits::MessageDisposition::Ack
+                                    | crate::traits::MessageDisposition::Reply(_)
+                                    | crate::traits::MessageDisposition::ReplyBatch(_) => *offset,
+                                    _ => None,
+                                })
+                                .max();
 
-                                if let Some(offset) = max_offset {
-                                    let mut file = offset_file.lock().await;
-                                    if let Err(e) = file.rewind().await {
-                                        tracing::error!("Failed to rewind offset file: {}", e);
-                                    } else if let Err(e) = file.set_len(0).await {
-                                        tracing::error!("Failed to truncate offset file: {}", e);
-                                    } else if let Err(e) =
-                                        file.write_all(offset.to_string().as_bytes()).await
-                                    {
-                                        tracing::error!("Failed to write offset file: {}", e);
-                                    } else if let Err(e) = file.flush().await {
-                                        tracing::error!("Failed to flush offset file: {}", e);
-                                    }
+                            if let Some(offset) = max_offset {
+                                let mut file = offset_file.lock().await;
+                                if let Err(e) = file.rewind().await {
+                                    tracing::error!("Failed to rewind offset file: {}", e);
+                                } else if let Err(e) = file.set_len(0).await {
+                                    tracing::error!("Failed to truncate offset file: {}", e);
+                                } else if let Err(e) =
+                                    file.write_all(offset.to_string().as_bytes()).await
+                                {
+                                    tracing::error!("Failed to write offset file: {}", e);
+                                } else if let Err(e) = file.flush().await {
+                                    tracing::error!("Failed to flush offset file: {}", e);
                                 }
-                                Ok(())
-                            })
-                                as crate::traits::BoxFuture<'static, anyhow::Result<()>>
-                        },
-                    )
+                            }
+                            Ok(())
+                        })
+                            as crate::traits::BoxFuture<'static, anyhow::Result<()>>
+                    })
                 } else {
                     // No-op commit since we are not deleting and no group_id to track
-                    Box::new(|_dispositions: Vec<crate::traits::MessageDisposition>| {
+                    Box::new(|_disposition: CommitDisposition| {
                         Box::pin(async move { Ok(()) })
                             as crate::traits::BoxFuture<'static, anyhow::Result<()>>
                     })
@@ -972,62 +972,61 @@ impl MessageConsumer for FileConsumer {
                 let nack_buffer = Arc::new(Mutex::new(Some(batch.clone())));
                 let delimiter = c.delimiter.clone();
 
-                let commit = Box::new(
-                    move |dispositions: Vec<crate::traits::MessageDisposition>| {
-                        let nack_buffer = nack_buffer.clone();
-                        let path = path.clone();
-                        let lock = lock.clone();
-                        let buffer_clone = buffer_clone.clone();
-                        let lines_mem = lines_mem.clone();
-                        let delimiter = delimiter.clone();
-                        Box::pin(async move {
-                            let mut leading_acks = 0;
-                            let mut nacked_msgs = Vec::new();
-                            let mut encountered_nack = false;
+                let commit = Box::new(move |disposition: CommitDisposition| {
+                    let nack_buffer = nack_buffer.clone();
+                    let path = path.clone();
+                    let lock = lock.clone();
+                    let buffer_clone = buffer_clone.clone();
+                    let lines_mem = lines_mem.clone();
+                    let delimiter = delimiter.clone();
+                    Box::pin(async move {
+                        let original_batch = nack_buffer.lock().await.take().unwrap_or_default();
+                        let dispositions = match disposition {
+                            CommitDisposition::All(d) => vec![d; original_batch.len()],
+                            CommitDisposition::Individual(v) => v,
+                        };
+                        let mut leading_acks = 0;
+                        let mut nacked_msgs = Vec::new();
+                        let mut encountered_nack = false;
 
-                            if let Some(original_batch) = nack_buffer.lock().await.take() {
-                                for (d, msg) in
-                                    dispositions.into_iter().zip(original_batch.into_iter())
-                                {
-                                    if encountered_nack {
-                                        nacked_msgs.push(msg);
-                                        continue;
-                                    }
-                                    match d {
-                                        crate::traits::MessageDisposition::Ack
-                                        | crate::traits::MessageDisposition::Reply(_) => {
-                                            leading_acks += 1;
-                                        }
-                                        crate::traits::MessageDisposition::Nack => {
-                                            encountered_nack = true;
-                                            nacked_msgs.push(msg);
-                                        }
-                                    }
+                        for (d, msg) in dispositions.into_iter().zip(original_batch.into_iter()) {
+                            if encountered_nack {
+                                nacked_msgs.push(msg);
+                                continue;
+                            }
+                            match d {
+                                crate::traits::MessageDisposition::Ack
+                                | crate::traits::MessageDisposition::Reply(_)
+                                | crate::traits::MessageDisposition::ReplyBatch(_) => {
+                                    leading_acks += 1;
+                                }
+                                crate::traits::MessageDisposition::Nack => {
+                                    encountered_nack = true;
+                                    nacked_msgs.push(msg);
                                 }
                             }
+                        }
 
-                            if !nacked_msgs.is_empty() {
-                                let mut buf = buffer_clone.lock().await;
-                                let old_buf = std::mem::take(&mut *buf);
-                                let mut new_buf = nacked_msgs;
-                                new_buf.extend(old_buf);
-                                *buf = new_buf;
-                            }
+                        if !nacked_msgs.is_empty() {
+                            let mut buf = buffer_clone.lock().await;
+                            let old_buf = std::mem::take(&mut *buf);
+                            let mut new_buf = nacked_msgs;
+                            new_buf.extend(old_buf);
+                            *buf = new_buf;
+                        }
 
-                            if leading_acks > 0 {
-                                let _guard = lock.lock().await;
-                                if let Err(e) =
-                                    remove_lines_from_file(&path, leading_acks, &delimiter).await
-                                {
-                                    tracing::error!("Failed to remove lines from {}: {}", path, e);
-                                }
-                                lines_mem.fetch_sub(leading_acks, Ordering::SeqCst);
+                        if leading_acks > 0 {
+                            let _guard = lock.lock().await;
+                            if let Err(e) =
+                                remove_lines_from_file(&path, leading_acks, &delimiter).await
+                            {
+                                tracing::error!("Failed to remove lines from {}: {}", path, e);
                             }
-                            Ok(())
-                        })
-                            as crate::traits::BoxFuture<'static, anyhow::Result<()>>
-                    },
-                );
+                            lines_mem.fetch_sub(leading_acks, Ordering::SeqCst);
+                        }
+                        Ok(())
+                    }) as crate::traits::BoxFuture<'static, anyhow::Result<()>>
+                });
 
                 Ok(ReceivedBatch {
                     messages: batch,
@@ -1043,11 +1042,12 @@ impl MessageConsumer for FileConsumer {
 }
 
 fn parse_message(buffer: &[u8], format: &FileFormat) -> CanonicalMessage {
+    use crate::traits::ORIGINAL_FORMAT_KEY;
     match format {
         FileFormat::Raw => {
             let mut msg = CanonicalMessage::new(buffer.to_vec(), None);
             msg.metadata
-                .insert("mq_bridge.original_format".to_string(), "raw".to_string());
+                .insert(ORIGINAL_FORMAT_KEY.to_string(), "raw".to_string());
             msg
         }
         FileFormat::Normal | FileFormat::Json | FileFormat::Text => {
@@ -1089,7 +1089,7 @@ fn parse_message(buffer: &[u8], format: &FileFormat) -> CanonicalMessage {
                     warn!(error = %e, content_length = buffer.len(), "Failed to parse file line as JSON, treating as raw.");
                     let mut msg = CanonicalMessage::new(buffer.to_vec(), None);
                     msg.metadata
-                        .insert("mq_bridge.original_format".to_string(), "raw".to_string());
+                        .insert(ORIGINAL_FORMAT_KEY.to_string(), "raw".to_string());
                     msg
                 }
             }
@@ -1102,8 +1102,9 @@ mod tests {
     use crate::endpoints::file::{FileConsumer, FilePublisher};
     use crate::models::{FileConfig, FileConsumerMode, FileFormat};
     use crate::msg;
-    use crate::traits::MessageConsumer;
     use crate::traits::MessagePublisher;
+    use crate::traits::ORIGINAL_FORMAT_KEY;
+    use crate::traits::{CommitDisposition, MessageConsumer};
     use serde_json::json;
     use tempfile::tempdir;
     use tokio::fs::OpenOptions;
@@ -1146,9 +1147,11 @@ mod tests {
 
         let batch = source.receive_batch(1).await.unwrap();
         let (received_msgs, commit2) = (batch.messages, batch.commit);
-        let len = received_msgs.len();
         let received_msg2 = received_msgs.into_iter().next().unwrap();
-        let _ = commit2(vec![crate::traits::MessageDisposition::Ack; len]).await;
+        let _ = commit2(CommitDisposition::All(
+            crate::traits::MessageDisposition::Ack,
+        ))
+        .await;
         assert_eq!(received_msg2.message_id, msg2.message_id);
         assert_eq!(received_msg2.payload, msg2.payload);
 
@@ -1263,9 +1266,11 @@ mod tests {
         assert_eq!(batch1.messages[0].payload.as_ref(), b"msg1");
 
         // 2. Nack the batch
-        (batch1.commit)(vec![crate::traits::MessageDisposition::Nack])
-            .await
-            .unwrap();
+        (batch1.commit)(CommitDisposition::All(
+            crate::traits::MessageDisposition::Nack,
+        ))
+        .await
+        .unwrap();
 
         // 3. Receive again - should get msg1 again because it wasn't removed
         let batch2 = consumer.receive_batch(1).await.unwrap();
@@ -1273,9 +1278,11 @@ mod tests {
         assert_eq!(batch2.messages[0].payload.as_ref(), b"msg1");
 
         // 4. Ack
-        (batch2.commit)(vec![crate::traits::MessageDisposition::Ack])
-            .await
-            .unwrap();
+        (batch2.commit)(CommitDisposition::All(
+            crate::traits::MessageDisposition::Ack,
+        ))
+        .await
+        .unwrap();
 
         // 5. Receive next - should get msg2
         let batch3 = consumer.receive_batch(1).await.unwrap();
@@ -1355,9 +1362,11 @@ mod tests {
         let received2 = consumer.receive_batch(2).await.unwrap();
         assert_eq!(received2.messages.len(), 1);
         assert_eq!(received2.messages[0].payload.as_ref(), b"line2");
-        (received2.commit)(vec![crate::traits::MessageDisposition::Ack])
-            .await
-            .unwrap();
+        (received2.commit)(CommitDisposition::All(
+            crate::traits::MessageDisposition::Ack,
+        ))
+        .await
+        .unwrap();
 
         // Verify file content is unchanged
         let content = tokio::fs::read_to_string(&file_path).await.unwrap();
@@ -1687,9 +1696,11 @@ mod tests {
         assert_eq!(batch1.messages[0].payload.as_ref(), b"msg1");
 
         // Commit msg1 -> should write offset
-        (batch1.commit)(vec![crate::traits::MessageDisposition::Ack])
-            .await
-            .unwrap();
+        (batch1.commit)(CommitDisposition::All(
+            crate::traits::MessageDisposition::Ack,
+        ))
+        .await
+        .unwrap();
 
         // Verify offset file exists and contains correct offset (length of "msg1\n" is 5)
         let offset_content = tokio::fs::read_to_string(&offset_path).await.unwrap();
@@ -1704,9 +1715,11 @@ mod tests {
         let batch2 = consumer2.receive_batch(1).await.unwrap();
         assert_eq!(batch2.messages[0].payload.as_ref(), b"msg2");
 
-        (batch2.commit)(vec![crate::traits::MessageDisposition::Ack])
-            .await
-            .unwrap();
+        (batch2.commit)(CommitDisposition::All(
+            crate::traits::MessageDisposition::Ack,
+        ))
+        .await
+        .unwrap();
 
         // Verify offset updated (5 + length of "msg2\n" (5) = 10)
         let offset_content = tokio::fs::read_to_string(&offset_path).await.unwrap();
@@ -1818,10 +1831,9 @@ mod tests {
                             }
                         }
                     }
-                    (batch.commit)(vec![
-                        crate::traits::MessageDisposition::Ack;
-                        batch.messages.len()
-                    ])
+                    (batch.commit)(CommitDisposition::All(
+                        crate::traits::MessageDisposition::Ack,
+                    ))
                     .await
                     .unwrap();
                 }
@@ -2051,7 +2063,7 @@ mod tests {
             received_fallback
                 .message
                 .metadata
-                .get("mq_bridge.original_format")
+                .get(ORIGINAL_FORMAT_KEY)
                 .map(|s| s.as_str()),
             Some("raw")
         );

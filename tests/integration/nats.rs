@@ -5,7 +5,7 @@ use mq_bridge::endpoints::nats::{NatsConsumer, NatsPublisher};
 use mq_bridge::test_utils::{
     add_performance_result, run_chaos_pipeline_test, run_direct_perf_test,
     run_performance_pipeline_test, run_pipeline_test, run_test_with_docker,
-    run_test_with_docker_controller, setup_logging, PERF_TEST_MESSAGE_COUNT,
+    run_test_with_docker_controller, setup_logging, verify_subscriber_logic, PERF_TEST_MESSAGE_COUNT,
 };
 const CONFIG_YAML: &str = r#"
 routes:
@@ -55,6 +55,27 @@ pub async fn test_nats_chaos() {
             run_chaos_pipeline_test("nats", &config_yaml, controller, "nats").await;
         },
     )
+    .await;
+}
+
+pub async fn test_nats_subscriber_logic() {
+    setup_logging();
+    run_test_with_docker("tests/integration/docker-compose/nats.yml", || async {
+        let subject = format!("sub_logic_{}", fast_uuid_v7::gen_id());
+        let config = mq_bridge::models::NatsConfig {
+            url: "nats://localhost:4222".to_string(),
+            subject: Some(subject),
+            stream: Some("test-stream".to_string()),
+            subscriber_mode: true,
+            ..Default::default()
+        };
+
+        let publisher = Arc::new(NatsPublisher::new(&config).await.unwrap());
+        let sub1 = Arc::new(tokio::sync::Mutex::new(NatsConsumer::new(&config).await.unwrap()));
+        let sub2 = Arc::new(tokio::sync::Mutex::new(NatsConsumer::new(&config).await.unwrap()));
+
+        verify_subscriber_logic(publisher, sub1, sub2).await;
+    })
     .await;
 }
 

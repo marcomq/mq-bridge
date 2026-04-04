@@ -31,6 +31,7 @@ async-channel = { version = "2.5" }
 once_cell = { version = "1.21" }
 uuid = { version = "1.19" }
 fast-uuid-v7 = "0.1.3"
+dashmap = "6.1"
 
 # Common TLS dependencies
 rustls = { version = "0.23", features = ["ring"], optional = true }
@@ -146,6 +147,7 @@ chrono = "0.4"
 metrics-util = "0.20"
 criterion = { version = "0.8", features = ["async", "async_tokio"] }
 mq-bridge = { path = ".", features = ["test-utils"] }
+reqwest = { version = "0.12", features = ["stream"] }
 
 [[bench]]
 name = "performance_bench"

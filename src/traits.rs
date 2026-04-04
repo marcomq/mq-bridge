@@ -7,11 +7,127 @@ pub use crate::errors::{ConsumerError, HandlerError, PublisherError};
 pub use crate::outcomes::{Handled, Received, ReceivedBatch, Sent, SentBatch};
 use crate::CanonicalMessage;
 use async_trait::async_trait;
+use dashmap::DashMap;
 pub use futures::future::BoxFuture;
+use once_cell::sync::Lazy;
 use std::any::Any;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::mpsc;
 use tracing::warn;
+
+pub const REPLY_PATH_KEY: &str = "mq_bridge.reply_path";
+pub const ORIGINAL_FORMAT_KEY: &str = "mq_bridge.original_format";
+pub const READER_MAX_MESSAGES_KEY: &str = "mq_bridge.reader.max_messages";
+
+/// A thread-safe registry to map message IDs to their return paths.
+/// This removes the need for infrastructure fields inside CanonicalMessage.
+pub struct ReplyRegistry;
+
+static REGISTRY: Lazy<DashMap<u128, (ReplySender, Instant)>> = Lazy::new(DashMap::new);
+
+impl ReplyRegistry {
+    pub fn register(id: u128, sender: ReplySender) {
+        REGISTRY.insert(id, (sender, Instant::now()));
+    }
+
+    pub fn get(id: u128) -> Option<ReplySender> {
+        REGISTRY.get(&id).map(|r| r.value().0.clone())
+    }
+
+    pub fn unregister(id: u128) {
+        REGISTRY.remove(&id);
+    }
+
+    /// Clears all entries from the registry.
+    pub fn clear() {
+        REGISTRY.clear();
+    }
+
+    /// Periodically removes entries that are no longer active or have timed out.
+    pub fn cleanup_stale_entries(ttl: std::time::Duration) {
+        let now = Instant::now();
+        REGISTRY.retain(|_, (sender, timestamp)| {
+            !sender.is_closed() && now.duration_since(*timestamp) < ttl
+        });
+    }
+}
+
+/// A callback that allows a publisher to send a reply directly back to the source consumer.
+/// This enables true end-to-end streaming by bypassing the batching in the Route.
+pub type MessageReplyCallback = ReplySender;
+
+/// A thin wrapper around a channel sender for asynchronous replies.
+#[derive(Clone)]
+pub struct ReplySender(mpsc::Sender<MessageDisposition>);
+
+impl ReplySender {
+    pub fn new(tx: mpsc::Sender<MessageDisposition>) -> Self {
+        Self(tx)
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.0.is_closed()
+    }
+
+    /// Sends a disposition to the channel. Returns the number of messages enqueued.
+    ///
+    /// For `ReplyBatch`, it attempts to send each message individually as a `Reply`.
+    /// This operation is best-effort; if the channel becomes full or is closed, it returns an
+    /// error containing the count of successfully sent messages.
+    pub async fn send(&self, disposition: MessageDisposition) -> anyhow::Result<usize> {
+        match disposition {
+            MessageDisposition::ReplyBatch(mut msgs) => {
+                let mut count = 0;
+                while !msgs.is_empty() {
+                    let msg = msgs.remove(0);
+                    // Use non-blocking try_send to fail early if the channel is full, allowing
+                    // callers to recover the remaining messages.
+                    match self.0.try_send(MessageDisposition::Reply(msg)) {
+                        Ok(_) => count += 1,
+                        Err(mpsc::error::TrySendError::Full(MessageDisposition::Reply(
+                            failed_msg,
+                        ))) => {
+                            msgs.insert(0, failed_msg);
+                            return Err(anyhow::anyhow!("Failed to send batch item: channel is full. {} messages sent, {} remaining.", count, msgs.len()));
+                        }
+                        Err(mpsc::error::TrySendError::Closed(_)) => {
+                            return Err(anyhow::anyhow!(
+                                "Failed to send batch item: channel is closed. {} messages sent.",
+                                count
+                            ));
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+                Ok(count)
+            }
+            MessageDisposition::Reply(_) => {
+                self.0
+                    .send(disposition)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to send reply: {}", e))?;
+                Ok(1)
+            }
+            other => {
+                let is_ack_nack =
+                    matches!(other, MessageDisposition::Ack | MessageDisposition::Nack);
+                self.0
+                    .send(other)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to send disposition: {}", e))?;
+                // Return 1 for Ack/Nack as they represent a single logical signal delivered to the source.
+                Ok(if is_ack_nack { 1 } else { 0 })
+            }
+        }
+    }
+}
+
+impl std::fmt::Debug for ReplySender {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ReplySender")
+    }
+}
 
 /// The disposition of a processed message.
 ///
@@ -25,8 +141,21 @@ pub enum MessageDisposition {
     Ack,
     /// Acknowledge processing and send a reply.
     Reply(CanonicalMessage),
+    /// Acknowledge processing and send multiple replies.
+    ReplyBatch(Vec<CanonicalMessage>),
     /// Negative acknowledgement (failure).
     Nack,
+}
+
+impl MessageDisposition {
+    /// Returns an iterator over all reply messages in this disposition.
+    pub fn replies(&self) -> Box<dyn Iterator<Item = &CanonicalMessage> + '_> {
+        match self {
+            MessageDisposition::Reply(msg) => Box::new(std::iter::once(msg)),
+            MessageDisposition::ReplyBatch(msgs) => Box::new(msgs.iter()),
+            _ => Box::new(std::iter::empty()),
+        }
+    }
 }
 
 impl From<Option<CanonicalMessage>> for MessageDisposition {
@@ -56,6 +185,7 @@ pub struct Yielder {
     sender: mpsc::Sender<MessageDisposition>,
     original_message_id: u128,
     original_correlation_id: Option<String>,
+    reply_callback: Option<MessageReplyCallback>,
 }
 
 impl Yielder {
@@ -63,16 +193,21 @@ impl Yielder {
         sender: mpsc::Sender<MessageDisposition>,
         original_message_id: u128,
         original_correlation_id: Option<String>,
+        reply_callback: Option<MessageReplyCallback>,
     ) -> Self {
         Self {
             sender,
             original_message_id,
             original_correlation_id,
+            reply_callback,
         }
     }
 
     /// Sends a message as part of the stream of responses.
     pub async fn send(&self, mut msg: CanonicalMessage) -> anyhow::Result<()> {
+        // Ensure yielded messages maintain the original message ID for correlation/reply routing
+        msg.message_id = self.original_message_id;
+
         // Ensure yielded messages maintain correlation with the original request
         msg.metadata
             .entry("correlation_id".to_string())
@@ -81,6 +216,12 @@ impl Yielder {
                     .clone()
                     .unwrap_or_else(|| format!("{:032x}", self.original_message_id))
             });
+
+        if self.reply_callback.is_some() {
+            msg.metadata
+                .insert(REPLY_PATH_KEY.to_string(), "true".to_string());
+        }
+
         self.sender
             .send(MessageDisposition::Reply(msg))
             .await
@@ -148,21 +289,48 @@ pub trait StreamingHandler: Send + Sync + 'static {
         &self,
         msg: CanonicalMessage,
         yielder: Yielder,
-    ) -> Result<Handled, HandlerError>;
+    ) -> Result<(), HandlerError>;
+
+    /// Tries to register a streaming handler for a specific type.
+    fn register_streaming_handler(
+        &self,
+        _type_name: &str,
+        _handler: Arc<dyn StreamingHandler>,
+    ) -> Option<Arc<dyn StreamingHandler>> {
+        None
+    }
 }
 
 #[async_trait]
 impl<F, Fut> StreamingHandler for F
 where
     F: Fn(CanonicalMessage, Yielder) -> Fut + Send + Sync + 'static,
-    Fut: std::future::Future<Output = Result<Handled, HandlerError>> + Send,
+    Fut: std::future::Future<Output = Result<(), HandlerError>> + Send,
 {
     async fn handle_stream(
         &self,
         msg: CanonicalMessage,
         yielder: Yielder,
-    ) -> Result<Handled, HandlerError> {
+    ) -> Result<(), HandlerError> {
         self(msg, yielder).await
+    }
+}
+
+#[async_trait]
+impl<T: StreamingHandler + ?Sized> StreamingHandler for Arc<T> {
+    async fn handle_stream(
+        &self,
+        msg: CanonicalMessage,
+        yielder: Yielder,
+    ) -> Result<(), HandlerError> {
+        (**self).handle_stream(msg, yielder).await
+    }
+    fn register_streaming_handler(
+        &self,
+        type_name: &str,
+        handler: Arc<dyn StreamingHandler>,
+    ) -> Option<Arc<dyn StreamingHandler>> {
+        (**self).register_streaming_handler(type_name, handler)
     }
 }
 
@@ -172,12 +340,18 @@ pub type CommitFunc = Box<
     dyn Fn(MessageDisposition) -> BoxFuture<'static, anyhow::Result<()>> + Send + Sync + 'static,
 >;
 
+/// A signal for committing a batch of messages.
+#[derive(Debug, Clone)]
+pub enum CommitDisposition {
+    /// Apply the same disposition to all messages in the batch.
+    All(MessageDisposition),
+    /// Apply a specific disposition to each message in the batch.
+    Individual(Vec<MessageDisposition>),
+}
+
 /// A closure for committing a batch of messages.
 pub type BatchCommitFunc = Box<
-    dyn Fn(Vec<MessageDisposition>) -> BoxFuture<'static, anyhow::Result<()>>
-        + Send
-        + Sync
-        + 'static,
+    dyn Fn(CommitDisposition) -> BoxFuture<'static, anyhow::Result<()>> + Send + Sync + 'static,
 >;
 
 /// Status information about an endpoint (Consumer or Publisher).
@@ -243,13 +417,12 @@ pub trait MessageConsumer: Send + Sync {
         &mut self,
         _max_messages: usize,
     ) -> Result<ReceivedBatch, ConsumerError> {
-        let received = self.receive().await?; // The `?` now correctly handles ConsumerError
-        let batch_commit = Box::new(move |dispositions: Vec<MessageDisposition>| {
-            // The default implementation only handles one message, so we take the first disposition.
-            let single_disposition = dispositions
-                .into_iter()
-                .next()
-                .unwrap_or(MessageDisposition::Ack);
+        let received = self.receive().await?;
+        let batch_commit = Box::new(move |disposition: CommitDisposition| {
+            let single_disposition = match disposition {
+                CommitDisposition::All(d) => d,
+                CommitDisposition::Individual(mut v) => v.pop().unwrap_or(MessageDisposition::Ack),
+            };
             (received.commit)(single_disposition)
         }) as BatchCommitFunc;
         Ok(ReceivedBatch {
@@ -284,11 +457,16 @@ pub trait MessagePublisher: Send + Sync + 'static {
             Ok(SentBatch::Partial {
                 mut responses,
                 mut failed,
+                commit,
             }) => {
                 if let Some((_, err)) = failed.pop() {
                     Err(err)
                 } else if let Some(res) = responses.as_mut().and_then(|r| r.pop()) {
-                    Ok(Sent::Response(res))
+                    if let Some(c) = commit {
+                        Ok(Sent::Responses(vec![res], Some(c)))
+                    } else {
+                        Ok(Sent::Response(res))
+                    }
                 } else {
                     Ok(Sent::Ack)
                 }
@@ -407,13 +585,15 @@ pub trait CustomMiddlewareFactory: Send + Sync + std::fmt::Debug {
     }
 }
 
-/// A helper function to send messages in bulk by calling `send` for each one.
-/// This is useful for `MessagePublisher` implementations that don't have a native bulk sending mechanism.
-/// Requires that "send" is implemented for the publisher. Otherwise causes an infinite loop,
-/// as send is calling "send_batch" by default.
+/// A helper function to send messages in bulk by calling a callback (typically `send`) for each one.
+///
+/// `response_disposition` defines how any responses received during the batch process are acknowledged
+/// back to their downstream source. For example, if sending a request results in multiple responses
+/// that require commitment, this disposition is used to commit them. Usually, this is `MessageDisposition::Ack`.
 pub async fn send_batch_helper<P: MessagePublisher + ?Sized>(
     publisher: &P,
     messages: Vec<CanonicalMessage>,
+    response_disposition: MessageDisposition,
     callback: impl for<'a> Fn(&'a P, CanonicalMessage) -> BoxFuture<'a, Result<Sent, PublisherError>>
         + Send
         + Sync,
@@ -425,6 +605,29 @@ pub async fn send_batch_helper<P: MessagePublisher + ?Sized>(
     while let Some(msg) = iter.next() {
         match callback(publisher, msg.clone()).await {
             Ok(Sent::Response(resp)) => responses.push(resp),
+            Ok(Sent::Responses(mut resps, commit)) => {
+                let _count = resps.len();
+                responses.append(&mut resps);
+                if let Some(c) = commit {
+                    // Use CommitDisposition::All to avoid expensive per-item cloning of the disposition.
+                    c(CommitDisposition::All(response_disposition.clone()))
+                        .await
+                        .map_err(|e| {
+                            let err = anyhow::anyhow!(
+                                "Failed to commit responses in send_batch_helper: {}",
+                                e
+                            );
+                            if matches!(
+                                e.downcast_ref::<PublisherError>(),
+                                Some(PublisherError::NonRetryable(_))
+                            ) {
+                                PublisherError::NonRetryable(err)
+                            } else {
+                                PublisherError::Retryable(err)
+                            }
+                        })?;
+                }
+            }
             Ok(Sent::Ack) => {}
             Err(PublisherError::Retryable(e)) => {
                 // A retryable error likely affects the whole connection.
@@ -458,6 +661,7 @@ pub async fn send_batch_helper<P: MessagePublisher + ?Sized>(
                 Some(responses)
             },
             failed: failed_messages,
+            commit: None,
         })
     }
 }
@@ -467,8 +671,7 @@ pub async fn send_batch_helper<P: MessagePublisher + ?Sized>(
 /// function that commits a single message is expected.
 pub fn into_commit_func(batch_commit: BatchCommitFunc) -> CommitFunc {
     Box::new(move |disposition: MessageDisposition| {
-        let batch_disposition = vec![disposition];
-        batch_commit(batch_disposition)
+        batch_commit(CommitDisposition::Individual(vec![disposition]))
     })
 }
 
@@ -478,16 +681,15 @@ pub fn into_commit_func(batch_commit: BatchCommitFunc) -> CommitFunc {
 /// extracting the first message from the response vector (if any) and passing
 /// it to the underlying single-message commit function.
 pub fn into_batch_commit_func(commit: CommitFunc) -> BatchCommitFunc {
-    Box::new(move |mut dispositions: Vec<MessageDisposition>| {
-        let single_disposition = if dispositions.len() > 1 {
-            warn!(
-                "into_batch_commit_func called with batch of {} messages; dropping all responses to avoid partial commit (incorrect usage)",
-                dispositions.len()
-            );
-            // Default to Ack to avoid hanging if we can't process the batch correctly
-            MessageDisposition::Ack
-        } else {
-            dispositions.pop().unwrap_or(MessageDisposition::Ack)
+    Box::new(move |disposition: CommitDisposition| {
+        let single_disposition = match disposition {
+            CommitDisposition::All(d) => d,
+            CommitDisposition::Individual(mut v) => {
+                if v.len() > 1 {
+                    warn!("into_batch_commit_func called with batch of {} messages; dropping all but the last to avoid partial commit (incorrect usage)", v.len());
+                }
+                v.pop().unwrap_or(MessageDisposition::Ack)
+            }
         };
         commit(single_disposition)
     })
@@ -522,22 +724,31 @@ mod tests {
             CanonicalMessage::from("3"),
         ];
 
-        let result = send_batch_helper(&publisher, msgs.clone(), |_pub, msg| {
-            Box::pin(async move {
-                let payload = msg.get_payload_str();
-                if payload == "1" {
-                    Ok(Sent::Response(CanonicalMessage::from("resp1")))
-                } else if payload == "2" {
-                    Err(PublisherError::Retryable(anyhow!("fail")))
-                } else {
-                    Ok(Sent::Ack)
-                }
-            })
-        })
+        let result = send_batch_helper(
+            &publisher,
+            msgs.clone(),
+            MessageDisposition::Ack,
+            |_pub, msg| {
+                Box::pin(async move {
+                    let payload = msg.get_payload_str();
+                    if payload == "1" {
+                        Ok(Sent::Response(CanonicalMessage::from("resp1")))
+                    } else if payload == "2" {
+                        Err(PublisherError::Retryable(anyhow!("fail")))
+                    } else {
+                        Ok(Sent::Ack)
+                    }
+                })
+            },
+        )
         .await;
 
         match result {
-            Ok(SentBatch::Partial { responses, failed }) => {
+            Ok(SentBatch::Partial {
+                responses,
+                failed,
+                commit: _,
+            }) => {
                 // 1. Verify response from first message
                 assert!(responses.is_some());
                 let resps = responses.unwrap();
@@ -574,6 +785,7 @@ mod tests {
                         msgs[0].clone(),
                         PublisherError::NonRetryable(anyhow!("inner")),
                     )],
+                    commit: None,
                 })
             }
             fn as_any(&self) -> &dyn Any {

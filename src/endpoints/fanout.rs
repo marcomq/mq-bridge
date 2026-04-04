@@ -49,7 +49,9 @@ impl MessagePublisher for FanoutPublisher {
                 Ok(SentBatch::Ack) => {
                     // This sub-publisher successfully processed the batch without returning specific responses.
                 }
-                Ok(SentBatch::Partial { responses, failed }) => {
+                Ok(SentBatch::Partial {
+                    responses, failed, ..
+                }) => {
                     if let Some(resps) = responses {
                         all_responses.extend(resps);
                     }
@@ -73,6 +75,7 @@ impl MessagePublisher for FanoutPublisher {
                     Some(all_responses)
                 },
                 failed: all_failed,
+                commit: None,
             })
         }
     }

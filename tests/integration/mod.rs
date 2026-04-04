@@ -18,4 +18,6 @@ pub mod sqlx;
 pub mod zeromq;
 
 pub mod memory;
+pub mod file;
 pub mod route;
+pub mod logic_test;

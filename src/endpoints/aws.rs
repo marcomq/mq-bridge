@@ -1,8 +1,8 @@
 use crate::canonical_message::tracing_support::LazyMessageIds;
 use crate::models::AwsConfig;
 use crate::traits::{
-    BatchCommitFunc, ConsumerError, EndpointStatus, MessageConsumer, MessageDisposition,
-    MessagePublisher, PublisherError, ReceivedBatch, Sent, SentBatch,
+    BatchCommitFunc, CommitDisposition, ConsumerError, EndpointStatus, MessageConsumer,
+    MessageDisposition, MessagePublisher, PublisherError, ReceivedBatch, Sent, SentBatch,
 };
 use crate::CanonicalMessage;
 use anyhow::{anyhow, Context};
@@ -142,11 +142,15 @@ impl MessageConsumer for AwsConsumer {
         let queue_url = self.queue_url.clone();
         let handles = Arc::new(receipt_handles);
 
-        let commit: BatchCommitFunc = Box::new(move |dispositions: Vec<MessageDisposition>| {
+        let commit: BatchCommitFunc = Box::new(move |disposition: CommitDisposition| {
             let client = client.clone();
             let queue_url = queue_url.clone();
             let handles = handles.clone();
             Box::pin(async move {
+                let dispositions = match disposition {
+                    CommitDisposition::All(d) => vec![d; handles.len()],
+                    CommitDisposition::Individual(v) => v,
+                };
                 process_aws_batch(&client, &queue_url, &handles, &dispositions).await
             })
         });
@@ -245,11 +249,16 @@ fn prepare_aws_entries(
                 MessageDisposition::Reply(_) => {
                     tracing::warn!("AWS consumer received a Reply/StreamReply, but replying is not supported. The reply is dropped.");
                 }
+                MessageDisposition::ReplyBatch(_) => {
+                    tracing::warn!("AWS consumer received a ReplyBatch, but replying is not supported. The replies are dropped.");
+                }
                 MessageDisposition::Nack => { /* handle below */ }
             }
 
             match disposition {
-                MessageDisposition::Ack | MessageDisposition::Reply(_) => {
+                MessageDisposition::Ack
+                | MessageDisposition::Reply(_)
+                | MessageDisposition::ReplyBatch(_) => {
                     delete_entries.push(
                         aws_sdk_sqs::types::DeleteMessageBatchRequestEntry::builder()
                             .id(format!("{}", i))
@@ -447,9 +456,12 @@ impl MessagePublisher for AwsPublisher {
         );
 
         if self.sns_client.is_some() {
-            return crate::traits::send_batch_helper(self, messages, |publisher, message| {
-                Box::pin(publisher.send(message))
-            })
+            return crate::traits::send_batch_helper(
+                self,
+                messages,
+                MessageDisposition::Ack,
+                |publisher, message| Box::pin(publisher.send(message)),
+            )
             .await;
         }
 
@@ -543,6 +555,7 @@ impl MessagePublisher for AwsPublisher {
                 Ok(SentBatch::Partial {
                     responses: None,
                     failed: failed_messages,
+                    commit: None,
                 })
             }
         } else {

@@ -1,8 +1,8 @@
 use crate::canonical_message::tracing_support::LazyMessageIds;
 use crate::models::{ZeroMqConfig, ZeroMqSocketType};
 use crate::traits::{
-    BoxFuture, ConsumerError, EndpointStatus, MessageConsumer, MessageDisposition,
-    MessagePublisher, PublisherError, ReceivedBatch, SentBatch,
+    BoxFuture, CommitDisposition, ConsumerError, EndpointStatus, MessageConsumer,
+    MessageDisposition, MessagePublisher, PublisherError, ReceivedBatch, SentBatch,
 };
 use crate::CanonicalMessage;
 use anyhow::anyhow;
@@ -140,6 +140,7 @@ impl MessagePublisher for ZeroMqPublisher {
             Ok(SentBatch::Partial {
                 responses: Some(responses),
                 failed: vec![],
+                commit: None,
             })
         } else {
             let (ack_tx, ack_rx) = oneshot::channel();
@@ -398,10 +399,15 @@ impl MessageConsumer for ZeroMqConsumer {
 
         trace!(count = messages.len(), message_ids = ?LazyMessageIds(&messages), "Received batch of ZeroMQ messages");
         let contexts = Arc::new(contexts);
-        let commit = Box::new(move |dispositions: Vec<MessageDisposition>| {
+        let commit = Box::new(move |disposition: CommitDisposition| {
             let contexts = contexts.clone();
             Box::pin(async move {
-                for (ctx_opt, disposition) in contexts.iter().zip(dispositions.into_iter()) {
+                let len = contexts.len();
+                let dispositions_vec = match disposition {
+                    CommitDisposition::All(d) => vec![d; len],
+                    CommitDisposition::Individual(v) => v,
+                };
+                for (ctx_opt, disposition) in contexts.iter().zip(dispositions_vec.into_iter()) {
                     if let Some(ctx) = ctx_opt {
                         let resp = match disposition {
                             MessageDisposition::Reply(r) => Some(r),

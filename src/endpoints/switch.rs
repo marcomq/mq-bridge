@@ -104,7 +104,9 @@ impl MessagePublisher for SwitchPublisher {
         for result in results {
             match result {
                 Ok(SentBatch::Ack) => {}
-                Ok(SentBatch::Partial { responses, failed }) => {
+                Ok(SentBatch::Partial {
+                    responses, failed, ..
+                }) => {
                     if let Some(resps) = responses {
                         all_responses.extend(resps);
                     }
@@ -129,6 +131,7 @@ impl MessagePublisher for SwitchPublisher {
                     Some(all_responses)
                 },
                 failed: all_failed,
+                commit: None,
             })
         }
     }

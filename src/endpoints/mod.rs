@@ -426,6 +426,10 @@ fn check_consumer_recursive(
             "[route:{}] Switch endpoint is only supported as an output",
             route_name
         )),
+        EndpointType::StreamingHandler(_) => Err(anyhow!(
+            "[route:{}] StreamingHandler endpoint is only supported as an output",
+            route_name
+        )),
         EndpointType::Reader(_) => Err(anyhow!(
             "[route:{}] Reader endpoint is only supported as an output",
             route_name
@@ -908,6 +912,15 @@ fn check_publisher_recursive(
             }
             Ok(warnings)
         }
+        EndpointType::StreamingHandler(cfg) => {
+            warnings.extend(check_publisher_recursive(
+                route_name,
+                &cfg.output,
+                depth + 1,
+                allowed_types,
+            )?);
+            Ok(warnings)
+        }
         EndpointType::Response(_) => Ok(warnings),
         EndpointType::Custom { .. } => Ok(warnings),
         EndpointType::Reader(inner) => check_consumer(route_name, inner, allowed_types),
@@ -1175,22 +1188,26 @@ async fn create_streaming_handler_publisher(
         create_publisher_with_depth(route_name.to_string(), config.output.clone(), depth + 1)
             .await?;
 
-    // This is where you'd resolve the actual StreamingHandler implementation.
-    // For now, we'll use a placeholder or assume a default.
-    // In a real scenario, you might have a factory for StreamingHandlers.
-    let handler: Arc<dyn crate::traits::StreamingHandler> = Arc::new(
-        crate::type_handler::TypeHandler::new() // Reuse TypeHandler for dispatching to streaming handlers.
-            .add_streaming_handler(
-                "default",
-                |msg: CanonicalMessage,
-                 _ctx: crate::MessageContext,
-                 yielder: crate::traits::Yielder| async move {
-                    // Default behavior: just pass the message through
-                    yielder.send(msg).await?;
-                    Ok(crate::outcomes::Handled::Ack)
-                },
-            ),
-    );
+    let handler: Arc<dyn crate::traits::StreamingHandler> = match &config.handler {
+        Some(h) => h.clone(),
+        None => {
+            // This is where you'd resolve the actual StreamingHandler implementation.
+            // For now, we'll use a placeholder or assume a default.
+            Arc::new(
+                crate::type_handler::TypeHandler::new() // Reuse TypeHandler for dispatching to streaming handlers.
+                    .add_streaming_handler(
+                        "default",
+                        |msg: CanonicalMessage,
+                         _ctx: crate::MessageContext,
+                         yielder: crate::traits::Yielder| async move {
+                            // Default behavior: just pass the message through
+                            yielder.send(msg).await?;
+                            Ok(())
+                        },
+                    ),
+            )
+        }
+    };
 
     Ok(Box::new(streaming_handler::StreamingHandlerPublisher::new(
         // No longer generic

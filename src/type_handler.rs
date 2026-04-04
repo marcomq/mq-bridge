@@ -141,7 +141,7 @@ impl TypeHandler {
     where
         T: DeserializeOwned + Send + Sync + 'static,
         F: Fn(T, MessageContext, Yielder) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Result<Handled, HandlerError>> + Send + 'static,
+        Fut: Future<Output = Result<(), HandlerError>> + Send + 'static,
     {
         let handler = Arc::new(handler);
         let wrapper = move |msg: CanonicalMessage, yielder: Yielder| {
@@ -196,7 +196,7 @@ impl StreamingHandler for TypeHandler {
         &self,
         msg: CanonicalMessage,
         yielder: Yielder,
-    ) -> Result<Handled, HandlerError> {
+    ) -> Result<(), HandlerError> {
         if let Some(type_val) = msg.metadata.get(&self.type_key) {
             if let Some(handler) = self.streaming_handlers.get(type_val) {
                 return handler.handle_stream(msg, yielder).await;
@@ -208,19 +208,40 @@ impl StreamingHandler for TypeHandler {
                 // For now, we'll assume a non-streaming fallback for regular handlers.
                 // A proper solution would involve a different registration for streaming handlers.
                 warn!("TypeHandler received a streaming request but is dispatching to a non-streaming handler. Yielder will not be used.");
-                return handler.handle(msg).await;
+                let _ = handler.handle(msg).await?;
+                return Ok(());
             }
         }
 
         if let Some(fallback) = &self.fallback {
-            warn!("TypeHandler received a streaming request but is dispatching to a non-streaming fallback. Yielder will not be available.");
-            return fallback.handle(msg).await;
+            warn!("TypeHandler received a streaming request but is dispatching to a non-streaming fallback. Yielder will be used to preserve responses.");
+            let result = fallback.handle(msg).await?;
+            match result {
+                Handled::Ack => {}
+                Handled::Publish(resp) => {
+                    yielder
+                        .send(resp)
+                        .await
+                        .map_err(|e| HandlerError::NonRetryable(e))?;
+                }
+            }
+            return Ok(());
         }
 
         Err(HandlerError::NonRetryable(anyhow::anyhow!(
             "No streaming handler registered for type: '{:?}' and no fallback provided",
             msg.metadata.get(&self.type_key)
         )))
+    }
+
+    fn register_streaming_handler(
+        &self,
+        type_name: &str,
+        handler: Arc<dyn StreamingHandler>,
+    ) -> Option<Arc<dyn StreamingHandler>> {
+        let mut th = self.clone();
+        th.streaming_handlers.insert(type_name.to_string(), handler);
+        Some(Arc::new(th))
     }
 }
 

@@ -3,11 +3,11 @@ use std::sync::Arc;
 
 use mq_bridge::test_utils::PERF_TEST_MESSAGE_COUNT;
 
-use mq_bridge::endpoints::mongodb::{MongoDbConsumer, MongoDbPublisher};
+use mq_bridge::endpoints::mongodb::{MongoDbConsumer, MongoDbPublisher, MongoDbSubscriber};
 use mq_bridge::test_utils::{
     add_performance_result, run_chaos_pipeline_test, run_direct_perf_test,
     run_performance_pipeline_test, run_pipeline_test, run_test_with_docker,
-    run_test_with_docker_controller, setup_logging,
+    run_test_with_docker_controller, setup_logging, verify_subscriber_logic,
 };
 const CONFIG_YAML: &str = r#"
 routes:
@@ -57,6 +57,27 @@ pub async fn test_mongodb_chaos() {
             run_chaos_pipeline_test("mongodb", &config_yaml, controller, "mongodb").await;
         },
     )
+    .await;
+}
+
+pub async fn test_mongodb_subscriber_logic() {
+    setup_logging();
+    run_test_with_docker("tests/integration/docker-compose/mongodb.yml", || async {
+        let collection = format!("sub_logic_{}", fast_uuid_v7::gen_id());
+        let config = mq_bridge::models::MongoDbConfig {
+            url: "mongodb://localhost:27017".to_string(),
+            database: "mq_bridge_test".to_string(),
+            collection: Some(collection),
+            change_stream: true,
+            ..Default::default()
+        };
+
+        let publisher = Arc::new(MongoDbPublisher::new(&config).await.unwrap());
+        let sub1 = Arc::new(tokio::sync::Mutex::new(MongoDbSubscriber::new(&config).await.unwrap()));
+        let sub2 = Arc::new(tokio::sync::Mutex::new(MongoDbSubscriber::new(&config).await.unwrap()));
+
+        verify_subscriber_logic(publisher, sub1, sub2).await;
+    })
     .await;
 }
 

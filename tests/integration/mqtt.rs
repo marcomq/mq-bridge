@@ -4,7 +4,7 @@ use mq_bridge::endpoints::mqtt::{MqttConsumer, MqttPublisher};
 use mq_bridge::test_utils::{
     add_performance_result, run_chaos_pipeline_test, run_direct_perf_test,
     run_performance_pipeline_test, run_pipeline_test, run_test_with_docker,
-    run_test_with_docker_controller, setup_logging, PERF_TEST_BATCH_MESSAGE_COUNT,
+    run_test_with_docker_controller, setup_logging, verify_subscriber_logic, PERF_TEST_BATCH_MESSAGE_COUNT,
 };
 use std::sync::Arc;
 const CONFIG_YAML: &str = r#"
@@ -55,6 +55,26 @@ pub async fn test_mqtt_chaos() {
             run_chaos_pipeline_test("mqtt", &config_yaml, controller, "mosquitto").await;
         },
     )
+    .await;
+}
+
+pub async fn test_mqtt_subscriber_logic() {
+    setup_logging();
+    run_test_with_docker("tests/integration/docker-compose/mqtt.yml", || async {
+        let topic = format!("sub_logic_{}", fast_uuid_v7::gen_id());
+        let config = mq_bridge::models::MqttConfig {
+            url: "mqtt://localhost:1883".to_string(),
+            topic: Some(topic),
+            clean_session: true,
+            ..Default::default()
+        };
+
+        let publisher = Arc::new(MqttPublisher::new(&config).await.unwrap());
+        let sub1 = Arc::new(tokio::sync::Mutex::new(MqttConsumer::new(&config).await.unwrap()));
+        let sub2 = Arc::new(tokio::sync::Mutex::new(MqttConsumer::new(&config).await.unwrap()));
+
+        verify_subscriber_logic(publisher, sub1, sub2).await;
+    })
     .await;
 }
 

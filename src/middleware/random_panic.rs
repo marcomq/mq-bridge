@@ -6,20 +6,36 @@ use crate::traits::{
 use crate::CanonicalMessage;
 use async_trait::async_trait;
 use std::any::Any;
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
+use std::collections::HashMap;
+use once_cell::sync::Lazy;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+
+// Global registry for triggered state, keyed by route name and middleware instance ID (if needed)
+static TRIGGERED_STATE: Lazy<Mutex<HashMap<String, Arc<AtomicBool>>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
 
 /// Wrapper around a `MessageConsumer` that injects faults for testing.
 pub struct RandomPanicConsumer {
     inner: Box<dyn MessageConsumer>,
     config: Arc<RandomPanicMiddleware>,
+    triggered_flag: Arc<AtomicBool>, // Shared flag
 }
 
 impl RandomPanicConsumer {
-    pub fn new(inner: Box<dyn MessageConsumer>, config: &RandomPanicMiddleware) -> Self {
+    /// Helper to get or create a shared AtomicBool for a given route.
+    fn get_triggered_flag(route_name: &str) -> Arc<AtomicBool> {
+        let mut map = TRIGGERED_STATE.lock().unwrap();
+        map.entry(route_name.to_string())
+           .or_insert_with(|| Arc::new(AtomicBool::new(false)))
+           .clone()
+    }
+
+    pub fn new(inner: Box<dyn MessageConsumer>, config: &RandomPanicMiddleware, route_name: &str) -> Self {
         Self {
             inner,
             config: Arc::new(config.clone()),
+            triggered_flag: Self::get_triggered_flag(route_name),
         }
     }
 
@@ -29,14 +45,21 @@ impl RandomPanicConsumer {
             return false;
         }
 
+        // Only trigger if it hasn't been triggered yet globally for this route.
+        if self.triggered_flag.load(Ordering::SeqCst) {
+            return false;
+        }
+
         // If no specific trigger count is set, trigger always
         if let Some(trigger_on) = self.config.trigger_on_message {
             let current_count = self.config.message_count.fetch_add(1, Ordering::SeqCst) + 1;
             current_count == trigger_on
         } else {
             let _ = self.config.message_count.fetch_add(1, Ordering::SeqCst);
-            true
+            true // Trigger always if no specific trigger_on_message
         }
+        .then(|| { self.triggered_flag.store(true, Ordering::SeqCst); true }) // Mark as triggered globally
+        .unwrap_or(false)
     }
 
     /// Execute the fault injection based on the configured mode.
@@ -105,13 +128,15 @@ impl MessageConsumer for RandomPanicConsumer {
 pub struct RandomPanicPublisher {
     inner: Box<dyn MessagePublisher>,
     config: Arc<RandomPanicMiddleware>,
+    triggered_flag: Arc<AtomicBool>, // Shared flag
 }
 
 impl RandomPanicPublisher {
-    pub fn new(inner: Box<dyn MessagePublisher>, config: &RandomPanicMiddleware) -> Self {
+    pub fn new(inner: Box<dyn MessagePublisher>, config: &RandomPanicMiddleware, route_name: &str) -> Self {
         Self {
             inner,
             config: Arc::new(config.clone()),
+            triggered_flag: RandomPanicConsumer::get_triggered_flag(route_name), // Use the same global registry
         }
     }
 
@@ -121,14 +146,21 @@ impl RandomPanicPublisher {
             return false;
         }
 
+        // Only trigger if it hasn't been triggered yet globally for this route.
+        if self.triggered_flag.load(Ordering::SeqCst) {
+            return false;
+        }
+
         // If no specific trigger count is set, trigger always
         if let Some(trigger_on) = self.config.trigger_on_message {
             let current_count = self.config.message_count.fetch_add(1, Ordering::SeqCst) + 1;
             current_count == trigger_on
         } else {
             let _ = self.config.message_count.fetch_add(1, Ordering::SeqCst);
-            true
+            true // Trigger always if no specific trigger_on_message
         }
+        .then(|| { self.triggered_flag.store(true, Ordering::SeqCst); true }) // Mark as triggered globally
+        .unwrap_or(false)
     }
 
     /// Execute the fault injection based on the configured mode.

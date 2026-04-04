@@ -2,9 +2,7 @@
 
 use mq_bridge::endpoints::amqp::{AmqpConsumer, AmqpPublisher};
 use mq_bridge::test_utils::{
-    add_performance_result, run_chaos_pipeline_test, run_direct_perf_test,
-    run_performance_pipeline_test, run_pipeline_test, run_test_with_docker,
-    run_test_with_docker_controller, setup_logging, PERF_TEST_MESSAGE_COUNT,
+    PERF_TEST_MESSAGE_COUNT, add_performance_result, run_chaos_pipeline_test, run_direct_perf_test, run_performance_pipeline_test, run_pipeline_test, run_test_with_docker, run_test_with_docker_controller, setup_logging, verify_subscriber_logic
 };
 use std::sync::Arc;
 
@@ -99,6 +97,26 @@ async fn test_amqp_publisher_handles_nack() {
         );
 
         println!("AMQP NACK handling test passed!");
+    })
+    .await;
+}
+
+pub async fn test_amqp_subscriber_logic() {
+    setup_logging();
+    run_test_with_docker("tests/integration/docker-compose/amqp.yml", || async {
+        let exchange = format!("sub_logic_{}", fast_uuid_v7::gen_id());
+        let config = mq_bridge::models::AmqpConfig {
+            url: "amqp://guest:guest@localhost:5672/%2f".to_string(),
+            exchange: Some(exchange),
+            subscribe_mode: true,
+            ..Default::default()
+        };
+
+        let publisher = Arc::new(AmqpPublisher::new(&config).await.unwrap());
+        let sub1 = Arc::new(tokio::sync::Mutex::new(AmqpConsumer::new(&config).await.unwrap()));
+        let sub2 = Arc::new(tokio::sync::Mutex::new(AmqpConsumer::new(&config).await.unwrap()));
+
+        verify_subscriber_logic(publisher, sub1, sub2).await;
     })
     .await;
 }

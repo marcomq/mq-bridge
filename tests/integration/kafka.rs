@@ -4,7 +4,7 @@ use mq_bridge::endpoints::kafka::{KafkaConsumer, KafkaPublisher};
 use mq_bridge::test_utils::{
     add_performance_result, run_chaos_pipeline_test, run_direct_perf_test,
     run_performance_pipeline_test, run_pipeline_test, run_test_with_docker,
-    run_test_with_docker_controller, setup_logging, PERF_TEST_MESSAGE_COUNT,
+    run_test_with_docker_controller, setup_logging, verify_subscriber_logic, PERF_TEST_MESSAGE_COUNT,
 };
 use std::sync::Arc;
 
@@ -76,6 +76,25 @@ pub async fn test_kafka_performance_pipeline() {
             &(PERF_TEST_MESSAGE_COUNT + 1000).to_string(),
         );
         run_performance_pipeline_test("kafka", &config_yaml, PERF_TEST_MESSAGE_COUNT).await;
+    })
+    .await;
+}
+
+pub async fn test_kafka_subscriber_logic() {
+    setup_logging();
+    run_test_with_docker("tests/integration/docker-compose/kafka.yml", || async {
+        let topic = format!("sub_logic_{}", fast_uuid_v7::gen_id());
+        let config = mq_bridge::models::KafkaConfig {
+            url: "localhost:9092".to_string(),
+            topic: Some(topic),
+            ..Default::default()
+        };
+
+        let publisher = Arc::new(KafkaPublisher::new(&config).await.unwrap());
+        let sub1 = Arc::new(tokio::sync::Mutex::new(KafkaConsumer::new(&config).await.unwrap()));
+        let sub2 = Arc::new(tokio::sync::Mutex::new(KafkaConsumer::new(&config).await.unwrap()));
+
+        verify_subscriber_logic(publisher, sub1, sub2).await;
     })
     .await;
 }

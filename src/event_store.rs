@@ -4,8 +4,8 @@
 
 use crate::canonical_message::tracing_support::LazyMessageIds;
 use crate::traits::{
-    BatchCommitFunc, ConsumerError, EndpointStatus, MessageConsumer, MessageDisposition,
-    ReceivedBatch,
+    BatchCommitFunc, CommitDisposition, ConsumerError, EndpointStatus, MessageConsumer,
+    MessageDisposition, ReceivedBatch,
 };
 use crate::CanonicalMessage;
 use async_trait::async_trait;
@@ -524,11 +524,15 @@ impl MessageConsumer for EventStoreConsumer {
         let subscriber_id = self.subscriber_id.clone();
         let last_offset_arc = self.last_offset.clone();
 
-        let commit: BatchCommitFunc = Box::new(move |dispositions| {
+        let commit: BatchCommitFunc = Box::new(move |disposition| {
             let store = store.clone();
             let subscriber_id = subscriber_id.clone();
             let last_offset_arc = last_offset_arc.clone();
             Box::pin(async move {
+                let dispositions = match disposition {
+                    CommitDisposition::All(d) => vec![d; 1], // EventStore handles monotonic acks differently
+                    CommitDisposition::Individual(v) => v,
+                };
                 if dispositions
                     .iter()
                     .any(|d| matches!(d, MessageDisposition::Nack))
@@ -774,7 +778,9 @@ mod tests {
         assert_eq!(batch.messages[0].get_payload_str(), "event1");
 
         // Ack the batch
-        (batch.commit)(vec![MessageDisposition::Ack]).await.unwrap();
+        (batch.commit)(CommitDisposition::All(MessageDisposition::Ack))
+            .await
+            .unwrap();
 
         producer_task.await.unwrap();
     }
@@ -788,7 +794,7 @@ mod tests {
 
         // Receive first batch and Nack it
         let batch1 = consumer.receive_batch(1).await.unwrap();
-        (batch1.commit)(vec![MessageDisposition::Nack])
+        (batch1.commit)(CommitDisposition::All(MessageDisposition::Nack))
             .await
             .unwrap();
 
@@ -797,7 +803,7 @@ mod tests {
         assert_eq!(batch2.messages[0].get_payload_str(), "event1");
 
         // Ack it this time
-        (batch2.commit)(vec![MessageDisposition::Ack])
+        (batch2.commit)(CommitDisposition::All(MessageDisposition::Ack))
             .await
             .unwrap();
     }

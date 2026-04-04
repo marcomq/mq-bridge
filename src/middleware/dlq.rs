@@ -86,9 +86,17 @@ impl MessagePublisher for DlqPublisher {
     ) -> Result<SentBatch, PublisherError> {
         match self.inner.send_batch(messages.clone()).await {
             Ok(SentBatch::Ack) => Ok(SentBatch::Ack),
-            Ok(SentBatch::Partial { responses, failed }) => {
+            Ok(SentBatch::Partial {
+                responses,
+                failed,
+                commit,
+            }) => {
                 if failed.is_empty() {
-                    return Ok(SentBatch::Partial { responses, failed });
+                    return Ok(SentBatch::Partial {
+                        responses,
+                        failed,
+                        commit,
+                    });
                 }
 
                 let (retryable, mut non_retryable): (Vec<_>, Vec<_>) = failed
@@ -106,6 +114,7 @@ impl MessagePublisher for DlqPublisher {
                     return Ok(SentBatch::Partial {
                         responses,
                         failed: still_retryable,
+                        commit,
                     });
                 }
 
@@ -123,9 +132,12 @@ impl MessagePublisher for DlqPublisher {
                     Ok(SentBatch::Ack) => Ok(SentBatch::Partial {
                         responses,
                         failed: final_failed,
+                        commit,
                     }),
                     Ok(SentBatch::Partial {
-                        failed: dlq_failed, ..
+                        failed: dlq_failed,
+                        commit: dlq_commit,
+                        ..
                     }) => {
                         let mut final_failed = final_failed;
                         error!(
@@ -136,6 +148,7 @@ impl MessagePublisher for DlqPublisher {
                         Ok(SentBatch::Partial {
                             responses,
                             failed: final_failed,
+                            commit: dlq_commit,
                         })
                     }
                     Err(dlq_error) => {
@@ -194,6 +207,7 @@ impl MessagePublisher for DlqPublisher {
                         Ok(SentBatch::Partial {
                             responses: None,
                             failed: dlq_failed,
+                            commit: None,
                         })
                     }
                     Err(dlq_error) => {
@@ -427,6 +441,7 @@ mod tests {
                     let (head, _) = messages.split_at(1);
                     return Ok(SentBatch::Partial {
                         responses: None,
+                        commit: None,
                         failed: vec![(
                             head[0].clone(),
                             PublisherError::NonRetryable(anyhow::anyhow!("Partial batch fail")),

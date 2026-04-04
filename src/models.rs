@@ -12,7 +12,7 @@ use std::{
     sync::{atomic::AtomicUsize, Arc},
 };
 
-use crate::traits::Handler;
+use crate::traits::{Handler, StreamingHandler};
 use tracing::trace;
 
 /// The top-level configuration is a map of named routes.
@@ -242,7 +242,11 @@ impl<'de> Deserialize<'de> for Endpoint {
             where
                 E: serde::de::Error,
             {
-                Ok(Endpoint::new(EndpointType::Null))
+                Ok(Endpoint {
+                    middlewares: Vec::new(),
+                    endpoint_type: EndpointType::Null,
+                    handler: None,
+                })
             }
 
             fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
@@ -492,6 +496,7 @@ impl EndpointType {
                 | EndpointType::Fanout(_)
                 | EndpointType::Switch(_)
                 | EndpointType::Response(_)
+                | EndpointType::StreamingHandler(_)
                 | EndpointType::Reader(_)
                 | EndpointType::Custom { .. }
                 | EndpointType::Null
@@ -1617,14 +1622,32 @@ pub struct SwitchConfig {
 ///
 /// This endpoint allows a handler to yield multiple responses for a single input message.
 /// The yielded messages are then sent to the `output` endpoint.
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[derive(Deserialize, Serialize, Clone, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct StreamingHandlerConfig {
     /// The output endpoint where the yielded messages will be sent.
     /// This could be a `response` endpoint for HTTP streaming, or a `fanout` for multiple destinations.
     pub output: Endpoint,
-    // In a more advanced version, you might add a 'handler_name' field to reference a globally registered StreamingHandler.
+    #[serde(skip)]
+    #[cfg_attr(feature = "schema", schemars(skip))]
+    pub handler: Option<Arc<dyn StreamingHandler>>,
+}
+
+impl std::fmt::Debug for StreamingHandlerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StreamingHandlerConfig")
+            .field("output", &self.output)
+            .field(
+                "handler",
+                &if self.handler.is_some() {
+                    "Some(<StreamingHandler>)"
+                } else {
+                    "None"
+                },
+            )
+            .finish()
+    }
 }
 
 // --- Response Endpoint Configuration ---

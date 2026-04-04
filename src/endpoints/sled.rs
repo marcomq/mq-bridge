@@ -6,8 +6,8 @@
 use crate::canonical_message::tracing_support::LazyMessageIds;
 use crate::models::SledConfig;
 use crate::traits::{
-    ConsumerError, EndpointStatus, MessageConsumer, MessageDisposition, MessagePublisher,
-    PublisherError, Received, ReceivedBatch, Sent, SentBatch,
+    CommitDisposition, ConsumerError, EndpointStatus, MessageConsumer, MessageDisposition,
+    MessagePublisher, PublisherError, Received, ReceivedBatch, Sent, SentBatch,
 };
 use crate::CanonicalMessage;
 use anyhow::{anyhow, Context};
@@ -282,9 +282,11 @@ impl MessageConsumer for SledConsumer {
                     Box::pin(async move {
                         if delete {
                             match disposition {
-                                MessageDisposition::Ack | MessageDisposition::Reply(_) => {
-                                    if matches!(disposition, MessageDisposition::Reply(_)) {
-                                        tracing::warn!("Sled consumer received a Reply/StreamReply, but replying is not supported. Dropping reply.");
+                                MessageDisposition::Ack
+                                | MessageDisposition::Reply(_)
+                                | MessageDisposition::ReplyBatch(_) => {
+                                    if !matches!(disposition, MessageDisposition::Ack) {
+                                        tracing::warn!("Sled consumer received a Reply or ReplyBatch, but replying is not supported. Dropping reply.");
                                     }
                                     inflight_tree.remove(key_clone).map_err(|e| anyhow!(e))?;
                                 }
@@ -351,7 +353,12 @@ impl MessageConsumer for SledConsumer {
                 let commits_mutex = commits_mutex.clone();
                 Box::pin(async move {
                     let commits_vec = commits_mutex.lock().unwrap().take().unwrap_or_default();
-                    for (commit, disposition) in commits_vec.into_iter().zip(dispositions) {
+                    let len = commits_vec.len();
+                    let dispositions_vec = match dispositions {
+                        CommitDisposition::All(d) => vec![d; len],
+                        CommitDisposition::Individual(v) => v,
+                    };
+                    for (commit, disposition) in commits_vec.into_iter().zip(dispositions_vec) {
                         commit(disposition).await?;
                     }
                     Ok(())

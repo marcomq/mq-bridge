@@ -8,9 +8,10 @@ use crate::errors::ProcessingError;
 pub use crate::models::Route;
 use crate::models::{Endpoint, EndpointType, RouteOptions};
 use crate::traits::{
-    BatchCommitFunc, ConsumerError, Handler, HandlerError, MessageDisposition, PublisherError,
-    SentBatch,
+    BatchCommitFunc, CommitDisposition, ConsumerError, Handler, HandlerError, MessageDisposition,
+    PublisherError, SentBatch, StreamingHandler, Yielder,
 };
+use crate::Handled;
 use async_channel::{bounded, Sender};
 use serde::de::DeserializeOwned;
 use std::collections::{BTreeMap, HashMap};
@@ -404,7 +405,6 @@ impl Route {
                     let seq = seq_counter;
                     seq_counter += 1;
                     let commit = wrap_commit(received_batch.commit, seq, seq_tx.clone());
-                    let batch_len = received_batch.messages.len();
                     message_ids.clear();
                     message_ids.extend(received_batch.messages.iter().map(|m| m.message_id));
 
@@ -413,7 +413,7 @@ impl Route {
                             let permit = commit_semaphore.clone().acquire_owned().await.map_err(|e| anyhow::anyhow!("Semaphore error: {}", e))?;
                             let err_tx = err_tx.clone();
                             commit_tasks.spawn(async move {
-                                if let Err(e) = commit(vec![MessageDisposition::Ack; batch_len]).await {
+                                if let Err(e) = commit(CommitDisposition::All(MessageDisposition::Ack)).await {
                                     error!("Commit failed: {}", e);
                                     if err_tx.try_send(e).is_err() {
                                         warn!("Could not send commit error to main task, it might be down or busy.");
@@ -423,7 +423,7 @@ impl Route {
                                 drop(permit);
                             });
                         }
-                        Ok(SentBatch::Partial { responses, failed }) => {
+                        Ok(SentBatch::Partial { responses, failed, commit: res_commit }) => {
                             let has_retryable = failed.iter().any(|(_, e)| matches!(e, PublisherError::Retryable(_)));
                             if has_retryable {
                                 let failed_count = failed.len();
@@ -439,7 +439,7 @@ impl Route {
                                 // Partially ack/nack the batch to fill the sequencer slot.
                                 let dispositions =
                                     map_responses_to_dispositions(&message_ids, responses, &failed);
-                                if let Err(commit_err) = commit(dispositions).await {
+                                if let Err(commit_err) = commit(CommitDisposition::Individual(dispositions)).await {
                                     warn!("Commit after partial send failure also failed (this is expected during a disconnect): {}", commit_err);
                                 }
 
@@ -452,19 +452,25 @@ impl Route {
                             let err_tx = err_tx.clone();
                             let ids = std::mem::take(&mut message_ids);
                             commit_tasks.spawn(async move {
-                                let dispositions = map_responses_to_dispositions(&ids, responses, &failed);
-                                if let Err(e) = commit(dispositions).await {
+                                let dispositions = map_responses_to_dispositions(&ids, responses.clone(), &failed);
+                                if let Err(e) = commit(CommitDisposition::Individual(dispositions)).await {
                                     error!("Commit failed: {}", e);
                                     if err_tx.try_send(e).is_err() {
                                         warn!("Could not send commit error to main task, it might be down or busy.");
+                                    }
+                                }
+                                if let Some(c) = res_commit {
+                                    let count = responses.as_ref().map(|r| r.len()).unwrap_or(0);
+                                    if count > 0 {
+                                        let _ = c(CommitDisposition::All(MessageDisposition::Ack)).await;
                                     }
                                 }
                                 drop(permit);
                             });
                         }
                         Err(e) => {
-                            warn!("Publisher error, sending {} Nacks to commit", batch_len);
-                            let nack_result = commit(vec![MessageDisposition::Nack; batch_len]).await;
+                            warn!("Publisher error, sending Nacks to commit");
+                            let nack_result = commit(CommitDisposition::All(MessageDisposition::Nack)).await;
                             debug!("Nack commit result: {:?}", nack_result);
                             break Err(e.into());
                         }
@@ -534,10 +540,10 @@ impl Route {
                 debug!("Starting worker {}", i);
                 let mut message_ids = Vec::with_capacity(batch_size);
                 while let Ok((messages, commit)) = work_rx_clone.recv().await {
-                    let batch_len = messages.len();
                     message_ids.clear();
                     message_ids.extend(messages.iter().map(|m| m.message_id));
-                    match publisher.send_batch(messages).await {
+                    let result = publisher.send_batch(messages).await;
+                    match result {
                         Ok(SentBatch::Ack) => {
                             let permit = match commit_semaphore.clone().acquire_owned().await {
                                 Ok(p) => p,
@@ -548,7 +554,7 @@ impl Route {
                             };
                             let err_tx = err_tx.clone();
                             commit_tasks.spawn(async move {
-                                if let Err(e) = commit(vec![MessageDisposition::Ack; batch_len]).await {
+                                if let Err(e) = commit(CommitDisposition::All(MessageDisposition::Ack)).await {
                                     error!("Commit failed: {}", e);
                                     if err_tx.try_send(e).is_err() {
                                         warn!("Could not send commit error to main task, it might be down or busy.");
@@ -557,7 +563,7 @@ impl Route {
                                 drop(permit);
                             });
                         }
-                        Ok(SentBatch::Partial { responses, failed }) => {
+                        Ok(SentBatch::Partial { responses, failed, commit: res_commit }) => {
                             let has_retryable = failed.iter().any(|(_, e)| matches!(e, PublisherError::Retryable(_)));
                             if has_retryable {
                                 let failed_count = failed.len();
@@ -576,7 +582,7 @@ impl Route {
                                 // due to a broken connection, it's important to attempt it.
                                 let dispositions =
                                     map_responses_to_dispositions(&message_ids, responses, &failed);
-                                if let Err(commit_err) = commit(dispositions).await {
+                                if let Err(commit_err) = commit(CommitDisposition::Individual(dispositions.clone())).await { // Clone dispositions
                                     warn!("Commit after partial send failure also failed (this is expected during a disconnect): {}", commit_err);
                                 }
 
@@ -598,11 +604,17 @@ impl Route {
                             let err_tx = err_tx.clone();
                             let ids = std::mem::take(&mut message_ids);
                             commit_tasks.spawn(async move {
-                                let dispositions = map_responses_to_dispositions(&ids, responses, &failed);
-                                if let Err(e) = commit(dispositions).await {
+                                let dispositions = map_responses_to_dispositions(&ids, responses.clone(), &failed);
+                                if let Err(e) = commit(CommitDisposition::Individual(dispositions)).await {
                                     error!("Commit failed: {}", e);
                                     if err_tx.try_send(e).is_err() {
                                         warn!("Could not send commit error to main task, it might be down or busy.");
+                                    }
+                                }
+                                if let Some(c) = res_commit {
+                                    let count = responses.as_ref().map(|r| r.len()).unwrap_or(0);
+                                    if count > 0 {
+                                        let _ = c(CommitDisposition::All(MessageDisposition::Ack)).await;
                                     }
                                 }
                                 drop(permit);
@@ -611,7 +623,7 @@ impl Route {
                         Err(e) => {
                             error!("Worker failed to send message batch: {}", e);
                             // Nack the commit to fill the sequencer slot and prevent a deadlock.
-                            let nack_result = commit(vec![MessageDisposition::Nack; batch_len]).await;
+                            let nack_result = commit(CommitDisposition::All(MessageDisposition::Nack)).await;
                             debug!("Nack commit result: {:?}", nack_result);
                             // Send the error back to the main task to tear down the route.
                             if err_tx.try_send(e.into()).is_err() {
@@ -746,6 +758,20 @@ impl Route {
         self
     }
 
+    pub fn with_streaming_handler(mut self, handler: impl StreamingHandler + 'static) -> Self {
+        self.output = Endpoint {
+            middlewares: self.output.middlewares.clone(),
+            endpoint_type: EndpointType::StreamingHandler(Box::new(
+                crate::models::StreamingHandlerConfig {
+                    output: self.output.clone(),
+                    handler: Some(Arc::new(handler)),
+                },
+            )),
+            handler: None,
+        };
+        self
+    }
+
     /// Registers a typed handler for the route.
     ///
     /// The handler can accept either:
@@ -810,6 +836,101 @@ impl Route {
         self.output.handler = Some(new_handler);
         self
     }
+
+    /// Registers a typed streaming handler for the route.
+    ///
+    /// The handler can accept:
+    /// - `fn(T, MessageContext, Yielder) -> Future<Output = Result<Handled, HandlerError>>`
+    pub fn add_streaming_handler<T, F, Fut>(mut self, type_name: &str, handler: F) -> Self
+    where
+        T: DeserializeOwned + Send + Sync + 'static,
+        F: Fn(T, crate::MessageContext, Yielder) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<(), HandlerError>> + Send + 'static,
+    {
+        let (current_target, prev_handler) = match &mut self.output.endpoint_type {
+            EndpointType::StreamingHandler(cfg) => {
+                let h = cfg.handler.take();
+                (cfg.output.clone(), h)
+            }
+            _ => (self.output.clone(), None),
+        };
+
+        let new_handler = if let Some(h) = prev_handler {
+            let handler = Arc::new(handler);
+            let wrapper_handler = handler.clone();
+            let wrapper = Arc::new(move |msg: crate::CanonicalMessage, yielder: Yielder| {
+                let handler = wrapper_handler.clone();
+                async move {
+                    let data = msg.parse::<T>().map_err(|e| {
+                        HandlerError::NonRetryable(anyhow::anyhow!("Deserialization failed: {}", e))
+                    })?;
+                    let ctx = crate::MessageContext::from(msg);
+                    handler(data, ctx, yielder).await
+                }
+            });
+
+            if let Some(extended) = h.register_streaming_handler(type_name, wrapper.clone()) {
+                extended
+            } else {
+                let h_fallback = h.clone();
+                Arc::new(
+                    crate::type_handler::TypeHandler::new()
+                        .add_streaming_handler(type_name, move |msg: T, ctx, yielder| {
+                            let handler = handler.clone();
+                            async move { handler(msg, ctx, yielder).await }
+                        })
+                        .with_fallback(Arc::new(move |msg: crate::CanonicalMessage| {
+                            let h = h_fallback.clone();
+                            let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+                            let callback =
+                                if msg.metadata.contains_key(crate::traits::REPLY_PATH_KEY) {
+                                    crate::traits::ReplyRegistry::get(msg.message_id)
+                                } else {
+                                    None
+                                };
+                            let yielder = Yielder::new(
+                                tx,
+                                msg.message_id,
+                                msg.metadata.get("correlation_id").cloned(),
+                                callback.clone(),
+                            );
+                            let drain_handle = tokio::spawn(async move {
+                                if let Some(cb) = callback {
+                                    while let Some(disp) = rx.recv().await {
+                                        let _ = cb.send(disp).await;
+                                    }
+                                } else {
+                                    while rx.recv().await.is_some() {}
+                                }
+                            });
+                            async move {
+                                // Propagate the handler's return value and wait for the drain task to complete
+                                let result = h.handle_stream(msg, yielder).await;
+                                let _ = drain_handle.await;
+                                result.map(|_| Handled::Ack)
+                            }
+                        })),
+                )
+            }
+        } else {
+            Arc::new(
+                crate::type_handler::TypeHandler::new().add_streaming_handler(type_name, handler),
+            )
+        };
+
+        self.output = Endpoint {
+            middlewares: self.output.middlewares.clone(),
+            endpoint_type: EndpointType::StreamingHandler(Box::new(
+                crate::models::StreamingHandlerConfig {
+                    output: current_target,
+                    handler: Some(new_handler),
+                },
+            )),
+            handler: None,
+        };
+        self
+    }
+
     pub fn add_handlers<T, H, Args>(mut self, handlers: HashMap<&str, H>) -> Self
     where
         T: DeserializeOwned + Send + Sync + 'static,
@@ -824,7 +945,7 @@ impl Route {
 }
 
 type SequencerItem = (
-    Vec<MessageDisposition>,
+    CommitDisposition,
     BatchCommitFunc,
     tokio::sync::oneshot::Sender<anyhow::Result<()>>,
 );
@@ -840,7 +961,7 @@ fn spawn_sequencer(buffer_size: usize) -> (Sender<(u64, SequencerItem)>, JoinHan
 
         loop {
             while let Some((dispositions, commit_func, notify)) = buffer.remove(&next_seq) {
-                let res = commit_func(dispositions).await;
+                let res = commit_func(dispositions.into()).await;
                 let _ = notify.send(res);
                 next_seq += 1;
             }
@@ -905,7 +1026,7 @@ fn wrap_commit(
     seq_tx: Sender<(u64, SequencerItem)>,
 ) -> BatchCommitFunc {
     let commit: Arc<BatchCommitFunc> = Arc::from(commit);
-    Box::new(move |dispositions| {
+    Box::new(move |disposition| {
         let commit = commit.clone();
         let seq_tx = seq_tx.clone();
         Box::pin(async move {
@@ -916,7 +1037,7 @@ fn wrap_commit(
                 commit(d)
             });
             if seq_tx
-                .send((seq, (dispositions, commit_wrapper, notify_tx)))
+                .send((seq, (disposition, commit_wrapper, notify_tx)))
                 .await
                 .is_ok()
             {
@@ -946,18 +1067,23 @@ fn map_responses_to_dispositions(
         failed.iter().map(|(m, _)| m.message_id).collect();
 
     // Create a map from message_id to response message for efficient lookup.
-    let mut response_map: std::collections::HashMap<u128, crate::CanonicalMessage> = responses
-        .unwrap_or_default()
-        .into_iter()
-        .map(|r| (r.message_id, r))
-        .collect();
+    let mut response_map: std::collections::HashMap<u128, Vec<crate::CanonicalMessage>> =
+        HashMap::new();
+    if let Some(resps) = responses {
+        for r in resps {
+            response_map.entry(r.message_id).or_default().push(r);
+        }
+    }
 
     for id in message_ids {
         if failed_ids.contains(id) {
             dispositions.push(MessageDisposition::Nack);
-        } else if let Some(resp) = response_map.remove(id) {
-            // If a response exists for this specific ID, use it.
-            dispositions.push(MessageDisposition::Reply(resp));
+        } else if let Some(mut resps) = response_map.remove(id) {
+            if resps.len() == 1 {
+                dispositions.push(MessageDisposition::Reply(resps.pop().unwrap()));
+            } else {
+                dispositions.push(MessageDisposition::ReplyBatch(resps));
+            }
         } else {
             // Otherwise, it was a successful send that did not produce a response.
             dispositions.push(MessageDisposition::Ack);
@@ -1594,6 +1720,7 @@ mod tests {
                     Ok(SentBatch::Partial {
                         responses: None,
                         failed,
+                        commit: None,
                     })
                 }
             }
@@ -1634,7 +1761,7 @@ mod tests {
 
         let route = Route::new(input.clone(), output_with_middlewares).with_batch_size(4);
         // Inject the mock publisher into the route's output
-        let final_publisher = crate::middleware::apply_middlewares_to_publisher(
+        let _final_publisher = crate::middleware::apply_middlewares_to_publisher(
             Box::new(mock_publisher.clone()),
             &route.output,
             "test_route",
@@ -1644,17 +1771,17 @@ mod tests {
 
         // We need a way to run the route with our mocked publisher.
         // The simplest way is to manually drive the core logic.
-        let (work_tx, work_rx) =
+        let (work_tx, _work_rx) =
             async_channel::bounded::<(Vec<crate::CanonicalMessage>, BatchCommitFunc)>(1);
         let (seq_tx, _sequencer_handle) = spawn_sequencer(1);
 
         // Spawn a worker to process one batch
         tokio::spawn(async move {
-            if let Ok((messages, commit)) = work_rx.recv().await {
+            if let Ok((messages, commit)) = _work_rx.recv().await {
                 let batch_len = messages.len();
-                match final_publisher.send_batch(messages).await {
+                match _final_publisher.send_batch(messages).await {
                     Ok(SentBatch::Ack) => {
-                        let _ = commit(vec![MessageDisposition::Ack; batch_len]).await;
+                        let _ = commit(CommitDisposition::All(MessageDisposition::Ack)).await;
                     }
                     Ok(SentBatch::Partial { failed, .. }) => {
                         // In a real route, we'd map responses, but here we just care about failure.
@@ -1665,10 +1792,10 @@ mod tests {
                             // would map dispositions based on message IDs.
                             vec![MessageDisposition::Nack; batch_len]
                         };
-                        let _ = commit(dispositions).await;
+                        let _ = commit(CommitDisposition::Individual(dispositions)).await;
                     }
                     Err(_) => {
-                        let _ = commit(vec![MessageDisposition::Nack; batch_len]).await;
+                        let _ = commit(CommitDisposition::All(MessageDisposition::Nack)).await;
                     }
                 }
             }

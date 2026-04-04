@@ -345,79 +345,53 @@ async fn test_commit_concurrency_limit() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_route_with_streaming_handler() {
-    use async_trait::async_trait;
-    use mq_bridge::endpoints::memory::MemoryPublisher;
-    use mq_bridge::endpoints::streaming_handler::StreamingHandlerPublisher;
-    use mq_bridge::extensions::register_endpoint_factory;
-    use mq_bridge::traits::{
-        CustomEndpointFactory, Handled, HandlerError, MessagePublisher, StreamingHandler, Yielder,
-    };
+    use mq_bridge::traits::{Handled, HandlerError, StreamingHandler, Yielder};
     use mq_bridge::CanonicalMessage;
     use std::time::Duration;
 
     // 1. Define a custom StreamingHandler for the test
     struct MyRouteStreamingHandler;
 
-    #[async_trait]
+    #[async_trait::async_trait]
     impl StreamingHandler for MyRouteStreamingHandler {
         async fn handle_stream(
             &self,
             msg: CanonicalMessage,
             yielder: Yielder,
-        ) -> Result<Handled, HandlerError> {
+        ) -> Result<(), HandlerError> {
             let original_payload = msg.get_payload_str();
-            let original_cid = msg.metadata.get("correlation_id").cloned();
+            let correlation_id = msg
+                .metadata
+                .get("correlation_id")
+                .cloned()
+                .unwrap_or_else(|| format!("{:032x}", msg.message_id));
 
             // Yield first message
-            let mut yielded_msg1 =
-                CanonicalMessage::from(format!("yielded_A: {}", original_payload));
-            if let Some(cid) = original_cid.clone() {
-                yielded_msg1
-                    .metadata
-                    .insert("correlation_id".to_string(), cid);
-            }
             yielder
-                .send(yielded_msg1)
-                .await
-                .map_err(|e| HandlerError::NonRetryable(e))?;
+                .send(
+                    CanonicalMessage::from(format!("yielded_A: {}", original_payload))
+                        .with_metadata_kv("correlation_id", correlation_id.clone()),
+                )
+                .await?;
             tokio::time::sleep(Duration::from_millis(5)).await; // Simulate some work
 
             // Yield second message
-            let mut yielded_msg2 =
-                CanonicalMessage::from(format!("yielded_B: {}", original_payload));
-            if let Some(cid) = original_cid.clone() {
-                yielded_msg2
-                    .metadata
-                    .insert("correlation_id".to_string(), cid);
-            }
             yielder
-                .send(yielded_msg2)
-                .await
-                .map_err(|e| HandlerError::NonRetryable(e))?;
+                .send(
+                    CanonicalMessage::from(format!("yielded_B: {}", original_payload))
+                        .with_metadata_kv("correlation_id", correlation_id.clone()),
+                )
+                .await?;
             tokio::time::sleep(Duration::from_millis(5)).await; // Simulate more work
 
             // Return a final message
-            let mut final_msg = CanonicalMessage::from(format!("final_C: {}", original_payload));
-            if let Some(cid) = original_cid {
-                final_msg.metadata.insert("correlation_id".to_string(), cid);
-            }
-            Ok(Handled::Publish(final_msg))
-        }
-    }
-
-    // 2. Use a CustomEndpointFactory to inject our StreamingHandlerPublisher
-    struct StreamingTestFactory {
-        publisher: Arc<dyn MessagePublisher>,
-    }
-
-    #[async_trait::async_trait]
-    impl CustomEndpointFactory for StreamingTestFactory {
-        async fn create_publisher(
-            &self,
-            _route_name: &str,
-            _config: &serde_json::Value,
-        ) -> anyhow::Result<Box<dyn MessagePublisher>> {
-            Ok(Box::new(self.publisher.clone()))
+            yielder
+                .send(
+                    CanonicalMessage::from(format!("final_C: {}", original_payload))
+                        .with_metadata_kv("correlation_id", correlation_id.clone()),
+                )
+                .await?;
+            Ok(())
         }
     }
 
@@ -427,41 +401,18 @@ async fn test_route_with_streaming_handler() {
 
     // 3. Setup Input Endpoint (Memory)
     let input_ep = Endpoint::new_memory(&input_topic, 10);
-    let input_channel = input_ep.channel().unwrap();
+    let output_ep = Endpoint::new_memory(&output_topic, 10);
 
-    // 4. Setup the inner publisher for StreamingHandlerPublisher (Memory)
-    let inner_output_ep = Endpoint::new_memory(&output_topic, 10);
-    let inner_output_channel = inner_output_ep.channel().unwrap();
-    let inner_publisher = Arc::new(MemoryPublisher::new_local(&output_topic, 10));
-
-    // 5. Manually create the StreamingHandlerPublisher
-    let streaming_handler_publisher = Arc::new(StreamingHandlerPublisher::new(
-        Arc::new(MyRouteStreamingHandler),
-        inner_publisher.clone(),
-    ));
-
-    // 6. Register the factory
-    let factory_name = "streaming_test_factory";
-    register_endpoint_factory(
-        factory_name,
-        Arc::new(StreamingTestFactory {
-            publisher: streaming_handler_publisher.clone(),
-        }),
-    );
-
-    // 7. Create a Route using the CustomEndpointFactory
-    let route = Route::new(
-        input_ep,
-        Endpoint::new(EndpointType::Custom {
-            name: factory_name.to_string(),
-            config: serde_json::Value::Null,
-        }),
-    );
+    let route = Route::new(input_ep.clone(), output_ep.clone())
+        .with_streaming_handler(MyRouteStreamingHandler);
 
     // 8. Deploy Route
     route.deploy(route_name).await.unwrap();
 
     // 9. Send an initial message
+    let input_channel = input_ep.channel().unwrap();
+    let output_channel = output_ep.channel().unwrap();
+
     let initial_msg_payload = "test_request";
     let correlation_id = fast_uuid_v7::gen_id_string();
     let initial_msg = CanonicalMessage::from(initial_msg_payload)
@@ -476,7 +427,7 @@ async fn test_route_with_streaming_handler() {
         if start.elapsed() > Duration::from_secs(5) {
             panic!("Timeout waiting for all messages from streaming handler");
         }
-        received_messages.extend(inner_output_channel.drain_messages());
+        received_messages.extend(output_channel.drain_messages());
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 

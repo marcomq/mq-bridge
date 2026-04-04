@@ -1,8 +1,8 @@
 use crate::canonical_message::tracing_support::LazyMessageIds;
 use crate::models::AmqpConfig;
 use crate::traits::{
-    BatchCommitFunc, BoxFuture, ConsumerError, EndpointStatus, MessageConsumer, MessageDisposition,
-    MessagePublisher, PublisherError, ReceivedBatch, Sent, SentBatch,
+    BatchCommitFunc, BoxFuture, CommitDisposition, ConsumerError, EndpointStatus, MessageConsumer,
+    MessageDisposition, MessagePublisher, PublisherError, ReceivedBatch, Sent, SentBatch,
 };
 use crate::CanonicalMessage;
 use crate::APP_NAME;
@@ -199,9 +199,12 @@ impl MessagePublisher for AmqpPublisher {
     ) -> Result<SentBatch, PublisherError> {
         trace!(count = messages.len(), queue = %self.queue, message_ids = ?LazyMessageIds(&messages), "Publishing batch of AMQP messages");
         if self.delayed_ack {
-            return crate::traits::send_batch_helper(self, messages, |publisher, message| {
-                Box::pin(publisher.send(message))
-            })
+            return crate::traits::send_batch_helper(
+                self,
+                messages,
+                MessageDisposition::Ack,
+                |publisher, message| Box::pin(publisher.send(message)),
+            )
             .await;
         }
 
@@ -293,6 +296,7 @@ impl MessagePublisher for AmqpPublisher {
             Ok(SentBatch::Partial {
                 responses: None,
                 failed: failed_messages,
+                commit: None,
             })
         }
     }
@@ -616,27 +620,30 @@ impl MessageConsumer for AmqpConsumer {
         let is_poisoned = self.is_poisoned.clone();
         let ackers = Arc::new(ackers);
         let reply_infos = Arc::new(reply_infos);
-        let commit: BatchCommitFunc = Box::new(move |dispositions: Vec<MessageDisposition>| {
+        let commit: BatchCommitFunc = Box::new(move |disposition: CommitDisposition| {
             let channel = channel.clone();
             let is_poisoned = is_poisoned.clone();
             let ackers = ackers.clone();
             let reply_infos = reply_infos.clone();
             Box::pin(async move {
-                if dispositions.len() != reply_infos.len() {
-                    tracing::error!(
-                        expected = reply_infos.len(),
-                        actual = dispositions.len(),
-                        "AMQP batch commit received mismatched disposition count"
-                    );
-                    return Err(anyhow::anyhow!(
-                        "AMQP batch commit received mismatched disposition count: expected {}, got {}",
-                        reply_infos.len(),
-                        dispositions.len()
-                    ));
-                }
+                let messages_len = reply_infos.len();
+                let dispositions = match disposition {
+                    CommitDisposition::Individual(v) => {
+                        if v.len() != messages_len {
+                            tracing::error!(
+                                expected = messages_len,
+                                actual = v.len(),
+                                "AMQP batch commit received mismatched disposition count"
+                            );
+                            return Err(anyhow::anyhow!("AMQP batch commit received mismatched disposition count: expected {}, got {}", messages_len, v.len()));
+                        }
+                        v
+                    }
+                    CommitDisposition::All(d) => vec![d; messages_len],
+                };
 
                 let commit_op = async {
-                    handle_replies(&channel, &reply_infos, &dispositions).await;
+                    handle_replies(&channel, &reply_infos, &dispositions).await?;
                     handle_dispositions(ackers.to_vec(), dispositions).await
                 };
 
@@ -709,38 +716,39 @@ async fn handle_replies(
     channel: &Channel,
     reply_infos: &[(Option<String>, Option<String>)],
     dispositions: &[MessageDisposition],
-) {
-    for ((reply_to, correlation_id), disposition) in reply_infos.iter().zip(dispositions.iter()) {
-        let payload = match (disposition, reply_to) {
-            (MessageDisposition::Reply(resp), Some(_)) => Some(resp.payload.clone()),
-            (MessageDisposition::Reply(_), None) => {
-                tracing::warn!("MessageDisposition::Reply received but no reply_to address found in original message");
-                None
-            }
-            _ => None,
-        };
+) -> anyhow::Result<()> {
+    for ((reply_to, correlation_id), disposition) in reply_infos.iter().zip(dispositions) {
+        if let Some(rt) = reply_to {
+            let replies: Vec<_> = match disposition {
+                MessageDisposition::Reply(msg) => vec![msg.payload.clone()],
+                MessageDisposition::ReplyBatch(msgs) => {
+                    msgs.iter().map(|m| m.payload.clone()).collect()
+                }
+                _ => Vec::new(),
+            };
 
-        if let (Some(rt), Some(body)) = (reply_to, payload) {
-            let mut props = BasicProperties::default();
-            if let Some(cid) = correlation_id {
-                props = props.with_correlation_id(cid.clone().into());
-            }
+            for body in replies {
+                let mut props = BasicProperties::default();
+                if let Some(cid) = correlation_id {
+                    props = props.with_correlation_id(cid.clone().into());
+                }
 
-            // Publish response to the default exchange with the routing key set to reply_to
-            if let Err(e) = channel
-                .basic_publish(
-                    "", // Default exchange
-                    rt,
-                    BasicPublishOptions::default(),
-                    &body,
-                    props,
-                )
-                .await
-            {
-                tracing::error!(reply_to = %rt, error = %e, "Failed to publish AMQP reply");
+                // Publish response to the default exchange with the routing key set to reply_to
+                if let Err(e) = channel
+                    .basic_publish("", rt, BasicPublishOptions::default(), &body, props)
+                    .await
+                {
+                    tracing::error!(reply_to = %rt, error = %e, "Failed to publish AMQP reply");
+                    return Err(anyhow::anyhow!(
+                        "Failed to publish AMQP reply to {}: {}",
+                        rt,
+                        e
+                    ));
+                }
             }
         }
     }
+    Ok(())
 }
 
 async fn handle_dispositions(
@@ -751,9 +759,9 @@ async fn handle_dispositions(
     let mut futures = futures::stream::iter(ackers.into_iter().zip(dispositions).map(
         |(acker, disposition)| async move {
             match disposition {
-                MessageDisposition::Ack | MessageDisposition::Reply(_) => {
-                    acker.ack(BasicAckOptions::default()).await
-                }
+                MessageDisposition::Ack
+                | MessageDisposition::Reply(_)
+                | MessageDisposition::ReplyBatch(_) => acker.ack(BasicAckOptions::default()).await,
                 MessageDisposition::Nack => {
                     // Nack with requeue. This will return the message to the front of the queue.
                     acker

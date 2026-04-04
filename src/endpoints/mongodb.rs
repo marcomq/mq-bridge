@@ -1,8 +1,9 @@
 use crate::canonical_message::tracing_support::LazyMessageIds;
 use crate::models::{MongoDbConfig, MongoDbFormat};
 use crate::traits::{
-    BatchCommitFunc, BoxFuture, ConsumerError, EndpointStatus, MessageConsumer, MessageDisposition,
-    MessagePublisher, PublisherError, Received, ReceivedBatch, Sent, SentBatch,
+    BatchCommitFunc, BoxFuture, CommitDisposition, ConsumerError, EndpointStatus, MessageConsumer,
+    MessageDisposition, MessagePublisher, PublisherError, Received, ReceivedBatch, Sent, SentBatch,
+    ORIGINAL_FORMAT_KEY,
 };
 use crate::CanonicalMessage;
 use anyhow::{anyhow, Context};
@@ -79,7 +80,7 @@ fn document_to_canonical(doc: Document) -> anyhow::Result<CanonicalMessage> {
     let payload = serde_json::to_vec(&doc)?;
     let mut msg = CanonicalMessage::new(payload, None);
     msg.metadata
-        .insert("mq_bridge.original_format".to_string(), "raw".to_string());
+        .insert(ORIGINAL_FORMAT_KEY.to_string(), "raw".to_string());
     Ok(msg)
 }
 
@@ -184,6 +185,13 @@ async fn handle_reply(
 
         let reply_coll = db.collection::<Document>(coll_name);
         if let Err(e) = reply_coll.insert_one(doc).await {
+            if let ErrorKind::Write(mongodb::error::WriteFailure::WriteError(ref w)) = *e.kind {
+                if w.code == 11000 {
+                    // Duplicate key error. This can happen during retries.
+                    // We treat it as success to provide idempotency.
+                    return Ok(());
+                }
+            }
             tracing::error!(collection = %coll_name, error = %e, "Failed to insert MongoDB reply");
             return Err(anyhow::anyhow!("Failed to insert MongoDB reply: {}", e,));
         }
@@ -476,8 +484,13 @@ impl MessagePublisher for MongoDbPublisher {
         }
 
         if self.request_reply {
-            return crate::traits::send_batch_helper(self, messages, |p, m| Box::pin(p.send(m)))
-                .await;
+            return crate::traits::send_batch_helper(
+                self,
+                messages,
+                MessageDisposition::Ack,
+                |p, m| Box::pin(p.send(m)),
+            )
+            .await;
         }
 
         trace!(count = messages.len(), collection = %self.collection_name, message_ids = ?LazyMessageIds(&messages), "Publishing batch of documents to MongoDB");
@@ -504,6 +517,7 @@ impl MessagePublisher for MongoDbPublisher {
                 return Ok(SentBatch::Partial {
                     responses: None,
                     failed: failed_messages,
+                    commit: None,
                 });
             }
         }
@@ -549,6 +563,7 @@ impl MessagePublisher for MongoDbPublisher {
                     Ok(SentBatch::Partial {
                         responses: None,
                         failed: failed_messages,
+                        commit: None,
                     })
                 }
             }
@@ -576,6 +591,7 @@ impl MessagePublisher for MongoDbPublisher {
                         return Ok(SentBatch::Partial {
                             responses: None,
                             failed: failed_messages,
+                            commit: None,
                         });
                     }
 
@@ -610,6 +626,7 @@ impl MessagePublisher for MongoDbPublisher {
                     Ok(SentBatch::Partial {
                         responses: None,
                         failed: failed_messages,
+                        commit: None,
                     })
                 } else {
                     Err(PublisherError::Retryable(anyhow!(e)))
@@ -931,6 +948,17 @@ impl MongoDbConsumer {
                                 )
                                 .await?;
                             }
+                            MessageDisposition::ReplyBatch(msgs) => {
+                                for resp in msgs {
+                                    handle_reply(
+                                        &db,
+                                        reply_collection_name.as_ref(),
+                                        correlation_id.as_ref(),
+                                        resp,
+                                    )
+                                    .await?;
+                                }
+                            }
                             MessageDisposition::Ack => {}
                             MessageDisposition::Nack => {
                                 collection_clone
@@ -1027,12 +1055,17 @@ impl MongoDbConsumer {
 
         let reply_infos = Arc::new(reply_infos);
         let ids = Arc::new(ids);
-        let commit = Box::new(move |dispositions: Vec<MessageDisposition>| {
+        let commit = Box::new(move |disposition: CommitDisposition| {
             let db = db.clone();
             let collection_clone = collection_clone.clone();
             let reply_infos = reply_infos.clone();
             let ids = ids.clone();
             Box::pin(async move {
+                let messages_len = reply_infos.len();
+                let dispositions = match disposition {
+                    CommitDisposition::All(d) => vec![d; messages_len],
+                    CommitDisposition::Individual(v) => v,
+                };
                 if !dispositions.is_empty() && dispositions.len() != reply_infos.len() {
                     tracing::warn!(
                         "Disposition count mismatch: expected {}, got {}",
@@ -1087,6 +1120,28 @@ async fn process_mongodb_batch_commit(
                     ids_to_unlock.push(id);
                 }
             },
+            MessageDisposition::ReplyBatch(msgs) => {
+                let mut success = true;
+                for resp in msgs {
+                    if let Err(e) = handle_reply(
+                        db,
+                        reply_coll_opt.as_ref(),
+                        correlation_id_opt.as_ref(),
+                        resp,
+                    )
+                    .await
+                    {
+                        errors.push(e);
+                        success = false;
+                        break;
+                    }
+                }
+                if success {
+                    ids_to_delete.push(id);
+                } else {
+                    ids_to_unlock.push(id);
+                }
+            }
             MessageDisposition::Ack => {
                 ids_to_delete.push(id);
             }
@@ -1239,11 +1294,16 @@ impl MessageConsumer for MongoDbSubscriber {
                 let cursor_id = self.cursor_id.clone();
                 let seqs = Arc::new(seqs);
 
-                let commit = Box::new(move |dispositions: Vec<MessageDisposition>| {
+                let commit = Box::new(move |disposition: CommitDisposition| {
                     let collection = collection.clone();
                     let cursor_id = cursor_id.clone();
                     let seqs = seqs.clone();
                     Box::pin(async move {
+                        let seqs_len = seqs.len();
+                        let dispositions = match disposition {
+                            CommitDisposition::All(d) => vec![d; seqs_len],
+                            CommitDisposition::Individual(v) => v,
+                        };
                         let mut highest_acked = 0;
                         for (disp, seq) in dispositions.iter().zip(seqs.iter()) {
                             if matches!(

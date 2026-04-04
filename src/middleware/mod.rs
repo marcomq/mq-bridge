@@ -57,7 +57,7 @@ pub async fn apply_middlewares_to_consumer(
                 consumer
             }
             Middleware::Delay(cfg) => Box::new(DelayConsumer::new(consumer, cfg)),
-            Middleware::RandomPanic(cfg) => Box::new(RandomPanicConsumer::new(consumer, cfg)),
+            Middleware::RandomPanic(cfg) => Box::new(RandomPanicConsumer::new(consumer, cfg, route_name)),
             Middleware::WeakJoin(cfg) => Box::new(WeakJoinConsumer::new(consumer, cfg)),
             Middleware::Custom { name, config } => {
                 let factory = get_middleware_factory(name).ok_or_else(|| {
@@ -101,7 +101,7 @@ pub async fn apply_middlewares_to_publisher(
             }
             Middleware::Retry(cfg) => Box::new(RetryPublisher::new(publisher, cfg.clone())),
             Middleware::Delay(cfg) => Box::new(DelayPublisher::new(publisher, cfg)),
-            Middleware::RandomPanic(cfg) => Box::new(RandomPanicPublisher::new(publisher, cfg)),
+            Middleware::RandomPanic(cfg) => Box::new(RandomPanicPublisher::new(publisher, cfg, route_name)),
             Middleware::Custom { name, config } => {
                 let factory = get_middleware_factory(name).ok_or_else(|| {
                     anyhow::anyhow!("Custom middleware factory '{}' not found", name)

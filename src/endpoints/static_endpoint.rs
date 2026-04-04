@@ -44,9 +44,12 @@ impl MessagePublisher for StaticEndpointPublisher {
         &self,
         messages: Vec<CanonicalMessage>,
     ) -> Result<SentBatch, PublisherError> {
-        crate::traits::send_batch_helper(self, messages, |publisher, message| {
-            Box::pin(publisher.send(message))
-        })
+        crate::traits::send_batch_helper(
+            self,
+            messages,
+            MessageDisposition::Ack,
+            |publisher, message| Box::pin(publisher.send(message)),
+        )
         .await
     }
 

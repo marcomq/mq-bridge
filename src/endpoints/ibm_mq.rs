@@ -12,8 +12,8 @@ use crate::{
     canonical_message::CanonicalMessage,
     outcomes::SentBatch,
     traits::{
-        self, ConsumerError, EndpointStatus, MessageConsumer, MessageDisposition, MessagePublisher,
-        PublisherError, ReceivedBatch,
+        self, CommitDisposition, ConsumerError, EndpointStatus, MessageConsumer,
+        MessageDisposition, MessagePublisher, PublisherError, ReceivedBatch,
     },
 };
 use mqi::attribute::{InqResItem, SetItems, MQIA_CURRENT_Q_DEPTH, MQIA_MAX_Q_DEPTH};
@@ -508,13 +508,18 @@ async fn spawn_consumer_thread(
                             let tx_commit = tx_loop.clone();
                             let epoch = current_epoch;
                             let commit_fn: traits::BatchCommitFunc =
-                                Box::new(move |dispositions: Vec<MessageDisposition>| {
+                                Box::new(move |disposition: CommitDisposition| {
                                     let tx = tx_commit.clone();
                                     Box::pin(async move {
                                         let (reply_tx, reply_rx) = oneshot::channel();
-                                        let should_backout = dispositions
-                                            .iter()
-                                            .any(|d| matches!(d, MessageDisposition::Nack));
+                                        let should_backout = match disposition {
+                                            CommitDisposition::All(d) => {
+                                                matches!(d, MessageDisposition::Nack)
+                                            }
+                                            CommitDisposition::Individual(v) => v
+                                                .iter()
+                                                .any(|d| matches!(d, MessageDisposition::Nack)),
+                                        };
 
                                         let job = if !should_backout {
                                             ConsumerJob::Commit { epoch, reply_tx }

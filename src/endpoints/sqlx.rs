@@ -6,8 +6,8 @@
 use crate::canonical_message::tracing_support::LazyMessageIds;
 use crate::models::SqlxConfig;
 use crate::traits::{
-    BoxFuture, ConsumerError, EndpointStatus, MessageConsumer, MessageDisposition,
-    MessagePublisher, PublisherError, ReceivedBatch, Sent, SentBatch,
+    BoxFuture, CommitDisposition, ConsumerError, EndpointStatus, MessageConsumer,
+    MessageDisposition, MessagePublisher, PublisherError, ReceivedBatch, Sent, SentBatch,
 };
 use crate::CanonicalMessage;
 use anyhow::{anyhow, Context};
@@ -684,7 +684,7 @@ impl MessageConsumer for SqlxConsumer {
                 let delete = self.delete_after_read;
                 let driver_name = self.driver_name.clone();
 
-                let commit = Box::new(move |dispositions: Vec<MessageDisposition>| {
+                let commit = Box::new(move |disposition: CommitDisposition| {
                     let pool = pool.clone();
                     let table = table.clone();
                     let ids = ids_to_delete.clone();
@@ -693,12 +693,18 @@ impl MessageConsumer for SqlxConsumer {
                         if !delete {
                             return Ok(());
                         }
+                        let ids_len = ids.len();
+                        let dispositions = match disposition {
+                            CommitDisposition::All(d) => vec![d; ids_len],
+                            CommitDisposition::Individual(v) => v,
+                        };
                         let mut ids_to_ack = Vec::new();
                         for (i, disp) in dispositions.iter().enumerate() {
                             let should_ack = match disp {
                                 MessageDisposition::Ack => true,
-                                MessageDisposition::Reply(_) => {
-                                    tracing::warn!("SQLx consumer received a Reply/StreamReply, but replying is not supported by this endpoint. The reply payload is dropped, and the original message is acknowledged.");
+                                MessageDisposition::Reply(_)
+                                | MessageDisposition::ReplyBatch(_) => {
+                                    tracing::warn!("SQLx consumer received a Reply or ReplyBatch, but replying is not supported by this endpoint. The reply payload is dropped, and the original message is acknowledged.");
                                     true
                                 }
                                 MessageDisposition::Nack => false,
@@ -843,7 +849,7 @@ mod tests {
         assert_eq!(received_batch.messages.len(), 1);
         assert_eq!(received_batch.messages[0].payload.as_ref(), &msg_payload);
 
-        (received_batch.commit)(vec![MessageDisposition::Ack])
+        (received_batch.commit)(CommitDisposition::All(MessageDisposition::Ack))
             .await
             .unwrap();
 
@@ -875,7 +881,7 @@ mod tests {
         let received_batch = consumer.receive_batch(1).await.unwrap();
         assert_eq!(received_batch.messages.len(), 1);
 
-        (received_batch.commit)(vec![MessageDisposition::Ack])
+        (received_batch.commit)(CommitDisposition::All(MessageDisposition::Ack))
             .await
             .unwrap();
 

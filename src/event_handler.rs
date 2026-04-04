@@ -4,7 +4,7 @@
 //  git clone https://github.com/marcomq/mq-bridge
 
 use crate::errors::PublisherError;
-use crate::traits::{send_batch_helper, Handler, MessagePublisher};
+use crate::traits::{send_batch_helper, Handler, MessageDisposition, MessagePublisher};
 use crate::CanonicalMessage;
 use async_trait::async_trait;
 use std::any::Any;
@@ -39,9 +39,12 @@ impl MessagePublisher for EventPublisher {
         &self,
         messages: Vec<CanonicalMessage>,
     ) -> Result<SentBatch, PublisherError> {
-        send_batch_helper(self, messages, |publisher, message| {
-            Box::pin(publisher.send(message))
-        })
+        send_batch_helper(
+            self,
+            messages,
+            MessageDisposition::Ack,
+            |publisher, message| Box::pin(publisher.send(message)),
+        )
         .await
     }
 
