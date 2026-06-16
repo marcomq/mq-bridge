@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1781462537261,
+  "lastUpdate": 1781635854839,
   "repoUrl": "https://github.com/marcomq/mq-bridge",
   "entries": {
     "Rust Benchmark": [
@@ -85715,6 +85715,410 @@ window.BENCHMARK_DATA = {
             "name": "performance/grpc_server_batch_read",
             "value": 522018,
             "range": "± 29050",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "marcomq",
+            "username": "marcomq"
+          },
+          "committer": {
+            "name": "marcomq",
+            "username": "marcomq"
+          },
+          "id": "916e4b6c890eb5b9218991ec3a262326d4f7906c",
+          "message": "Improve HTTP performance",
+          "timestamp": "2026-06-14T18:15:33Z",
+          "url": "https://github.com/marcomq/mq-bridge/pull/32/commits/916e4b6c890eb5b9218991ec3a262326d4f7906c"
+        },
+        "date": 1781635854118,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "performance/aws_single_write",
+            "value": 1066051582,
+            "range": "± 28118901",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/aws_single_read",
+            "value": 2124914020,
+            "range": "± 27299460",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/aws_batch_write",
+            "value": 138439808,
+            "range": "± 1961988",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/aws_batch_read",
+            "value": 235854651,
+            "range": "± 2091635",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/kafka_single_write",
+            "value": 515835513,
+            "range": "± 159072529",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/kafka_single_read",
+            "value": 5465143,
+            "range": "± 1029245",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/kafka_batch_write",
+            "value": 152229073,
+            "range": "± 43715692",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/kafka_batch_read",
+            "value": 2729455,
+            "range": "± 224717",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/amqp_single_write",
+            "value": 18491734,
+            "range": "± 1259994",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/amqp_single_read",
+            "value": 14686445,
+            "range": "± 2674635",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/amqp_batch_write",
+            "value": 15547754,
+            "range": "± 2181255",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/amqp_batch_read",
+            "value": 14236775,
+            "range": "± 1753871",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/nats_single_write",
+            "value": 15256621,
+            "range": "± 12166060",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/nats_single_read",
+            "value": 7185445,
+            "range": "± 321503",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/nats_batch_write",
+            "value": 62576487,
+            "range": "± 22828190",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/nats_batch_read",
+            "value": 6523926,
+            "range": "± 277219",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/mongodb_single_write",
+            "value": 137858240,
+            "range": "± 16975641",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/mongodb_single_read",
+            "value": 414799514,
+            "range": "± 19110822",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/mongodb_batch_write",
+            "value": 7351565,
+            "range": "± 960451",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/mongodb_batch_read",
+            "value": 38905817,
+            "range": "± 6830590",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/mongodb_subscriber_single_write",
+            "value": 132929307,
+            "range": "± 13959947",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/mongodb_subscriber_single_read",
+            "value": 299540704,
+            "range": "± 8260371",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/mongodb_subscriber_batch_write",
+            "value": 6711806,
+            "range": "± 633886",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/mongodb_subscriber_batch_read",
+            "value": 9485066,
+            "range": "± 114169",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/mqtt_single_write",
+            "value": 1214262,
+            "range": "± 534527",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/mqtt_single_read",
+            "value": 1625056,
+            "range": "± 89218",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/mqtt_batch_write",
+            "value": 491860,
+            "range": "± 296933",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/mqtt_batch_read",
+            "value": 284188,
+            "range": "± 23860",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/zeromq_single_write",
+            "value": 2978492,
+            "range": "± 26607",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/zeromq_single_read",
+            "value": 1569647,
+            "range": "± 41372",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/zeromq_batch_write",
+            "value": 249603,
+            "range": "± 24480",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/zeromq_batch_read",
+            "value": 695749,
+            "range": "± 20632",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/memory_single_write",
+            "value": 290523,
+            "range": "± 8545",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/memory_single_read",
+            "value": 1062490,
+            "range": "± 22344",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/memory_batch_write",
+            "value": 119494,
+            "range": "± 8119",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/memory_batch_read",
+            "value": 28944,
+            "range": "± 1353",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/memory_subscriber_single_write",
+            "value": 349770,
+            "range": "± 44192",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/memory_subscriber_single_read",
+            "value": 1333368,
+            "range": "± 37510",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/memory_subscriber_batch_write",
+            "value": 158888,
+            "range": "± 15216",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/memory_subscriber_batch_read",
+            "value": 132881,
+            "range": "± 2939",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/file_delete_single_write",
+            "value": 57281210,
+            "range": "± 1333938",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/file_delete_single_read",
+            "value": 1114435,
+            "range": "± 137302",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/file_delete_batch_write",
+            "value": 1285962,
+            "range": "± 47369",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/file_delete_batch_read",
+            "value": 135669,
+            "range": "± 14277",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/file_single_write",
+            "value": 56813391,
+            "range": "± 796470",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/file_single_read",
+            "value": 1463124,
+            "range": "± 24839",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/file_batch_write",
+            "value": 1294160,
+            "range": "± 44605",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/file_batch_read",
+            "value": 66380,
+            "range": "± 4446",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/http_single_write",
+            "value": 10103758,
+            "range": "± 260835",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/http_single_read",
+            "value": 2129043,
+            "range": "± 182604",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/http_batch_write",
+            "value": 10376543,
+            "range": "± 278515",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/http_batch_read",
+            "value": 920170,
+            "range": "± 75870",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/websocket_single_write",
+            "value": 51061470,
+            "range": "± 1238406",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/websocket_single_read",
+            "value": 1579239,
+            "range": "± 65147",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/websocket_batch_write",
+            "value": 1457296,
+            "range": "± 92113",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/websocket_batch_read",
+            "value": 135017,
+            "range": "± 24344",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/grpc_single_write",
+            "value": 60473604,
+            "range": "± 5096304",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/grpc_single_read",
+            "value": 1437456,
+            "range": "± 1095574",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/grpc_batch_write",
+            "value": 42495714,
+            "range": "± 4255911",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/grpc_batch_read",
+            "value": 864801,
+            "range": "± 1460725",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/grpc_server_single_write",
+            "value": 60288970,
+            "range": "± 5982587",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/grpc_server_single_read",
+            "value": 1292007,
+            "range": "± 65443",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/grpc_server_batch_write",
+            "value": 35717566,
+            "range": "± 5173244",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "performance/grpc_server_batch_read",
+            "value": 463120,
+            "range": "± 29781",
             "unit": "ns/iter"
           }
         ]
