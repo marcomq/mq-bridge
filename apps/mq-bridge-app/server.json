@@ -1,0 +1,44 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.marcomq/mq-bridge-app",
+  "title": "mq-bridge-app",
+  "description": "Move data between 15+ databases, queues and files at high throughput, without it entering context",
+  "version": "0.4.8",
+  "websiteUrl": "https://marcomq.github.io/mq-bridge/MCP.html",
+  "repository": {
+    "url": "https://github.com/marcomq/mq-bridge",
+    "source": "github"
+  },
+  "icons": [
+    {
+      "src": "https://raw.githubusercontent.com/marcomq/mq-bridge/main/apps/mq-bridge-app/crates/desktop/icons/128x128.png",
+      "mimeType": "image/png",
+      "sizes": ["128x128"]
+    }
+  ],
+  "packages": [
+    {
+      "registryType": "oci",
+      "identifier": "ghcr.io/marcomq/mq-bridge-app:0.4.8",
+      "transport": { "type": "stdio" },
+      "runtimeArguments": [
+        { "type": "named", "name": "--rm" },
+        { "type": "named", "name": "-i" }
+      ],
+      "packageArguments": [
+        { "type": "positional", "valueHint": "command", "value": "mcp" },
+        { "type": "named", "name": "--transport", "value": "stdio" }
+      ]
+    },
+    {
+      "registryType": "cargo",
+      "identifier": "mq-bridge-app",
+      "version": "0.4.8",
+      "transport": { "type": "stdio" },
+      "packageArguments": [
+        { "type": "positional", "valueHint": "command", "value": "mcp" },
+        { "type": "named", "name": "--transport", "value": "stdio" }
+      ]
+    }
+  ]
+}

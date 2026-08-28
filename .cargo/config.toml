@@ -1,0 +1,17 @@
+# Workspace-wide Cargo config. Cargo discovers this file from the *current
+# directory* upward, not from the manifest, so it is what applies to every
+# build invoked from the repository root — CI, Docker, and plain local
+# `cargo build`. The app keeps its own path-scoped config for the settings
+# that must only affect app-cwd builds (see apps/mq-bridge-app/.cargo/config.toml).
+
+[env]
+# librdkafka's CMakeLists declares cmake_minimum_required(3.2), which cmake 4
+# refuses. rdkafka-sys is reachable from the engine's kafka feature and from
+# every app build, so this belongs at the root.
+CMAKE_ARGS = "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
+
+# Pinned explicitly so a --manifest-path build of the app workspace still writes
+# here instead of defaulting to apps/mq-bridge-app/target. One target dir for the
+# engine, the app, tauri and maturin.
+[build]
+target-dir = "target"

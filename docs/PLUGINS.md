@@ -257,7 +257,7 @@ mq-bridge-package-plugin --package node --pack --out npm
 
 ## Loading without writing code
 
-[mq-bridge-app](https://github.com/marcomq/mq-bridge-app) loads plugins for you,
+[mq-bridge-app](https://github.com/marcomq/mq-bridge/tree/main/apps/mq-bridge-app) loads plugins for you,
 so a YAML-only deployment can use an endpoint the binary never compiled:
 
 ```yaml

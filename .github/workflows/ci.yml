@@ -3,6 +3,12 @@ name: CI
 on:
   pull_request:
     branches: [main, dev]
+    # The app lives in the same repo but cannot affect the engine crate. Its own
+    # checks run in app.yml, which conversely *does* trigger on engine changes.
+    paths-ignore:
+      - 'apps/mq-bridge-app/**'
+      - '.github/workflows/app.yml'
+      - '.github/workflows/docs.yml'
   workflow_dispatch:
 
 # Only the tip of a PR branch is worth testing; superseded runs are cancelled so
@@ -26,7 +32,7 @@ jobs:
     name: Check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
@@ -54,7 +60,7 @@ jobs:
     name: Build (feature subsets)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
@@ -85,7 +91,7 @@ jobs:
     name: Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
@@ -121,7 +127,7 @@ jobs:
     name: Integration — Build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
@@ -183,7 +189,7 @@ jobs:
         image: docker:dind
         options: --privileged
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@v2
@@ -230,7 +236,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: integration-build
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@v2
@@ -253,7 +259,7 @@ jobs:
     name: Documentation
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
@@ -271,7 +277,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
 

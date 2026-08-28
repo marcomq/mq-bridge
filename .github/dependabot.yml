@@ -18,3 +18,43 @@ updates:
         update-types:
           - "minor"
           - "patch"
+
+  # The app workspace has its own Cargo.lock, so the "/" cargo entry above does
+  # not reach it. Without this, app dependencies would never be updated.
+  - package-ecosystem: "cargo"
+    directory: "/apps/mq-bridge-app"
+    target-branch: "dev"
+    schedule:
+      interval: "weekly"
+    groups:
+      app-minor-and-patch:
+        applies-to: version-updates
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+
+  - package-ecosystem: "npm"
+    directory: "/apps/mq-bridge-app"
+    target-branch: "dev"
+    schedule:
+      interval: "weekly"
+    groups:
+      npm-minor-patch:
+        applies-to: version-updates
+        update-types:
+          - "minor"
+          - "patch"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    target-branch: "dev"
+    schedule:
+      interval: "weekly"
+    groups:
+      github-actions-minor-patch:
+        applies-to: version-updates
+        update-types:
+          - "minor"
+          - "patch"

@@ -1,0 +1,53 @@
+# The app is its own workspace, deliberately not a member of the mq-bridge one.
+# A library wants the lowest compatible dependency versions so downstreams keep
+# room to resolve; an application wants the newest. Sharing a lockfile forces one
+# policy on both, so the app keeps its own Cargo.lock, its own deny.toml and its
+# own version table here.
+[workspace]
+members = ["crates/core", "crates/cli", "crates/desktop"]
+resolver = "2"
+
+[workspace.package]
+version = "0.4.8"
+
+[workspace.dependencies]
+mq-bridge = { version = "0.4.8", path = "../..", default-features = false }
+mq_bridge_app = { version = "0.4.8", path = "crates/core", package = "mq-bridge-app-core", default-features = false }
+mq-bridge-pulsar = { version = "0.1.4", default-features = false }
+
+anyhow = "1.0"
+async-trait = "0.1"
+hex = "0.4.3"
+metrics = "0.24.6"
+metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
+mimalloc = { version = "0.1", default-features = false }
+rustls = "0.23.43"
+schemars = "1.2.2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["raw_value"] }
+tokio = { version = "1.34", features = ["rt-multi-thread", "macros", "signal", "sync"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3.23", features = ["json", "env-filter"] }
+url = "2.5.8"
+uuid = { version = "1.24", features = ["v4"] }
+
+[profile.dev.package."*"]
+debug = false
+
+[profile.dev.build-override]
+debug = false
+
+[profile.release]
+lto = "thin"
+strip = "symbols"
+
+[profile.release-with-lto]
+inherits = "release"
+lto = true
+strip = true
+
+# Keep extension crates on this workspace's engine instance. Without this,
+# their registry dependency would register factories in a second mq-bridge
+# global registry during local app builds.
+[patch.crates-io]
+mq-bridge = { path = "../.." }

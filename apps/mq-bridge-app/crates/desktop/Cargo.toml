@@ -1,0 +1,68 @@
+[package]
+name = "mq-bridge-app-desktop"
+version.workspace = true
+edition = "2024"
+rust-version = "1.94"
+authors = ["Marco Mengelkochs"]
+repository = "https://github.com/marcomq/mq-bridge"
+license = "MIT"
+description = "Tauri desktop application for mq-bridge-app."
+readme = "../../README.md"
+publish = false
+build = "build.rs"
+
+[lib]
+name = "mq_bridge_app_desktop"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mq-bridge-app-desktop"
+path = "src/main.rs"
+
+[dependencies]
+mq_bridge_app = { workspace = true }
+anyhow = { workspace = true }
+hex = "0.4.3"
+metrics = "0.24.6"
+metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
+mimalloc = { version = "0.1", default-features = false, optional = true }
+# Only used to install the process-wide crypto provider; see `rustls-aws-lc`.
+rustls = { version = "0.23.43", optional = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "sync"] }
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3.23", features = ["json", "env-filter"] }
+uuid = { version = "1.24", features = ["v4"] }
+
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
+tauri = { version = "2", features = ["protocol-asset"] }
+tauri-plugin-dialog = "2"
+getrandom = "0.4.3"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+serde_json = { workspace = true }
+
+[features]
+default = ["full"]
+# mimalloc global allocator; disable (--no-default-features) on platforms
+# where it is unsupported or to benchmark the system allocator.
+mimalloc = ["dep:mimalloc"]
+integration-test = ["mq_bridge_app/integration-test"]
+ibm-mq = ["mq_bridge_app/ibm-mq"]
+arm64-cross-compile = ["mq_bridge_app/arm64-cross-compile"]
+full = ["mq_bridge_app/full", "mimalloc", "rustls-aws-lc"]
+rustls-aws-lc = ["dep:rustls", "rustls/aws_lc_rs", "mq_bridge_app/rustls-aws-lc"]
+middleware = ["mq_bridge_app/middleware"]
+mongodb = ["mq_bridge_app/mongodb"]
+http = ["mq_bridge_app/http"]
+kafka = ["mq_bridge_app/kafka"]
+aws = ["mq_bridge_app/aws"]
+nats = ["mq_bridge_app/nats"]
+mqtt = ["mq_bridge_app/mqtt"]
+zeromq = ["mq_bridge_app/zeromq"]
+sled = ["mq_bridge_app/sled"]
+grpc = ["mq_bridge_app/grpc"]
+amqp = ["mq_bridge_app/amqp"]
+redis-streams = ["mq_bridge_app/redis-streams"]

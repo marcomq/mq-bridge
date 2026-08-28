@@ -25,7 +25,7 @@ It is not only a forwarder. A route can transform, filter, fan out, retry, rate-
 
 If you need to move data or events reliably between systems and you write code (Rust, Python, or Node), `mq-bridge` is a strong default. It is a **library you embed**, not a daemon or control plane you operate.
 
-**Prefer not to write code?** [`mq-bridge-app`](https://github.com/marcomq/mq-bridge-app) runs the exact same engine as a **standalone, zero-code ETL service** configured entirely by **YAML or environment variables** — move data from A to B without writing a line. It ships a **Postman-style UI** to build, send, and inspect messages against a route, and can **import Postman collections and AsyncAPI documents** to scaffold routes and endpoints for you.
+**Prefer not to write code?** [`mq-bridge-app`](https://github.com/marcomq/mq-bridge/tree/main/apps/mq-bridge-app) runs the exact same engine as a **standalone, zero-code ETL service** configured entirely by **YAML or environment variables** — move data from A to B without writing a line. It ships a **Postman-style UI** to build, send, and inspect messages against a route, and can **import Postman collections and AsyncAPI documents** to scaffold routes and endpoints for you.
 
 *   **16+ transports, one API**: Kafka, NATS, AMQP (RabbitMQ), MQTT, MongoDB, **Postgres CDC** (logical replication), PostgreSQL / MySQL / SQLite (SQLx), ClickHouse, HTTP, WebSocket, gRPC, ZeroMQ, Redis Streams, AWS SQS/SNS, cloud object storage (S3 / GCS / Azure), IBM MQ, files, and in-memory channels — all behind the same `receive_batch` / `send_batch` shape.
 *   **Change Data Capture**: stream row-level changes from **Postgres** (logical replication / `pgoutput`) and **MongoDB** (change streams) as flat rows with an operation marker.
@@ -35,9 +35,9 @@ If you need to move data or events reliably between systems and you write code (
 *   **TLS everywhere, one config shape**: a single `TlsConfig` block (CA bundle, client cert/key for mTLS, insecure-skip) is reused across transports.
 *   **Self-hosted, no daemon**: generate config in the optional UI, paste it into your code, run it in-process. No hosted control plane, no separate scheduler.
 
-> **Throughput & footprint.** In our own benchmarks, the same engine — driven the zero-code way through [`mq-bridge-app`](https://github.com/marcomq/mq-bridge-app) — on a CSV→JSONL file conversion (1,000,000 mixed-type rows, ~116 MiB) sustained **1,133,786 rows/s** at ~22 MiB, about **~58x faster** and **~20x leaner in memory** than Meltano (`tap-csv` → `target-jsonl`, ~19,500 rows/s / ~444 MiB). Full setup, methodology, and the exact parameters are in [`benches/ETL_BENCHMARKS.md`](benches/ETL_BENCHMARKS.md).
+> **Throughput & footprint.** In our own benchmarks, the same engine — driven the zero-code way through [`mq-bridge-app`](https://github.com/marcomq/mq-bridge/tree/main/apps/mq-bridge-app) — on a CSV→JSONL file conversion (1,000,000 mixed-type rows, ~116 MiB) sustained **1,133,786 rows/s** at ~22 MiB, about **~58x faster** and **~20x leaner in memory** than Meltano (`tap-csv` → `target-jsonl`, ~19,500 rows/s / ~444 MiB). Full setup, methodology, and the exact parameters are in [`benches/ETL_BENCHMARKS.md`](benches/ETL_BENCHMARKS.md).
 
-> **Kafka → file.** In a 1,000,000-row relay with the default file format and no transform, the engine was up to **65% faster than Sea Streamer**. The [`mq-bridge-app` benchmark](https://github.com/marcomq/mq-bridge-app/tree/dev/benches/etl) contains the reproducible helper and native file-format caveats.
+> **Kafka → file.** In a 1,000,000-row relay with the default file format and no transform, the engine was up to **65% faster than Sea Streamer**. The [`mq-bridge-app` benchmark](https://github.com/marcomq/mq-bridge/tree/main/apps/mq-bridge-app/benches/etl) contains the reproducible helper and native file-format caveats.
 
 
 ## Language Bindings
@@ -106,7 +106,7 @@ What it does not try to be: a domain framework, an actor runtime, or a full stre
 
 ### How it compares
 
-`mq-bridge` overlaps with config-driven ETL / pipeline runners, but comes in two shapes: a **library you embed in your own service**, or [`mq-bridge-app`](https://github.com/marcomq/mq-bridge-app) — the **same engine as a zero-code, config-driven ETL service**. You get the developer-first path and the no-code path from one codebase.
+`mq-bridge` overlaps with config-driven ETL / pipeline runners, but comes in two shapes: a **library you embed in your own service**, or [`mq-bridge-app`](https://github.com/marcomq/mq-bridge/tree/main/apps/mq-bridge-app) — the **same engine as a zero-code, config-driven ETL service**. You get the developer-first path and the no-code path from one codebase.
 
 *   **Choose the `mq-bridge` library** when you write the code that moves the data — in Rust, Python, or Node — and want batching, retries/DLQ/dedup, request-reply, CDC, and TLS behind one small API you run in-process. No separate scheduler, no daemon to operate.
 *   **Choose `mq-bridge-app` for zero-code ETL** when you'd rather move data A→B purely by config: define routes and endpoints in YAML/env, then use its **Postman-style UI** to send test messages and watch them flow — and **import Postman collections or AsyncAPI specs** through the UI to generate the config. Same reliability engine, no build step.
@@ -338,8 +338,10 @@ The `response` output endpoint sends a reply back to the original requester. Thi
 
 ## Usage
 
-There is a separate repository for running mq-bridge as a standalone app, for example as a Docker container configured via YAML or environment variables:
-https://github.com/marcomq/mq-bridge-app
+The [`mq-bridge-app`](apps/mq-bridge-app) workspace packages run mq-bridge as a
+standalone CLI, desktop app, or Docker container configured via YAML or
+environment variables. Plain `cargo build` still builds only this library;
+use `cargo build --workspace` to build every workspace package.
 
 ### Configuration-first workflow
 

@@ -57,7 +57,7 @@ docker compose -f tests/integration/docker-compose/postgres_cdc.yml down -v
 ## Results
 
 The scenarios are run through
-[`mq-bridge-app`](https://github.com/marcomq/mq-bridge-app) (the zero-code, config-driven
+[`mq-bridge-app`](https://github.com/marcomq/mq-bridge/tree/main/apps/mq-bridge-app) (the zero-code, config-driven
 path a real user takes) so the numbers are comparable to how other ETL/CDC tools publish
 theirs. The run brief lives in [`mq-bridge-app-benchmark-prompt.md`](mq-bridge-app-benchmark-prompt.md).
 
@@ -85,7 +85,7 @@ Same source table (`bench`: 1,000,000 rows, 7 mixed-type columns), same Postgres
 | mq-bridge-app `copy` | 7-col, 1,000,000 rows | 1024 | 1 | postgres (keyset cursor) → file (JSONL) | **338,066 rows/s** | 39.8 MiB |
 | Meltano (`tap-postgres` → `target-jsonl`) | 7-col, 1,000,000 rows | default Singer config | — | postgres → JSONL | 15,356 rows/s | 599.7 MiB |
 
-**~22x faster and ~15x leaner in peak memory** than Meltano in this scenario. Full setup (including the Meltano project config) is in [mq-bridge-app's `benches/etl/README.md`](https://github.com/marcomq/mq-bridge-app/blob/dev/benches/etl/README.md#5--postgres--jsonl-vs-meltano-tap-postgres--target-jsonl).
+**~22x faster and ~15x leaner in peak memory** than Meltano in this scenario. Full setup (including the Meltano project config) is in [mq-bridge-app's `benches/etl/README.md`](https://github.com/marcomq/mq-bridge/blob/dev/apps/mq-bridge-app/benches/etl/README.md#5--postgres--jsonl-vs-meltano-tap-postgres--target-jsonl).
 
 ### Preliminary run — CSV → JSONL vs. Meltano
 
@@ -96,7 +96,7 @@ Same seeded dataset both sides, same machine, one-shot full-file CSV → local J
 | mq-bridge-app `copy` | 7-col mixed-type, 1,000,000 rows (~116 MiB) | 1024 | 1 | file (CSV) → file (JSONL) | **1,133,786 rows/s** | 21.9 MiB |
 | Meltano (`tap-csv` → `target-jsonl`) | 7-col mixed-type, 1,000,000 rows | default Singer config | — | file (CSV) → JSONL | ~19,500 rows/s | 443.8 MiB |
 
-**~58x faster and ~20x leaner in peak memory** than Meltano in this scenario. Full setup is in [mq-bridge-app's `benches/etl/README.md`](https://github.com/marcomq/mq-bridge-app/blob/dev/benches/etl/README.md#6--csv--jsonl-vs-meltano).
+**~58x faster and ~20x leaner in peak memory** than Meltano in this scenario. Full setup is in [mq-bridge-app's `benches/etl/README.md`](https://github.com/marcomq/mq-bridge/blob/dev/apps/mq-bridge-app/benches/etl/README.md#6--csv--jsonl-vs-meltano).
 
 ## Status
 

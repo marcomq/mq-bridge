@@ -11,7 +11,9 @@ readme = "README.md"
 keywords = ["messaging", "kafka", "nats", "amqp", "cqrs"]
 categories = ["asynchronous", "network-programming"]
 # Test-only proto; build.rs skips it when absent so downstream builds skip the codegen.
-exclude = ["tests/fixtures/grpc_dynamic.proto"]
+# `apps/` is a sibling product, not part of the library: cargo only auto-excludes
+# the app's member crates, so the UI, book and benches would ship in the tarball.
+exclude = ["tests/fixtures/grpc_dynamic.proto", "apps/"]
 
 [workspace]
 members = [
@@ -22,6 +24,8 @@ members = [
     "tests/fixtures/plugin-fixture-bad-abi",
     "tests/fixtures/grpc-config-compat",
 ]
+# apps/mq-bridge-app is its own workspace with its own Cargo.lock; see its manifest.
+exclude = ["apps"]
 resolver = "2"
 
 [workspace.package]

@@ -1,0 +1,166 @@
+name: App CI
+
+on:
+  pull_request:
+    branches: [main, dev]
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "src/**"
+      - "apps/mq-bridge-app/**"
+      - ".github/workflows/app.yml"
+  # Called by release.yml so a tag runs the same app gate a PR does, rather
+  # than a second copy of it that can drift.
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    name: App Rust
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+        with:
+          components: clippy
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          # One cache for every app job: rust, ui and both integration
+          # shards compile the same crates at the same features.
+          shared-key: app
+          # rust-cache resolves its workspace at the repo root, so by default it
+          # purges every crate whose manifest lives under it -- mq-bridge itself
+          # included. Without this each app job recompiles the engine from
+          # scratch; only registry deps would survive.
+          cache-workspace-crates: true
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev libssl-dev pkg-config zlib1g-dev protobuf-compiler libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Test desktop crate
+        working-directory: apps/mq-bridge-app
+        run: cargo test -p mq-bridge-app-desktop --lib
+
+      - name: Check app crates
+        working-directory: apps/mq-bridge-app
+        run: cargo check -p mq-bridge-app-core -p mq-bridge-app --all-targets
+
+      - name: Lint app crates
+        working-directory: apps/mq-bridge-app
+        run: cargo clippy -p mq-bridge-app-core -p mq-bridge-app --all-targets -- -D warnings
+
+      - name: Test app crates
+        working-directory: apps/mq-bridge-app
+        run: cargo test -p mq-bridge-app-core -p mq-bridge-app --lib --bins
+
+      # The app resolves its own Cargo.lock, so the engine's supply-chain job in
+      # ci.yml does not cover it. Same policy, plus the Tauri-tree exceptions.
+      - name: Licenses / bans / sources
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: apps/mq-bridge-app/Cargo.toml
+          command: check bans licenses sources
+
+  ui:
+    name: App UI
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          # One cache for every app job: rust, ui and both integration
+          # shards compile the same crates at the same features.
+          shared-key: app
+          # rust-cache resolves its workspace at the repo root, so by default it
+          # purges every crate whose manifest lives under it -- mq-bridge itself
+          # included. Without this each app job recompiles the engine from
+          # scratch; only registry deps would survive.
+          cache-workspace-crates: true
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: lts/*
+          cache: npm
+          cache-dependency-path: apps/mq-bridge-app/package-lock.json
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev libssl-dev pkg-config zlib1g-dev protobuf-compiler
+
+      - name: Install frontend dependencies
+        working-directory: apps/mq-bridge-app
+        run: npm ci
+
+      - name: Run frontend unit tests
+        working-directory: apps/mq-bridge-app
+        run: npm run test:unit
+
+      - name: Install Playwright browser
+        working-directory: apps/mq-bridge-app
+        run: npx playwright install --with-deps chromium
+
+      - name: Build app binary for UI tests
+        working-directory: apps/mq-bridge-app
+        run: cargo build -p mq-bridge-app --bin mq-bridge-app
+
+      - name: Run frontend UI tests
+        working-directory: apps/mq-bridge-app
+        run: npm run test:ui
+
+      - name: Upload Playwright test artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-test-results
+          path: |
+            apps/mq-bridge-app/test-results/
+            apps/mq-bridge-app/playwright-report/
+          if-no-files-found: ignore
+
+  integration:
+    name: App integration (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [cli_copy_test, web_ui_test]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          # One cache for every app job: rust, ui and both integration
+          # shards compile the same crates at the same features.
+          shared-key: app
+          # rust-cache resolves its workspace at the repo root, so by default it
+          # purges every crate whose manifest lives under it -- mq-bridge itself
+          # included. Without this each app job recompiles the engine from
+          # scratch; only registry deps would survive.
+          cache-workspace-crates: true
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev libssl-dev pkg-config zlib1g-dev protobuf-compiler
+
+      - name: Run integration suite
+        working-directory: apps/mq-bridge-app
+        run: cargo test -p mq-bridge-app --test ${{ matrix.target }}

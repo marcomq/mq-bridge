@@ -12,7 +12,7 @@
 //!
 //! Unlike a standalone message broker or ETL service, `mq-bridge` runs inside
 //! your Rust application. If you prefer a zero-code service configured with YAML,
-//! see [`mq-bridge-app`](https://github.com/marcomq/mq-bridge-app).
+//! see [`mq-bridge-app`](https://github.com/marcomq/mq-bridge/tree/main/apps/mq-bridge-app).
 //!
 //! # Quick start
 //!

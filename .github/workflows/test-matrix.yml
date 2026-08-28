@@ -3,8 +3,20 @@ name: Test Matrix
 on:
   push:
     branches: [main, dev]
+    # The app lives in the same repo but cannot affect the engine crate. Its own
+    # checks run in app.yml, which conversely *does* trigger on engine changes.
+    paths-ignore:
+      - 'apps/mq-bridge-app/**'
+      - '.github/workflows/app.yml'
+      - '.github/workflows/docs.yml'
   pull_request:
     branches: [main, dev]
+    # The app lives in the same repo but cannot affect the engine crate. Its own
+    # checks run in app.yml, which conversely *does* trigger on engine changes.
+    paths-ignore:
+      - 'apps/mq-bridge-app/**'
+      - '.github/workflows/app.yml'
+      - '.github/workflows/docs.yml'
 
 # Superseded PR runs are cancelled; push runs always finish so every pre-merge
 # commit keeps its own verdict.
@@ -28,7 +40,7 @@ jobs:
           - os: ubuntu-latest
             rust: beta
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable

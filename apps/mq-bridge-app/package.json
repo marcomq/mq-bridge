@@ -1,0 +1,51 @@
+{
+  "name": "mq-bridge-app",
+  "dependencies": {
+    "@awesome.me/webawesome": "^3.11.0",
+    "@codemirror/commands": "^6.11.0",
+    "@codemirror/lang-json": "^6.0.2",
+    "@codemirror/lang-xml": "^6.1.0",
+    "@codemirror/state": "^6.6.0",
+    "@codemirror/view": "^6.43.9",
+    "@tauri-apps/plugin-dialog": "^2.7.2",
+    "buffer": "^6.0.3",
+    "codemirror": "^6.0.2",
+    "split.js": "^1.6.5",
+    "vanilla-schema-forms": "^0.1.11"
+  },
+  "scripts": {
+    "build:ui": "vite build",
+    "dev": "concurrently -k -n backend,ui -c yellow,cyan \"npm:dev:backend\" \"npm:dev:ui\"",
+    "dev:backend": "node dev/scripts/dev-backend.mjs",
+    "dev:ui": "vite --host 127.0.0.1 --port 39092",
+    "typecheck": "tsc --noEmit --pretty false",
+    "check": "npm run check:ui-types && npm run check:version && npm run typecheck",
+    "test:unit": "vitest run",
+    "test:unit:watch": "vitest",
+    "test:ui": "npm run build:ui && playwright test",
+    "test:playwright": "playwright test",
+    "test:ui:headed": "npm run build:ui && playwright test --headed",
+    "test:ui:update-screenshots": "npm run build:ui && playwright test --update-snapshots=all",
+    "tauri": "npm run build:ui && cargo run -p mq-bridge-app-desktop",
+    "test": "npm run check && npm run test:unit && npm run test:ui",
+    "generate:ui-types": "node dev/scripts/generate-ui-types.mjs",
+    "check:ui-types": "node dev/scripts/generate-ui-types.mjs --check",
+    "sync:version": "node dev/scripts/sync-version.mjs",
+    "check:version": "node dev/scripts/sync-version.mjs --check",
+    "update:ui-vendor": "npm update @awesome.me/webawesome split.js"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.62.1",
+    "@sveltejs/vite-plugin-svelte": "^7.2.0",
+    "@types/node": "^26.1.2",
+    "@vitest/coverage-v8": "^4.1.10",
+    "chokidar": "^5.0.0",
+    "concurrently": "^10.0.5",
+    "esbuild": "^0.28.2",
+    "jsdom": "^30.0.1",
+    "svelte": "^5.56.9",
+    "typescript": "^7.0.2",
+    "vite": "^8.2.1",
+    "vitest": "^4.1.5"
+  }
+}

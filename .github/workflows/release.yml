@@ -4,70 +4,745 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Tag name (e.g. v1.0.0)'
+        required: true
 
 env:
-  CARGO_TERM_COLOR: always
+  IMAGE_NAME: marcomq/mq-bridge-app
+  IBM_MQ_SHA256: faadc63c7a0d7ae24a85cdb0ed5f0669a61c5f70123bbd3cea3c540c77eea855
 
 jobs:
+  metadata:
+    name: Resolve Release Metadata
+    runs-on: ubuntu-latest
+    outputs:
+      cargo_version: ${{ steps.meta.outputs.cargo_version }}
+      release_tag: ${{ steps.meta.outputs.release_tag }}
+      is_prerelease: ${{ steps.meta.outputs.is_prerelease }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Resolve tag and version
+        id: meta
+        shell: bash
+        run: |
+          RELEASE_TAG="${{ inputs.tag_name || github.ref_name }}"
+          # Extract version from Cargo.toml, handling potential indentation
+          CARGO_VERSION="$(sed -n 's/^[[:space:]]*version = "\([^"]*\)".*/\1/p' Cargo.toml | tr -d '\r' | head -n1)"
+          # Fallback to the release tag (without 'v' prefix) if Cargo.toml version extraction fails
+          if [ -z "$CARGO_VERSION" ]; then
+            CARGO_VERSION="${RELEASE_TAG#v}"
+          fi
+          if [ "$RELEASE_TAG" != "v$CARGO_VERSION" ]; then
+            echo "release tag $RELEASE_TAG does not match workspace version v$CARGO_VERSION" >&2
+            exit 1
+          fi
+          if [[ "$RELEASE_TAG" == *rc* || "$RELEASE_TAG" == *alpha* || "$RELEASE_TAG" == *beta* ]]; then
+            IS_PRERELEASE=true
+          else
+            IS_PRERELEASE=false
+          fi
+          echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          echo "cargo_version=$CARGO_VERSION" >> "$GITHUB_OUTPUT"
+          echo "is_prerelease=$IS_PRERELEASE" >> "$GITHUB_OUTPUT"
+
+  test:
+    name: Cargo Test
+    runs-on: ubuntu-latest
+    needs: metadata
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config zlib1g-dev cmake libcurl4-openssl-dev protobuf-compiler
+
+      - name: Test mq-bridge
+        run: cargo test -p mq-bridge --all-targets --features full
+
+      - name: Test mq-bridge-app
+        run: cargo test --manifest-path apps/mq-bridge-app/Cargo.toml -p mq-bridge-app --all-targets
+
+  # Runs the exact app gate that PRs run (app.yml), so a tag cannot publish an
+  # app that was never checked. Reused rather than copied so the two cannot drift.
+  app-checks:
+    name: App Checks
+    needs: metadata
+    permissions:
+      contents: read
+    uses: ./.github/workflows/app.yml
+
+  package-dry-run:
+    name: Cargo Package Dry Run
+    runs-on: ubuntu-latest
+    needs: metadata
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config zlib1g-dev cmake libcurl4-openssl-dev protobuf-compiler
+
+      # The workspace [patch.crates-io] keeps every crate on this engine
+      # instance locally, but patches are ignored for published consumers. If the
+      # graph ever resolves two mq-bridge versions, extension factories register
+      # into two different global registries and endpoints silently disappear.
+      # `cargo tree --duplicates` is an inverted tree of every duplicated crate,
+      # so mq-bridge shows up in it as an ancestor either way. Count distinct
+      # resolved versions instead.
+      - name: Assert a single mq-bridge instance
+        run: |
+          set -euo pipefail
+          cargo metadata --manifest-path apps/mq-bridge-app/Cargo.toml --format-version 1 > metadata.json
+          python3 - <<'EOF'
+          import json, sys
+          meta = json.load(open("metadata.json"))
+          versions = sorted({p["version"] for p in meta["packages"] if p["name"] == "mq-bridge"})
+          print("mq-bridge versions in the graph:", versions)
+          if len(versions) > 1:
+              sys.exit("more than one mq-bridge instance: extension factories would "
+                       "register into separate global registries")
+          EOF
+
+      # Each crate can only be dry-run as far as its dependencies are already on
+      # crates.io, and this runs before anything is published:
+      #   mq-bridge        - every dep is published, so the tarball builds.
+      #   app-core         - depends on the unpublished mq-bridge at this version,
+      #                      so packaging is checked but verification is not.
+      #   mq-bridge-app    - same for app-core, which cannot even be resolved, so
+      #                      only the manifest and file list are checked.
+      # The real ordering guarantee is in publish-crates-io, which publishes in
+      # dependency order and waits for the index between crates.
+      - name: Package publishable crates
+        run: |
+          cargo package -p mq-bridge
+          cargo package --manifest-path apps/mq-bridge-app/Cargo.toml -p mq-bridge-app-core --no-verify
+          cargo package --manifest-path apps/mq-bridge-app/Cargo.toml --list -p mq-bridge-app > /dev/null
+
+  # Created as a draft: assets are staged onto it by the build jobs, and it is
+  # only made public by `publish-release` once every one of them has succeeded.
+  # A failed CLI or bundle build must not leave an empty release behind.
   release:
-    name: Release
+    name: Create Draft Release
+    needs: [metadata, test, app-checks, package-dry-run]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      release_id: ${{ steps.create_release.outputs.id }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Create Release
+        id: create_release
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        with:
+          tag_name: ${{ needs.metadata.outputs.release_tag }}
+          name: Release ${{ needs.metadata.outputs.release_tag }}
+          # No hardcoded body: it would overwrite notes written by hand on a
+          # pre-created release. Let GitHub generate notes when there are none.
+          generate_release_notes: true
+          draft: true
+          prerelease: ${{ needs.metadata.outputs.is_prerelease == 'true' }}
+
+  build-release:
+    name: Build CLI asset for ${{ matrix.target }}
+    needs: [metadata, release]
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Built natively rather than via `cross`: the cross 0.2.5 image is
+          # Ubuntu 16.04 (OpenSSL 1.0.2), which openssl-sys rejects, and the
+          # newer cross image is Ubuntu 24.04 -- a worse glibc floor than this.
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            binary_name: mq-bridge-app
+            use_cross: false
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            binary_name: mq-bridge-app
+            use_cross: false
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+            binary_name: mq-bridge-app.exe
+            use_cross: false
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          target: ${{ matrix.target }}
+
+      - name: Install Cross
+        if: matrix.use_cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config zlib1g-dev cmake libcurl4-openssl-dev protobuf-compiler
+
+      - name: Install dependencies (Windows)
+        if: runner.os == 'Windows'
+        run: choco install protoc --no-progress -y
+
+      - name: Install dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: brew install cmake pkg-config openssl@3 protobuf
+
+      - name: Build binary
+        shell: bash
+        run: |
+          if [ "${{ matrix.use_cross }}" == "true" ]; then
+            cross build --manifest-path apps/mq-bridge-app/Cargo.toml --release --target ${{ matrix.target }} -p mq-bridge-app
+          else
+            cargo build --manifest-path apps/mq-bridge-app/Cargo.toml --release --target ${{ matrix.target }} -p mq-bridge-app
+          fi
+
+      - name: Package artifacts
+        shell: bash
+        run: |
+          ASSET_NAME="mq-bridge-cli-${{ matrix.target }}"
+          mkdir staging
+          cp "target/${{ matrix.target }}/release/${{ matrix.binary_name }}" staging/
+          # The `mqb` launcher ships alongside the real binary so tarball and
+          # Homebrew installs get the short command too, same as `cargo install`.
+          if [ "$RUNNER_OS" == "Windows" ]; then
+            cp "target/${{ matrix.target }}/release/mqb.exe" staging/
+          else
+            cp "target/${{ matrix.target }}/release/mqb" staging/
+          fi
+          cp apps/mq-bridge-app/LICENSE apps/mq-bridge-app/README.md staging/
+          if [ "$RUNNER_OS" == "Windows" ]; then
+            7z a "${ASSET_NAME}.zip" ./staging/*
+            echo "ASSET_PATH=${ASSET_NAME}.zip" >> "$GITHUB_ENV"
+          else
+            tar -czf "${ASSET_NAME}.tar.gz" -C staging .
+            echo "ASSET_PATH=${ASSET_NAME}.tar.gz" >> "$GITHUB_ENV"
+          fi
+
+      - name: Upload Release Asset
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        with:
+          tag_name: ${{ needs.metadata.outputs.release_tag }}
+          files: ${{ env.ASSET_PATH }}
+
+  build-linux-amd64:
+    name: Build docker linux/amd64
+    needs: [metadata, test, app-checks, package-dry-run]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push mq-bridge-app (amd64)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: apps/mq-bridge-app/Dockerfile
+          platforms: linux/amd64
+          target: final
+          push: true
+          tags: |
+            ghcr.io/${{ env.IMAGE_NAME }}:amd64
+            ghcr.io/${{ env.IMAGE_NAME }}:${{ needs.metadata.outputs.cargo_version }}-amd64
+          build-args: |
+            CACHE_BUST=${{ needs.metadata.outputs.cargo_version }}
+            ENABLE_IBM_MQ=false
+          cache-from: type=gha,scope=build-amd64-v${{ needs.metadata.outputs.cargo_version }}
+          cache-to: type=gha,mode=max,scope=build-amd64-v${{ needs.metadata.outputs.cargo_version }}
+
+  build-linux-arm64:
+    name: Build docker linux/arm64
+    needs: [metadata, test, app-checks, package-dry-run]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push mq-bridge-app (arm64)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: apps/mq-bridge-app/Dockerfile
+          platforms: linux/arm64
+          target: final
+          push: true
+          tags: |
+            ghcr.io/${{ env.IMAGE_NAME }}:arm64
+            ghcr.io/${{ env.IMAGE_NAME }}:${{ needs.metadata.outputs.cargo_version }}-arm64
+          build-args: |
+            CACHE_BUST=${{ needs.metadata.outputs.cargo_version }}
+            ENABLE_IBM_MQ=false
+          cache-from: type=gha,scope=build-arm64-v${{ needs.metadata.outputs.cargo_version }}
+          cache-to: type=gha,mode=max,scope=build-arm64-v${{ needs.metadata.outputs.cargo_version }}
+
+  build-linux-amd64-ibm-mq:
+    name: Build docker linux/amd64 + IBM MQ
+    needs: [metadata, test, app-checks, package-dry-run]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push mq-bridge-app (amd64 + IBM MQ)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: apps/mq-bridge-app/Dockerfile
+          platforms: linux/amd64
+          target: final
+          push: true
+          tags: |
+            ghcr.io/${{ env.IMAGE_NAME }}:amd64-ibm-mq
+            ghcr.io/${{ env.IMAGE_NAME }}:${{ needs.metadata.outputs.cargo_version }}-amd64-ibm-mq
+          build-args: |
+            CACHE_BUST=${{ needs.metadata.outputs.cargo_version }}
+            ENABLE_IBM_MQ=true
+            IBM_MQ_SHA256=${{ env.IBM_MQ_SHA256 }}
+          cache-from: type=gha,scope=build-amd64-ibm-mq-v${{ needs.metadata.outputs.cargo_version }}
+          cache-to: type=gha,mode=max,scope=build-amd64-ibm-mq-v${{ needs.metadata.outputs.cargo_version }}
+
+  publish-manifest:
+    name: Push multi-arch manifest
+    needs: [metadata, build-linux-amd64, build-linux-arm64]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create and push multi-arch manifest
+        run: |
+          docker buildx imagetools create \
+            --tag ghcr.io/${{ env.IMAGE_NAME }}:${{ needs.metadata.outputs.cargo_version }} \
+            --tag ghcr.io/${{ env.IMAGE_NAME }}:latest \
+            ghcr.io/${{ env.IMAGE_NAME }}:${{ needs.metadata.outputs.cargo_version }}-amd64 \
+            ghcr.io/${{ env.IMAGE_NAME }}:${{ needs.metadata.outputs.cargo_version }}-arm64
+
+  publish-amd64-ibm-mq-tag:
+    name: Push amd64 IBM MQ aliases
+    needs: [metadata, build-linux-amd64-ibm-mq]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create and push IBM MQ image aliases
+        run: |
+          docker buildx imagetools create \
+            --tag ghcr.io/${{ env.IMAGE_NAME }}:ibm-mq \
+            --tag ghcr.io/${{ env.IMAGE_NAME }}:latest-ibm-mq \
+            ghcr.io/${{ env.IMAGE_NAME }}:${{ needs.metadata.outputs.cargo_version }}-amd64-ibm-mq
+
+  build-tauri-release:
+    name: Build Tauri bundle for ${{ matrix.name }}
+    needs: [metadata, release]
+    runs-on: ${{ matrix.platform }}
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos
+            platform: macos-latest
+            rust_targets: aarch64-apple-darwin
+            tauri_args: --target aarch64-apple-darwin --config tauri.release.conf.json
+          - name: windows
+            platform: windows-2022
+            rust_targets: ''
+            tauri_args: --config tauri.release.conf.json
+          - name: linux
+            platform: ubuntu-22.04
+            rust_targets: ''
+            tauri_args: --config tauri.release.conf.json
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: lts/*
+          cache: npm
+          cache-dependency-path: apps/mq-bridge-app/package-lock.json
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_targets }}
+
+      - name: Install Linux dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf protobuf-compiler libssl-dev pkg-config
+
+      # protoc is required by the `pulsar` build script on every platform.
+      - name: Install macOS dependencies
+        if: runner.os == 'macOS'
+        run: brew install protobuf
+
+      - name: Install Windows dependencies
+        if: runner.os == 'Windows'
+        run: choco install protoc --no-progress -y
+
+      - name: Install frontend dependencies
+        working-directory: apps/mq-bridge-app
+        run: npm ci
+
+      - name: Enable Tauri bundling for release builds
+        shell: bash
+        run: |
+          node <<'EOF'
+          const fs = require('fs');
+          const path = 'apps/mq-bridge-app/crates/desktop/tauri.release.conf.json';
+          const config = JSON.parse(fs.readFileSync('apps/mq-bridge-app/crates/desktop/tauri.conf.json', 'utf8'));
+          // In Tauri v2, productName is a top-level property
+          config.productName = "mq-bridge";
+          // Sync the version with the release metadata to ensure correct artifact naming
+          config.version = "${{ needs.metadata.outputs.cargo_version }}";
+          fs.writeFileSync(path, JSON.stringify(config, null, 2) + '\n');
+          EOF
+
+      - name: Build and upload Tauri bundle
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: apps/mq-bridge-app/crates/desktop
+          releaseId: ${{ needs.release.outputs.release_id }}
+          tagName: ${{ needs.metadata.outputs.release_tag }}
+          uploadPlainBinary: false
+          args: ${{ matrix.tauri_args }}
+
+  # The single point where the release becomes public. Everything above stages
+  # artifacts onto the draft; if any of it fails, the tag is left with a draft
+  # that can be deleted, not a published release missing half its downloads.
+  # Everything that publishes to an external registry hangs off this job.
+  publish-release:
+    name: Publish GitHub Release
+    needs:
+      - metadata
+      - build-release
+      - build-linux-arm64-asset
+      - build-tauri-release
+      - publish-manifest
+      - publish-amd64-ibm-mq-tag
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
-      
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-      
-      - name: Cache cargo registry
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
-      
-      - name: Build release
-        run: cargo build --release --features=full 
-      
-      - name: Run tests
-        run: cargo test --release --features=full 
-      
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          generate_release_notes: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Checkout repository
+        uses: actions/checkout@v7
 
+      - name: Undraft the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.metadata.outputs.release_tag }}
+        run: gh release edit "$RELEASE_TAG" --draft=false
+
+  # crates.io publication is irreversible, so it waits until every build has
+  # succeeded and the release is live.
   publish-crates-io:
     name: Publish to crates.io
     runs-on: ubuntu-latest
-    needs: release
+    needs: [metadata, publish-release]
     environment: release
     permissions:
       # Required for crates.io Trusted Publishing (OIDC).
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@v7
         with:
+          # Publishing uses CARGO_REGISTRY_TOKEN, not the GitHub token, so avoid
+          # persisting git credentials for this job.
           persist-credentials: false
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        uses: dtolnay/rust-toolchain@stable
+
+      # `cargo publish` verifies the tarball by building it, so this job needs
+      # the same system dependencies as the test job.
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config zlib1g-dev cmake libcurl4-openssl-dev protobuf-compiler
 
       # Exchange the GitHub OIDC token for a short-lived crates.io token.
+          # All three crates below must each have a Trusted Publisher registered on crates.io.
       - name: Authenticate to crates.io (Trusted Publishing)
-        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
+        uses: rust-lang/crates-io-auth-action@v1
         id: auth
 
       - name: Publish to crates.io
-        run: cargo publish
+        shell: bash
+        run: |
+          set -o pipefail
+          # Tolerate a re-run where this version is already live, but fail on
+          # anything else -- a swallowed error here surfaces later as a
+          # confusing "no matching version" failure on the dependent crate.
+          publish() {
+            for attempt in 1 2 3 4 5; do
+              cargo publish -p "$1" ${2:+--manifest-path "$2"} 2>&1 | tee "publish-$1.log" && return
+              if grep -q "already uploaded" "publish-$1.log"; then
+                echo "$1 is already on crates.io, continuing"
+                return
+              fi
+              [ "$attempt" = 5 ] && return 1
+              echo "publish of $1 failed; waiting for registry propagation"
+              sleep 20
+            done
+          }
+          publish mq-bridge
+          publish mq-bridge-app-core apps/mq-bridge-app/Cargo.toml
+          publish mq-bridge-app apps/mq-bridge-app/Cargo.toml
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+
+  publish-node:
+    name: Publish Node Packages
+    needs: publish-release
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/publish-node.yml
+    secrets: inherit
+
+  publish-python:
+    name: Publish Python Packages
+    needs: publish-release
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/publish-python.yml
+    with:
+      target: pypi
+    secrets: inherit
+
+  update-homebrew-tap:
+    name: Update Homebrew tap
+    # render.sh streams the CLI tarballs and the Tauri .dmg to compute their
+    # sha256, and a draft release's assets have no public download URL — so this
+    # waits for the release to be undrafted, not just for the builds.
+    needs: [metadata, publish-release]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          # The tap is cloned and pushed over SSH (GIT_SSH_COMMAND + deploy key),
+          # so the checkout token has no reason to persist in .git/config.
+          persist-credentials: false
+
+      - name: Render formula + cask from release assets
+        env:
+          VERSION: ${{ needs.metadata.outputs.release_tag }}
+          REPO: ${{ github.repository }}
+        run: apps/mq-bridge-app/packaging/homebrew/render.sh "$VERSION" "$REPO" out
+
+      - name: Push to tap
+        # Auth via an SSH deploy key on marcomq/homebrew-tap (write-enabled).
+        # HOMEBREW_TAP_DEPLOY_KEY holds the PRIVATE key; the matching public key
+        # is registered as a deploy key on the tap. Deploy keys don't expire, so
+        # there's no yearly token rotation to break this job.
+        env:
+          DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+          VERSION: ${{ needs.metadata.outputs.release_tag }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/tap_key
+          chmod 600 ~/.ssh/tap_key
+          ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
+          export GIT_SSH_COMMAND="ssh -i ~/.ssh/tap_key -o IdentitiesOnly=yes"
+          git clone git@github.com:marcomq/homebrew-tap.git tap
+          mkdir -p tap/Formula tap/Casks
+          cp out/Formula/mq-bridge-app.rb tap/Formula/mq-bridge-app.rb
+          cp out/Casks/mq-bridge.rb       tap/Casks/mq-bridge.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/mq-bridge-app.rb Casks/mq-bridge.rb
+          git commit -m "mq-bridge ${VERSION}" || exit 0
+          git push
+
+  publish-mcp-registry:
+    name: Publish to MCP Registry
+    # The registry validates that every package in server.json actually exists
+    # and carries the ownership marker, so both the ghcr manifest and the
+    # crates.io release must land first.
+    needs: [metadata, publish-manifest, publish-crates-io]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Required for `mcp-publisher login github-oidc`.
+      id-token: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Pin server.json to the release version
+        env:
+          VERSION: ${{ needs.metadata.outputs.cargo_version }}
+        run: |
+          python3 - "$VERSION" <<'PY'
+          import json, sys
+          version = sys.argv[1]
+          path = "apps/mq-bridge-app/server.json"
+          with open(path) as f:
+              server = json.load(f)
+          server["version"] = version
+          for pkg in server.get("packages", []):
+              if pkg["registryType"] == "oci":
+                  pkg["identifier"] = pkg["identifier"].rsplit(":", 1)[0] + ":" + version
+              else:
+                  pkg["version"] = version
+          with open(path, "w") as f:
+              json.dump(server, f, indent=2)
+              f.write("\n")
+          PY
+          cat apps/mq-bridge-app/server.json
+
+      - name: Install mcp-publisher
+        env:
+          # Pinned instead of `latest` so a compromised or simply changed
+          # upstream release can't silently swap the publisher out from under
+          # a job that holds an OIDC identity. Checksum is from
+          # registry_${MCP_PUBLISHER_VERSION#v}_checksums.txt of that release.
+          MCP_PUBLISHER_VERSION: v1.8.0
+          MCP_PUBLISHER_SHA256: 1370446bbe74d562608e8005a6ccce02d146a661fbd78674e11cc70b9618d6cf
+        run: |
+          curl -fsSL -o mcp-publisher.tar.gz \
+            "https://github.com/modelcontextprotocol/registry/releases/download/${MCP_PUBLISHER_VERSION}/mcp-publisher_linux_amd64.tar.gz"
+          echo "${MCP_PUBLISHER_SHA256}  mcp-publisher.tar.gz" | sha256sum -c -
+          tar xzf mcp-publisher.tar.gz mcp-publisher
+          sudo mv mcp-publisher /usr/local/bin/
+
+      - name: Publish
+        run: |
+          mcp-publisher login github-oidc
+          # The publisher reads this argument as a file path, not a directory.
+          mcp-publisher publish apps/mq-bridge-app/server.json
+
+  build-linux-arm64-asset:
+    name: Extract linux/arm64 CLI asset
+    # The arm64 binary is already cross-compiled by the docker job (the
+    # Dockerfile carries the cmake/pkg-config toolchain that makes librdkafka
+    # and OpenSSL build for aarch64). Rather than reproduce that with `cross`,
+    # lift the finished binary out of the image that was just pushed.
+    needs: [metadata, release, build-linux-arm64]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract the binary from the arm64 image
+        env:
+          IMAGE: ghcr.io/${{ env.IMAGE_NAME }}:${{ needs.metadata.outputs.cargo_version }}-arm64
+        run: |
+          # `create` + `cp` only unpack the filesystem, so no QEMU is needed to
+          # pull a foreign-arch binary out of the image.
+          docker pull --platform linux/arm64 "$IMAGE"
+          CID="$(docker create --platform linux/arm64 "$IMAGE")"
+          mkdir staging
+          docker cp "$CID:/usr/local/bin/mq-bridge-app" staging/mq-bridge-app
+          docker cp "$CID:/usr/local/bin/mqb" staging/mqb
+          docker rm "$CID"
+          file staging/mq-bridge-app
+
+      - name: Package artifacts
+        run: |
+          cp apps/mq-bridge-app/LICENSE apps/mq-bridge-app/README.md staging/
+          tar -czf mq-bridge-cli-aarch64-unknown-linux-gnu.tar.gz -C staging .
+
+      - name: Upload Release Asset
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        with:
+          tag_name: ${{ needs.metadata.outputs.release_tag }}
+          files: mq-bridge-cli-aarch64-unknown-linux-gnu.tar.gz

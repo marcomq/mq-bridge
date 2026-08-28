@@ -1,0 +1,28 @@
+services:
+  mq-bridge:
+    build:
+      context: ../..
+      dockerfile: apps/mq-bridge-app/Dockerfile
+      target: final
+    container_name: mq-bridge
+    ports:
+      - "9091:9091" # Prometheus metrics
+      - "9090:9090" # UI
+    # environment:
+      # The application can read its configuration from the mounted config file.
+      # You might still need some environment variables, e.g., passwords
+    volumes:
+      - ./sled_data:/data # Persist deduplication database
+      - ./config/config.yml:/etc/mq-bridge/config.yml:ro # Mount the configuration file into the container
+
+  mq-bridge-mcp:
+    build:
+      context: ../..
+      dockerfile: apps/mq-bridge-app/Dockerfile
+      target: final
+    container_name: mq-bridge-mcp
+    ports:
+      - "9092:9092" # Streamable HTTP MCP transport
+    volumes:
+      - ./config/config.yml:/app/config.yml:ro # Mount a config for MCP. You might want a separate one.
+    command: ["--config", "/app/config.yml", "mcp", "--transport", "http", "--bind", "0.0.0.0:9092"]

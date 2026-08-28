@@ -1,0 +1,102 @@
+# cargo-deny for the app workspace. The app has its own Cargo.lock, so it needs
+# its own gate; cargo-deny has no inheritance, hence the copy of the engine's
+# policy plus the Tauri-specific entries below.
+# cargo-deny configuration — supply-chain checks run in CI.
+#   cargo deny check
+# See https://embarkstudios.github.io/cargo-deny/
+#
+# Note: cargo-deny reads Cargo.lock, which is feature-blind. Nearly every
+# transport in this crate is behind an optional feature, so a finding here does
+# not imply the affected code is compiled into any given build. SECURITY.md
+# records the per-feature reachability analysis; keep the two in sync.
+
+[graph]
+# Scan the full-feature dependency graph, so optional transports are covered.
+all-features = true
+
+[advisories]
+version = 2
+# Security advisories from the RustSec database. Yanked crates are denied by
+# default. `unmaintained = "workspace"` limits unmaintained warnings to crates
+# we depend on directly — transitive ones are rarely actionable.
+#
+# NOTE: in CI the `advisories` check runs as an *informational* step
+# (non-blocking). Every finding below lives in a transitive dependency we cannot
+# upgrade ourselves, and the RustSec database updates daily, so gating hard on it
+# would redden CI on days nothing in this repo changed. License / bans / sources
+# ARE hard-gated. To make advisories blocking, drop `continue-on-error` from the
+# supply-chain job in .github/workflows/ci.yml.
+unmaintained = "workspace"
+
+ignore = [
+    # --- rustls-webpki, via rumqttc 0.25 (feature: mqtt) ------------------
+    # rumqttc pulls rustls-webpki 0.102.8 into its tree but uses exactly one
+    # item from it: the `webpki::Error` variant in its error enum (tls.rs:42 is
+    # the only reference in the crate). All certificate validation on the MQTT
+    # path runs through tokio-rustls 0.26 -> rustls 0.23 -> rustls-webpki
+    # 0.103.13, which is patched for all four advisories below.
+    #
+    # --- rustls-webpki, via aws-sdk-* (feature: aws) ----------------------
+    # aws-smithy-http-client still selects its `legacy-rustls-ring` connector,
+    # which compiles rustls 0.21 -> rustls-webpki 0.101.7. That code is live on
+    # the SQS/SNS path. See per-advisory reasoning below.
+
+    { id = "RUSTSEC-2026-0104", reason = "Panic in CRL parsing. Unreachable: the CRL code path only executes when the application supplies a CRL to a client-certificate verifier. Both affected paths (rumqttc, aws-sdk) are outbound TLS clients that never configure one, and our only WebPkiClientVerifier (src/endpoints/http/mod.rs) runs on the patched rustls-webpki 0.103.13 and passes no CRLs." },
+    { id = "RUSTSEC-2026-0049", reason = "CRL distribution-point matching. Unreachable for the same reason as RUSTSEC-2026-0104: no CRL is ever supplied on any path in this crate." },
+    { id = "RUSTSEC-2026-0098", reason = "Name constraints for URI names incorrectly accepted. Not affected via rumqttc (validation runs on patched 0.103.13). REACHABLE via the aws feature's legacy rustls 0.21 connector during ordinary server-certificate validation; exploitation requires a name-constrained CA in the trust store issuing outside its constraints. Tracked, blocked on the AWS SDK migrating off rustls 0.21." },
+    { id = "RUSTSEC-2026-0099", reason = "Name constraints accepted for wildcard-asserting certificates. Same disposition as RUSTSEC-2026-0098: not affected via rumqttc, reachable-but-narrow via the aws feature." },
+    { id = "RUSTSEC-2026-0258", reason = "h2 0.3.27 is pulled in by the AWS SDK legacy hyper 0.14 client and has no patch release. This application uses it only in outbound AWS clients. Tracked pending the AWS SDK dropping hyper 0.14." },
+
+    # --- Unmaintained, no known vulnerability -----------------------------
+    # `unmaintained = "workspace"` above only surfaces crates we depend on
+    # directly, so the transitive fxhash / instant advisories (RUSTSEC-2025-0057,
+    # RUSTSEC-2024-0384, both via sled 0.34) are never raised here and need no
+    # entry. `cargo audit` has no such filter and does report them; SECURITY.md
+    # covers both so the two tools tell the same story.
+    { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile unmaintained. Superseded by pemfile support in rustls-pki-types. No vulnerability. We depend on it directly (Cargo.toml) and via rumqttc; the direct dependency is a tracked migration." },
+]
+
+[licenses]
+version = 2
+# Permissive licenses accepted across the dependency tree. Derived from the
+# actual --all-features tree, not copied from a template: add a license only
+# after confirming which dependency needs it.
+#
+# There is no copyleft obligation in the tree today. `r-efi` is the only crate
+# offering an (L)GPL option and it is one arm of `MIT OR Apache-2.0 OR
+# LGPL-2.1-or-later`, so a permissive arm is always selectable.
+allow = [
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-1-Clause",          # fiat-crypto (as one arm of an OR)
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",           # ICU / idna data tables
+    "CDLA-Permissive-2.0",   # webpki-roots, webpki-root-certs (Mozilla CA bundle)
+    "CC0-1.0",
+    "BSL-1.0",
+    "0BSD",                  # adler2 (as one arm of an OR)
+    "Unlicense",             # win_uds; also one arm of aho-corasick / memchr / byteorder
+    "MPL-2.0",               # cssparser/selectors in the Tauri desktop dependency tree
+]
+confidence-threshold = 0.8
+# Per-crate license clarifications go here if a crate's license can't be detected.
+exceptions = []
+
+[bans]
+# Duplicate dependency versions and wildcard requirements are warnings, not
+# errors: a tree spanning this many transports legitimately carries several
+# major versions of shared crates (three rustls-webpki majors today).
+multiple-versions = "warn"
+wildcards = "warn"
+allow = []
+deny = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

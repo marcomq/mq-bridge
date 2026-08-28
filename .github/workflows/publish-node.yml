@@ -17,10 +17,10 @@ name: Publish Node Package
 # do NOT read NPM_TOKEN: a present-but-expired secret would be sent to the registry
 # and 401 instead of falling back to OIDC, so the credential is left out entirely.
 
+# Invoked by release.yml after the GitHub release goes public, rather than
+# listening on `release: published` — see the note in publish-python.yml.
 on:
-  release:
-    types:
-      - published
+  workflow_call:
   workflow_dispatch:
 
 env:
@@ -45,7 +45,7 @@ jobs:
           - runner: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # rdkafka builds librdkafka from source (cc/make) and aws-lc-sys needs
       # cmake; the slim node image lacks these.
@@ -116,10 +116,10 @@ jobs:
           - runner: windows-latest
             target: x86_64-pc-windows-msvc
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: "20"
           cache: npm
@@ -168,10 +168,10 @@ jobs:
       contents: read
       id-token: write # OIDC trusted publishing + provenance
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: "20"
           registry-url: "https://registry.npmjs.org"

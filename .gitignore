@@ -49,6 +49,8 @@ tests/**/*.pkcs12
 python/mq-bridge-py/.venv/
 python/mq-bridge-py/dist/
 
-# Local build setup (shared cargo target dir with mq-bridge-app), not for git
-.cargo/
 .vscode/
+.DS_Store
+# Both .cargo/config.toml files are tracked on purpose: the root one applies to
+# every build started from the repository root (CI, Docker), the app one to
+# app-cwd builds. Don't add .cargo/ back to this file.

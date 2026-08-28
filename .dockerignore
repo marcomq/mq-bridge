@@ -1,0 +1,18 @@
+.git
+.serena
+.tokensave
+logs
+target
+**/target
+**/node_modules
+apps/mq-bridge-app/dev/docs/book
+
+# Local build output
+**/.venv
+**/__pycache__
+**/*.so
+**/*.node
+**/*.whl
+python/mq-bridge-py/dist
+apps/mq-bridge-app/test-results
+apps/mq-bridge-app/playwright-report

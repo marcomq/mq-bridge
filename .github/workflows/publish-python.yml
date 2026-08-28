@@ -1,9 +1,16 @@
 name: Publish Python Packages
 
+# Invoked by release.yml after the GitHub release goes public. It deliberately
+# does NOT listen on `release: published` any more: that made a second, unordered
+# entry point into publication that the release orchestrator could not gate.
 on:
-  release:
-    types:
-      - published
+  workflow_call:
+    inputs:
+      target:
+        description: "Where to publish the packages"
+        required: false
+        default: "pypi"
+        type: string
   workflow_dispatch:
     inputs:
       target:
@@ -148,7 +155,7 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Select package metadata
         if: matrix.pyproject != 'pyproject.toml'
@@ -206,7 +213,7 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Select package metadata
         if: matrix.pyproject != 'pyproject.toml'
@@ -235,14 +242,14 @@ jobs:
           path: python/mq-bridge-py/dist
 
   publish:
-    name: Publish to ${{ github.event_name == 'release' && 'PyPI' || inputs.target }}
+    name: Publish to ${{ inputs.target == 'pypi' && 'PyPI' || 'TestPyPI' }}
     runs-on: ubuntu-latest
     needs: [build-wheels, build-sdists]
     permissions:
       contents: read
       id-token: write
     environment:
-      name: ${{ github.event_name == 'release' && 'pypi' || inputs.target }}
+      name: ${{ inputs.target }}
 
     steps:
       - name: Download all artifacts
@@ -265,14 +272,14 @@ jobs:
           twine check dist/*
 
       - name: Publish to TestPyPI
-        if: github.event_name == 'workflow_dispatch' && inputs.target == 'testpypi'
+        if: inputs.target == 'testpypi'
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           repository-url: https://test.pypi.org/legacy/
           packages-dir: dist/
 
       - name: Publish to PyPI
-        if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.target == 'pypi')
+        if: inputs.target == 'pypi'
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist/

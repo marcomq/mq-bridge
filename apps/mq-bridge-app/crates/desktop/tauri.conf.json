@@ -1,0 +1,40 @@
+{
+  "$schema": "../../node_modules/@tauri-apps/cli/config.schema.json",
+  "app": {
+    "security": {
+      "assetProtocol": {
+        "enable": true
+      },
+      "csp": "default-src 'self' asset:; connect-src 'self' ipc: http://ipc.localhost; img-src 'self' asset: http://asset.localhost blob: data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-eval'"
+    },
+    "windows": [
+      {
+        "height": 960,
+        "label": "main",
+        "minHeight": 600,
+        "minWidth": 800,
+        "resizable": true,
+        "title": "mq-bridge",
+        "width": 1280
+      }
+    ],
+    "withGlobalTauri": true
+  },
+  "build": {
+    "frontendDist": "../core/static"
+  },
+  "bundle": {
+    "active": true,
+    "icon": [
+      "icons/icon.png",
+      "icons/icon.ico",
+      "icons/icon.icns",
+      "icons/32x32.png",
+      "icons/128x128.png"
+    ]
+  },
+  "identifier": "com.marcomq.mqbridgeapp",
+  "mainBinaryName": "mq-bridge",
+  "productName": "mq-bridge",
+  "version": "0.4.8"
+}
