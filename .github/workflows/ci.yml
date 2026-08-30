@@ -101,7 +101,7 @@ jobs:
 
       # setup-python provides a non-PEP-668 interpreter; the system python3 on
       # ubuntu-latest is externally managed and rejects a plain pip install.
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
 

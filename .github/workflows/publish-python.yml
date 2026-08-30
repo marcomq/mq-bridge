@@ -164,7 +164,7 @@ jobs:
         run: cp "${{ matrix.pyproject }}" pyproject.toml
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.11"
 
@@ -221,7 +221,7 @@ jobs:
         run: cp "${{ matrix.pyproject }}" pyproject.toml
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.11"
 
@@ -270,7 +270,7 @@ jobs:
           merge-multiple: true
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.11"
 
