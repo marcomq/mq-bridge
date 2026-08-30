@@ -539,9 +539,9 @@ dependencies = [
 
 [[package]]
 name = "aws-sdk-sns"
-version = "1.109.0"
+version = "1.110.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e1d4d35d8f5e0090e78d2d9f65221a0fbc90edca62900ddb27a420534d78cec2"
+checksum = "24a258ad67746ba5c18d4816c47d7908ee403b19d8d7a06fc6f633d927d54841"
 dependencies = [
  "arc-swap",
  "aws-credential-types",
@@ -566,9 +566,9 @@ dependencies = [
 
 [[package]]
 name = "aws-sdk-sqs"
-version = "1.107.0"
+version = "1.108.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "16df2d9b99f4c97ad4035837ba03f0a16386a3e2dbb84ca32481ab8749161056"
+checksum = "40c9b871e292a3b5255b65f80b2708431732e9d05e155594db9751a2f9e61a6e"
 dependencies = [
  "arc-swap",
  "aws-credential-types",
@@ -6952,9 +6952,9 @@ checksum = "b6c140620e7ffbb22c2dee59cafe6084a59b5ffc27a8859a5f0d494b5d52b6be"
 
 [[package]]
 name = "uuid"
-version = "1.25.0"
+version = "1.26.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f053576934f05a761a402421fbbe3d425d9366f75f978806a037b3ca481abecc"
+checksum = "b5772d71c9be8a8a6ac2117d949c5b224c1b72241bb611d9a3012edcf8af7812"
 dependencies = [
  "getrandom 0.4.3",
  "js-sys",
