@@ -193,13 +193,13 @@ jobs:
         run: npm ci
 
       - name: Download loader into package root
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: loader
           path: node/mq-bridge-node
 
       - name: Download platform addons
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: bindings-*
           path: node/mq-bridge-node/artifacts
