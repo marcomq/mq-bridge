@@ -152,7 +152,7 @@ jobs:
             --archive-file nextest-archive.tar.zst
 
       - name: Upload nextest archive
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: integration-nextest-archive
           path: nextest-archive.tar.zst

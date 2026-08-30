@@ -194,7 +194,7 @@ jobs:
             command -v cmake >/dev/null 2>&1 || apk add --no-cache cmake gcc g++ make musl-dev perl
 
       - name: Upload wheels
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: wheels-${{ matrix.package }}-${{ matrix.os }}-${{ matrix.target }}-${{ matrix.manylinux || 'auto' }}
           path: python/mq-bridge-py/dist
@@ -236,7 +236,7 @@ jobs:
           args: --out dist
 
       - name: Upload sdist
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: sdist-${{ matrix.package }}
           path: python/mq-bridge-py/dist

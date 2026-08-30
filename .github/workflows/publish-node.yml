@@ -83,7 +83,7 @@ jobs:
           --js native.js --dts native.d.ts
 
       - name: Upload addon
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: bindings-${{ matrix.target }}
           path: node/mq-bridge-node/*.node
@@ -92,7 +92,7 @@ jobs:
       # The root package ships the generated loader; upload it once.
       - name: Upload loader
         if: matrix.target == 'x86_64-unknown-linux-gnu'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: loader
           path: |
@@ -154,7 +154,7 @@ jobs:
           --js native.js --dts native.d.ts
 
       - name: Upload addon
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: bindings-${{ matrix.target }}
           path: node/mq-bridge-node/*.node
