@@ -133,8 +133,12 @@ tracing-subscriber = { version = "0.3", features = ["json", "env-filter"], optio
 
 # --- Optional Endpoint Dependencies ---
 
-# Kafka
-rdkafka = { version = "0.39", features = ["tokio"], optional = true }
+# Kafka. Neither the linkage nor zlib is chosen here — both come from the
+# `link-static` / `link-dynamic` features below. In particular rdkafka's default
+# `libz` feature is NOT enabled: it makes libz-sys probe for a *system* zlib and
+# emit `-L /usr/lib64`, which on a conda toolchain shadows the sysroot's libc
+# with the host's and breaks the link with undefined `__libc_csu_init`.
+rdkafka = { version = "0.39", default-features = false, features = ["tokio"], optional = true }
 
 # AMQP (RabbitMQ).
 # Drop lapin's defaults so the crypto provider remains wired through
@@ -200,8 +204,15 @@ aws-config = { version = "1.10", optional = true, default-features = false, feat
 aws-sdk-sqs = { version = "1.105", optional = true, default-features = false, features = ["rt-tokio", "default-https-client"] }
 aws-sdk-sns = { version = "1.107", optional = true, default-features = false, features = ["rt-tokio", "default-https-client"] }
 
-# SQLx
-sqlx = { version = "0.9", features = ["runtime-tokio", "tls-rustls", "postgres", "mysql", "sqlite", "any"], optional = true }
+# SQLx. The SQLite driver is NOT selected here: sqlx's `sqlite-bundled` and
+# `sqlite-unbundled` are mutually exclusive (they hand libsqlite3-sys two
+# conflicting build strategies), so cargo's additive features cannot carry both.
+# `link-static` / `link-dynamic` below pick exactly one, which is why one of
+# them is mandatory whenever `sqlx` is enabled.
+# Note both drop `sqlite-deserialize` / `sqlite-load-extension` /
+# `sqlite-unlock-notify`, which the plain `sqlite` alias enabled and the crate
+# does not use.
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "mysql", "any"], optional = true }
 
 # ClickHouse — talks the ClickHouse HTTP interface directly (JSONEachRow in/out).
 # reqwest is used rather than the typed `clickhouse` crate because that crate is
@@ -254,6 +265,12 @@ serde_yaml_ng = { workspace = true, optional = true }
 
 [build-dependencies]
 tonic-prost-build = { version = "0.14", optional = true, default-features = false, features = ["transport"] }
+# Now optional, behind `vendored-protoc`, and no longer implied by `grpc`. It
+# ships prebuilt protoc binaries for nine targets, which a distro or
+# conda-forge build must not use — those have to compile against the packaged
+# protobuf. `full` still enables it so `cargo add mq-bridge --features full`
+# needs nothing installed; `full-dynamic` leaves it off and takes protoc from
+# $PROTOC or PATH. See the precedence order in build.rs.
 protoc-bin-vendored = { version = "3.2", optional = true }
 
 [features]
@@ -264,20 +281,96 @@ middleware = ["metrics", "dedup", "compression", "encryption", "filter"]
 # on ~19% of 17-significant-digit doubles (e.g. a Postgres `double precision` value
 # moved through a JSON payload). Enable if bit-exact float round-tripping matters.
 float-roundtrip = ["serde_json/float_roundtrip"]
+# --- The three build variants -------------------------------------------------
+#
+# Only two endpoints link a C library whose provenance is a choice — kafka
+# (librdkafka) and sqlx (SQLite) — plus IBM MQ, whose client is always a shared
+# object and differs only in *when* it is resolved. That gives three variants:
+#
+#   full                  self-contained C libs; IBM MQ via runtime dlopen
+#   full-static-ibm-mq    as above, but libmqm_r bound at link time
+#   full-dynamic          librdkafka + libsqlite linked from the environment
+#
+# `full` is the default and stays self-contained, so `cargo add mq-bridge
+# --features full` needs no system librdkafka, libsqlite or protoc.
+# `full-dynamic` is for conda-forge packaging and for distro builds that must
+# link the system copies; it also drops the vendored protoc, which those builds
+# are not allowed to use.
+#
+# Every endpoint, with the linkage left out. Not meant to be enabled on its
+# own; it exists so the three variant lists below cannot drift apart.
+full-common = ["middleware", "plugin", "mongodb", "kafka", "amqp", "nats", "mqtt", "http", "aws", "zeromq", "zeromq-omq", "redis-streams", "sled", "grpc", "sqlx", "clickhouse", "websocket", "postgres-cdc", "object-store", "rustls-aws-lc"]
+
 # ibm-mq (dlopen) is safe to include: it needs no IBM SDK at build, and at
 # runtime the client is loaded lazily only when an ibm-mq endpoint is opened
-# (clear error if the client isn't installed). Use `ibm-mq-static` instead for
-# static linking.
-full = ["middleware", "plugin", "mongodb", "kafka", "amqp", "nats", "mqtt", "http", "aws", "zeromq", "zeromq-omq", "redis-streams", "sled", "grpc", "sqlx", "clickhouse", "websocket", "postgres-cdc", "object-store", "rustls-aws-lc", "ibm-mq"]
+# (clear error if the client isn't installed).
+full = ["full-common", "ibm-mq", "link-static", "vendored-protoc"]
+# Same, but libmqm_r becomes a link-time dependency, so the IBM MQ client must
+# be present at BUILD time and the binary will not start without it installed.
+# See python/mq-bridge-py/examples/IBM_MQ.md, and
+# apps/mq-bridge-app/dev/docs/IBM_MQ_SETUP.md for the app.
+full-static-ibm-mq = ["full-common", "ibm-mq-static", "link-static", "vendored-protoc"]
+# librdkafka and libsqlite come from the environment via pkg-config, and protoc
+# from $PROTOC or PATH — nothing prebuilt, nothing vendored.
+full-dynamic = ["full-common", "ibm-mq", "link-dynamic"]
 
-# Endpoints that build across most OS targets (glibc/musl/Alpine, macOS,
-# Windows, aarch64/armv7) without a special toolchain — no librdkafka, protoc,
-# IBM SDK or bundled sqlite. NOT a wasm target: still needs a C compiler for
-# aws-lc crypto (amqp + aws pull aws-lc-sys), and tokio net/raw-TCP endpoints
-# don't run on wasm. Excluded — genuinely need an exotic native toolchain:
-# kafka (librdkafka), sqlx (libsqlite3-sys), grpc (protoc), ibm-mq/ibm-mq-static
-# (IBM C client). postgres-cdc is excluded too: its wire protocol is pure Rust
-# but it pulls in sqlx (C).
+# Everything clippy and rustdoc should see, for CI. `--all-features` cannot be
+# used any more: it enables `link-static` and `link-dynamic` together, which
+# src/lib.rs rejects (it would also enable both rustls providers, which the
+# comment on those features already warns against). Linkage features gate no
+# code, so linting the static one covers the dynamic variant too.
+# Keep this in sync when adding a feature that gates code.
+lint-all = ["full", "test-utils", "schema", "plugin-sdk", "perf-diagnostics", "float-roundtrip"]
+
+# --- Native linkage -----------------------------------------------------------
+#
+# Deliberately orthogonal to the endpoint features: the 65 `#[cfg(feature =
+# "kafka")]` / `#[cfg(feature = "sqlx")]` gates in src/ stay untouched, so
+# neither of these changes which code compiles — only how its C library is
+# obtained. Enable EXACTLY ONE whenever `sqlx` is on (src/lib.rs enforces it);
+# `kafka` alone falls back to librdkafka's own bundled build.
+#
+# `libz-static` gives the bundled librdkafka build gzip from libz-sys'
+# *vendored* zlib. Plain `libz` — which is rdkafka's default, and why the
+# dependency above sets `default-features = false` — probes for a *system*
+# zlib instead and emits `-L /usr/lib64`, which on a conda toolchain shadows
+# the sysroot's libc and breaks the link with undefined `__libc_csu_init`.
+#
+# `cmake-build` is deliberately NOT here: it stays in the cfg(windows) override
+# at the bottom of this file, which is the only platform that needs it. Turning
+# it on everywhere fails on any host without libcurl headers — librdkafka's
+# CMakeLists still compiles the OAUTHBEARER OIDC code that includes
+# <curl/curl.h> even under `-DWITH_CURL=0`, whereas its configure script (what
+# rdkafka-sys uses by default) probes for curl and disables the feature.
+link-static = ["rdkafka?/libz-static", "sqlx?/sqlite-bundled"]
+# Links a shared librdkafka >= 2.12.1 and libsqlite3 >= 3.34.1 found through
+# pkg-config — a distro's `librdkafka-dev` + `libsqlite3-dev`, or conda-forge's
+# `librdkafka` + `libsqlite`. No zlib feature here: the shared librdkafka already has zlib,
+# zstd, lz4, OpenSSL and SASL linked in (see its .pc `Libs.private`). The SQLite
+# bindings are generated by bindgen, so this variant also needs libclang.
+link-dynamic = ["rdkafka?/dynamic-linking", "sqlx?/sqlite-unbundled"]
+
+# The third C dependency whose provenance is a choice, kept separate from the
+# two above because it is a build-time *tool* rather than something linked, and
+# `grpc` is the only feature that wants it. On when enabled: build.rs points
+# $PROTOC at the prebuilt binary protoc-bin-vendored ships. Off: protoc comes
+# from $PROTOC or PATH, which is what a distro or conda-forge build needs.
+# An explicitly set $PROTOC wins either way.
+vendored-protoc = ["dep:protoc-bin-vendored"]
+
+# Endpoints that need no C toolchain and no code generator at all — a step
+# leaner than `full`, which is self-contained but does compile librdkafka and
+# SQLite from source. NOT a wasm target: still needs a C compiler for aws-lc
+# crypto (amqp + aws pull aws-lc-sys), and tokio net/raw-TCP endpoints don't run
+# on wasm. Excluded, with what each would add to the build:
+#   kafka        cmake + a C compiler for the bundled librdkafka
+#   sqlx         a C compiler for the SQLite amalgamation
+#   grpc         protoc — a prebuilt one via `vendored-protoc`, or your own
+#                from $PROTOC / PATH
+#   ibm-mq*      nothing at build on the dlopen path; the IBM C client at
+#                runtime, or at build time for ibm-mq-static
+# postgres-cdc is excluded too: its wire protocol is pure Rust but it pulls in
+# sqlx.
 portable = ["metrics", "dedup", "plugin", "mongodb", "amqp", "nats", "mqtt", "http", "aws", "zeromq", "redis-streams", "clickhouse", "websocket", "object-store", "rustls-aws-lc"]
 
 # Functionality features
@@ -318,7 +411,13 @@ rustls-aws-lc  = ["rustls/aws_lc_rs",  "rustls/prefer-post-quantum", "tokio-rust
 # Generate Schema file
 schema = ["dep:schemars"]
 
-# Endpoint features
+# Endpoint features. These decide which code compiles; how librdkafka and
+# SQLite are obtained is the separate `link-static` / `link-dynamic` choice.
+# Without `link-static` or `link-dynamic` alongside it this builds librdkafka
+# from rdkafka-sys' bundled source with no zlib, so gzip-compressed topics are
+# unavailable — `libz-static` rides on `link-static`, and `link-dynamic` gets
+# zlib from the shared library. Every `full*` set includes one of the two; a
+# bare `--features kafka` is the only configuration that does not.
 kafka = ["rdkafka"]
 amqp = ["lapin", "rustls", "rustls-pemfile", "url"]
 nats = ["async-nats", "rustls", "rustls-pemfile"]
@@ -345,8 +444,13 @@ zeromq = ["dep:zeromq"]
 # The default `backend: try_omq` uses it when present and falls back to zmq.
 zeromq-omq = ["dep:omq-tokio"]
 redis-streams = ["dep:redis"]
-# Note: The grpc feature requires protobuf-src which can significantly increase build times.
-grpc = ["tonic", "tonic-reflection", "prost", "prost-types", "prost-reflect", "tokio-stream", "tonic-prost", "tonic-prost-build", "protoc-bin-vendored", "rustls"]
+# Needs `protoc` at build time. It no longer arrives with this feature: add
+# `vendored-protoc` to have one downloaded as a build-dependency (what `full`
+# does), or supply your own through $PROTOC or PATH. Enabling `grpc` on its own
+# therefore expects protoc to be installed.
+grpc = ["tonic", "tonic-reflection", "prost", "prost-types", "prost-reflect", "tokio-stream", "tonic-prost", "tonic-prost-build", "rustls"]
+# Needs `link-static` or `link-dynamic` alongside it to supply sqlx's SQLite
+# driver; src/lib.rs fails the build with an explanatory message otherwise.
 sqlx = ["dep:sqlx", "url"]
 clickhouse = ["dep:reqwest", "dep:flate2", "dep:lz4_flex", "dep:zstd", "url"]
 # Cloud object-store checkpoint backend (S3/GCS/Azure/R2). Talks cloud REST via reqwest.
@@ -402,7 +506,19 @@ required-features = ["zeromq", "zeromq-omq"]
 name = "integration_test"
 required-features = ["test-utils"]
 
+# `cmake-build` is what gets the bundled librdkafka source to compile under
+# MSVC; rdkafka-sys' default configure script is not usable there.
+# .cargo/config.toml supplies the CMAKE_POLICY_VERSION_MINIMUM it needs.
+#
+# `default-features = false` has to be repeated: a target-specific dependency is
+# its own declaration, and cargo unions the two feature sets, so omitting it
+# here would bring rdkafka's default `libz` back on Windows only — see the
+# `link-static` comment for why that breaks the link.
+#
+# Under `link-dynamic` this is inert: `dynamic-linking` links a prebuilt
+# librdkafka and rdkafka-sys never runs a build at all.
 [target.'cfg(windows)'.dependencies.rdkafka]
 version = "0.39"
+default-features = false
 features = ["cmake-build", "tokio"]
 optional = true

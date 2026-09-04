@@ -45,8 +45,11 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
       
+      # Not --all-features: that enables `link-static` and `link-dynamic`
+      # together, which src/lib.rs rejects with a compile_error!. `lint-all` is
+      # every feature that gates code, with one linkage picked; see Cargo.toml.
       - name: Run clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --all-targets --features lint-all -- -D warnings
 
       # Not a workspace default member, so nothing else builds it. It pins the
       # exhaustive `GrpcConfig` literal a downstream crate would write.
@@ -69,10 +72,13 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       # amqp/aws/zeromq are omitted: unchanged for a while and covered by `full`.
+      # `grpc` carries `vendored-protoc` because protoc no longer arrives with
+      # the feature itself and the runner has none installed; `full` includes it
+      # already. See the `vendored-protoc` comment in Cargo.toml.
       - name: Check each feature subset
         run: |
           failed=""
-          for f in "" full kafka nats grpc mqtt mongodb http; do
+          for f in "" full kafka nats grpc,vendored-protoc mqtt mongodb http; do
             echo "::group::cargo check --features ${f:-<default>}"
             if [ -z "$f" ]; then
               cargo check --all-targets || failed="$failed <default>"
@@ -267,8 +273,9 @@ jobs:
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
       
+      # `lint-all` rather than --all-features, for the same reason as clippy.
       - name: Build documentation (deny warnings)
-        run: RUSTDOCFLAGS="-D warnings" cargo doc --all-features --no-deps
+        run: RUSTDOCFLAGS="-D warnings" cargo doc --features lint-all --no-deps
 
   # Supply chain: licenses, banned crates, source registries, RustSec advisories
   supply-chain:

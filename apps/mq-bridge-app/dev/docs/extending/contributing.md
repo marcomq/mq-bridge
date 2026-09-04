@@ -16,7 +16,10 @@ page is a short orientation.
 ## Code style
 
 - `cargo fmt --all` before submitting a PR.
-- `cargo clippy -p mq-bridge-app --all-features -- -D warnings` must pass.
+- `cargo clippy -p mq-bridge-app --all-targets -- -D warnings` must pass (what
+  `app.yml` runs). Not `--all-features`: `full` and `full-dynamic` are mutually
+  exclusive — they select the engine's `link-static` and `link-dynamic`
+  respectively — so enabling both fails with a `compile_error!`.
 - Follow idiomatic Rust and existing conventions.
 
 ## Adding an endpoint or middleware

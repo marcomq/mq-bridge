@@ -84,6 +84,10 @@ bench-cdc = ["bench", "mq_bridge_app/bench-cdc", "rustls-aws-lc"]
 ibm-mq = ["mq_bridge_app/ibm-mq"]
 arm64-cross-compile = ["mq_bridge_app/arm64-cross-compile"]
 full = ["mq_bridge_app/full", "mimalloc", "rustls-aws-lc"]
+# The second half of the `full-dynamic` passthrough; see `crates/core`. Build
+# with `--no-default-features --features full-dynamic`: `default = ["full"]`
+# would otherwise also be on and collide with `link-dynamic`.
+full-dynamic = ["mq_bridge_app/full-dynamic", "mimalloc", "rustls-aws-lc"]
 middleware = ["mq_bridge_app/middleware"]
 compression = ["mq_bridge_app/compression"]
 encryption = ["mq_bridge_app/encryption"]

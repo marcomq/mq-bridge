@@ -102,6 +102,43 @@
 #![warn(rustdoc::broken_intra_doc_links)]
 #![warn(rustdoc::missing_crate_level_docs)]
 
+// --- Native linkage guards ---------------------------------------------------
+//
+// `link-static` and `link-dynamic` select how librdkafka and SQLite are
+// obtained. They are mutually exclusive because sqlx's `sqlite-bundled` and
+// `sqlite-unbundled` hand libsqlite3-sys two conflicting build strategies, and
+// cargo features are additive, so nothing but a hard error can stop a caller
+// enabling both.
+//
+// Caveat on the first guard: it is a backstop, not the message you are
+// guaranteed to see. Both features reach dependency *build scripts*
+// (rdkafka-sys, libsqlite3-sys), which cargo may run before this crate's own
+// lib is compiled — so enabling both often surfaces as an rdkafka-sys
+// pkg-config failure instead. The second guard has no such race: `sqlx` with no
+// linkage feature leaves libsqlite3-sys without a driver to build at all, so
+// nothing fails ahead of it.
+
+#[cfg(all(feature = "link-static", feature = "link-dynamic"))]
+compile_error!(
+    "features `link-static` and `link-dynamic` are mutually exclusive - enable exactly one. \
+     `link-static` compiles librdkafka and SQLite into the binary; `link-dynamic` links the \
+     shared libraries found via pkg-config. This usually means two feature sets were combined, \
+     e.g. `full` (static) together with `full-dynamic`; add --no-default-features or pick one."
+);
+
+// sqlx has no SQLite driver of its own here: the driver arrives with the
+// linkage feature, so `--features sqlx` on its own cannot compile.
+#[cfg(all(
+    feature = "sqlx",
+    not(any(feature = "link-static", feature = "link-dynamic"))
+))]
+compile_error!(
+    "the `sqlx` endpoint (also reached through `postgres-cdc`) needs a linkage feature: add \
+     `link-static` to compile SQLite from source, or `link-dynamic` to link a shared \
+     libsqlite3 >= 3.34.1 via pkg-config (which also needs libclang for bindgen). The `full`, \
+     `full-static-ibm-mq` and `full-dynamic` feature sets already include one."
+);
+
 pub mod canonical_message;
 #[cfg(any(
     feature = "mongodb",

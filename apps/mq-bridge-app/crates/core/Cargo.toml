@@ -71,6 +71,17 @@ integration-test = []
 ibm-mq = ["mq-bridge/ibm-mq"]
 arm64-cross-compile = ["rdkafka", "rdkafka/cmake-build"]
 full = ["mq-bridge/full", "rustls-aws-lc"]
+# As `full`, but librdkafka and libsqlite are linked from the environment via
+# pkg-config instead of compiled from vendored C sources. The two differ only in
+# `mq-bridge`'s `link-static` / `link-dynamic`, which are mutually exclusive, so
+# this cannot be layered on top of `full` — it has to be its own list.
+#
+# It exists here because cargo's `--features dep/feature` syntax only reaches a
+# *direct* dependency: `crates/cli` sees `mq_bridge_app`, not `mq-bridge`, so
+# there is no command line that turns on `mq-bridge/link-dynamic` from the CLI
+# package. This passthrough and the matching one in `crates/cli` are what make
+# it reachable.
+full-dynamic = ["mq-bridge/full-dynamic", "rustls-aws-lc"]
 # Lean feature set for the ETL/CDC benchmarks (benches/etl): Postgres bulk-insert
 # (sqlx) + logical-replication CDC + per-route metrics. Avoids the heavy `full`
 # deps (rdkafka/librdkafka, grpc/protoc, ibm-mq) that aren't needed to move
