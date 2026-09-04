@@ -289,8 +289,15 @@ struct CopyArgs {
     ///
     /// The source's native cursor, offset, slot, or checkpoint mechanism is used.
     /// Fails before starting when the source cannot resume safely.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "no_resume")]
     resume: bool,
+
+    /// Ignore optional resume/checkpoint configuration.
+    ///
+    /// This suppresses resume warnings and errors for cursor-based sources. It
+    /// is a no-op for native queue and CDC offsets.
+    #[arg(long, conflicts_with = "resume")]
+    no_resume: bool,
 
     /// Exit once the source yields an empty batch (drain-then-exit). Without it,
     /// `copy` keeps running like a continuous bridge until Ctrl-C.
@@ -806,12 +813,12 @@ async fn run_copy(args: CopyArgs) -> anyhow::Result<()> {
     let route = Route::new(input, output).with_options(options);
     let run_id = format!("copy-{}", uuid::Uuid::new_v4());
     let started = std::time::Instant::now();
-    let handle = Arc::new(
-        route
-            .run(&run_id)
-            .await
-            .context("failed to start copy route")?,
-    );
+    let handle = if args.no_resume {
+        route.run_without_resume(&run_id).await
+    } else {
+        route.run(&run_id).await
+    };
+    let handle = Arc::new(handle.context("failed to start copy route")?);
     let copy_status = copy_status_lease(
         run_id,
         input_endpoint_label.to_string(),
@@ -1314,10 +1321,10 @@ fn custom_endpoint_from_uri(
 fn base_endpoint_from_uri(uri: &str) -> anyhow::Result<mq_bridge::models::Endpoint> {
     use anyhow::bail;
     use mq_bridge::models::{
-        AmqpConfig, AwsConfig, ClickHouseConfig, DirSpoolConfig, Endpoint, EndpointType, FileConfig,
-        GrpcConfig, HttpConfig, IbmMqConfig, KafkaConfig, MongoDbConfig, MqttConfig, NatsConfig,
-        ObjectStoreConfig, PostgresCdcConfig, RedisStreamsConfig, SqlxConfig, WebSocketConfig,
-        ZeroMqConfig,
+        AmqpConfig, AwsConfig, ClickHouseConfig, DirSpoolConfig, Endpoint, EndpointType,
+        FileConfig, GrpcConfig, HttpConfig, IbmMqConfig, KafkaConfig, MongoDbConfig, MqttConfig,
+        NatsConfig, ObjectStoreConfig, PostgresCdcConfig, RedisStreamsConfig, SqlxConfig,
+        WebSocketConfig, ZeroMqConfig,
     };
     use std::collections::HashMap;
     use url::Url;
@@ -1588,8 +1595,7 @@ fn base_endpoint_from_uri(uri: &str) -> anyhow::Result<mq_bridge::models::Endpoi
         // Local and cloud object storage. Cloud schemes pass through; the explicit
         // local alias is rewritten to `file://` below so plain `file://` keeps
         // selecting the single-file connector.
-        "local-store" | "s3" | "s3a" | "gs" | "gcs" | "az" | "azure" | "abfs"
-        | "abfss" => (
+        "local-store" | "s3" | "s3a" | "gs" | "gcs" | "az" | "azure" | "abfs" | "abfss" => (
             "object_store",
             schema_fields(schemars::schema_for!(ObjectStoreConfig)),
         ),
@@ -2506,7 +2512,10 @@ mod uri_tests {
         assert_eq!(cfg["emit_done"], "success");
         assert_eq!(cfg["shard_depth"], 2);
 
-        let cfg = config("spool:///tmp/q?drain_on_read=true&stop_on_done=true", "dir_spool");
+        let cfg = config(
+            "spool:///tmp/q?drain_on_read=true&stop_on_done=true",
+            "dir_spool",
+        );
         assert_eq!(cfg["drain_on_read"], true);
         assert_eq!(cfg["stop_on_done"], true);
     }
@@ -2515,7 +2524,9 @@ mod uri_tests {
     /// rather than a driver option riding along.
     #[test]
     fn spool_rejects_an_unrecognised_param() {
-        let err = endpoint_from_uri("spool:///tmp/q?nonsense=1").unwrap_err().to_string();
+        let err = endpoint_from_uri("spool:///tmp/q?nonsense=1")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("nonsense"), "got: {err}");
     }
 

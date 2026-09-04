@@ -100,6 +100,7 @@ mqb copy \
 | `--from <uri> --to <uri>` | — | Backward-compatible alternative to the positional form. |
 | `--filter <expr>` | off | Retain messages for which the expression is true. Top-level JSON scalar fields are variables. |
 | `--resume` | off | Configure the source's safe native resume mechanism, or fail before route startup. |
+| `--no-resume` | off | Ignore optional cursor/checkpoint resume state, including its warnings and errors. Conflicts with `--resume`; native queue/CDC offsets are unchanged. |
 | `--drain` | off | Exit once the source yields an empty batch. Without it, `copy` runs as a continuous bridge until Ctrl-C. |
 | `--concurrency <N>` | `4` | Route concurrency. |
 | `--batch-size <N>` | `1024` | Batch size. |
@@ -134,6 +135,12 @@ current file offset past a failed record. NATS is also rejected because its gene
 consumer name cannot currently include the destination and filter. Other non-replayable sources,
 including MQTT, fail early instead of silently ignoring `--resume`. Full checkpoint details:
 [Checkpoints & resumable copies](../cookbook/checkpoints.md).
+
+When a full re-copy is intentional, `--no-resume` skips optional `cursor_id` and
+`checkpoint_store` handling for SQL/ClickHouse cursor readers, MongoDB change streams, and
+object-store sources. A SQL or ClickHouse `cursor_column` is still required for paging.
+For native-position sources such as Kafka, NATS, and Postgres CDC, `--no-resume` is intentionally
+a no-op; configure their normal group, durable, slot, or start-position settings instead.
 
 ### Filtering
 

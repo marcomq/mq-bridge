@@ -45,7 +45,7 @@ dbg_macro = "warn"
 exit = "warn"
 
 [workspace.package]
-version = "0.4.11"
+version = "0.4.12"
 
 [workspace.dependencies]
 anyhow = "1.0"
@@ -348,7 +348,7 @@ redis-streams = ["dep:redis"]
 # Note: The grpc feature requires protobuf-src which can significantly increase build times.
 grpc = ["tonic", "tonic-reflection", "prost", "prost-types", "prost-reflect", "tokio-stream", "tonic-prost", "tonic-prost-build", "protoc-bin-vendored", "rustls"]
 sqlx = ["dep:sqlx", "url"]
-clickhouse = ["dep:reqwest", "dep:flate2", "dep:lz4_flex", "dep:zstd", "url"]
+clickhouse = ["dep:reqwest", "dep:flate2", "dep:lz4_flex", "dep:zstd", "dep:percent-encoding", "url"]
 # Cloud object-store checkpoint backend (S3/GCS/Azure/R2). Talks cloud REST via reqwest.
 object-store = ["dep:object_store", "url"]
 # Postgres logical-replication CDC (pgoutput). Reuses the sqlx dependency for the

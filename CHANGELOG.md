@@ -2,7 +2,26 @@
 
 All notable changes to `mq-bridge`. Newest first.
 
-## 0.4.11 — unreleased
+## 0.4.12 — unreleased
+
+### Added
+
+- **`Route::run_without_resume` runs a route while skipping optional cursor/checkpoint state.**
+  Resume setup, warnings, and errors are suppressed for cursor-based ClickHouse, SQL, MongoDB
+  change-stream, and object-store sources. `Route::run` is unchanged, and native broker offsets
+  and CDC slots are unaffected.
+- **`mqb copy --no-resume` explicitly opts out of optional checkpoint state.** Cursor-based
+  ClickHouse, SQL, MongoDB CDC, and object-store sources skip resume configuration, warnings,
+  and errors when a full copy is intentional. It conflicts with `--resume` and does not alter
+  native queue offsets.
+
+### Fixed
+
+- **ClickHouse URL credentials now behave as advertised.** HTTP clients read percent-decoded
+  `user:password@` credentials from the endpoint URL, while explicit `username` / `password`
+  fields still take precedence, and strip userinfo from the request URL.
+
+## 0.4.11
 
 ### Changed
 

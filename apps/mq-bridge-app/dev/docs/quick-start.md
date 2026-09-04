@@ -19,7 +19,7 @@ running as a continuous bridge (see
 The common copy controls are deliberately small:
 
 ```text
-mqb copy SOURCE TARGET [--filter EXPR] [--resume] [--drain]
+mqb copy SOURCE TARGET [--filter EXPR] [--resume | --no-resume] [--drain]
 ```
 
 `--filter` evaluates a readable expression against each top-level JSON payload,
@@ -34,6 +34,8 @@ are named — see [Filtering](./reference/cli.md#filtering).
 the route starts when that is not safe. The generated state identity includes
 the credential-redacted source, destination, and filter, so changing pipeline
 semantics starts a new checkpoint while rotating a password does not.
+`--no-resume` explicitly ignores optional cursor/checkpoint state and its
+diagnostics for cursor-based sources; it is a no-op for native queue/CDC offsets.
 
 The examples below are complete, working commands. Each links to the
 full [connector page](./connectors/) for that endpoint, which lists every

@@ -45,8 +45,9 @@ table/collection name in the source datastore.
 Notes:
 
 - **ClickHouse requires an external store.** It cannot cheaply upsert cursor rows, so a
-  source-datastore checkpoint is rejected; `cursor_id` without a `checkpoint_store` silently
-  disables resume (with a warning).
+  source-datastore checkpoint is rejected; `cursor_id` without a `checkpoint_store` disables
+  resume with a warning. Use `--resume` when a missing resumable configuration must be fatal,
+  or `--no-resume` when a full re-copy is intentional and resume diagnostics should be ignored.
 - **Object-store sources** must point `checkpoint_store` at a *different* bucket or prefix than
   they read — a cursor object written under the source prefix would be listed and re-read as
   data. The source rejects an overlapping location.
@@ -55,6 +56,13 @@ Notes:
 - Cloud object-store checkpoints need the `object-store` feature compiled in.
 
 ## Using it with `copy`
+
+Pass `--no-resume` to make an intentional full copy without checkpoint diagnostics. For SQL and
+ClickHouse, `cursor_column` is still required to page through the source; the flag only ignores
+optional `cursor_id` / `checkpoint_store` state. It currently applies to cursor-based SQL and
+ClickHouse sources, MongoDB change streams, and object-store sources. It does not change native
+queue or CDC offsets and cannot be combined with `--resume`; for sources such as Kafka, NATS,
+and Postgres CDC, the flag is intentionally a no-op.
 
 `cursor_id`, `cursor_column`, and `checkpoint_store` are ordinary endpoint config fields, so on
 the CLI they are just query parameters on `--from`:

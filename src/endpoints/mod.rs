@@ -696,6 +696,17 @@ pub async fn create_consumer_from_route_with_source_metadata(
     endpoint: &Endpoint,
     source_metadata_required: bool,
 ) -> Result<Box<dyn MessageConsumer>> {
+    create_consumer_from_route_with_policy(route_name, endpoint, source_metadata_required, false)
+        .await
+}
+
+/// Create a route consumer with the requested source metadata and resume policy.
+pub(crate) async fn create_consumer_from_route_with_policy(
+    route_name: &str,
+    endpoint: &Endpoint,
+    source_metadata_required: bool,
+    no_resume: bool,
+) -> Result<Box<dyn MessageConsumer>> {
     let resolved_endpoint = resolve_endpoint(endpoint, route_name)?;
     check_consumer(route_name, &resolved_endpoint, None)?;
     if source_metadata_required && !supports_source_metadata(&resolved_endpoint.endpoint_type) {
@@ -703,7 +714,8 @@ pub async fn create_consumer_from_route_with_source_metadata(
     }
     let source_metadata =
         source_metadata_required || source_metadata_requested(&resolved_endpoint.endpoint_type);
-    let consumer = create_base_consumer(route_name, &resolved_endpoint, source_metadata).await?;
+    let consumer =
+        create_base_consumer(route_name, &resolved_endpoint, source_metadata, no_resume).await?;
     apply_middlewares_to_consumer(consumer, &resolved_endpoint, route_name).await
 }
 
@@ -1268,6 +1280,7 @@ async fn create_base_consumer(
     route_name: &str,
     endpoint: &Endpoint,
     _source_metadata: bool,
+    _no_resume: bool,
 ) -> Result<Box<dyn MessageConsumer>> {
     // Helper to coerce concrete consumers to the trait object, fixing type inference issues in the match block.
     fn boxed<T: MessageConsumer + 'static>(c: T) -> Box<dyn MessageConsumer> {
@@ -1346,9 +1359,9 @@ async fn create_base_consumer(
             dir_spool::DirSpoolConsumer::new_with_source_metadata(cfg, _source_metadata).await?,
         )),
         #[cfg(feature = "object-store")]
-        EndpointType::ObjectStore(cfg) => {
-            Ok(boxed(object_store::ObjectStoreConsumer::new(cfg).await?))
-        }
+        EndpointType::ObjectStore(cfg) => Ok(boxed(
+            object_store::ObjectStoreConsumer::new_with_no_resume(cfg, _no_resume).await?,
+        )),
         #[cfg(feature = "grpc")]
         EndpointType::Grpc(cfg) => {
             let mut config = cfg.clone();
@@ -1382,7 +1395,12 @@ async fn create_base_consumer(
             } else if cfg.cursor_column.is_some() {
                 // Non-destructive, resumable cursor read of an arbitrary table.
                 Ok(boxed(
-                    sqlx::SqlxCursorReader::new_with_source_metadata(cfg, _source_metadata).await?,
+                    sqlx::SqlxCursorReader::new_with_source_metadata_and_no_resume(
+                        cfg,
+                        _source_metadata,
+                        _no_resume,
+                    )
+                    .await?,
                 ))
             } else {
                 Ok(boxed(sqlx::SqlxConsumer::new(cfg).await?))
@@ -1392,7 +1410,9 @@ async fn create_base_consumer(
         EndpointType::ClickHouse(cfg) => {
             if cfg.cursor_column.is_some() {
                 // ClickHouse has no native queue; only non-destructive cursor reads are supported.
-                Ok(boxed(clickhouse::ClickHouseCursorReader::new(cfg).await?))
+                Ok(boxed(
+                    clickhouse::ClickHouseCursorReader::new_with_no_resume(cfg, _no_resume).await?,
+                ))
             } else {
                 Err(anyhow::anyhow!(
                     "ClickHouse endpoint used as a consumer requires 'cursor_column' (ClickHouse has no native queue; only non-destructive cursor reads are supported)."
@@ -1435,10 +1455,11 @@ async fn create_base_consumer(
                     // Watch an existing collection for changes from now on (needs a replica set;
                     // otherwise the change-stream open returns a clear error).
                     Ok(boxed(
-                        mongodb::MongoDbChangeStreamReader::new_with_source_metadata(
+                        mongodb::MongoDbChangeStreamReader::new_with_source_metadata_and_no_resume(
                             &config,
                             false,
                             _source_metadata,
+                            _no_resume,
                         )
                         .await?,
                     ))
@@ -1449,10 +1470,11 @@ async fn create_base_consumer(
                     // return documents above its high-water mark, so anything a concurrent writer
                     // commits below it is skipped for good. That loss is silent and unrecoverable,
                     // so refuse to start instead and name the two sound alternatives.
-                    mongodb::MongoDbChangeStreamReader::new_with_source_metadata(
+                    mongodb::MongoDbChangeStreamReader::new_with_source_metadata_and_no_resume(
                         &config,
                         true,
                         _source_metadata,
+                        _no_resume,
                     )
                     .await
                     .map(boxed)

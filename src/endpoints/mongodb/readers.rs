@@ -379,6 +379,15 @@ impl MongoDbChangeStreamReader {
         snapshot: bool,
         source_metadata: bool,
     ) -> anyhow::Result<Self> {
+        Self::new_with_source_metadata_and_no_resume(config, snapshot, source_metadata, false).await
+    }
+
+    pub(crate) async fn new_with_source_metadata_and_no_resume(
+        config: &MongoDbConfig,
+        snapshot: bool,
+        source_metadata: bool,
+        no_resume: bool,
+    ) -> anyhow::Result<Self> {
         let source_metadata = crate::canonical_message::source_metadata_enabled_for_endpoint(
             source_metadata || config.source_metadata,
         );
@@ -409,9 +418,9 @@ impl MongoDbChangeStreamReader {
             .map(|q| vec![doc! { "$match": full_document_match(q) }])
             .unwrap_or_default();
 
-        let checkpoint: Option<Arc<dyn crate::checkpoint::CheckpointStore>> = if let Some(cid) =
-            &config.cursor_id
-        {
+        let checkpoint: Option<Arc<dyn crate::checkpoint::CheckpointStore>> = if no_resume {
+            None
+        } else if let Some(cid) = &config.cursor_id {
             use crate::checkpoint::CheckpointBackend;
             let backend = match &config.checkpoint_store {
                 None => CheckpointBackend::Source {

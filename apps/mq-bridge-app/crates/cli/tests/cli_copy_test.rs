@@ -1624,6 +1624,82 @@ fn resume_rejections_name_the_source_and_the_reason() {
     }
 }
 
+#[cfg(any(feature = "full", feature = "sqlx"))]
+#[test]
+fn no_resume_ignores_optional_checkpoint_configuration_without_warning() {
+    let dir = TestDir::new();
+    let database = dir.path().join("no-resume.db");
+    sqlite_execute(
+        &database,
+        &[
+            "CREATE TABLE orders (id INTEGER PRIMARY KEY, amount INTEGER)",
+            "INSERT INTO orders (id, amount) VALUES (1, 10), (2, 20)",
+        ],
+    );
+    let source = format!(
+        "sqlite://{}?table=orders&cursor_column=id&cursor_id=ignored&checkpoint_store=unsupported%3A%2F%2Fignored",
+        database.display()
+    );
+
+    let result = copy_with_options(&source, "null:", &["--no-resume"]);
+    assert_success(&result, "copy without resume");
+    let output = logged(&result);
+    assert!(
+        output.contains("copied 2 rows"),
+        "unexpected output: {output}"
+    );
+    assert!(
+        !output.contains("resume is disabled") && !output.contains("checkpoint_store"),
+        "resume diagnostics must be suppressed: {output}"
+    );
+}
+
+#[cfg(any(feature = "full", feature = "sqlx"))]
+#[test]
+fn no_resume_re_copies_rows_past_a_valid_checkpoint() {
+    let dir = TestDir::new();
+    let database = dir.path().join("no-resume-checkpoint.db");
+    sqlite_execute(
+        &database,
+        &[
+            "CREATE TABLE orders (id INTEGER PRIMARY KEY, amount INTEGER)",
+            "INSERT INTO orders (id, amount) VALUES (1, 10), (2, 20)",
+        ],
+    );
+    let source = format!(
+        "sqlite://{}?table=orders&cursor_column=id&cursor_id=nightly",
+        database.display()
+    );
+
+    let first = copy_with_options(&source, "null:", &[]);
+    assert_success(&first, "initial checkpointed copy");
+    assert!(logged(&first).contains("copied 2 rows"));
+
+    let resumed = copy_with_options(&source, "null:", &[]);
+    assert_success(&resumed, "copy from persisted checkpoint");
+    assert!(logged(&resumed).contains("copied 0 rows"));
+
+    let full_copy = copy_with_options(&source, "null:", &["--no-resume"]);
+    assert_success(&full_copy, "full copy ignoring persisted checkpoint");
+    assert!(logged(&full_copy).contains("copied 2 rows"));
+}
+
+#[test]
+fn no_resume_conflicts_with_resume() {
+    let result = copy_with_options("static:?message=x", "null:", &["--resume", "--no-resume"]);
+    assert!(
+        !result.status.success(),
+        "conflicting flags unexpectedly succeeded"
+    );
+    let output = logged(&result);
+    assert!(
+        output.contains("cannot be used with")
+            && output.contains("--resume")
+            && output.contains("--no-resume"),
+        "unexpected conflict diagnostic: {output}"
+    );
+}
+
 /// A sink that permanently rejects every message must not produce a successful
 /// copy. The route drops those messages and runs to a normal end by design — one
 /// poison message must not wedge a bridge — so the drop tally, not the outcome,

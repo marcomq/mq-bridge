@@ -2,12 +2,12 @@ services:
   nats:
     image: nats:2.12.2-alpine3.22
     container_name: nats-itest-mq-bridge
-    command: "-js -sd /data" # Enable JetStream and set store dir
+    command: "-js -sd /data -m 8222" # Enable JetStream, persistence, and monitoring
     ports:
       - "4222:4222"
-      - "8222:8222" # Expose monitoring port for health check
+      - "8222:8222" # Expose monitoring and health endpoints
     healthcheck:
-      test: ["CMD", "nats-server", "-h"]
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8222/healthz?js-enabled-only=true"]
       interval: 5s
       timeout: 20s
       retries: 5

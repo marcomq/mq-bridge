@@ -25,7 +25,7 @@ At its core is a zero-config `copy` command that moves data between databases, q
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/marcomq/mq-bridge/main/docs/assets/copy-demo.png"
-       alt="mqb copy: a CSV file and a Postgres table, each 1,000,000 rows, copied to S3 as zstd-compressed JSONL, plus a filtered extract to a local JSONL file" width="900">
+       alt="mqb copy: a CSV file to S3 as zstd-compressed JSONL, a filtered Postgres table to NATS, and a ClickHouse table to Kafka — 1,000,000 rows each, one command per line" width="900">
 </p>
 
 ```bash

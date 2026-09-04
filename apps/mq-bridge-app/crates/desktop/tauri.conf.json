@@ -40,5 +40,5 @@
   "identifier": "com.marcomq.mqbridgeapp",
   "mainBinaryName": "mq-bridge",
   "productName": "mq-bridge",
-  "version": "0.4.11"
+  "version": "0.4.12"
 }
