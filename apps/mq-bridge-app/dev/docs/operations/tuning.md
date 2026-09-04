@@ -163,24 +163,21 @@ exact `batch_size` / `concurrency` next to every figure.
 Measured through `mq-bridge-app`'s `copy` CLI (the zero-code path) on an Apple M1, 8 cores,
 8 GB RAM. **Numbers are hardware-dependent — treat them as shape, not guarantees.**
 
-| Scenario | Batch | Conc. | Throughput | Peak RSS |
-|---|---|---|---|---|
-| IPC forward (`static` → `memory`) | 1024 | 1 | **1,769,700 rows/s** | — |
-| CSV → JSONL (strings passthrough, 1M rows ~116 MiB) | 1024 | 1 | **1,133,786 rows/s** | ~22 MiB |
-| CSV → JSONL with typing `transform` (id→int, embedded JSON) | 1024 | 1 | **742,390 rows/s** | ~94 MiB |
-| Postgres → JSONL (1M rows, 7 mixed-type cols) | 1024 | 1 | **338,066 rows/s** | ~40 MiB |
-| Postgres → JSONL (same) | 1024 | 4 | **384,615 rows/s** | ~41 MiB |
+<!-- Pulled from the benchmark harness README, which is the single source of truth for
+     every measured number. Do not paste a copy here — update it there. -->
+{{#include ../../../benches/etl/README.md:reference_numbers}}
 
 All rows measured with the mimalloc allocator used by the shipped binaries. It is
 the default-on `mimalloc` cargo feature (also implied by `bench`); build with
 `--no-default-features` and without it in the feature list to fall back to the
-system allocator on platforms where mimalloc is unsupported.
+system allocator on platforms where mimalloc is unsupported. The `Version` column
+matters: the rows are not all from one measurement session.
 
 Two things the table shows:
 
 - **Typing has a real but modest cost.** Adding a `transform` that coerces `id` to an integer
-  and decodes an embedded JSON document costs ~0.47 µs/row — CSV→JSONL drops from 1.13M to 742k
-  rows/s but every output record is fully typed.
+  and decodes an embedded JSON document costs ~0.46 µs/row — CSV→JSONL drops from 1.09M to 726k
+  rows/s, about 1.5x, but every output record is fully typed.
 - **Peak RSS does not scale with dataset size**, because rows stream in batches rather than
   being buffered whole — at the fixed batch size and concurrency above, ~22 MiB for a
   passthrough copy however large the input. It is not a constant: batch size, connector-side

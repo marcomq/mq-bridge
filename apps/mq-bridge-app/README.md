@@ -23,6 +23,11 @@ Supported integration types include **Kafka**, **RabbitMQ (AMQP)**, **NATS**, **
 
 At its core is a zero-config `copy` command that moves data between databases, queues, and files in a single line of bash — no YAML, no pipeline definition, no code:
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/marcomq/mq-bridge/main/docs/assets/copy-demo.png"
+       alt="mqb copy: a CSV file and a Postgres table, each 1,000,000 rows, copied to S3 as zstd-compressed JSONL, plus a filtered extract to a local JSONL file" width="900">
+</p>
+
 ```bash
 mqb copy \
   'postgres://${PGUSER}:${PGPASSWORD}@localhost/db?table=src&sslmode=disable' \
@@ -114,10 +119,12 @@ Use Postman/Bruno when your main job is crafting and sharing API requests; use `
 
 ## Performance
 
-A CSV → JSONL conversion hit **1,133,786 rows/s**; the same job **through an MCP tool call** ran at **1,176,489 rows/s** while costing an agent a *flat* ~381 tokens regardless of row count, because the rows never enter the model's context.
+A CSV → JSONL conversion hit **1,079,913 rows/s** (mq-bridge 0.4.11). The same job **through an MCP tool call** ran at **1,176,489 rows/s** against that session's 1,133,786 rows/s CLI baseline (0.4.10) — i.e. the MCP interface costs one round-trip, not a per-row tax — while costing an agent a *flat* ~381 tokens regardless of row count, because the rows never enter the model's context.
 
 On a Kafka → file relay using mq-bridge-app's default file format and no transform,
-the same engine was up to **65% faster than Sea Streamer**; the native file-format caveats are detailed in the linked benchmark documentation.
+the same engine was **~65% faster than Sea Streamer** comparing both on the mimalloc
+allocator (~80% against its default-allocator build); the native file-format caveats are
+detailed in the linked benchmark documentation.
 
 → Full numbers, methodology, and knobs: [Performance tuning](https://marcomq.github.io/mq-bridge/operations/tuning.html) and [`benches/etl/README.md`](benches/etl/README.md).
 

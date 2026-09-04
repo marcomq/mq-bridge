@@ -79,7 +79,9 @@ wait_drain() {
   while ((tries--)); do
     local n; n="$(processed_count)"
     if [[ "${n:-0}" -eq "$last" && "${n:-0}" -gt 0 ]]; then
-      ((stable++)); ((stable >= stable_needed)) && return 0
+      # Assignment, not `((stable++))`: see kill_pids in lib.sh — a post-increment
+      # at 0 exits 1 and would kill this under `set -e`.
+      stable=$((stable + 1)); ((stable >= stable_needed)) && return 0
     else
       stable=0; last="${n:-0}"
     fi

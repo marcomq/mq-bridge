@@ -2,18 +2,25 @@
 
 This harness produces **like-for-like ETL / data-movement numbers for the
 mq-bridge engine, driven the way a real no-code user drives it** — through
-`mq-bridge-app` configured by CLI/YAML, not a bespoke Rust harness. It mirrors
-the scenarios and fixed parameters in the library's
-[`benches/ETL_BENCHMARKS.md`](https://github.com/marcomq/mq-bridge/blob/dev/benches/ETL_BENCHMARKS.md),
-so the output pastes straight into that document's **Results** section next to the
-Debezium / OpenMessaging / Airbyte baselines.
+`mq-bridge-app` configured by CLI/YAML, not a bespoke Rust harness.
+
+**This file is the single source of truth for every measured ETL/CDC number.** The
+library's [`benches/ETL_BENCHMARKS.md`](https://github.com/marcomq/mq-bridge/blob/dev/benches/ETL_BENCHMARKS.md)
+states the methodology and reporting rules and links here; it does not carry its own
+copy of the results. Update a number here and nowhere else — the book's
+[tuning page](../../dev/docs/operations/tuning.md) and
+[MCP page](../../dev/docs/MCP.md) pull their tables straight out of this file by
+anchor, so they follow automatically.
 
 **The two headline scenarios (§5 Postgres → JSONL and §6 CSV → JSONL)** are
 full-dataset ETL jobs on a 1,000,000-row seed-42 dataset, reporting throughput
 **and** peak RSS against a Sling and a Meltano (`tap-*` → `target-jsonl`) baseline (see
 [Results](#results--the-two-headline-etl-scenarios-1m-rows)). The remaining
 scenarios (1 & 3 table→table copy, 2 CDC latency, 4 local IPC, 7 the MCP server,
-8 Postgres' own tools, and 9 Kafka streaming) are additional coverage.
+and 8 Postgres' own tools) are additional coverage, as are the Kafka streaming
+comparisons in [C](#c--kafka--jsonl-mq-bridge-app-vs-arroyo-1000000-rows) and
+[D](#d--kafka--native-ss-mq-bridge-app-vs-sea-streamer-1000000-rows), which are
+reported as results rather than as a numbered scenario.
 
 ## Why this path is credible
 
@@ -30,6 +37,13 @@ the same seeded (seed 42) 7-column mixed-type dataset of 1,000,000 rows, against
 baselines — Sling (a compiled Go EL tool) and Meltano (`tap-*` → `target-jsonl`) —
 reporting throughput **and** peak RSS (detailed writeups in §5 and §6 below). All
 columns are measured on the same machine (this repo's Apple M1 host).
+
+> **These A/B tables are a 0.4.10-era, single-session comparison, kept intact so the
+> ratios against Sling and Meltano stay internally consistent.** mq-bridge's own
+> throughput was re-measured on 0.4.11 — CSV untyped 1,079,913 rows/s, CSV typed
+> 727,272 rows/s, Postgres 446,830 rows/s — and those figures are in
+> [Reference numbers](#reference-numbers-all-scenarios-at-a-glance). The baselines were
+> not re-run in that session, so the ratios below are not recomputed from it.
 
 ### A — CSV → JSONL (1,000,000 rows, ~116 MiB)
 
@@ -176,13 +190,54 @@ To add the allocator comparison, rebuild the same helper in the same target
 directory with `--features mimalloc`, then run
 `SEA_STREAMER_LABEL=sea-streamer-mimalloc REPEATS=3 ./benches/etl/run_kafka_stream.sh sea`.
 
+## Reference numbers (all scenarios, at a glance)
+
+Cross-scenario summary on this repo's Apple M1 (8 cores, 8 GB RAM), `mq-bridge-app`
+built with default features (`full`, which includes mimalloc — the allocator the
+shipped binaries use). **Numbers are hardware-dependent — treat them as shape, not
+guarantees.** The `Version` column is the point of this table: rows are not all from
+one session, and a row must never be quoted without it.
+
+<!-- ANCHOR: reference_numbers -->
+| Scenario | Batch | Conc. | Throughput | Peak RSS | Version |
+|---|---|---|---|---|---|
+| IPC forward (`static` → `memory`, Unix socket) | 1024 | 1 | **1,595,115 rows/s** | — | 0.4.11 (300 s window; was 1,769,700 on 0.4.9) |
+| CSV → JSONL (strings passthrough, 1M rows ~116 MiB) | 1024 | 1 | **1,079,913 rows/s** | ~22 MiB | 0.4.11 |
+| CSV → JSONL with typing `transform` (id→int, embedded JSON) | 1024 | 1 | **727,272 rows/s** | ~94 MiB | 0.4.11 |
+| Postgres → JSONL (1M rows, 7 mixed-type cols) | 1024 | 1 | **446,830 rows/s** | ~40 MiB | 0.4.11 |
+| Postgres → JSONL (same) | 1024 | 4 | **384,615 rows/s** | ~41 MiB | 0.4.10 |
+<!-- ANCHOR_END: reference_numbers -->
+
+The 0.4.11 rows were re-measured on 2026-09-04 on an idle machine (no build, no
+indexer, no other container running): CSV 3 timed runs after a discarded warm-up
+(untyped 0.926 s ±0.002, typed 1.375 s ±0.001), Postgres 10 timed runs across two
+sessions (2.238 s ±0.069), IPC one 300 s window. The Postgres figure is measured
+against a **freshly seeded** `bench` table on a freshly created container; the same
+scenario read 369,412 rows/s against a table left in place from earlier runs, so
+reseed before quoting it. **Peak RSS was not
+re-measured in that session** and is carried over from the 0.4.10 runs; the throughput
+figures are fresh. The 0.4.10 and 0.4.9 rows are retained as measured — see §4, §5 and
+§6 for the full write-ups and the Sling / Meltano baselines.
+
+Two things the table shows:
+
+- **Typing has a real but modest cost.** Adding a `transform` that coerces `id` to an
+  integer and decodes an embedded JSON document costs ~0.46 µs/row — CSV→JSONL drops
+  from 1.09M to 726k rows/s, about 1.5x, but every output record is fully typed.
+- **Peak RSS does not scale with dataset size**, because rows stream in batches rather
+  than being buffered whole — ~22 MiB for a passthrough copy however large the input. It
+  is not a constant: batch size, connector-side buffering, allocator retention and
+  transforms all move it. The typing `transform` is the exception: its per-row JSON
+  decode and buffering push peak RSS to ~94 MiB, still far leaner than tools that
+  materialize the dataset.
+
 ## Fixed parameters (printed next to every number)
 
 | Parameter     | Value                                             |
 | ------------- | ------------------------------------------------- |
 | Payload       | 256 B and 4 KiB JSON rows (both reported)         |
 | Message count | 1 000 000 per run                                 |
-| Batch sizes   | 1 / 128 (table→table §1 & §3); 1024 (§5, §6 & §9); 32768 (§8) |
+| Batch sizes   | 1 / 128 (table→table §1 & §3); 1024 (§5, §6 & the Kafka runs in C/D); 32768 (§8) |
 | Concurrency   | 1 and 4 route workers                             |
 | Postgres      | `postgres:16-alpine`, `wal_level=logical`         |
 | Warm-up       | 5 000-message pre-roll, excluded from timing      |
@@ -193,7 +248,7 @@ Payload rows are `{"id":<n>,"pad":"xxx…"}` padded to exactly 256 / 4096 bytes.
 ## One-time setup
 
 ```bash
-# 1. Release binary. The published §5 CSV numbers are measured on the DEFAULT
+# 1. Release binary. The published §6 CSV numbers are measured on the DEFAULT
 #    (`full`) release build — the same artifact shipped via Homebrew and
 #    cargo-binstall — so the figures describe what a user actually installs.
 cargo build -p mq-bridge-app --release
@@ -206,7 +261,7 @@ cargo build -p mq-bridge-app --release
 #    benchmarks against it (the runners resolve BIN from it):
 # CARGO_TARGET_DIR=target-lean cargo build -p mq-bridge-app \
 #   --no-default-features --features bench --release
-# CARGO_TARGET_DIR=target-lean benches/etl/run_pipeline.sh
+# CARGO_TARGET_DIR=target-lean benches/etl/run_throughput.sh
 #
 #    For run_cdc_latency.sh use `bench-cdc` instead: CDC needs the postgres
 #    logical-replication endpoint, which pulls aws-lc-sys (a slow C build) and
@@ -312,10 +367,19 @@ over a 15-second sampling window:
 benches/etl/run_ipc_throughput.sh      # -> benches/etl/results/ipc_throughput.csv
 ```
 
-**Latest result: 1,769,700 rows/s** at `concurrency: 1`, sustained over a 5-minute
-window — `RUN_SECONDS=300 benches/etl/run_ipc_throughput.sh`, i.e. the same script
-with the sampling window widened from its 15-second default (system-allocator
-baseline on the same run: 1,207,906 rows/s). An earlier
+**Latest result: 1,594,722 rows/s** (mq-bridge 0.4.11) at `concurrency: 1`, sustained
+over a 5-minute window — `RUN_SECONDS=300 benches/etl/run_ipc_throughput.sh`, i.e. the
+same script with the sampling window widened from its 15-second default. The 0.4.9 run
+measured 1,769,700 rows/s over the same window (system-allocator baseline on that run:
+1,207,906 rows/s).
+
+> **This scenario recorded nothing at all between 0.4.9 and 0.4.11.** `kill_pids` in
+> `lib.sh` used `((waited++))`, which evaluates to the old value and so exits 1 at
+> zero — under `set -e` that aborted the runner after it had measured but before it
+> wrote the result row, and the EXIT trap still returned 0. Fixed, and covered by
+> [`lib_test.sh`](lib_test.sh), which CI now runs.
+
+An earlier
 pre-mimalloc session measured 1,202,926 rows/s at `concurrency: 1`; `concurrency: 4`
 gave a very slightly *lower* 1,167,428 rows/s there — expected, since both sides talk over a
 single Unix socket connection either way, serialized through one mutex-guarded
@@ -404,7 +468,7 @@ mqb copy \
   --to   'file:///tmp/mqb_csv_out.jsonl?format=raw' \
   --drain --batch-size 1024 --concurrency 1
 
-# typed — reproduces Sling's typing, and is what §5's Sling ratio compares
+# typed — reproduces Sling's typing, and is what §6's Sling ratio compares
 mqb copy \
   --from 'file:///…/benches/etl/data/bench.csv?format=csv' \
   --to   'file:///tmp/mqb_csv_out.jsonl?format=raw|transform?schema_file=…/schemas/bench.json' \
@@ -458,7 +522,7 @@ infer types — they pass values through as strings. Comparing those two directl
 would time a string passthrough against a tool that parses and re-types every row,
 which is not a benchmark, so the two scenarios handle it differently.
 
-**§5 (CSV → JSONL) — equal work, ratio is like-for-like.** The mq-bridge-app run
+**§6 (CSV → JSONL) — equal work, ratio is like-for-like.** The mq-bridge-app run
 carries a `transform` middleware ([`schemas/bench.json`](schemas/bench.json)) that
 reproduces Sling's output exactly: `coerce` widens the `id` string to an integer,
 and `contentMediaType: application/json` decodes the embedded `attributes` document
@@ -470,7 +534,7 @@ into a nested object. Both tools then emit the same records:
 ```
 
 This is asserted, not assumed: [`compare_jsonl.py`](compare_jsonl.py) diffs the two
-outputs record-by-record and **fails the run** on any mismatch, so the numbers in §5
+outputs record-by-record and **fails the run** on any mismatch, so the numbers in §6
 cannot be published unless all 1,000,000 rows match. Records are compared as parsed
 JSON — mq-bridge-app preserves the source column order inside `attributes` while
 Sling alphabetizes it, which is a serialization difference, not a data one.
@@ -493,7 +557,7 @@ it, measuring 119,217 → 128,766 → 127,959 rows/s in three separate sessions 
 machine, so the movement in the typed number is real engine work rather than a
 drifting baseline.
 
-**§6 (Postgres → JSONL) — not yet equalised.** That scenario still runs
+**§5 (Postgres → JSONL) — not yet equalised.** That scenario still runs
 mq-bridge-app untyped against a type-inferring Sling, so part of its ~2.8x gap is
 mq-bridge-app doing less. Read it with that attached. Applying the same treatment
 there needs a Postgres-shaped schema (the driver already returns typed values for

@@ -2,7 +2,52 @@
 
 All notable changes to `mq-bridge`. Newest first.
 
+## 0.4.11 — unreleased
+
+### Changed
+
+- **The Python and Node packages ship third-party licence notices.** Each wheel and npm
+  package now carries a `THIRD_PARTY_LICENSES.txt` covering its bundled Rust dependencies,
+  and the Node package gained the `LICENSE` file it was missing. Nothing about the code
+  changes; this is the attribution the binary distributions always owed.
+
+- **PyPI publishing is its own release job.** It previously rode along with another
+  publish step, so a skip upstream could strand the wheels while the rest of a release went
+  out. Splitting it lets the PyPI upload succeed or fail on its own.
+
 ## 0.4.10
+
+### Added
+
+- **`dir_spool` endpoint — a crash-safe directory FIFO queue.** Each message becomes a
+  payload file plus a JSON metadata sidecar, written to a `.tmp` name and renamed into place
+  so a reader never observes a partial chunk (`atomic`, on by default). `naming_pattern`
+  templates the chunk name from `{seq}` / `{seq:06}` / `{timestamp}` / `{message_id}`, and
+  `fsync` chooses how hard a write works to survive power loss. It is the endpoint to reach
+  for when the queue has to be a plain directory that another process — or another vendor's
+  tool — can read.
+
+  A flat directory is the wrong shape past a few hundred thousand chunks, so `shard_depth`
+  and `shard_width` spread them over subdirectories keyed on the leading digits of the
+  sequence number: depth 2 / width 3 writes chunk 1 as `000/000/001.bin`, capping every
+  directory at 1000 entries. **Both ends must agree on these** — a consumer descends only as
+  far as its own depth, so a mismatch reads the spool as permanently empty, and it warns when
+  a scan finds subdirectories it is not configured to enter.
+
+  Producer and consumer take their own lock file (`producer_file` / `consumer_file`), and the
+  producer's lock doubles as the "producer finished" signal. `emit_done` is three-valued —
+  `never`, `success`, `end` — controlling when the `done_file` is written, and `stop_on_done`
+  lets a reader end its stream when it sees one. `dir_spool` is **not idempotent**: every
+  write consumes a fresh `{seq}`, so a replay creates a new chunk even when the pattern
+  contains `{message_id}`. Pair it with downstream deduplication or an idempotent sink.
+
+- **`object_store` reads and writes local directories.** The `fs` backend is now enabled, so
+  the same endpoint that talks to S3, GCS and Azure also works against a plain path —
+  `file:///var/lib/mqb/incoming` in YAML, or `local-store://` on the CLI, which distinguishes
+  it from the single-file `file` connector.
+
+- **Conda packaging for `mq-bridge-app`.** A recipe and a release workflow publish the app
+  through conda alongside the existing Homebrew and cargo-binstall paths.
 
 ### Security
 
@@ -24,6 +69,18 @@ All notable changes to `mq-bridge`. Newest first.
 
 ### Fixed
 
+- **A Kafka drain no longer loses its tail.** `enable.partition.eof` is now set, and the
+  consumer tracks the end-of-partition offset each partition reports. A drain finishes when
+  every partition has actually delivered up to its high watermark, rather than when a batch
+  happens to come back empty — a buffer still in flight inside librdkafka or the prefetch
+  task used to read as "nothing left" and silently truncate the run.
+
+- **A route that fails to start reports the real cause.** The recorded cause is now read
+  *before* the task is aborted. Aborting drops the `OutcomeGuard`, which overwrites the cause
+  with its panicked-or-aborted fallback as soon as the task is next polled; under load that
+  landed first, so an actionable error — an unusable filter expression, say — was replaced by
+  a generic one.
+
 - **Five pieces of process-wide state are now reclaimed.** The event store dropped timed-out
   subscribers from its ack math but kept them in the map, so ephemeral subscribers — which
   use a fresh id per instance — grew it with churn. A `stream_buffer` partition created by
@@ -42,6 +99,19 @@ All notable changes to `mq-bridge`. Newest first.
 
 ### Changed
 
+- **Filter and `switch` expressions infer the numeric cast.** Comparing a text-typed field
+  against a numeric literal now reads it as a number, so `meta.retry_count > 3` and
+  `amount >= 50` work on metadata, CSV, and a SQL source's `numeric`/timestamp columns without
+  `number()`. The literal is what decides, so `zip == "01234"` still compares as text. `number()`
+  is unchanged and stays required where no literal names the intent (`meta.a > meta.b`,
+  `amount > 100 * 2`); text that is not a number still fails with the hint that names the field.
+  A side effect is that `meta.retries == 3` now matches at all — it previously compared a string
+  against a number on the fast path and could never be true.
+
+- **`zen-expression` upgraded from 0.55 to 2.0.** This is the engine behind `filter` and
+  `switch` expressions. Expressions that worked before are expected to keep working; the
+  numeric-cast inference above is the behaviour change worth re-reading a config for.
+
 - **Less allocation on hot paths.** The metrics middleware resolved its counter and histogram
   from the registry — allocating both label strings — on every message; the handles are now
   built once per wrapped endpoint. (Recorders must therefore be installed before routes
@@ -51,17 +121,6 @@ All notable changes to `mq-bridge`. Newest first.
   one pass without cloning keys.
 
 ## 0.4.9
-
-### Changed
-
-- **Filter and `switch` expressions infer the numeric cast.** Comparing a text-typed field
-  against a numeric literal now reads it as a number, so `meta.retry_count > 3` and
-  `amount >= 50` work on metadata, CSV, and a SQL source's `numeric`/timestamp columns without
-  `number()`. The literal is what decides, so `zip == "01234"` still compares as text. `number()`
-  is unchanged and stays required where no literal names the intent (`meta.a > meta.b`,
-  `amount > 100 * 2`); text that is not a number still fails with the hint that names the field.
-  A side effect is that `meta.retries == 3` now matches at all — it previously compared a string
-  against a number on the fast path and could never be true.
 
 ### Fixed
 
