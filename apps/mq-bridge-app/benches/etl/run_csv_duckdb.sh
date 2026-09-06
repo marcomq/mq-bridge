@@ -10,12 +10,13 @@
 # the string the CSV reader produced. Without it DuckDB infers types, which is
 # different work and belongs against the typed column instead.
 #
-# THREADS is the parameter to watch. DuckDB parallelises its CSV scan across
-# cores while `run_csv_mqb.sh` runs at --concurrency 1, so the two are only
-# comparable when this is stated. Both numbers are worth having:
+# Neither side is single-threaded. DuckDB parallelises its CSV scan across cores;
+# mq-bridge's --concurrency 1 is one route worker, but batch decode runs on a shared
+# pool (~2.4 cores measured on the untyped run). Publish the all-core run and state
+# the cores each side used. THREADS pins DuckDB's thread count if you need it for
+# diagnosis; a pinned figure is not comparable and is not published.
 #
-#   THREADS=1 ./run_csv_duckdb.sh   # like-for-like against mq-bridge
-#   ./run_csv_duckdb.sh             # this machine's ceiling (all cores)
+#   ./run_csv_duckdb.sh             # all cores — the number to publish against
 #
 # Skipped (not fatal) when uv is absent; duckdb is fetched ephemerally so the
 # repo takes on no permanent dependency.

@@ -17,7 +17,7 @@ YAML to write first and no per-connector tool to install. `list_routes`,
 
 **The rows never enter the model's context.** The agent describes the job; the
 engine moves the bytes. Moving a 116.3 MiB dataset costs three tool calls and
-~381 tokens — the same ~381 tokens whether the job is 1,000 rows or 1,000,000.
+~385 tokens — the same ~385 tokens whether the job is 1,000 rows or 1,000,000.
 
 | | Registry name | `io.github.marcomq/mq-bridge-app` |
 | --- | --- | --- |
@@ -336,11 +336,13 @@ Tail a live Kafka topic and keep the last 20 messages for inspection:
 ## Performance
 
 The interface costs **one round-trip, not a per-row tax**: a route started through
-`start_route` moves data at the rate the `copy` CLI does, within run-to-run
-variance, and what separates them is a fixed ~30-55 ms of startup and completion
-polling. In the latest run the MCP path measured marginally *above* the CLI on the
-same dataset — that is variance on a sub-second job, not the tool call being
-faster than the command.
+`start_route` moves data at the rate the `copy` CLI does, and what separates them is
+a fixed **~72 ms** of route startup and completion polling — 0.426 s against the CLI's
+0.354 s on the same 1M-row dataset in the same session. Most of that is the measuring
+client asking `route_status` every 50 ms, so completion is noticed up to one poll
+late; the two tool calls bracketing the job cost ~0.05 ms each at p50. The gap is
+fixed, so it shrinks to nothing as a proportion as the dataset grows — and it is more
+visible than it used to be only because the job itself got ~2.6x faster.
 
 {{#include ../../benches/etl/README.md:mcp_results}}
 

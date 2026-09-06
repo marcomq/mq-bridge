@@ -40,8 +40,8 @@ columns are measured on the same machine (this repo's Apple M1 host).
 
 > **These A/B tables are a 0.4.10-era, single-session comparison, kept intact so the
 > ratios against Sling and Meltano stay internally consistent.** mq-bridge's own
-> throughput was re-measured on 0.4.11 — CSV untyped 1,079,913 rows/s, CSV typed
-> 727,272 rows/s, Postgres 446,830 rows/s — and those figures are in
+> throughput was re-measured on 0.4.12 — CSV untyped 2,824,858 rows/s, CSV typed
+> 1,636,661 rows/s, Postgres 421,220 rows/s — and those figures are in
 > [Reference numbers](#reference-numbers-all-scenarios-at-a-glance). The baselines were
 > not re-run in that session, so the ratios below are not recomputed from it.
 
@@ -201,35 +201,70 @@ one session, and a row must never be quoted without it.
 <!-- ANCHOR: reference_numbers -->
 | Scenario | Batch | Conc. | Throughput | Peak RSS | Version |
 |---|---|---|---|---|---|
-| IPC forward (`static` → `memory`, Unix socket) | 1024 | 1 | **1,595,115 rows/s** | — | 0.4.11 (300 s window; was 1,769,700 on 0.4.9) |
-| CSV → JSONL (strings passthrough, 1M rows ~116 MiB) | 1024 | 1 | **1,079,913 rows/s** | ~22 MiB | 0.4.11 |
-| CSV → JSONL with typing `transform` (id→int, embedded JSON) | 1024 | 1 | **727,272 rows/s** | ~94 MiB | 0.4.11 |
-| Postgres → JSONL (1M rows, 7 mixed-type cols) | 1024 | 1 | **446,830 rows/s** | ~40 MiB | 0.4.11 |
-| Postgres → JSONL (same) | 1024 | 4 | **384,615 rows/s** | ~41 MiB | 0.4.10 |
+| CSV → JSONL (strings passthrough, 1M rows ~116 MiB) | 1024 | 1 | **2,824,858 rows/s** | ~28 MiB | 0.4.12 |
+| CSV → JSONL, same job driven through an MCP tool call | 1024 | 1 | **2,348,793 rows/s** | — | 0.4.12 |
+| CSV → JSONL with typing `transform` (id→int, embedded JSON) | 1024 | 1 | **1,636,661 rows/s** | ~68 MiB | 0.4.12 |
+| IPC forward (`static` → `memory`, Unix socket) | 1024 | 1 | **1,619,135 rows/s** | — | 0.4.12 (300 s window; 1,594,722 on 0.4.11) |
+| Postgres → JSONL (1M rows, 7 mixed-type cols) | 1024 | 4 | **480,538 rows/s** | ~55 MiB | 0.4.12 |
+| Postgres → JSONL (same) | 1024 | 1 | **421,220 rows/s** | ~46 MiB | 0.4.12 |
 <!-- ANCHOR_END: reference_numbers -->
 
-The 0.4.11 rows were re-measured on 2026-09-04 on an idle machine (no build, no
-indexer, no other container running): CSV 3 timed runs after a discarded warm-up
-(untyped 0.926 s ±0.002, typed 1.375 s ±0.001), Postgres 10 timed runs across two
-sessions (2.238 s ±0.069), IPC one 300 s window. The Postgres figure is measured
-against a **freshly seeded** `bench` table on a freshly created container; the same
-scenario read 369,412 rows/s against a table left in place from earlier runs, so
-reseed before quoting it. **Peak RSS was not
-re-measured in that session** and is carried over from the 0.4.10 runs; the throughput
-figures are fresh. The 0.4.10 and 0.4.9 rows are retained as measured — see §4, §5 and
-§6 for the full write-ups and the Sling / Meltano baselines.
+The 0.4.12 rows were measured on 2026-09-06 on a settled machine (no build and no
+indexer running; load average under 2.5 entering each block), on the default (`full`)
+release build. CSV: 3 timed runs after a discarded warm-up (untyped 0.354 s ±0.001,
+typed 0.611 s ±0.020). MCP: 6 runs and **no discarded warm-up** — `mcp_bench.py` times
+every run including the cold first one, so a 2- or 3-run median reads materially low.
+Postgres: 10 timed runs across two sessions at concurrency 1 (median 2.374 s, spread
+2.190–2.509 s) and 3 runs at concurrency 4 (2.081 s ±0.132). IPC: one 300 s window.
+Peak RSS was re-measured in this session rather than carried over; the IPC scenario
+reports a sustained rate sampled from the receiver's transport log rather than a
+wall-clocked job, so it has no RSS column and is not comparable cell-for-cell with the
+rest of the table. The Postgres figure is measured against a
+**freshly seeded** `bench` table on a freshly created container; the same scenario read
+369,412 rows/s against a table left in place from earlier runs, so reseed before
+quoting it. See §4, §5 and §6 for the full write-ups and the Sling / Meltano
+baselines.
 
-Two things the table shows:
+> **`--concurrency 1` doesn't mean one thread.** It is one route *worker*. CSV decoding is spread across a shared pool, so the
+> untyped run uses ~2.4 cores (0.61 s user + 0.13 s sys against 0.31 s wall) and the
+> typed run ~3.9. Any comparison against a baseline pinned to one thread has to say so.
+
+Three things the table shows:
 
 - **Typing has a real but modest cost.** Adding a `transform` that coerces `id` to an
-  integer and decodes an embedded JSON document costs ~0.46 µs/row — CSV→JSONL drops
-  from 1.09M to 726k rows/s, about 1.5x, but every output record is fully typed.
+  integer and decodes an embedded JSON document costs ~0.26 µs/row — CSV→JSONL drops
+  from 2.82M to 1.64M rows/s, about 1.73x, but every output record is fully typed.
+- **Postgres → JSONL did not improve, and at concurrency 1 it read ~6% below the
+  0.4.11 figure** (421,220 vs 446,830). Two independent 5-run sessions agreed
+  (415,973 and 426,803), so this is not a one-off, but it is inside the session-to-
+  session spread this scenario is already documented to have. The scenario is bound by
+  the Postgres read, not by the file sink the 0.4.12 work touched. Concurrency 4, by
+  contrast, went from 384,615 to 480,538 and now overtakes concurrency 1, which it did
+  not before.
 - **Peak RSS does not scale with dataset size**, because rows stream in batches rather
-  than being buffered whole — ~22 MiB for a passthrough copy however large the input. It
+  than being buffered whole — ~28 MiB for a passthrough copy however large the input. It
   is not a constant: batch size, connector-side buffering, allocator retention and
   transforms all move it. The typing `transform` is the exception: its per-row JSON
-  decode and buffering push peak RSS to ~94 MiB, still far leaner than tools that
+  decode and buffering push peak RSS to ~68 MiB, still far leaner than tools that
   materialize the dataset.
+
+### Same-session baseline: DuckDB
+
+DuckDB, on the same file in the same session, is the reference for how fast this
+machine can turn this CSV into JSON *at all*. It is not an ETL tool and offers none of
+the delivery semantics mq-bridge does — no at-least-once, no checkpointing, no
+arbitrary sinks — so this is a throughput ceiling, not a like-for-like product
+comparison. `all_varchar=true` matches the untyped mq-bridge column: strings in,
+strings out. Run with [`run_csv_duckdb.sh`](run_csv_duckdb.sh).
+
+| Tool | Threads / cores used | Throughput | Peak RSS |
+|---|---|---|---|
+| mq-bridge-app `copy`, untyped | `--concurrency 1`, ~2.4 cores | **2,824,858 rows/s** (0.354 s ±0.001) | ~28 MiB |
+| DuckDB, all cores (default) | ~3.7 cores | 2,036,659 rows/s (0.491 s ±0.015) | ~467 MiB |
+
+mq-bridge was **~1.39x faster than DuckDB running on all of this machine's cores**,
+while using fewer cores and ~17x less memory. Both sides are multi-threaded here (see
+the note above), so the core counts belong next to the rates.
 
 ## Fixed parameters (printed next to every number)
 
@@ -367,11 +402,13 @@ over a 15-second sampling window:
 benches/etl/run_ipc_throughput.sh      # -> benches/etl/results/ipc_throughput.csv
 ```
 
-**Latest result: 1,594,722 rows/s** (mq-bridge 0.4.11) at `concurrency: 1`, sustained
+**Latest result: 1,619,135 rows/s** (mq-bridge 0.4.12) at `concurrency: 1`, sustained
 over a 5-minute window — `RUN_SECONDS=300 benches/etl/run_ipc_throughput.sh`, i.e. the
-same script with the sampling window widened from its 15-second default. The 0.4.9 run
-measured 1,769,700 rows/s over the same window (system-allocator baseline on that run:
-1,207,906 rows/s).
+same script with the sampling window widened from its 15-second default. That is flat
+against 0.4.11's 1,594,722 rows/s, which is the expected result: the 0.4.12 throughput
+work was in the file endpoint, transform, filter and batch decode, and none of it is on
+this path. The 0.4.9 run measured 1,769,700 rows/s over the same window
+(system-allocator baseline on that run: 1,207,906 rows/s).
 
 > **This scenario recorded nothing at all between 0.4.9 and 0.4.11.** `kill_pids` in
 > `lib.sh` used `((waited++))`, which evaluates to the old value and so exits 1 at
@@ -444,7 +481,12 @@ tap-csv emit):
 
 ```bash
 benches/etl/run_csv_to_jsonl.sh   # all tools -> benches/etl/results/csv_to_jsonl.csv
+benches/etl/run_csv_duckdb.sh     # DuckDB ceiling, appended to the same results CSV
 ```
+
+`run_csv_to_jsonl.sh` does not chain the DuckDB run — DuckDB is a ceiling reference
+rather than an ETL baseline, so it is invoked on its own. Its numbers are in
+[Same-session baseline: DuckDB](#same-session-baseline-duckdb).
 
 Each tool is also a standalone script, so a single number can be re-measured
 without re-running the matrix. They append to the same results CSV, each replacing
@@ -595,24 +637,35 @@ REPEATS=3 LATENCY_CALLS=1000 benches/etl/run_mcp_bench.sh
 <!-- ANCHOR: mcp_results -->
 | Measurement | Result |
 | --- | --- |
-| Tool-call round-trip latency (200 calls) | **p50 0.060 ms** · p95 0.080 ms · p99 0.583 ms |
-| 1M-row CSV → JSONL via `start_route` (client wall-clock, 2 runs) | **1,176,489 rows/s** (0.850 s ±0.023) |
-| Same job, server's own `average_messages_per_second` | 1,191,579 rows/s |
-| `copy` CLI baseline, same dataset (§6 untyped) | 1,133,786 rows/s (2-run median 0.882 s, ±0.001) |
-| Agent tool traffic to move the whole dataset | **1,526 bytes** (~381 tokens, 3 calls) |
+| Tool-call round-trip latency (200 calls) | **p50 0.051 ms** · p95 0.060 ms · p99 0.277 ms |
+| 1M-row CSV → JSONL via `start_route` (client wall-clock, 6 runs) | **2,348,793 rows/s** (0.426 s ±0.027) |
+| Same job, server's own `average_messages_per_second` | no longer usable at this speed — see the note below |
+| `copy` CLI baseline, same dataset and session (§6 untyped) | 2,824,858 rows/s (3-run median 0.354 s, ±0.001) |
+| Fixed cost of going through the MCP interface | **~72 ms** |
+| Agent tool traffic to move the whole dataset | **1,540 bytes** (~385 tokens, 3 calls) |
 | The same 116.3 MiB through a model's context | ~30.5M tokens |
 <!-- ANCHOR_END: mcp_results -->
 
-- **The MCP interface costs one round-trip, not a per-row tax.** Client wall-clock
-  lands within ~4% of the `copy` CLI on the same dataset and inside this host's
-  run-to-run spread — here it measures slightly *above* the CLI, which is variance,
-  not the MCP path being faster. What separates them is a fixed ~30-55 ms — route
-  startup plus up to one 50 ms completion poll — not a rate difference: the server's
-  own average over the identical job (1,191,579 rows/s) lands beside the CLI's
-  1,133,786 rows/s. Scale the dataset and the gap stays constant.
+- **The MCP interface costs one round-trip, not a per-row tax.** Client wall-clock is
+  0.426 s against the CLI's 0.354 s on the same dataset in the same session — a fixed
+  **~72 ms**, not a rate difference. Most of it is the client's own polling: it asks
+  `route_status` every 50 ms (`POLL_INTERVAL_S` in `mcp_bench.py`), so completion is
+  seen 0–50 ms late, ~25 ms on average. The two round trips that bracket the job cost
+  ~0.05 ms each at p50. The comparison is in fact tilted *toward* MCP: the harness
+  spawns a fresh `mqb copy` process for every CLI run, while the MCP server is spawned
+  once and reused, so the CLI figure carries process startup the MCP path never pays.
+  Scale the dataset and the ~72 ms stays put.
+- **Run the MCP scenario with enough repeats.** `mcp_bench.py` discards no warm-up —
+  every run is timed, including the cold first one. At `REPEATS=3` this measured
+  1,831,609 rows/s off a monotonically warming series (1.48M → 1.83M → 2.03M); at
+  `REPEATS=6` the trend is gone and the median is 2,348,793. Use 6 or more.
+- **Ignore the server's own `average_messages_per_second` here.** The route sampler
+  ticks every 200 ms and the whole job now finishes in about two ticks, so that field
+  quantises — it reported anything from 2.4M to 5.1M rows/s across runs of nearly
+  identical wall-clock. Client wall-clock is the only meaningful figure at this speed.
 - **Agent token cost is flat in the number of rows moved** — the one row here with
   no CLI counterpart. An agent moves the dataset with three tool calls
-  (`start_route`, one `route_status`, `stop_route`) totalling 1,526 bytes of
+  (`start_route`, one `route_status`, `stop_route`) totalling 1,540 bytes of
   JSON-RPC. The rows never enter the model's context, so the same ~1.5 KB moves 1M
   rows or 1,000 — only the digits of the counters differ. Passing the 116.3 MiB
   through a context window instead would cost ~30.5M tokens (~4 bytes/token, an
