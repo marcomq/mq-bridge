@@ -1313,10 +1313,32 @@ pub(crate) fn validate_agent_name(name: &str) -> anyhow::Result<&str> {
         || trimmed.contains(['/', '\\', ':', '?', '#'])
         || trimmed.starts_with('.')
         || matches!(trimmed, "DONE" | "PRODUCER" | "CONSUMER")
+        || is_windows_reserved(trimmed)
     {
         anyhow::bail!("invalid agent name '{name}': use a plain directory-safe name");
     }
     Ok(trimmed)
+}
+
+/// Whether the name is a Windows device name, which cannot become a directory
+/// there whatever the extension: `con.txt` still opens the console.
+fn is_windows_reserved(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or(name);
+    if stem.eq_ignore_ascii_case("CON")
+        || stem.eq_ignore_ascii_case("PRN")
+        || stem.eq_ignore_ascii_case("AUX")
+        || stem.eq_ignore_ascii_case("NUL")
+    {
+        return true;
+    }
+    let mut chars = stem.chars();
+    match (chars.next(), chars.next(), chars.next(), chars.next()) {
+        (Some(a), Some(b), Some(c), Some(d)) if chars.next().is_none() => {
+            let prefix = [a, b, c].map(|ch| ch.to_ascii_uppercase());
+            (prefix == ['C', 'O', 'M'] || prefix == ['L', 'P', 'T']) && ('1'..='9').contains(&d)
+        }
+        _ => false,
+    }
 }
 
 fn agents_dir() -> Result<PathBuf, McpError> {
@@ -1534,6 +1556,25 @@ mod tests {
                 validate_agent_name(bad).is_err(),
                 "'{bad}' must be refused as an agent name"
             );
+        }
+    }
+
+    // A Windows device name cannot be a directory there, whatever its case or
+    // extension, so the inbox has to be refused before it is created.
+    #[test]
+    fn a_windows_device_name_is_not_an_agent_name() {
+        for bad in [
+            "CON", "con", "Prn", "AUX", "nul", "COM1", "com9", "LPT1", "lpt9", "con.txt",
+            "NUL.log.1", "CoM3.spool",
+        ] {
+            assert!(
+                validate_agent_name(bad).is_err(),
+                "'{bad}' must be refused as an agent name"
+            );
+        }
+        // Only the exact device stems are reserved: nothing longer, and no COM0/LPT0.
+        for ok in ["console", "connie", "com", "COM0", "LPT10", "com1x", "nula"] {
+            assert_eq!(validate_agent_name(ok).unwrap(), ok);
         }
     }
 

@@ -215,7 +215,9 @@ impl DockerController {
         self.await_stopped(service);
     }
 
-    /// Blocks until the daemon stops reporting the service as running.
+    /// Blocks until the daemon stops reporting the service as running, and
+    /// panics if it still does after 30s rather than letting a restart test run
+    /// against a container that never went down.
     ///
     /// `compose stop` can return while the container is still listed running, and
     /// a `compose up` that reads that state reports `Running`, skips the start and
@@ -223,10 +225,11 @@ impl DockerController {
     fn await_stopped(&self, service: &str) {
         let deadline = Instant::now() + Duration::from_secs(30);
         while self.is_running(service) {
-            if Instant::now() >= deadline {
-                println!("docker still reports {service} as running 30s after stop");
-                return;
-            }
+            assert!(
+                Instant::now() < deadline,
+                "docker still reports {service} as running 30s after stop; \
+                 a restart test would run against the container that never stopped"
+            );
             std::thread::sleep(Duration::from_millis(100));
         }
     }
