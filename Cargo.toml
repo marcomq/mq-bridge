@@ -52,6 +52,8 @@ anyhow = "1.0"
 async-trait = "0.1"
 bytes = "1"
 fast-uuid-v7 = "0.1.9"
+# Bulk delimiter/quote scanning in the CSV row decoder.
+memchr = "2"
 serde = "1.0"
 serde_json = { version = "1.0", features = ["raw_value"] }
 serde_yaml_ng = "0.10"
@@ -92,6 +94,7 @@ thiserror = "2.0"
 futures = "0.3"
 tracing.workspace = true
 bytes = { workspace = true, features = ["serde"] }
+memchr.workspace = true
 async-channel = { version = "2.5" }
 # Length-delimited framing for the memory endpoint's IPC transports (portable:
 # Unix sockets and Windows named pipes). Already in the tree transitively.
@@ -383,6 +386,18 @@ rustls = { version = "0.23", features = ["ring"] }
 name = "performance_bench"
 harness = false
 required-features = ["test-utils"]
+
+# CSV -> JSON decode throughput for the file source (pure CPU, no I/O).
+[[bench]]
+name = "csv_to_json_bench"
+harness = false
+required-features = ["test-utils"]
+
+# Per-message cost of the `filter` and `transform` middlewares.
+[[bench]]
+name = "middleware_expr_bench"
+harness = false
+required-features = ["test-utils", "filter"]
 
 # Isolates the per-request HTTP route lookup (Mutex<HashMap> vs ArcSwap).
 # No external services or features required.

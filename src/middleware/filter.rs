@@ -14,7 +14,7 @@ use std::sync::Arc;
 use anyhow::{anyhow, bail, Context};
 use async_trait::async_trait;
 use serde_json::{Map, Value};
-use zen_expression::compiler::{FetchFastTarget, Opcode};
+use zen_expression::compiler::{Compare, FetchFastTarget, Jump, Opcode};
 use zen_expression::expression::Standard;
 use zen_expression::{compile_expression, Expression, Variable};
 
@@ -35,6 +35,12 @@ const METADATA_PREFIX: &str = "meta";
 pub(crate) struct CompiledFilter {
     expression: Expression<Standard>,
     fast_predicate: Option<FastPredicate>,
+    /// Whether every term of `fast_predicate` reads a metadata key or a single top-level
+    /// payload field, which is what the span route can serve without a document.
+    fast_reads_spans: bool,
+    /// Whether `fast_predicate` reads the payload at all. A metadata-only predicate must
+    /// not require the payload to be JSON.
+    fast_reads_payload: bool,
     /// Payload field paths the expression reads, e.g. `["order", "status"]`.
     payload_paths: Vec<Vec<String>>,
     /// Metadata keys the expression reads via the `meta` prefix.
@@ -45,10 +51,33 @@ pub(crate) struct CompiledFilter {
     warned_unusable_field: AtomicBool,
 }
 
-struct FastPredicate {
+/// A tree of single-field comparisons joined by `and`/`or`, decided without building a
+/// `Value` for the payload or running the expression VM.
+///
+/// Every evaluation returns `Option<bool>`: `None` means the slow path has to decide,
+/// which happens only where it would raise an error this route cannot phrase.
+enum FastPredicate {
+    Term(FastTerm),
+    And(Box<FastPredicate>, Box<FastPredicate>),
+    Or(Box<FastPredicate>, Box<FastPredicate>),
+}
+
+/// One field tested against one literal.
+struct FastTerm {
+    /// Dotted path into the merged document, so metadata reads as `["meta", key]`.
     path: Vec<String>,
-    expected: FastLiteral,
-    negate: bool,
+    op: FastOp,
+    literal: FastLiteral,
+}
+
+#[derive(Clone, Copy)]
+enum FastOp {
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
 }
 
 enum FastLiteral {
@@ -58,49 +87,227 @@ enum FastLiteral {
     String(Arc<str>),
 }
 
-impl FastPredicate {
-    fn evaluate(&self, document: &Value) -> bool {
-        self.evaluate_value(resolve_any(document, &self.path))
+/// What a term found where it looked. Metadata is always text, a payload field is
+/// whatever JSON held, and either can be missing.
+#[derive(Clone, Copy)]
+enum Reading<'a> {
+    Absent,
+    Text(&'a str),
+    Json(&'a Value),
+}
+
+impl FastOp {
+    fn from_compare(compare: Compare) -> Self {
+        match compare {
+            Compare::More => Self::Gt,
+            Compare::MoreOrEqual => Self::Ge,
+            Compare::Less => Self::Lt,
+            Compare::LessOrEqual => Self::Le,
+        }
     }
 
-    fn evaluate_value(&self, actual: Option<&Value>) -> bool {
-        let equal = match (&self.expected, actual) {
-            (FastLiteral::Null, None | Some(Value::Null)) => true,
-            (FastLiteral::Bool(expected), Some(Value::Bool(actual))) => expected == actual,
-            (FastLiteral::Number(expected), Some(Value::Number(actual))) => {
-                Variable::from(&Value::Number(actual.clone()))
-                    .as_number()
-                    .is_some_and(|actual| actual == *expected)
-            }
-            (FastLiteral::String(expected), Some(Value::String(actual))) => {
-                expected.as_ref() == actual
-            }
-            (FastLiteral::Number(expected), Some(Value::String(actual))) => {
-                parse_number(actual).is_some_and(|actual| actual == *expected)
-            }
-            _ => false,
-        };
-        equal ^ self.negate
+    /// The same test with its operands swapped, for a literal written on the left.
+    fn flipped(self) -> Self {
+        match self {
+            Self::Lt => Self::Gt,
+            Self::Gt => Self::Lt,
+            Self::Le => Self::Ge,
+            Self::Ge => Self::Le,
+            other => other,
+        }
     }
 
+    fn is_ordering(self) -> bool {
+        !matches!(self, Self::Eq | Self::Ne)
+    }
+
+    fn accepts(self, ordering: std::cmp::Ordering) -> bool {
+        use std::cmp::Ordering::{Equal, Greater, Less};
+        match self {
+            Self::Eq => ordering == Equal,
+            Self::Ne => ordering != Equal,
+            Self::Lt => ordering == Less,
+            Self::Le => ordering != Greater,
+            Self::Gt => ordering == Greater,
+            Self::Ge => ordering != Less,
+        }
+    }
+}
+
+impl Reading<'_> {
+    /// Absent, null, or a container: what [`resolve`] refuses to hand the expression.
+    fn is_unusable(&self) -> bool {
+        match self {
+            Self::Absent => true,
+            Self::Text(_) => false,
+            Self::Json(value) => value.is_null() || value.is_array() || value.is_object(),
+        }
+    }
+}
+
+impl FastTerm {
     fn metadata_key(&self) -> Option<&str> {
         (self.path.len() == 2 && self.path[0] == METADATA_PREFIX).then(|| self.path[1].as_str())
     }
 
-    fn top_level_payload_key(&self) -> Option<&str> {
+    fn payload_key(&self) -> Option<&str> {
         (self.path.len() == 1 && self.path[0] != METADATA_PREFIX).then(|| self.path[0].as_str())
     }
 
-    fn evaluate_metadata(&self, actual: Option<&String>) -> bool {
-        let equal = match (&self.expected, actual) {
-            (FastLiteral::Null, None) => true,
-            (FastLiteral::String(expected), Some(actual)) => expected.as_ref() == actual,
-            (FastLiteral::Number(expected), Some(actual)) => {
+    /// `None` where the engine would raise an error. What an error means depends on the
+    /// rest of the expression — it aborts the whole evaluation rather than just this
+    /// term, and `CompiledFilter::evaluate` then weighs it against every field the
+    /// expression reads — so those cases belong to the slow path alone.
+    fn evaluate(&self, reading: Reading<'_>) -> Option<bool> {
+        match self.op {
+            // Equality never errors: mismatched types simply do not match.
+            FastOp::Eq => Some(self.equals(reading)),
+            FastOp::Ne => Some(!self.equals(reading)),
+            _ => {
+                let FastLiteral::Number(expected) = &self.literal else {
+                    return None;
+                };
+                let actual = Self::numeric(reading)?;
+                Some(self.op.accepts(actual.cmp(expected)))
+            }
+        }
+    }
+
+    /// Equality as the engine performs it: mismatched types simply do not match, and a
+    /// text-typed field compared against a number is read as one.
+    fn equals(&self, reading: Reading<'_>) -> bool {
+        match (&self.literal, reading) {
+            (FastLiteral::Null, Reading::Absent | Reading::Json(Value::Null)) => true,
+            (FastLiteral::Bool(expected), Reading::Json(Value::Bool(actual))) => expected == actual,
+            (FastLiteral::String(expected), Reading::Json(Value::String(actual))) => {
+                expected.as_ref() == actual
+            }
+            (FastLiteral::String(expected), Reading::Text(actual)) => expected.as_ref() == actual,
+            (FastLiteral::Number(expected), Reading::Json(Value::Number(actual))) => {
+                Variable::from(&Value::Number(actual.clone()))
+                    .as_number()
+                    .is_some_and(|actual| actual == *expected)
+            }
+            (FastLiteral::Number(expected), Reading::Json(Value::String(actual))) => {
+                parse_number(actual).is_some_and(|actual| actual == *expected)
+            }
+            (FastLiteral::Number(expected), Reading::Text(actual)) => {
                 parse_number(actual).is_some_and(|actual| actual == *expected)
             }
             _ => false,
+        }
+    }
+
+    /// The value as a number, reading a text-typed field as one the way the slow path's
+    /// `coerce_numeric_fields` does. `None` for anything the engine cannot order.
+    fn numeric(reading: Reading<'_>) -> Option<rust_decimal::Decimal> {
+        let text = match reading {
+            Reading::Text(text) => text,
+            Reading::Json(Value::String(text)) => text,
+            Reading::Json(Value::Number(number)) => {
+                return Variable::from(&Value::Number(number.clone())).as_number()
+            }
+            Reading::Absent | Reading::Json(_) => return None,
         };
-        equal ^ self.negate
+        parse_number(text)
+    }
+}
+
+impl FastPredicate {
+    /// Evaluates against the merged document the slow path builds, which already carries
+    /// metadata under `meta` and a `null` for every absent path.
+    fn evaluate(&self, document: &Value) -> Option<bool> {
+        match self {
+            Self::Term(term) => term
+                .evaluate(resolve_any(document, &term.path).map_or(Reading::Absent, Reading::Json)),
+            // Short-circuiting mirrors the engine's own `and`/`or`, so a term the fast
+            // route would defer on is skipped here exactly as it is there.
+            Self::And(left, right) => match left.evaluate(document)? {
+                false => Some(false),
+                true => right.evaluate(document),
+            },
+            Self::Or(left, right) => match left.evaluate(document)? {
+                true => Some(true),
+                false => right.evaluate(document),
+            },
+        }
+    }
+
+    /// Evaluates from the record's top-level spans, so only the fields the predicate
+    /// actually names are ever parsed.
+    fn evaluate_spans(
+        &self,
+        message: &CanonicalMessage,
+        pairs: &[(&str, &serde_json::value::RawValue)],
+        warn: &mut dyn FnMut(&str),
+    ) -> Option<bool> {
+        match self {
+            Self::Term(term) => Self::evaluate_term_from_spans(term, message, pairs, warn),
+            Self::And(left, right) => match left.evaluate_spans(message, pairs, warn)? {
+                false => Some(false),
+                true => right.evaluate_spans(message, pairs, warn),
+            },
+            Self::Or(left, right) => match left.evaluate_spans(message, pairs, warn)? {
+                true => Some(true),
+                false => right.evaluate_spans(message, pairs, warn),
+            },
+        }
+    }
+
+    fn evaluate_term_from_spans(
+        term: &FastTerm,
+        message: &CanonicalMessage,
+        pairs: &[(&str, &serde_json::value::RawValue)],
+        warn: &mut dyn FnMut(&str),
+    ) -> Option<bool> {
+        if let Some(key) = term.metadata_key() {
+            let reading = message
+                .metadata
+                .get(key)
+                .map_or(Reading::Absent, |value| Reading::Text(value));
+            if reading.is_unusable() {
+                warn(&format!("{METADATA_PREFIX}.{key}"));
+            }
+            return term.evaluate(reading);
+        }
+
+        let key = term.payload_key()?;
+        // Searching from the back resolves a duplicated key to its last value, the way
+        // collapsing the payload into a `Value` would.
+        let raw = pairs
+            .iter()
+            .rev()
+            .find(|(candidate, _)| *candidate == key)
+            .map(|(_, raw)| *raw);
+        let value: Option<Value> = match raw {
+            // A field that will not parse is left for the slow path to report.
+            Some(raw) => Some(serde_json::from_str(raw.get()).ok()?),
+            None => None,
+        };
+        let reading = value.as_ref().map_or(Reading::Absent, Reading::Json);
+        if reading.is_unusable() {
+            warn(key);
+        }
+        term.evaluate(reading)
+    }
+
+    /// Whether every term reads a metadata key or a single top-level payload field.
+    fn reads_spans(&self) -> bool {
+        match self {
+            Self::Term(term) => term.metadata_key().is_some() || term.payload_key().is_some(),
+            Self::And(left, right) | Self::Or(left, right) => {
+                left.reads_spans() && right.reads_spans()
+            }
+        }
+    }
+
+    fn reads_payload(&self) -> bool {
+        match self {
+            Self::Term(term) => term.metadata_key().is_none(),
+            Self::And(left, right) | Self::Or(left, right) => {
+                left.reads_payload() || right.reads_payload()
+            }
+        }
     }
 }
 
@@ -187,9 +394,17 @@ impl CompiledFilter {
                  index into the array before the filter, or compare a scalar field"
             );
         }
+        let fast_reads_spans = fast_predicate
+            .as_ref()
+            .is_some_and(FastPredicate::reads_spans);
+        let fast_reads_payload = fast_predicate
+            .as_ref()
+            .is_some_and(FastPredicate::reads_payload);
         Ok(Self {
             expression,
             fast_predicate,
+            fast_reads_spans,
+            fast_reads_payload,
             payload_paths,
             metadata_keys,
             numeric_paths,
@@ -215,28 +430,19 @@ impl CompiledFilter {
         context: &mut FilterContext,
     ) -> anyhow::Result<bool> {
         if let Some(predicate) = &self.fast_predicate {
-            if let Some(key) = predicate.metadata_key() {
-                let actual = message.metadata.get(key);
-                if actual.is_none() {
-                    self.warn_unusable_field(&format!("{METADATA_PREFIX}.{key}"));
-                }
-                return Ok(predicate.evaluate_metadata(actual));
-            }
-            if let Some(key) = predicate.top_level_payload_key() {
-                if let Ok(RawPairs(pairs)) = serde_json::from_slice(&message.payload) {
-                    let raw = pairs
-                        .iter()
-                        .rev()
-                        .find(|(candidate, _)| *candidate == key)
-                        .map(|(_, value)| *value);
-                    let value: Option<Value> =
-                        raw.map(|raw| serde_json::from_str(raw.get())).transpose()?;
-                    if value.as_ref().is_none_or(|value| {
-                        value.is_null() || value.is_array() || value.is_object()
-                    }) {
-                        self.warn_unusable_field(key);
+            if self.fast_reads_spans {
+                let mut warn = |field: &str| self.warn_unusable_field(field);
+                // A metadata-only predicate must not require the payload to be JSON.
+                let decided = if self.fast_reads_payload {
+                    match serde_json::from_slice(&message.payload) {
+                        Ok(RawPairs(pairs)) => predicate.evaluate_spans(message, &pairs, &mut warn),
+                        Err(_) => None,
                     }
-                    return Ok(predicate.evaluate_value(value.as_ref()));
+                } else {
+                    predicate.evaluate_spans(message, &[], &mut warn)
+                };
+                if let Some(result) = decided {
+                    return Ok(result);
                 }
             }
         }
@@ -276,8 +482,14 @@ impl CompiledFilter {
     }
 
     fn evaluate(&self, document: &Value, has_unusable_field: bool) -> anyhow::Result<bool> {
-        if let Some(predicate) = &self.fast_predicate {
-            return Ok(predicate.evaluate(document));
+        // Unusable fields were already reported by the caller, which also filled every
+        // absent path with a `null`, so this sees the same document the engine would.
+        if let Some(result) = self
+            .fast_predicate
+            .as_ref()
+            .and_then(|p| p.evaluate(document))
+        {
+            return Ok(result);
         }
 
         let variable = Variable::from(document);
@@ -352,22 +564,63 @@ impl CompiledFilter {
     }
 }
 
+/// Recognises the shapes the fast route can serve: one field against one literal, joined
+/// by `and`/`or`.
+///
+/// `and` and `or` compile to `[<left>, Jump(IfFalse|IfTrue, j), Pop, <right>]`, where the
+/// jump always lands on the last opcode of the subexpression it belongs to. The first
+/// such jump is therefore the outermost operator, which is what makes the grouping
+/// recoverable — and why `a or b and c` cannot be mistaken for `(a or b) and c`.
 fn compile_fast_predicate(expression: &Expression<Standard>) -> Option<FastPredicate> {
-    let opcodes = expression.bytecode();
-    let (left, right, negate) = match opcodes.as_ref() {
-        [left, right, Opcode::Equal] => (left, right, false),
-        [left, right, Opcode::Equal, Opcode::Not] => (left, right, true),
+    parse_fast_node(expression.bytecode().as_ref())
+}
+
+fn parse_fast_node(opcodes: &[Opcode]) -> Option<FastPredicate> {
+    let last = opcodes.len().checked_sub(1)?;
+    for (index, opcode) in opcodes.iter().enumerate() {
+        let Opcode::Jump(kind @ (Jump::IfFalse | Jump::IfTrue), offset) = opcode else {
+            continue;
+        };
+        if index + *offset as usize != last || !matches!(opcodes.get(index + 1), Some(Opcode::Pop))
+        {
+            continue;
+        }
+        let left = Box::new(parse_fast_node(&opcodes[..index])?);
+        let right = Box::new(parse_fast_node(&opcodes[index + 2..])?);
+        return Some(match kind {
+            Jump::IfFalse => FastPredicate::And(left, right),
+            _ => FastPredicate::Or(left, right),
+        });
+    }
+    parse_fast_term(opcodes).map(FastPredicate::Term)
+}
+
+fn parse_fast_term(opcodes: &[Opcode]) -> Option<FastTerm> {
+    let (left, right, op) = match opcodes {
+        [left, right, Opcode::Equal] => (left, right, FastOp::Eq),
+        [left, right, Opcode::Equal, Opcode::Not] => (left, right, FastOp::Ne),
+        [left, right, Opcode::Compare(compare)] => (left, right, FastOp::from_compare(*compare)),
         _ => return None,
     };
 
-    let (path, expected) = parse_fast_fetch(left)
-        .zip(parse_fast_literal(right))
-        .or_else(|| parse_fast_fetch(right).zip(parse_fast_literal(left)))?;
-    Some(FastPredicate {
-        path,
-        expected,
-        negate,
-    })
+    let (path, literal, op) = match parse_fast_fetch(left).zip(parse_fast_literal(right)) {
+        Some((path, literal)) => (path, literal, op),
+        // A literal written on the left reverses the test.
+        None => {
+            let (literal, path) = parse_fast_literal(left).zip(parse_fast_fetch(right))?;
+            (path, literal, op.flipped())
+        }
+    };
+    if path.is_empty() {
+        return None;
+    }
+    // The engine compares only numbers, and reports anything else as a typed-field
+    // problem the slow path phrases. Ordering against another kind of literal is
+    // therefore left to it entirely.
+    if op.is_ordering() && !matches!(literal, FastLiteral::Number(_)) {
+        return None;
+    }
+    Some(FastTerm { path, op, literal })
 }
 
 fn parse_fast_fetch(opcode: &Opcode) -> Option<Vec<String>> {
@@ -612,7 +865,7 @@ fn normalize_expression(expression: &str) -> String {
 /// Drops messages that do not match, before anything downstream sees them.
 pub struct FilterConsumer {
     inner: Box<dyn MessageConsumer>,
-    filter: CompiledFilter,
+    filter: Arc<CompiledFilter>,
     deferred: DeferredCommits,
 }
 
@@ -620,7 +873,7 @@ impl FilterConsumer {
     pub fn new(inner: Box<dyn MessageConsumer>, expression: &str) -> anyhow::Result<Self> {
         Ok(Self {
             inner,
-            filter: CompiledFilter::new(expression).context("invalid filter expression")?,
+            filter: Arc::new(CompiledFilter::new(expression).context("invalid filter expression")?),
             deferred: DeferredCommits::new(),
         })
     }
@@ -846,14 +1099,14 @@ impl MessageConsumer for FilterConsumer {
 /// Dropped messages count as sent: the route did what the configuration asked.
 pub struct FilterPublisher {
     inner: Box<dyn MessagePublisher>,
-    filter: CompiledFilter,
+    filter: Arc<CompiledFilter>,
 }
 
 impl FilterPublisher {
     pub fn new(inner: Box<dyn MessagePublisher>, expression: &str) -> anyhow::Result<Self> {
         Ok(Self {
             inner,
-            filter: CompiledFilter::new(expression).context("invalid filter expression")?,
+            filter: Arc::new(CompiledFilter::new(expression).context("invalid filter expression")?),
         })
     }
 }
@@ -890,14 +1143,20 @@ impl MessagePublisher for FilterPublisher {
         &self,
         messages: Vec<CanonicalMessage>,
     ) -> Result<SentBatch, PublisherError> {
-        let mut kept = Vec::with_capacity(messages.len());
-        for message in messages {
-            if self
-                .filter
-                .matches(&message)
-                .map_err(PublisherError::NonRetryable)?
-            {
-                kept.push(message);
+        // Split across cores: an ordered sink serializes this whole call, so route
+        // concurrency cannot overlap it and the batch itself is what has to parallelise.
+        let filter = Arc::clone(&self.filter);
+        let outcomes = crate::support::parallel::map_messages(messages, move |message| {
+            filter.matches(&message).map(|kept| kept.then_some(message))
+        })
+        .await;
+
+        let mut kept = Vec::with_capacity(outcomes.len());
+        for outcome in outcomes {
+            match outcome {
+                Ok(Some(message)) => kept.push(message),
+                Ok(None) => {}
+                Err(error) => return Err(PublisherError::NonRetryable(error)),
             }
         }
         if kept.is_empty() {
@@ -1198,8 +1457,88 @@ mod tests {
         assert!(error.contains("indexed path"), "unexpected error: {error}");
     }
 
+    /// Every predicate the fast route now claims must answer exactly as the expression
+    /// engine does — including where the engine raises an error, which the fast route has
+    /// to defer rather than silently turn into `false`.
     #[test]
-    fn simple_equality_predicates_compile_to_the_fast_path() {
+    fn fast_predicates_match_zen_across_operators_and_readings() {
+        let expressions = [
+            "amount == 100",
+            "amount != 100",
+            "amount > 100",
+            "amount >= 100",
+            "amount < 100",
+            "amount <= 100",
+            "100 < amount",
+            "100 >= amount",
+            "amount > 100 and country == 'US'",
+            "amount > 100 or country == 'US'",
+            "country == 'US' or amount > 100 and active == true",
+            "country == 'US' and amount > 100 or active == true",
+            "a == 1 and b == 2 and c == 3",
+            "a == 1 or b == 2 or c == 3",
+            "meta.retries > 3",
+            "meta.kind == 'order' and amount > 100",
+            "amount == null",
+            "amount != null",
+        ];
+
+        let payloads = [
+            r#"{"amount":100,"country":"US","active":true,"a":1,"b":2,"c":3}"#,
+            r#"{"amount":101,"country":"DE","active":false,"a":1,"b":9,"c":3}"#,
+            // Text-typed columns, as a CSV or SQL source delivers them.
+            r#"{"amount":"100","country":"US","active":true}"#,
+            r#"{"amount":"250.75","country":"US"}"#,
+            // Readings the engine refuses: text that is not a number, a bool, a
+            // container, an explicit null, and an absent field.
+            r#"{"amount":"abc","country":"US"}"#,
+            r#"{"amount":true,"country":"US"}"#,
+            r#"{"amount":[1,2],"country":"US"}"#,
+            r#"{"amount":{"v":1},"country":"US"}"#,
+            r#"{"amount":null,"country":"US"}"#,
+            r#"{"country":"US"}"#,
+            r#"{}"#,
+            // Duplicate keys must resolve the way a `Value` parse would: last wins.
+            r#"{"amount":1,"amount":900}"#,
+        ];
+
+        let metadata_sets: [&[(&str, &str)]; 3] = [
+            &[],
+            &[("retries", "5"), ("kind", "order")],
+            &[("retries", "x")],
+        ];
+
+        for expression in expressions {
+            let fast = CompiledFilter::new(expression).unwrap();
+            assert!(
+                fast.fast_predicate.is_some(),
+                "{expression} should compile to the fast path"
+            );
+            let mut zen = CompiledFilter::new(expression).unwrap();
+            zen.fast_predicate = None;
+
+            for payload in payloads {
+                for metadata in metadata_sets {
+                    let message = message(payload, metadata);
+                    let (fast, zen) = (fast.matches(&message), zen.matches(&message));
+                    match (fast, zen) {
+                        (Ok(fast), Ok(zen)) => assert_eq!(
+                            fast, zen,
+                            "{expression} disagreed on {payload} with {metadata:?}"
+                        ),
+                        (Err(_), Err(_)) => {}
+                        (fast, zen) => panic!(
+                            "{expression} on {payload} with {metadata:?}: \
+                             fast={fast:?} zen={zen:?}"
+                        ),
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn comparison_and_boolean_predicates_compile_to_the_fast_path() {
         for expression in [
             "x == 1",
             "1 == x",
@@ -1207,6 +1546,15 @@ mod tests {
             "enabled == true",
             "order.status == 'open'",
             "meta.kind != 'ignored'",
+            "x > 1",
+            "1 < x",
+            "x >= 1",
+            "x <= 1",
+            "x == 1 or y == 2",
+            "x > 1 and y < 2",
+            "a == 1 and b == 2 and c == 3",
+            "a == 1 or b > 2 and c == 3",
+            "meta.retries > 3 and status == 'open'",
         ] {
             assert!(
                 CompiledFilter::new(expression)
@@ -1218,10 +1566,15 @@ mod tests {
         }
 
         for expression in [
-            "x > 1",
+            // A call or arithmetic is not a bare field against a bare literal.
             "number(meta.count) >= 2",
-            "x == 1 or y == 2",
             "x + 1 == 2",
+            // The engine orders numbers only, so ordering against anything else has to
+            // reach the slow path that reports it as a typed-field problem.
+            "x > 'a'",
+            "x >= true",
+            // Neither side is a literal.
+            "x == y",
         ] {
             assert!(
                 CompiledFilter::new(expression)

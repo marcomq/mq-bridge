@@ -8,6 +8,7 @@
 //  Tools: `publish`, `start_route`, `list_routes`, `route_status`, `stop_route`.
 
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -168,6 +169,35 @@ struct StartRouteArgs {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct AgentListenArgs {
+    /// The name other agents address this one by. Becomes a directory under
+    /// `$MQB_AGENTS_DIR` (default `~/.mqb-agents`).
+    name: String,
+    /// Optional source endpoint replacing the default local directory — any
+    /// connector, e.g. `{"nats": {"url": "...", "stream": "AGENTS", "subject":
+    /// "agents.me"}}`, to receive from agents that are not on this machine.
+    #[serde(default)]
+    input: Option<Endpoint>,
+    /// How many messages to hold for `route_messages`. Defaults to 200.
+    #[serde(default)]
+    capture_last: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct AgentSendArgs {
+    /// The recipient agent's name. Required unless `output` names the target
+    /// explicitly.
+    #[serde(default)]
+    to: Option<String>,
+    /// The message to deliver — a string, or any JSON value.
+    message: serde_json::Value,
+    /// Optional sink endpoint replacing the recipient's local inbox directory,
+    /// for an agent reachable over a broker rather than this filesystem.
+    #[serde(default)]
+    output: Option<Endpoint>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct GenerateCliCommandArgs {
     /// Optional route name in the generated configuration.
     #[serde(default)]
@@ -227,6 +257,10 @@ pub struct BridgeMcp {
     // generated handler builds the router, so the field itself isn't read directly.
     #[allow(dead_code)]
     tool_router: ToolRouter<BridgeMcp>,
+    /// This server's agent-bus name, claimed by `agent_listen` once its inbox is
+    /// actually open. `None` means the inbox was never opened: this process can
+    /// still send to other agents, but nothing can reach it.
+    agent: Arc<Mutex<Option<String>>>,
 }
 
 /// Capture buffer topic for an MCP-started route.
@@ -489,6 +523,7 @@ impl BridgeMcp {
             routes,
             starting: Arc::new(Mutex::new(HashSet::new())),
             publishers: Arc::new(Mutex::new(HashMap::new())),
+            agent: Arc::new(Mutex::new(None)),
             metrics,
             tool_router: Self::tool_router(),
         }
@@ -874,13 +909,139 @@ impl BridgeMcp {
         annotations(read_only_hint = true)
     )]
     async fn server_info(&self) -> Result<CallToolResult, McpError> {
+        let agent = self.agent.lock().await.clone();
         Ok(ok_json(serde_json::json!({
             "name": "mq-bridge-app",
             "version": env!("CARGO_PKG_VERSION"),
             "git_hash": option_env!("MQB_GIT_HASH").unwrap_or("unknown"),
             "profile": option_env!("MQB_BUILD_PROFILE").unwrap_or("unknown"),
             "build_time": option_env!("MQB_BUILD_TIME").unwrap_or("unknown"),
+            "agent_bus": {
+                "listening_as": agent.clone(),
+                "inbox_route": agent.as_ref().map(|_| AGENT_INBOX_ROUTE),
+                "agents_dir": agents_dir().ok().map(|d| d.to_string_lossy().into_owned()),
+                "peers": agent_peers(),
+            },
         })))
+    }
+
+    #[tool(
+        description = "Open this server's agent inbox so other agents on this machine can send it \
+            messages, and tail it for the rest of the session. Off until called — nothing can \
+            reach this agent before that. `name` is what peers address it by. Messages are then \
+            collected with `route_messages` on route `agent-inbox`; reads are destructive, and \
+            only the last `capture_last` (default 200) are held — the durable inbox is drained \
+            into that buffer, so mail beyond it is discarded, not queued. By \
+            default the inbox is a local directory under `$MQB_AGENTS_DIR` (default \
+            `~/.mqb-agents`), which any process able to write a file can post to; pass `input` to \
+            receive over a broker instead. Calling it twice is an error — one inbox per server.",
+        annotations(destructive_hint = false, read_only_hint = false)
+    )]
+    async fn agent_listen(
+        &self,
+        Parameters(args): Parameters<AgentListenArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let dir = agent_dir(&args.name)?;
+        // Held for the whole call, so two concurrent listens serialize rather than
+        // both starting a route. The name is written only once the inbox is open:
+        // claiming it up front would burn it for the session if the start failed.
+        let mut claim = self.agent.lock().await;
+        if let Some(existing) = claim.as_deref() {
+            return Err(invalid(format!(
+                "this server already listens as '{existing}'"
+            )));
+        }
+
+        let custom_input = args.input.is_some();
+        let input = match args.input {
+            Some(endpoint) => endpoint,
+            None => {
+                std::fs::create_dir_all(&dir).map_err(|e| {
+                    internal(format!("could not create inbox {}: {e}", dir.display()))
+                })?;
+                agent_spool_endpoint(&dir, false)?
+            }
+        };
+
+        // Concurrency 1 keeps the mailbox in the order it was written; an inbox
+        // is not a throughput problem.
+        let start = serde_json::json!({
+            "name": AGENT_INBOX_ROUTE,
+            "route": { "input": input, "output": { "null": null } },
+            "concurrency": 1,
+            "capture_last": args.capture_last.unwrap_or(AGENT_INBOX_CAPTURE),
+        });
+        let start: StartRouteArgs = serde_json::from_value(start)
+            .map_err(|e| internal(format!("could not build the inbox route: {e}")))?;
+        let result = self.start_route(Parameters(start)).await?;
+        if result.is_error.unwrap_or(false) {
+            return Ok(result);
+        }
+        *claim = Some(args.name.trim().to_string());
+
+        Ok(ok_json(serde_json::json!({
+            "listening_as": args.name.trim(),
+            "inbox_route": AGENT_INBOX_ROUTE,
+            // A custom `input` is the inbox in that case; the local directory the
+            // name maps to has nothing to do with where the mail comes from.
+            "inbox": (!custom_input).then(|| dir.to_string_lossy()),
+            "read_with": format!("route_messages {{\"name\": \"{AGENT_INBOX_ROUTE}\"}}"),
+            "peers": agent_peers(),
+        })))
+    }
+
+    #[tool(
+        description = "Send a message to another agent's inbox on this machine. Always available: \
+            sending needs no opt-in, because it only writes into a mailbox the recipient chose to \
+            open with `agent_listen`. `to` is the peer's name — `server_info` lists the peers that \
+            have an inbox and which are currently listening. Delivery is a single atomically \
+            written file, so a peer that is not running collects the message when it next listens. \
+            Pass `output` instead of `to` to reach an agent over a broker rather than this \
+            filesystem. A sender that has not called `agent_listen` is delivered as \
+            `from: \"unnamed\"` and cannot be replied to."
+    )]
+    async fn agent_send(
+        &self,
+        Parameters(args): Parameters<AgentSendArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let (endpoint, target) = match (args.output, args.to) {
+            (Some(endpoint), to) => {
+                let label = to.unwrap_or_else(|| endpoint_type_label(&endpoint.endpoint_type));
+                (endpoint, label)
+            }
+            (None, Some(to)) => {
+                let dir = agent_dir(&to)?;
+                if !dir.is_dir() {
+                    return Err(invalid(format!(
+                        "no agent '{to}' has an inbox here; `server_info` lists the ones that do"
+                    )));
+                }
+                (agent_spool_endpoint(&dir, true)?, to)
+            }
+            (None, None) => return Err(invalid("provide `to` (an agent name) or `output`")),
+        };
+
+        // A sender that never opened an inbox has no name to reply to.
+        let from = self.agent.lock().await.clone();
+        // The envelope is the payload, so a recipient reading raw files — with no
+        // mq-bridge at all — still learns who sent it and when.
+        let envelope = serde_json::json!({
+            "from": from.as_deref().unwrap_or("unnamed"),
+            "to": target,
+            "ts": std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0),
+            "message": args.message,
+        });
+        let publish = serde_json::json!({
+            "publisher": endpoint,
+            "message": { "payload": envelope },
+            "name": format!("agent:{target}"),
+        });
+        let publish: PublishArgs = serde_json::from_value(publish)
+            .map_err(|e| internal(format!("could not build the agent send: {e}")))?;
+        self.publish(Parameters(publish)).await
     }
 
     #[tool(
@@ -1109,9 +1270,126 @@ impl ServerHandler for BridgeMcp {
              \"pulsar\", \"config\": {\"url\": \"pulsar://host:6650\", \"topic\": \"...\", \
              \"subscription\": \"...\", \"initial_position\": \"earliest\"}}}. A source needs \
              `initial_position: earliest` to read a topic's existing backlog; the default \
-             (`latest`) only sees messages published after the subscription is created.",
+             (`latest`) only sees messages published after the subscription is created. \
+             Agents on one machine can also message each other: `agent_send` delivers to a named \
+             peer and is always available, while `agent_listen` opens this server's own inbox and \
+             is off until called — so nothing reaches this agent unless it opts in. Once \
+             listening, collect mail with `route_messages` on route `agent-inbox`. `server_info` \
+             reports the bus: who is listening here, and which peers have an inbox.",
         )
     }
+}
+
+/// Route name of this process's agent inbox. Fixed, so `route_messages` can read
+/// the mailbox without the caller having to remember a generated name.
+const AGENT_INBOX_ROUTE: &str = "agent-inbox";
+
+/// How many inbox messages are held for `route_messages` to collect.
+const AGENT_INBOX_CAPTURE: usize = 200;
+
+/// Root holding one directory per agent on this machine. The directory listing
+/// *is* the registry: an inbox exists only because an agent opened one.
+pub(crate) fn agents_root() -> anyhow::Result<PathBuf> {
+    if let Some(dir) = std::env::var_os("MQB_AGENTS_DIR") {
+        return Ok(PathBuf::from(dir));
+    }
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .ok_or_else(|| anyhow::anyhow!("no HOME or USERPROFILE set; set MQB_AGENTS_DIR instead"))?;
+    Ok(PathBuf::from(home).join(".mqb-agents"))
+}
+
+/// One agent name is one directory name, so anything that could escape the root
+/// or collide with `dir_spool`'s own control files is rejected.
+///
+/// `:` is refused alongside the separators because every Windows path prefix —
+/// a drive, a verbatim `\\?\` and a UNC share alike — is built from one of the
+/// three, and `join` treats a prefix as a new root rather than as a name.
+pub(crate) fn validate_agent_name(name: &str) -> anyhow::Result<&str> {
+    let trimmed = name.trim();
+    if trimmed.is_empty()
+        || trimmed.contains(['/', '\\', ':'])
+        || trimmed.starts_with('.')
+        || matches!(trimmed, "DONE" | "PRODUCER" | "CONSUMER")
+    {
+        anyhow::bail!("invalid agent name '{name}': use a plain directory-safe name");
+    }
+    Ok(trimmed)
+}
+
+fn agents_dir() -> Result<PathBuf, McpError> {
+    agents_root().map_err(|e| internal(e.to_string()))
+}
+
+fn agent_dir(name: &str) -> Result<PathBuf, McpError> {
+    let trimmed = validate_agent_name(name).map_err(|e| invalid(e.to_string()))?;
+    Ok(agents_dir()?.join(trimmed))
+}
+
+/// The default local transport: a `dir_spool` queue with no metadata sidecar, so
+/// one message is one atomically-renamed file and any process that can write a
+/// file can take part.
+fn agent_spool_endpoint(dir: &Path, sending: bool) -> Result<Endpoint, McpError> {
+    let mut spool = serde_json::json!({
+        "path": dir.to_string_lossy(),
+        "metadata_extension": "",
+    });
+    if sending {
+        // Several agents write one inbox, so names must not collide and the
+        // producer lock must not refuse the second sender.
+        spool["naming_pattern"] = serde_json::json!("{seq:09}-{message_id}");
+        spool["claim"] = serde_json::json!("warn");
+    }
+    serde_json::from_value(serde_json::json!({ "dir_spool": spool }))
+        .map_err(|e| internal(format!("could not build the agent inbox endpoint: {e}")))
+}
+
+/// Whether a listener is actually running on `inbox`.
+///
+/// `dir_spool` holds its `CONSUMER` lock only while a draining consumer is open,
+/// but a crashed listener leaves the file behind — so the lock's *owner* is the
+/// question, not the file's existence. `get_owner` reports a dead owner as free
+/// and clears the lock, exactly as the next `dir_spool` start would.
+///
+/// That cleanup is the one write behind `server_info`'s `read_only_hint`: it only
+/// ever removes a lock whose owner is gone, which no caller can still be relying
+/// on, and pidlock offers no liveness read without it.
+fn consumer_alive(inbox: &Path) -> bool {
+    pidlock::Pidlock::new_validated(inbox.join("CONSUMER"))
+        .map(|lock| !matches!(lock.get_owner(), Ok(None)))
+        .unwrap_or(false)
+}
+
+/// Every agent that has an inbox, whether its listener is currently running, and
+/// how much unread mail is waiting.
+fn agent_peers() -> Vec<serde_json::Value> {
+    let Ok(root) = agents_dir() else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        return Vec::new();
+    };
+    let mut peers: Vec<serde_json::Value> = entries
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .map(|e| {
+            let path = e.path();
+            let pending = std::fs::read_dir(&path)
+                .map(|d| {
+                    d.flatten()
+                        .filter(|f| f.file_name().to_string_lossy().ends_with(".bin"))
+                        .count()
+                })
+                .unwrap_or(0);
+            serde_json::json!({
+                "name": e.file_name().to_string_lossy(),
+                "pending": pending,
+                "listening": consumer_alive(&path),
+            })
+        })
+        .collect();
+    peers.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+    peers
 }
 
 /// A process-unique name for an auto-named route. A monotonic counter avoids the
@@ -1236,6 +1514,45 @@ mod tests {
 
     fn parse(route: serde_json::Value) -> RouteArg {
         serde_json::from_value(route).expect("route parses")
+    }
+
+    // An agent name becomes a directory under the agents root, so anything that
+    // could resolve outside it has to be refused before `join` sees it.
+    #[test]
+    fn an_agent_name_must_be_one_plain_directory_name() {
+        for ok in ["bob", "claude-1", "gpt_worker"] {
+            assert_eq!(validate_agent_name(ok).unwrap(), ok);
+        }
+        // `C:` carries no separator, but `join` treats a drive prefix as a new root.
+        for bad in [
+            "", " ", ".", "..", "a/b", "a\\b", "C:", "\\\\?\\x", "/etc", "CONSUMER",
+        ] {
+            assert!(
+                validate_agent_name(bad).is_err(),
+                "'{bad}' must be refused as an agent name"
+            );
+        }
+    }
+
+    // `server_info` reports a peer as listening, and a crashed listener leaves its
+    // lock file behind — so the answer has to come from the lock's owner.
+    #[test]
+    fn a_peer_is_listening_only_while_its_lock_owner_lives() {
+        let inbox = std::env::temp_dir().join(format!("mqb-consumer-alive-{}", std::process::id()));
+        std::fs::create_dir_all(&inbox).expect("inbox is creatable");
+        let lock = inbox.join("CONSUMER");
+        let _ = std::fs::remove_file(&lock);
+
+        assert!(!consumer_alive(&inbox), "no lock is not listening");
+
+        std::fs::write(&lock, std::process::id().to_string()).expect("lock is writable");
+        assert!(consumer_alive(&inbox), "a live owner is listening");
+
+        // pid 0 is never a running process, so this is the crashed-listener case.
+        std::fs::write(&lock, "0").expect("lock is writable");
+        assert!(!consumer_alive(&inbox), "a stale lock is not listening");
+
+        let _ = std::fs::remove_dir_all(&inbox);
     }
 
     #[test]

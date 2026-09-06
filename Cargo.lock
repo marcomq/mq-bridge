@@ -3432,6 +3432,7 @@ dependencies = [
  "libloading",
  "libmqm-sys",
  "lz4_flex",
+ "memchr",
  "metrics",
  "metrics-util",
  "mongodb",

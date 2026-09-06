@@ -19,7 +19,7 @@ running as a continuous bridge (see
 The common copy controls are deliberately small:
 
 ```text
-mqb copy SOURCE TARGET [--filter EXPR] [--resume | --no-resume] [--drain]
+mqb copy SOURCE TARGET [--filter EXPR] [--resume | --no-resume] [--drain] [--wait SECS]
 ```
 
 `--filter` evaluates a readable expression against each top-level JSON payload,
@@ -128,6 +128,27 @@ never "end". With `--drain`, `copy` exits once the source yields an empty
 batch — the right mode for finite sources (a file, or a full-table read from
 a database). `--concurrency` and `--batch-size` tune throughput on both
 modes.
+
+`--wait SECS` covers the case in between: a source another process is still
+filling. It is long polling over a drain — it implies `--drain`, waits up to
+SECS for the first message, and returns as soon as one arrives, so the value is
+a ceiling rather than a delay. Without it a drain that starts a moment too early
+sees an empty source and exits reporting nothing to do.
+
+```bash
+# Blocks until another process writes to the spool, then drains it and exits.
+mqb copy --from spool:///var/spool/incoming --to postgres://... --wait 300
+```
+
+`--wait` waits by retrying the drain, so it lets go of the source between
+attempts. That is invisible for a file or a table, but a source that allows only
+one reader at a time — a `dir_spool` queue — is claimable by someone else in the
+gap. Where that matters, use `agent-listen`, which holds its source open for the
+whole wait.
+
+Each retry is a fresh connection, roughly four a second. That is free for a spool
+or a file, but a long `--wait` against a broker or a database reconnects thousands
+of times; prefer a short wait there, or a continuous bridge.
 
 ## Escape hatch: driver options and full connection strings
 

@@ -17,6 +17,7 @@ pub mod connection_registry;
 pub mod crypto;
 pub(crate) mod crypto_envelope;
 pub mod interpolation;
+pub(crate) mod parallel;
 /// The stable C ABI shared with dynamically loaded endpoint plugins.
 #[cfg(feature = "plugin")]
 pub mod plugin_abi;

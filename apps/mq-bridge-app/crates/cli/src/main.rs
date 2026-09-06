@@ -44,6 +44,16 @@ pub(crate) const DEFAULT_CONCURRENCY: usize = 4;
 /// exposes completion as a poll, not a notification; see [`run_copy`].
 const COPY_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
+/// How long `copy --wait` pauses between drain attempts. An empty source drains
+/// instantly, so without this the wait would spin.
+const COPY_WAIT_RETRY_INTERVAL: Duration = Duration::from_millis(250);
+
+/// How long a stopped route is given to publish what it already read. `stop` only
+/// signals; the tally is a source-side count, so reporting before the task ends
+/// can claim rows the destination never saw. Matches the budget `Route::stop`
+/// gives a route it owns, so the two ways of stopping wait the same.
+const COPY_STOP_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Address the web UI falls back to when the config names none. Only ever
 /// applied after an explicit `--ui` or a `y` from [`ui_prompt`].
 const DEFAULT_UI_ADDR: &str = "0.0.0.0:9091";
@@ -169,9 +179,44 @@ enum Command {
     /// endpoints, all supplied ad hoc as endpoint JSON. No web UI is started.
     Mcp(McpArgs),
 
+    /// Wait for mail in this machine's agent inbox, write it out, and exit.
+    ///
+    /// The inbox is `$MQB_AGENTS_DIR/<NAME>` (default `~/.mqb-agents/<NAME>`) —
+    /// the same mailbox the MCP server's `agent_listen` and `agent_send` tools
+    /// use, so an agent with no MCP client can join in with one command.
+    ///
+    /// The inbox is held for the whole wait, so a second listener on the same
+    /// name is refused rather than quietly splitting the mail.
+    ///
+    /// Exiting *is* the notification: run it as a background job and its
+    /// completion is what tells the agent mail arrived.
+    AgentListen(AgentListenArgs),
+
     /// Print a copyable, self-contained command for the loaded YAML/JSON config.
     /// Credential values are replaced by environment-variable placeholders.
     ToCli,
+}
+
+#[derive(clap::Args, Debug)]
+struct AgentListenArgs {
+    /// Inbox to read: this agent's own name.
+    #[arg(value_name = "NAME")]
+    name: String,
+
+    /// Seconds to wait for the first message before giving up. `0` does not wait
+    /// at all: it takes whatever is already queued and exits.
+    #[arg(long, value_name = "SECS", default_value_t = 3600)]
+    wait: u64,
+
+    /// Where to write what arrives. Defaults to a file named after the inbox
+    /// under the system temp directory, whose path is printed on exit.
+    #[arg(long, value_name = "TARGET")]
+    to: Option<String>,
+
+    /// Log what the listen is doing. Without it only warnings and errors are
+    /// logged.
+    #[arg(short, long)]
+    verbose: bool,
 }
 
 #[derive(clap::Args, Debug)]
@@ -304,6 +349,18 @@ struct CopyArgs {
     #[arg(long)]
     drain: bool,
 
+    /// Wait up to SECS for the source to produce something (long polling).
+    ///
+    /// Implies `--drain`: the job still drains and exits, this only governs how
+    /// long it looks for the first message. It returns as soon as one arrives,
+    /// so this is a ceiling, not a delay. `0` waits not at all, which is plain
+    /// `--drain`.
+    ///
+    /// Use it when another process fills the source: a drain that starts too
+    /// early sees an empty source and exits reporting nothing to do.
+    #[arg(long, value_name = "SECS")]
+    wait: Option<u64>,
+
     /// Route concurrency (defaults to 4).
     #[arg(long)]
     concurrency: Option<usize>,
@@ -374,7 +431,12 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Copy(copy_args)) => {
             init_copy_logging(args.color, copy_args.verbose);
             load_cli_plugins(&args.plugins)?;
-            return run_copy(copy_args).await;
+            return run_copy(copy_args, StopWhen::SourceDrained).await;
+        }
+        Some(Command::AgentListen(listen_args)) => {
+            init_copy_logging(args.color, listen_args.verbose);
+            load_cli_plugins(&args.plugins)?;
+            return run_agent_listen(listen_args).await;
         }
         Some(Command::Mcp(mcp_args)) => {
             // The install actions configure clients and exit; only the bare
@@ -764,10 +826,111 @@ fn route_entity(name: &str, config: &AppConfig) -> StatusRoute {
         summary,
     }
 }
+/// When a copy stops.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum StopWhen {
+    /// What `copy` does: the source running dry, or Ctrl-C without `--drain`.
+    SourceDrained,
+    /// What `agent-listen` does: the first message to arrive. The route runs as a
+    /// continuous bridge, so the source is never let go of while waiting and an
+    /// exclusive claim (`dir_spool`) stays held throughout. Anything that lands
+    /// after the decision to stop simply waits for the next run.
+    FirstMessage,
+}
+
+/// Whether this copy is drain-then-exit.
+///
+/// `--wait` is long polling over a drain: it governs only how long we look for
+/// the first message, so it implies `--drain` rather than competing with it.
+fn drains(args: &CopyArgs) -> bool {
+    args.drain || args.wait.is_some()
+}
+
+/// Runs the `agent-listen` subcommand: holds this machine's agent inbox open
+/// until mail arrives, writes it out and exits.
+///
+/// Deliberately a thin wrapper over [`run_copy`] rather than its own consumer:
+/// the inbox is an ordinary `dir_spool` queue, so the only thing this adds is
+/// knowing where it lives and stopping at the first message.
+async fn run_agent_listen(args: AgentListenArgs) -> anyhow::Result<()> {
+    let name = mcp::validate_agent_name(&args.name)?;
+    let inbox = mcp::agents_root()?.join(name);
+    // The inbox has to exist before a consumer can hold it, and an agent that
+    // listens before anyone has written to it is the normal first run.
+    std::fs::create_dir_all(&inbox)
+        .with_context(|| format!("could not create agent inbox {}", inbox.display()))?;
+
+    let to = match args.to {
+        Some(to) => to,
+        None => {
+            let out = std::env::temp_dir().join(format!("mqb-agent-{name}.jsonl"));
+            println!("writing mail to {}", out.display());
+            // `raw` writes the sender's envelope as-is; the default format would
+            // wrap it in a second JSON object with the payload as a string.
+            format!("file://{}?format=raw", out.display())
+        }
+    };
+
+    // With no budget there is no first message to hold out for, so `--wait 0` is a
+    // plain drain of what is already queued — the same reading `copy --wait 0` has.
+    // Waiting for a delivery that has not happened yet is what `FirstMessage` is for.
+    let take_queued_only = args.wait == 0;
+
+    run_copy(
+        CopyArgs {
+            // `metadata_extension=` (empty) matches what `agent_send` writes: one
+            // message is one file, with no sidecar.
+            from: Some(format!("spool://{}?metadata_extension=", inbox.display())),
+            to: Some(to),
+            source: None,
+            target: None,
+            filter: None,
+            resume: false,
+            no_resume: false,
+            // Draining is what `--wait 0` means here; any other budget holds the
+            // inbox open and stops at the first delivery instead.
+            drain: take_queued_only,
+            wait: Some(args.wait),
+            concurrency: Some(1),
+            batch_size: None,
+            verbose: args.verbose,
+        },
+        if take_queued_only {
+            StopWhen::SourceDrained
+        } else {
+            StopWhen::FirstMessage
+        },
+    )
+    .await
+}
+
+/// Stops a route and waits for its task to actually end, reporting how it ended.
+///
+/// `RouteHandle::stop` only signals shutdown: it returns while the route is still
+/// publishing what it has already read. Every caller here reports a tally taken
+/// on the source side, so settling first is what keeps the summary from claiming
+/// rows the destination never received.
+async fn stop_and_settle(
+    handle: &mq_bridge::route::RouteHandle,
+) -> Option<mq_bridge::route::RouteOutcome> {
+    handle.stop().await;
+    tokio::time::timeout(COPY_STOP_TIMEOUT, async {
+        loop {
+            if let Some(outcome) = handle.outcome() {
+                break outcome;
+            }
+            tokio::time::sleep(COPY_POLL_INTERVAL).await;
+        }
+    })
+    .await
+    .inspect_err(|_| warn!("route did not finish stopping; the summary may overcount"))
+    .ok()
+}
+
 /// Runs the `copy` subcommand: builds a single in-memory route from the `--from`
 /// and `--to` URIs and awaits its completion. With `--drain` the underlying route
 /// exits once the source is empty; otherwise it runs until Ctrl-C.
-async fn run_copy(args: CopyArgs) -> anyhow::Result<()> {
+async fn run_copy(args: CopyArgs, stop_when: StopWhen) -> anyhow::Result<()> {
     use mq_bridge::models::{Route, RouteOptions};
     use mq_bridge::route::RouteOutcome;
 
@@ -803,28 +966,23 @@ async fn run_copy(args: CopyArgs) -> anyhow::Result<()> {
     let read = copy_pipeline::configure_counter(&mut input)?;
     let input_endpoint_label = endpoint_type_label(&input.endpoint_type);
     let output_endpoint_label = endpoint_type_label(&output.endpoint_type);
+    // `FirstMessage` deliberately does not drain: a drained route releases the
+    // source, and reacquiring it between polls is what opens the window a second
+    // listener can slip through.
+    let drain = drains(&args) && stop_when == StopWhen::SourceDrained;
     let options = RouteOptions {
         concurrency: args.concurrency.unwrap_or(DEFAULT_CONCURRENCY),
         batch_size: args.batch_size.unwrap_or(DEFAULT_BATCH_SIZE),
-        exit_on_empty: args.drain,
+        exit_on_empty: drain,
         ..Default::default()
     };
 
     let route = Route::new(input, output).with_options(options);
     let run_id = format!("copy-{}", uuid::Uuid::new_v4());
     let started = std::time::Instant::now();
-    let handle = if args.no_resume {
-        route.run_without_resume(&run_id).await
-    } else {
-        route.run(&run_id).await
-    };
-    let handle = Arc::new(handle.context("failed to start copy route")?);
-    let copy_status = copy_status_lease(
-        run_id,
-        input_endpoint_label.to_string(),
-        output_endpoint_label.to_string(),
-        handle.clone(),
-    );
+    // An empty source drains instantly, so waiting for one means retrying that
+    // drain until an attempt finds something or the budget is spent.
+    let wait_until = args.wait.map(|secs| started + Duration::from_secs(secs));
 
     info!(
         // Redacted: this line is the one that reaches journald, Docker logs and CI.
@@ -834,11 +992,77 @@ async fn run_copy(args: CopyArgs) -> anyhow::Result<()> {
         // Names the mechanism, not just the flag: which one the source picked
         // is what tells you where a restart will actually pick up from.
         resume = resume.map_or("off", copy_pipeline::ResumeCapability::as_str),
-        drain = args.drain,
+        drain,
+        wait_secs = args.wait,
         "copy route started"
     );
 
-    let result = if args.drain {
+    loop {
+        let handle = if args.no_resume {
+            route.run_without_resume(&run_id).await
+        } else {
+            route.run(&run_id).await
+        };
+        let handle = Arc::new(handle.context("failed to start copy route")?);
+        let copy_status = copy_status_lease(
+            run_id.clone(),
+            input_endpoint_label.to_string(),
+            output_endpoint_label.to_string(),
+            handle.clone(),
+        );
+
+        if stop_when == StopWhen::FirstMessage {
+            // Stop on whichever comes first: mail, the budget running out, or
+            // Ctrl-C. All three end the same way, since the rows already copied
+            // are the answer in every case.
+            tokio::select! {
+                _ = async {
+                    loop {
+                        if copied.load(std::sync::atomic::Ordering::Relaxed) > 0 {
+                            break;
+                        }
+                        tokio::time::sleep(COPY_POLL_INTERVAL).await;
+                    }
+                } => {}
+                _ = async {
+                    match wait_until {
+                        Some(deadline) => {
+                            tokio::time::sleep(
+                                deadline.saturating_duration_since(std::time::Instant::now()),
+                            )
+                            .await
+                        }
+                        None => std::future::pending::<()>().await,
+                    }
+                } => info!("nothing arrived within the wait budget"),
+                _ = tokio::signal::ctrl_c() => info!("Ctrl+C received; stopping listen"),
+            }
+            let outcome = stop_and_settle(&handle).await;
+            return copy_result(
+                outcome.or(Some(RouteOutcome::Stopped)),
+                handle.status().error,
+                &throughput(&copied, &read, started),
+            );
+        }
+
+        if !drain {
+            // Continuous bridge: run until Ctrl-C, then stop gracefully.
+            tokio::signal::ctrl_c()
+                .await
+                .context("failed to listen for Ctrl+C")?;
+            info!("Ctrl+C received; stopping copy");
+            // Through the same reporting as the drained branch: a bridge that dropped
+            // rows did not run clean either, and a supervisor restarting it needs to
+            // hear that from the exit status. The fallback only guards against a
+            // route that outlasts `COPY_STOP_TIMEOUT` without resolving.
+            let outcome = stop_and_settle(&handle).await;
+            return copy_result(
+                outcome.or(Some(RouteOutcome::Stopped)),
+                handle.status().error,
+                &throughput(&copied, &read, started),
+            );
+        }
+
         // One-shot: run until the source is drained, or abort on Ctrl-C.
         //
         // The route task ends on a permanent error just as it does on a real drain, so
@@ -863,36 +1087,39 @@ async fn run_copy(args: CopyArgs) -> anyhow::Result<()> {
 
         // Interrupted: shut the route down the same way the continuous branch does,
         // so the source connection and any checkpoint are released before we exit.
+        // A route that had already failed under the Ctrl-C says so through the
+        // settled outcome; a healthy one reports the same `Stopped` either way.
         if outcome.is_none() {
-            handle.stop().await;
+            let settled = stop_and_settle(&handle).await;
+            return copy_result(
+                settled,
+                handle.status().error,
+                &throughput(&copied, &read, started),
+            );
         }
 
-        copy_result(
+        // Drained with nothing to show and budget left: drop this route and look
+        // again. The tally is registered globally, so a later attempt keeps adding
+        // to the same counter rather than starting over.
+        if copied.load(std::sync::atomic::Ordering::Relaxed) == 0
+            && wait_until.is_some_and(|deadline| std::time::Instant::now() < deadline)
+        {
+            drop(copy_status);
+            tokio::select! {
+                _ = tokio::time::sleep(COPY_WAIT_RETRY_INTERVAL) => continue,
+                _ = tokio::signal::ctrl_c() => {
+                    info!("Ctrl+C received; aborting copy");
+                    return copy_result(None, None, &throughput(&copied, &read, started));
+                }
+            }
+        }
+
+        return copy_result(
             outcome,
             handle.status().error,
             &throughput(&copied, &read, started),
-        )
-    } else {
-        // Continuous bridge: run until Ctrl-C, then stop gracefully.
-        tokio::signal::ctrl_c()
-            .await
-            .context("failed to listen for Ctrl+C")?;
-        info!("Ctrl+C received; stopping copy");
-        handle.stop().await;
-        // Through the same reporting as the drained branch: a bridge that dropped
-        // rows did not run clean either, and a supervisor restarting it needs to
-        // hear that from the exit status. `stop` resolves the outcome, so the
-        // fallback only guards against the summary going missing.
-        copy_result(
-            handle.outcome().or(Some(RouteOutcome::Stopped)),
-            handle.status().error,
-            &throughput(&copied, &read, started),
-        )
-    };
-
-    drop(copy_status);
-
-    result
+        );
+    }
 }
 
 fn copy_endpoints(args: &CopyArgs) -> anyhow::Result<(&str, &str)> {
@@ -3104,5 +3331,54 @@ mod uri_tests {
 
         let cfg = config("zmq://127.0.0.1:5555", "zeromq");
         assert_eq!(cfg["url"], "tcp://127.0.0.1:5555");
+    }
+}
+
+#[cfg(test)]
+mod wait_flag_tests {
+    use super::*;
+    use clap::Parser;
+
+    fn copy_args(argv: &[&str]) -> CopyArgs {
+        let args = Args::try_parse_from(argv).expect("arguments should parse");
+        match args.command {
+            Some(Command::Copy(copy)) => copy,
+            _ => panic!("expected the copy subcommand"),
+        }
+    }
+
+    // A source another process is still filling drains empty on the first look,
+    // so `--wait` has to keep the drain alive rather than start a bridge.
+    #[test]
+    fn wait_implies_drain() {
+        assert!(!drains(&copy_args(&["mqb", "copy", "a://b", "c://d"])));
+        assert!(drains(&copy_args(&[
+            "mqb", "copy", "a://b", "c://d", "--drain"
+        ])));
+        assert!(drains(&copy_args(&[
+            "mqb", "copy", "a://b", "c://d", "--wait", "30"
+        ])));
+    }
+
+    // `--wait 0` is the SQS reading: a ceiling of zero waits not at all. It still
+    // drains, so it stays equivalent to a bare `--drain` rather than becoming a
+    // continuous bridge.
+    #[test]
+    fn a_zero_wait_still_drains() {
+        let args = copy_args(&["mqb", "copy", "a://b", "c://d", "--wait", "0"]);
+        assert_eq!(args.wait, Some(0));
+        assert!(drains(&args));
+    }
+
+    #[test]
+    fn agent_listen_defaults_to_an_hour() {
+        let args =
+            Args::try_parse_from(["mqb", "agent-listen", "bob"]).expect("arguments should parse");
+        let Some(Command::AgentListen(listen)) = args.command else {
+            panic!("expected the agent-listen subcommand")
+        };
+        assert_eq!(listen.name, "bob");
+        assert_eq!(listen.wait, 3600);
+        assert!(listen.to.is_none());
     }
 }

@@ -58,6 +58,52 @@ pub const TRANSFORM_ERROR_KEY: &str = "mqb.transform_error";
 #[cfg(test)]
 mod tests;
 
+/// Bench-only: applies the compiled configuration to every message and returns the total
+/// output size. Lives here because `Compiled` is private to this module.
+#[cfg(feature = "test-utils")]
+#[doc(hidden)]
+pub(crate) fn bench_apply(
+    config: &TransformMiddleware,
+    messages: &[CanonicalMessage],
+) -> anyhow::Result<usize> {
+    let compiled = Compiled::new(config)?;
+    let mut total = 0;
+    for message in messages {
+        let mut message = message.clone();
+        compiled
+            .transform(&mut message)
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        total += message.payload.len();
+    }
+    Ok(total)
+}
+
+/// One message's outcome: transformed (possibly annotated by the failure policy), or
+/// rejected with the error that rejected it.
+///
+/// Boxed on the rejected side so the whole batch's `Vec` is sized by a transformed
+/// message rather than by the far larger error pair.
+type Transformed = Result<CanonicalMessage, Box<(CanonicalMessage, error::TransformError)>>;
+
+/// Transforms a whole batch, spreading the work over cores when it is big enough.
+/// Outcomes come back in input order.
+async fn apply_batch(
+    compiled: &Arc<Compiled>,
+    messages: Vec<CanonicalMessage>,
+) -> Vec<Transformed> {
+    let compiled = Arc::clone(compiled);
+    crate::support::parallel::map_messages(messages, move |mut message| {
+        match compiled.transform(&mut message) {
+            Ok(()) => Ok(message),
+            Err(error) => match compiled.handle_failure(&mut message, error) {
+                Ok(()) => Ok(message),
+                Err(error) => Err(Box::new((message, error))),
+            },
+        }
+    })
+    .await
+}
+
 // --- Publisher attach point ---
 
 pub struct TransformPublisher {
@@ -74,6 +120,10 @@ impl TransformPublisher {
             inner,
             compiled: Arc::new(Compiled::new(config)?),
         })
+    }
+
+    async fn apply_to_batch(&self, messages: Vec<CanonicalMessage>) -> Vec<Transformed> {
+        apply_batch(&self.compiled, messages).await
     }
 }
 
@@ -95,15 +145,19 @@ impl MessagePublisher for TransformPublisher {
             return self.inner.send_batch(messages).await;
         }
 
-        let mut forwarded = Vec::with_capacity(messages.len());
+        // Split across cores: an ordered sink serializes this whole call, so route
+        // concurrency cannot overlap it and the batch itself is what has to parallelise.
+        let outcomes = self.apply_to_batch(messages).await;
+
+        let mut forwarded = Vec::with_capacity(outcomes.len());
         let mut failed: Vec<(CanonicalMessage, PublisherError)> = Vec::new();
-        for mut message in messages {
-            match self.compiled.transform(&mut message) {
-                Ok(()) => forwarded.push(message),
-                Err(error) => match self.compiled.handle_failure(&mut message, error) {
-                    Ok(()) => forwarded.push(message),
-                    Err(error) => failed.push((message, error.into())),
-                },
+        for outcome in outcomes {
+            match outcome {
+                Ok(message) => forwarded.push(message),
+                Err(rejected) => {
+                    let (message, error) = *rejected;
+                    failed.push((message, error.into()));
+                }
             }
         }
 
@@ -221,27 +275,23 @@ impl MessageConsumer for TransformConsumer {
 
             let ReceivedBatch { messages, commit } = batch;
             let original_len = messages.len();
+            let outcomes = apply_batch(&self.compiled, messages).await;
             let mut kept = Vec::with_capacity(original_len);
             let mut kept_indices: Vec<usize> = Vec::with_capacity(original_len);
 
-            for (index, mut message) in messages.into_iter().enumerate() {
-                match self.compiled.transform(&mut message) {
-                    Ok(()) => {
+            for (index, outcome) in outcomes.into_iter().enumerate() {
+                match outcome {
+                    Ok(message) => {
                         kept_indices.push(index);
                         kept.push(message);
                     }
-                    Err(error) => match self.compiled.handle_failure(&mut message, error) {
-                        Ok(()) => {
-                            kept_indices.push(index);
-                            kept.push(message);
-                        }
-                        Err(error) => {
-                            tracing::error!(
-                                message_id = format_args!("{:032x}", message.message_id),
-                                "Rejecting invalid input message: {error}"
-                            );
-                        }
-                    },
+                    Err(rejected) => {
+                        let (message, error) = *rejected;
+                        tracing::error!(
+                            message_id = format_args!("{:032x}", message.message_id),
+                            "Rejecting invalid input message: {error}"
+                        );
+                    }
                 }
             }
 

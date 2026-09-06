@@ -216,7 +216,7 @@ fn split_records<'a>(data: &'a [u8], delimiter: &[u8]) -> Vec<&'a [u8]> {
 /// the object's lines (so the first CSV row establishes the schema).
 fn split_and_parse(data: &[u8], delimiter: &[u8], format: &FileFormat) -> Vec<CanonicalMessage> {
     let mut out = Vec::new();
-    let mut csv_header: Option<Vec<String>> = None;
+    let mut csv_header: Option<crate::endpoints::file::CsvHeader> = None;
     for record in split_records(data, delimiter) {
         if let Some(msg) = parse_message(record, format, &mut csv_header) {
             out.push(msg);

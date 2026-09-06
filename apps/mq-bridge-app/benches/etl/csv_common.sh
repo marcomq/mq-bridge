@@ -30,12 +30,14 @@ RESULTS_CSV="${RESULTS_CSV:-$RESULTS_DIR/csv_to_jsonl.csv}"
 OUT_MQB="${OUT_MQB:-/tmp/mqb_csv_out.jsonl}"
 OUT_MQB_RAW="${OUT_MQB_RAW:-/tmp/mqb_csv_out_raw.jsonl}"
 OUT_SLING="${OUT_SLING:-/tmp/sling_csv_out.jsonl}"
+OUT_DUCKDB="${OUT_DUCKDB:-/tmp/duckdb_csv_out.jsonl}"
 OUT_MELTANO="$MELTANO_PROJECT/output/bench.jsonl"
 
 # Roughly 20-100x the measured median at 1M rows: a healthy run never trips one,
 # a wedged run fails in minutes. See [[bench-harness-timeout-contract]].
 COPY_TIMEOUT="${COPY_TIMEOUT:-$(guard_budget 0.0002 60)}"          # ~200s at 1M rows
 SLING_TIMEOUT="${SLING_TIMEOUT:-$(guard_budget 0.0004 60)}"        # ~400s at 1M rows
+DUCKDB_TIMEOUT="${DUCKDB_TIMEOUT:-$(guard_budget 0.0002 60)}"        # ~200s at 1M rows
 MELTANO_TIMEOUT="${MELTANO_TIMEOUT:-$(guard_budget 0.0006 120)}"   # ~600s at 1M rows
 
 # (Re)generate the seeded CSV if missing or the wrong length (rows + header line).

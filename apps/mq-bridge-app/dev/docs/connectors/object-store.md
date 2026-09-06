@@ -16,7 +16,7 @@ load_orders:
       checkpoint_store: "file:///var/lib/mqb/checkpoints/orders.json"
       polling_interval_ms: 1000
   output:
-    postgres:
+    sqlx:
       url: "postgres://localhost/app"
       table: orders
 ```

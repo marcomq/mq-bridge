@@ -2020,6 +2020,79 @@ pub async fn run_concurrency_test(
     );
 }
 
+/// Entry points that let the Criterion benches in `benches/` reach crate-internal hot
+/// paths. Not part of the public API — it lives here so one feature gate covers every
+/// out-of-crate dev harness, and can be split back out if it grows.
+#[doc(hidden)]
+pub mod bench {
+    use crate::models::FileFormat;
+    use crate::CanonicalMessage;
+
+    /// Decodes a CSV corpus the way the file source does: the first record establishes the
+    /// column header, every later record becomes one message.
+    pub fn csv_records_to_json(records: &[&[u8]]) -> Vec<CanonicalMessage> {
+        let mut header = None;
+        records
+            .iter()
+            .filter_map(|record| {
+                crate::endpoints::file::parse_message(record, &FileFormat::Csv, &mut header)
+            })
+            .collect()
+    }
+
+    /// Decodes a CSV corpus in reader-sized batches, the way the file source does. This is
+    /// the path that splits a batch across cores, so it is the one that shows the cost of
+    /// the split itself.
+    pub fn csv_batch_decode(records: &[&[u8]], batch_size: usize) -> usize {
+        let mut header = None;
+        let mut buf: Vec<u8> = Vec::new();
+        let mut decoded = 0;
+        for chunk in records.chunks(batch_size) {
+            buf.clear();
+            let mut spans = Vec::with_capacity(chunk.len());
+            for (i, record) in chunk.iter().enumerate() {
+                let start = buf.len();
+                buf.extend_from_slice(record);
+                spans.push((start, buf.len(), i as u64));
+            }
+            decoded += crate::endpoints::file::decode_records(
+                &mut buf,
+                &spans,
+                &FileFormat::Csv,
+                &mut header,
+                false,
+            )
+            .len();
+        }
+        decoded
+    }
+
+    /// Evaluates one `filter` expression over a corpus, returning how many messages it kept.
+    #[cfg(feature = "filter")]
+    pub fn filter_matches(
+        expression: &str,
+        messages: &[CanonicalMessage],
+    ) -> anyhow::Result<usize> {
+        let filter = crate::middleware::filter::CompiledFilter::new(expression)?;
+        let mut kept = 0;
+        for message in messages {
+            if filter.matches(message)? {
+                kept += 1;
+            }
+        }
+        Ok(kept)
+    }
+
+    /// Applies one `transform` configuration to a corpus, returning the total output size so
+    /// nothing the middleware produced can be optimized away.
+    pub fn transform_messages(
+        config: &crate::models::TransformMiddleware,
+        messages: &[CanonicalMessage],
+    ) -> anyhow::Result<usize> {
+        crate::middleware::transform::bench_apply(config, messages)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{should_skip_subbench, with_subbench_timeout_configured};
