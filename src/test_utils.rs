@@ -212,36 +212,72 @@ impl DockerController {
             .expect("Failed to stop docker compose service");
 
         assert!(status.success(), "docker compose stop failed");
+        self.await_stopped(service);
+    }
+
+    /// Blocks until the daemon stops reporting the service as running.
+    ///
+    /// `compose stop` can return while the container is still listed running, and
+    /// a `compose up` that reads that state reports `Running`, skips the start and
+    /// then fails its own `--wait` on the container that has meanwhile exited.
+    fn await_stopped(&self, service: &str) {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while self.is_running(service) {
+            if Instant::now() >= deadline {
+                println!("docker still reports {service} as running 30s after stop");
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    /// Whether compose lists a running container for the service. A failed query
+    /// answers `false`: `start_service` reports a container that never comes back.
+    fn is_running(&self, service: &str) -> bool {
+        Command::new("docker")
+            .arg("compose")
+            .arg("-f")
+            .arg(&self.compose_file)
+            .args(["ps", "-q", "--status", "running"])
+            .arg(service)
+            .output()
+            .map(|out| out.status.success() && !out.stdout.trim_ascii().is_empty())
+            .unwrap_or(false)
     }
 
     /// Starts the service and waits until it is running/healthy again. Plain
     /// `docker compose start` returns before the broker accepts connections,
     /// which made reconnect tests race the container startup.
     pub fn start_service(&self, service: &str) {
-        println!(
-            "Starting docker-compose service {} from {}...",
-            service, self.compose_file
-        );
-        let status = Command::new("docker")
-            .arg("compose")
-            .arg("-f")
-            .arg(&self.compose_file)
-            .arg("up")
-            .arg("-d")
-            .arg("--wait")
-            .arg("--wait-timeout")
-            .arg("120")
-            .arg(service)
-            .stdout(std::process::Stdio::inherit())
-            .stderr(std::process::Stdio::inherit())
-            .status()
-            .expect("Failed to start docker compose service");
+        // Retried once: a stale `Running` makes compose skip the start and fail
+        // immediately, and by the second attempt the container reads as exited.
+        for attempt in 1..=2 {
+            println!(
+                "Starting docker-compose service {} from {}...",
+                service, self.compose_file
+            );
+            let status = Command::new("docker")
+                .arg("compose")
+                .arg("-f")
+                .arg(&self.compose_file)
+                .arg("up")
+                .arg("-d")
+                .arg("--wait")
+                .arg("--wait-timeout")
+                .arg("120")
+                .arg(service)
+                .stdout(std::process::Stdio::inherit())
+                .stderr(std::process::Stdio::inherit())
+                .status()
+                .expect("Failed to start docker compose service");
 
-        if !status.success() {
+            if status.success() {
+                return;
+            }
             self.dump_diagnostics(service);
+            assert!(attempt < 2, "docker compose start failed");
+            std::thread::sleep(Duration::from_secs(1));
         }
-
-        assert!(status.success(), "docker compose start failed");
     }
 
     /// Prints `ps` and the service logs; used when a restart fails or a test
