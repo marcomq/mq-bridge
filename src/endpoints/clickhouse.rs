@@ -26,6 +26,7 @@ use crate::traits::{
 use crate::CanonicalMessage;
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;
+use percent_encoding::percent_decode_str;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tracing::{info, trace, warn};
@@ -94,6 +95,16 @@ fn build_row(
     }
 }
 
+/// Whether the URL names this machine, where a clear-text password never leaves it.
+fn is_loopback(url: &url::Url) -> bool {
+    match url.host() {
+        Some(url::Host::Domain(host)) => host == "localhost",
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    }
+}
+
 /// A minimal ClickHouse HTTP client: every statement is a POST whose body is the SQL (plus inline
 /// data for inserts). Auth and target database travel as headers/params so payload `?` chars are never
 /// treated as bind placeholders.
@@ -108,9 +119,43 @@ struct ChClient {
 
 impl ChClient {
     fn from_config(config: &ClickHouseConfig) -> anyhow::Result<Self> {
-        let mut builder = reqwest::Client::builder().connect_timeout(Duration::from_millis(
-            config.connect_timeout_ms.unwrap_or(10_000),
-        ));
+        let mut url = url::Url::parse(&config.url).context("Invalid ClickHouse URL")?;
+        if !url.has_host() || !matches!(url.scheme(), "http" | "https") {
+            return Err(anyhow!(
+                "ClickHouse URL must be an absolute http(s) URL with a host, e.g. 'http://localhost:8123'"
+            ));
+        }
+        let url_username = if url.username().is_empty() {
+            None
+        } else {
+            Some(
+                percent_decode_str(url.username())
+                    .decode_utf8()
+                    .context("ClickHouse URL username is not valid UTF-8")?
+                    .into_owned(),
+            )
+        };
+        let url_password = url
+            .password()
+            .map(|password| {
+                percent_decode_str(password)
+                    .decode_utf8()
+                    .context("ClickHouse URL password is not valid UTF-8")
+                    .map(|password| password.into_owned())
+            })
+            .transpose()?;
+        url.set_password(None)
+            .map_err(|_| anyhow!("ClickHouse URL cannot contain password userinfo"))?;
+        url.set_username("")
+            .map_err(|_| anyhow!("ClickHouse URL cannot contain username userinfo"))?;
+
+        // No redirect following: credentials travel as plain `X-ClickHouse-*` headers, which
+        // reqwest does not strip on a cross-host hop, and the HTTP interface never redirects.
+        let mut builder = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(Duration::from_millis(
+                config.connect_timeout_ms.unwrap_or(10_000),
+            ));
         if let Some(ms) = config.request_timeout_ms {
             builder = builder.timeout(Duration::from_millis(ms));
         }
@@ -128,12 +173,23 @@ impl ChClient {
         let http = builder
             .build()
             .context("Failed to build ClickHouse HTTP client")?;
+        let password = config.password.clone().or(url_password).unwrap_or_default();
+        if !password.is_empty() && url.scheme() == "http" && !is_loopback(&url) {
+            warn!(
+                host = url.host_str().unwrap_or_default(),
+                "ClickHouse password is sent in clear text over http; use an https URL"
+            );
+        }
         Ok(Self {
             http,
-            url: config.url.trim_end_matches('/').to_string(),
+            url: url.as_str().trim_end_matches('/').to_string(),
             database: config.database.clone().unwrap_or_else(|| "default".into()),
-            user: config.username.clone().unwrap_or_else(|| "default".into()),
-            password: config.password.clone().unwrap_or_default(),
+            user: config
+                .username
+                .clone()
+                .or(url_username)
+                .unwrap_or_else(|| "default".into()),
+            password,
             compression: config.compression,
         })
     }
@@ -441,6 +497,13 @@ pub struct ClickHouseCursorReader {
 
 impl ClickHouseCursorReader {
     pub async fn new(config: &ClickHouseConfig) -> anyhow::Result<Self> {
+        Self::new_with_no_resume(config, false).await
+    }
+
+    pub(crate) async fn new_with_no_resume(
+        config: &ClickHouseConfig,
+        no_resume: bool,
+    ) -> anyhow::Result<Self> {
         if !is_valid_ident(&config.table, true) {
             return Err(anyhow!(
                 "Invalid ClickHouse table name: '{}'.",
@@ -454,7 +517,6 @@ impl ClickHouseCursorReader {
         if !is_valid_ident(&cursor_column, false) {
             return Err(anyhow!("Invalid cursor_column name: '{}'.", cursor_column));
         }
-
         let client = ChClient::from_config(config)?;
         client
             .run("SELECT 1", &[], false)
@@ -463,7 +525,9 @@ impl ClickHouseCursorReader {
 
         // Durable resume needs an external checkpoint store: ClickHouse is unsuited to per-row cursor
         // upserts, so the source-datastore backend is rejected here.
-        let checkpoint: Option<Arc<dyn CheckpointStore>> = if let Some(cid) = &config.cursor_id {
+        let checkpoint: Option<Arc<dyn CheckpointStore>> = if no_resume {
+            None
+        } else if let Some(cid) = &config.cursor_id {
             match &config.checkpoint_store {
                 None => {
                     warn!(
@@ -725,6 +789,14 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
 
+    fn config(url: &str) -> ClickHouseConfig {
+        serde_json::from_value(serde_json::json!({
+            "url": url,
+            "table": "orders"
+        }))
+        .unwrap()
+    }
+
     fn msg(payload: &serde_json::Value, meta: &[(&str, &str)]) -> CanonicalMessage {
         let mut m = CanonicalMessage::new(serde_json::to_vec(payload).unwrap(), None);
         for (k, v) in meta {
@@ -742,6 +814,41 @@ mod tests {
         assert!(!is_valid_ident("", false));
         assert!(!is_valid_ident(".x", true));
         assert!(!is_valid_ident("a..b", true));
+    }
+
+    #[test]
+    fn url_userinfo_supplies_credentials_and_is_removed_from_request_url() {
+        let client = ChClient::from_config(&config("http://demo:p%40ss@localhost:8123")).unwrap();
+
+        assert_eq!(client.user, "demo");
+        assert_eq!(client.password, "p@ss");
+        assert_eq!(client.url, "http://localhost:8123");
+    }
+
+    #[test]
+    fn explicit_credentials_override_url_userinfo() {
+        let mut config = config("http://embedded:secret@localhost:8123");
+        config.username = Some("explicit".into());
+        config.password = Some("override".into());
+
+        let client = ChClient::from_config(&config).unwrap();
+
+        assert_eq!(client.user, "explicit");
+        assert_eq!(client.password, "override");
+        assert_eq!(client.url, "http://localhost:8123");
+    }
+
+    #[test]
+    fn scheme_less_url_reports_the_missing_absolute_url() {
+        let error = ChClient::from_config(&config("localhost:8123"))
+            .err()
+            .expect("scheme-less URL must fail")
+            .to_string();
+
+        assert!(
+            error.contains("absolute http(s) URL with a host"),
+            "{error}"
+        );
     }
 
     #[test]

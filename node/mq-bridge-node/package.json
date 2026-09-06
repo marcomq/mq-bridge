@@ -1,6 +1,6 @@
 {
   "name": "mq-bridge",
-  "version": "0.4.11",
+  "version": "0.4.12",
   "description": "Node.js bindings for mq-bridge",
   "license": "MIT",
   "repository": {
@@ -44,11 +44,11 @@
     "artifacts": "napi artifacts"
   },
   "optionalDependencies": {
-    "mq-bridge-darwin-x64": "0.4.11",
-    "mq-bridge-darwin-arm64": "0.4.11",
-    "mq-bridge-linux-x64-gnu": "0.4.11",
-    "mq-bridge-linux-arm64-gnu": "0.4.11",
-    "mq-bridge-win32-x64-msvc": "0.4.11"
+    "mq-bridge-darwin-x64": "0.4.12",
+    "mq-bridge-darwin-arm64": "0.4.12",
+    "mq-bridge-linux-x64-gnu": "0.4.12",
+    "mq-bridge-linux-arm64-gnu": "0.4.12",
+    "mq-bridge-win32-x64-msvc": "0.4.12"
   },
   "devDependencies": {
     "@napi-rs/cli": "^3.0.0"

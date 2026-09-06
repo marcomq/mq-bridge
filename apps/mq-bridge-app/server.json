@@ -3,7 +3,7 @@
   "name": "io.github.marcomq/mq-bridge-app",
   "title": "mq-bridge-app",
   "description": "Move data between 15+ databases, queues and files at high throughput, without it entering context",
-  "version": "0.4.11",
+  "version": "0.4.12",
   "websiteUrl": "https://marcomq.github.io/mq-bridge/MCP.html",
   "repository": {
     "url": "https://github.com/marcomq/mq-bridge",
@@ -19,7 +19,7 @@
   "packages": [
     {
       "registryType": "oci",
-      "identifier": "ghcr.io/marcomq/mq-bridge-app:0.4.11",
+      "identifier": "ghcr.io/marcomq/mq-bridge-app:0.4.12",
       "transport": { "type": "stdio" },
       "runtimeArguments": [
         { "type": "named", "name": "--rm" },
@@ -33,7 +33,7 @@
     {
       "registryType": "cargo",
       "identifier": "mq-bridge-app",
-      "version": "0.4.11",
+      "version": "0.4.12",
       "transport": { "type": "stdio" },
       "packageArguments": [
         { "type": "positional", "valueHint": "command", "value": "mcp" },

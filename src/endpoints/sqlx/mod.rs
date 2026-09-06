@@ -2012,6 +2012,14 @@ impl SqlxCursorReader {
         config: &SqlxConfig,
         source_metadata: bool,
     ) -> anyhow::Result<Self> {
+        Self::new_with_source_metadata_and_no_resume(config, source_metadata, false).await
+    }
+
+    pub(crate) async fn new_with_source_metadata_and_no_resume(
+        config: &SqlxConfig,
+        source_metadata: bool,
+        no_resume: bool,
+    ) -> anyhow::Result<Self> {
         sqlx::any::install_default_drivers();
         if config.delete_after_read {
             return Err(anyhow!(
@@ -2041,9 +2049,9 @@ impl SqlxCursorReader {
         }
         info!(table = %config.table, column = %cursor_column, driver = %driver_name, "SQLx cursor reader connected");
 
-        let checkpoint: Option<Arc<dyn crate::checkpoint::CheckpointStore>> = if let Some(cid) =
-            &config.cursor_id
-        {
+        let checkpoint: Option<Arc<dyn crate::checkpoint::CheckpointStore>> = if no_resume {
+            None
+        } else if let Some(cid) = &config.cursor_id {
             use crate::checkpoint::CheckpointBackend;
             let backend = match &config.checkpoint_store {
                 // Absent: source datastore with an auto-unique meta table.

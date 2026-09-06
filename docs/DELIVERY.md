@@ -17,12 +17,23 @@ configure an idempotent sink write. At startup, `mq-bridge` inspects the route a
 inferred guarantee as `effectively-once` or `at-least-once`; it does not silently change how the
 sink writes data.
 
-| Sink | Configuration recognised as effectively-once |
-|---|---|
-| MongoDB | `id_field` set to a payload field or replay-stable template such as `${metadata:mqb.id}` |
-| PostgreSQL / SQLite | `sqlx.insert_query` uses a unique key with `ON CONFLICT` |
-| MySQL / MariaDB | `sqlx.insert_query` uses a unique key with `ON DUPLICATE KEY` |
-| File / object store | `name_by: source_position` (the `object_store` default over a replayable Kafka, Postgres CDC, SQL cursor, MongoDB CDC or `consume`-mode file source). Needs positions that *repeat* across runs — a file source in `subscribe` or `group_subscribe` mode stamps a per-run epoch, so its names never collide and a replay is not recognised |
+This table is **advice on how to configure an idempotent sink** — it is not a list of
+switches the engine flips. A plain `INSERT` is not idempotent; you make it so by writing
+the conflict clause yourself.
+
+| Sink | How to make the write idempotent | Reported as `effectively-once` at startup? |
+|---|---|---|
+| MongoDB | `id_field` set to a payload field or replay-stable template such as `${metadata:mqb.id}` | Yes |
+| PostgreSQL / SQLite | `sqlx.insert_query` uses a unique key with `ON CONFLICT … DO NOTHING` | Yes |
+| PostgreSQL / SQLite | `sqlx.insert_query` uses a unique key with `ON CONFLICT … DO UPDATE` (convergent upsert) | No — still idempotent, but the startup line says `at-least-once` |
+| MySQL / MariaDB | `sqlx.insert_query` uses a unique key with `ON DUPLICATE KEY UPDATE` assigning replay-stable values (a convergent upsert; an accumulating assignment such as `c = c + 1` is **not** idempotent) | No — still idempotent, but the startup line says `at-least-once` |
+| File / object store | `name_by: source_position` (the `object_store` default over a replayable Kafka, Postgres CDC, SQL cursor, MongoDB CDC or `consume`-mode file source). Needs positions that *repeat* across runs — a file source in `subscribe` or `group_subscribe` mode stamps a per-run epoch, so its names never collide and a replay is not recognised | Yes |
+
+The right-hand column only describes the **informational log line** `mq-bridge` emits when a
+route starts. The inference is deliberately conservative: it recognises the two forms it can
+read off the configuration with certainty, and says `at-least-once` for everything else. A
+route in the third or fourth row is still effectively-once in practice — the sink absorbs the
+replay either way. Do not read `at-least-once` in the log as "this route creates duplicates".
 
 For a source without stable identity, derive one once and consume it at the sink:
 

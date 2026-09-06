@@ -27,7 +27,7 @@ If you need to move data or events reliably between systems and you write code (
 
 **Prefer not to write code?** [`mq-bridge-app`](https://github.com/marcomq/mq-bridge/tree/main/apps/mq-bridge-app) runs the exact same engine as a **standalone, zero-code ETL service** configured entirely by **YAML or environment variables** — move data from A to B without writing a line. It ships a **Postman-style UI** to build, send, and inspect messages against a route, and can **import Postman collections and AsyncAPI documents** to scaffold routes and endpoints for you.
 
-*   **16+ transports, one API**: Kafka, NATS, AMQP (RabbitMQ), MQTT, MongoDB, **Postgres CDC** (logical replication), PostgreSQL / MySQL / SQLite (SQLx), ClickHouse, HTTP, WebSocket, gRPC, ZeroMQ, Redis Streams, AWS SQS/SNS, cloud object storage (S3 / GCS / Azure), IBM MQ, files, and in-memory channels — all behind the same `receive_batch` / `send_batch` shape.
+*   **16+ transports, one API**: Kafka, NATS, AMQP (RabbitMQ), MQTT, MongoDB, **Postgres CDC** (logical replication), PostgreSQL / MySQL / SQLite (SQLx), ClickHouse, HTTP, WebSocket, gRPC, ZeroMQ, Redis Streams, AWS SQS/SNS, cloud object storage (S3 / GCS / Azure), IBM MQ, files, `dir_spool` (a crash-safe directory FIFO queue), and in-memory channels — all behind the same `receive_batch` / `send_batch` shape.
 *   **Change Data Capture**: stream row-level changes from **Postgres** (logical replication / `pgoutput`) and **MongoDB** (change streams) as flat rows with an operation marker.
 *   **Restart-safe delivery**: batch-aware ack/nack with commit sequencing for cumulative-ack brokers; the integration suite shows **no data loss during in-flight broker restarts**, including a Postgres CDC restart-safety test.
 *   **Reliability middleware, not a framework**: retries, dead-letter queues, deduplication, rate limiting, and cookie/session persistence wrap any endpoint.
@@ -35,9 +35,9 @@ If you need to move data or events reliably between systems and you write code (
 *   **TLS everywhere, one config shape**: a single `TlsConfig` block (CA bundle, client cert/key for mTLS, insecure-skip) is reused across transports.
 *   **Self-hosted, no daemon**: generate config in the optional UI, paste it into your code, run it in-process. No hosted control plane, no separate scheduler.
 
-> **Throughput & footprint.** In our own benchmarks, the same engine — driven the zero-code way through [`mq-bridge-app`](https://github.com/marcomq/mq-bridge/tree/main/apps/mq-bridge-app) — on a CSV→JSONL file conversion (1,000,000 mixed-type rows, ~116 MiB) sustained **1,133,786 rows/s** at ~22 MiB, about **~58x faster** and **~20x leaner in memory** than Meltano (`tap-csv` → `target-jsonl`, ~19,500 rows/s / ~444 MiB). Full setup, methodology, and the exact parameters are in [`benches/ETL_BENCHMARKS.md`](benches/ETL_BENCHMARKS.md).
+> **Throughput & footprint.** In our own benchmarks, the same engine — driven the zero-code way through [`mq-bridge-app`](https://github.com/marcomq/mq-bridge/tree/main/apps/mq-bridge-app) — on a CSV→JSONL file conversion (1,000,000 mixed-type rows, ~116 MiB) sustained **2,824,858 rows/s** at ~28 MiB (mq-bridge 0.4.12), about **~145x faster** and **~16x leaner in memory** than Meltano (`tap-csv` → `target-jsonl`, ~19,500 rows/s / ~444 MiB, measured in an earlier session on the same machine). On the same file in the same session it also ran **~1.4x faster than DuckDB** using all of this machine's cores (2,036,659 rows/s) while holding ~17x less memory — DuckDB being a throughput ceiling for the conversion itself, not an ETL tool. Methodology and reporting rules are in [`benches/ETL_BENCHMARKS.md`](benches/ETL_BENCHMARKS.md); the measured numbers and their baselines are in the [ETL benchmark harness](https://github.com/marcomq/mq-bridge/blob/dev/apps/mq-bridge-app/benches/etl/README.md).
 
-> **Kafka → file.** In a 1,000,000-row relay with the default file format and no transform, the engine was up to **65% faster than Sea Streamer**. The [`mq-bridge-app` benchmark](https://github.com/marcomq/mq-bridge/tree/main/apps/mq-bridge-app/benches/etl) contains the reproducible helper and native file-format caveats.
+> **Kafka → file.** In a 1,000,000-row relay with the default file format and no transform, the engine was **~65% faster than Sea Streamer** comparing both on the mimalloc allocator (~80% against its default-allocator build). The [`mq-bridge-app` benchmark](https://github.com/marcomq/mq-bridge/tree/main/apps/mq-bridge-app/benches/etl) contains the reproducible helper and native file-format caveats.
 
 
 ## Language Bindings
@@ -76,7 +76,7 @@ For implementation details and quick start examples for each usage type, see the
 
 ## Features
 
-*   **Supported Backends**: Kafka, NATS, AMQP (RabbitMQ), MQTT, MongoDB, SQL Databases (PostgreSQL, MySQL, SQLite via sqlx), **Postgres CDC** (logical replication), ClickHouse, gRPC, HTTP, WebSocket, ZeroMQ, Redis Streams, Files, cloud object storage (S3 / GCS / Azure), AWS (SQS/SNS), IBM MQ, and in-memory channels.
+*   **Supported Backends**: Kafka, NATS, AMQP (RabbitMQ), MQTT, MongoDB, SQL Databases (PostgreSQL, MySQL, SQLite via sqlx), **Postgres CDC** (logical replication), ClickHouse, gRPC, HTTP, WebSocket, ZeroMQ, Redis Streams, Files, `dir_spool` (a crash-safe directory FIFO queue), cloud object storage (S3 / GCS / Azure), AWS (SQS/SNS), IBM MQ, and in-memory channels.
 *   **Change Data Capture**: PostgreSQL logical replication (`postgres_cdc`) and MongoDB change streams, surfaced as flat rows with an `*.operation` marker (`insert`/`update`/`delete`/`truncate`).
     > **Note**: IBM MQ is included in the `full` feature set via the `ibm-mq` feature, which loads the IBM MQ client library at runtime via dlopen — **no IBM SDK is needed to build**. The IBM MQ redistributable client only has to be present at runtime, and only if you actually use an IBM MQ endpoint (it is loaded lazily on first connect). If the client is missing, the affected route fails fast with a non-retryable error instead of reconnecting forever. The loader finds the client via the platform default name, `MQ_INSTALLATION_PATH` (e.g. `/opt/mqm`), or an explicit `MQB_IBM_MQ_LIB` path. To link the client statically at build time instead, use the `ibm-mq-static` feature (requires the IBM MQ SDK). See the [mqi crate](https://crates.io/crates/mqi/) for details.
     >
@@ -659,3 +659,7 @@ Some parts of the code are more verbose than I would write by hand, but I kept t
 
 ## License
 `mq-bridge` is licensed under the MIT License.
+
+Binary distributions carry their applicable third-party terms in
+`THIRD_PARTY_LICENSES.txt`. Their current maintenance process is documented in
+[docs/THIRD_PARTY_LICENSES.md](docs/THIRD_PARTY_LICENSES.md).

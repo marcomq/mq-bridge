@@ -212,36 +212,75 @@ impl DockerController {
             .expect("Failed to stop docker compose service");
 
         assert!(status.success(), "docker compose stop failed");
+        self.await_stopped(service);
+    }
+
+    /// Blocks until the daemon stops reporting the service as running, and
+    /// panics if it still does after 30s rather than letting a restart test run
+    /// against a container that never went down.
+    ///
+    /// `compose stop` can return while the container is still listed running, and
+    /// a `compose up` that reads that state reports `Running`, skips the start and
+    /// then fails its own `--wait` on the container that has meanwhile exited.
+    fn await_stopped(&self, service: &str) {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while self.is_running(service) {
+            assert!(
+                Instant::now() < deadline,
+                "docker still reports {service} as running 30s after stop; \
+                 a restart test would run against the container that never stopped"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    /// Whether compose lists a running container for the service. A failed query
+    /// answers `false`: `start_service` reports a container that never comes back.
+    fn is_running(&self, service: &str) -> bool {
+        Command::new("docker")
+            .arg("compose")
+            .arg("-f")
+            .arg(&self.compose_file)
+            .args(["ps", "-q", "--status", "running"])
+            .arg(service)
+            .output()
+            .map(|out| out.status.success() && !out.stdout.trim_ascii().is_empty())
+            .unwrap_or(false)
     }
 
     /// Starts the service and waits until it is running/healthy again. Plain
     /// `docker compose start` returns before the broker accepts connections,
     /// which made reconnect tests race the container startup.
     pub fn start_service(&self, service: &str) {
-        println!(
-            "Starting docker-compose service {} from {}...",
-            service, self.compose_file
-        );
-        let status = Command::new("docker")
-            .arg("compose")
-            .arg("-f")
-            .arg(&self.compose_file)
-            .arg("up")
-            .arg("-d")
-            .arg("--wait")
-            .arg("--wait-timeout")
-            .arg("120")
-            .arg(service)
-            .stdout(std::process::Stdio::inherit())
-            .stderr(std::process::Stdio::inherit())
-            .status()
-            .expect("Failed to start docker compose service");
+        // Retried once: a stale `Running` makes compose skip the start and fail
+        // immediately, and by the second attempt the container reads as exited.
+        for attempt in 1..=2 {
+            println!(
+                "Starting docker-compose service {} from {}...",
+                service, self.compose_file
+            );
+            let status = Command::new("docker")
+                .arg("compose")
+                .arg("-f")
+                .arg(&self.compose_file)
+                .arg("up")
+                .arg("-d")
+                .arg("--wait")
+                .arg("--wait-timeout")
+                .arg("120")
+                .arg(service)
+                .stdout(std::process::Stdio::inherit())
+                .stderr(std::process::Stdio::inherit())
+                .status()
+                .expect("Failed to start docker compose service");
 
-        if !status.success() {
+            if status.success() {
+                return;
+            }
             self.dump_diagnostics(service);
+            assert!(attempt < 2, "docker compose start failed");
+            std::thread::sleep(Duration::from_secs(1));
         }
-
-        assert!(status.success(), "docker compose start failed");
     }
 
     /// Prints `ps` and the service logs; used when a restart fails or a test
@@ -2018,6 +2057,79 @@ pub async fn run_concurrency_test(
         "Execution too fast: {:?}",
         elapsed
     );
+}
+
+/// Entry points that let the Criterion benches in `benches/` reach crate-internal hot
+/// paths. Not part of the public API — it lives here so one feature gate covers every
+/// out-of-crate dev harness, and can be split back out if it grows.
+#[doc(hidden)]
+pub mod bench {
+    use crate::models::FileFormat;
+    use crate::CanonicalMessage;
+
+    /// Decodes a CSV corpus the way the file source does: the first record establishes the
+    /// column header, every later record becomes one message.
+    pub fn csv_records_to_json(records: &[&[u8]]) -> Vec<CanonicalMessage> {
+        let mut header = None;
+        records
+            .iter()
+            .filter_map(|record| {
+                crate::endpoints::file::parse_message(record, &FileFormat::Csv, &mut header)
+            })
+            .collect()
+    }
+
+    /// Decodes a CSV corpus in reader-sized batches, the way the file source does. This is
+    /// the path that splits a batch across cores, so it is the one that shows the cost of
+    /// the split itself.
+    pub fn csv_batch_decode(records: &[&[u8]], batch_size: usize) -> usize {
+        let mut header = None;
+        let mut buf: Vec<u8> = Vec::new();
+        let mut decoded = 0;
+        for chunk in records.chunks(batch_size) {
+            buf.clear();
+            let mut spans = Vec::with_capacity(chunk.len());
+            for (i, record) in chunk.iter().enumerate() {
+                let start = buf.len();
+                buf.extend_from_slice(record);
+                spans.push((start, buf.len(), i as u64));
+            }
+            decoded += crate::endpoints::file::decode_records(
+                &mut buf,
+                &spans,
+                &FileFormat::Csv,
+                &mut header,
+                false,
+            )
+            .len();
+        }
+        decoded
+    }
+
+    /// Evaluates one `filter` expression over a corpus, returning how many messages it kept.
+    #[cfg(feature = "filter")]
+    pub fn filter_matches(
+        expression: &str,
+        messages: &[CanonicalMessage],
+    ) -> anyhow::Result<usize> {
+        let filter = crate::middleware::filter::CompiledFilter::new(expression)?;
+        let mut kept = 0;
+        for message in messages {
+            if filter.matches(message)? {
+                kept += 1;
+            }
+        }
+        Ok(kept)
+    }
+
+    /// Applies one `transform` configuration to a corpus, returning the total output size so
+    /// nothing the middleware produced can be optimized away.
+    pub fn transform_messages(
+        config: &crate::models::TransformMiddleware,
+        messages: &[CanonicalMessage],
+    ) -> anyhow::Result<usize> {
+        crate::middleware::transform::bench_apply(config, messages)
+    }
 }
 
 #[cfg(test)]

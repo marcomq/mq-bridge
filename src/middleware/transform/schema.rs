@@ -322,6 +322,79 @@ impl CompiledSchema {
         }
     }
 
+    /// Rewrites a quoted scalar into its typed JSON token, writing straight from the raw
+    /// span instead of building a `Value` for the field and serializing it back.
+    ///
+    /// Text-typed sources — CSV, and SQL exports that stringify everything — hand every
+    /// column over as a string, so this is the coercion a typing schema performs on
+    /// nearly every field of nearly every row.
+    ///
+    /// Returns `false` whenever it will not serve the field, *including* every failure,
+    /// so an unconvertible value still reaches `apply` and gets its proper error. It
+    /// writes nothing in that case.
+    pub(super) fn coerce_scalar_raw(&self, raw: &str, opts: Opts, out: &mut Vec<u8>) -> bool {
+        // Without `coerce` a mistyped field is an error, which only `apply` can phrase.
+        // The rest mirrors `is_passthrough`: anything else declared means `apply` has
+        // more to do than change this value's type.
+        if !opts.coerce
+            || self.enum_values.is_some()
+            || self.content.is_some()
+            || self.default.is_some()
+            || self.items.is_some()
+            || !self.properties.is_empty()
+            || !self.required.is_empty()
+        {
+            return false;
+        }
+
+        // Only an unescaped string literal: the span between the quotes is then exactly
+        // the text `coerce` would see, with no unescaping to do.
+        let Some(text) = raw
+            .strip_prefix('"')
+            .and_then(|rest| rest.strip_suffix('"'))
+            .filter(|text| !text.contains('\\'))
+        else {
+            return false;
+        };
+        let text = text.trim();
+
+        // Each arm reproduces the matching rule in `coerce`, and writes through
+        // `serde_json` so the token is formatted exactly as the general path formats it.
+        let start = out.len();
+        let written = match self.ty {
+            Some(Ty::Integer) => {
+                if let Ok(value) = text.parse::<i64>() {
+                    serde_json::to_writer(&mut *out, &value).is_ok()
+                } else if let Ok(value) = text.parse::<u64>() {
+                    serde_json::to_writer(&mut *out, &value).is_ok()
+                } else {
+                    false
+                }
+            }
+            Some(Ty::Number) => text
+                .parse::<f64>()
+                .ok()
+                .and_then(serde_json::Number::from_f64)
+                .is_some_and(|number| serde_json::to_writer(&mut *out, &number).is_ok()),
+            Some(Ty::Boolean) => match text {
+                "true" | "1" => {
+                    out.extend_from_slice(b"true");
+                    true
+                }
+                "false" | "0" => {
+                    out.extend_from_slice(b"false");
+                    true
+                }
+                _ => false,
+            },
+            _ => false,
+        };
+        if !written {
+            out.truncate(start);
+        }
+        written
+    }
+
     /// True when decoding an embedded JSON document is the *only* thing `apply` would do
     /// to `raw`. That decode is a string unescape followed by a well-formedness check,
     /// both of which work on bytes, so no `Value` has to be built for the document —

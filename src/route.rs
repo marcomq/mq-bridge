@@ -5,10 +5,9 @@
 
 use crate::endpoints::{
     check_source_position_available, create_consumer_from_route,
-    create_consumer_from_route_with_source_metadata,
-    create_publisher_from_route_with_source_position, output_has_write_time_named_object_store,
-    output_passes_through_http_status, output_requires_source_metadata, relax_object_naming,
-    supports_source_metadata,
+    create_consumer_from_route_with_policy, create_publisher_from_route_with_source_position,
+    output_has_write_time_named_object_store, output_passes_through_http_status,
+    output_requires_source_metadata, relax_object_naming, supports_source_metadata,
 };
 use crate::errors::ProcessingError;
 pub use crate::models::Route;
@@ -1107,6 +1106,23 @@ impl Route {
     /// # }
     /// ```
     pub async fn run(&self, name_str: &str) -> anyhow::Result<RouteHandle> {
+        self.run_with_resume_policy(name_str, false).await
+    }
+
+    /// Runs the route without optional cursor/checkpoint resume state.
+    ///
+    /// This is intended for deliberate full copies. It suppresses resume setup,
+    /// warnings, and errors for cursor-based sources without changing native
+    /// broker offsets or other consumption semantics.
+    pub async fn run_without_resume(&self, name_str: &str) -> anyhow::Result<RouteHandle> {
+        self.run_with_resume_policy(name_str, true).await
+    }
+
+    async fn run_with_resume_policy(
+        &self,
+        name_str: &str,
+        no_resume: bool,
+    ) -> anyhow::Result<RouteHandle> {
         let warnings = self.check(name_str, None)?;
         for warning in warnings {
             tracing::warn!(route = name_str, "Configuration warning: {}", warning);
@@ -1193,6 +1209,7 @@ impl Route {
                             Some(internal_shutdown_rx),
                             Some(iter_ready_tx),
                             Some(&drops_run),
+                            no_resume,
                         )
                         .await
                 });
@@ -1397,7 +1414,7 @@ impl Route {
         shutdown_rx: Option<async_channel::Receiver<()>>,
         ready_tx: Option<Sender<()>>,
     ) -> anyhow::Result<bool> {
-        self.run_until_err_reporting_to(name, shutdown_rx, ready_tx, None)
+        self.run_until_err_reporting_to(name, shutdown_rx, ready_tx, None, false)
             .await
     }
 
@@ -1411,6 +1428,7 @@ impl Route {
         shutdown_rx: Option<async_channel::Receiver<()>>,
         ready_tx: Option<Sender<()>>,
         drops: Option<&Arc<RwLock<DropReport>>>,
+        no_resume: bool,
     ) -> anyhow::Result<bool> {
         let (_internal_shutdown_tx, internal_shutdown_rx) = bounded(1);
         let shutdown_rx = shutdown_rx.unwrap_or(internal_shutdown_rx);
@@ -1425,10 +1443,10 @@ impl Route {
             return result;
         }
         if self.options.concurrency == 1 {
-            self.run_sequentially(name, shutdown_rx, ready_tx, drops)
+            self.run_sequentially(name, shutdown_rx, ready_tx, drops, no_resume)
                 .await
         } else {
-            self.run_concurrently(name, shutdown_rx, ready_tx, drops)
+            self.run_concurrently(name, shutdown_rx, ready_tx, drops, no_resume)
                 .await
         }
     }
@@ -1440,6 +1458,7 @@ impl Route {
         shutdown_rx: async_channel::Receiver<()>,
         ready_tx: Option<Sender<()>>,
         drops: Option<&Arc<RwLock<DropReport>>>,
+        no_resume: bool,
     ) -> anyhow::Result<bool> {
         let source_has_position = self.source_has_position();
         let relaxed_output;
@@ -1462,10 +1481,11 @@ impl Route {
             &self.input,
             output_passes_through_http_status(name, output)?,
         );
-        let mut consumer = create_consumer_from_route_with_source_metadata(
+        let mut consumer = create_consumer_from_route_with_policy(
             name,
             &self.input,
             source_metadata_required,
+            no_resume,
         )
         .await?;
         consumer.set_exit_on_empty(self.options.exit_on_empty);
@@ -1610,6 +1630,7 @@ impl Route {
         shutdown_rx: async_channel::Receiver<()>,
         ready_tx: Option<Sender<()>>,
         drops: Option<&Arc<RwLock<DropReport>>>,
+        no_resume: bool,
     ) -> anyhow::Result<bool> {
         let source_has_position = self.source_has_position();
         let relaxed_output;
@@ -1646,10 +1667,11 @@ impl Route {
             &self.input,
             output_passes_through_http_status(name, output)?,
         );
-        let mut consumer = create_consumer_from_route_with_source_metadata(
+        let mut consumer = create_consumer_from_route_with_policy(
             name,
             &self.input,
             source_metadata_required,
+            no_resume,
         )
         .await?;
         consumer.set_exit_on_empty(self.options.exit_on_empty);
@@ -2370,7 +2392,7 @@ mod tests {
         };
         let (_tx, rx) = async_channel::bounded(1);
         let error = route
-            .run_sequentially("probe", rx, None, None)
+            .run_sequentially("probe", rx, None, None, false)
             .await
             .unwrap_err();
         assert!(

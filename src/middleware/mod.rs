@@ -30,7 +30,7 @@ mod metrics;
 mod random_panic;
 mod raw_json;
 mod retry;
-mod transform;
+pub(crate) mod transform;
 mod weak_join;
 
 use buffer::{BufferConsumer, BufferPublisher};

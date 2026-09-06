@@ -216,7 +216,7 @@ fn split_records<'a>(data: &'a [u8], delimiter: &[u8]) -> Vec<&'a [u8]> {
 /// the object's lines (so the first CSV row establishes the schema).
 fn split_and_parse(data: &[u8], delimiter: &[u8], format: &FileFormat) -> Vec<CanonicalMessage> {
     let mut out = Vec::new();
-    let mut csv_header: Option<Vec<String>> = None;
+    let mut csv_header: Option<crate::endpoints::file::CsvHeader> = None;
     for record in split_records(data, delimiter) {
         if let Some(msg) = parse_message(record, format, &mut csv_header) {
             out.push(msg);
@@ -651,52 +651,60 @@ const MAX_OBJECT_DECODE_FAILURES: u32 = 5;
 
 impl ObjectStoreConsumer {
     pub async fn new(config: &ObjectStoreConfig) -> anyhow::Result<Self> {
+        Self::new_with_no_resume(config, false).await
+    }
+
+    pub(crate) async fn new_with_no_resume(
+        config: &ObjectStoreConfig,
+        no_resume: bool,
+    ) -> anyhow::Result<Self> {
         validate_object_settings(config)?;
         let (store, base) = build_store(&config.url)?;
         let delimiter = parse_delimiter(config.delimiter.as_deref())?;
 
         // Durable resume needs an external checkpoint store: an object store has no cheap
         // per-key cursor row, so the source-datastore backend is rejected here.
-        let checkpoint: Option<Arc<dyn CheckpointStore>> = match (
-            &config.cursor_id,
-            &config.checkpoint_store,
-        ) {
-            (Some(cid), Some(spec)) => match checkpoint::parse_checkpoint_store(spec)? {
-                CheckpointBackend::Source { .. } => {
-                    // Same misconfiguration class as the overlap check below: permanent.
-                    return Err(anyhow::Error::new(ConsumerError::Permanent(anyhow!(
+        let checkpoint: Option<Arc<dyn CheckpointStore>> = if no_resume {
+            None
+        } else {
+            match (&config.cursor_id, &config.checkpoint_store) {
+                (Some(cid), Some(spec)) => match checkpoint::parse_checkpoint_store(spec)? {
+                    CheckpointBackend::Source { .. } => {
+                        // Same misconfiguration class as the overlap check below: permanent.
+                        return Err(anyhow::Error::new(ConsumerError::Permanent(anyhow!(
                             "object_store source requires an external checkpoint_store (file://, s3://, postgres://, or mongodb://); a source-datastore checkpoint is not available."
                         ))));
-                }
-                external => {
-                    // Guard against the cursor object landing under the source prefix, where
-                    // it would be listed and re-emitted as data.
-                    if let CheckpointBackend::ObjectStore { url: ck_url } = &external {
-                        if object_urls_overlap(&config.url, ck_url) {
-                            // Misconfiguration: rebuilding the consumer reads the same config,
-                            // so this must stop the route rather than reconnect forever.
-                            return Err(anyhow::Error::new(ConsumerError::Permanent(anyhow!(
+                    }
+                    external => {
+                        // Guard against the cursor object landing under the source prefix, where
+                        // it would be listed and re-emitted as data.
+                        if let CheckpointBackend::ObjectStore { url: ck_url } = &external {
+                            if object_urls_overlap(&config.url, ck_url) {
+                                // Misconfiguration: rebuilding the consumer reads the same config,
+                                // so this must stop the route rather than reconnect forever.
+                                return Err(anyhow::Error::new(ConsumerError::Permanent(anyhow!(
                                 "object_store checkpoint_store '{ck_url}' overlaps the source prefix '{}'; the cursor object would be listed and re-read as data. Point checkpoint_store at a different bucket or prefix.",
                                 config.url
                             ))));
+                            }
                         }
+                        Some(checkpoint::build_external_store(external, &config.url, cid).await?)
                     }
-                    Some(checkpoint::build_external_store(external, &config.url, cid).await?)
+                },
+                (Some(_), None) => {
+                    warn!(
+                        url = %config.url,
+                        "object_store source has cursor_id but no checkpoint_store; resume is disabled and every restart re-emits all objects. Set an external checkpoint_store (file://, s3://, postgres://, mongodb://)."
+                    );
+                    None
                 }
-            },
-            (Some(_), None) => {
-                warn!(
-                    url = %config.url,
-                    "object_store source has cursor_id but no checkpoint_store; resume is disabled and every restart re-emits all objects. Set an external checkpoint_store (file://, s3://, postgres://, mongodb://)."
-                );
-                None
-            }
-            (None, _) => {
-                warn!(
-                    url = %config.url,
-                    "object_store source has no cursor_id; resume is disabled and every restart re-emits all objects."
-                );
-                None
+                (None, _) => {
+                    warn!(
+                        url = %config.url,
+                        "object_store source has no cursor_id; resume is disabled and every restart re-emits all objects."
+                    );
+                    None
+                }
             }
         };
 

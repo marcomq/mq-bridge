@@ -55,6 +55,9 @@ metrics-exporter-prometheus = { version = "0.18.3", default-features = false, fe
 mimalloc = { version = "0.1", default-features = false, optional = true }
 # Only used to install the process-wide crypto provider; see `rustls-aws-lc`.
 rustls = { version = "0.23.43", optional = true }
+# Reads the `CONSUMER` pid lock so `server_info` can tell a live agent listener
+# from one that crashed and left its lock behind. Same version dir_spool uses.
+pidlock = "0.2.2"
 schemars = "1.2.2"
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

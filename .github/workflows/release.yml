@@ -1011,7 +1011,7 @@ jobs:
             echo "::warning::ANACONDA_API_TOKEN is not configured; packages were built but not published"
             exit 0
           fi
-          pipx install anaconda-client
+          pipx install --include-deps anaconda-client
           find conda-packages -type f -name '*.conda' -print0 \
             | xargs -0 anaconda --token "$ANACONDA_API_TOKEN" upload --user marcomq --label main
 

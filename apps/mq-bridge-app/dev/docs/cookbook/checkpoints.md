@@ -45,8 +45,9 @@ table/collection name in the source datastore.
 Notes:
 
 - **ClickHouse requires an external store.** It cannot cheaply upsert cursor rows, so a
-  source-datastore checkpoint is rejected; `cursor_id` without a `checkpoint_store` silently
-  disables resume (with a warning).
+  source-datastore checkpoint is rejected; `cursor_id` without a `checkpoint_store` disables
+  resume with a warning. Use `--resume` when a missing resumable configuration must be fatal,
+  or `--no-resume` when a full re-copy is intentional and resume diagnostics should be ignored.
 - **Object-store sources** must point `checkpoint_store` at a *different* bucket or prefix than
   they read — a cursor object written under the source prefix would be listed and re-read as
   data. The source rejects an overlapping location.
@@ -55,6 +56,13 @@ Notes:
 - Cloud object-store checkpoints need the `object-store` feature compiled in.
 
 ## Using it with `copy`
+
+Pass `--no-resume` to make an intentional full copy without checkpoint diagnostics. For SQL and
+ClickHouse, `cursor_column` is still required to page through the source; the flag only ignores
+optional `cursor_id` / `checkpoint_store` state. It currently applies to cursor-based SQL and
+ClickHouse sources, MongoDB change streams, and object-store sources. It does not change native
+queue or CDC offsets and cannot be combined with `--resume`; for sources such as Kafka, NATS,
+and Postgres CDC, the flag is intentionally a no-op.
 
 `cursor_id`, `cursor_column`, and `checkpoint_store` are ordinary endpoint config fields, so on
 the CLI they are just query parameters on `--from`:
@@ -89,7 +97,7 @@ a query-parameter value. In a YAML config it is written plainly:
 ```yaml
 orders_sync:
   input:
-    postgres:
+    sqlx:
       url: "postgres://user:pass@localhost/app"
       table: orders
       cursor_column: id
@@ -98,6 +106,41 @@ orders_sync:
   output:
     clickhouse: { url: "http://localhost:8123", table: orders, database: analytics }
 ```
+
+### Translating a `copy` command into a config file
+
+Most of a `copy` command maps field for field: URI query parameters become endpoint config keys,
+`--drain` becomes `exit_on_empty: true`, and `--filter` becomes a `filter` middleware on the
+input. `mqb to-cli` goes the other way — it prints a command for a loaded config — but there is no
+converter in this direction, so three differences are worth knowing.
+
+**`--no-resume` is not a field to copy across.** It does not remove `cursor_id` from the config;
+it makes the consumer ignore it. Translating the fields literally therefore reverses the
+behaviour — the CLI run re-copies everything, the config route resumes and copies nothing. The
+correct translation is to *omit* `cursor_id`, which is how a config route says the same thing:
+
+```bash
+mqb copy 'sqlite:///data/app.db?table=orders&cursor_column=id&cursor_id=nightly' \
+         'file:///data/orders.jsonl' --drain --no-resume
+```
+
+```yaml
+orders_dump:
+  exit_on_empty: true
+  input:
+    sqlx: { url: "sqlite:///data/app.db", table: orders, cursor_column: id }  # no cursor_id
+  output:
+    file: { path: /data/orders.jsonl }
+```
+
+**`--resume` cannot be reproduced.** It generates a `copy-…` cursor id from the
+credential-redacted source, destination, and filter, and never prints it. Re-running the same
+command resumes correctly, but a config route has no way to name that id, so it starts a fresh
+checkpoint under whatever `cursor_id` you choose.
+
+**The defaults differ.** `copy` defaults to `concurrency: 4` and `batch_size: 1024`; a route
+defaults to `1` and `512`. Write both out explicitly, or the translated route runs at a quarter
+of the concurrency for no visible reason.
 
 ### `--drain` and checkpoints
 

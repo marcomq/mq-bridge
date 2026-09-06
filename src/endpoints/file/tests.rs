@@ -1822,6 +1822,172 @@ fn test_csv_ends_inside_quotes_tracks_field_starts() {
     assert!(!csv_ends_inside_quotes(b"1,in\"ch\n"));
 }
 
+/// The row decoder that shipped before the fused span parser: one `String` per field,
+/// then a JSON object built from them. Kept here as the executable definition of the
+/// behaviour the fast parser must reproduce byte for byte, quirks included.
+mod csv_reference {
+    fn parse_row(line: &str) -> Vec<String> {
+        let mut fields = Vec::new();
+        let mut cur = String::new();
+        let mut in_quotes = false;
+        let mut chars = line.chars().peekable();
+        while let Some(c) = chars.next() {
+            if in_quotes {
+                if c == '"' {
+                    if chars.peek() == Some(&'"') {
+                        cur.push('"');
+                        chars.next();
+                    } else {
+                        in_quotes = false;
+                    }
+                } else {
+                    cur.push(c);
+                }
+            } else if c == '"' && cur.is_empty() {
+                in_quotes = true;
+            } else if c == ',' {
+                fields.push(std::mem::take(&mut cur));
+            } else {
+                cur.push(c);
+            }
+        }
+        fields.push(cur);
+        fields
+    }
+
+    fn escape(buf: &mut String, s: &str) {
+        for c in s.chars() {
+            match c {
+                '"' => buf.push_str("\\\""),
+                '\\' => buf.push_str("\\\\"),
+                '\n' => buf.push_str("\\n"),
+                '\r' => buf.push_str("\\r"),
+                '\t' => buf.push_str("\\t"),
+                '\u{08}' => buf.push_str("\\b"),
+                '\u{0C}' => buf.push_str("\\f"),
+                c if (c as u32) < 0x20 => {
+                    use std::fmt::Write;
+                    let _ = write!(buf, "\\u{:04x}", c as u32);
+                }
+                c => buf.push(c),
+            }
+        }
+    }
+
+    pub(super) fn encode(header: &[u8], record: &[u8]) -> Vec<u8> {
+        let cols = parse_row(&String::from_utf8_lossy(header));
+        let fields = parse_row(&String::from_utf8_lossy(record));
+        let mut out = String::new();
+        out.push('{');
+        for (i, col) in cols.iter().enumerate() {
+            if i > 0 {
+                out.push(',');
+            }
+            out.push('"');
+            escape(&mut out, col);
+            out.push_str("\":\"");
+            escape(&mut out, fields.get(i).map_or("", |s| s.as_str()));
+            out.push('"');
+        }
+        out.push('}');
+        out.into_bytes()
+    }
+}
+
+/// Decodes one header + one data record through the production path.
+fn csv_decode(header: &[u8], record: &[u8]) -> Vec<u8> {
+    use crate::endpoints::file::parse_message;
+    let mut state = None;
+    assert!(
+        parse_message(header, &FileFormat::Csv, &mut state).is_none(),
+        "the header record establishes columns and yields no message"
+    );
+    parse_message(record, &FileFormat::Csv, &mut state)
+        .expect("a data record always yields a message")
+        .payload
+        .to_vec()
+}
+
+/// Every quirk of the old row decoder, pinned so the fast parser cannot quietly
+/// reinterpret a real file: quotes that open only on an empty field, doubled quotes,
+/// delimiters and newlines inside quotes, control characters, and multi-byte UTF-8.
+#[test]
+fn csv_fast_parser_matches_the_reference_byte_for_byte() {
+    let header = b"a,b,c".as_slice();
+    let records: &[&[u8]] = &[
+        b"1,2,3",
+        b"",
+        b",,",
+        b"1,2",
+        b"1,2,3,4,5",
+        // A quote opens a section only while the field is empty.
+        b"1,in\"ch,3",
+        b"1,\"a\"x,3",
+        b"1,\"\"abc,3",
+        // Doubled quotes are an escape, not a close.
+        b"1,\"a \"\"quoted\"\" word\",3",
+        b"1,\"\"\"\",3",
+        // Delimiters and newlines survive inside a quoted field.
+        b"1,\"With, comma\",3",
+        b"1,\"Line1\nLine2\",",
+        // Characters JSON has to escape.
+        b"1,back\\slash,tab\there",
+        b"1,\x01\x1f,3",
+        b"1,\"quote\"\"and\\slash\",3",
+        // Multi-byte UTF-8 must pass through untouched.
+        "1,héllo 世界,🎉".as_bytes(),
+        // Invalid UTF-8 is replaced, not rejected.
+        b"1,\xff\xfe,3",
+    ];
+
+    for record in records {
+        assert_eq!(
+            csv_decode(header, record),
+            csv_reference::encode(header, record),
+            "record {:?} decoded differently",
+            String::from_utf8_lossy(record)
+        );
+    }
+}
+
+/// Headers get the same treatment as values, including names that need JSON escaping.
+#[test]
+fn csv_fast_parser_matches_the_reference_for_awkward_headers() {
+    let cases: &[(&[u8], &[u8])] = &[
+        (b"\"a,b\",c", b"1,2"),
+        (b"a\"b,c", b"1,2"),
+        (b"\"quote\"\"name\",c", b"1,2"),
+        (b"back\\slash,c", b"1,2"),
+        ("héllo,世界".as_bytes(), "1,2".as_bytes()),
+        (b"a", b"1,2,3"),
+        (b"", b"1"),
+    ];
+
+    for (header, record) in cases {
+        assert_eq!(
+            csv_decode(header, record),
+            csv_reference::encode(header, record),
+            "header {:?} decoded differently",
+            String::from_utf8_lossy(header)
+        );
+    }
+}
+
+proptest::proptest! {
+    /// Random records, including ones no CSV writer would produce, must decode
+    /// identically to the reference.
+    #[test]
+    fn csv_fast_parser_matches_the_reference_on_arbitrary_records(
+        header in "[a-c\",\\\\ ]{0,12}",
+        record in "[a-c0-9\",\\\\\\n\\t ]{0,40}",
+    ) {
+        proptest::prop_assert_eq!(
+            csv_decode(header.as_bytes(), record.as_bytes()),
+            csv_reference::encode(header.as_bytes(), record.as_bytes())
+        );
+    }
+}
+
 #[tokio::test]
 async fn test_file_csv_value_types_and_escaping() {
     let dir = tempdir().unwrap();
@@ -2176,6 +2342,72 @@ fn test_parse_message_payload_shapes() {
             .map(String::as_str),
         Some("raw")
     );
+}
+
+/// `json` copies the payload's own bytes out of the line, so everything a
+/// `serde_json::Value` round trip would quietly normalise stays put.
+#[test]
+fn test_json_format_payload_is_copied_verbatim() {
+    use crate::endpoints::file::parse_message;
+
+    let decoded = |payload: &str| -> Vec<u8> {
+        let line = format!(
+            r#"{{"message_id":"019f9b12-d786-7ebe-a7ec-a1aa71bc47ae","payload":{payload}}}"#
+        );
+        let mut header = None;
+        parse_message(line.as_bytes(), &FileFormat::Json, &mut header)
+            .expect("line decodes")
+            .payload
+            .to_vec()
+    };
+
+    // Key order is the producer's, not alphabetical: without `preserve_order`
+    // a `Value` is a `BTreeMap` and would have re-sorted these.
+    assert_eq!(decoded(r#"{"b":1,"a":2}"#), br#"{"b":1,"a":2}"#);
+    // Numbers keep their source spelling, so a double cannot shift a ULP on the
+    // way through regardless of the `float-roundtrip` feature.
+    assert_eq!(decoded("1e3"), b"1e3");
+    assert_eq!(decoded("2.5000"), b"2.5000");
+    assert_eq!(decoded("0.1234567890123456789"), b"0.1234567890123456789");
+    // Interior spacing is part of those bytes too.
+    assert_eq!(decoded(r#"{"a": 1}"#), br#"{"a": 1}"#);
+    // Scalars and nulls are unchanged from the `Value` path.
+    assert_eq!(decoded("null"), b"null");
+    assert_eq!(decoded("true"), b"true");
+    assert_eq!(decoded(r#""hi""#), br#""hi""#);
+    // A lone surrogate is legal JSON text but not a legal Rust `String`, so the
+    // `Value` gate used to reject the whole line and discard its metadata.
+    assert_eq!(decoded(r#""\ud800""#), br#""\ud800""#);
+}
+
+/// The `json` sink writes the payload's own bytes into the wrapper for the same
+/// reason the source reads them out of it, so a round trip changes nothing.
+#[test]
+fn test_json_format_round_trip_preserves_payload_bytes() {
+    use crate::endpoints::file::{encode_record, parse_message};
+    use crate::CanonicalMessage;
+
+    for payload in [
+        r#"{"b":1,"a":2}"#,
+        r#"{"z":{"y":1e3,"x":2.5000}}"#,
+        r#"{"a": 1}"#,
+        r#""\ud800""#,
+        "0.1234567890123456789",
+    ] {
+        let mut msg = CanonicalMessage::new(payload.as_bytes().to_vec(), None);
+        msg.metadata.insert("k".to_string(), "v".to_string());
+        let line = encode_record(&msg, &FileFormat::Json).expect("record encodes");
+
+        let mut header = None;
+        let back = parse_message(&line, &FileFormat::Json, &mut header).expect("line decodes");
+        assert_eq!(
+            String::from_utf8_lossy(&back.payload),
+            payload,
+            "payload changed on the way through"
+        );
+        assert_eq!(back.metadata.get("k").map(String::as_str), Some("v"));
+        assert_eq!(back.message_id, msg.message_id);
+    }
 }
 
 /// Reads batches until the consumer surfaces an empty (drain) batch, returning
@@ -2554,4 +2786,69 @@ fn pre_existing_marker_does_not_break_a_binary_round_trip() {
     let line = encode_record(&msg, &FileFormat::Json).unwrap();
     let parsed = parse_message(&line, &FileFormat::Json, &mut None).unwrap();
     assert_eq!(parsed.payload.as_ref(), payload.as_slice());
+}
+
+/// The reader decodes a batch across cores; that must be invisible. At every size around
+/// the split threshold the parallel decode has to match a plain sequential one, record
+/// for record, including the header row it swallows and the offsets it stamps.
+#[test]
+fn parallel_record_decode_matches_a_sequential_one() {
+    use crate::endpoints::file::{decode_records, parse_message, CsvHeader, RecordSpan};
+    use std::sync::Arc;
+
+    let header = b"id,name,amount,note".to_vec();
+    let row = |i: usize| format!(r#"{i},"a,b {i}",{i}.5,"say ""hi"" {i}""#).into_bytes();
+
+    for count in [0, 1, 2, 63, 64, 65, 127, 1024] {
+        for with_header in [true, false] {
+            let mut buf: Vec<u8> = Vec::new();
+            let mut spans: Vec<RecordSpan> = Vec::new();
+            let mut records: Vec<Vec<u8>> = Vec::new();
+            if with_header {
+                records.push(header.clone());
+            }
+            records.extend((0..count).map(row));
+            for (i, record) in records.iter().enumerate() {
+                let start = buf.len();
+                buf.extend_from_slice(record);
+                spans.push((start, buf.len(), i as u64 + 1));
+            }
+
+            let mut state = (!with_header).then(|| Arc::new(CsvHeader::parse(&header)));
+            let actual = decode_records(&mut buf, &spans, &FileFormat::Csv, &mut state, true);
+            // The batch buffer is lent to the workers and must come back intact, or the
+            // reader silently reallocates it every batch.
+            assert_eq!(
+                buf.len(),
+                records.iter().map(Vec::len).sum::<usize>(),
+                "{count} records, header={with_header}: buffer not handed back"
+            );
+
+            let mut expected_state = (!with_header).then(|| CsvHeader::parse(&header));
+            let expected: Vec<_> = spans
+                .iter()
+                .filter_map(|&(start, end, position)| {
+                    let mut msg =
+                        parse_message(&buf[start..end], &FileFormat::Csv, &mut expected_state)?;
+                    msg.metadata
+                        .insert("file_offset".to_string(), position.to_string());
+                    Some(msg)
+                })
+                .collect();
+
+            assert_eq!(
+                actual.len(),
+                expected.len(),
+                "{count} records, header={with_header}: wrong count"
+            );
+            for (got, want) in actual.iter().zip(&expected) {
+                assert_eq!(got.payload, want.payload, "payload differs");
+                assert_eq!(
+                    got.metadata.get("file_offset"),
+                    want.metadata.get("file_offset"),
+                    "offset differs"
+                );
+            }
+        }
+    }
 }

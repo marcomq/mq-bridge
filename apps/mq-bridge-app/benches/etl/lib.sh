@@ -161,7 +161,10 @@ kill_pids() {
     done
     ((alive)) || return 0
     sleep 0.1
-    ((waited++))
+    # Assignment, not `((waited++))`: a post-increment evaluates to the *old*
+    # value, so at waited=0 the arithmetic result is 0 and `(( ))` exits 1 —
+    # which under `set -e` killed the caller on the first iteration.
+    waited=$((waited + 1))
   done
   for pid in "$@"; do
     [[ -n "$pid" ]] || continue

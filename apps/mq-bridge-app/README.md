@@ -23,6 +23,11 @@ Supported integration types include **Kafka**, **RabbitMQ (AMQP)**, **NATS**, **
 
 At its core is a zero-config `copy` command that moves data between databases, queues, and files in a single line of bash — no YAML, no pipeline definition, no code:
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/marcomq/mq-bridge/main/docs/assets/copy-demo.png"
+       alt="mqb copy: a CSV file to S3 as zstd-compressed JSONL, a filtered Postgres table to NATS, and a ClickHouse table to Kafka — 1,000,000 rows each, one command per line" width="900">
+</p>
+
 ```bash
 mqb copy \
   'postgres://${PGUSER}:${PGPASSWORD}@localhost/db?table=src&sslmode=disable' \
@@ -114,10 +119,12 @@ Use Postman/Bruno when your main job is crafting and sharing API requests; use `
 
 ## Performance
 
-A CSV → JSONL conversion hit **1,133,786 rows/s**; the same job **through an MCP tool call** ran at **1,176,489 rows/s** while costing an agent a *flat* ~381 tokens regardless of row count, because the rows never enter the model's context.
+A CSV → JSONL conversion hit **2,824,858 rows/s** (mq-bridge 0.4.12) — ~1.4x DuckDB's all-core copy of the same file, on fewer cores and ~17x less memory. The same job **through an MCP tool call** ran at **2,348,793 rows/s** against that session's 2,824,858 rows/s CLI baseline: the MCP interface costs a *fixed* ~72 ms (route start, plus up to one 50 ms completion poll), not a per-row tax. It costs an agent a *flat* ~385 tokens regardless of row count, because the rows never enter the model's context.
 
 On a Kafka → file relay using mq-bridge-app's default file format and no transform,
-the same engine was up to **65% faster than Sea Streamer**; the native file-format caveats are detailed in the linked benchmark documentation.
+the same engine was **~65% faster than Sea Streamer** comparing both on the mimalloc
+allocator (~80% against its default-allocator build); the native file-format caveats are
+detailed in the linked benchmark documentation.
 
 → Full numbers, methodology, and knobs: [Performance tuning](https://marcomq.github.io/mq-bridge/operations/tuning.html) and [`benches/etl/README.md`](benches/etl/README.md).
 

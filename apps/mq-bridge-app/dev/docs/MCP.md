@@ -17,12 +17,12 @@ YAML to write first and no per-connector tool to install. `list_routes`,
 
 **The rows never enter the model's context.** The agent describes the job; the
 engine moves the bytes. Moving a 116.3 MiB dataset costs three tool calls and
-~381 tokens — the same ~381 tokens whether the job is 1,000 rows or 1,000,000.
+~385 tokens — the same ~385 tokens whether the job is 1,000 rows or 1,000,000.
 
 | | Registry name | `io.github.marcomq/mq-bridge-app` |
 | --- | --- | --- |
 | **Transports** | `stdio`, streamable HTTP | |
-| **Tools** | 8 | [see below](#tools) |
+| **Tools** | 10 | [see below](#tools) |
 | **Connectors** | 15+ | [see below](#endpoints) |
 | **Install** | `mqb mcp install` | Docker / cargo / Homebrew / binaries — [Installation](INSTALL.md) |
 
@@ -73,10 +73,71 @@ transport owns stdout for the protocol itself.
 | `wait_route` | `name`, `timeout_ms` | Block until a route finishes, then report how it ended. One call instead of a polling loop. |
 | `route_messages` | `name` | The most recent messages captured on a route. Requires `capture_last`; reads drain the buffer. |
 | `stop_route` | `name` | Stop a route; returns total messages and the rate it achieved. |
-| `server_info` | — | Crate version, git hash, build profile and build time. |
+| `server_info` | — | Crate version, git hash, build profile and build time, plus the agent bus. |
+| `agent_listen` | `name`, `input`, `capture_last` | Open this server's agent inbox so other agents can reach it. Off until called. |
+| `agent_send` | `to`, `message`, `output` | Send a message to another agent's inbox. Always available. |
 
 Call `server_info` before quoting any throughput number: a debug binary reports
 much slower rates, and the figure would be meaningless.
+
+### Agent messaging
+
+Two agents on one machine can message each other without a broker. `agent_listen`
+opens this server's inbox — a `dir_spool` directory under `$MQB_AGENTS_DIR`
+(default `~/.mqb-agents/<name>`) — and tails it for the session. Nothing can reach
+an agent that has not called it.
+
+```text
+agent_listen {"name": "claude"}     # opt in; off by default
+agent_send   {"to": "gpt-worker", "message": "..."}   # always available
+route_messages {"name": "agent-inbox"}                # collect mail
+```
+
+Mail collected this way is held in a ring of the last `capture_last` messages
+(default 200), and the inbox file is deleted as it is read. An agent that leaves a
+session running without calling `route_messages` therefore loses the overflow —
+raise `capture_last`, or collect more often.
+
+`server_info` reports the bus: who this server listens as, and which peers have an
+inbox and are currently listening. One message is one atomically renamed file, so a
+peer that is not running collects its mail when it next listens, and any process
+that can write a file can take part — no MCP client required:
+
+```bash
+f=~/.mqb-agents/claude/$(printf '%09d' $SEQ)-$(uuidgen | tr -d - | cut -c1-12)
+printf '%s' '{"from":"gpt","message":"hi"}' > "$f.bin.tmp" && mv "$f.bin.tmp" "$f.bin"
+```
+
+Both tools take an optional endpoint (`input` / `output`) replacing the local
+directory, so the same bus works over NATS, Kafka or anything else when the peer is
+not on this machine.
+
+#### Being woken by mail
+
+MCP has no way to wake an agent: a server cannot start a turn, so `agent_listen`
+can only hold the mail until the agent asks for it. A background job *can* wake
+one, and `agent-listen` is that job — it blocks until mail arrives, writes it out
+and exits, so its completion is the notification:
+
+```bash
+mqb agent-listen claude --wait 600    # blocks; exits when mail lands
+```
+
+It is sugar for `copy --from spool://<inbox> --wait <secs>`, and writes each
+envelope as one line. Point it somewhere explicit with `--to`.
+
+Use `agent_listen` for a mailbox you poll during a session, and `agent-listen`
+when you want the arrival itself to interrupt you — but only one of them per
+inbox. `dir_spool` allows a single consumer, so while an MCP server is listening
+as `claude`, `mqb agent-listen claude` fails with `already held by a consumer`.
+
+The refusal works in both directions: `agent-listen` holds the inbox for its
+whole wait rather than polling it, so a second listener on the same name fails
+instead of quietly splitting the mail with the first.
+
+It stops at the first delivery, not at an empty inbox, so a burst that is still
+arriving may leave messages queued. They are not lost — the next `agent-listen`
+picks them up, and the summary line says how many came through this time.
 
 `start_route` and `route_messages` are annotated **not read-only** — starting a
 route moves real data, and reading captured messages consumes the buffer — so a
@@ -275,11 +336,13 @@ Tail a live Kafka topic and keep the last 20 messages for inspection:
 ## Performance
 
 The interface costs **one round-trip, not a per-row tax**: a route started through
-`start_route` moves data at the rate the `copy` CLI does, within run-to-run
-variance, and what separates them is a fixed ~30-55 ms of startup and completion
-polling. In the latest run the MCP path measured marginally *above* the CLI on the
-same dataset — that is variance on a sub-second job, not the tool call being
-faster than the command.
+`start_route` moves data at the rate the `copy` CLI does, and what separates them is
+a fixed **~72 ms** of route startup and completion polling — 0.426 s against the CLI's
+0.354 s on the same 1M-row dataset in the same session. Most of that is the measuring
+client asking `route_status` every 50 ms, so completion is noticed up to one poll
+late; the two tool calls bracketing the job cost ~0.05 ms each at p50. The gap is
+fixed, so it shrinks to nothing as a proportion as the dataset grows — and it is more
+visible than it used to be only because the job itself got ~2.6x faster.
 
 {{#include ../../benches/etl/README.md:mcp_results}}
 

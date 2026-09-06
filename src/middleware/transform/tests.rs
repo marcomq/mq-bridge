@@ -1188,6 +1188,138 @@ mod fast_path_equivalence {
         );
     }
 
+    /// A text-typed column rewritten straight from its raw span must be byte-identical to
+    /// what building a `Value` for the field and re-serializing it produces — for the
+    /// values that convert *and* for the ones that must still fail with the same error.
+    #[test]
+    fn raw_scalar_coercion_matches_the_value_path() {
+        let cases: &[(&str, &[&str])] = &[
+            (
+                "integer",
+                &[
+                    "0",
+                    "42",
+                    "-42",
+                    "007",
+                    "+42",
+                    " 42 ",
+                    "\\t7\\n",
+                    // The i64/u64 boundary, and past it.
+                    "9223372036854775807",
+                    "9223372036854775808",
+                    "18446744073709551615",
+                    "18446744073709551616",
+                    // Must fail exactly as the general path fails.
+                    "4.5",
+                    "1e3",
+                    "abc",
+                    "",
+                    " ",
+                    "-",
+                    "0x10",
+                ],
+            ),
+            (
+                "number",
+                &[
+                    "1.5", "-0.001", "0", "1e3", "2.5000", "0.1", " 2.5 ", "-0", "1e400", "NaN",
+                    "inf", "abc", "", "1.2.3",
+                ],
+            ),
+            (
+                "boolean",
+                &[
+                    "true", "false", "1", "0", "TRUE", "False", "yes", "", " true ",
+                ],
+            ),
+        ];
+
+        for (ty, values) in cases {
+            let schema = json!({ "type": "object", "properties": { "v": { "type": ty } } });
+            for value in *values {
+                let payload = format!(r#"{{"v":"{value}","other":"x"}}"#);
+                assert_byte_identical(schema.clone(), &payload);
+            }
+        }
+    }
+
+    /// A value carrying escapes cannot be read from its span verbatim, so it has to fall
+    /// back — and still agree.
+    #[test]
+    fn escaped_and_non_string_scalars_still_match() {
+        for (ty, raw) in [
+            // Both spell "42", but only after the escapes are decoded — the raw span
+            // rewrite has to stand aside and let the general path unescape them.
+            ("integer", r#""\u0034\u0032""#),
+            ("integer", r#""4\u0032""#),
+            ("number", r#""1.5""#),
+            ("boolean", r#""true""#),
+            // Already the right type, or a type no rewrite covers.
+            ("integer", "42"),
+            ("number", "1.5"),
+            ("boolean", "true"),
+            ("integer", "null"),
+            ("integer", "[1]"),
+            ("integer", r#"{"a":1}"#),
+            ("string", r#""x""#),
+            ("string", "42"),
+        ] {
+            let schema = json!({ "type": "object", "properties": { "v": { "type": ty } } });
+            assert_byte_identical(schema, &format!(r#"{{"v":{raw},"other":"x"}}"#));
+        }
+    }
+
+    /// The rewrite must stay out of the way of everything else a schema can declare.
+    #[test]
+    fn raw_scalar_coercion_defers_to_other_schema_keywords() {
+        let payload = r#"{"v":"1","other":"x"}"#;
+        for sub in [
+            json!({ "type": "integer", "enum": [1, 2] }),
+            json!({ "type": "integer", "enum": [7] }),
+            json!({ "type": "boolean", "enum": [true] }),
+            json!({ "type": "integer", "contentMediaType": "application/json" }),
+        ] {
+            let schema = json!({ "type": "object", "properties": { "v": sub } });
+            assert_byte_identical(schema, payload);
+        }
+
+        // A sub-schema default takes the whole root off the fast path, because filling one
+        // needs to know which fields are absent — which copying spans never learns.
+        assert_same(
+            json!({
+                "type": "object",
+                "properties": { "v": { "type": "integer", "default": 5 } }
+            }),
+            payload,
+        );
+
+        // `coerce: false` makes a mistyped field an error, which only `apply` phrases.
+        assert_byte_identical_with(
+            TransformMiddleware {
+                schema: Some(json!({
+                    "type": "object",
+                    "properties": { "v": { "type": "integer" } }
+                })),
+                coerce: false,
+                ..Default::default()
+            },
+            payload,
+        );
+
+        // An empty string is read as null first, so it belongs to the general path.
+        assert_same_with(
+            TransformMiddleware {
+                schema: Some(json!({
+                    "type": "object",
+                    "properties": { "v": { "type": ["integer", "null"] } }
+                })),
+                coerce_empty_as_null: true,
+                ..Default::default()
+            },
+            r#"{"v":"","other":"x"}"#,
+        );
+    }
+
     /// `transform_fast` writes keys itself instead of going through a `serde_json::Map`, so
     /// it consults `map_sorts_keys` to order them the way the normal path would. That probe
     /// has to describe the `Map` this build actually compiled in, whichever it is.

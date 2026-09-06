@@ -16,6 +16,8 @@ use serde_json::{Map, Value};
 #[cfg(feature = "zen")]
 use zen_expression::compiler::{FetchFastTarget, Opcode};
 #[cfg(feature = "zen")]
+use zen_expression::variable::Symbol;
+#[cfg(feature = "zen")]
 use zen_expression::{compile_expression, expression::Standard, Expression, Variable};
 
 #[derive(Debug, Clone, Copy)]
@@ -41,6 +43,10 @@ pub(super) struct Compiled {
     pub(super) on_error: TransformErrorPolicy,
     /// Decided once: whether a fast path may be tried at all.
     pub(super) fast_eligible: bool,
+    /// Decided once: an expression with no mapping or schema stage beside it, which lets
+    /// the payload be read straight into the engine's own `Variable`.
+    #[cfg(feature = "zen")]
+    expression_only: bool,
     /// `Some` when the mapping is a plain projection `project_fast` can serve; parallel
     /// to `rules`, which stays the source of truth for everything else about a rule.
     pub(super) fast_map: Option<Vec<FastMapRule>>,
@@ -211,6 +217,8 @@ impl Compiled {
         Ok(Self {
             fast_eligible: config.expression.is_none()
                 && (fast_eligible(&rules, schema.as_ref(), opts) || fast_map.is_some()),
+            #[cfg(feature = "zen")]
+            expression_only: expression.is_some() && rules.is_empty() && schema.is_none(),
             take_inputs: paths_are_disjoint(&rules),
             fast_map,
             sort_keys: map_sorts_keys(),
@@ -352,6 +360,12 @@ impl Compiled {
                 // The schema has something to say about this field and the raw bytes do
                 // not already satisfy it: parse just this field and transform it.
                 Some(sub) if empty_string || !sub.is_passthrough(raw.get()) => {
+                    // A text-typed column becomes its typed token straight from the span.
+                    // `false` means the field is not a shape that serves, or the rewrite
+                    // failed and the general path has to raise the error.
+                    if !empty_string && sub.coerce_scalar_raw(raw.get(), self.opts, &mut out) {
+                        continue;
+                    }
                     let mut value: Value = match serde_json::from_str(raw.get()) {
                         Ok(value) => value,
                         Err(e) => {
@@ -439,6 +453,83 @@ impl Compiled {
         Some(Ok(out))
     }
 
+    /// The expression on its own, with no mapping or schema stage beside it.
+    ///
+    /// Reading the payload straight into the engine's own `Variable` skips the
+    /// intermediate `serde_json::Value` the general path builds only to convert away
+    /// again, and lets `meta` be inserted without the deep clone that path needs.
+    ///
+    /// The result still travels home through `Value`: serializing a `Variable` directly
+    /// would put its `Decimal` through `to_u64`, which truncates, so `100.5` would land
+    /// as `100`.
+    #[cfg(feature = "zen")]
+    fn transform_expression_only(
+        &self,
+        message: &mut CanonicalMessage,
+    ) -> Result<(), TransformError> {
+        let expression = self
+            .expression
+            .as_ref()
+            .expect("expression_only implies an expression");
+
+        let input: Variable = serde_json::from_slice(&message.payload).map_err(|e| {
+            TransformError::new(
+                "$".to_string(),
+                ErrorKind::Parse,
+                format!("payload is not valid JSON: {e}"),
+            )
+        })?;
+        let Some(object) = input.as_object() else {
+            return Err(TransformError::new(
+                "$".to_string(),
+                ErrorKind::Expression,
+                "expression requires a structured JSON object payload",
+            ));
+        };
+
+        if self.expression_uses_metadata {
+            let meta = message
+                .metadata
+                .iter()
+                .map(|(key, value)| {
+                    (
+                        Symbol::from(key.as_str()),
+                        Variable::String(value.as_str().into()),
+                    )
+                })
+                .collect();
+            object
+                .borrow_mut()
+                .insert(Symbol::from("meta"), Variable::from_object(meta));
+        }
+        drop(object);
+
+        let evaluated = expression.evaluate(input).map_err(|error| {
+            TransformError::new("$".to_string(), ErrorKind::Expression, error.to_string())
+        })?;
+        self.write_payload(message, &Value::from(evaluated))
+    }
+
+    /// Serializes the reshaped document back over the message's payload. Sized from the
+    /// input rather than left at serde_json's 128-byte default: the output tracks the
+    /// input closely, so this is usually the only allocation the write side makes.
+    fn write_payload(
+        &self,
+        message: &mut CanonicalMessage,
+        value: &Value,
+    ) -> Result<(), TransformError> {
+        let mut bytes = Vec::with_capacity(message.payload.len() + message.payload.len() / 2);
+        serde_json::to_writer(&mut bytes, value).map_err(|e| {
+            TransformError::new(
+                "$".to_string(),
+                ErrorKind::Parse,
+                format!("transformed value could not be serialized: {e}"),
+            )
+        })?;
+        message.payload = Bytes::from(bytes);
+        Ok(())
+    }
+
     /// Parses once, reshapes, serialises once.
     pub(super) fn transform(&self, message: &mut CanonicalMessage) -> Result<(), TransformError> {
         if self.fast_eligible {
@@ -451,6 +542,11 @@ impl Compiled {
                 message.payload = Bytes::from(result?);
                 return Ok(());
             }
+        }
+
+        #[cfg(feature = "zen")]
+        if self.expression_only {
+            return self.transform_expression_only(message);
         }
 
         let mut input: Value = serde_json::from_slice(&message.payload).map_err(|e| {
@@ -509,19 +605,7 @@ impl Compiled {
             schema.apply(&mut value, &mut crumbs, self.opts)?;
         }
 
-        // Sized from the input rather than left at serde_json's 128-byte default: the
-        // output tracks the input closely, so this is usually the only allocation the
-        // write side makes.
-        let mut bytes = Vec::with_capacity(message.payload.len() + message.payload.len() / 2);
-        serde_json::to_writer(&mut bytes, &value).map_err(|e| {
-            TransformError::new(
-                "$".to_string(),
-                ErrorKind::Parse,
-                format!("transformed value could not be serialized: {e}"),
-            )
-        })?;
-        message.payload = Bytes::from(bytes);
-        Ok(())
+        self.write_payload(message, &value)
     }
 
     /// Applies the configured policy to a failure. `Ok` keeps the message (annotated),
@@ -539,6 +623,109 @@ impl Compiled {
                 Ok(())
             }
             TransformErrorPolicy::Reject => Err(error),
+        }
+    }
+}
+
+#[cfg(all(test, feature = "zen"))]
+mod tests {
+    use super::*;
+    use crate::models::TransformMiddleware;
+
+    fn message(payload: &str, metadata: &[(&str, &str)]) -> CanonicalMessage {
+        let mut message = CanonicalMessage::new(payload.as_bytes().to_vec(), None);
+        for (key, value) in metadata {
+            message
+                .metadata
+                .insert((*key).to_string(), (*value).to_string());
+        }
+        message
+    }
+
+    /// The direct-to-`Variable` route must reproduce the general `Value` path byte for
+    /// byte. Numbers are the reason this test exists: serializing a `Variable` straight
+    /// out would put its `Decimal` through `to_u64`, which truncates, so `100.5` would
+    /// silently land as `100`.
+    #[test]
+    fn the_expression_only_route_matches_the_value_path() {
+        let payloads = [
+            r#"{"a":1,"b":"x"}"#,
+            r#"{"a":100.5,"b":"x"}"#,
+            r#"{"a":-0.001,"b":"x"}"#,
+            r#"{"a":1.0,"b":"x"}"#,
+            r#"{"a":0,"b":"x"}"#,
+            r#"{"a":0.1,"b":"x"}"#,
+            r#"{"a":12345678901234,"b":"x"}"#,
+            r#"{"a":-42,"b":"x"}"#,
+            r#"{"a":1e3,"b":"x"}"#,
+            r#"{"a":2.5000,"b":"x"}"#,
+            r#"{"a":"7.25","b":"x"}"#,
+            r#"{"a":[1,2.5],"b":"x"}"#,
+            r#"{"a":{"c":3.75},"b":"x"}"#,
+            r#"{"a":true,"b":null}"#,
+            r#"{"a":null,"b":"héllo 世界"}"#,
+            r#"{"a":1,"b":"quote\"and\\slash"}"#,
+            // A payload carrying its own `meta`: both routes overwrite it with the
+            // message metadata, and must agree on that.
+            r#"{"a":1,"b":"x","meta":{"kind":"from-payload"}}"#,
+            r#"{"a":1,"b":"x","meta":"not an object"}"#,
+        ];
+        let expressions = [
+            "{value: a, other: b}",
+            "{value: a, kind: meta.kind}",
+            "{keys: keys($), value: a}",
+        ];
+        let metadata = &[("kind", "order")][..];
+
+        for expression in expressions {
+            let config = TransformMiddleware {
+                expression: Some(expression.to_string()),
+                ..Default::default()
+            };
+            let fast = Compiled::new(&config).expect("config compiles");
+            assert!(
+                fast.expression_only,
+                "{expression} should take the fast route"
+            );
+            let mut general = Compiled::new(&config).expect("config compiles");
+            general.expression_only = false;
+
+            for payload in payloads {
+                let mut left = message(payload, metadata);
+                let mut right = message(payload, metadata);
+                match (fast.transform(&mut left), general.transform(&mut right)) {
+                    (Ok(()), Ok(())) => assert_eq!(
+                        left.payload, right.payload,
+                        "{expression} disagreed on {payload}"
+                    ),
+                    (Err(_), Err(_)) => {}
+                    (left, right) => {
+                        panic!("{expression} on {payload}: fast={left:?} general={right:?}")
+                    }
+                }
+            }
+        }
+    }
+
+    /// A payload that is not a JSON object is rejected the same way on both routes.
+    #[test]
+    fn the_expression_only_route_rejects_non_object_payloads_alike() {
+        let config = TransformMiddleware {
+            expression: Some("{value: a}".to_string()),
+            ..Default::default()
+        };
+        let fast = Compiled::new(&config).unwrap();
+        let mut general = Compiled::new(&config).unwrap();
+        general.expression_only = false;
+
+        for payload in [r#"[1,2]"#, r#""text""#, r#"7"#, r#"not json"#] {
+            let mut left = message(payload, &[]);
+            let mut right = message(payload, &[]);
+            assert_eq!(
+                fast.transform(&mut left).is_err(),
+                general.transform(&mut right).is_err(),
+                "{payload}"
+            );
         }
     }
 }
