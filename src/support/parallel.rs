@@ -168,8 +168,11 @@ where
     for handle in handles {
         match handle.await {
             Ok(part) => out.extend(part),
-            // `spawn_blocking` work cannot be cancelled once started, so this is a panic.
-            Err(error) => std::panic::resume_unwind(error.into_panic()),
+            // Started blocking work cannot be cancelled, so a panic is the usual case;
+            // a chunk still queued when the runtime shuts down comes back cancelled, and
+            // its messages are gone with it, so neither may return a short batch.
+            Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+            Err(error) => panic!("batch chunk was cancelled by runtime shutdown: {error}"),
         }
     }
     out

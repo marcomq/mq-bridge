@@ -87,7 +87,7 @@ opens this server's inbox — a `dir_spool` directory under `$MQB_AGENTS_DIR`
 (default `~/.mqb-agents/<name>`) — and tails it for the session. Nothing can reach
 an agent that has not called it.
 
-```
+```text
 agent_listen {"name": "claude"}     # opt in; off by default
 agent_send   {"to": "gpt-worker", "message": "..."}   # always available
 route_messages {"name": "agent-inbox"}                # collect mail

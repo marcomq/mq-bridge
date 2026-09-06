@@ -95,6 +95,16 @@ fn build_row(
     }
 }
 
+/// Whether the URL names this machine, where a clear-text password never leaves it.
+fn is_loopback(url: &url::Url) -> bool {
+    match url.host() {
+        Some(url::Host::Domain(host)) => host == "localhost",
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    }
+}
+
 /// A minimal ClickHouse HTTP client: every statement is a POST whose body is the SQL (plus inline
 /// data for inserts). Auth and target database travel as headers/params so payload `?` chars are never
 /// treated as bind placeholders.
@@ -110,7 +120,7 @@ struct ChClient {
 impl ChClient {
     fn from_config(config: &ClickHouseConfig) -> anyhow::Result<Self> {
         let mut url = url::Url::parse(&config.url).context("Invalid ClickHouse URL")?;
-        if !url.has_host() {
+        if !url.has_host() || !matches!(url.scheme(), "http" | "https") {
             return Err(anyhow!(
                 "ClickHouse URL must be an absolute http(s) URL with a host, e.g. 'http://localhost:8123'"
             ));
@@ -139,9 +149,13 @@ impl ChClient {
         url.set_username("")
             .map_err(|_| anyhow!("ClickHouse URL cannot contain username userinfo"))?;
 
-        let mut builder = reqwest::Client::builder().connect_timeout(Duration::from_millis(
-            config.connect_timeout_ms.unwrap_or(10_000),
-        ));
+        // No redirect following: credentials travel as plain `X-ClickHouse-*` headers, which
+        // reqwest does not strip on a cross-host hop, and the HTTP interface never redirects.
+        let mut builder = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(Duration::from_millis(
+                config.connect_timeout_ms.unwrap_or(10_000),
+            ));
         if let Some(ms) = config.request_timeout_ms {
             builder = builder.timeout(Duration::from_millis(ms));
         }
@@ -159,6 +173,13 @@ impl ChClient {
         let http = builder
             .build()
             .context("Failed to build ClickHouse HTTP client")?;
+        let password = config.password.clone().or(url_password).unwrap_or_default();
+        if !password.is_empty() && url.scheme() == "http" && !is_loopback(&url) {
+            warn!(
+                host = url.host_str().unwrap_or_default(),
+                "ClickHouse password is sent in clear text over http; use an https URL"
+            );
+        }
         Ok(Self {
             http,
             url: url.as_str().trim_end_matches('/').to_string(),
@@ -168,7 +189,7 @@ impl ChClient {
                 .clone()
                 .or(url_username)
                 .unwrap_or_else(|| "default".into()),
-            password: config.password.clone().or(url_password).unwrap_or_default(),
+            password,
             compression: config.compression,
         })
     }

@@ -26,7 +26,7 @@ the conflict clause yourself.
 | MongoDB | `id_field` set to a payload field or replay-stable template such as `${metadata:mqb.id}` | Yes |
 | PostgreSQL / SQLite | `sqlx.insert_query` uses a unique key with `ON CONFLICT … DO NOTHING` | Yes |
 | PostgreSQL / SQLite | `sqlx.insert_query` uses a unique key with `ON CONFLICT … DO UPDATE` (convergent upsert) | No — still idempotent, but the startup line says `at-least-once` |
-| MySQL / MariaDB | `sqlx.insert_query` uses a unique key with `ON DUPLICATE KEY UPDATE` | No — still idempotent, but the startup line says `at-least-once` |
+| MySQL / MariaDB | `sqlx.insert_query` uses a unique key with `ON DUPLICATE KEY UPDATE` assigning replay-stable values (a convergent upsert; an accumulating assignment such as `c = c + 1` is **not** idempotent) | No — still idempotent, but the startup line says `at-least-once` |
 | File / object store | `name_by: source_position` (the `object_store` default over a replayable Kafka, Postgres CDC, SQL cursor, MongoDB CDC or `consume`-mode file source). Needs positions that *repeat* across runs — a file source in `subscribe` or `group_subscribe` mode stamps a per-run epoch, so its names never collide and a replay is not recognised | Yes |
 
 The right-hand column only describes the **informational log line** `mq-bridge` emits when a

@@ -1308,7 +1308,9 @@ pub(crate) fn agents_root() -> anyhow::Result<PathBuf> {
 pub(crate) fn validate_agent_name(name: &str) -> anyhow::Result<&str> {
     let trimmed = name.trim();
     if trimmed.is_empty()
-        || trimmed.contains(['/', '\\', ':'])
+        // `?` and `#` too: the name goes into a `spool://`/`file://` URI, where they
+        // would start a query or fragment and silently retarget the inbox.
+        || trimmed.contains(['/', '\\', ':', '?', '#'])
         || trimmed.starts_with('.')
         || matches!(trimmed, "DONE" | "PRODUCER" | "CONSUMER")
     {
@@ -1523,9 +1525,10 @@ mod tests {
         for ok in ["bob", "claude-1", "gpt_worker"] {
             assert_eq!(validate_agent_name(ok).unwrap(), ok);
         }
-        // `C:` carries no separator, but `join` treats a drive prefix as a new root.
+        // `C:` carries no separator, but `join` treats a drive prefix as a new root;
+        // `a?b`/`a#b` would split the `spool://` URI the name is interpolated into.
         for bad in [
-            "", " ", ".", "..", "a/b", "a\\b", "C:", "\\\\?\\x", "/etc", "CONSUMER",
+            "", " ", ".", "..", "a/b", "a\\b", "C:", "\\\\?\\x", "/etc", "CONSUMER", "a?b", "a#b",
         ] {
             assert!(
                 validate_agent_name(bad).is_err(),
