@@ -1,6 +1,6 @@
 //  mq-bridge
 //  © Copyright 2026, by Marco Mengelkoch
-//  Licensed under MIT License, see License file for more details
+//  Licensed under MIT OR Apache-2.0, see LICENSE file for more details
 //  git clone https://github.com/marcomq/mq-bridge
 
 //! Built-in Bridge consumer: consumes from a remote `mq-bridge` gRPC server.

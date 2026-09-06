@@ -3,7 +3,7 @@
 ![Linux](https://img.shields.io/badge/Linux-supported-green?logo=linux)
 ![Windows](https://img.shields.io/badge/Windows-supported-green?logo=windows)
 ![macOS](https://img.shields.io/badge/macOS-supported-green?logo=apple)
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE)
 [![Docs](https://img.shields.io/badge/docs-book-orange)](https://marcomq.github.io/mq-bridge/)
 
 <p align="center">
@@ -145,6 +145,7 @@ Active development. Originally the reference implementation and testbed for the 
 
 ## License
 
-mq-bridge-app is MIT licensed; see [LICENSE](LICENSE). Third-party terms for
-the CLI and desktop distributions are in
+mq-bridge-app is dual-licensed under either the [MIT license](LICENSE-MIT) or the
+[Apache License, Version 2.0](LICENSE-APACHE), at your option. Third-party terms
+for the CLI and desktop distributions are in
 [THIRD_PARTY_LICENSES.txt](crates/core/THIRD_PARTY_LICENSES.txt).

@@ -1,6 +1,6 @@
 //  mq-bridge
 //  © Copyright 2026, by Marco Mengelkoch
-//  Licensed under MIT License, see License file for more details
+//  Licensed under MIT OR Apache-2.0, see LICENSE file for more details
 
 use crate::canonical_message::tracing_support::LazyMessageIds;
 use crate::traits::{

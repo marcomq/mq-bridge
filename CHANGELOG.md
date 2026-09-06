@@ -4,6 +4,13 @@ All notable changes to `mq-bridge`. Newest first.
 
 ## 0.4.12 — unreleased
 
+### Changed
+
+- **`mq-bridge` is now dual-licensed `MIT OR Apache-2.0`.** Every crate, the npm package,
+  and the Python wheels carry the new SPDX expression; `LICENSE-MIT` and `LICENSE-APACHE`
+  hold the two texts and `LICENSE` points at both. Recipients pick either arm, so nothing
+  changes for existing MIT users — the Apache arm adds an express patent grant.
+
 ### Added
 
 - **`Route::run_without_resume` runs a route while skipping optional cursor/checkpoint state.**

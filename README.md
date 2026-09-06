@@ -8,7 +8,7 @@
 ![macOS](https://img.shields.io/badge/macOS-supported-green?logo=apple)
 [![Supply chain](https://img.shields.io/badge/supply%20chain-cargo--deny-blue)](deny.toml)
 [![Security](https://img.shields.io/badge/security-advisory%20analysis-brightgreen)](SECURITY.md)
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE)
 
 
 ```text
@@ -658,8 +658,14 @@ Due to the large feature set, there may still be unfixed issues. The current foc
 Some parts of the code are more verbose than I would write by hand, but I kept the readable parts when they worked well. I am not a native English speaker, so AI assistance is also useful for documentation. The important part is that the code is reviewed and tested, not that every sentence or helper function looks hand-typed from the first draft.
 
 ## License
-`mq-bridge` is licensed under the MIT License.
+`mq-bridge` is dual-licensed under either the [MIT license](LICENSE-MIT) or the
+[Apache License, Version 2.0](LICENSE-APACHE), at your option.
 
 Binary distributions carry their applicable third-party terms in
 `THIRD_PARTY_LICENSES.txt`. Their current maintenance process is documented in
 [docs/THIRD_PARTY_LICENSES.md](docs/THIRD_PARTY_LICENSES.md).
+
+### Contribution
+Unless you explicitly state otherwise, any contribution intentionally submitted
+for inclusion in `mq-bridge` by you, as defined in the Apache-2.0 license, shall
+be dual licensed as above, without any additional terms or conditions.

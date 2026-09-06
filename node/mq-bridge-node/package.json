@@ -2,7 +2,7 @@
   "name": "mq-bridge",
   "version": "0.4.12",
   "description": "Node.js bindings for mq-bridge",
-  "license": "MIT",
+  "license": "MIT OR Apache-2.0",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/marcomq/mq-bridge.git",
@@ -19,6 +19,8 @@
     "native.js",
     "native.d.ts",
     "plugin-packaging.mjs",
+    "LICENSE-MIT",
+    "LICENSE-APACHE",
     "THIRD_PARTY_LICENSES.txt"
   ],
   "napi": {
