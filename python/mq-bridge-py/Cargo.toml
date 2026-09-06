@@ -4,7 +4,7 @@ version.workspace = true
 edition = "2021"
 publish = false
 description = "Python bindings for mq-bridge, an async message-bridging library"
-license = "MIT"
+license = "MIT OR Apache-2.0"
 repository = "https://github.com/marcomq/mq-bridge"
 
 [lib]

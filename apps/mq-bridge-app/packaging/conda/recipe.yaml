@@ -80,9 +80,11 @@ about:
     mq-bridge-app is the headless CLI, server, and MCP server for mq-bridge.
     The package installs both the mq-bridge-app executable and the shorter mqb
     launcher. IBM MQ support requires an IBM MQ client library at runtime.
-  license: MIT
+  license: MIT OR Apache-2.0
   license_file:
     - apps/mq-bridge-app/LICENSE
+    - apps/mq-bridge-app/LICENSE-MIT
+    - apps/mq-bridge-app/LICENSE-APACHE
     - apps/mq-bridge-app/crates/core/THIRD_PARTY_LICENSES.txt
     - THIRDPARTY.yml
 

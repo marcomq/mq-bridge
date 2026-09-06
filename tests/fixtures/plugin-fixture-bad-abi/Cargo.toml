@@ -5,7 +5,7 @@ edition = "2021"
 rust-version = "1.85"
 publish = false
 description = "A plugin built against an incompatible ABI major version, to test host rejection"
-license = "MIT"
+license = "MIT OR Apache-2.0"
 
 [lib]
 crate-type = ["cdylib"]

@@ -13,12 +13,13 @@ dependencies = [
   "typing-extensions>=4.0",
 ]
 
-license = { text = "MIT" }
-license-files = ["LICENSE.python", "THIRD_PARTY_LICENSES.txt"]
+license = { text = "MIT OR Apache-2.0" }
+license-files = ["LICENSE.python", "LICENSE-MIT.python", "LICENSE-APACHE.python", "THIRD_PARTY_LICENSES.txt"]
 keywords = ["messaging", "tokio", "pyo3", "maturin", "mq-bridge"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "License :: OSI Approved :: MIT License",
+  "License :: OSI Approved :: Apache Software License",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.9",
   "Programming Language :: Python :: 3.10",

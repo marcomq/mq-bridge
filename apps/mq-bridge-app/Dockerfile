@@ -172,6 +172,8 @@ LABEL io.modelcontextprotocol.server.name="io.github.marcomq/mq-bridge-app"
 COPY --from=builder /usr/src/mq-bridge/mq-bridge-app /usr/local/bin/mq-bridge-app
 COPY --from=builder /usr/src/mq-bridge/mqb /usr/local/bin/mqb
 COPY apps/mq-bridge-app/LICENSE /usr/share/licenses/mq-bridge-app/LICENSE
+COPY apps/mq-bridge-app/LICENSE-MIT /usr/share/licenses/mq-bridge-app/LICENSE-MIT
+COPY apps/mq-bridge-app/LICENSE-APACHE /usr/share/licenses/mq-bridge-app/LICENSE-APACHE
 COPY apps/mq-bridge-app/crates/core/THIRD_PARTY_LICENSES.txt /usr/share/licenses/mq-bridge-app/THIRD_PARTY_LICENSES.txt
 COPY --from=builder --chown=nonroot:nonroot /app_placeholder /app
 COPY --from=builder --chown=nonroot:nonroot /usr/src/mq-bridge/input.log /app/input.log

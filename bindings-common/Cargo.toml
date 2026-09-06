@@ -4,7 +4,7 @@ version.workspace = true
 edition = "2021"
 publish = false
 description = "Shared config-loading and message helpers for the mq-bridge Python and Node bindings"
-license = "MIT"
+license = "MIT OR Apache-2.0"
 repository = "https://github.com/marcomq/mq-bridge"
 
 [lib]

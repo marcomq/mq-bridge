@@ -107,8 +107,8 @@ jobs:
           \`mq-bridge\` package and is selected automatically via optionalDependencies —
           you install \`mq-bridge\`, not this package directly.
           EOF
-            cp LICENSE THIRD_PARTY_LICENSES.txt "$dir/"
-            node -e "const p='./$dir/package.json',j=require(p);j.description='Prebuilt '+j.name+' binary for the mq-bridge Node.js addon';j.homepage='https://github.com/marcomq/mq-bridge#readme';j.keywords=['mq-bridge','napi','native','prebuilt','addon'];j.files=[...new Set([...(j.files||[]),'THIRD_PARTY_LICENSES.txt'])];require('fs').writeFileSync(p,JSON.stringify(j,null,2)+'\n')"
+            cp LICENSE LICENSE-MIT LICENSE-APACHE THIRD_PARTY_LICENSES.txt "$dir/"
+            node -e "const p='./$dir/package.json',j=require(p);j.description='Prebuilt '+j.name+' binary for the mq-bridge Node.js addon';j.homepage='https://github.com/marcomq/mq-bridge#readme';j.keywords=['mq-bridge','napi','native','prebuilt','addon'];j.files=[...new Set([...(j.files||[]),'LICENSE-MIT','LICENSE-APACHE','THIRD_PARTY_LICENSES.txt'])];require('fs').writeFileSync(p,JSON.stringify(j,null,2)+'\n')"
           done
 
       - name: Publish platform packages and root
