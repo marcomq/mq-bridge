@@ -52,6 +52,7 @@ default = ["full"]
 # Testing-only middleware hooks; do not include this feature in production wheels.
 middleware = ["mq-bridge/middleware"]
 full = ["mq-bridge/full", "plugin", "rustls-aws-lc", "mimalloc"]
+full-dynamic = ["mq-bridge/full-dynamic", "plugin", "rustls-aws-lc", "mimalloc"]
 # mimalloc as Rust-side global allocator. Only redirects allocations made by
 # this cdylib's Rust code; CPython's own allocator is untouched. Safe here
 # because no raw Rust-allocated buffer crosses the extension boundary.

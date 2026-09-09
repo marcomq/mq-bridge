@@ -1,5 +1,7 @@
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    if std::env::var("CARGO_FEATURE_IBM_MQ").is_ok() {
+    if std::env::var("CARGO_FEATURE_IBM_MQ").is_ok()
+        || std::env::var("CARGO_FEATURE_IBM_MQ_STATIC").is_ok()
+    {
         // Ensure rebuild when these environment variables change
         println!("cargo:rerun-if-env-changed=MQ_INSTALLATION_PATH");
         println!("cargo:rerun-if-env-changed=MQ_HOME");
@@ -29,7 +31,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(feature = "grpc")]
     {
         let out_dir = std::path::PathBuf::from(std::env::var("OUT_DIR")?);
-        std::env::set_var("PROTOC", protoc_bin_vendored::protoc_bin_path().unwrap());
+        println!("cargo:rerun-if-env-changed=PROTOC");
+        #[cfg(feature = "vendored-protoc")]
+        if std::env::var_os("PROTOC").is_none() {
+            std::env::set_var("PROTOC", protoc_bin_vendored::protoc_bin_path()?);
+        }
         println!("cargo:rerun-if-changed=src/endpoints/grpc/proto/mqbridge/bridge.proto");
         tonic_prost_build::configure()
             .file_descriptor_set_path(out_dir.join("mqbridge_descriptor.bin"))
