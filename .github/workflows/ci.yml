@@ -72,7 +72,7 @@ jobs:
       - name: Check each feature subset
         run: |
           failed=""
-          for f in "" full kafka nats grpc,vendored-protoc mqtt mongodb http; do
+          for f in "" full kafka nats grpc mqtt mongodb http; do
             echo "::group::cargo check --features ${f:-<default>}"
             if [ -z "$f" ]; then
               cargo check --all-targets || failed="$failed <default>"

@@ -192,10 +192,9 @@ fixtures, not redistributed IBM software.
   the install, the `/features` check and `mqb copy` one-off drains.
 - **The `mq-bridge` crate** — `features = ["ibm-mq"]` for the dlopen build, or
   `features = ["ibm-mq-static"]` to bind the client at link time, which then
-  requires the IBM SDK at build. Neither needs a `link-static` /
-  `link-dynamic` companion: those two select how librdkafka and SQLite are
-  obtained, and IBM MQ is not part of that choice. Enabling `ibm-mq` alongside
-  `ibm-mq-static` forces the link-time path.
+  requires the IBM SDK at build. Neither needs a `link-dynamic` companion: that
+  feature selects how librdkafka is obtained, and IBM MQ is not part of that
+  choice. Enabling `ibm-mq` alongside `ibm-mq-static` forces the link-time path.
 
   `ibm-mq-static` is a deliberate individual opt-in and is in **no** `full*`
   feature set, because binding IBM's client at link time is not something a

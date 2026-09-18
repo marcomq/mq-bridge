@@ -273,14 +273,26 @@ full-common = ["middleware", "plugin", "mongodb", "kafka", "amqp", "nats", "mqtt
 # runtime the client is loaded lazily only when an ibm-mq endpoint is opened
 # (clear error if the client isn't installed). Use `ibm-mq-static` instead for
 # static linking.
-full = ["full-common", "ibm-mq", "link-static", "vendored-protoc"]
-full-dynamic = ["full-common", "ibm-mq", "link-dynamic"]
+full = ["full-common", "ibm-mq"]
 
-lint-all = ["full", "test-utils", "schema", "plugin-sdk", "perf-diagnostics", "float-roundtrip"]
-
-link-static = []
+# The two build variants. `full` compiles librdkafka from bundled sources and
+# needs nothing installed. `full-dynamic` adds `link-dynamic`, which links the
+# shared librdkafka found via pkg-config -- what a conda-forge recipe or a distro
+# package wants, so the library stays patchable. Purely additive: enabling both
+# just gives you the dynamic one.
+full-dynamic = ["full", "link-dynamic"]
 link-dynamic = ["rdkafka?/dynamic-linking"]
 
+# The feature set for lint and doc builds. NOT `--all-features`: that turns on
+# `link-dynamic`, whose rdkafka-sys build script probes pkg-config for
+# librdkafka >= 2.12.1 and fails where none is installed. Everything else that
+# gates code is here, `ibm-mq-static` included -- clippy never links, so it needs
+# no IBM SDK.
+lint-all = ["full", "test-utils", "schema", "plugin-sdk", "perf-diagnostics", "float-roundtrip", "ibm-mq-static", "rustls-ring"]
+
+# `grpc` carries this, so every set containing grpc has a protoc without one
+# installed. build.rs prefers $PROTOC when set, so a distro or conda-forge build
+# still compiles against its own protobuf and this goes unused.
 vendored-protoc = ["dep:protoc-bin-vendored"]
 
 # Endpoints that build across most OS targets (glibc/musl/Alpine, macOS,
@@ -359,7 +371,7 @@ zeromq = ["dep:zeromq"]
 zeromq-omq = ["dep:omq-tokio"]
 redis-streams = ["dep:redis"]
 # Note: The grpc feature requires protobuf-src which can significantly increase build times.
-grpc = ["tonic", "tonic-reflection", "prost", "prost-types", "prost-reflect", "tokio-stream", "tonic-prost", "tonic-prost-build", "rustls"]
+grpc = ["tonic", "tonic-reflection", "prost", "prost-types", "prost-reflect", "tokio-stream", "tonic-prost", "tonic-prost-build", "rustls", "vendored-protoc"]
 sqlx = ["dep:sqlx", "url"]
 clickhouse = ["dep:reqwest", "dep:flate2", "dep:lz4_flex", "dep:zstd", "dep:percent-encoding", "url"]
 # Cloud object-store checkpoint backend (S3/GCS/Azure/R2). Talks cloud REST via reqwest.
