@@ -71,6 +71,7 @@ integration-test = []
 ibm-mq = ["mq-bridge/ibm-mq"]
 arm64-cross-compile = ["rdkafka", "rdkafka/cmake-build"]
 full = ["mq-bridge/full", "rustls-aws-lc"]
+full-dynamic = ["mq-bridge/full-dynamic", "rustls-aws-lc"]
 # Lean feature set for the ETL/CDC benchmarks (benches/etl): Postgres bulk-insert
 # (sqlx) + logical-replication CDC + per-route metrics. Avoids the heavy `full`
 # deps (rdkafka/librdkafka, grpc/protoc, ibm-mq) that aren't needed to move

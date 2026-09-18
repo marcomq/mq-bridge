@@ -15,7 +15,10 @@ Thank you for your interest in contributing to **mq-bridge**! We welcome bug rep
 ## Code Style
 
 - Run `cargo fmt --all` before submitting a PR.
-- Ensure code passes `cargo clippy --all-features -- -D warnings`.
+- Ensure code passes `cargo clippy --all-targets --features lint-all -- -D warnings`.
+  Not `--all-features`: that enables `link-static` and `link-dynamic` at once,
+  which the crate rejects with a `compile_error!`. `lint-all` is every feature
+  that gates code, with one linkage picked.
 - Follow idiomatic Rust and existing code conventions.
 
 ## Making Changes
