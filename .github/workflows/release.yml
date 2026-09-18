@@ -523,7 +523,7 @@ jobs:
           else
             cp "target/${{ matrix.target }}/release/mqb" staging/
           fi
-          cp apps/mq-bridge-app/LICENSE apps/mq-bridge-app/README.md apps/mq-bridge-app/crates/core/THIRD_PARTY_LICENSES.txt staging/
+          cp apps/mq-bridge-app/LICENSE apps/mq-bridge-app/LICENSE-MIT apps/mq-bridge-app/LICENSE-APACHE apps/mq-bridge-app/README.md apps/mq-bridge-app/crates/core/THIRD_PARTY_LICENSES.txt staging/
           if [ "$RUNNER_OS" == "Windows" ]; then
             7z a "${ASSET_NAME}.zip" ./staging/*
             echo "ASSET_PATH=${ASSET_NAME}.zip" >> "$GITHUB_ENV"
@@ -1271,7 +1271,7 @@ jobs:
 
       - name: Package artifacts
         run: |
-          cp apps/mq-bridge-app/LICENSE apps/mq-bridge-app/README.md apps/mq-bridge-app/crates/core/THIRD_PARTY_LICENSES.txt staging/
+          cp apps/mq-bridge-app/LICENSE apps/mq-bridge-app/LICENSE-MIT apps/mq-bridge-app/LICENSE-APACHE apps/mq-bridge-app/README.md apps/mq-bridge-app/crates/core/THIRD_PARTY_LICENSES.txt staging/
           tar -czf mq-bridge-cli-aarch64-unknown-linux-gnu.tar.gz -C staging .
 
       - name: Upload Release Asset

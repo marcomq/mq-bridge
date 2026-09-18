@@ -5,7 +5,7 @@ edition = "2021"
 rust-version = "1.85"
 publish = false
 description = "In-memory endpoint used to test the mq-bridge plugin ABI, loader and SDK"
-license = "MIT"
+license = "MIT OR Apache-2.0"
 
 [lib]
 # Both halves on purpose: the tests run the same endpoint linked directly and

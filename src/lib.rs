@@ -1,6 +1,6 @@
 //  mq-bridge
 //  © Copyright 2025, by Marco Mengelkoch
-//  Licensed under MIT License, see License file for more details
+//  Licensed under MIT OR Apache-2.0, see LICENSE file for more details
 //  git clone https://github.com/marcomq/mq-bridge
 //! Move messages between brokers, databases, files, HTTP services, and in-memory
 //! channels without coupling application code to a specific transport.

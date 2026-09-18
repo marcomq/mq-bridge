@@ -34,6 +34,8 @@
     ],
     "resources": {
       "../../LICENSE": "LICENSE",
+      "../../LICENSE-MIT": "LICENSE-MIT",
+      "../../LICENSE-APACHE": "LICENSE-APACHE",
       "../core/THIRD_PARTY_LICENSES.txt": "THIRD_PARTY_LICENSES.txt"
     }
   },

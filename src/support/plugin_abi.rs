@@ -1,6 +1,6 @@
 //  mq-bridge
 //  © Copyright 2025, by Marco Mengelkoch
-//  Licensed under MIT License, see License file for more details
+//  Licensed under MIT OR Apache-2.0, see LICENSE file for more details
 //  git clone https://github.com/marcomq/mq-bridge
 
 //! The stable C ABI between an mq-bridge host process and a dynamically loaded

@@ -48,7 +48,7 @@ class MqBridgeApp < Formula
   desc "Universal, protocol-agnostic message and data bridge (CLI + MCP server)"
   homepage "https://github.com/${REPO}"
   version "${CARGO_VERSION}"
-  license "MIT"
+  license any_of: ["MIT", "Apache-2.0"]
 
   on_macos do
     on_arm do
@@ -73,7 +73,7 @@ class MqBridgeApp < Formula
     # that forwards to it.
     bin.install "mq-bridge-app"
     bin.install "mqb"
-    pkgshare.install "LICENSE", "THIRD_PARTY_LICENSES.txt"
+    pkgshare.install "LICENSE", "LICENSE-MIT", "LICENSE-APACHE", "THIRD_PARTY_LICENSES.txt"
   end
 
   test do
