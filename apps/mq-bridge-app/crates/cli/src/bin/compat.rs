@@ -1,6 +1,6 @@
 //  mq-bridge-app
 //  © Copyright 2026, by Marco Mengelkoch
-//  Licensed under MIT License, see License file for more details
+//  Licensed under MIT OR Apache-2.0, see LICENSE file for more details
 //  git clone https://github.com/marcomq/mq-bridge
 
 //! `mqb` — the short command, forwarding to the `mq-bridge-app` binary.

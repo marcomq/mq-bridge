@@ -1,6 +1,6 @@
 //  mq-bridge-app
 //  © Copyright 2025, by Marco Mengelkoch
-//  Licensed under MIT License, see License file for more details
+//  Licensed under MIT OR Apache-2.0, see LICENSE file for more details
 //  git clone https://github.com/marcomq/mq-bridge
 
 //! Registers this binary as a stdio MCP server with local MCP clients.
