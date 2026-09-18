@@ -22,7 +22,7 @@ engine moves the bytes. Moving a 116.3 MiB dataset costs three tool calls and
 | | Registry name | `io.github.marcomq/mq-bridge-app` |
 | --- | --- | --- |
 | **Transports** | `stdio`, streamable HTTP | |
-| **Tools** | 8 (10 with `--agent-bus`) | [see below](#tools) |
+| **Tools** | 9 (11 with `--agent-bus`) | [see below](#tools) |
 | **Connectors** | 15+ | [see below](#endpoints) |
 | **Install** | `mqb mcp install` | Docker / cargo / Homebrew / binaries — [Installation](INSTALL.md) |
 
@@ -69,6 +69,7 @@ transport owns stdout for the protocol itself.
 | --- | --- | --- |
 | `publish` | `publisher`, `message` \| `messages`, `name` | Send one message or a batch to any endpoint. Independent of routes. |
 | `start_route` | `route` (`input`/`output`), `name`, `batch_size`, `concurrency`, `capture_last` | Run a route moving messages from source to sink. Returns the route name. |
+| `generate_cli_command` | `route` (`input`/`output`), `name`, `batch_size`, `concurrency` | Render the same route as a copyable headless `mqb` command, with credentials replaced by environment variable placeholders. Starts nothing. |
 | `list_routes` | — | Every route started by this server, with live connection health and rates. |
 | `route_status` | `name` (optional) | Health, totals and rates for one route, or all of them. |
 | `wait_route` | `name`, `timeout_ms` | Block until a route finishes, then report how it ended. One call instead of a polling loop. |
