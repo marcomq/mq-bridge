@@ -421,6 +421,12 @@ name = "middleware_expr_bench"
 harness = false
 required-features = ["test-utils", "filter"]
 
+# Transport batching: `pack`/`unpack` envelope cost and wire size, per codec.
+[[bench]]
+name = "pack_bench"
+harness = false
+required-features = ["test-utils", "compression"]
+
 # Isolates the per-request HTTP route lookup (Mutex<HashMap> vs ArcSwap).
 # No external services or features required.
 [[bench]]

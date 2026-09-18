@@ -331,3 +331,42 @@ async fn publisher_middleware_wraps_last_entry_outermost() {
         "the failed message should have been dead-lettered"
     );
 }
+
+/// `pack` / `unpack` config shapes, including the boolean toggle, deserialized the way a
+/// route file and an inline JSON endpoint each present them.
+#[test]
+fn pack_config_round_trips_through_yaml_and_json() {
+    let parsed = middlewares(
+        "- pack: { max_messages: 250, max_bytes: 1024, compression: lz4, drop_message_id: true }",
+        0,
+    );
+    let Middleware::Pack(cfg) = &parsed[0] else {
+        panic!("expected pack, got {parsed:?}");
+    };
+    assert_eq!(cfg.max_messages, 250);
+    assert_eq!(cfg.max_bytes, 1024);
+    assert!(cfg.drop_message_id, "yaml `true` must reach the config");
+
+    // The toggle is negated so the safe behaviour — ids survive — is what a missing
+    // key gives, without depending on a default function.
+    let defaults = middlewares("- pack: {}", 0);
+    let Middleware::Pack(cfg) = &defaults[0] else {
+        panic!("expected pack");
+    };
+    assert_eq!(cfg.max_messages, 1000);
+    assert!(!cfg.drop_message_id, "omitted means ids are kept");
+
+    let json: Middleware =
+        serde_json::from_str(r#"{"pack":{"drop_message_id":true,"compression":"zstd"}}"#)
+            .expect("json pack config");
+    let Middleware::Pack(cfg) = &json else {
+        panic!("expected pack");
+    };
+    assert!(cfg.drop_message_id, "json `true` must reach the config");
+
+    let parsed = middlewares("- unpack: { max_messages: 5000 }", 0);
+    let Middleware::Unpack(cfg) = &parsed[0] else {
+        panic!("expected unpack, got {parsed:?}");
+    };
+    assert_eq!(cfg.max_messages, Some(5000));
+}

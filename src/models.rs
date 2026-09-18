@@ -392,6 +392,11 @@ pub enum Middleware {
     Transform(TransformMiddleware),
     Encryption(EncryptionConfig),
     Compression(CompressionMiddleware),
+    /// Combines a publish batch into one physical transport message. Output-only;
+    /// pair it with `unpack` on the reading route's input.
+    Pack(PackMiddleware),
+    /// Splits a packed physical message back into its logical messages. Input-only.
+    Unpack(UnpackMiddleware),
     /// Keeps only messages matching an expression, e.g. `filter: "amount > 100"`.
     /// Reads payload fields by name and metadata as `meta.<key>`. Input and output.
     Filter(
@@ -887,6 +892,76 @@ pub struct CompressionMiddleware {
     /// Consumer side only; unset means no limit.
     #[serde(default)]
     pub max_decompressed_bytes: Option<u64>,
+}
+
+/// Batch envelope used by the `pack` / `unpack` middlewares.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum PackFormat {
+    /// mq-bridge's own envelope: payload, metadata and `message_id` per record,
+    /// length-prefixed, with an optional compressed body.
+    #[default]
+    Mqb,
+    /// The layout Redpanda Connect's `archive: binary` writes. Payloads only —
+    /// metadata and ids are dropped — and no room for an inner codec.
+    BenthosBinary,
+}
+
+/// Transport batching middleware configuration (`pack`, output side).
+///
+/// Combines the messages of one publish batch into a single physical message, so a
+/// thousand rows cost one transport operation instead of a thousand. `unpack` on the
+/// reading side reverses it. Output only.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct PackMiddleware {
+    /// Envelope format: `mqb` (default) or `benthos_binary`.
+    #[serde(default)]
+    pub format: PackFormat,
+    /// Compression for the packed body: `none`, `gzip`, `lz4` or `zstd`. Recorded in the
+    /// envelope, so `unpack` needs no matching setting. `mqb` format only.
+    #[serde(default)]
+    pub compression: Compression,
+    /// Maximum logical messages per physical message. Defaults to 1000.
+    #[serde(default = "default_pack_max_messages")]
+    pub max_messages: usize,
+    /// Maximum uncompressed body bytes per physical message. Defaults to 4 MiB.
+    #[serde(default = "default_pack_max_bytes")]
+    pub max_bytes: usize,
+    /// Leave each message's `message_id` out of the envelope, saving 16 bytes per
+    /// record. Off by default, so ids survive a pack/unpack round trip.
+    #[serde(default)]
+    pub drop_message_id: bool,
+}
+
+/// Transport batching middleware configuration (`unpack`, input side).
+///
+/// Splits one physical message back into the logical messages `pack` put in it.
+/// Input only.
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct UnpackMiddleware {
+    /// Envelope format: `mqb` (default) or `benthos_binary`. Must match the sender.
+    #[serde(default)]
+    pub format: PackFormat,
+    /// Reject a batch declaring more messages than this. Unset means no limit.
+    #[serde(default)]
+    pub max_messages: Option<usize>,
+    /// Reject a body that decompresses larger than this many bytes (bomb guard).
+    /// Unset means no limit.
+    #[serde(default)]
+    pub max_decompressed_bytes: Option<u64>,
+}
+
+fn default_pack_max_messages() -> usize {
+    1000
+}
+
+fn default_pack_max_bytes() -> usize {
+    4 * 1024 * 1024
 }
 
 // --- Sink object / part naming ---

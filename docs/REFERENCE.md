@@ -81,6 +81,8 @@ middlewares:
 | [`cookie_jar`](#cookie_jar) | ✅ | ✅ | – | Persist HTTP cookies / session values across messages |
 | [`encryption`](#encryption) | ✅ | ✅ | `encryption` | AEAD-encrypt payloads on send, decrypt on receive |
 | [`compression`](#compression) | ✅ | ✅ | `compression` | Compress payloads on send, decompress on receive |
+| [`pack`](#pack) | – | ✅ | – | Combine a batch into one physical transport message |
+| [`unpack`](#unpack) | ✅ | – | – | Split a packed physical message back into messages |
 | [`metrics`](#metrics) | ✅ | ✅ | `metrics` | Emit throughput/latency/error metrics |
 | [`random_panic`](#random_panic) | ✅ | ✅ | – | Fault injection for testing |
 | [`custom`](#custom-middleware) | ✅ | ✅ | – | Your own middleware via a registered factory |
@@ -101,7 +103,8 @@ above rather than assuming:
 - `dlq` / `retry` on an input log a warning and are skipped. The route still starts.
 - `deduplication`, `weak_join` and `id` on an output are **hard startup errors**. Deduplication
   cannot work on the publish side, and silently starting an un-deduplicated route is worse
-  than refusing to start.
+  than refusing to start. `pack` on an input and `unpack` on an output are hard errors too —
+  the pair is directional.
 
 A middleware whose feature is not compiled in (`deduplication` without `dedup`, `metrics`
 without `metrics`) is likewise a startup error, not a silent no-op.
@@ -665,6 +668,88 @@ batches decodable with `zcat` / `lz4 -d` — this middleware frames per message 
 readable through a matching consumer. Do not combine it with the [`encryption`](#encryption)
 middleware (ciphertext does not compress); for compressed-and-encrypted data at rest, use the
 endpoints' own `compression`/`encryption` fields instead.
+
+### `pack`
+
+Combines the messages of one publish batch into a **single physical transport message**, so a
+thousand rows cost one transport operation instead of a thousand. **Output only** — pair it
+with [`unpack`](#unpack) on the reading route's input.
+
+| Field | Type | Default |
+|---|---|---|
+| `format` | `mqb` \| `benthos_binary` | `mqb` |
+| `compression` | `none` \| `gzip` \| `lz4` \| `zstd` — applied to the packed body (`mqb` only) | `none` |
+| `max_messages` | integer — logical messages per physical message | `1000` |
+| `max_bytes` | integer — uncompressed body bytes per physical message | `4194304` (4 MiB) |
+| `drop_message_id` | boolean — leave each `message_id` out, saving 16 bytes per record | `false` |
+
+```yaml middleware
+- pack: { max_messages: 1000, compression: zstd }
+```
+
+A batch larger than either bound is split into several physical messages, and the final
+partial batch is sent like any other. A single message larger than `max_bytes` gets a
+physical message of its own rather than being dropped. `compression` is recorded in the
+envelope header, so `unpack` needs no matching setting.
+
+Put it **before** `buffer` in the list so `buffer` ends up outermost and hands `pack` a full
+batch — see [Ordering](#ordering--read-this-before-combining-middleware):
+
+```yaml middleware
+- pack: { max_messages: 1000, max_bytes: 4194304, compression: lz4 }
+- buffer: { max_messages: 1000, max_delay_ms: 20 }
+```
+
+A route already reads its input in `batch_size` chunks, so `buffer` is only needed when
+`batch_size` is small or messages arrive one at a time.
+
+The physical message carries no per-message metadata of its own — only `mqb.pack.count` —
+so do not combine `pack` with a sink that interpolates `${metadata:…}` into a topic,
+subject or path. It is likewise incompatible with request/reply: one physical message has
+one acknowledgement and cannot carry N replies.
+
+To save 16 bytes per record, set `drop_message_id: true` — the unpacked messages then get
+fresh ids. To drop metadata too, use `format: benthos_binary`.
+
+### `unpack`
+
+Splits a physical message written by [`pack`](#pack) back into its logical messages.
+**Input only.**
+
+| Field | Type | Default |
+|---|---|---|
+| `format` | `mqb` \| `benthos_binary` — must match the sender | `mqb` |
+| `max_messages` | integer — reject a batch declaring more messages than this | unset (no limit) |
+| `max_decompressed_bytes` | integer — reject a body that decompresses larger than this (bomb guard) | unset (no limit) |
+
+```yaml middleware
+- unpack: {}
+```
+
+Unpacked messages behave exactly like any other: payload, metadata, `message_id` and order
+are all as they were before packing. `receive_batch` still honours the route's `batch_size` —
+anything over it is held and handed out on the next read.
+
+A malformed, truncated or foreign payload is a **permanent** consumer error, not a
+reconnectable one, so a poison message is not re-read forever. So is an envelope written by
+a newer format version.
+
+**Acknowledgement.** The physical message is what the transport acks, so the messages inside
+one share its fate. `unpack` holds the source's commit until every message it produced has
+been dispositioned, then collapses the group: any `Nack` nacks the whole physical message and
+all N are redelivered. Nothing is lost; some may be seen twice. That is the same at-least-once
+widening a `batch_size` above 1 already has — pair with [`deduplication`](#deduplication) or
+an idempotent sink if duplicates matter.
+
+**Interoperability.** `format: benthos_binary` reads and writes the layout Redpanda Connect's
+`archive: binary` / `unarchive: binary` processors use (`u32` big-endian count, then a `u32`
+big-endian length before each payload). It carries payloads only — metadata and `message_id`
+have nowhere to go — and has no header to record a codec in, so compress it with a separate
+[`compression`](#compression) middleware if you need to:
+
+```yaml middleware
+- unpack: { format: benthos_binary }
+```
 
 ### `metrics`
 

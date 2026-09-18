@@ -188,7 +188,7 @@ fn distribute_batch_results(
     }
 }
 
-fn rebuild_error(error: &PublisherError, message: &str) -> PublisherError {
+pub(super) fn rebuild_error(error: &PublisherError, message: &str) -> PublisherError {
     match error {
         PublisherError::Retryable(_) => PublisherError::Retryable(anyhow!(message.to_string())),
         PublisherError::NonRetryable(_) => {

@@ -321,9 +321,11 @@ class Middleware(TypedDict, total=False):
     id: str
     limiter: LimiterMiddleware
     metrics: MetricsMiddleware
+    pack: PackMiddleware
     random_panic: RandomPanicMiddleware
     retry: RetryMiddleware
     transform: TransformMiddleware
+    unpack: UnpackMiddleware
     weak_join: WeakJoinMiddleware
 
 
@@ -410,6 +412,15 @@ class ObjectStoreConfig(TypedDict, total=False):
     name_by: NameBy
     polling_interval_ms: Optional[int]
     url: Required[str]
+
+
+class PackMiddleware(TypedDict, total=False):
+    """Transport batching middleware configuration (`pack`, output side)."""
+    compression: Compression
+    drop_message_id: bool
+    format: PackFormat
+    max_bytes: int
+    max_messages: int
 
 
 class PostgresCdcConfig(TypedDict, total=False):
@@ -572,6 +583,13 @@ class TransformMiddleware(TypedDict, total=False):
     schema_file: Optional[str]
 
 
+class UnpackMiddleware(TypedDict, total=False):
+    """Transport batching middleware configuration (`unpack`, input side)."""
+    format: PackFormat
+    max_decompressed_bytes: Optional[int]
+    max_messages: Optional[int]
+
+
 class WeakJoinMiddleware(TypedDict, total=False):
     """Weak Join middleware configuration."""
     branch_by: Optional[str]
@@ -614,6 +632,7 @@ MongoDbFormat = Literal["normal", "json", "text", "raw"]
 MqttProtocol = Literal["v5", "v3"]
 NameBy = Literal["auto", "source_position", "write_time"]
 NatsDeliverPolicy = Literal["all", "last", "new", "last_per_subject"]
+PackFormat = Literal["mqb", "benthos_binary"]
 SpoolClaim = Literal["exclusive", "warn", "off"]
 SpoolDone = Literal["never", "success", "end"]
 SpoolFsync = Literal["chunk", "off"]
