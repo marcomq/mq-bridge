@@ -137,7 +137,7 @@ tracing-subscriber = { version = "0.3", features = ["json", "env-filter"], optio
 # --- Optional Endpoint Dependencies ---
 
 # Kafka
-rdkafka = { version = "0.39", features = ["tokio"], optional = true }
+rdkafka = { version = "0.39", default-features = false, features = ["tokio"], optional = true }
 
 # AMQP (RabbitMQ).
 # Drop lapin's defaults so the crypto provider remains wired through
@@ -204,7 +204,7 @@ aws-sdk-sqs = { version = "1.105", optional = true, default-features = false, fe
 aws-sdk-sns = { version = "1.107", optional = true, default-features = false, features = ["rt-tokio", "default-https-client"] }
 
 # SQLx
-sqlx = { version = "0.9", features = ["runtime-tokio", "tls-rustls", "postgres", "mysql", "sqlite", "any"], optional = true }
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "mysql", "any", "sqlite-bundled"], optional = true }
 
 # ClickHouse — talks the ClickHouse HTTP interface directly (JSONEachRow in/out).
 # reqwest is used rather than the typed `clickhouse` crate because that crate is
@@ -251,9 +251,9 @@ pidlock = "0.2.2"
 # Generate JSON schema
 schemars = { version = "1.2", optional = true }
 
+
 # test-utils
 serde_yaml_ng = { workspace = true, optional = true }
-
 
 [build-dependencies]
 tonic-prost-build = { version = "0.14", optional = true, default-features = false, features = ["transport"] }
@@ -267,11 +267,21 @@ middleware = ["metrics", "dedup", "compression", "encryption", "filter"]
 # on ~19% of 17-significant-digit doubles (e.g. a Postgres `double precision` value
 # moved through a JSON payload). Enable if bit-exact float round-tripping matters.
 float-roundtrip = ["serde_json/float_roundtrip"]
+full-common = ["middleware", "plugin", "mongodb", "kafka", "amqp", "nats", "mqtt", "http", "aws", "zeromq", "zeromq-omq", "redis-streams", "sled", "grpc", "sqlx", "clickhouse", "websocket", "postgres-cdc", "object-store", "rustls-aws-lc"]
+
 # ibm-mq (dlopen) is safe to include: it needs no IBM SDK at build, and at
 # runtime the client is loaded lazily only when an ibm-mq endpoint is opened
 # (clear error if the client isn't installed). Use `ibm-mq-static` instead for
 # static linking.
-full = ["middleware", "plugin", "mongodb", "kafka", "amqp", "nats", "mqtt", "http", "aws", "zeromq", "zeromq-omq", "redis-streams", "sled", "grpc", "sqlx", "clickhouse", "websocket", "postgres-cdc", "object-store", "rustls-aws-lc", "ibm-mq"]
+full = ["full-common", "ibm-mq", "link-static", "vendored-protoc"]
+full-dynamic = ["full-common", "ibm-mq", "link-dynamic"]
+
+lint-all = ["full", "test-utils", "schema", "plugin-sdk", "perf-diagnostics", "float-roundtrip"]
+
+link-static = []
+link-dynamic = ["rdkafka?/dynamic-linking"]
+
+vendored-protoc = ["dep:protoc-bin-vendored"]
 
 # Endpoints that build across most OS targets (glibc/musl/Alpine, macOS,
 # Windows, aarch64/armv7) without a special toolchain — no librdkafka, protoc,
@@ -322,7 +332,7 @@ rustls-aws-lc  = ["rustls/aws_lc_rs",  "rustls/prefer-post-quantum", "tokio-rust
 schema = ["dep:schemars"]
 
 # Endpoint features
-kafka = ["rdkafka"]
+kafka = ["rdkafka", "rdkafka/libz-static"]
 amqp = ["lapin", "rustls", "rustls-pemfile", "url"]
 nats = ["async-nats", "rustls", "rustls-pemfile"]
 mongodb = ["dep:mongodb", "url"]
@@ -349,7 +359,7 @@ zeromq = ["dep:zeromq"]
 zeromq-omq = ["dep:omq-tokio"]
 redis-streams = ["dep:redis"]
 # Note: The grpc feature requires protobuf-src which can significantly increase build times.
-grpc = ["tonic", "tonic-reflection", "prost", "prost-types", "prost-reflect", "tokio-stream", "tonic-prost", "tonic-prost-build", "protoc-bin-vendored", "rustls"]
+grpc = ["tonic", "tonic-reflection", "prost", "prost-types", "prost-reflect", "tokio-stream", "tonic-prost", "tonic-prost-build", "rustls"]
 sqlx = ["dep:sqlx", "url"]
 clickhouse = ["dep:reqwest", "dep:flate2", "dep:lz4_flex", "dep:zstd", "dep:percent-encoding", "url"]
 # Cloud object-store checkpoint backend (S3/GCS/Azure/R2). Talks cloud REST via reqwest.
@@ -419,5 +429,6 @@ required-features = ["test-utils"]
 
 [target.'cfg(windows)'.dependencies.rdkafka]
 version = "0.39"
+default-features = false
 features = ["cmake-build", "tokio"]
 optional = true

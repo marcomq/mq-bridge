@@ -58,3 +58,4 @@ python/mq-bridge-py/dist/
 # rattler-build writes here; it sits inside the recipe's source path, so it must be
 # ignored or the source copy recurses into its own output.
 /output
+/build
