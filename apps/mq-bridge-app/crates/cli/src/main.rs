@@ -251,6 +251,15 @@ struct McpArgs {
     #[arg(long, global = true, conflicts_with = "report_to_ui")]
     no_report_to_ui: bool,
 
+    /// Offer the agent bus: the `agent_listen` and `agent_send` tools for
+    /// messaging other agents on this machine. Off by default — without it
+    /// neither tool is registered.
+    ///
+    /// Even with the flag, this server's own inbox stays closed until
+    /// `agent_listen` is called.
+    #[arg(long)]
+    agent_bus: bool,
+
     /// Register/unregister this binary with local MCP clients instead of serving.
     #[command(subcommand)]
     action: Option<McpAction>,
@@ -276,6 +285,11 @@ enum McpAction {
         /// instead of installing anything.
         #[arg(long)]
         print_config: bool,
+
+        /// Bake `--agent-bus` into the registered command, so the client gets
+        /// the agent-messaging tools.
+        #[arg(long)]
+        agent_bus: bool,
     },
 
     /// Remove this server from local MCP clients.
@@ -446,11 +460,12 @@ async fn main() -> anyhow::Result<()> {
                     client,
                     local,
                     print_config,
+                    agent_bus,
                 }) => {
                     return if print_config {
-                        mcp_install::print_config()
+                        mcp_install::print_config(agent_bus)
                     } else {
-                        mcp_install::install(client, local)
+                        mcp_install::install(client, local, agent_bus)
                     };
                 }
                 Some(McpAction::Uninstall { client, local }) => {
@@ -468,6 +483,7 @@ async fn main() -> anyhow::Result<()> {
                 mcp_args.transport,
                 mcp_args.bind,
                 mcp_args.report_to_ui && !mcp_args.no_report_to_ui,
+                mcp_args.agent_bus,
                 workspace_path,
             )
             .await;

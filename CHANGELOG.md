@@ -75,13 +75,17 @@ All notable changes to `mq-bridge`. Newest first.
   recipe or a distro package wants, so the library stays patchable. The two are purely
   additive; enabling both gives you the dynamic one.
 
-- **An agent bus in the MCP server, and `mqb agent-listen` for clients that have none.**
-  `agent_listen` opens this server's inbox under `~/.mqb-agents` (or `$MQB_AGENTS_DIR`) so
-  other agents on the machine can send to it, or over a broker when given a connector;
-  `agent_send` delivers to a named inbox; `server_info` reports who is listening here and
-  which peers have one. One inbox per server — calling `agent_listen` twice is an error.
-  `mqb agent-listen <NAME>` holds the same inbox open from the command line, so an agent
-  with no MCP client can join with one command.
+- **An opt-in agent bus in the MCP server, and `mqb agent-listen` for clients that have
+  none.** `mqb mcp --agent-bus` offers two extra tools; without the flag neither is
+  registered and `server_info` reports no bus, so a client that never asked for agent
+  messaging does not see it. `mqb mcp install --agent-bus` bakes the flag into the
+  registered command. With the bus on, `agent_listen` opens this server's inbox under
+  `~/.mqb-agents` (or `$MQB_AGENTS_DIR`) so other agents on the machine can send to it, or
+  over a broker when given a connector; `agent_send` delivers to a named inbox;
+  `server_info` reports who is listening here and which peers have one. One inbox per
+  server — calling `agent_listen` twice is an error. `mqb agent-listen <NAME>` holds the
+  same inbox open from the command line and needs no flag, so an agent with no MCP client
+  can join with one command.
 
 - **A `.justfile` covering the build, lint, test and packaging tasks**, with
   `just check-native-deps` to diagnose the native prerequisites. When it finds librdkafka

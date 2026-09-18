@@ -261,6 +261,10 @@ pub struct BridgeMcp {
     /// actually open. `None` means the inbox was never opened: this process can
     /// still send to other agents, but nothing can reach it.
     agent: Arc<Mutex<Option<String>>>,
+    /// Whether `mcp --agent-bus` was given. Off by default: the agent tools are
+    /// then not registered at all, so a client that never asked for the bus does
+    /// not see it.
+    agent_bus: bool,
 }
 
 /// Capture buffer topic for an MCP-started route.
@@ -524,9 +528,29 @@ impl BridgeMcp {
             starting: Arc::new(Mutex::new(HashSet::new())),
             publishers: Arc::new(Mutex::new(HashMap::new())),
             agent: Arc::new(Mutex::new(None)),
+            agent_bus: false,
             metrics,
-            tool_router: Self::tool_router(),
+            tool_router: Self::agent_aware_router(false),
         }
+    }
+
+    /// Turns the agent bus on, registering `agent_listen` and `agent_send`.
+    /// Without it neither tool exists and `server_info` reports no bus.
+    pub fn with_agent_bus(mut self, enabled: bool) -> Self {
+        self.tool_router = Self::agent_aware_router(enabled);
+        self.agent_bus = enabled;
+        self
+    }
+
+    /// The macro-generated router, minus the agent-bus tools unless asked for.
+    fn agent_aware_router(agent_bus: bool) -> ToolRouter<Self> {
+        let mut router = Self::tool_router();
+        if !agent_bus {
+            for tool in AGENT_TOOLS {
+                router.remove_route(tool);
+            }
+        }
+        router
     }
 
     /// Metric keys are shared between routes and publishers, so publishers are
@@ -909,26 +933,32 @@ impl BridgeMcp {
         annotations(read_only_hint = true)
     )]
     async fn server_info(&self) -> Result<CallToolResult, McpError> {
-        let agent = self.agent.lock().await.clone();
-        Ok(ok_json(serde_json::json!({
+        let mut info = serde_json::json!({
             "name": "mq-bridge-app",
             "version": env!("CARGO_PKG_VERSION"),
             "git_hash": option_env!("MQB_GIT_HASH").unwrap_or("unknown"),
             "profile": option_env!("MQB_BUILD_PROFILE").unwrap_or("unknown"),
             "build_time": option_env!("MQB_BUILD_TIME").unwrap_or("unknown"),
-            "agent_bus": {
+        });
+        // Without `--agent-bus` there is nothing to report and no reason to scan
+        // the agents directory for peers.
+        if self.agent_bus {
+            let agent = self.agent.lock().await.clone();
+            info["agent_bus"] = serde_json::json!({
                 "listening_as": agent.clone(),
                 "inbox_route": agent.as_ref().map(|_| AGENT_INBOX_ROUTE),
                 "agents_dir": agents_dir().ok().map(|d| d.to_string_lossy().into_owned()),
                 "peers": agent_peers(),
-            },
-        })))
+            });
+        }
+        Ok(ok_json(info))
     }
 
     #[tool(
         description = "Open this server's agent inbox so other agents on this machine can send it \
-            messages, and tail it for the rest of the session. Off until called — nothing can \
-            reach this agent before that. `name` is what peers address it by. Messages are then \
+            messages, and tail it for the rest of the session. Only exists when the server was \
+            started with `--agent-bus`, and off until called — nothing can reach this agent \
+            before that. `name` is what peers address it by. Messages are then \
             collected with `route_messages` on route `agent-inbox`; reads are destructive, and \
             only the last `capture_last` (default 200) are held — the durable inbox is drained \
             into that buffer, so mail beyond it is discarded, not queued. By \
@@ -1251,34 +1281,47 @@ impl ServerHandler for BridgeMcp {
         server_info.name = "mq-bridge-app".to_string();
         server_info.version = env!("CARGO_PKG_VERSION").to_string();
 
+        // The agent tools are not registered without `--agent-bus`, so describing
+        // them there would advertise tools the client cannot call.
+        let agent_bus = if self.agent_bus {
+            AGENT_BUS_INSTRUCTIONS
+        } else {
+            ""
+        };
+
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-        .with_server_info(server_info)
-        .with_instructions(
-            "mq-bridge: a universal, protocol-agnostic message and data bridge. Move data between \
-             any of the supported endpoints (postgres, kafka, nats, mqtt, mongodb, redis, ibm-mq, \
-             http, files, and more) ad hoc. `publish` and `start_route` take the endpoint(s) \
-             inline as JSON keyed by type, e.g. {\"kafka\": {\"url\": \"...\", \"topic\": \
-             \"...\"}}. Use `publish` to \
-             send messages to a target; `start_route` to move messages from a source (`input`) to \
-             a sink (`output`), optionally setting `exit_on_empty` to drain-then-exit; and \
-             `list_routes` / `route_status` / `stop_route` to manage running routes. Prefer \
-             `wait_route` over polling `route_status` for a drain-then-exit job: it is one call \
-             however long the job runs. Either endpoint may carry a `middlewares` array (retry, \
-             dlq, deduplication, limiter, transform, compression, encryption, ...) to add delivery \
-             behaviour without changing the route. Apache Pulsar is available too, but is not one \
-             of the endpoint variants in the tool schema: address it as {\"custom\": {\"name\": \
-             \"pulsar\", \"config\": {\"url\": \"pulsar://host:6650\", \"topic\": \"...\", \
-             \"subscription\": \"...\", \"initial_position\": \"earliest\"}}}. A source needs \
-             `initial_position: earliest` to read a topic's existing backlog; the default \
-             (`latest`) only sees messages published after the subscription is created. \
-             Agents on one machine can also message each other: `agent_send` delivers to a named \
-             peer and is always available, while `agent_listen` opens this server's own inbox and \
-             is off until called — so nothing reaches this agent unless it opts in. Once \
-             listening, collect mail with `route_messages` on route `agent-inbox`. `server_info` \
-             reports the bus: who is listening here, and which peers have an inbox.",
-        )
+            .with_server_info(server_info)
+            .with_instructions([INSTRUCTIONS, agent_bus].concat())
     }
 }
+
+const INSTRUCTIONS: &str = "mq-bridge: a universal, protocol-agnostic message and data bridge. Move data between \
+     any of the supported endpoints (postgres, kafka, nats, mqtt, mongodb, redis, ibm-mq, \
+     http, files, and more) ad hoc. `publish` and `start_route` take the endpoint(s) \
+     inline as JSON keyed by type, e.g. {\"kafka\": {\"url\": \"...\", \"topic\": \
+     \"...\"}}. Use `publish` to \
+     send messages to a target; `start_route` to move messages from a source (`input`) to \
+     a sink (`output`), optionally setting `exit_on_empty` to drain-then-exit; and \
+     `list_routes` / `route_status` / `stop_route` to manage running routes. Prefer \
+     `wait_route` over polling `route_status` for a drain-then-exit job: it is one call \
+     however long the job runs. Either endpoint may carry a `middlewares` array (retry, \
+     dlq, deduplication, limiter, transform, compression, encryption, ...) to add delivery \
+     behaviour without changing the route. Apache Pulsar is available too, but is not one \
+     of the endpoint variants in the tool schema: address it as {\"custom\": {\"name\": \
+     \"pulsar\", \"config\": {\"url\": \"pulsar://host:6650\", \"topic\": \"...\", \
+     \"subscription\": \"...\", \"initial_position\": \"earliest\"}}}. A source needs \
+     `initial_position: earliest` to read a topic's existing backlog; the default \
+     (`latest`) only sees messages published after the subscription is created.";
+
+/// Appended to the instructions above only when `--agent-bus` is on.
+const AGENT_BUS_INSTRUCTIONS: &str = " Agents on one machine can also message each other: `agent_send` delivers to a named \
+     peer and is always available, while `agent_listen` opens this server's own inbox and \
+     is off until called — so nothing reaches this agent unless it opts in. Once \
+     listening, collect mail with `route_messages` on route `agent-inbox`. `server_info` \
+     reports the bus: who is listening here, and which peers have an inbox.";
+
+/// The tools that exist only when the agent bus is on.
+const AGENT_TOOLS: [&str; 2] = ["agent_listen", "agent_send"];
 
 /// Route name of this process's agent inbox. Fixed, so `route_messages` can read
 /// the mailbox without the caller having to remember a generated name.
@@ -1441,9 +1484,10 @@ pub async fn run(
     transport: String,
     bind: Option<String>,
     report_to_ui: bool,
+    agent_bus: bool,
     workspace_path: String,
 ) -> anyhow::Result<()> {
-    let server = BridgeMcp::new();
+    let server = BridgeMcp::new().with_agent_bus(agent_bus);
     // Held for the lifetime of the transport; dropping it removes the lease,
     // including on the `bail!` below.
     let _lease = report_to_ui
@@ -1540,6 +1584,59 @@ mod tests {
         serde_json::from_value(route).expect("route parses")
     }
 
+    fn tool_names(server: &BridgeMcp) -> Vec<String> {
+        server
+            .tool_router
+            .list_all()
+            .into_iter()
+            .map(|t| t.name.to_string())
+            .collect()
+    }
+
+    // The agent bus is an opt-in: a client that never asked for it must not even
+    // see the tools, let alone a description telling the model to use them.
+    #[test]
+    fn the_agent_tools_are_absent_until_the_bus_is_turned_on() {
+        let off = BridgeMcp::new();
+        let names = tool_names(&off);
+        for tool in AGENT_TOOLS {
+            assert!(!names.contains(&tool.to_string()), "{tool} in {names:?}");
+        }
+        assert!(names.contains(&"start_route".to_string()), "{names:?}");
+        assert!(!off.get_info().instructions.unwrap().contains("agent_send"));
+
+        let on = BridgeMcp::new().with_agent_bus(true);
+        let names = tool_names(&on);
+        for tool in AGENT_TOOLS {
+            assert!(
+                names.contains(&tool.to_string()),
+                "{tool} missing from {names:?}"
+            );
+        }
+        assert!(on.get_info().instructions.unwrap().contains("agent_send"));
+    }
+
+    // `server_info` reaches the filesystem for its peer list, so the bus block has
+    // to disappear with the tools rather than merely read as empty.
+    #[tokio::test]
+    async fn server_info_reports_no_bus_when_it_is_off() {
+        let off = json_of(BridgeMcp::new().server_info().await.expect("server_info"));
+        assert!(off.get("agent_bus").is_none(), "{off}");
+
+        let on = json_of(
+            BridgeMcp::new()
+                .with_agent_bus(true)
+                .server_info()
+                .await
+                .expect("server_info"),
+        );
+        assert!(on["agent_bus"]["listening_as"].is_null(), "{on}");
+    }
+
+    fn json_of(result: CallToolResult) -> serde_json::Value {
+        serde_json::from_str(&result.content[0].as_text().expect("text").text).expect("json")
+    }
+
     // An agent name becomes a directory under the agents root, so anything that
     // could resolve outside it has to be refused before `join` sees it.
     #[test]
@@ -1564,8 +1661,18 @@ mod tests {
     #[test]
     fn a_windows_device_name_is_not_an_agent_name() {
         for bad in [
-            "CON", "con", "Prn", "AUX", "nul", "COM1", "com9", "LPT1", "lpt9", "con.txt",
-            "NUL.log.1", "CoM3.spool",
+            "CON",
+            "con",
+            "Prn",
+            "AUX",
+            "nul",
+            "COM1",
+            "com9",
+            "LPT1",
+            "lpt9",
+            "con.txt",
+            "NUL.log.1",
+            "CoM3.spool",
         ] {
             assert!(
                 validate_agent_name(bad).is_err(),

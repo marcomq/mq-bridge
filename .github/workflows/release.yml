@@ -324,6 +324,9 @@ jobs:
           # a release must be built from the tag it claims to be.
           ref: ${{ inputs.tag_name || github.ref }}
 
+      # No `rustflags:` here or in build-release. v1 defaulted it to
+      # `-D warnings`; v2 denies the same lints through CARGO_BUILD_WARNINGS
+      # instead, and setting RUSTFLAGS would override `[target.*].rustflags`.
       - name: Install Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v2
         with:

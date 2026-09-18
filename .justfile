@@ -104,16 +104,15 @@ doc:
 config-compat:
     cargo check -p grpc-config-compat
 
-# `grpc` carries `vendored-protoc` because protoc no longer arrives with the
-# feature itself and a bare checkout may have none installed; every `full*` set
-# already includes it.
+# The list mirrors CI's exactly, so a pass here means the same there. `grpc`
+# needs no `vendored-protoc` alongside it: the feature carries it (Cargo.toml).
 [doc('cargo check each feature subset CI covers')]
 [group('gate')]
 check-features:
     #!/usr/bin/env bash
     set -uo pipefail
     failed=""
-    for f in "" full kafka nats grpc,vendored-protoc mqtt mongodb http; do
+    for f in "" full kafka nats grpc mqtt mongodb http; do
         echo "::: cargo check --features ${f:-<default>}"
         if [ -z "$f" ]; then
             cargo check --all-targets || failed="$failed <default>"
