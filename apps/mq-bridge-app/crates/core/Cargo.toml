@@ -21,6 +21,7 @@ path = "src/lib.rs"
 # build must be able to honour a `plugins:` entry. It only adds `libloading`.
 mq-bridge = { workspace = true, features = ["schema", "plugin"] }
 mq-bridge-pulsar = { workspace = true }
+mq-bridge-meilisearch = { workspace = true }
 # The workspace dependency resolves to the root engine locally and retains a
 # registry version for publishing.
 

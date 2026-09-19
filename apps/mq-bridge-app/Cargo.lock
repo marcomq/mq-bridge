@@ -4514,6 +4514,7 @@ dependencies = [
  "metrics",
  "metrics-exporter-prometheus",
  "mq-bridge",
+ "mq-bridge-meilisearch",
  "mq-bridge-pulsar",
  "rdkafka",
  "rust-embed",
@@ -4553,6 +4554,22 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+]
+
+[[package]]
+name = "mq-bridge-meilisearch"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2245de3f955aed506c8cbf80ce011ad8bf02017e74892696c2979aa564418d42"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "mq-bridge",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

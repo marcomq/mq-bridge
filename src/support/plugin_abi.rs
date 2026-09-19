@@ -66,7 +66,10 @@ use core::fmt;
 /// Incompatible-change counter. A host refuses a plugin with a different major.
 pub const MQB_PLUGIN_ABI_MAJOR: u32 = 1;
 /// Additive-change counter. A host accepts any minor, old or new.
-pub const MQB_PLUGIN_ABI_MINOR: u32 = 0;
+///
+/// * **1.1** appended [`MqbPluginVTable::publisher_requires_ordered_publish`]
+///   and [`MqbPluginVTable::publisher_send_batch_outcomes`].
+pub const MQB_PLUGIN_ABI_MINOR: u32 = 1;
 
 /// Name of the discovery symbol a plugin shared library must export.
 ///
@@ -106,6 +109,14 @@ pub const MQB_ERR_CONNECTION: MqbStatus = 7;
 pub const MQB_DISPOSITION_ACK: u8 = 0;
 /// Negatively acknowledge the message so the broker can redeliver it.
 pub const MQB_DISPOSITION_NACK: u8 = 1;
+
+/// The message was published. Per-message counterpart of [`MQB_OK`], written by
+/// [`MqbPluginVTable::publisher_send_batch_outcomes`].
+pub const MQB_OUTCOME_OK: u8 = 0;
+/// This message failed transiently; the host may send it again.
+pub const MQB_OUTCOME_RETRYABLE: u8 = 1;
+/// This message failed permanently. Sending it again cannot help.
+pub const MQB_OUTCOME_PERMANENT: u8 = 2;
 
 /// The plugin can create consumers (input endpoints).
 pub const MQB_CAP_CONSUMER: u64 = 1 << 0;
@@ -416,6 +427,77 @@ pub struct MqbPluginVTable {
     pub middleware_result_free: unsafe extern "C" fn(result: MqbFilterHandle),
     /// Frees a middleware handle. Null is a no-op.
     pub middleware_free: unsafe extern "C" fn(middleware: MqbMiddlewareHandle),
+
+    // --- Added in ABI 1.1. Appended here rather than beside the other
+    // publisher entries because the layout up to `middleware_free` is frozen:
+    // moving a field would break every plugin compiled against 1.0.
+    /// Non-zero if whole batches must reach this publisher in the order the
+    /// source produced them, the publisher-side counterpart of
+    /// [`MqbPluginVTable::consumer_commit_requires_order`].
+    ///
+    /// Only present when
+    /// [`struct_size`](MqbPluginVTable::struct_size) reaches
+    /// [`MQB_VTABLE_SIZE_V1_1`]; read it through
+    /// [`MqbPluginVTable::publisher_ordering_hook`], never directly.
+    pub publisher_requires_ordered_publish:
+        unsafe extern "C" fn(publisher: MqbPublisherHandle) -> u8,
+    /// Publishes a batch like
+    /// [`publisher_send_batch`](MqbPluginVTable::publisher_send_batch), but says
+    /// which messages failed.
+    ///
+    /// `out_outcomes` is **host-allocated** and exactly `len` bytes long. On a
+    /// non-[`MQB_OK`] return the plugin writes one `MQB_OUTCOME_*` byte per
+    /// message in the order they were passed, and `err` carries one batch-level
+    /// message for the whole failure — no per-message text, so nothing is
+    /// allocated per failure. On [`MQB_OK`] every message was accepted and the
+    /// buffer is left untouched.
+    ///
+    /// Marking a subset is what stops the host re-sending the part that already
+    /// landed. A batch where *nothing* landed needs no marks: the return status
+    /// alone says so, which is what keeps [`MQB_ERR_CONNECTION`] meaning
+    /// "reconnect this endpoint".
+    ///
+    /// Only present when
+    /// [`struct_size`](MqbPluginVTable::struct_size) reaches
+    /// [`MQB_VTABLE_SIZE_V1_1`]; read it through
+    /// [`MqbPluginVTable::publisher_outcomes_hook`], never directly.
+    pub publisher_send_batch_outcomes: MqbPublisherSendBatchOutcomes,
+}
+
+/// Signature of [`MqbPluginVTable::publisher_send_batch_outcomes`], named so the
+/// field and the accessor cannot drift apart.
+pub type MqbPublisherSendBatchOutcomes = unsafe extern "C" fn(
+    publisher: MqbPublisherHandle,
+    messages: *const MqbMessage,
+    len: usize,
+    out_outcomes: *mut u8,
+    err: *mut MqbBuffer,
+) -> MqbStatus;
+
+impl MqbPluginVTable {
+    /// The 1.1 publisher-ordering hook, or `None` when the plugin predates it.
+    ///
+    /// A 1.0 plugin's table really is only [`MQB_VTABLE_SIZE_V1_0`] bytes long,
+    /// so reading the field without this check reads past the end of it. `None`
+    /// means "unknown", which callers treat as unordered — exactly how 1.0
+    /// plugins already behave.
+    pub fn publisher_ordering_hook(
+        &self,
+    ) -> Option<unsafe extern "C" fn(MqbPublisherHandle) -> u8> {
+        (self.struct_size >= MQB_VTABLE_SIZE_V1_1)
+            .then_some(self.publisher_requires_ordered_publish)
+    }
+
+    /// The 1.1 per-message publish hook, or `None` when the plugin predates it.
+    ///
+    /// Gated for the same reason as
+    /// [`publisher_ordering_hook`](Self::publisher_ordering_hook). `None` means
+    /// the caller must fall back to
+    /// [`publisher_send_batch`](Self::publisher_send_batch), whose failures are
+    /// whole-batch.
+    pub fn publisher_outcomes_hook(&self) -> Option<MqbPublisherSendBatchOutcomes> {
+        (self.struct_size >= MQB_VTABLE_SIZE_V1_1).then_some(self.publisher_send_batch_outcomes)
+    }
 }
 
 /// Size of the **1.0** field set: 7 header words (`struct_size`, the packed
@@ -433,6 +515,16 @@ pub struct MqbPluginVTable {
 /// target whose padding differs fails the build's tests rather than silently
 /// rejecting valid plugins.
 pub const MQB_VTABLE_SIZE_V1_0: usize = 27 * core::mem::size_of::<usize>();
+
+/// Size of the **1.1** field set: 1.0 plus
+/// [`MqbPluginVTable::publisher_requires_ordered_publish`] and
+/// [`MqbPluginVTable::publisher_send_batch_outcomes`].
+///
+/// This is a *feature gate*, not a minimum: [`check_compatibility`] still
+/// admits anything at or above [`MQB_VTABLE_SIZE_V1_0`], and a table smaller
+/// than this one simply has neither 1.1 hook. Both are gated on the one
+/// constant because 1.1 ships as a unit; nothing in between was ever released.
+pub const MQB_VTABLE_SIZE_V1_1: usize = MQB_VTABLE_SIZE_V1_0 + 2 * core::mem::size_of::<usize>();
 
 /// Why a plugin was rejected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -527,6 +619,43 @@ mod tests {
         } else {
             assert!(size_of::<MqbPluginVTable>() > MQB_VTABLE_SIZE_V1_0);
         }
+    }
+
+    /// The 1.1 size is frozen for the same reason 1.0 is: it gates a field
+    /// read, so a stale value would read past a 1.0 plugin's table.
+    #[test]
+    fn the_1_1_table_size_matches_the_declared_table() {
+        assert_eq!(
+            MQB_VTABLE_SIZE_V1_1,
+            MQB_VTABLE_SIZE_V1_0 + 2 * size_of::<usize>()
+        );
+        assert_eq!(size_of::<MqbPluginVTable>(), MQB_VTABLE_SIZE_V1_1);
+    }
+
+    /// The whole point of an additive minor: a 1.0 plugin still loads, and the
+    /// host discovers that it can ask it neither 1.1 question.
+    #[test]
+    fn a_1_0_table_loads_but_offers_no_1_1_hooks() {
+        let mut table = stub_table();
+        table.struct_size = MQB_VTABLE_SIZE_V1_0;
+        assert!(check_compatibility(&table).is_ok());
+        assert!(table.publisher_ordering_hook().is_none());
+        assert!(table.publisher_outcomes_hook().is_none());
+
+        table.struct_size = MQB_VTABLE_SIZE_V1_1;
+        assert!(table.publisher_ordering_hook().is_some());
+        assert!(table.publisher_outcomes_hook().is_some());
+    }
+
+    /// The three outcome codes share the byte the dispositions use, so they must
+    /// stay distinct and stay put: a plugin compiled against one numbering and a
+    /// host reading another would mis-class every failure.
+    #[test]
+    fn outcome_codes_are_stable() {
+        assert_eq!(
+            [MQB_OUTCOME_OK, MQB_OUTCOME_RETRYABLE, MQB_OUTCOME_PERMANENT],
+            [0, 1, 2]
+        );
     }
 
     fn table(abi_major: u32, struct_size: usize) -> MqbPluginVTable {
@@ -672,6 +801,18 @@ mod tests {
         }
         unsafe extern "C" fn middleware_result_free(_: MqbFilterHandle) {}
         unsafe extern "C" fn middleware_free(_: MqbMiddlewareHandle) {}
+        unsafe extern "C" fn requires_ordered_publish(_: MqbPublisherHandle) -> u8 {
+            0
+        }
+        unsafe extern "C" fn send_batch_outcomes(
+            _: MqbPublisherHandle,
+            _: *const MqbMessage,
+            _: usize,
+            _: *mut u8,
+            _: *mut MqbBuffer,
+        ) -> MqbStatus {
+            MQB_OK
+        }
 
         MqbPluginVTable {
             struct_size: MQB_VTABLE_SIZE_V1_0,
@@ -700,6 +841,8 @@ mod tests {
             middleware_apply,
             middleware_result_free,
             middleware_free,
+            publisher_requires_ordered_publish: requires_ordered_publish,
+            publisher_send_batch_outcomes: send_batch_outcomes,
         }
     }
 }

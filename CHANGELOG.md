@@ -2,7 +2,40 @@
 
 All notable changes to `mq-bridge`. Newest first.
 
-## 0.4.12 — unreleased
+## 0.4.13
+
+### Added
+
+- **Meilisearch is a built-in endpoint of `mqb`.** `mq-bridge-meilisearch` is compiled
+  into the CLI and registered at startup next to Pulsar, so a `meilisearch://` URI works
+  wherever an endpoint URI is accepted — `mqb copy 'postgres://…/orders'
+  'meilisearch://localhost:7700?index=orders&primary_key=id'` indexes a table with no
+  config file and no `--plugin`. The output is a document sink that awaits the
+  asynchronous task each write enqueues before acknowledging, so a committed source
+  cursor means Meilisearch really applied the batch; the input is a resumable,
+  non-destructive scan of an index. The crate stays a separate plugin as well, for hosts
+  that load the `cdylib` instead.
+
+- **Plugin ABI 1.1 — ordered publishing and per-message publish outcomes.** Two entries
+  appended to the vtable. `publisher_requires_ordered_publish` lets
+  `MessagePublisher::requires_ordered_publish` cross the plugin boundary: a keyed sink
+  loaded from a shared library gets its sends sequenced like a directly linked one,
+  whatever the route's `concurrency`. Until now the flag was unreachable across the ABI
+  and every plugin publisher silently took the trait default, `false`.
+  `publisher_send_batch_outcomes` carries a `SentBatch::Partial` across: the host passes
+  one byte per message and the plugin marks the ones that failed, so the route nacks or
+  dead-letters only those and acknowledges the rest. Previously a partly failed batch was
+  reported as the first failure's class, and retrying it re-sent every message that had
+  already been published. A batch where *nothing* landed is still reported as a
+  whole-batch error, so a connection-level failure still reconnects the endpoint.
+
+  The bump is additive — the `mq_bridge_plugin_v1` entry symbol and the minimum accepted
+  table size are unchanged, so **plugins built against 1.0 keep loading as they are**: the
+  host cannot ask them about ordering, so it assumes unordered, and falls back to the
+  all-or-nothing send. Both are what those plugins already do today. Rebuild against 1.1
+  to get either. See [PLUGINS.md](docs/PLUGINS.md).
+
+## 0.4.12
 
 ### Changed
 

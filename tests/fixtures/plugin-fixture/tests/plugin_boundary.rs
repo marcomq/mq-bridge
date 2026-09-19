@@ -12,7 +12,7 @@ use mq_bridge::errors::{ConsumerError, PublisherError};
 use mq_bridge::plugin::conformance::{self, ConformanceOptions};
 use mq_bridge::plugin::{load_endpoint_plugin, test_support::build_plugin_cdylib};
 use mq_bridge::traits::{CustomEndpointFactory, MessageDisposition};
-use mq_bridge::{CanonicalMessage, ReceivedBatch};
+use mq_bridge::{CanonicalMessage, ReceivedBatch, SentBatch};
 use mq_bridge_plugin_fixture::FixtureFactory;
 use serde_json::json;
 
@@ -314,6 +314,192 @@ async fn publisher_error_classes_survive_the_abi() {
             _ => panic!("`fail_send: {fail}` produced the wrong error class: {error}"),
         }
     }
+}
+
+/// ABI 1.1. Before it, the host had no way to ask, so an order-sensitive sink
+/// loaded as a plugin was silently published to in parallel whenever the route
+/// ran with `concurrency > 1`.
+#[tokio::test(flavor = "multi_thread")]
+async fn publisher_ordering_requirement_survives_the_abi() {
+    let factory = plugin_factory();
+    for ordered in [true, false] {
+        let publisher = factory
+            .create_publisher(
+                "ordering",
+                &json!({ "queue": "ordering", "requires_ordered_publish": ordered }),
+            )
+            .await
+            .expect("create publisher");
+        assert_eq!(
+            publisher.requires_ordered_publish(),
+            ordered,
+            "`requires_ordered_publish: {ordered}` did not survive the ABI"
+        );
+    }
+}
+
+/// The directly linked endpoint is the reference: the plugin-loaded one has to
+/// give the same answer, or the ABI is reporting something the endpoint didn't
+/// say.
+#[tokio::test(flavor = "multi_thread")]
+async fn ordering_is_reported_the_same_linked_and_loaded() {
+    let config = json!({ "queue": "ordering-parity", "requires_ordered_publish": true });
+    let direct = FixtureFactory
+        .create_publisher("ordering-parity", &config)
+        .await
+        .expect("create the directly linked publisher");
+    let loaded = plugin_factory()
+        .create_publisher("ordering-parity", &config)
+        .await
+        .expect("create the plugin-loaded publisher");
+
+    assert!(direct.requires_ordered_publish());
+    assert_eq!(
+        direct.requires_ordered_publish(),
+        loaded.requires_ordered_publish()
+    );
+}
+
+/// ABI 1.1. The point of the per-message outcome array: a batch that half
+/// landed must come back as `Partial`, naming the half that did not. Under 1.0
+/// the whole batch was reported as the first failure's class, so a retry
+/// duplicated everything that had already been published.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_partial_publish_survives_the_abi() {
+    let factory = plugin_factory();
+    let config = json!({ "queue": "partial", "fail_send_at": [1, 3] });
+    let publisher = factory
+        .create_publisher("partial", &config)
+        .await
+        .expect("create publisher");
+
+    let payloads = ["a", "b", "c", "d", "e"];
+    let sent = publisher
+        .send_batch(payloads.iter().map(|p| CanonicalMessage::from(*p)).collect())
+        .await
+        .expect("a partial batch is a success, not an error");
+
+    let SentBatch::Partial { failed, .. } = sent else {
+        panic!("expected a partial batch, got {sent:?}");
+    };
+    // Pairing is positional, so the host must name exactly the messages it put
+    // at indices 1 and 3 — not merely the right number of them.
+    let names: Vec<String> = failed
+        .iter()
+        .map(|(message, _)| message.get_payload_str().into_owned())
+        .collect();
+    assert_eq!(names, ["b", "d"]);
+    for (message, error) in &failed {
+        assert!(
+            matches!(error, PublisherError::Retryable(_)),
+            "{} came back as {error}",
+            message.get_payload_str()
+        );
+    }
+
+    // And the other three really were published: the route acknowledges them on
+    // the strength of this, so a lost message here is a silently dropped one.
+    let mut consumer = factory
+        .create_consumer("partial", &config)
+        .await
+        .expect("create consumer");
+    let mut delivered: Vec<String> = receive_at_least(&mut *consumer, 3, Duration::from_secs(5))
+        .await
+        .iter()
+        .map(|message| message.get_payload_str().into_owned())
+        .collect();
+    delivered.sort();
+    assert_eq!(delivered, ["a", "c", "e"]);
+}
+
+/// The outcome byte carries the class, so a permanent per-message failure must
+/// not arrive as a retryable one: the route would nack it forever.
+#[tokio::test(flavor = "multi_thread")]
+async fn partial_failure_classes_survive_the_abi() {
+    let factory = plugin_factory();
+    let publisher = factory
+        .create_publisher(
+            "partial-class",
+            &json!({
+                "queue": "partial-class",
+                "fail_send_at": [0],
+                "fail_send": "permanent",
+            }),
+        )
+        .await
+        .expect("create publisher");
+
+    let sent = publisher
+        .send_batch(vec![CanonicalMessage::from("x"), CanonicalMessage::from("y")])
+        .await
+        .expect("a partial batch is a success, not an error");
+    let SentBatch::Partial { failed, .. } = sent else {
+        panic!("expected a partial batch, got {sent:?}");
+    };
+    assert_eq!(failed.len(), 1);
+    assert!(
+        matches!(failed[0].1, PublisherError::NonRetryable(_)),
+        "{}",
+        failed[0].1
+    );
+}
+
+/// A batch where nothing landed stays a batch error rather than becoming a
+/// `Partial` listing every message. That is what keeps `Connection` able to mean
+/// "reconnect the endpoint", which no per-message byte can say.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_wholly_failed_batch_is_still_an_error() {
+    let publisher = plugin_factory()
+        .create_publisher(
+            "partial-none",
+            &json!({ "queue": "partial-none", "fail_send_at": [0, 1] }),
+        )
+        .await
+        .expect("create publisher");
+
+    let error = publisher
+        .send_batch(vec![CanonicalMessage::from("x"), CanonicalMessage::from("y")])
+        .await
+        .expect_err("every message failed, so the batch failed");
+    assert!(matches!(error, PublisherError::Retryable(_)), "{error}");
+    assert!(
+        error.to_string().contains("2 of 2 messages failed"),
+        "the plugin's own summary should reach the host: {error}"
+    );
+}
+
+/// The directly linked endpoint is the reference for which messages failed too.
+#[tokio::test(flavor = "multi_thread")]
+async fn partial_publishes_agree_linked_and_loaded() {
+    let config = json!({ "queue": "partial-parity", "fail_send_at": [2] });
+    let payloads = ["p", "q", "r", "s"];
+
+    async fn failed_payloads(
+        factory: &dyn CustomEndpointFactory,
+        config: &serde_json::Value,
+        payloads: &[&str],
+    ) -> Vec<String> {
+        let publisher = factory
+            .create_publisher("partial-parity", config)
+            .await
+            .expect("create publisher");
+        let sent = publisher
+            .send_batch(payloads.iter().map(|p| CanonicalMessage::from(*p)).collect())
+            .await
+            .expect("send batch");
+        let SentBatch::Partial { failed, .. } = sent else {
+            panic!("expected a partial batch, got {sent:?}");
+        };
+        failed
+            .iter()
+            .map(|(message, _)| message.get_payload_str().into_owned())
+            .collect()
+    }
+
+    let direct = failed_payloads(&FixtureFactory, &config, &payloads).await;
+    let loaded = failed_payloads(&*plugin_factory(), &config, &payloads).await;
+    assert_eq!(direct, ["r"]);
+    assert_eq!(direct, loaded);
 }
 
 #[tokio::test(flavor = "multi_thread")]

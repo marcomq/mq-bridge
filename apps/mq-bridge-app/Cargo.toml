@@ -14,6 +14,9 @@ version = "0.4.13"
 mq-bridge = { version = "0.4.13", path = "../..", default-features = false }
 mq_bridge_app = { version = "0.4.13", path = "crates/core", package = "mq-bridge-app-core", default-features = false }
 mq-bridge-pulsar = { version = "0.1.4", default-features = false }
+# `default-features = false` drops its `plugin` feature: that export would collide
+# with the identical `mq_bridge_plugin_v1` symbol in mq-bridge-pulsar, as both link in.
+mq-bridge-meilisearch = { version = "0.1.0", default-features = false }
 
 anyhow = "1.0"
 async-trait = "0.1"

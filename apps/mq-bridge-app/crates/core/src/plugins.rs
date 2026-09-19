@@ -39,7 +39,11 @@ use anyhow::Context;
 pub fn register_builtin_endpoints() -> anyhow::Result<()> {
     static RESULT: OnceLock<Result<(), String>> = OnceLock::new();
     RESULT
-        .get_or_init(|| mq_bridge_pulsar::register().map_err(|error| format!("{error:#}")))
+        .get_or_init(|| {
+            mq_bridge_pulsar::register()
+                .and_then(|()| mq_bridge_meilisearch::register())
+                .map_err(|error| format!("{error:#}"))
+        })
         .clone()
         .map_err(anyhow::Error::msg)
 }
@@ -115,6 +119,7 @@ mod tests {
                 .is_empty()
         );
         assert!(mq_bridge::extensions::get_endpoint_factory("pulsar").is_some());
+        assert!(mq_bridge::extensions::get_endpoint_factory("meilisearch").is_some());
     }
 
     #[test]

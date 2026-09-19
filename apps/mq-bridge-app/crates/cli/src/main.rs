@@ -1872,13 +1872,13 @@ fn base_endpoint_from_uri(uri: &str) -> anyhow::Result<mq_bridge::models::Endpoi
         "aws" | "aws-sqs" => ("aws", schema_fields(schemars::schema_for!(AwsConfig))),
         "zeromq" | "zmq" => ("zeromq", schema_fields(schemars::schema_for!(ZeroMqConfig))),
         // A scheme naming a registered endpoint — one compiled in as an extension
-        // (`pulsar`) or loaded with `--plugin` — is that endpoint. This mirrors the
+        // (`pulsar`, `meilisearch`) or loaded with `--plugin` — is that endpoint. This mirrors the
         // config path, where an unknown single key falls back to `custom`.
         other if mq_bridge::extensions::get_endpoint_factory(other).is_some() => {
             return custom_endpoint_from_uri(other, &parsed, uri);
         }
         other => bail!(
-            "unsupported endpoint scheme '{other}' in URI '{uri}'. Supported schemes: postgres, postgresql, mysql, mariadb, sqlite, nats, mongodb, redis, file, spool, kafka, mqtt, mqtts, amqp, amqps, rabbitmq, rabbitmqs, http, https, clickhouse, clickhouses, ws, wss, grpc, grpcs, ibmmq, aws, zeromq, zmq, s3, gs, az, abfs, and the structural memory, null, static, fanout, request, switch, response. A scheme may also name an endpoint registered by an extension (pulsar) or loaded with --plugin"
+            "unsupported endpoint scheme '{other}' in URI '{uri}'. Supported schemes: postgres, postgresql, mysql, mariadb, sqlite, nats, mongodb, redis, file, spool, kafka, mqtt, mqtts, amqp, amqps, rabbitmq, rabbitmqs, http, https, clickhouse, clickhouses, ws, wss, grpc, grpcs, ibmmq, aws, zeromq, zmq, s3, gs, az, abfs, and the structural memory, null, static, fanout, request, switch, response. A scheme may also name an endpoint registered by an extension (pulsar, meilisearch) or loaded with --plugin"
         ),
     };
 
@@ -3144,6 +3144,28 @@ mod uri_tests {
         assert_eq!(config["url"], "pulsar://localhost:6650");
         assert_eq!(config["topic"], "persistent://public/default/orders");
         assert_eq!(config["subscription"], "workers");
+    }
+
+    // Meilisearch reaches `copy` the same way. Its crate normalizes the
+    // `meilisearch://` url to the HTTP one the server speaks, and accepts the
+    // string spelling of each scalar, which is all a query string can carry.
+    #[test]
+    fn meilisearch_scheme_builds_a_custom_endpoint() {
+        mq_bridge_app::plugins::register_builtin_endpoints().unwrap();
+
+        let endpoint =
+            endpoint_from_uri("meilisearch://localhost:7700?index=orders&primary_key=id").unwrap();
+
+        let EndpointType::Custom { name, config } = endpoint.endpoint_type else {
+            panic!(
+                "expected a custom endpoint, got {:?}",
+                endpoint.endpoint_type
+            );
+        };
+        assert_eq!(name, "meilisearch");
+        assert_eq!(config["url"], "meilisearch://localhost:7700");
+        assert_eq!(config["index"], "orders");
+        assert_eq!(config["primary_key"], "id");
     }
 
     #[test]

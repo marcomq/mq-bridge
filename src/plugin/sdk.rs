@@ -60,6 +60,7 @@
 //! See [`conformance`](super::conformance) for the suite to run against your
 //! endpoint both linked directly and loaded as a plugin.
 
+use std::collections::HashMap;
 use std::ffi::c_void;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
@@ -77,8 +78,8 @@ use crate::support::plugin_abi::{
     MqbMiddlewareHandle, MqbPluginVTable, MqbPublisherHandle, MqbSlice, MqbStatus,
     MQB_CAP_CONSUMER, MQB_CAP_MIDDLEWARE, MQB_CAP_PUBLISHER, MQB_DISPOSITION_NACK,
     MQB_END_OF_STREAM, MQB_ERR_CONNECTION, MQB_ERR_INVALID_CONFIG, MQB_ERR_PANIC,
-    MQB_ERR_PERMANENT, MQB_ERR_RETRYABLE, MQB_MIDDLEWARE_RECEIVE, MQB_OK, MQB_PLUGIN_ABI_MAJOR,
-    MQB_PLUGIN_ABI_MINOR,
+    MQB_ERR_PERMANENT, MQB_ERR_RETRYABLE, MQB_MIDDLEWARE_RECEIVE, MQB_OK, MQB_OUTCOME_OK,
+    MQB_OUTCOME_PERMANENT, MQB_OUTCOME_RETRYABLE, MQB_PLUGIN_ABI_MAJOR, MQB_PLUGIN_ABI_MINOR,
 };
 use crate::traits::{
     BatchCommitFunc, CustomEndpointFactory, MessageConsumer, MessageDisposition, MessagePublisher,
@@ -205,6 +206,10 @@ struct ConsumerState {
 struct PublisherState {
     publisher: Arc<dyn MessagePublisher>,
     runtime: Arc<Runtime>,
+    /// Read once at creation: the route asks once when it starts, and calling
+    /// back into the publisher on every query would cross the ABI for a value
+    /// that cannot change.
+    requires_ordered_publish: bool,
 }
 
 struct BatchState {
@@ -621,10 +626,11 @@ unsafe extern "C" fn publisher_create(
             if let Some(hook) = publisher.on_connect_hook() {
                 hook.await.map_err(|error| (MQB_ERR_CONNECTION, error))?;
             }
-            Ok::<_, (MqbStatus, anyhow::Error)>(publisher)
+            let requires_ordered_publish = publisher.requires_ordered_publish();
+            Ok::<_, (MqbStatus, anyhow::Error)>((publisher, requires_ordered_publish))
         });
-        let publisher = match created {
-            Ok(Ok(publisher)) => publisher,
+        let (publisher, requires_ordered_publish) = match created {
+            Ok(Ok(created)) => created,
             Ok(Err((status, error))) => {
                 unsafe { set_error(err, format!("{error:#}")) };
                 return status;
@@ -636,6 +642,7 @@ unsafe extern "C" fn publisher_create(
             *out = MqbPublisherHandle(into_handle(PublisherState {
                 publisher: Arc::from(publisher),
                 runtime,
+                requires_ordered_publish,
             }))
         };
         MQB_OK
@@ -679,6 +686,105 @@ unsafe extern "C" fn publisher_send_batch(
             Err(failure) => unsafe { task_failed(err, failure) },
         }
     })
+}
+
+/// The 1.1 send: same publish, but the host learns which messages failed.
+///
+/// A whole-batch failure leaves `out_outcomes` untouched — the host reads "no
+/// message marked" as exactly that, and the return status keeps carrying the
+/// class, including [`MQB_ERR_CONNECTION`], which no per-message byte can express.
+unsafe extern "C" fn publisher_send_batch_outcomes(
+    publisher: MqbPublisherHandle,
+    messages: *const MqbMessage,
+    len: usize,
+    out_outcomes: *mut u8,
+    err: *mut MqbBuffer,
+) -> MqbStatus {
+    guarded(err, || {
+        let Some(state) = (unsafe { borrow::<PublisherState>(publisher.0) }) else {
+            unsafe {
+                set_error(
+                    err,
+                    "publisher_send_batch_outcomes called with a null handle",
+                )
+            };
+            return MQB_ERR_PERMANENT;
+        };
+        let messages: Vec<CanonicalMessage> = unsafe { from_abi(messages, len) };
+        // `SentBatch::Partial` reports failures as messages, not indices, so the
+        // ids are captured here to recover the position afterwards.
+        let ids: Vec<u128> = messages.iter().map(|message| message.message_id).collect();
+        let shared = Arc::clone(&state.publisher);
+        let sent = block_on(
+            &state.runtime,
+            async move { shared.send_batch(messages).await },
+        );
+        match sent {
+            Ok(Ok(SentBatch::Ack)) => MQB_OK,
+            Ok(Ok(SentBatch::Partial { failed, .. })) => {
+                let Some((_, first)) = failed.first() else {
+                    return MQB_OK;
+                };
+                let status = processing_status(first);
+                let summary = format!(
+                    "{} of {len} messages failed to publish; first failure: {first:#}",
+                    failed.len()
+                );
+                unsafe { write_outcomes(out_outcomes, &ids, &failed) };
+                unsafe { set_error(err, summary) };
+                status
+            }
+            Ok(Err(error)) => {
+                let status = processing_status(&error);
+                unsafe { set_error(err, format!("{error:#}")) };
+                status
+            }
+            Err(failure) => unsafe { task_failed(err, failure) },
+        }
+    })
+}
+
+/// Marks each failed message's slot, leaving every other one [`MQB_OUTCOME_OK`].
+///
+/// # Safety
+/// `out` must be writable for `ids.len()` bytes, as the ABI requires of the
+/// host's buffer.
+unsafe fn write_outcomes(
+    out: *mut u8,
+    ids: &[u128],
+    failed: &[(CanonicalMessage, ProcessingError)],
+) {
+    if out.is_null() || ids.is_empty() {
+        return;
+    }
+    let outcomes = unsafe { std::slice::from_raw_parts_mut(out, ids.len()) };
+    outcomes.fill(MQB_OUTCOME_OK);
+    let classes: HashMap<u128, u8> = failed
+        .iter()
+        .map(|(message, error)| (message.message_id, outcome_code(error)))
+        .collect();
+    for (outcome, id) in outcomes.iter_mut().zip(ids) {
+        if let Some(code) = classes.get(id) {
+            *outcome = *code;
+        }
+    }
+}
+
+/// The per-message counterpart of [`processing_status`]. A connection fault has
+/// no outcome byte, so it degrades to retryable — which is how the host acts on
+/// one anyway; the batch status is where it stays visible.
+fn outcome_code(error: &ProcessingError) -> u8 {
+    match error {
+        ProcessingError::NonRetryable(_) => MQB_OUTCOME_PERMANENT,
+        ProcessingError::Retryable(_) | ProcessingError::Connection(_) => MQB_OUTCOME_RETRYABLE,
+    }
+}
+
+unsafe extern "C" fn publisher_requires_ordered_publish(publisher: MqbPublisherHandle) -> u8 {
+    // Defaults to the safe answer (ordered) if the handle is unusable, matching
+    // `consumer_commit_requires_order`.
+    unsafe { borrow::<PublisherState>(publisher.0) }
+        .map_or(1, |state| u8::from(state.requires_ordered_publish))
 }
 
 unsafe extern "C" fn publisher_flush(
@@ -1001,6 +1107,8 @@ where
         middleware_apply,
         middleware_result_free,
         middleware_free,
+        publisher_requires_ordered_publish,
+        publisher_send_batch_outcomes,
     })
 }
 

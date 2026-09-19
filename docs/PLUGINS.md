@@ -186,10 +186,47 @@ mq_bridge::export_endpoint_plugin! {
 }
 ```
 
+### Ordered publishing
+
+A sink whose correctness depends on batches arriving in source order — anything
+keyed, where a stale write can overwrite a newer one — overrides
+`MessagePublisher::requires_ordered_publish`. Since **ABI 1.1** the host reads
+that through the plugin boundary too, so a plugin-loaded sink gets its sends
+sequenced exactly like a directly linked one, whatever the route's
+`concurrency`.
+
+A plugin built against ABI 1.0 has no such entry. The host cannot ask, so it
+assumes unordered — which is what those plugins already do today. Rebuild
+against 1.1 to have the flag honoured.
+
+### Partial publishes
+
+A publisher that returns `SentBatch::Partial` says some of the batch landed and
+some did not. Since **ABI 1.1** that survives the boundary: the host hands the
+plugin a byte per message and the plugin marks the ones that failed, so the route
+nacks or dead-letters only those and acknowledges the rest.
+
+Nothing new to write — the SDK derives the marks from the `Partial` your
+`send_batch` already returns, matching each failure back to its position by
+message id. Two details are worth knowing:
+
+- **The class travels per message, the text does not.** Each mark says retryable
+  or permanent; one error string describes the batch. Per-message text would cost
+  an allocation per failure, and can be appended in a later minor if it is ever
+  needed.
+- **A batch where nothing landed stays a batch error**, not a `Partial` listing
+  every message, so a connection-level failure can still mean "reconnect this
+  endpoint" — something no per-message mark can express.
+
+A plugin built against ABI 1.0 has no such entry. The host falls back to the
+all-or-nothing send, where a partial failure is reported as the first failure's
+class and the whole batch — including the part that succeeded — is retried or
+dead-lettered.
+
 ### Limits of ABI v1
 
-- A batch is published all-or-nothing: no per-message publish responses, so no
-  request/reply through a plugin.
+- No per-message publish *responses*, so no request/reply through a plugin. A
+  `Partial`'s `responses` are dropped; only its failures cross.
 - `MessageDisposition::Reply` acknowledges the source message.
 - One plugin per shared library (the export macro defines the discovery symbol),
   so two plugin crates cannot be statically linked into one binary. Gate the
@@ -295,6 +332,13 @@ of the mq-bridge release it ships in:
 - Within a major, fields are only ever appended to the function table, and both
   sides use its recorded size to decide what exists — so an older plugin keeps
   working with a newer host.
+
+Minor versions so far:
+
+| Minor | Added |
+| --- | --- |
+| 1.0 | The initial table. |
+| 1.1 | `publisher_requires_ordered_publish`, so a plugin sink can ask the route to keep its sends in source order, and `publisher_send_batch_outcomes`, so a partly failed batch reports which messages failed. |
 
 Publish the supported ABI range in your package metadata, and test each packaged
 plugin against the oldest and newest mq-bridge you claim to support.
