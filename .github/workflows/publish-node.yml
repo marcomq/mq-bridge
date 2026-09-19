@@ -28,6 +28,12 @@ name: Publish Node Package
 
 on:
   workflow_call:
+    inputs:
+      ref:
+        description: 'Git ref to check out; defaults to the triggering ref.'
+        type: string
+        required: false
+        default: ''
 
 env:
   CARGO_TERM_COLOR: always
@@ -41,6 +47,8 @@ jobs:
       id-token: write # OIDC trusted publishing + provenance
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
 
       - name: Set up Node
         uses: actions/setup-node@v7
