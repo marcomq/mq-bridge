@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 mod buffer;
 #[cfg(feature = "compression")]
-mod compression;
+pub(crate) mod compression;
 mod cookie_jar;
 #[cfg(feature = "dedup")]
 pub(crate) mod deduplication;
@@ -20,7 +20,7 @@ mod deferred_commit;
 mod delay;
 mod dlq;
 #[cfg(feature = "encryption")]
-mod encryption;
+pub(crate) mod encryption;
 #[cfg(feature = "filter")]
 pub(crate) mod filter;
 mod id;

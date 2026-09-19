@@ -229,7 +229,8 @@ mqb copy \
 ```
 
 - Names: `retry`, `metrics`, `dlq`, `deduplication`, `transform`, `delay`, `limiter`,
-  `buffer`, `weak_join`, `cookie_jar`, `random_panic`, `compression`, `encryption`, `custom`
+  `buffer`, `weak_join`, `cookie_jar`, `random_panic`, `compression`, `encryption`, `pack`,
+  `unpack`, `custom`
   (`-` is accepted for `_`).
 - `encryption`'s `key` is a shell-visible argument; prefer `${env:VAR}` to keep it out of the
   process list and shell history: `|encryption?key=$%7Benv:MQB_KEY%7D`.

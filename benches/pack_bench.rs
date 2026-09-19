@@ -9,9 +9,20 @@
 //! - **Fewer bytes.** The summary table prints bytes per row for each codec, so the
 //!   wire saving is visible next to the CPU it costs.
 //!
-//! `individual` is the baseline: what an unpacked route spends framing the same rows
-//! one at a time, which is the ZeroMQ `raw_framed` shape (a JSON metadata frame plus
-//! the payload). Comparing it with `pack/none` shows what the envelope itself costs.
+//! Compression is a separate middleware, so the `pack+<codec>` cases here measure the
+//! composed pipeline — `[compression, pack]` on the output — rather than an inner codec.
+//!
+//! `individual` is the baseline on both sides: what an unpacked route spends framing
+//! the same rows one at a time, and decoding them again, which is the ZeroMQ
+//! `raw_framed` shape (a JSON metadata frame plus the payload). Comparing it with
+//! `pack/none` shows what the envelope itself costs.
+//!
+//! **Do not read `pack` against `unpack` directly.** Packing metadata is a memcpy into
+//! one buffer; unpacking it rebuilds a `HashMap<String, String>` per record, which costs
+//! one map plus two allocations per pair. `unpack/none_no_metadata` isolates that: the
+//! records themselves decode several times faster than they pack, and everything above
+//! that is the map, not the format. The honest comparison for `unpack` is
+//! `unpack/individual`, which pays the same reconstruction per message.
 //!
 //! Rows are the seven-column shape `csv_to_json_bench` uses, so a figure here is
 //! directly comparable with the CSV/ETL numbers.
@@ -20,7 +31,8 @@
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use mq_bridge::models::{Compression, PackFormat, PackMiddleware};
-use mq_bridge::test_utils::bench::{pack_batches, unpack_batch};
+use mq_bridge::test_utils::bench::{compress_member, decompress_member, pack_batches, unpack_batch};
+use bytes::Bytes;
 use mq_bridge::CanonicalMessage;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -48,6 +60,44 @@ unsafe impl GlobalAlloc for Counting {
 #[global_allocator]
 static ALLOCATOR: Counting = Counting;
 
+/// The same rows without metadata, to separate the envelope's own cost from the
+/// cost of rebuilding a `HashMap<String, String>` per record.
+fn corpus_without_metadata() -> Vec<CanonicalMessage> {
+    corpus()
+        .into_iter()
+        .map(|mut message| {
+            message.metadata.clear();
+            message
+        })
+        .collect()
+}
+
+/// The per-message counterpart of `decompress_then_unpack`: what a route pays to turn
+/// a `raw_framed` pair back into a message. `pack` only ever *writes* metadata, so
+/// comparing it against `unpack` — which rebuilds it — needs this baseline to be fair.
+fn decode_individually(wire: &[(Vec<u8>, Bytes)]) -> usize {
+    let mut count = 0;
+    for (meta, payload) in wire {
+        let mut message = CanonicalMessage::new_bytes(payload.clone(), None);
+        message.metadata =
+            serde_json::from_slice(meta).expect("metadata frame parses");
+        count += message.metadata.len();
+    }
+    count
+}
+
+fn frame_individually_owned(messages: &[CanonicalMessage]) -> Vec<(Vec<u8>, Bytes)> {
+    messages
+        .iter()
+        .map(|message| {
+            (
+                serde_json::to_vec(&message.metadata).expect("metadata serializes"),
+                message.payload.clone(),
+            )
+        })
+        .collect()
+}
+
 fn corpus() -> Vec<CanonicalMessage> {
     const COUNTRIES: [&str; 5] = ["US", "GB", "DE", "IN", "JP"];
     const TIERS: [&str; 3] = ["free", "pro", "enterprise"];
@@ -73,14 +123,40 @@ fn corpus() -> Vec<CanonicalMessage> {
         .collect()
 }
 
-fn config(compression: Compression) -> PackMiddleware {
+fn config() -> PackMiddleware {
     PackMiddleware {
         format: PackFormat::Mqb,
-        compression,
         max_messages: BATCH,
         max_bytes: 64 * 1024 * 1024,
         drop_message_id: false,
     }
+}
+
+/// `pack`, then the `compression` middleware over each physical message — the
+/// `[compression, pack]` output pipeline, measured end to end.
+fn pack_then_compress(algorithm: Compression, messages: &[CanonicalMessage]) -> Vec<Bytes> {
+    let packed = pack_batches(&config(), messages).expect("packs");
+    if algorithm == Compression::None {
+        return packed;
+    }
+    packed
+        .iter()
+        .map(|batch| Bytes::from(compress_member(algorithm, batch).expect("compresses")))
+        .collect()
+}
+
+/// The reading half: `[unpack, compression]`.
+fn decompress_then_unpack(algorithm: Compression, wire: &[Bytes]) -> usize {
+    let mut count = 0;
+    for batch in wire {
+        let plain = if algorithm == Compression::None {
+            batch.clone()
+        } else {
+            Bytes::from(decompress_member(algorithm, batch).expect("decompresses"))
+        };
+        count += unpack_batch(PackFormat::Mqb, &plain).expect("unpacks").len();
+    }
+    count
 }
 
 fn codecs() -> [(&'static str, Compression); 4] {
@@ -126,18 +202,34 @@ fn summary(messages: &[CanonicalMessage]) {
 
     for (name, codec) in codecs() {
         ALLOCATIONS.store(0, Ordering::Relaxed);
-        let packed = pack_batches(&config(codec), messages).expect("packs");
-        let allocations = ALLOCATIONS.load(Ordering::Relaxed);
+        let packed = pack_then_compress(codec, messages);
+        let pack_allocations = ALLOCATIONS.load(Ordering::Relaxed);
         let bytes: usize = packed.iter().map(|b| b.len()).sum();
+
+        ALLOCATIONS.store(0, Ordering::Relaxed);
+        decompress_then_unpack(codec, &packed);
+        let unpack_allocations = ALLOCATIONS.load(Ordering::Relaxed);
+
         println!(
-            "pack/{name:<20} {:>12}  ({:.1} B/row)  {} transport ops, {:.3} allocs/row, {:.2}x vs individual",
+            "pack/{name:<10} {:>10}  ({:>5.1} B/row)  {:>5} ops  pack {:.3} allocs/row, unpack {:.3} allocs/row, {:.2}x vs individual",
             bytes,
             bytes as f64 / ROWS as f64,
             packed.len(),
-            allocations as f64 / ROWS as f64,
+            pack_allocations as f64 / ROWS as f64,
+            unpack_allocations as f64 / ROWS as f64,
             individual as f64 / bytes as f64,
         );
     }
+
+    // Same envelope, no metadata: the difference is what rebuilding the map costs.
+    let bare = corpus_without_metadata();
+    ALLOCATIONS.store(0, Ordering::Relaxed);
+    let packed = pack_then_compress(Compression::None, &bare);
+    decompress_then_unpack(Compression::None, &packed);
+    println!(
+        "pack/none (no metadata)                            unpack {:.3} allocs/row",
+        ALLOCATIONS.load(Ordering::Relaxed) as f64 / ROWS as f64,
+    );
     println!();
 }
 
@@ -151,9 +243,8 @@ fn bench_pack(c: &mut Criterion) {
         b.iter(|| frame_individually(&messages));
     });
     for (name, codec) in codecs() {
-        let config = config(codec);
-        group.bench_with_input(BenchmarkId::from_parameter(name), &config, |b, config| {
-            b.iter(|| pack_batches(config, &messages).expect("packs"));
+        group.bench_with_input(BenchmarkId::from_parameter(name), &codec, |b, codec| {
+            b.iter(|| pack_then_compress(*codec, &messages));
         });
     }
     group.finish();
@@ -164,16 +255,22 @@ fn bench_unpack(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("unpack");
     group.throughput(Throughput::Elements(ROWS as u64));
+
+    // The per-message baseline, and the same batch with no metadata at all. Together
+    // they say how much of unpack's time is the envelope and how much is metadata.
+    let individual = frame_individually_owned(&messages);
+    group.bench_function("individual", |b| {
+        b.iter(|| decode_individually(&individual));
+    });
+    let bare = pack_then_compress(Compression::None, &corpus_without_metadata());
+    group.bench_function("none_no_metadata", |b| {
+        b.iter(|| decompress_then_unpack(Compression::None, &bare));
+    });
+
     for (name, codec) in codecs() {
-        let packed = pack_batches(&config(codec), &messages).expect("packs");
-        group.bench_with_input(BenchmarkId::from_parameter(name), &packed, |b, packed| {
-            b.iter(|| {
-                let mut count = 0;
-                for batch in packed {
-                    count += unpack_batch(PackFormat::Mqb, batch).expect("unpacks").len();
-                }
-                count
-            });
+        let wire = pack_then_compress(codec, &messages);
+        group.bench_with_input(BenchmarkId::from_parameter(name), &wire, |b, wire| {
+            b.iter(|| decompress_then_unpack(codec, wire));
         });
     }
     group.finish();
@@ -187,17 +284,8 @@ fn bench_round_trip(c: &mut Criterion) {
     let mut group = c.benchmark_group("pack_round_trip");
     group.throughput(Throughput::Elements(ROWS as u64));
     for (name, codec) in codecs() {
-        let config = config(codec);
-        group.bench_with_input(BenchmarkId::from_parameter(name), &config, |b, config| {
-            b.iter(|| {
-                let mut count = 0;
-                for batch in pack_batches(config, &messages).expect("packs") {
-                    count += unpack_batch(PackFormat::Mqb, &batch)
-                        .expect("unpacks")
-                        .len();
-                }
-                count
-            });
+        group.bench_with_input(BenchmarkId::from_parameter(name), &codec, |b, codec| {
+            b.iter(|| decompress_then_unpack(*codec, &pack_then_compress(*codec, &messages)));
         });
     }
     group.finish();

@@ -8,18 +8,18 @@
 //!
 //! # `mqb` wire format (version 1)
 //!
-//! A plaintext header followed by an optionally compressed body — the same shape
-//! as a Kafka `RecordBatch` or an Avro object-container block, so the reader can
-//! learn the codec before it decodes anything.
+//! A fixed header followed by length-prefixed records — the same shape as a Kafka
+//! `RecordBatch` or an Avro object-container block, minus their inner codec, which
+//! the `compression` middleware supplies from outside.
 //!
 //! ```text
 //! header (8 bytes, never compressed)
-//!   0..4  magic    b"MQB1"
-//!   4     version  u8   = 1
-//!   5     codec    u8   0 none | 1 gzip | 2 lz4 | 3 zstd
-//!   6..8  flags    u16 LE   bit0 records carry metadata, bit1 records carry message_id
+//!   0..4  magic     b"MQB1"
+//!   4     version   u8   = 1
+//!   5     reserved  u8   = 0 (room for an inner codec without a version bump)
+//!   6..8  flags     u16 LE   bit0 records carry metadata, bit1 records carry message_id
 //!
-//! body (compressed with `codec` as one self-contained member)
+//! body
 //!   count    uvarint
 //!   count x record
 //!
@@ -34,14 +34,17 @@
 //! Record order is the message order. Lengths are LEB128 so a 60-byte CSV row
 //! costs one framing byte, not four.
 //!
+//! Compression is not part of the envelope: stack the `compression` middleware
+//! around `pack` / `unpack` instead, which compresses the physical message the
+//! same way and keeps one way of doing it.
+//!
 //! # `benthos_binary`
 //!
 //! The layout Redpanda Connect's `archive: binary` / `unarchive: binary` writes:
 //! `u32 BE count`, then `u32 BE len` + payload per part. Payloads only — metadata
-//! and ids have nowhere to go — and no envelope header, so compression has to be
-//! composed around it with the `compression` middleware.
+//! and ids have nowhere to go.
 
-use crate::models::{Compression, PackFormat};
+use crate::models::PackFormat;
 use crate::CanonicalMessage;
 use anyhow::{anyhow, bail, Result};
 use bytes::Bytes;
@@ -53,30 +56,6 @@ const HEADER_LEN: usize = 8;
 
 const FLAG_METADATA: u16 = 1 << 0;
 const FLAG_MESSAGE_ID: u16 = 1 << 1;
-
-const CODEC_NONE: u8 = 0;
-const CODEC_GZIP: u8 = 1;
-const CODEC_LZ4: u8 = 2;
-const CODEC_ZSTD: u8 = 3;
-
-fn codec_id(algo: Compression) -> u8 {
-    match algo {
-        Compression::None => CODEC_NONE,
-        Compression::Gzip => CODEC_GZIP,
-        Compression::Lz4 => CODEC_LZ4,
-        Compression::Zstd => CODEC_ZSTD,
-    }
-}
-
-fn codec_from_id(id: u8) -> Result<Compression> {
-    Ok(match id {
-        CODEC_NONE => Compression::None,
-        CODEC_GZIP => Compression::Gzip,
-        CODEC_LZ4 => Compression::Lz4,
-        CODEC_ZSTD => Compression::Zstd,
-        other => bail!("packed batch uses unknown compression codec {other}"),
-    })
-}
 
 // --- LEB128 ---
 
@@ -134,31 +113,15 @@ fn take<'a>(body: &'a Bytes, pos: &mut usize, len: usize, what: &str) -> Result<
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Packer {
     format: PackFormat,
-    codec: Compression,
     include_message_id: bool,
 }
 
 impl Packer {
-    pub(crate) fn new(
-        format: PackFormat,
-        codec: Compression,
-        include_message_id: bool,
-    ) -> Result<Self> {
-        if format == PackFormat::BenthosBinary && codec != Compression::None {
-            bail!(
-                "pack format `benthos_binary` has no envelope header to record a codec in, so \
-                 `compression` must be left unset; put a `compression` middleware after `pack` instead"
-            );
-        }
-        #[cfg(not(feature = "compression"))]
-        if codec != Compression::None {
-            bail!("pack `compression` needs the `compression` feature to be enabled");
-        }
-        Ok(Self {
+    pub(crate) fn new(format: PackFormat, include_message_id: bool) -> Self {
+        Self {
             format,
-            codec,
             include_message_id: include_message_id && format == PackFormat::Mqb,
-        })
+        }
     }
 
     /// Uncompressed body bytes this message will add to a batch. The chunker adds
@@ -185,9 +148,9 @@ impl Packer {
 
     /// Frames `messages` into one physical payload. Borrows throughout: nothing
     /// here clones a payload or a metadata map.
-    pub(crate) fn pack(&self, messages: &[CanonicalMessage]) -> Result<Bytes> {
+    pub(crate) fn pack(&self, messages: &[CanonicalMessage]) -> Bytes {
         match self.format {
-            PackFormat::BenthosBinary => Ok(self.pack_benthos(messages)),
+            PackFormat::BenthosBinary => self.pack_benthos(messages),
             PackFormat::Mqb => self.pack_mqb(messages),
         }
     }
@@ -203,7 +166,7 @@ impl Packer {
         out.into()
     }
 
-    fn pack_mqb(&self, messages: &[CanonicalMessage]) -> Result<Bytes> {
+    fn pack_mqb(&self, messages: &[CanonicalMessage]) -> Bytes {
         let with_metadata = messages.iter().any(|m| !m.metadata.is_empty());
         let mut flags = 0u16;
         if with_metadata {
@@ -216,63 +179,42 @@ impl Packer {
         let body_len = uvarint_len(messages.len() as u64)
             + messages.iter().map(|m| self.record_len(m)).sum::<usize>();
 
-        // Leave room for the header up front so the uncompressed path needs one
-        // allocation and no second copy.
-        let mut buffer = Vec::with_capacity(HEADER_LEN + body_len);
-        buffer.extend_from_slice(&[0; HEADER_LEN]);
-        put_uvarint(&mut buffer, messages.len() as u64);
+        // The header is written in place at the front, so the whole physical message
+        // is one allocation with no second copy.
+        let mut out = Vec::with_capacity(HEADER_LEN + body_len);
+        out.extend_from_slice(&[0; HEADER_LEN]);
+        put_uvarint(&mut out, messages.len() as u64);
         for message in messages {
             if self.include_message_id {
-                buffer.extend_from_slice(&message.message_id.to_le_bytes());
+                out.extend_from_slice(&message.message_id.to_le_bytes());
             }
-            put_uvarint(&mut buffer, message.payload.len() as u64);
-            buffer.extend_from_slice(&message.payload);
+            put_uvarint(&mut out, message.payload.len() as u64);
+            out.extend_from_slice(&message.payload);
             if with_metadata {
-                put_uvarint(&mut buffer, message.metadata.len() as u64);
+                put_uvarint(&mut out, message.metadata.len() as u64);
                 for (key, value) in &message.metadata {
-                    put_uvarint(&mut buffer, key.len() as u64);
-                    buffer.extend_from_slice(key.as_bytes());
-                    put_uvarint(&mut buffer, value.len() as u64);
-                    buffer.extend_from_slice(value.as_bytes());
+                    put_uvarint(&mut out, key.len() as u64);
+                    out.extend_from_slice(key.as_bytes());
+                    put_uvarint(&mut out, value.len() as u64);
+                    out.extend_from_slice(value.as_bytes());
                 }
             }
         }
 
-        let mut out = if self.codec == Compression::None {
-            buffer
-        } else {
-            #[cfg(feature = "compression")]
-            {
-                let member = crate::support::compression::compress_member(
-                    self.codec,
-                    &buffer[HEADER_LEN..],
-                )?;
-                let mut out = Vec::with_capacity(HEADER_LEN + member.len());
-                out.extend_from_slice(&[0; HEADER_LEN]);
-                out.extend_from_slice(&member);
-                out
-            }
-            #[cfg(not(feature = "compression"))]
-            unreachable!("Packer::new rejects a codec without the compression feature")
-        };
-
         out[..4].copy_from_slice(MAGIC);
         out[4] = VERSION;
-        out[5] = codec_id(self.codec);
         out[6..8].copy_from_slice(&flags.to_le_bytes());
-        Ok(out.into())
+        out.into()
     }
 }
 
 // --- unpacking ---
 
-/// Bounds applied to a batch that arrived over the wire. Both are unset by
-/// default; a hostile or corrupt envelope is otherwise only bounded by its own
-/// declared sizes.
+/// Bounds applied to a batch that arrived over the wire. Unset by default; a
+/// hostile or corrupt envelope is otherwise only bounded by its own declared sizes.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct UnpackLimits {
     pub(crate) max_messages: Option<usize>,
-    pub(crate) max_decompressed_bytes: Option<u64>,
 }
 
 /// Splits one physical payload back into its logical messages.
@@ -290,11 +232,28 @@ pub(crate) fn unpack(
     }
 }
 
-fn check_count(count: u64, remaining: usize, limits: &UnpackLimits) -> Result<usize> {
-    // Each record needs at least one byte, so the body length caps the count. This
-    // is what keeps a bogus header from driving a huge `with_capacity`.
-    if count > remaining as u64 {
-        bail!("packed batch declares {count} messages but only {remaining} bytes follow");
+/// Records to reserve up front. A declared count is checked against the bytes that
+/// actually follow, but the smallest record is still far smaller than a
+/// `CanonicalMessage`, so a hostile envelope could otherwise turn a modest payload
+/// into a large allocation. Beyond this the vector grows as records are read.
+const PREALLOC_RECORDS: usize = 4096;
+
+/// Validates a declared record count against the bytes left to read.
+///
+/// `min_record_len` is the smallest a record can be in this format and flag
+/// combination, so the bound is as tight as the envelope allows.
+fn check_count(
+    count: u64,
+    remaining: usize,
+    min_record_len: usize,
+    limits: &UnpackLimits,
+) -> Result<usize> {
+    let capacity = (remaining / min_record_len) as u64;
+    if count > capacity {
+        bail!(
+            "packed batch declares {count} messages but only {remaining} bytes follow, \
+             room for at most {capacity}"
+        );
     }
     let count = count as usize;
     if let Some(max) = limits.max_messages {
@@ -312,10 +271,10 @@ fn unpack_benthos(payload: &Bytes, limits: &UnpackLimits) -> Result<Vec<Canonica
         bail!("benthos_binary batch is shorter than its 4-byte count prefix");
     }
     let count = u32::from_be_bytes(payload[..4].try_into().expect("4 bytes"));
-    let count = check_count(u64::from(count), payload.len() - 4, limits)?;
+    let count = check_count(u64::from(count), payload.len() - 4, 4, limits)?;
 
     let mut pos = 4;
-    let mut messages = Vec::with_capacity(count);
+    let mut messages = Vec::with_capacity(count.min(PREALLOC_RECORDS));
     for _ in 0..count {
         let len_bytes = take(payload, &mut pos, 4, "record length")?;
         let len = u32::from_be_bytes(len_bytes.try_into().expect("4 bytes")) as usize;
@@ -337,32 +296,28 @@ fn unpack_mqb(payload: &Bytes, limits: &UnpackLimits) -> Result<Vec<CanonicalMes
     if version != VERSION {
         bail!("packed batch is format version {version}, this build understands {VERSION}");
     }
-    let codec = codec_from_id(payload[5])?;
+    if payload[5] != 0 {
+        bail!(
+            "packed batch sets reserved header byte 5 to {}; this build expects 0. A newer \
+             writer may be using an envelope feature this version does not have.",
+            payload[5]
+        );
+    }
     let flags = u16::from_le_bytes(payload[6..8].try_into().expect("2 bytes"));
     let with_metadata = flags & FLAG_METADATA != 0;
     let with_message_id = flags & FLAG_MESSAGE_ID != 0;
 
-    let body = if codec == Compression::None {
-        // Zero-copy: record payloads become slices of the message that arrived.
-        payload.slice(HEADER_LEN..)
-    } else {
-        #[cfg(feature = "compression")]
-        {
-            Bytes::from(crate::support::compression::decompress_all(
-                codec,
-                &payload[HEADER_LEN..],
-                limits.max_decompressed_bytes,
-            )?)
-        }
-        #[cfg(not(feature = "compression"))]
-        bail!("packed batch is {codec:?}-compressed; rebuild with the `compression` feature")
-    };
+    // Zero-copy: record payloads become slices of the message that arrived.
+    let body = payload.slice(HEADER_LEN..);
 
     let mut pos = 0usize;
     let count = get_uvarint(&body, &mut pos)?;
-    let count = check_count(count, body.len() - pos, limits)?;
+    // Smallest possible record: a one-byte zero payload length, plus the fixed id and
+    // the metadata-count varint when the flags say those are present.
+    let min_record_len = 1 + 16 * usize::from(with_message_id) + usize::from(with_metadata);
+    let count = check_count(count, body.len() - pos, min_record_len, limits)?;
 
-    let mut messages = Vec::with_capacity(count);
+    let mut messages = Vec::with_capacity(count.min(PREALLOC_RECORDS));
     for _ in 0..count {
         let message_id = if with_message_id {
             let raw = take(&body, &mut pos, 16, "message id")?;
@@ -417,21 +372,8 @@ mod tests {
         message
     }
 
-    fn packer(codec: Compression) -> Packer {
-        Packer::new(PackFormat::Mqb, codec, true).unwrap()
-    }
-
-    fn codecs() -> Vec<Compression> {
-        if cfg!(feature = "compression") {
-            vec![
-                Compression::None,
-                Compression::Gzip,
-                Compression::Lz4,
-                Compression::Zstd,
-            ]
-        } else {
-            vec![Compression::None]
-        }
+    fn packer() -> Packer {
+        Packer::new(PackFormat::Mqb, true)
     }
 
     #[test]
@@ -459,46 +401,40 @@ mod tests {
 
     #[test]
     fn an_empty_batch_round_trips() {
-        for codec in codecs() {
-            let packed = packer(codec).pack(&[]).unwrap();
-            let out = unpack(PackFormat::Mqb, &packed, &UnpackLimits::default()).unwrap();
-            assert!(out.is_empty(), "codec {codec:?}");
-        }
+        let packed = packer().pack(&[]);
+        let out = unpack(PackFormat::Mqb, &packed, &UnpackLimits::default()).unwrap();
+        assert!(out.is_empty());
     }
 
     #[test]
     fn a_single_message_round_trips() {
-        for codec in codecs() {
-            let input = vec![message("only one", &[("kind", "note")])];
-            let packed = packer(codec).pack(&input).unwrap();
-            let out = unpack(PackFormat::Mqb, &packed, &UnpackLimits::default()).unwrap();
-            assert_eq!(out.len(), 1);
-            assert_eq!(out[0].payload, input[0].payload);
-            assert_eq!(out[0].metadata, input[0].metadata);
-            assert_eq!(out[0].message_id, input[0].message_id);
-        }
+        let input = vec![message("only one", &[("kind", "note")])];
+        let packed = packer().pack(&input);
+        let out = unpack(PackFormat::Mqb, &packed, &UnpackLimits::default()).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].payload, input[0].payload);
+        assert_eq!(out[0].metadata, input[0].metadata);
+        assert_eq!(out[0].message_id, input[0].message_id);
     }
 
     #[test]
     fn many_messages_keep_payload_metadata_and_order() {
-        for codec in codecs() {
-            let input: Vec<CanonicalMessage> = (0..500)
-                .map(|i| {
-                    message(
-                        &format!("row-{i}"),
-                        &[("seq", &i.to_string()), ("kind", "row")],
-                    )
-                })
-                .collect();
-            let packed = packer(codec).pack(&input).unwrap();
-            let out = unpack(PackFormat::Mqb, &packed, &UnpackLimits::default()).unwrap();
+        let input: Vec<CanonicalMessage> = (0..500)
+            .map(|i| {
+                message(
+                    &format!("row-{i}"),
+                    &[("seq", &i.to_string()), ("kind", "row")],
+                )
+            })
+            .collect();
+        let packed = packer().pack(&input);
+        let out = unpack(PackFormat::Mqb, &packed, &UnpackLimits::default()).unwrap();
 
-            assert_eq!(out.len(), input.len(), "codec {codec:?}");
-            for (i, (got, want)) in out.iter().zip(&input).enumerate() {
-                assert_eq!(got.payload, want.payload, "record {i} codec {codec:?}");
-                assert_eq!(got.metadata, want.metadata, "record {i} codec {codec:?}");
-                assert_eq!(got.message_id, want.message_id, "record {i}");
-            }
+        assert_eq!(out.len(), input.len());
+        for (i, (got, want)) in out.iter().zip(&input).enumerate() {
+            assert_eq!(got.payload, want.payload, "record {i}");
+            assert_eq!(got.metadata, want.metadata, "record {i}");
+            assert_eq!(got.message_id, want.message_id, "record {i}");
         }
     }
 
@@ -506,7 +442,7 @@ mod tests {
     #[test]
     fn the_uncompressed_path_slices_rather_than_copies() {
         let input = vec![message("a payload worth pointing at", &[])];
-        let packed = packer(Compression::None).pack(&input).unwrap();
+        let packed = packer().pack(&input);
         let out = unpack(PackFormat::Mqb, &packed, &UnpackLimits::default()).unwrap();
         let start = out[0].payload.as_ptr() as usize - packed.as_ptr() as usize;
         assert_eq!(
@@ -517,12 +453,8 @@ mod tests {
 
     #[test]
     fn a_batch_without_metadata_writes_no_metadata_frames() {
-        let bare = packer(Compression::None)
-            .pack(&[message("x", &[])])
-            .unwrap();
-        let tagged = packer(Compression::None)
-            .pack(&[message("x", &[("k", "v")])])
-            .unwrap();
+        let bare = packer().pack(&[message("x", &[])]);
+        let tagged = packer().pack(&[message("x", &[("k", "v")])]);
         assert_eq!(u16::from_le_bytes([bare[6], bare[7]]) & FLAG_METADATA, 0);
         assert_ne!(
             u16::from_le_bytes([tagged[6], tagged[7]]) & FLAG_METADATA,
@@ -536,11 +468,8 @@ mod tests {
     #[test]
     fn message_ids_can_be_left_out() {
         let input = vec![message("dense", &[])];
-        let dense = Packer::new(PackFormat::Mqb, Compression::None, false)
-            .unwrap()
-            .pack(&input)
-            .unwrap();
-        let full = packer(Compression::None).pack(&input).unwrap();
+        let dense = Packer::new(PackFormat::Mqb, false).pack(&input);
+        let full = packer().pack(&input);
         assert_eq!(full.len(), dense.len() + 16);
         let out = unpack(PackFormat::Mqb, &dense, &UnpackLimits::default()).unwrap();
         assert_eq!(out[0].payload, input[0].payload);
@@ -556,30 +485,28 @@ mod tests {
     /// shared lz4 reader tolerates by design.
     #[test]
     fn a_truncated_batch_never_decodes_to_a_partial_batch() {
-        for codec in codecs() {
-            let input = vec![message("first", &[]), message("second", &[("k", "v")])];
-            let packed = packer(codec).pack(&input).unwrap();
-            for cut in 0..packed.len() {
-                let short = packed.slice(..cut);
-                let Ok(out) = unpack(PackFormat::Mqb, &short, &UnpackLimits::default()) else {
-                    continue;
-                };
-                assert_eq!(out.len(), input.len(), "codec {codec:?} cut at {cut}");
-                for (got, want) in out.iter().zip(&input) {
-                    assert_eq!(got.payload, want.payload, "codec {codec:?} cut at {cut}");
-                    assert_eq!(got.metadata, want.metadata, "codec {codec:?} cut at {cut}");
-                }
+        let input = vec![message("first", &[]), message("second", &[("k", "v")])];
+        let packed = packer().pack(&input);
+        for cut in 0..packed.len() {
+            let short = packed.slice(..cut);
+            let Ok(out) = unpack(PackFormat::Mqb, &short, &UnpackLimits::default()) else {
+                continue;
+            };
+            assert_eq!(out.len(), input.len(), "cut at {cut}");
+            for (got, want) in out.iter().zip(&input) {
+                assert_eq!(got.payload, want.payload, "cut at {cut}");
+                assert_eq!(got.metadata, want.metadata, "cut at {cut}");
             }
         }
     }
 
-    /// Losing a record's bytes — rather than only a codec trailer — is always caught.
+    /// Losing a record's bytes is always caught.
     #[test]
     fn a_batch_missing_record_bytes_is_rejected() {
         let input: Vec<CanonicalMessage> = (0..20)
             .map(|i| message(&format!("record number {i}"), &[("k", "v")]))
             .collect();
-        let packed = packer(Compression::None).pack(&input).unwrap();
+        let packed = packer().pack(&input);
         for cut in HEADER_LEN..packed.len() {
             assert!(
                 unpack(
@@ -595,10 +522,7 @@ mod tests {
 
     #[test]
     fn trailing_bytes_after_the_records_are_rejected() {
-        let mut packed = packer(Compression::None)
-            .pack(&[message("x", &[])])
-            .unwrap()
-            .to_vec();
+        let mut packed = packer().pack(&[message("x", &[])]).to_vec();
         packed.extend_from_slice(b"junk");
         let error = unpack(PackFormat::Mqb, &packed.into(), &UnpackLimits::default()).unwrap_err();
         assert!(error.to_string().contains("trailing bytes"), "{error}");
@@ -613,24 +537,20 @@ mod tests {
 
     #[test]
     fn an_unknown_format_version_is_rejected() {
-        let mut packed = packer(Compression::None)
-            .pack(&[message("x", &[])])
-            .unwrap()
-            .to_vec();
+        let mut packed = packer().pack(&[message("x", &[])]).to_vec();
         packed[4] = 99;
         let error = unpack(PackFormat::Mqb, &packed.into(), &UnpackLimits::default()).unwrap_err();
         assert!(error.to_string().contains("version 99"), "{error}");
     }
 
+    /// Byte 5 is reserved for a future envelope feature, so a writer that sets it is
+    /// making a claim this build cannot honour.
     #[test]
-    fn an_unknown_codec_is_rejected() {
-        let mut packed = packer(Compression::None)
-            .pack(&[message("x", &[])])
-            .unwrap()
-            .to_vec();
+    fn a_set_reserved_byte_is_rejected() {
+        let mut packed = packer().pack(&[message("x", &[])]).to_vec();
         packed[5] = 42;
         let error = unpack(PackFormat::Mqb, &packed.into(), &UnpackLimits::default()).unwrap_err();
-        assert!(error.to_string().contains("codec 42"), "{error}");
+        assert!(error.to_string().contains("reserved header byte"), "{error}");
     }
 
     /// A bogus count must not drive a huge allocation before the body is read.
@@ -649,64 +569,21 @@ mod tests {
     #[test]
     fn max_messages_caps_an_oversized_batch() {
         let input: Vec<CanonicalMessage> = (0..10).map(|i| message(&i.to_string(), &[])).collect();
-        let packed = packer(Compression::None).pack(&input).unwrap();
+        let packed = packer().pack(&input);
         let limits = UnpackLimits {
             max_messages: Some(4),
-            ..Default::default()
         };
         assert!(unpack(PackFormat::Mqb, &packed, &limits).is_err());
         let limits = UnpackLimits {
             max_messages: Some(10),
-            ..Default::default()
         };
         assert_eq!(unpack(PackFormat::Mqb, &packed, &limits).unwrap().len(), 10);
-    }
-
-    #[cfg(feature = "compression")]
-    #[test]
-    fn the_decompressed_size_guard_applies_to_the_body() {
-        let input: Vec<CanonicalMessage> = (0..200)
-            .map(|i| message(&format!("a fairly repetitive row number {i}"), &[]))
-            .collect();
-        let packed = packer(Compression::Zstd).pack(&input).unwrap();
-        let limits = UnpackLimits {
-            max_decompressed_bytes: Some(64),
-            ..Default::default()
-        };
-        assert!(unpack(PackFormat::Mqb, &packed, &limits).is_err());
-    }
-
-    #[cfg(feature = "compression")]
-    #[test]
-    fn compression_shrinks_a_repetitive_batch() {
-        let input: Vec<CanonicalMessage> = (0..1000)
-            .map(|i| {
-                message(
-                    &format!("{{\"id\":{i},\"status\":\"ok\",\"region\":\"eu\"}}"),
-                    &[],
-                )
-            })
-            .collect();
-        let plain = packer(Compression::None).pack(&input).unwrap();
-        for codec in [Compression::Gzip, Compression::Lz4, Compression::Zstd] {
-            let squeezed = packer(codec).pack(&input).unwrap();
-            assert!(squeezed.len() < plain.len() / 2, "codec {codec:?}");
-            assert_eq!(
-                unpack(PackFormat::Mqb, &squeezed, &UnpackLimits::default())
-                    .unwrap()
-                    .len(),
-                input.len()
-            );
-        }
     }
 
     #[test]
     fn benthos_binary_matches_the_documented_layout() {
         let input = vec![message("hello", &[]), message("world", &[("k", "v")])];
-        let packed = Packer::new(PackFormat::BenthosBinary, Compression::None, true)
-            .unwrap()
-            .pack(&input)
-            .unwrap();
+        let packed = Packer::new(PackFormat::BenthosBinary, true).pack(&input);
         assert_eq!(
             packed.as_ref(),
             b"\x00\x00\x00\x02\x00\x00\x00\x05hello\x00\x00\x00\x05world"
@@ -721,10 +598,7 @@ mod tests {
 
     #[test]
     fn benthos_binary_rejects_a_truncated_blob() {
-        let packed = Packer::new(PackFormat::BenthosBinary, Compression::None, true)
-            .unwrap()
-            .pack(&[message("hello", &[])])
-            .unwrap();
+        let packed = Packer::new(PackFormat::BenthosBinary, true).pack(&[message("hello", &[])]);
         for cut in 0..packed.len() {
             assert!(unpack(
                 PackFormat::BenthosBinary,
@@ -735,11 +609,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn benthos_binary_refuses_an_inner_codec() {
-        let error = Packer::new(PackFormat::BenthosBinary, Compression::Zstd, true).unwrap_err();
-        assert!(error.to_string().contains("no envelope header"), "{error}");
-    }
 }
 
 /// Round-trip properties of the envelope. `pack`/`unpack` sit between two
@@ -764,24 +633,10 @@ mod proptests {
         )
     }
 
-    fn codecs() -> impl Strategy<Value = Compression> {
-        #[cfg(feature = "compression")]
-        {
-            prop_oneof![
-                Just(Compression::None),
-                Just(Compression::Gzip),
-                Just(Compression::Lz4),
-                Just(Compression::Zstd),
-            ]
-        }
-        #[cfg(not(feature = "compression"))]
-        Just(Compression::None)
-    }
-
     proptest! {
         #[test]
-        fn a_batch_round_trips(input in messages(), codec in codecs()) {
-            let packed = Packer::new(PackFormat::Mqb, codec, true).unwrap().pack(&input).unwrap();
+        fn a_batch_round_trips(input in messages()) {
+            let packed = Packer::new(PackFormat::Mqb, true).pack(&input);
             let out = unpack(PackFormat::Mqb, &packed, &UnpackLimits::default()).unwrap();
             prop_assert_eq!(out.len(), input.len());
             for (got, want) in out.iter().zip(&input) {
@@ -811,10 +666,7 @@ mod proptests {
             index in any::<prop::sample::Index>(),
             mask in 1u8..=255,
         ) {
-            let packed = Packer::new(PackFormat::Mqb, Compression::None, true)
-                .unwrap()
-                .pack(&input)
-                .unwrap();
+            let packed = Packer::new(PackFormat::Mqb, true).pack(&input);
             let mut bytes = packed.to_vec();
             let at = index.index(bytes.len());
             bytes[at] ^= mask;

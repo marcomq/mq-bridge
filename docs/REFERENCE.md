@@ -92,10 +92,13 @@ middlewares:
 > the batch `compression` *field* on the `file` and `object_store` endpoints (`none` / `gzip`
 > / `lz4` / `zstd`, same `compression` feature) compresses whole write batches so the file
 > stays decodable with `zcat` / `lz4 -d`. Use the field for CLI-readable data at rest, the
-> middleware for over-the-wire payloads. Don't stack either compression with the
-> [`encryption`](#encryption) middleware on the same route — ciphertext does not compress; for
-> compressed-and-encrypted data at rest use the endpoints' own `compression`/`encryption`
-> fields (compress-then-encrypt per batch).
+> middleware for over-the-wire payloads. Stacking compression with the
+> [`encryption`](#encryption) middleware only works in one order — the codec must run
+> **before** the cipher, since ciphertext does not compress. On an output that means
+> listing `encryption` *before* `compression`, so compression ends up outermost of the
+> two: see [compress-then-encrypt over the wire](#compress-then-encrypt-over-the-wire).
+> For compressed-and-encrypted data at rest, prefer the endpoints' own
+> `compression`/`encryption` fields, which do this per write batch.
 
 **Putting a middleware on the wrong side behaves in two different ways**, so check the table
 above rather than assuming:
@@ -678,30 +681,33 @@ with [`unpack`](#unpack) on the reading route's input.
 | Field | Type | Default |
 |---|---|---|
 | `format` | `mqb` \| `benthos_binary` | `mqb` |
-| `compression` | `none` \| `gzip` \| `lz4` \| `zstd` — applied to the packed body (`mqb` only) | `none` |
 | `max_messages` | integer — logical messages per physical message | `1000` |
-| `max_bytes` | integer — uncompressed body bytes per physical message | `4194304` (4 MiB) |
+| `max_bytes` | integer — body-size threshold that closes a physical message | `4194304` (4 MiB) |
 | `drop_message_id` | boolean — leave each `message_id` out, saving 16 bytes per record | `false` |
 
 ```yaml middleware
-- pack: { max_messages: 1000, compression: zstd }
+- pack: { max_messages: 1000 }
 ```
 
 A batch larger than either bound is split into several physical messages, and the final
-partial batch is sent like any other. A single message larger than `max_bytes` gets a
-physical message of its own rather than being dropped. `compression` is recorded in the
-envelope header, so `unpack` needs no matching setting.
+partial batch is sent like any other. `max_bytes` is a threshold, not a hard cap: a single
+message larger than it is sent on its own rather than being dropped.
 
-Put it **before** `buffer` in the list so `buffer` ends up outermost and hands `pack` a full
-batch — see [Ordering](#ordering--read-this-before-combining-middleware):
+**Compression is separate.** `pack` has no codec of its own — stack the
+[`compression`](#compression) middleware around it and the whole physical message is
+compressed, which is where the ratio is best anyway. Order matters
+(see [Ordering](#ordering--read-this-before-combining-middleware)); on the output,
+`pack` must be outermost of the two so it frames before the codec compresses:
 
 ```yaml middleware
-- pack: { max_messages: 1000, max_bytes: 4194304, compression: lz4 }
+- compression: { algorithm: zstd }
+- pack: { max_messages: 1000, max_bytes: 4194304 }
 - buffer: { max_messages: 1000, max_delay_ms: 20 }
 ```
 
-A route already reads its input in `batch_size` chunks, so `buffer` is only needed when
-`batch_size` is small or messages arrive one at a time.
+`buffer` goes last so it ends up outermost and hands `pack` a full batch. A route already
+reads its input in `batch_size` chunks, so `buffer` is only needed when `batch_size` is
+small or messages arrive one at a time.
 
 The physical message carries no per-message metadata of its own — only `mqb.pack.count` —
 so do not combine `pack` with a sink that interpolates `${metadata:…}` into a topic,
@@ -720,15 +726,30 @@ Splits a physical message written by [`pack`](#pack) back into its logical messa
 |---|---|---|
 | `format` | `mqb` \| `benthos_binary` — must match the sender | `mqb` |
 | `max_messages` | integer — reject a batch declaring more messages than this | unset (no limit) |
-| `max_decompressed_bytes` | integer — reject a body that decompresses larger than this (bomb guard) | unset (no limit) |
 
 ```yaml middleware
 - unpack: {}
 ```
 
+The reading list is the **mirror** of the writing one, so `compression` comes *after*
+`unpack` — the codec then decompresses the physical message before `unpack` sees it:
+
+```yaml middleware
+- unpack: {}
+- compression: { algorithm: zstd }
+```
+
 Unpacked messages behave exactly like any other: payload, metadata, `message_id` and order
 are all as they were before packing. `receive_batch` still honours the route's `batch_size` —
 anything over it is held and handed out on the next read.
+
+Payloads are sliced out of the physical message rather than copied, so unpacking costs
+almost nothing per record — *except* for metadata, which has to be rebuilt into an owned
+map (one allocation for the map plus two per key/value pair, per message). On the
+`benches/pack_bench.rs` corpus that is the difference between ~64M and ~4.5M records/s.
+It is the same price any consumer pays for metadata, and still cheaper than decoding a
+per-message metadata frame; but if a pipeline does not need per-record metadata,
+`format: benthos_binary` skips it entirely.
 
 A malformed, truncated or foreign payload is a **permanent** consumer error, not a
 reconnectable one, so a poison message is not re-read forever. So is an envelope written by
@@ -744,12 +765,44 @@ an idempotent sink if duplicates matter.
 **Interoperability.** `format: benthos_binary` reads and writes the layout Redpanda Connect's
 `archive: binary` / `unarchive: binary` processors use (`u32` big-endian count, then a `u32`
 big-endian length before each payload). It carries payloads only — metadata and `message_id`
-have nowhere to go — and has no header to record a codec in, so compress it with a separate
-[`compression`](#compression) middleware if you need to:
+have nowhere to go:
 
 ```yaml middleware
 - unpack: { format: benthos_binary }
 ```
+
+#### Compress-then-encrypt over the wire
+
+`pack`, `compression` and `encryption` compose into the full at-rest stack, and the
+ordering rules decide which way round they have to go. On an **output**, the last entry is
+outermost and runs first, so listing them in this order gives
+`encrypt(compress(pack(messages)))`:
+
+```yaml middleware
+- encryption: { key: "${env:MQB_KEY}" }
+- compression: { algorithm: zstd }
+- pack: { max_messages: 1000 }
+- buffer: { max_messages: 1000, max_delay_ms: 20 }
+```
+
+Read the list bottom-up to follow a message: `buffer` collects, `pack` frames the batch
+into one physical message, `compression` compresses that whole message, `encryption` seals
+the result. Packing first is what makes the compression worth having — the codec sees a
+thousand similar records instead of one payload at a time.
+
+The **input** list is the plain mirror, with `unpack` in place of `pack`:
+
+```yaml middleware
+- unpack: {}
+- compression: { algorithm: zstd }
+- encryption: { key: "${env:MQB_KEY}" }
+```
+
+Getting either order wrong fails loudly rather than silently: compressing ciphertext
+merely wastes time, but decrypting something that was never encrypted, or unpacking
+something still compressed, is a permanent error on the first message.
+
+> Asserted by `middleware::pack::tests::pack_compression_and_encryption_stack_in_the_documented_order`.
 
 ### `metrics`
 

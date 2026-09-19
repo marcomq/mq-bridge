@@ -913,6 +913,9 @@ pub enum PackFormat {
 /// Combines the messages of one publish batch into a single physical message, so a
 /// thousand rows cost one transport operation instead of a thousand. `unpack` on the
 /// reading side reverses it. Output only.
+///
+/// Compression is a separate middleware: list `compression` before `pack` on the
+/// output and after `unpack` on the input.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
@@ -920,14 +923,14 @@ pub struct PackMiddleware {
     /// Envelope format: `mqb` (default) or `benthos_binary`.
     #[serde(default)]
     pub format: PackFormat,
-    /// Compression for the packed body: `none`, `gzip`, `lz4` or `zstd`. Recorded in the
-    /// envelope, so `unpack` needs no matching setting. `mqb` format only.
-    #[serde(default)]
-    pub compression: Compression,
     /// Maximum logical messages per physical message. Defaults to 1000.
+    #[cfg_attr(feature = "schema", schemars(range(min = 1)))]
     #[serde(default = "default_pack_max_messages")]
     pub max_messages: usize,
-    /// Maximum uncompressed body bytes per physical message. Defaults to 4 MiB.
+    /// Body-size threshold that closes a physical message, in bytes. Defaults to 4 MiB.
+    /// A single logical message larger than this is sent on its own and exceeds it,
+    /// rather than being dropped.
+    #[cfg_attr(feature = "schema", schemars(range(min = 1)))]
     #[serde(default = "default_pack_max_bytes")]
     pub max_bytes: usize,
     /// Leave each message's `message_id` out of the envelope, saving 16 bytes per
@@ -950,10 +953,6 @@ pub struct UnpackMiddleware {
     /// Reject a batch declaring more messages than this. Unset means no limit.
     #[serde(default)]
     pub max_messages: Option<usize>,
-    /// Reject a body that decompresses larger than this many bytes (bomb guard).
-    /// Unset means no limit.
-    #[serde(default)]
-    pub max_decompressed_bytes: Option<u64>,
 }
 
 fn default_pack_max_messages() -> usize {

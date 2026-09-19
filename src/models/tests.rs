@@ -101,10 +101,11 @@ mod config_tests {
     /// every leaf arrives as a string.
     #[test]
     fn pack_defaults_survive_env_flattened_config() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         const VARS: [&str; 3] = [
             "MQB__ENVPACK__INPUT__MEMORY__TOPIC",
             "MQB__ENVPACK__OUTPUT__MEMORY__TOPIC",
-            "MQB__ENVPACK__OUTPUT__MIDDLEWARES__0__PACK__COMPRESSION",
+            "MQB__ENVPACK__OUTPUT__MIDDLEWARES__0__PACK__FORMAT",
         ];
         struct EnvCleanup(Vec<(&'static str, Option<std::ffi::OsString>)>);
         impl Drop for EnvCleanup {
@@ -128,10 +129,10 @@ mod config_tests {
         unsafe {
             std::env::set_var("MQB__ENVPACK__INPUT__MEMORY__TOPIC", "in");
             std::env::set_var("MQB__ENVPACK__OUTPUT__MEMORY__TOPIC", "out");
-            // Only `compression` is given; every other pack field must come from its default.
+            // Only `format` is given; every other pack field must come from its default.
             std::env::set_var(
-                "MQB__ENVPACK__OUTPUT__MIDDLEWARES__0__PACK__COMPRESSION",
-                "zstd",
+                "MQB__ENVPACK__OUTPUT__MIDDLEWARES__0__PACK__FORMAT",
+                "benthos_binary",
             );
         }
 
@@ -150,7 +151,7 @@ mod config_tests {
         let Middleware::Pack(cfg) = &route.output.middlewares[0] else {
             panic!("expected pack, got {:?}", route.output.middlewares);
         };
-        assert_eq!(cfg.compression, Compression::Zstd);
+        assert_eq!(cfg.format, PackFormat::BenthosBinary);
         assert_eq!(
             cfg.max_messages, 1000,
             "default fn must fire on the env path"
@@ -333,8 +334,14 @@ kafka_to_nats:
         assert_config_values(&config);
     }
 
+    /// Every test that reads the `MQB__` namespace sees *all* of it, so two of them
+    /// running at once would each pick up the other's routes — and one's cleanup can
+    /// unset vars the other is still reading. Serialize them.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn test_deserialize_from_env() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         const VARS: [&str; 11] = [
             "MQB__KAFKA_TO_NATS__CONCURRENCY",
             "MQB__KAFKA_TO_NATS__INPUT__KAFKA__TOPIC",

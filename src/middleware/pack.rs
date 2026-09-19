@@ -7,6 +7,10 @@
 //! message on the output side; `unpack` splits it back on the input side. The
 //! envelope itself lives in [`crate::support::pack`].
 //!
+//! Compression is not built in: stack the `compression` middleware around this one
+//! (`[compression, pack]` on the output, `[unpack, compression]` on the input) and
+//! the physical message is compressed as a whole.
+//!
 //! # Acknowledgement
 //!
 //! A physical message is the unit the transport acks, so the N logical messages
@@ -56,7 +60,7 @@ impl PackPublisher {
         }
         Ok(Self {
             inner,
-            packer: Packer::new(config.format, config.compression, !config.drop_message_id)?,
+            packer: Packer::new(config.format, !config.drop_message_id),
             max_messages: config.max_messages,
             max_bytes: config.max_bytes,
         })
@@ -111,10 +115,7 @@ impl MessagePublisher for PackPublisher {
         let ranges = self.chunks(&messages);
         let mut physical = Vec::with_capacity(ranges.len());
         for range in &ranges {
-            let body = self
-                .packer
-                .pack(&messages[range.clone()])
-                .map_err(PublisherError::NonRetryable)?;
+            let body = self.packer.pack(&messages[range.clone()]);
             let mut packed = CanonicalMessage::new_bytes(body, None);
             packed
                 .metadata
@@ -281,7 +282,6 @@ impl UnpackConsumer {
             config: config.clone(),
             limits: UnpackLimits {
                 max_messages: config.max_messages,
-                max_decompressed_bytes: config.max_decompressed_bytes,
             },
             pending: VecDeque::new(),
         }
@@ -413,13 +413,12 @@ impl MessageConsumer for UnpackConsumer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{Compression, PackFormat};
+    use crate::models::PackFormat;
     use std::sync::atomic::AtomicUsize;
 
     fn pack_config(max_messages: usize, max_bytes: usize) -> PackMiddleware {
         PackMiddleware {
             format: PackFormat::Mqb,
-            compression: Compression::None,
             max_messages,
             max_bytes,
             drop_message_id: false,
@@ -581,7 +580,7 @@ mod tests {
         );
 
         // Two rows per physical message: one record fits, the second tips it over.
-        let packer = Packer::new(PackFormat::Mqb, Compression::None, true).unwrap();
+        let packer = Packer::new(PackFormat::Mqb, true);
         let two = packer.record_len(&input[0]) + packer.record_len(&input[1]);
         let wire = publish(&pack_config(1000, two), input).await;
         assert_eq!(wire.len(), 5);
@@ -714,32 +713,127 @@ mod tests {
         ));
     }
 
+    /// Compression is a separate middleware, so the pipeline the docs describe —
+    /// `[compression, pack]` writing and `[unpack, compression]` reading — has to
+    /// round-trip. The wrapping below is exactly what `apply_middlewares_to_*`
+    /// builds from those two lists.
     #[cfg(feature = "compression")]
     #[tokio::test]
-    async fn every_codec_round_trips_through_the_middlewares() {
-        for codec in [
-            Compression::None,
-            Compression::Gzip,
-            Compression::Lz4,
-            Compression::Zstd,
-        ] {
-            let input = rows(200);
-            let config = PackMiddleware {
-                compression: codec,
-                ..pack_config(1000, 1 << 20)
-            };
-            let wire = publish(&config, input.clone()).await;
-            assert_eq!(wire.len(), 1, "codec {codec:?}");
+    async fn pack_round_trips_when_stacked_with_the_compression_middleware() {
+        use crate::middleware::compression::{CompressionConsumer, CompressionPublisher};
+        use crate::models::{Compression, CompressionMiddleware};
 
-            // The reading side is configured with no codec at all: it reads the
-            // algorithm out of the envelope header.
-            let (mut consumer, _) = unpacker(wire);
+        for algorithm in [Compression::Gzip, Compression::Lz4, Compression::Zstd] {
+            let codec = CompressionMiddleware {
+                algorithm,
+                max_decompressed_bytes: None,
+            };
+            let input = rows(200);
+
+            // Output `[compression, pack]`: pack outermost, so it frames first and the
+            // codec then compresses the one physical message.
+            let recording = RecordingPublisher::default();
+            let publisher = PackPublisher::new(
+                Box::new(CompressionPublisher::new(
+                    Box::new(recording.clone()),
+                    &codec,
+                )),
+                &pack_config(1000, 1 << 20),
+            )
+            .unwrap();
+            publisher.send_batch(input.clone()).await.unwrap();
+
+            let wire = recording.sent.lock().unwrap().clone();
+            assert_eq!(wire.len(), 1, "{algorithm:?}");
+            assert_ne!(&wire[0].payload[..4], b"MQB1", "the envelope is compressed");
+
+            // Input `[unpack, compression]`: the codec is innermost, so it decompresses
+            // what the transport produced before unpack sees it.
+            let mut consumer = UnpackConsumer::new(
+                Box::new(CompressionConsumer::new(
+                    Box::new(ScriptedConsumer {
+                        batches: VecDeque::from(vec![wire]),
+                        commits: Arc::new(Mutex::new(Vec::new())),
+                    }),
+                    &codec,
+                )),
+                &UnpackMiddleware::default(),
+            );
             let batch = consumer.receive_batch(1000).await.unwrap();
-            assert_eq!(batch.messages.len(), 200, "codec {codec:?}");
+            assert_eq!(batch.messages.len(), 200, "{algorithm:?}");
             for (got, want) in batch.messages.iter().zip(&input) {
-                assert_eq!(got.payload, want.payload, "codec {codec:?}");
-                assert_eq!(got.metadata, want.metadata, "codec {codec:?}");
+                assert_eq!(got.payload, want.payload, "{algorithm:?}");
+                assert_eq!(got.metadata, want.metadata, "{algorithm:?}");
+                assert_eq!(got.message_id, want.message_id, "{algorithm:?}");
             }
+        }
+    }
+
+    /// The full at-rest stack from the reference: frame, then compress, then encrypt.
+    /// Order is the whole point — compressing *after* encryption would gain nothing,
+    /// and `pack` is what makes compressing worthwhile, since it hands the codec a
+    /// whole batch instead of one payload.
+    #[cfg(all(feature = "compression", feature = "encryption"))]
+    #[tokio::test]
+    async fn pack_compression_and_encryption_stack_in_the_documented_order() {
+        use crate::middleware::compression::{CompressionConsumer, CompressionPublisher};
+        use crate::middleware::encryption::{EncryptionConsumer, EncryptionPublisher};
+        use crate::models::{Compression, CompressionMiddleware, EncryptionConfig};
+
+        let codec = CompressionMiddleware {
+            algorithm: Compression::Zstd,
+            max_decompressed_bytes: None,
+        };
+        let cipher = EncryptionConfig {
+            cipher: Default::default(),
+            key_id: "default".to_string(),
+            key: "QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE=".to_string(),
+            decrypt_keys: Default::default(),
+            authenticate_metadata: Vec::new(),
+        };
+        let input = rows(200);
+
+        // Output `[encryption, compression, pack]`: pack outermost frames first, the
+        // codec compresses the batch, encryption seals what is left.
+        let recording = RecordingPublisher::default();
+        let publisher = PackPublisher::new(
+            Box::new(CompressionPublisher::new(
+                Box::new(
+                    EncryptionPublisher::new(Box::new(recording.clone()), &cipher).unwrap(),
+                ),
+                &codec,
+            )),
+            &pack_config(1000, 1 << 20),
+        )
+        .unwrap();
+        publisher.send_batch(input.clone()).await.unwrap();
+
+        let wire = recording.sent.lock().unwrap().clone();
+        assert_eq!(wire.len(), 1, "200 rows leave as one physical message");
+        assert_ne!(&wire[0].payload[..4], b"MQB1", "the envelope is not on the wire");
+
+        // Input `[unpack, compression, encryption]` — the mirror.
+        let mut consumer = UnpackConsumer::new(
+            Box::new(CompressionConsumer::new(
+                Box::new(
+                    EncryptionConsumer::new(
+                        Box::new(ScriptedConsumer {
+                            batches: VecDeque::from(vec![wire]),
+                            commits: Arc::new(Mutex::new(Vec::new())),
+                        }),
+                        &cipher,
+                    )
+                    .unwrap(),
+                ),
+                &codec,
+            )),
+            &UnpackMiddleware::default(),
+        );
+        let batch = consumer.receive_batch(1000).await.unwrap();
+        assert_eq!(batch.messages.len(), 200);
+        for (got, want) in batch.messages.iter().zip(&input) {
+            assert_eq!(got.payload, want.payload);
+            assert_eq!(got.metadata, want.metadata);
         }
     }
 
@@ -768,8 +862,8 @@ mod tests {
         assert!(empty.is_empty());
 
         // Hand the consumer a batch whose only envelope holds nothing.
-        let packer = Packer::new(PackFormat::Mqb, Compression::None, true).unwrap();
-        let wire = vec![CanonicalMessage::new_bytes(packer.pack(&[]).unwrap(), None)];
+        let packer = Packer::new(PackFormat::Mqb, true);
+        let wire = vec![CanonicalMessage::new_bytes(packer.pack(&[]), None)];
         let (mut consumer, commits) = unpacker(wire);
         assert!(consumer
             .receive_batch(100)

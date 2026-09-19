@@ -337,7 +337,7 @@ async fn publisher_middleware_wraps_last_entry_outermost() {
 #[test]
 fn pack_config_round_trips_through_yaml_and_json() {
     let parsed = middlewares(
-        "- pack: { max_messages: 250, max_bytes: 1024, compression: lz4, drop_message_id: true }",
+        "- pack: { max_messages: 250, max_bytes: 1024, drop_message_id: true }",
         0,
     );
     let Middleware::Pack(cfg) = &parsed[0] else {
@@ -357,7 +357,7 @@ fn pack_config_round_trips_through_yaml_and_json() {
     assert!(!cfg.drop_message_id, "omitted means ids are kept");
 
     let json: Middleware =
-        serde_json::from_str(r#"{"pack":{"drop_message_id":true,"compression":"zstd"}}"#)
+        serde_json::from_str(r#"{"pack":{"drop_message_id":true,"max_bytes":2048}}"#)
             .expect("json pack config");
     let Middleware::Pack(cfg) = &json else {
         panic!("expected pack");

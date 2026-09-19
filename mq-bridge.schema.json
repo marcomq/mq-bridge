@@ -2992,14 +2992,9 @@
       ]
     },
     "PackMiddleware": {
-      "description": "Transport batching middleware configuration (`pack`, output side).\n\nCombines the messages of one publish batch into a single physical message, so a\nthousand rows cost one transport operation instead of a thousand. `unpack` on the\nreading side reverses it. Output only.",
+      "description": "Transport batching middleware configuration (`pack`, output side).\n\nCombines the messages of one publish batch into a single physical message, so a\nthousand rows cost one transport operation instead of a thousand. `unpack` on the\nreading side reverses it. Output only.\n\nCompression is a separate middleware: list `compression` before `pack` on the\noutput and after `unpack` on the input.",
       "type": "object",
       "properties": {
-        "compression": {
-          "description": "Compression for the packed body: `none`, `gzip`, `lz4` or `zstd`. Recorded in the\nenvelope, so `unpack` needs no matching setting. `mqb` format only.",
-          "$ref": "#/$defs/Compression",
-          "default": "none"
-        },
         "drop_message_id": {
           "description": "Leave each message's `message_id` out of the envelope, saving 16 bytes per\nrecord. Off by default, so ids survive a pack/unpack round trip.",
           "type": "boolean",
@@ -3011,18 +3006,18 @@
           "default": "mqb"
         },
         "max_bytes": {
-          "description": "Maximum uncompressed body bytes per physical message. Defaults to 4 MiB.",
+          "description": "Body-size threshold that closes a physical message, in bytes. Defaults to 4 MiB.\nA single logical message larger than this is sent on its own and exceeds it,\nrather than being dropped.",
           "type": "integer",
           "format": "uint",
           "default": 4194304,
-          "minimum": 0
+          "minimum": 1
         },
         "max_messages": {
           "description": "Maximum logical messages per physical message. Defaults to 1000.",
           "type": "integer",
           "format": "uint",
           "default": 1000,
-          "minimum": 0
+          "minimum": 1
         }
       },
       "additionalProperties": false
@@ -3944,16 +3939,6 @@
           "description": "Envelope format: `mqb` (default) or `benthos_binary`. Must match the sender.",
           "$ref": "#/$defs/PackFormat",
           "default": "mqb"
-        },
-        "max_decompressed_bytes": {
-          "description": "Reject a body that decompresses larger than this many bytes (bomb guard).\nUnset means no limit.",
-          "type": [
-            "integer",
-            "null"
-          ],
-          "format": "uint64",
-          "default": null,
-          "minimum": 0
         },
         "max_messages": {
           "description": "Reject a batch declaring more messages than this. Unset means no limit.",

@@ -780,7 +780,7 @@ impl BridgeMcp {
             route options like `concurrency`, `batch_size`, and `exit_on_empty` (drain the source \
             then exit; otherwise the route runs continuously until stopped). Either endpoint may \
             carry a `middlewares` array — `retry`, `dlq`, `deduplication`, `limiter`, `transform`, \
-            `compression`, `encryption`, `buffer`, `delay`, `weak_join`, `cookie_jar`, `metrics` — \
+            `compression`, `encryption`, `pack`/`unpack`, `buffer`, `delay`, `weak_join`, `cookie_jar`, `metrics` — \
             e.g. `{\"sqlx\": {...}, \"middlewares\": [{\"retry\": {\"max_attempts\": 3}}]}`. \
             `concurrency`/`batch_size` may be given inside `route` or as top-level arguments \
             — the top-level argument wins, and an unset value becomes the app default \
