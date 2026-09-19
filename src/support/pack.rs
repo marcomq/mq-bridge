@@ -124,9 +124,17 @@ impl Packer {
         }
     }
 
+    /// Whether a batch is framed with metadata: the flag is per batch, so one
+    /// message carrying any makes every record pay the metadata-count varint.
+    pub(crate) fn batch_has_metadata(&self, messages: &[CanonicalMessage]) -> bool {
+        self.format == PackFormat::Mqb && messages.iter().any(|m| !m.metadata.is_empty())
+    }
+
     /// Uncompressed body bytes this message will add to a batch. The chunker adds
     /// these up to honour `max_bytes` without serializing anything twice.
-    pub(crate) fn record_len(&self, message: &CanonicalMessage) -> usize {
+    /// `batch_has_metadata` must come from [`Packer::batch_has_metadata`] over the
+    /// same batch, or a mixed batch is undercounted.
+    pub(crate) fn record_len(&self, message: &CanonicalMessage, batch_has_metadata: bool) -> usize {
         match self.format {
             PackFormat::BenthosBinary => 4 + message.payload.len(),
             PackFormat::Mqb => {
@@ -134,7 +142,7 @@ impl Packer {
                 if self.include_message_id {
                     len += 16;
                 }
-                if !message.metadata.is_empty() {
+                if batch_has_metadata {
                     len += uvarint_len(message.metadata.len() as u64);
                     for (key, value) in &message.metadata {
                         len += uvarint_len(key.len() as u64) + key.len();
@@ -167,7 +175,7 @@ impl Packer {
     }
 
     fn pack_mqb(&self, messages: &[CanonicalMessage]) -> Bytes {
-        let with_metadata = messages.iter().any(|m| !m.metadata.is_empty());
+        let with_metadata = self.batch_has_metadata(messages);
         let mut flags = 0u16;
         if with_metadata {
             flags |= FLAG_METADATA;
@@ -177,7 +185,10 @@ impl Packer {
         }
 
         let body_len = uvarint_len(messages.len() as u64)
-            + messages.iter().map(|m| self.record_len(m)).sum::<usize>();
+            + messages
+                .iter()
+                .map(|m| self.record_len(m, with_metadata))
+                .sum::<usize>();
 
         // The header is written in place at the front, so the whole physical message
         // is one allocation with no second copy.
@@ -237,6 +248,11 @@ pub(crate) fn unpack(
 /// `CanonicalMessage`, so a hostile envelope could otherwise turn a modest payload
 /// into a large allocation. Beyond this the vector grows as records are read.
 const PREALLOC_RECORDS: usize = 4096;
+
+/// Metadata pairs to reserve up front, for the same reason as [`PREALLOC_RECORDS`]:
+/// a declared pair count is bounded by the bytes that follow, but two bytes on the
+/// wire buy an entry far larger than that in the map.
+const PREALLOC_PAIRS: usize = 64;
 
 /// Validates a declared record count against the bytes left to read.
 ///
@@ -333,10 +349,12 @@ fn unpack_mqb(payload: &Bytes, limits: &UnpackLimits) -> Result<Vec<CanonicalMes
 
         if with_metadata {
             let pairs = get_uvarint(&body, &mut pos)? as usize;
-            if pairs > body.len() - pos {
+            // The smallest pair is two zero-length varints, so anything past half the
+            // remaining bytes cannot be there.
+            if pairs > (body.len() - pos) / 2 {
                 bail!("packed record declares {pairs} metadata pairs but the batch is shorter");
             }
-            let mut metadata = HashMap::with_capacity(pairs);
+            let mut metadata = HashMap::with_capacity(pairs.min(PREALLOC_PAIRS));
             for _ in 0..pairs {
                 let key_len = get_uvarint(&body, &mut pos)? as usize;
                 let key = std::str::from_utf8(take(&body, &mut pos, key_len, "metadata key")?)?;
@@ -463,6 +481,24 @@ mod tests {
         assert!(bare.len() < tagged.len());
         let out = unpack(PackFormat::Mqb, &bare, &UnpackLimits::default()).unwrap();
         assert!(out[0].metadata.is_empty());
+    }
+
+    #[test]
+    fn record_len_matches_what_a_mixed_batch_writes() {
+        let packer = packer();
+        let batch = vec![
+            message("a", &[]),
+            message("b", &[("k", "v")]),
+            message("c", &[]),
+        ];
+        let with_metadata = packer.batch_has_metadata(&batch);
+        assert!(with_metadata);
+        let predicted = uvarint_len(batch.len() as u64)
+            + batch
+                .iter()
+                .map(|m| packer.record_len(m, with_metadata))
+                .sum::<usize>();
+        assert_eq!(packer.pack(&batch).len(), HEADER_LEN + predicted);
     }
 
     #[test]

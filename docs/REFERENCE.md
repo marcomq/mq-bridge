@@ -739,8 +739,10 @@ The reading list is the **mirror** of the writing one, so `compression` comes *a
 - compression: { algorithm: zstd }
 ```
 
-Unpacked messages behave exactly like any other: payload, metadata, `message_id` and order
-are all as they were before packing. `receive_batch` still honours the route's `batch_size` —
+With `format: mqb`, unpacked messages behave exactly like any other: payload, metadata,
+`message_id` and order are all as they were before packing. `format: benthos_binary` carries
+payloads only — an input reading it gets the payloads and their order back, but no metadata
+and no `message_id`. Either way `receive_batch` still honours the route's `batch_size` —
 anything over it is held and handed out on the next read.
 
 Payloads are sliced out of the physical message rather than copied, so unpacking costs
@@ -773,7 +775,7 @@ have nowhere to go:
 
 #### Compress-then-encrypt over the wire
 
-`pack`, `compression` and `encryption` compose into the full at-rest stack, and the
+`pack`, `compression` and `encryption` compose into the full wire stack, and the
 ordering rules decide which way round they have to go. On an **output**, the last entry is
 outermost and runs first, so listing them in this order gives
 `encrypt(compress(pack(messages)))`:

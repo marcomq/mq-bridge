@@ -2115,8 +2115,9 @@ pub mod bench {
         let mut out = Vec::new();
         let mut start = 0;
         let mut bytes = 0usize;
+        let with_metadata = packer.batch_has_metadata(messages);
         for index in 0..messages.len() {
-            let len = packer.record_len(&messages[index]);
+            let len = packer.record_len(&messages[index], with_metadata);
             if index - start >= config.max_messages
                 || (index > start && bytes + len > config.max_bytes)
             {

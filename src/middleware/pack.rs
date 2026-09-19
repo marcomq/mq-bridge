@@ -73,9 +73,11 @@ impl PackPublisher {
         let mut chunks = Vec::new();
         let mut start = 0;
         let mut bytes = 0usize;
+        // Conservative: a chunk that ends up without metadata is only over-counted.
+        let with_metadata = self.packer.batch_has_metadata(messages);
 
         for (index, message) in messages.iter().enumerate() {
-            let len = self.packer.record_len(message);
+            let len = self.packer.record_len(message, with_metadata);
             let full = index - start >= self.max_messages;
             let over = index > start && bytes + len > self.max_bytes;
             if full || over {
@@ -581,7 +583,7 @@ mod tests {
 
         // Two rows per physical message: one record fits, the second tips it over.
         let packer = Packer::new(PackFormat::Mqb, true);
-        let two = packer.record_len(&input[0]) + packer.record_len(&input[1]);
+        let two = packer.record_len(&input[0], true) + packer.record_len(&input[1], true);
         let wire = publish(&pack_config(1000, two), input).await;
         assert_eq!(wire.len(), 5);
     }
