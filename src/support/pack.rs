@@ -254,6 +254,11 @@ const PREALLOC_RECORDS: usize = 4096;
 /// wire buy an entry far larger than that in the map.
 const PREALLOC_PAIRS: usize = 64;
 
+/// Metadata pairs one record may carry. `max_messages` bounds how many records a
+/// batch expands into, not how large the map inside one of them grows, so without
+/// this ceiling a single record escapes that limit.
+const MAX_METADATA_PAIRS: usize = 64 * 1024;
+
 /// Validates a declared record count against the bytes left to read.
 ///
 /// `min_record_len` is the smallest a record can be in this format and flag
@@ -349,6 +354,12 @@ fn unpack_mqb(payload: &Bytes, limits: &UnpackLimits) -> Result<Vec<CanonicalMes
 
         if with_metadata {
             let pairs = get_uvarint(&body, &mut pos)? as usize;
+            if pairs > MAX_METADATA_PAIRS {
+                bail!(
+                    "packed record declares {pairs} metadata pairs, above the \
+                     {MAX_METADATA_PAIRS} a single record may carry"
+                );
+            }
             // The smallest pair is two zero-length varints, so anything past half the
             // remaining bytes cannot be there.
             if pairs > (body.len() - pos) / 2 {
@@ -603,6 +614,21 @@ mod tests {
         packed.extend_from_slice(&body);
         let error = unpack(PackFormat::Mqb, &packed.into(), &UnpackLimits::default()).unwrap_err();
         assert!(error.to_string().contains("bytes follow"), "{error}");
+    }
+
+    /// `max_messages` bounds records, so a record's own metadata map needs its own
+    /// ceiling to stay bounded.
+    #[test]
+    fn an_absurd_metadata_pair_count_is_rejected() {
+        let mut packed = vec![0u8; HEADER_LEN];
+        packed[..4].copy_from_slice(MAGIC);
+        packed[4] = VERSION;
+        packed[6..8].copy_from_slice(&FLAG_METADATA.to_le_bytes());
+        put_uvarint(&mut packed, 1);
+        put_uvarint(&mut packed, 0);
+        put_uvarint(&mut packed, MAX_METADATA_PAIRS as u64 + 1);
+        let error = unpack(PackFormat::Mqb, &packed.into(), &UnpackLimits::default()).unwrap_err();
+        assert!(error.to_string().contains("may carry"), "{error}");
     }
 
     #[test]
