@@ -416,7 +416,6 @@ class ObjectStoreConfig(TypedDict, total=False):
 
 class PackMiddleware(TypedDict, total=False):
     """Transport batching middleware configuration (`pack`, output side)."""
-    compression: Compression
     drop_message_id: bool
     format: PackFormat
     max_bytes: int
@@ -586,7 +585,6 @@ class TransformMiddleware(TypedDict, total=False):
 class UnpackMiddleware(TypedDict, total=False):
     """Transport batching middleware configuration (`unpack`, input side)."""
     format: PackFormat
-    max_decompressed_bytes: Optional[int]
     max_messages: Optional[int]
 
 
