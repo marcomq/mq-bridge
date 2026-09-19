@@ -23,6 +23,10 @@ build:
         then:
           - cargo auditable install --locked --no-track --bins --root ${{ PREFIX }} --path apps/mq-bridge-app/crates/cli
         else:
+          # rattler-build >=0.68 puts CARGO_HOME under %SRC_DIR%, which pushes
+          # aws-lc-sys' relative third_party includes past MAX_PATH -- cl.exe is
+          # not long-path aware. %CD:~0,2% is the drive the build already runs on.
+          - 'set CARGO_HOME=%CD:~0,2%\cargo'
           - cargo auditable install --locked --no-track --bins --root %LIBRARY_PREFIX% --path apps/mq-bridge-app/crates/cli
       - cargo-bundle-licenses --format yaml --output THIRDPARTY.yml
 

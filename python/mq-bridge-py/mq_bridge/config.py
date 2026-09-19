@@ -30,6 +30,7 @@ MongoDbConfig = dict
 MqttConfig = dict
 NatsConfig = dict
 ObjectStoreConfig = dict
+PackMiddleware = dict
 PostgresCdcConfig = dict
 RandomPanicMiddleware = dict
 RedisStreamsConfig = dict
@@ -44,6 +45,7 @@ SwitchCase = dict
 SwitchConfig = dict
 TlsConfig = dict
 TransformMiddleware = dict
+UnpackMiddleware = dict
 WeakJoinMiddleware = dict
 WebSocketConfig = dict
 ZeroMqConfig = dict
@@ -58,6 +60,7 @@ MongoDbFormat = str
 MqttProtocol = str
 NameBy = str
 NatsDeliverPolicy = str
+PackFormat = str
 SpoolClaim = str
 SpoolDone = str
 SpoolFsync = str
@@ -114,6 +117,8 @@ __all__ = [
     "NatsConfig",
     "NatsDeliverPolicy",
     "ObjectStoreConfig",
+    "PackFormat",
+    "PackMiddleware",
     "PostgresCdcConfig",
     "RandomPanicMiddleware",
     "RedisStreamsConfig",
@@ -135,6 +140,7 @@ __all__ = [
     "TlsConfig",
     "TransformErrorPolicy",
     "TransformMiddleware",
+    "UnpackMiddleware",
     "WeakJoinMiddleware",
     "WeakJoinTimeout",
     "WebSocketConfig",

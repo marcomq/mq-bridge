@@ -16,9 +16,9 @@ Thank you for your interest in contributing to **mq-bridge**! We welcome bug rep
 
 - Run `cargo fmt --all` before submitting a PR.
 - Ensure code passes `cargo clippy --all-targets --features lint-all -- -D warnings`.
-  Not `--all-features`: that enables `link-static` and `link-dynamic` at once,
-  which the crate rejects with a `compile_error!`. `lint-all` is every feature
-  that gates code, with one linkage picked.
+  Not `--all-features`: that turns on `link-dynamic`, whose build script probes
+  pkg-config for a system librdkafka. `lint-all` is every feature that gates
+  code, with the bundled linkage.
 - Follow idiomatic Rust and existing code conventions.
 
 ## Making Changes

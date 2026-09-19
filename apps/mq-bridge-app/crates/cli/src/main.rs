@@ -251,6 +251,15 @@ struct McpArgs {
     #[arg(long, global = true, conflicts_with = "report_to_ui")]
     no_report_to_ui: bool,
 
+    /// Offer the agent bus: the `agent_listen` and `agent_send` tools for
+    /// messaging other agents on this machine. Off by default — without it
+    /// neither tool is registered.
+    ///
+    /// Even with the flag, this server's own inbox stays closed until
+    /// `agent_listen` is called.
+    #[arg(long)]
+    agent_bus: bool,
+
     /// Register/unregister this binary with local MCP clients instead of serving.
     #[command(subcommand)]
     action: Option<McpAction>,
@@ -276,6 +285,11 @@ enum McpAction {
         /// instead of installing anything.
         #[arg(long)]
         print_config: bool,
+
+        /// Bake `--agent-bus` into the registered command, so the client gets
+        /// the agent-messaging tools.
+        #[arg(long)]
+        agent_bus: bool,
     },
 
     /// Remove this server from local MCP clients.
@@ -446,11 +460,12 @@ async fn main() -> anyhow::Result<()> {
                     client,
                     local,
                     print_config,
+                    agent_bus,
                 }) => {
                     return if print_config {
-                        mcp_install::print_config()
+                        mcp_install::print_config(agent_bus)
                     } else {
-                        mcp_install::install(client, local)
+                        mcp_install::install(client, local, agent_bus)
                     };
                 }
                 Some(McpAction::Uninstall { client, local }) => {
@@ -468,6 +483,7 @@ async fn main() -> anyhow::Result<()> {
                 mcp_args.transport,
                 mcp_args.bind,
                 mcp_args.report_to_ui && !mcp_args.no_report_to_ui,
+                mcp_args.agent_bus,
                 workspace_path,
             )
             .await;
@@ -1439,8 +1455,8 @@ fn middleware_from_spec(spec: &str) -> anyhow::Result<mq_bridge::models::Middlew
     use mq_bridge::models::{
         BufferMiddleware, CompressionMiddleware, CookieJarMiddleware, DeadLetterQueueMiddleware,
         DeduplicationMiddleware, DelayMiddleware, EncryptionConfig, LimiterMiddleware,
-        MetricsMiddleware, RandomPanicMiddleware, RetryMiddleware, TransformMiddleware,
-        WeakJoinMiddleware,
+        MetricsMiddleware, PackMiddleware, RandomPanicMiddleware, RetryMiddleware,
+        TransformMiddleware, UnpackMiddleware, WeakJoinMiddleware,
     };
     use std::collections::HashMap;
 
@@ -1466,6 +1482,8 @@ fn middleware_from_spec(spec: &str) -> anyhow::Result<mq_bridge::models::Middlew
         "transform" => schema_fields(schemars::schema_for!(TransformMiddleware)),
         "encryption" => schema_fields(schemars::schema_for!(EncryptionConfig)),
         "compression" => schema_fields(schemars::schema_for!(CompressionMiddleware)),
+        "pack" => schema_fields(schemars::schema_for!(PackMiddleware)),
+        "unpack" => schema_fields(schemars::schema_for!(UnpackMiddleware)),
         // The escape hatch for a handler-provided middleware: `name` selects it,
         // `config` carries its free-form JSON.
         "custom" => HashMap::from([
@@ -1473,7 +1491,7 @@ fn middleware_from_spec(spec: &str) -> anyhow::Result<mq_bridge::models::Middlew
             ("config".to_string(), FieldType::Object),
         ]),
         other => bail!(
-            "unsupported middleware '{other}'. Supported middlewares: deduplication, metrics, dlq, retry, random_panic, delay, weak_join, limiter, buffer, cookie_jar, transform, encryption, compression, custom"
+            "unsupported middleware '{other}'. Supported middlewares: deduplication, metrics, dlq, retry, random_panic, delay, weak_join, limiter, buffer, cookie_jar, transform, encryption, compression, pack, unpack, custom"
         ),
     };
 

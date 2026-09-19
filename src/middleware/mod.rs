@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 mod buffer;
 #[cfg(feature = "compression")]
-mod compression;
+pub(crate) mod compression;
 mod cookie_jar;
 #[cfg(feature = "dedup")]
 pub(crate) mod deduplication;
@@ -20,13 +20,14 @@ mod deferred_commit;
 mod delay;
 mod dlq;
 #[cfg(feature = "encryption")]
-mod encryption;
+pub(crate) mod encryption;
 #[cfg(feature = "filter")]
 pub(crate) mod filter;
 mod id;
 mod limiter;
 #[cfg(feature = "metrics")]
 mod metrics;
+mod pack;
 mod random_panic;
 mod raw_json;
 mod retry;
@@ -49,6 +50,7 @@ use id::IdConsumer;
 use limiter::{LimiterConsumer, LimiterPublisher};
 #[cfg(feature = "metrics")]
 use metrics::{MetricsConsumer, MetricsPublisher};
+use pack::{PackPublisher, UnpackConsumer};
 use random_panic::{RandomPanicConsumer, RandomPanicPublisher};
 use retry::RetryPublisher;
 use transform::{TransformConsumer, TransformPublisher};
@@ -93,6 +95,13 @@ pub async fn apply_middlewares_to_consumer(
             Middleware::Encryption(cfg) => Box::new(EncryptionConsumer::new(consumer, cfg)?),
             #[cfg(feature = "compression")]
             Middleware::Compression(cfg) => Box::new(CompressionConsumer::new(consumer, cfg)),
+            Middleware::Unpack(cfg) => Box::new(UnpackConsumer::new(consumer, cfg)),
+            // Output-only: packing is what a transport writes, not what it reads.
+            Middleware::Pack(_) => {
+                return Err(anyhow::anyhow!(
+                    "[middleware:{route_name}] `pack` is an output-only middleware. Put `pack` on the route's output endpoint and `unpack` on its input."
+                ))
+            }
             #[cfg(feature = "filter")]
             Middleware::Filter(expression) => Box::new(FilterConsumer::new(consumer, expression)?),
             Middleware::Custom { name, config } => {
@@ -172,6 +181,13 @@ pub async fn apply_middlewares_to_publisher(
             Middleware::Encryption(cfg) => Box::new(EncryptionPublisher::new(publisher, cfg)?),
             #[cfg(feature = "compression")]
             Middleware::Compression(cfg) => Box::new(CompressionPublisher::new(publisher, cfg)),
+            Middleware::Pack(cfg) => Box::new(PackPublisher::new(publisher, cfg)?),
+            // Input-only: unpacking is what a transport reads, not what it writes.
+            Middleware::Unpack(_) => {
+                return Err(anyhow::anyhow!(
+                    "[middleware:{route_name}] `unpack` is an input-only middleware. Put `unpack` on the route's input endpoint and `pack` on its output."
+                ))
+            }
             #[cfg(feature = "filter")]
             Middleware::Filter(expression) => Box::new(FilterPublisher::new(publisher, expression)?),
             Middleware::Custom { name, config } => {

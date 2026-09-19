@@ -72,7 +72,7 @@ jobs:
       - name: Check each feature subset
         run: |
           failed=""
-          for f in "" full kafka nats grpc,vendored-protoc mqtt mongodb http; do
+          for f in "" full kafka nats grpc mqtt mongodb http; do
             echo "::group::cargo check --features ${f:-<default>}"
             if [ -z "$f" ]; then
               cargo check --all-targets || failed="$failed <default>"
@@ -203,7 +203,12 @@ jobs:
 
       - name: Pre-pull docker images
         run: |
-          find tests/integration/docker-compose -name "*.yml" | xargs -P 5 -I {} docker compose -f {} pull -q
+          # Best-effort cache warm-up: each test pulls what it needs at `compose up`
+          # anyway, so a flaky registry must not fail the job before tests run.
+          # ibm_mq*.yml is excluded: those tests are gated on a dlopen'd client that
+          # is not installed here, and icr.io is the slowest registry in the set.
+          find tests/integration/docker-compose -name "*.yml" ! -name "ibm_mq*.yml" \
+            | xargs -P 5 -I {} sh -c 'docker compose -f "$1" pull -q || echo "pre-pull failed (non-fatal): $1"' _ {}
 
       - name: Install JRE (for keytool)
         timeout-minutes: 5

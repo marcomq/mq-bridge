@@ -11,6 +11,53 @@ All notable changes to `mq-bridge`. Newest first.
   hold the two texts and `LICENSE` points at both. Recipients pick either arm, so nothing
   changes for existing MIT users — the Apache arm adds an express patent grant.
 
+- **The file, `transform` and `filter` hot paths got substantially faster.** A CSV → JSONL
+  conversion of 1,000,000 mixed-type rows (~116 MiB) sustains **2,824,858 rows/s** at
+  ~28 MiB, and the same job with a typing `transform` runs at **1,636,661 rows/s**. Three
+  changes carry it. CSV parsing and JSON escaping are fused, so a field is walked once and
+  its unescaped runs are copied in bulk — a row costs one allocation rather than one per
+  column. Each column's name is quoted and escaped once per file instead of once per row.
+  And `filter` compiles a tree of single-field comparisons it can decide without building
+  a `Value` for the payload or entering the expression VM, falling back to the full
+  expression only where that tree cannot phrase the answer. Output is unchanged
+  throughout; a metadata-only predicate no longer requires the payload to be JSON.
+
+- **Independent per-message batch work is split across cores.** The file reader's record
+  decoder and middleware batches both hand large batches to a worker pool. Results are
+  concatenated in chunk order, so a caller cannot tell a parallel run from a sequential
+  one — same messages, same order, same outcomes. Batches under 256 messages stay on the
+  caller's thread, where splitting costs more in thread wake-ups than the work it saves.
+  This is what helps a sink that requires ordered publishing, whose serialized `send_batch`
+  means route `concurrency` cannot.
+
+- **SQLite is always bundled, and is no longer part of the linkage choice.** Static versus
+  dynamic linkage is a real packaging decision for librdkafka, where a distro or
+  conda-forge build has to link the copy it ships so a security fix arrives through a
+  rebuild. SQLite is a single-file amalgamation that compiles in seconds and has no such
+  story, and coupling it to that pair made `--features sqlx` uncompilable on its own — the
+  guard fired for every path reaching `sqlx` or `postgres-cdc` without naming a linkage,
+  the bindings and `sqlite_test` included. Those build again.
+
+- **`grpc` now carries `vendored-protoc`.** Every feature set containing `grpc` builds
+  without a `protoc` installed. `build.rs` still prefers `$PROTOC` when it is set, so a
+  distro or conda-forge build compiles against its own protobuf and the vendored binary
+  goes unused.
+
+- **Lint and doc builds use the `lint-all` feature set, not `--all-features`.**
+  `--all-features` turns on `link-dynamic`, whose build script probes pkg-config for
+  librdkafka and fails where none is installed. `lint-all` covers everything that gates
+  code — `ibm-mq-static` included, since clippy never links and so needs no IBM SDK.
+
+- **`mqb copy --wait` implies `--drain`.** Giving a deadline without also asking to drain
+  was accepted and then ignored.
+
+- **`full-static-ibm-mq` was removed.** It was a general-purpose feature set that bound
+  `libmqm_r` at link time, which IBM's licence does not permit for a build offered this
+  way. It was added during this cycle and never released. `ibm-mq-static` stays as a
+  deliberate individual opt-in for someone who has accepted IBM's terms for their own
+  build, and no `full*` set reaches it; IBM MQ still reaches every `full*` set through
+  `ibm-mq`, the dlopen path, which is unaffected.
+
 ### Added
 
 - **`Route::run_without_resume` runs a route while skipping optional cursor/checkpoint state.**
@@ -22,11 +69,64 @@ All notable changes to `mq-bridge`. Newest first.
   and errors when a full copy is intentional. It conflicts with `--resume` and does not alter
   native queue offsets.
 
+- **`full-dynamic` links the librdkafka you already have.** `full` is unchanged: it compiles
+  librdkafka from bundled sources and needs nothing installed. `full-dynamic` adds
+  `link-dynamic`, which links the shared library found via pkg-config — what a conda-forge
+  recipe or a distro package wants, so the library stays patchable. The two are purely
+  additive; enabling both gives you the dynamic one.
+
+- **An opt-in agent bus in the MCP server, and `mqb agent-listen` for clients that have
+  none.** `mqb mcp --agent-bus` offers two extra tools; without the flag neither is
+  registered and `server_info` reports no bus, so a client that never asked for agent
+  messaging does not see it. `mqb mcp install --agent-bus` bakes the flag into the
+  registered command. With the bus on, `agent_listen` opens this server's inbox under
+  `~/.mqb-agents` (or `$MQB_AGENTS_DIR`) so other agents on the machine can send to it, or
+  over a broker when given a connector; `agent_send` delivers to a named inbox;
+  `server_info` reports who is listening here and which peers have one. One inbox per
+  server — calling `agent_listen` twice is an error. `mqb agent-listen <NAME>` holds the
+  same inbox open from the command line and needs no flag, so an agent with no MCP client
+  can join with one command.
+
+- **A `.justfile` covering the build, lint, test and packaging tasks**, with
+  `just check-native-deps` to diagnose the native prerequisites. When it finds librdkafka
+  missing it searches where `pixi global install` and `conda install` actually put it —
+  `~/.pixi/envs/*`, `$CONDA_PREFIX`, the in-project `.pixi/envs/*`, `build/conan`, and both
+  Homebrew prefixes — because those expose binaries, not libraries, so "MISSING" usually
+  means "installed, but pkg-config cannot see it". It then leads with the export that fixes
+  it rather than a list of packages to install, and prints where pkg-config is looking,
+  distinguishing `PKG_CONFIG_LIBDIR` from `PKG_CONFIG_PATH`. Every failure carries
+  remediation, and each leads with `just build-static` — wanting `full-dynamic` is a
+  packaging requirement, so someone who just wants a working build is told the shorter way
+  out first.
+
+- **A CSV → DuckDB comparison in the ETL benchmark harness**, alongside the existing
+  baselines. Methodology and reporting rules are in `benches/ETL_BENCHMARKS.md`.
+
 ### Fixed
 
 - **ClickHouse URL credentials now behave as advertised.** HTTP clients read percent-decoded
   `user:password@` credentials from the endpoint URL, while explicit `username` / `password`
   fields still take precedence, and strip userinfo from the request URL.
+
+- **`--features kafka` alone has gzip again.** The dependency sets `default-features = false`
+  to stop libz-sys probing for a *system* zlib — that probe emits `-L /usr/lib64`, which on a
+  conda toolchain shadows the sysroot's libc and breaks the link — but re-adding only `tokio`
+  dropped zlib, which then came back solely through the static linkage feature. So anyone
+  building with `--features kafka` on its own lost gzip-compressed topics, silently. Verified
+  against librdkafka's generated `config.h` rather than inferred from the feature graph.
+
+- **The IBM MQ rpath is back on the dlopen build.** It had been narrowed to the static build
+  on the premise that dlopen never consults the link search path. Half true — `rustc-link-search`
+  is build-time only, but the rpath is not: glibc resolves `dlopen("libmqm_r.so")` against the
+  calling object's `DT_RPATH` before `LD_LIBRARY_PATH`, `DT_RUNPATH`, `ld.so.cache` and the
+  default directories. A stock `/opt/mqm` install with neither `MQB_IBM_MQ_LIB` nor
+  `MQ_INSTALLATION_PATH` set had stopped resolving. The static build gets the rpath too.
+
+- **The Python `just` recipes survive a stale `CONDA_PREFIX`.** `pixi global install` exports
+  one pointing at an environment with no `bin/python`, and pyo3-ffi picks it over a working
+  interpreter on `PATH` without falling through, while maturin refuses outright when
+  `$VIRTUAL_ENV` and `$CONDA_PREFIX` are both set — which `uv run` guarantees. `uv` owns this
+  project's interpreter, so the recipes now unset `CONDA_PREFIX`.
 
 ## 0.4.11
 

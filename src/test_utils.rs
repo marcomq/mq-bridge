@@ -2106,6 +2106,64 @@ pub mod bench {
         decoded
     }
 
+    /// Frames a corpus into physical messages exactly as the `pack` middleware does.
+    pub fn pack_batches(
+        config: &crate::models::PackMiddleware,
+        messages: &[CanonicalMessage],
+    ) -> anyhow::Result<Vec<bytes::Bytes>> {
+        let packer = crate::support::pack::Packer::new(config.format, !config.drop_message_id);
+        let mut out = Vec::new();
+        let mut start = 0;
+        let mut bytes = 0usize;
+        let with_metadata = packer.batch_has_metadata(messages);
+        for index in 0..messages.len() {
+            let len = packer.record_len(&messages[index], with_metadata);
+            if index - start >= config.max_messages
+                || (index > start && bytes + len > config.max_bytes)
+            {
+                out.push(packer.pack(&messages[start..index]));
+                start = index;
+                bytes = 0;
+            }
+            bytes += len;
+        }
+        if start < messages.len() {
+            out.push(packer.pack(&messages[start..]));
+        }
+        Ok(out)
+    }
+
+    /// Compresses one physical message the way the `compression` middleware does, so a
+    /// benchmark can measure `pack` and `compression` stacked as the docs describe them.
+    #[cfg(feature = "compression")]
+    pub fn compress_member(
+        algorithm: crate::models::Compression,
+        data: &[u8],
+    ) -> std::io::Result<Vec<u8>> {
+        crate::support::compression::compress_member(algorithm, data)
+    }
+
+    /// The matching decompression, for the reading half of the same benchmark.
+    #[cfg(feature = "compression")]
+    pub fn decompress_member(
+        algorithm: crate::models::Compression,
+        data: &[u8],
+    ) -> std::io::Result<Vec<u8>> {
+        crate::support::compression::decompress_all(algorithm, data, None)
+    }
+
+    /// Splits one physical message back into its logical messages, as `unpack` does.
+    pub fn unpack_batch(
+        format: crate::models::PackFormat,
+        packed: &bytes::Bytes,
+    ) -> anyhow::Result<Vec<CanonicalMessage>> {
+        crate::support::pack::unpack(
+            format,
+            packed,
+            &crate::support::pack::UnpackLimits::default(),
+        )
+    }
+
     /// Evaluates one `filter` expression over a corpus, returning how many messages it kept.
     #[cfg(feature = "filter")]
     pub fn filter_matches(

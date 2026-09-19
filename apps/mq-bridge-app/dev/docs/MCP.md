@@ -22,7 +22,7 @@ engine moves the bytes. Moving a 116.3 MiB dataset costs three tool calls and
 | | Registry name | `io.github.marcomq/mq-bridge-app` |
 | --- | --- | --- |
 | **Transports** | `stdio`, streamable HTTP | |
-| **Tools** | 10 | [see below](#tools) |
+| **Tools** | 9 (11 with `--agent-bus`) | [see below](#tools) |
 | **Connectors** | 15+ | [see below](#endpoints) |
 | **Install** | `mqb mcp install` | Docker / cargo / Homebrew / binaries — [Installation](INSTALL.md) |
 
@@ -58,6 +58,7 @@ mqb mcp --transport http --bind 127.0.0.1:9092
 | `--transport` | `stdio` | `stdio` for local clients, `http` for streamable HTTP (served over hyper) |
 | `--bind` | `127.0.0.1:9092` | Listen address; `--transport http` only |
 | `--report-to-ui` | off | Also report route/publisher activity to a running desktop or web UI |
+| `--agent-bus` | off | Offer the `agent_listen` / `agent_send` tools — [Agent messaging](#agent-messaging) |
 
 No web UI is started in this mode. Logs go to **stderr**, because `stdio`
 transport owns stdout for the protocol itself.
@@ -68,29 +69,44 @@ transport owns stdout for the protocol itself.
 | --- | --- | --- |
 | `publish` | `publisher`, `message` \| `messages`, `name` | Send one message or a batch to any endpoint. Independent of routes. |
 | `start_route` | `route` (`input`/`output`), `name`, `batch_size`, `concurrency`, `capture_last` | Run a route moving messages from source to sink. Returns the route name. |
+| `generate_cli_command` | `route` (`input`/`output`), `name`, `batch_size`, `concurrency` | Render the same route as a copyable headless `mqb` command, with credentials replaced by environment variable placeholders. Starts nothing. |
 | `list_routes` | — | Every route started by this server, with live connection health and rates. |
 | `route_status` | `name` (optional) | Health, totals and rates for one route, or all of them. |
 | `wait_route` | `name`, `timeout_ms` | Block until a route finishes, then report how it ended. One call instead of a polling loop. |
 | `route_messages` | `name` | The most recent messages captured on a route. Requires `capture_last`; reads drain the buffer. |
 | `stop_route` | `name` | Stop a route; returns total messages and the rate it achieved. |
-| `server_info` | — | Crate version, git hash, build profile and build time, plus the agent bus. |
-| `agent_listen` | `name`, `input`, `capture_last` | Open this server's agent inbox so other agents can reach it. Off until called. |
-| `agent_send` | `to`, `message`, `output` | Send a message to another agent's inbox. Always available. |
+| `server_info` | — | Crate version, git hash, build profile and build time, plus the agent bus when it is on. |
+| `agent_listen` | `name`, `input`, `capture_last` | **`--agent-bus` only.** Open this server's agent inbox so other agents can reach it. Off until called. |
+| `agent_send` | `to`, `message`, `output` | **`--agent-bus` only.** Send a message to another agent's inbox. |
 
 Call `server_info` before quoting any throughput number: a debug binary reports
 much slower rates, and the figure would be meaningless.
 
 ### Agent messaging
 
-Two agents on one machine can message each other without a broker. `agent_listen`
-opens this server's inbox — a `dir_spool` directory under `$MQB_AGENTS_DIR`
-(default `~/.mqb-agents/<name>`) — and tails it for the session. Nothing can reach
-an agent that has not called it.
+Two agents on one machine can message each other without a broker. This is off by
+default: start the server with `--agent-bus` (or install it that way, see below)
+and neither tool exists otherwise.
+
+`agent_listen` opens this server's inbox — a `dir_spool` directory under
+`$MQB_AGENTS_DIR` (default `~/.mqb-agents/<name>`) — and tails it for the session.
+Nothing can reach an agent that has not called it, so the bus is opt-in twice
+over: the flag offers the tools, the call opens the mailbox.
+
+```bash
+mqb mcp --agent-bus                 # without this the two tools are not registered
+```
 
 ```text
-agent_listen {"name": "claude"}     # opt in; off by default
-agent_send   {"to": "gpt-worker", "message": "..."}   # always available
+agent_listen {"name": "claude"}     # opt in; off until called
+agent_send   {"to": "gpt-worker", "message": "..."}
 route_messages {"name": "agent-inbox"}                # collect mail
+```
+
+To register a client with the bus already enabled:
+
+```bash
+mqb mcp install --agent-bus
 ```
 
 Mail collected this way is held in a ring of the last `capture_last` messages
@@ -247,7 +263,7 @@ without changing the route:
 ```
 
 Available: `retry`, `dlq`, `deduplication`, `limiter`, `transform`, `compression`,
-`encryption`, `buffer`, `delay`, `weak_join`, `cookie_jar`, `metrics`. Each is
+`encryption`, `pack`, `unpack`, `buffer`, `delay`, `weak_join`, `cookie_jar`, `metrics`. Each is
 documented with its options in the [Cookbook](cookbook/retries.md) and
 [Middleware reference](engine/reference.md).
 

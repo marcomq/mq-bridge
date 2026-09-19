@@ -9,8 +9,8 @@
 # `just` on its own lists everything, grouped.
 
 # The feature set for every lint and doc build. NOT `--all-features`: that
-# enables `link-static` and `link-dynamic` together, which src/lib.rs rejects
-# with a compile_error!. See the `lint-all` comment in Cargo.toml.
+# enables `link-dynamic`, whose build script probes pkg-config for a system
+# librdkafka. See the `lint-all` comment in Cargo.toml.
 lint_features := "lint-all"
 
 _default:
@@ -19,13 +19,12 @@ _default:
 # Fail early, with instructions, for the recipes that need a protoc the build
 # does not supply itself.
 #
-# The engine's own `grpc` needs none: `full` and `lint-all` include
-# `vendored-protoc`, which hands its build script a prebuilt binary. Two things
-# are not covered by that. The app workspace depends on `pulsar`, whose build
-# script calls protoc and vendors nothing — `std::env::set_var("PROTOC", …)` in
-# the engine's build script sets it only in that process, not in a sibling's.
-# And `full-dynamic` deliberately drops `vendored-protoc`, because a distro or
-# conda-forge build has to compile against the protobuf it packages.
+# The engine's own `grpc` needs none: it carries `vendored-protoc`, which hands
+# its build script a prebuilt binary. What that does not cover is the app
+# workspace, which depends on `pulsar`, whose build script calls protoc and
+# vendors nothing — `std::env::set_var("PROTOC", …)` in the engine's build
+# script sets it only in that process, not in a sibling's. So only the `app-`
+# recipes need this.
 _require-protoc:
     #!/usr/bin/env bash
     if [ -n "${PROTOC:-}" ] && [ -x "${PROTOC:-}" ]; then exit 0; fi
@@ -105,16 +104,15 @@ doc:
 config-compat:
     cargo check -p grpc-config-compat
 
-# `grpc` carries `vendored-protoc` because protoc no longer arrives with the
-# feature itself and a bare checkout may have none installed; every `full*` set
-# already includes it.
+# The list mirrors CI's exactly, so a pass here means the same there. `grpc`
+# needs no `vendored-protoc` alongside it: the feature carries it (Cargo.toml).
 [doc('cargo check each feature subset CI covers')]
 [group('gate')]
 check-features:
     #!/usr/bin/env bash
     set -uo pipefail
     failed=""
-    for f in "" full kafka nats grpc,vendored-protoc mqtt mongodb http; do
+    for f in "" full kafka nats grpc mqtt mongodb http; do
         echo "::: cargo check --features ${f:-<default>}"
         if [ -z "$f" ]; then
             cargo check --all-targets || failed="$failed <default>"
@@ -203,10 +201,8 @@ build-static:
 # more than a cargo line:
 #
 #   librdkafka   pkg-config. A distro's librdkafka-dev, or
-#                `pixi global install librdkafka`.
-#   protoc       $PROTOC or PATH — `full-dynamic` drops `vendored-protoc` on
-#                purpose.
-#
+#                `pixi global install librdkafka`. protoc is NOT among them:
+#                `grpc` carries `vendored-protoc` either way.
 # SQLite is NOT among them: it is bundled either way, so this variant needs
 # neither libsqlite3 nor the libclang that generating its bindings would have
 # required. See the sqlx dependency in Cargo.toml.
@@ -218,7 +214,7 @@ build-static:
 # Appended, so an ambient RUSTFLAGS survives.
 [doc('Link librdkafka from the environment')]
 [group('build')]
-build-dynamic: _require-protoc
+build-dynamic:
     #!/usr/bin/env bash
     set -euo pipefail
     if ! pkg-config --exists rdkafka; then
@@ -318,8 +314,9 @@ check-native-deps:
 
     advise_protoc() {
         say "protoc is not on PATH, and \$PROTOC is unset or not executable." ""
-        say "\`full-dynamic\` drops \`vendored-protoc\` deliberately, so the grpc" \
-            "build script needs a protoc from the environment:" "" \
+        say "\`build-dynamic\` does not need it — \`grpc\` carries" \
+            "\`vendored-protoc\`. The \`app-\` recipes do: the app workspace" \
+            "depends on \`pulsar\`, which vendors no protoc." "" \
             "    Fedora        sudo dnf install protobuf-compiler" \
             "    Debian        sudo apt-get install protobuf-compiler" \
             "    macOS         brew install protobuf" \
@@ -328,8 +325,6 @@ check-native-deps:
             "    Windows       choco install protoc" ""
         say "or point \$PROTOC at one you already have:" "" \
             "    export PROTOC=/path/to/protoc" ""
-        say "Alternatively \`just build-static\` carries a prebuilt protoc through" \
-            "\`vendored-protoc\` and needs none installed."
     }
 
     for probe in "rdkafka >= 2.12.1"; do
@@ -354,9 +349,8 @@ check-native-deps:
     elif [ -n "${PROTOC:-}" ] && [ -x "${PROTOC}" ]; then
         printf '  %-10s %s (from $PROTOC)\n' protoc "$("$PROTOC" --version)"
     else
-        printf '  %-10s MISSING\n' protoc
+        printf '  %-10s MISSING (not needed by build-dynamic; the app- recipes want it)\n' protoc
         advise_protoc
-        missing=1
     fi
 
     if [ "$missing" -eq 0 ]; then

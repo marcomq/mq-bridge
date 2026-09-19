@@ -102,14 +102,6 @@
 #![warn(rustdoc::broken_intra_doc_links)]
 #![warn(rustdoc::missing_crate_level_docs)]
 
-#[cfg(all(feature = "link-static", feature = "link-dynamic"))]
-compile_error!(
-    "features `link-static` and `link-dynamic` are mutually exclusive - enable exactly one. \
-     `link-static` compiles librdkafka into the binary; `link-dynamic` links the shared \
-     library found via pkg-config. This usually means two feature sets were combined, \
-     e.g. `full` (static) together with `full-dynamic`; add --no-default-features or pick one."
-);
-
 pub mod canonical_message;
 #[cfg(any(
     feature = "mongodb",

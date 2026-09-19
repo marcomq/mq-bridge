@@ -96,6 +96,104 @@ mod config_tests {
     use super::*;
     use config::{Config as ConfigBuilder, Environment};
 
+    /// Defaults must still fire for a middleware assembled from flattened `MQB__…`
+    /// environment keys, where the config crate synthesizes the nested tables and
+    /// every leaf arrives as a string.
+    #[test]
+    fn pack_defaults_survive_env_flattened_config() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        const VARS: [&str; 3] = [
+            "MQB__ENVPACK__INPUT__MEMORY__TOPIC",
+            "MQB__ENVPACK__OUTPUT__MEMORY__TOPIC",
+            "MQB__ENVPACK__OUTPUT__MIDDLEWARES__0__PACK__FORMAT",
+        ];
+        struct EnvCleanup(Vec<(&'static str, Option<std::ffi::OsString>)>);
+        impl Drop for EnvCleanup {
+            fn drop(&mut self) {
+                unsafe {
+                    for (name, previous) in self.0.drain(..) {
+                        match previous {
+                            Some(value) => std::env::set_var(name, value),
+                            None => std::env::remove_var(name),
+                        }
+                    }
+                }
+            }
+        }
+        let _cleanup = EnvCleanup(
+            VARS.into_iter()
+                .map(|name| (name, std::env::var_os(name)))
+                .collect(),
+        );
+
+        unsafe {
+            std::env::set_var("MQB__ENVPACK__INPUT__MEMORY__TOPIC", "in");
+            std::env::set_var("MQB__ENVPACK__OUTPUT__MEMORY__TOPIC", "out");
+            // Only `format` is given; every other pack field must come from its default.
+            std::env::set_var(
+                "MQB__ENVPACK__OUTPUT__MIDDLEWARES__0__PACK__FORMAT",
+                "benthos_binary",
+            );
+        }
+
+        let config: Config = ConfigBuilder::builder()
+            .add_source(
+                Environment::with_prefix("MQB")
+                    .separator("__")
+                    .try_parsing(true),
+            )
+            .build()
+            .expect("config builds")
+            .try_deserialize()
+            .expect("config deserializes");
+
+        let route = config.get("envpack").expect("route exists");
+        let Middleware::Pack(cfg) = &route.output.middlewares[0] else {
+            panic!("expected pack, got {:?}", route.output.middlewares);
+        };
+        assert_eq!(cfg.format, PackFormat::BenthosBinary);
+        assert_eq!(
+            cfg.max_messages, 1000,
+            "default fn must fire on the env path"
+        );
+        assert_eq!(cfg.max_bytes, 4 * 1024 * 1024, "default fn must fire");
+        assert!(!cfg.drop_message_id, "ids are kept when the key is absent");
+    }
+
+    /// The runtime loads routes through the `config` crate, not serde directly, so the
+    /// boolean toggle on `pack` is checked on that path too.
+    #[test]
+    fn pack_boolean_survives_the_config_crate_loader() {
+        let yaml = r#"
+packed_route:
+  input:
+    memory: { topic: "in" }
+    middlewares:
+      - unpack: {}
+  output:
+    memory: { topic: "out" }
+    middlewares:
+      - pack: { max_messages: 250, drop_message_id: true }
+"#;
+        let config: Config = ConfigBuilder::builder()
+            .add_source(config::File::from_str(yaml, config::FileFormat::Yaml))
+            .build()
+            .expect("config builds")
+            .try_deserialize()
+            .expect("config deserializes");
+
+        let route = config.get("packed_route").expect("route exists");
+        let Middleware::Pack(cfg) = &route.output.middlewares[0] else {
+            panic!("expected pack, got {:?}", route.output.middlewares);
+        };
+        assert_eq!(cfg.max_messages, 250);
+        assert!(
+            cfg.drop_message_id,
+            "`drop_message_id: true` must survive the config crate"
+        );
+        assert!(matches!(route.input.middlewares[0], Middleware::Unpack(_)));
+    }
+
     const TEST_YAML: &str = r#"
 kafka_to_nats:
   concurrency: 10
@@ -189,6 +287,8 @@ kafka_to_nats:
                 Middleware::Transform(_) => {}
                 Middleware::Encryption(_) => {}
                 Middleware::Compression(_) => {}
+                Middleware::Pack(_) => {}
+                Middleware::Unpack(_) => {}
                 Middleware::Id(_) => {}
                 Middleware::Filter(_) => {}
             }
@@ -234,8 +334,14 @@ kafka_to_nats:
         assert_config_values(&config);
     }
 
+    /// Every test that reads the `MQB__` namespace sees *all* of it, so two of them
+    /// running at once would each pick up the other's routes — and one's cleanup can
+    /// unset vars the other is still reading. Serialize them.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn test_deserialize_from_env() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         const VARS: [&str; 11] = [
             "MQB__KAFKA_TO_NATS__CONCURRENCY",
             "MQB__KAFKA_TO_NATS__INPUT__KAFKA__TOPIC",
