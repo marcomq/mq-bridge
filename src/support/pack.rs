@@ -550,7 +550,10 @@ mod tests {
         let mut packed = packer().pack(&[message("x", &[])]).to_vec();
         packed[5] = 42;
         let error = unpack(PackFormat::Mqb, &packed.into(), &UnpackLimits::default()).unwrap_err();
-        assert!(error.to_string().contains("reserved header byte"), "{error}");
+        assert!(
+            error.to_string().contains("reserved header byte"),
+            "{error}"
+        );
     }
 
     /// A bogus count must not drive a huge allocation before the body is read.
@@ -608,7 +611,6 @@ mod tests {
             .is_err());
         }
     }
-
 }
 
 /// Round-trip properties of the envelope. `pack`/`unpack` sit between two

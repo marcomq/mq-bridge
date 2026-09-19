@@ -29,10 +29,12 @@
 //!
 //! Run with: `cargo bench --bench pack_bench --features test-utils,compression`
 
+use bytes::Bytes;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use mq_bridge::models::{Compression, PackFormat, PackMiddleware};
-use mq_bridge::test_utils::bench::{compress_member, decompress_member, pack_batches, unpack_batch};
-use bytes::Bytes;
+use mq_bridge::test_utils::bench::{
+    compress_member, decompress_member, pack_batches, unpack_batch,
+};
 use mq_bridge::CanonicalMessage;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -79,8 +81,7 @@ fn decode_individually(wire: &[(Vec<u8>, Bytes)]) -> usize {
     let mut count = 0;
     for (meta, payload) in wire {
         let mut message = CanonicalMessage::new_bytes(payload.clone(), None);
-        message.metadata =
-            serde_json::from_slice(meta).expect("metadata frame parses");
+        message.metadata = serde_json::from_slice(meta).expect("metadata frame parses");
         count += message.metadata.len();
     }
     count
@@ -154,7 +155,9 @@ fn decompress_then_unpack(algorithm: Compression, wire: &[Bytes]) -> usize {
         } else {
             Bytes::from(decompress_member(algorithm, batch).expect("decompresses"))
         };
-        count += unpack_batch(PackFormat::Mqb, &plain).expect("unpacks").len();
+        count += unpack_batch(PackFormat::Mqb, &plain)
+            .expect("unpacks")
+            .len();
     }
     count
 }

@@ -798,9 +798,7 @@ mod tests {
         let recording = RecordingPublisher::default();
         let publisher = PackPublisher::new(
             Box::new(CompressionPublisher::new(
-                Box::new(
-                    EncryptionPublisher::new(Box::new(recording.clone()), &cipher).unwrap(),
-                ),
+                Box::new(EncryptionPublisher::new(Box::new(recording.clone()), &cipher).unwrap()),
                 &codec,
             )),
             &pack_config(1000, 1 << 20),
@@ -810,7 +808,11 @@ mod tests {
 
         let wire = recording.sent.lock().unwrap().clone();
         assert_eq!(wire.len(), 1, "200 rows leave as one physical message");
-        assert_ne!(&wire[0].payload[..4], b"MQB1", "the envelope is not on the wire");
+        assert_ne!(
+            &wire[0].payload[..4],
+            b"MQB1",
+            "the envelope is not on the wire"
+        );
 
         // Input `[unpack, compression, encryption]` — the mirror.
         let mut consumer = UnpackConsumer::new(
