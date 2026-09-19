@@ -942,6 +942,8 @@ jobs:
     permissions:
       contents: read
     uses: ./.github/workflows/build-node.yml
+    with:
+      ref: ${{ needs.metadata.outputs.release_tag }}
 
   build-python-packages:
     name: Build Python Packages
@@ -1016,11 +1018,11 @@ jobs:
           fi
           pipx install --include-deps anaconda-client
           find conda-packages -type f -name '*.conda' -print0 \
-            | xargs -0 anaconda --token "$ANACONDA_API_TOKEN" upload --user marcomq --label main
+            | xargs -0 anaconda upload --user marcomq --label main
 
   publish-node:
     name: Publish Node Packages
-    needs: [build-node-packages, publish-release]
+    needs: [metadata, build-node-packages, publish-release]
     if: >-
       ${{ !cancelled() && !inputs.skip_npm
           && needs.build-node-packages.result == 'success'
@@ -1029,6 +1031,8 @@ jobs:
       contents: read
       id-token: write
     uses: ./.github/workflows/publish-node.yml
+    with:
+      ref: ${{ needs.metadata.outputs.release_tag }}
     secrets: inherit
 
   # The upload stays here, not in publish-python.yml: attestations are signed
