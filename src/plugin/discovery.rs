@@ -330,10 +330,14 @@ mod tests {
             "/usr/local/lib",
             "/usr/local/lib/mq-bridge",
         ] {
+            // `Path`, not the raw string: a joined directory spells its
+            // separator the platform's way.
+            let once = Path::new(once);
             assert_eq!(
-                dirs.iter().filter(|d| d.as_os_str() == once).count(),
+                dirs.iter().filter(|d| d.as_path() == once).count(),
                 1,
-                "{once} in {dirs:?}"
+                "{} in {dirs:?}",
+                once.display()
             );
         }
     }
