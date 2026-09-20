@@ -51,19 +51,43 @@ jobs:
       # rdkafka builds librdkafka from source (cc/make) and aws-lc-sys needs
       # cmake; the slim node image lacks these.
       - name: Install build toolchain
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
+          set -u
+          pkgs="build-essential cmake perl pkg-config"
+          apt_try() {
+            # deb.debian.org fronts the archive with Fastly, and an edge can
+            # negatively cache a pool object for days while the index correctly
+            # lists it (libarchive13 404 => no cmake). No-Cache makes the edge
+            # revalidate instead of replaying that cached 404.
+            apt-get update -qq "$@" \
+              && apt-get install -y --no-install-recommends \
+                   -o Acquire::Retries=3 \
+                   -o Acquire::http::No-Cache=true \
+                   "$@" $pkgs
+          }
           for attempt in 1 2 3; do
-            if apt-get update -qq \
-              && apt-get install -y --no-install-recommends build-essential cmake perl pkg-config; then
-              exit 0
-            fi
-            # A CDN edge can serve a bullseye index listing a .deb the pool has
-            # already rotated out (404). Dropping the lists forces a fresh index.
+            apt_try && exit 0
             echo "toolchain install failed (attempt $attempt); refreshing apt lists"
             rm -rf /var/lib/apt/lists/*
             sleep 20
           done
-          exit 1
+          # snapshot.debian.org is a separate, non-CDN host serving immutable
+          # archives, so it cannot be holding the same poisoned edge. Its
+          # Release files are older than Valid-Until allows, hence the override.
+          echo "toolchain install still failing; falling back to snapshot.debian.org"
+          snap=http://snapshot.debian.org/archive
+          stamp=20260901T000000Z
+          mkdir -p /etc/apt/sources.list.d.disabled
+          mv /etc/apt/sources.list.d/* /etc/apt/sources.list.d.disabled/ 2>/dev/null || true
+          {
+            echo "deb $snap/debian/$stamp bullseye main"
+            echo "deb $snap/debian-security/$stamp bullseye-security main"
+            echo "deb $snap/debian/$stamp bullseye-updates main"
+          } > /etc/apt/sources.list
+          rm -rf /var/lib/apt/lists/*
+          apt_try -o Acquire::Check-Valid-Until=false
 
       - name: Install Rust toolchain
         run: |

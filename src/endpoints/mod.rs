@@ -51,16 +51,16 @@ use crate::endpoints::memory::{get_or_create_channel, MemoryChannel};
 /// directly under `endpoints`. Prefer `endpoints::structural::*`.
 #[doc(hidden)]
 pub use crate::endpoints::structural::{
-    fanout, null, reader, request, response, static_endpoint, stream_buffer, switch,
+    fanout, null, reader, request, response, sequence, static_endpoint, stream_buffer, switch,
 };
 use crate::middleware::apply_middlewares_to_consumer;
 use crate::models::{
-    Endpoint, EndpointType, MemoryConfig, Middleware, NameBy, ResponseConfig, SpoolDone,
-    StreamBufferConfig, TransformErrorPolicy,
+    Endpoint, EndpointType, MemoryConfig, Middleware, NameBy, ResponseConfig, SequenceConfig,
+    SpoolDone, StreamBufferConfig, TransformErrorPolicy,
 };
 use crate::route::{get_endpoint, get_endpoint_factory};
-use crate::traits::{BoxFuture, MessageConsumer, MessagePublisher};
-use anyhow::{anyhow, Result};
+use crate::traits::{BoxFuture, CustomEndpointFactory, MessageConsumer, MessagePublisher};
+use anyhow::{anyhow, Context, Result};
 use std::sync::Arc;
 
 impl Endpoint {
@@ -501,6 +501,17 @@ fn check_consumer_recursive(
                     "postgres_cdc consumer requires a 'publication' (defines which tables are captured)."
                 ));
             }
+            // Same reason `sequence` refuses it: the slot is dropped when the route stops, so a
+            // restart would resume with no retained WAL and skip the backfill's changes.
+            if cfg.resolved_consume() == crate::models::PostgresConsume::CaptureAll
+                && cfg.temporary_slot
+            {
+                return Err(anyhow!(
+                    "postgres_cdc `consume: capture_all` cannot use temporary_slot: true — the \
+                     slot must outlive the backfill for the handover to be gapless. Set \
+                     temporary_slot: false."
+                ));
+            }
             Ok(warnings)
         }
         #[cfg(feature = "sled")]
@@ -567,6 +578,18 @@ fn check_consumer_recursive(
         #[cfg(feature = "websocket")]
         EndpointType::WebSocket(_) => Ok(warnings),
         EndpointType::Custom { .. } => Ok(warnings),
+        EndpointType::Sequence(cfg) => {
+            check_sequence(route_name, cfg)?;
+            for endpoint in &cfg.endpoints {
+                warnings.extend(check_consumer_recursive(
+                    route_name,
+                    endpoint,
+                    depth + 1,
+                    allowed_types,
+                )?);
+            }
+            Ok(warnings)
+        }
         EndpointType::Switch(_) => Err(anyhow!(
             "[route:{}] Switch endpoint is only supported as an output",
             route_name
@@ -590,6 +613,87 @@ fn check_consumer_recursive(
             ))
         }
     }
+}
+
+/// Config-only checks for a `sequence` input, run before anything connects.
+fn check_sequence(route_name: &str, cfg: &SequenceConfig) -> Result<()> {
+    if cfg.endpoints.is_empty() {
+        return Err(anyhow!(
+            "[route:{route_name}] sequence needs at least one endpoint"
+        ));
+    }
+    if cfg.cursor_id.is_some() != cfg.checkpoint_store.is_some() {
+        return Err(anyhow!(
+            "[route:{route_name}] sequence needs both cursor_id and checkpoint_store to persist \
+             its phase marker, or neither"
+        ));
+    }
+    // A phase that is handed to later must survive the phases before it. A Postgres
+    // temporary slot is dropped when the route stops, so a restart would resume with no
+    // retained WAL and silently skip every change made during the snapshot.
+    #[cfg(feature = "postgres-cdc")]
+    for endpoint in cfg.endpoints.iter().skip(1) {
+        if let EndpointType::PostgresCdc(pg) = &endpoint.endpoint_type {
+            if pg.temporary_slot {
+                return Err(anyhow!(
+                    "[route:{route_name}] postgres_cdc with temporary_slot: true cannot follow \
+                     another phase in a sequence — the slot is dropped when the route stops, so a \
+                     restart loses every change made while the earlier phase ran. Set \
+                     temporary_slot: false."
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Makes the position `endpoint` will later resume from durable *now*, without consuming
+/// anything, so nothing is lost between an earlier phase and this one.
+///
+/// Called by `sequence` on every phase after the first, before the earlier phases read.
+/// Endpoints with nothing to pin — a plain table scan, a file, a queue — are a no-op.
+pub(crate) async fn pin_resume_position(route_name: &str, endpoint: &Endpoint) -> Result<()> {
+    let resolved = resolve_endpoint(endpoint, route_name)?;
+
+    #[cfg(feature = "postgres-cdc")]
+    {
+        // The slot is what retains WAL. Creating it before the snapshot runs is the whole
+        // mechanism: replication later resumes from the slot's own consistent point, which
+        // is this moment, so changes made during the snapshot are still on the server.
+        let cdc = match &resolved.endpoint_type {
+            EndpointType::PostgresCdc(cfg) => Some(std::borrow::Cow::Borrowed(cfg)),
+            #[cfg(feature = "sqlx")]
+            EndpointType::Sqlx(cfg) if cfg.publication.is_some() => {
+                Some(std::borrow::Cow::Owned(sqlx_cfg_to_cdc(cfg)?))
+            }
+            _ => None,
+        };
+        if let Some(cfg) = cdc {
+            postgres::replication::ensure_slot(
+                &cfg.url,
+                &cfg.slot_name,
+                cfg.create_slot,
+                cfg.temporary_slot,
+                &cfg.tls,
+            )
+            .await
+            .map_err(|e| {
+                anyhow!(
+                    "[route:{route_name}] could not pin the postgres_cdc resume position before \
+                     the earlier phases run: {e}"
+                )
+            })?;
+            tracing::info!(
+                route = %route_name,
+                slot = %cfg.slot_name,
+                "pinned postgres_cdc resume position; the slot now retains WAL"
+            );
+            return Ok(());
+        }
+    }
+
+    let _ = &resolved;
+    Ok(())
 }
 
 fn resolve_endpoint(endpoint: &Endpoint, route_name: &str) -> Result<Endpoint> {
@@ -639,6 +743,120 @@ fn resolve_endpoint_recursive(
     }
 }
 
+/// Builds the consumer for a `postgres_cdc` endpoint, desugaring `capture_all` / `snapshot`
+/// onto a `sequence` of per-table backfill phases.
+///
+/// The backfill is the existing `sqlx` cursor reader, one phase per published table, so
+/// nothing about paging or resuming is reimplemented here. `capture_all` appends the CDC
+/// phase, which `sequence` pins — creating the replication slot — before any backfill runs.
+#[cfg(feature = "postgres-cdc")]
+async fn postgres_cdc_consumer(
+    route_name: &str,
+    cfg: &crate::models::PostgresCdcConfig,
+    source_metadata: bool,
+) -> Result<Box<dyn MessageConsumer>> {
+    use crate::models::PostgresConsume;
+
+    let mode = cfg.resolved_consume();
+    if mode == PostgresConsume::CaptureNew {
+        return Ok(Box::new(
+            postgres::PostgresCdcConsumer::new_with_source_metadata(cfg, source_metadata).await?,
+        ));
+    }
+    let plan = postgres_backfill_sequence(route_name, cfg, mode, source_metadata).await?;
+    Ok(Box::new(
+        sequence::SequenceConsumer::new(route_name, &plan).await?,
+    ))
+}
+
+/// The `sequence` a `capture_all` / `snapshot` `postgres_cdc` endpoint expands to.
+#[cfg(all(feature = "postgres-cdc", feature = "sqlx"))]
+async fn postgres_backfill_sequence(
+    route_name: &str,
+    cfg: &crate::models::PostgresCdcConfig,
+    mode: crate::models::PostgresConsume,
+    source_metadata: bool,
+) -> Result<SequenceConfig> {
+    use crate::models::PostgresConsume;
+
+    // The publication has to exist before it can be asked which tables it covers, and in
+    // `capture_all` the CDC phase that would create it runs last.
+    if cfg.create_publication {
+        postgres::replication::ensure_publication(
+            &cfg.url,
+            &cfg.publication,
+            &cfg.publication_tables,
+            &cfg.tls,
+        )
+        .await?;
+    }
+
+    let tables = postgres::replication::snapshot_tables(&cfg.url, &cfg.publication, &cfg.tls)
+        .await
+        .map_err(|e| anyhow!("[route:{route_name}] {e}"))?;
+
+    let mut endpoints = Vec::with_capacity(tables.len() + 1);
+    for table in &tables {
+        if source_metadata && !table.key_is_integer {
+            return Err(anyhow!(
+                "[route:{route_name}] cannot back fill {} with source positions — its primary \
+                 key `{}` is not an integer, and a source position needs a unique integer \
+                 cursor. Drop source_metadata, or spell the backfill out as a `sequence` input.",
+                table.qualified(),
+                table.key
+            ));
+        }
+        endpoints.push(Endpoint::new(EndpointType::Sqlx(
+            crate::models::SqlxConfig {
+                url: cfg.url.clone(),
+                table: table.qualified(),
+                cursor_column: Some(table.key.clone()),
+                // Per table, so each backfill phase resumes on its own.
+                cursor_id: cfg
+                    .cursor_id
+                    .as_ref()
+                    .map(|id| format!("{id}_{}_{}", table.schema, table.table)),
+                checkpoint_store: cfg.checkpoint_store.clone(),
+                source_metadata,
+                tls: cfg.tls.clone(),
+                ..Default::default()
+            },
+        )));
+    }
+
+    if mode == PostgresConsume::CaptureAll {
+        let mut cdc = cfg.clone();
+        // Pinned to `capture_new` so expanding this endpoint cannot recurse.
+        cdc.consume = Some(PostgresConsume::CaptureNew);
+        endpoints.push(Endpoint::new(EndpointType::PostgresCdc(cdc)));
+    }
+
+    // `sequence` wants both halves of the marker or neither; `postgres_cdc` allows a
+    // cursor_id on its own, so only pass them through as a pair.
+    let (cursor_id, checkpoint_store) = match (&cfg.cursor_id, &cfg.checkpoint_store) {
+        (Some(id), Some(store)) => (Some(id.clone()), Some(store.clone())),
+        _ => (None, None),
+    };
+    Ok(SequenceConfig {
+        endpoints,
+        cursor_id,
+        checkpoint_store,
+    })
+}
+
+#[cfg(all(feature = "postgres-cdc", not(feature = "sqlx")))]
+async fn postgres_backfill_sequence(
+    route_name: &str,
+    _cfg: &crate::models::PostgresCdcConfig,
+    _mode: crate::models::PostgresConsume,
+    _source_metadata: bool,
+) -> Result<SequenceConfig> {
+    Err(anyhow!(
+        "[route:{route_name}] postgres_cdc `consume: capture_all`/`snapshot` backfills through the \
+         `sqlx` cursor reader, so it needs the 'sqlx' feature enabled"
+    ))
+}
+
 /// Map a `sqlx` consumer config that requested CDC (via `publication`) onto a
 /// `PostgresCdcConfig`, so a Postgres `sqlx` endpoint can transparently fall back
 /// to logical-replication CDC. Postgres-only; other drivers error.
@@ -662,6 +880,7 @@ fn sqlx_cfg_to_cdc(
     Ok(crate::models::PostgresCdcConfig {
         url: cfg.url.clone(),
         publication: cfg.publication.clone().unwrap_or_default(),
+        consume: None,
         source_metadata: false,
         slot_name: cfg
             .slot_name
@@ -1276,6 +1495,44 @@ async fn run_http_inline_response_fast_path(
 /// NATS and AMQP consumers, which stamp provenance that is not a replay position. The other
 /// branches ignore the flag. Startup only rejects an input for missing replay positions when
 /// `source_metadata_required` is set.
+/// Resolves a `custom` endpoint name, loading an installed plugin that provides
+/// it when no factory is registered under the name yet.
+fn custom_endpoint_factory(name: &str) -> Result<Arc<dyn CustomEndpointFactory>> {
+    if let Some(factory) = get_endpoint_factory(name) {
+        return Ok(factory);
+    }
+    if let Some(factory) = discover_custom_endpoint(name)? {
+        return Ok(factory);
+    }
+    Err(anyhow!(
+        "Custom endpoint factory '{name}' not found{}",
+        custom_endpoint_hint(name)
+    ))
+}
+
+#[cfg(feature = "plugin")]
+fn discover_custom_endpoint(name: &str) -> Result<Option<Arc<dyn CustomEndpointFactory>>> {
+    if crate::plugin::discover_endpoint_plugin(name)?.is_none() {
+        return Ok(None);
+    }
+    Ok(get_endpoint_factory(name))
+}
+
+#[cfg(not(feature = "plugin"))]
+fn discover_custom_endpoint(_name: &str) -> Result<Option<Arc<dyn CustomEndpointFactory>>> {
+    Ok(None)
+}
+
+#[cfg(feature = "plugin")]
+fn custom_endpoint_hint(name: &str) -> String {
+    format!(": {}", crate::plugin::search_path_hint(name))
+}
+
+#[cfg(not(feature = "plugin"))]
+fn custom_endpoint_hint(_name: &str) -> String {
+    String::new()
+}
+
 async fn create_base_consumer(
     route_name: &str,
     endpoint: &Endpoint,
@@ -1420,9 +1677,9 @@ async fn create_base_consumer(
             }
         }
         #[cfg(feature = "postgres-cdc")]
-        EndpointType::PostgresCdc(cfg) => Ok(boxed(
-            postgres::PostgresCdcConsumer::new_with_source_metadata(cfg, _source_metadata).await?,
-        )),
+        EndpointType::PostgresCdc(cfg) => {
+            postgres_cdc_consumer(route_name, cfg, _source_metadata).await
+        }
         #[cfg(feature = "http")]
         EndpointType::Http(cfg) => Ok(boxed(http::HttpConsumer::new(cfg).await?)),
         #[cfg(feature = "websocket")]
@@ -1432,6 +1689,9 @@ async fn create_base_consumer(
         EndpointType::StreamBuffer(cfg) => {
             Ok(boxed(stream_buffer::StreamBufferConsumer::new(cfg)?))
         }
+        EndpointType::Sequence(cfg) => Ok(boxed(
+            sequence::SequenceConsumer::new(route_name, cfg).await?,
+        )),
         #[cfg(feature = "sled")]
         EndpointType::Sled(cfg) => Ok(boxed(sled::SledConsumer::new(cfg)?)),
         #[cfg(feature = "mongodb")]
@@ -1495,8 +1755,9 @@ async fn create_base_consumer(
             }
         }
         EndpointType::Custom { name, config } => {
-            let factory = get_endpoint_factory(name)
-                .ok_or_else(|| anyhow!("Custom endpoint factory '{}' not found", name))?;
+            let factory = custom_endpoint_factory(name)?;
+            crate::support::config_schema::check_endpoint_config(name, config)
+                .with_context(|| format!("[route:{route_name}]"))?;
             factory.create_consumer(route_name, config).await
         }
         EndpointType::Switch(_) => Err(anyhow!(
@@ -1939,6 +2200,10 @@ fn check_publisher_recursive(
         }
         EndpointType::Response(_) => Ok(warnings),
         EndpointType::Custom { .. } => Ok(warnings),
+        EndpointType::Sequence(_) => Err(anyhow!(
+            "[route:{}] Sequence endpoint is only supported as an input",
+            route_name
+        )),
         EndpointType::Reader(inner) => check_consumer(route_name, inner, allowed_types),
         EndpointType::Request(cfg) => {
             warnings.extend(check_publisher_recursive(
@@ -2339,8 +2604,9 @@ async fn create_base_publisher(
             )
         }
         EndpointType::Custom { name, config } => {
-            let factory = get_endpoint_factory(name)
-                .ok_or_else(|| anyhow!("Custom endpoint factory '{}' not found", name))?;
+            let factory = custom_endpoint_factory(name)?;
+            crate::support::config_schema::check_endpoint_config(name, config)
+                .with_context(|| format!("[route:{route_name}]"))?;
             factory.create_publisher(route_name, config).await
         }
         #[allow(unreachable_patterns)]

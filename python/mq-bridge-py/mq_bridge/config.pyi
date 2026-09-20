@@ -162,6 +162,7 @@ class Endpoint(TypedDict, total=False):
     ref: str
     request: RequestForwardConfig
     response: ResponseConfig
+    sequence: SequenceConfig
     sled: SledConfig
     sqlx: SqlxConfig
     static: StaticConfig
@@ -425,6 +426,7 @@ class PackMiddleware(TypedDict, total=False):
 class PostgresCdcConfig(TypedDict, total=False):
     """Postgres logical-replication CDC source (pgoutput). Source-only."""
     checkpoint_store: Optional[str]
+    consume: Optional[PostgresConsume]
     create_publication: bool
     create_slot: bool
     cursor_id: Optional[str]
@@ -494,6 +496,13 @@ class Route(TypedDict, total=False):
     output: Optional[Endpoint]
     reconnect_interval_ms: int
     startup_timeout_ms: int
+
+
+class SequenceConfig(TypedDict, total=False):
+    """Reads several input endpoints one after another: each is drained before the next"""
+    checkpoint_store: Optional[str]
+    cursor_id: Optional[str]
+    endpoints: Required[List[Endpoint]]
 
 
 class SledConfig(TypedDict, total=False):
@@ -631,6 +640,7 @@ MqttProtocol = Literal["v5", "v3"]
 NameBy = Literal["auto", "source_position", "write_time"]
 NatsDeliverPolicy = Literal["all", "last", "new", "last_per_subject"]
 PackFormat = Literal["mqb", "benthos_binary"]
+PostgresConsume = Literal["capture_new", "capture_all", "snapshot"]
 SpoolClaim = Literal["exclusive", "warn", "off"]
 SpoolDone = Literal["never", "success", "end"]
 SpoolFsync = Literal["chunk", "off"]

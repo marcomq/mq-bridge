@@ -24,10 +24,15 @@
 //!     config: { url: "pulsar://localhost:6650" }
 //! ```
 //!
-//! Loading is explicit and never implicit: installing a package does not
-//! register anything. It is also permanent — a loaded library is kept for the
-//! life of the process, because unloading while endpoint handles or in-flight
-//! batches still exist cannot be made safe.
+//! A plugin is also found by the name a route asks for, without being listed
+//! anywhere: `custom: { name: pulsar }` with no `pulsar` factory registered
+//! looks for `libmq_bridge_pulsar` on the search path. Only the requested name
+//! is ever looked up, so installing a library does not by itself load it. See
+//! [`discovery`].
+//!
+//! Loading is permanent — a loaded library is kept for the life of the process,
+//! because unloading while endpoint handles or in-flight batches still exist
+//! cannot be made safe.
 //!
 //! Plugins are native code with the full privileges of the host process. Treat
 //! them like any other native dependency, not like sandboxed scripts.
@@ -35,9 +40,14 @@
 //! Endpoint authors do not implement [`crate::support::plugin_abi`] by hand:
 //! enable the `plugin-sdk` feature and use [`export_endpoint_plugin!`](crate::export_endpoint_plugin)
 //! from [`sdk`], then check the result with [`conformance`].
+//!
+//! A plugin may also describe its configuration as a JSON Schema, which is what
+//! lets a host render a form for it and turn a URI into typed configuration.
+//! See [`crate::support::config_schema`].
 
 #[cfg(feature = "plugin-sdk")]
 pub mod conformance;
+pub mod discovery;
 mod endpoint;
 mod message;
 mod middleware;
@@ -52,7 +62,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::support::plugin_abi::{
     check_compatibility, MqbBuffer, MqbFactoryHandle, MqbPluginEntry, MqbPluginVTable, MQB_OK,
-    MQB_PLUGIN_ENTRY_SYMBOL,
+    MQB_PLUGIN_ENTRY_SYMBOL, MQB_SCHEMA_ENDPOINT, MQB_SCHEMA_MIDDLEWARE,
 };
 use anyhow::{anyhow, Context};
 
@@ -61,6 +71,13 @@ use crate::extensions::{
     register_middleware_factory, unregister_endpoint_factory,
 };
 
+pub use crate::support::config_schema::{
+    endpoint_uri_schema, UriPosition, UriSchema, URI_ANNOTATION,
+};
+pub use discovery::{
+    discover_endpoint_plugin, discover_endpoint_plugin_in, discovery_enabled, library_file_name,
+    plugin_search_path, search_path_hint,
+};
 pub use endpoint::PluginEndpointFactory;
 pub use middleware::PluginMiddlewareFactory;
 
@@ -83,6 +100,32 @@ pub struct PluginInfo {
     pub supports_middleware: bool,
     /// Resolved path of the loaded library.
     pub path: PathBuf,
+    /// JSON Schema of the endpoint's `config` object, as the plugin described
+    /// it. Kept as text because that is what crossed the ABI; parse it with
+    /// [`PluginInfo::endpoint_schema`].
+    pub config_schema: Option<String>,
+    /// JSON Schema of the middleware's `config` object. See
+    /// [`PluginInfo::config_schema`].
+    pub middleware_config_schema: Option<String>,
+}
+
+impl PluginInfo {
+    /// The endpoint's configuration schema, parsed.
+    ///
+    /// Validated at load time, so this only returns `None` when the plugin
+    /// described nothing.
+    pub fn endpoint_schema(&self) -> Option<serde_json::Value> {
+        self.config_schema
+            .as_deref()
+            .and_then(|text| serde_json::from_str(text).ok())
+    }
+
+    /// The middleware's configuration schema, parsed.
+    pub fn middleware_schema(&self) -> Option<serde_json::Value> {
+        self.middleware_config_schema
+            .as_deref()
+            .and_then(|text| serde_json::from_str(text).ok())
+    }
 }
 
 /// A loaded plugin library plus the factory created from it.
@@ -120,6 +163,29 @@ impl LoadedPlugin {
     pub(crate) fn take_error(&self, buffer: MqbBuffer) -> String {
         if buffer.is_empty() {
             return "plugin reported no error message".to_string();
+        }
+        // Safety: the plugin owns the buffer until it is handed back below.
+        let text = unsafe { String::from_utf8_lossy(buffer.as_bytes()).into_owned() };
+        unsafe { (self.table().buffer_free)(buffer) };
+        text
+    }
+
+    /// Consumes a buffer whose bytes have to be text, rather than repairing
+    /// them: a schema silently mangled into replacement characters still parses.
+    pub(crate) fn take_buffer_utf8(&self, buffer: MqbBuffer) -> anyhow::Result<String> {
+        if buffer.is_empty() {
+            return Ok(String::new());
+        }
+        // Safety: the plugin owns the buffer until it is handed back below.
+        let text = unsafe { std::str::from_utf8(buffer.as_bytes()).map(str::to_owned) };
+        unsafe { (self.table().buffer_free)(buffer) };
+        text.map_err(|e| anyhow!("it returned a buffer that is not UTF-8: {e}"))
+    }
+
+    /// Consumes a buffer the plugin filled on success and returns its text.
+    pub(crate) fn take_buffer(&self, buffer: MqbBuffer) -> String {
+        if buffer.is_empty() {
+            return String::new();
         }
         // Safety: the plugin owns the buffer until it is handed back below.
         let text = unsafe { String::from_utf8_lossy(buffer.as_bytes()).into_owned() };
@@ -260,7 +326,7 @@ fn open_plugin(path: &Path) -> anyhow::Result<LoadedPlugin> {
     let mut error = MqbBuffer::EMPTY;
     let status = unsafe { (table_ref.factory_create)(&mut factory, &mut error) };
 
-    let plugin = LoadedPlugin {
+    let mut plugin = LoadedPlugin {
         _library: library,
         table,
         factory,
@@ -279,6 +345,8 @@ fn open_plugin(path: &Path) -> anyhow::Result<LoadedPlugin> {
                 & crate::support::plugin_abi::MQB_CAP_MIDDLEWARE
                 != 0,
             path: path.to_path_buf(),
+            config_schema: None,
+            middleware_config_schema: None,
         },
     };
     if status != MQB_OK {
@@ -294,7 +362,39 @@ fn open_plugin(path: &Path) -> anyhow::Result<LoadedPlugin> {
             path.display()
         ));
     }
+
+    // Needs the factory, so it cannot happen before the checks above.
+    plugin.info.config_schema = read_config_schema(&plugin, MQB_SCHEMA_ENDPOINT)
+        .with_context(|| format!("plugin {} describes its endpoint badly", path.display()))?;
+    plugin.info.middleware_config_schema = read_config_schema(&plugin, MQB_SCHEMA_MIDDLEWARE)
+        .with_context(|| format!("plugin {} describes its middleware badly", path.display()))?;
     Ok(plugin)
+}
+
+/// Asks a plugin for one configuration schema, and refuses one the host cannot use.
+///
+/// A schema is read once, here, rather than wherever a form or a URI needs it:
+/// a plugin that describes itself wrongly should fail to load, not fail later at
+/// whichever call site happened to look first.
+fn read_config_schema(plugin: &LoadedPlugin, kind: u32) -> anyhow::Result<Option<String>> {
+    let Some(hook) = plugin.table().config_schema_hook() else {
+        return Ok(None);
+    };
+    let mut schema = MqbBuffer::EMPTY;
+    let mut error = MqbBuffer::EMPTY;
+    let status = unsafe { hook(plugin.factory, kind, &mut schema, &mut error) };
+    if status != MQB_OK {
+        plugin.take_buffer(schema);
+        return Err(anyhow!("{}", plugin.take_error(error)));
+    }
+    if schema.is_empty() {
+        return Ok(None);
+    }
+    let text = plugin.take_buffer_utf8(schema)?;
+    let parsed: serde_json::Value = serde_json::from_str(&text)
+        .with_context(|| format!("the schema it returned is not JSON: {text}"))?;
+    crate::support::config_schema::validate(&parsed)?;
+    Ok(Some(text))
 }
 
 fn read_static_str(

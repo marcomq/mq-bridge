@@ -968,6 +968,8 @@ async fn run_copy(args: CopyArgs, stop_when: StopWhen) -> anyhow::Result<()> {
     } else {
         None
     };
+    // The label names the steady-state source, not the `sequence` wrapper below.
+    let input_endpoint_label = endpoint_type_label(&input.endpoint_type);
     // Attached outside every other source middleware, so it sees only what the
     // whole chain let through — past the filter below and past any URI-configured
     // `transform` that rejects rows: what was copied.
@@ -980,7 +982,6 @@ async fn run_copy(args: CopyArgs, stop_when: StopWhen) -> anyhow::Result<()> {
     // making the copy any slower, and rating the surviving rows against the time
     // spent reading every row reports that as a slowdown.
     let read = copy_pipeline::configure_counter(&mut input)?;
-    let input_endpoint_label = endpoint_type_label(&input.endpoint_type);
     let output_endpoint_label = endpoint_type_label(&output.endpoint_type);
     // `FirstMessage` deliberately does not drain: a drained route releases the
     // source, and reacquiring it between polls is what opens the window a second
@@ -1528,34 +1529,36 @@ fn middleware_from_spec(spec: &str) -> anyhow::Result<mq_bridge::models::Middlew
         .with_context(|| format!("could not build a '{tag}' middleware from '{spec}'"))
 }
 
+/// The extension endpoints this build compiled in, for the unsupported-scheme
+/// message, so it never names one this binary does not have.
+fn extension_schemes() -> String {
+    let mut names = Vec::new();
+    if cfg!(feature = "pulsar") {
+        names.push("pulsar");
+    }
+    if cfg!(feature = "meilisearch") {
+        names.push("meilisearch");
+    }
+    if names.is_empty() {
+        return String::new();
+    }
+    format!(" ({})", names.join(", "))
+}
+
 /// Builds a `custom` endpoint for a scheme that names a registered factory.
 ///
-/// The factory owns its config shape and the CLI has no schema for it, so the
-/// mapping stays literal: `url` is the URI up to the query (the plugin defined
-/// that format, so it is passed through rather than normalised) and every query
-/// param becomes a string field. A `?url=` param overrides the derived one.
-/// Values stay strings — guessing types here would silently turn an id like
-/// `0123` into a number; a factory needing typed fields takes them from config.
-fn custom_endpoint_from_uri(
-    name: &str,
-    parsed: &url::Url,
-    uri: &str,
-) -> anyhow::Result<mq_bridge::models::Endpoint> {
+/// The factory owns its config shape, so the mapping comes from the JSON Schema
+/// it declares: which field takes the address, which takes the path, and what
+/// type each query param is read as. A factory that declares nothing keeps the
+/// mapping that predates schemas — `url` is the URI up to the query and every
+/// query param is a string, since guessing a type there would silently turn an
+/// id like `0123` into a number.
+fn custom_endpoint_from_uri(name: &str, uri: &str) -> anyhow::Result<mq_bridge::models::Endpoint> {
     use mq_bridge::models::{Endpoint, EndpointType};
 
-    let mut config = serde_json::Map::new();
-    let mut url = uri.split('?').next().unwrap_or(uri).to_string();
-    for (key, value) in parsed.query_pairs() {
-        if key == "url" {
-            url = value.into_owned();
-        } else {
-            config.insert(
-                key.into_owned(),
-                serde_json::Value::String(value.into_owned()),
-            );
-        }
-    }
-    config.insert("url".into(), serde_json::Value::String(url));
+    let config = mq_bridge::plugin::endpoint_uri_schema(name)
+        .config_from_uri(uri)
+        .with_context(|| format!("endpoint '{name}' in URI '{uri}'"))?;
 
     Ok(Endpoint::new(EndpointType::Custom {
         name: name.to_string(),
@@ -1872,14 +1875,26 @@ fn base_endpoint_from_uri(uri: &str) -> anyhow::Result<mq_bridge::models::Endpoi
         "aws" | "aws-sqs" => ("aws", schema_fields(schemars::schema_for!(AwsConfig))),
         "zeromq" | "zmq" => ("zeromq", schema_fields(schemars::schema_for!(ZeroMqConfig))),
         // A scheme naming a registered endpoint — one compiled in as an extension
-        // (`pulsar`) or loaded with `--plugin` — is that endpoint. This mirrors the
-        // config path, where an unknown single key falls back to `custom`.
+        // or loaded with `--plugin` — is that endpoint. This mirrors the config
+        // path, where an unknown single key falls back to `custom`.
         other if mq_bridge::extensions::get_endpoint_factory(other).is_some() => {
-            return custom_endpoint_from_uri(other, &parsed, uri);
+            return custom_endpoint_from_uri(other, uri);
         }
-        other => bail!(
-            "unsupported endpoint scheme '{other}' in URI '{uri}'. Supported schemes: postgres, postgresql, mysql, mariadb, sqlite, nats, mongodb, redis, file, spool, kafka, mqtt, mqtts, amqp, amqps, rabbitmq, rabbitmqs, http, https, clickhouse, clickhouses, ws, wss, grpc, grpcs, ibmmq, aws, zeromq, zmq, s3, gs, az, abfs, and the structural memory, null, static, fanout, request, switch, response. A scheme may also name an endpoint registered by an extension (pulsar) or loaded with --plugin"
-        ),
+        other => {
+            // A URI names the endpoint before any route is built, so an
+            // installed plugin is searched for here as well as in the engine.
+            if mq_bridge::plugin::discover_endpoint_plugin(other)
+                .with_context(|| format!("endpoint scheme '{other}' in URI '{uri}'"))?
+                .is_some()
+            {
+                return custom_endpoint_from_uri(other, uri);
+            }
+            bail!(
+                "unsupported endpoint scheme '{other}' in URI '{uri}'. Supported schemes: postgres, postgresql, mysql, mariadb, sqlite, nats, mongodb, redis, file, spool, kafka, mqtt, mqtts, amqp, amqps, rabbitmq, rabbitmqs, http, https, clickhouse, clickhouses, ws, wss, grpc, grpcs, ibmmq, aws, zeromq, zmq, s3, gs, az, abfs, and the structural memory, null, static, fanout, request, switch, response. A scheme may also name an endpoint registered by an extension{}, loaded with --plugin, or installed on the plugin search path ({})",
+                extension_schemes(),
+                mq_bridge::plugin::search_path_hint(other),
+            )
+        }
     };
 
     // Split query params: recognised scalar config fields become endpoint config,
@@ -3126,6 +3141,7 @@ mod uri_tests {
     // address an extension or `--plugin` endpoint the URI parser knows nothing
     // about. `pulsar` is compiled in, so registering it is enough to exercise it.
     #[test]
+    #[cfg(feature = "pulsar")]
     fn registered_endpoint_scheme_builds_a_custom_endpoint() {
         mq_bridge_app::plugins::register_builtin_endpoints().unwrap();
 
@@ -3146,7 +3162,51 @@ mod uri_tests {
         assert_eq!(config["subscription"], "workers");
     }
 
+    // Meilisearch reaches `copy` the same way. Its crate normalizes the
+    // `meilisearch://` url to the HTTP one the server speaks, and accepts the
+    // string spelling of each scalar, which is all a query string can carry.
     #[test]
+    #[cfg(feature = "meilisearch")]
+    fn meilisearch_scheme_builds_a_custom_endpoint() {
+        mq_bridge_app::plugins::register_builtin_endpoints().unwrap();
+
+        let endpoint =
+            endpoint_from_uri("meilisearch://localhost:7700?index=orders&primary_key=id").unwrap();
+
+        let EndpointType::Custom { name, config } = endpoint.endpoint_type else {
+            panic!(
+                "expected a custom endpoint, got {:?}",
+                endpoint.endpoint_type
+            );
+        };
+        assert_eq!(name, "meilisearch");
+        assert_eq!(config["url"], "meilisearch://localhost:7700");
+        assert_eq!(config["index"], "orders");
+        assert_eq!(config["primary_key"], "id");
+    }
+
+    // Deliberately ungated: the features that name an extension here are this
+    // crate's, while the one that compiles it in is the core crate's. A build
+    // enabling only the latter registers the endpoint but omits it from the
+    // error, and every gated test would still pass.
+    #[test]
+    fn every_registered_extension_is_named_in_the_scheme_error() {
+        mq_bridge_app::plugins::register_builtin_endpoints().unwrap();
+        let schemes = super::extension_schemes();
+
+        for name in ["pulsar", "meilisearch"] {
+            if super::mq_bridge::extensions::get_endpoint_factory(name).is_some() {
+                assert!(
+                    schemes.contains(name),
+                    "`{name}` is registered but missing from `{schemes}`: enable the \
+                     `{name}` feature of this crate alongside the core one"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "pulsar")]
     fn registered_endpoint_url_preserves_a_trailing_slash() {
         mq_bridge_app::plugins::register_builtin_endpoints().unwrap();
 
@@ -3349,6 +3409,41 @@ mod uri_tests {
 
         let cfg = config("zmq://127.0.0.1:5555", "zeromq");
         assert_eq!(cfg["url"], "tcp://127.0.0.1:5555");
+    }
+
+    // `consume: capture_all` is the documented way to back fill a CDC source, so it has to
+    // be reachable from a URI on both CDC endpoints.
+    #[test]
+    fn both_cdc_endpoints_take_consume_capture_all_from_a_uri() {
+        let cfg = config(
+            "postgres-cdc://u:p@host:5432/db?publication=mqb_pub&consume=capture_all",
+            "postgres_cdc",
+        );
+        assert_eq!(cfg["consume"], "capture_all");
+
+        // Mongo takes the database as a query param; the path stays part of the connection URL.
+        let cfg = config(
+            "mongodb://host:27017/?database=shop&collection=orders&consume=capture_all",
+            "mongodb",
+        );
+        assert_eq!(cfg["consume"], "capture_all");
+    }
+
+    /// An unknown scheme is often a plugin that is not installed yet, so the error
+    /// has to name the file to install and where it looked — listing the built-in
+    /// schemes alone sends the reader looking for a typo that is not there.
+    #[test]
+    fn an_unknown_scheme_names_the_plugin_file_it_looked_for() {
+        let error = endpoint_from_uri("nosuchthing://host/orders")
+            .map(|_| ())
+            .expect_err("an unknown scheme cannot resolve");
+        let message = format!("{error:#}");
+
+        assert!(message.contains("nosuchthing"), "{message}");
+        assert!(
+            message.contains(&super::mq_bridge::plugin::library_file_name("nosuchthing")),
+            "{message}"
+        );
     }
 }
 

@@ -129,27 +129,155 @@ pub fn app_config_schema() -> serde_json::Value {
             .insert("default".to_string(), default.clone());
     }
 
-    schema["$defs"]["PulsarConfig"] = serde_json::json!({
-        "type": "object",
-        "additionalProperties": false,
-        "properties": {
-            "url": { "type": "string" },
-            "topic": { "type": "string" },
-            "subscription": { "type": "string" }
-        },
-        "required": ["url"]
+    for (name, declared) in registered_endpoint_schemas() {
+        add_endpoint_definition(&mut schema, &name, declared);
+    }
+    schema
+}
+
+/// What every registered endpoint says about its own configuration.
+///
+/// `mq-bridge-pulsar` is an external crate that predates
+/// `CustomEndpointFactory::config_schema`, so its shape is described here —
+/// `or_insert_with`, so a later version declaring its own takes over.
+fn registered_endpoint_schemas() -> std::collections::BTreeMap<String, serde_json::Value> {
+    #[cfg_attr(not(feature = "pulsar"), allow(unused_mut))]
+    let mut schemas = mq_bridge::extensions::endpoint_config_schemas();
+    #[cfg(feature = "pulsar")]
+    schemas.entry("pulsar".to_string()).or_insert_with(|| {
+        serde_json::json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "url": { "type": "string" },
+                "topic": { "type": "string" },
+                "subscription": { "type": "string" }
+            },
+            "required": ["url"]
+        })
     });
+    schemas
+}
+
+/// Puts one endpoint's declared schema into the document and lists it as an
+/// `Endpoint` variant, which is what makes the UI offer it.
+fn add_endpoint_definition(schema: &mut serde_json::Value, name: &str, declared: serde_json::Value) {
+    let prefix = pascal_case(name);
+    // Claimed before lifting, so a nested definition cannot take the same key.
+    let definition = reserve_definition(schema, &format!("{prefix}Config"));
+    schema["$defs"][&definition] = lift_definitions(schema, &prefix, declared);
     schema["$defs"]["Endpoint"]["oneOf"]
         .as_array_mut()
         .expect("AppConfig schema should contain Endpoint variants")
         .push(serde_json::json!({
             "type": "object",
-            "properties": {
-                "pulsar": { "$ref": "#/$defs/PulsarConfig" }
-            },
-            "required": ["pulsar"]
+            "properties": { name: { "$ref": format!("#/$defs/{definition}") } },
+            "required": [name]
         }));
-    schema
+}
+
+/// Claims a free `$defs` key for `wanted`, suffixing it until it is unused.
+///
+/// An endpoint named after something the document already defines would
+/// otherwise redefine it; the placeholder holds the key until the real
+/// definition replaces it.
+fn reserve_definition(schema: &mut serde_json::Value, wanted: &str) -> String {
+    let mut key = wanted.to_string();
+    let mut next = 2;
+    while schema["$defs"].get(&key).is_some() {
+        key = format!("{wanted}{next}");
+        next += 1;
+    }
+    schema["$defs"][&key] = serde_json::Value::Null;
+    key
+}
+
+/// Moves a declared schema's own `$defs` into the document's, under names
+/// prefixed with the endpoint's, and rewrites the `$ref`s that pointed at them.
+///
+/// A derived schema carries definitions for its nested types, and two endpoints
+/// may well both have a `Tls` or an `Auth`. Prefixing is what keeps one from
+/// silently redefining the other's.
+fn lift_definitions(
+    schema: &mut serde_json::Value,
+    prefix: &str,
+    mut declared: serde_json::Value,
+) -> serde_json::Value {
+    // `$schema`/`$id` belong to a document, not to a subschema of one.
+    if let Some(object) = declared.as_object_mut() {
+        object.remove("$schema");
+        object.remove("$id");
+    }
+    let Some(own) = declared
+        .as_object_mut()
+        .and_then(|object| object.remove("$defs"))
+        .and_then(|defs| defs.as_object().cloned())
+    else {
+        return declared;
+    };
+
+    let renames: std::collections::BTreeMap<String, String> = own
+        .keys()
+        .map(|key| {
+            (
+                key.clone(),
+                reserve_definition(schema, &format!("{prefix}{key}")),
+            )
+        })
+        .collect();
+
+    for (key, definition) in &own {
+        schema["$defs"][&renames[key]] = rewrite_refs(definition, &renames);
+    }
+    rewrite_refs(&declared, &renames)
+}
+
+/// Repoints every `$ref` that named a lifted definition at its new key, leaving
+/// every other value — including a string that merely looks like one — alone.
+fn rewrite_refs(
+    value: &serde_json::Value,
+    renames: &std::collections::BTreeMap<String, String>,
+) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(members) => members
+            .iter()
+            .map(|(key, child)| {
+                let repointed = match (key.as_str(), child.as_str()) {
+                    ("$ref", Some(target)) => target
+                        .strip_prefix("#/$defs/")
+                        .and_then(|name| renames.get(name))
+                        .map(|renamed| serde_json::json!(format!("#/$defs/{renamed}"))),
+                    _ => None,
+                };
+                (
+                    key.clone(),
+                    repointed.unwrap_or_else(|| rewrite_refs(child, renames)),
+                )
+            })
+            .collect::<serde_json::Map<_, _>>()
+            .into(),
+        serde_json::Value::Array(items) => items
+            .iter()
+            .map(|item| rewrite_refs(item, renames))
+            .collect::<Vec<_>>()
+            .into(),
+        other => other.clone(),
+    }
+}
+
+/// `redpanda` -> `Redpanda`, `my-thing` -> `MyThing`: an endpoint name is
+/// lowercase and hyphenated, a `$defs` key is neither.
+fn pascal_case(name: &str) -> String {
+    name.split(['-', '_'])
+        .filter(|word| !word.is_empty())
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect()
 }
 
 #[derive(Debug, serde::Deserialize, serde::Serialize, JsonSchema, Clone, Default)]
@@ -1452,6 +1580,7 @@ publishers:
     }
 
     #[test]
+    #[cfg(feature = "pulsar")]
     fn app_schema_includes_the_built_in_pulsar_endpoint() {
         let schema = app_config_schema();
         assert_eq!(
@@ -1468,6 +1597,118 @@ publishers:
                 .unwrap()
                 .iter()
                 .any(|variant| variant["required"] == serde_json::json!(["pulsar"]))
+        );
+    }
+
+    /// A plugin's schema has to reach the UI the same way Pulsar's does, or the
+    /// endpoint stays a blank text box however well it describes itself.
+    #[test]
+    fn app_schema_lists_an_endpoint_that_declares_its_own_schema() {
+        #[derive(Debug)]
+        struct Declaring;
+
+        impl mq_bridge::traits::CustomEndpointFactory for Declaring {
+            fn config_schema(&self) -> Option<serde_json::Value> {
+                Some(serde_json::json!({
+                    "type": "object",
+                    "$defs": { "Tls": { "type": "object" } },
+                    "properties": {
+                        "topic": { "type": "string", "x-mqb-uri": "path" },
+                        "tls": { "$ref": "#/$defs/Tls" }
+                    },
+                    "required": ["topic"]
+                }))
+            }
+        }
+
+        let name = "config-schema-test-endpoint";
+        mq_bridge::extensions::register_endpoint_factory(name, std::sync::Arc::new(Declaring))
+            .unwrap();
+        let schema = app_config_schema();
+        mq_bridge::extensions::unregister_endpoint_factory(name);
+
+        let definition = "ConfigSchemaTestEndpointConfig";
+        assert_eq!(
+            schema.pointer(&format!("/$defs/{definition}/required/0")),
+            Some(&serde_json::json!("topic"))
+        );
+        assert!(
+            schema["$defs"]["Endpoint"]["oneOf"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|variant| variant["required"] == serde_json::json!([name])),
+            "the endpoint must be offered as a variant"
+        );
+        // Its own `$defs` are lifted under a prefix, and the ref follows.
+        assert!(schema.pointer("/$defs/ConfigSchemaTestEndpointTls").is_some());
+        assert_eq!(
+            schema.pointer(&format!("/$defs/{definition}/properties/tls/$ref")),
+            Some(&serde_json::json!("#/$defs/ConfigSchemaTestEndpointTls"))
+        );
+    }
+
+    /// An endpoint named after something the document already defines must not
+    /// redefine it, and its nested types must not bind to a stranger's.
+    #[test]
+    fn app_schema_keeps_a_colliding_endpoint_off_an_existing_definition() {
+        #[derive(Debug)]
+        struct Colliding;
+
+        impl mq_bridge::traits::CustomEndpointFactory for Colliding {
+            fn config_schema(&self) -> Option<serde_json::Value> {
+                Some(serde_json::json!({
+                    "type": "object",
+                    "$defs": { "Config": { "type": "object" } },
+                    "properties": { "nested": { "$ref": "#/$defs/Config" } },
+                    "required": ["nested"]
+                }))
+            }
+        }
+
+        // `RouteConfig` is asserted to exist by `app_config_schema` itself.
+        let name = "route";
+        mq_bridge::extensions::register_endpoint_factory(name, std::sync::Arc::new(Colliding))
+            .unwrap();
+        let schema = app_config_schema();
+        mq_bridge::extensions::unregister_endpoint_factory(name);
+
+        assert!(
+            schema
+                .pointer("/$defs/RouteConfig/properties/batch_size")
+                .is_some(),
+            "the built-in RouteConfig must survive"
+        );
+        let variant = schema["$defs"]["Endpoint"]["oneOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|variant| variant["required"] == serde_json::json!([name]))
+            .expect("the endpoint must be offered as a variant");
+        let target = variant["properties"][name]["$ref"]
+            .as_str()
+            .unwrap()
+            .strip_prefix("#/$defs/")
+            .unwrap()
+            .to_string();
+        assert_ne!(target, "RouteConfig");
+        assert_eq!(
+            schema.pointer(&format!("/$defs/{target}/required/0")),
+            Some(&serde_json::json!("nested"))
+        );
+        // Its own `Config` collides with the root name it was just given, so it
+        // gets a key of its own rather than aliasing it.
+        let nested = schema
+            .pointer(&format!("/$defs/{target}/properties/nested/$ref"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap()
+            .to_string();
+        assert_ne!(nested, format!("#/$defs/{target}"));
+        assert!(
+            schema
+                .pointer(&nested.replace("#/$defs/", "/$defs/"))
+                .is_some(),
+            "the lifted definition must exist at {nested}"
         );
     }
 

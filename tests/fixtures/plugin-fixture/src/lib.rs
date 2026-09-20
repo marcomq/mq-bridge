@@ -14,8 +14,10 @@
 //!     queue: orders            # required: which in-process queue to attach to
 //!     fail_receive: retryable  # none | retryable | permanent | end_of_stream
 //!     fail_send: none          # none | retryable | permanent
+//!     fail_send_at: [1, 3]     # publish the rest, fail these: a partial batch
 //!     panic_on_receive: false  # exercises the SDK's panic containment
 //!     commit_requires_order: true
+//!     requires_ordered_publish: false
 //! ```
 //!
 //! The same plugin also exports a middleware under the name `fixture`:
@@ -84,10 +86,19 @@ pub struct FixtureConfig {
     pub fail_receive: ReceiveFailure,
     #[serde(default)]
     pub fail_send: SendFailure,
+    /// Indices of the batch that fail while every other message is published,
+    /// which is the only way to reach [`SentBatch::Partial`] from a test. Takes
+    /// precedence over `fail_send`, which then only classifies these failures.
+    #[serde(default)]
+    pub fail_send_at: Vec<usize>,
     #[serde(default)]
     pub panic_on_receive: bool,
     #[serde(default = "default_true")]
     pub commit_requires_order: bool,
+    /// Defaults to `false` like the trait itself, so a test that asks for
+    /// ordered publishing has to say so and cannot pass by accident.
+    #[serde(default)]
+    pub requires_ordered_publish: bool,
 }
 
 fn default_true() -> bool {
@@ -141,8 +152,43 @@ fn resolve(route_name: &str, value: &serde_json::Value) -> anyhow::Result<(Fixtu
     Ok((config, name))
 }
 
+/// Hand-written rather than derived, because that is what a plugin in another
+/// language has to do and the ABI carries nothing but the JSON.
+fn fixture_config_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "title": "Fixture queue",
+        "additionalProperties": false,
+        "properties": {
+            "queue": {
+                "type": "string",
+                "description": "In-process queue to attach to. Defaults to the route name.",
+                "x-mqb-uri": "path",
+            },
+            "fail_receive": {
+                "type": "string",
+                "enum": ["none", "retryable", "permanent", "end_of_stream"],
+                "default": "none",
+            },
+            "fail_send": {
+                "type": "string",
+                "enum": ["none", "retryable", "permanent"],
+                "default": "none",
+            },
+            "fail_send_at": { "type": "array", "items": { "type": "integer" } },
+            "panic_on_receive": { "type": "boolean", "default": false },
+            "commit_requires_order": { "type": "boolean", "default": true },
+            "requires_ordered_publish": { "type": "boolean", "default": false },
+        },
+    })
+}
+
 #[async_trait]
 impl CustomEndpointFactory for FixtureFactory {
+    fn config_schema(&self) -> Option<serde_json::Value> {
+        Some(fixture_config_schema())
+    }
+
     async fn create_consumer(
         &self,
         route_name: &str,
@@ -288,12 +334,49 @@ struct FixturePublisher {
     config: FixtureConfig,
 }
 
+impl FixturePublisher {
+    /// Publishes everything but the indices in `fail_send_at`, which come back
+    /// as failures — a batch that half landed.
+    fn publish_all_but_failed(&self, messages: Vec<CanonicalMessage>) -> SentBatch {
+        let mut delivered = Vec::with_capacity(messages.len());
+        let mut failed = Vec::new();
+        for (index, message) in messages.into_iter().enumerate() {
+            if self.config.fail_send_at.contains(&index) {
+                let cause = anyhow!("fixture failed message {index} of the batch");
+                let error = match self.config.fail_send {
+                    SendFailure::Permanent => PublisherError::NonRetryable(cause),
+                    SendFailure::None | SendFailure::Retryable => PublisherError::Retryable(cause),
+                };
+                failed.push((message, error));
+            } else {
+                delivered.push(message);
+            }
+        }
+        self.queue
+            .lock()
+            .expect("fixture queue poisoned")
+            .ready
+            .extend(delivered);
+        SentBatch::Partial {
+            responses: None,
+            failed,
+        }
+    }
+}
+
 #[async_trait]
 impl MessagePublisher for FixturePublisher {
+    fn requires_ordered_publish(&self) -> bool {
+        self.config.requires_ordered_publish
+    }
+
     async fn send_batch(
         &self,
         messages: Vec<CanonicalMessage>,
     ) -> Result<SentBatch, PublisherError> {
+        if !self.config.fail_send_at.is_empty() {
+            return Ok(self.publish_all_but_failed(messages));
+        }
         match self.config.fail_send {
             SendFailure::None => {}
             SendFailure::Retryable => {
@@ -377,6 +460,19 @@ pub struct FixtureMiddlewareFactory;
 
 #[async_trait]
 impl mq_bridge::plugin::sdk::MiddlewareFactory for FixtureMiddlewareFactory {
+    fn config_schema(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({
+            "type": "object",
+            "title": "Fixture filter",
+            "additionalProperties": false,
+            "properties": {
+                "drop_prefix": { "type": "string" },
+                "suffix": { "type": "string" },
+                "fail": { "type": "boolean", "default": false },
+            },
+        }))
+    }
+
     async fn create(
         &self,
         _route_name: &str,

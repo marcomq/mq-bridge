@@ -102,6 +102,12 @@ impl AbiMessages {
     pub(crate) fn len(&self) -> usize {
         self.messages.len()
     }
+
+    /// Recovers the messages, consuming the ABI view of them. Lets a publish
+    /// outcome be paired back with the message it belongs to.
+    pub(crate) fn into_messages(self) -> Vec<CanonicalMessage> {
+        self.messages
+    }
 }
 
 #[cfg(test)]

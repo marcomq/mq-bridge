@@ -1,5 +1,5 @@
 use crate::traits::{CustomEndpointFactory, CustomMiddlewareFactory};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, OnceLock, RwLock};
 
 static CUSTOM_ENDPOINT_REGISTRY: OnceLock<RwLock<HashMap<String, Arc<dyn CustomEndpointFactory>>>> =
@@ -34,6 +34,22 @@ pub fn get_endpoint_factory(name: &str) -> Option<Arc<dyn CustomEndpointFactory>
     let registry = CUSTOM_ENDPOINT_REGISTRY.get_or_init(|| RwLock::new(HashMap::new()));
     let map = registry.read().ok()?;
     map.get(name).cloned()
+}
+
+/// The configuration schema of every registered endpoint that declares one,
+/// keyed by the name routes address it as.
+///
+/// Sorted, so a document built from it — a host's config schema, a UI's endpoint
+/// list — is the same on every run. Both statically linked extensions and loaded
+/// plugins answer here, so a host needs no separate path for either.
+pub fn endpoint_config_schemas() -> BTreeMap<String, serde_json::Value> {
+    let registry = CUSTOM_ENDPOINT_REGISTRY.get_or_init(|| RwLock::new(HashMap::new()));
+    let Ok(map) = registry.read() else {
+        return BTreeMap::new();
+    };
+    map.iter()
+        .filter_map(|(name, factory)| Some((name.clone(), factory.config_schema()?)))
+        .collect()
 }
 
 /// Removes the endpoint factory registered under `name`, freeing the name for

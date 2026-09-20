@@ -31,7 +31,16 @@ function makeConfig(overrides = {}) {
   };
 }
 
-/** A populated workspace: one disabled route, one consumer, two publishers. */
+/**
+ * A populated workspace: one disabled route, one consumer, two publishers.
+ *
+ * The ids are pinned rather than left out. `id` defaults to a fresh UUID on
+ * every deserialization (config.rs), so a config posted without one gives the
+ * consumer a different id on each reset — and a request already in flight
+ * against the previous id then 404s. The sweep hits this: it advances as soon
+ * as a click shows an effect, so the next button's reset can land between a
+ * Start handler's save and the `/consumer-start` that follows it.
+ */
 const BASE_CONFIG = makeConfig({
   routes: {
     ingest_http: {
@@ -45,6 +54,7 @@ const BASE_CONFIG = makeConfig({
   },
   consumers: [
     {
+      id: "00000000-0000-7000-8000-00000000c001",
       name: "memory_consumer",
       comment: "Demo consumer comment",
       endpoint: {
@@ -59,6 +69,7 @@ const BASE_CONFIG = makeConfig({
   ],
   publishers: [
     {
+      id: "00000000-0000-7000-8000-00000000b001",
       name: "http_publisher",
       comment: "Demo publisher comment",
       endpoint: {
@@ -67,6 +78,7 @@ const BASE_CONFIG = makeConfig({
       },
     },
     {
+      id: "00000000-0000-7000-8000-00000000b002",
       name: "memory_publisher",
       comment: "Queue publisher comment",
       endpoint: {

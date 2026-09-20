@@ -71,7 +71,11 @@ const test = base.test.extend({
       page.on("pageerror", (error) => record("uncaught exception", error.stack || error));
       page.on("console", (message) => {
         if (message.type() !== "error") return;
-        record("console.error", message.text());
+        // A failed subresource is reported as a console error whose text names
+        // only the status, never the URL. The location does, and without it the
+        // URL-keyed ignores above can never match a network message.
+        const url = message.location()?.url;
+        record("console.error", url ? `${message.text()} — ${url}` : message.text());
       });
       // A request the app never awaits still means the server rejected it. 4xx is
       // left to the specs: some flows legitimately probe an endpoint that 404s.

@@ -312,6 +312,8 @@ pub enum EndpointType {
     PostgresCdc(PostgresCdcConfig),
     #[cfg_attr(feature = "schema", schemars(extend("format" = "structural_endpoint")))]
     Fanout(Vec<Endpoint>),
+    #[cfg_attr(feature = "schema", schemars(extend("format" = "structural_endpoint")))]
+    Sequence(SequenceConfig),
     #[serde(rename = "stream_buffer")]
     #[cfg_attr(feature = "schema", schemars(extend("format" = "structural_endpoint")))]
     StreamBuffer(StreamBufferConfig),
@@ -2182,6 +2184,24 @@ pub struct IbmMqConfig {
     pub disable_status_inq: bool,
 }
 
+// --- Sequence Configuration ---
+
+/// Reads several input endpoints one after another: each is drained before the next
+/// begins, and the last one streams until the route stops.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct SequenceConfig {
+    /// The inputs to read, in order. At least one is required.
+    pub endpoints: Vec<Endpoint>,
+    /// (Optional) Identifies the durable phase marker, so a restart resumes at the phase
+    /// it had reached instead of replaying the earlier ones. Needs `checkpoint_store`.
+    pub cursor_id: Option<String>,
+    /// (Optional) Where to persist the phase marker. A local path, `file://`, or any URL
+    /// the shared checkpoint stores accept. Without it, every restart begins at phase 1.
+    pub checkpoint_store: Option<String>,
+}
+
 // --- Switch/Router Configuration ---
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -2271,6 +2291,30 @@ pub struct RequestForwardConfig {
 
 // --- Postgres CDC (logical replication) Configuration ---
 
+/// How a `postgres_cdc` endpoint consumes its publication. The intent-named counterpart of
+/// [`MongoConsume`], so the two CDC endpoints read alike.
+///
+/// `consumer` has no Postgres meaning — a replication slot is not a work queue; use a `sqlx`
+/// endpoint for competing consumers.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum PostgresConsume {
+    /// **Stream changes only** — capture what happens from the slot's position onward. Reads
+    /// nothing that already exists; never ends on drain. Default, because it is what
+    /// `postgres_cdc` has always done.
+    #[default]
+    CaptureNew,
+    /// **Backfill, then stream** — page the publication's tables by primary key first, then
+    /// capture changes, with no gap between the two. The slot is created before the backfill
+    /// starts, so the server retains WAL throughout. Delivery across the handover is
+    /// at-least-once, so the sink must upsert. Each table needs a single-column primary key.
+    CaptureAll,
+    /// **One-shot backfill** — page the publication's tables by primary key, then end the
+    /// route. Non-destructive, creates no slot, and captures no changes.
+    Snapshot,
+}
+
 /// Postgres logical-replication CDC source (pgoutput). Source-only.
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -2281,6 +2325,9 @@ pub struct PostgresCdcConfig {
     pub url: String,
     /// Publication name (must already exist; defines which tables are captured).
     pub publication: String,
+    /// (Consumer only) What to read: `capture_new` (default, changes only), `capture_all`
+    /// (backfill the tables first, then changes) or `snapshot` (backfill only).
+    pub consume: Option<PostgresConsume>,
     /// Include authoritative `mqb.src.postgres_*` source positions. Defaults to false.
     #[serde(default)]
     pub source_metadata: bool,

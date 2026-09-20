@@ -24,7 +24,7 @@ use crate::support::plugin_abi::{
     MqbBatchHandle, MqbBuffer, MqbConsumerHandle, MqbMessage, MqbPublisherHandle, MqbSlice,
     MqbStatus, MQB_DISPOSITION_ACK, MQB_DISPOSITION_NACK, MQB_END_OF_STREAM, MQB_ERR_CONNECTION,
     MQB_ERR_INVALID_CONFIG, MQB_ERR_PANIC, MQB_ERR_PERMANENT, MQB_ERR_RETRYABLE,
-    MQB_ERR_UNSUPPORTED, MQB_OK,
+    MQB_ERR_UNSUPPORTED, MQB_OK, MQB_OUTCOME_OK, MQB_OUTCOME_PERMANENT,
 };
 use anyhow::anyhow;
 use async_trait::async_trait;
@@ -70,6 +70,10 @@ impl std::fmt::Debug for PluginEndpointFactory {
 
 #[async_trait]
 impl CustomEndpointFactory for PluginEndpointFactory {
+    fn config_schema(&self) -> Option<serde_json::Value> {
+        self.plugin.info.endpoint_schema()
+    }
+
     async fn create_consumer(
         &self,
         route_name: &str,
@@ -412,19 +416,37 @@ impl MessagePublisher for PluginPublisher {
             let plugin = &publisher.plugin;
             let messages = super::message::AbiMessages::new(messages);
             let mut err = MqbBuffer::EMPTY;
+            let Some(hook) = plugin.table().publisher_outcomes_hook() else {
+                let status = unsafe {
+                    (plugin.table().publisher_send_batch)(
+                        publisher.handle,
+                        messages.as_ptr(),
+                        messages.len(),
+                        &mut err,
+                    )
+                };
+                return if status == MQB_OK {
+                    Ok(SentBatch::Ack)
+                } else {
+                    Err(publisher_error(plugin, status, err, "publish a batch"))
+                };
+            };
+            // Host-allocated, one byte per message: the plugin writes back into
+            // this, so no payload travels the other way.
+            let mut outcomes = vec![MQB_OUTCOME_OK; messages.len()];
             let status = unsafe {
-                (plugin.table().publisher_send_batch)(
+                hook(
                     publisher.handle,
                     messages.as_ptr(),
                     messages.len(),
+                    outcomes.as_mut_ptr(),
                     &mut err,
                 )
             };
             if status == MQB_OK {
-                Ok(SentBatch::Ack)
-            } else {
-                Err(publisher_error(plugin, status, err, "publish a batch"))
+                return Ok(SentBatch::Ack);
             }
+            publish_outcome(plugin, status, err, messages.into_messages(), &outcomes)
         })
         .await
         .map_err(|err| PublisherError::Retryable(join_error(err)))?
@@ -442,9 +464,75 @@ impl MessagePublisher for PluginPublisher {
         .map_err(join_error)?
     }
 
+    /// Asks the plugin whether its sends must stay in source order.
+    ///
+    /// A plugin built against ABI 1.0 has no such entry, and answering `true`
+    /// on its behalf would serialise every existing plugin sink. So it keeps
+    /// the trait default, `false` — what those plugins already get today.
+    fn requires_ordered_publish(&self) -> bool {
+        let publisher = &self.publisher;
+        match publisher.plugin.table().publisher_ordering_hook() {
+            Some(hook) => unsafe { hook(publisher.handle) != 0 },
+            None => false,
+        }
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
+}
+
+/// Turns a failed 1.1 publish into the outcome the route reacts to.
+///
+/// Only a *subset* of failures becomes [`SentBatch::Partial`]. When every
+/// message failed — or the plugin marked none, which is a plugin that reported
+/// an error it could not attribute — the whole-batch status is returned as it
+/// is, so [`MQB_ERR_CONNECTION`] still reconnects the endpoint and nothing is
+/// silently acknowledged.
+fn publish_outcome(
+    plugin: &LoadedPlugin,
+    status: MqbStatus,
+    err: MqbBuffer,
+    messages: Vec<CanonicalMessage>,
+    outcomes: &[u8],
+) -> Result<SentBatch, PublisherError> {
+    let cause = plugin.take_error(err);
+    let failures = outcomes
+        .iter()
+        .filter(|outcome| **outcome != MQB_OUTCOME_OK)
+        .count();
+    if failures == 0 || failures == messages.len() {
+        return Err(publisher_error_from(
+            status,
+            anyhow!(
+                "endpoint plugin `{}` failed to publish a batch: {cause}",
+                plugin.name()
+            ),
+        ));
+    }
+    let failed = messages
+        .into_iter()
+        .zip(outcomes)
+        .filter(|(_, outcome)| **outcome != MQB_OUTCOME_OK)
+        .map(|(message, outcome)| {
+            // One batch-level message by design; the byte carries the class. An
+            // unrecognised byte is treated as retryable, as for a status code.
+            let cause = anyhow!(
+                "endpoint plugin `{}` failed to publish this message: {cause}",
+                plugin.name()
+            );
+            let error = if *outcome == MQB_OUTCOME_PERMANENT {
+                PublisherError::NonRetryable(cause)
+            } else {
+                PublisherError::Retryable(cause)
+            };
+            (message, error)
+        })
+        .collect();
+    Ok(SentBatch::Partial {
+        responses: None,
+        failed,
+    })
 }
 
 fn disposition_code(disposition: &MessageDisposition) -> u8 {

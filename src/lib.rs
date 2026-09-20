@@ -103,12 +103,9 @@
 #![warn(rustdoc::missing_crate_level_docs)]
 
 pub mod canonical_message;
-#[cfg(any(
-    feature = "mongodb",
-    feature = "sqlx",
-    feature = "clickhouse",
-    feature = "object-store"
-))]
+// Not feature-gated: the trait, the file backend and the URL parser need no
+// optional dependency, and each external backend already reports its own
+// missing feature at runtime.
 pub mod checkpoint;
 pub mod command_handler;
 pub mod endpoints;

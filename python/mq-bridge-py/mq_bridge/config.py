@@ -38,6 +38,7 @@ RequestForwardConfig = dict
 ResponseConfig = dict
 RetryMiddleware = dict
 Route = dict
+SequenceConfig = dict
 SledConfig = dict
 SqlxConfig = dict
 StreamBufferConfig = dict
@@ -61,6 +62,7 @@ MqttProtocol = str
 NameBy = str
 NatsDeliverPolicy = str
 PackFormat = str
+PostgresConsume = str
 SpoolClaim = str
 SpoolDone = str
 SpoolFsync = str
@@ -120,6 +122,7 @@ __all__ = [
     "PackFormat",
     "PackMiddleware",
     "PostgresCdcConfig",
+    "PostgresConsume",
     "RandomPanicMiddleware",
     "RedisStreamsConfig",
     "RequestForwardConfig",
@@ -128,6 +131,7 @@ __all__ = [
     "Route",
     "RouteConfig",
     "RoutesConfig",
+    "SequenceConfig",
     "SledConfig",
     "SpoolClaim",
     "SpoolDone",

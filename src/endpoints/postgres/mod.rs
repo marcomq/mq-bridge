@@ -16,7 +16,7 @@
 //! [`commit_requires_order`](MessageConsumer::commit_requires_order) is `true`.
 
 mod pgoutput;
-mod replication;
+pub(crate) mod replication;
 mod state;
 
 use crate::canonical_message::CanonicalMessage;

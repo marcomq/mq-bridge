@@ -16,6 +16,7 @@ pub mod null;
 pub mod reader;
 pub mod request;
 pub mod response;
+pub mod sequence;
 pub mod static_endpoint;
 pub mod stream_buffer;
 pub mod switch;

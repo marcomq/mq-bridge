@@ -26,6 +26,7 @@ fn cfg(slot: &str) -> PostgresCdcConfig {
     PostgresCdcConfig {
         url: URL.to_string(),
         publication: PUBLICATION.to_string(),
+        consume: None,
         source_metadata: false,
         slot_name: slot.to_string(),
         create_slot: true,

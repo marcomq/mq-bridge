@@ -55,6 +55,36 @@ use std::sync::Arc;
 /// Metadata key carrying the failure description when `on_error: pass_through`.
 pub const TRANSFORM_ERROR_KEY: &str = "mqb.transform_error";
 
+/// A schema compiled for checking a document against, nothing else.
+///
+/// Compiling and checking are separate so a caller can tell "this schema uses
+/// more of JSON Schema than we understand" from "this document does not match
+/// it" — the first is the schema author's problem, the second the user's.
+pub(crate) struct JsonSchemaCheck(schema::CompiledSchema);
+
+impl JsonSchemaCheck {
+    /// Compiles `schema`, or fails if it needs more than the supported subset:
+    /// `type`, `nullable`, `required`, `enum`, `items`, nested `properties`.
+    pub(crate) fn compile(schema: &serde_json::Value) -> anyhow::Result<Self> {
+        schema::CompiledSchema::compile(schema).map(Self)
+    }
+
+    /// Checks `value` without coercing it or filling defaults, so the document
+    /// is either accepted as it stands or refused naming the path that failed.
+    pub(crate) fn check(&self, value: &serde_json::Value) -> anyhow::Result<()> {
+        let opts = compiled::Opts {
+            coerce: false,
+            apply_defaults: false,
+            coerce_empty_as_null: false,
+        };
+        let mut candidate = value.clone();
+        let mut crumbs = Vec::new();
+        self.0
+            .apply(&mut candidate, &mut crumbs, opts)
+            .map_err(|error| anyhow::anyhow!("{} {}", error.path, error.detail))
+    }
+}
+
 #[cfg(test)]
 mod tests;
 
