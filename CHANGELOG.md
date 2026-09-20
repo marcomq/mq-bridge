@@ -78,6 +78,21 @@ All notable changes to `mq-bridge`. Newest first.
   `plugin::discover_endpoint_plugin_in(dirs, name)` runs the same lookup against directories
   the caller names, for a host that keeps its plugins somewhere it already knows.
 
+- **`MQB_PLUGIN_OVERRIDE` — replace an endpoint `mqb` already has with an installed plugin.**
+  Pulsar and Meilisearch are compiled into the `full` build, and a registered factory is found
+  before the search path is ever consulted, so until now an installed newer copy was shadowed
+  with no indication. The built-in still wins by default — one binary behaving the same
+  wherever it runs — but `MQB_PLUGIN_OVERRIDE=meilisearch` (or `1` for every extension, or a
+  comma-separated list) prefers the installed library instead, so an extension can be updated
+  without waiting for a new `mqb` release. A plugin that is installed but not preferred is now
+  reported at startup, naming the file and the variable that would use it, rather than being
+  ignored in silence. Preference is by name, not by version — a plugin's version cannot be read
+  without loading it, so an *older* installed plugin will replace a newer built-in.
+  `MQB_PLUGIN_DISCOVERY=0` switches the search, the notice and the override off together. It is
+  an environment variable rather than a flag or a config key because endpoints are registered
+  once per process before any config is read: `mqb copy` between two URIs loads no config at
+  all, and two routes in one process cannot hold different versions of one endpoint.
+
 - **Plugin ABI 1.1 — ordered publishing, per-message publish outcomes, and a configuration
   schema.** Three entries appended to the vtable. `publisher_requires_ordered_publish` lets
   `MessagePublisher::requires_ordered_publish` cross the plugin boundary: a keyed sink
@@ -97,8 +112,14 @@ All notable changes to `mq-bridge`. Newest first.
   gain — a URI carries only text, so until now `?batch_size=100` reached a plugin as the
   string `"100"` and `?tls=true` as `"true"`, which made any plugin with a non-string config
   field unreachable from a URI. Where each field sits in a URI is a per-property annotation,
-  `x-mqb-uri`, with the values `origin`, `url`, `path` and `query`; JSON Schema reserves the
-  `x-` prefix for annotations, so the document stays a plain schema. One document serves both
+  `x-mqb-uri`, with the values `subscheme`, `origin`, `url`, `path` and `query`; JSON Schema
+  reserves the `x-` prefix for annotations, so the document stays a plain schema.
+  `subscheme` is for a plugin that is a gateway to a family of protocols rather than one
+  transport: it takes the scheme's part after a `+`, so
+  `redpanda+mqtt://localhost:1883/orders` names the plugin, the protocol and the address in
+  one line — the spelling `git+ssh://` and `postgresql+psycopg2://` made familiar. The rest
+  of the URI then describes the inner protocol, so `origin` and `url` are handed over
+  carrying the inner scheme (`mqtt://localhost:1883`) rather than the compound one. One document serves both
   the form and the URI on purpose: a field renamed in one and not the other is a bug class
   nobody notices. `mq-bridge-app` builds the endpoint's entry in its own config schema from
   it, so a plugin the UI has never heard of gets a rendered form with labels, defaults and

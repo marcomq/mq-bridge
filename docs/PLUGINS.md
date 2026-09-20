@@ -130,6 +130,38 @@ error naming both — and the library stays loaded, because nothing is ever
 unloaded. The same applies to a library that exists but fails to load: that is
 reported as a load failure, not as an unknown endpoint.
 
+### Replacing an endpoint `mqb` already has
+
+Some endpoints are compiled into `mqb` itself — Pulsar and Meilisearch are
+separate crates linked into the `full` build — and a registered factory is found
+before the search above ever runs. The built-in copy therefore wins by default,
+so one binary behaves the same wherever it runs.
+
+`MQB_PLUGIN_OVERRIDE` reverses that, which is how such an endpoint is updated
+without waiting for a new `mqb` release:
+
+```console
+# prefer the installed Meilisearch plugin over the linked-in copy
+MQB_PLUGIN_OVERRIDE=meilisearch mqb copy 'postgres://…/orders' 'meilisearch://localhost:7700?index=orders'
+
+# prefer an installed plugin for every built-in extension
+MQB_PLUGIN_OVERRIDE=1 mqb run -c config.yaml
+```
+
+The value is `1`, `true`, `yes`, `on` or `all` for every extension, or a
+comma-separated list of endpoint names. It is an environment variable rather
+than a flag or a config key because endpoints are registered once per process,
+before any config is read — a `mqb copy` between two URIs never loads a config
+file at all, and two routes in one process cannot use different versions of the
+same endpoint.
+
+When a plugin is installed but *not* preferred, startup says so rather than
+ignoring it silently, naming the file and the variable that would use it. And
+because a plugin's version cannot be read without loading it, preference is by
+name, not by version: an **older** installed plugin will replace a newer
+built-in. `MQB_PLUGIN_DISCOVERY=0` switches off the search, the notice and the
+override together.
+
 ---
 
 ## Writing a plugin
