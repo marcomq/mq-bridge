@@ -237,7 +237,7 @@ mod tests {
 
         /// A file under the conventional name. Never loaded on the paths that
         /// only probe, so its contents do not have to be a real library.
-        fn install_stub(dir: &PathBuf, name: &str) -> PathBuf {
+        fn install_stub(dir: &std::path::Path, name: &str) -> PathBuf {
             let path = dir.join(mq_bridge::plugin::library_file_name(name));
             std::fs::write(&path, b"not a library").unwrap();
             path
@@ -256,7 +256,7 @@ mod tests {
                 Ok(())
             }
 
-            register_builtin_in(&[dir.clone()], "meilisearch", false, register).unwrap();
+            register_builtin_in(std::slice::from_ref(&dir), "meilisearch", false, register).unwrap();
 
             assert_eq!(NOTHING_INSTALLED.load(Ordering::SeqCst), 1);
             std::fs::remove_dir_all(&dir).ok();
@@ -273,7 +273,7 @@ mod tests {
 
             // The stub is not a loadable library, so reaching for it would fail:
             // succeeding proves the built-in path never touched it.
-            register_builtin_in(&[dir.clone()], "meilisearch", false, register).unwrap();
+            register_builtin_in(std::slice::from_ref(&dir), "meilisearch", false, register).unwrap();
 
             assert_eq!(NOT_PREFERRED.load(Ordering::SeqCst), 1);
             std::fs::remove_dir_all(&dir).ok();
@@ -287,7 +287,7 @@ mod tests {
                 Ok(())
             }
 
-            register_builtin_in(&[dir.clone()], "meilisearch", true, register).unwrap();
+            register_builtin_in(std::slice::from_ref(&dir), "meilisearch", true, register).unwrap();
 
             assert_eq!(PREFERRED_BUT_ABSENT.load(Ordering::SeqCst), 1);
             std::fs::remove_dir_all(&dir).ok();
@@ -303,7 +303,7 @@ mod tests {
 
             // The stub cannot load, and that failure is the evidence: the
             // override branch went to the file rather than to the built-in.
-            let error = register_builtin_in(&[dir.clone()], "meilisearch", true, register)
+            let error = register_builtin_in(std::slice::from_ref(&dir), "meilisearch", true, register)
                 .expect_err("a stub library cannot load");
 
             assert!(
@@ -324,7 +324,7 @@ mod tests {
             let dir = scratch_dir();
             install_stub(&dir, "meilisearch");
             if mq_bridge::plugin::discovery_enabled() {
-                register_builtin_in(&[dir.clone()], "meilisearch", false, register).unwrap();
+                register_builtin_in(std::slice::from_ref(&dir), "meilisearch", false, register).unwrap();
             } else {
                 register().unwrap();
             }
