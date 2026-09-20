@@ -375,7 +375,12 @@ async fn a_partial_publish_survives_the_abi() {
 
     let payloads = ["a", "b", "c", "d", "e"];
     let sent = publisher
-        .send_batch(payloads.iter().map(|p| CanonicalMessage::from(*p)).collect())
+        .send_batch(
+            payloads
+                .iter()
+                .map(|p| CanonicalMessage::from(*p))
+                .collect(),
+        )
         .await
         .expect("a partial batch is a success, not an error");
 
@@ -430,7 +435,10 @@ async fn partial_failure_classes_survive_the_abi() {
         .expect("create publisher");
 
     let sent = publisher
-        .send_batch(vec![CanonicalMessage::from("x"), CanonicalMessage::from("y")])
+        .send_batch(vec![
+            CanonicalMessage::from("x"),
+            CanonicalMessage::from("y"),
+        ])
         .await
         .expect("a partial batch is a success, not an error");
     let SentBatch::Partial { failed, .. } = sent else {
@@ -458,7 +466,10 @@ async fn a_wholly_failed_batch_is_still_an_error() {
         .expect("create publisher");
 
     let error = publisher
-        .send_batch(vec![CanonicalMessage::from("x"), CanonicalMessage::from("y")])
+        .send_batch(vec![
+            CanonicalMessage::from("x"),
+            CanonicalMessage::from("y"),
+        ])
         .await
         .expect_err("every message failed, so the batch failed");
     assert!(matches!(error, PublisherError::Retryable(_)), "{error}");
@@ -484,7 +495,12 @@ async fn partial_publishes_agree_linked_and_loaded() {
             .await
             .expect("create publisher");
         let sent = publisher
-            .send_batch(payloads.iter().map(|p| CanonicalMessage::from(*p)).collect())
+            .send_batch(
+                payloads
+                    .iter()
+                    .map(|p| CanonicalMessage::from(*p))
+                    .collect(),
+            )
             .await
             .expect("send batch");
         let SentBatch::Partial { failed, .. } = sent else {
@@ -584,6 +600,63 @@ fn a_file_that_is_not_a_plugin_is_rejected_with_its_path() {
         format!("{error:#}").contains("plugin library not found"),
         "{error:#}"
     );
+}
+
+// ---------------------------------------------------------- config schema
+
+/// The schema is the one thing the host reads *about* the plugin rather than
+/// through it, so a difference between the two sides is invisible until a form
+/// or a URI is wrong.
+#[test]
+fn the_configuration_schema_is_the_same_linked_and_loaded() {
+    let info = load_endpoint_plugin(library("mq-bridge-plugin-fixture")).unwrap();
+
+    let loaded = info
+        .endpoint_schema()
+        .expect("the fixture describes itself");
+    assert_eq!(loaded, FixtureFactory.config_schema().unwrap());
+    assert_eq!(
+        info.middleware_schema().expect("and its middleware"),
+        mq_bridge::plugin::sdk::MiddlewareFactory::config_schema(
+            &mq_bridge_plugin_fixture::FixtureMiddlewareFactory
+        )
+        .unwrap()
+    );
+    assert_eq!(loaded["properties"]["queue"]["x-mqb-uri"], json!("path"));
+}
+
+/// What the schema buys: the fixture's config has no `url` field at all and
+/// denies unknown ones, so an unannotated mapping cannot address it — and
+/// `commit_requires_order` is a bool that arrives from a URI as text.
+#[test]
+fn a_uri_maps_onto_the_schema_the_plugin_declared() {
+    load_endpoint_plugin(library("mq-bridge-plugin-fixture")).unwrap();
+
+    let config = mq_bridge::plugin::endpoint_uri_schema("fixture")
+        .config_from_uri("fixture://_/orders?commit_requires_order=false&fail_send_at=1,3")
+        .expect("map the uri");
+
+    assert_eq!(config["queue"], json!("orders"));
+    assert_eq!(config["commit_requires_order"], json!(false));
+    assert_eq!(config["fail_send_at"], json!([1, 3]));
+    assert!(!config.contains_key("url"), "{config:?}");
+}
+
+/// And it has to reach the endpoint: a mapping the plugin then rejects is worth
+/// nothing, and `deny_unknown_fields` makes that a real risk.
+#[tokio::test(flavor = "multi_thread")]
+async fn configuration_mapped_from_a_uri_opens_the_endpoint() {
+    let factory = plugin_factory();
+    let config = mq_bridge::plugin::endpoint_uri_schema("fixture")
+        .config_from_uri("fixture://_/uri-mapped?commit_requires_order=false")
+        .expect("map the uri");
+
+    let consumer = factory
+        .create_consumer("test", &serde_json::Value::Object(config))
+        .await
+        .expect("the plugin accepts what the schema mapped");
+
+    assert!(!consumer.commit_requires_order());
 }
 
 // ------------------------------------------------------------- middleware

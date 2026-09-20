@@ -1,0 +1,18 @@
+[package]
+name = "mq-bridge-plugin-fixture-middleware"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+publish = false
+description = "A plugin that provides only a middleware, to test that it cannot answer an endpoint name"
+license = "MIT OR Apache-2.0"
+
+[lib]
+crate-type = ["cdylib"]
+doctest = false
+
+[dependencies]
+mq-bridge = { path = "../../..", default-features = false, features = ["plugin-sdk"] }
+# The middleware itself is the fixture's, linked as an rlib: this crate exists
+# for its entry point, not for a second implementation.
+mq-bridge-plugin-fixture = { path = "../plugin-fixture" }

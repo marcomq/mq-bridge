@@ -20,6 +20,11 @@
 //! Every build can load plugins; no cargo feature is involved. Paths go through
 //! the usual config placeholder expansion, so `${VAR}` works.
 //!
+//! Listing a path is only needed for a library that is not installed under its
+//! conventional name. A route asking for an endpoint no factory provides falls
+//! back to searching for `libmq_bridge_<name>` (see `mq_bridge::plugin::discovery`),
+//! so an installed plugin needs no entry here at all.
+//!
 //! Plugins must be loaded **before** any route is built, or the endpoint name is
 //! not yet registered and route startup fails with a confusing "unknown
 //! endpoint" error. Plugins are startup-only: changing the configured set needs
@@ -108,16 +113,12 @@ mod tests {
 
     #[test]
     fn an_empty_list_loads_nothing() {
-        assert!(
-            load_trusted_plugins(&[], &HashMap::new())
-                .unwrap()
-                .is_empty()
-        );
-        assert!(
-            load_trusted_plugins(&["  ".to_string()], &HashMap::new())
-                .unwrap()
-                .is_empty()
-        );
+        assert!(load_trusted_plugins(&[], &HashMap::new())
+            .unwrap()
+            .is_empty());
+        assert!(load_trusted_plugins(&["  ".to_string()], &HashMap::new())
+            .unwrap()
+            .is_empty());
         assert!(mq_bridge::extensions::get_endpoint_factory("pulsar").is_some());
         assert!(mq_bridge::extensions::get_endpoint_factory("meilisearch").is_some());
     }

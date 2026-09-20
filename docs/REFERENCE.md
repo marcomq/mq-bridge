@@ -898,6 +898,7 @@ another structural endpoint.
 | [`request`](#request) | – | ✅ | Call a request/reply endpoint, forward the response onward |
 | [`response`](#response) | – | ✅ | Reply to the origin of the current request |
 | [`reader`](#reader) | – | ✅ | Use an incoming message as a trigger to pull from a consumer |
+| [`sequence`](#sequence) | ✅ | – | Read several inputs in order: drain each, then stream the last |
 | [`static`](#static) | ✅ | ✅ | Fixed, pre-rendered message |
 | [`stream_buffer`](#stream_buffer) | ✅ | ✅ | Correlation-partitioned in-memory stream |
 | [`null`](#null) | – | ✅ | Discard everything |
@@ -1126,6 +1127,116 @@ poll_api:
 The value is a single nested endpoint, which must be valid as a **consumer**. The message read
 is acknowledged immediately, before the caller has necessarily received it — so a crash in
 between loses it. Use it for polling APIs, not for guaranteed delivery.
+
+### `sequence`
+
+Reads several inputs one after another. Each is drained before the next begins, and the last
+one streams until the route stops. Input only.
+
+The motivating case is a change-data-capture backfill — snapshot a table, then tail its
+replication stream — but the shape fits any history-then-live pair.
+
+#### For a CDC backfill, reach for the endpoint's own `consume` first
+
+**You usually do not need to write a `sequence` by hand.** Both CDC endpoints spell
+"backfill, then follow changes" the same way, as one field:
+
+```yaml endpoint
+input:
+  postgres_cdc:
+    url: "postgres://user@localhost/shop"
+    publication: "orders_pub"
+    consume: capture_all          # page the tables by primary key, then stream changes
+
+input:
+  mongodb:
+    url: "mongodb://localhost:27017"
+    database: "shop"
+    collection: "orders"
+    consume: capture_all          # page the collection by _id, then stream changes
+```
+
+`postgres_cdc: consume: capture_all` **expands to exactly the `sequence` below** — it reads the
+publication's tables, takes each table's primary key as the cursor, and appends the CDC phase. Use
+the explicit form only when that expansion cannot serve you:
+
+| Situation | Spelling |
+|---|---|
+| Back fill a Postgres or MongoDB CDC source | `consume: capture_all` on the endpoint |
+| A table with a composite or non-integer primary key | `sequence`, with your own `cursor_column` |
+| Back fill from somewhere else entirely — a file, an S3 prefix, a different database | `sequence` |
+| A custom snapshot query, or only some of the publication's tables | `sequence` |
+
+#### Fields
+
+| Field | Type | Default |
+|---|---|---|
+| `endpoints` | list of endpoints | required |
+| `cursor_id` | string | none |
+| `checkpoint_store` | string | none |
+
+```yaml route
+# The explicit form. This is what `postgres_cdc: consume: capture_all` becomes.
+orders_to_search:
+  input:
+    sequence:
+      endpoints:
+        - sqlx: { url: "postgres://user@localhost/shop", table: "orders", cursor_column: "id" }
+        - postgres_cdc: { url: "postgres://user@localhost/shop", publication: "orders_pub", slot_name: "orders_slot" }
+      cursor_id: "orders_backfill"
+      checkpoint_store: "/var/lib/mqb/orders-phase.json"
+  output:
+    meilisearch: { url: "http://localhost:7700", index: "orders", primary_key: "id" }
+```
+
+**The order of operations is what makes this gapless.** Before the first phase reads anything,
+every later phase is asked to pin the position it will resume from. For `postgres_cdc` that
+creates the replication slot, so Postgres retains WAL from that moment while the snapshot runs,
+and the stream later resumes from the slot's own consistent point. Endpoints with nothing to
+pin — a table scan, a file, a queue — are left alone.
+
+Consequences worth knowing:
+
+* **Delivery is at-least-once across the handoff.** A row changed while the snapshot was running
+  is read twice: once by the snapshot, once from the stream. The sink must be idempotent — an
+  upsert keyed on the primary key, which is what a search index or a `ON CONFLICT` sink already
+  does. There is no exported-snapshot mode that would deduplicate this.
+* **A phase must be able to drain.** An intermediate phase is always run in drain mode, and its
+  first empty batch is the handoff signal; only the last phase inherits the route's own
+  `exit_on_empty`. An endpoint that never reports empty would never hand off.
+* **`postgres_cdc` needs `temporary_slot: false`** when it follows another phase. A temporary
+  slot is dropped when the route stops, so a restart would resume with no retained WAL and
+  silently skip every change made while the earlier phase ran. This is rejected at startup, for
+  `consume: capture_all` as well as for a hand-written `sequence`.
+* **Without `cursor_id` + `checkpoint_store` every restart re-enters the first phase.** Whether
+  that re-reads anything is then up to that phase's own cursor — a `sqlx` phase with its own
+  `cursor_id` picks up where it left off. The marker records which phase was reached, so a
+  restart skips the earlier ones outright.
+* Phases connect lazily — a later phase opens no connection while an earlier one is still
+  running, so a long snapshot does not hold a replication stream open.
+
+**Which endpoints can be a phase: all of them.** Any endpoint valid as an input works in any
+position — there is no per-endpoint support list. An intermediate phase is run in drain mode, and every consumer either returns an empty
+batch when idle (the poll-style sources: `sqlx`, `clickhouse`, `object_store`, `aws`, `ibm_mq`)
+or surfaces one after a short idle timeout — the same mechanism `--drain` uses. That timeout
+defaults to 1s and is set process-wide by `MQ_BRIDGE_DRAIN_IDLE_TIMEOUT_MS`, so a handover costs
+about a second on a blocking source.
+
+**What differs per endpoint is the pin** — whether the last phase can guarantee it resumes from
+before the backfill rather than from "now":
+
+| Last phase | Pinned by | Gapless |
+|---|---|:---:|
+| `postgres_cdc`, or `sqlx` with a `publication` | Creating the replication slot, so the server retains WAL for the whole backfill | ✅ |
+| `mongodb` with `consume: capture_all` | Nothing — it already captures a resume token, snapshots, then streams from that token, inside the consumer | ✅ |
+| `kafka`, `nats` JetStream, `redis_streams` | Not pinned. These retain history themselves, so start the consumer at the earliest position rather than relying on a pin | n/a |
+| Everything else | Nothing to pin | ⚠️ |
+
+⚠️ means the handover is only as gapless as the source's own retention: a change made *during*
+the backfill is missed if the source does not keep it. For a queue or a log that is not a
+concern — nothing is dropped while you are not reading. It matters for sources that only expose
+"what is true now".
+
 
 ### `static`
 

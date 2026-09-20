@@ -70,6 +70,10 @@ impl std::fmt::Debug for PluginEndpointFactory {
 
 #[async_trait]
 impl CustomEndpointFactory for PluginEndpointFactory {
+    fn config_schema(&self) -> Option<serde_json::Value> {
+        self.plugin.info.endpoint_schema()
+    }
+
     async fn create_consumer(
         &self,
         route_name: &str,

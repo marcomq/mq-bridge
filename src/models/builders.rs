@@ -95,6 +95,7 @@ impl EndpointType {
             EndpointType::ClickHouse(_) => "clickhouse",
             EndpointType::PostgresCdc(_) => "postgres_cdc",
             EndpointType::Fanout(_) => "fanout",
+            EndpointType::Sequence(_) => "sequence",
             EndpointType::StreamBuffer(_) => "stream_buffer",
             EndpointType::Switch(_) => "switch",
             EndpointType::Response(_) => "response",
@@ -114,6 +115,7 @@ impl EndpointType {
                 | EndpointType::Ref(_)
                 | EndpointType::Memory(_)
                 | EndpointType::Fanout(_)
+                | EndpointType::Sequence(_)
                 | EndpointType::StreamBuffer(_)
                 | EndpointType::Switch(_)
                 | EndpointType::Response(_)
@@ -530,6 +532,14 @@ impl AmqpConfig {
         self.username = Some(username.into());
         self.password = Some(password.into());
         self
+    }
+}
+
+impl crate::models::PostgresCdcConfig {
+    /// The consume mode, defaulting to `capture_new` — what `postgres_cdc` did before the
+    /// field existed, so an upgrade never starts backfilling a table on its own.
+    pub fn resolved_consume(&self) -> crate::models::PostgresConsume {
+        self.consume.unwrap_or_default()
     }
 }
 

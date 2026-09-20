@@ -93,6 +93,10 @@ impl std::fmt::Debug for PluginMiddlewareFactory {
 
 #[async_trait]
 impl CustomMiddlewareFactory for PluginMiddlewareFactory {
+    fn config_schema(&self) -> Option<serde_json::Value> {
+        self.plugin.info.middleware_schema()
+    }
+
     async fn apply_consumer(
         &self,
         consumer: Box<dyn MessageConsumer>,

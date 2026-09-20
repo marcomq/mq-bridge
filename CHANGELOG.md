@@ -6,6 +6,46 @@ All notable changes to `mq-bridge`. Newest first.
 
 ### Added
 
+- **`postgres_cdc` gains `consume: capture_all` — back fill the tables, then follow changes.**
+  The same field, the same values and the same meaning as `mongodb`'s, so the two CDC endpoints
+  finally read alike:
+
+  ```yaml
+  input:
+    postgres_cdc:
+      url: "postgres://user@localhost/shop"
+      publication: "orders_pub"
+      consume: capture_all
+  ```
+
+  It pages each published table by its primary key and then streams changes, with the
+  replication slot created **before** the backfill so the server retains WAL throughout —
+  no gap, and no change lost in the handover. `snapshot` back fills only; `capture_new` is
+  the default and is exactly what `postgres_cdc` has always done, so an upgrade never starts
+  reading a table on its own. Tables and cursors are discovered from the publication; a table
+  without a single-column primary key fails at startup naming that table, rather than reading
+  it non-resumably. `temporary_slot: true` is rejected, since the slot must outlive the
+  backfill. Needs the `sqlx` feature, which supplies the paging.
+
+- **`sequence` input — read several endpoints in order, for a gapless CDC backfill.** Each
+  phase is drained before the next begins and the last one streams until the route stops, so
+  `sequence: { endpoints: [ sqlx table scan, postgres_cdc ] }` copies the existing rows and
+  then follows the changes. Before the first phase reads anything, every later phase pins the
+  position it will resume from: for `postgres_cdc` that creates the replication slot, so the
+  server retains WAL for the whole snapshot and the stream resumes from the slot's own
+  consistent point rather than from "now". Delivery across the handoff is at-least-once, which
+  an upsert sink absorbs. Phases connect lazily, so a long snapshot never holds a replication
+  stream open. `cursor_id` + `checkpoint_store` persist which phase was reached, so a restart
+  resumes there instead of re-running the snapshot, and `postgres_cdc` with
+  `temporary_slot: true` is rejected as a later phase — its slot would not survive the
+  earlier ones. MongoDB needs none of this: `consume: capture_all` already does the same
+  handoff inside the consumer. `consume: capture_all` above **expands to exactly this**, so
+  reach for `sequence` only when the expansion cannot serve you: a composite or non-integer
+  primary key, a custom snapshot query, only some of a publication's tables, or a backfill
+  from somewhere else entirely. Any endpoint valid as an input can be a phase; what differs
+  per endpoint is whether the last one can pin a resume position, which
+  [REFERENCE.md](docs/REFERENCE.md#sequence) tabulates.
+
 - **Meilisearch is a built-in endpoint of `mqb`.** `mq-bridge-meilisearch` is compiled
   into the CLI and registered at startup next to Pulsar, so a `meilisearch://` URI works
   wherever an endpoint URI is accepted — `mqb copy 'postgres://…/orders'
@@ -16,8 +56,27 @@ All notable changes to `mq-bridge`. Newest first.
   non-destructive scan of an index. The crate stays a separate plugin as well, for hosts
   that load the `cdylib` instead.
 
-- **Plugin ABI 1.1 — ordered publishing and per-message publish outcomes.** Two entries
-  appended to the vtable. `publisher_requires_ordered_publish` lets
+- **A plugin is found by the endpoint name a route asks for — installing the library is the
+  whole setup.** An endpoint no factory is registered under is looked up as one file,
+  `libmq_bridge_<name>.so` / `.dylib` / `mq_bridge_<name>.dll` (`-` becomes `_`, so `ibm-mq`
+  is `libmq_bridge_ibm_mq.so`), on a search path that covers `MQB_PLUGIN_DIR`, the running
+  binary's own directory and prefix, an activated conda environment (`$CONDA_PREFIX`),
+  Homebrew (`$HOMEBREW_PREFIX`, plus `/opt/homebrew` and `/usr/local` for a service or
+  container that never ran `brew shellenv`), and `~/.local/share/mq-bridge/plugins`. Both
+  `lib/mq-bridge` and plain `lib` are searched under each prefix, so a brew formula or conda
+  package needs no special layout. `brew install mq-bridge-<x>` followed by
+  `mqb copy '<x>://…' …` therefore works with no `plugins:` entry, no `--plugin` and no
+  `load_endpoint_plugin` call — in a config, in a URI scheme, and from every language binding.
+  Directories are **never listed**: only the requested name is ever opened, so a library no
+  route names is never loaded, and the lookup runs at all only after the registry has missed.
+  A library that exists but fails to load is reported as a load failure rather than as an
+  unknown endpoint, and a file whose name disagrees with the endpoint it provides is an error
+  naming both. `MQB_PLUGIN_DISCOVERY=0` switches the search off entirely.
+  `plugin::discover_endpoint_plugin_in(dirs, name)` runs the same lookup against directories
+  the caller names, for a host that keeps its plugins somewhere it already knows.
+
+- **Plugin ABI 1.1 — ordered publishing, per-message publish outcomes, and a configuration
+  schema.** Three entries appended to the vtable. `publisher_requires_ordered_publish` lets
   `MessagePublisher::requires_ordered_publish` cross the plugin boundary: a keyed sink
   loaded from a shared library gets its sends sequenced like a directly linked one,
   whatever the route's `concurrency`. Until now the flag was unreachable across the ABI
@@ -29,11 +88,39 @@ All notable changes to `mq-bridge`. Newest first.
   already been published. A batch where *nothing* landed is still reported as a
   whole-batch error, so a connection-level failure still reconnects the endpoint.
 
+  `factory_config_schema` lets a plugin describe its `config` object as a JSON Schema, which
+  a host reads for two things: rendering a form for the endpoint instead of a blank text box,
+  and turning a URI into configuration with the right **types**. The second is the bigger
+  gain — a URI carries only text, so until now `?batch_size=100` reached a plugin as the
+  string `"100"` and `?tls=true` as `"true"`, which made any plugin with a non-string config
+  field unreachable from a URI. Where each field sits in a URI is a per-property annotation,
+  `x-mqb-uri`, with the values `origin`, `url`, `path` and `query`; JSON Schema reserves the
+  `x-` prefix for annotations, so the document stays a plain schema. One document serves both
+  the form and the URI on purpose: a field renamed in one and not the other is a bug class
+  nobody notices. `mq-bridge-app` builds the endpoint's entry in its own config schema from
+  it, so a plugin the UI has never heard of gets a rendered form with labels, defaults and
+  field descriptions instead of a blank text box — the hand-written Pulsar block is now just
+  the fallback for an extension that predates the mechanism. Setting
+  `MQB_PLUGIN_VALIDATE_CONFIG=1` additionally checks a route's config against the schema
+  before the endpoint opens, turning a deserializer's complaint into `unknown field `topci`;
+  this endpoint takes batch_size, group, topic, url`. That is off by default and reuses the
+  JSON Schema subset the `transform` middleware already validates against, so no new
+  dependency; a schema needing more than that subset is logged as uncheckable and passed
+  through rather than rejected. Return it from `CustomEndpointFactory::config_schema` — a defaulted method,
+  so nothing existing has to change — and from `MiddlewareFactory::config_schema` for the
+  middleware half. Nothing but JSON crosses the ABI, so a plugin may derive the document with
+  `schemars`, hand-write it, or emit it from another language, with no version coupling to the
+  host. Statically linked extensions answer through the same trait method, so they gain the
+  same mapping. A schema the host cannot use — not an object, two fields claiming the same
+  part of a URI, a misspelled annotation — is refused at load time rather than at whichever
+  call site read it first.
+
   The bump is additive — the `mq_bridge_plugin_v1` entry symbol and the minimum accepted
   table size are unchanged, so **plugins built against 1.0 keep loading as they are**: the
-  host cannot ask them about ordering, so it assumes unordered, and falls back to the
-  all-or-nothing send. Both are what those plugins already do today. Rebuild against 1.1
-  to get either. See [PLUGINS.md](docs/PLUGINS.md).
+  host cannot ask them about ordering, so it assumes unordered; it falls back to the
+  all-or-nothing send; and it maps a URI the way it always has, `url` taking everything
+  before `?` with every parameter a string. All three are what those plugins already do
+  today. Rebuild against 1.1 to get any of them. See [PLUGINS.md](docs/PLUGINS.md).
 
 ## 0.4.12
 

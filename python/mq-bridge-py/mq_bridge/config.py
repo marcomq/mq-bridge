@@ -38,6 +38,7 @@ RequestForwardConfig = dict
 ResponseConfig = dict
 RetryMiddleware = dict
 Route = dict
+SequenceConfig = dict
 SledConfig = dict
 SqlxConfig = dict
 StreamBufferConfig = dict
@@ -128,6 +129,7 @@ __all__ = [
     "Route",
     "RouteConfig",
     "RoutesConfig",
+    "SequenceConfig",
     "SledConfig",
     "SpoolClaim",
     "SpoolDone",

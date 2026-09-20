@@ -616,6 +616,19 @@ pub trait CustomEndpointFactory: Send + Sync + std::fmt::Debug {
             "This custom endpoint does not support creating publishers"
         ))
     }
+
+    /// The JSON Schema of the object this factory accepts as `config`.
+    ///
+    /// Returning it lets a host render a form for the endpoint and turn a URI
+    /// into configuration with the right types, instead of guessing. `None`
+    /// means neither: the factory still works, and the host passes whatever it
+    /// was given straight through.
+    ///
+    /// `x-mqb-uri` annotations say where each field sits in a URI; see
+    /// `docs/PLUGINS.md`.
+    fn config_schema(&self) -> Option<serde_json::Value> {
+        None
+    }
 }
 
 /// Factory for creating custom middleware.
@@ -637,6 +650,14 @@ pub trait CustomMiddlewareFactory: Send + Sync + std::fmt::Debug {
         _config: &serde_json::Value,
     ) -> anyhow::Result<Box<dyn MessagePublisher>> {
         Ok(publisher)
+    }
+
+    /// The JSON Schema of the object this middleware accepts as `config`.
+    ///
+    /// A middleware is never addressed by URI, so only the form-rendering half
+    /// of [`CustomEndpointFactory::config_schema`] applies here.
+    fn config_schema(&self) -> Option<serde_json::Value> {
+        None
     }
 }
 

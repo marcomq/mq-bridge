@@ -152,8 +152,43 @@ fn resolve(route_name: &str, value: &serde_json::Value) -> anyhow::Result<(Fixtu
     Ok((config, name))
 }
 
+/// Hand-written rather than derived, because that is what a plugin in another
+/// language has to do and the ABI carries nothing but the JSON.
+fn fixture_config_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "title": "Fixture queue",
+        "additionalProperties": false,
+        "properties": {
+            "queue": {
+                "type": "string",
+                "description": "In-process queue to attach to. Defaults to the route name.",
+                "x-mqb-uri": "path",
+            },
+            "fail_receive": {
+                "type": "string",
+                "enum": ["none", "retryable", "permanent", "end_of_stream"],
+                "default": "none",
+            },
+            "fail_send": {
+                "type": "string",
+                "enum": ["none", "retryable", "permanent"],
+                "default": "none",
+            },
+            "fail_send_at": { "type": "array", "items": { "type": "integer" } },
+            "panic_on_receive": { "type": "boolean", "default": false },
+            "commit_requires_order": { "type": "boolean", "default": true },
+            "requires_ordered_publish": { "type": "boolean", "default": false },
+        },
+    })
+}
+
 #[async_trait]
 impl CustomEndpointFactory for FixtureFactory {
+    fn config_schema(&self) -> Option<serde_json::Value> {
+        Some(fixture_config_schema())
+    }
+
     async fn create_consumer(
         &self,
         route_name: &str,
@@ -310,9 +345,7 @@ impl FixturePublisher {
                 let cause = anyhow!("fixture failed message {index} of the batch");
                 let error = match self.config.fail_send {
                     SendFailure::Permanent => PublisherError::NonRetryable(cause),
-                    SendFailure::None | SendFailure::Retryable => {
-                        PublisherError::Retryable(cause)
-                    }
+                    SendFailure::None | SendFailure::Retryable => PublisherError::Retryable(cause),
                 };
                 failed.push((message, error));
             } else {
@@ -427,6 +460,19 @@ pub struct FixtureMiddlewareFactory;
 
 #[async_trait]
 impl mq_bridge::plugin::sdk::MiddlewareFactory for FixtureMiddlewareFactory {
+    fn config_schema(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({
+            "type": "object",
+            "title": "Fixture filter",
+            "additionalProperties": false,
+            "properties": {
+                "drop_prefix": { "type": "string" },
+                "suffix": { "type": "string" },
+                "fail": { "type": "boolean", "default": false },
+            },
+        }))
+    }
+
     async fn create(
         &self,
         _route_name: &str,

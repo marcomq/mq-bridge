@@ -3545,6 +3545,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "mq-bridge-plugin-fixture-middleware"
+version = "0.1.0"
+dependencies = [
+ "mq-bridge",
+ "mq-bridge-plugin-fixture",
+]
+
+[[package]]
 name = "mq-bridge-py"
 version = "0.4.13"
 dependencies = [

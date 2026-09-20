@@ -25,6 +25,7 @@ members = [
     "node/mq-bridge-node",
     "tests/fixtures/plugin-fixture",
     "tests/fixtures/plugin-fixture-bad-abi",
+    "tests/fixtures/plugin-fixture-middleware",
     "tests/fixtures/grpc-config-compat",
 ]
 # apps/mq-bridge-app is its own workspace with its own Cargo.lock; see its manifest.
@@ -234,7 +235,7 @@ prost-types = { version = "0.14", optional = true }
 prost-reflect = { version = "0.16", optional = true, features = ["serde"] }
 tokio-stream = { version = "0.1", optional = true, features = ["net"] }
 
-url = { version = "2.5", optional = true }
+url = "2.5"
 percent-encoding = { version = "2.3", optional = true }
 
 # Postgres CDC (logical replication / pgoutput). pgwire-replication is a
@@ -345,10 +346,10 @@ schema = ["dep:schemars"]
 
 # Endpoint features
 kafka = ["rdkafka", "rdkafka/libz-static"]
-amqp = ["lapin", "rustls", "rustls-pemfile", "url"]
+amqp = ["lapin", "rustls", "rustls-pemfile"]
 nats = ["async-nats", "rustls", "rustls-pemfile"]
-mongodb = ["dep:mongodb", "url"]
-mqtt = ["rumqttc", "rustls", "tokio-rustls", "rustls-pemfile", "url"]
+mongodb = ["dep:mongodb"]
+mqtt = ["rumqttc", "rustls", "tokio-rustls", "rustls-pemfile"]
 http = ["dep:arc-swap", "hyper", "hyper-util", "hyper-rustls", "http-body-util", "dep:http-body", "rustls", "tokio-rustls", "rustls-pemfile", "webpki-roots", "h2", "dep:flate2", "dep:lz4_flex", "dep:zstd"]
 websocket = ["dep:tokio-websockets"]
 aws = ["aws-config", "aws-sdk-sqs", "aws-sdk-sns"]
@@ -372,14 +373,14 @@ zeromq-omq = ["dep:omq-tokio"]
 redis-streams = ["dep:redis"]
 # Note: The grpc feature requires protobuf-src which can significantly increase build times.
 grpc = ["tonic", "tonic-reflection", "prost", "prost-types", "prost-reflect", "tokio-stream", "tonic-prost", "tonic-prost-build", "rustls", "vendored-protoc"]
-sqlx = ["dep:sqlx", "url"]
-clickhouse = ["dep:reqwest", "dep:flate2", "dep:lz4_flex", "dep:zstd", "dep:percent-encoding", "url"]
+sqlx = ["dep:sqlx"]
+clickhouse = ["dep:reqwest", "dep:flate2", "dep:lz4_flex", "dep:zstd", "dep:percent-encoding"]
 # Cloud object-store checkpoint backend (S3/GCS/Azure/R2). Talks cloud REST via reqwest.
-object-store = ["dep:object_store", "url"]
+object-store = ["dep:object_store"]
 # Postgres logical-replication CDC (pgoutput). Reuses the sqlx dependency for the
 # slot-lifecycle control plane; the streaming wire protocol is pgwire-replication.
 # Needs Rust 1.88 (pgwire-replication MSRV), like the amqp feature gate.
-postgres-cdc = ["dep:pgwire-replication", "dep:byteorder", "sqlx", "url", "dep:percent-encoding"]
+postgres-cdc = ["dep:pgwire-replication", "dep:byteorder", "sqlx", "dep:percent-encoding"]
 
 [dev-dependencies]
 config = { version = "0.15" }

@@ -162,6 +162,7 @@ class Endpoint(TypedDict, total=False):
     ref: str
     request: RequestForwardConfig
     response: ResponseConfig
+    sequence: SequenceConfig
     sled: SledConfig
     sqlx: SqlxConfig
     static: StaticConfig
@@ -494,6 +495,13 @@ class Route(TypedDict, total=False):
     output: Optional[Endpoint]
     reconnect_interval_ms: int
     startup_timeout_ms: int
+
+
+class SequenceConfig(TypedDict, total=False):
+    """Reads several input endpoints one after another: each is drained before the next"""
+    checkpoint_store: Optional[str]
+    cursor_id: Optional[str]
+    endpoints: Required[List[Endpoint]]
 
 
 class SledConfig(TypedDict, total=False):

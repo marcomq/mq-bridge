@@ -80,6 +80,7 @@ use crate::support::plugin_abi::{
     MQB_END_OF_STREAM, MQB_ERR_CONNECTION, MQB_ERR_INVALID_CONFIG, MQB_ERR_PANIC,
     MQB_ERR_PERMANENT, MQB_ERR_RETRYABLE, MQB_MIDDLEWARE_RECEIVE, MQB_OK, MQB_OUTCOME_OK,
     MQB_OUTCOME_PERMANENT, MQB_OUTCOME_RETRYABLE, MQB_PLUGIN_ABI_MAJOR, MQB_PLUGIN_ABI_MINOR,
+    MQB_SCHEMA_ENDPOINT, MQB_SCHEMA_MIDDLEWARE,
 };
 use crate::traits::{
     BatchCommitFunc, CustomEndpointFactory, MessageConsumer, MessageDisposition, MessagePublisher,
@@ -371,6 +372,45 @@ unsafe extern "C" fn buffer_free(buffer: MqbBuffer) {
             drop(unsafe { Vec::from_raw_parts(buffer.ptr, buffer.len, buffer.cap) });
         }
     });
+}
+
+/// Answers one `MQB_SCHEMA_*` selector, or nothing at all.
+///
+/// A selector this build does not know answers empty rather than failing, so a
+/// newer host may ask for anything without first checking the minor version.
+unsafe extern "C" fn factory_config_schema<M>(
+    factory: MqbFactoryHandle,
+    kind: u32,
+    out: *mut MqbBuffer,
+    err: *mut MqbBuffer,
+) -> MqbStatus
+where
+    M: MiddlewareFactory,
+{
+    guarded(err, || {
+        if out.is_null() {
+            unsafe { set_error(err, "factory_config_schema called with no output slot") };
+            return MQB_ERR_PERMANENT;
+        }
+        let Some(state) = (unsafe { borrow::<FactoryState>(factory.0) }) else {
+            unsafe {
+                set_error(
+                    err,
+                    "factory_config_schema called with a null factory handle",
+                )
+            };
+            return MQB_ERR_PERMANENT;
+        };
+        let schema = match kind {
+            MQB_SCHEMA_ENDPOINT => state.factory.config_schema(),
+            MQB_SCHEMA_MIDDLEWARE => M::default().config_schema(),
+            _ => None,
+        };
+        if let Some(schema) = schema {
+            unsafe { *out = buffer_from(schema.to_string()) };
+        }
+        MQB_OK
+    })
 }
 
 // ------------------------------------------------------------------ consumer
@@ -875,6 +915,12 @@ pub trait MiddlewareFactory: Default + Send + Sync + 'static {
         route_name: &str,
         config: &serde_json::Value,
     ) -> anyhow::Result<Box<dyn BatchFilter>>;
+
+    /// The JSON Schema of the object this middleware accepts as `config`, for a
+    /// host that renders a form for it. `None` describes nothing.
+    fn config_schema(&self) -> Option<serde_json::Value> {
+        None
+    }
 }
 
 /// Stand-in for a plugin that exports no middleware.
@@ -1109,6 +1155,7 @@ where
         middleware_free,
         publisher_requires_ordered_publish,
         publisher_send_batch_outcomes,
+        factory_config_schema: factory_config_schema::<M>,
     })
 }
 

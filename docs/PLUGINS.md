@@ -17,7 +17,8 @@ implementation with the same delivery semantics.
 
 ## Using a plugin
 
-Loading is always explicit; installing a package never registers anything.
+A plugin is loaded either by path, as below, or by the endpoint name a route
+asks for — see [Installing a plugin by name](#installing-a-plugin-by-name).
 
 ```rust
 // Rust
@@ -70,6 +71,64 @@ process may do. Treat plugin packages like other native dependencies, not like
 sandboxed scripts. Nothing is ever unloaded: a library stays mapped for the life
 of the process, because unloading while endpoint handles or in-flight batches
 exist cannot be made safe.
+
+---
+
+## Installing a plugin by name
+
+A plugin does not have to be listed anywhere. When a route asks for a `custom`
+endpoint no factory is registered under, mq-bridge looks for one file named
+after it:
+
+| Platform | File |
+| :--- | :--- |
+| Linux | `libmq_bridge_<name>.so` |
+| macOS | `libmq_bridge_<name>.dylib` |
+| Windows | `mq_bridge_<name>.dll` |
+
+`-` in an endpoint name becomes `_` in the file name, so `ibm-mq` is
+`libmq_bridge_ibm_mq.so`. Installing that file is the whole installation step —
+no `plugins:` entry, no `--plugin`, no `load_endpoint_plugin` call:
+
+```console
+mqb copy 'redpanda://…' 'postgres://…'
+```
+
+Directories are searched in this order, nearest first:
+
+1. every directory in `MQB_PLUGIN_DIR` (`:`-separated, `;` on Windows) — a
+   custom location, and the one to set for an unpackaged build
+2. the directory holding the running binary
+3. `lib/mq-bridge` and `lib` under that binary's prefix — `/opt/homebrew/lib`
+   for a brewed `mqb`, `$CONDA_PREFIX/lib` for a conda-installed one
+4. the same two under `$CONDA_PREFIX` and `$HOMEBREW_PREFIX`, which reach a
+   plugin the *running* binary is not installed beside — `python` in a venv,
+   `cargo run`, a plugin brewed for a binary from somewhere else
+5. `/opt/homebrew` and `/usr/local` (`/home/linuxbrew/.linuxbrew` and
+   `/usr/local` on Linux), because `HOMEBREW_PREFIX` comes from
+   `brew shellenv` in a shell profile and a service or container has none
+6. `$XDG_DATA_HOME/mq-bridge/plugins`, else `~/.local/share/mq-bridge/plugins`
+   (`%APPDATA%\mq-bridge\plugins` on Windows)
+
+On Windows each prefix also contributes `Library\bin`, where a conda environment
+keeps its DLLs. Both `lib/mq-bridge` and plain `lib` are searched under every
+prefix, so a package manager needs no special layout: `lib.install` in a brew
+formula or a conda package's default `lib` is enough, and `lib/mq-bridge` keeps
+a hand-managed install tidy.
+
+**Only the requested name is ever looked up.** Directories are never listed, so
+a library no route names is never opened, and installing one has no effect on a
+process that does not ask for it. That is also why the lookup costs nothing when
+every endpoint is built in: it runs only after the registry has already missed.
+
+Set `MQB_PLUGIN_DISCOVERY=0` (or `false`, `off`, `no`) to switch the search off
+and resolve endpoints only from factories the host registered or a config listed
+by path.
+
+A file whose name does not match the endpoint the library actually provides is an
+error naming both — and the library stays loaded, because nothing is ever
+unloaded. The same applies to a library that exists but fails to load: that is
+reported as a load failure, not as an unknown endpoint.
 
 ---
 
@@ -185,6 +244,98 @@ mq_bridge::export_endpoint_plugin! {
     middleware: PulsarMiddleware,
 }
 ```
+
+### Describing its configuration
+
+An endpoint's `config` is an opaque JSON object: the plugin defines it, and the
+host has no idea what is in there. Since **ABI 1.1** a plugin can describe it as
+a JSON Schema, which buys two things — a host can render a form for the endpoint
+instead of a blank text box, and it can turn a URI into configuration with the
+right *types*.
+
+The second one matters more than it sounds. A URI carries only text, so without
+a schema `?batch_size=100` reaches the plugin as the string `"100"` and
+`?tls=true` as `"true"`. Any plugin with a non-string config field is unusable
+from a URI until it describes one.
+
+```rust
+impl CustomEndpointFactory for RedpandaFactory {
+    fn config_schema(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "url":        { "type": "string",  "x-mqb-uri": "origin" },
+                "topic":      { "type": "string",  "x-mqb-uri": "path" },
+                "group":      { "type": "string",  "default": "mq-bridge" },
+                "batch_size": { "type": "integer", "default": 100 }
+            },
+            "required": ["url", "topic"]
+        }))
+    }
+    // ...
+}
+```
+
+Deriving it beats writing it by hand if your config is a Rust struct — add
+[`schemars`](https://docs.rs/schemars) to your own crate and return
+`serde_json::to_value(schemars::schema_for!(RedpandaConfig)).ok()`. Nothing but
+JSON crosses the ABI, so your schemars version and the host's need not agree,
+and a plugin written in another language just emits the document. `title`,
+`description` and `default` are what a host shows, so they are worth filling in;
+`models.rs` doc comments serve the same purpose for built-in endpoints.
+
+`MiddlewareFactory::config_schema` does the same for the middleware half. A
+middleware is never addressed by a URI, so only the form applies.
+
+#### Where each field sits in a URI
+
+`x-mqb-uri` names a field's place in a URI. JSON Schema reserves the `x-` prefix
+for annotations, so a validator ignores it and the document stays a plain schema.
+
+| `x-mqb-uri` | Gets | From `rp://user@host:9092/orders?group=g` |
+| --- | --- | --- |
+| `origin` | scheme, userinfo, host and port | `rp://user@host:9092` |
+| `url` | everything before `?` | `rp://user@host:9092/orders` |
+| `path` | the path, without its leading `/` | `orders` |
+| `query` | the query parameter of the same name (the default) | `g` |
+
+Each of `origin`, `url` and `path` may be claimed by at most one field.
+Everything unannotated is a query parameter, read as its declared `type` —
+`integer`, `number`, `boolean`, `array` (comma-separated, with `items` honoured)
+or string. A value that is not what the field declares is refused by name,
+rather than handed to the plugin's deserializer to complain about.
+
+A query parameter always wins over the position it would have had, so
+`?url=...` remains the escape hatch for an address a URI cannot spell.
+
+Annotate nothing and the mapping is the one that predates schemas: `url` gets
+everything before `?` and every parameter stays a string. That is also what a
+plugin describing no schema at all gets, so nothing changes under an older
+plugin.
+
+A schema the host cannot use — not an object, two fields claiming the same
+position, a misspelled `x-mqb-uri` — fails at **load** time rather than at
+whichever call site looked first.
+
+#### Enforcing it
+
+A schema is read and mapped, **not enforced** — your factory still checks what it
+is given. Set `MQB_PLUGIN_VALIDATE_CONFIG=1` and the host checks a route's config
+against it first, which turns a deserializer's complaint into a message naming
+the field:
+
+```
+endpoint `redpanda` configuration: unknown field `topci`; this endpoint takes
+batch_size, group, topic, url
+```
+
+It is off by default on purpose. The schema is yours, not the route's, and the
+host checks only the subset the `transform` middleware already validates against
+— `type`, `required`, `enum`, `items`, nested `properties`, plus unknown
+top-level fields when you set `additionalProperties: false`. A schema using more
+than that (`oneOf`, `$ref` to a remote document, `patternProperties`) is logged
+as uncheckable and passed through rather than rejected, so describing yourself
+richly for the sake of a form never costs you a working endpoint.
 
 ### Ordered publishing
 
@@ -320,6 +471,10 @@ config portable across machines that install libraries in different places.
 Plugins load before any route is built; a path that fails to load stops startup
 rather than leaving a route to fail later with "unknown endpoint".
 
+Neither is needed for a plugin installed under its conventional file name: the
+endpoint name alone resolves it, in a config or in a URI scheme. See
+[Installing a plugin by name](#installing-a-plugin-by-name).
+
 ---
 
 ## Versioning and compatibility
@@ -338,7 +493,7 @@ Minor versions so far:
 | Minor | Added |
 | --- | --- |
 | 1.0 | The initial table. |
-| 1.1 | `publisher_requires_ordered_publish`, so a plugin sink can ask the route to keep its sends in source order, and `publisher_send_batch_outcomes`, so a partly failed batch reports which messages failed. |
+| 1.1 | `publisher_requires_ordered_publish`, so a plugin sink can ask the route to keep its sends in source order; `publisher_send_batch_outcomes`, so a partly failed batch reports which messages failed; and `factory_config_schema`, so a plugin describes its configuration as a JSON Schema for a host to render and to map a URI onto. |
 
 Publish the supported ABI range in your package metadata, and test each packaged
 plugin against the oldest and newest mq-bridge you claim to support.

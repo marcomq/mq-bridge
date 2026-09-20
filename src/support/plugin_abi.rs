@@ -125,6 +125,13 @@ pub const MQB_CAP_PUBLISHER: u64 = 1 << 1;
 /// The plugin provides a middleware under the same name.
 pub const MQB_CAP_MIDDLEWARE: u64 = 1 << 2;
 
+/// Asks [`MqbPluginVTable::factory_config_schema`] for the endpoint's
+/// configuration object.
+pub const MQB_SCHEMA_ENDPOINT: u32 = 0;
+/// Asks [`MqbPluginVTable::factory_config_schema`] for the middleware's
+/// configuration object.
+pub const MQB_SCHEMA_MIDDLEWARE: u32 = 1;
+
 /// Middleware sitting on an input endpoint: it sees each batch after the source
 /// produced it.
 pub const MQB_MIDDLEWARE_RECEIVE: u8 = 0;
@@ -462,7 +469,32 @@ pub struct MqbPluginVTable {
     /// [`MQB_VTABLE_SIZE_V1_1`]; read it through
     /// [`MqbPluginVTable::publisher_outcomes_hook`], never directly.
     pub publisher_send_batch_outcomes: MqbPublisherSendBatchOutcomes,
+    /// Describes one of the plugin's configuration objects as a JSON Schema.
+    ///
+    /// `kind` is an `MQB_SCHEMA_*` selector. On [`MQB_OK`] the plugin either
+    /// writes an owned [`MqbBuffer`] holding a UTF-8 JSON Schema document, or
+    /// leaves it empty to say it describes nothing — an empty buffer is the
+    /// answer for a kind the plugin does not implement, so a host may ask for
+    /// any selector without checking first.
+    ///
+    /// The document is read once at load time and outlives the call, so the
+    /// plugin may build it on demand rather than keeping it resident.
+    ///
+    /// Only present when
+    /// [`struct_size`](MqbPluginVTable::struct_size) reaches
+    /// [`MQB_VTABLE_SIZE_V1_1`]; read it through
+    /// [`MqbPluginVTable::config_schema_hook`], never directly.
+    pub factory_config_schema: MqbConfigSchema,
 }
+
+/// Signature of [`MqbPluginVTable::factory_config_schema`], named so the field
+/// and the accessor cannot drift apart.
+pub type MqbConfigSchema = unsafe extern "C" fn(
+    factory: MqbFactoryHandle,
+    kind: u32,
+    out: *mut MqbBuffer,
+    err: *mut MqbBuffer,
+) -> MqbStatus;
 
 /// Signature of [`MqbPluginVTable::publisher_send_batch_outcomes`], named so the
 /// field and the accessor cannot drift apart.
@@ -498,6 +530,16 @@ impl MqbPluginVTable {
     pub fn publisher_outcomes_hook(&self) -> Option<MqbPublisherSendBatchOutcomes> {
         (self.struct_size >= MQB_VTABLE_SIZE_V1_1).then_some(self.publisher_send_batch_outcomes)
     }
+
+    /// The 1.1 configuration-schema hook, or `None` when the plugin predates it.
+    ///
+    /// Gated for the same reason as
+    /// [`publisher_ordering_hook`](Self::publisher_ordering_hook). `None` and an
+    /// empty answer mean the same thing to a caller: the plugin describes no
+    /// configuration, so the host validates and maps nothing on its behalf.
+    pub fn config_schema_hook(&self) -> Option<MqbConfigSchema> {
+        (self.struct_size >= MQB_VTABLE_SIZE_V1_1).then_some(self.factory_config_schema)
+    }
 }
 
 /// Size of the **1.0** field set: 7 header words (`struct_size`, the packed
@@ -517,14 +559,15 @@ impl MqbPluginVTable {
 pub const MQB_VTABLE_SIZE_V1_0: usize = 27 * core::mem::size_of::<usize>();
 
 /// Size of the **1.1** field set: 1.0 plus
-/// [`MqbPluginVTable::publisher_requires_ordered_publish`] and
-/// [`MqbPluginVTable::publisher_send_batch_outcomes`].
+/// [`MqbPluginVTable::publisher_requires_ordered_publish`],
+/// [`MqbPluginVTable::publisher_send_batch_outcomes`] and
+/// [`MqbPluginVTable::factory_config_schema`].
 ///
 /// This is a *feature gate*, not a minimum: [`check_compatibility`] still
 /// admits anything at or above [`MQB_VTABLE_SIZE_V1_0`], and a table smaller
 /// than this one simply has neither 1.1 hook. Both are gated on the one
 /// constant because 1.1 ships as a unit; nothing in between was ever released.
-pub const MQB_VTABLE_SIZE_V1_1: usize = MQB_VTABLE_SIZE_V1_0 + 2 * core::mem::size_of::<usize>();
+pub const MQB_VTABLE_SIZE_V1_1: usize = MQB_VTABLE_SIZE_V1_0 + 3 * core::mem::size_of::<usize>();
 
 /// Why a plugin was rejected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -627,13 +670,13 @@ mod tests {
     fn the_1_1_table_size_matches_the_declared_table() {
         assert_eq!(
             MQB_VTABLE_SIZE_V1_1,
-            MQB_VTABLE_SIZE_V1_0 + 2 * size_of::<usize>()
+            MQB_VTABLE_SIZE_V1_0 + 3 * size_of::<usize>()
         );
         assert_eq!(size_of::<MqbPluginVTable>(), MQB_VTABLE_SIZE_V1_1);
     }
 
     /// The whole point of an additive minor: a 1.0 plugin still loads, and the
-    /// host discovers that it can ask it neither 1.1 question.
+    /// host discovers that it can ask it none of the 1.1 questions.
     #[test]
     fn a_1_0_table_loads_but_offers_no_1_1_hooks() {
         let mut table = stub_table();
@@ -641,10 +684,12 @@ mod tests {
         assert!(check_compatibility(&table).is_ok());
         assert!(table.publisher_ordering_hook().is_none());
         assert!(table.publisher_outcomes_hook().is_none());
+        assert!(table.config_schema_hook().is_none());
 
         table.struct_size = MQB_VTABLE_SIZE_V1_1;
         assert!(table.publisher_ordering_hook().is_some());
         assert!(table.publisher_outcomes_hook().is_some());
+        assert!(table.config_schema_hook().is_some());
     }
 
     /// The three outcome codes share the byte the dispositions use, so they must
@@ -813,6 +858,14 @@ mod tests {
         ) -> MqbStatus {
             MQB_OK
         }
+        unsafe extern "C" fn config_schema(
+            _: MqbFactoryHandle,
+            _: u32,
+            _: *mut MqbBuffer,
+            _: *mut MqbBuffer,
+        ) -> MqbStatus {
+            MQB_OK
+        }
 
         MqbPluginVTable {
             struct_size: MQB_VTABLE_SIZE_V1_0,
@@ -843,6 +896,7 @@ mod tests {
             middleware_free,
             publisher_requires_ordered_publish: requires_ordered_publish,
             publisher_send_batch_outcomes: send_batch_outcomes,
+            factory_config_schema: config_schema,
         }
     }
 }

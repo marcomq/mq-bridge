@@ -172,6 +172,78 @@ pub async fn ensure_slot(
     Ok(())
 }
 
+/// A table a `capture_all`/`snapshot` backfill will page through.
+#[derive(Debug, Clone)]
+pub struct SnapshotTable {
+    pub schema: String,
+    pub table: String,
+    /// The single-column primary key the backfill pages by.
+    pub key: String,
+    /// Whether `key` is an integer type, which source positions require.
+    pub key_is_integer: bool,
+}
+
+impl SnapshotTable {
+    pub fn qualified(&self) -> String {
+        format!("{}.{}", self.schema, self.table)
+    }
+}
+
+/// The publication's tables with the primary key each backfill phase pages by.
+///
+/// A table without exactly one primary-key column cannot be paged safely, so it is an error
+/// naming the table rather than a silently skipped or non-resumable read.
+pub async fn snapshot_tables(
+    url: &str,
+    publication: &str,
+    tls: &crate::models::TlsConfig,
+) -> anyhow::Result<Vec<SnapshotTable>> {
+    let mut conn = control_conn(url, tls).await?;
+
+    let tables: Vec<(String, String)> = sqlx::query_as(
+        "SELECT schemaname::text, tablename::text FROM pg_publication_tables          WHERE pubname = $1 ORDER BY schemaname, tablename",
+    )
+    .bind(publication)
+    .fetch_all(&mut conn)
+    .await
+    .map_err(|e| anyhow!("postgres-cdc: listing publication tables failed: {e}"))?;
+
+    if tables.is_empty() {
+        return Err(anyhow!(
+            "postgres-cdc: publication '{publication}' captures no tables, so there is \
+             nothing to back fill"
+        ));
+    }
+
+    let mut out = Vec::with_capacity(tables.len());
+    for (schema, table) in tables {
+        let keys: Vec<(String, String)> = sqlx::query_as(
+            "SELECT a.attname::text, t.typname::text              FROM pg_index i              JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)              JOIN pg_type t ON t.oid = a.atttypid              WHERE i.indrelid = format('%I.%I', $1, $2)::regclass AND i.indisprimary",
+        )
+        .bind(&schema)
+        .bind(&table)
+        .fetch_all(&mut conn)
+        .await
+        .map_err(|e| anyhow!("postgres-cdc: primary-key lookup for {schema}.{table} failed: {e}"))?;
+
+        let [(key, typname)] = keys.as_slice() else {
+            return Err(anyhow!(
+                "postgres-cdc: cannot back fill {schema}.{table} — it has {} primary-key \
+                 columns and paging needs exactly one. Spell the backfill out as a `sequence` \
+                 input with an explicit `cursor_column` instead.",
+                keys.len()
+            ));
+        };
+        out.push(SnapshotTable {
+            schema,
+            table,
+            key: key.clone(),
+            key_is_integer: matches!(typname.as_str(), "int2" | "int4" | "int8"),
+        });
+    }
+    Ok(out)
+}
+
 /// Drop the replication slot, waiting for the server to release it first.
 /// `pg_drop_replication_slot` refuses to run while a walsender still holds the
 /// slot, and the server releases it only shortly after the streaming socket
