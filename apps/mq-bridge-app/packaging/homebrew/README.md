@@ -20,6 +20,26 @@ marcomq/homebrew-tap          ← the tap (installs read from here)
 └── Casks/mq-bridge.rb        ← desktop UI
 ```
 
+## Endpoint plugins
+
+The tap also carries one formula per mq-bridge endpoint plugin —
+`mq-bridge-pulsar`, `mq-bridge-meilisearch`, `mq-bridge-redpanda` — each a
+prebuilt shared library installed into `lib/mq-bridge`, which mq-bridge probes
+under `HOMEBREW_PREFIX` by default. They declare no dependency on
+`mq-bridge-app`: the same library serves the brewed CLI, the desktop app and a
+Python or Node host.
+
+These are rendered and pushed **by the tap, not by this repo or the plugin
+repos**. `marcomq/homebrew-tap` runs `.github/workflows/sync-plugins.yml` daily
+(and on demand), reads each plugin's latest public release, renders it with
+`bin/render-plugin-formula.sh` and commits to itself. The plugin repositories
+therefore need no tap credential: a write-enabled deploy key lives in exactly
+one place, this repo, for the formula and cask above.
+
+The renderer reads each release's `.sha256` sidecar instead of downloading the
+archive to hash it, which is why the plugin releases publish one. A plugin that
+has not cut a release yet renders no formula, and the sync job says so.
+
 ## macOS vs Linux
 
 Homebrew runs on **both macOS and Linux** ("Homebrew on Linux"), but the two

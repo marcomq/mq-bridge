@@ -130,6 +130,23 @@ error naming both — and the library stays loaded, because nothing is ever
 unloaded. The same applies to a library that exists but fails to load: that is
 reported as a load failure, not as an unknown endpoint.
 
+### Installing one with a package manager
+
+Homebrew and conda install into a prefix the search above already covers, so
+either one is the whole installation — no `plugins:` entry, no `--plugin`, no
+`load_endpoint_plugin` call:
+
+```console
+brew install marcomq/tap/mq-bridge-pulsar     # macOS arm64, Linux x86_64/arm64
+conda install -c marcomq mq-bridge-pulsar     # the same, plus Windows x86_64
+```
+
+Both cover `pulsar`, `meilisearch` and `redpanda`. Neither depends on
+`mq-bridge-app`: one installed library serves whatever host asks for the
+endpoint — the brewed CLI, the desktop app, a Python or Node process in a
+virtualenv — which is why the search covers `HOMEBREW_PREFIX` and
+`CONDA_PREFIX` rather than only the running binary's own prefix.
+
 ### Replacing an endpoint `mqb` already has
 
 Some endpoints are compiled into `mqb` itself — Pulsar and Meilisearch are
