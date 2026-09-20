@@ -86,8 +86,17 @@ bench = ["mq_bridge_app/bench", "mimalloc"]
 bench-cdc = ["bench", "mq_bridge_app/bench-cdc", "rustls-aws-lc"]
 ibm-mq = ["mq_bridge_app/ibm-mq"]
 arm64-cross-compile = ["mq_bridge_app/arm64-cross-compile"]
-full = ["mq_bridge_app/full", "mimalloc", "rustls-aws-lc"]
-full-dynamic = ["mq_bridge_app/full-dynamic", "mimalloc", "rustls-aws-lc"]
+# The extension features are named again rather than left to `mq_bridge_app/full`:
+# that enables them on the core crate, but this crate's own `cfg` — the scheme
+# list in an unsupported-scheme error — reads the flags declared here.
+full = ["mq_bridge_app/full", "mimalloc", "rustls-aws-lc", "pulsar", "meilisearch"]
+full-dynamic = [
+    "mq_bridge_app/full-dynamic",
+    "mimalloc",
+    "rustls-aws-lc",
+    "pulsar",
+    "meilisearch",
+]
 middleware = ["mq_bridge_app/middleware"]
 compression = ["mq_bridge_app/compression"]
 encryption = ["mq_bridge_app/encryption"]

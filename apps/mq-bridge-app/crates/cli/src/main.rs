@@ -3185,6 +3185,26 @@ mod uri_tests {
         assert_eq!(config["primary_key"], "id");
     }
 
+    // Deliberately ungated: the features that name an extension here are this
+    // crate's, while the one that compiles it in is the core crate's. A build
+    // enabling only the latter registers the endpoint but omits it from the
+    // error, and every gated test would still pass.
+    #[test]
+    fn every_registered_extension_is_named_in_the_scheme_error() {
+        mq_bridge_app::plugins::register_builtin_endpoints().unwrap();
+        let schemes = super::extension_schemes();
+
+        for name in ["pulsar", "meilisearch"] {
+            if super::mq_bridge::extensions::get_endpoint_factory(name).is_some() {
+                assert!(
+                    schemes.contains(name),
+                    "`{name}` is registered but missing from `{schemes}`: enable the \
+                     `{name}` feature of this crate alongside the core one"
+                );
+            }
+        }
+    }
+
     #[test]
     #[cfg(feature = "pulsar")]
     fn registered_endpoint_url_preserves_a_trailing_slash() {
