@@ -67,8 +67,9 @@ use core::fmt;
 pub const MQB_PLUGIN_ABI_MAJOR: u32 = 1;
 /// Additive-change counter. A host accepts any minor, old or new.
 ///
-/// * **1.1** appended [`MqbPluginVTable::publisher_requires_ordered_publish`]
-///   and [`MqbPluginVTable::publisher_send_batch_outcomes`].
+/// * **1.1** appended [`MqbPluginVTable::publisher_requires_ordered_publish`],
+///   [`MqbPluginVTable::publisher_send_batch_outcomes`] and
+///   [`MqbPluginVTable::factory_config_schema`].
 pub const MQB_PLUGIN_ABI_MINOR: u32 = 1;
 
 /// Name of the discovery symbol a plugin shared library must export.
@@ -510,14 +511,16 @@ impl MqbPluginVTable {
     /// The 1.1 publisher-ordering hook, or `None` when the plugin predates it.
     ///
     /// A 1.0 plugin's table really is only [`MQB_VTABLE_SIZE_V1_0`] bytes long,
-    /// so reading the field without this check reads past the end of it. `None`
-    /// means "unknown", which callers treat as unordered — exactly how 1.0
-    /// plugins already behave.
+    /// so the size is checked *before* the field is touched — reading it first
+    /// reads past the end of the table. `None` means "unknown", which callers
+    /// treat as unordered — exactly how 1.0 plugins already behave.
     pub fn publisher_ordering_hook(
         &self,
     ) -> Option<unsafe extern "C" fn(MqbPublisherHandle) -> u8> {
-        (self.struct_size >= MQB_VTABLE_SIZE_V1_1)
-            .then_some(self.publisher_requires_ordered_publish)
+        if self.struct_size < MQB_VTABLE_SIZE_V1_1 {
+            return None;
+        }
+        Some(self.publisher_requires_ordered_publish)
     }
 
     /// The 1.1 per-message publish hook, or `None` when the plugin predates it.
@@ -528,7 +531,10 @@ impl MqbPluginVTable {
     /// [`publisher_send_batch`](Self::publisher_send_batch), whose failures are
     /// whole-batch.
     pub fn publisher_outcomes_hook(&self) -> Option<MqbPublisherSendBatchOutcomes> {
-        (self.struct_size >= MQB_VTABLE_SIZE_V1_1).then_some(self.publisher_send_batch_outcomes)
+        if self.struct_size < MQB_VTABLE_SIZE_V1_1 {
+            return None;
+        }
+        Some(self.publisher_send_batch_outcomes)
     }
 
     /// The 1.1 configuration-schema hook, or `None` when the plugin predates it.
@@ -538,7 +544,10 @@ impl MqbPluginVTable {
     /// empty answer mean the same thing to a caller: the plugin describes no
     /// configuration, so the host validates and maps nothing on its behalf.
     pub fn config_schema_hook(&self) -> Option<MqbConfigSchema> {
-        (self.struct_size >= MQB_VTABLE_SIZE_V1_1).then_some(self.factory_config_schema)
+        if self.struct_size < MQB_VTABLE_SIZE_V1_1 {
+            return None;
+        }
+        Some(self.factory_config_schema)
     }
 }
 

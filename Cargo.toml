@@ -344,6 +344,10 @@ rustls-aws-lc  = ["rustls/aws_lc_rs",  "rustls/prefer-post-quantum", "tokio-rust
 # Generate Schema file
 schema = ["dep:schemars"]
 
+# `url` became an unconditional dependency, which removed the implicit feature an
+# optional one had. Kept as a no-op so `features = ["url"]` still resolves.
+url = []
+
 # Endpoint features
 kafka = ["rdkafka", "rdkafka/libz-static"]
 amqp = ["lapin", "rustls", "rustls-pemfile"]

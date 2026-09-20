@@ -141,7 +141,9 @@ pub fn app_config_schema() -> serde_json::Value {
 /// `CustomEndpointFactory::config_schema`, so its shape is described here —
 /// `or_insert_with`, so a later version declaring its own takes over.
 fn registered_endpoint_schemas() -> std::collections::BTreeMap<String, serde_json::Value> {
+    #[cfg_attr(not(feature = "pulsar"), allow(unused_mut))]
     let mut schemas = mq_bridge::extensions::endpoint_config_schemas();
+    #[cfg(feature = "pulsar")]
     schemas.entry("pulsar".to_string()).or_insert_with(|| {
         serde_json::json!({
             "type": "object",
@@ -161,7 +163,8 @@ fn registered_endpoint_schemas() -> std::collections::BTreeMap<String, serde_jso
 /// `Endpoint` variant, which is what makes the UI offer it.
 fn add_endpoint_definition(schema: &mut serde_json::Value, name: &str, declared: serde_json::Value) {
     let prefix = pascal_case(name);
-    let definition = format!("{prefix}Config");
+    // Claimed before lifting, so a nested definition cannot take the same key.
+    let definition = reserve_definition(schema, &format!("{prefix}Config"));
     schema["$defs"][&definition] = lift_definitions(schema, &prefix, declared);
     schema["$defs"]["Endpoint"]["oneOf"]
         .as_array_mut()
@@ -171,6 +174,22 @@ fn add_endpoint_definition(schema: &mut serde_json::Value, name: &str, declared:
             "properties": { name: { "$ref": format!("#/$defs/{definition}") } },
             "required": [name]
         }));
+}
+
+/// Claims a free `$defs` key for `wanted`, suffixing it until it is unused.
+///
+/// An endpoint named after something the document already defines would
+/// otherwise redefine it; the placeholder holds the key until the real
+/// definition replaces it.
+fn reserve_definition(schema: &mut serde_json::Value, wanted: &str) -> String {
+    let mut key = wanted.to_string();
+    let mut next = 2;
+    while schema["$defs"].get(&key).is_some() {
+        key = format!("{wanted}{next}");
+        next += 1;
+    }
+    schema["$defs"][&key] = serde_json::Value::Null;
+    key
 }
 
 /// Moves a declared schema's own `$defs` into the document's, under names
@@ -197,24 +216,53 @@ fn lift_definitions(
         return declared;
     };
 
-    let rewrite = |value: &serde_json::Value| {
-        let mut text = value.to_string();
-        for key in own.keys() {
-            text = text.replace(
-                &format!("\"#/$defs/{key}\""),
-                &format!("\"#/$defs/{prefix}{key}\""),
-            );
-        }
-        serde_json::from_str(&text).unwrap_or_else(|_| value.clone())
-    };
+    let renames: std::collections::BTreeMap<String, String> = own
+        .keys()
+        .map(|key| {
+            (
+                key.clone(),
+                reserve_definition(schema, &format!("{prefix}{key}")),
+            )
+        })
+        .collect();
 
     for (key, definition) in &own {
-        let renamed = format!("{prefix}{key}");
-        if schema["$defs"].get(&renamed).is_none() {
-            schema["$defs"][renamed] = rewrite(definition);
-        }
+        schema["$defs"][&renames[key]] = rewrite_refs(definition, &renames);
     }
-    rewrite(&declared)
+    rewrite_refs(&declared, &renames)
+}
+
+/// Repoints every `$ref` that named a lifted definition at its new key, leaving
+/// every other value — including a string that merely looks like one — alone.
+fn rewrite_refs(
+    value: &serde_json::Value,
+    renames: &std::collections::BTreeMap<String, String>,
+) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(members) => members
+            .iter()
+            .map(|(key, child)| {
+                let repointed = match (key.as_str(), child.as_str()) {
+                    ("$ref", Some(target)) => target
+                        .strip_prefix("#/$defs/")
+                        .and_then(|name| renames.get(name))
+                        .map(|renamed| serde_json::json!(format!("#/$defs/{renamed}"))),
+                    _ => None,
+                };
+                (
+                    key.clone(),
+                    repointed.unwrap_or_else(|| rewrite_refs(child, renames)),
+                )
+            })
+            .collect::<serde_json::Map<_, _>>()
+            .into(),
+        serde_json::Value::Array(items) => items
+            .iter()
+            .map(|item| rewrite_refs(item, renames))
+            .collect::<Vec<_>>()
+            .into(),
+        other => other.clone(),
+    }
 }
 
 /// `redpanda` -> `Redpanda`, `my-thing` -> `MyThing`: an endpoint name is
@@ -1532,6 +1580,7 @@ publishers:
     }
 
     #[test]
+    #[cfg(feature = "pulsar")]
     fn app_schema_includes_the_built_in_pulsar_endpoint() {
         let schema = app_config_schema();
         assert_eq!(
@@ -1596,6 +1645,70 @@ publishers:
         assert_eq!(
             schema.pointer(&format!("/$defs/{definition}/properties/tls/$ref")),
             Some(&serde_json::json!("#/$defs/ConfigSchemaTestEndpointTls"))
+        );
+    }
+
+    /// An endpoint named after something the document already defines must not
+    /// redefine it, and its nested types must not bind to a stranger's.
+    #[test]
+    fn app_schema_keeps_a_colliding_endpoint_off_an_existing_definition() {
+        #[derive(Debug)]
+        struct Colliding;
+
+        impl mq_bridge::traits::CustomEndpointFactory for Colliding {
+            fn config_schema(&self) -> Option<serde_json::Value> {
+                Some(serde_json::json!({
+                    "type": "object",
+                    "$defs": { "Config": { "type": "object" } },
+                    "properties": { "nested": { "$ref": "#/$defs/Config" } },
+                    "required": ["nested"]
+                }))
+            }
+        }
+
+        // `RouteConfig` is asserted to exist by `app_config_schema` itself.
+        let name = "route";
+        mq_bridge::extensions::register_endpoint_factory(name, std::sync::Arc::new(Colliding))
+            .unwrap();
+        let schema = app_config_schema();
+        mq_bridge::extensions::unregister_endpoint_factory(name);
+
+        assert!(
+            schema
+                .pointer("/$defs/RouteConfig/properties/batch_size")
+                .is_some(),
+            "the built-in RouteConfig must survive"
+        );
+        let variant = schema["$defs"]["Endpoint"]["oneOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|variant| variant["required"] == serde_json::json!([name]))
+            .expect("the endpoint must be offered as a variant");
+        let target = variant["properties"][name]["$ref"]
+            .as_str()
+            .unwrap()
+            .strip_prefix("#/$defs/")
+            .unwrap()
+            .to_string();
+        assert_ne!(target, "RouteConfig");
+        assert_eq!(
+            schema.pointer(&format!("/$defs/{target}/required/0")),
+            Some(&serde_json::json!("nested"))
+        );
+        // Its own `Config` collides with the root name it was just given, so it
+        // gets a key of its own rather than aliasing it.
+        let nested = schema
+            .pointer(&format!("/$defs/{target}/properties/nested/$ref"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap()
+            .to_string();
+        assert_ne!(nested, format!("#/$defs/{target}"));
+        assert!(
+            schema
+                .pointer(&nested.replace("#/$defs/", "/$defs/"))
+                .is_some(),
+            "the lifted definition must exist at {nested}"
         );
     }
 

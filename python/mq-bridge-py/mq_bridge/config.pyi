@@ -426,6 +426,7 @@ class PackMiddleware(TypedDict, total=False):
 class PostgresCdcConfig(TypedDict, total=False):
     """Postgres logical-replication CDC source (pgoutput). Source-only."""
     checkpoint_store: Optional[str]
+    consume: Optional[PostgresConsume]
     create_publication: bool
     create_slot: bool
     cursor_id: Optional[str]
@@ -639,6 +640,7 @@ MqttProtocol = Literal["v5", "v3"]
 NameBy = Literal["auto", "source_position", "write_time"]
 NatsDeliverPolicy = Literal["all", "last", "new", "last_per_subject"]
 PackFormat = Literal["mqb", "benthos_binary"]
+PostgresConsume = Literal["capture_new", "capture_all", "snapshot"]
 SpoolClaim = Literal["exclusive", "warn", "off"]
 SpoolDone = Literal["never", "success", "end"]
 SpoolFsync = Literal["chunk", "off"]

@@ -62,6 +62,7 @@ MqttProtocol = str
 NameBy = str
 NatsDeliverPolicy = str
 PackFormat = str
+PostgresConsume = str
 SpoolClaim = str
 SpoolDone = str
 SpoolFsync = str
@@ -121,6 +122,7 @@ __all__ = [
     "PackFormat",
     "PackMiddleware",
     "PostgresCdcConfig",
+    "PostgresConsume",
     "RandomPanicMiddleware",
     "RedisStreamsConfig",
     "RequestForwardConfig",

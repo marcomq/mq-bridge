@@ -20,8 +20,8 @@ path = "src/lib.rs"
 # `plugin` is not optional: native plugin loading is a runtime setting, so every
 # build must be able to honour a `plugins:` entry. It only adds `libloading`.
 mq-bridge = { workspace = true, features = ["schema", "plugin"] }
-mq-bridge-pulsar = { workspace = true }
-mq-bridge-meilisearch = { workspace = true }
+mq-bridge-pulsar = { workspace = true, optional = true }
+mq-bridge-meilisearch = { workspace = true, optional = true }
 # The workspace dependency resolves to the root engine locally and retains a
 # registry version for publishing.
 
@@ -71,8 +71,8 @@ default = ["full", "zeromq-omq"]
 integration-test = []
 ibm-mq = ["mq-bridge/ibm-mq"]
 arm64-cross-compile = ["rdkafka", "rdkafka/cmake-build"]
-full = ["mq-bridge/full", "rustls-aws-lc"]
-full-dynamic = ["mq-bridge/full-dynamic", "rustls-aws-lc"]
+full = ["mq-bridge/full", "rustls-aws-lc", "pulsar", "meilisearch"]
+full-dynamic = ["mq-bridge/full-dynamic", "rustls-aws-lc", "pulsar", "meilisearch"]
 # Lean feature set for the ETL/CDC benchmarks (benches/etl): Postgres bulk-insert
 # (sqlx) + logical-replication CDC + per-route metrics. Avoids the heavy `full`
 # deps (rdkafka/librdkafka, grpc/protoc, ibm-mq) that aren't needed to move
@@ -119,3 +119,9 @@ grpc = ["mq-bridge/grpc"]
 amqp = ["mq-bridge/amqp"]
 redis-streams = ["mq-bridge/redis-streams"]
 object-store = ["mq-bridge/object-store"]
+# Extension endpoints maintained as separate crates. In `full`, so a default
+# build addresses `pulsar://` and `meilisearch://` with no install step, and out
+# of a lean one, where meilisearch is the only reason to compile reqwest at all.
+# Either is also loadable as a plugin, so leaving it out costs no reach.
+pulsar = ["dep:mq-bridge-pulsar"]
+meilisearch = ["dep:mq-bridge-meilisearch"]

@@ -170,6 +170,18 @@ impl LoadedPlugin {
         text
     }
 
+    /// Consumes a buffer whose bytes have to be text, rather than repairing
+    /// them: a schema silently mangled into replacement characters still parses.
+    pub(crate) fn take_buffer_utf8(&self, buffer: MqbBuffer) -> anyhow::Result<String> {
+        if buffer.is_empty() {
+            return Ok(String::new());
+        }
+        // Safety: the plugin owns the buffer until it is handed back below.
+        let text = unsafe { std::str::from_utf8(buffer.as_bytes()).map(str::to_owned) };
+        unsafe { (self.table().buffer_free)(buffer) };
+        text.map_err(|e| anyhow!("it returned a buffer that is not UTF-8: {e}"))
+    }
+
     /// Consumes a buffer the plugin filled on success and returns its text.
     pub(crate) fn take_buffer(&self, buffer: MqbBuffer) -> String {
         if buffer.is_empty() {
@@ -378,7 +390,7 @@ fn read_config_schema(plugin: &LoadedPlugin, kind: u32) -> anyhow::Result<Option
     if schema.is_empty() {
         return Ok(None);
     }
-    let text = plugin.take_buffer(schema);
+    let text = plugin.take_buffer_utf8(schema)?;
     let parsed: serde_json::Value = serde_json::from_str(&text)
         .with_context(|| format!("the schema it returned is not JSON: {text}"))?;
     crate::support::config_schema::validate(&parsed)?;

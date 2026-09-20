@@ -54,7 +54,10 @@ All notable changes to `mq-bridge`. Newest first.
   asynchronous task each write enqueues before acknowledging, so a committed source
   cursor means Meilisearch really applied the batch; the input is a resumable,
   non-destructive scan of an index. The crate stays a separate plugin as well, for hosts
-  that load the `cdylib` instead.
+  that load the `cdylib` instead — so it and Pulsar are cargo features of the app, both in
+  `full`, and a lean build leaves them out and reaches them over the plugin search path
+  instead. It declares its configuration schema, so `?wait_for_task=false` arrives as the
+  boolean the endpoint wants rather than as text.
 
 - **A plugin is found by the endpoint name a route asks for — installing the library is the
   whole setup.** An endpoint no factory is registered under is looked up as one file,
@@ -102,8 +105,8 @@ All notable changes to `mq-bridge`. Newest first.
   field descriptions instead of a blank text box — the hand-written Pulsar block is now just
   the fallback for an extension that predates the mechanism. Setting
   `MQB_PLUGIN_VALIDATE_CONFIG=1` additionally checks a route's config against the schema
-  before the endpoint opens, turning a deserializer's complaint into `unknown field `topci`;
-  this endpoint takes batch_size, group, topic, url`. That is off by default and reuses the
+  before the endpoint opens, turning a deserializer's complaint into ``unknown field `topci`;
+  this endpoint takes batch_size, group, topic, url``. That is off by default and reuses the
   JSON Schema subset the `transform` middleware already validates against, so no new
   dependency; a schema needing more than that subset is logged as uncheckable and passed
   through rather than rejected. Return it from `CustomEndpointFactory::config_schema` — a defaulted method,

@@ -44,13 +44,19 @@ use anyhow::Context;
 pub fn register_builtin_endpoints() -> anyhow::Result<()> {
     static RESULT: OnceLock<Result<(), String>> = OnceLock::new();
     RESULT
-        .get_or_init(|| {
-            mq_bridge_pulsar::register()
-                .and_then(|()| mq_bridge_meilisearch::register())
-                .map_err(|error| format!("{error:#}"))
-        })
+        .get_or_init(|| register_each().map_err(|error| format!("{error:#}")))
         .clone()
         .map_err(anyhow::Error::msg)
+}
+
+/// Each extension crate this build compiled in. They are cargo features, so a
+/// build that leaves one out reaches it through the plugin search path instead.
+fn register_each() -> anyhow::Result<()> {
+    #[cfg(feature = "pulsar")]
+    mq_bridge_pulsar::register()?;
+    #[cfg(feature = "meilisearch")]
+    mq_bridge_meilisearch::register()?;
+    Ok(())
 }
 
 fn resolved_plugin_paths(
@@ -119,7 +125,9 @@ mod tests {
         assert!(load_trusted_plugins(&["  ".to_string()], &HashMap::new())
             .unwrap()
             .is_empty());
+        #[cfg(feature = "pulsar")]
         assert!(mq_bridge::extensions::get_endpoint_factory("pulsar").is_some());
+        #[cfg(feature = "meilisearch")]
         assert!(mq_bridge::extensions::get_endpoint_factory("meilisearch").is_some());
     }
 

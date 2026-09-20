@@ -1529,6 +1529,22 @@ fn middleware_from_spec(spec: &str) -> anyhow::Result<mq_bridge::models::Middlew
         .with_context(|| format!("could not build a '{tag}' middleware from '{spec}'"))
 }
 
+/// The extension endpoints this build compiled in, for the unsupported-scheme
+/// message, so it never names one this binary does not have.
+fn extension_schemes() -> String {
+    let mut names = Vec::new();
+    if cfg!(feature = "pulsar") {
+        names.push("pulsar");
+    }
+    if cfg!(feature = "meilisearch") {
+        names.push("meilisearch");
+    }
+    if names.is_empty() {
+        return String::new();
+    }
+    format!(" ({})", names.join(", "))
+}
+
 /// Builds a `custom` endpoint for a scheme that names a registered factory.
 ///
 /// The factory owns its config shape, so the mapping comes from the JSON Schema
@@ -1859,8 +1875,8 @@ fn base_endpoint_from_uri(uri: &str) -> anyhow::Result<mq_bridge::models::Endpoi
         "aws" | "aws-sqs" => ("aws", schema_fields(schemars::schema_for!(AwsConfig))),
         "zeromq" | "zmq" => ("zeromq", schema_fields(schemars::schema_for!(ZeroMqConfig))),
         // A scheme naming a registered endpoint — one compiled in as an extension
-        // (`pulsar`, `meilisearch`) or loaded with `--plugin` — is that endpoint. This mirrors the
-        // config path, where an unknown single key falls back to `custom`.
+        // or loaded with `--plugin` — is that endpoint. This mirrors the config
+        // path, where an unknown single key falls back to `custom`.
         other if mq_bridge::extensions::get_endpoint_factory(other).is_some() => {
             return custom_endpoint_from_uri(other, uri);
         }
@@ -1874,7 +1890,8 @@ fn base_endpoint_from_uri(uri: &str) -> anyhow::Result<mq_bridge::models::Endpoi
                 return custom_endpoint_from_uri(other, uri);
             }
             bail!(
-                "unsupported endpoint scheme '{other}' in URI '{uri}'. Supported schemes: postgres, postgresql, mysql, mariadb, sqlite, nats, mongodb, redis, file, spool, kafka, mqtt, mqtts, amqp, amqps, rabbitmq, rabbitmqs, http, https, clickhouse, clickhouses, ws, wss, grpc, grpcs, ibmmq, aws, zeromq, zmq, s3, gs, az, abfs, and the structural memory, null, static, fanout, request, switch, response. A scheme may also name an endpoint registered by an extension (pulsar, meilisearch), loaded with --plugin, or installed on the plugin search path ({})",
+                "unsupported endpoint scheme '{other}' in URI '{uri}'. Supported schemes: postgres, postgresql, mysql, mariadb, sqlite, nats, mongodb, redis, file, spool, kafka, mqtt, mqtts, amqp, amqps, rabbitmq, rabbitmqs, http, https, clickhouse, clickhouses, ws, wss, grpc, grpcs, ibmmq, aws, zeromq, zmq, s3, gs, az, abfs, and the structural memory, null, static, fanout, request, switch, response. A scheme may also name an endpoint registered by an extension{}, loaded with --plugin, or installed on the plugin search path ({})",
+                extension_schemes(),
                 mq_bridge::plugin::search_path_hint(other),
             )
         }
@@ -3124,6 +3141,7 @@ mod uri_tests {
     // address an extension or `--plugin` endpoint the URI parser knows nothing
     // about. `pulsar` is compiled in, so registering it is enough to exercise it.
     #[test]
+    #[cfg(feature = "pulsar")]
     fn registered_endpoint_scheme_builds_a_custom_endpoint() {
         mq_bridge_app::plugins::register_builtin_endpoints().unwrap();
 
@@ -3148,6 +3166,7 @@ mod uri_tests {
     // `meilisearch://` url to the HTTP one the server speaks, and accepts the
     // string spelling of each scalar, which is all a query string can carry.
     #[test]
+    #[cfg(feature = "meilisearch")]
     fn meilisearch_scheme_builds_a_custom_endpoint() {
         mq_bridge_app::plugins::register_builtin_endpoints().unwrap();
 
@@ -3167,6 +3186,7 @@ mod uri_tests {
     }
 
     #[test]
+    #[cfg(feature = "pulsar")]
     fn registered_endpoint_url_preserves_a_trailing_slash() {
         mq_bridge_app::plugins::register_builtin_endpoints().unwrap();
 
