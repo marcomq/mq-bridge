@@ -294,12 +294,13 @@ for annotations, so a validator ignores it and the document stays a plain schema
 
 | `x-mqb-uri` | Gets | From `rp://user@host:9092/orders?group=g` |
 | --- | --- | --- |
+| `subscheme` | the scheme's part after `+` | nothing; see below |
 | `origin` | scheme, userinfo, host and port | `rp://user@host:9092` |
 | `url` | everything before `?` | `rp://user@host:9092/orders` |
 | `path` | the path, without its leading `/` | `orders` |
 | `query` | the query parameter of the same name (the default) | `g` |
 
-Each of `origin`, `url` and `path` may be claimed by at most one field.
+Each position but `query` may be claimed by at most one field.
 Everything unannotated is a query parameter, read as its declared `type` —
 `integer`, `number`, `boolean`, `array` (comma-separated, with `items` honoured)
 or string. A value that is not what the field declares is refused by name,
@@ -312,6 +313,36 @@ Annotate nothing and the mapping is the one that predates schemas: `url` gets
 everything before `?` and every parameter stays a string. That is also what a
 plugin describing no schema at all gets, so nothing changes under an older
 plugin.
+
+#### A plugin that is a gateway
+
+A plugin reaching a family of protocols rather than one — a compatibility layer,
+a driver host — names the protocol in the scheme, after a `+`:
+
+```
+mq-bridge --input 'redpanda+mqtt://localhost:1883/orders' --output 'kafka://...'
+```
+
+This is the spelling `git+ssh://`, `svn+ssh://` and SQLAlchemy's
+`postgresql+psycopg2://` made familiar. The part before the `+` names the
+plugin, so that is what the host looks the factory up by; the part after it is
+the plugin's own vocabulary, and a field annotated `subscheme` receives it.
+
+Everything after the scheme then describes the inner protocol rather than the
+plugin, so `origin` and `url` are handed over carrying the inner scheme:
+
+| From `redpanda+mqtt://host:1883/orders` | |
+| --- | --- |
+| `subscheme` | `mqtt` |
+| `origin` | `mqtt://host:1883` |
+| `url` | `mqtt://host:1883/orders` |
+| `path` | `orders` |
+
+A scheme may hold only letters, digits, `+`, `-` and `.`
+([RFC 3986](https://www.rfc-editor.org/rfc/rfc3986#section-3.1)) — no `_`. A
+plugin whose protocol names contain one accepts `-` in its place and maps it
+back itself, which stays unambiguous only as long as no name of its own uses
+`-`.
 
 A schema the host cannot use — not an object, two fields claiming the same
 position, a misspelled `x-mqb-uri` — fails at **load** time rather than at

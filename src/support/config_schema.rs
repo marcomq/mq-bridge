@@ -17,14 +17,35 @@
 //!
 //! | `x-mqb-uri` | Gets | Example from `rp://user@host:9092/orders?group=g` |
 //! |---|---|---|
+//! | `subscheme` | the scheme's part after `+` | nothing; see below |
 //! | `origin` | scheme, userinfo, host and port | `rp://user@host:9092` |
 //! | `url` | everything before `?` | `rp://user@host:9092/orders` |
 //! | `path` | the path, without its leading `/` | `orders` |
 //! | `query` | the query parameter of the same name (the default) | `g` |
 //!
-//! Each of `origin`, `url` and `path` may be claimed by at most one property.
-//! Anything unannotated is a query parameter, which is also what a plugin that
-//! describes nothing gets.
+//! Each position but `query` may be claimed by at most one property. Anything
+//! unannotated is a query parameter, which is also what a plugin that describes
+//! nothing gets.
+//!
+//! # Compound schemes
+//!
+//! A plugin that is a gateway to a family of protocols reaches them through a
+//! `plugin+protocol` scheme, the spelling `git+ssh` and `postgresql+psycopg2`
+//! made familiar. `subscheme` is the part after the `+`, and the rest of the URI
+//! then describes the inner protocol rather than the plugin, so `origin` and
+//! `url` are handed over carrying the inner scheme:
+//!
+//! | From `rp+mqtt://host:1883/orders` | |
+//! |---|---|
+//! | `subscheme` | `mqtt` |
+//! | `origin` | `mqtt://host:1883` |
+//! | `url` | `mqtt://host:1883/orders` |
+//! | `path` | `orders` |
+//!
+//! A scheme cannot hold `_` ([RFC 3986] &sect;3.1), so a plugin whose protocol
+//! names do is the one that maps `-` back onto them.
+//!
+//! [RFC 3986]: https://www.rfc-editor.org/rfc/rfc3986#section-3.1
 //!
 //! ```json
 //! {
@@ -62,6 +83,8 @@ pub const URI_ANNOTATION: &str = "x-mqb-uri";
 /// Where a field's value comes from in a URI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum UriPosition {
+    /// What the scheme carries after a `+`, in a `plugin+protocol` scheme.
+    Subscheme,
     /// Scheme, userinfo, host and port: everything before the path.
     Origin,
     /// Everything before the query string.
@@ -75,12 +98,14 @@ pub enum UriPosition {
 impl UriPosition {
     fn parse(text: &str) -> anyhow::Result<Self> {
         match text {
+            "subscheme" => Ok(Self::Subscheme),
             "origin" => Ok(Self::Origin),
             "url" => Ok(Self::Url),
             "path" => Ok(Self::Path),
             "query" => Ok(Self::Query),
             other => bail!(
-                "`{URI_ANNOTATION}: {other}` is not a URI position; expected origin, url, path or query"
+                "`{URI_ANNOTATION}: {other}` is not a URI position; \
+                 expected subscheme, origin, url, path or query"
             ),
         }
     }
@@ -163,6 +188,7 @@ impl FieldType {
 /// a declared type, and the whole URI up to the query string becomes `url`.
 #[derive(Debug, Clone, Default)]
 pub struct UriSchema {
+    subscheme: Option<String>,
     origin: Option<String>,
     url: Option<String>,
     path: Option<String>,
@@ -194,6 +220,7 @@ impl UriSchema {
                 .and_then(Value::as_str)
                 .and_then(|text| UriPosition::parse(text).ok());
             let slot = match position {
+                Some(UriPosition::Subscheme) => &mut mapping.subscheme,
                 Some(UriPosition::Origin) => &mut mapping.origin,
                 Some(UriPosition::Url) => &mut mapping.url,
                 Some(UriPosition::Path) => &mut mapping.path,
@@ -206,7 +233,10 @@ impl UriSchema {
 
     /// Whether any field claimed a position outside the query string.
     fn positions_a_field(&self) -> bool {
-        self.origin.is_some() || self.url.is_some() || self.path.is_some()
+        self.subscheme.is_some()
+            || self.origin.is_some()
+            || self.url.is_some()
+            || self.path.is_some()
     }
 
     /// Turns a URI into a configuration object.
@@ -217,16 +247,26 @@ impl UriSchema {
     pub fn config_from_uri(&self, uri: &str) -> anyhow::Result<Map<String, Value>> {
         let parsed = url::Url::parse(uri).with_context(|| format!("`{uri}` is not a URI"))?;
         let before_query = uri.split('?').next().unwrap_or(uri);
+        // Everything after the `+` describes the inner protocol, so that is the
+        // scheme the address is handed over with.
+        let inner = subscheme_of(parsed.scheme());
 
         let mut config = Map::new();
         if self.positions_a_field() {
+            if let (Some(field), Some(inner)) = (&self.subscheme, inner) {
+                config.insert(field.clone(), self.coerce(field, inner)?);
+            }
             if let Some(field) = &self.origin {
-                let authority = parsed.authority();
-                let origin = format!("{}://{authority}", parsed.scheme());
+                let scheme = inner.unwrap_or_else(|| parsed.scheme());
+                let origin = format!("{scheme}://{}", parsed.authority());
                 config.insert(field.clone(), Value::String(origin));
             }
             if let Some(field) = &self.url {
-                config.insert(field.clone(), Value::String(before_query.to_string()));
+                let url = match inner {
+                    Some(inner) => format!("{inner}{}", &before_query[parsed.scheme().len()..]),
+                    None => before_query.to_string(),
+                };
+                config.insert(field.clone(), Value::String(url));
             }
             if let Some(field) = &self.path {
                 let path = parsed.path().trim_start_matches('/');
@@ -252,6 +292,14 @@ impl UriSchema {
         let item = self.items.get(field).copied().unwrap_or(FieldType::Text);
         declared.coerce(field, raw, item)
     }
+}
+
+/// The protocol a `plugin+protocol` scheme names, if it names one.
+fn subscheme_of(scheme: &str) -> Option<&str> {
+    scheme
+        .split_once('+')
+        .map(|(_, inner)| inner)
+        .filter(|inner| !inner.is_empty())
 }
 
 /// How a URI maps onto the configuration of whichever endpoint is registered
@@ -542,9 +590,83 @@ mod tests {
         assert!(!config.contains_key("topic"), "{config:?}");
     }
 
+    /// A gateway plugin's schema: the scheme names both the plugin and the
+    /// protocol it should reach, the way `git+ssh` and `postgresql+psycopg2` do.
+    fn gateway_schema() -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "connector": { "type": "string", "x-mqb-uri": "subscheme" },
+                "address": { "type": "string", "x-mqb-uri": "origin" },
+                "topic": { "type": "string", "x-mqb-uri": "path" },
+            },
+        })
+    }
+
+    #[test]
+    fn a_compound_scheme_names_the_protocol_and_hands_the_address_over_with_it() {
+        let config = UriSchema::from_schema(&gateway_schema())
+            .config_from_uri("rp+mqtt://host:1883/orders?client_id=reader")
+            .expect("map the uri");
+
+        assert_eq!(config["connector"], json!("mqtt"));
+        assert_eq!(config["address"], json!("mqtt://host:1883"));
+        assert_eq!(config["topic"], json!("orders"));
+        assert_eq!(config["client_id"], json!("reader"));
+    }
+
+    #[test]
+    fn a_claimed_url_is_handed_over_carrying_the_inner_scheme_too() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "connector": { "type": "string", "x-mqb-uri": "subscheme" },
+                "url": { "type": "string", "x-mqb-uri": "url" },
+            },
+        });
+
+        let config = UriSchema::from_schema(&schema)
+            .config_from_uri("rp+amqp://user@host:5672/jobs?tls=true")
+            .expect("map the uri");
+
+        assert_eq!(config["connector"], json!("amqp"));
+        assert_eq!(config["url"], json!("amqp://user@host:5672/jobs"));
+    }
+
+    /// Without the `+` there is no protocol to name, and the rest of the URI is
+    /// read exactly as it was before compound schemes existed.
+    #[test]
+    fn a_plain_scheme_leaves_the_subscheme_field_unset() {
+        let config = UriSchema::from_schema(&gateway_schema())
+            .config_from_uri("rp://host:1883/orders")
+            .expect("map the uri");
+
+        assert!(!config.contains_key("connector"), "{config:?}");
+        assert_eq!(config["address"], json!("rp://host:1883"));
+    }
+
+    /// The whole point of claiming the subscheme: a schema that positions only
+    /// it must not also get the legacy whole-URI-as-`url` field, which no
+    /// gateway plugin has anywhere to put.
+    #[test]
+    fn claiming_only_the_subscheme_still_suppresses_the_pre_schema_mapping() {
+        let schema = json!({
+            "type": "object",
+            "properties": { "connector": { "type": "string", "x-mqb-uri": "subscheme" } },
+        });
+
+        let config = UriSchema::from_schema(&schema)
+            .config_from_uri("rp+mqtt://host:1883?client_id=reader")
+            .expect("map the uri");
+
+        assert_eq!(config["connector"], json!("mqtt"));
+        assert!(!config.contains_key("url"), "{config:?}");
+    }
+
     #[test]
     fn a_usable_schema_validates() {
         validate(&redpanda_schema()).expect("the annotated schema is usable");
+        validate(&gateway_schema()).expect("a compound-scheme schema is usable");
         validate(&json!({ "type": "object" })).expect("describing no property is usable");
     }
 
