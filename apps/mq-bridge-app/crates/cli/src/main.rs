@@ -632,6 +632,8 @@ async fn main() -> anyhow::Result<()> {
     // routes, so it has to live until shutdown. With a UI, `start_web_server`
     // owns them for as long as it serves.
     let mut headless_app = None;
+    // Headless and all routes drain: how many of them failed to start.
+    let mut drain_job = None;
     let web_ui_handle = if !config.ui_addr.is_empty() {
         let addr = &config.ui_addr;
         let socket_addr: SocketAddr = addr
@@ -688,6 +690,16 @@ async fn main() -> anyhow::Result<()> {
         if enabled_consumers > 0 && started_consumers == 0 {
             anyhow::bail!("none of the {enabled_consumers} enabled consumers could be started");
         }
+        // Every enabled route drains, so the run is a batch job that ends with them.
+        if enabled_consumers > 0
+            && config
+                .consumers
+                .iter()
+                .filter(|consumer| consumer.enabled)
+                .all(|consumer| consumer.options.exit_on_empty)
+        {
+            drain_job = Some(enabled_consumers - started_consumers);
+        }
         headless_app = Some(app);
         None
     };
@@ -705,12 +717,22 @@ async fn main() -> anyhow::Result<()> {
 
     info!("Bridge running. Waiting for signal.");
 
+    let mut drained = Ok(());
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {
             info!("Ctrl+C (SIGINT) received.");
         },
         _ = platform_specific_shutdown() => {
                 info!("Shutdown signal received.");
+        },
+        result = async {
+            match (&headless_app, drain_job) {
+                (Some(app), Some(unstarted)) => routes_drained(app, unstarted).await,
+                _ => std::future::pending().await,
+            }
+        } => {
+            info!("Every route has drained.");
+            drained = result;
         },
     }
 
@@ -750,6 +772,48 @@ async fn main() -> anyhow::Result<()> {
 
     info!("Shutdown complete.");
 
+    drained
+}
+
+/// Waits until every started headless route has ended, then judges the run the
+/// way `copy --drain` does.
+async fn routes_drained(app: &UiApp, unstarted: usize) -> anyhow::Result<()> {
+    loop {
+        let outcomes = app.consumer_outcomes().await;
+        if outcomes.iter().all(|(_, outcome, _)| outcome.is_some()) {
+            return drain_result(&outcomes, unstarted);
+        }
+        tokio::time::sleep(COPY_POLL_INTERVAL).await;
+    }
+}
+
+/// A drained run failed if a route failed, did not start, or left an error behind.
+fn drain_result(
+    outcomes: &[(
+        String,
+        Option<mq_bridge::route::RouteOutcome>,
+        Option<String>,
+    )],
+    unstarted: usize,
+) -> anyhow::Result<()> {
+    use mq_bridge::route::RouteOutcome;
+
+    let mut problems: Vec<String> = outcomes
+        .iter()
+        .filter_map(|(name, outcome, error)| match (outcome, error) {
+            (_, Some(error)) => Some(format!("route '{name}': {error}")),
+            (Some(RouteOutcome::Failed), None) => {
+                Some(format!("route '{name}' failed: no error reported"))
+            }
+            _ => None,
+        })
+        .collect();
+    if unstarted > 0 {
+        problems.push(format!("{unstarted} route(s) did not start"));
+    }
+    if !problems.is_empty() {
+        anyhow::bail!("not every route drained cleanly: {}", problems.join("; "));
+    }
     Ok(())
 }
 
@@ -1566,6 +1630,12 @@ fn custom_endpoint_from_uri(name: &str, uri: &str) -> anyhow::Result<mq_bridge::
     }))
 }
 
+/// The plugin a `plugin+component` scheme names. Built-in schemes are matched
+/// before this is consulted, so none of them can be shadowed by it.
+fn plugin_of(scheme: &str) -> &str {
+    scheme.split_once('+').map_or(scheme, |(plugin, _)| plugin)
+}
+
 fn base_endpoint_from_uri(uri: &str) -> anyhow::Result<mq_bridge::models::Endpoint> {
     use anyhow::bail;
     use mq_bridge::models::{
@@ -1876,23 +1946,26 @@ fn base_endpoint_from_uri(uri: &str) -> anyhow::Result<mq_bridge::models::Endpoi
         "zeromq" | "zmq" => ("zeromq", schema_fields(schemars::schema_for!(ZeroMqConfig))),
         // A scheme naming a registered endpoint — one compiled in as an extension
         // or loaded with `--plugin` — is that endpoint. This mirrors the config
-        // path, where an unknown single key falls back to `custom`.
-        other if mq_bridge::extensions::get_endpoint_factory(other).is_some() => {
-            return custom_endpoint_from_uri(other, uri);
+        // path, where an unknown single key falls back to `custom`. In
+        // `plugin+component://` the plugin is the part before the `+`; the full
+        // URI still goes to the factory, whose schema reads the component.
+        other if mq_bridge::extensions::get_endpoint_factory(plugin_of(other)).is_some() => {
+            return custom_endpoint_from_uri(plugin_of(other), uri);
         }
         other => {
             // A URI names the endpoint before any route is built, so an
             // installed plugin is searched for here as well as in the engine.
-            if mq_bridge::plugin::discover_endpoint_plugin(other)
+            let plugin = plugin_of(other);
+            if mq_bridge::plugin::discover_endpoint_plugin(plugin)
                 .with_context(|| format!("endpoint scheme '{other}' in URI '{uri}'"))?
                 .is_some()
             {
-                return custom_endpoint_from_uri(other, uri);
+                return custom_endpoint_from_uri(plugin, uri);
             }
             bail!(
                 "unsupported endpoint scheme '{other}' in URI '{uri}'. Supported schemes: postgres, postgresql, mysql, mariadb, sqlite, nats, mongodb, redis, file, spool, kafka, mqtt, mqtts, amqp, amqps, rabbitmq, rabbitmqs, http, https, clickhouse, clickhouses, ws, wss, grpc, grpcs, ibmmq, aws, zeromq, zmq, s3, gs, az, abfs, and the structural memory, null, static, fanout, request, switch, response. A scheme may also name an endpoint registered by an extension{}, loaded with --plugin, or installed on the plugin search path ({})",
                 extension_schemes(),
-                mq_bridge::plugin::search_path_hint(other),
+                mq_bridge::plugin::search_path_hint(plugin),
             )
         }
     };
@@ -2534,6 +2607,34 @@ mod copy_result_tests {
                 "the drop cause must reach the exit status, got: {err}"
             );
         }
+    }
+
+    // A headless drain exits non-zero on the same grounds as `copy --drain`.
+    #[test]
+    fn a_headless_drain_fails_on_any_failed_unstarted_or_lossy_route() {
+        use super::drain_result;
+        let done = |name: &str, outcome, error: Option<&str>| {
+            (name.to_string(), Some(outcome), error.map(str::to_string))
+        };
+
+        let clean = [
+            done("a", RouteOutcome::Completed, None),
+            done("b", RouteOutcome::Completed, None),
+        ];
+        assert!(drain_result(&clean, 0).is_ok());
+
+        let failed = [
+            done("a", RouteOutcome::Completed, None),
+            done("b", RouteOutcome::Failed, Some("boom")),
+        ];
+        let err = drain_result(&failed, 0).unwrap_err().to_string();
+        assert!(err.contains("route 'b': boom"), "got: {err}");
+
+        let lossy = [done("a", RouteOutcome::Completed, Some("dropped 2 rows"))];
+        assert!(drain_result(&lossy, 0).is_err());
+
+        let err = drain_result(&clean, 1).unwrap_err().to_string();
+        assert!(err.contains("1 route(s) did not start"), "got: {err}");
     }
 }
 
@@ -3227,6 +3328,61 @@ mod uri_tests {
         assert!(
             msg.contains("unsupported endpoint scheme 'kafkaa'"),
             "got: {msg}"
+        );
+    }
+
+    #[derive(Debug)]
+    struct SubschemeFactory;
+
+    impl super::mq_bridge::traits::CustomEndpointFactory for SubschemeFactory {
+        fn config_schema(&self) -> Option<serde_json::Value> {
+            Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "component": { "type": "string", "x-mqb-uri": "subscheme" },
+                    "url": { "type": "string", "x-mqb-uri": "url" },
+                    "subject": { "type": "string", "x-mqb-uri": "path" }
+                }
+            }))
+        }
+    }
+
+    // `plugin+component://` names the plugin before the `+`; the component
+    // reaches the factory's config through its schema.
+    #[test]
+    fn a_plugin_scheme_with_a_component_resolves_the_plugin() {
+        let _ = super::mq_bridge::extensions::register_endpoint_factory(
+            "subschemetest",
+            std::sync::Arc::new(SubschemeFactory),
+        );
+
+        let endpoint =
+            endpoint_from_uri("subschemetest+nats-jetstream://127.0.0.1:4222/subj.data").unwrap();
+
+        let EndpointType::Custom { name, config } = endpoint.endpoint_type else {
+            panic!(
+                "expected a custom endpoint, got {:?}",
+                endpoint.endpoint_type
+            );
+        };
+        assert_eq!(name, "subschemetest");
+        assert_eq!(config["component"], "nats-jetstream");
+        assert_eq!(config["url"], "nats-jetstream://127.0.0.1:4222/subj.data");
+        assert_eq!(config["subject"], "subj.data");
+    }
+
+    // The search-path hint names the plugin's library, not one for the whole scheme.
+    #[test]
+    fn an_unknown_plugin_with_a_component_names_the_plugin_library() {
+        let err = endpoint_from_uri("nosuchplugin+nats-jetstream://127.0.0.1:4222").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("unsupported endpoint scheme 'nosuchplugin+nats-jetstream'"),
+            "got: {msg}"
+        );
+        assert!(
+            !msg.contains("jetstream."),
+            "hint names the wrong library: {msg}"
         );
     }
 
