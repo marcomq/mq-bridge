@@ -792,3 +792,108 @@ pub async fn test_mongodb_status() {
     )
     .await;
 }
+
+/// Two instances of one route share a MongoDB dedup store while their sinks fail now and
+/// then. A failing instance reconnects and its claims outlive it in the store; the peer must
+/// wait them out rather than ack the redeliveries as duplicates. Every key lands once.
+#[cfg(feature = "dedup")]
+pub async fn test_mongodb_dedup_store_competing_instances() {
+    use mq_bridge::models::{
+        DeduplicationMiddleware, Endpoint, EndpointType, FaultMode, MemoryConfig, Middleware,
+        RandomPanicMiddleware,
+    };
+    use mq_bridge::{CanonicalMessage, Route};
+    setup_logging();
+    run_test_with_docker("tests/integration/docker-compose/mongodb.yml", || async {
+        const MESSAGES: usize = 200;
+        let run = fast_uuid_v7::gen_id();
+        let (in_topic, out_topic) = (format!("mdg_in_{run}"), format!("mdg_out_{run}"));
+        let store = format!("mongodb://localhost:27017/mq_bridge_test/dedup_{run}");
+
+        let mut instances = Vec::new();
+        for fail_on in [[5usize, 17, 41], [7, 23, 37]] {
+            let input = Endpoint::new(EndpointType::Memory(
+                MemoryConfig::new(&in_topic, Some(4 * MESSAGES)).with_enable_nack(true),
+            ))
+            .add_middleware(Middleware::Deduplication(DeduplicationMiddleware {
+                store: Some(store.clone()),
+                sled_path: None,
+                ttl_seconds: 3600,
+                key: Some("${payload:id}".to_string()),
+                replay_response: false,
+            }));
+            let output = fail_on.iter().fold(
+                Endpoint::new_memory(&out_topic, 4 * MESSAGES),
+                |endpoint, &n| {
+                    endpoint.add_middleware(Middleware::RandomPanic(RandomPanicMiddleware {
+                        mode: FaultMode::Disconnect,
+                        trigger_on_message: Some(n),
+                        enabled: true,
+                        ..Default::default()
+                    }))
+                },
+            );
+            let handle = Route::new(input, output)
+                .with_concurrency(2)
+                .with_batch_size(8)
+                .with_fault_injection(true)
+                .with_reconnect_interval_ms(50)
+                .run("mongo_dedup_shared")
+                .await
+                .unwrap();
+            instances.push(handle);
+        }
+
+        let input = Endpoint::new_memory(&in_topic, 4 * MESSAGES)
+            .channel()
+            .unwrap();
+        for i in 0..MESSAGES {
+            for copy in 0..2u128 {
+                let body = format!(r#"{{"id":"k{i}"}}"#);
+                input
+                    .send_message(CanonicalMessage::new(
+                        body.into_bytes(),
+                        Some((i as u128) << 1 | copy),
+                    ))
+                    .await
+                    .unwrap();
+            }
+        }
+
+        let output = Endpoint::new_memory(&out_topic, 4 * MESSAGES)
+            .channel()
+            .unwrap();
+        let mut seen = std::collections::HashMap::<String, usize>::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let mut settled_at = None;
+        loop {
+            for msg in output.drain_messages() {
+                let body: serde_json::Value = serde_json::from_slice(&msg.payload).unwrap();
+                *seen
+                    .entry(body["id"].as_str().unwrap().to_string())
+                    .or_default() += 1;
+            }
+            if seen.len() == MESSAGES
+                && settled_at
+                    .get_or_insert_with(std::time::Instant::now)
+                    .elapsed()
+                    > std::time::Duration::from_secs(1)
+            {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                let missing: Vec<usize> = (0..MESSAGES)
+                    .filter(|i| !seen.contains_key(&format!("k{i}")))
+                    .collect();
+                panic!("lost messages: missing keys {missing:?}");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        for instance in instances {
+            instance.stop().await;
+        }
+        let duplicated: Vec<_> = seen.iter().filter(|(_, n)| **n > 1).collect();
+        assert!(duplicated.is_empty(), "duplicated keys: {duplicated:?}");
+    })
+    .await;
+}

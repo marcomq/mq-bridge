@@ -325,3 +325,64 @@ pub async fn test_kafka_status() {
     )
     .await;
 }
+
+/// A nacked batch must be redelivered. Kafka commits are cumulative, so before the fix the
+/// next batch's ack committed past the nacked records and they were never read again.
+pub async fn test_kafka_nack_replays_from_committed_offset() {
+    use mq_bridge::traits::{MessageConsumer, MessageDisposition, MessagePublisher};
+    use mq_bridge::CanonicalMessage;
+    setup_logging();
+    run_test_with_docker("tests/integration/docker-compose/kafka.yml", || async {
+        let topic = format!("nack_replay_{}", fast_uuid_v7::gen_id());
+        let config = mq_bridge::models::KafkaConfig {
+            url: "localhost:9092".to_string(),
+            topic: Some(topic.clone()),
+            group_id: Some(format!("group_{topic}")),
+            ..Default::default()
+        }
+        .with_consumer_option("auto.offset.reset", "earliest");
+
+        let publisher = KafkaPublisher::new(&config).await.unwrap();
+        let sent: Vec<CanonicalMessage> = (0..10)
+            .map(|i| CanonicalMessage::from(format!("m{i}")))
+            .collect();
+        publisher.send_batch(sent).await.unwrap();
+
+        let mut first = KafkaConsumer::new(&config).await.unwrap();
+        let batch = first.receive_batch(3).await.unwrap();
+        let nacked: Vec<String> = batch
+            .messages
+            .iter()
+            .map(|m| m.get_payload_str().to_string())
+            .collect();
+        assert!(!nacked.is_empty());
+        (batch.commit)(vec![MessageDisposition::Nack; nacked.len()])
+            .await
+            .unwrap();
+        assert!(
+            first.receive_batch(10).await.is_err(),
+            "a consumer with a nacked batch must stop, so nothing commits past it"
+        );
+        drop(first);
+
+        let mut second = KafkaConsumer::new(&config).await.unwrap();
+        let mut replayed = Vec::new();
+        tokio::time::timeout(std::time::Duration::from_secs(60), async {
+            while !nacked.iter().all(|n| replayed.contains(n)) {
+                let batch = second.receive_batch(10).await.unwrap();
+                replayed.extend(
+                    batch
+                        .messages
+                        .iter()
+                        .map(|m| m.get_payload_str().to_string()),
+                );
+                (batch.commit)(vec![MessageDisposition::Ack; batch.messages.len()])
+                    .await
+                    .unwrap();
+            }
+        })
+        .await
+        .expect("the nacked records must be redelivered from the last committed offset");
+    })
+    .await;
+}

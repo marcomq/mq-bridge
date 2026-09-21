@@ -369,6 +369,34 @@ pub struct KafkaConsumer {
     source_metadata: bool,
     /// What the drain knows about its partitions — see [`DrainState`].
     drain_state: DrainState,
+    /// Set by the first nack; see [`NackLatch`].
+    nacked: NackLatch,
+}
+
+/// Kafka commits are cumulative: committing a later batch also commits every offset before
+/// it, including a nacked one, which is then never redelivered. So after a nack this
+/// consumer stops committing, and its next read fails, making the route reconnect and resume
+/// from the last committed offset. Later batches are replayed too — duplicates, not loss.
+#[derive(Clone, Default)]
+struct NackLatch(Arc<std::sync::atomic::AtomicBool>);
+
+impl NackLatch {
+    fn trip(&self) {
+        self.0.store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    fn is_tripped(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    fn check(&self) -> Result<(), ConsumerError> {
+        if self.is_tripped() {
+            return Err(ConsumerError::Connection(anyhow!(
+                "Kafka batch was nacked; reconnecting to replay from the last committed offset"
+            )));
+        }
+        Ok(())
+    }
 }
 
 impl KafkaConsumer {
@@ -484,6 +512,7 @@ impl KafkaConsumer {
             prefetcher: None,
             source_metadata,
             drain_state: DrainState::default(),
+            nacked: NackLatch::default(),
         })
     }
 }
@@ -499,6 +528,7 @@ impl Drop for KafkaConsumer {
 #[async_trait]
 impl MessageConsumer for KafkaConsumer {
     async fn receive(&mut self) -> Result<Received, ConsumerError> {
+        self.nacked.check()?;
         // Through the prefetcher, not the consumer directly: two readers would race for
         // the same records and each would see only some of them.
         let item = self
@@ -523,11 +553,15 @@ impl MessageConsumer for KafkaConsumer {
         // We can't move `self.consumer` into the closure, but we can commit by position.
         let consumer_clone = self.consumer.clone();
         let producer_clone = self.producer.clone();
+        let nacked = self.nacked.clone();
 
         let commit = Box::new(move |disposition: MessageDisposition| {
             Box::pin(async move {
-                // Handle reply
                 if matches!(disposition, MessageDisposition::Nack) {
+                    nacked.trip();
+                    return Ok(());
+                }
+                if nacked.is_tripped() {
                     return Ok(());
                 }
 
@@ -571,6 +605,8 @@ impl MessageConsumer for KafkaConsumer {
     }
 
     async fn receive_batch(&mut self, max_messages: usize) -> Result<ReceivedBatch, ConsumerError> {
+        self.nacked.check()?;
+        let nacked = self.nacked.clone();
         let (consumer, producer, topic, exit_on_empty) = (
             self.consumer.clone(),
             self.producer.clone(),
@@ -587,6 +623,7 @@ impl MessageConsumer for KafkaConsumer {
             &topic,
             exit_on_empty,
             &mut drain_state,
+            nacked,
         )
         .await;
         self.drain_state = drain_state;
@@ -1436,6 +1473,7 @@ fn assemble_batch(
     parts
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn receive_batch_internal(
     prefetcher: &Prefetcher,
     consumer: &Arc<ClosingStreamConsumer>,
@@ -1444,6 +1482,7 @@ async fn receive_batch_internal(
     topic: &str,
     exit_on_empty: bool,
     drain_state: &mut DrainState,
+    nacked: NackLatch,
 ) -> Result<ReceivedBatch, ConsumerError> {
     // A terminal held back by the previous batch ends the stream now.
     if let Some(terminal) = drain_state.pending_terminal.take() {
@@ -1503,9 +1542,10 @@ async fn receive_batch_internal(
 
             handle_kafka_replies(producer, &reply_infos, dispositions).await;
 
-            // Only commit if there are offsets to commit AND no messages were Nacked.
-            // If any message is Nacked, we skip the commit for the whole batch to ensure at-least-once delivery.
-            if !any_nack && messages_len > 0 {
+            if any_nack {
+                nacked.trip();
+            }
+            if !nacked.is_tripped() && messages_len > 0 {
                 // Ack failure may result in redelivery. Enable deduplication middleware to handle duplicates.
                 if let Err(e) = consumer.commit(&last_offset_tpl, CommitMode::Async) {
                     tracing::error!("Failed to commit Kafka message batch: {:?}", e);

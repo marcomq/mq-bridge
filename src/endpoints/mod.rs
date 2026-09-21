@@ -1026,6 +1026,25 @@ pub fn output_requires_source_metadata(
     })
 }
 
+/// Whether a keyed sink (Mongo `id_field`, SQL `insert_query`) reads a source position, the way
+/// Kafka Connect's JDBC sink keys rows on topic/partition/offset. Unlike positional naming this
+/// only asks for the metadata: it is never an error for an input without a position.
+pub fn output_keys_on_source_position(route_name: &str, endpoint: &Endpoint) -> Result<bool> {
+    const POSITION_KEYS: [&str; 5] = [
+        "mqb.src.kafka_",
+        "mqb.src.postgres_",
+        "mqb.src.mongodb_",
+        "mqb.src.file_",
+        "mqb.src.sqlx_",
+    ];
+    let reads_position = |template: &str| POSITION_KEYS.iter().any(|key| template.contains(key));
+    output_has_sink(route_name, endpoint, &|endpoint_type| match endpoint_type {
+        EndpointType::Sqlx(config) => config.insert_query.as_deref().is_some_and(reads_position),
+        EndpointType::MongoDb(config) => config.id_field.as_deref().is_some_and(reads_position),
+        _ => false,
+    })
+}
+
 /// Whether a route's resolved output contains an object-store sink that names objects by write
 /// time. Key order is the only order a bucket has, and above `concurrency: 1` write order is
 /// worker arrival order rather than source order.
@@ -3001,6 +3020,7 @@ mod tests {
                 sled_path: Some("".into()),
                 ttl_seconds: 10,
                 key: None,
+                replay_response: false,
             })
             .with_consumer_metrics();
 
@@ -3065,6 +3085,7 @@ mod tests {
                 sled_path: None,
                 ttl_seconds: 60,
                 key: None,
+                replay_response: false,
             })
         }
 

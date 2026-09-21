@@ -629,6 +629,26 @@ pub trait CustomEndpointFactory: Send + Sync + std::fmt::Debug {
     fn config_schema(&self) -> Option<serde_json::Value> {
         None
     }
+
+    /// Whether a publisher built from `config` absorbs a replayed message — writing the same
+    /// record twice leaves one effect — so a route into it can be reported, and required, as
+    /// effectively-once. Defaults to the `x-mqb-idempotent-sink` boolean at the top of
+    /// [`Self::config_schema`], else `false` (at-least-once). Override it when the answer
+    /// depends on `config`, as it does for a sink that is only idempotent with a key set.
+    fn idempotent_sink(&self, _config: &serde_json::Value) -> bool {
+        schema_flag(self.config_schema(), "x-mqb-idempotent-sink").unwrap_or(false)
+    }
+
+    /// Whether a consumer built from `config` acknowledges messages, so one lost in a crash
+    /// is redelivered. `false` makes a route from it at-most-once. Defaults to the
+    /// `x-mqb-acknowledges` boolean in [`Self::config_schema`], else `true`.
+    fn acknowledges(&self, _config: &serde_json::Value) -> bool {
+        schema_flag(self.config_schema(), "x-mqb-acknowledges").unwrap_or(true)
+    }
+}
+
+fn schema_flag(schema: Option<serde_json::Value>, key: &str) -> Option<bool> {
+    schema?.get(key)?.as_bool()
 }
 
 /// Factory for creating custom middleware.

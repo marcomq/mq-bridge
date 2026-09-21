@@ -316,3 +316,72 @@ fn tag_outcome_on_returns_tagged_response() {
         }
     }
 }
+
+/// Needs `tests/integration/docker-compose/mongodb.yml` running.
+#[cfg(feature = "dedup")]
+#[tokio::test]
+#[ignore = "requires a MongoDB on localhost:27017"]
+async fn mongo_dedup_store_states_release_and_replies() {
+    use crate::middleware::deduplication::{Reservation, PENDING_TTL_SECS};
+    let collection = format!("dedup_states_{}", fast_uuid_v7::gen_id());
+    let store = build_mongo_dedup_store(
+        "mongodb://localhost:27017",
+        "mq_bridge_test",
+        Some(collection),
+        60,
+        "states",
+    )
+    .await
+    .unwrap();
+    let now = 1_000;
+
+    assert_eq!(
+        store.reserve(b"k", now).await.unwrap(),
+        Reservation::Claimed
+    );
+    assert_eq!(
+        store.reserve(b"k", now).await.unwrap(),
+        Reservation::InFlight
+    );
+    store.release(b"k").await;
+    assert_eq!(
+        store.reserve(b"k", now).await.unwrap(),
+        Reservation::Claimed
+    );
+
+    store
+        .mark_processed_with_response(b"k", now, b"reply")
+        .await;
+    assert_eq!(
+        store.reserve(b"k", now).await.unwrap(),
+        Reservation::Processed
+    );
+    assert_eq!(
+        store.stored_response(b"k").await.as_deref(),
+        Some(&b"reply"[..])
+    );
+    store.release(b"k").await;
+    assert_eq!(
+        store.reserve(b"k", now).await.unwrap(),
+        Reservation::Processed,
+        "release only drops an in-flight claim"
+    );
+
+    // Expired, reclaimed and plainly acked: the old reply must not be replayed.
+    assert_eq!(
+        store.reserve(b"k", now + 61).await.unwrap(),
+        Reservation::Claimed
+    );
+    store.mark_processed(b"k", now + 61).await;
+    assert_eq!(store.stored_response(b"k").await, None);
+
+    // A crashed holder's claim lapses after the lease.
+    assert_eq!(
+        store.reserve(b"c", now).await.unwrap(),
+        Reservation::Claimed
+    );
+    assert_eq!(
+        store.reserve(b"c", now + PENDING_TTL_SECS).await.unwrap(),
+        Reservation::Claimed
+    );
+}

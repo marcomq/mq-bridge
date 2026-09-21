@@ -6,16 +6,35 @@ source/sink combinations give you which guarantee.
 > **Short version.** `mq-bridge` is **at-least-once**. A message is acked only after the output
 > chain reports success, so nothing is lost on a crash — but a crash between the write and the ack
 > replays the message. Combine at-least-once delivery with an **idempotent write at the sink** and
-> you get *effective exactly-once*: the record lands once no matter how many times it is delivered.
-> Everything below is about how to arrange that.
+> you get **effectively-once**: exactly-once *effects* — the record lands once no matter how many
+> times it is delivered. Nothing here is exactly-once *delivery*. Everything below is about how to
+> arrange that.
 
-## Enabling effective exactly-once
+## Enabling effectively-once
 
 There is no global `exactly_once` switch. The guarantee follows from ordinary endpoint
 configuration: provide a replay-stable identity when the source does not already have one, then
-configure an idempotent sink write. At startup, `mq-bridge` inspects the route and reports the
-inferred guarantee as `effectively-once` or `at-least-once`; it does not silently change how the
-sink writes data.
+configure an idempotent sink write. At startup, `mq-bridge` inspects the route and logs the
+inferred guarantee as `at-most-once`, `at-least-once` or `effectively-once`; it does not silently
+change how the sink writes data. The same value is available in code as
+`Route::delivery_guarantee()`, a `DeliveryGuarantee`.
+
+To make the guarantee a requirement rather than a log line, set `required_delivery` on the route.
+A route whose configuration cannot meet it fails at startup instead of running with less:
+
+```yaml
+orders_to_postgres:
+  required_delivery: effectively_once   # at_most_once | at_least_once | effectively_once
+  input:  { kafka: { topic: "orders", url: "localhost:9092" } }
+  output:
+    sqlx:
+      url: "postgres://localhost/shop"
+      insert_query: "INSERT INTO orders (id, body) VALUES (${payload:id}, ${payload:body}) ON CONFLICT (id) DO NOTHING"
+```
+
+`at-most-once` is inferred for inputs that forget a message once handed over: `zeromq`, core NATS
+(`no_jetstream: true`), MQTT with `qos: 0`, and HTTP with `fire_and_forget: true`. A crash in the
+route loses what it held.
 
 This table is **advice on how to configure an idempotent sink** — it is not a list of
 switches the engine flips. A plain `INSERT` is not idempotent; you make it so by writing
@@ -23,8 +42,8 @@ the conflict clause yourself.
 
 | Sink | How to make the write idempotent | Reported as `effectively-once` at startup? |
 |---|---|---|
-| MongoDB | `id_field` set to a payload field or replay-stable template such as `${metadata:mqb.id}` | Yes |
-| PostgreSQL / SQLite | `sqlx.insert_query` uses a unique key with `ON CONFLICT … DO NOTHING` | Yes |
+| MongoDB | `id_field` set to a payload field or replay-stable template such as `${metadata:mqb.id}` | Yes (a key read from `mqb.src.*` only over an input with a [replay position](#keying-a-sink-on-the-source-position)) |
+| PostgreSQL / SQLite | `sqlx.insert_query` uses a unique key with `ON CONFLICT … DO NOTHING` | Yes (same `mqb.src.*` rule) |
 | PostgreSQL / SQLite | `sqlx.insert_query` uses a unique key with `ON CONFLICT … DO UPDATE` (convergent upsert) | No — still idempotent, but the startup line says `at-least-once` |
 | MySQL / MariaDB | `sqlx.insert_query` uses a unique key with `ON DUPLICATE KEY UPDATE` assigning replay-stable values (a convergent upsert; an accumulating assignment such as `c = c + 1` is **not** idempotent) | No — still idempotent, but the startup line says `at-least-once` |
 | File / object store | `name_by: source_position` (the `object_store` default over a replayable Kafka, Postgres CDC, SQL cursor, MongoDB CDC or `consume`-mode file source). Needs positions that *repeat* across runs — a file source in `subscribe` or `group_subscribe` mode stamps a per-run epoch, so its names never collide and a replay is not recognised | Yes |
@@ -56,7 +75,7 @@ output:
 The target column must actually have a `PRIMARY KEY` or `UNIQUE` constraint. `DO NOTHING` gives
 insert-once semantics; an appropriate `DO UPDATE` clause gives convergent upsert semantics.
 
-## What exactly-once actually requires
+## What effectively-once actually requires
 
 It is four separate properties, and they fail independently:
 
@@ -83,20 +102,21 @@ therefore useless for dedup across a restart.
 | `nats` | JetStream: **yes** (stream sequence). Core NATS: only if the producer set `Nats-Msg-Id` | No |
 | `mongodb` (`consumer`/`subscriber`) | **Yes** — the stored document `_id` | No |
 | `mongodb` (`capture_new`/`capture_all`) | No — fresh id per read | No |
-| `amqp` | Only if the producer set the AMQP `message_id` property; the `delivery_tag` fallback resets per channel | No |
+| `amqp` | **Yes** when the producer set the AMQP `message_id` property — `mq-bridge` writes it; any string is accepted (a non-UUID one is hashed). Without it, a fresh id per read — never the delivery tag, which restarts at 1 on every channel | No |
 | `redis_streams` | Only if the producer wrote a `mq_bridge.message_id` field; the entry ID is **not** used | No |
 | `http` / `websocket` / `grpc` | From the request when it carries an id | No (request/reply, not replay) |
 | `dir_spool` | **Yes** — the sidecar's `message_id`, when the chunk was written by `mq-bridge`. A foreign producer's payload-only chunk gets a fresh id | No — a drained chunk is deleted |
-| `mqtt`, `aws` (SQS), `zeromq`, `ibm_mq`, `file`, `object_store`, `clickhouse` | No — fresh id per read | No |
+| `mqtt` | MQTT 5: only if the producer set the `mq_bridge.message_id` user property, which `mq-bridge` writes. MQTT 3: no | No |
+| `aws` (SQS), `zeromq`, `ibm_mq`, `file`, `object_store`, `clickhouse` | No — fresh id per read | No |
 
 Two consequences worth internalising:
 
 - A `file` or `object_store` **source** cannot deduplicate on `message_id`. Re-reading the same
   file produces entirely new ids. Derive a business key instead — see
   [Giving a source an identity](#giving-a-source-an-identity).
-- `mq-bridge` writes `mq_bridge.message_id` on the sink side for Kafka, NATS and Redis Streams, so
-  a `mq-bridge → broker → mq-bridge` hop preserves identity end to end even when the broker itself
-  has no id concept.
+- `mq-bridge` writes the message id on the sink side for Kafka, NATS, Redis Streams, MQTT 5 and
+  AMQP (as the native `message_id` property), so a `mq-bridge → broker → mq-bridge` hop preserves
+  identity end to end even when the broker itself has no id concept.
 
 ### Giving a source an identity
 
@@ -158,7 +178,8 @@ one identity to every message missing the field, so it is dropped instead.
 | `file`, `object_store` | Deterministic, sortable part names + covered-range recovery | `name_by: source_position` (needs a source that reproduces the same positions on a re-read — a file source only in `consume` mode; the `object_store` default under `auto`) |
 | `dir_spool` | Not idempotent: every write consumes a new `{seq}` value, so a replay creates a new chunk path even when `naming_pattern` contains `{message_id}` | Rely on downstream deduplication or an idempotent sink |
 | `kafka` | `enable.idempotence` dedups **producer retries within one session** — this is *not* exactly-once semantics | On by default |
-| `nats`, `amqp`, `mqtt`, `redis_streams`, `aws`, `ibm_mq`, `zeromq` | None | Deduplicate at the next consumer instead |
+| `nats` (JetStream) | `Nats-Msg-Id` from the message id; the server drops a repeat **within the stream's duplicate window** (2 minutes by default) — a replay after that lands again | `deduplicate: true` |
+| `amqp`, `mqtt`, `redis_streams`, `aws`, `ibm_mq`, `zeromq` | None — at-least-once | Deduplicate at the next consumer instead |
 
 ## Picking a combination
 
@@ -170,9 +191,26 @@ it a deterministic key (`id_field`, or a `ON CONFLICT` column) and you are done.
 needs a replayable source position and therefore works **only from `kafka` or `postgres_cdc`**. See
 [Files & object storage](#files--object-storage--name_by).
 
-**A source → a broker sink** (Kafka, NATS, MQTT, …). The sink cannot deduplicate. Either filter
-before it with the [`deduplication` middleware](#the-deduplication-middleware), or accept
-at-least-once and make the *downstream consumer* idempotent.
+**A source → a broker sink** (Kafka, NATS, MQTT, …). The sink cannot deduplicate beyond what the
+table above lists. Either filter before it with the
+[`deduplication` middleware](#the-deduplication-middleware), or accept at-least-once and make the
+*downstream consumer* idempotent.
+
+### The matrix
+
+What a route achieves, by what its input offers and what its output can absorb:
+
+| Input ↓ / Output → | Keyed idempotent write (Mongo `id_field`, SQL `ON CONFLICT`) | Positional names (file / object_store `source_position`) | Broker or plain sink |
+|---|---|---|---|
+| Replayable position (`kafka`, `postgres_cdc`, MongoDB CDC, `file` in `consume`, `sqlx` cursor) | effectively-once — key on a business id or on the position itself | effectively-once | at-least-once |
+| Stable identity only (JetStream, AMQP/MQTT 5 with an id, `mongodb` consumer, `dir_spool`) | effectively-once — key on the id | not available (no position) | at-least-once; `deduplication` narrows duplicates, see below |
+| Neither (`aws`, `ibm_mq`, MQTT 3, `file` re-read, …) | effectively-once only with a business key (`id` middleware) | not available | at-least-once |
+| No acknowledgement (`zeromq`, core NATS, MQTT QoS 0, HTTP `fire_and_forget`) | at-most-once | at-most-once | at-most-once |
+
+A handler, or any side effect it performs, sits outside this table: see [Handlers](#handlers).
+A `custom` endpoint (or plugin) is placed in it by its own declaration — see
+[Declaring a delivery guarantee](PLUGINS.md#declaring-a-delivery-guarantee); one that declares
+nothing counts as an acknowledging source and a non-idempotent sink.
 
 **A route with a handler.** Sink-side idempotency happens *after* the handler runs. If that matters,
 see [Handlers](#handlers).
@@ -181,7 +219,7 @@ see [Handlers](#handlers).
 
 ## Deduplication & idempotent writes
 
-For ETL, at-least-once delivery plus an **idempotent write** gives you effective exactly-once: a
+For ETL, at-least-once delivery plus an **idempotent write** gives you effectively-once: a
 replayed or retried record must not create a duplicate row. The most robust place to enforce this is
 the sink database's own **unique constraint** — it is already shared across every writer, so no extra
 state store is needed. Both database sinks lean on this instead of an application-side cache.
@@ -272,6 +310,31 @@ server-side (default one-hour window) — `insert_deduplication_token` lets you 
 mq-bridge does not set one, so rely on `ReplacingMergeTree` for logical dedup and treat block-level
 dedup only as retry-safety.
 
+### Keying a sink on the source position
+
+A source with a replay position already identifies every record: Kafka by topic, partition and
+offset, Postgres CDC by slot, LSN and ordinal. Keying the sink row on that position needs no
+business key and no extra state — it is the Kafka Connect JDBC sink's `pk.mode=kafka`:
+
+```yaml
+kafka_to_postgres:
+  input: { kafka: { topic: "events", url: "localhost:9092" } }
+  output:
+    sqlx:
+      url: "postgres://localhost/shop"
+      insert_query: >
+        INSERT INTO events (topic, part, off, body)
+        VALUES (${metadata:mqb.src.kafka_topic}, ${metadata:mqb.src.kafka_partition},
+                ${metadata:mqb.src.kafka_offset}, ${payload:body})
+        ON CONFLICT (topic, part, off) DO NOTHING
+```
+
+A SQL `insert_query` or Mongo `id_field` that reads `mqb.src.kafka_*`, `postgres_*`, `mongodb_*`,
+`file_*` or `sqlx_*` turns `source_metadata` on for the input, as positional file names do. Over an
+input without a replay position those keys are absent, so such a route is not reported as
+effectively-once. Prefer a business key when records have one: a position identifies *this copy
+of the log*, so re-publishing the same data to a new topic writes it again.
+
 ### Postgres CDC — deterministic id + `postgres.key`
 
 The `postgres_cdc` source resumes from the slot's durable `confirmed_flush_lsn`. In-band standby
@@ -304,16 +367,23 @@ The middleware is a complement, not a replacement: it filters duplicates *before
 multi-writer ETL; reach for the middleware when the sink has no constraint to lean on, or when you
 need to keep duplicates away from a handler.
 
-Two things decide whether it actually works:
+Three things decide whether it actually works:
 
-- **`key`.** The default keys on `message_id`, which most sources mint fresh per read (see the
+- **`key`.** The default keys on `message_id`, which many sources mint fresh per read (see the
   [source table](#sources-what-identity-you-get)) — the route then looks configured and dedupes
-  nothing. Set `key` to a business key, either directly (`"${payload:order_id}"`) or via
-  `"${metadata:mqb.id}"` when an [`id` middleware](#giving-a-source-an-identity) already derived
-  one. An unresolvable template also falls back to `message_id` with only a warning, so a typo
-  fails silently.
+  nothing; for the sources that always do this, startup logs a warning. Set `key` to a business
+  key, either directly (`"${payload:order_id}"`) or via `"${metadata:mqb.id}"` when an
+  [`id` middleware](#giving-a-source-an-identity) already derived one. An unresolvable template
+  also falls back to `message_id` with only a warning, so a typo fails silently. Content hashing
+  is deliberately not offered as a fallback: two legitimately equal payloads would collapse.
 - **`store`.** `sled` is single-instance. Point it at a shared MongoDB or SQL deployment for
-  anything scaled out.
+  anything scaled out. The shared collection or table defaults to `mqb_dedup_<route name>`, so
+  replicas must run under the **same route name** — or name the collection/table explicitly in
+  the URL (not possible for SQLite, which has no path slot for it).
+- **`ttl_seconds`.** A key is remembered for this long after it was processed. It must exceed the
+  longest time in which the same record can come back: broker redelivery and retry limits, a
+  producer's retry horizon, and any replay an operator may trigger from a DLQ. A copy arriving
+  after that is processed again. Longer costs only storage.
 
 ```yaml
 input:
@@ -326,6 +396,30 @@ input:
 ```
 
 `middlewares` sits **beside** the endpoint type, not nested inside it. Requires the `dedup` feature.
+
+**How it orders its steps.** A key is *claimed* when its message is read, *marked processed*
+after the sink accepted the write — **before** the source is acked — and *released* when the
+write failed. A copy that arrives while another is still in flight waits for it rather than
+being acked on its strength: if the first write then fails, the copy is processed; if it
+succeeds, the copy is dropped. A claim whose holder died lapses after five seconds. What each
+crash window does:
+
+| Crash or failure between | Outcome |
+|---|---|
+| claim → sink write | The claim lapses; the redelivery is processed. No loss. |
+| sink write → marker | The redelivery is processed again — **a duplicate**, unless the sink is idempotent. |
+| marker → source ack | The redelivery is recognised and acked. No duplicate. |
+| a failed write (nack) | The claim is released at once; the redelivery is processed. No loss. |
+| the store is unreachable | The batch is nacked back to the source and the route reconnects. |
+
+The second row is why the middleware stays **at-least-once**: its marker is not committed in the
+sink's transaction. Only an idempotent sink closes that window.
+
+**Replaying a reply.** On a request/reply route (HTTP, gRPC, NATS or memory requests) a duplicate
+is normally acked with nothing to say, so a caller retrying a request gets an empty answer.
+`replay_response: true` stores each reply next to its marker and answers a duplicate with it —
+the idempotency-key pattern of payment APIs. The reply is kept for the whole TTL, in the store,
+so size the store for it and consider what the replies contain. Off by default.
 
 ### MongoDB — branch on insert vs. duplicate (`report_outcome`)
 
@@ -374,8 +468,8 @@ but before the branch's downstream send committed, the replay hits a duplicate k
 
 > **Check first whether you need any of this.** If your records already carry a business key — an
 > `id` field in the payload, or `mqb.id` from the [`id` middleware](#giving-a-source-an-identity) —
-> then a key-addressed sink (Mongo `id_field`, SQL `ON CONFLICT`) already gives you effective
-> exactly-once, and the order objects happen to land in does not matter. Positional naming below is
+> then a key-addressed sink (Mongo `id_field`, SQL `ON CONFLICT`) already gives you
+> effectively-once, and the order objects happen to land in does not matter. Positional naming below is
 > for the case where the *sink itself* has to recognise a replay, or where a downstream reader
 > depends on replay **order**. Turning it on when you do not need it only adds restrictions.
 
@@ -521,10 +615,10 @@ emitting an event — it means duplicates reach your code.
 out of the batch before the route ever calls the publisher chain, and the duplicates are acked
 straight back at the source. Set `key` to a business key, as above.
 
-**This is still at-least-once, deliberately.** The middleware reserves a key on receive and only
-promotes it to "processed" when the message is acked. That in-flight reservation expires after five
-seconds, precisely so that a crash between reserve and commit frees the key for redelivery rather
-than losing the message. A crash after the handler ran but before the commit will re-run the handler.
+**This is still at-least-once, deliberately.** The middleware claims a key on receive and only
+marks it processed once the write succeeded; a claim whose holder crashed lapses after five
+seconds, so the redelivery is processed rather than lost. A crash after the handler ran but before
+the marker was written will re-run the handler.
 
 To make a handler *effectively*-once, its own effect has to be idempotent:
 
@@ -538,7 +632,12 @@ To make a handler *effectively*-once, its own effect has to be idempotent:
 - **Exactly-once across systems.** Not achievable without a transaction spanning the source's offset
   commit and the sink's write. Nothing here claims it.
 - **Kafka transactional EOS.** `enable.idempotence` is on, but `transactional.id` and
-  `send_offsets_to_transaction` are not used, so Kafka→Kafka is not exactly-once.
+  `send_offsets_to_transaction` are not used, so Kafka→Kafka is not exactly-once. This is a
+  choice: transactions only cover a Kafka sink fed by a Kafka source, need `read_committed`
+  consumers downstream, and cost a round trip per batch. An idempotent sink or consumer covers
+  every combination instead.
+- **Effects inside handlers.** An HTTP call, an email or any write a handler makes on its own is
+  not covered by any of the above; see [Handlers](#handlers).
 - **Fencing on checkpoint stores.** The `file`/`s3`/`mongodb`/`postgres` checkpoint stores have no
   lease, owner id or epoch. Kafka consumer groups and Postgres replication slots fence structurally;
   the checkpoint stores do not, so a zombie instance after a partial partition can re-emit.

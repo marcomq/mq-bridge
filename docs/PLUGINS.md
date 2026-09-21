@@ -417,6 +417,27 @@ than that (`oneOf`, `$ref` to a remote document, `patternProperties`) is logged
 as uncheckable and passed through rather than rejected, so describing yourself
 richly for the sake of a form never costs you a working endpoint.
 
+### Declaring a delivery guarantee
+
+A route logs — and with `required_delivery` enforces — the guarantee it can give
+(see [DELIVERY.md](DELIVERY.md)). For a custom endpoint only its author knows the
+answer, so the factory states it. Two top-level schema annotations cover the
+common case and cross the plugin boundary unchanged:
+
+| Annotation | Meaning | Default |
+| --- | --- | --- |
+| `x-mqb-idempotent-sink` | writing the same record twice leaves one effect, so a route into this sink is effectively-once | `false` |
+| `x-mqb-acknowledges` | the consumer acks, so a message lost in a crash is redelivered; `false` makes a route from it at-most-once | `true` |
+
+```json
+{ "type": "object", "x-mqb-idempotent-sink": true, "properties": { "...": {} } }
+```
+
+When the answer depends on the configuration — idempotent only with a key set —
+a directly linked factory overrides `CustomEndpointFactory::idempotent_sink` or
+`acknowledges` instead; both receive the endpoint's `config`. Claim idempotency
+only for a write keyed on something replay-stable: the route trusts it.
+
 ### Ordered publishing
 
 A sink whose correctness depends on batches arriving in source order — anything

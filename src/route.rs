@@ -6,12 +6,13 @@
 use crate::endpoints::{
     check_source_position_available, create_consumer_from_route,
     create_consumer_from_route_with_policy, create_publisher_from_route_with_source_position,
-    output_has_write_time_named_object_store, output_passes_through_http_status,
-    output_requires_source_metadata, relax_object_naming, supports_source_metadata,
+    output_has_write_time_named_object_store, output_keys_on_source_position,
+    output_passes_through_http_status, output_requires_source_metadata, relax_object_naming,
+    supports_source_metadata,
 };
 use crate::errors::ProcessingError;
 pub use crate::models::Route;
-use crate::models::{Endpoint, EndpointType, Middleware, NameBy, RouteOptions};
+use crate::models::{DeliveryGuarantee, Endpoint, EndpointType, Middleware, NameBy, RouteOptions};
 use crate::traits::{
     with_disconnect_outcome, BatchCommitFunc, ConsumerError, DisconnectOutcome, EndpointStatus,
     Handler, HandlerError, MessageConsumer, MessageDisposition, MessagePublisher, PublisherError,
@@ -820,6 +821,41 @@ async fn send_batch_and_commit(
     }
 }
 
+/// Inputs that forget a message once they hand it over, so a crash in the route loses it.
+fn source_is_at_most_once(endpoint_type: &EndpointType) -> bool {
+    match endpoint_type {
+        EndpointType::ZeroMq(_) => true,
+        EndpointType::Nats(config) => config.no_jetstream,
+        EndpointType::Mqtt(config) => config.qos == Some(0),
+        EndpointType::Http(config) => config.fire_and_forget,
+        EndpointType::Custom { name, config } => crate::extensions::get_endpoint_factory(name)
+            .is_some_and(|factory| !factory.acknowledges(config)),
+        _ => false,
+    }
+}
+
+/// Whether the input deduplicates on `message_id` although it mints a fresh one per read.
+fn dedup_keys_on_minted_message_id(input: &Endpoint) -> bool {
+    let default_key = input.middlewares.iter().any(|middleware| {
+        matches!(middleware, Middleware::Deduplication(config) if config.key.is_none())
+    });
+    default_key
+        && match &input.endpoint_type {
+            EndpointType::File(_)
+            | EndpointType::ObjectStore(_)
+            | EndpointType::Aws(_)
+            | EndpointType::IbmMq(_)
+            | EndpointType::ZeroMq(_)
+            | EndpointType::ClickHouse(_) => true,
+            EndpointType::MongoDb(config) => matches!(
+                config.consume,
+                Some(crate::models::MongoConsume::CaptureNew)
+                    | Some(crate::models::MongoConsume::CaptureAll)
+            ),
+            _ => false,
+        }
+}
+
 impl Route {
     /// Whether this route's input can stamp a replay position, which is what `name_by: auto`
     /// resolves against. A `ref` input that cannot be resolved counts as no position, so `auto`
@@ -852,13 +888,18 @@ impl Route {
             return None;
         }
         let source_has_position = self.source_has_position();
+        // A key built from `mqb.src.*` is only replay-stable when the input stamps a position.
+        let replayable = |key: &str| source_has_position || !key.contains("mqb.src.");
         match &output.endpoint_type {
-            EndpointType::MongoDb(config) if config.id_field.is_some() => {
+            EndpointType::MongoDb(config) if config.id_field.as_deref().is_some_and(replayable) => {
                 Some("MongoDB unique _id")
             }
             EndpointType::Sqlx(config) => {
-                let query = config.insert_query.as_deref()?.to_ascii_uppercase();
-                query
+                let raw = config.insert_query.as_deref()?;
+                if !replayable(raw) {
+                    return None;
+                }
+                raw.to_ascii_uppercase()
                     .split_once("ON CONFLICT")
                     .is_some_and(|(_, conflict_action)| conflict_action.contains("DO NOTHING"))
                     .then_some("SQL unique-key conflict handling")
@@ -873,7 +914,38 @@ impl Route {
             {
                 Some("object names carrying the source range")
             }
+            EndpointType::Custom { name, config }
+                if crate::extensions::get_endpoint_factory(name)
+                    .is_some_and(|factory| factory.idempotent_sink(config)) =>
+            {
+                Some("custom endpoint's idempotent write")
+            }
             _ => None,
+        }
+    }
+
+    /// The delivery guarantee this route's configuration supports, as logged at startup.
+    ///
+    /// Conservative: `EffectivelyOnce` only for sink writes recognisable as idempotent from
+    /// configuration alone, `AtMostOnce` only for inputs with no acknowledgement at all.
+    /// Everything else is `AtLeastOnce`.
+    pub fn delivery_guarantee(&self) -> DeliveryGuarantee {
+        let relaxed =
+            relax_object_naming("", self.source_has_position(), &self.input, &self.output)
+                .ok()
+                .flatten()
+                .map(|(output, _)| output);
+        self.inferred_delivery(relaxed.as_ref().unwrap_or(&self.output))
+            .0
+    }
+
+    fn inferred_delivery(&self, output: &Endpoint) -> (DeliveryGuarantee, Option<&'static str>) {
+        if source_is_at_most_once(&self.input.endpoint_type) {
+            return (DeliveryGuarantee::AtMostOnce, None);
+        }
+        match self.inferred_idempotency_mechanism(output) {
+            Some(mechanism) => (DeliveryGuarantee::EffectivelyOnce, Some(mechanism)),
+            None => (DeliveryGuarantee::AtLeastOnce, None),
         }
     }
 
@@ -1075,6 +1147,24 @@ impl Route {
                 self.options.concurrency
             ));
         }
+        if dedup_keys_on_minted_message_id(&self.input) {
+            warnings.push(format!(
+                "Route '{name}' deduplicates on `message_id`, which this input mints fresh on \
+                 every read, so a redelivery never matches. Set the deduplication `key` to a \
+                 business key, or to `${{metadata:mqb.id}}` derived by the `id` middleware."
+            ));
+        }
+        if let Some(required) = self.options.required_delivery {
+            let actual = self.delivery_guarantee();
+            if actual < required {
+                return Err(anyhow::anyhow!(
+                    "Route '{name}' requires {required} delivery, but its configuration supports \
+                     only {actual}. Make the sink write idempotent (Mongo `id_field`, SQL `ON \
+                     CONFLICT … DO NOTHING`, file/object_store `name_by: source_position`), \
+                     see docs/DELIVERY.md."
+                ));
+            }
+        }
         Ok(warnings)
     }
 
@@ -1135,19 +1225,18 @@ impl Route {
         )?
         .map(|(output, _)| output);
         let inferred_output = relaxed_output.as_ref().unwrap_or(&self.output);
-        if let Some(mechanism) = self.inferred_idempotency_mechanism(inferred_output) {
-            tracing::info!(
+        match self.inferred_delivery(inferred_output) {
+            (delivery, Some(mechanism)) => tracing::info!(
                 route = name_str,
-                delivery = "effectively-once",
+                delivery = %delivery,
                 mechanism,
                 "Inferred delivery guarantee from idempotent sink configuration"
-            );
-        } else {
-            tracing::info!(
+            ),
+            (delivery, None) => tracing::info!(
                 route = name_str,
-                delivery = "at-least-once",
+                delivery = %delivery,
                 "Inferred delivery guarantee"
-            );
+            ),
         }
         let startup_timeout = std::time::Duration::from_millis(self.options.startup_timeout_ms);
         let reconnect_interval =
@@ -1474,6 +1563,8 @@ impl Route {
         let source_metadata_required =
             output_requires_source_metadata(name, output, source_has_position)?;
         check_source_position_available(name, &self.input, source_metadata_required)?;
+        let source_metadata_required = source_metadata_required
+            || (source_has_position && output_keys_on_source_position(name, output)?);
         let publisher =
             create_publisher_from_route_with_source_position(name, output, source_has_position)
                 .await?;
@@ -1646,6 +1737,8 @@ impl Route {
         let source_metadata_required =
             output_requires_source_metadata(name, output, source_has_position)?;
         check_source_position_available(name, &self.input, source_metadata_required)?;
+        let source_metadata_required = source_metadata_required
+            || (source_has_position && output_keys_on_source_position(name, output)?);
         // A write-time name is minted inside the worker pool, so it is arrival order here
         // whether or not the input could have supplied a position instead. Checked after the
         // relaxation above, so a route it just moved onto write-time names is warned about too.
@@ -2501,6 +2594,191 @@ mod tests {
             ordinary.inferred_idempotency_mechanism(&ordinary.output),
             None
         );
+    }
+
+    /// A key built from source-position metadata only counts when the input stamps one.
+    #[test]
+    fn a_position_key_is_idempotent_only_over_a_positional_input() {
+        let keyed_on_offset = || {
+            Endpoint::new(EndpointType::Sqlx(SqlxConfig {
+                insert_query: Some(
+                    "INSERT INTO t (p, o) VALUES (${metadata:mqb.src.kafka_partition}, \
+                     ${metadata:mqb.src.kafka_offset}) ON CONFLICT (p, o) DO NOTHING"
+                        .to_string(),
+                ),
+                ..Default::default()
+            }))
+        };
+        let positionless = Route::new(Endpoint::new_memory("delivery_in", 1), keyed_on_offset());
+        assert_eq!(
+            positionless.delivery_guarantee(),
+            DeliveryGuarantee::AtLeastOnce
+        );
+
+        let positional = Route::new(
+            Endpoint::new(EndpointType::File(crate::models::FileConfig::new(
+                "/tmp/orders.jsonl",
+            ))),
+            keyed_on_offset(),
+        );
+        assert_eq!(
+            positional.delivery_guarantee(),
+            DeliveryGuarantee::EffectivelyOnce
+        );
+    }
+
+    #[test]
+    fn inputs_without_acknowledgement_are_at_most_once() {
+        let zeromq = Route::new(
+            Endpoint::new(EndpointType::ZeroMq(Default::default())),
+            Endpoint::new_memory("delivery_out", 1),
+        );
+        assert_eq!(zeromq.delivery_guarantee(), DeliveryGuarantee::AtMostOnce);
+
+        let core_nats = Route::new(
+            Endpoint::new(EndpointType::Nats(crate::models::NatsConfig {
+                no_jetstream: true,
+                ..Default::default()
+            })),
+            Endpoint::new_memory("delivery_out", 1),
+        );
+        assert_eq!(
+            core_nats.delivery_guarantee(),
+            DeliveryGuarantee::AtMostOnce
+        );
+
+        let memory = Route::new(
+            Endpoint::new_memory("delivery_in", 1),
+            Endpoint::new_memory("delivery_out", 1),
+        );
+        assert_eq!(memory.delivery_guarantee(), DeliveryGuarantee::AtLeastOnce);
+    }
+
+    #[test]
+    fn a_required_guarantee_the_route_cannot_meet_fails_the_check() {
+        let options =
+            RouteOptions::default().with_required_delivery(DeliveryGuarantee::EffectivelyOnce);
+        let plain = Route::new(
+            Endpoint::new_memory("delivery_in", 1),
+            Endpoint::new_memory("delivery_out", 1),
+        )
+        .with_options(options.clone());
+        let err = plain.check("plain", None).unwrap_err().to_string();
+        assert!(err.contains("requires effectively-once"), "{err}");
+
+        let idempotent = Route::new(
+            Endpoint::new_memory("delivery_in", 1),
+            Endpoint::new(EndpointType::MongoDb(MongoDbConfig {
+                id_field: Some("order_id".to_string()),
+                ..Default::default()
+            })),
+        )
+        .with_options(options);
+        assert_eq!(
+            idempotent.delivery_guarantee(),
+            DeliveryGuarantee::EffectivelyOnce
+        );
+    }
+
+    /// A custom endpoint takes part through its factory, by override or by schema annotation.
+    #[test]
+    fn custom_endpoints_declare_their_delivery() {
+        #[derive(Debug)]
+        struct KeyedSink;
+        impl crate::traits::CustomEndpointFactory for KeyedSink {
+            fn idempotent_sink(&self, config: &serde_json::Value) -> bool {
+                config.get("key").is_some()
+            }
+        }
+        #[derive(Debug)]
+        struct FireAndForget;
+        impl crate::traits::CustomEndpointFactory for FireAndForget {
+            fn config_schema(&self) -> Option<serde_json::Value> {
+                Some(serde_json::json!({ "type": "object", "x-mqb-acknowledges": false }))
+            }
+        }
+        let _ = crate::extensions::register_endpoint_factory("dg_keyed_sink", Arc::new(KeyedSink));
+        let _ = crate::extensions::register_endpoint_factory(
+            "dg_fire_and_forget",
+            Arc::new(FireAndForget),
+        );
+        let custom = |name: &str, config| {
+            Endpoint::new(EndpointType::Custom {
+                name: name.to_string(),
+                config,
+            })
+        };
+        let memory = || Endpoint::new_memory("delivery_x", 1);
+
+        let keyed = Route::new(
+            memory(),
+            custom("dg_keyed_sink", serde_json::json!({"key": "id"})),
+        );
+        assert_eq!(
+            keyed.delivery_guarantee(),
+            DeliveryGuarantee::EffectivelyOnce
+        );
+        let unkeyed = Route::new(memory(), custom("dg_keyed_sink", serde_json::json!({})));
+        assert_eq!(unkeyed.delivery_guarantee(), DeliveryGuarantee::AtLeastOnce);
+        let lossy = Route::new(
+            custom("dg_fire_and_forget", serde_json::json!({})),
+            memory(),
+        );
+        assert_eq!(lossy.delivery_guarantee(), DeliveryGuarantee::AtMostOnce);
+        let unknown = Route::new(memory(), custom("dg_not_registered", serde_json::json!({})));
+        assert_eq!(unknown.delivery_guarantee(), DeliveryGuarantee::AtLeastOnce);
+    }
+
+    #[test]
+    fn guarantees_order_and_parse_as_documented() {
+        assert!(DeliveryGuarantee::AtMostOnce < DeliveryGuarantee::AtLeastOnce);
+        assert!(DeliveryGuarantee::AtLeastOnce < DeliveryGuarantee::EffectivelyOnce);
+        let parsed: RouteOptions =
+            serde_json::from_str(r#"{"required_delivery": "effectively_once"}"#).unwrap();
+        assert_eq!(
+            parsed.required_delivery,
+            Some(DeliveryGuarantee::EffectivelyOnce)
+        );
+        assert_eq!(DeliveryGuarantee::AtLeastOnce.to_string(), "at-least-once");
+
+        let route: Route = serde_json::from_str(
+            r#"{"required_delivery": "effectively_once",
+                "input": {"memory": {"topic": "a"}}, "output": {"memory": {"topic": "b"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            route.options.required_delivery,
+            Some(DeliveryGuarantee::EffectivelyOnce)
+        );
+    }
+
+    #[cfg(feature = "dedup")]
+    #[test]
+    fn deduplicating_a_minted_message_id_is_warned_about() {
+        let dedup = |key: Option<&str>| {
+            Middleware::Deduplication(crate::models::DeduplicationMiddleware {
+                store: Some("sled:///tmp/unused".to_string()),
+                sled_path: None,
+                ttl_seconds: 60,
+                key: key.map(str::to_string),
+                replay_response: false,
+            })
+        };
+        let file_with = |key| Endpoint {
+            middlewares: vec![dedup(key)],
+            ..Endpoint::new(EndpointType::File(crate::models::FileConfig::new(
+                "/tmp/orders.jsonl",
+            )))
+        };
+        let warns = |input: Endpoint| {
+            Route::new(input, Endpoint::new_memory("delivery_out", 1))
+                .check("dedup", None)
+                .unwrap()
+                .iter()
+                .any(|w| w.contains("mints fresh"))
+        };
+        assert!(warns(file_with(None)));
+        assert!(!warns(file_with(Some("${payload:id}"))));
     }
 
     /// The object-store sink reports the mechanism it derived, so `name_by: auto` has to be

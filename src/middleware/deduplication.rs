@@ -16,28 +16,47 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tracing::{error, info, instrument, trace, warn};
 
 /// Short TTL for a reservation held while a message is in flight. Kept small so a crash between
 /// reserve and commit frees the key quickly for at-least-once redelivery.
 pub(crate) const PENDING_TTL_SECS: u64 = 5;
 
+/// How often a delivery whose key is held elsewhere re-checks it.
+const IN_FLIGHT_POLL: Duration = Duration::from_millis(50);
+
+/// What [`DedupStore::reserve`] found for a key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Reservation {
+    /// Newly claimed: the caller owns the key until it marks or releases it.
+    Claimed,
+    /// Committed within the TTL: a true duplicate, safe to ack and skip.
+    Processed,
+    /// Claimed by a delivery that has not committed yet. That delivery may still fail, so
+    /// this copy must never be acked on its strength.
+    InFlight,
+}
+
 /// A pluggable deduplication backend: a keyed store with an atomic reserve and a TTL.
 ///
-/// `reserve` is the ordering point — it atomically claims a key, returning whether a *live*
-/// entry already existed. `mark_processed` promotes a claimed key to the full TTL once the
-/// message is committed. Local (`sled`) and shared (`mongodb`) backends implement this.
+/// `reserve` is the ordering point — it atomically claims a key or reports who holds it.
+/// `mark_processed` promotes a claimed key to the full TTL once the sink write succeeded;
+/// `release` drops a claim whose delivery failed. Local (`sled`) and shared (`mongodb`,
+/// SQL) backends implement this.
 #[async_trait]
 pub(crate) trait DedupStore: Send + Sync {
-    /// Atomically reserve `key`. `Ok(true)` = a live entry already exists (duplicate);
-    /// `Ok(false)` = freshly reserved (caller should process the message).
-    async fn reserve(&self, key: &[u8], now: u64) -> Result<bool, ConsumerError>;
+    /// Atomically reserve `key`.
+    async fn reserve(&self, key: &[u8], now: u64) -> Result<Reservation, ConsumerError>;
 
-    /// Reserve a whole batch at once, returning one flag per key in order. Backends that can
+    /// Reserve a whole batch at once, returning one state per key in order. Backends that can
     /// amortise per-call work — a lock, a network round trip — override this; the default
     /// reserves one key at a time.
-    async fn reserve_many(&self, keys: &[Vec<u8>], now: u64) -> Result<Vec<bool>, ConsumerError> {
+    async fn reserve_many(
+        &self,
+        keys: &[Vec<u8>],
+        now: u64,
+    ) -> Result<Vec<Reservation>, ConsumerError> {
         let mut claimed = Vec::with_capacity(keys.len());
         for key in keys {
             claimed.push(self.reserve(key, now).await?);
@@ -54,6 +73,24 @@ pub(crate) trait DedupStore: Send + Sync {
     async fn mark_processed_many(&self, keys: &[Vec<u8>], now: u64) {
         for key in keys {
             self.mark_processed(key, now).await;
+        }
+    }
+
+    /// Promote a key and keep the reply its delivery answered with, for `replay_response`.
+    /// The reply is stored before the marker, so a processed key never lacks it.
+    async fn mark_processed_with_response(&self, key: &[u8], now: u64, response: &[u8]);
+
+    /// The reply stored for a processed key, if any.
+    async fn stored_response(&self, key: &[u8]) -> Option<Vec<u8>>;
+
+    /// Drop a claim without marking it, so a redelivery after a nack is processed at once
+    /// instead of waiting out the lease. Best-effort, like `mark_processed`.
+    async fn release(&self, key: &[u8]);
+
+    /// Release a whole batch of claims.
+    async fn release_many(&self, keys: &[Vec<u8>]) {
+        for key in keys {
+            self.release(key).await;
         }
     }
 
@@ -153,11 +190,16 @@ async fn build_store(
     backend: DedupBackend,
     ttl_seconds: u64,
     route_name: &str,
+    replay_response: bool,
 ) -> anyhow::Result<Arc<dyn DedupStore>> {
     #[cfg(not(any(feature = "mongodb", feature = "sqlx")))]
     let _ = route_name;
     match backend {
-        DedupBackend::Sled { path } => Ok(Arc::new(SledDedupStore::new(&path, ttl_seconds)?)),
+        DedupBackend::Sled { path } => Ok(Arc::new(SledDedupStore::new(
+            &path,
+            ttl_seconds,
+            replay_response,
+        )?)),
         #[cfg(feature = "mongodb")]
         DedupBackend::Mongo {
             url,
@@ -175,8 +217,14 @@ async fn build_store(
         }
         #[cfg(feature = "sqlx")]
         DedupBackend::Sqlx { url, table } => {
-            crate::endpoints::sqlx::build_sql_dedup_store(&url, table, ttl_seconds, route_name)
-                .await
+            crate::endpoints::sqlx::build_sql_dedup_store(
+                &url,
+                table,
+                ttl_seconds,
+                route_name,
+                replay_response,
+            )
+            .await
         }
     }
 }
@@ -201,55 +249,54 @@ fn lock_claims(claims: &Mutex<Claims>) -> std::sync::MutexGuard<'_, Claims> {
     claims.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Whether a stored value is still within its TTL. Values written by older versions are 8 bytes
-/// (a bare timestamp) or carry the pending state, and are read on their own terms.
-fn is_live(value: &[u8], now: u64, ttl_seconds: u64) -> bool {
-    let (timestamp, ttl) = match value.len() {
+/// The state of a stored value still within its TTL, or `None` once it has expired. Values
+/// written by older versions are 8 bytes (a bare timestamp) or carry an on-disk pending state,
+/// and are read on their own terms.
+fn stored_state(value: &[u8], now: u64, ttl_seconds: u64) -> Option<Reservation> {
+    let (timestamp, ttl, state) = match value.len() {
         9 => {
-            let ttl = if value[0] == STATE_PENDING {
-                PENDING_TTL_SECS
+            let (ttl, state) = if value[0] == STATE_PENDING {
+                (PENDING_TTL_SECS, Reservation::InFlight)
             } else {
-                ttl_seconds
+                (ttl_seconds, Reservation::Processed)
             };
-            match value[1..9].try_into() {
-                Ok(bytes) => (u64::from_be_bytes(bytes), ttl),
-                Err(_) => return false,
-            }
+            (u64::from_be_bytes(value[1..9].try_into().ok()?), ttl, state)
         }
-        8 => match value.try_into() {
-            Ok(bytes) => (u64::from_be_bytes(bytes), ttl_seconds),
-            Err(_) => return false,
-        },
-        _ => return false,
+        8 => (
+            u64::from_be_bytes(value.try_into().ok()?),
+            ttl_seconds,
+            Reservation::Processed,
+        ),
+        _ => return None,
     };
-    now.saturating_sub(timestamp) < ttl
+    (now.saturating_sub(timestamp) < ttl).then_some(state)
 }
 
-/// Claim `key` against an already-held claim map. `Ok(true)` = a live entry already exists.
+/// Claim `key` against an already-held claim map.
 fn claim_key(
     db: &Db,
     claims: &mut Claims,
     key: &[u8],
     now: u64,
     ttl_seconds: u64,
-) -> Result<bool, ConsumerError> {
+) -> Result<Reservation, ConsumerError> {
     if claims
         .get(key)
         .is_some_and(|at| now.saturating_sub(*at) < PENDING_TTL_SECS)
     {
-        return Ok(true);
+        return Ok(Reservation::InFlight);
     }
     let stored = db
         .get(key)
         .map_err(|e| ConsumerError::Connection(anyhow!("Deduplication DB error: {e}")))?;
-    if stored
+    if let Some(state) = stored
         .as_deref()
-        .is_some_and(|v| is_live(v, now, ttl_seconds))
+        .and_then(|v| stored_state(v, now, ttl_seconds))
     {
-        return Ok(true);
+        return Ok(state);
     }
     claims.insert(key.to_vec(), now);
-    Ok(false)
+    Ok(Reservation::Claimed)
 }
 
 /// Claim every key under one acquisition of the claim map.
@@ -259,7 +306,7 @@ fn claim_all(
     keys: &[Vec<u8>],
     now: u64,
     ttl_seconds: u64,
-) -> Result<Vec<bool>, ConsumerError> {
+) -> Result<Vec<Reservation>, ConsumerError> {
     let mut held = lock_claims(claims);
     keys.iter()
         .map(|key| claim_key(db, &mut held, key, now, ttl_seconds))
@@ -307,37 +354,89 @@ struct SledDedupStore {
     ttl_seconds: u64,
     in_flight: Arc<Mutex<Claims>>,
     last_cleanup: AtomicU64,
+    /// Stored replies, only with `replay_response`.
+    responses: Option<sled::Tree>,
 }
 
 impl SledDedupStore {
-    fn new(path: &str, ttl_seconds: u64) -> anyhow::Result<Self> {
+    fn new(path: &str, ttl_seconds: u64, replay_response: bool) -> anyhow::Result<Self> {
+        let db = sled::open(path)?;
+        let responses = replay_response
+            .then(|| db.open_tree("responses"))
+            .transpose()?;
         Ok(Self {
-            db: Arc::new(sled::open(path)?),
+            db: Arc::new(db),
             ttl_seconds,
             in_flight: Arc::new(Mutex::new(Claims::new())),
             last_cleanup: AtomicU64::new(0),
+            responses,
         })
+    }
+
+    /// A plain ack supersedes a reply stored by an earlier, expired processing of the key.
+    fn forget_responses<'a>(&self, keys: impl IntoIterator<Item = &'a [u8]>) {
+        if let Some(responses) = &self.responses {
+            for key in keys {
+                let _ = responses.remove(key);
+            }
+        }
     }
 }
 
 #[async_trait]
 impl DedupStore for SledDedupStore {
-    async fn reserve(&self, key: &[u8], now: u64) -> Result<bool, ConsumerError> {
+    async fn reserve(&self, key: &[u8], now: u64) -> Result<Reservation, ConsumerError> {
         let mut held = lock_claims(&self.in_flight);
         claim_key(&self.db, &mut held, key, now, self.ttl_seconds)
     }
 
-    async fn reserve_many(&self, keys: &[Vec<u8>], now: u64) -> Result<Vec<bool>, ConsumerError> {
+    async fn reserve_many(
+        &self,
+        keys: &[Vec<u8>],
+        now: u64,
+    ) -> Result<Vec<Reservation>, ConsumerError> {
         claim_all(&self.db, &self.in_flight, keys, now, self.ttl_seconds)
     }
 
+    async fn release(&self, key: &[u8]) {
+        lock_claims(&self.in_flight).remove(key);
+    }
+
+    async fn release_many(&self, keys: &[Vec<u8>]) {
+        let mut held = lock_claims(&self.in_flight);
+        for key in keys {
+            held.remove(key.as_slice());
+        }
+    }
+
     async fn mark_processed(&self, key: &[u8], now: u64) {
+        self.forget_responses([key]);
         commit_key(&self.db, key, now);
         lock_claims(&self.in_flight).remove(key);
     }
 
     async fn mark_processed_many(&self, keys: &[Vec<u8>], now: u64) {
+        self.forget_responses(keys.iter().map(Vec::as_slice));
         commit_all(&self.db, &self.in_flight, keys, now);
+    }
+
+    async fn mark_processed_with_response(&self, key: &[u8], now: u64, response: &[u8]) {
+        if let Some(responses) = &self.responses {
+            if let Err(e) = responses.insert(key, response) {
+                error!(
+                    "Failed to store deduplication reply for {}: {}",
+                    hex_key(key),
+                    e
+                );
+            }
+        }
+        commit_key(&self.db, key, now);
+        lock_claims(&self.in_flight).remove(key);
+    }
+
+    async fn stored_response(&self, key: &[u8]) -> Option<Vec<u8>> {
+        let value = self.responses.as_ref()?.get(key).ok()??;
+        Some(value.to_vec())
     }
 
     fn maybe_cleanup(&self, now: u64) {
@@ -363,6 +462,7 @@ impl DedupStore for SledDedupStore {
         lock_claims(&self.in_flight).retain(|_, at| now.saturating_sub(*at) < PENDING_TTL_SECS);
 
         let db = self.db.clone();
+        let responses = self.responses.clone();
         let ttl = self.ttl_seconds;
         tokio::task::spawn_blocking(move || {
             let cutoff = now.saturating_sub(ttl);
@@ -373,8 +473,15 @@ impl DedupStore for SledDedupStore {
                     _ => continue,
                 };
                 if let Ok(bytes) = value[offset..offset + 8].try_into() {
-                    if u64::from_be_bytes(bytes) < cutoff {
-                        let _ = db.compare_and_swap(&key, Some(value), None::<&[u8]>);
+                    if u64::from_be_bytes(bytes) < cutoff
+                        && matches!(
+                            db.compare_and_swap(&key, Some(value), None::<&[u8]>),
+                            Ok(Ok(()))
+                        )
+                    {
+                        if let Some(responses) = &responses {
+                            let _ = responses.remove(&key);
+                        }
                     }
                 }
             }
@@ -406,6 +513,8 @@ pub struct DeduplicationConsumer {
     /// Commits for batches that were entirely duplicates. See
     /// [`crate::middleware::deferred_commit`].
     deferred: DeferredCommits,
+    /// Answer a duplicate with the reply its first delivery produced.
+    replay_response: bool,
 }
 
 /// The dedup key for a message: the rendered `key` template, or the raw `message_id`.
@@ -429,6 +538,85 @@ fn dedup_key(template: Option<&CompiledTemplate>, msg: &CanonicalMessage) -> Vec
     }
 }
 
+/// The serialized reply to keep for `replay_response`, when this disposition carries one.
+fn stored_reply(disposition: &MessageDisposition, replay: bool) -> Option<Vec<u8>> {
+    let MessageDisposition::Reply(reply) = disposition else {
+        return None;
+    };
+    if !replay {
+        return None;
+    }
+    serde_json::to_vec(reply)
+        .map_err(|e| warn!("Failed to serialize reply for deduplication replay: {e}"))
+        .ok()
+}
+
+/// A repeat inside a batch answers with whatever reply its first copy got.
+fn copy_replies_to_repeats(dispositions: &mut [MessageDisposition], first_of: &[Option<usize>]) {
+    for (slot, first) in first_of.iter().enumerate() {
+        if let Some(first) = first {
+            if let MessageDisposition::Reply(reply) = &dispositions[*first] {
+                dispositions[slot] = MessageDisposition::Reply(reply.clone());
+            }
+        }
+    }
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+/// Reserves `keys` into `states` and waits out any held elsewhere.
+async fn reserve_settled(
+    store: &dyn DedupStore,
+    keys: &[Vec<u8>],
+    states: &mut [Reservation],
+) -> Result<(), ConsumerError> {
+    let reserved = store.reserve_many(keys, unix_now()).await?;
+    states.copy_from_slice(&reserved);
+    settle_in_flight(store, keys, states).await
+}
+
+/// Waits out keys held by a delivery that has not committed yet. The holder either commits
+/// (the key turns `Processed`) or fails and releases it or lets its lease lapse (`Claimed`
+/// here). Acking on `InFlight` instead would lose the message whenever the holder failed.
+/// Past twice the lease — reachable only through clock skew between instances — the message
+/// is processed unclaimed: a possible duplicate, never a loss.
+async fn settle_in_flight(
+    store: &dyn DedupStore,
+    keys: &[Vec<u8>],
+    states: &mut [Reservation],
+) -> Result<(), ConsumerError> {
+    let deadline = Instant::now() + Duration::from_secs(2 * PENDING_TTL_SECS + 1);
+    loop {
+        let waiting: Vec<usize> = (0..states.len())
+            .filter(|&i| states[i] == Reservation::InFlight)
+            .collect();
+        if waiting.is_empty() {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            warn!(
+                count = waiting.len(),
+                "Deduplication keys are still held by another delivery past their lease; processing them anyway (may duplicate)"
+            );
+            for i in waiting {
+                states[i] = Reservation::Claimed;
+            }
+            return Ok(());
+        }
+        tokio::time::sleep(IN_FLIGHT_POLL).await;
+        let retry: Vec<Vec<u8>> = waiting.iter().map(|&i| keys[i].clone()).collect();
+        let fresh = store.reserve_many(&retry, unix_now()).await?;
+        for (i, state) in waiting.into_iter().zip(fresh) {
+            states[i] = state;
+        }
+    }
+}
+
 impl DeduplicationConsumer {
     pub async fn new(
         inner: Box<dyn MessageConsumer>,
@@ -449,7 +637,13 @@ impl DeduplicationConsumer {
                 ))
             }
         };
-        let store = build_store(backend, config.ttl_seconds, route_name).await?;
+        let store = build_store(
+            backend,
+            config.ttl_seconds,
+            route_name,
+            config.replay_response,
+        )
+        .await?;
         let key_template = config
             .key
             .as_deref()
@@ -461,7 +655,25 @@ impl DeduplicationConsumer {
             store,
             key_template,
             deferred: DeferredCommits::new(),
+            replay_response: config.replay_response,
         })
+    }
+
+    /// How to settle a duplicate: its stored reply under `replay_response`, else a plain ack.
+    async fn duplicate_disposition(&self, key: &[u8]) -> MessageDisposition {
+        if !self.replay_response {
+            return MessageDisposition::Ack;
+        }
+        let Some(bytes) = self.store.stored_response(key).await else {
+            return MessageDisposition::Ack;
+        };
+        match serde_json::from_slice(&bytes) {
+            Ok(reply) => MessageDisposition::Reply(reply),
+            Err(e) => {
+                warn!("Stored deduplication reply is unreadable; acking the duplicate without it: {e}");
+                MessageDisposition::Ack
+            }
+        }
     }
 
     /// Test seam: wrap `inner` around a store the caller already holds, so a test can inspect
@@ -472,6 +684,7 @@ impl DeduplicationConsumer {
         inner: Box<dyn MessageConsumer>,
         store: Arc<dyn DedupStore>,
         key: Option<&str>,
+        replay_response: bool,
     ) -> anyhow::Result<Self> {
         Ok(Self {
             inner,
@@ -480,6 +693,7 @@ impl DeduplicationConsumer {
                 .map(|k| CompiledTemplate::compile(k, None))
                 .transpose()?,
             deferred: DeferredCommits::new(),
+            replay_response,
         })
     }
 }
@@ -535,9 +749,18 @@ impl MessageConsumer for DeduplicationConsumer {
             self.store.maybe_cleanup(now);
 
             let key = dedup_key(self.key_template.as_ref(), &received.message);
-            if self.store.reserve(&key, now).await? {
+            let mut state = [Reservation::Claimed];
+            if let Err(e) =
+                reserve_settled(self.store.as_ref(), std::slice::from_ref(&key), &mut state).await
+            {
+                // Handed back rather than dropped: not every source redelivers what it gave out.
+                let _ = (received.commit)(MessageDisposition::Nack).await;
+                return Err(e);
+            }
+            if state[0] == Reservation::Processed {
                 info!(message_id = %format!("{:032x}", received.message.message_id), "Duplicate message detected and skipped");
-                if let Err(e) = (received.commit)(MessageDisposition::Ack).await {
+                let disposition = self.duplicate_disposition(&key).await;
+                if let Err(e) = (received.commit)(disposition).await {
                     warn!("Failed to commit skipped duplicate message: {}", e);
                 }
                 continue;
@@ -545,23 +768,22 @@ impl MessageConsumer for DeduplicationConsumer {
 
             let store = self.store.clone();
             let original_commit = received.commit;
+            let replay = self.replay_response;
 
-            // Wrap commit to promote the reservation to "processed" state.
+            // The marker is written before the source ack: a crash between the two then
+            // replays a message that is already recognised, instead of one that is not.
             let commit = Box::new(move |disposition: MessageDisposition| {
                 Box::pin(async move {
-                    let is_ack = matches!(
-                        disposition,
-                        MessageDisposition::Ack | MessageDisposition::Reply(_)
-                    );
-                    original_commit(disposition).await?;
-                    if is_ack {
-                        let now = SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs();
-                        store.mark_processed(&key, now).await;
+                    match (&disposition, stored_reply(&disposition, replay)) {
+                        (_, Some(reply)) => {
+                            store
+                                .mark_processed_with_response(&key, unix_now(), &reply)
+                                .await
+                        }
+                        (MessageDisposition::Nack, None) => store.release(&key).await,
+                        (_, None) => store.mark_processed(&key, unix_now()).await,
                     }
-                    Ok(())
+                    original_commit(disposition).await
                 }) as crate::traits::BoxFuture<'static, anyhow::Result<()>>
             });
 
@@ -606,30 +828,63 @@ impl MessageConsumer for DeduplicationConsumer {
                 .iter()
                 .map(|msg| dedup_key(self.key_template.as_ref(), msg))
                 .collect();
-            let duplicates = self.store.reserve_many(&keys, now).await?;
+            // A key repeated inside the batch rides on the slot of its first copy; reserving
+            // it again would find that copy's own claim and wait on itself.
+            let first_of: Vec<Option<usize>> = {
+                let mut seen = HashMap::with_capacity(total_len);
+                keys.iter()
+                    .enumerate()
+                    .map(|(slot, key)| match seen.entry(key.as_slice()) {
+                        std::collections::hash_map::Entry::Occupied(first) => Some(*first.get()),
+                        std::collections::hash_map::Entry::Vacant(entry) => {
+                            entry.insert(slot);
+                            None
+                        }
+                    })
+                    .collect()
+            };
+            let unique: Vec<Vec<u8>> = keys
+                .into_iter()
+                .zip(&first_of)
+                .filter_map(|(key, first)| first.is_none().then_some(key))
+                .collect();
+            let mut states = vec![Reservation::Claimed; unique.len()];
+            if let Err(e) = reserve_settled(self.store.as_ref(), &unique, &mut states).await {
+                // Handed back rather than dropped: not every source redelivers what it gave out.
+                let _ = inner_commit(vec![MessageDisposition::Nack; total_len]).await;
+                return Err(e);
+            }
 
             let mut filtered_messages = Vec::with_capacity(total_len);
             let mut kept_indices = Vec::with_capacity(total_len);
             let mut kept_keys: Vec<Vec<u8>> = Vec::with_capacity(total_len);
+            let mut settled = vec![MessageDisposition::Ack; total_len];
+            let mut unique_entries = unique.into_iter().zip(states);
 
-            for ((idx, msg), (key, duplicate)) in messages
-                .into_iter()
-                .enumerate()
-                .zip(keys.into_iter().zip(duplicates))
-            {
-                if duplicate {
-                    info!(message_id = %format!("{:032x}", msg.message_id), "Duplicate message detected and skipped");
-                } else {
-                    filtered_messages.push(msg);
-                    kept_indices.push(idx);
-                    kept_keys.push(key);
+            for (slot, (msg, first)) in messages.into_iter().zip(&first_of).enumerate() {
+                if first.is_none() {
+                    let (key, state) = unique_entries
+                        .next()
+                        .expect("one reservation per first occurrence");
+                    if state != Reservation::Processed {
+                        filtered_messages.push(msg);
+                        kept_indices.push(slot);
+                        kept_keys.push(key);
+                        continue;
+                    }
+                    settled[slot] = self.duplicate_disposition(&key).await;
                 }
+                info!(message_id = %format!("{:032x}", msg.message_id), "Duplicate message detected and skipped");
+            }
+            let replay = self.replay_response;
+            if replay {
+                copy_replies_to_repeats(&mut settled, &first_of);
             }
 
             if filtered_messages.is_empty() {
                 let ordered = self.inner.commit_requires_order();
                 self.deferred
-                    .ack_emptied(ordered, inner_commit, total_len)
+                    .settle_emptied(ordered, inner_commit, settled)
                     .await
                     .map_err(ConsumerError::Connection)?;
                 continue;
@@ -640,29 +895,34 @@ impl MessageConsumer for DeduplicationConsumer {
 
             let commit: crate::traits::BatchCommitFunc = Box::new(move |dispositions| {
                 Box::pin(async move {
-                    let mut full_dispositions = vec![MessageDisposition::Ack; total_len];
+                    let mut full_dispositions = settled;
                     let mut acked = Vec::with_capacity(kept_keys.len());
+                    let mut replied = Vec::new();
+                    let mut failed = Vec::new();
                     for ((key, disposition), slot) in
                         kept_keys.into_iter().zip(dispositions).zip(kept_indices)
                     {
-                        if matches!(
-                            disposition,
-                            MessageDisposition::Ack | MessageDisposition::Reply(_)
-                        ) {
-                            acked.push(key);
+                        match (&disposition, stored_reply(&disposition, replay)) {
+                            (_, Some(reply)) => replied.push((key, reply)),
+                            (MessageDisposition::Nack, None) => failed.push(key),
+                            (_, None) => acked.push(key),
                         }
                         full_dispositions[slot] = disposition;
                     }
+                    if replay {
+                        copy_replies_to_repeats(&mut full_dispositions, &first_of);
+                    }
 
                     run_all(held).await?;
-                    inner_commit(full_dispositions).await?;
-
-                    let now = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs();
+                    // Markers before the source ack, see `receive`. Failed keys are released
+                    // first so a broker that redelivers at once finds them free.
+                    let now = unix_now();
                     store.mark_processed_many(&acked, now).await;
-                    Ok(())
+                    for (key, reply) in &replied {
+                        store.mark_processed_with_response(key, now, reply).await;
+                    }
+                    store.release_many(&failed).await;
+                    inner_commit(full_dispositions).await
                 }) as crate::traits::BoxFuture<'static, anyhow::Result<()>>
             });
 
@@ -697,6 +957,7 @@ mod tests {
             sled_path: Some(db_path),
             ttl_seconds: 60,
             key: None,
+            replay_response: false,
         };
 
         let mem_consumer = MemoryConsumer::new_local("dedup_topic", 10);
@@ -738,6 +999,7 @@ mod tests {
             sled_path: Some(dir.path().join("dedup_drain").to_str().unwrap().to_string()),
             ttl_seconds: 60,
             key: None,
+            replay_response: false,
         };
 
         let mut mem_consumer = MemoryConsumer::new_local("dedup_drain_topic", 10);
@@ -769,6 +1031,7 @@ mod tests {
             sled_path: Some(dir.path().join("dedup_key").to_str().unwrap().to_string()),
             ttl_seconds: 60,
             key: Some("${payload:order_id}".to_string()),
+            replay_response: false,
         };
 
         let mem_consumer = MemoryConsumer::new_local("dedup_key_topic", 10);
@@ -826,6 +1089,7 @@ mod tests {
             sled_path: Some(dir.path().join("dedup_miss").to_str().unwrap().to_string()),
             ttl_seconds: 60,
             key: Some("${payload:order_id}".to_string()),
+            replay_response: false,
         };
 
         let mem_consumer = MemoryConsumer::new_local("dedup_miss_topic", 10);
@@ -860,24 +1124,32 @@ mod tests {
     // sleeping. These pin the reserve/promote/expire contract the consumer relies on.
 
     fn sled_store(dir: &tempfile::TempDir, name: &str, ttl_seconds: u64) -> SledDedupStore {
-        SledDedupStore::new(dir.path().join(name).to_str().unwrap(), ttl_seconds).unwrap()
+        SledDedupStore::new(dir.path().join(name).to_str().unwrap(), ttl_seconds, false).unwrap()
     }
+
+    use Reservation::{Claimed, InFlight, Processed};
 
     #[tokio::test]
     async fn reserve_claims_a_key_once() {
         let dir = tempdir().unwrap();
         let store = sled_store(&dir, "once", 60);
-        assert!(!store.reserve(b"k", 1000).await.unwrap(), "first is fresh");
-        assert!(store.reserve(b"k", 1000).await.unwrap(), "second is a dup");
+        assert_eq!(store.reserve(b"k", 1000).await.unwrap(), Claimed);
+        assert_eq!(
+            store.reserve(b"k", 1000).await.unwrap(),
+            InFlight,
+            "an uncommitted claim is held, not a duplicate"
+        );
+        store.mark_processed(b"k", 1000).await;
+        assert_eq!(store.reserve(b"k", 1000).await.unwrap(), Processed);
     }
 
     #[tokio::test]
     async fn distinct_keys_do_not_collide() {
         let dir = tempdir().unwrap();
         let store = sled_store(&dir, "distinct", 60);
-        assert!(!store.reserve(b"a", 1000).await.unwrap());
-        assert!(!store.reserve(b"b", 1000).await.unwrap());
-        assert!(!store.reserve(b"", 1000).await.unwrap());
+        assert_eq!(store.reserve(b"a", 1000).await.unwrap(), Claimed);
+        assert_eq!(store.reserve(b"b", 1000).await.unwrap(), Claimed);
+        assert_eq!(store.reserve(b"", 1000).await.unwrap(), Claimed);
     }
 
     /// A reservation that is never committed frees itself, so a crash between reserve and
@@ -886,21 +1158,32 @@ mod tests {
     async fn an_uncommitted_reservation_expires_quickly() {
         let dir = tempdir().unwrap();
         let store = sled_store(&dir, "pending", 3600);
-        assert!(!store.reserve(b"k", 1000).await.unwrap());
-        assert!(
+        assert_eq!(store.reserve(b"k", 1000).await.unwrap(), Claimed);
+        assert_eq!(
             store
                 .reserve(b"k", 1000 + PENDING_TTL_SECS - 1)
                 .await
                 .unwrap(),
+            InFlight,
             "still held while the reservation is live"
         );
-        assert!(
-            !store
+        assert_eq!(
+            store
                 .reserve(b"k", 1000 + PENDING_TTL_SECS + 1)
                 .await
                 .unwrap(),
+            Claimed,
             "a reservation outlived by its short TTL must be reclaimable"
         );
+    }
+
+    #[tokio::test]
+    async fn a_released_claim_is_reclaimable_at_once() {
+        let dir = tempdir().unwrap();
+        let store = sled_store(&dir, "release", 3600);
+        assert_eq!(store.reserve(b"k", 1000).await.unwrap(), Claimed);
+        store.release(b"k").await;
+        assert_eq!(store.reserve(b"k", 1000).await.unwrap(), Claimed);
     }
 
     /// Committing promotes the key to the configured TTL, which is what makes it a duplicate
@@ -909,39 +1192,44 @@ mod tests {
     async fn mark_processed_promotes_to_the_full_ttl() {
         let dir = tempdir().unwrap();
         let store = sled_store(&dir, "promote", 3600);
-        assert!(!store.reserve(b"k", 1000).await.unwrap());
+        assert_eq!(store.reserve(b"k", 1000).await.unwrap(), Claimed);
         store.mark_processed(b"k", 1000).await;
-        assert!(
+        assert_eq!(
             store
                 .reserve(b"k", 1000 + PENDING_TTL_SECS + 1)
                 .await
                 .unwrap(),
+            Processed,
             "a committed key must outlive the reservation TTL"
         );
-        assert!(store.reserve(b"k", 1000 + 3599).await.unwrap());
-        assert!(
-            !store.reserve(b"k", 1000 + 3601).await.unwrap(),
+        assert_eq!(store.reserve(b"k", 1000 + 3599).await.unwrap(), Processed);
+        assert_eq!(
+            store.reserve(b"k", 1000 + 3601).await.unwrap(),
+            Claimed,
             "past its TTL the key is reclaimable again"
         );
     }
 
     // --- Batch path ---
 
-    fn label(disposition: &MessageDisposition) -> &'static str {
+    fn label(disposition: &MessageDisposition) -> String {
         match disposition {
-            MessageDisposition::Ack => "ack",
-            MessageDisposition::Nack => "nack",
-            MessageDisposition::Reply(_) => "reply",
+            MessageDisposition::Ack => "ack".into(),
+            MessageDisposition::Nack => "nack".into(),
+            MessageDisposition::Reply(reply) => {
+                format!("reply:{}", String::from_utf8_lossy(&reply.payload))
+            }
         }
     }
 
-    type Committed = Arc<std::sync::Mutex<Vec<Vec<&'static str>>>>;
+    type Committed = Arc<std::sync::Mutex<Vec<Vec<String>>>>;
 
     /// Hands out prepared batches and records what its commit was called with, so the
     /// dispositions the wrapper passes *inward* can be asserted on.
     struct RecordingConsumer {
         batches: std::collections::VecDeque<Vec<CanonicalMessage>>,
         committed: Committed,
+        fail_commits: bool,
     }
 
     #[async_trait]
@@ -952,12 +1240,19 @@ mod tests {
         ) -> Result<ReceivedBatch, ConsumerError> {
             let messages = self.batches.pop_front().unwrap_or_default();
             let committed = self.committed.clone();
+            let fail = self.fail_commits;
             let commit: crate::traits::BatchCommitFunc = Box::new(move |dispositions| {
                 committed
                     .lock()
                     .unwrap()
                     .push(dispositions.iter().map(label).collect());
-                Box::pin(async { Ok(()) }) as crate::traits::BoxFuture<'static, anyhow::Result<()>>
+                Box::pin(async move {
+                    if fail {
+                        Err(anyhow!("source ack failed"))
+                    } else {
+                        Ok(())
+                    }
+                }) as crate::traits::BoxFuture<'static, anyhow::Result<()>>
             });
             Ok(ReceivedBatch { messages, commit })
         }
@@ -985,11 +1280,13 @@ mod tests {
             sled_path: Some(dir.path().join(name).to_str().unwrap().to_string()),
             ttl_seconds: 3600,
             key: Some("${payload:id}".to_string()),
+            replay_response: false,
         };
         let committed: Committed = Arc::new(std::sync::Mutex::new(Vec::new()));
         let inner = RecordingConsumer {
             batches: batches.into(),
             committed: committed.clone(),
+            fail_commits: false,
         };
         let consumer = DeduplicationConsumer::new(Box::new(inner), &config, "test_route")
             .await
@@ -1126,45 +1423,313 @@ mod tests {
         );
     }
 
-    /// Only an ack promotes the reservation. A nacked message leaves its key on the short
-    /// reservation TTL, so a redelivery is reprocessed rather than silently dropped.
-    #[tokio::test]
-    async fn a_nacked_message_is_not_marked_processed() {
-        let dir = tempdir().unwrap();
-        let store: Arc<dyn DedupStore> = Arc::new(sled_store(&dir, "nack_state", 3600));
+    /// Consumer over prepared batches sharing `store`, so a test can inspect or share state.
+    fn consumer_on(
+        store: &Arc<dyn DedupStore>,
+        batches: Vec<Vec<CanonicalMessage>>,
+        fail_commits: bool,
+    ) -> (DeduplicationConsumer, Committed) {
+        replaying_consumer_on(store, batches, fail_commits, false)
+    }
+
+    fn replaying_consumer_on(
+        store: &Arc<dyn DedupStore>,
+        batches: Vec<Vec<CanonicalMessage>>,
+        fail_commits: bool,
+        replay_response: bool,
+    ) -> (DeduplicationConsumer, Committed) {
         let committed: Committed = Arc::new(std::sync::Mutex::new(Vec::new()));
         let inner = RecordingConsumer {
-            batches: vec![vec![keyed("A", 1), keyed("B", 2)]].into(),
-            committed,
+            batches: batches.into(),
+            committed: committed.clone(),
+            fail_commits,
         };
-        let mut consumer = DeduplicationConsumer::with_store(
+        let consumer = DeduplicationConsumer::with_store(
             Box::new(inner),
             store.clone(),
             Some("${payload:id}"),
+            replay_response,
         )
         .unwrap();
+        (consumer, committed)
+    }
+
+    fn ids(batch: &ReceivedBatch) -> Vec<u128> {
+        batch.messages.iter().map(|m| m.message_id).collect()
+    }
+
+    /// Only an ack promotes the reservation; a nack releases it, so a broker that redelivers
+    /// at once (AMQP requeue, JetStream Nak) gets the message processed instead of acked away.
+    #[tokio::test]
+    async fn a_nacked_message_is_redelivered_immediately() {
+        let dir = tempdir().unwrap();
+        let store: Arc<dyn DedupStore> = Arc::new(sled_store(&dir, "nack_state", 3600));
+        let (mut consumer, committed) = consumer_on(
+            &store,
+            vec![vec![keyed("A", 1), keyed("B", 2)], vec![keyed("A", 3)]],
+            false,
+        );
 
         let batch = consumer.receive_batch(16).await.unwrap();
         (batch.commit)(vec![MessageDisposition::Nack, MessageDisposition::Ack])
             .await
             .unwrap();
 
-        // Look past the reservation window: the acked key was promoted and still blocks, the
-        // nacked one has released.
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
+        let redelivered = tokio::time::timeout(Duration::from_secs(2), consumer.receive_batch(16))
+            .await
+            .expect("a nacked key must not be held for the lease")
+            .unwrap();
+        assert_eq!(
+            ids(&redelivered),
+            vec![3],
+            "the redelivered copy must be processed"
+        );
+        assert_eq!(committed.lock().unwrap().as_slice(), [vec!["nack", "ack"]]);
+
+        let now = unix_now();
+        assert_eq!(store.reserve(b"B", now).await.unwrap(), Processed);
+    }
+
+    /// The marker is written before the source ack, so an ack that fails — a crash in the
+    /// same window — replays a message that is already recognised.
+    #[tokio::test]
+    async fn the_marker_is_written_before_the_source_ack() {
+        let dir = tempdir().unwrap();
+        let store: Arc<dyn DedupStore> = Arc::new(sled_store(&dir, "mark_first", 3600));
+        let (mut consumer, _) = consumer_on(&store, vec![vec![keyed("A", 1)]], true);
+
+        let batch = consumer.receive_batch(16).await.unwrap();
+        assert!((batch.commit)(vec![MessageDisposition::Ack]).await.is_err());
+        assert_eq!(store.reserve(b"A", unix_now()).await.unwrap(), Processed);
+    }
+
+    /// A copy whose key is held by an uncommitted delivery waits for it; once the holder
+    /// acks, the copy is a real duplicate and is dropped and acked.
+    #[tokio::test]
+    async fn an_in_flight_copy_is_skipped_once_the_holder_acks() {
+        let dir = tempdir().unwrap();
+        let store: Arc<dyn DedupStore> = Arc::new(sled_store(&dir, "wait_ack", 3600));
+        let (mut consumer, committed) = consumer_on(
+            &store,
+            vec![vec![keyed("A", 1)], vec![keyed("A", 2), keyed("B", 3)]],
+            false,
+        );
+
+        let holder = consumer.receive_batch(16).await.unwrap();
+        let waiter = tokio::spawn(async move { consumer.receive_batch(16).await.unwrap() });
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            !waiter.is_finished(),
+            "the copy must wait while the holder is in flight"
+        );
+
+        (holder.commit)(vec![MessageDisposition::Ack])
+            .await
+            .unwrap();
+        let second = tokio::time::timeout(Duration::from_secs(2), waiter)
+            .await
             .unwrap()
-            .as_secs()
-            + PENDING_TTL_SECS
-            + 1;
-        assert!(
-            !store.reserve(b"A", now).await.unwrap(),
-            "a nacked key must be reclaimable"
+            .unwrap();
+        assert_eq!(ids(&second), vec![3]);
+        (second.commit)(vec![MessageDisposition::Ack])
+            .await
+            .unwrap();
+        assert_eq!(
+            committed.lock().unwrap().as_slice(),
+            [vec!["ack"], vec!["ack", "ack"]]
         );
-        assert!(
-            store.reserve(b"B", now).await.unwrap(),
-            "an acked key stays claimed for the configured TTL"
+    }
+
+    /// If the holder fails instead, the waiting copy is the one that gets processed.
+    #[tokio::test]
+    async fn an_in_flight_copy_is_delivered_when_the_holder_nacks() {
+        let dir = tempdir().unwrap();
+        let store: Arc<dyn DedupStore> = Arc::new(sled_store(&dir, "wait_nack", 3600));
+        let (mut consumer, _) = consumer_on(
+            &store,
+            vec![vec![keyed("A", 1)], vec![keyed("A", 2), keyed("B", 3)]],
+            false,
         );
+
+        let holder = consumer.receive_batch(16).await.unwrap();
+        let waiter = tokio::spawn(async move { consumer.receive_batch(16).await.unwrap() });
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        (holder.commit)(vec![MessageDisposition::Nack])
+            .await
+            .unwrap();
+
+        let second = tokio::time::timeout(Duration::from_secs(2), waiter)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            ids(&second),
+            vec![2, 3],
+            "a failed holder must not swallow its copy"
+        );
+    }
+
+    /// Two instances on one shared store. The first claims a key and dies without committing;
+    /// its broker hands the message to the second at once. The second must wait out the dead
+    /// claim and process it — before, it acked the message as a duplicate and it was lost.
+    #[tokio::test]
+    async fn a_crashed_holder_does_not_swallow_its_redelivery() {
+        let dir = tempdir().unwrap();
+        let store: Arc<dyn DedupStore> = Arc::new(sled_store(&dir, "crash", 3600));
+        let (mut first, _) = consumer_on(&store, vec![vec![keyed("A", 1)]], false);
+        let (mut second, committed) = consumer_on(&store, vec![vec![keyed("A", 1)]], false);
+
+        let claimed = first.receive_batch(16).await.unwrap();
+        drop(claimed);
+        drop(first);
+
+        let started = Instant::now();
+        let redelivered = tokio::time::timeout(
+            Duration::from_secs(3 * PENDING_TTL_SECS),
+            second.receive_batch(16),
+        )
+        .await
+        .expect("the dead claim must lapse")
+        .unwrap();
+        assert_eq!(ids(&redelivered), vec![1]);
+        assert!(started.elapsed() >= Duration::from_secs(PENDING_TTL_SECS - 1));
+        assert!(
+            committed.lock().unwrap().is_empty(),
+            "nothing acked before processing"
+        );
+    }
+
+    /// A store whose backend is down.
+    struct UnreachableStore;
+
+    #[async_trait]
+    impl DedupStore for UnreachableStore {
+        async fn reserve(&self, _key: &[u8], _now: u64) -> Result<Reservation, ConsumerError> {
+            Err(ConsumerError::Connection(anyhow!("store unreachable")))
+        }
+        async fn mark_processed(&self, _key: &[u8], _now: u64) {}
+        async fn mark_processed_with_response(&self, _key: &[u8], _now: u64, _response: &[u8]) {}
+        async fn stored_response(&self, _key: &[u8]) -> Option<Vec<u8>> {
+            None
+        }
+        async fn release(&self, _key: &[u8]) {}
+    }
+
+    /// A store failure hands the batch back instead of dropping it: a source that does not
+    /// redeliver on reconnect (memory) lost it before.
+    #[tokio::test]
+    async fn a_store_failure_nacks_the_batch() {
+        let store: Arc<dyn DedupStore> = Arc::new(UnreachableStore);
+        let (mut consumer, committed) =
+            consumer_on(&store, vec![vec![keyed("A", 1), keyed("B", 2)]], false);
+        assert!(consumer.receive_batch(16).await.is_err());
+        assert_eq!(committed.lock().unwrap().as_slice(), [vec!["nack", "nack"]]);
+    }
+
+    fn replying_store(dir: &tempfile::TempDir, name: &str) -> Arc<dyn DedupStore> {
+        Arc::new(SledDedupStore::new(dir.path().join(name).to_str().unwrap(), 3600, true).unwrap())
+    }
+
+    fn reply(body: &str) -> MessageDisposition {
+        MessageDisposition::Reply(CanonicalMessage::new(body.as_bytes().to_vec(), None))
+    }
+
+    /// Under `replay_response`, a duplicate request is answered with the first reply instead
+    /// of an empty ack, so a retrying caller gets the same answer.
+    #[tokio::test]
+    async fn replay_response_answers_a_duplicate_with_the_stored_reply() {
+        let dir = tempdir().unwrap();
+        let store = replying_store(&dir, "replay");
+        let (mut consumer, committed) = replaying_consumer_on(
+            &store,
+            vec![vec![keyed("A", 1)], vec![keyed("A", 2), keyed("B", 3)]],
+            false,
+            true,
+        );
+
+        let first = consumer.receive_batch(16).await.unwrap();
+        (first.commit)(vec![reply("answer-1")]).await.unwrap();
+
+        let second = consumer.receive_batch(16).await.unwrap();
+        assert_eq!(ids(&second), vec![3]);
+        (second.commit)(vec![MessageDisposition::Ack])
+            .await
+            .unwrap();
+        assert_eq!(
+            committed.lock().unwrap().as_slice(),
+            [vec!["reply:answer-1"], vec!["reply:answer-1", "ack"]]
+        );
+    }
+
+    /// A batch made only of duplicates is settled with their replies too, not bare acks.
+    #[tokio::test]
+    async fn replay_response_covers_an_all_duplicate_batch() {
+        let dir = tempdir().unwrap();
+        let store = replying_store(&dir, "replay_all_dup");
+        let (mut consumer, committed) = replaying_consumer_on(
+            &store,
+            vec![
+                vec![keyed("A", 1)],
+                vec![keyed("A", 2)],
+                vec![keyed("C", 3)],
+            ],
+            false,
+            true,
+        );
+
+        let first = consumer.receive_batch(16).await.unwrap();
+        (first.commit)(vec![reply("answer-1")]).await.unwrap();
+        let third = consumer.receive_batch(16).await.unwrap();
+        assert_eq!(ids(&third), vec![3]);
+        (third.commit)(vec![MessageDisposition::Ack]).await.unwrap();
+        assert_eq!(
+            committed.lock().unwrap().as_slice(),
+            [vec!["reply:answer-1"], vec!["reply:answer-1"], vec!["ack"]]
+        );
+    }
+
+    #[tokio::test]
+    async fn replay_response_copies_the_reply_to_a_repeat_in_the_same_batch() {
+        let dir = tempdir().unwrap();
+        let store = replying_store(&dir, "replay_repeat");
+        let (mut consumer, committed) = replaying_consumer_on(
+            &store,
+            vec![vec![keyed("A", 1), keyed("A", 2)]],
+            false,
+            true,
+        );
+
+        let batch = consumer.receive_batch(16).await.unwrap();
+        assert_eq!(ids(&batch), vec![1]);
+        (batch.commit)(vec![reply("answer-1")]).await.unwrap();
+        assert_eq!(
+            committed.lock().unwrap().as_slice(),
+            [vec!["reply:answer-1", "reply:answer-1"]]
+        );
+    }
+
+    /// Off by default: the duplicate is a plain ack, and no reply is kept.
+    #[tokio::test]
+    async fn without_replay_response_a_duplicate_is_a_plain_ack() {
+        let dir = tempdir().unwrap();
+        let store: Arc<dyn DedupStore> = Arc::new(sled_store(&dir, "no_replay", 3600));
+        let (mut consumer, committed) = consumer_on(
+            &store,
+            vec![vec![keyed("A", 1)], vec![keyed("A", 2), keyed("B", 3)]],
+            false,
+        );
+
+        let first = consumer.receive_batch(16).await.unwrap();
+        (first.commit)(vec![reply("answer-1")]).await.unwrap();
+        let second = consumer.receive_batch(16).await.unwrap();
+        (second.commit)(vec![MessageDisposition::Ack])
+            .await
+            .unwrap();
+        assert_eq!(
+            committed.lock().unwrap().as_slice(),
+            [vec!["reply:answer-1"], vec!["ack", "ack"]]
+        );
+        assert_eq!(store.stored_response(b"A").await, None);
     }
 
     #[test]

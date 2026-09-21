@@ -193,6 +193,34 @@ pub struct RouteOptions {
     #[serde(default = "default_false", skip_serializing_if = "is_false")]
     #[cfg_attr(feature = "schema", schemars(default = "default_false"))]
     pub exit_on_empty: bool,
+    /// Fail the route at startup unless its inferred delivery guarantee is at least this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_delivery: Option<DeliveryGuarantee>,
+}
+
+/// What a route guarantees about its sink effect, as inferred from its configuration.
+///
+/// Ordered weakest to strongest, so a requirement is met by any guarantee `>=` it.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryGuarantee {
+    /// The source forgets a message once it hands it over; a crash can lose it.
+    AtMostOnce,
+    /// Acked only after the sink accepted it; a crash or retry can repeat the write.
+    AtLeastOnce,
+    /// At-least-once delivery absorbed by an idempotent sink write: the effect lands once.
+    EffectivelyOnce,
+}
+
+impl std::fmt::Display for DeliveryGuarantee {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::AtMostOnce => "at-most-once",
+            Self::AtLeastOnce => "at-least-once",
+            Self::EffectivelyOnce => "effectively-once",
+        })
+    }
 }
 
 /// Represents a connection point for messages, which can be a source (input) or a sink (output).
@@ -433,6 +461,9 @@ pub struct DeduplicationMiddleware {
     /// Dedup key template, e.g. `${payload:order_id}`. Defaults to `message_id`.
     #[serde(default)]
     pub key: Option<String>,
+    /// Answer a duplicate request with the reply its first delivery produced. Off by default.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub replay_response: bool,
 }
 
 /// Metrics middleware configuration.

@@ -1255,27 +1255,96 @@ async fn sql_dedup_store_reserve_mark_and_expire() {
     drop(tokio::fs::File::create(&path).await.unwrap());
     let url = sqlite_url(&path);
 
-    let store = build_sql_dedup_store(&url, None, 60, "test_route")
+    let store = build_sql_dedup_store(&url, None, 60, "test_route", false)
         .await
         .unwrap();
 
     let key = 12345u128.to_be_bytes();
     let now = 1_000u64;
 
-    // First sight -> reserved (not a duplicate).
-    assert!(!store.reserve(&key, now).await.unwrap());
-    // Same key while the pending reservation is live -> duplicate.
-    assert!(store.reserve(&key, now).await.unwrap());
-    // Promote to processed; still a duplicate within the 60s TTL.
+    use crate::middleware::deduplication::Reservation;
+
+    // First sight -> claimed.
+    assert_eq!(
+        store.reserve(&key, now).await.unwrap(),
+        Reservation::Claimed
+    );
+    // Same key while the claim is live -> held by an uncommitted delivery, not a duplicate.
+    assert_eq!(
+        store.reserve(&key, now).await.unwrap(),
+        Reservation::InFlight
+    );
+    // Promote to processed; a duplicate within the 60s TTL.
     store.mark_processed(&key, now).await;
-    assert!(store.reserve(&key, now).await.unwrap());
+    assert_eq!(
+        store.reserve(&key, now).await.unwrap(),
+        Reservation::Processed
+    );
 
     // A different key is unaffected.
     let other = 999u128.to_be_bytes();
-    assert!(!store.reserve(&other, now).await.unwrap());
+    assert_eq!(
+        store.reserve(&other, now).await.unwrap(),
+        Reservation::Claimed
+    );
 
     // Once the processed TTL has elapsed, the key is reclaimable.
-    assert!(!store.reserve(&key, now + 61).await.unwrap());
+    assert_eq!(
+        store.reserve(&key, now + 61).await.unwrap(),
+        Reservation::Claimed
+    );
+
+    // A released claim is reclaimable at once, so a nacked message is redelivered.
+    store.release(&key).await;
+    assert_eq!(
+        store.reserve(&key, now + 61).await.unwrap(),
+        Reservation::Claimed
+    );
+
+    // An expired claim (a crashed holder) is reclaimable after the lease.
+    let lease = crate::middleware::deduplication::PENDING_TTL_SECS;
+    assert_eq!(
+        store.reserve(&other, now + lease - 1).await.unwrap(),
+        Reservation::InFlight
+    );
+    assert_eq!(
+        store.reserve(&other, now + lease).await.unwrap(),
+        Reservation::Claimed
+    );
+}
+
+#[cfg(feature = "dedup")]
+#[tokio::test]
+async fn sql_dedup_store_keeps_replies_and_migrates_an_existing_table() {
+    sqlx::any::install_default_drivers();
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("dedup_replay.db");
+    drop(tokio::fs::File::create(&path).await.unwrap());
+    let url = sqlite_url(&path);
+
+    // A table created before `replay_response` has no response column.
+    let plain = build_sql_dedup_store(&url, None, 60, "replay_route", false)
+        .await
+        .unwrap();
+    plain.mark_processed(b"old", 1_000).await;
+    drop(plain);
+
+    let store = build_sql_dedup_store(&url, None, 60, "replay_route", true)
+        .await
+        .unwrap();
+    assert_eq!(store.stored_response(b"old").await, None);
+
+    store
+        .mark_processed_with_response(b"k", 1_000, b"reply")
+        .await;
+    assert_eq!(
+        store.stored_response(b"k").await.as_deref(),
+        Some(&b"reply"[..])
+    );
+
+    // A plain ack after expiry supersedes the stale reply.
+    store.mark_processed(b"k", 2_000).await;
+    assert_eq!(store.stored_response(b"k").await, None);
 }
 
 #[test]

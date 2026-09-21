@@ -2,6 +2,61 @@
 
 All notable changes to `mq-bridge`. Newest first.
 
+## Unreleased
+
+### Fixed
+
+- **`deduplication` no longer loses a message that failed and came straight back.** A nacked
+  key stayed reserved for five seconds, so a broker that redelivers at once (AMQP requeue,
+  JetStream `Nak`) — or another instance on a shared store — had the redelivery acked as a
+  duplicate, and the message was gone. A failed delivery now releases its key, and a copy that
+  arrives while another is still in flight waits for it instead of being acked on its
+  strength.
+- **`deduplication` writes its marker before acking the source**, not after. A crash between
+  the two now replays a message that is already recognised.
+- **`deduplication` on MongoDB no longer fails the route on every contested key.** The upsert
+  reports a duplicate key as a command error, which was not recognised; the route reconnected
+  and the batch it held was dropped. A store error now also hands the batch back to the source
+  instead of dropping it.
+- **A nacked Kafka batch is redelivered.** Kafka commits are cumulative, so the next batch's
+  commit used to cover the nacked offsets and they were never read again. After a nack the
+  consumer stops committing and reconnects, resuming from the last committed offset.
+- **AMQP carries message identity.** The publisher now sets the `message_id` property, and the
+  consumer accepts any string id (hashing a non-UUID one) and no longer falls back to the
+  delivery tag, which restarts at 1 on every channel and gave fresh messages the ids of
+  processed ones.
+
+### Added
+
+- **`DeliveryGuarantee` and `required_delivery`.** Each route's inferred guarantee —
+  `at-most-once`, `at-least-once` or `effectively-once` — is logged at startup and available as
+  `Route::delivery_guarantee()`. Setting `required_delivery` on a route fails it at startup when
+  its configuration cannot meet that guarantee. `at-most-once` is new: inputs without
+  acknowledgement (`zeromq`, core NATS, MQTT QoS 0, HTTP `fire_and_forget`).
+- **Sink rows keyed on the source position.** A SQL `insert_query` or Mongo `id_field` reading
+  `mqb.src.*` position keys turns on the input's `source_metadata` automatically — the Kafka
+  Connect `pk.mode=kafka` pattern — and counts as effectively-once over an input with a replay
+  position.
+- **Custom endpoints and plugins declare their delivery.** `CustomEndpointFactory` gains
+  `idempotent_sink` and `acknowledges`, defaulting to the `x-mqb-idempotent-sink` /
+  `x-mqb-acknowledges` annotations in the endpoint's config schema — so plugins take part without
+  an ABI change, and existing factories keep reporting at-least-once.
+- **`deduplication.replay_response`** (opt-in): answer a duplicate request with the reply its
+  first delivery produced, stored next to the marker.
+- A startup warning when `deduplication` keys on a `message_id` that its input mints fresh on
+  every read.
+
+### Changed
+
+- The startup inference no longer reports `effectively-once` for a sink keyed on `mqb.src.*`
+  over an input that has no replay position.
+- `DeduplicationMiddleware` has a new `replay_response` field; code building it as a struct
+  literal must add `replay_response: false`. Configuration files are unaffected.
+- The SQL dedup store marks an in-flight claim with a negative `expire_at` on the key's own
+  row, so claiming stays one INSERT and committing one UPDATE; no migration. During a rolling
+  upgrade an older instance's sweep deletes those claims, which can let a duplicate through —
+  never a loss.
+
 ## 0.4.13
 
 ### Added

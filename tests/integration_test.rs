@@ -31,6 +31,27 @@ async fn test_kafka_produce_only() {
     integration::kafka::test_kafka_produce_only_bench().await;
 }
 
+#[cfg(feature = "amqp")]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires docker compose"]
+async fn test_amqp_message_id_round_trip() {
+    integration::amqp::test_amqp_message_id_round_trip().await;
+}
+
+#[cfg(all(feature = "mongodb", feature = "dedup"))]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires docker compose"]
+async fn test_mongodb_dedup_store_competing_instances() {
+    integration::mongodb::test_mongodb_dedup_store_competing_instances().await;
+}
+
+#[cfg(feature = "kafka")]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires docker compose"]
+async fn test_kafka_nack_replay() {
+    integration::kafka::test_kafka_nack_replays_from_committed_offset().await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires docker compose"]
 async fn test_all_request_reply() {

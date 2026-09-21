@@ -264,7 +264,7 @@ been removed as unsound — it is not comparable and needs re-measuring on a rep
 With a durable source and durable checkpoint configuration, `mq-bridge` is **at-least-once** across
 crashes: a replay can redeliver, while in-process Memory endpoint state is not crash-durable. Pair a
 stable replay identity with an **idempotent sink operation** and that covered sink effect is
-effectively exactly-once, however often the message is delivered. Which sink absorbs a duplicate, which source gives you a stable key to
+effectively-once — exactly-once effects, however often the message is delivered. Which sink absorbs a duplicate, which source gives you a stable key to
 deduplicate on, and what a handler in the route changes about all of this, is covered in full by:
 
 > **[docs/DELIVERY.md](docs/DELIVERY.md) — delivery guarantees.** Per-source identity and

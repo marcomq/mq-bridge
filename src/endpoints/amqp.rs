@@ -24,7 +24,6 @@ use std::time::Duration;
 use std::{any::Any, sync::Arc};
 use tokio::sync::RwLock;
 use tracing::{error, info, trace};
-use uuid::Uuid;
 
 /// Maximum time to wait for a broker publisher confirmation before treating the
 /// publish as failed. Prevents the producer from hanging indefinitely when the
@@ -225,6 +224,10 @@ impl MessagePublisher for AmqpPublisher {
         if let Some(correlation_id) = message.metadata.get("correlation_id") {
             properties = properties.with_correlation_id(correlation_id.clone().into());
         }
+        // Carries identity across the hop; the consumer would otherwise fall back to a fresh id.
+        properties = properties.with_message_id(
+            crate::canonical_message::format_message_id(message.message_id).into(),
+        );
         if !message.metadata.is_empty() {
             let mut table = FieldTable::default();
             for (key, value) in &message.metadata {
@@ -333,6 +336,10 @@ impl MessagePublisher for AmqpPublisher {
             if let Some(correlation_id) = message.metadata.get("correlation_id") {
                 properties = properties.with_correlation_id(correlation_id.clone().into());
             }
+            // Carries identity across the hop; the consumer would otherwise fall back to a fresh id.
+            properties = properties.with_message_id(
+                crate::canonical_message::format_message_id(message.message_id).into(),
+            );
 
             if !message.metadata.is_empty() {
                 let mut table = FieldTable::default();
@@ -690,14 +697,13 @@ fn delivery_to_canonical_message(
     delivery: &lapin::message::Delivery,
     source_metadata: bool,
 ) -> CanonicalMessage {
-    let mut message_id = Some(delivery.delivery_tag as u128);
-    if let Some(amqp_id) = delivery.properties.message_id().as_ref() {
-        if let Ok(uuid) = Uuid::parse_str(amqp_id.as_str()) {
-            message_id = Some(uuid.as_u128());
-        } else if let Ok(val) = amqp_id.as_str().parse::<u128>() {
-            message_id = Some(val);
-        }
-    }
+    // Never the delivery tag: it restarts at 1 on every channel, so it would hand a fresh
+    // message the id of one already processed.
+    let message_id = delivery
+        .properties
+        .message_id()
+        .as_ref()
+        .and_then(|id| crate::canonical_message::message_id_from_str(id.as_str()).ok());
 
     let mut canonical_message = CanonicalMessage::new(delivery.data.clone(), message_id);
 
@@ -1061,4 +1067,49 @@ async fn handle_dispositions(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn delivery(tag: u64, message_id: Option<&str>) -> lapin::message::Delivery {
+        let mut delivery =
+            lapin::message::Delivery::mock(tag, "".into(), "q".into(), false, b"x".to_vec());
+        if let Some(id) = message_id {
+            delivery.properties = BasicProperties::default().with_message_id(id.into());
+        }
+        delivery
+    }
+
+    /// Delivery tags restart at 1 per channel; keying on them made a fresh message after a
+    /// reconnect look like one already processed.
+    #[test]
+    fn the_delivery_tag_is_never_the_message_id() {
+        let first = delivery_to_canonical_message(&delivery(1, None), false);
+        let again = delivery_to_canonical_message(&delivery(1, None), false);
+        assert_ne!(first.message_id, 1);
+        assert_ne!(first.message_id, again.message_id);
+    }
+
+    #[test]
+    fn any_message_id_property_is_a_stable_id() {
+        for id in ["order-42", "42", "019fd574-0000-7000-8000-000000000001"] {
+            let a = delivery_to_canonical_message(&delivery(1, Some(id)), false);
+            let b = delivery_to_canonical_message(&delivery(7, Some(id)), false);
+            assert_eq!(a.message_id, b.message_id, "{id}");
+            assert_eq!(
+                a.message_id,
+                crate::canonical_message::message_id_from_str(id).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn a_published_id_round_trips() {
+        let id = 0x0123_4567_89ab_cdef_0123_4567_89ab_cdefu128;
+        let wire = crate::canonical_message::format_message_id(id);
+        let msg = delivery_to_canonical_message(&delivery(3, Some(&wire)), false);
+        assert_eq!(msg.message_id, id);
+    }
 }
