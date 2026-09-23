@@ -1554,7 +1554,7 @@ async fn run_http(server: BridgeMcp, bind: String) -> anyhow::Result<()> {
 
     loop {
         let io = tokio::select! {
-            _ = tokio::signal::ctrl_c() => break,
+            _ = crate::shutdown_requested() => break,
             accept = listener.accept() => match accept {
                 Ok((stream, _)) => TokioIo::new(stream),
                 // A transient accept error must not tear down the whole server.

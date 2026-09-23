@@ -18,6 +18,17 @@ def init_logging(level: Optional[str] = ...) -> None:
     Raises if logging was already initialized."""
     ...
 
+def request_shutdown() -> bool:
+    """Request a graceful shutdown of every route: running ones stop, and ones
+    started afterwards stop immediately. Wire it to your own signal handling,
+    e.g. ``signal.signal(signal.SIGTERM, lambda *_: request_shutdown())``.
+    Returns ``True`` only for the first request. It cannot be undone."""
+    ...
+
+def is_shutdown_requested() -> bool:
+    """``True`` once :func:`request_shutdown` has been called."""
+    ...
+
 def register_endpoint(
     name: str, factory: Callable[[str, Dict[str, Any]], Any]
 ) -> None:
@@ -158,7 +169,8 @@ class Route:
     ) -> "Route": ...
 
     def run(self) -> None:
-        """Deploy and block the calling thread until ``stop()`` is called."""
+        """Deploy and block the calling thread until ``stop()`` is called. A
+        ``KeyboardInterrupt`` stops the route gracefully and is re-raised."""
         ...
 
     def start(self) -> None:
@@ -166,7 +178,8 @@ class Route:
         ...
 
     def join(self) -> None:
-        """Block until a route started with ``start()`` has stopped."""
+        """Block until a route started with ``start()`` has stopped. A
+        ``KeyboardInterrupt`` stops the route gracefully and is re-raised."""
         ...
 
     def stop(self) -> None: ...

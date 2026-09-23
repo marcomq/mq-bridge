@@ -877,10 +877,7 @@ async fn deploy_routes(config: &mut AppConfig) -> anyhow::Result<()> {
 }
 
 async fn shutdown_routes() {
-    let routes = mq_bridge_app::mq_bridge::list_routes();
-    for name in routes {
-        mq_bridge_app::mq_bridge::stop_route(&name).await;
-    }
+    mq_bridge_app::mq_bridge::shutdown::stop_all_routes().await;
 }
 
 fn desktop_config_path<R: tauri::Runtime>(

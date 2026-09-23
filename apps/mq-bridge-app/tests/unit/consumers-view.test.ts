@@ -5,7 +5,9 @@ import { get } from "svelte/store";
 import {
   addConsumerAction,
   addConsumerResponseHeader,
+  applyCurrentConsumerRawConfig,
   copyCurrentConsumerAction,
+  currentConsumerConfigVariants,
   importAsyncApiToConsumerAction,
   importMqbToConsumerAction,
   initConsumers,
@@ -200,6 +202,24 @@ describe("initConsumers", () => {
     expect(config.consumers[0].endpoint).toMatchObject({
       nats: { url: "nats://localhost:4222", subject: "events.created" },
     });
+  });
+
+  test("applies an edited raw config and keeps the consumer id", async () => {
+    const config = { consumers: [], routes: {}, publishers: [] } as any;
+    const schema = { properties: { consumers: { items: {} } } };
+    await initConsumers(config, schema);
+    await addConsumerAction("nats");
+    const id = config.consumers[0].id;
+
+    const raw = (await currentConsumerConfigVariants())!.find((variant) => variant.id === "raw")!;
+    expect(raw.editable).toBe(true);
+    expect(raw.value).not.toHaveProperty("id");
+
+    await applyCurrentConsumerRawConfig({ name: "edited", endpoint: { memory: { topic: "in" } } });
+
+    expect(config.consumers[0]).toMatchObject({ id, name: "edited", endpoint: { memory: { topic: "in" } } });
+    await expect(applyCurrentConsumerRawConfig({ name: "broken" })).rejects.toThrow("endpoint");
+    expect(config.consumers[0].name).toBe("edited");
   });
 
   test("includes fallback endpoint metadata for unnamed consumers in the sidebar state", async () => {

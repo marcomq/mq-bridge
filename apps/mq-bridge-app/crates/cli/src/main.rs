@@ -428,8 +428,28 @@ fn ui_prompt(addr: &str) -> bool {
 /// so it runs after that command installed its logging — the loader logs what
 /// it registered, and before a subscriber exists those lines go nowhere.
 fn load_cli_plugins(paths: &[String]) -> anyhow::Result<()> {
+    install_signal_handlers();
     mq_bridge_app::plugins::load_trusted_plugins(paths, &std::collections::HashMap::new())?;
     Ok(())
+}
+
+/// Registers SIGINT and SIGTERM before any plugin loads (see
+/// [`mq_bridge::shutdown::install_signal_handlers`]); a second signal force-exits.
+fn install_signal_handlers() {
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
+        if let Err(e) =
+            mq_bridge::shutdown::install_signal_handlers(|code| std::process::exit(code))
+        {
+            warn!("Failed to install shutdown signal handlers: {e}");
+        }
+    });
+}
+
+/// Resolves once SIGINT or SIGTERM has been received, including before this call.
+pub(crate) async fn shutdown_requested() {
+    install_signal_handlers();
+    mq_bridge::shutdown::shutdown_requested().await;
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -719,12 +739,7 @@ async fn main() -> anyhow::Result<()> {
 
     let mut drained = Ok(());
     tokio::select! {
-        _ = tokio::signal::ctrl_c() => {
-            info!("Ctrl+C (SIGINT) received.");
-        },
-        _ = platform_specific_shutdown() => {
-                info!("Shutdown signal received.");
-        },
+        _ = shutdown_requested() => {},
         result = async {
             match (&headless_app, drain_job) {
                 (Some(app), Some(unstarted)) => routes_drained(app, unstarted).await,
@@ -743,12 +758,9 @@ async fn main() -> anyhow::Result<()> {
     drop(headless_app);
 
     let shutdown_task = async {
-        let routes = mq_bridge::list_routes();
-        if !routes.is_empty() {
-            info!("Attempting to gracefully stop {} routes...", routes.len());
-            for name in routes {
-                mq_bridge::stop_route(&name).await;
-            }
+        let stopped = mq_bridge::shutdown::stop_all_routes().await;
+        if !stopped.is_empty() {
+            info!("Stopped {} routes.", stopped.len());
         }
     };
 
@@ -1116,7 +1128,7 @@ async fn run_copy(args: CopyArgs, stop_when: StopWhen) -> anyhow::Result<()> {
                         None => std::future::pending::<()>().await,
                     }
                 } => info!("nothing arrived within the wait budget"),
-                _ = tokio::signal::ctrl_c() => info!("Ctrl+C received; stopping listen"),
+                _ = shutdown_requested() => info!("Shutdown requested; stopping listen"),
             }
             let outcome = stop_and_settle(&handle).await;
             return copy_result(
@@ -1128,10 +1140,8 @@ async fn run_copy(args: CopyArgs, stop_when: StopWhen) -> anyhow::Result<()> {
 
         if !drain {
             // Continuous bridge: run until Ctrl-C, then stop gracefully.
-            tokio::signal::ctrl_c()
-                .await
-                .context("failed to listen for Ctrl+C")?;
-            info!("Ctrl+C received; stopping copy");
+            shutdown_requested().await;
+            info!("Shutdown requested; stopping copy");
             // Through the same reporting as the drained branch: a bridge that dropped
             // rows did not run clean either, and a supervisor restarting it needs to
             // hear that from the exit status. The fallback only guards against a
@@ -1160,8 +1170,8 @@ async fn run_copy(args: CopyArgs, stop_when: StopWhen) -> anyhow::Result<()> {
                     tokio::time::sleep(COPY_POLL_INTERVAL).await;
                 }
             } => Some(outcome),
-            _ = tokio::signal::ctrl_c() => {
-                info!("Ctrl+C received; aborting copy");
+            _ = shutdown_requested() => {
+                info!("Shutdown requested; aborting copy");
                 None
             }
         };
@@ -1188,8 +1198,8 @@ async fn run_copy(args: CopyArgs, stop_when: StopWhen) -> anyhow::Result<()> {
             drop(copy_status);
             tokio::select! {
                 _ = tokio::time::sleep(COPY_WAIT_RETRY_INTERVAL) => continue,
-                _ = tokio::signal::ctrl_c() => {
-                    info!("Ctrl+C received; aborting copy");
+                _ = shutdown_requested() => {
+                    info!("Shutdown requested; aborting copy");
                     return copy_result(None, None, &throughput(&copied, &read, started));
                 }
             }
@@ -2397,34 +2407,6 @@ fn init_logging(config: &AppConfig, color: ColorChoice) {
         config.log_level,
         config.logger
     );
-}
-
-/// Waits for a platform-specific shutdown signal.
-/// On Unix, this is SIGTERM. On other platforms, it's a future that never completes.
-async fn platform_specific_shutdown() {
-    #[cfg(unix)]
-    {
-        use tokio::signal::unix::{SignalKind, signal};
-        match signal(SignalKind::terminate()) {
-            Ok(mut stream) => {
-                use tracing::info;
-
-                stream.recv().await;
-                info!("SIGTERM received.");
-            }
-            Err(e) => {
-                warn!(
-                    "Failed to install SIGTERM handler: {}. This signal will be ignored.",
-                    e
-                );
-                // If we can't listen for the signal, pend forever.
-                std::future::pending::<()>().await;
-            }
-        }
-    }
-    #[cfg(not(unix))]
-    // On non-unix, ctrl_c is the primary mechanism. This future never completes.
-    std::future::pending::<()>().await
 }
 
 #[cfg(test)]

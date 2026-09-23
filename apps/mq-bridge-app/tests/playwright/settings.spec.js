@@ -131,7 +131,7 @@ test("JSON view shows the live config and closes again", async ({ page }) => {
   await page.locator("#js-show-json").click();
   // The wa-dialog host has no layout box of its own, so toBeVisible() never
   // holds on it; the editor content is what actually proves the dialog opened.
-  const dialog = page.locator('wa-dialog[label="Current Configuration (JSON)"]');
+  const dialog = page.locator('wa-dialog[label="Current Configuration"]');
   await expect(dialog).toHaveAttribute("open", "");
   // CodeMirror only renders the lines in view, so assert on the top of the
   // document; `publishers` sits below the fold and never reaches the DOM.

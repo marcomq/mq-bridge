@@ -25,6 +25,9 @@ All notable changes to `mq-bridge`. Newest first.
   consumer accepts any string id (hashing a non-UUID one) and no longer falls back to the
   delivery tag, which restarts at 1 on every channel and gave fresh messages the ids of
   processed ones.
+- **Python: Ctrl+C now stops a route blocked in `run()` or `join()`.** Signal handlers used
+  to wait until the route ended by itself. Now a `KeyboardInterrupt`, or any exception a
+  handler raises, stops the route cleanly and is re-raised.
 
 ### Added
 
@@ -45,6 +48,16 @@ All notable changes to `mq-bridge`. Newest first.
   first delivery produced, stored next to the marker.
 - A startup warning when `deduplication` keys on a `message_id` that its input mints fresh on
   every read.
+- **Graceful shutdown in the library: `mq_bridge::shutdown`.** A process-wide latch
+  (`request_shutdown()`, `shutdown_requested().await`) and `stop_all_routes()`. Rust apps can
+  opt in to `install_signal_handlers(on_repeat)`, which sets the latch on SIGINT/SIGTERM and
+  hands a second signal's exit code (130/143) to the caller. Call it before loading a Go
+  plugin. The CLI now uses it in place of its own handlers.
+- **Python and Node: `request_shutdown()` / `requestShutdown()`** and
+  `is_shutdown_requested()` / `isShutdownRequested()`. Every route stops once shutdown is
+  requested, so a host's own signal handling can drive it.
+- **Node: `Route.wait()`**, a promise that resolves once the route stops. Unlike `join()`, it
+  leaves the event loop running, so `process.on("SIGINT")` handlers still fire.
 
 ### Changed
 

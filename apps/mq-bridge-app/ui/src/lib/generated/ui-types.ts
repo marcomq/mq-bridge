@@ -36,6 +36,7 @@ export interface ConsumerConfig {
   empty_batch_delay_ms?: number;
   allow_fault_injection?: boolean;
   exit_on_empty?: boolean;
+  required_delivery?: DeliveryGuarantee | null;
 }
 
 export interface PublisherClient {
@@ -119,6 +120,7 @@ export interface RouteConfig {
   empty_batch_delay_ms?: number;
   allow_fault_injection?: boolean;
   exit_on_empty?: boolean;
+  required_delivery?: DeliveryGuarantee | null;
 }
 
 export interface Endpoint {
@@ -132,6 +134,7 @@ export interface DeduplicationMiddleware {
   sled_path?: string | null;
   ttl_seconds: number;
   key?: string | null;
+  replay_response?: boolean;
 }
 
 export type MetricsMiddleware = Record<string, never>;
@@ -186,6 +189,7 @@ export interface CookieJarMiddleware {
   capture_metadata_keys?: string[];
   export_metadata_prefix?: string | null;
   inject_metadata?: Record<string, string>;
+  max_cookies?: number;
 }
 
 export interface TransformMiddleware {
@@ -214,6 +218,7 @@ export interface EncryptionConfig {
   key_id?: string;
   key: string;
   decrypt_keys?: Record<string, string>;
+  authenticate_metadata?: string[];
 }
 
 export type CipherKind = "xchacha20poly1305" | "aes256gcm";
@@ -224,6 +229,20 @@ export interface CompressionMiddleware {
 }
 
 export type Compression = "none" | "gzip" | "lz4" | "zstd";
+
+export interface PackMiddleware {
+  format?: PackFormat;
+  max_messages?: number;
+  max_bytes?: number;
+  drop_message_id?: boolean;
+}
+
+export type PackFormat = "mqb" | "benthos_binary";
+
+export interface UnpackMiddleware {
+  format?: PackFormat;
+  max_messages?: number | null;
+}
 
 export interface AwsConfig {
   queue_url?: string | null;
@@ -301,6 +320,32 @@ export interface FileConfig {
 export type NameBy = "auto" | "source_position" | "write_time";
 
 export type FileFormat = "normal" | "json" | "text" | "raw" | "csv";
+
+export interface DirSpoolConfig {
+  path: string;
+  naming_pattern?: string;
+  shard_depth?: number;
+  shard_width?: number;
+  payload_extension?: string;
+  metadata_extension?: string;
+  atomic?: boolean;
+  fsync?: SpoolFsync;
+  done_file?: string;
+  emit_done?: SpoolDone;
+  producer_file?: string;
+  consumer_file?: string;
+  drain_on_read?: boolean;
+  stop_on_done?: boolean;
+  poll_interval_ms?: number;
+  source_metadata?: boolean;
+  claim?: SpoolClaim;
+}
+
+export type SpoolFsync = "chunk" | "off";
+
+export type SpoolDone = "never" | "success" | "end";
+
+export type SpoolClaim = "exclusive" | "warn" | "off";
 
 export interface ObjectStoreConfig {
   url: string;
@@ -586,6 +631,7 @@ export interface ClickHouseConfig {
 export interface PostgresCdcConfig {
   url: string;
   publication: string;
+  consume?: PostgresConsume | null;
   source_metadata?: boolean;
   slot_name?: string;
   create_slot?: boolean;
@@ -598,10 +644,19 @@ export interface PostgresCdcConfig {
   tls?: TlsConfig;
 }
 
+export type PostgresConsume = "capture_new" | "capture_all" | "snapshot";
+
+export interface SequenceConfig {
+  endpoints: Endpoint[];
+  cursor_id?: string | null;
+  checkpoint_store?: string | null;
+}
+
 export interface StreamBufferConfig {
   topic: string;
   correlation_id?: string | null;
   capacity?: number | null;
+  idle_ttl_secs?: number | null;
 }
 
 export interface SwitchConfig {
@@ -622,6 +677,8 @@ export interface RequestForwardConfig {
   to: Endpoint;
   forward_to: Endpoint;
 }
+
+export type DeliveryGuarantee = "at_most_once" | "at_least_once" | "effectively_once";
 
 export interface ConsumerResponseConfig {
   headers?: Record<string, string>;

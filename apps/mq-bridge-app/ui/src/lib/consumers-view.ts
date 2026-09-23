@@ -817,18 +817,35 @@ export async function currentConsumerConfigVariants(): Promise<ConfigJsonVariant
   }
   const record = exportConsumer as unknown as Record<string, unknown>;
   const publishers = (activeConfig.publishers ?? []) as unknown as Array<Record<string, unknown>>;
+  const { id: _id, ...raw } = record;
   return [
+    { id: "raw", label: "App config", value: raw, editable: true },
     {
       id: "publisher",
       label: "Publisher.from_config",
-      value: JSON.stringify(buildConsumerPublisherDocument(record), null, 2),
+      value: buildConsumerPublisherDocument(record),
     },
     {
       id: "route",
       label: "Route.from_config",
-      value: JSON.stringify(buildConsumerConfigDocument(record, publishers), null, 2),
+      value: buildConsumerConfigDocument(record, publishers),
     },
   ];
+}
+
+// Replaces the selected consumer with an edited raw config, keeping its id.
+export async function applyCurrentConsumerRawConfig(value: Record<string, unknown>) {
+  const consumer = currentConsumer();
+  if (!consumer) return;
+  if (!value.endpoint || typeof value.endpoint !== "object" || Array.isArray(value.endpoint)) {
+    throw new Error("The consumer config needs an `endpoint` object.");
+  }
+  const idx = get(consumersPanelState).selectedIndex;
+  activeConfig.consumers[idx] = normalizeConsumerConfig({ ...value, id: consumer.id } as unknown as ConsumerConfig);
+  formDrafts.delete(idx);
+  renderedConsumerFormSignature = null;
+  refreshConsumerDirty();
+  await restoreConsumerStateFromView(idx, { tab: get(consumersPanelState).activeSubtab });
 }
 
 export async function deleteCurrentConsumerAction() {

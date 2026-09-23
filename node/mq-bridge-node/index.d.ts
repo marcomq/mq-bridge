@@ -119,7 +119,10 @@ export class Route {
   addHandler(kind: string, handler: JsonHandler): void;
   start(): void;
   stop(): void;
+  /** Blocks the event loop until the route stops; prefer {@link Route.wait}. */
   join(): void;
+  /** Resolves once the route stops, without blocking the event loop. */
+  wait(): Promise<void>;
 }
 
 /**
@@ -152,6 +155,17 @@ export function initLogging(
 ): void;
 
 /** Throw from {@link CustomEndpoint.receiveBatch} to end the route cleanly. */
+/**
+ * Request a graceful shutdown of every route: running ones stop, and ones
+ * started afterwards stop immediately. Wire it to your signal handling, e.g.
+ * `process.on("SIGTERM", () => requestShutdown())`. Returns `true` only for the
+ * first request. It cannot be undone.
+ */
+export function requestShutdown(): boolean;
+
+/** `true` once {@link requestShutdown} has been called. */
+export function isShutdownRequested(): boolean;
+
 export class EndOfStream extends Error {
   constructor(message?: string);
 }

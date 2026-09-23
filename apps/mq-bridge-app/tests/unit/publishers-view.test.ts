@@ -10,6 +10,7 @@ import { getAppState } from "../../ui/src/lib/app-shell";
 import {
   addPublisherAction,
   addPublisherMetadataRow,
+  applyCurrentPublisherRawConfig,
   beautifyPublisherPayloadAction,
   browsePublisherFilePath,
   clearActivePublisherHistory,
@@ -280,6 +281,25 @@ describe("initPublishers", () => {
     expect(get(publishersPanelState).urlField.value).toBe("http://localhost:8080");
     expect(get(publishersPanelState).activeSubtab).toBe("definition");
     expect(config.publishers[0].endpoint.middlewares).toEqual([]);
+  });
+
+  test("applies an edited raw config over the local request state", async () => {
+    const config = { publishers: [], routes: {}, consumers: [] } as any;
+    initPublishers(config, { properties: { publishers: { items: {} } } });
+    await addPublisherAction("http");
+    const id = config.publishers[0].id;
+    updatePublisherPayload("{\"old\":true}");
+
+    await applyCurrentPublisherRawConfig({
+      name: "edited",
+      endpoint: { memory: { topic: "out" } },
+      payload: "{\"new\":true}",
+      headers: [{ key: "x-a", value: "1", enabled: true }],
+    });
+
+    expect(config.publishers[0]).toMatchObject({ id, name: "edited", endpoint: { memory: { topic: "out" } } });
+    expect(get(publishersPanelState).requestPayload).toBe("{\"new\":true}");
+    expect(get(publishersPanelState).metadataRows).toMatchObject([{ key: "x-a", value: "1", enabled: true }]);
   });
 
   test("creates new static publishers on definition and saves scalar endpoint values", async () => {
