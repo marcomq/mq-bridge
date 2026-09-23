@@ -182,7 +182,13 @@ flate2 = { version = "1.1", optional = true }
 # lz4 frame format (concatenable frames, like gzip members) for the `compression` feature.
 lz4_flex = { version = "0.14", optional = true, default-features = false, features = ["frame"] }
 # zstd (bundled libzstd via zstd-sys); Decoder handles concatenated frames like gzip/lz4.
-zstd = { version = "0.13", optional = true }
+zstd = { version = "0.14", optional = true }
+# Parquet for the object_store `format: parquet`. Only the codecs whose crates the
+# `compression` feature already pulls in, plus snap (tiny, pure Rust): snappy is the
+# default codec of pyarrow/Spark/DuckDB, so without it most foreign files can't be read.
+parquet = { version = "60", optional = true, default-features = false, features = ["arrow", "flate2-rust_backend", "lz4", "zstd", "snap"] }
+arrow-json = { version = "60", optional = true }
+arrow-array = { version = "60", optional = true }
 # Non-optional: `CanonicalMessage`'s JSON form encodes binary payloads as base64.
 base64 = { version = "0.23" }
 
@@ -268,7 +274,7 @@ middleware = ["metrics", "dedup", "compression", "encryption", "filter"]
 # on ~19% of 17-significant-digit doubles (e.g. a Postgres `double precision` value
 # moved through a JSON payload). Enable if bit-exact float round-tripping matters.
 float-roundtrip = ["serde_json/float_roundtrip"]
-full-common = ["middleware", "plugin", "mongodb", "kafka", "amqp", "nats", "mqtt", "http", "aws", "zeromq", "zeromq-omq", "redis-streams", "sled", "grpc", "sqlx", "clickhouse", "websocket", "postgres-cdc", "object-store", "rustls-aws-lc"]
+full-common = ["middleware", "plugin", "mongodb", "kafka", "amqp", "nats", "mqtt", "http", "aws", "zeromq", "zeromq-omq", "redis-streams", "sled", "grpc", "sqlx", "clickhouse", "websocket", "postgres-cdc", "object-store", "parquet", "rustls-aws-lc"]
 
 # ibm-mq (dlopen) is safe to include: it needs no IBM SDK at build, and at
 # runtime the client is loaded lazily only when an ibm-mq endpoint is opened
@@ -381,6 +387,8 @@ sqlx = ["dep:sqlx"]
 clickhouse = ["dep:reqwest", "dep:flate2", "dep:lz4_flex", "dep:zstd", "dep:percent-encoding"]
 # Cloud object-store checkpoint backend (S3/GCS/Azure/R2). Talks cloud REST via reqwest.
 object-store = ["dep:object_store"]
+# `format: parquet` on object_store. Column codecs reuse the `compression` crates.
+parquet = ["object-store", "compression", "dep:parquet", "dep:arrow-json", "dep:arrow-array"]
 # Postgres logical-replication CDC (pgoutput). Reuses the sqlx dependency for the
 # slot-lifecycle control plane; the streaming wire protocol is pgwire-replication.
 # Needs Rust 1.88 (pgwire-replication MSRV), like the amqp feature gate.

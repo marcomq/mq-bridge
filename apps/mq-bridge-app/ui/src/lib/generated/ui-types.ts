@@ -319,7 +319,7 @@ export interface FileConfig {
 
 export type NameBy = "auto" | "source_position" | "write_time";
 
-export type FileFormat = "normal" | "json" | "text" | "raw" | "csv";
+export type FileFormat = "normal" | "json" | "text" | "raw" | "csv" | "parquet";
 
 export interface DirSpoolConfig {
   path: string;

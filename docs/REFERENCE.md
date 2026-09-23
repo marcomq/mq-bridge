@@ -641,7 +641,8 @@ output:
 Both endpoints accept the same `compression` and `encryption` fields (`object_store`
 derives its default object extension from them, e.g. `.jsonl.gz` / `.jsonl.lz4`, and adds a
 trailing `.enc` when encryption is on since the object is ciphertext, not a directly
-decompressible `.gz`). An
+decompressible `.gz`). With `format: parquet` (object_store only) `compression` sets the
+Parquet column codec instead and the extension stays `.parquet`. An
 encrypted **file** is written as length-prefixed sealed frames (one per batch) and is only
 readable through a matching consumer; a compressed-only file stays a standard `.gz`/`.lz4`
 stream. File compression/encryption supports only the default `consume` mode. `csv` works

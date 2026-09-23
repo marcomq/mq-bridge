@@ -546,11 +546,14 @@ pub struct FilePublisher {
     csv_header: Arc<Mutex<Option<Vec<String>>>>,
 }
 
-/// Validates the `compression`/`encryption` settings shared by the file
+/// Validates the `format`/`compression`/`encryption` settings shared by the file
 /// publisher and consumer: both need their Cargo feature enabled.
 fn validate_member_settings(config: &FileConfig) -> anyhow::Result<()> {
-    // Only the feature-gated checks below read it, so it is unused with both features on.
-    let _ = config;
+    if config.format == FileFormat::Parquet {
+        return Err(anyhow::anyhow!(
+            "file 'format: parquet' is not supported (a Parquet file can't be appended to); parquet is only supported by object_store"
+        ));
+    }
     #[cfg(not(feature = "compression"))]
     if config.compression != Compression::None {
         return Err(anyhow::anyhow!(
@@ -682,6 +685,7 @@ impl FilePublisher {
             FileFormat::Csv => "csv",
             FileFormat::Raw => "bin",
             FileFormat::Normal | FileFormat::Json | FileFormat::Text => "jsonl",
+            FileFormat::Parquet => "parquet",
         }
         .to_string();
         match config.compression {
@@ -2867,6 +2871,9 @@ pub(crate) fn encode_record(
             }
         }
         FileFormat::Csv => unreachable!("CSV is encoded by the caller, not encode_record"),
+        FileFormat::Parquet => Err(serde::ser::Error::custom(
+            "parquet is encoded per batch by the object_store sink, not per record",
+        )),
     }
 }
 
@@ -3038,6 +3045,8 @@ pub(crate) fn parse_message(
             }
             Some(header) => Some(decode_csv_row(header, buffer)),
         },
+        // Parquet objects are decoded whole by the object_store source; there are no lines.
+        FileFormat::Parquet => None,
         FileFormat::Raw => {
             let mut msg = CanonicalMessage::new(buffer.to_vec(), None);
             msg.metadata

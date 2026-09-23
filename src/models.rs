@@ -888,6 +888,8 @@ pub enum FileFormat {
     Raw,
     /// CSV rows mapped to/from JSON objects (string values only). The first row is the header/schema.
     Csv,
+    /// Parquet, one object per batch, JSON-object rows (object_store only; `parquet` feature).
+    Parquet,
 }
 
 /// Compression algorithm. Used for at-rest batches (file, object_store) and for HTTP

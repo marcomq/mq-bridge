@@ -52,6 +52,7 @@ WebSocketConfig = dict
 ZeroMqConfig = dict
 CipherKind = str
 Compression = str
+DeliveryGuarantee = str
 FaultMode = str
 FileFormat = str
 HttpServerProtocol = str
@@ -91,6 +92,7 @@ __all__ = [
     "DeadLetterQueueMiddleware",
     "DeduplicationMiddleware",
     "DelayMiddleware",
+    "DeliveryGuarantee",
     "DetailedMappingRule",
     "DirSpoolConfig",
     "EncryptionConfig",
