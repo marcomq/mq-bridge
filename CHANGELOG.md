@@ -28,6 +28,10 @@ All notable changes to `mq-bridge`. Newest first.
 - **Python: Ctrl+C now stops a route blocked in `run()` or `join()`.** Signal handlers used
   to wait until the route ended by itself. Now a `KeyboardInterrupt`, or any exception a
   handler raises, stops the route cleanly and is re-raised.
+- **`mq-bridge-app`: switching publishers, consumers and tabs is fast again.** Every switch
+  re-parsed and re-compiled the whole config schema, which took 1–2 s per click and grew to
+  several seconds in the desktop app. A parsed form is now reused per schema and only its data
+  is swapped; only the first visit to each tab still builds its form.
 
 ### Added
 
@@ -58,6 +62,9 @@ All notable changes to `mq-bridge`. Newest first.
   requested, so a host's own signal handling can drive it.
 - **Node: `Route.wait()`**, a promise that resolves once the route stops. Unlike `join()`, it
   leaves the event loop running, so `process.on("SIGINT")` handlers still fire.
+- **`mq-bridge-app`: edit the config as JSON or YAML.** The JSON view of a publisher, a
+  consumer and the whole app config is now editable, with a JSON/YAML toggle, live syntax
+  errors and an Apply button. It is a fallback for when the generated form gets in the way.
 
 ### Changed
 

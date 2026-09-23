@@ -1,5 +1,6 @@
 import { get } from "svelte/store";
 import { appShell, getAppState, switchMainTab } from "./app-shell";
+import { initSchemaForm } from "./forms/form-cache";
 import { browserWindow, replaceHash } from "./browser";
 import { pickFilePath } from "./desktop-file-dialog";
 import { createLocalEntityId, getEntityDisplayLabel } from "./utils";
@@ -944,7 +945,7 @@ async function renderPublisherForm() {
   if (Array.isArray((schema as any).required)) {
     (schema as any).required = (schema as any).required.filter((key: string) => key !== "name");
   }
-  await forms.init(container, schema, deepClone(publisher), (updated: PublisherConfig) => {
+  await initSchemaForm(forms, container, schema, deepClone(publisher), (updated: PublisherConfig) => {
     formDrafts.set(get(publishersPanelState).selectedIndex, updated);
     const current = currentPublisher();
     if (!current) return;

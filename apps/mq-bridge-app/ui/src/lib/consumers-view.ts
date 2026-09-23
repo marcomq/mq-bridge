@@ -1,6 +1,7 @@
 import { tick } from "svelte";
 import { get } from "svelte/store";
 import { appShell, getAppState, switchMainTab, workspaceRuntime } from "./app-shell";
+import { initSchemaForm } from "./forms/form-cache";
 import { browserWindow, replaceHash } from "./browser";
 import { createLocalEntityId, getEntityDisplayLabel, normalizeConsumerNames, normalizeConsumerResponse, sanitizeConsumerName } from "./utils";
 import { CONSUMER_TYPE_OPTIONS, RESPONSE_CAPABLE_CONSUMER_TYPES, formatEndpointTypeLabel } from "./endpoint-metadata";
@@ -554,7 +555,7 @@ async function renderConsumerForm() {
   const forms = appShell.forms() as any;
   getAppState().form_mode = "consumer";
   (window as any)._mqb_form_mode = "consumer";
-  await forms.init(container, createConsumerFormSchema(consumer), deepClone(consumer), (updated: ConsumerConfig) => {
+  await initSchemaForm(forms, container, createConsumerFormSchema(consumer), deepClone(consumer), (updated: ConsumerConfig) => {
     formDrafts.set(get(consumersPanelState).selectedIndex, updated);
     const current = currentConsumer();
     if (!current) return;
