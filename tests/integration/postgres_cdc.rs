@@ -156,10 +156,10 @@ pub async fn test_postgres_cdc_batches_a_backlog_of_small_transactions() {
             .await
             .expect("create CDC consumer");
 
-        insert_rows(1..=100).await;
+        insert_rows(1..=300).await;
         tokio::time::sleep(Duration::from_secs(1)).await;
         let (mut rows, mut batches) = (0, 0);
-        while rows < 100 {
+        while rows < 300 {
             let batch = tokio::time::timeout(Duration::from_secs(20), consumer.receive_batch(1024))
                 .await
                 .expect("timed out waiting for CDC events")
@@ -168,8 +168,8 @@ pub async fn test_postgres_cdc_batches_a_backlog_of_small_transactions() {
             batches += 1;
         }
         assert!(
-            batches < 20,
-            "100 committed single-row transactions took {batches} batches"
+            batches <= 2,
+            "300 committed single-row transactions took {batches} batches"
         );
     })
     .await;

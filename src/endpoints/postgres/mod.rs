@@ -518,8 +518,10 @@ impl MessageConsumer for PostgresCdcConsumer {
 
         // Top the batch up from events that already arrived, without waiting for more:
         // a backlog of single-row transactions otherwise leaves as one-row batches.
+        // `unconstrained`: tokio's coop budget would report the channel empty after
+        // ~128 events, capping batches at ~40 transactions.
         while self.ready.len() < max_messages {
-            match self.client.recv().now_or_never() {
+            match tokio::task::unconstrained(self.client.recv()).now_or_never() {
                 None => break,
                 Some(Ok(None)) | Some(Ok(Some(ReplicationEvent::StoppedAt { .. }))) => {
                     self.ended = true;
