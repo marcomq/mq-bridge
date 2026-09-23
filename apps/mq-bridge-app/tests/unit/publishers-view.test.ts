@@ -307,7 +307,7 @@ describe("initPublishers", () => {
     let formChange: ((updated: unknown) => void) | null = null;
     window.VanillaSchemaForms.init = vi.fn().mockImplementation((_container, _schema, _data, onChange) => {
       formChange = onChange;
-      return Promise.resolve();
+      return Promise.resolve({ setData: vi.fn() });
     });
     window.saveConfigSection = vi.fn().mockImplementation(async (_section: string, publishers: any[]) => ({ publishers }));
 
@@ -356,7 +356,7 @@ describe("initPublishers", () => {
     let formChange: ((updated: unknown) => void) | null = null;
     window.VanillaSchemaForms.init = vi.fn().mockImplementation((_container, _schema, _data, onChange) => {
       formChange = onChange;
-      return Promise.resolve();
+      return Promise.resolve({ setData: vi.fn() });
     });
     window.saveConfigSection = vi.fn().mockImplementation(async (_section: string, publishers: any[]) => ({ publishers }));
 
@@ -582,7 +582,7 @@ describe("initPublishers", () => {
     let formChange: ((updated: unknown) => void) | null = null;
     window.VanillaSchemaForms.init = vi.fn().mockImplementation((_container, _schema, _data, onChange) => {
       formChange = onChange;
-      return Promise.resolve();
+      return Promise.resolve({ setData: vi.fn() });
     });
     window.saveConfigSection = vi.fn().mockImplementation(async (_section: string, publishers: any[]) => ({ publishers }));
 
@@ -594,7 +594,7 @@ describe("initPublishers", () => {
       },
     );
     selectPublisherSubtab("definition");
-    await Promise.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 0));
 
     formChange?.({
       name: "renamed_http",
@@ -659,7 +659,7 @@ describe("initPublishers", () => {
       input.value = "http";
       container.appendChild(input);
       formChange = onChange;
-      return Promise.resolve();
+      return Promise.resolve({ setData: vi.fn() });
     });
     window.saveConfigSection = vi.fn().mockImplementation(async (_section: string, publishers: any[]) => ({ publishers }));
 

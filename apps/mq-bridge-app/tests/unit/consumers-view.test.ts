@@ -358,7 +358,7 @@ describe("initConsumers", () => {
     let formChange: ((updated: unknown) => void) | null = null;
     window.VanillaSchemaForms.init = vi.fn().mockImplementation((_container, _schema, _data, onChange) => {
       formChange = onChange;
-      return Promise.resolve();
+      return Promise.resolve({ setData: vi.fn() });
     });
     window.saveConfigSection = vi.fn().mockImplementation(async (_section: string, consumers: any[]) => ({ consumers }));
 
@@ -460,7 +460,7 @@ describe("initConsumers", () => {
     let formChange: ((updated: unknown) => void) | null = null;
     window.VanillaSchemaForms.init = vi.fn().mockImplementation((_container, _schema, _data, onChange) => {
       formChange = onChange;
-      return Promise.resolve();
+      return Promise.resolve({ setData: vi.fn() });
     });
     window.saveConfigSection = vi.fn().mockImplementation(async (_section: string, consumers: any[]) => ({ consumers }));
 
@@ -785,7 +785,7 @@ describe("initConsumers", () => {
     let formChange: ((updated: unknown) => void) | null = null;
     window.VanillaSchemaForms.init = vi.fn().mockImplementation((_container, _schema, _data, onChange) => {
       formChange = onChange;
-      return Promise.resolve();
+      return Promise.resolve({ setData: vi.fn() });
     });
     window.saveConfigSection = vi.fn().mockImplementation(async (_section: string, consumers: any[]) => ({ consumers }));
 

@@ -45,10 +45,11 @@ describe("settings", () => {
         element.textContent = label;
         return element;
       },
-      init: vi.fn().mockImplementation(async (_container: HTMLElement, _schema: Record<string, unknown>, data: Record<string, unknown>) => {
-        (window as any).__settingsData = data;
-        return {};
-      }),
+      init: vi.fn().mockImplementation(async () => ({
+        setData: (data: Record<string, unknown>) => {
+          (window as any).__settingsData = data;
+        },
+      })),
     } as any;
   });
 
@@ -233,13 +234,15 @@ describe("settings", () => {
         },
         required: [],
       },
-      {
-        default_tab: "publishers",
-        log_level: "info",
-        env_vars: { BASE_URL: "https://example.test" },
-        config_security: { mode: "balanced" },
-      },
+      {},
+      expect.any(Function),
     );
+    expect((window as any).__settingsData).toEqual({
+      default_tab: "publishers",
+      log_level: "info",
+      env_vars: { BASE_URL: "https://example.test" },
+      config_security: { mode: "balanced" },
+    });
     expect(document.getElementById("form-actions")?.style.display).toBe("flex");
     expect(document.getElementById("storage-security-note")).toBeNull();
     expect(document.getElementById("storage-mode-note")).toBeNull();
@@ -277,7 +280,7 @@ describe("settings", () => {
         select.appendChild(option);
       });
       container.appendChild(select);
-      return {};
+      return { setData: vi.fn() };
     });
 
     await initSettings(
