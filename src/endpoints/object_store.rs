@@ -2237,7 +2237,14 @@ mod tests {
     #[cfg(feature = "parquet")]
     async fn object_bytes(store: &dyn ObjectStore, key: &str) -> Vec<u8> {
         let key = ObjPath::from(key);
-        store.get(&key).await.unwrap().bytes().await.unwrap().to_vec()
+        store
+            .get(&key)
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap()
+            .to_vec()
     }
 
     #[cfg(feature = "parquet")]

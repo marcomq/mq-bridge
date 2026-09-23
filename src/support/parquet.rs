@@ -11,7 +11,7 @@ use crate::models::Compression;
 use crate::CanonicalMessage;
 use anyhow::{anyhow, Context};
 use arrow_json::reader::{infer_json_schema_from_iterator, ReaderBuilder};
-use arrow_json::LineDelimitedWriter;
+use arrow_json::writer::{LineDelimited, WriterBuilder};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::ArrowWriter;
 use parquet::basic::{Compression as ParquetCompression, GzipLevel, ZstdLevel};
@@ -62,7 +62,9 @@ pub(crate) fn decode_rows(data: Vec<u8>) -> anyhow::Result<Vec<CanonicalMessage>
     let reader = ParquetRecordBatchReaderBuilder::try_new(bytes::Bytes::from(data))?.build()?;
     let mut out = Vec::new();
     for batch in reader {
-        let mut writer = LineDelimitedWriter::new(Vec::new());
+        let mut writer = WriterBuilder::new()
+            .with_explicit_nulls(true)
+            .build::<_, LineDelimited>(Vec::new());
         writer.write_batches(&[&batch?])?;
         writer.finish()?;
         for line in writer.into_inner().split(|b| *b == b'\n') {
@@ -98,6 +100,14 @@ mod tests {
         writer.write(&batch).unwrap();
 
         let messages = decode_rows(writer.into_inner().unwrap()).unwrap();
+        let row: serde_json::Value = serde_json::from_slice(&messages[0].payload).unwrap();
+        assert_eq!(row, rows[0]);
+    }
+
+    #[test]
+    fn keeps_null_fields_on_decode() {
+        let rows = vec![serde_json::json!({"id": 1, "name": null})];
+        let messages = decode_rows(encode_rows(&rows, Compression::None).unwrap()).unwrap();
         let row: serde_json::Value = serde_json::from_slice(&messages[0].payload).unwrap();
         assert_eq!(row, rows[0]);
     }

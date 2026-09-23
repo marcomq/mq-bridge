@@ -2857,7 +2857,12 @@ fn parallel_record_decode_matches_a_sequential_one() {
 async fn test_file_rejects_parquet_format() {
     let dir = tempdir().unwrap();
     let config = FileConfig {
-        path: dir.path().join("data.parquet").to_str().unwrap().to_string(),
+        path: dir
+            .path()
+            .join("data.parquet")
+            .to_str()
+            .unwrap()
+            .to_string(),
         format: FileFormat::Parquet,
         ..Default::default()
     };
