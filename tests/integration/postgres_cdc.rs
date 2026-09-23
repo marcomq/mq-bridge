@@ -145,6 +145,36 @@ pub async fn test_postgres_cdc_pipeline() {
     .await;
 }
 
+/// A backlog of single-row transactions is batched up to `max_messages` rather
+/// than handed out one transaction per batch.
+pub async fn test_postgres_cdc_batches_a_backlog_of_small_transactions() {
+    setup_logging();
+    run_test_with_docker(COMPOSE, || async {
+        let slot = "mqb_cdc_backlog_slot";
+        reset_schema(slot).await;
+        let mut consumer = PostgresCdcConsumer::new(&cfg(slot))
+            .await
+            .expect("create CDC consumer");
+
+        insert_rows(1..=100).await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let (mut rows, mut batches) = (0, 0);
+        while rows < 100 {
+            let batch = tokio::time::timeout(Duration::from_secs(20), consumer.receive_batch(1024))
+                .await
+                .expect("timed out waiting for CDC events")
+                .expect("receive_batch failed");
+            rows += batch.messages.len();
+            batches += 1;
+        }
+        assert!(
+            batches < 20,
+            "100 committed single-row transactions took {batches} batches"
+        );
+    })
+    .await;
+}
+
 /// `temporary_slot: true` must actually deliver changes, and must leave no slot
 /// behind once the route stops. A Postgres *temporary* slot dies with the session
 /// that created it, so the option is implemented as drop-on-stop instead.

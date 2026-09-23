@@ -354,6 +354,16 @@ async fn test_postgres_cdc() {
 #[cfg(all(feature = "postgres-cdc", feature = "test-utils"))]
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires docker compose (postgres with wal_level=logical)"]
+async fn test_postgres_cdc_batches_a_backlog_of_small_transactions() {
+    if should_run("postgres_cdc") || should_run("postgres") {
+        integration::postgres_cdc::test_postgres_cdc_batches_a_backlog_of_small_transactions()
+            .await;
+    }
+}
+
+#[cfg(all(feature = "postgres-cdc", feature = "test-utils"))]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires docker compose (postgres with wal_level=logical)"]
 async fn test_postgres_cdc_temporary_slot() {
     if should_run("postgres_cdc") || should_run("postgres") {
         integration::postgres_cdc::test_postgres_cdc_temporary_slot().await;

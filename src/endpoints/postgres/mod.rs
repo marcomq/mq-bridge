@@ -27,6 +27,7 @@ use crate::traits::{BatchCommitFunc, MessageConsumer, MessageDisposition};
 use crate::ReceivedBatch;
 use anyhow::anyhow;
 use async_trait::async_trait;
+use futures::FutureExt;
 use pgwire_replication::{Lsn, ReplicationClient};
 use replication::ReplicationEvent;
 use std::any::Any;
@@ -373,6 +374,16 @@ fn replica_key_string(
     }
 }
 
+fn recv_error(e: impl std::fmt::Display) -> ConsumerError {
+    let msg = format!("postgres_cdc: recv failed: {e}");
+    // A vanished slot never comes back on its own; don't reconnect-loop.
+    if replication::is_missing_slot_error(&msg) {
+        ConsumerError::Permanent(anyhow!(msg))
+    } else {
+        ConsumerError::Connection(anyhow!(msg))
+    }
+}
+
 /// Deterministic dedup id for a change event: FNV-1a 128-bit over
 /// `schema.table\0key\0operation\0lsn\0ordinal`. A replayed change (same key, op and
 /// in-tx position at the same commit LSN) hashes identically so the dedup middleware /
@@ -501,15 +512,23 @@ impl MessageConsumer for PostgresCdcConsumer {
                 Ok(Some(ev)) => {
                     self.handle_event(ev).map_err(ConsumerError::Connection)?;
                 }
-                Err(e) => {
-                    let msg = format!("postgres_cdc: recv failed: {e}");
-                    // A vanished slot never comes back on its own; don't reconnect-loop.
-                    return Err(if replication::is_missing_slot_error(&msg) {
-                        ConsumerError::Permanent(anyhow!(msg))
-                    } else {
-                        ConsumerError::Connection(anyhow!(msg))
-                    });
+                Err(e) => return Err(recv_error(e)),
+            }
+        }
+
+        // Top the batch up from events that already arrived, without waiting for more:
+        // a backlog of single-row transactions otherwise leaves as one-row batches.
+        while self.ready.len() < max_messages {
+            match self.client.recv().now_or_never() {
+                None => break,
+                Some(Ok(None)) | Some(Ok(Some(ReplicationEvent::StoppedAt { .. }))) => {
+                    self.ended = true;
+                    break;
                 }
+                Some(Ok(Some(ev))) => {
+                    self.handle_event(ev).map_err(ConsumerError::Connection)?;
+                }
+                Some(Err(e)) => return Err(recv_error(e)),
             }
         }
 
