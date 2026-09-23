@@ -146,7 +146,7 @@
   }
 
   async function applyEdits() {
-    if (!onApply || !activeVariant) return;
+    if (applying || !onApply || !activeVariant) return;
     applying = true;
     applyError = "";
     try {
