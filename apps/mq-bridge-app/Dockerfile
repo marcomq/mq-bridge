@@ -142,7 +142,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
         RUST_TARGET="aarch64-unknown-linux-gnu"; \
         CARGO_FEATURES="--features=arm64-cross-compile"; \
     fi && \
-    CARGO_PROFILE_RELEASE_LTO=thin \
+    CARGO_PROFILE_RELEASE_WITH_LTO_LTO=thin \
     CMAKE_BUILD_PARALLEL_LEVEL=1 \
     cargo build --manifest-path apps/mq-bridge-app/Cargo.toml --target "$RUST_TARGET" --profile release-with-lto $CARGO_FEATURES --jobs 3 -p mq-bridge-app && \
     cp target/$RUST_TARGET/release-with-lto/mq-bridge-app mq-bridge-app && \
