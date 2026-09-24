@@ -12,10 +12,11 @@ Query parameters recognised as config fields for this connector. The object-type
 | `compression` | `none` \| `gzip` \| `lz4` \| `zstd` | no | `none` | Whole-object compression (`none`, `gzip`, `lz4`, `zstd`). Requires the `compression` feature. |
 | `cursor_id` | string | no | — | (Source only) Cursor id namespacing the checkpoint key; enables durable resume. |
 | `date_partition` | boolean | no | `null` | (Sink only) Prepend a `YYYY/MM/DD/` path (write time, UTC) to each object key. Applies to `write_time` naming only; defaults to on. Purely for readability / lifecycle rules. |
+| `date_partition_style` | `nested` \| `hive` | no | `nested` | (Sink only) Date folder layout: `nested` (`YYYY/MM/DD/`) or `hive` (`year=YYYY/month=MM/day=DD/`). |
 | `delimiter` | string | no | — | Record delimiter within an object. Defaults to newline ("\n"). Can be a string or a hex sequence (e.g. "0x00"). |
 | `encryption` | object | no | `null` | At-rest AEAD encryption applied after compression. Requires the `encryption` feature. |
 | `extension` | string | no | — | (Sink only) Extension for written objects, without the dot. Defaults to a value derived from `format`, `compression` and `encryption` (e.g. `jsonl`, `csv`, `bin`, `jsonl.gz`, `jsonl.lz4`, `jsonl.gz.enc`); encrypted objects get a trailing `.enc` since they are ciphertext, not a directly decompressible `.gz`. |
-| `format` | `normal` \| `json` \| `text` \| `raw` \| `csv` | no | `normal` | Record encoding within an object, shared with the file endpoint. Defaults to `normal` (one JSON `CanonicalMessage` per line). CSV is supported for sources only. |
+| `format` | `normal` \| `json` \| `text` \| `raw` \| `csv` \| `parquet` | no | `normal` | Record encoding within an object, shared with the file endpoint. Defaults to `normal` (one JSON `CanonicalMessage` per line). CSV is source-only; Parquet needs the `parquet` feature. |
 | `idempotency` | boolean | no | — | Deprecated: use `name_by`. true = `source_position`, false = `write_time`; ignored when `name_by` is set. |
 | `max_object_bytes` | integer | no | — | (Source only) Maximum size in bytes of a single object to fetch into memory. An object larger than this fails the read (surfaced as a consumer error) instead of being buffered whole. Unset means no limit (the whole object is materialized). |
 | `name_by` | `auto` \| `source_position` \| `write_time` | no | `auto` | (Sink only) `auto`, `write_time` (uuidv7 name) or `source_position` (name carries the source range). |

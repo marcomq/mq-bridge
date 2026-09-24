@@ -1,5 +1,6 @@
 import { get } from "svelte/store";
 import { appShell, getAppState, switchMainTab } from "./app-shell";
+import { initSchemaForm } from "./forms/form-cache";
 import { browserWindow, replaceHash } from "./browser";
 import { pickFilePath } from "./desktop-file-dialog";
 import { createLocalEntityId, getEntityDisplayLabel } from "./utils";
@@ -358,18 +359,41 @@ export async function currentPublisherConfigVariants(): Promise<ConfigJsonVarian
     ? normalizePublisher({ ...publisher, ...deepClone(draft) })
     : deepClone(publisher);
   const record = exportPublisher as unknown as Record<string, unknown>;
+  const { id: _id, ...raw } = record;
   return [
+    { id: "raw", label: "App config", value: raw, editable: true },
     {
       id: "publisher",
       label: "Publisher.from_config",
-      value: JSON.stringify(buildPublisherConfigDocument(record), null, 2),
+      value: buildPublisherConfigDocument(record),
     },
     {
       id: "route",
       label: "Route.from_config",
-      value: JSON.stringify(buildPublisherConfigRouteDocument(record), null, 2),
+      value: buildPublisherConfigRouteDocument(record),
     },
   ];
+}
+
+// Replaces the selected publisher with an edited raw config, keeping its id.
+export async function applyCurrentPublisherRawConfig(value: Record<string, unknown>) {
+  const publisher = currentPublisher();
+  if (!publisher) return;
+  if (!value.endpoint || typeof value.endpoint !== "object" || Array.isArray(value.endpoint)) {
+    throw new Error("The publisher config needs an `endpoint` object.");
+  }
+  const idx = get(publishersPanelState).selectedIndex;
+  const next = normalizePublisher({ ...value, id: publisher.id } as unknown as PublisherConfig);
+  activeConfig.publishers[idx] = next;
+  // Local request state would otherwise override the applied payload and headers.
+  setLocalPublisherState(next, {
+    payload: next.payload,
+    headers: (next.headers ?? []).map((row) => ({ ...row, id: nextHeaderRowId++ })),
+  });
+  formDrafts.delete(idx);
+  renderedPublisherFormSignature = null;
+  refreshPublisherDirty();
+  await restorePublisherStateFromView(idx, { tab: get(publishersPanelState).activeSubtab });
 }
 
 export async function deleteCurrentPublisherAction() {
@@ -921,7 +945,7 @@ async function renderPublisherForm() {
   if (Array.isArray((schema as any).required)) {
     (schema as any).required = (schema as any).required.filter((key: string) => key !== "name");
   }
-  await forms.init(container, schema, deepClone(publisher), (updated: PublisherConfig) => {
+  await initSchemaForm(forms, container, schema, deepClone(publisher), (updated: PublisherConfig) => {
     formDrafts.set(get(publishersPanelState).selectedIndex, updated);
     const current = currentPublisher();
     if (!current) return;

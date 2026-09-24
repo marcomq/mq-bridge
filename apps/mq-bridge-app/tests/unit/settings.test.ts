@@ -45,9 +45,13 @@ describe("settings", () => {
         element.textContent = label;
         return element;
       },
-      init: vi.fn().mockImplementation(async (_container: HTMLElement, _schema: Record<string, unknown>, data: Record<string, unknown>) => {
-        (window as any).__settingsData = data;
-        return {};
+      init: vi.fn().mockImplementation(async (_container: HTMLElement, _schema: unknown, _data: unknown, onChange: (data: unknown) => void) => {
+        (window as any).__settingsChange = onChange;
+        return {
+          setData: (data: Record<string, unknown>) => {
+            (window as any).__settingsData = data;
+          },
+        };
       }),
     } as any;
   });
@@ -233,20 +237,25 @@ describe("settings", () => {
         },
         required: [],
       },
-      {
-        default_tab: "publishers",
-        log_level: "info",
-        env_vars: { BASE_URL: "https://example.test" },
-        config_security: { mode: "balanced" },
-      },
+      {},
+      expect.any(Function),
     );
+    expect((window as any).__settingsData).toEqual({
+      default_tab: "publishers",
+      log_level: "info",
+      env_vars: { BASE_URL: "https://example.test" },
+      config_security: { mode: "balanced" },
+    });
     expect(document.getElementById("form-actions")?.style.display).toBe("flex");
     expect(document.getElementById("storage-security-note")).toBeNull();
     expect(document.getElementById("storage-mode-note")).toBeNull();
 
-    (window as any).__settingsData.log_level = "debug";
-    (window as any).__settingsData.env_vars = { BASE_URL: "https://changed.test", API_TOKEN: "abc" };
-    (window as any).__settingsData.config_security = { mode: "balanced" };
+    (window as any).__settingsChange({
+      ...structuredClone((window as any).__settingsData),
+      log_level: "debug",
+      env_vars: { BASE_URL: "https://changed.test", API_TOKEN: "abc" },
+      config_security: { mode: "balanced" },
+    });
     const beforeSaveHook = (window.registerBeforeWorkspaceSave as any).mock.calls[0][1] as () => void;
     beforeSaveHook();
     expect(window.appConfig.log_level).toBe("debug");
@@ -277,7 +286,7 @@ describe("settings", () => {
         select.appendChild(option);
       });
       container.appendChild(select);
-      return {};
+      return { setData: vi.fn() };
     });
 
     await initSettings(

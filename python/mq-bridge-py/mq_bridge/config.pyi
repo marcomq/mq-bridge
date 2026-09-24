@@ -89,6 +89,7 @@ class DeadLetterQueueMiddleware(TypedDict, total=False):
 class DeduplicationMiddleware(TypedDict, total=False):
     """Deduplication middleware configuration."""
     key: Optional[str]
+    replay_response: bool
     sled_path: Optional[str]
     store: Optional[str]
     ttl_seconds: Required[int]
@@ -404,6 +405,7 @@ class ObjectStoreConfig(TypedDict, total=False):
     compression: Compression
     cursor_id: Optional[str]
     date_partition: Optional[bool]
+    date_partition_style: DatePartitionStyle
     delimiter: Optional[str]
     encryption: Optional[EncryptionConfig]
     extension: Optional[str]
@@ -495,6 +497,7 @@ class Route(TypedDict, total=False):
     input: Required[Endpoint]
     output: Optional[Endpoint]
     reconnect_interval_ms: int
+    required_delivery: Optional[DeliveryGuarantee]
     startup_timeout_ms: int
 
 
@@ -630,8 +633,10 @@ class ZeroMqConfig(TypedDict, total=False):
 
 CipherKind = Literal["xchacha20poly1305", "aes256gcm"]
 Compression = Literal["none", "gzip", "lz4", "zstd"]
+DatePartitionStyle = Literal["nested", "hive"]
+DeliveryGuarantee = Literal["at_most_once", "at_least_once", "effectively_once"]
 FaultMode = Literal["panic", "disconnect", "timeout", "json_format_error", "nack"]
-FileFormat = Literal["normal", "json", "text", "raw", "csv"]
+FileFormat = Literal["normal", "json", "text", "raw", "csv", "parquet"]
 HttpServerProtocol = Literal["auto", "http1_only", "http2_only"]
 MappingRule = Union[str, DetailedMappingRule]
 MongoConsume = Literal["consumer", "snapshot", "capture_new", "capture_all"]

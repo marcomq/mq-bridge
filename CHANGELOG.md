@@ -2,6 +2,81 @@
 
 All notable changes to `mq-bridge`. Newest first.
 
+## Unreleased
+
+### Fixed
+
+- **`deduplication` no longer loses a message that failed and came straight back.** A nacked
+  key stayed reserved for five seconds, so a broker that redelivers at once (AMQP requeue,
+  JetStream `Nak`) — or another instance on a shared store — had the redelivery acked as a
+  duplicate, and the message was gone. A failed delivery now releases its key, and a copy that
+  arrives while another is still in flight waits for it instead of being acked on its
+  strength.
+- **`deduplication` writes its marker before acking the source**, not after. A crash between
+  the two now replays a message that is already recognised.
+- **`deduplication` on MongoDB no longer fails the route on every contested key.** The upsert
+  reports a duplicate key as a command error, which was not recognised; the route reconnected
+  and the batch it held was dropped. A store error now also hands the batch back to the source
+  instead of dropping it.
+- **A nacked Kafka batch is redelivered.** Kafka commits are cumulative, so the next batch's
+  commit used to cover the nacked offsets and they were never read again. After a nack the
+  consumer stops committing and reconnects, resuming from the last committed offset.
+- **AMQP carries message identity.** The publisher now sets the `message_id` property, and the
+  consumer accepts any string id (hashing a non-UUID one) and no longer falls back to the
+  delivery tag, which restarts at 1 on every channel and gave fresh messages the ids of
+  processed ones.
+- **Python: Ctrl+C now stops a route blocked in `run()` or `join()`.** Signal handlers used
+  to wait until the route ended by itself. Now a `KeyboardInterrupt`, or any exception a
+  handler raises, stops the route cleanly and is re-raised.
+- **`mq-bridge-app`: switching publishers, consumers and tabs is fast again.** Every switch
+  re-parsed and re-compiled the whole config schema, which took 1–2 s per click and grew to
+  several seconds in the desktop app. A parsed form is now reused per schema and only its data
+  is swapped; only the first visit to each tab still builds its form.
+
+### Added
+
+- **`DeliveryGuarantee` and `required_delivery`.** Each route's inferred guarantee —
+  `at-most-once`, `at-least-once` or `effectively-once` — is logged at startup and available as
+  `Route::delivery_guarantee()`. Setting `required_delivery` on a route fails it at startup when
+  its configuration cannot meet that guarantee. `at-most-once` is new: inputs without
+  acknowledgement (`zeromq`, core NATS, MQTT QoS 0, HTTP `fire_and_forget`).
+- **Sink rows keyed on the source position.** A SQL `insert_query` or Mongo `id_field` reading
+  `mqb.src.*` position keys turns on the input's `source_metadata` automatically — the Kafka
+  Connect `pk.mode=kafka` pattern — and counts as effectively-once over an input with a replay
+  position.
+- **Custom endpoints and plugins declare their delivery.** `CustomEndpointFactory` gains
+  `idempotent_sink` and `acknowledges`, defaulting to the `x-mqb-idempotent-sink` /
+  `x-mqb-acknowledges` annotations in the endpoint's config schema — so plugins take part without
+  an ABI change, and existing factories keep reporting at-least-once.
+- **`deduplication.replay_response`** (opt-in): answer a duplicate request with the reply its
+  first delivery produced, stored next to the marker.
+- A startup warning when `deduplication` keys on a `message_id` that its input mints fresh on
+  every read.
+- **Graceful shutdown in the library: `mq_bridge::shutdown`.** A process-wide latch
+  (`request_shutdown()`, `shutdown_requested().await`) and `stop_all_routes()`. Rust apps can
+  opt in to `install_signal_handlers(on_repeat)`, which sets the latch on SIGINT/SIGTERM and
+  hands a second signal's exit code (130/143) to the caller. Call it before loading a Go
+  plugin. The CLI now uses it in place of its own handlers.
+- **Python and Node: `request_shutdown()` / `requestShutdown()`** and
+  `is_shutdown_requested()` / `isShutdownRequested()`. Every route stops once shutdown is
+  requested, so a host's own signal handling can drive it.
+- **Node: `Route.wait()`**, a promise that resolves once the route stops. Unlike `join()`, it
+  leaves the event loop running, so `process.on("SIGINT")` handlers still fire.
+- **`mq-bridge-app`: edit the config as JSON or YAML.** The JSON view of a publisher, a
+  consumer and the whole app config is now editable, with a JSON/YAML toggle, live syntax
+  errors and an Apply button. It is a fallback for when the generated form gets in the way.
+
+### Changed
+
+- The startup inference no longer reports `effectively-once` for a sink keyed on `mqb.src.*`
+  over an input that has no replay position.
+- `DeduplicationMiddleware` has a new `replay_response` field; code building it as a struct
+  literal must add `replay_response: false`. Configuration files are unaffected.
+- The SQL dedup store marks an in-flight claim with a negative `expire_at` on the key's own
+  row, so claiming stays one INSERT and committing one UPDATE; no migration. During a rolling
+  upgrade an older instance's sweep deletes those claims, which can let a duplicate through —
+  never a loss.
+
 ## 0.4.13
 
 ### Added
@@ -116,7 +191,7 @@ All notable changes to `mq-bridge`. Newest first.
   reserves the `x-` prefix for annotations, so the document stays a plain schema.
   `subscheme` is for a plugin that is a gateway to a family of protocols rather than one
   transport: it takes the scheme's part after a `+`, so
-  `redpanda+mqtt://localhost:1883/orders` names the plugin, the protocol and the address in
+  `connect+mqtt://localhost:1883/orders` names the plugin, the protocol and the address in
   one line — the spelling `git+ssh://` and `postgresql+psycopg2://` made familiar. The rest
   of the URI then describes the inner protocol, so `origin` and `url` are handed over
   carrying the inner scheme (`mqtt://localhost:1883`) rather than the compound one. One document serves both

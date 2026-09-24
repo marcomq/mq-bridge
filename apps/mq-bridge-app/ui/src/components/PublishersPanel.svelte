@@ -33,6 +33,7 @@
     copyPublisherAsCurl,
     copyCurrentPublisherAction,
     currentPublisherConfigVariants,
+    applyCurrentPublisherRawConfig,
     importAsyncApiToPublisherAction,
     importMqbToPublisherAction,
     importOpenApiToPublisherAction,
@@ -804,9 +805,10 @@
 
 <JsonPreviewDialog
   open={configJsonOpen}
-  title="Publisher Configuration JSON"
+  title="Publisher Configuration"
   variants={configJsonVariants}
   onClose={() => (configJsonOpen = false)}
+  onApply={(_variantId, value) => applyCurrentPublisherRawConfig(value)}
 />
 
 <style>

@@ -28,7 +28,7 @@
 
 use crate::checkpoint::{self, CheckpointBackend, CheckpointStore};
 use crate::endpoints::file::{encode_record, parse_delimiter, parse_message};
-use crate::models::{Compression, FileFormat, NameBy, ObjectStoreConfig};
+use crate::models::{Compression, DatePartitionStyle, FileFormat, NameBy, ObjectStoreConfig};
 #[cfg(feature = "encryption")]
 use crate::support::crypto::Crypto;
 use crate::support::source_ranges::{
@@ -88,8 +88,11 @@ fn extension_for(format: &FileFormat, compression: Compression, encrypted: bool)
         FileFormat::Normal | FileFormat::Json | FileFormat::Text => "jsonl",
         FileFormat::Csv => "csv",
         FileFormat::Raw => "bin",
+        // The codec lives inside the Parquet file, so there is no outer compression suffix.
+        FileFormat::Parquet => "parquet",
     };
     let mut ext = match compression {
+        _ if *format == FileFormat::Parquet => base.to_string(),
         Compression::None => base.to_string(),
         Compression::Gzip => format!("{base}.gz"),
         Compression::Lz4 => format!("{base}.lz4"),
@@ -101,8 +104,14 @@ fn extension_for(format: &FileFormat, compression: Compression, encrypted: bool)
     ext
 }
 
-/// Rejects `compression`/`encryption` settings whose Cargo feature is missing.
+/// Rejects `format`/`compression`/`encryption` settings whose Cargo feature is missing.
 fn validate_object_settings(_config: &ObjectStoreConfig) -> anyhow::Result<()> {
+    #[cfg(not(feature = "parquet"))]
+    if _config.format == FileFormat::Parquet {
+        return Err(anyhow!(
+            "object_store 'format: parquet' requires the `parquet` feature"
+        ));
+    }
     #[cfg(not(feature = "compression"))]
     if _config.compression != Compression::None {
         return Err(anyhow!(
@@ -225,6 +234,36 @@ fn split_and_parse(data: &[u8], delimiter: &[u8], format: &FileFormat) -> Vec<Ca
     out
 }
 
+/// One object's worth of encoded records: delimited bytes, or the rows of a Parquet body.
+#[derive(Default)]
+struct ObjectBody {
+    bytes: Vec<u8>,
+    rows: Vec<serde_json::Value>,
+}
+
+impl ObjectBody {
+    fn push(
+        &mut self,
+        msg: &CanonicalMessage,
+        format: &FileFormat,
+        delimiter: &[u8],
+    ) -> anyhow::Result<()> {
+        #[cfg(feature = "parquet")]
+        if *format == FileFormat::Parquet {
+            self.rows
+                .push(crate::support::parquet::parse_row(&msg.payload)?);
+            return Ok(());
+        }
+        self.bytes.extend_from_slice(&encode_record(msg, format)?);
+        self.bytes.extend_from_slice(delimiter);
+        Ok(())
+    }
+
+    fn is_empty(&self) -> bool {
+        self.bytes.is_empty() && self.rows.is_empty()
+    }
+}
+
 fn empty_batch() -> ReceivedBatch {
     ReceivedBatch {
         messages: Vec::new(),
@@ -246,6 +285,7 @@ pub struct ObjectStorePublisher {
     #[cfg(feature = "encryption")]
     crypto: Option<Arc<Crypto>>,
     date_partition: bool,
+    hive_partition: bool,
     extension: String,
     name_by: NameBy,
     /// Ranges already on the store, filled by one listing before the first idempotent write.
@@ -305,6 +345,7 @@ impl ObjectStorePublisher {
                 .transpose()?
                 .map(Arc::new),
             date_partition: config.date_partition_enabled(name_by),
+            hive_partition: config.date_partition_style == DatePartitionStyle::Hive,
             extension,
             name_by,
             covered_ranges: Arc::new(Mutex::new(CoveredRanges::default())),
@@ -331,11 +372,20 @@ impl ObjectStorePublisher {
         if self.date_partition {
             // Top 48 bits of a uuidv7 are the Unix-epoch millisecond timestamp.
             let (y, m, d) = civil_from_unix_ms((id >> 80) as u64);
+            let (y, m, d) = if self.hive_partition {
+                (
+                    format!("year={y:04}"),
+                    format!("month={m:02}"),
+                    format!("day={d:02}"),
+                )
+            } else {
+                (format!("{y:04}"), format!("{m:02}"), format!("{d:02}"))
+            };
             self.base
                 .clone()
-                .join(format!("{y:04}").as_str())
-                .join(format!("{m:02}").as_str())
-                .join(format!("{d:02}").as_str())
+                .join(y.as_str())
+                .join(m.as_str())
+                .join(d.as_str())
                 .join(name.as_str())
         } else {
             self.base.clone().join(name.as_str())
@@ -347,10 +397,20 @@ impl ObjectStorePublisher {
     /// envelope — no framing, because objects are written and read whole. Both write paths go
     /// through here, so an idempotent part object is shaped exactly like an ordinary one and
     /// [`ObjectStoreConsumer::decode_object`] reads either without knowing which wrote it.
+    /// Parquet compresses its columns itself, so it skips the outer compression.
     #[allow(unused_mut)]
-    fn encode_object_body(&self, mut body: Vec<u8>) -> Result<Vec<u8>, PublisherError> {
+    fn encode_object_body(&self, body: ObjectBody) -> Result<Vec<u8>, PublisherError> {
+        #[cfg(feature = "parquet")]
+        let mut body = if self.format == FileFormat::Parquet {
+            crate::support::parquet::encode_rows(&body.rows, self.compression)
+                .map_err(PublisherError::NonRetryable)?
+        } else {
+            body.bytes
+        };
+        #[cfg(not(feature = "parquet"))]
+        let mut body = body.bytes;
         #[cfg(feature = "compression")]
-        if self.compression != Compression::None {
+        if self.compression != Compression::None && self.format != FileFormat::Parquet {
             body = crate::support::compression::compress_member(self.compression, &body)
                 .map_err(|error| PublisherError::NonRetryable(anyhow!(error)))?;
         }
@@ -441,18 +501,15 @@ impl ObjectStorePublisher {
             // the offsets around it are still written, under names covering exactly what went
             // in, and the bad record goes to the DLQ like it would on the write-time path.
             // Encode failures are a property of the record, so a replay splits identically.
-            // No format this sink accepts can actually fail today, which is why the split has
-            // no test of its own; it guards the fallible signature, not a reachable case.
+            // Only `parquet` can fail here today, on a payload that is not a JSON object.
             let mut segment_start = run.start;
             let mut segment_end = None;
-            let mut body = Vec::new();
+            let mut body = ObjectBody::default();
             for (index, mut message) in run.messages.into_iter().enumerate() {
                 let offset = run.start.saturating_add(index as u64);
                 message.strip_source_metadata();
-                match encode_record(&message, &self.format) {
-                    Ok(bytes) => {
-                        body.extend_from_slice(&bytes);
-                        body.extend_from_slice(&self.delimiter);
+                match body.push(&message, &self.format, &self.delimiter) {
+                    Ok(()) => {
                         segment_end = Some(offset);
                     }
                     Err(error) => {
@@ -468,7 +525,7 @@ impl ObjectStorePublisher {
                         // `take` above emptied the body, and it can only be non-empty when
                         // `segment_end` was set, so there is nothing left to discard here.
                         segment_start = offset.saturating_add(1);
-                        failed.push((message, PublisherError::NonRetryable(anyhow!(error))));
+                        failed.push((message, PublisherError::NonRetryable(error)));
                     }
                 }
             }
@@ -493,7 +550,7 @@ impl ObjectStorePublisher {
         source: &SourcePartition,
         start: u64,
         end: u64,
-        body: Vec<u8>,
+        body: ObjectBody,
     ) -> Result<(), PublisherError> {
         let name = finalized_name(source, start, end, &self.extension)
             .map_err(PublisherError::NonRetryable)?;
@@ -559,18 +616,12 @@ impl MessagePublisher for ObjectStorePublisher {
         if self.name_by == NameBy::SourcePosition {
             return self.send_batch_by_source_position(messages).await;
         }
-        let mut body = Vec::new();
+        let mut body = ObjectBody::default();
         let mut failed = Vec::new();
         for mut msg in messages {
             msg.strip_source_metadata();
-            match encode_record(&msg, &self.format) {
-                Ok(bytes) => {
-                    body.extend_from_slice(&bytes);
-                    body.extend_from_slice(&self.delimiter);
-                }
-                Err(e) => {
-                    failed.push((msg, PublisherError::NonRetryable(anyhow!(e))));
-                }
+            if let Err(e) = body.push(&msg, &self.format, &self.delimiter) {
+                failed.push((msg, PublisherError::NonRetryable(e)));
             }
         }
         if body.is_empty() {
@@ -624,6 +675,9 @@ struct ObjProgress {
 pub struct ObjectStoreConsumer {
     store: Arc<dyn ObjectStore>,
     base: ObjPath,
+    /// `Some(true)`: the URL names one object, read just that key. `None`: undecided until
+    /// the prefix lists something or the key itself appears.
+    single_object: Option<bool>,
     delimiter: Vec<u8>,
     format: FileFormat,
     #[cfg(feature = "compression")]
@@ -719,9 +773,19 @@ impl ObjectStoreConsumer {
             "Object-store source connected"
         );
 
+        // A URL naming an object reads that object alone, like DuckDB/Polars paths.
+        let single_object = if base.as_ref().is_empty() {
+            Some(false)
+        } else if store.head(&base).await.is_ok() {
+            Some(true)
+        } else {
+            None
+        };
+
         Ok(Self {
             store: Arc::from(store),
             base,
+            single_object,
             delimiter,
             format: config.format.clone(),
             #[cfg(feature = "compression")]
@@ -755,6 +819,7 @@ impl ObjectStoreConsumer {
         Self {
             store,
             base,
+            single_object: Some(false),
             delimiter: vec![b'\n'],
             format,
             #[cfg(feature = "compression")]
@@ -775,13 +840,39 @@ impl ObjectStoreConsumer {
     /// Fetches the next object strictly after `last` (in key order), skipping directory
     /// markers. Relies on the store listing keys in lexicographic order (S3/GCS/Azure/local
     /// /in-memory all do); `list_with_offset` also filters server-side when resuming.
-    async fn next_object(&self, last: Option<&str>) -> anyhow::Result<Option<(String, Vec<u8>)>> {
+    async fn next_object(
+        &mut self,
+        last: Option<&str>,
+    ) -> anyhow::Result<Option<(String, Vec<u8>)>> {
+        // An exact key may be written after the consumer starts; decide on first sight.
+        if self.single_object.is_none() {
+            let listed = self.store.list(Some(&self.base)).next().await.transpose()?;
+            if listed.is_some() {
+                self.single_object = Some(false);
+            } else if self.store.head(&self.base).await.is_ok() {
+                self.single_object = Some(true);
+            }
+        }
+        // In prefix mode the exact key still counts; it sorts before its children.
+        let exact = match last {
+            _ if self.single_object == Some(true) || self.base.as_ref().is_empty() => None,
+            Some(k) if k >= self.base.as_ref() => None,
+            _ => self.store.head(&self.base).await.ok(),
+        };
         let mut stream = match last {
+            _ if self.single_object == Some(true) => {
+                futures::stream::once(self.store.head(&self.base)).boxed()
+            }
             Some(k) => self
                 .store
                 .list_with_offset(Some(&self.base), &ObjPath::from(k)),
             None => self.store.list(Some(&self.base)),
         };
+        if let Some(meta) = exact {
+            stream = futures::stream::once(async { Ok(meta) })
+                .chain(stream)
+                .boxed();
+        }
         while let Some(meta) = stream.next().await {
             let meta = meta?;
             let key = meta.location.to_string();
@@ -818,11 +909,22 @@ impl ObjectStoreConsumer {
     /// `max_object_bytes` caps the *stored* size (see `next_object`), so reusing it here
     /// would reject any object that compressed better than 1:1 — i.e. most of them. Scale
     /// it instead; the result is still bounded, so a decompression bomb cannot run away.
-    #[cfg(feature = "compression")]
+    #[cfg(any(feature = "compression", feature = "parquet"))]
     fn decompressed_limit(&self) -> Option<u64> {
         const MAX_DECOMPRESSED_EXPANSION: u64 = 20;
         self.max_object_bytes
             .map(|limit| limit.saturating_mul(MAX_DECOMPRESSED_EXPANSION))
+    }
+
+    /// Decodes a fetched object into its messages: decrypt, decompress, then split and parse.
+    fn decode_records(&self, key: &str, data: Vec<u8>) -> anyhow::Result<Vec<CanonicalMessage>> {
+        let data = self.decode_object(key, data)?;
+        #[cfg(feature = "parquet")]
+        if self.format == FileFormat::Parquet {
+            return crate::support::parquet::decode_rows(data, self.decompressed_limit())
+                .with_context(|| format!("decode parquet object '{key}'"));
+        }
+        Ok(split_and_parse(&data, &self.delimiter, &self.format))
     }
 
     /// Decrypt-then-decompress a fetched object whole (the write path compressed first).
@@ -837,7 +939,7 @@ impl ObjectStoreConsumer {
             data
         };
         #[cfg(feature = "compression")]
-        let data = if self.compression != Compression::None {
+        let data = if self.compression != Compression::None && self.format != FileFormat::Parquet {
             crate::support::compression::decompress_all(
                 self.compression,
                 &data,
@@ -893,11 +995,11 @@ impl MessageConsumer for ObjectStoreConsumer {
                     Some((key, raw)) => {
                         // Decode here so a poison object is bounded-retried then
                         // quarantined (cursor advanced past it) rather than looping forever.
-                        let data = match self.decode_object(&key, raw) {
-                            Ok(data) => {
+                        let records = match self.decode_records(&key, raw) {
+                            Ok(records) => {
                                 self.decode_failing_key = None;
                                 self.decode_failures = 0;
-                                data
+                                records
                             }
                             Err(e) => {
                                 if self.decode_failing_key.as_deref() == Some(key.as_str()) {
@@ -937,7 +1039,6 @@ impl MessageConsumer for ObjectStoreConsumer {
                                 return Ok(empty_batch());
                             }
                         };
-                        let records = split_and_parse(&data, &self.delimiter, &self.format);
                         if records.is_empty() {
                             // No data records (e.g. a lone CSV header): advance past it so we
                             // don't re-list it forever, then idle.
@@ -1146,6 +1247,7 @@ mod tests {
             #[cfg(feature = "encryption")]
             crypto: None,
             date_partition: false,
+            hive_partition: false,
             extension: "jsonl".to_string(),
             name_by: NameBy::WriteTime,
             covered_ranges: Arc::new(Mutex::new(CoveredRanges::default())),
@@ -1166,6 +1268,25 @@ mod tests {
             })
             .collect();
         assert!(keys.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
+    #[test]
+    fn hive_style_names_the_date_folders() {
+        let mut publisher = test_publisher(Arc::new(InMemory::new()));
+        publisher.date_partition = true;
+        publisher.hive_partition = true;
+        let key = publisher.next_key().to_string();
+        let parts: Vec<&str> = key.split('/').collect();
+        assert_eq!(parts.len(), 5, "{key}");
+        assert!(
+            parts[1].starts_with("year=") && parts[1].len() == 9,
+            "{key}"
+        );
+        assert!(
+            parts[2].starts_with("month=") && parts[2].len() == 8,
+            "{key}"
+        );
+        assert!(parts[3].starts_with("day=") && parts[3].len() == 6, "{key}");
     }
 
     fn kafka_message(offset: i64) -> CanonicalMessage {
@@ -2136,6 +2257,88 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_url_naming_one_object_reads_only_that_object() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.jsonl"), b"{\"n\":1}\n").unwrap();
+        std::fs::write(dir.path().join("a.jsonl.bak"), b"{\"n\":2}\n").unwrap();
+        let config = ObjectStoreConfig {
+            url: format!("file://{}/a.jsonl", dir.path().display()),
+            format: FileFormat::Json,
+            polling_interval_ms: Some(1),
+            ..Default::default()
+        };
+
+        let mut consumer = ObjectStoreConsumer::new(&config).await.unwrap();
+        let batch = consumer.receive_batch(10).await.unwrap();
+        assert_eq!(batch.messages.len(), 1);
+        assert_eq!(batch.messages[0].payload.as_ref(), br#"{"n":1}"#);
+        (batch.commit)(vec![MessageDisposition::Ack]).await.unwrap();
+        assert!(consumer
+            .receive_batch(10)
+            .await
+            .unwrap()
+            .messages
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_url_naming_one_object_reads_it_once_it_is_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = ObjectStoreConfig {
+            url: format!("file://{}/a.jsonl", dir.path().display()),
+            format: FileFormat::Json,
+            polling_interval_ms: Some(1),
+            ..Default::default()
+        };
+
+        let mut consumer = ObjectStoreConsumer::new(&config).await.unwrap();
+        assert!(consumer
+            .receive_batch(10)
+            .await
+            .unwrap()
+            .messages
+            .is_empty());
+        std::fs::write(dir.path().join("a.jsonl"), b"{\"n\":1}\n").unwrap();
+        let batch = consumer.receive_batch(10).await.unwrap();
+        assert_eq!(batch.messages.len(), 1);
+        assert_eq!(batch.messages[0].payload.as_ref(), br#"{"n":1}"#);
+    }
+
+    #[tokio::test]
+    async fn an_exact_key_written_after_a_child_is_still_read() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let mut consumer = ObjectStoreConsumer::from_store(
+            store.clone(),
+            ObjPath::from("a"),
+            FileFormat::Json,
+            None,
+            None,
+        );
+        consumer.single_object = None;
+        store
+            .put(&ObjPath::from("a/child"), b"{\"n\":2}\n".to_vec().into())
+            .await
+            .unwrap();
+        store
+            .put(&ObjPath::from("a"), b"{\"n\":1}\n".to_vec().into())
+            .await
+            .unwrap();
+
+        let mut payloads = Vec::new();
+        for _ in 0..2 {
+            let batch = consumer.receive_batch(10).await.unwrap();
+            payloads.extend(batch.messages.iter().map(|m| m.payload.to_vec()));
+            (batch.commit)(vec![MessageDisposition::Ack; batch.messages.len()])
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            payloads,
+            vec![br#"{"n":1}"#.to_vec(), br#"{"n":2}"#.to_vec()]
+        );
+    }
+
+    #[tokio::test]
     async fn nacked_records_are_redelivered() {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let publisher = test_publisher(store.clone());
@@ -2170,5 +2373,166 @@ mod tests {
 
         let drained = consumer.receive_batch(10).await.unwrap();
         assert!(drained.messages.is_empty());
+    }
+
+    #[test]
+    fn parquet_extension_carries_no_compression_suffix() {
+        assert_eq!(
+            extension_for(&FileFormat::Parquet, Compression::Zstd, false),
+            "parquet"
+        );
+        assert_eq!(
+            extension_for(&FileFormat::Parquet, Compression::Gzip, true),
+            "parquet.enc"
+        );
+    }
+
+    #[cfg(feature = "parquet")]
+    async fn object_bytes(store: &dyn ObjectStore, key: &str) -> Vec<u8> {
+        let key = ObjPath::from(key);
+        store
+            .get(&key)
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap()
+            .to_vec()
+    }
+
+    #[cfg(feature = "parquet")]
+    #[tokio::test]
+    async fn parquet_round_trips_typed_rows_for_every_codec() {
+        let rows = [
+            serde_json::json!({"id": 1, "name": "alice", "score": 1.5, "active": true}),
+            serde_json::json!({"id": 2, "name": "bob", "score": 2.25, "active": false}),
+            serde_json::json!({"id": 3, "name": "carol", "score": 3.0, "active": true}),
+        ];
+        for compression in [
+            Compression::None,
+            Compression::Gzip,
+            Compression::Lz4,
+            Compression::Zstd,
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let config = ObjectStoreConfig {
+                url: format!("file://{}", dir.path().display()),
+                format: FileFormat::Parquet,
+                compression,
+                date_partition: Some(false),
+                polling_interval_ms: Some(1),
+                ..Default::default()
+            };
+            let publisher = ObjectStorePublisher::new(&config).await.unwrap();
+            publisher
+                .send_batch(rows.iter().cloned().map(json_msg).collect())
+                .await
+                .unwrap();
+
+            let files: Vec<_> = std::fs::read_dir(dir.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .collect();
+            assert_eq!(files.len(), 1);
+            assert_eq!(files[0].extension().unwrap(), "parquet");
+            let bytes = std::fs::read(&files[0]).unwrap();
+            assert!(bytes.starts_with(b"PAR1") && bytes.ends_with(b"PAR1"));
+
+            let mut consumer = ObjectStoreConsumer::new(&config).await.unwrap();
+            let batch = consumer.receive_batch(10).await.unwrap();
+            let read: Vec<serde_json::Value> = batch
+                .messages
+                .iter()
+                .map(|m| serde_json::from_slice(&m.payload).unwrap())
+                .collect();
+            assert_eq!(read, rows, "{compression:?}");
+            assert_eq!(
+                batch.messages[0]
+                    .metadata
+                    .get("mq_bridge.original_format")
+                    .map(String::as_str),
+                Some("parquet")
+            );
+            (batch.commit)(vec![MessageDisposition::Ack; 3])
+                .await
+                .unwrap();
+        }
+    }
+
+    #[cfg(feature = "parquet")]
+    #[tokio::test]
+    async fn parquet_sink_fails_only_non_object_rows() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let mut publisher = test_publisher(store.clone());
+        publisher.format = FileFormat::Parquet;
+        publisher.extension = "parquet".to_string();
+        let sent = publisher
+            .send_batch(vec![
+                json_msg(serde_json::json!({"n": 1})),
+                json_msg(serde_json::json!([1, 2])),
+                CanonicalMessage::new(b"not json".to_vec(), None),
+                json_msg(serde_json::json!({"n": 2})),
+            ])
+            .await
+            .unwrap();
+        let SentBatch::Partial { failed, .. } = sent else {
+            panic!("expected a partial send");
+        };
+        assert_eq!(failed.len(), 2);
+
+        let keys = keys(store.as_ref()).await;
+        assert_eq!(keys.len(), 1);
+        let rows = crate::support::parquet::decode_rows(
+            object_bytes(store.as_ref(), &keys[0]).await,
+            None,
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 2);
+    }
+
+    #[cfg(feature = "parquet")]
+    #[tokio::test]
+    async fn parquet_parts_by_source_position_split_at_a_bad_row() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let mut publisher = test_publisher(store.clone());
+        publisher.format = FileFormat::Parquet;
+        publisher.compression = Compression::Zstd;
+        publisher.extension = extension_for(&FileFormat::Parquet, Compression::Zstd, false);
+        publisher.name_by = NameBy::SourcePosition;
+        let mut bad = kafka_message(1);
+        bad.payload = b"\"a string\"".to_vec().into();
+        let sent = publisher
+            .send_batch(vec![kafka_message(0), bad, kafka_message(2)])
+            .await
+            .unwrap();
+        assert!(matches!(sent, SentBatch::Partial { ref failed, .. } if failed.len() == 1));
+
+        assert_eq!(
+            keys(store.as_ref()).await,
+            vec![
+                part_key(0, 0, "parquet").to_string(),
+                part_key(2, 2, "parquet").to_string(),
+            ]
+        );
+
+        let mut consumer = ObjectStoreConsumer::from_store(
+            store,
+            ObjPath::from("data"),
+            FileFormat::Parquet,
+            None,
+            None,
+        );
+        let mut offsets = Vec::new();
+        for _ in 0..2 {
+            let batch = consumer.receive_batch(10).await.unwrap();
+            for message in &batch.messages {
+                let row: serde_json::Value = serde_json::from_slice(&message.payload).unwrap();
+                offsets.push(row["offset"].as_i64().unwrap());
+            }
+            (batch.commit)(vec![MessageDisposition::Ack; batch.messages.len()])
+                .await
+                .unwrap();
+        }
+        assert_eq!(offsets, vec![0, 2]);
     }
 }

@@ -403,6 +403,7 @@ feature (pulls `sled`).
 | `sled_path` | string | one of `store`/`sled_path` |
 | `ttl_seconds` | integer | yes |
 | `key` | string | no (defaults to `message_id`) |
+| `replay_response` | bool | no (default `false`) |
 
 `key` is an interpolation template (see `${namespace:selector}`), typically
 `"${payload:order_id}"`. Without it the key is the `message_id`, which most sources
@@ -426,6 +427,15 @@ dedup to survive a re-read.
 
 `sled_path` is the legacy spelling of a local sled store and is equivalent to `store: "sled://<path>"`.
 
+A shared store's default collection/table is named after the route, so replicas of one route
+must run under the same route name. A copy whose key is still in flight elsewhere waits for that
+delivery instead of being dropped; a failed delivery releases its key at once. The ordering and
+its crash windows are in [DELIVERY.md](DELIVERY.md#the-deduplication-middleware).
+
+`replay_response: true` answers a duplicate request with the reply its first delivery produced,
+stored next to the marker for the TTL — for request/reply inputs whose callers retry. Off by
+default.
+
 ```yaml middleware
 - deduplication: { store: "sled:///var/lib/mq-bridge/dedup", ttl_seconds: 3600 }
 ```
@@ -440,6 +450,10 @@ dedup to survive a re-read.
 
 ```yaml middleware
 - deduplication: { store: "sled:///var/lib/mq-bridge/dedup", ttl_seconds: 3600, key: "${payload:order_id}" }
+```
+
+```yaml middleware
+- deduplication: { store: "sled:///var/lib/mq-bridge/dedup", ttl_seconds: 600, key: "${metadata:idempotency-key}", replay_response: true }
 ```
 
 When MongoDB is your sink and messages carry a business key, prefer the sink's own unique
@@ -627,7 +641,8 @@ output:
 Both endpoints accept the same `compression` and `encryption` fields (`object_store`
 derives its default object extension from them, e.g. `.jsonl.gz` / `.jsonl.lz4`, and adds a
 trailing `.enc` when encryption is on since the object is ciphertext, not a directly
-decompressible `.gz`). An
+decompressible `.gz`). With `format: parquet` (object_store only) `compression` sets the
+Parquet column codec instead and the extension stays `.parquet`. An
 encrypted **file** is written as length-prefixed sealed frames (one per batch) and is only
 readable through a matching consumer; a compressed-only file stays a standard `.gz`/`.lz4`
 stream. File compression/encryption supports only the default `consume` mode. `csv` works

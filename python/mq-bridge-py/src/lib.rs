@@ -47,6 +47,8 @@ use tracing_subscriber::util::SubscriberInitExt;
 const MAX_JSON_DEPTH: usize = 64;
 /// How often a blocking `run()`/`join()` checks whether the route ended on its own.
 const ROUTE_END_POLL_INTERVAL: Duration = Duration::from_millis(25);
+/// How often a blocking `run()`/`join()` returns to Python to run signal handlers.
+const SIGNAL_CHECK_INTERVAL: Duration = Duration::from_millis(50);
 
 static PYTHON_HANDLER_CONCURRENCY: OnceLock<Option<Arc<Semaphore>>> = OnceLock::new();
 static ACTIVE_ROUTE_NAMES: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
@@ -1237,26 +1239,50 @@ impl Route {
     /// on its own — a drained source under `exit_on_empty`, or an exhausted
     /// stream. Raises if the route ended on a permanent error. Use `start()`
     /// instead if you want to keep running Python code after the route is up.
+    ///
+    /// Python signal handlers keep running while it blocks: a `KeyboardInterrupt`
+    /// (or any exception a handler raises) stops the route gracefully and is then
+    /// re-raised.
     fn run(&self, py: Python<'_>) -> PyResult<()> {
         let route = self.lock_route()?.clone();
         let stop_rx = self.begin_run()?;
         let name = self.name.clone();
         let deployed_name = name.clone();
-        let runtime = Arc::clone(&self.runtime);
         let run_state = Arc::clone(&self.run_state);
 
-        py.detach(move || {
-            let result = runtime.block_on(async move {
+        let mut task = self.runtime.spawn(async move {
+            let result = async {
                 route.deploy(&deployed_name).await?;
                 let outcome = wait_for_stop_or_end(&deployed_name, stop_rx).await;
                 let result = outcome_to_result(&deployed_name, outcome);
                 core::Route::stop(&deployed_name).await;
                 result
-            });
+            }
+            .await;
             finish_run(&run_state, &name);
             result
-        })
-        .map_err(to_py_runtime_error)
+        });
+
+        let runtime = Arc::clone(&self.runtime);
+        loop {
+            let joined = py.detach(|| {
+                runtime.block_on(async {
+                    tokio::time::timeout(SIGNAL_CHECK_INTERVAL, &mut task)
+                        .await
+                        .ok()
+                })
+            });
+            if let Some(joined) = joined {
+                return joined
+                    .map_err(to_py_runtime_error)?
+                    .map_err(to_py_runtime_error);
+            }
+            if let Err(interrupt) = py.check_signals() {
+                self.stop()?;
+                let _ = py.detach(|| runtime.block_on(task));
+                return Err(interrupt);
+            }
+        }
     }
 
     /// Deploy the route and return immediately, running it on a background
@@ -1320,9 +1346,19 @@ impl Route {
     /// `stop()` or by ending on its own (a drained source under `exit_on_empty`,
     /// an exhausted stream). Raises if the route ended on a permanent error.
     /// No-op for routes that were never started or that ran via `run()`.
+    /// Like `run()`, an exception from a signal handler stops the route and is
+    /// re-raised.
     fn join(&self, py: Python<'_>) -> PyResult<()> {
         let handle = self.lock_run_state()?.join_handle.take();
         if let Some(handle) = handle {
+            while !handle.is_finished() {
+                py.detach(|| thread::sleep(SIGNAL_CHECK_INTERVAL));
+                if let Err(interrupt) = py.check_signals() {
+                    self.stop()?;
+                    let _ = py.detach(|| handle.join());
+                    return Err(interrupt);
+                }
+            }
             py.detach(|| handle.join())
                 .map_err(|_| PyRuntimeError::new_err("Route background thread panicked"))?;
         }
@@ -2730,8 +2766,8 @@ fn lock_active_route_names() -> PyResult<std::sync::MutexGuard<'static, HashSet<
 /// source under `exit_on_empty`, an exhausted stream, or a permanent failure.
 ///
 /// Returns the terminal outcome when the route ended by itself, `None` when a
-/// stop was requested. Without this a drain-then-exit route would block its
-/// caller forever on a stop signal that never arrives.
+/// stop or a process-wide shutdown was requested. Without this a drain-then-exit
+/// route would block its caller forever on a stop signal that never arrives.
 async fn wait_for_stop_or_end(
     name: &str,
     stop_rx: oneshot::Receiver<()>,
@@ -2740,6 +2776,7 @@ async fn wait_for_stop_or_end(
     loop {
         tokio::select! {
             _ = &mut stop_rx => return None,
+            _ = core::shutdown::shutdown_requested() => return None,
             _ = tokio::time::sleep(ROUTE_END_POLL_INTERVAL) => {
                 if let Some(outcome) = core::route_outcome(name) {
                     return Some(outcome);
@@ -2949,6 +2986,22 @@ fn init_logging(level: Option<String>) -> PyResult<()> {
     Ok(())
 }
 
+/// Request a graceful shutdown of every route: running ones stop, and ones
+/// started afterwards stop immediately. Wire it to your own signal handling, e.g.
+/// `signal.signal(signal.SIGTERM, lambda *_: mq_bridge.request_shutdown())`.
+/// Returns `True` only for the first request, so a caller can force-exit on the
+/// second. The request cannot be undone.
+#[pyfunction]
+fn request_shutdown() -> bool {
+    core::shutdown::request_shutdown()
+}
+
+/// `True` once `request_shutdown()` has been called.
+#[pyfunction]
+fn is_shutdown_requested() -> bool {
+    core::shutdown::is_shutdown_requested()
+}
+
 #[pymodule(gil_used = true)]
 #[pyo3(name = "_mq_bridge")]
 fn _mq_bridge(module: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -2961,6 +3014,8 @@ fn _mq_bridge(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("__version__", env!("CARGO_PKG_VERSION"))?;
     module.add_function(wrap_pyfunction!(config_schema, module)?)?;
     module.add_function(wrap_pyfunction!(init_logging, module)?)?;
+    module.add_function(wrap_pyfunction!(is_shutdown_requested, module)?)?;
+    module.add_function(wrap_pyfunction!(request_shutdown, module)?)?;
     module.add_function(wrap_pyfunction!(load_endpoint_plugin, module)?)?;
     module.add_function(wrap_pyfunction!(register_endpoint, module)?)?;
     module.add_function(wrap_pyfunction!(register_middleware, module)?)?;

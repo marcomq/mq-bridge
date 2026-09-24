@@ -17,8 +17,8 @@ import { hasEncryptedMessages, resolveStorageSecurity } from "./storage-security
 
 export type ImportedRequest = PublisherPreset;
 
-// One selectable format in the config-JSON preview dialog.
-export type ConfigJsonVariant = { id: string; label: string; value: string };
+// One selectable view in the config preview dialog; `editable` views can be applied back.
+export type ConfigJsonVariant = { id: string; label: string; value: unknown; editable?: boolean };
 
 type ExportBundle = {
   type: "mqb-export";
@@ -661,6 +661,10 @@ export function extractImportedRequests(text: string): {
     throw new Error("Unsupported file. Use Postman collection JSON, OpenAPI JSON, or AsyncAPI JSON.");
   }
   return result;
+}
+
+export async function replaceAppConfig(config: Record<string, unknown>) {
+  await saveImportedConfig(config);
 }
 
 async function saveImportedConfig(config: Record<string, unknown>) {

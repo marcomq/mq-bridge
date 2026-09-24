@@ -24,6 +24,7 @@
     cloneCurrentConsumerAction,
     copyCurrentConsumerAction,
     currentConsumerConfigVariants,
+    applyCurrentConsumerRawConfig,
     deleteCurrentConsumerAction,
     importAsyncApiToConsumerAction,
     importMqbToConsumerAction,
@@ -765,9 +766,10 @@
 
 <JsonPreviewDialog
   open={configJsonOpen}
-  title="Consumer Configuration JSON"
+  title="Consumer Configuration"
   variants={configJsonVariants}
   onClose={() => (configJsonOpen = false)}
+  onApply={(_variantId, value) => applyCurrentConsumerRawConfig(value)}
 />
 
 <style>

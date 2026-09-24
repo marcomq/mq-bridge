@@ -472,6 +472,21 @@
       },
       "additionalProperties": false
     },
+    "DatePartitionStyle": {
+      "description": "Layout of the object_store sink's date folders.",
+      "oneOf": [
+        {
+          "description": "`YYYY/MM/DD/`.",
+          "type": "string",
+          "const": "nested"
+        },
+        {
+          "description": "`year=YYYY/month=MM/day=DD/`, read as partition columns by Spark, DuckDB, DataFusion, Athena.",
+          "type": "string",
+          "const": "hive"
+        }
+      ]
+    },
     "DeadLetterQueueMiddleware": {
       "description": "Dead-Letter Queue (DLQ) middleware configuration.\n\nRoutes failed messages to a designated endpoint for later analysis and recovery.\nIt is recommended to pair this with the Retry middleware to avoid message loss.\n\nFailed messages are sent to the configured endpoint when they are exhausted after retry attempts.",
       "type": "object",
@@ -497,6 +512,10 @@
             "null"
           ],
           "default": null
+        },
+        "replay_response": {
+          "description": "Answer a duplicate request with the reply its first delivery produced. Off by default.",
+          "type": "boolean"
         },
         "sled_path": {
           "description": "Local Sled directory (legacy). Prefer `store`.",
@@ -540,6 +559,26 @@
       "additionalProperties": false,
       "required": [
         "delay_ms"
+      ]
+    },
+    "DeliveryGuarantee": {
+      "description": "What a route guarantees about its sink effect, as inferred from its configuration.\n\nOrdered weakest to strongest, so a requirement is met by any guarantee `>=` it.",
+      "oneOf": [
+        {
+          "description": "The source forgets a message once it hands it over; a crash can lose it.",
+          "type": "string",
+          "const": "at_most_once"
+        },
+        {
+          "description": "Acked only after the sink accepted it; a crash or retry can repeat the write.",
+          "type": "string",
+          "const": "at_least_once"
+        },
+        {
+          "description": "At-least-once delivery absorbed by an idempotent sink write: the effect lands once.",
+          "type": "string",
+          "const": "effectively_once"
+        }
       ]
     },
     "DetailedMappingRule": {
@@ -981,6 +1020,18 @@
           "type": "object",
           "format": "structural_endpoint",
           "properties": {
+            "sequence": {
+              "$ref": "#/$defs/SequenceConfig"
+            }
+          },
+          "required": [
+            "sequence"
+          ]
+        },
+        {
+          "type": "object",
+          "format": "structural_endpoint",
+          "properties": {
             "stream_buffer": {
               "$ref": "#/$defs/StreamBufferConfig"
             }
@@ -1255,6 +1306,11 @@
           "description": "CSV rows mapped to/from JSON objects (string values only). The first row is the header/schema.",
           "type": "string",
           "const": "csv"
+        },
+        {
+          "description": "Parquet, one object per batch, JSON-object rows (object_store only; `parquet` feature).",
+          "type": "string",
+          "const": "parquet"
         }
       ]
     },
@@ -2906,6 +2962,11 @@
           ],
           "default": null
         },
+        "date_partition_style": {
+          "description": "(Sink only) Date folder layout: `nested` (`YYYY/MM/DD/`) or `hive` (`year=YYYY/month=MM/day=DD/`).",
+          "$ref": "#/$defs/DatePartitionStyle",
+          "default": "nested"
+        },
         "delimiter": {
           "description": "Record delimiter within an object. Defaults to newline (\"\\n\"). Can be a string or a\nhex sequence (e.g. \"0x00\").",
           "type": [
@@ -2933,7 +2994,7 @@
           ]
         },
         "format": {
-          "description": "Record encoding within an object, shared with the file endpoint. Defaults to\n`normal` (one JSON `CanonicalMessage` per line). CSV is supported for sources only.",
+          "description": "Record encoding within an object, shared with the file endpoint. Defaults to\n`normal` (one JSON `CanonicalMessage` per line). CSV is source-only; Parquet needs the `parquet` feature.",
           "$ref": "#/$defs/FileFormat",
           "default": "normal"
         },
@@ -3034,6 +3095,17 @@
           ],
           "format": "password"
         },
+        "consume": {
+          "description": "(Consumer only) What to read: `capture_new` (default, changes only), `capture_all`\n(backfill the tables first, then changes) or `snapshot` (backfill only).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PostgresConsume"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "create_publication": {
           "description": "Create the `publication` if missing (default false; leave off if it pre-exists).\nNeeds table ownership for `publication_tables`, or superuser when none are set (`FOR ALL TABLES`).",
           "type": "boolean",
@@ -3107,6 +3179,26 @@
       "required": [
         "url",
         "publication"
+      ]
+    },
+    "PostgresConsume": {
+      "description": "How a `postgres_cdc` endpoint consumes its publication. The intent-named counterpart of\n[`MongoConsume`], so the two CDC endpoints read alike.\n\n`consumer` has no Postgres meaning — a replication slot is not a work queue; use a `sqlx`\nendpoint for competing consumers.",
+      "oneOf": [
+        {
+          "description": "**Stream changes only** — capture what happens from the slot's position onward. Reads\nnothing that already exists; never ends on drain. Default, because it is what\n`postgres_cdc` has always done.",
+          "type": "string",
+          "const": "capture_new"
+        },
+        {
+          "description": "**Backfill, then stream** — page the publication's tables by primary key first, then\ncapture changes, with no gap between the two. The slot is created before the backfill\nstarts, so the server retains WAL throughout. Delivery across the handover is\nat-least-once, so the sink must upsert. Each table needs a single-column primary key.",
+          "type": "string",
+          "const": "capture_all"
+        },
+        {
+          "description": "**One-shot backfill** — page the publication's tables by primary key, then end the\nroute. Non-destructive, creates no slot, and captures no changes.",
+          "type": "string",
+          "const": "snapshot"
+        }
       ]
     },
     "RandomPanicMiddleware": {
@@ -3377,6 +3469,17 @@
           "default": 5000,
           "minimum": 0
         },
+        "required_delivery": {
+          "description": "Fail the route at startup unless its inferred delivery guarantee is at least this.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DeliveryGuarantee"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "startup_timeout_ms": {
           "description": "Time to wait for a route to establish connections before startup fails. Defaults to 5000ms.",
           "type": "integer",
@@ -3388,6 +3491,38 @@
       "additionalProperties": false,
       "required": [
         "input"
+      ]
+    },
+    "SequenceConfig": {
+      "description": "Reads several input endpoints one after another: each is drained before the next\nbegins, and the last one streams until the route stops.",
+      "type": "object",
+      "properties": {
+        "checkpoint_store": {
+          "description": "(Optional) Where to persist the phase marker. A local path, `file://`, or any URL\nthe shared checkpoint stores accept. Without it, every restart begins at phase 1.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cursor_id": {
+          "description": "(Optional) Identifies the durable phase marker, so a restart resumes at the phase\nit had reached instead of replaying the earlier ones. Needs `checkpoint_store`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "endpoints": {
+          "description": "The inputs to read, in order. At least one is required.",
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/Endpoint"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "endpoints"
       ]
     },
     "SledConfig": {

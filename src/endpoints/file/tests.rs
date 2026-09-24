@@ -2852,3 +2852,22 @@ fn parallel_record_decode_matches_a_sequential_one() {
         }
     }
 }
+
+#[tokio::test]
+async fn test_file_rejects_parquet_format() {
+    let dir = tempdir().unwrap();
+    let config = FileConfig {
+        path: dir
+            .path()
+            .join("data.parquet")
+            .to_str()
+            .unwrap()
+            .to_string(),
+        format: FileFormat::Parquet,
+        ..Default::default()
+    };
+    let error = FilePublisher::new(&config).await.err().unwrap();
+    assert!(error.to_string().contains("only supported by object_store"));
+    let error = FileConsumer::new(&config).await.err().unwrap();
+    assert!(error.to_string().contains("only supported by object_store"));
+}

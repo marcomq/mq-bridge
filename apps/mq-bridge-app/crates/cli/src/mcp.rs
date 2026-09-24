@@ -30,7 +30,7 @@ use rmcp::schemars;
 use rmcp::{
     ErrorData as McpError, ServerHandler, ServiceExt,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
-    model::{CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerInfo},
+    model::{CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerConfig},
     tool, tool_handler, tool_router,
 };
 use serde::Deserialize;
@@ -1275,7 +1275,7 @@ impl Default for BridgeMcp {
 
 #[tool_handler]
 impl ServerHandler for BridgeMcp {
-    fn get_info(&self) -> ServerInfo {
+    fn get_info(&self) -> ServerConfig {
         // `Implementation` is `#[non_exhaustive]`, so build via Default then set fields.
         let mut server_info = Implementation::default();
         server_info.name = "mq-bridge-app".to_string();
@@ -1289,7 +1289,7 @@ impl ServerHandler for BridgeMcp {
             ""
         };
 
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(server_info)
             .with_instructions([INSTRUCTIONS, agent_bus].concat())
     }
@@ -1526,7 +1526,10 @@ fn status_entity(name: &str, endpoint: &str, snapshot: &ConsumerStatusSnapshot) 
 async fn run_stdio(server: BridgeMcp) -> anyhow::Result<()> {
     info!("MCP server starting on stdio");
     let service = server.serve(rmcp::transport::stdio()).await?;
-    service.waiting().await?;
+    tokio::select! {
+        result = service.waiting() => { result?; }
+        _ = crate::shutdown_requested() => {}
+    }
     Ok(())
 }
 
@@ -1554,7 +1557,7 @@ async fn run_http(server: BridgeMcp, bind: String) -> anyhow::Result<()> {
 
     loop {
         let io = tokio::select! {
-            _ = tokio::signal::ctrl_c() => break,
+            _ = crate::shutdown_requested() => break,
             accept = listener.accept() => match accept {
                 Ok((stream, _)) => TokioIo::new(stream),
                 // A transient accept error must not tear down the whole server.

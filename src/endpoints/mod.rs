@@ -573,6 +573,9 @@ fn check_consumer_recursive(
             if cfg.date_partition.is_some() {
                 warnings.push("Endpoint 'object_store' is used as a consumer, but 'date_partition' is a publisher-only option and will be ignored.".to_string());
             }
+            if cfg.date_partition_style != crate::models::DatePartitionStyle::Nested {
+                warnings.push("Endpoint 'object_store' is used as a consumer, but 'date_partition_style' is a publisher-only option and will be ignored.".to_string());
+            }
             Ok(warnings)
         }
         #[cfg(feature = "websocket")]
@@ -1023,6 +1026,25 @@ pub fn output_requires_source_metadata(
             _ => return false,
         };
         name_by == NameBy::SourcePosition
+    })
+}
+
+/// Whether a keyed sink (Mongo `id_field`, SQL `insert_query`) reads a source position, the way
+/// Kafka Connect's JDBC sink keys rows on topic/partition/offset. Unlike positional naming this
+/// only asks for the metadata: it is never an error for an input without a position.
+pub fn output_keys_on_source_position(route_name: &str, endpoint: &Endpoint) -> Result<bool> {
+    const POSITION_KEYS: [&str; 5] = [
+        "mqb.src.kafka_",
+        "mqb.src.postgres_",
+        "mqb.src.mongodb_",
+        "mqb.src.file_",
+        "mqb.src.sqlx_",
+    ];
+    let reads_position = |template: &str| POSITION_KEYS.iter().any(|key| template.contains(key));
+    output_has_sink(route_name, endpoint, &|endpoint_type| match endpoint_type {
+        EndpointType::Sqlx(config) => config.insert_query.as_deref().is_some_and(reads_position),
+        EndpointType::MongoDb(config) => config.id_field.as_deref().is_some_and(reads_position),
+        _ => false,
     })
 }
 
@@ -3001,6 +3023,7 @@ mod tests {
                 sled_path: Some("".into()),
                 ttl_seconds: 10,
                 key: None,
+                replay_response: false,
             })
             .with_consumer_metrics();
 
@@ -3065,6 +3088,7 @@ mod tests {
                 sled_path: None,
                 ttl_seconds: 60,
                 key: None,
+                replay_response: false,
             })
         }
 

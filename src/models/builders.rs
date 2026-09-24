@@ -53,6 +53,12 @@ macro_rules! with_optional_string_setters {
 }
 
 impl RouteOptions {
+    /// Fail the route at startup unless it can deliver at least `guarantee`.
+    pub fn with_required_delivery(mut self, guarantee: DeliveryGuarantee) -> Self {
+        self.required_delivery = Some(guarantee);
+        self
+    }
+
     pub fn validate(&self) -> anyhow::Result<()> {
         if self.concurrency == 0 {
             return Err(anyhow::anyhow!("route concurrency must be at least 1"));
@@ -948,7 +954,7 @@ impl TlsConfig {
 with_string_setters!(RouteOptions { with_description => description });
 with_value_setters!(RouteOptions { with_concurrency => concurrency: usize, with_batch_size => batch_size: usize, with_commit_concurrency_limit => commit_concurrency_limit: usize, with_startup_timeout_ms => startup_timeout_ms: u64, with_reconnect_interval_ms => reconnect_interval_ms: u64, with_empty_batch_delay_ms => empty_batch_delay_ms: u64, with_allow_fault_injection => allow_fault_injection: bool, with_exit_on_empty => exit_on_empty: bool });
 with_optional_string_setters!(DeduplicationMiddleware { with_store => store, with_sled_path => sled_path, with_key => key });
-with_value_setters!(DeduplicationMiddleware { with_ttl_seconds => ttl_seconds: u64 });
+with_value_setters!(DeduplicationMiddleware { with_ttl_seconds => ttl_seconds: u64, with_replay_response => replay_response: bool });
 with_value_setters!(RetryMiddleware { with_max_attempts => max_attempts: usize, with_initial_interval_ms => initial_interval_ms: u64, with_max_interval_ms => max_interval_ms: u64, with_multiplier => multiplier: f64 });
 with_value_setters!(DelayMiddleware { with_delay_ms => delay_ms: u64 });
 with_value_setters!(LimiterMiddleware { with_messages_per_second => messages_per_second: f64 });
@@ -983,7 +989,7 @@ with_value_setters!(FileConfig { with_name_by => name_by: NameBy, with_format =>
 with_optional_setters!(FileConfig { with_idempotency => idempotency: bool, with_encryption => encryption: EncryptionConfig });
 with_optional_string_setters!(FileConfig { with_delimiter => delimiter });
 
-with_value_setters!(ObjectStoreConfig { with_name_by => name_by: NameBy, with_format => format: FileFormat, with_compression => compression: Compression });
+with_value_setters!(ObjectStoreConfig { with_name_by => name_by: NameBy, with_format => format: FileFormat, with_compression => compression: Compression, with_date_partition_style => date_partition_style: DatePartitionStyle });
 with_optional_setters!(ObjectStoreConfig { with_idempotency => idempotency: bool, with_date_partition => date_partition: bool });
 with_optional_setters!(ObjectStoreConfig { with_polling_interval_ms => polling_interval_ms: u64, with_max_object_bytes => max_object_bytes: u64, with_encryption => encryption: EncryptionConfig });
 with_optional_string_setters!(ObjectStoreConfig { with_delimiter => delimiter, with_checkpoint_store => checkpoint_store, with_cursor_id => cursor_id, with_extension => extension });

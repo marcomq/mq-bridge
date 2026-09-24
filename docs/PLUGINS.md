@@ -91,7 +91,7 @@ after it:
 no `plugins:` entry, no `--plugin`, no `load_endpoint_plugin` call:
 
 ```console
-mqb copy 'redpanda://…' 'postgres://…'
+mqb copy 'connect://…' 'postgres://…'
 ```
 
 Directories are searched in this order, nearest first:
@@ -129,6 +129,23 @@ A file whose name does not match the endpoint the library actually provides is a
 error naming both — and the library stays loaded, because nothing is ever
 unloaded. The same applies to a library that exists but fails to load: that is
 reported as a load failure, not as an unknown endpoint.
+
+### Installing one with a package manager
+
+Homebrew and conda install into a prefix the search above already covers, so
+either one is the whole installation — no `plugins:` entry, no `--plugin`, no
+`load_endpoint_plugin` call:
+
+```console
+brew install marcomq/tap/mq-bridge-pulsar     # macOS arm64, Linux x86_64/arm64
+conda install -c marcomq mq-bridge-pulsar     # the same, plus Windows x86_64
+```
+
+Both cover `pulsar`, `meilisearch` and `connect`. Neither depends on
+`mq-bridge-app`: one installed library serves whatever host asks for the
+endpoint — the brewed CLI, the desktop app, a Python or Node process in a
+virtualenv — which is why the search covers `HOMEBREW_PREFIX` and
+`CONDA_PREFIX` rather than only the running binary's own prefix.
 
 ### Replacing an endpoint `mqb` already has
 
@@ -291,7 +308,7 @@ a schema `?batch_size=100` reaches the plugin as the string `"100"` and
 from a URI until it describes one.
 
 ```rust
-impl CustomEndpointFactory for RedpandaFactory {
+impl CustomEndpointFactory for ConnectFactory {
     fn config_schema(&self) -> Option<serde_json::Value> {
         Some(serde_json::json!({
             "type": "object",
@@ -310,7 +327,7 @@ impl CustomEndpointFactory for RedpandaFactory {
 
 Deriving it beats writing it by hand if your config is a Rust struct — add
 [`schemars`](https://docs.rs/schemars) to your own crate and return
-`serde_json::to_value(schemars::schema_for!(RedpandaConfig)).ok()`. Nothing but
+`serde_json::to_value(schemars::schema_for!(ConnectConfig)).ok()`. Nothing but
 JSON crosses the ABI, so your schemars version and the host's need not agree,
 and a plugin written in another language just emits the document. `title`,
 `description` and `default` are what a host shows, so they are worth filling in;
@@ -352,7 +369,7 @@ A plugin reaching a family of protocols rather than one — a compatibility laye
 a driver host — names the protocol in the scheme, after a `+`:
 
 ```
-mq-bridge --input 'redpanda+mqtt://localhost:1883/orders' --output 'kafka://...'
+mq-bridge --input 'connect+mqtt://localhost:1883/orders' --output 'kafka://...'
 ```
 
 This is the spelling `git+ssh://`, `svn+ssh://` and SQLAlchemy's
@@ -363,7 +380,7 @@ the plugin's own vocabulary, and a field annotated `subscheme` receives it.
 Everything after the scheme then describes the inner protocol rather than the
 plugin, so `origin` and `url` are handed over carrying the inner scheme:
 
-| From `redpanda+mqtt://host:1883/orders` | |
+| From `connect+mqtt://host:1883/orders` | |
 | --- | --- |
 | `subscheme` | `mqtt` |
 | `origin` | `mqtt://host:1883` |
@@ -388,7 +405,7 @@ against it first, which turns a deserializer's complaint into a message naming
 the field:
 
 ```
-endpoint `redpanda` configuration: unknown field `topci`; this endpoint takes
+endpoint `connect` configuration: unknown field `topci`; this endpoint takes
 batch_size, group, topic, url
 ```
 
@@ -399,6 +416,27 @@ top-level fields when you set `additionalProperties: false`. A schema using more
 than that (`oneOf`, `$ref` to a remote document, `patternProperties`) is logged
 as uncheckable and passed through rather than rejected, so describing yourself
 richly for the sake of a form never costs you a working endpoint.
+
+### Declaring a delivery guarantee
+
+A route logs — and with `required_delivery` enforces — the guarantee it can give
+(see [DELIVERY.md](DELIVERY.md)). For a custom endpoint only its author knows the
+answer, so the factory states it. Two top-level schema annotations cover the
+common case and cross the plugin boundary unchanged:
+
+| Annotation | Meaning | Default |
+| --- | --- | --- |
+| `x-mqb-idempotent-sink` | writing the same record twice leaves one effect, so a route into this sink is effectively-once | `false` |
+| `x-mqb-acknowledges` | the consumer acks, so a message lost in a crash is redelivered; `false` makes a route from it at-most-once | `true` |
+
+```json
+{ "type": "object", "x-mqb-idempotent-sink": true, "properties": { "...": {} } }
+```
+
+When the answer depends on the configuration — idempotent only with a key set —
+a directly linked factory overrides `CustomEndpointFactory::idempotent_sink` or
+`acknowledges` instead; both receive the endpoint's `config`. Claim idempotency
+only for a write keyed on something replay-stable: the route trusts it.
 
 ### Ordered publishing
 

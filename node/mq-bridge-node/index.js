@@ -216,6 +216,10 @@ class Route {
   join() {
     this._native.join();
   }
+
+  wait() {
+    return this._native.wait();
+  }
 }
 
 /** Throw this from `receiveBatch` to tell the route the source is finished. */
@@ -410,6 +414,14 @@ function initLogging(callback, level = null) {
   return native.initLogging(callback, level);
 }
 
+function requestShutdown() {
+  return native.requestShutdown();
+}
+
+function isShutdownRequested() {
+  return native.isShutdownRequested();
+}
+
 function loadEndpointPlugin(pluginPath) {
   return native.loadEndpointPlugin(pluginPath);
 }
@@ -475,6 +487,8 @@ module.exports = {
   EndOfStream,
   configSchema,
   initLogging,
+  isShutdownRequested,
+  requestShutdown,
   definePluginPackage,
   loadEndpointPlugin,
   loadPluginPackage,

@@ -423,3 +423,39 @@ pub async fn test_amqp_status() {
     )
     .await;
 }
+
+/// Identity survives an `mq-bridge → AMQP → mq-bridge` hop, and a redelivery keeps it. Before,
+/// the publisher set no `message_id` property and the consumer fell back to the delivery tag,
+/// which restarts at 1 per channel.
+pub async fn test_amqp_message_id_round_trip() {
+    use mq_bridge::traits::{MessageConsumer, MessageDisposition, MessagePublisher};
+    use mq_bridge::CanonicalMessage;
+    setup_logging();
+    run_test_with_docker("tests/integration/docker-compose/amqp.yml", || async {
+        let config = mq_bridge::models::AmqpConfig {
+            url: "amqp://guest:guest@localhost:5672/%2f".to_string(),
+            queue: Some(format!("id_round_trip_{}", fast_uuid_v7::gen_id())),
+            ..Default::default()
+        };
+        let publisher = AmqpPublisher::new(&config).await.unwrap();
+        let sent = CanonicalMessage::new(b"x".to_vec(), Some(0xabcdef_u128 << 64 | 42));
+        publisher.send(sent.clone()).await.unwrap();
+
+        let mut consumer = AmqpConsumer::new(&config).await.unwrap();
+        let deadline = std::time::Duration::from_secs(30);
+        let first = tokio::time::timeout(deadline, consumer.receive())
+            .await
+            .expect("first delivery timed out")
+            .unwrap();
+        assert_eq!(first.message.message_id, sent.message_id);
+        (first.commit)(MessageDisposition::Nack).await.unwrap();
+
+        let again = tokio::time::timeout(deadline, consumer.receive())
+            .await
+            .expect("redelivery timed out")
+            .unwrap();
+        assert_eq!(again.message.message_id, sent.message_id);
+        (again.commit)(MessageDisposition::Ack).await.unwrap();
+    })
+    .await;
+}

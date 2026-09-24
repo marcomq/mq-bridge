@@ -21,6 +21,8 @@ pub(crate) mod crypto_envelope;
 pub mod interpolation;
 pub(crate) mod pack;
 pub(crate) mod parallel;
+#[cfg(feature = "parquet")]
+pub(crate) mod parquet;
 /// The stable C ABI shared with dynamically loaded endpoint plugins.
 #[cfg(feature = "plugin")]
 pub mod plugin_abi;

@@ -28,7 +28,7 @@ const subtab = (target) => (page) => page.locator(`button.content-tab[data-targe
  * on the open one: the wa-dialog host has no layout box, which rules out
  * toBeVisible, and the bare class matches two elements.
  */
-const DIALOG = "wa-dialog.json-preview-dialog[open]";
+const DIALOG = "dialog.json-preview-dialog[open]";
 
 const jsonPreview = (paneTarget, triggerId) => async (page) => {
   await subtab(paneTarget)(page);

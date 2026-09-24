@@ -6,6 +6,7 @@ interface DesktopSecretEntry {
 }
 import { cloneSectionState } from "./dirty-state";
 import { appShell, getAppState, workspaceRuntime } from "./app-shell";
+import { initSchemaForm } from "./forms/form-cache";
 import { availableStorageModeValues, type StorageModeValue, type StorageSecurityInfo } from "./storage-security";
 import { ensureWorkspaceCollections } from "./workspace-config";
 
@@ -278,7 +279,9 @@ export async function initSettings(config: Record<string, unknown>, schema: Reco
 
   state.form_mode = "settings";
   (window as any)._mqb_form_mode = "settings";
-  await lib.init(container, settingsSchema, settingsConfig);
+  await initSchemaForm(lib, container, settingsSchema, settingsConfig, (updated: Record<string, unknown>) => {
+    settingsConfig = updated;
+  });
   pruneStorageModeOptions(
     container,
     state.storage_security,

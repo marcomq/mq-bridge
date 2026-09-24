@@ -265,7 +265,7 @@ fn rewrite_refs(
     }
 }
 
-/// `redpanda` -> `Redpanda`, `my-thing` -> `MyThing`: an endpoint name is
+/// `connect` -> `Connect`, `my-thing` -> `MyThing`: an endpoint name is
 /// lowercase and hyphenated, a `$defs` key is neither.
 fn pascal_case(name: &str) -> String {
     name.split(['-', '_'])

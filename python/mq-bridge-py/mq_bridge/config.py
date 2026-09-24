@@ -52,6 +52,8 @@ WebSocketConfig = dict
 ZeroMqConfig = dict
 CipherKind = str
 Compression = str
+DatePartitionStyle = str
+DeliveryGuarantee = str
 FaultMode = str
 FileFormat = str
 HttpServerProtocol = str
@@ -88,9 +90,11 @@ __all__ = [
     "CompressionMiddleware",
     "ConfigDocument",
     "CookieJarMiddleware",
+    "DatePartitionStyle",
     "DeadLetterQueueMiddleware",
     "DeduplicationMiddleware",
     "DelayMiddleware",
+    "DeliveryGuarantee",
     "DetailedMappingRule",
     "DirSpoolConfig",
     "EncryptionConfig",

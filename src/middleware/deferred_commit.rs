@@ -36,7 +36,23 @@ const MAX_DEFERRED_COMMITS: usize = 1024;
 /// `&mut self`, so `get_mut` suffices and nothing ever blocks.
 #[derive(Default)]
 pub(crate) struct DeferredCommits {
-    held: Mutex<VecDeque<(BatchCommitFunc, usize)>>,
+    held: Mutex<VecDeque<(BatchCommitFunc, Emptied)>>,
+}
+
+/// What a held commit settles its dropped messages with. Plain acks stay a count, so a
+/// middleware that drops everything for a long stretch holds no per-message state.
+pub(crate) enum Emptied {
+    Acked(usize),
+    Settled(Vec<MessageDisposition>),
+}
+
+impl Emptied {
+    fn into_dispositions(self) -> Vec<MessageDisposition> {
+        match self {
+            Emptied::Acked(dropped) => vec![MessageDisposition::Ack; dropped],
+            Emptied::Settled(dispositions) => dispositions,
+        }
+    }
 }
 
 impl DeferredCommits {
@@ -44,7 +60,7 @@ impl DeferredCommits {
         Self::default()
     }
 
-    fn queue(&mut self) -> &mut VecDeque<(BatchCommitFunc, usize)> {
+    fn queue(&mut self) -> &mut VecDeque<(BatchCommitFunc, Emptied)> {
         self.held
             .get_mut()
             .expect("held commits are only reached through &mut self, never locked")
@@ -54,31 +70,60 @@ impl DeferredCommits {
     ///
     /// On a source needing ordered commits the commit is held for the next
     /// retained batch; otherwise it runs now.
+    #[cfg_attr(not(feature = "filter"), allow(dead_code))]
     pub(crate) async fn ack_emptied(
         &mut self,
         ordered: bool,
         commit: BatchCommitFunc,
         dropped: usize,
     ) -> anyhow::Result<()> {
+        self.hold(ordered, commit, Emptied::Acked(dropped)).await
+    }
+
+    /// Like [`Self::ack_emptied`], for a batch whose dropped messages are not all plain acks
+    /// — a deduplicated request answered with its stored reply.
+    pub(crate) async fn settle_emptied(
+        &mut self,
+        ordered: bool,
+        commit: BatchCommitFunc,
+        dispositions: Vec<MessageDisposition>,
+    ) -> anyhow::Result<()> {
+        let emptied = if dispositions
+            .iter()
+            .all(|d| matches!(d, MessageDisposition::Ack))
+        {
+            Emptied::Acked(dispositions.len())
+        } else {
+            Emptied::Settled(dispositions)
+        };
+        self.hold(ordered, commit, emptied).await
+    }
+
+    async fn hold(
+        &mut self,
+        ordered: bool,
+        commit: BatchCommitFunc,
+        emptied: Emptied,
+    ) -> anyhow::Result<()> {
         if !ordered {
-            return commit(vec![MessageDisposition::Ack; dropped]).await;
+            return commit(emptied.into_dispositions()).await;
         }
         let queue = self.queue();
         if queue.len() >= MAX_DEFERRED_COMMITS {
             queue.pop_front();
         }
-        queue.push_back((commit, dropped));
+        queue.push_back((commit, emptied));
         Ok(())
     }
 
     /// Hands the held commits to the caller, to be run from inside the commit of
     /// the next batch that did retain something. See [`run_all`].
-    pub(crate) fn take(&mut self) -> VecDeque<(BatchCommitFunc, usize)> {
+    pub(crate) fn take(&mut self) -> VecDeque<(BatchCommitFunc, Emptied)> {
         std::mem::take(self.queue())
     }
 
     /// Hands held commits to lifecycle code that only has a shared consumer reference.
-    pub(crate) fn take_shared(&self) -> VecDeque<(BatchCommitFunc, usize)> {
+    pub(crate) fn take_shared(&self) -> VecDeque<(BatchCommitFunc, Emptied)> {
         std::mem::take(&mut *self.held.lock().expect("deferred commit lock poisoned"))
     }
 }
@@ -87,9 +132,9 @@ impl DeferredCommits {
 ///
 /// Call this *before* the retained batch's own commit, so the acks stay in the
 /// order the source produced them.
-pub(crate) async fn run_all(held: VecDeque<(BatchCommitFunc, usize)>) -> anyhow::Result<()> {
-    for (commit, dropped) in held {
-        commit(vec![MessageDisposition::Ack; dropped]).await?;
+pub(crate) async fn run_all(held: VecDeque<(BatchCommitFunc, Emptied)>) -> anyhow::Result<()> {
+    for (commit, emptied) in held {
+        commit(emptied.into_dispositions()).await?;
     }
     Ok(())
 }

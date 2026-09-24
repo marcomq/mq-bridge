@@ -32,6 +32,7 @@ impl Default for RouteOptions {
             empty_batch_delay_ms: default_empty_batch_delay_ms(),
             allow_fault_injection: false,
             exit_on_empty: false,
+            required_delivery: None,
         }
     }
 }

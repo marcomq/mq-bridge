@@ -27,6 +27,7 @@ use crate::traits::{BatchCommitFunc, MessageConsumer, MessageDisposition};
 use crate::ReceivedBatch;
 use anyhow::anyhow;
 use async_trait::async_trait;
+use futures::FutureExt;
 use pgwire_replication::{Lsn, ReplicationClient};
 use replication::ReplicationEvent;
 use std::any::Any;
@@ -60,6 +61,8 @@ pub struct PostgresCdcConsumer {
     /// TLS config used on teardown to reopen the control-plane connection (see `Drop`).
     tls: crate::models::TlsConfig,
     ended: bool,
+    /// A failure hit while topping up a batch, reported after that batch is delivered.
+    deferred_error: Option<ConsumerError>,
     /// `temporary_slot`: drop the slot on teardown instead of advancing it.
     drop_slot_on_stop: bool,
     /// Set once teardown has run, so the `Drop` fallback never repeats the hook's work.
@@ -183,6 +186,7 @@ impl PostgresCdcConsumer {
             slot_name: config.slot_name.clone(),
             tls: config.tls.clone(),
             ended: false,
+            deferred_error: None,
             drop_slot_on_stop: config.temporary_slot,
             teardown_done: AtomicBool::new(false),
             exit_on_empty: false,
@@ -373,6 +377,16 @@ fn replica_key_string(
     }
 }
 
+fn recv_error(e: impl std::fmt::Display) -> ConsumerError {
+    let msg = format!("postgres_cdc: recv failed: {e}");
+    // A vanished slot never comes back on its own; don't reconnect-loop.
+    if replication::is_missing_slot_error(&msg) {
+        ConsumerError::Permanent(anyhow!(msg))
+    } else {
+        ConsumerError::Connection(anyhow!(msg))
+    }
+}
+
 /// Deterministic dedup id for a change event: FNV-1a 128-bit over
 /// `schema.table\0key\0operation\0lsn\0ordinal`. A replayed change (same key, op and
 /// in-tx position at the same commit LSN) hashes identically so the dedup middleware /
@@ -479,6 +493,12 @@ impl MessageConsumer for PostgresCdcConsumer {
         // Report the latest durably-acknowledged position before blocking.
         self.feedback();
 
+        if self.ready.is_empty() {
+            if let Some(e) = self.deferred_error.take() {
+                return Err(e);
+            }
+        }
+
         // Pump the replication stream until a committed transaction is ready.
         while self.ready.is_empty() {
             if self.ended {
@@ -501,14 +521,33 @@ impl MessageConsumer for PostgresCdcConsumer {
                 Ok(Some(ev)) => {
                     self.handle_event(ev).map_err(ConsumerError::Connection)?;
                 }
-                Err(e) => {
-                    let msg = format!("postgres_cdc: recv failed: {e}");
-                    // A vanished slot never comes back on its own; don't reconnect-loop.
-                    return Err(if replication::is_missing_slot_error(&msg) {
-                        ConsumerError::Permanent(anyhow!(msg))
-                    } else {
-                        ConsumerError::Connection(anyhow!(msg))
-                    });
+                Err(e) => return Err(recv_error(e)),
+            }
+        }
+
+        // Top the batch up from events that already arrived, without waiting for more:
+        // a backlog of single-row transactions otherwise leaves as one-row batches.
+        // `unconstrained`: tokio's coop budget would report the channel empty after
+        // ~128 events, capping batches at ~40 transactions. Bounded by event count too:
+        // rows of a still-open transaction don't grow `ready`, so it alone may never fill.
+        let mut event_budget = max_messages.saturating_mul(4).max(64);
+        while self.deferred_error.is_none() && self.ready.len() < max_messages && event_budget > 0 {
+            event_budget -= 1;
+            match tokio::task::unconstrained(self.client.recv()).now_or_never() {
+                None => break,
+                Some(Ok(None)) | Some(Ok(Some(ReplicationEvent::StoppedAt { .. }))) => {
+                    self.ended = true;
+                    break;
+                }
+                Some(Ok(Some(ev))) => {
+                    if let Err(e) = self.handle_event(ev) {
+                        self.deferred_error = Some(ConsumerError::Connection(e));
+                        break;
+                    }
+                }
+                Some(Err(e)) => {
+                    self.deferred_error = Some(recv_error(e));
+                    break;
                 }
             }
         }

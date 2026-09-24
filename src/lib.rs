@@ -121,6 +121,7 @@ pub mod plugin;
 pub mod publisher;
 pub mod response;
 pub mod route;
+pub mod shutdown;
 pub mod support;
 #[cfg(feature = "test-utils")]
 pub mod test_utils;

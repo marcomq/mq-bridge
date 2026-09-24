@@ -107,6 +107,19 @@ pub fn init_logging(
     Ok(())
 }
 
+/// Request a graceful shutdown of every route: running ones stop, and ones
+/// started afterwards stop immediately. Wire it to the host's signal handling.
+/// Returns `true` only for the first request. It cannot be undone.
+#[napi(js_name = "requestShutdown")]
+pub fn request_shutdown() -> bool {
+    core::shutdown::request_shutdown()
+}
+
+#[napi(js_name = "isShutdownRequested")]
+pub fn is_shutdown_requested() -> bool {
+    core::shutdown::is_shutdown_requested()
+}
+
 #[napi(object)]
 pub struct NativeMessage {
     pub payload: Buffer,
@@ -1171,6 +1184,23 @@ impl Route {
         }
         Ok(())
     }
+
+    /// Like `join()`, but resolves asynchronously so the event loop, and with it
+    /// `process.on('SIGINT')` handlers, keeps running while the route does.
+    #[napi]
+    pub async fn wait(&self) -> Result<()> {
+        let handle = self.lock_run_state()?.join_handle.take();
+        if let Some(handle) = handle {
+            tokio::task::spawn_blocking(move || handle.join())
+                .await
+                .map_err(to_napi_error)?
+                .map_err(|_| Error::from_reason("Route background thread panicked"))?;
+        }
+        if let Some(failure) = self.lock_run_state()?.failure.take() {
+            return Err(Error::from_reason(failure));
+        }
+        Ok(())
+    }
 }
 
 impl Route {
@@ -1810,8 +1840,8 @@ fn lock_active_route_names() -> Result<std::sync::MutexGuard<'static, HashSet<St
 /// source under `exit_on_empty`, an exhausted stream, or a permanent failure.
 ///
 /// Returns the terminal outcome when the route ended by itself, `None` when a
-/// stop was requested. Without this a drain-then-exit route would leave `join()`
-/// waiting forever on a stop signal that never arrives.
+/// stop or a process-wide shutdown was requested. Without this a drain-then-exit
+/// route would leave `join()` waiting forever on a stop signal that never arrives.
 async fn wait_for_stop_or_end(
     name: &str,
     stop_rx: oneshot::Receiver<()>,
@@ -1820,6 +1850,7 @@ async fn wait_for_stop_or_end(
     loop {
         tokio::select! {
             _ = &mut stop_rx => return None,
+            _ = core::shutdown::shutdown_requested() => return None,
             _ = tokio::time::sleep(ROUTE_END_POLL_INTERVAL) => {
                 if let Some(outcome) = core::route_outcome(name) {
                     return Some(outcome);

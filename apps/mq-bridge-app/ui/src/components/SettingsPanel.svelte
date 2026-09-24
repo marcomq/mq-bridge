@@ -1,20 +1,18 @@
 <script lang="ts">
   import '@awesome.me/webawesome/dist/components/callout/callout.js';
-  import { tick } from "svelte";
   import { activeMainTab, storageSecurityStore } from "../lib/stores";
-  import { exportFullBundle, importAppConfigFromJsonText, resetAppConfigToDefaults } from "../lib/import-export";
+  import { exportFullBundle, importAppConfigFromJsonText, replaceAppConfig, resetAppConfigToDefaults } from "../lib/import-export";
+  import JsonPreviewDialog from "./JsonPreviewDialog.svelte";
   import { withSelectedFileText } from "../lib/utils";
   import { appShell } from "../lib/app-shell";
   import { browserWindow } from "../lib/browser";
   import { alertDialog, confirmDialog } from "../lib/dialogs";
   import type { StorageSecurityInfo } from "../lib/storage-security";
   import { formatDesktopSecretsSummary } from "../lib/settings";
-  import { EditorView, basicSetup } from "codemirror";
-  import { json } from "@codemirror/lang-json";
 
   let isJsonModalOpen = $state(false);
-  let editorContainer = $state<HTMLElement | null>(null);
-  let editorView: EditorView | null = null;
+  let jsonModalConfig = $state<unknown>({});
+  const jsonModalVariants = $derived([{ id: "config", label: "App config", value: jsonModalConfig, editable: true }]);
   let importInputEl = $state<HTMLInputElement | null>(null);
   const isDesktop = appShell.isDesktop();
   const storageSecurity = $derived($storageSecurityStore);
@@ -49,31 +47,19 @@
     window.location.reload();
   }
 
-  async function openJsonModal() {
+  function openJsonModal() {
+    jsonModalConfig = structuredClone(appShell.config());
     isJsonModalOpen = true;
-    const configData = JSON.stringify(appShell.config(), null, 2);
+  }
 
-    await tick();
-    if (!editorContainer) return;
-    if (!editorView) {
-      editorView = new EditorView({
-        doc: configData,
-        extensions: [
-          basicSetup,
-          json(),
-          EditorView.editable.of(false),
-          EditorView.theme({
-            "&": { height: "60vh", fontSize: "13px" },
-            ".cm-scroller": { overflow: "auto" },
-          }),
-        ],
-        parent: editorContainer,
-      });
-    } else {
-      editorView.dispatch({
-        changes: { from: 0, to: editorView.state.doc.length, insert: configData },
-      });
-    }
+  async function applyJsonConfig(value: Record<string, unknown>) {
+    const confirmed = await confirmDialog(
+      "Replace the whole app config with the edited version? Unsaved changes elsewhere are discarded.",
+      "Apply Config",
+    );
+    if (!confirmed) return false;
+    await replaceAppConfig(value);
+    window.location.reload();
   }
 
   async function checkStoredSecrets() {
@@ -203,27 +189,15 @@
   </div>
 </div>
 
-<wa-dialog label="Current Configuration (JSON)" open={isJsonModalOpen} onwa-hide={() => (isJsonModalOpen = false)}>
-  <div bind:this={editorContainer} class="json-preview-container"></div>
-  <wa-button slot="footer" variant="brand" 
-    role="button"
-    tabindex="0"
-    onclick={() => (isJsonModalOpen = false)} 
-    onkeydown={(e) => e.key === 'Enter' && (isJsonModalOpen = false)}>Close</wa-button>
-</wa-dialog>
+<JsonPreviewDialog
+  open={isJsonModalOpen}
+  title="Current Configuration"
+  variants={jsonModalVariants}
+  onClose={() => (isJsonModalOpen = false)}
+  onApply={(_variantId, value) => applyJsonConfig(value)}
+/>
 
 <style>
-  .json-preview-container {
-    border: 1px solid var(--wa-color-neutral-border);
-    border-radius: var(--wa-border-radius-medium);
-    background: var(--wa-color-neutral-surface);
-    overflow: hidden;
-  }
-
-  :global(.cm-editor) {
-    outline: none !important;
-  }
-
   .settings-security-banner {
     color: var(--text-secondary);
     font-size: 12px;

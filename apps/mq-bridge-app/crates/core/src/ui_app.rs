@@ -1103,6 +1103,25 @@ impl UiApp {
         started
     }
 
+    /// Each started consumer by name, with how its route ended (`None` while it
+    /// runs) and the error it last reported.
+    pub async fn consumer_outcomes(&self) -> Vec<(String, Option<RouteOutcome>, Option<String>)> {
+        let config = self.config.read().await;
+        let handles = self.ui_handles.read().await;
+        config
+            .consumers
+            .iter()
+            .filter_map(|consumer| {
+                let handle = handles.get(&consumer_runtime_key(consumer))?;
+                Some((
+                    consumer.name.clone(),
+                    handle.outcome(),
+                    handle.status().error,
+                ))
+            })
+            .collect()
+    }
+
     pub async fn stop_consumer(&self, consumer_key: &str) -> bool {
         let resolved_consumer_key = {
             let config = self.config.read().await;

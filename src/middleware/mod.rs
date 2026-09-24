@@ -225,6 +225,7 @@ mod tests {
             sled_path: None,
             ttl_seconds: 60,
             key: None,
+            replay_response: false,
         })];
 
         let result = apply_middlewares_to_publisher(

@@ -193,6 +193,34 @@ pub struct RouteOptions {
     #[serde(default = "default_false", skip_serializing_if = "is_false")]
     #[cfg_attr(feature = "schema", schemars(default = "default_false"))]
     pub exit_on_empty: bool,
+    /// Fail the route at startup unless its inferred delivery guarantee is at least this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_delivery: Option<DeliveryGuarantee>,
+}
+
+/// What a route guarantees about its sink effect, as inferred from its configuration.
+///
+/// Ordered weakest to strongest, so a requirement is met by any guarantee `>=` it.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryGuarantee {
+    /// The source forgets a message once it hands it over; a crash can lose it.
+    AtMostOnce,
+    /// Acked only after the sink accepted it; a crash or retry can repeat the write.
+    AtLeastOnce,
+    /// At-least-once delivery absorbed by an idempotent sink write: the effect lands once.
+    EffectivelyOnce,
+}
+
+impl std::fmt::Display for DeliveryGuarantee {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::AtMostOnce => "at-most-once",
+            Self::AtLeastOnce => "at-least-once",
+            Self::EffectivelyOnce => "effectively-once",
+        })
+    }
 }
 
 /// Represents a connection point for messages, which can be a source (input) or a sink (output).
@@ -433,6 +461,9 @@ pub struct DeduplicationMiddleware {
     /// Dedup key template, e.g. `${payload:order_id}`. Defaults to `message_id`.
     #[serde(default)]
     pub key: Option<String>,
+    /// Answer a duplicate request with the reply its first delivery produced. Off by default.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub replay_response: bool,
 }
 
 /// Metrics middleware configuration.
@@ -857,6 +888,8 @@ pub enum FileFormat {
     Raw,
     /// CSV rows mapped to/from JSON objects (string values only). The first row is the header/schema.
     Csv,
+    /// Parquet, one object per batch, JSON-object rows (object_store only; `parquet` feature).
+    Parquet,
 }
 
 /// Compression algorithm. Used for at-rest batches (file, object_store) and for HTTP
@@ -988,6 +1021,18 @@ pub enum NameBy {
     SourcePosition,
     /// object_store: `<uuidv7>.<ext>` under an optional `YYYY/MM/DD/` prefix. file: appends to `path`.
     WriteTime,
+}
+
+/// Layout of the object_store sink's date folders.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum DatePartitionStyle {
+    /// `YYYY/MM/DD/`.
+    #[default]
+    Nested,
+    /// `year=YYYY/month=MM/day=DD/`, read as partition columns by Spark, DuckDB, DataFusion, Athena.
+    Hive,
 }
 
 impl NameBy {
@@ -1313,7 +1358,7 @@ pub struct ObjectStoreConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotency: Option<bool>,
     /// Record encoding within an object, shared with the file endpoint. Defaults to
-    /// `normal` (one JSON `CanonicalMessage` per line). CSV is supported for sources only.
+    /// `normal` (one JSON `CanonicalMessage` per line). CSV is source-only; Parquet needs the `parquet` feature.
     #[serde(default)]
     pub format: FileFormat,
     /// Record delimiter within an object. Defaults to newline ("\n"). Can be a string or a
@@ -1336,6 +1381,9 @@ pub struct ObjectStoreConfig {
     /// `write_time` naming only; defaults to on. Purely for readability / lifecycle rules.
     #[serde(default)]
     pub date_partition: Option<bool>,
+    /// (Sink only) Date folder layout: `nested` (`YYYY/MM/DD/`) or `hive` (`year=YYYY/month=MM/day=DD/`).
+    #[serde(default)]
+    pub date_partition_style: DatePartitionStyle,
     /// (Sink only) Extension for written objects, without the dot. Defaults to a value derived
     /// from `format`, `compression` and `encryption` (e.g. `jsonl`, `csv`, `bin`, `jsonl.gz`,
     /// `jsonl.lz4`, `jsonl.gz.enc`); encrypted objects get a trailing `.enc` since they are
@@ -2193,6 +2241,7 @@ pub struct IbmMqConfig {
 #[serde(deny_unknown_fields)]
 pub struct SequenceConfig {
     /// The inputs to read, in order. At least one is required.
+    #[cfg_attr(feature = "schema", schemars(length(min = 1)))]
     pub endpoints: Vec<Endpoint>,
     /// (Optional) Identifies the durable phase marker, so a restart resumes at the phase
     /// it had reached instead of replaying the earlier ones. Needs `checkpoint_store`.

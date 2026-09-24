@@ -197,6 +197,18 @@ The table below summarizes the capabilities and configuration for each backend:
 | **WebSocket** | N/A | No | No |
 | **ZeroMQ** | Set `socket_type: "sub"` | **Native** (REQ/REP) | No |
 
+### Plugin Endpoints
+
+These endpoints live in their own repositories and load as [plugins](docs/PLUGINS.md), so the core library carries none of their dependencies:
+
+| Plugin | What it does | In `mqb` |
+| :--- | :--- | :--- |
+| **[Pulsar](https://github.com/marcomq/mq-bridge-pulsar)** | Apache Pulsar input and output | Built in |
+| **[Meilisearch](https://github.com/marcomq/mq-bridge-meilisearch)** | Document sink into a search index; index scan as input | Built in |
+| **[Connect](https://github.com/marcomq/mq-bridge-connect)** | Redpanda Connect connectors as endpoints (`connect+mqtt://…`) | Separate install (size) |
+
+Outside `mqb` (Python, Node.js, your own Rust host), or for Connect, install the plugin with `brew install marcomq/tap/<repo>` or `conda install -c marcomq <repo>`; it is then discovered automatically.
+
 ### Feature Details
 *   **Request-Reply**:
     *   **Native**: Uses protocol-level correlation (e.g., HTTP connection, NATS reply subject).
@@ -264,7 +276,7 @@ been removed as unsound — it is not comparable and needs re-measuring on a rep
 With a durable source and durable checkpoint configuration, `mq-bridge` is **at-least-once** across
 crashes: a replay can redeliver, while in-process Memory endpoint state is not crash-durable. Pair a
 stable replay identity with an **idempotent sink operation** and that covered sink effect is
-effectively exactly-once, however often the message is delivered. Which sink absorbs a duplicate, which source gives you a stable key to
+effectively-once — exactly-once effects, however often the message is delivered. Which sink absorbs a duplicate, which source gives you a stable key to
 deduplicate on, and what a handler in the route changes about all of this, is covered in full by:
 
 > **[docs/DELIVERY.md](docs/DELIVERY.md) — delivery guarantees.** Per-source identity and
@@ -280,8 +292,9 @@ across every writer, so no extra state store is needed. Add the `deduplication` 
 ### Cloud Object Storage (S3 / GCS / Azure)
 The `object_store` endpoint (alias `s3`) reads and writes cloud object stores — Amazon S3, Google Cloud Storage, Azure Blob, Cloudflare R2, and anything else the [`object_store`](https://crates.io/crates/object_store) crate speaks — behind the same `receive_batch` / `send_batch` API. Enable it with the `object-store` feature. Credentials and backend options are read from the process environment (`AWS_ACCESS_KEY_ID`, `AWS_ENDPOINT`, `AWS_REGION`, `GOOGLE_SERVICE_ACCOUNT`, `AZURE_STORAGE_ACCOUNT`, ...); the URL scheme picks the backend (`s3://`, `gs://`, `az://`).
 
-*   **As a sink**, batches are encoded with the same file endpoint formats (`normal` JSONL, `json`, `text`, `raw`) and written as whole immutable objects — write-once, nothing appended or mutated. Under `name_by: write_time` each flushed batch becomes **one object** at `<prefix>/[YYYY/MM/DD/]<uuidv7>.<ext>`; the uuidv7 name already sorts by write time, and the optional `date_partition` prefix (on by default, derived from that same id's timestamp) is a readability / lifecycle-rule convenience. Under `name_by: source_position` a batch becomes **one object per contiguous run of source positions** it covers — usually one, more when the batch spans partitions or skips offsets a replay already wrote — each named for the range it covers and written flat under the prefix, where `date_partition` does not apply. The default `name_by: auto` picks `source_position` whenever the route's input carries a replay position — Kafka, Postgres CDC, a SQL cursor, a MongoDB change stream or a file — so key order equals source order at any `concurrency` without configuring anything (see [Files & object storage — `name_by`](docs/DELIVERY.md#files--object-storage--name_by)).
+*   **As a sink**, batches are encoded with the same file endpoint formats (`normal` JSONL, `json`, `text`, `raw`) and written as whole immutable objects — write-once, nothing appended or mutated. Under `name_by: write_time` each flushed batch becomes **one object** at `<prefix>/[YYYY/MM/DD/]<uuidv7>.<ext>`; the uuidv7 name already sorts by write time, and the optional `date_partition` prefix (on by default, derived from that same id's timestamp) is a readability / lifecycle-rule convenience; `date_partition_style: hive` writes it as `year=YYYY/month=MM/day=DD/`, which Spark, DuckDB, DataFusion and Athena read as partition columns. Under `name_by: source_position` a batch becomes **one object per contiguous run of source positions** it covers — usually one, more when the batch spans partitions or skips offsets a replay already wrote — each named for the range it covers and written flat under the prefix, where `date_partition` does not apply. The default `name_by: auto` picks `source_position` whenever the route's input carries a replay position — Kafka, Postgres CDC, a SQL cursor, a MongoDB change stream or a file — so key order equals source order at any `concurrency` without configuring anything (see [Files & object storage — `name_by`](docs/DELIVERY.md#files--object-storage--name_by)).
 *   **As a source**, objects under the prefix are listed in key order, fetched whole, split on the delimiter, and emitted. Progress is a durable cursor holding the last fully-acked object key: set `cursor_id` and an external `checkpoint_store` (`file://`, `s3://`, `postgres://`, `mongodb://`) so a restart resumes without re-emitting. Objects are **never deleted or rewritten** — resume is non-destructive and at-least-once at object granularity (a nacked batch is redelivered; the cursor only advances once an object is fully acked). `csv` is supported on the source only.
+*   **Parquet** (`format: parquet`, `parquet` feature, included in `full`): each batch becomes one `.parquet` object whose schema is inferred from that batch, so DataFusion, DuckDB and other lake engines can query the prefix directly. Every payload must be a JSON object; any other payload fails on its own — sent to the DLQ when the route has `dlq` middleware, otherwise acknowledged and dropped — and the rest of the batch is still written. On a Parquet object, `compression` picks the column codec (`gzip`, `lz4` = LZ4_RAW, `zstd`) instead of wrapping the whole file, so the extension stays `.parquet`. As a source it emits one JSON-object message per row, with typed values, and it also reads snappy-compressed files written by other tools. Because each object's column types come from its own batch, put a `transform` with a `schema` before the sink when a prefix is queried as one table: it pins every field's type (a value is coerced losslessly or the message is rejected), so a value that is a number in one batch and a string in the next can't give the objects conflicting schemas. A field that is `null` in every row of a batch is still written as an untyped (`NULL`) column; DataFusion merges that with the other objects, and DuckDB needs `read_parquet(..., union_by_name = true)`. The `file` endpoint rejects `parquet` because a Parquet file can't be appended to.
 
 ```yaml
 archive_to_s3:

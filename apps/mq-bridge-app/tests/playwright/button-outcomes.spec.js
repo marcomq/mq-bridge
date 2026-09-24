@@ -92,7 +92,7 @@ test.describe("JSON preview", () => {
     await page.locator("#ctab-config").click();
     await page.locator("#pub-export-config").click();
 
-    const dialog = page.locator("wa-dialog.json-preview-dialog[open]");
+    const dialog = page.locator("dialog.json-preview-dialog[open]");
     await expect(dialog).toHaveCount(1);
     // The preview is of the selected publisher, not of some other entity.
     await expect(dialog.locator(".json-preview-container")).toContainText("http_publisher");
@@ -122,11 +122,11 @@ test.describe("JSON preview", () => {
     await page.locator("#ctab-config").click();
     await page.locator("#pub-export-config").click();
 
-    const dialog = page.locator("wa-dialog.json-preview-dialog[open]");
+    const dialog = page.locator("dialog.json-preview-dialog[open]");
     await expect(dialog).toHaveCount(1);
     await dialog.locator("wa-button", { hasText: "Close" }).first().click();
 
-    await expect(page.locator("wa-dialog.json-preview-dialog[open]")).toHaveCount(0);
+    await expect(page.locator("dialog.json-preview-dialog[open]")).toHaveCount(0);
     expect(await readConfig(page)).toEqual(before);
   });
 });
