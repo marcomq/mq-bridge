@@ -54,6 +54,14 @@ Thank you for your interest in contributing to **mq-bridge**! We welcome bug rep
 
 Some integration tests require Docker services. See `tests/integration/docker-compose/` for setup.
 
+### Keeping builds fast and `target/` small
+
+- Use the aliases `cargo cf` (check) and `cargo tf` (test). Both use `--features full,test-utils`.
+  Every other `--features` list builds a separate copy of `mq_bridge` and its incremental cache.
+- Prefer `cargo sweep --time 7` ([cargo-sweep](https://crates.io/crates/cargo-sweep)) over `cargo clean`.
+  Cargo never garbage-collects `target/`, and a clean `full` build takes 10-20 minutes.
+- [sccache](https://github.com/mozilla/sccache) (`RUSTC_WRAPPER=sccache`) restores dependencies from cache after a clean or a branch switch.
+
 ## Submitting a Pull Request
 
 1. **Create a branch** for your change.

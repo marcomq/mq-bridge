@@ -61,6 +61,11 @@ serde_yaml_ng = "0.10"
 tokio = "1.34"  # `Receiver::recv_many` (HTTP source batch drain) needs 1.34+.
 tracing = "0.1"
 
+# Workspace crates keep file:line backtraces without full DWARF, which made each
+# mq_bridge rlib 130-500 MB. For a debugger: CARGO_PROFILE_DEV_DEBUG=full.
+[profile.dev]
+debug = "line-tables-only"
+
 [profile.dev.package."*"]
 debug = false
 

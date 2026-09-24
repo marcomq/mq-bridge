@@ -15,3 +15,9 @@ CMAKE_ARGS = "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
 # engine, the app, tauri and maturin.
 [build]
 target-dir = "target"
+
+# One standard dev feature set: every distinct `--features` list builds its own
+# mq_bridge rlib and incremental cache (0.5-1.8 GB each).
+[alias]
+cf = "check --all-targets --features full,test-utils"
+tf = "test --features full,test-utils"
