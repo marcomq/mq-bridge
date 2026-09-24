@@ -15,3 +15,8 @@ rustflags = ["-C", "link-arg=-Wl,-no_compact_unwind"]
 
 [target.x86_64-apple-darwin]
 rustflags = ["-C", "link-arg=-Wl,-no_compact_unwind"]
+
+# Override the inherited root aliases: the app crates have no `test-utils` feature.
+[alias]
+cf = "check --all-targets --features full"
+tf = "test --features full"
