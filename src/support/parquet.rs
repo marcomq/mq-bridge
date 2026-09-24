@@ -28,22 +28,23 @@ pub(crate) fn parse_row(payload: &[u8]) -> anyhow::Result<serde_json::Value> {
     Ok(value)
 }
 
+/// Largest integer magnitude an `f64` holds exactly.
+const F64_EXACT_INT: u64 = 1 << 53;
+
 /// Encodes rows into one Parquet body. `compression` picks the column codec.
+///
+/// A top-level field whose values don't share one Arrow type, or that would widen large
+/// integers to a lossy `Float64`, is written as JSON text instead of failing the batch.
 pub(crate) fn encode_rows(
     rows: &[serde_json::Value],
     compression: Compression,
 ) -> anyhow::Result<Vec<u8>> {
-    let schema = Arc::new(
-        infer_json_schema_from_iterator(rows.iter().map(Ok)).context("infer parquet schema")?,
-    );
-    let mut decoder = ReaderBuilder::new(schema.clone())
-        .with_batch_size(rows.len().max(1))
-        .with_coerce_primitive(true)
-        .build_decoder()?;
-    decoder.serialize(rows).context("convert rows to arrow")?;
-    let batch = decoder
-        .flush()?
-        .ok_or_else(|| anyhow!("no rows to encode as parquet"))?;
+    let batch = match rows_to_batch(rows) {
+        Ok(batch) => batch,
+        Err(first) => rows_to_batch(&stringify_conflicting_fields(rows))
+            .with_context(|| format!("after stringifying conflicting fields ({first:#})"))?,
+    };
+    let schema = batch.schema();
 
     let codec = match compression {
         Compression::None => ParquetCompression::UNCOMPRESSED,
@@ -57,10 +58,88 @@ pub(crate) fn encode_rows(
     Ok(writer.into_inner()?)
 }
 
+fn rows_to_batch(rows: &[serde_json::Value]) -> anyhow::Result<arrow_array::RecordBatch> {
+    let schema =
+        infer_json_schema_from_iterator(rows.iter().map(Ok)).context("infer parquet schema")?;
+    if let Some(field) = schema
+        .fields()
+        .iter()
+        .find(|field| widens_lossily(field, rows))
+    {
+        return Err(anyhow!(
+            "field '{}' mixes floats with integers beyond 2^53",
+            field.name()
+        ));
+    }
+    let mut decoder = ReaderBuilder::new(Arc::new(schema))
+        .with_batch_size(rows.len().max(1))
+        .with_coerce_primitive(true)
+        .build_decoder()?;
+    decoder.serialize(rows).context("convert rows to arrow")?;
+    decoder
+        .flush()?
+        .ok_or_else(|| anyhow!("no rows to encode as parquet"))
+}
+
+fn widens_lossily(field: &arrow_schema::Field, rows: &[serde_json::Value]) -> bool {
+    field.data_type() == &arrow_schema::DataType::Float64
+        && rows.iter().any(|row| {
+            row.get(field.name()).is_some_and(|value| {
+                value.as_i64().map(i64::unsigned_abs).or(value.as_u64()) > Some(F64_EXACT_INT)
+            })
+        })
+}
+
+/// Rewrites every top-level field that has no single lossless Arrow type as JSON text.
+fn stringify_conflicting_fields(rows: &[serde_json::Value]) -> Vec<serde_json::Value> {
+    let names: std::collections::BTreeSet<&String> = rows
+        .iter()
+        .filter_map(serde_json::Value::as_object)
+        .flat_map(|row| row.keys())
+        .collect();
+    let conflicting: Vec<&String> = names
+        .into_iter()
+        .filter(|name| {
+            let column: Vec<serde_json::Value> = rows
+                .iter()
+                .filter_map(|row| row.get(name.as_str()))
+                .map(|value| serde_json::json!({ name.as_str(): value }))
+                .collect();
+            match infer_json_schema_from_iterator(column.iter().map(Ok)) {
+                Ok(schema) => schema
+                    .fields()
+                    .iter()
+                    .any(|field| widens_lossily(field, &column)),
+                Err(_) => true,
+            }
+        })
+        .collect();
+    rows.iter()
+        .map(|row| {
+            let mut row = row.clone();
+            if let Some(object) = row.as_object_mut() {
+                for name in &conflicting {
+                    if let Some(value) = object.get_mut(name.as_str()) {
+                        if !value.is_null() && !value.is_string() {
+                            *value = serde_json::Value::String(value.to_string());
+                        }
+                    }
+                }
+            }
+            row
+        })
+        .collect()
+}
+
 /// Decodes a Parquet body into one message per row, each payload a JSON object.
-pub(crate) fn decode_rows(data: Vec<u8>) -> anyhow::Result<Vec<CanonicalMessage>> {
+/// `max_bytes` bounds the decoded payload total, so a small object cannot expand without limit.
+pub(crate) fn decode_rows(
+    data: Vec<u8>,
+    max_bytes: Option<u64>,
+) -> anyhow::Result<Vec<CanonicalMessage>> {
     let reader = ParquetRecordBatchReaderBuilder::try_new(bytes::Bytes::from(data))?.build()?;
     let mut out = Vec::new();
+    let mut decoded: u64 = 0;
     for batch in reader {
         let mut writer = WriterBuilder::new()
             .with_explicit_nulls(true)
@@ -70,6 +149,12 @@ pub(crate) fn decode_rows(data: Vec<u8>) -> anyhow::Result<Vec<CanonicalMessage>
         for line in writer.into_inner().split(|b| *b == b'\n') {
             if line.is_empty() {
                 continue;
+            }
+            decoded = decoded.saturating_add(line.len() as u64);
+            if let Some(limit) = max_bytes.filter(|limit| decoded > *limit) {
+                return Err(anyhow!(
+                    "decoded parquet rows exceed {limit} bytes; raise max_object_bytes to read it"
+                ));
             }
             let mut msg = CanonicalMessage::new(line.to_vec(), None);
             msg.metadata.insert(
@@ -99,15 +184,43 @@ mod tests {
         let mut writer = ArrowWriter::try_new(Vec::new(), schema, Some(props)).unwrap();
         writer.write(&batch).unwrap();
 
-        let messages = decode_rows(writer.into_inner().unwrap()).unwrap();
+        let messages = decode_rows(writer.into_inner().unwrap(), None).unwrap();
         let row: serde_json::Value = serde_json::from_slice(&messages[0].payload).unwrap();
         assert_eq!(row, rows[0]);
     }
 
     #[test]
+    fn keeps_large_integers_exact_next_to_floats() {
+        let big = (1u64 << 53) + 1;
+        let rows = vec![serde_json::json!({"n": 1.5}), serde_json::json!({"n": big})];
+        let messages = decode_rows(encode_rows(&rows, Compression::None).unwrap(), None).unwrap();
+        let row: serde_json::Value = serde_json::from_slice(&messages[1].payload).unwrap();
+        assert_eq!(row["n"], big.to_string());
+    }
+
+    #[test]
+    fn a_row_with_a_conflicting_shape_does_not_fail_the_batch() {
+        let rows = vec![
+            serde_json::json!({"id": 1, "v": 5}),
+            serde_json::json!({"id": 2, "v": {"nested": true}}),
+        ];
+        let messages = decode_rows(encode_rows(&rows, Compression::None).unwrap(), None).unwrap();
+        let second: serde_json::Value = serde_json::from_slice(&messages[1].payload).unwrap();
+        assert_eq!(second["id"], 2);
+        assert_eq!(second["v"], r#"{"nested":true}"#);
+    }
+
+    #[test]
+    fn decode_stops_at_the_byte_limit() {
+        let rows: Vec<_> = (0..100).map(|i| serde_json::json!({"id": i})).collect();
+        let body = encode_rows(&rows, Compression::None).unwrap();
+        assert!(decode_rows(body, Some(64)).is_err());
+    }
+
+    #[test]
     fn keeps_null_fields_on_decode() {
         let rows = vec![serde_json::json!({"id": 1, "name": null})];
-        let messages = decode_rows(encode_rows(&rows, Compression::None).unwrap()).unwrap();
+        let messages = decode_rows(encode_rows(&rows, Compression::None).unwrap(), None).unwrap();
         let row: serde_json::Value = serde_json::from_slice(&messages[0].payload).unwrap();
         assert_eq!(row, rows[0]);
     }

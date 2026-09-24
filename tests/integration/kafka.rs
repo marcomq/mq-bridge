@@ -349,7 +349,11 @@ pub async fn test_kafka_nack_replays_from_committed_offset() {
         publisher.send_batch(sent).await.unwrap();
 
         let mut first = KafkaConsumer::new(&config).await.unwrap();
-        let batch = first.receive_batch(3).await.unwrap();
+        let batch =
+            tokio::time::timeout(std::time::Duration::from_secs(60), first.receive_batch(3))
+                .await
+                .expect("initial batch timed out")
+                .unwrap();
         let nacked: Vec<String> = batch
             .messages
             .iter()

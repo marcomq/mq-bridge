@@ -61,6 +61,8 @@ pub struct PostgresCdcConsumer {
     /// TLS config used on teardown to reopen the control-plane connection (see `Drop`).
     tls: crate::models::TlsConfig,
     ended: bool,
+    /// A failure hit while topping up a batch, reported after that batch is delivered.
+    deferred_error: Option<ConsumerError>,
     /// `temporary_slot`: drop the slot on teardown instead of advancing it.
     drop_slot_on_stop: bool,
     /// Set once teardown has run, so the `Drop` fallback never repeats the hook's work.
@@ -184,6 +186,7 @@ impl PostgresCdcConsumer {
             slot_name: config.slot_name.clone(),
             tls: config.tls.clone(),
             ended: false,
+            deferred_error: None,
             drop_slot_on_stop: config.temporary_slot,
             teardown_done: AtomicBool::new(false),
             exit_on_empty: false,
@@ -490,6 +493,12 @@ impl MessageConsumer for PostgresCdcConsumer {
         // Report the latest durably-acknowledged position before blocking.
         self.feedback();
 
+        if self.ready.is_empty() {
+            if let Some(e) = self.deferred_error.take() {
+                return Err(e);
+            }
+        }
+
         // Pump the replication stream until a committed transaction is ready.
         while self.ready.is_empty() {
             if self.ended {
@@ -519,8 +528,11 @@ impl MessageConsumer for PostgresCdcConsumer {
         // Top the batch up from events that already arrived, without waiting for more:
         // a backlog of single-row transactions otherwise leaves as one-row batches.
         // `unconstrained`: tokio's coop budget would report the channel empty after
-        // ~128 events, capping batches at ~40 transactions.
-        while self.ready.len() < max_messages {
+        // ~128 events, capping batches at ~40 transactions. Bounded by event count too:
+        // rows of a still-open transaction don't grow `ready`, so it alone may never fill.
+        let mut event_budget = max_messages.saturating_mul(4).max(64);
+        while self.deferred_error.is_none() && self.ready.len() < max_messages && event_budget > 0 {
+            event_budget -= 1;
             match tokio::task::unconstrained(self.client.recv()).now_or_never() {
                 None => break,
                 Some(Ok(None)) | Some(Ok(Some(ReplicationEvent::StoppedAt { .. }))) => {
@@ -528,9 +540,15 @@ impl MessageConsumer for PostgresCdcConsumer {
                     break;
                 }
                 Some(Ok(Some(ev))) => {
-                    self.handle_event(ev).map_err(ConsumerError::Connection)?;
+                    if let Err(e) = self.handle_event(ev) {
+                        self.deferred_error = Some(ConsumerError::Connection(e));
+                        break;
+                    }
                 }
-                Some(Err(e)) => return Err(recv_error(e)),
+                Some(Err(e)) => {
+                    self.deferred_error = Some(recv_error(e));
+                    break;
+                }
             }
         }
 

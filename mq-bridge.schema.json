@@ -1291,6 +1291,11 @@
           "description": "CSV rows mapped to/from JSON objects (string values only). The first row is the header/schema.",
           "type": "string",
           "const": "csv"
+        },
+        {
+          "description": "Parquet, one object per batch, JSON-object rows (object_store only; `parquet` feature).",
+          "type": "string",
+          "const": "parquet"
         }
       ]
     },

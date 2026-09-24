@@ -442,11 +442,18 @@ pub async fn test_amqp_message_id_round_trip() {
         publisher.send(sent.clone()).await.unwrap();
 
         let mut consumer = AmqpConsumer::new(&config).await.unwrap();
-        let first = consumer.receive().await.unwrap();
+        let deadline = std::time::Duration::from_secs(30);
+        let first = tokio::time::timeout(deadline, consumer.receive())
+            .await
+            .expect("first delivery timed out")
+            .unwrap();
         assert_eq!(first.message.message_id, sent.message_id);
         (first.commit)(MessageDisposition::Nack).await.unwrap();
 
-        let again = consumer.receive().await.unwrap();
+        let again = tokio::time::timeout(deadline, consumer.receive())
+            .await
+            .expect("redelivery timed out")
+            .unwrap();
         assert_eq!(again.message.message_id, sent.message_id);
         (again.commit)(MessageDisposition::Ack).await.unwrap();
     })

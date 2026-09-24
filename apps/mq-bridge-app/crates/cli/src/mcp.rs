@@ -1526,7 +1526,10 @@ fn status_entity(name: &str, endpoint: &str, snapshot: &ConsumerStatusSnapshot) 
 async fn run_stdio(server: BridgeMcp) -> anyhow::Result<()> {
     info!("MCP server starting on stdio");
     let service = server.serve(rmcp::transport::stdio()).await?;
-    service.waiting().await?;
+    tokio::select! {
+        result = service.waiting() => { result?; }
+        _ = crate::shutdown_requested() => {}
+    }
     Ok(())
 }
 

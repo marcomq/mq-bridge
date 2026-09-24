@@ -22,6 +22,9 @@ marcomq/homebrew-tap          ← the tap (installs read from here)
 
 ## Endpoint plugins
 
+> **Forthcoming:** the plugin formulas and the tap's `sync-plugins.yml` are not
+> in `marcomq/homebrew-tap` yet; the commands below work once they land.
+
 The tap also carries one formula per mq-bridge endpoint plugin —
 `mq-bridge-pulsar`, `mq-bridge-meilisearch`, `mq-bridge-redpanda` — each a
 prebuilt shared library installed into `lib/mq-bridge`, which mq-bridge probes

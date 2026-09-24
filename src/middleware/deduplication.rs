@@ -585,6 +585,9 @@ async fn reserve_settled(
 /// here). Acking on `InFlight` instead would lose the message whenever the holder failed.
 /// Past twice the lease — reachable only through clock skew between instances — the message
 /// is processed unclaimed: a possible duplicate, never a loss.
+///
+/// This batch's own claims are released before each wait and re-reserved after it, since
+/// their lease could lapse during the wait and let a peer claim them too.
 async fn settle_in_flight(
     store: &dyn DedupStore,
     keys: &[Vec<u8>],
@@ -608,12 +611,17 @@ async fn settle_in_flight(
             }
             return Ok(());
         }
-        tokio::time::sleep(IN_FLIGHT_POLL).await;
-        let retry: Vec<Vec<u8>> = waiting.iter().map(|&i| keys[i].clone()).collect();
-        let fresh = store.reserve_many(&retry, unix_now()).await?;
-        for (i, state) in waiting.into_iter().zip(fresh) {
-            states[i] = state;
+        // Released right after the reserve that claimed them, so they are still ours.
+        let claimed: Vec<Vec<u8>> = (0..states.len())
+            .filter(|&i| states[i] == Reservation::Claimed)
+            .map(|i| keys[i].clone())
+            .collect();
+        if !claimed.is_empty() {
+            store.release_many(&claimed).await;
         }
+        tokio::time::sleep(IN_FLIGHT_POLL).await;
+        let fresh = store.reserve_many(keys, unix_now()).await?;
+        states.copy_from_slice(&fresh);
     }
 }
 

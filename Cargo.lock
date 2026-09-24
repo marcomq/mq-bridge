@@ -3640,6 +3640,7 @@ dependencies = [
  "arc-swap",
  "arrow-array",
  "arrow-json",
+ "arrow-schema",
  "async-channel",
  "async-nats",
  "async-trait",

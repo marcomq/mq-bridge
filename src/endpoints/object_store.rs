@@ -664,6 +664,8 @@ struct ObjProgress {
 pub struct ObjectStoreConsumer {
     store: Arc<dyn ObjectStore>,
     base: ObjPath,
+    /// The URL names one object, not a prefix: read just that key.
+    single_object: bool,
     delimiter: Vec<u8>,
     format: FileFormat,
     #[cfg(feature = "compression")]
@@ -759,9 +761,13 @@ impl ObjectStoreConsumer {
             "Object-store source connected"
         );
 
+        // A URL naming an existing object reads that object alone, like DuckDB/Polars paths.
+        let single_object = !base.as_ref().is_empty() && store.head(&base).await.is_ok();
+
         Ok(Self {
             store: Arc::from(store),
             base,
+            single_object,
             delimiter,
             format: config.format.clone(),
             #[cfg(feature = "compression")]
@@ -795,6 +801,7 @@ impl ObjectStoreConsumer {
         Self {
             store,
             base,
+            single_object: false,
             delimiter: vec![b'\n'],
             format,
             #[cfg(feature = "compression")]
@@ -817,6 +824,7 @@ impl ObjectStoreConsumer {
     /// /in-memory all do); `list_with_offset` also filters server-side when resuming.
     async fn next_object(&self, last: Option<&str>) -> anyhow::Result<Option<(String, Vec<u8>)>> {
         let mut stream = match last {
+            _ if self.single_object => futures::stream::once(self.store.head(&self.base)).boxed(),
             Some(k) => self
                 .store
                 .list_with_offset(Some(&self.base), &ObjPath::from(k)),
@@ -858,7 +866,7 @@ impl ObjectStoreConsumer {
     /// `max_object_bytes` caps the *stored* size (see `next_object`), so reusing it here
     /// would reject any object that compressed better than 1:1 — i.e. most of them. Scale
     /// it instead; the result is still bounded, so a decompression bomb cannot run away.
-    #[cfg(feature = "compression")]
+    #[cfg(any(feature = "compression", feature = "parquet"))]
     fn decompressed_limit(&self) -> Option<u64> {
         const MAX_DECOMPRESSED_EXPANSION: u64 = 20;
         self.max_object_bytes
@@ -870,7 +878,7 @@ impl ObjectStoreConsumer {
         let data = self.decode_object(key, data)?;
         #[cfg(feature = "parquet")]
         if self.format == FileFormat::Parquet {
-            return crate::support::parquet::decode_rows(data)
+            return crate::support::parquet::decode_rows(data, self.decompressed_limit())
                 .with_context(|| format!("decode parquet object '{key}'"));
         }
         Ok(split_and_parse(&data, &self.delimiter, &self.format))
@@ -2186,6 +2194,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_url_naming_one_object_reads_only_that_object() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.jsonl"), b"{\"n\":1}\n").unwrap();
+        std::fs::write(dir.path().join("a.jsonl.bak"), b"{\"n\":2}\n").unwrap();
+        let config = ObjectStoreConfig {
+            url: format!("file://{}/a.jsonl", dir.path().display()),
+            format: FileFormat::Json,
+            polling_interval_ms: Some(1),
+            ..Default::default()
+        };
+
+        let mut consumer = ObjectStoreConsumer::new(&config).await.unwrap();
+        let batch = consumer.receive_batch(10).await.unwrap();
+        assert_eq!(batch.messages.len(), 1);
+        assert_eq!(batch.messages[0].payload.as_ref(), br#"{"n":1}"#);
+        (batch.commit)(vec![MessageDisposition::Ack]).await.unwrap();
+        assert!(consumer
+            .receive_batch(10)
+            .await
+            .unwrap()
+            .messages
+            .is_empty());
+    }
+
+    #[tokio::test]
     async fn nacked_records_are_redelivered() {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let publisher = test_publisher(store.clone());
@@ -2329,9 +2362,11 @@ mod tests {
 
         let keys = keys(store.as_ref()).await;
         assert_eq!(keys.len(), 1);
-        let rows =
-            crate::support::parquet::decode_rows(object_bytes(store.as_ref(), &keys[0]).await)
-                .unwrap();
+        let rows = crate::support::parquet::decode_rows(
+            object_bytes(store.as_ref(), &keys[0]).await,
+            None,
+        )
+        .unwrap();
         assert_eq!(rows.len(), 2);
     }
 

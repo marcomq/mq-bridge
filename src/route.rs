@@ -834,6 +834,21 @@ fn source_is_at_most_once(endpoint_type: &EndpointType) -> bool {
     }
 }
 
+/// The `mqb.src.*` family a positioned input stamps; see [`supports_source_metadata`].
+fn source_position_prefix(endpoint_type: &EndpointType) -> Option<&'static str> {
+    match endpoint_type {
+        EndpointType::Kafka(_) => Some("mqb.src.kafka_"),
+        EndpointType::PostgresCdc(_) => Some("mqb.src.postgres_"),
+        EndpointType::Sqlx(config) if config.publication.is_some() => Some("mqb.src.postgres_"),
+        EndpointType::Sqlx(config) if config.cursor_column.is_some() => Some("mqb.src.sqlx_"),
+        EndpointType::MongoDb(_) if supports_source_metadata(endpoint_type) => {
+            Some("mqb.src.mongodb_")
+        }
+        EndpointType::File(_) => Some("mqb.src.file_"),
+        _ => None,
+    }
+}
+
 /// Whether the input deduplicates on `message_id` although it mints a fresh one per read.
 fn dedup_keys_on_minted_message_id(input: &Endpoint) -> bool {
     let default_key = input.middlewares.iter().any(|middleware| {
@@ -861,23 +876,33 @@ impl Route {
     /// resolves against. A `ref` input that cannot be resolved counts as no position, so `auto`
     /// falls back to `write_time` rather than failing the route on a naming choice.
     fn source_has_position(&self) -> bool {
+        self.resolved_input()
+            .is_some_and(|input| supports_source_metadata(&input.endpoint_type))
+    }
+
+    /// The input with any `ref` chain followed, carrying the middlewares of every hop.
+    /// `None` when a ref cannot be resolved.
+    fn resolved_input(&self) -> Option<std::borrow::Cow<'_, Endpoint>> {
         // A ref may name another ref, so follow the chain the way `resolve_endpoint_recursive`
         // does. The depth bound doubles as the cycle guard: a loop simply runs out of it.
         const MAX_DEPTH: usize = 16;
         let EndpointType::Ref(name) = &self.input.endpoint_type else {
-            return supports_source_metadata(&self.input.endpoint_type);
+            return Some(std::borrow::Cow::Borrowed(&self.input));
         };
+        let mut middlewares = self.input.middlewares.clone();
         let mut name = name.clone();
         for _ in 0..MAX_DEPTH {
-            let Some(referenced) = get_endpoint(&name) else {
-                return false;
-            };
+            let mut referenced = get_endpoint(&name)?;
+            middlewares.append(&mut referenced.middlewares);
             match referenced.endpoint_type {
                 EndpointType::Ref(next) => name = next,
-                endpoint_type => return supports_source_metadata(&endpoint_type),
+                _ => {
+                    referenced.middlewares = middlewares;
+                    return Some(std::borrow::Cow::Owned(referenced));
+                }
             }
         }
-        false
+        None
     }
 
     /// Returns the sink mechanism that makes replayed writes idempotent, when it can be
@@ -887,9 +912,18 @@ impl Route {
         if output.handler.is_some() {
             return None;
         }
-        let source_has_position = self.source_has_position();
-        // A key built from `mqb.src.*` is only replay-stable when the input stamps a position.
-        let replayable = |key: &str| source_has_position || !key.contains("mqb.src.");
+        let input = self.resolved_input();
+        let source_has_position = input
+            .as_ref()
+            .is_some_and(|input| supports_source_metadata(&input.endpoint_type));
+        let position_prefix = input
+            .as_ref()
+            .and_then(|input| source_position_prefix(&input.endpoint_type));
+        // A key built from `mqb.src.*` is only replay-stable when the input stamps that position.
+        let replayable = |key: &str| {
+            key.match_indices("mqb.src.")
+                .all(|(at, _)| position_prefix.is_some_and(|prefix| key[at..].starts_with(prefix)))
+        };
         match &output.endpoint_type {
             EndpointType::MongoDb(config) if config.id_field.as_deref().is_some_and(replayable) => {
                 Some("MongoDB unique _id")
@@ -940,7 +974,10 @@ impl Route {
     }
 
     fn inferred_delivery(&self, output: &Endpoint) -> (DeliveryGuarantee, Option<&'static str>) {
-        if source_is_at_most_once(&self.input.endpoint_type) {
+        if self
+            .resolved_input()
+            .is_some_and(|input| source_is_at_most_once(&input.endpoint_type))
+        {
             return (DeliveryGuarantee::AtMostOnce, None);
         }
         match self.inferred_idempotency_mechanism(output) {
@@ -1147,7 +1184,10 @@ impl Route {
                 self.options.concurrency
             ));
         }
-        if dedup_keys_on_minted_message_id(&self.input) {
+        if self
+            .resolved_input()
+            .is_some_and(|input| dedup_keys_on_minted_message_id(&input))
+        {
             warnings.push(format!(
                 "Route '{name}' deduplicates on `message_id`, which this input mints fresh on \
                  every read, so a redelivery never matches. Set the deduplication `key` to a \
@@ -2596,35 +2636,53 @@ mod tests {
         );
     }
 
-    /// A key built from source-position metadata only counts when the input stamps one.
+    /// A key built from source-position metadata only counts when the input stamps that family.
     #[test]
     fn a_position_key_is_idempotent_only_over_a_positional_input() {
-        let keyed_on_offset = || {
+        let keyed_on = |family: &str| {
             Endpoint::new(EndpointType::Sqlx(SqlxConfig {
-                insert_query: Some(
-                    "INSERT INTO t (p, o) VALUES (${metadata:mqb.src.kafka_partition}, \
-                     ${metadata:mqb.src.kafka_offset}) ON CONFLICT (p, o) DO NOTHING"
-                        .to_string(),
-                ),
+                insert_query: Some(format!(
+                    "INSERT INTO t (p, o) VALUES (${{metadata:mqb.src.{family}_partition}}, \
+                     ${{metadata:mqb.src.{family}_offset}}) ON CONFLICT (p, o) DO NOTHING"
+                )),
                 ..Default::default()
             }))
         };
-        let positionless = Route::new(Endpoint::new_memory("delivery_in", 1), keyed_on_offset());
+        let file_input = || {
+            Endpoint::new(EndpointType::File(crate::models::FileConfig::new(
+                "/tmp/orders.jsonl",
+            )))
+        };
+        let positionless = Route::new(Endpoint::new_memory("delivery_in", 1), keyed_on("kafka"));
         assert_eq!(
             positionless.delivery_guarantee(),
             DeliveryGuarantee::AtLeastOnce
         );
 
-        let positional = Route::new(
-            Endpoint::new(EndpointType::File(crate::models::FileConfig::new(
-                "/tmp/orders.jsonl",
-            ))),
-            keyed_on_offset(),
-        );
+        let foreign_family = Route::new(file_input(), keyed_on("kafka"));
         assert_eq!(
-            positional.delivery_guarantee(),
+            foreign_family.delivery_guarantee(),
+            DeliveryGuarantee::AtLeastOnce
+        );
+
+        let own_family = Route::new(file_input(), keyed_on("file"));
+        assert_eq!(
+            own_family.delivery_guarantee(),
             DeliveryGuarantee::EffectivelyOnce
         );
+    }
+
+    #[test]
+    fn a_ref_input_is_classified_by_what_it_resolves_to() {
+        register_endpoint(
+            "dg_ref_zeromq",
+            Endpoint::new(EndpointType::ZeroMq(Default::default())),
+        );
+        let route = Route::new(
+            Endpoint::new(EndpointType::Ref("dg_ref_zeromq".to_string())),
+            Endpoint::new_memory("delivery_out", 1),
+        );
+        assert_eq!(route.delivery_guarantee(), DeliveryGuarantee::AtMostOnce);
     }
 
     #[test]

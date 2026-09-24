@@ -29,7 +29,7 @@ impl Drop for TestDir {
 
 fn file_route(name: &str, from: &Path, to: &Path, drains: bool) -> String {
     format!(
-        "  {name}:\n    exit_on_empty: {drains}\n    input:\n      file:\n        path: \"{}\"\n        format: raw\n    output:\n      file:\n        path: \"{}\"\n        format: raw\n",
+        "  {name}:\n    exit_on_empty: {drains}\n    input:\n      file:\n        path: '{}'\n        format: raw\n    output:\n      file:\n        path: '{}'\n        format: raw\n",
         from.display(),
         to.display()
     )
