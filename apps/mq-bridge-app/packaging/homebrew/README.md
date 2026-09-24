@@ -26,7 +26,7 @@ marcomq/homebrew-tap          ← the tap (installs read from here)
 > in `marcomq/homebrew-tap` yet; the commands below work once they land.
 
 The tap also carries one formula per mq-bridge endpoint plugin —
-`mq-bridge-pulsar`, `mq-bridge-meilisearch`, `mq-bridge-redpanda` — each a
+`mq-bridge-pulsar`, `mq-bridge-meilisearch`, `mq-bridge-connect` — each a
 prebuilt shared library installed into `lib/mq-bridge`, which mq-bridge probes
 under `HOMEBREW_PREFIX` by default. They declare no dependency on
 `mq-bridge-app`: the same library serves the brewed CLI, the desktop app and a

@@ -91,7 +91,7 @@ after it:
 no `plugins:` entry, no `--plugin`, no `load_endpoint_plugin` call:
 
 ```console
-mqb copy 'redpanda://…' 'postgres://…'
+mqb copy 'connect://…' 'postgres://…'
 ```
 
 Directories are searched in this order, nearest first:
@@ -141,7 +141,7 @@ brew install marcomq/tap/mq-bridge-pulsar     # macOS arm64, Linux x86_64/arm64
 conda install -c marcomq mq-bridge-pulsar     # the same, plus Windows x86_64
 ```
 
-Both cover `pulsar`, `meilisearch` and `redpanda`. Neither depends on
+Both cover `pulsar`, `meilisearch` and `connect`. Neither depends on
 `mq-bridge-app`: one installed library serves whatever host asks for the
 endpoint — the brewed CLI, the desktop app, a Python or Node process in a
 virtualenv — which is why the search covers `HOMEBREW_PREFIX` and
@@ -308,7 +308,7 @@ a schema `?batch_size=100` reaches the plugin as the string `"100"` and
 from a URI until it describes one.
 
 ```rust
-impl CustomEndpointFactory for RedpandaFactory {
+impl CustomEndpointFactory for ConnectFactory {
     fn config_schema(&self) -> Option<serde_json::Value> {
         Some(serde_json::json!({
             "type": "object",
@@ -327,7 +327,7 @@ impl CustomEndpointFactory for RedpandaFactory {
 
 Deriving it beats writing it by hand if your config is a Rust struct — add
 [`schemars`](https://docs.rs/schemars) to your own crate and return
-`serde_json::to_value(schemars::schema_for!(RedpandaConfig)).ok()`. Nothing but
+`serde_json::to_value(schemars::schema_for!(ConnectConfig)).ok()`. Nothing but
 JSON crosses the ABI, so your schemars version and the host's need not agree,
 and a plugin written in another language just emits the document. `title`,
 `description` and `default` are what a host shows, so they are worth filling in;
@@ -369,7 +369,7 @@ A plugin reaching a family of protocols rather than one — a compatibility laye
 a driver host — names the protocol in the scheme, after a `+`:
 
 ```
-mq-bridge --input 'redpanda+mqtt://localhost:1883/orders' --output 'kafka://...'
+mq-bridge --input 'connect+mqtt://localhost:1883/orders' --output 'kafka://...'
 ```
 
 This is the spelling `git+ssh://`, `svn+ssh://` and SQLAlchemy's
@@ -380,7 +380,7 @@ the plugin's own vocabulary, and a field annotated `subscheme` receives it.
 Everything after the scheme then describes the inner protocol rather than the
 plugin, so `origin` and `url` are handed over carrying the inner scheme:
 
-| From `redpanda+mqtt://host:1883/orders` | |
+| From `connect+mqtt://host:1883/orders` | |
 | --- | --- |
 | `subscheme` | `mqtt` |
 | `origin` | `mqtt://host:1883` |
@@ -405,7 +405,7 @@ against it first, which turns a deserializer's complaint into a message naming
 the field:
 
 ```
-endpoint `redpanda` configuration: unknown field `topci`; this endpoint takes
+endpoint `connect` configuration: unknown field `topci`; this endpoint takes
 batch_size, group, topic, url
 ```
 

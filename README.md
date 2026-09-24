@@ -197,6 +197,18 @@ The table below summarizes the capabilities and configuration for each backend:
 | **WebSocket** | N/A | No | No |
 | **ZeroMQ** | Set `socket_type: "sub"` | **Native** (REQ/REP) | No |
 
+### Plugin Endpoints
+
+These endpoints live in their own repositories and load as [plugins](docs/PLUGINS.md), so the core library carries none of their dependencies:
+
+| Plugin | What it does | In `mqb` |
+| :--- | :--- | :--- |
+| **[Pulsar](https://github.com/marcomq/mq-bridge-pulsar)** | Apache Pulsar input and output | Built in |
+| **[Meilisearch](https://github.com/marcomq/mq-bridge-meilisearch)** | Document sink into a search index; index scan as input | Built in |
+| **[Connect](https://github.com/marcomq/mq-bridge-connect)** | Redpanda Connect connectors as endpoints (`connect+mqtt://…`) | Separate install (size) |
+
+Outside `mqb` (Python, Node.js, your own Rust host), or for Connect, install the plugin with `brew install marcomq/tap/<repo>` or `conda install -c marcomq <repo>`; it is then discovered automatically.
+
 ### Feature Details
 *   **Request-Reply**:
     *   **Native**: Uses protocol-level correlation (e.g., HTTP connection, NATS reply subject).

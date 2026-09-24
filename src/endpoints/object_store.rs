@@ -675,8 +675,9 @@ struct ObjProgress {
 pub struct ObjectStoreConsumer {
     store: Arc<dyn ObjectStore>,
     base: ObjPath,
-    /// The URL names one object, not a prefix: read just that key.
-    single_object: bool,
+    /// `Some(true)`: the URL names one object, read just that key. `None`: undecided until
+    /// the prefix lists something or the key itself appears.
+    single_object: Option<bool>,
     delimiter: Vec<u8>,
     format: FileFormat,
     #[cfg(feature = "compression")]
@@ -772,8 +773,14 @@ impl ObjectStoreConsumer {
             "Object-store source connected"
         );
 
-        // A URL naming an existing object reads that object alone, like DuckDB/Polars paths.
-        let single_object = !base.as_ref().is_empty() && store.head(&base).await.is_ok();
+        // A URL naming an object reads that object alone, like DuckDB/Polars paths.
+        let single_object = if base.as_ref().is_empty() {
+            Some(false)
+        } else if store.head(&base).await.is_ok() {
+            Some(true)
+        } else {
+            None
+        };
 
         Ok(Self {
             store: Arc::from(store),
@@ -812,7 +819,7 @@ impl ObjectStoreConsumer {
         Self {
             store,
             base,
-            single_object: false,
+            single_object: Some(false),
             delimiter: vec![b'\n'],
             format,
             #[cfg(feature = "compression")]
@@ -833,9 +840,23 @@ impl ObjectStoreConsumer {
     /// Fetches the next object strictly after `last` (in key order), skipping directory
     /// markers. Relies on the store listing keys in lexicographic order (S3/GCS/Azure/local
     /// /in-memory all do); `list_with_offset` also filters server-side when resuming.
-    async fn next_object(&self, last: Option<&str>) -> anyhow::Result<Option<(String, Vec<u8>)>> {
+    async fn next_object(
+        &mut self,
+        last: Option<&str>,
+    ) -> anyhow::Result<Option<(String, Vec<u8>)>> {
+        // An exact key may be written after the consumer starts; decide on first sight.
+        if self.single_object.is_none() {
+            let listed = self.store.list(Some(&self.base)).next().await.transpose()?;
+            if listed.is_some() {
+                self.single_object = Some(false);
+            } else if self.store.head(&self.base).await.is_ok() {
+                self.single_object = Some(true);
+            }
+        }
         let mut stream = match last {
-            _ if self.single_object => futures::stream::once(self.store.head(&self.base)).boxed(),
+            _ if self.single_object == Some(true) => {
+                futures::stream::once(self.store.head(&self.base)).boxed()
+            }
             Some(k) => self
                 .store
                 .list_with_offset(Some(&self.base), &ObjPath::from(k)),
@@ -2247,6 +2268,29 @@ mod tests {
             .unwrap()
             .messages
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_url_naming_one_object_reads_it_once_it_is_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = ObjectStoreConfig {
+            url: format!("file://{}/a.jsonl", dir.path().display()),
+            format: FileFormat::Json,
+            polling_interval_ms: Some(1),
+            ..Default::default()
+        };
+
+        let mut consumer = ObjectStoreConsumer::new(&config).await.unwrap();
+        assert!(consumer
+            .receive_batch(10)
+            .await
+            .unwrap()
+            .messages
+            .is_empty());
+        std::fs::write(dir.path().join("a.jsonl"), b"{\"n\":1}\n").unwrap();
+        let batch = consumer.receive_batch(10).await.unwrap();
+        assert_eq!(batch.messages.len(), 1);
+        assert_eq!(batch.messages[0].payload.as_ref(), br#"{"n":1}"#);
     }
 
     #[tokio::test]

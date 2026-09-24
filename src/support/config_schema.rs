@@ -487,7 +487,7 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn redpanda_schema() -> Value {
+    fn connect_schema() -> Value {
         json!({
             "type": "object",
             "properties": {
@@ -518,7 +518,7 @@ mod tests {
     /// query parameter, whatever the transport's own conventions are.
     #[test]
     fn an_annotated_schema_splits_the_address_from_the_path() {
-        let config = UriSchema::from_schema(&redpanda_schema())
+        let config = UriSchema::from_schema(&connect_schema())
             .config_from_uri("rp://user@host:9092/orders?group=g")
             .expect("map the uri");
 
@@ -529,7 +529,7 @@ mod tests {
 
     #[test]
     fn a_declared_type_is_what_makes_a_query_parameter_a_number() {
-        let config = UriSchema::from_schema(&redpanda_schema())
+        let config = UriSchema::from_schema(&connect_schema())
             .config_from_uri(
                 "rp://host/t?batch_size=100&tls=true&acks=0.5&brokers=a,b&partitions=0,1",
             )
@@ -546,7 +546,7 @@ mod tests {
     /// whatever the plugin's deserializer says; naming the field here does not.
     #[test]
     fn a_value_that_is_not_the_declared_type_is_rejected_by_name() {
-        let error = UriSchema::from_schema(&redpanda_schema())
+        let error = UriSchema::from_schema(&connect_schema())
             .config_from_uri("rp://host/t?batch_size=plenty")
             .map(|_| ())
             .expect_err("`plenty` is not an integer");
@@ -558,7 +558,7 @@ mod tests {
 
     #[test]
     fn a_query_parameter_still_overrides_the_position_it_would_have_had() {
-        let config = UriSchema::from_schema(&redpanda_schema())
+        let config = UriSchema::from_schema(&connect_schema())
             .config_from_uri("rp://host/orders?url=rp://elsewhere:9092")
             .expect("map the uri");
 
@@ -582,7 +582,7 @@ mod tests {
 
     #[test]
     fn a_missing_path_leaves_the_field_to_the_plugin_s_own_defaulting() {
-        let config = UriSchema::from_schema(&redpanda_schema())
+        let config = UriSchema::from_schema(&connect_schema())
             .config_from_uri("rp://host:9092")
             .expect("map the uri");
 
@@ -665,7 +665,7 @@ mod tests {
 
     #[test]
     fn a_usable_schema_validates() {
-        validate(&redpanda_schema()).expect("the annotated schema is usable");
+        validate(&connect_schema()).expect("the annotated schema is usable");
         validate(&gateway_schema()).expect("a compound-scheme schema is usable");
         validate(&json!({ "type": "object" })).expect("describing no property is usable");
     }

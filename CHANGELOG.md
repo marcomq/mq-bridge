@@ -191,7 +191,7 @@ All notable changes to `mq-bridge`. Newest first.
   reserves the `x-` prefix for annotations, so the document stays a plain schema.
   `subscheme` is for a plugin that is a gateway to a family of protocols rather than one
   transport: it takes the scheme's part after a `+`, so
-  `redpanda+mqtt://localhost:1883/orders` names the plugin, the protocol and the address in
+  `connect+mqtt://localhost:1883/orders` names the plugin, the protocol and the address in
   one line — the spelling `git+ssh://` and `postgresql+psycopg2://` made familiar. The rest
   of the URI then describes the inner protocol, so `origin` and `url` are handed over
   carrying the inner scheme (`mqtt://localhost:1883`) rather than the compound one. One document serves both

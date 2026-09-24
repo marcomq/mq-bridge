@@ -131,6 +131,8 @@ fn stringify_conflicting_fields(rows: &[serde_json::Value]) -> Vec<serde_json::V
         .collect()
 }
 
+const ROWS_PER_CHUNK: usize = 64;
+
 /// Decodes a Parquet body into one message per row, each payload a JSON object.
 /// `max_bytes` bounds the decoded payload total, so a small object cannot expand without limit.
 pub(crate) fn decode_rows(
@@ -141,27 +143,32 @@ pub(crate) fn decode_rows(
     let mut out = Vec::new();
     let mut decoded: u64 = 0;
     for batch in reader {
-        let mut writer = WriterBuilder::new()
-            .with_explicit_nulls(true)
-            .build::<_, LineDelimited>(Vec::new());
-        writer.write_batches(&[&batch?])?;
-        writer.finish()?;
-        for line in writer.into_inner().split(|b| *b == b'\n') {
-            if line.is_empty() {
-                continue;
+        let batch = batch?;
+        // Serialize in small zero-copy slices so the limit trips before a whole batch is JSON.
+        for offset in (0..batch.num_rows()).step_by(ROWS_PER_CHUNK) {
+            let chunk = batch.slice(offset, ROWS_PER_CHUNK.min(batch.num_rows() - offset));
+            let mut writer = WriterBuilder::new()
+                .with_explicit_nulls(true)
+                .build::<_, LineDelimited>(Vec::new());
+            writer.write(&chunk)?;
+            writer.finish()?;
+            for line in writer.into_inner().split(|b| *b == b'\n') {
+                if line.is_empty() {
+                    continue;
+                }
+                decoded = decoded.saturating_add(line.len() as u64);
+                if let Some(limit) = max_bytes.filter(|limit| decoded > *limit) {
+                    return Err(anyhow!(
+                        "decoded parquet rows exceed {limit} bytes; raise max_object_bytes to read it"
+                    ));
+                }
+                let mut msg = CanonicalMessage::new(line.to_vec(), None);
+                msg.metadata.insert(
+                    "mq_bridge.original_format".to_string(),
+                    "parquet".to_string(),
+                );
+                out.push(msg);
             }
-            decoded = decoded.saturating_add(line.len() as u64);
-            if let Some(limit) = max_bytes.filter(|limit| decoded > *limit) {
-                return Err(anyhow!(
-                    "decoded parquet rows exceed {limit} bytes; raise max_object_bytes to read it"
-                ));
-            }
-            let mut msg = CanonicalMessage::new(line.to_vec(), None);
-            msg.metadata.insert(
-                "mq_bridge.original_format".to_string(),
-                "parquet".to_string(),
-            );
-            out.push(msg);
         }
     }
     Ok(out)

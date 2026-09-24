@@ -218,14 +218,14 @@ mod tests {
 
     #[test]
     fn a_library_name_is_the_endpoint_name_with_the_platform_decoration() {
-        let name = library_file_name("redpanda");
-        assert!(name.contains("mq_bridge_redpanda"), "{name}");
+        let name = library_file_name("connect");
+        assert!(name.contains("mq_bridge_connect"), "{name}");
         if cfg!(target_os = "windows") {
-            assert_eq!(name, "mq_bridge_redpanda.dll");
+            assert_eq!(name, "mq_bridge_connect.dll");
         } else if cfg!(target_os = "macos") {
-            assert_eq!(name, "libmq_bridge_redpanda.dylib");
+            assert_eq!(name, "libmq_bridge_connect.dylib");
         } else {
-            assert_eq!(name, "libmq_bridge_redpanda.so");
+            assert_eq!(name, "libmq_bridge_connect.so");
         }
     }
 
