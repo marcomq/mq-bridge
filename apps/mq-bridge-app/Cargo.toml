@@ -34,6 +34,9 @@ tracing-subscriber = { version = "0.3.23", features = ["json", "env-filter"] }
 url = "2.5.8"
 uuid = { version = "1.24", features = ["v4"] }
 
+[profile.dev]
+debug = "line-tables-only"
+
 [profile.dev.package."*"]
 debug = false
 
