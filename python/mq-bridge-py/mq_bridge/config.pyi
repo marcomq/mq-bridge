@@ -405,6 +405,7 @@ class ObjectStoreConfig(TypedDict, total=False):
     compression: Compression
     cursor_id: Optional[str]
     date_partition: Optional[bool]
+    date_partition_style: DatePartitionStyle
     delimiter: Optional[str]
     encryption: Optional[EncryptionConfig]
     extension: Optional[str]
@@ -632,6 +633,7 @@ class ZeroMqConfig(TypedDict, total=False):
 
 CipherKind = Literal["xchacha20poly1305", "aes256gcm"]
 Compression = Literal["none", "gzip", "lz4", "zstd"]
+DatePartitionStyle = Literal["nested", "hive"]
 DeliveryGuarantee = Literal["at_most_once", "at_least_once", "effectively_once"]
 FaultMode = Literal["panic", "disconnect", "timeout", "json_format_error", "nack"]
 FileFormat = Literal["normal", "json", "text", "raw", "csv", "parquet"]

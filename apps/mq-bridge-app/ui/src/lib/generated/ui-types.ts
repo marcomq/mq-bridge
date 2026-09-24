@@ -358,10 +358,13 @@ export interface ObjectStoreConfig {
   polling_interval_ms?: number | null;
   max_object_bytes?: number | null;
   date_partition?: boolean | null;
+  date_partition_style?: DatePartitionStyle;
   extension?: string | null;
   compression?: Compression;
   encryption?: EncryptionConfig | null;
 }
+
+export type DatePartitionStyle = "nested" | "hive";
 
 export type StaticConfig = string | Record<string, never>;
 

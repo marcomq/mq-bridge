@@ -28,7 +28,7 @@
 
 use crate::checkpoint::{self, CheckpointBackend, CheckpointStore};
 use crate::endpoints::file::{encode_record, parse_delimiter, parse_message};
-use crate::models::{Compression, FileFormat, NameBy, ObjectStoreConfig};
+use crate::models::{Compression, DatePartitionStyle, FileFormat, NameBy, ObjectStoreConfig};
 #[cfg(feature = "encryption")]
 use crate::support::crypto::Crypto;
 use crate::support::source_ranges::{
@@ -285,6 +285,7 @@ pub struct ObjectStorePublisher {
     #[cfg(feature = "encryption")]
     crypto: Option<Arc<Crypto>>,
     date_partition: bool,
+    hive_partition: bool,
     extension: String,
     name_by: NameBy,
     /// Ranges already on the store, filled by one listing before the first idempotent write.
@@ -344,6 +345,7 @@ impl ObjectStorePublisher {
                 .transpose()?
                 .map(Arc::new),
             date_partition: config.date_partition_enabled(name_by),
+            hive_partition: config.date_partition_style == DatePartitionStyle::Hive,
             extension,
             name_by,
             covered_ranges: Arc::new(Mutex::new(CoveredRanges::default())),
@@ -370,11 +372,20 @@ impl ObjectStorePublisher {
         if self.date_partition {
             // Top 48 bits of a uuidv7 are the Unix-epoch millisecond timestamp.
             let (y, m, d) = civil_from_unix_ms((id >> 80) as u64);
+            let (y, m, d) = if self.hive_partition {
+                (
+                    format!("year={y:04}"),
+                    format!("month={m:02}"),
+                    format!("day={d:02}"),
+                )
+            } else {
+                (format!("{y:04}"), format!("{m:02}"), format!("{d:02}"))
+            };
             self.base
                 .clone()
-                .join(format!("{y:04}").as_str())
-                .join(format!("{m:02}").as_str())
-                .join(format!("{d:02}").as_str())
+                .join(y.as_str())
+                .join(m.as_str())
+                .join(d.as_str())
                 .join(name.as_str())
         } else {
             self.base.clone().join(name.as_str())
@@ -1204,6 +1215,7 @@ mod tests {
             #[cfg(feature = "encryption")]
             crypto: None,
             date_partition: false,
+            hive_partition: false,
             extension: "jsonl".to_string(),
             name_by: NameBy::WriteTime,
             covered_ranges: Arc::new(Mutex::new(CoveredRanges::default())),
@@ -1224,6 +1236,25 @@ mod tests {
             })
             .collect();
         assert!(keys.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
+    #[test]
+    fn hive_style_names_the_date_folders() {
+        let mut publisher = test_publisher(Arc::new(InMemory::new()));
+        publisher.date_partition = true;
+        publisher.hive_partition = true;
+        let key = publisher.next_key().to_string();
+        let parts: Vec<&str> = key.split('/').collect();
+        assert_eq!(parts.len(), 5, "{key}");
+        assert!(
+            parts[1].starts_with("year=") && parts[1].len() == 9,
+            "{key}"
+        );
+        assert!(
+            parts[2].starts_with("month=") && parts[2].len() == 8,
+            "{key}"
+        );
+        assert!(parts[3].starts_with("day=") && parts[3].len() == 6, "{key}");
     }
 
     fn kafka_message(offset: i64) -> CanonicalMessage {

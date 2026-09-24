@@ -989,7 +989,7 @@ with_value_setters!(FileConfig { with_name_by => name_by: NameBy, with_format =>
 with_optional_setters!(FileConfig { with_idempotency => idempotency: bool, with_encryption => encryption: EncryptionConfig });
 with_optional_string_setters!(FileConfig { with_delimiter => delimiter });
 
-with_value_setters!(ObjectStoreConfig { with_name_by => name_by: NameBy, with_format => format: FileFormat, with_compression => compression: Compression });
+with_value_setters!(ObjectStoreConfig { with_name_by => name_by: NameBy, with_format => format: FileFormat, with_compression => compression: Compression, with_date_partition_style => date_partition_style: DatePartitionStyle });
 with_optional_setters!(ObjectStoreConfig { with_idempotency => idempotency: bool, with_date_partition => date_partition: bool });
 with_optional_setters!(ObjectStoreConfig { with_polling_interval_ms => polling_interval_ms: u64, with_max_object_bytes => max_object_bytes: u64, with_encryption => encryption: EncryptionConfig });
 with_optional_string_setters!(ObjectStoreConfig { with_delimiter => delimiter, with_checkpoint_store => checkpoint_store, with_cursor_id => cursor_id, with_extension => extension });

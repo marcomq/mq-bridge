@@ -12,6 +12,7 @@ Query parameters recognised as config fields for this connector. The object-type
 | `compression` | `none` \| `gzip` \| `lz4` \| `zstd` | no | `none` | Whole-object compression (`none`, `gzip`, `lz4`, `zstd`). Requires the `compression` feature. |
 | `cursor_id` | string | no | — | (Source only) Cursor id namespacing the checkpoint key; enables durable resume. |
 | `date_partition` | boolean | no | `null` | (Sink only) Prepend a `YYYY/MM/DD/` path (write time, UTC) to each object key. Applies to `write_time` naming only; defaults to on. Purely for readability / lifecycle rules. |
+| `date_partition_style` | `nested` \| `hive` | no | `nested` | (Sink only) Date folder layout: `nested` (`YYYY/MM/DD/`) or `hive` (`year=YYYY/month=MM/day=DD/`). |
 | `delimiter` | string | no | — | Record delimiter within an object. Defaults to newline ("\n"). Can be a string or a hex sequence (e.g. "0x00"). |
 | `encryption` | object | no | `null` | At-rest AEAD encryption applied after compression. Requires the `encryption` feature. |
 | `extension` | string | no | — | (Sink only) Extension for written objects, without the dot. Defaults to a value derived from `format`, `compression` and `encryption` (e.g. `jsonl`, `csv`, `bin`, `jsonl.gz`, `jsonl.lz4`, `jsonl.gz.enc`); encrypted objects get a trailing `.enc` since they are ciphertext, not a directly decompressible `.gz`. |

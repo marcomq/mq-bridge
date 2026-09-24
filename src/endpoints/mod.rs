@@ -573,6 +573,9 @@ fn check_consumer_recursive(
             if cfg.date_partition.is_some() {
                 warnings.push("Endpoint 'object_store' is used as a consumer, but 'date_partition' is a publisher-only option and will be ignored.".to_string());
             }
+            if cfg.date_partition_style != crate::models::DatePartitionStyle::Nested {
+                warnings.push("Endpoint 'object_store' is used as a consumer, but 'date_partition_style' is a publisher-only option and will be ignored.".to_string());
+            }
             Ok(warnings)
         }
         #[cfg(feature = "websocket")]

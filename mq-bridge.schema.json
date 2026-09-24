@@ -472,6 +472,21 @@
       },
       "additionalProperties": false
     },
+    "DatePartitionStyle": {
+      "description": "Layout of the object_store sink's date folders.",
+      "oneOf": [
+        {
+          "description": "`YYYY/MM/DD/`.",
+          "type": "string",
+          "const": "nested"
+        },
+        {
+          "description": "`year=YYYY/month=MM/day=DD/`, read as partition columns by Spark, DuckDB, DataFusion, Athena.",
+          "type": "string",
+          "const": "hive"
+        }
+      ]
+    },
     "DeadLetterQueueMiddleware": {
       "description": "Dead-Letter Queue (DLQ) middleware configuration.\n\nRoutes failed messages to a designated endpoint for later analysis and recovery.\nIt is recommended to pair this with the Retry middleware to avoid message loss.\n\nFailed messages are sent to the configured endpoint when they are exhausted after retry attempts.",
       "type": "object",
@@ -2946,6 +2961,11 @@
             "null"
           ],
           "default": null
+        },
+        "date_partition_style": {
+          "description": "(Sink only) Date folder layout: `nested` (`YYYY/MM/DD/`) or `hive` (`year=YYYY/month=MM/day=DD/`).",
+          "$ref": "#/$defs/DatePartitionStyle",
+          "default": "nested"
         },
         "delimiter": {
           "description": "Record delimiter within an object. Defaults to newline (\"\\n\"). Can be a string or a\nhex sequence (e.g. \"0x00\").",

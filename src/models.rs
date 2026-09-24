@@ -1023,6 +1023,18 @@ pub enum NameBy {
     WriteTime,
 }
 
+/// Layout of the object_store sink's date folders.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum DatePartitionStyle {
+    /// `YYYY/MM/DD/`.
+    #[default]
+    Nested,
+    /// `year=YYYY/month=MM/day=DD/`, read as partition columns by Spark, DuckDB, DataFusion, Athena.
+    Hive,
+}
+
 impl NameBy {
     /// Resolves `Auto` against the input's ability to stamp a replay position. Explicit
     /// values pass through, so an unsupported source still fails where it is configured.
@@ -1369,6 +1381,9 @@ pub struct ObjectStoreConfig {
     /// `write_time` naming only; defaults to on. Purely for readability / lifecycle rules.
     #[serde(default)]
     pub date_partition: Option<bool>,
+    /// (Sink only) Date folder layout: `nested` (`YYYY/MM/DD/`) or `hive` (`year=YYYY/month=MM/day=DD/`).
+    #[serde(default)]
+    pub date_partition_style: DatePartitionStyle,
     /// (Sink only) Extension for written objects, without the dot. Defaults to a value derived
     /// from `format`, `compression` and `encryption` (e.g. `jsonl`, `csv`, `bin`, `jsonl.gz`,
     /// `jsonl.lz4`, `jsonl.gz.enc`); encrypted objects get a trailing `.enc` since they are
