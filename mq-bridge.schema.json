@@ -2994,7 +2994,7 @@
           ]
         },
         "format": {
-          "description": "Record encoding within an object, shared with the file endpoint. Defaults to\n`normal` (one JSON `CanonicalMessage` per line). CSV is supported for sources only.",
+          "description": "Record encoding within an object, shared with the file endpoint. Defaults to\n`normal` (one JSON `CanonicalMessage` per line). CSV is source-only; Parquet needs the `parquet` feature.",
           "$ref": "#/$defs/FileFormat",
           "default": "normal"
         },
@@ -3514,6 +3514,7 @@
         "endpoints": {
           "description": "The inputs to read, in order. At least one is required.",
           "type": "array",
+          "minItems": 1,
           "items": {
             "$ref": "#/$defs/Endpoint"
           }

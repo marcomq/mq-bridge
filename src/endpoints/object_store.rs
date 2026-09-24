@@ -853,6 +853,12 @@ impl ObjectStoreConsumer {
                 self.single_object = Some(true);
             }
         }
+        // In prefix mode the exact key still counts; it sorts before its children.
+        let exact = match last {
+            _ if self.single_object == Some(true) || self.base.as_ref().is_empty() => None,
+            Some(k) if k >= self.base.as_ref() => None,
+            _ => self.store.head(&self.base).await.ok(),
+        };
         let mut stream = match last {
             _ if self.single_object == Some(true) => {
                 futures::stream::once(self.store.head(&self.base)).boxed()
@@ -862,6 +868,11 @@ impl ObjectStoreConsumer {
                 .list_with_offset(Some(&self.base), &ObjPath::from(k)),
             None => self.store.list(Some(&self.base)),
         };
+        if let Some(meta) = exact {
+            stream = futures::stream::once(async { Ok(meta) })
+                .chain(stream)
+                .boxed();
+        }
         while let Some(meta) = stream.next().await {
             let meta = meta?;
             let key = meta.location.to_string();
@@ -2291,6 +2302,40 @@ mod tests {
         let batch = consumer.receive_batch(10).await.unwrap();
         assert_eq!(batch.messages.len(), 1);
         assert_eq!(batch.messages[0].payload.as_ref(), br#"{"n":1}"#);
+    }
+
+    #[tokio::test]
+    async fn an_exact_key_written_after_a_child_is_still_read() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let mut consumer = ObjectStoreConsumer::from_store(
+            store.clone(),
+            ObjPath::from("a"),
+            FileFormat::Json,
+            None,
+            None,
+        );
+        consumer.single_object = None;
+        store
+            .put(&ObjPath::from("a/child"), b"{\"n\":2}\n".to_vec().into())
+            .await
+            .unwrap();
+        store
+            .put(&ObjPath::from("a"), b"{\"n\":1}\n".to_vec().into())
+            .await
+            .unwrap();
+
+        let mut payloads = Vec::new();
+        for _ in 0..2 {
+            let batch = consumer.receive_batch(10).await.unwrap();
+            payloads.extend(batch.messages.iter().map(|m| m.payload.to_vec()));
+            (batch.commit)(vec![MessageDisposition::Ack; batch.messages.len()])
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            payloads,
+            vec![br#"{"n":1}"#.to_vec(), br#"{"n":2}"#.to_vec()]
+        );
     }
 
     #[tokio::test]

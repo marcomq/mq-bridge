@@ -1358,7 +1358,7 @@ pub struct ObjectStoreConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotency: Option<bool>,
     /// Record encoding within an object, shared with the file endpoint. Defaults to
-    /// `normal` (one JSON `CanonicalMessage` per line). CSV is supported for sources only.
+    /// `normal` (one JSON `CanonicalMessage` per line). CSV is source-only; Parquet needs the `parquet` feature.
     #[serde(default)]
     pub format: FileFormat,
     /// Record delimiter within an object. Defaults to newline ("\n"). Can be a string or a
@@ -2241,6 +2241,7 @@ pub struct IbmMqConfig {
 #[serde(deny_unknown_fields)]
 pub struct SequenceConfig {
     /// The inputs to read, in order. At least one is required.
+    #[cfg_attr(feature = "schema", schemars(length(min = 1)))]
     pub endpoints: Vec<Endpoint>,
     /// (Optional) Identifies the durable phase marker, so a restart resumes at the phase
     /// it had reached instead of replaying the earlier ones. Needs `checkpoint_store`.

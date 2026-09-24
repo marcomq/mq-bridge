@@ -133,42 +133,69 @@ fn stringify_conflicting_fields(rows: &[serde_json::Value]) -> Vec<serde_json::V
 
 const ROWS_PER_CHUNK: usize = 64;
 
+/// Output sink that refuses to grow past `remaining` bytes.
+struct BoundedWriter {
+    buf: Vec<u8>,
+    remaining: u64,
+}
+
+impl std::io::Write for BoundedWriter {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        let len = data.len() as u64;
+        if len > self.remaining {
+            return Err(std::io::Error::other("decoded parquet size limit exceeded"));
+        }
+        self.remaining -= len;
+        self.buf.extend_from_slice(data);
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 /// Decodes a Parquet body into one message per row, each payload a JSON object.
-/// `max_bytes` bounds the decoded payload total, so a small object cannot expand without limit.
+/// `max_bytes` bounds the decoded output total, so a small object cannot expand without limit.
 pub(crate) fn decode_rows(
     data: Vec<u8>,
     max_bytes: Option<u64>,
 ) -> anyhow::Result<Vec<CanonicalMessage>> {
-    let reader = ParquetRecordBatchReaderBuilder::try_new(bytes::Bytes::from(data))?.build()?;
+    // Small record batches keep the Arrow side of a decode bounded too, not just the JSON.
+    let reader = ParquetRecordBatchReaderBuilder::try_new(bytes::Bytes::from(data))?
+        .with_batch_size(ROWS_PER_CHUNK)
+        .build()?;
     let mut out = Vec::new();
-    let mut decoded: u64 = 0;
+    let mut remaining = max_bytes.unwrap_or(u64::MAX);
     for batch in reader {
         let batch = batch?;
-        // Serialize in small zero-copy slices so the limit trips before a whole batch is JSON.
-        for offset in (0..batch.num_rows()).step_by(ROWS_PER_CHUNK) {
-            let chunk = batch.slice(offset, ROWS_PER_CHUNK.min(batch.num_rows() - offset));
-            let mut writer = WriterBuilder::new()
-                .with_explicit_nulls(true)
-                .build::<_, LineDelimited>(Vec::new());
-            writer.write(&chunk)?;
-            writer.finish()?;
-            for line in writer.into_inner().split(|b| *b == b'\n') {
-                if line.is_empty() {
-                    continue;
-                }
-                decoded = decoded.saturating_add(line.len() as u64);
-                if let Some(limit) = max_bytes.filter(|limit| decoded > *limit) {
-                    return Err(anyhow!(
-                        "decoded parquet rows exceed {limit} bytes; raise max_object_bytes to read it"
-                    ));
-                }
-                let mut msg = CanonicalMessage::new(line.to_vec(), None);
-                msg.metadata.insert(
-                    "mq_bridge.original_format".to_string(),
-                    "parquet".to_string(),
-                );
-                out.push(msg);
+        let mut writer = WriterBuilder::new()
+            .with_explicit_nulls(true)
+            .build::<_, LineDelimited>(BoundedWriter {
+                buf: Vec::new(),
+                remaining,
+            });
+        let written = writer.write(&batch).and_then(|()| writer.finish());
+        if written.is_err() {
+            if let Some(limit) = max_bytes {
+                return Err(anyhow!(
+                    "decoded parquet rows exceed {limit} bytes; raise max_object_bytes to read it"
+                ));
             }
+            written?;
+        }
+        let sink = writer.into_inner();
+        remaining = sink.remaining;
+        for line in sink.buf.split(|b| *b == b'\n') {
+            if line.is_empty() {
+                continue;
+            }
+            let mut msg = CanonicalMessage::new(line.to_vec(), None);
+            msg.metadata.insert(
+                "mq_bridge.original_format".to_string(),
+                "parquet".to_string(),
+            );
+            out.push(msg);
         }
     }
     Ok(out)
