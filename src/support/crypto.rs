@@ -25,9 +25,7 @@
 //! so the cipher id, key id and nonce are covered by the tag too. Those envelopes
 //! carry version 2; an empty `aad` binds nothing and stays byte-identical to v1.
 
-// TODO key hygiene (deferred): no zeroize, so key bytes outlive use in EncryptionConfig.key,
-// decode_key's Vec, Crypto.key and decrypt_keys. EncryptionConfig also derives Debug with the
-// key as a plain String -- SecretExtractor covers only the serialize path.
+// Decoded keys and cipher state are wiped on drop; EncryptionConfig.key itself stays a plain String.
 
 use crate::models::{CipherKind, EncryptionConfig};
 use aes_gcm::Aes256Gcm;
@@ -37,6 +35,7 @@ use chacha20poly1305::aead::{Aead, AeadInOut, KeyInit, Payload};
 use chacha20poly1305::XChaCha20Poly1305;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
+use zeroize::Zeroizing;
 
 use super::crypto_envelope::{
     AES_GCM_NONCE_LEN, CIPHER_AES_GCM, CIPHER_XCHACHA, ENVELOPE_VERSION,
@@ -116,9 +115,9 @@ impl Cipher {
 pub struct Crypto {
     cipher: CipherKind,
     key_id: String,
-    key: [u8; 32],
+    key: Zeroizing<[u8; 32]>,
     active: Cipher,
-    decrypt_keys: HashMap<String, [u8; 32]>,
+    decrypt_keys: HashMap<String, Zeroizing<[u8; 32]>>,
     /// Drawn once; the leading `nonce_len - NONCE_COUNTER_LEN` bytes are used.
     nonce_prefix: [u8; XCHACHA_NONCE_LEN - NONCE_COUNTER_LEN],
     nonce_counter: AtomicU64,
@@ -127,25 +126,32 @@ pub struct Crypto {
 
 /// Decodes a configured key: optional `${env:VAR}` indirection, then base64 to
 /// exactly 32 bytes.
-fn decode_key(configured: &str, key_id: &str) -> anyhow::Result<[u8; 32]> {
-    let raw = match configured
-        .strip_prefix("${env:")
-        .and_then(|r| r.strip_suffix('}'))
-    {
-        Some(var) => std::env::var(var).with_context(|| {
-            format!("environment variable '{var}' for encryption key '{key_id}' is not set")
-        })?,
-        None => configured.to_string(),
-    };
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(raw.trim())
-        .with_context(|| format!("encryption key '{key_id}' is not valid base64"))?;
-    <[u8; 32]>::try_from(bytes.as_slice()).map_err(|_| {
-        anyhow!(
+fn decode_key(configured: &str, key_id: &str) -> anyhow::Result<Zeroizing<[u8; 32]>> {
+    let raw = Zeroizing::new(
+        match configured
+            .strip_prefix("${env:")
+            .and_then(|r| r.strip_suffix('}'))
+        {
+            Some(var) => std::env::var(var).with_context(|| {
+                format!("environment variable '{var}' for encryption key '{key_id}' is not set")
+            })?,
+            None => configured.to_string(),
+        },
+    );
+    let bytes = Zeroizing::new(
+        base64::engine::general_purpose::STANDARD
+            .decode(raw.trim())
+            .with_context(|| format!("encryption key '{key_id}' is not valid base64"))?,
+    );
+    let mut key = Zeroizing::new([0u8; 32]);
+    if bytes.len() != key.len() {
+        return Err(anyhow!(
             "encryption key '{key_id}' must be 32 bytes, got {}",
             bytes.len()
-        )
-    })
+        ));
+    }
+    key.copy_from_slice(&bytes);
+    Ok(key)
 }
 
 impl Crypto {
@@ -157,7 +163,8 @@ impl Crypto {
             ));
         }
         let key = decode_key(&config.key, &config.key_id)?;
-        let mut decrypt_keys = HashMap::new();
+        // Pre-sized so a rehash never leaves unwiped key copies behind.
+        let mut decrypt_keys = HashMap::with_capacity(config.decrypt_keys.len());
         for (id, k) in &config.decrypt_keys {
             decrypt_keys.insert(id.clone(), decode_key(k, id)?);
         }
@@ -312,6 +319,17 @@ mod tests {
             decrypt_keys: HashMap::new(),
             authenticate_metadata: Vec::new(),
         }
+    }
+
+    #[test]
+    fn debug_output_redacts_keys() {
+        let mut cfg = config(CipherKind::Xchacha20poly1305);
+        let old_key = base64::engine::general_purpose::STANDARD.encode([9u8; 32]);
+        cfg.decrypt_keys.insert("k0".to_string(), old_key.clone());
+        let debug = format!("{cfg:?}");
+        assert!(!debug.contains(&cfg.key), "{debug}");
+        assert!(!debug.contains(&old_key), "{debug}");
+        assert!(debug.contains("k0"), "{debug}");
     }
 
     #[test]

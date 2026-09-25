@@ -1531,7 +1531,7 @@ fn middleware_from_spec(spec: &str) -> anyhow::Result<mq_bridge::models::Middlew
         BufferMiddleware, CompressionMiddleware, CookieJarMiddleware, DeadLetterQueueMiddleware,
         DeduplicationMiddleware, DelayMiddleware, EncryptionConfig, LimiterMiddleware,
         MetricsMiddleware, PackMiddleware, RandomPanicMiddleware, RetryMiddleware,
-        TransformMiddleware, UnpackMiddleware, WeakJoinMiddleware,
+        TimeoutMiddleware, TransformMiddleware, UnpackMiddleware, WeakJoinMiddleware,
     };
     use std::collections::HashMap;
 
@@ -1550,6 +1550,7 @@ fn middleware_from_spec(spec: &str) -> anyhow::Result<mq_bridge::models::Middlew
         "retry" => schema_fields(schemars::schema_for!(RetryMiddleware)),
         "random_panic" => schema_fields(schemars::schema_for!(RandomPanicMiddleware)),
         "delay" => schema_fields(schemars::schema_for!(DelayMiddleware)),
+        "timeout" => schema_fields(schemars::schema_for!(TimeoutMiddleware)),
         "weak_join" => schema_fields(schemars::schema_for!(WeakJoinMiddleware)),
         "limiter" => schema_fields(schemars::schema_for!(LimiterMiddleware)),
         "buffer" => schema_fields(schemars::schema_for!(BufferMiddleware)),
@@ -1566,7 +1567,7 @@ fn middleware_from_spec(spec: &str) -> anyhow::Result<mq_bridge::models::Middlew
             ("config".to_string(), FieldType::Object),
         ]),
         other => bail!(
-            "unsupported middleware '{other}'. Supported middlewares: deduplication, metrics, dlq, retry, random_panic, delay, weak_join, limiter, buffer, cookie_jar, transform, encryption, compression, pack, unpack, custom"
+            "unsupported middleware '{other}'. Supported middlewares: deduplication, metrics, dlq, retry, random_panic, delay, timeout, weak_join, limiter, buffer, cookie_jar, transform, encryption, compression, pack, unpack, custom"
         ),
     };
 

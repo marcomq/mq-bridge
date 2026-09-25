@@ -21,8 +21,12 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context};
+
+use crate::traits::MessageConsumer;
+use crate::{CanonicalMessage, ReceivedBatch};
 
 /// Builds `package` as a shared library and returns the artifact path.
 ///
@@ -67,6 +71,70 @@ pub fn build_plugin_cdylib(
              add `crate-type = [\"cdylib\"]` to its [lib] section"
         )
     })
+}
+
+/// Receives one non-empty batch and leaves it uncommitted. Panics after `timeout`.
+pub async fn receive_one_batch(
+    consumer: &mut dyn MessageConsumer,
+    timeout: Duration,
+) -> ReceivedBatch {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let batch = tokio::time::timeout(remaining, consumer.receive_batch(16))
+            .await
+            .unwrap_or_else(|_| panic!("no message arrived within {timeout:?}"))
+            .expect("receive batch");
+        if !batch.messages.is_empty() {
+            return batch;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no message arrived within {timeout:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+/// Receives until at least `expected` messages arrived, committing nothing.
+/// Panics after `timeout`.
+pub async fn receive_at_least(
+    consumer: &mut dyn MessageConsumer,
+    expected: usize,
+    timeout: Duration,
+) -> Vec<CanonicalMessage> {
+    let deadline = Instant::now() + timeout;
+    let mut messages = Vec::new();
+    while messages.len() < expected {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let batch = tokio::time::timeout(remaining, consumer.receive_batch(16))
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "only {} of {expected} messages arrived within {timeout:?}",
+                    messages.len()
+                )
+            })
+            .expect("receive batch");
+        messages.extend(batch.messages);
+        assert!(
+            Instant::now() < deadline,
+            "only {} of {expected} messages arrived within {timeout:?}",
+            messages.len()
+        );
+        if messages.len() < expected {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+    messages
+}
+
+/// The payloads as text, in order.
+pub fn payload_texts<'a>(messages: impl IntoIterator<Item = &'a CanonicalMessage>) -> Vec<String> {
+    messages
+        .into_iter()
+        .map(|message| message.get_payload_str().into_owned())
+        .collect()
 }
 
 /// Picks the package's shared-library artifact out of cargo's JSON message stream.

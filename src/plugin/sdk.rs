@@ -46,16 +46,9 @@
 //! arguments — and be `Send + Sync`. Configure endpoints through the route's
 //! `config` object, not through factory state.
 //!
-//! ABI v1 limits: a batch is *reported* all-or-nothing (no per-message publish
-//! responses, so no request/reply), and `MessageDisposition::Reply`
-//! acknowledges the source message.
-//!
-//! All-or-nothing is about the status, not about what reached the sink. A
-//! [`SentBatch::Partial`] may already have delivered some of its messages, yet
-//! only the first failure's class crosses the ABI — and if that class is
-//! retryable, the host retries the *whole* batch and the delivered messages are
-//! duplicated. Under ABI v1, publish into an idempotent sink or do not return
-//! partial results.
+//! Publish responses, `MessageDisposition::Reply` and `status()` cross the ABI
+//! from 1.2 on; per-message publish failures from 1.1 on. A host older than
+//! that sees whole-batch results and an acknowledged reply.
 //!
 //! See [`conformance`](super::conformance) for the suite to run against your
 //! endpoint both linked directly and loaded as a plugin.
@@ -71,19 +64,21 @@ use futures::FutureExt;
 use tokio::runtime::Runtime;
 use tokio::sync::Mutex;
 
-use crate::errors::{ConsumerError, ProcessingError};
+use crate::errors::{ConsumerError, InvalidConfig, ProcessingError};
 use crate::plugin::message::{from_abi, AbiMessages};
 use crate::support::plugin_abi::{
-    MqbBatchHandle, MqbBuffer, MqbConsumerHandle, MqbFactoryHandle, MqbFilterHandle, MqbMessage,
-    MqbMiddlewareHandle, MqbPluginVTable, MqbPublisherHandle, MqbSlice, MqbStatus,
-    MQB_CAP_CONSUMER, MQB_CAP_MIDDLEWARE, MQB_CAP_PUBLISHER, MQB_DISPOSITION_NACK,
-    MQB_END_OF_STREAM, MQB_ERR_CONNECTION, MQB_ERR_INVALID_CONFIG, MQB_ERR_PANIC,
-    MQB_ERR_PERMANENT, MQB_ERR_RETRYABLE, MQB_MIDDLEWARE_RECEIVE, MQB_OK, MQB_OUTCOME_OK,
-    MQB_OUTCOME_PERMANENT, MQB_OUTCOME_RETRYABLE, MQB_PLUGIN_ABI_MAJOR, MQB_PLUGIN_ABI_MINOR,
-    MQB_SCHEMA_ENDPOINT, MQB_SCHEMA_MIDDLEWARE,
+    MqbBatchHandle, MqbBuffer, MqbCompletion, MqbConsumerHandle, MqbFactoryHandle, MqbFilterHandle,
+    MqbMessage, MqbMiddlewareHandle, MqbPluginVTable, MqbPublisherHandle, MqbResponsesHandle,
+    MqbSlice, MqbStatus, MQB_CAP_CONSUMER, MQB_CAP_MIDDLEWARE, MQB_CAP_PUBLISHER,
+    MQB_DELIVERY_ACKNOWLEDGES, MQB_DELIVERY_IDEMPOTENT_SINK, MQB_DISPOSITION_NACK,
+    MQB_DISPOSITION_REPLY, MQB_END_OF_STREAM, MQB_ERR_CONNECTION, MQB_ERR_INVALID_CONFIG,
+    MQB_ERR_PANIC, MQB_ERR_PERMANENT, MQB_ERR_RETRYABLE, MQB_MIDDLEWARE_RECEIVE, MQB_OK,
+    MQB_OUTCOME_OK, MQB_OUTCOME_PERMANENT, MQB_OUTCOME_RETRYABLE, MQB_PLUGIN_ABI_MAJOR,
+    MQB_PLUGIN_ABI_MINOR, MQB_SCHEMA_ENDPOINT, MQB_SCHEMA_MIDDLEWARE,
 };
 use crate::traits::{
-    BatchCommitFunc, CustomEndpointFactory, MessageConsumer, MessageDisposition, MessagePublisher,
+    BatchCommitFunc, CustomEndpointFactory, EndpointStatus, MessageConsumer, MessageDisposition,
+    MessagePublisher,
 };
 use crate::{CanonicalMessage, SentBatch};
 
@@ -188,6 +183,85 @@ fn block_on<T: Send + 'static>(
     }
 }
 
+/// The async counterpart of [`block_on`]'s containment: catches a panic and
+/// applies `MQB_PLUGIN_CALL_TIMEOUT_SECS`, leaving a timed-out future running.
+async fn run_contained<T: Send + 'static>(
+    future: impl Future<Output = T> + Send + 'static,
+) -> Result<T, TaskFailure> {
+    let caught = AssertUnwindSafe(future).catch_unwind();
+    let outcome = match call_timeout() {
+        None => caught.await,
+        Some(limit) => match tokio::time::timeout(limit, tokio::spawn(caught)).await {
+            Ok(Ok(outcome)) => outcome,
+            Ok(Err(_)) => return Err(TaskFailure::Lost),
+            Err(_) => return Err(TaskFailure::TimedOut(limit)),
+        },
+    };
+    outcome.map_err(|payload| TaskFailure::Panicked(panic_text(payload.as_ref())))
+}
+
+/// Calls the host's completion exactly once: with the task's status, or as a
+/// lost task if the runtime drops it unfinished.
+struct Completion {
+    completion: Option<MqbCompletion>,
+    err: *mut MqbBuffer,
+}
+
+// The host keeps `err` and `ctx` valid, from any thread, until the callback.
+unsafe impl Send for Completion {}
+
+impl Completion {
+    fn finish(mut self, status: MqbStatus) {
+        if let Some(completion) = self.completion.take() {
+            unsafe { (completion.callback)(completion.ctx, status) };
+        }
+    }
+}
+
+impl Drop for Completion {
+    fn drop(&mut self) {
+        if let Some(completion) = self.completion.take() {
+            let status = unsafe { task_failed(self.err, TaskFailure::Lost) };
+            unsafe { (completion.callback)(completion.ctx, status) };
+        }
+    }
+}
+
+/// Carries a closure over the host's out-pointers onto the plugin's runtime.
+struct SendCell<T>(T);
+
+unsafe impl<T> Send for SendCell<T> {}
+
+impl<T> SendCell<T> {
+    // A method, so an `async move` block captures the whole cell, not the field.
+    fn into_inner(self) -> T {
+        self.0
+    }
+}
+
+/// Starts `future` without blocking. `finish` writes its result through the
+/// out-pointers and returns the status the host's completion receives.
+fn start<T: Send + 'static>(
+    runtime: &Runtime,
+    future: impl Future<Output = T> + Send + 'static,
+    err: *mut MqbBuffer,
+    completion: MqbCompletion,
+    finish: impl FnOnce(Result<T, TaskFailure>) -> MqbStatus + 'static,
+) -> MqbStatus {
+    let done = Completion {
+        completion: Some(completion),
+        err,
+    };
+    let finish = SendCell(finish);
+    runtime.spawn(async move {
+        let result = run_contained(future).await;
+        let finish = finish.into_inner();
+        let status = guarded(done.err, || finish(result));
+        done.finish(status);
+    });
+    MQB_OK
+}
+
 // ---------------------------------------------------------------- plugin state
 
 struct FactoryState {
@@ -213,6 +287,11 @@ struct PublisherState {
     requires_ordered_publish: bool,
 }
 
+struct ResponsesState {
+    /// Owns the memory the handed-out response array points into.
+    _messages: AbiMessages,
+}
+
 struct BatchState {
     /// Owns the memory the handed-out ABI array points into.
     messages: AbiMessages,
@@ -236,6 +315,14 @@ unsafe fn borrow<'a, T>(handle: *mut c_void) -> Option<&'a T> {
 /// `handle` must be a live handle for `T`, and must not be used afterwards.
 unsafe fn reclaim<T>(handle: *mut c_void) -> Option<Box<T>> {
     (!handle.is_null()).then(|| unsafe { Box::from_raw(handle.cast::<T>()) })
+}
+
+/// Drops a handle's state inside its runtime, since an endpoint's `Drop` may spawn.
+fn drop_in_runtime<T>(state: Option<Box<T>>, runtime: fn(&T) -> &Arc<Runtime>) {
+    let Some(state) = state else { return };
+    let runtime = Arc::clone(runtime(&state));
+    let _entered = runtime.enter();
+    drop(state);
 }
 
 fn buffer_from(message: impl AsRef<str>) -> MqbBuffer {
@@ -337,6 +424,23 @@ fn processing_status(err: &ProcessingError) -> MqbStatus {
     }
 }
 
+/// Classifies a failed `create_consumer`/`create_publisher` the way a linked
+/// route would: only [`InvalidConfig`] or a permanent error class stops the
+/// route, anything else (a broker that is down) is reconnected.
+fn create_status(error: &anyhow::Error) -> MqbStatus {
+    if error.is::<InvalidConfig>() {
+        return MQB_ERR_INVALID_CONFIG;
+    }
+    match (
+        error.downcast_ref::<ConsumerError>(),
+        error.downcast_ref::<ProcessingError>(),
+    ) {
+        (Some(ConsumerError::Connection(_)), _) => MQB_ERR_CONNECTION,
+        (Some(_), _) | (_, Some(ProcessingError::NonRetryable(_))) => MQB_ERR_PERMANENT,
+        _ => MQB_ERR_CONNECTION,
+    }
+}
+
 // ------------------------------------------------------------------- factory
 
 /// Creates the factory. Generic so the export macro can name the author's type;
@@ -363,7 +467,11 @@ where
 }
 
 unsafe extern "C" fn factory_free(factory: MqbFactoryHandle) {
-    guarded_unit(|| drop(unsafe { reclaim::<FactoryState>(factory.0) }));
+    guarded_unit(|| {
+        drop_in_runtime(unsafe { reclaim::<FactoryState>(factory.0) }, |state| {
+            &state.runtime
+        })
+    });
 }
 
 unsafe extern "C" fn buffer_free(buffer: MqbBuffer) {
@@ -413,6 +521,41 @@ where
     })
 }
 
+/// Asks the factory's `idempotent_sink` and `acknowledges` about one config.
+unsafe extern "C" fn factory_delivery(
+    factory: MqbFactoryHandle,
+    config_json: MqbSlice,
+    out_flags: *mut u8,
+    err: *mut MqbBuffer,
+) -> MqbStatus {
+    guarded(err, || {
+        if out_flags.is_null() {
+            unsafe { set_error(err, "factory_delivery called with no output slot") };
+            return MQB_ERR_PERMANENT;
+        }
+        let Some(state) = (unsafe { borrow::<FactoryState>(factory.0) }) else {
+            unsafe { set_error(err, "factory_delivery called with a null factory handle") };
+            return MQB_ERR_PERMANENT;
+        };
+        let config = match unsafe { read_config(config_json) } {
+            Ok(config) => config,
+            Err(message) => {
+                unsafe { set_error(err, &message) };
+                return MQB_ERR_INVALID_CONFIG;
+            }
+        };
+        let mut flags = 0;
+        if state.factory.idempotent_sink(&config) {
+            flags |= MQB_DELIVERY_IDEMPOTENT_SINK;
+        }
+        if state.factory.acknowledges(&config) {
+            flags |= MQB_DELIVERY_ACKNOWLEDGES;
+        }
+        unsafe { *out_flags = flags };
+        MQB_OK
+    })
+}
+
 // ------------------------------------------------------------------ consumer
 
 unsafe extern "C" fn consumer_create(
@@ -439,12 +582,10 @@ unsafe extern "C" fn consumer_create(
         let factory = Arc::clone(&state.factory);
         let runtime = Arc::clone(&state.runtime);
         let created = block_on(&runtime, async move {
-            // Creation and connection fail for different reasons, so they are
-            // reported separately: a bad config is never worth reconnecting.
             let consumer = factory
                 .create_consumer(&route, &config)
                 .await
-                .map_err(|error| (MQB_ERR_INVALID_CONFIG, error))?;
+                .map_err(|error| (create_status(&error), error))?;
             // The host route awaits this hook for endpoints it builds itself;
             // behind the ABI only the plugin can run it.
             if let Some(hook) = consumer.on_connect_hook() {
@@ -488,37 +629,93 @@ unsafe extern "C" fn consumer_receive_batch(
             unsafe { set_error(err, "consumer_receive_batch called with a null handle") };
             return MQB_ERR_PERMANENT;
         };
-        let shared = Arc::clone(&state.consumer);
-        let mut shutdown = state.shutdown.subscribe();
-        let received = block_on(&state.runtime, async move {
-            tokio::select! {
-                batch = async { shared.lock().await.receive_batch(max_messages).await } => Some(batch),
-                _ = shutdown.wait_for(|closed| *closed) => None,
-            }
-        });
-        let batch = match received {
-            Ok(Some(Ok(batch))) => batch,
-            Ok(Some(Err(error))) => {
-                let status = consumer_status(&error);
-                unsafe { set_error(err, format!("{error:#}")) };
-                return status;
-            }
-            Ok(None) => return MQB_END_OF_STREAM,
-            Err(failure) => return unsafe { task_failed(err, failure) },
-        };
-
-        let state = Box::new(BatchState {
-            messages: AbiMessages::new(batch.messages),
-            commit: Some(batch.commit),
-            runtime: Arc::clone(&state.runtime),
-        });
+        let received = block_on(&state.runtime, receive(state, max_messages));
         unsafe {
-            *out_messages = state.messages.as_ptr();
-            *out_len = state.messages.len();
-            *out_batch = MqbBatchHandle(Box::into_raw(state).cast());
+            write_batch(
+                received,
+                Arc::clone(&state.runtime),
+                out_batch,
+                out_messages,
+                out_len,
+                err,
+            )
         }
-        MQB_OK
     })
+}
+
+/// The 1.2 non-blocking receive.
+unsafe extern "C" fn consumer_receive_batch_async(
+    consumer: MqbConsumerHandle,
+    max_messages: usize,
+    out_batch: *mut MqbBatchHandle,
+    out_messages: *mut *const MqbMessage,
+    out_len: *mut usize,
+    err: *mut MqbBuffer,
+    completion: MqbCompletion,
+) -> MqbStatus {
+    guarded(err, || {
+        let Some(state) = (unsafe { borrow::<ConsumerState>(consumer.0) }) else {
+            unsafe { set_error(err, "consumer_receive_batch called with a null handle") };
+            return MQB_ERR_PERMANENT;
+        };
+        let runtime = Arc::clone(&state.runtime);
+        start(
+            &state.runtime,
+            receive(state, max_messages),
+            err,
+            completion,
+            move |received| unsafe {
+                write_batch(received, runtime, out_batch, out_messages, out_len, err)
+            },
+        )
+    })
+}
+
+/// A receive that ends early, as `None`, once the consumer is closed.
+fn receive(
+    state: &ConsumerState,
+    max_messages: usize,
+) -> impl Future<Output = Option<Result<crate::ReceivedBatch, ConsumerError>>> + Send + 'static {
+    let shared = Arc::clone(&state.consumer);
+    let mut shutdown = state.shutdown.subscribe();
+    async move {
+        tokio::select! {
+            batch = async { shared.lock().await.receive_batch(max_messages).await } => Some(batch),
+            _ = shutdown.wait_for(|closed| *closed) => None,
+        }
+    }
+}
+
+unsafe fn write_batch(
+    received: Result<Option<Result<crate::ReceivedBatch, ConsumerError>>, TaskFailure>,
+    runtime: Arc<Runtime>,
+    out_batch: *mut MqbBatchHandle,
+    out_messages: *mut *const MqbMessage,
+    out_len: *mut usize,
+    err: *mut MqbBuffer,
+) -> MqbStatus {
+    let batch = match received {
+        Ok(Some(Ok(batch))) => batch,
+        Ok(Some(Err(error))) => {
+            let status = consumer_status(&error);
+            unsafe { set_error(err, format!("{error:#}")) };
+            return status;
+        }
+        Ok(None) => return MQB_END_OF_STREAM,
+        Err(failure) => return unsafe { task_failed(err, failure) },
+    };
+
+    let state = Box::new(BatchState {
+        messages: AbiMessages::new(batch.messages),
+        commit: Some(batch.commit),
+        runtime,
+    });
+    unsafe {
+        *out_messages = state.messages.as_ptr();
+        *out_len = state.messages.len();
+        *out_batch = MqbBatchHandle(Box::into_raw(state).cast());
+    }
+    MQB_OK
 }
 
 unsafe extern "C" fn consumer_commit_requires_order(consumer: MqbConsumerHandle) -> u8 {
@@ -562,7 +759,11 @@ unsafe extern "C" fn consumer_close(consumer: MqbConsumerHandle, err: *mut MqbBu
 }
 
 unsafe extern "C" fn consumer_free(consumer: MqbConsumerHandle) {
-    guarded_unit(|| drop(unsafe { reclaim::<ConsumerState>(consumer.0) }));
+    guarded_unit(|| {
+        drop_in_runtime(unsafe { reclaim::<ConsumerState>(consumer.0) }, |state| {
+            &state.runtime
+        })
+    });
 }
 
 // --------------------------------------------------------------------- batch
@@ -573,64 +774,137 @@ unsafe extern "C" fn batch_commit(
     len: usize,
     err: *mut MqbBuffer,
 ) -> MqbStatus {
-    guarded(err, || {
-        let Some(mut state) = (unsafe { reclaim::<BatchState>(batch.0) }) else {
-            unsafe { set_error(err, "batch_commit called with a null handle") };
-            return MQB_ERR_PERMANENT;
-        };
-        let Some(commit) = state.commit.take() else {
-            unsafe { set_error(err, "batch_commit called twice for the same batch") };
-            return MQB_ERR_PERMANENT;
-        };
-        // Same check the middleware side makes: a mismatched count would
-        // silently ack or drop messages instead of failing loudly.
-        let expected = state.messages.len();
-        if len != expected {
-            unsafe {
-                set_error(
-                    err,
-                    format!(
-                        "batch_commit got {len} dispositions for a batch of {expected} messages"
-                    ),
-                )
-            };
-            return MQB_ERR_PERMANENT;
-        }
-        if dispositions.is_null() && len != 0 {
-            unsafe { set_error(err, "batch_commit got a null disposition array") };
-            return MQB_ERR_PERMANENT;
-        }
-        let codes: &[u8] = if len == 0 {
-            &[]
-        } else {
-            unsafe { std::slice::from_raw_parts(dispositions, len) }
-        };
-        let dispositions: Vec<MessageDisposition> = codes
-            .iter()
-            .map(|code| {
-                if *code == MQB_DISPOSITION_NACK {
-                    MessageDisposition::Nack
-                } else {
-                    MessageDisposition::Ack
-                }
-            })
-            .collect();
+    unsafe { commit_batch(batch, dispositions, std::ptr::null(), len, err) }
+}
 
-        match block_on(&state.runtime, commit(dispositions)) {
-            Ok(Ok(())) => MQB_OK,
-            Ok(Err(error)) => {
-                unsafe { set_error(err, format!("{error:#}")) };
-                MQB_ERR_RETRYABLE
-            }
-            Err(failure) => unsafe { task_failed(err, failure) },
+/// The 1.2 commit: [`MQB_DISPOSITION_REPLY`] reads its reply from `replies`.
+unsafe extern "C" fn batch_commit_replies(
+    batch: MqbBatchHandle,
+    dispositions: *const u8,
+    replies: *const MqbMessage,
+    len: usize,
+    err: *mut MqbBuffer,
+) -> MqbStatus {
+    unsafe { commit_batch(batch, dispositions, replies, len, err) }
+}
+
+/// The 1.2 non-blocking commit, with replies.
+unsafe extern "C" fn batch_commit_async(
+    batch: MqbBatchHandle,
+    dispositions: *const u8,
+    replies: *const MqbMessage,
+    len: usize,
+    err: *mut MqbBuffer,
+    completion: MqbCompletion,
+) -> MqbStatus {
+    guarded(err, || {
+        match unsafe { prepare_commit(batch, dispositions, replies, len, err) } {
+            Ok((runtime, commit)) => start(&runtime, commit, err, completion, move |done| unsafe {
+                unit_status(done, err)
+            }),
+            Err(status) => status,
         }
     })
+}
+
+/// Shared body of both commits; `replies` is null for the 1.0 one.
+unsafe fn commit_batch(
+    batch: MqbBatchHandle,
+    dispositions: *const u8,
+    replies: *const MqbMessage,
+    len: usize,
+    err: *mut MqbBuffer,
+) -> MqbStatus {
+    guarded(err, || {
+        match unsafe { prepare_commit(batch, dispositions, replies, len, err) } {
+            Ok((runtime, commit)) => unsafe { unit_status(block_on(&runtime, commit), err) },
+            Err(status) => status,
+        }
+    })
+}
+
+/// Consumes the batch and decodes the dispositions into its commit future.
+unsafe fn prepare_commit(
+    batch: MqbBatchHandle,
+    dispositions: *const u8,
+    replies: *const MqbMessage,
+    len: usize,
+    err: *mut MqbBuffer,
+) -> Result<
+    (
+        Arc<Runtime>,
+        futures::future::BoxFuture<'static, anyhow::Result<()>>,
+    ),
+    MqbStatus,
+> {
+    let Some(mut state) = (unsafe { reclaim::<BatchState>(batch.0) }) else {
+        unsafe { set_error(err, "batch_commit called with a null handle") };
+        return Err(MQB_ERR_PERMANENT);
+    };
+    let Some(commit) = state.commit.take() else {
+        unsafe { set_error(err, "batch_commit called twice for the same batch") };
+        return Err(MQB_ERR_PERMANENT);
+    };
+    // Same check the middleware side makes: a mismatched count would
+    // silently ack or drop messages instead of failing loudly.
+    let expected = state.messages.len();
+    if len != expected {
+        unsafe {
+            set_error(
+                err,
+                format!("batch_commit got {len} dispositions for a batch of {expected} messages"),
+            )
+        };
+        return Err(MQB_ERR_PERMANENT);
+    }
+    if dispositions.is_null() && len != 0 {
+        unsafe { set_error(err, "batch_commit got a null disposition array") };
+        return Err(MQB_ERR_PERMANENT);
+    }
+    let codes: &[u8] = if len == 0 {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(dispositions, len) }
+    };
+    let dispositions: Vec<MessageDisposition> = codes
+        .iter()
+        .enumerate()
+        .map(|(index, code)| match *code {
+            MQB_DISPOSITION_NACK => MessageDisposition::Nack,
+            MQB_DISPOSITION_REPLY if !replies.is_null() => {
+                unsafe { from_abi(replies.add(index), 1) }
+                    .pop()
+                    .map_or(MessageDisposition::Ack, MessageDisposition::Reply)
+            }
+            _ => MessageDisposition::Ack,
+        })
+        .collect();
+    Ok((Arc::clone(&state.runtime), commit(dispositions)))
+}
+
+/// Status of a call whose only failure is retryable, such as a commit or flush.
+unsafe fn unit_status(
+    done: Result<anyhow::Result<()>, TaskFailure>,
+    err: *mut MqbBuffer,
+) -> MqbStatus {
+    match done {
+        Ok(Ok(())) => MQB_OK,
+        Ok(Err(error)) => {
+            unsafe { set_error(err, format!("{error:#}")) };
+            MQB_ERR_RETRYABLE
+        }
+        Err(failure) => unsafe { task_failed(err, failure) },
+    }
 }
 
 unsafe extern "C" fn batch_free(batch: MqbBatchHandle) {
     // Dropping the commit closure without calling it acknowledges nothing,
     // which is what an uncommitted batch must do.
-    guarded_unit(|| drop(unsafe { reclaim::<BatchState>(batch.0) }));
+    guarded_unit(|| {
+        drop_in_runtime(unsafe { reclaim::<BatchState>(batch.0) }, |state| {
+            &state.runtime
+        })
+    });
 }
 
 // ----------------------------------------------------------------- publisher
@@ -662,7 +936,7 @@ unsafe extern "C" fn publisher_create(
             let publisher = factory
                 .create_publisher(&route, &config)
                 .await
-                .map_err(|error| (MQB_ERR_INVALID_CONFIG, error))?;
+                .map_err(|error| (create_status(&error), error))?;
             if let Some(hook) = publisher.on_connect_hook() {
                 hook.await.map_err(|error| (MQB_ERR_CONNECTION, error))?;
             }
@@ -750,38 +1024,166 @@ unsafe extern "C" fn publisher_send_batch_outcomes(
             };
             return MQB_ERR_PERMANENT;
         };
-        let messages: Vec<CanonicalMessage> = unsafe { from_abi(messages, len) };
-        // `SentBatch::Partial` reports failures as messages, not indices, so the
-        // ids are captured here to recover the position afterwards.
-        let ids: Vec<u128> = messages.iter().map(|message| message.message_id).collect();
-        let shared = Arc::clone(&state.publisher);
-        let sent = block_on(
-            &state.runtime,
-            async move { shared.send_batch(messages).await },
-        );
-        match sent {
-            Ok(Ok(SentBatch::Ack)) => MQB_OK,
-            Ok(Ok(SentBatch::Partial { failed, .. })) => {
-                let Some((_, first)) = failed.first() else {
-                    return MQB_OK;
-                };
-                let status = processing_status(first);
-                let summary = format!(
-                    "{} of {len} messages failed to publish; first failure: {first:#}",
-                    failed.len()
-                );
-                unsafe { write_outcomes(out_outcomes, &ids, &failed) };
-                unsafe { set_error(err, summary) };
-                status
-            }
-            Ok(Err(error)) => {
-                let status = processing_status(&error);
-                unsafe { set_error(err, format!("{error:#}")) };
-                status
-            }
-            Err(failure) => unsafe { task_failed(err, failure) },
+        let (ids, send) = unsafe { send(state, messages, len) };
+        let sent = block_on(&state.runtime, send);
+        unsafe { report_sent(sent, &ids, out_outcomes, err) }.0
+    })
+}
+
+/// The 1.2 send: as [`publisher_send_batch_outcomes`], plus the responses.
+unsafe extern "C" fn publisher_send_batch_responses(
+    publisher: MqbPublisherHandle,
+    messages: *const MqbMessage,
+    len: usize,
+    out_outcomes: *mut u8,
+    out_result: *mut MqbResponsesHandle,
+    out_responses: *mut *const MqbMessage,
+    out_responses_len: *mut usize,
+    err: *mut MqbBuffer,
+) -> MqbStatus {
+    guarded(err, || {
+        let Some(state) = (unsafe { borrow::<PublisherState>(publisher.0) }) else {
+            unsafe {
+                set_error(
+                    err,
+                    "publisher_send_batch_responses called with a null handle",
+                )
+            };
+            return MQB_ERR_PERMANENT;
+        };
+        let (ids, send) = unsafe { send(state, messages, len) };
+        let sent = block_on(&state.runtime, send);
+        unsafe {
+            write_sent(
+                sent,
+                &ids,
+                out_outcomes,
+                out_result,
+                out_responses,
+                out_responses_len,
+                err,
+            )
         }
     })
+}
+
+/// The 1.2 non-blocking send.
+unsafe extern "C" fn publisher_send_batch_async(
+    publisher: MqbPublisherHandle,
+    messages: *const MqbMessage,
+    len: usize,
+    out_outcomes: *mut u8,
+    out_result: *mut MqbResponsesHandle,
+    out_responses: *mut *const MqbMessage,
+    out_responses_len: *mut usize,
+    err: *mut MqbBuffer,
+    completion: MqbCompletion,
+) -> MqbStatus {
+    guarded(err, || {
+        let Some(state) = (unsafe { borrow::<PublisherState>(publisher.0) }) else {
+            unsafe { set_error(err, "publisher_send_batch_async called with a null handle") };
+            return MQB_ERR_PERMANENT;
+        };
+        let (ids, send) = unsafe { send(state, messages, len) };
+        start(&state.runtime, send, err, completion, move |sent| unsafe {
+            write_sent(
+                sent,
+                &ids,
+                out_outcomes,
+                out_result,
+                out_responses,
+                out_responses_len,
+                err,
+            )
+        })
+    })
+}
+
+/// Copies the borrowed messages into the publish future, returning their ids too.
+///
+/// `SentBatch::Partial` reports failures as messages, not indices, so the ids
+/// recover each failure's position afterwards.
+unsafe fn send(
+    state: &PublisherState,
+    messages: *const MqbMessage,
+    len: usize,
+) -> (
+    Vec<u128>,
+    impl Future<Output = Result<SentBatch, ProcessingError>> + Send + 'static,
+) {
+    let messages: Vec<CanonicalMessage> = unsafe { from_abi(messages, len) };
+    let ids: Vec<u128> = messages.iter().map(|message| message.message_id).collect();
+    let shared = Arc::clone(&state.publisher);
+    (ids, async move { shared.send_batch(messages).await })
+}
+
+/// [`report_sent`] plus the responses, written as a plugin-owned result.
+unsafe fn write_sent(
+    sent: Result<Result<SentBatch, ProcessingError>, TaskFailure>,
+    ids: &[u128],
+    out_outcomes: *mut u8,
+    out_result: *mut MqbResponsesHandle,
+    out_responses: *mut *const MqbMessage,
+    out_responses_len: *mut usize,
+    err: *mut MqbBuffer,
+) -> MqbStatus {
+    let (status, responses) = unsafe { report_sent(sent, ids, out_outcomes, err) };
+    let responses = responses.filter(|responses| !responses.is_empty());
+    if let (Some(responses), false, false, false) = (
+        responses,
+        out_result.is_null(),
+        out_responses.is_null(),
+        out_responses_len.is_null(),
+    ) {
+        let responses = AbiMessages::new(responses);
+        unsafe {
+            *out_responses = responses.as_ptr();
+            *out_responses_len = responses.len();
+            *out_result = MqbResponsesHandle(into_handle(ResponsesState {
+                _messages: responses,
+            }));
+        }
+    }
+    status
+}
+
+unsafe extern "C" fn responses_free(result: MqbResponsesHandle) {
+    guarded_unit(|| drop(unsafe { reclaim::<ResponsesState>(result.0) }));
+}
+
+/// Shared body of the 1.1 and 1.2 sends: the status, per-message outcomes
+/// written to `out_outcomes`, and the responses the publisher produced.
+///
+/// A whole-batch failure leaves `out_outcomes` untouched.
+unsafe fn report_sent(
+    sent: Result<Result<SentBatch, ProcessingError>, TaskFailure>,
+    ids: &[u128],
+    out_outcomes: *mut u8,
+    err: *mut MqbBuffer,
+) -> (MqbStatus, Option<Vec<CanonicalMessage>>) {
+    let len = ids.len();
+    match sent {
+        Ok(Ok(SentBatch::Ack)) => (MQB_OK, None),
+        Ok(Ok(SentBatch::Partial { responses, failed })) => {
+            let Some((_, first)) = failed.first() else {
+                return (MQB_OK, responses);
+            };
+            let status = processing_status(first);
+            let summary = format!(
+                "{} of {len} messages failed to publish; first failure: {first:#}",
+                failed.len()
+            );
+            unsafe { write_outcomes(out_outcomes, ids, &failed) };
+            unsafe { set_error(err, summary) };
+            (status, responses)
+        }
+        Ok(Err(error)) => {
+            let status = processing_status(&error);
+            unsafe { set_error(err, format!("{error:#}")) };
+            (status, None)
+        }
+        Err(failure) => (unsafe { task_failed(err, failure) }, None),
+    }
 }
 
 /// Marks each failed message's slot, leaving every other one [`MQB_OUTCOME_OK`].
@@ -836,14 +1238,30 @@ unsafe extern "C" fn publisher_flush(
             return MQB_OK;
         };
         let shared = Arc::clone(&state.publisher);
-        match block_on(&state.runtime, async move { shared.flush().await }) {
-            Ok(Ok(())) => MQB_OK,
-            Ok(Err(error)) => {
-                unsafe { set_error(err, format!("{error:#}")) };
-                MQB_ERR_RETRYABLE
-            }
-            Err(failure) => unsafe { task_failed(err, failure) },
-        }
+        let flushed = block_on(&state.runtime, async move { shared.flush().await });
+        unsafe { unit_status(flushed, err) }
+    })
+}
+
+/// The 1.2 non-blocking flush.
+unsafe extern "C" fn publisher_flush_async(
+    publisher: MqbPublisherHandle,
+    err: *mut MqbBuffer,
+    completion: MqbCompletion,
+) -> MqbStatus {
+    guarded(err, || {
+        let Some(state) = (unsafe { borrow::<PublisherState>(publisher.0) }) else {
+            unsafe { set_error(err, "publisher_flush_async called with a null handle") };
+            return MQB_ERR_PERMANENT;
+        };
+        let shared = Arc::clone(&state.publisher);
+        start(
+            &state.runtime,
+            async move { shared.flush().await },
+            err,
+            completion,
+            move |flushed| unsafe { unit_status(flushed, err) },
+        )
     })
 }
 
@@ -875,7 +1293,77 @@ unsafe extern "C" fn publisher_close(
 }
 
 unsafe extern "C" fn publisher_free(publisher: MqbPublisherHandle) {
-    guarded_unit(|| drop(unsafe { reclaim::<PublisherState>(publisher.0) }));
+    guarded_unit(|| {
+        drop_in_runtime(unsafe { reclaim::<PublisherState>(publisher.0) }, |state| {
+            &state.runtime
+        })
+    });
+}
+
+// -------------------------------------------------------------------- status
+
+/// A consumer parked in `receive_batch` holds its lock, so a busy consumer
+/// reports healthy-and-receiving instead of waiting for the next message.
+unsafe extern "C" fn consumer_status_json(
+    consumer: MqbConsumerHandle,
+    out: *mut MqbBuffer,
+    err: *mut MqbBuffer,
+) -> MqbStatus {
+    guarded(err, || {
+        let Some(state) = (unsafe { borrow::<ConsumerState>(consumer.0) }) else {
+            unsafe { set_error(err, "consumer_status called with a null handle") };
+            return MQB_ERR_PERMANENT;
+        };
+        let shared = Arc::clone(&state.consumer);
+        let status = block_on(&state.runtime, async move {
+            match shared.try_lock() {
+                Ok(consumer) => consumer.status().await,
+                Err(_) => EndpointStatus {
+                    details: serde_json::json!({ "state": "receiving" }),
+                    ..Default::default()
+                },
+            }
+        });
+        unsafe { write_status(status, out, err) }
+    })
+}
+
+unsafe extern "C" fn publisher_status_json(
+    publisher: MqbPublisherHandle,
+    out: *mut MqbBuffer,
+    err: *mut MqbBuffer,
+) -> MqbStatus {
+    guarded(err, || {
+        let Some(state) = (unsafe { borrow::<PublisherState>(publisher.0) }) else {
+            unsafe { set_error(err, "publisher_status called with a null handle") };
+            return MQB_ERR_PERMANENT;
+        };
+        let shared = Arc::clone(&state.publisher);
+        let status = block_on(&state.runtime, async move { shared.status().await });
+        unsafe { write_status(status, out, err) }
+    })
+}
+
+unsafe fn write_status(
+    status: Result<EndpointStatus, TaskFailure>,
+    out: *mut MqbBuffer,
+    err: *mut MqbBuffer,
+) -> MqbStatus {
+    if out.is_null() {
+        unsafe { set_error(err, "status called with no output slot") };
+        return MQB_ERR_PERMANENT;
+    }
+    match status.map(|status| serde_json::to_string(&status)) {
+        Ok(Ok(json)) => {
+            unsafe { *out = buffer_from(json) };
+            MQB_OK
+        }
+        Ok(Err(error)) => {
+            unsafe { set_error(err, format!("status is not serializable: {error}")) };
+            MQB_ERR_PERMANENT
+        }
+        Err(failure) => unsafe { task_failed(err, failure) },
+    }
 }
 
 // ---------------------------------------------------------------- middleware
@@ -1081,7 +1569,12 @@ unsafe extern "C" fn middleware_result_free(result: MqbFilterHandle) {
 }
 
 unsafe extern "C" fn middleware_free(middleware: MqbMiddlewareHandle) {
-    guarded_unit(|| drop(unsafe { reclaim::<MiddlewareState>(middleware.0) }));
+    guarded_unit(|| {
+        drop_in_runtime(
+            unsafe { reclaim::<MiddlewareState>(middleware.0) },
+            |state| &state.runtime,
+        )
+    });
 }
 
 /// A function table wrapped so it can live in a `static`.
@@ -1156,6 +1649,17 @@ where
         publisher_requires_ordered_publish,
         publisher_send_batch_outcomes,
         factory_config_schema: factory_config_schema::<M>,
+        publisher_send_batch_responses,
+        responses_free,
+        batch_commit_replies,
+        consumer_status: consumer_status_json,
+        publisher_status: publisher_status_json,
+        consumer_receive_batch_async,
+        batch_commit_async,
+        publisher_send_batch_async,
+        publisher_flush_async,
+        plugin_init: super::forward::plugin_init,
+        factory_delivery,
     })
 }
 
@@ -1191,52 +1695,89 @@ where
 /// }
 /// ```
 ///
-/// The macro defines the `mq_bridge_plugin_v1` symbol, so a crate may export at
-/// most one plugin — and two plugins cannot be statically linked into the same
-/// binary. Gate the macro behind a feature if your crate is also linked
-/// directly alongside others.
+/// The macro defines the `mq_bridge_plugin_v1` symbol, so a crate may use it
+/// (or [`export_endpoint_plugins!`](crate::export_endpoint_plugins)) once — and two plugin crates cannot be
+/// statically linked into the same binary. Gate the macro behind a feature if
+/// your crate is also linked directly alongside others.
 #[macro_export]
 macro_rules! export_endpoint_plugin {
+    ($($entry:tt)*) => {
+        $crate::export_endpoint_plugins!({ $($entry)* });
+    };
+}
+
+/// Exports several plugins from one library, each written as the arguments of
+/// [`export_endpoint_plugin!`](crate::export_endpoint_plugin):
+///
+/// ```ignore
+/// mq_bridge::export_endpoint_plugins! {
+///     { name: "pulsar", factory: PulsarFactory },
+///     { name: "pulsar-admin", factory: AdminFactory, capabilities: mq_bridge::plugin::sdk::CAPABILITIES_OUTPUT_ONLY },
+/// }
+/// ```
+///
+/// A host from 1.2 on registers all of them; an older host only the first.
+#[macro_export]
+macro_rules! export_endpoint_plugins {
+    ($({ $($entry:tt)* }),+ $(,)?) => {
+        const _: () = {
+            static MQ_BRIDGE_PLUGIN_VTABLES: &[$crate::plugin::sdk::ExportedVTable] =
+                &[$($crate::__mq_bridge_plugin_vtable!($($entry)*)),+];
+
+            /// Discovery symbol read by `mq_bridge::plugin::load_endpoint_plugin`.
+            #[no_mangle]
+            pub extern "C" fn mq_bridge_plugin_v1() -> *const $crate::support::plugin_abi::MqbPluginVTable {
+                MQ_BRIDGE_PLUGIN_VTABLES[0].as_ptr()
+            }
+
+            /// Every exported table by index, null past the last.
+            #[no_mangle]
+            pub extern "C" fn mq_bridge_plugin_v1_at(
+                index: usize,
+            ) -> *const $crate::support::plugin_abi::MqbPluginVTable {
+                MQ_BRIDGE_PLUGIN_VTABLES
+                    .get(index)
+                    .map_or(std::ptr::null(), $crate::plugin::sdk::ExportedVTable::as_ptr)
+            }
+        };
+    };
+}
+
+/// One table for [`export_endpoint_plugins!`], with the defaults filled in.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __mq_bridge_plugin_vtable {
     (name: $name:expr, factory: $factory:ty $(,)?) => {
-        $crate::export_endpoint_plugin!(
+        $crate::__mq_bridge_plugin_vtable!(
             name: $name,
             factory: $factory,
             middleware: $crate::plugin::sdk::NoMiddleware,
             capabilities: $crate::plugin::sdk::CAPABILITIES_INPUT_AND_OUTPUT,
-        );
+        )
     };
     (name: $name:expr, factory: $factory:ty, capabilities: $capabilities:expr $(,)?) => {
-        $crate::export_endpoint_plugin!(
+        $crate::__mq_bridge_plugin_vtable!(
             name: $name,
             factory: $factory,
             middleware: $crate::plugin::sdk::NoMiddleware,
             capabilities: $capabilities,
-        );
+        )
     };
     (name: $name:expr, factory: $factory:ty, middleware: $middleware:ty $(,)?) => {
-        $crate::export_endpoint_plugin!(
+        $crate::__mq_bridge_plugin_vtable!(
             name: $name,
             factory: $factory,
             middleware: $middleware,
             capabilities: $crate::plugin::sdk::CAPABILITIES_INPUT_AND_OUTPUT
                 | $crate::plugin::sdk::CAPABILITIES_MIDDLEWARE_ONLY,
-        );
+        )
     };
     (name: $name:expr, factory: $factory:ty, middleware: $middleware:ty, capabilities: $capabilities:expr $(,)?) => {
-        const _: () = {
-            static MQ_BRIDGE_PLUGIN_VTABLE: $crate::plugin::sdk::ExportedVTable =
-                $crate::plugin::sdk::build_vtable::<$factory, $middleware>(
-                    $name,
-                    env!("CARGO_PKG_VERSION"),
-                    $capabilities,
-                );
-
-            /// Discovery symbol read by `mq_bridge::plugin::load_endpoint_plugin`.
-            #[no_mangle]
-            pub extern "C" fn mq_bridge_plugin_v1() -> *const $crate::support::plugin_abi::MqbPluginVTable {
-                MQ_BRIDGE_PLUGIN_VTABLE.as_ptr()
-            }
-        };
+        $crate::plugin::sdk::build_vtable::<$factory, $middleware>(
+            $name,
+            env!("CARGO_PKG_VERSION"),
+            $capabilities,
+        )
     };
 }
 
@@ -1296,6 +1837,24 @@ mod tests {
         let text = String::from_utf8_lossy(unsafe { slot.as_bytes() }).into_owned();
         assert!(text.contains("kaboom"), "{text}");
         unsafe { buffer_free(slot) };
+    }
+
+    #[test]
+    fn only_a_rejected_config_stops_a_route_at_creation() {
+        use anyhow::{anyhow, Context};
+        let rejected = Err::<(), _>(anyhow::Error::new(InvalidConfig(anyhow!("no url"))))
+            .context("route x")
+            .unwrap_err();
+        assert_eq!(create_status(&rejected), MQB_ERR_INVALID_CONFIG);
+        assert_eq!(
+            create_status(&anyhow::Error::new(ConsumerError::Permanent(anyhow!("x")))),
+            MQB_ERR_PERMANENT
+        );
+        assert_eq!(
+            create_status(&anyhow::Error::new(ConsumerError::Connection(anyhow!("x")))),
+            MQB_ERR_CONNECTION
+        );
+        assert_eq!(create_status(&anyhow!("broker down")), MQB_ERR_CONNECTION);
     }
 
     #[test]

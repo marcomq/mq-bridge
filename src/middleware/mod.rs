@@ -31,6 +31,7 @@ mod pack;
 mod random_panic;
 mod raw_json;
 mod retry;
+mod timeout;
 pub(crate) mod transform;
 mod weak_join;
 
@@ -53,6 +54,7 @@ use metrics::{MetricsConsumer, MetricsPublisher};
 use pack::{PackPublisher, UnpackConsumer};
 use random_panic::{RandomPanicConsumer, RandomPanicPublisher};
 use retry::RetryPublisher;
+use timeout::TimeoutPublisher;
 use transform::{TransformConsumer, TransformPublisher};
 use weak_join::WeakJoinConsumer;
 
@@ -100,6 +102,11 @@ pub async fn apply_middlewares_to_consumer(
             Middleware::Pack(_) => {
                 return Err(anyhow::anyhow!(
                     "[middleware:{route_name}] `pack` is an output-only middleware. Put `pack` on the route's output endpoint and `unpack` on its input."
+                ))
+            }
+            Middleware::Timeout(_) => {
+                return Err(anyhow::anyhow!(
+                    "[middleware:{route_name}] `timeout` bounds sends and is output-only. Move it to the route's output endpoint."
                 ))
             }
             #[cfg(feature = "filter")]
@@ -172,6 +179,7 @@ pub async fn apply_middlewares_to_publisher(
             }
             Middleware::Retry(cfg) => Box::new(RetryPublisher::new(publisher, cfg.clone())),
             Middleware::Delay(cfg) => Box::new(DelayPublisher::new(publisher, cfg)),
+            Middleware::Timeout(cfg) => Box::new(TimeoutPublisher::new(publisher, cfg)),
             Middleware::RandomPanic(cfg) => Box::new(RandomPanicPublisher::new(publisher, cfg)),
             Middleware::Limiter(cfg) => Box::new(LimiterPublisher::new(publisher, cfg)?),
             Middleware::Buffer(cfg) => Box::new(BufferPublisher::new(publisher, cfg)?),

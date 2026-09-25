@@ -117,6 +117,9 @@ jobs:
       - name: Run non-Docker integration tests
         run: cargo test --test ref_test --test sqlite_test --test tls_example --test websocket_test --features=full
 
+      - name: C plugin header is current and a C plugin loads
+        run: cargo test -p mq-bridge-plugin-fixture --test plugin_c_header --test plugin_c_abi
+
       - name: Memory leak soak (route commit-task JoinSet)
         run: cargo test --test memory_leak_test --features=full -- --ignored --nocapture
 

@@ -70,7 +70,12 @@ pub const MQB_PLUGIN_ABI_MAJOR: u32 = 1;
 /// * **1.1** appended [`MqbPluginVTable::publisher_requires_ordered_publish`],
 ///   [`MqbPluginVTable::publisher_send_batch_outcomes`] and
 ///   [`MqbPluginVTable::factory_config_schema`].
-pub const MQB_PLUGIN_ABI_MINOR: u32 = 1;
+/// * **1.2** appended request/reply ([`MqbPluginVTable::publisher_send_batch_responses`],
+///   [`MqbPluginVTable::responses_free`], [`MqbPluginVTable::batch_commit_replies`])
+///   status ([`MqbPluginVTable::consumer_status`], [`MqbPluginVTable::publisher_status`])
+///   non-blocking twins of the hot-path calls ([`MqbCompletion`]) and host
+///   services for logs, metrics and crash handlers ([`MqbHostVTable`]).
+pub const MQB_PLUGIN_ABI_MINOR: u32 = 2;
 
 /// Name of the discovery symbol a plugin shared library must export.
 ///
@@ -84,6 +89,14 @@ pub const MQB_PLUGIN_ENTRY_SYMBOL: &[u8] = b"mq_bridge_plugin_v1\0";
 /// library. It must never return null and must be callable before any other
 /// plugin function.
 pub type MqbPluginEntry = unsafe extern "C" fn() -> *const MqbPluginVTable;
+
+/// Name of the optional symbol through which one library exports several
+/// tables (1.2). Its type is [`MqbPluginListEntry`].
+pub const MQB_PLUGIN_LIST_SYMBOL: &[u8] = b"mq_bridge_plugin_v1_at\0";
+
+/// Returns the table at `index`, or null past the last one. Index 0 must be the
+/// table [`MQB_PLUGIN_ENTRY_SYMBOL`] returns, so a 1.0/1.1 host loads that one.
+pub type MqbPluginListEntry = unsafe extern "C" fn(index: usize) -> *const MqbPluginVTable;
 
 /// Result of an ABI call. `0` is success; every other value is a failure whose
 /// class the host maps onto its own error types.
@@ -110,6 +123,9 @@ pub const MQB_ERR_CONNECTION: MqbStatus = 7;
 pub const MQB_DISPOSITION_ACK: u8 = 0;
 /// Negatively acknowledge the message so the broker can redeliver it.
 pub const MQB_DISPOSITION_NACK: u8 = 1;
+/// Acknowledge the message and send the parallel reply (ABI 1.2,
+/// [`MqbPluginVTable::batch_commit_replies`] only).
+pub const MQB_DISPOSITION_REPLY: u8 = 2;
 
 /// The message was published. Per-message counterpart of [`MQB_OK`], written by
 /// [`MqbPluginVTable::publisher_send_batch_outcomes`].
@@ -145,6 +161,11 @@ pub const MQB_MIDDLEWARE_SEND: u8 = 1;
 pub const MQB_MESSAGE_DROPPED: u8 = 0;
 /// The middleware kept this message, possibly rewritten.
 pub const MQB_MESSAGE_KEPT: u8 = 1;
+
+/// [`MqbPluginVTable::factory_delivery`] flag: a publisher built from the config absorbs replays.
+pub const MQB_DELIVERY_IDEMPOTENT_SINK: u8 = 1 << 0;
+/// [`MqbPluginVTable::factory_delivery`] flag: a consumer built from the config acknowledges.
+pub const MQB_DELIVERY_ACKNOWLEDGES: u8 = 1 << 1;
 
 /// A borrowed, non-owning view of bytes. Lifetime is defined by whichever side
 /// produced it; see the crate-level ownership rules.
@@ -272,6 +293,107 @@ pub struct MqbMiddlewareHandle(pub *mut c_void);
 #[derive(Copy, Clone, Debug)]
 pub struct MqbFilterHandle(pub *mut c_void);
 
+/// Plugin-owned publish responses, released with
+/// [`MqbPluginVTable::responses_free`] (ABI 1.2).
+#[repr(transparent)]
+#[derive(Copy, Clone, Debug)]
+pub struct MqbResponsesHandle(pub *mut c_void);
+
+/// `MQB_LOG_*`: severity of an event passed to [`MqbHostVTable::log`] (ABI 1.2).
+pub const MQB_LOG_ERROR: u8 = 1;
+pub const MQB_LOG_WARN: u8 = 2;
+pub const MQB_LOG_INFO: u8 = 3;
+pub const MQB_LOG_DEBUG: u8 = 4;
+pub const MQB_LOG_TRACE: u8 = 5;
+
+/// `MQB_METRIC_*`: what [`MqbHostVTable::metric`] does with its value (ABI 1.2).
+pub const MQB_METRIC_COUNTER: u8 = 0;
+pub const MQB_METRIC_COUNTER_ABSOLUTE: u8 = 1;
+pub const MQB_METRIC_GAUGE_SET: u8 = 2;
+/// Adds to a gauge; a negative value decrements it.
+pub const MQB_METRIC_GAUGE_ADD: u8 = 3;
+pub const MQB_METRIC_HISTOGRAM: u8 = 4;
+
+/// What a crash handler learns about the fatal signal (ABI 1.2).
+#[repr(C)]
+pub struct MqbCrashInfo {
+    /// `size_of::<MqbCrashInfo>()` as compiled into the host; fields may be appended.
+    pub struct_size: usize,
+    /// The signal number: `SIGSEGV`, `SIGBUS`, `SIGILL`, `SIGFPE` or `SIGABRT`.
+    pub signal: i32,
+    /// `siginfo_t::si_code`.
+    pub code: i32,
+    /// `siginfo_t::si_addr`: the faulting address, for the signals that have one.
+    pub fault_address: *const c_void,
+    /// The interrupted instruction, or null where the host cannot read it.
+    pub pc: *const c_void,
+    /// The raw `siginfo_t *` the host's signal handler received.
+    pub siginfo: *const c_void,
+    /// The raw `ucontext_t *` the host's signal handler received.
+    pub ucontext: *const c_void,
+}
+
+/// A plugin's crash handler, registered through
+/// [`MqbHostVTable::register_crash_handler`] (ABI 1.2).
+///
+/// It runs inside the host's signal handler, possibly on a small alternate
+/// stack: only async-signal-safe calls (`write`, `backtrace_symbols_fd`), no
+/// `malloc`, `printf` or locks. The process dies after it returns; recovering
+/// by `siglongjmp` is unsupported.
+pub type MqbCrashHandler =
+    Option<unsafe extern "C" fn(user_data: *mut c_void, info: *const MqbCrashInfo)>;
+
+/// Services the host offers a plugin, handed over once through
+/// [`MqbPluginVTable::plugin_init`] (ABI 1.2).
+///
+/// Lives as long as the process. Every function may be called from any thread,
+/// never blocks, and borrows its arguments only for the call.
+#[repr(C)]
+pub struct MqbHostVTable {
+    /// `size_of::<MqbHostVTable>()` as compiled into the host; fields may be appended.
+    pub struct_size: usize,
+    /// Non-zero if the host records events at `MQB_LOG_*` `level`.
+    pub log_enabled: unsafe extern "C" fn(level: u8) -> u8,
+    /// Records one event; `target` is the plugin's module path, `message` the
+    /// rendered text including its fields.
+    pub log: unsafe extern "C" fn(level: u8, target: MqbSlice, message: MqbSlice),
+    /// Records one metric sample; `kind` is an `MQB_METRIC_*` code.
+    pub metric: unsafe extern "C" fn(
+        kind: u8,
+        name: MqbSlice,
+        labels: *const MqbKeyValue,
+        labels_len: usize,
+        value: f64,
+    ),
+    /// Runs `handler` with `user_data` when the process gets a fatal signal,
+    /// before it dies. `MQB_ERR_UNSUPPORTED` where the host has no crash
+    /// handling (Windows), `MQB_ERR_PERMANENT` for a null handler or once all
+    /// slots are taken.
+    pub register_crash_handler:
+        unsafe extern "C" fn(handler: MqbCrashHandler, user_data: *mut c_void) -> MqbStatus,
+}
+
+/// Size of the 1.2 [`MqbHostVTable`]; a plugin reads no field past a host's
+/// `struct_size`.
+pub const MQB_HOST_VTABLE_SIZE_V1_2: usize = 5 * core::mem::size_of::<usize>();
+
+/// Where an asynchronous 1.2 call reports that it finished.
+///
+/// If the starting call returns [`MQB_OK`], the plugin invokes `callback(ctx,
+/// status)` exactly once, from any thread, possibly before the starting call
+/// returns; any other return means it never does. Out-parameters stay writable
+/// until the callback, which must not block. The host sets no deadline: a
+/// callback that never comes holds the call and its buffers until shutdown.
+///
+/// A plugin that returns [`MQB_ERR_UNSUPPORTED`] from a non-blocking entry gets
+/// its blocking twin instead, from then on for that endpoint.
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct MqbCompletion {
+    pub callback: unsafe extern "C" fn(ctx: *mut c_void, status: MqbStatus),
+    pub ctx: *mut c_void,
+}
+
 macro_rules! handle_helpers {
     ($($ty:ident),+ $(,)?) => {$(
         impl $ty {
@@ -289,7 +411,8 @@ handle_helpers!(
     MqbPublisherHandle,
     MqbBatchHandle,
     MqbMiddlewareHandle,
-    MqbFilterHandle
+    MqbFilterHandle,
+    MqbResponsesHandle,
 );
 
 /// The function table a plugin exports through [`MQB_PLUGIN_ENTRY_SYMBOL`].
@@ -298,7 +421,7 @@ handle_helpers!(
 /// return the plugin may write an owned [`MqbBuffer`] holding UTF-8 error text;
 /// on [`MQB_OK`] it must leave the buffer empty. All calls are blocking: the
 /// host invokes them off its async executor, and the plugin drives its own
-/// runtime internally.
+/// runtime internally. The `*_async` entries (1.2) are the exception.
 ///
 /// Fields may only be appended in later minor versions. Readers must check
 /// [`struct_size`](Self::struct_size) before touching a field added after 1.0.
@@ -419,6 +542,10 @@ pub struct MqbPluginVTable {
     /// entry's message is unspecified. Both arrays stay valid until the result
     /// is freed.
     ///
+    /// The output may point into the input: the host reads the result before it
+    /// releases the input, so an unchanged message (or its id and metadata) can
+    /// be passed back without copying.
+    ///
     /// Keeping the arrays parallel to the input is what lets the host map the
     /// route's dispositions back onto the source messages and acknowledge the
     /// ones that were dropped.
@@ -469,6 +596,7 @@ pub struct MqbPluginVTable {
     /// [`struct_size`](MqbPluginVTable::struct_size) reaches
     /// [`MQB_VTABLE_SIZE_V1_1`]; read it through
     /// [`MqbPluginVTable::publisher_outcomes_hook`], never directly.
+    /// [`MQB_ERR_UNSUPPORTED`] falls back to `publisher_send_batch`.
     pub publisher_send_batch_outcomes: MqbPublisherSendBatchOutcomes,
     /// Describes one of the plugin's configuration objects as a JSON Schema.
     ///
@@ -486,6 +614,159 @@ pub struct MqbPluginVTable {
     /// [`MQB_VTABLE_SIZE_V1_1`]; read it through
     /// [`MqbPluginVTable::config_schema_hook`], never directly.
     pub factory_config_schema: MqbConfigSchema,
+
+    // --- Added in ABI 1.2. Read through `request_reply_hooks` / `status_hooks`.
+    /// Publishes like
+    /// [`publisher_send_batch_outcomes`](MqbPluginVTable::publisher_send_batch_outcomes)
+    /// and also returns the responses the sink produced.
+    ///
+    /// `out_result`, `out_responses` and `out_responses_len` start as null/0.
+    /// Whatever the status, the plugin may write a result handle plus a compact
+    /// array of responses in input order (only messages that produced one). The
+    /// array lives until the host passes the handle to `responses_free`.
+    /// [`MQB_ERR_UNSUPPORTED`] falls back to `publisher_send_batch_outcomes`.
+    pub publisher_send_batch_responses: MqbPublisherSendBatchResponses,
+    /// Releases a result written by `publisher_send_batch_responses`. Null is a no-op.
+    pub responses_free: unsafe extern "C" fn(result: MqbResponsesHandle),
+    /// Like [`batch_commit`](MqbPluginVTable::batch_commit), and accepts
+    /// [`MQB_DISPOSITION_REPLY`]. `replies` is parallel to `dispositions`,
+    /// borrowed for the call, and read only where the disposition is a reply.
+    pub batch_commit_replies: unsafe extern "C" fn(
+        batch: MqbBatchHandle,
+        dispositions: *const u8,
+        replies: *const MqbMessage,
+        len: usize,
+        err: *mut MqbBuffer,
+    ) -> MqbStatus,
+    /// Writes the consumer's `EndpointStatus` as an owned UTF-8 JSON buffer;
+    /// [`MQB_ERR_UNSUPPORTED`] reports a healthy default.
+    pub consumer_status: unsafe extern "C" fn(
+        consumer: MqbConsumerHandle,
+        out: *mut MqbBuffer,
+        err: *mut MqbBuffer,
+    ) -> MqbStatus,
+    /// Writes the publisher's `EndpointStatus` as an owned UTF-8 JSON buffer;
+    /// [`MQB_ERR_UNSUPPORTED`] reports a healthy default.
+    pub publisher_status: unsafe extern "C" fn(
+        publisher: MqbPublisherHandle,
+        out: *mut MqbBuffer,
+        err: *mut MqbBuffer,
+    ) -> MqbStatus,
+    /// Non-blocking [`consumer_receive_batch`](MqbPluginVTable::consumer_receive_batch);
+    /// see [`MqbCompletion`]. Read through `async_hooks`.
+    pub consumer_receive_batch_async: MqbReceiveBatchAsync,
+    /// Non-blocking [`batch_commit_replies`](MqbPluginVTable::batch_commit_replies).
+    /// The inputs are copied before it returns. The handle is consumed unless it
+    /// returns [`MQB_ERR_UNSUPPORTED`], which falls back to the blocking commit.
+    pub batch_commit_async: MqbBatchCommitAsync,
+    /// Non-blocking [`publisher_send_batch_responses`](MqbPluginVTable::publisher_send_batch_responses).
+    /// `messages` is copied before it returns.
+    pub publisher_send_batch_async: MqbPublisherSendBatchAsync,
+    /// Non-blocking [`publisher_flush`](MqbPluginVTable::publisher_flush).
+    pub publisher_flush_async: MqbPublisherFlushAsync,
+    /// Hands the plugin the host's services before `factory_create`. Called
+    /// for every table a library exports, so it must tolerate repeats.
+    /// Read through `host_init_hook`.
+    pub plugin_init: MqbPluginInit,
+    /// Writes the `MQB_DELIVERY_*` flags for an endpoint built from `config_json`.
+    /// Read through `delivery_hook`.
+    pub factory_delivery: MqbFactoryDelivery,
+}
+
+/// Signature of [`MqbPluginVTable::factory_delivery`].
+pub type MqbFactoryDelivery = unsafe extern "C" fn(
+    factory: MqbFactoryHandle,
+    config_json: MqbSlice,
+    out_flags: *mut u8,
+    err: *mut MqbBuffer,
+) -> MqbStatus;
+
+/// Signature of [`MqbPluginVTable::plugin_init`].
+pub type MqbPluginInit = unsafe extern "C" fn(host: *const MqbHostVTable);
+
+/// Signature of [`MqbPluginVTable::consumer_receive_batch_async`].
+pub type MqbReceiveBatchAsync = unsafe extern "C" fn(
+    consumer: MqbConsumerHandle,
+    max_messages: usize,
+    out_batch: *mut MqbBatchHandle,
+    out_messages: *mut *const MqbMessage,
+    out_len: *mut usize,
+    err: *mut MqbBuffer,
+    completion: MqbCompletion,
+) -> MqbStatus;
+
+/// Signature of [`MqbPluginVTable::batch_commit_async`].
+pub type MqbBatchCommitAsync = unsafe extern "C" fn(
+    batch: MqbBatchHandle,
+    dispositions: *const u8,
+    replies: *const MqbMessage,
+    len: usize,
+    err: *mut MqbBuffer,
+    completion: MqbCompletion,
+) -> MqbStatus;
+
+/// Signature of [`MqbPluginVTable::publisher_send_batch_async`].
+pub type MqbPublisherSendBatchAsync = unsafe extern "C" fn(
+    publisher: MqbPublisherHandle,
+    messages: *const MqbMessage,
+    len: usize,
+    out_outcomes: *mut u8,
+    out_result: *mut MqbResponsesHandle,
+    out_responses: *mut *const MqbMessage,
+    out_responses_len: *mut usize,
+    err: *mut MqbBuffer,
+    completion: MqbCompletion,
+) -> MqbStatus;
+
+/// Signature of [`MqbPluginVTable::publisher_flush_async`].
+pub type MqbPublisherFlushAsync = unsafe extern "C" fn(
+    publisher: MqbPublisherHandle,
+    err: *mut MqbBuffer,
+    completion: MqbCompletion,
+) -> MqbStatus;
+
+/// The 1.2 non-blocking entries.
+#[derive(Copy, Clone)]
+pub struct MqbAsyncHooks {
+    pub receive_batch: MqbReceiveBatchAsync,
+    pub batch_commit: MqbBatchCommitAsync,
+    pub send_batch: MqbPublisherSendBatchAsync,
+    pub flush: MqbPublisherFlushAsync,
+}
+
+/// Signature of [`MqbPluginVTable::publisher_send_batch_responses`].
+pub type MqbPublisherSendBatchResponses = unsafe extern "C" fn(
+    publisher: MqbPublisherHandle,
+    messages: *const MqbMessage,
+    len: usize,
+    out_outcomes: *mut u8,
+    out_result: *mut MqbResponsesHandle,
+    out_responses: *mut *const MqbMessage,
+    out_responses_len: *mut usize,
+    err: *mut MqbBuffer,
+) -> MqbStatus;
+
+/// The 1.2 request/reply entries, present together or not at all.
+#[derive(Copy, Clone)]
+pub struct MqbRequestReplyHooks {
+    pub send_batch_responses: MqbPublisherSendBatchResponses,
+    pub responses_free: unsafe extern "C" fn(MqbResponsesHandle),
+    pub batch_commit_replies: unsafe extern "C" fn(
+        MqbBatchHandle,
+        *const u8,
+        *const MqbMessage,
+        usize,
+        *mut MqbBuffer,
+    ) -> MqbStatus,
+}
+
+/// The 1.2 status entries.
+#[derive(Copy, Clone)]
+pub struct MqbStatusHooks {
+    pub consumer_status:
+        unsafe extern "C" fn(MqbConsumerHandle, *mut MqbBuffer, *mut MqbBuffer) -> MqbStatus,
+    pub publisher_status:
+        unsafe extern "C" fn(MqbPublisherHandle, *mut MqbBuffer, *mut MqbBuffer) -> MqbStatus,
 }
 
 /// Signature of [`MqbPluginVTable::factory_config_schema`], named so the field
@@ -549,6 +830,62 @@ impl MqbPluginVTable {
         }
         Some(self.factory_config_schema)
     }
+
+    /// The 1.2 request/reply entries, or `None` for an older plugin, which
+    /// then publishes without responses and acks a reply disposition.
+    pub fn request_reply_hooks(&self) -> Option<MqbRequestReplyHooks> {
+        if self.struct_size < MQB_VTABLE_SIZE_V1_2 {
+            return None;
+        }
+        Some(MqbRequestReplyHooks {
+            send_batch_responses: self.publisher_send_batch_responses,
+            responses_free: self.responses_free,
+            batch_commit_replies: self.batch_commit_replies,
+        })
+    }
+
+    /// The 1.2 status entries, or `None` for an older plugin.
+    pub fn status_hooks(&self) -> Option<MqbStatusHooks> {
+        if self.struct_size < MQB_VTABLE_SIZE_V1_2 {
+            return None;
+        }
+        Some(MqbStatusHooks {
+            consumer_status: self.consumer_status,
+            publisher_status: self.publisher_status,
+        })
+    }
+
+    /// The 1.2 host-services entry, or `None` for an older plugin, which then
+    /// logs and records metrics only to its own globals.
+    pub fn host_init_hook(&self) -> Option<MqbPluginInit> {
+        if self.struct_size < MQB_VTABLE_SIZE_V1_2 {
+            return None;
+        }
+        Some(self.plugin_init)
+    }
+
+    /// The 1.2 delivery-flags entry, or `None` for an older plugin, whose
+    /// guarantees then come from its config schema alone.
+    pub fn delivery_hook(&self) -> Option<MqbFactoryDelivery> {
+        if self.struct_size < MQB_VTABLE_SIZE_V1_2 {
+            return None;
+        }
+        Some(self.factory_delivery)
+    }
+
+    /// The 1.2 non-blocking entries, or `None` for an older plugin, whose calls
+    /// the host then runs on its blocking pool.
+    pub fn async_hooks(&self) -> Option<MqbAsyncHooks> {
+        if self.struct_size < MQB_VTABLE_SIZE_V1_2 {
+            return None;
+        }
+        Some(MqbAsyncHooks {
+            receive_batch: self.consumer_receive_batch_async,
+            batch_commit: self.batch_commit_async,
+            send_batch: self.publisher_send_batch_async,
+            flush: self.publisher_flush_async,
+        })
+    }
 }
 
 /// Size of the **1.0** field set: 7 header words (`struct_size`, the packed
@@ -577,6 +914,11 @@ pub const MQB_VTABLE_SIZE_V1_0: usize = 27 * core::mem::size_of::<usize>();
 /// than this one simply has neither 1.1 hook. Both are gated on the one
 /// constant because 1.1 ships as a unit; nothing in between was ever released.
 pub const MQB_VTABLE_SIZE_V1_1: usize = MQB_VTABLE_SIZE_V1_0 + 3 * core::mem::size_of::<usize>();
+
+/// Size of the **1.2** field set: 1.1 plus request/reply, status, the
+/// non-blocking entries, host services and delivery flags. A feature gate like
+/// [`MQB_VTABLE_SIZE_V1_1`].
+pub const MQB_VTABLE_SIZE_V1_2: usize = MQB_VTABLE_SIZE_V1_1 + 11 * core::mem::size_of::<usize>();
 
 /// Why a plugin was rejected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -676,12 +1018,57 @@ mod tests {
     /// The 1.1 size is frozen for the same reason 1.0 is: it gates a field
     /// read, so a stale value would read past a 1.0 plugin's table.
     #[test]
-    fn the_1_1_table_size_matches_the_declared_table() {
+    fn the_1_1_table_size_is_frozen() {
         assert_eq!(
             MQB_VTABLE_SIZE_V1_1,
             MQB_VTABLE_SIZE_V1_0 + 3 * size_of::<usize>()
         );
-        assert_eq!(size_of::<MqbPluginVTable>(), MQB_VTABLE_SIZE_V1_1);
+    }
+
+    #[test]
+    fn the_1_2_table_size_matches_the_declared_table() {
+        assert_eq!(
+            MQB_VTABLE_SIZE_V1_2,
+            MQB_VTABLE_SIZE_V1_1 + 11 * size_of::<usize>()
+        );
+        assert_eq!(size_of::<MqbPluginVTable>(), MQB_VTABLE_SIZE_V1_2);
+    }
+
+    #[test]
+    fn a_1_1_table_loads_but_offers_no_1_2_hooks() {
+        let mut table = stub_table();
+        table.struct_size = MQB_VTABLE_SIZE_V1_1;
+        assert!(check_compatibility(&table).is_ok());
+        assert!(table.config_schema_hook().is_some());
+        assert!(table.request_reply_hooks().is_none());
+        assert!(table.status_hooks().is_none());
+        assert!(table.async_hooks().is_none());
+        assert!(table.host_init_hook().is_none());
+        assert!(table.delivery_hook().is_none());
+
+        table.struct_size = MQB_VTABLE_SIZE_V1_2;
+        assert!(table.request_reply_hooks().is_some());
+        assert!(table.status_hooks().is_some());
+        assert!(table.async_hooks().is_some());
+        assert!(table.host_init_hook().is_some());
+        assert!(table.delivery_hook().is_some());
+    }
+
+    #[test]
+    fn the_1_2_host_table_size_is_frozen() {
+        assert_eq!(size_of::<MqbHostVTable>(), MQB_HOST_VTABLE_SIZE_V1_2);
+    }
+
+    #[test]
+    fn disposition_codes_are_stable() {
+        assert_eq!(
+            [
+                MQB_DISPOSITION_ACK,
+                MQB_DISPOSITION_NACK,
+                MQB_DISPOSITION_REPLY
+            ],
+            [0, 1, 2]
+        );
     }
 
     /// The whole point of an additive minor: a 1.0 plugin still loads, and the
@@ -875,6 +1262,92 @@ mod tests {
         ) -> MqbStatus {
             MQB_OK
         }
+        unsafe extern "C" fn send_batch_responses(
+            _: MqbPublisherHandle,
+            _: *const MqbMessage,
+            _: usize,
+            _: *mut u8,
+            _: *mut MqbResponsesHandle,
+            _: *mut *const MqbMessage,
+            _: *mut usize,
+            _: *mut MqbBuffer,
+        ) -> MqbStatus {
+            MQB_OK
+        }
+        unsafe extern "C" fn responses_free(_: MqbResponsesHandle) {}
+        unsafe extern "C" fn batch_commit_replies(
+            _: MqbBatchHandle,
+            _: *const u8,
+            _: *const MqbMessage,
+            _: usize,
+            _: *mut MqbBuffer,
+        ) -> MqbStatus {
+            MQB_OK
+        }
+        unsafe extern "C" fn consumer_status(
+            _: MqbConsumerHandle,
+            _: *mut MqbBuffer,
+            _: *mut MqbBuffer,
+        ) -> MqbStatus {
+            MQB_OK
+        }
+        unsafe extern "C" fn publisher_status(
+            _: MqbPublisherHandle,
+            _: *mut MqbBuffer,
+            _: *mut MqbBuffer,
+        ) -> MqbStatus {
+            MQB_OK
+        }
+        unsafe extern "C" fn receive_batch_async(
+            _: MqbConsumerHandle,
+            _: usize,
+            _: *mut MqbBatchHandle,
+            _: *mut *const MqbMessage,
+            _: *mut usize,
+            _: *mut MqbBuffer,
+            _: MqbCompletion,
+        ) -> MqbStatus {
+            MQB_ERR_UNSUPPORTED
+        }
+        unsafe extern "C" fn batch_commit_async(
+            _: MqbBatchHandle,
+            _: *const u8,
+            _: *const MqbMessage,
+            _: usize,
+            _: *mut MqbBuffer,
+            _: MqbCompletion,
+        ) -> MqbStatus {
+            MQB_ERR_UNSUPPORTED
+        }
+        unsafe extern "C" fn send_batch_async(
+            _: MqbPublisherHandle,
+            _: *const MqbMessage,
+            _: usize,
+            _: *mut u8,
+            _: *mut MqbResponsesHandle,
+            _: *mut *const MqbMessage,
+            _: *mut usize,
+            _: *mut MqbBuffer,
+            _: MqbCompletion,
+        ) -> MqbStatus {
+            MQB_ERR_UNSUPPORTED
+        }
+        unsafe extern "C" fn flush_async(
+            _: MqbPublisherHandle,
+            _: *mut MqbBuffer,
+            _: MqbCompletion,
+        ) -> MqbStatus {
+            MQB_ERR_UNSUPPORTED
+        }
+        unsafe extern "C" fn plugin_init(_: *const MqbHostVTable) {}
+        unsafe extern "C" fn factory_delivery(
+            _: MqbFactoryHandle,
+            _: MqbSlice,
+            _: *mut u8,
+            _: *mut MqbBuffer,
+        ) -> MqbStatus {
+            MQB_OK
+        }
 
         MqbPluginVTable {
             struct_size: MQB_VTABLE_SIZE_V1_0,
@@ -906,6 +1379,17 @@ mod tests {
             publisher_requires_ordered_publish: requires_ordered_publish,
             publisher_send_batch_outcomes: send_batch_outcomes,
             factory_config_schema: config_schema,
+            publisher_send_batch_responses: send_batch_responses,
+            responses_free,
+            batch_commit_replies,
+            consumer_status,
+            publisher_status,
+            consumer_receive_batch_async: receive_batch_async,
+            batch_commit_async,
+            publisher_send_batch_async: send_batch_async,
+            publisher_flush_async: flush_async,
+            plugin_init,
+            factory_delivery,
         }
     }
 }

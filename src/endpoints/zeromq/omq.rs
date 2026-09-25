@@ -262,14 +262,7 @@ impl MessagePublisher for ZeroMqOmqPublisher {
             });
         }
 
-        if failed.is_empty() {
-            Ok(SentBatch::Ack)
-        } else {
-            Ok(SentBatch::Partial {
-                responses: None,
-                failed,
-            })
-        }
+        Ok(SentBatch::from_failures(failed))
     }
 
     async fn status(&self) -> EndpointStatus {

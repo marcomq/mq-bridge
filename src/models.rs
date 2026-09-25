@@ -378,7 +378,7 @@ pub enum CipherKind {
 /// AEAD encryption settings, shared by the `encryption` middleware (per-message
 /// payload encryption) and the at-rest `encryption` field of the file and
 /// object_store endpoints. Requires the `encryption` feature.
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[derive(Deserialize, Serialize, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct EncryptionConfig {
@@ -400,6 +400,19 @@ pub struct EncryptionConfig {
     pub authenticate_metadata: Vec<String>,
 }
 
+impl std::fmt::Debug for EncryptionConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let decrypt_key_ids: Vec<&String> = self.decrypt_keys.keys().collect();
+        f.debug_struct("EncryptionConfig")
+            .field("cipher", &self.cipher)
+            .field("key_id", &self.key_id)
+            .field("key", &"<redacted>")
+            .field("decrypt_keys", &decrypt_key_ids)
+            .field("authenticate_metadata", &self.authenticate_metadata)
+            .finish()
+    }
+}
+
 /// An enumeration of all supported middleware types.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -415,6 +428,8 @@ pub enum Middleware {
     Retry(RetryMiddleware),
     RandomPanic(RandomPanicMiddleware),
     Delay(DelayMiddleware),
+    /// Bounds each send; one that does not finish in time fails as retryable. Output-only.
+    Timeout(TimeoutMiddleware),
     WeakJoin(WeakJoinMiddleware),
     Limiter(LimiterMiddleware),
     Buffer(BufferMiddleware),
@@ -524,6 +539,19 @@ pub struct RetryMiddleware {
 pub struct DelayMiddleware {
     /// Delay duration in milliseconds.
     pub delay_ms: u64,
+}
+
+/// Send timeout middleware configuration.
+///
+/// Fails a `send`/`send_batch` that has not finished within `timeout_ms` with a
+/// retryable error instead of letting it block the route. The sink may still have
+/// accepted the batch, so a retry after a timeout can deliver it twice.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct TimeoutMiddleware {
+    /// Longest a single send may take, in milliseconds.
+    pub timeout_ms: u64,
 }
 
 /// Throughput limiter middleware configuration.

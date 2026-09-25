@@ -228,7 +228,7 @@ mqb copy \
   --drain
 ```
 
-- Names: `retry`, `metrics`, `dlq`, `deduplication`, `transform`, `delay`, `limiter`,
+- Names: `retry`, `metrics`, `dlq`, `deduplication`, `transform`, `delay`, `timeout`, `limiter`,
   `buffer`, `weak_join`, `cookie_jar`, `random_panic`, `compression`, `encryption`, `pack`,
   `unpack`, `custom`
   (`-` is accepted for `_`).

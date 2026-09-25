@@ -21,6 +21,7 @@ use crate::traits::{
 use async_channel::{bounded, Sender};
 use serde::de::DeserializeOwned;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use tokio::{
     select,
@@ -85,6 +86,56 @@ pub(crate) struct DropReport {
     last_cause: Option<String>,
 }
 
+/// How long a `send_batch` may stay pending before the route reports unhealthy.
+const SEND_STALL_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Start time of each worker's in-flight `send_batch`, so a send that never
+/// returns shows up in [`RouteHandle::status`] instead of looking healthy.
+#[derive(Debug)]
+pub(crate) struct PendingSends {
+    epoch: std::time::Instant,
+    /// Nanoseconds since `epoch` plus one; zero while the worker is not sending.
+    slots: Box<[AtomicU64]>,
+}
+
+impl PendingSends {
+    fn new(workers: usize) -> Self {
+        Self {
+            epoch: std::time::Instant::now(),
+            slots: (0..workers.max(1)).map(|_| AtomicU64::new(0)).collect(),
+        }
+    }
+
+    /// Marks worker `index` as sending until the returned guard drops.
+    fn begin(&self, index: usize) -> Option<PendingSendGuard<'_>> {
+        let slot = self.slots.get(index)?;
+        let started = self.epoch.elapsed().as_nanos() as u64 + 1;
+        slot.store(started, Ordering::Relaxed);
+        Some(PendingSendGuard(slot))
+    }
+
+    /// Age of the oldest send still pending.
+    fn oldest(&self) -> Option<std::time::Duration> {
+        let started = self
+            .slots
+            .iter()
+            .map(|slot| slot.load(Ordering::Relaxed))
+            .filter(|&started| started != 0)
+            .min()?;
+        let now = self.epoch.elapsed().as_nanos() as u64 + 1;
+        Some(std::time::Duration::from_nanos(now.saturating_sub(started)))
+    }
+}
+
+/// Clears its slot on drop, so a cancelled send does not read as stuck.
+struct PendingSendGuard<'a>(&'a AtomicU64);
+
+impl Drop for PendingSendGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(0, Ordering::Relaxed);
+    }
+}
+
 impl OutcomeGuard {
     fn set(&mut self, outcome: RouteOutcome) {
         self.resolved = Some(outcome);
@@ -140,6 +191,8 @@ pub struct RouteHandle {
     /// Terminal outcome, published once by the run task as it exits.
     /// `None` while the route is still running. Read via [`RouteHandle::outcome`].
     outcome: Arc<RwLock<Option<RouteOutcome>>>,
+    /// In-flight sends, folded into [`RouteHandle::status`].
+    sends: Option<Arc<PendingSends>>,
 }
 
 impl RouteHandle {
@@ -171,9 +224,38 @@ impl RouteHandle {
     /// The reconnect loop updates this on every (re)connect attempt and failure, so a
     /// supervisor can distinguish "running and connected" (`healthy == true`) from
     /// "running but failing to connect / reconnecting" (`healthy == false`, with `error`
-    /// set to the last connection error).
+    /// set to the last connection error). A `send_batch` pending longer than a
+    /// minute also reports unhealthy, with `details.state = "send pending"`.
     pub fn status(&self) -> EndpointStatus {
-        recover_read_lock(&self.status, "route_handle_status").clone()
+        self.status_with_stall_threshold(SEND_STALL_THRESHOLD)
+    }
+
+    fn status_with_stall_threshold(&self, threshold: std::time::Duration) -> EndpointStatus {
+        let mut status = recover_read_lock(&self.status, "route_handle_status").clone();
+        let stalled = self
+            .sends
+            .as_ref()
+            .and_then(|sends| sends.oldest())
+            .filter(|age| *age >= threshold && self.outcome().is_none());
+        if let Some(age) = stalled {
+            status.healthy = false;
+            status
+                .error
+                .get_or_insert_with(|| format!("send pending for {}s", age.as_secs()));
+            let details = serde_json::json!({
+                "state": "send pending",
+                "send_pending_ms": age.as_millis() as u64,
+            });
+            match &mut status.details {
+                serde_json::Value::Object(map) => {
+                    if let serde_json::Value::Object(extra) = details {
+                        map.extend(extra);
+                    }
+                }
+                other => *other = details,
+            }
+        }
+        status
     }
 }
 
@@ -265,6 +347,7 @@ impl From<(JoinHandle<()>, Sender<()>)> for RouteHandle {
             shutdown_tx: tuple.1,
             status: Arc::new(RwLock::new(EndpointStatus::default())),
             outcome: Arc::new(RwLock::new(None)),
+            sends: None,
         }
     }
 }
@@ -611,6 +694,7 @@ async fn send_batch_and_commit(
     commit_tasks: &mut JoinSet<()>,
     scratch: &mut BatchScratch,
     drops: Option<&Arc<RwLock<DropReport>>>,
+    send_slot: Option<(&PendingSends, usize)>,
     ticket: Option<OrderTicket>,
 ) -> anyhow::Result<()> {
     let batch_len = messages.len();
@@ -628,6 +712,7 @@ async fn send_batch_and_commit(
             }
             None => None,
         };
+        let _pending = send_slot.and_then(|(sends, index)| sends.begin(index));
         publisher.send_batch(messages).await
     };
     match sent {
@@ -1301,6 +1386,8 @@ impl Route {
         let outcome = Arc::new(RwLock::new(None::<RouteOutcome>));
         // Tally of discarded messages, published alongside the terminal outcome.
         let drops = Arc::new(RwLock::new(DropReport::default()));
+        let sends = Arc::new(PendingSends::new(self.options.concurrency));
+        let sends_loop = Arc::clone(&sends);
         let mut outcome_guard = OutcomeGuard {
             outcome: Arc::clone(&outcome),
             status: Arc::clone(&status),
@@ -1331,6 +1418,7 @@ impl Route {
 
                 // The actual route logic is in `run_until_err`.
                 let drops_run = Arc::clone(&drops);
+                let sends_run = Arc::clone(&sends_loop);
                 let mut run_task = tokio::spawn(async move {
                     route_arc
                         .run_until_err_reporting_to(
@@ -1338,6 +1426,7 @@ impl Route {
                             Some(internal_shutdown_rx),
                             Some(iter_ready_tx),
                             Some(&drops_run),
+                            Some(&sends_run),
                             no_resume,
                         )
                         .await
@@ -1399,6 +1488,7 @@ impl Route {
                                     let is_permanent =
                                         e.downcast_ref::<ProcessingError>().is_some_and(|pe| matches!(pe, ProcessingError::NonRetryable(_)))
                                         || e.downcast_ref::<ConsumerError>().is_some_and(|ce| matches!(ce, ConsumerError::Permanent(_)))
+                                        || e.is::<crate::errors::InvalidConfig>()
                                         || is_end_of_stream;
 
                                     // EndOfStream is a clean terminal, not a failure, so
@@ -1493,6 +1583,7 @@ impl Route {
                 shutdown_tx,
                 status,
                 outcome,
+                sends: Some(sends),
             });
         }
         // The startup failure itself stays inside the reconnect loop, so
@@ -1543,7 +1634,7 @@ impl Route {
         shutdown_rx: Option<async_channel::Receiver<()>>,
         ready_tx: Option<Sender<()>>,
     ) -> anyhow::Result<bool> {
-        self.run_until_err_reporting_to(name, shutdown_rx, ready_tx, None, false)
+        self.run_until_err_reporting_to(name, shutdown_rx, ready_tx, None, None, false)
             .await
     }
 
@@ -1557,6 +1648,7 @@ impl Route {
         shutdown_rx: Option<async_channel::Receiver<()>>,
         ready_tx: Option<Sender<()>>,
         drops: Option<&Arc<RwLock<DropReport>>>,
+        sends: Option<&Arc<PendingSends>>,
         no_resume: bool,
     ) -> anyhow::Result<bool> {
         let (_internal_shutdown_tx, internal_shutdown_rx) = bounded(1);
@@ -1572,10 +1664,10 @@ impl Route {
             return result;
         }
         if self.options.concurrency == 1 {
-            self.run_sequentially(name, shutdown_rx, ready_tx, drops, no_resume)
+            self.run_sequentially(name, shutdown_rx, ready_tx, drops, sends, no_resume)
                 .await
         } else {
-            self.run_concurrently(name, shutdown_rx, ready_tx, drops, no_resume)
+            self.run_concurrently(name, shutdown_rx, ready_tx, drops, sends, no_resume)
                 .await
         }
     }
@@ -1587,6 +1679,7 @@ impl Route {
         shutdown_rx: async_channel::Receiver<()>,
         ready_tx: Option<Sender<()>>,
         drops: Option<&Arc<RwLock<DropReport>>>,
+        sends: Option<&Arc<PendingSends>>,
         no_resume: bool,
     ) -> anyhow::Result<bool> {
         let source_has_position = self.source_has_position();
@@ -1708,6 +1801,7 @@ impl Route {
                         &mut commit_tasks,
                         &mut batch_scratch,
                         drops,
+                        sends.map(|sends| (sends.as_ref(), 0)),
                         // The sequential runner sends one batch at a time already.
                         None,
                     )
@@ -1761,6 +1855,7 @@ impl Route {
         shutdown_rx: async_channel::Receiver<()>,
         ready_tx: Option<Sender<()>>,
         drops: Option<&Arc<RwLock<DropReport>>>,
+        sends: Option<&Arc<PendingSends>>,
         no_resume: bool,
     ) -> anyhow::Result<bool> {
         let source_has_position = self.source_has_position();
@@ -1868,6 +1963,7 @@ impl Route {
             let batch_size = self.options.batch_size;
             // Owned per worker: the borrow cannot outlive this loop iteration.
             let drops = drops.cloned();
+            let sends = sends.cloned();
             join_set.spawn(async move {
                 debug!("Starting worker {}", i);
                 let mut batch_scratch = BatchScratch::with_capacity(batch_size);
@@ -1886,6 +1982,7 @@ impl Route {
                         &mut commit_tasks,
                         &mut batch_scratch,
                         drops.as_ref(),
+                        sends.as_deref().map(|sends| (sends, i)),
                         ticket,
                     )
                     .await
@@ -2525,7 +2622,7 @@ mod tests {
         };
         let (_tx, rx) = async_channel::bounded(1);
         let error = route
-            .run_sequentially("probe", rx, None, None, false)
+            .run_sequentially("probe", rx, None, None, None, false)
             .await
             .unwrap_err();
         assert!(
@@ -4590,6 +4687,55 @@ mod tests {
         Route::stop("test_retry_handler_once").await;
     }
 
+    #[tokio::test]
+    async fn test_a_send_that_never_returns_reports_the_route_unhealthy() {
+        let factory_name = format!("stuck_output_{}", fast_uuid_v7::gen_id());
+        let mut factory = MockEndpointFactory::new();
+        factory.publisher_behavior = Arc::new(Mutex::new(|| {
+            struct StuckPublisher;
+            #[async_trait::async_trait]
+            impl MessagePublisher for StuckPublisher {
+                async fn send_batch(
+                    &self,
+                    _: Vec<crate::CanonicalMessage>,
+                ) -> Result<SentBatch, PublisherError> {
+                    std::future::pending().await
+                }
+                fn as_any(&self) -> &dyn Any {
+                    self
+                }
+            }
+            Ok(Box::new(StuckPublisher) as Box<dyn MessagePublisher>)
+        }));
+        register_endpoint_factory(&factory_name, Arc::new(factory)).unwrap();
+
+        let input = Endpoint::new_memory("stuck_send_in", 10);
+        let input_ch = input.channel().unwrap();
+        let output = Endpoint {
+            endpoint_type: EndpointType::Custom {
+                name: factory_name,
+                config: serde_json::Value::Null,
+            },
+            middlewares: vec![],
+            handler: None,
+        };
+        let handle = Route::new(input, output)
+            .run("test_stuck_send_health")
+            .await
+            .unwrap();
+        let threshold = Duration::from_millis(50);
+        assert!(handle.status_with_stall_threshold(threshold).healthy);
+
+        input_ch.send_message("one".into()).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let status = handle.status_with_stall_threshold(threshold);
+        assert!(!status.healthy, "a stuck send must not report healthy");
+        assert_eq!(status.details["state"], "send pending");
+        assert!(status.details["send_pending_ms"].as_u64().unwrap() >= 50);
+
+        handle.stop().await;
+    }
+
     // N5 (regression): a drain route whose output leg is at a dead address used to
     // reconnect forever — `finished: false`, no outcome, and `healthy: true` on every
     // poll, because reconnecting flipped health back the moment the consumer was ready.
@@ -5475,14 +5621,7 @@ mod tests {
                     // Odd numbers succeed implicitly by not being in `failed`
                 }
 
-                if failed.is_empty() {
-                    Ok(SentBatch::Ack)
-                } else {
-                    Ok(SentBatch::Partial {
-                        responses: None,
-                        failed,
-                    })
-                }
+                Ok(SentBatch::from_failures(failed))
             }
             async fn send(
                 &self,

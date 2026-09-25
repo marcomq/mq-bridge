@@ -279,14 +279,7 @@ impl ZeroMqPublisher {
                     )),
                 }
             }
-            if failed.is_empty() {
-                Ok(SentBatch::Ack)
-            } else {
-                Ok(SentBatch::Partial {
-                    responses: None,
-                    failed,
-                })
-            }
+            Ok(SentBatch::from_failures(failed))
         }
     }
 }

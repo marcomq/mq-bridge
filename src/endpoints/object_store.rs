@@ -534,14 +534,7 @@ impl ObjectStorePublisher {
                     .await?;
             }
         }
-        if failed.is_empty() {
-            Ok(SentBatch::Ack)
-        } else {
-            Ok(SentBatch::Partial {
-                responses: None,
-                failed,
-            })
-        }
+        Ok(SentBatch::from_failures(failed))
     }
 
     /// Writes one contiguous source range as a single object and records it as covered.
@@ -638,14 +631,7 @@ impl MessagePublisher for ObjectStorePublisher {
             .await
             .map_err(|e| classify_put_error(e, format!("object-store put '{key}'")))?;
         trace!(key = %key, "Wrote object to object store");
-        if failed.is_empty() {
-            Ok(SentBatch::Ack)
-        } else {
-            Ok(SentBatch::Partial {
-                responses: None,
-                failed,
-            })
-        }
+        Ok(SentBatch::from_failures(failed))
     }
 
     async fn flush(&self) -> anyhow::Result<()> {

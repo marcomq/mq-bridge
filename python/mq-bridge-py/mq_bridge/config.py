@@ -44,6 +44,7 @@ SqlxConfig = dict
 StreamBufferConfig = dict
 SwitchCase = dict
 SwitchConfig = dict
+TimeoutMiddleware = dict
 TlsConfig = dict
 TransformMiddleware = dict
 UnpackMiddleware = dict
@@ -145,6 +146,7 @@ __all__ = [
     "StreamBufferConfig",
     "SwitchCase",
     "SwitchConfig",
+    "TimeoutMiddleware",
     "TlsConfig",
     "TransformErrorPolicy",
     "TransformMiddleware",

@@ -2270,6 +2270,19 @@
           ]
         },
         {
+          "description": "Bounds each send; one that does not finish in time fails as retryable. Output-only.",
+          "type": "object",
+          "properties": {
+            "timeout": {
+              "$ref": "#/$defs/TimeoutMiddleware"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "timeout"
+          ]
+        },
+        {
           "type": "object",
           "properties": {
             "weak_join": {
@@ -3514,10 +3527,10 @@
         "endpoints": {
           "description": "The inputs to read, in order. At least one is required.",
           "type": "array",
-          "minItems": 1,
           "items": {
             "$ref": "#/$defs/Endpoint"
-          }
+          },
+          "minItems": 1
         }
       },
       "additionalProperties": false,
@@ -3942,6 +3955,22 @@
         }
       },
       "additionalProperties": false
+    },
+    "TimeoutMiddleware": {
+      "description": "Send timeout middleware configuration.\n\nFails a `send`/`send_batch` that has not finished within `timeout_ms` with a\nretryable error instead of letting it block the route. The sink may still have\naccepted the batch, so a retry after a timeout can deliver it twice.",
+      "type": "object",
+      "properties": {
+        "timeout_ms": {
+          "description": "Longest a single send may take, in milliseconds.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "timeout_ms"
+      ]
     },
     "TlsConfig": {
       "description": "TLS configuration for secure connections.\n\nConfigures Transport Layer Security (TLS/SSL) for encrypted communication.\nSupports both client certificate (mutual TLS) and server certificate validation.\n\n# Examples\n\n```\nuse mq_bridge::models::TlsConfig;\n\nlet tls = TlsConfig {\n    required: true,\n    ca_file: Some(\"/path/to/ca.pem\".to_string()),\n    cert_file: Some(\"/path/to/cert.pem\".to_string()),\n    key_file: Some(\"/path/to/key.pem\".to_string()),\n    ..Default::default()\n};\n```",

@@ -6,6 +6,10 @@ All notable changes to `mq-bridge`. Newest first.
 
 ### Fixed
 
+- **Plugin SDK: an endpoint is dropped inside the plugin's runtime.** Freeing a consumer,
+  publisher, batch or middleware ran its `Drop` outside that runtime, so a `Drop` that spawns
+  — the Pulsar client closing its producer — panicked and skipped its cleanup. Rebuild a
+  plugin against this version to get the fix.
 - **`deduplication` no longer loses a message that failed and came straight back.** A nacked
   key stayed reserved for five seconds, so a broker that redelivers at once (AMQP requeue,
   JetStream `Nak`) — or another instance on a shared store — had the redelivery acked as a
@@ -35,6 +39,51 @@ All notable changes to `mq-bridge`. Newest first.
 
 ### Added
 
+- **Helpers for endpoint and plugin authors.** `errors::InvalidConfig` marks a config error
+  as permanent on either side, so the route stops instead of reconnecting;
+  `support::stream_batch::next_batch` collects a batch from a message stream and ends a drain
+  on an idle source; `SentBatch::from_failures` builds `Ack` or `Partial` from a failure list.
+  The Pulsar, Meilisearch and connect plugins use them.
+- **C header for the plugin ABI.** `include/mq_bridge_plugin.h` lets a plugin be written in C
+  or C++, e.g. to wrap an existing C library as a middleware; `mq_bridge_plugin_helpers.h`
+  fills in the entries a plugin does not implement. `examples/c-plugin/` has a ~35-line
+  filter, and a plugin that wraps existing C libraries as both a middleware and an output.
+  The header is generated from `src/support/plugin_abi.rs` and a test fails when it is stale.
+  `middleware_apply`'s output may now point into its input, which the host already allowed.
+- **Plugins may skip the optional ABI entries.** When a non-blocking, outcome, response or
+  status entry returns `MQB_ERR_UNSUPPORTED`, the host now falls back to the blocking send,
+  receive or flush (remembered per endpoint), or reports a default status. Before this, such
+  a plugin failed every send with a permanent error.
+- **Plugin ABI 1.2: request/reply and status.** A plugin publisher's responses now reach the
+  route, so a plugin sink can answer a request. A plugin consumer receives
+  `MessageDisposition::Reply` together with the reply message instead of a plain ack.
+  `status()` of plugin endpoints reports what the plugin reports. Receive, commit, send and
+  flush complete through a callback instead of holding a host blocking thread per call, so
+  crossing the boundary is 1.3–1.6× faster, and 4.3× with 16 concurrent callers at batch 1
+  (see docs/PLUGINS.md).
+  Plugin `tracing` events and `metrics` samples are forwarded to the host (logs under the
+  target `mq_bridge::plugin`; metrics need the `metrics` feature on both sides).
+  One library can export several endpoints with `export_endpoint_plugins!`; they are
+  registered together (`plugin::load_endpoint_plugins`) or not at all.
+  A plugin's `idempotent_sink` / `acknowledges` overrides now count on the host too, so its
+  delivery guarantee can depend on the config.
+  Plugins built against 1.0/1.1 keep loading and behave as before.
+- **A crashing plugin is reported instead of dying silently.** Once a plugin library loads,
+  the host catches `SIGSEGV`/`SIGBUS`/`SIGILL`/`SIGFPE`/`SIGABRT` (Linux, macOS). It
+  prints a backtrace plus each plugin's load address and build id to stderr, so a stripped
+  plugin can be symbolized offline, then chains to the previous handler and dies.
+  `MQB_PLUGIN_CRASH_REPORT=0` turns the dump off. Plugins can add their own report through
+  `MqbHostVTable::register_crash_handler` (ABI 1.2; `mqb_register_crash_handler` in the C
+  helpers).
+- **`plugin::discover_all_endpoint_plugins` loads every installed plugin up front.**
+  `mq-bridge-app` calls it at startup so the UI lists them. A file that does not export the
+  plugin entry point, like a plugin's own helper library, is never opened. A route's own
+  lookup still opens only the file named for its endpoint.
+- **Discovery loads only libraries nobody else could have planted.** On Linux and macOS a
+  discovered library and every directory above it must belong to the current user or root
+  and must not be world-writable (sticky directories like `/tmp` are fine). As root, only
+  root-owned libraries pass. Each discovered load is logged with its path and SHA-256. A
+  library loaded by path is not checked. See "Which files discovery trusts" in PLUGINS.md.
 - **`DeliveryGuarantee` and `required_delivery`.** Each route's inferred guarantee —
   `at-most-once`, `at-least-once` or `effectively-once` — is logged at startup and available as
   `Route::delivery_guarantee()`. Setting `required_delivery` on a route fails it at startup when
@@ -68,6 +117,9 @@ All notable changes to `mq-bridge`. Newest first.
 
 ### Changed
 
+- A plugin endpoint that fails to start is now retried like a linked one, not stopped: only
+  an error wrapped in `InvalidConfig` (or a permanent error class) stops the route. A broker
+  that is down at startup used to stop a plugin route for good.
 - The startup inference no longer reports `effectively-once` for a sink keyed on `mqb.src.*`
   over an input that has no replay position.
 - `DeduplicationMiddleware` has a new `replay_response` field; code building it as a struct

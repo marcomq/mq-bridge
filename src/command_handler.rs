@@ -119,27 +119,11 @@ impl MessagePublisher for CommandPublisher {
         }
 
         if to_publish.is_empty() {
-            return if failed.is_empty() {
-                Ok(SentBatch::Ack)
-            } else {
-                Ok(SentBatch::Partial {
-                    responses: None,
-                    failed,
-                })
-            };
+            return Ok(SentBatch::from_failures(failed));
         }
 
         match self.inner.send_batch(to_publish).await {
-            Ok(SentBatch::Ack) => {
-                if failed.is_empty() {
-                    Ok(SentBatch::Ack)
-                } else {
-                    Ok(SentBatch::Partial {
-                        responses: None,
-                        failed,
-                    })
-                }
-            }
+            Ok(SentBatch::Ack) => Ok(SentBatch::from_failures(failed)),
             Ok(SentBatch::Partial {
                 responses,
                 failed: inner_failed,

@@ -78,6 +78,7 @@ middlewares:
 | [`buffer`](#buffer) | ✅ | ✅ | – | Coalesce single sends into batches |
 | [`limiter`](#limiter) | ✅ | ✅ | – | Cap throughput to a message rate |
 | [`delay`](#delay) | ✅ | ✅ | – | Fixed delay per receive/send |
+| [`timeout`](#timeout) | – | ✅ | – | Fail a send that does not finish in time as retryable |
 | [`cookie_jar`](#cookie_jar) | ✅ | ✅ | – | Persist HTTP cookies / session values across messages |
 | [`encryption`](#encryption) | ✅ | ✅ | `encryption` | AEAD-encrypt payloads on send, decrypt on receive |
 | [`compression`](#compression) | ✅ | ✅ | `compression` | Compress payloads on send, decompress on receive |
@@ -545,6 +546,27 @@ Sleeps a fixed duration before each receive or send. Input and output.
 
 Mainly for testing and for crude pacing of a downstream system; prefer
 [`limiter`](#limiter) for real rate control.
+
+### `timeout`
+
+Bounds each send. A send still pending after `timeout_ms` is dropped and fails as
+`Retryable`, instead of blocking the route forever. Output only; on an input it fails at
+startup.
+
+| Field | Type | Required |
+|---|---|---|
+| `timeout_ms` | integer | yes |
+
+```yaml middleware
+- timeout: { timeout_ms: 30000 }
+- retry: { max_attempts: 3 }
+```
+
+List it **before** `retry`, so every attempt gets its own bound. The sink may already
+have accepted a batch that timed out, so a retry can deliver it twice.
+
+Without this middleware a stuck send is still visible: a route whose send has been
+pending for a minute reports `healthy: false` with `details.state: "send pending"`.
 
 ### `cookie_jar`
 

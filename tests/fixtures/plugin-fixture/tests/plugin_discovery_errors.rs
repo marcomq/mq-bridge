@@ -2,16 +2,13 @@
 //!
 //! Its own test binary: the mismatch case loads the fixture, and the sibling
 //! discovery suite asserts nothing is registered before its route asks. These
-//! cases pass their directory in, so none of them touches the process env.
+//! cases pass their directory in, so none of them scans the real search path.
 
 use std::path::PathBuf;
 
-use mq_bridge::endpoints::create_consumer_from_route;
-use mq_bridge::models::{Endpoint, EndpointType};
 use mq_bridge::plugin::{
     discover_endpoint_plugin_in, library_file_name, test_support::build_plugin_cdylib,
 };
-use serde_json::json;
 
 const WORKSPACE: &str = env!("CARGO_MANIFEST_DIR");
 
@@ -111,29 +108,4 @@ fn a_name_with_no_file_is_not_an_error() {
     assert!(found.is_none());
 
     std::fs::remove_dir_all(&dir).ok();
-}
-
-/// The name it looked for and where is the whole value of the route's error.
-#[tokio::test]
-async fn an_endpoint_no_plugin_provides_reports_what_it_looked_for() {
-    let endpoint = Endpoint {
-        endpoint_type: EndpointType::Custom {
-            name: "not-installed".to_string(),
-            config: json!({ "queue": "discovery" }),
-        },
-        middlewares: vec![],
-        handler: None,
-    };
-
-    let error = create_consumer_from_route("discovery", &endpoint)
-        .await
-        .map(|_| ())
-        .expect_err("an endpoint with no factory and no library cannot resolve");
-    let message = format!("{error:#}");
-
-    assert!(message.contains("not-installed"), "{message}");
-    assert!(
-        message.contains(&library_file_name("not-installed")),
-        "{message}"
-    );
 }

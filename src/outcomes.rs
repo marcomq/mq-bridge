@@ -33,6 +33,20 @@ pub enum SentBatch {
     },
 }
 
+impl SentBatch {
+    /// `Ack` when nothing failed, otherwise `Partial` without responses.
+    pub fn from_failures(failed: Vec<(CanonicalMessage, PublisherError)>) -> Self {
+        if failed.is_empty() {
+            SentBatch::Ack
+        } else {
+            SentBatch::Partial {
+                responses: None,
+                failed,
+            }
+        }
+    }
+}
+
 /// A successfully received single message.
 pub struct Received {
     pub message: CanonicalMessage,
@@ -78,6 +92,19 @@ impl std::fmt::Debug for ReceivedBatch {
 mod tests {
     use super::*;
     use crate::traits::MessageDisposition;
+
+    #[test]
+    fn a_batch_without_failures_is_acknowledged_whole() {
+        assert!(matches!(SentBatch::from_failures(vec![]), SentBatch::Ack));
+        let failed = vec![(
+            CanonicalMessage::from("x"),
+            PublisherError::Retryable(anyhow::anyhow!("busy")),
+        )];
+        assert!(matches!(
+            SentBatch::from_failures(failed),
+            SentBatch::Partial { responses: None, failed } if failed.len() == 1
+        ));
+    }
 
     #[test]
     fn test_received_debug_hides_commit_implementation() {

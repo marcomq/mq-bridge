@@ -191,6 +191,7 @@ pub(crate) fn is_known_middleware_name(name: &str) -> bool {
             | "retry"
             | "random_panic"
             | "delay"
+            | "timeout"
             | "weak_join"
             | "limiter"
             | "buffer"

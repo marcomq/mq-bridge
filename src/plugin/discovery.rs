@@ -6,8 +6,13 @@
 //! Finding an installed plugin from the endpoint name a route asked for.
 //!
 //! A `custom` endpoint whose name no factory is registered under is the trigger:
-//! the searched directories are consulted for one file, `libmq_bridge_<name>`.
-//! Directories are never listed, so a library no route names is never opened.
+//! the searched directories are consulted for `libmq_bridge_<name>` and nothing
+//! else, so a route never loads a library it did not name. A host that lists what
+//! is installed before any route asks calls [`discover_all_endpoint_plugins`].
+//!
+//! Loading a library runs its code, so a discovered one must pass
+//! `check_trusted` first. A library loaded by explicit path is the caller's choice
+//! and is not checked.
 
 use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
@@ -15,7 +20,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context};
 
-use super::{load_endpoint_plugin, PluginInfo};
+use super::{load_endpoint_plugins, PluginInfo};
 
 /// Set to `0`, `false`, `off` or `no` to resolve `custom` endpoints only from
 /// factories the host registered or a config listed by path.
@@ -39,16 +44,17 @@ fn discovery_enabled_from(value: Option<&str>) -> bool {
     }
 }
 
+#[cfg(target_os = "windows")]
+const LIBRARY_AFFIXES: (&str, &str) = ("mq_bridge_", ".dll");
+#[cfg(target_os = "macos")]
+const LIBRARY_AFFIXES: (&str, &str) = ("libmq_bridge_", ".dylib");
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+const LIBRARY_AFFIXES: (&str, &str) = ("libmq_bridge_", ".so");
+
 /// The file name a plugin providing `name` is expected to have.
 pub fn library_file_name(name: &str) -> String {
-    let stem = name.replace('-', "_");
-    if cfg!(target_os = "windows") {
-        format!("mq_bridge_{stem}.dll")
-    } else if cfg!(target_os = "macos") {
-        format!("libmq_bridge_{stem}.dylib")
-    } else {
-        format!("libmq_bridge_{stem}.so")
-    }
+    let (prefix, suffix) = LIBRARY_AFFIXES;
+    format!("{prefix}{}{suffix}", name.replace('-', "_"))
 }
 
 /// Install prefixes searched when the environment does not name one, so a
@@ -143,7 +149,7 @@ fn non_empty_var(name: &str) -> Option<OsString> {
 
 /// Loads the plugin providing `name` from the search path.
 ///
-/// `Ok(None)` means no candidate file exists, which is not an error on its own —
+/// `Ok(None)` means no installed library provides it, which is not an error on its own —
 /// the caller reports the unresolved name, with [`search_path_hint`].
 pub fn discover_endpoint_plugin(name: &str) -> anyhow::Result<Option<PluginInfo>> {
     if !discovery_enabled() {
@@ -167,20 +173,19 @@ pub fn discover_endpoint_plugin_in(
         if !candidate.is_file() {
             continue;
         }
-        let info = load_endpoint_plugin(&candidate)
+        let infos = load_discovered(&candidate)
             .with_context(|| format!("endpoint `{name}` resolved to {}", candidate.display()))?;
         // The file name is a convention the library itself never sees, so a
         // mismatch is possible. It stays loaded, because unloading is not safe.
-        if info.name != name {
+        let Some(info) = infos.iter().find(|info| info.name == name).cloned() else {
+            let first = &infos[0].name;
             return Err(anyhow!(
-                "{} is named for endpoint `{name}` but provides `{}`; it stays loaded for \
-                 the life of the process. Rename the file to {} or ask for `{}`.",
+                "{} is named for endpoint `{name}` but provides `{first}`; it stays loaded for \
+                 the life of the process. Rename the file to {} or ask for `{first}`.",
                 candidate.display(),
-                info.name,
-                library_file_name(&info.name),
-                info.name,
+                library_file_name(first),
             ));
-        }
+        };
         if !(info.supports_consumer || info.supports_publisher) {
             return Err(anyhow!(
                 "{} provides the `{name}` middleware but no endpoint",
@@ -190,6 +195,155 @@ pub fn discover_endpoint_plugin_in(
         return Ok(Some(info));
     }
     Ok(None)
+}
+
+/// Loads every plugin library installed on the search path, so a host can list
+/// them before any route asks. Off when [`DISCOVERY_VAR`] says so.
+pub fn discover_all_endpoint_plugins() -> Vec<PluginInfo> {
+    if !discovery_enabled() {
+        return Vec::new();
+    }
+    discover_all_endpoint_plugins_in(&plugin_search_path())
+}
+
+/// [`discover_all_endpoint_plugins`] against an explicit list of directories.
+///
+/// The first directory wins for a file name, and a file whose endpoint is already
+/// registered — compiled in, or loaded before — is left alone. A file that does not
+/// export the plugin entry point, such as a plugin's own helper library, is never
+/// opened. One that fails `check_trusted` or fails to load is logged and skipped.
+pub fn discover_all_endpoint_plugins_in(dirs: &[PathBuf]) -> Vec<PluginInfo> {
+    let (prefix, suffix) = LIBRARY_AFFIXES;
+    let mut seen = HashSet::new();
+    let mut infos = Vec::new();
+    for dir in dirs {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        let mut files: Vec<PathBuf> = entries.flatten().map(|entry| entry.path()).collect();
+        files.sort();
+        for path in files {
+            let Some(stem) = path
+                .file_name()
+                .and_then(OsStr::to_str)
+                .and_then(|name| name.strip_prefix(prefix)?.strip_suffix(suffix))
+            else {
+                continue;
+            };
+            if !seen.insert(stem.to_owned()) || !path.is_file() || is_registered(stem) {
+                continue;
+            }
+            match exports_plugin_entry(&path) {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(error) => {
+                    tracing::warn!(path = %path.display(), "skipping plugin library: {error:#}");
+                    continue;
+                }
+            }
+            match load_discovered(&path) {
+                Ok(loaded) => infos.extend(loaded),
+                Err(error) => {
+                    tracing::warn!(path = %path.display(), "skipping plugin library: {error:#}")
+                }
+            }
+        }
+    }
+    infos
+}
+
+/// Loads a library found on the search path, after [`check_trusted`], and logs
+/// its path and SHA-256 so every library loaded without being named is on record.
+fn load_discovered(path: &Path) -> anyhow::Result<Vec<PluginInfo>> {
+    check_trusted(path)?;
+    let sha256 = sha256_hex(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let infos = load_endpoint_plugins(path)?;
+    let names: Vec<&str> = infos.iter().map(|info| info.name.as_str()).collect();
+    tracing::info!(path = %path.display(), %sha256, endpoints = ?names, "loaded discovered plugin library");
+    Ok(infos)
+}
+
+fn sha256_hex(path: &Path) -> std::io::Result<String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
+/// Refuses a library another user could have planted. The file and every directory
+/// above it, symlinks resolved, must belong to this user or root, and none may be
+/// world-writable unless it is a sticky directory like `/tmp`. Group write is allowed:
+/// Homebrew's `lib` is `775`. Running as root, only root-owned files pass.
+#[cfg(unix)]
+fn check_trusted(path: &Path) -> anyhow::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    let euid = unsafe { libc::geteuid() };
+    let real = std::fs::canonicalize(path)
+        .with_context(|| format!("failed to resolve {}", path.display()))?;
+    for component in real.ancestors() {
+        let metadata = std::fs::metadata(component)
+            .with_context(|| format!("failed to stat {}", component.display()))?;
+        let owner = metadata.uid();
+        let problem = if owner != euid && owner != 0 {
+            Some(format!(
+                "is owned by uid {owner}, not by this user (uid {euid}) or root"
+            ))
+        } else if metadata.mode() & 0o002 != 0
+            && !(metadata.is_dir() && metadata.mode() & 0o1000 != 0)
+        {
+            Some("is world-writable".to_string())
+        } else {
+            None
+        };
+        if let Some(problem) = problem {
+            return Err(anyhow!(
+                "refusing to load discovered plugin {}: {} {problem}. Fix its ownership or \
+                 permissions, or load it by path to trust it explicitly",
+                path.display(),
+                component.display(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Windows has no uid and mode to check; see docs/PLUGINS.md.
+#[cfg(not(unix))]
+fn check_trusted(_path: &Path) -> anyhow::Result<()> {
+    Ok(())
+}
+
+/// A file stem may spell a hyphenated endpoint name with an underscore.
+fn is_registered(stem: &str) -> bool {
+    use crate::extensions::get_endpoint_factory;
+    get_endpoint_factory(stem).is_some() || get_endpoint_factory(&stem.replace('_', "-")).is_some()
+}
+
+/// Reads the export table only, so a library that is not a plugin runs no code.
+fn exports_plugin_entry(path: &Path) -> anyhow::Result<bool> {
+    use object::{Object, ReadCache};
+    let entry = &super::MQB_PLUGIN_ENTRY_SYMBOL[..super::MQB_PLUGIN_ENTRY_SYMBOL.len() - 1];
+    let cache = ReadCache::new(std::fs::File::open(path)?);
+    let file = object::File::parse(&cache).context("not a readable shared library")?;
+    Ok(file.exports()?.iter().any(|export| {
+        // Mach-O prefixes C symbols with an underscore.
+        let name = export.name();
+        name == entry || name.strip_prefix(b"_") == Some(entry)
+    }))
 }
 
 /// Where an unresolved endpoint name was looked for, to append to that error.
@@ -347,6 +501,34 @@ mod tests {
         let dirs = search_path_from(Some(OsStr::new("")), None, &[], None);
 
         assert!(dirs.is_empty(), "{dirs:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_library_anyone_could_have_written_is_not_trusted() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let library = dir.path().join(library_file_name("trusted"));
+        std::fs::write(&library, b"").unwrap();
+        let set_mode = |path: &Path, mode| {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap()
+        };
+
+        check_trusted(&library).expect("a private file of this user's");
+
+        set_mode(&library, 0o666);
+        let error = check_trusted(&library).expect_err("world-writable file");
+        assert!(format!("{error:#}").contains("world-writable"), "{error:#}");
+
+        set_mode(&library, 0o644);
+        set_mode(dir.path(), 0o777);
+        let error = check_trusted(&library).expect_err("world-writable directory");
+        assert!(format!("{error:#}").contains("world-writable"), "{error:#}");
+
+        // Like /tmp: others may add files, but not replace this user's.
+        set_mode(dir.path(), 0o1777);
+        check_trusted(&library).expect("a sticky directory");
+        set_mode(dir.path(), 0o700);
     }
 
     #[test]

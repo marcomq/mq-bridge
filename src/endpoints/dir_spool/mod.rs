@@ -933,14 +933,7 @@ impl MessagePublisher for DirSpoolPublisher {
         if matches!(self.fsync, SpoolFsync::Chunk) {
             sync_directory(&self.dir).await;
         }
-        if failed.is_empty() {
-            Ok(SentBatch::Ack)
-        } else {
-            Ok(SentBatch::Partial {
-                responses: None,
-                failed,
-            })
-        }
+        Ok(SentBatch::from_failures(failed))
     }
 
     // Closing is this producer's whole statement about production: the sentinel it may owe

@@ -976,14 +976,7 @@ impl FilePublisher {
             }
         }
 
-        if failed_messages.is_empty() {
-            Ok(SentBatch::Ack)
-        } else {
-            Ok(SentBatch::Partial {
-                responses: None,
-                failed: failed_messages,
-            })
-        }
+        Ok(SentBatch::from_failures(failed_messages))
     }
 }
 
@@ -1170,14 +1163,7 @@ impl MessagePublisher for FilePublisher {
                 anyhow::Error::new(e).context("Failed to flush file writer"),
             ));
         }
-        if failed_messages.is_empty() {
-            Ok(SentBatch::Ack)
-        } else {
-            Ok(SentBatch::Partial {
-                responses: None,
-                failed: failed_messages,
-            })
-        }
+        Ok(SentBatch::from_failures(failed_messages))
     }
 
     async fn flush(&self) -> anyhow::Result<()> {

@@ -263,7 +263,7 @@ without changing the route:
 ```
 
 Available: `retry`, `dlq`, `deduplication`, `limiter`, `transform`, `compression`,
-`encryption`, `pack`, `unpack`, `buffer`, `delay`, `weak_join`, `cookie_jar`, `metrics`. Each is
+`encryption`, `pack`, `unpack`, `buffer`, `delay`, `timeout`, `weak_join`, `cookie_jar`, `metrics`. Each is
 documented with its options in the [Cookbook](cookbook/retries.md) and
 [Middleware reference](engine/reference.md).
 

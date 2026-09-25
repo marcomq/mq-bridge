@@ -575,14 +575,7 @@ impl MessagePublisher for AwsPublisher {
                 }
             }
 
-            if failed_messages.is_empty() {
-                Ok(SentBatch::Ack)
-            } else {
-                Ok(SentBatch::Partial {
-                    responses: None,
-                    failed: failed_messages,
-                })
-            }
+            Ok(SentBatch::from_failures(failed_messages))
         } else {
             Ok(SentBatch::Ack)
         }

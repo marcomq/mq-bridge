@@ -816,6 +816,8 @@ impl UiApp {
                 .into_iter()
                 .map(|plugin| plugin.path),
         );
+        // After the listed ones, so an explicit path wins; the UI schema lists these too.
+        mq_bridge::plugin::discover_all_endpoint_plugins();
         initial_config
             .plugins
             .extend(startup_plugins.iter().cloned());

@@ -116,14 +116,45 @@ prefix, so a package manager needs no special layout: `lib.install` in a brew
 formula or a conda package's default `lib` is enough, and `lib/mq-bridge` keeps
 a hand-managed install tidy.
 
-**Only the requested name is ever looked up.** Directories are never listed, so
-a library no route names is never opened, and installing one has no effect on a
-process that does not ask for it. That is also why the lookup costs nothing when
-every endpoint is built in: it runs only after the registry has already missed.
+**Only the named file is opened.** A route never loads a library it did not name,
+and the search runs only after the registry has missed, so it costs nothing when
+every endpoint is built in. `plugin::discover_all_endpoint_plugins()` is the one
+call that lists the directories and loads every `libmq_bridge_*` up front;
+`mq-bridge-app` makes it at startup so its UI lists those endpoints. A file that
+does not export `mq_bridge_plugin_v1` — a plugin's own helper library, such as
+`libmq_bridge_connect_go` — is recognised from its export table and never opened.
 
 Set `MQB_PLUGIN_DISCOVERY=0` (or `false`, `off`, `no`) to switch the search off
 and resolve endpoints only from factories the host registered or a config listed
 by path.
+
+### Which files discovery trusts
+
+Loading a library runs its code, so a library found by discovery is loaded only
+if nobody but you or root could have put it there. On Linux and macOS the file
+and every directory above it, symlinks resolved, must:
+
+- belong to the user running mq-bridge, or to root, and
+- not be world-writable. A sticky directory such as `/tmp` is fine, because
+  others may add files there but not replace yours.
+
+Group write is allowed, because Homebrew's `lib` directory is `775`. A library
+that fails the check is refused with a message naming the offending directory.
+When `discover_all_endpoint_plugins()` finds one, it logs a warning and skips it.
+
+**Running as root, only root-owned libraries pass.** A service started as root
+therefore never picks up a plugin a user installed into their own Homebrew
+prefix or `~/.local/share`. Install system-wide plugins as root, or give the
+service a user of its own.
+
+Every library discovery loads is logged at `info` with its path and SHA-256, so
+there is a record of what ran without being named.
+
+A library loaded **by path** — `load_endpoint_plugin`, `--plugin`, a `plugins:`
+entry — is not checked: naming the file is the trust decision. Windows has no
+equivalent owner and mode to check, so discovery there relies on the directory
+permissions of the install location; set `MQB_PLUGIN_DISCOVERY=0` and load by path
+where that is not enough.
 
 A file whose name does not match the endpoint the library actually provides is an
 error naming both — and the library stays loaded, because nothing is ever
@@ -229,6 +260,42 @@ mq_bridge::export_endpoint_plugin! {
     capabilities: mq_bridge::plugin::sdk::CAPABILITIES_OUTPUT_ONLY,
 }
 ```
+
+Since **ABI 1.2** one library can export several endpoints. Each entry takes
+the same arguments as `export_endpoint_plugin!`:
+
+```rust
+mq_bridge::export_endpoint_plugins! {
+    { name: "pulsar", factory: PulsarFactory },
+    { name: "pulsar-admin", factory: AdminFactory, capabilities: mq_bridge::plugin::sdk::CAPABILITIES_OUTPUT_ONLY },
+}
+```
+
+Loading the library registers all of them, or none if one name is taken.
+A route's lookup opens only the file named for the endpoint it asks for, so
+install the library under each name a route may ask for (a symlink will do), or
+load it explicitly. `discover_all_endpoint_plugins()` finds every entry either
+way. A 1.0/1.1 host sees only the first entry.
+
+### Shared helpers
+
+Three things most endpoints need, so a plugin doesn't write them itself:
+
+- **`mq_bridge::errors::InvalidConfig`.** Return a config error wrapped in it from
+  `create_consumer` or `create_publisher`, and the route stops instead of
+  reconnecting forever: `config::resolve(value).map_err(InvalidConfig)?`. The
+  same wrapper works for both sides, linked directly or loaded as a plugin.
+- **`mq_bridge::support::stream_batch::next_batch`.** Collects one batch from a
+  client that hands out messages as a `Stream`. A live route waits for the first
+  message; a draining one (`exit_on_empty`) gets an empty batch from an idle
+  source after 250 ms, which is what ends the drain. A stream error comes back as
+  a `PartialBatch` holding the messages collected before it: deliver those, then
+  report the error on the next call.
+- **`SentBatch::from_failures`.** `Ack` when nothing failed, otherwise a
+  `Partial` naming the failed messages.
+
+A batch's commit function gets exactly one disposition per message, so it needn't
+count them; the plugin host rejects any other count before calling it.
 
 ### Middleware
 
@@ -355,6 +422,13 @@ Everything unannotated is a query parameter, read as its declared `type` —
 or string. A value that is not what the field declares is refused by name,
 rather than handed to the plugin's deserializer to complain about.
 
+A parameter the schema does not declare stays a string. A plugin that takes
+open-ended options (`additionalProperties`) and cannot declare their types can
+set `"x-mqb-uri-infer-scalars": true` at the schema's top level: an undeclared
+value of `true` or `false` becomes a boolean, a plain integer an integer, and a
+decimal like `0.5` a number. Anything else stays a string, including `007`,
+`1.0.0` and integers too large for 64 bits.
+
 A query parameter always wins over the position it would have had, so
 `?url=...` remains the escape hatch for an address a URI cannot spell.
 
@@ -434,8 +508,9 @@ common case and cross the plugin boundary unchanged:
 ```
 
 When the answer depends on the configuration — idempotent only with a key set —
-a directly linked factory overrides `CustomEndpointFactory::idempotent_sink` or
-`acknowledges` instead; both receive the endpoint's `config`. Claim idempotency
+override `CustomEndpointFactory::idempotent_sink` or `acknowledges` instead; both
+receive the endpoint's `config`. Since ABI 1.2 the host asks a loaded plugin the
+same way (`factory_delivery`); a 1.0/1.1 plugin is judged by its schema alone. Claim idempotency
 only for a write keyed on something replay-stable: the route trusts it.
 
 ### Ordered publishing
@@ -475,14 +550,64 @@ all-or-nothing send, where a partial failure is reported as the first failure's
 class and the whole batch — including the part that succeeded — is retried or
 dead-lettered.
 
+### Request/reply and status
+
+Since **ABI 1.2** request/reply works through a plugin in both directions:
+
+- **Publisher:** the responses your `send_batch` returns (`Sent::Response`,
+  `SentBatch::Partial { responses, .. }`) cross the boundary. The route matches
+  each one to its request by `message_id`, exactly as for a linked endpoint.
+  Failures and responses in the same batch both survive.
+- **Consumer:** a `MessageDisposition::Reply` reaches your batch's commit
+  together with the reply message, so a plugin source can answer the request it
+  received.
+
+`status()` crosses too: the host asks the plugin, and your endpoint's
+`EndpointStatus` is what a host shows. A consumer busy in `receive_batch`
+answers healthy with `details.state = "receiving"` rather than waiting for its
+next message.
+
+Receive, commit, send and flush no longer tie up a host thread either: the host
+starts the call and the plugin reports back through a completion callback when
+its runtime has finished. Before 1.2 each of those calls held a thread of the
+host's blocking pool for its whole duration.
+
+That is measurably faster. The same in-memory endpoint, which does no work of its
+own, was built against the 1.1 and the 1.2 SDK and driven by the same host
+(messages per second, macOS arm64, release build):
+
+| Batch | Call | 1.1 | 1.2 | Gain |
+| ---: | :--- | ---: | ---: | ---: |
+| 1 | send | 94k | 154k | 1.6× |
+| 1 | receive + commit | 46k | 76k | 1.6× |
+| 1 | send, 16 concurrent callers | 164k | 708k | 4.3× |
+| 128 | send | 6.5M | 8.6M | 1.3× |
+| 128 | receive + commit | 4.0M | 5.4M | 1.4× |
+| 128 | send, 16 concurrent callers | 15.6M | 25.5M | 1.6× |
+
+This measures only the boundary cost. It matters most for small batches and
+many concurrent routes; a real broker's latency hides most of it at large
+batches. Rebuilding a plugin against 1.2 is enough to get the gain.
+
+Your `tracing` events and `metrics` samples reach the host as well. On load the
+SDK installs a subscriber and a recorder inside the plugin that forward to the
+host's own. The host re-emits every plugin event under the target
+`mq_bridge::plugin` (`mq_bridge::plugin::PLUGIN_LOG_TARGET`), with your module
+path in the `module` field, so `RUST_LOG=mq_bridge::plugin=debug` filters them.
+Metrics keep their names and labels; forwarding them needs the `metrics` feature
+of `mq-bridge` in the plugin and in the host. A plugin that installs its own
+global subscriber or recorder first keeps it, and nothing is forwarded.
+
+The SDK wires all of this up; there is nothing new to implement. A plugin built
+against 1.0 or 1.1 publishes without responses, has a reply acknowledged like a
+plain ack, reports the default status, runs its calls on the blocking pool, and
+keeps its logs and metrics to itself.
+
 ### Limits of ABI v1
 
-- No per-message publish *responses*, so no request/reply through a plugin. A
-  `Partial`'s `responses` are dropped; only its failures cross.
-- `MessageDisposition::Reply` acknowledges the source message.
-- One plugin per shared library (the export macro defines the discovery symbol),
-  so two plugin crates cannot be statically linked into one binary. Gate the
-  macro behind a feature if that matters for your crate.
+- The export macro defines the discovery symbols, so a crate uses it once and
+  two plugin crates cannot be statically linked into one binary. Gate the macro
+  behind a feature if that matters for your crate.
 
 ### Testing it
 
@@ -512,6 +637,132 @@ broker delays redelivery beyond a test's patience, and the metadata check off
 
 `build_plugin_cdylib` builds the package and reads the artifact path back out of
 cargo, so tests do not hard-code target-directory layout or file extensions.
+
+### Writing one in C or C++
+
+The ABI is plain C, so a plugin does not have to be Rust. The usual reason is an
+existing C library — a parser for a proprietary wire format, say — that should
+run as a middleware without being rewritten.
+[`include/mq_bridge_plugin.h`](../include/mq_bridge_plugin.h) declares the ABI;
+[`include/mq_bridge_plugin_helpers.h`](../include/mq_bridge_plugin_helpers.h)
+fills in every entry a plugin does not implement. A complete middleware that
+drops heartbeat messages:
+
+```c
+#include <stdlib.h>
+#include <string.h>
+#include "mq_bridge_plugin_helpers.h"
+
+static MqbStatus apply(MqbMiddlewareHandle middleware, const MqbMessage *messages, size_t len,
+                       MqbFilterHandle *out_result, const MqbMessage **out_messages,
+                       const uint8_t **out_kept, MqbBuffer *err) {
+    uint8_t *kept = malloc(len + 1);
+    if (kept == NULL) {
+        mqb_set_error(err, "out of memory");
+        return MQB_ERR_RETRYABLE;
+    }
+    for (size_t i = 0; i < len; i++) {
+        MqbSlice p = messages[i].payload;
+        int ping = p.len == 4 && memcmp(p.ptr, "ping", 4) == 0;
+        kept[i] = ping ? MQB_MESSAGE_DROPPED : MQB_MESSAGE_KEPT;
+    }
+    *out_result = kept;
+    *out_messages = messages; /* kept messages pass through unchanged */
+    *out_kept = kept;
+    return MQB_OK;
+}
+
+static const MqbPluginVTable table = {
+    MQB_TABLE_HEADER("drop_heartbeats", "0.1.0", MQB_CAP_MIDDLEWARE),
+    MQB_DEFAULT_FACTORY,
+    MQB_NO_CONSUMER,
+    MQB_NO_PUBLISHER,
+    MQB_STATELESS_MIDDLEWARE,
+    .middleware_apply = apply,
+    .middleware_result_free = free,
+};
+
+const MqbPluginVTable *mq_bridge_plugin_v1(void) { return &table; }
+```
+
+```sh
+cc -shared -fPIC -I include examples/c-plugin/minimal.c -o libdrop_heartbeats.so
+```
+
+`middleware_apply` writes back two arrays as long as the input: the messages,
+and one `MQB_MESSAGE_KEPT` / `MQB_MESSAGE_DROPPED` flag each. Both stay valid
+until the host passes the result handle to `middleware_result_free`. The output
+may point into the input, so an unchanged message — or a rewritten one's id and
+metadata — needs no copy. The rules the Rust SDK enforces for you are yours to
+keep:
+
+- **Every function pointer must be set.** The host never checks for null; the
+  helper macros cover what you don't implement.
+- Other arguments are borrowed for the call only; copy what you keep.
+- Error text goes into the `err` buffer (`mqb_set_error`), released through the
+  table's `buffer_free`.
+- Calls can arrive concurrently from several threads.
+- A `*_async` entry that returns `MQB_OK` must call its completion exactly once,
+  errors included. The host waits without a deadline, since the plugin may still
+  write the out-parameters, so a missed callback stalls that endpoint.
+- In C++, never let an exception escape: catch it and return `MQB_ERR_PERMANENT`.
+  The helper macros are C only; C++ fills the table in declaration order.
+
+A plugin need not implement the non-blocking (`*_async`), per-message-outcome,
+response or status entries. Where one answers `MQB_ERR_UNSUPPORTED`, the host
+falls back to the plain blocking call, on a thread of its own, and reports a
+healthy default status. `MQB_BLOCKING_PUBLISHER` fills in exactly those entries,
+so a publisher sets only `publisher_create`, `_send_batch`, `_flush`, `_close`
+and `_free`.
+
+[`examples/c-plugin/plugin.c`](../examples/c-plugin/plugin.c) shows both sides
+in one library, wrapping two unchanged "legacy" libraries. Its middleware turns
+fixed-width records into JSON and logs the ones it drops (`mqb_log`). Its output
+appends each message to a ledger file, taking the path from its config and a
+mutex around the non-thread-safe library.
+
+`mq_bridge_plugin.h` is generated from `src/support/plugin_abi.rs`, so it always
+matches the host, and its `static_assert`s refuse to compile if the table layout
+ever does not.
+
+#### When it crashes
+
+A plugin has no `main()` in which to install a `SIGSEGV` handler, and a handler
+it installs itself would replace the host's and every other plugin's. So the
+host installs one when the first plugin library loads (Linux and macOS). On
+`SIGSEGV`, `SIGBUS`, `SIGILL`, `SIGFPE` or `SIGABRT` it writes to stderr:
+
+```text
+mq-bridge: fatal signal 11 (SIGSEGV), fault address 0x8, pc 0x7f3a1c2b4f10
+mq-bridge: pc is in /opt/plugins/liblegacy_payments.so at offset 0x1f10
+mq-bridge: plugin libraries (load address, path, build id):
+mq-bridge:   0x7f3a1c2b3000 /opt/plugins/liblegacy_payments.so build-id 3c9e…
+mq-bridge: backtrace (symbolize with `addr2line -e <library> <offset>` or `atos -o <library> -l <load address> <address>`):
+…
+```
+
+A stripped plugin is still symbolizable: whoever holds its debug info matches
+the build id (the UUID on macOS) and resolves the offsets offline, e.g.
+`addr2line -f -e liblegacy_payments.so.debug 0x1f10`. After the dump the host
+hands the signal to whichever handler was installed before (Rust's stack
+overflow message, Python's `faulthandler`), then dies of it, so core dumps and
+debuggers work as usual. `MQB_PLUGIN_CRASH_REPORT=0` turns the dump off.
+
+A plugin can add its own report through `register_crash_handler` on the host
+table (`mqb_register_crash_handler` in the helpers). A closed-source plugin
+might print where to send the output, or write a minidump.
+[`plugin.c`](../examples/c-plugin/plugin.c) registers one from its own
+`plugin_init`, using `MQB_FACTORY_WITHOUT_INIT`. The handler runs inside the
+signal handler, after the dump. It may only make async-signal-safe calls
+(`write`, `backtrace_symbols_fd`), with no `malloc`, `printf` or locks. The
+process dies afterwards.
+
+Limits: a thread the plugin created itself has no alternate signal stack, so a
+stack overflow on it ends the process without a report. Windows has no crash
+handling, and `register_crash_handler` returns `MQB_ERR_UNSUPPORTED` there. For
+memory bugs that don't crash where they happen, build the plugin with
+`-fsanitize=address` and preload the ASan runtime
+(`LD_PRELOAD=$(cc -print-file-name=libasan.so)`).
 
 ---
 
@@ -595,6 +846,7 @@ Minor versions so far:
 | --- | --- |
 | 1.0 | The initial table. |
 | 1.1 | `publisher_requires_ordered_publish`, so a plugin sink can ask the route to keep its sends in source order; `publisher_send_batch_outcomes`, so a partly failed batch reports which messages failed; and `factory_config_schema`, so a plugin describes its configuration as a JSON Schema for a host to render and to map a URI onto. |
+| 1.2 | `publisher_send_batch_responses` and `responses_free`, so publish responses reach the route; `batch_commit_replies` with `MQB_DISPOSITION_REPLY`, so a plugin consumer receives the reply to send; `consumer_status` / `publisher_status`, so `status()` reports the plugin's own state; and `*_async` twins of receive, commit, send and flush that finish through an `MqbCompletion` callback instead of blocking a host thread; `plugin_init` hands the plugin an `MqbHostVTable`, through which its logs and metrics reach the host and it registers a crash handler; the optional `mq_bridge_plugin_v1_at` symbol exports several tables from one library; `factory_delivery` answers `idempotent_sink` / `acknowledges` per config. |
 
 Publish the supported ABI range in your package metadata, and test each packaged
 plugin against the oldest and newest mq-bridge you claim to support.

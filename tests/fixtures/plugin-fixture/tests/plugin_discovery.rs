@@ -54,5 +54,16 @@ async fn a_route_finds_an_installed_plugin_by_the_endpoint_name_it_asks_for() {
         "discovery registers the endpoint, so a second route needs no search"
     );
 
+    // Runs last: an unknown name scans the whole search path, build tree included.
+    let error = create_consumer_from_route("discovery", &custom_endpoint("not-installed"))
+        .await
+        .map(|_| ())
+        .expect_err("an endpoint with no factory and no library cannot resolve");
+    let message = format!("{error:#}");
+    assert!(
+        message.contains(&library_file_name("not-installed")),
+        "{message}"
+    );
+
     std::fs::remove_dir_all(&dir).ok();
 }

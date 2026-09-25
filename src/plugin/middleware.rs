@@ -204,11 +204,12 @@ impl PluginMiddleware {
                 .iter()
                 .map(|flag| *flag == MQB_MESSAGE_KEPT)
                 .collect();
-            let all = unsafe { from_abi(out_messages, input.len()) };
-            let kept = all
-                .into_iter()
-                .zip(&keep_flags)
-                .filter_map(|(message, keep)| keep.then_some(message))
+            // A dropped entry's message is unspecified, so only kept ones are read.
+            let kept = keep_flags
+                .iter()
+                .enumerate()
+                .filter(|(_, keep)| **keep)
+                .flat_map(|(index, _)| unsafe { from_abi(out_messages.add(index), 1) })
                 .collect();
             Ok(AssertSend(Filtered { kept, keep_flags }))
         })

@@ -1,0 +1,109 @@
+language = "C"
+cpp_compat = true
+documentation = true
+documentation_style = "c99"
+usize_is_size_t = true
+no_includes = true
+sys_includes = ["stddef.h", "stdint.h"]
+autogen_warning = "/* Generated from src/support/plugin_abi.rs by cbindgen. Do not edit.\n * Regenerate: MQB_BLESS=1 cargo test -p mq-bridge-plugin-fixture --test plugin_c_header */"
+
+header = """
+/*
+ * mq_bridge_plugin.h - the C ABI of an mq-bridge endpoint/middleware plugin.
+ *
+ * A plugin is a shared library exporting `mq_bridge_plugin_v1`, which returns a
+ * static MqbPluginVTable. The host checks `abi_major` and `struct_size`, then
+ * calls through the table. See docs/PLUGINS.md and examples/c-plugin/;
+ * mq_bridge_plugin_helpers.h fills in the entries a plugin does not need.
+ *
+ * Rules a C or C++ plugin must follow:
+ *  - Every function pointer in the table must be non-null, including ones the
+ *    plugin does not support: point those at a stub returning
+ *    MQB_ERR_UNSUPPORTED (or doing nothing, for the *_free entries).
+ *  - Host -> plugin data (arguments) is borrowed for the call only; copy what
+ *    you keep. Plugin -> host data stays valid until its handle is freed.
+ *    middleware_apply's output may point into its input.
+ *  - Error text goes into the `err` MqbBuffer, allocated by the plugin and
+ *    released through `buffer_free`; leave it empty on MQB_OK.
+ *  - Handles may be used and freed from any thread, and may be called
+ *    concurrently.
+ *  - Never let a C++ exception escape an ABI function: catch it and return
+ *    MQB_ERR_PERMANENT.
+ *  - The layout is defined for 64-bit targets.
+ */
+
+#ifndef MQ_BRIDGE_PLUGIN_H
+#define MQ_BRIDGE_PLUGIN_H"""
+
+trailer = """
+/* Name of the discovery symbol a plugin must export; its type is MqbPluginEntry. */
+#define MQB_PLUGIN_ENTRY_SYMBOL "mq_bridge_plugin_v1"
+/* Optional symbol exporting several tables; its type is MqbPluginListEntry. */
+#define MQB_PLUGIN_LIST_SYMBOL "mq_bridge_plugin_v1_at"
+
+/* Table sizes that gate the fields each ABI minor appended. */
+#define MQB_VTABLE_SIZE_V1_0 (27 * sizeof(size_t))
+#define MQB_VTABLE_SIZE_V1_1 (MQB_VTABLE_SIZE_V1_0 + 3 * sizeof(size_t))
+#define MQB_VTABLE_SIZE_V1_2 (MQB_VTABLE_SIZE_V1_1 + 11 * sizeof(size_t))
+#define MQB_HOST_VTABLE_SIZE_V1_2 (5 * sizeof(size_t))
+
+#if defined(_WIN32)
+#define MQB_PLUGIN_EXPORT __declspec(dllexport)
+#else
+#define MQB_PLUGIN_EXPORT __attribute__((visibility("default")))
+#endif
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* The discovery function every plugin defines. */
+MQB_PLUGIN_EXPORT const MqbPluginVTable *mq_bridge_plugin_v1(void);
+
+#ifdef __cplusplus
+}
+#define MQB_STATIC_ASSERT(cond, msg) static_assert(cond, msg)
+#else
+#define MQB_STATIC_ASSERT(cond, msg) _Static_assert(cond, msg)
+#endif
+
+MQB_STATIC_ASSERT(sizeof(size_t) == 8, "the plugin ABI layout is defined for 64-bit targets");
+MQB_STATIC_ASSERT(sizeof(MqbMessage) == 16 + 4 * sizeof(size_t), "MqbMessage layout");
+MQB_STATIC_ASSERT(sizeof(MqbHostVTable) == MQB_HOST_VTABLE_SIZE_V1_2, "MqbHostVTable layout");
+MQB_STATIC_ASSERT(sizeof(MqbPluginVTable) == MQB_VTABLE_SIZE_V1_2,
+                  "MqbPluginVTable grew: add the new MQB_VTABLE_SIZE_* to include/cbindgen.toml");
+
+#endif /* MQ_BRIDGE_PLUGIN_H */
+"""
+
+[export]
+include = [
+    "MqbSlice",
+    "MqbBuffer",
+    "MqbKeyValue",
+    "MqbMessage",
+    "MqbFactoryHandle",
+    "MqbConsumerHandle",
+    "MqbPublisherHandle",
+    "MqbBatchHandle",
+    "MqbMiddlewareHandle",
+    "MqbFilterHandle",
+    "MqbResponsesHandle",
+    "MqbCompletion",
+    "MqbHostVTable",
+    "MqbPluginVTable",
+    "MqbPluginEntry",
+    "MqbPluginListEntry",
+]
+exclude = [
+    "MqbAsyncHooks",
+    "MqbRequestReplyHooks",
+    "MqbStatusHooks",
+    "AbiMismatch",
+    "MQB_PLUGIN_ENTRY_SYMBOL",
+    "MQB_PLUGIN_LIST_SYMBOL",
+    "MQB_VTABLE_SIZE_V1_0",
+    "MQB_VTABLE_SIZE_V1_1",
+    "MQB_VTABLE_SIZE_V1_2",
+    "MQB_HOST_VTABLE_SIZE_V1_2",
+]

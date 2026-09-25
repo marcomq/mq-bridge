@@ -46,7 +46,7 @@ dbg_macro = "warn"
 exit = "warn"
 
 [workspace.package]
-version = "0.4.14"
+version = "0.4.15"
 
 [workspace.dependencies]
 anyhow = "1.0"
@@ -110,6 +110,7 @@ once_cell = { version = "1.21" }
 # no C toolchain; the ABI itself lives in src/support/plugin_abi.rs.
 # 0.9 needs Rust 1.88+, like the amqp/mongodb/nats features.
 libloading = { version = "0.9", optional = true }
+object = { version = "0.39", default-features = false, features = ["read_core", "elf", "macho", "pe", "std"], optional = true }
 # SHA-256 for hashing connection-registry identities so secret-bearing fields
 # (URL/TLS passwords) are never retained verbatim in cache keys.
 sha2 = "0.11"
@@ -199,8 +200,9 @@ arrow-schema = { version = "60", optional = true }
 base64 = { version = "0.23" }
 
 # AEAD ciphers for the `encryption` feature (payload middleware + at-rest file/object).
-chacha20poly1305 = { version = "0.11", optional = true }
-aes-gcm = { version = "0.11", optional = true }
+chacha20poly1305 = { version = "0.11", optional = true, features = ["zeroize"] }
+aes-gcm = { version = "0.11", optional = true, features = ["zeroize"] }
+zeroize = { version = "1.9", optional = true }
 
 # Expression VM for the `filter` feature. `regex-lite` keeps the regex engine
 # pure Rust; the default features pull a heavier one.
@@ -325,7 +327,7 @@ dedup = ["sled"]
 compression = ["dep:flate2", "dep:lz4_flex", "dep:zstd"]
 # AEAD payload encryption: the `encryption` middleware and the at-rest
 # `encryption` field on the file/object_store endpoints.
-encryption = ["dep:chacha20poly1305", "dep:aes-gcm"]
+encryption = ["dep:chacha20poly1305", "dep:aes-gcm", "dep:zeroize"]
 # Expression predicates: the `filter` middleware and the `switch` endpoint's
 # `when` cases. Kept out of `portable` because zen-expression pulls in psm,
 # whose build.rs assembles per-target stack-switching assembly.
@@ -334,7 +336,7 @@ zen = ["dep:zen-expression", "dep:rust_decimal"]
 metrics = ["dep:metrics"]
 # Load endpoints from native plugin libraries at runtime (`mq_bridge::plugin`).
 # The endpoint itself lives in its own crate and package; see docs/PLUGINS.md.
-plugin = ["dep:libloading"]
+plugin = ["dep:libloading", "dep:object", "dep:libc"]
 # Author an endpoint plugin: the export macro, the FFI adapters and the
 # conformance suite (`mq_bridge::plugin::sdk` / `::conformance`). Endpoint
 # crates enable this; hosts only need `plugin`.
@@ -463,6 +465,10 @@ required-features = ["zeromq", "zeromq-omq"]
 [[test]]
 name = "integration_test"
 required-features = ["test-utils"]
+
+[target.'cfg(unix)'.dependencies]
+# The effective uid for the plugin discovery trust check (`plugin` feature).
+libc = { version = "0.2", optional = true }
 
 [target.'cfg(windows)'.dependencies.rdkafka]
 version = "0.39"

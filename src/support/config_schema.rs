@@ -80,6 +80,10 @@ use serde_json::{Map, Value};
 /// The per-property annotation naming a field's place in a URI.
 pub const URI_ANNOTATION: &str = "x-mqb-uri";
 
+/// Schema-level flag: read undeclared query values as `true`/`false`, integers
+/// or decimals instead of text.
+pub const INFER_SCALARS_ANNOTATION: &str = "x-mqb-uri-infer-scalars";
+
 /// Where a field's value comes from in a URI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum UriPosition {
@@ -195,6 +199,8 @@ pub struct UriSchema {
     types: HashMap<String, FieldType>,
     /// Element type of each field that is a list, keyed the same way.
     items: HashMap<String, FieldType>,
+    /// Whether an undeclared field's value is guessed rather than kept as text.
+    infer_scalars: bool,
 }
 
 impl UriSchema {
@@ -203,7 +209,13 @@ impl UriSchema {
     /// Call [`validate`] first: a position this build cannot read is ignored
     /// here, so an unchecked schema maps silently rather than loudly.
     pub fn from_schema(schema: &Value) -> Self {
-        let mut mapping = Self::default();
+        let mut mapping = Self {
+            infer_scalars: schema
+                .get(INFER_SCALARS_ANNOTATION)
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            ..Self::default()
+        };
         let Some(properties) = schema.get("properties").and_then(Value::as_object) else {
             return mapping;
         };
@@ -256,7 +268,11 @@ impl UriSchema {
             if let (Some(field), Some(inner)) = (&self.subscheme, inner) {
                 config.insert(field.clone(), self.coerce(field, inner)?);
             }
-            if let Some(field) = &self.origin {
+            if let Some(field) = self
+                .origin
+                .as_ref()
+                .filter(|_| !parsed.authority().is_empty())
+            {
                 let scheme = inner.unwrap_or_else(|| parsed.scheme());
                 let origin = format!("{scheme}://{}", parsed.authority());
                 config.insert(field.clone(), Value::String(origin));
@@ -286,12 +302,47 @@ impl UriSchema {
         Ok(config)
     }
 
-    /// Reads one value as the field's declared type. Undeclared fields stay text.
+    /// Reads one value as the field's declared type. Undeclared fields stay
+    /// text unless the schema opted in to [`INFER_SCALARS_ANNOTATION`].
     fn coerce(&self, field: &str, raw: &str) -> anyhow::Result<Value> {
-        let declared = self.types.get(field).copied().unwrap_or(FieldType::Text);
+        let Some(declared) = self.types.get(field).copied() else {
+            return Ok(if self.infer_scalars {
+                infer_scalar(raw)
+            } else {
+                Value::String(raw.to_string())
+            });
+        };
         let item = self.items.get(field).copied().unwrap_or(FieldType::Text);
         declared.coerce(field, raw, item)
     }
+}
+
+/// Guesses a scalar from text. Leading zeros and non-decimal spellings stay
+/// text, so an id like `007` or a version like `1.0.0` survives unchanged.
+fn infer_scalar(raw: &str) -> Value {
+    match raw {
+        "true" => return Value::Bool(true),
+        "false" => return Value::Bool(false),
+        _ => {}
+    }
+    let digits = raw.strip_prefix('-').unwrap_or(raw);
+    let leading_zero = digits.len() > 1 && digits.starts_with('0') && !digits.starts_with("0.");
+    let decimal = !digits.is_empty()
+        && digits.chars().all(|c| c.is_ascii_digit() || c == '.')
+        && digits.matches('.').count() <= 1
+        && !digits.starts_with('.')
+        && !digits.ends_with('.');
+    if !decimal || leading_zero {
+        return Value::String(raw.to_string());
+    }
+    if let Ok(number) = raw.parse::<i64>() {
+        return Value::from(number);
+    }
+    raw.parse::<f64>()
+        .ok()
+        .filter(|_| raw.contains('.'))
+        .and_then(serde_json::Number::from_f64)
+        .map_or_else(|| Value::String(raw.to_string()), Value::Number)
 }
 
 /// The protocol a `plugin+protocol` scheme names, if it names one.
@@ -451,6 +502,11 @@ pub fn validate(schema: &Value) -> anyhow::Result<()> {
     if let Some(declared) = object.get("type") {
         if declared.as_str() != Some("object") {
             bail!("a configuration schema must describe an object, not {declared}");
+        }
+    }
+    if let Some(flag) = object.get(INFER_SCALARS_ANNOTATION) {
+        if !flag.is_boolean() {
+            bail!("`{INFER_SCALARS_ANNOTATION}` must be true or false, not {flag}");
         }
     }
     let Some(properties) = object.get("properties") else {
@@ -631,6 +687,48 @@ mod tests {
 
         assert_eq!(config["connector"], json!("amqp"));
         assert_eq!(config["url"], json!("amqp://user@host:5672/jobs"));
+    }
+
+    #[test]
+    fn undeclared_query_values_stay_text_unless_the_schema_opts_in() {
+        let uri = "rp://host/t?flag=true&count=100&ratio=0.5&id=007&version=1.0.0&name=x&big=99999999999999999999";
+        let open = json!({ "type": "object", "properties": {} });
+        let config = UriSchema::from_schema(&open)
+            .config_from_uri(uri)
+            .expect("map the uri");
+        assert_eq!(config["flag"], json!("true"));
+        assert_eq!(config["count"], json!("100"));
+
+        let mut inferring = open;
+        inferring[INFER_SCALARS_ANNOTATION] = json!(true);
+        validate(&inferring).expect("a valid schema");
+        let config = UriSchema::from_schema(&inferring)
+            .config_from_uri(uri)
+            .expect("map the uri");
+        assert_eq!(config["flag"], json!(true));
+        assert_eq!(config["count"], json!(100));
+        assert_eq!(config["ratio"], json!(0.5));
+        assert_eq!(config["id"], json!("007"));
+        assert_eq!(config["version"], json!("1.0.0"));
+        assert_eq!(config["name"], json!("x"));
+        assert_eq!(config["big"], json!("99999999999999999999"));
+    }
+
+    #[test]
+    fn a_non_boolean_infer_scalars_flag_is_refused() {
+        let schema = json!({ "type": "object", INFER_SCALARS_ANNOTATION: "yes" });
+        assert!(validate(&schema).is_err());
+    }
+
+    #[test]
+    fn an_empty_authority_leaves_the_origin_field_unset() {
+        let config = UriSchema::from_schema(&gateway_schema())
+            .config_from_uri("connect+generate://?count=100")
+            .expect("map the uri");
+
+        assert_eq!(config["connector"], json!("generate"));
+        assert!(!config.contains_key("address"), "{config:?}");
+        assert!(!config.contains_key("topic"), "{config:?}");
     }
 
     /// Without the `+` there is no protocol to name, and the rest of the URI is

@@ -186,13 +186,15 @@ impl<T: AsyncHandler> Handler for SimpleHandler<T> {
 pub type CommitFunc =
     Box<dyn FnOnce(MessageDisposition) -> BoxFuture<'static, anyhow::Result<()>> + Send + 'static>;
 
-/// A closure for committing a batch of messages.
+/// A closure for committing a batch of messages. It gets one disposition per
+/// message of its batch, in order; the plugin host rejects any other count.
 pub type BatchCommitFunc = Box<
     dyn FnOnce(Vec<MessageDisposition>) -> BoxFuture<'static, anyhow::Result<()>> + Send + 'static,
 >;
 
 /// Status information about an endpoint (Consumer or Publisher).
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct EndpointStatus {
     pub healthy: bool,
     pub target: String,
@@ -647,7 +649,7 @@ pub trait CustomEndpointFactory: Send + Sync + std::fmt::Debug {
     }
 }
 
-fn schema_flag(schema: Option<serde_json::Value>, key: &str) -> Option<bool> {
+pub(crate) fn schema_flag(schema: Option<serde_json::Value>, key: &str) -> Option<bool> {
     schema?.get(key)?.as_bool()
 }
 
