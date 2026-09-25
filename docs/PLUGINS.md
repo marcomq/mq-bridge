@@ -375,6 +375,13 @@ Everything unannotated is a query parameter, read as its declared `type` —
 or string. A value that is not what the field declares is refused by name,
 rather than handed to the plugin's deserializer to complain about.
 
+A parameter the schema does not declare stays a string. A plugin that takes
+open-ended options (`additionalProperties`) and cannot declare their types can
+set `"x-mqb-uri-infer-scalars": true` at the schema's top level: an undeclared
+value of `true` or `false` becomes a boolean, a plain integer an integer, and a
+decimal like `0.5` a number. Anything else stays a string, including `007`,
+`1.0.0` and integers too large for 64 bits.
+
 A query parameter always wins over the position it would have had, so
 `?url=...` remains the escape hatch for an address a URI cannot spell.
 
@@ -517,6 +524,23 @@ Receive, commit, send and flush no longer tie up a host thread either: the host
 starts the call and the plugin reports back through a completion callback when
 its runtime has finished. Before 1.2 each of those calls held a thread of the
 host's blocking pool for its whole duration.
+
+That is measurably faster. The same in-memory endpoint, which does no work of its
+own, was built against the 1.1 and the 1.2 SDK and driven by the same host
+(messages per second, macOS arm64, release build):
+
+| Batch | Call | 1.1 | 1.2 | Gain |
+| ---: | :--- | ---: | ---: | ---: |
+| 1 | send | 94k | 154k | 1.6× |
+| 1 | receive + commit | 46k | 76k | 1.6× |
+| 1 | send, 16 concurrent callers | 164k | 708k | 4.3× |
+| 128 | send | 6.5M | 8.6M | 1.3× |
+| 128 | receive + commit | 4.0M | 5.4M | 1.4× |
+| 128 | send, 16 concurrent callers | 15.6M | 25.5M | 1.6× |
+
+This measures only the boundary cost. It matters most for small batches and
+many concurrent routes; a real broker's latency hides most of it at large
+batches. Rebuilding a plugin against 1.2 is enough to get the gain.
 
 Your `tracing` events and `metrics` samples reach the host as well. On load the
 SDK installs a subscriber and a recorder inside the plugin that forward to the

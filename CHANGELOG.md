@@ -43,7 +43,9 @@ All notable changes to `mq-bridge`. Newest first.
   route, so a plugin sink can answer a request. A plugin consumer receives
   `MessageDisposition::Reply` together with the reply message instead of a plain ack.
   `status()` of plugin endpoints reports what the plugin reports. Receive, commit, send and
-  flush complete through a callback instead of holding a host blocking thread per call.
+  flush complete through a callback instead of holding a host blocking thread per call, so
+  crossing the boundary is 1.3–1.6× faster, and 4.3× with 16 concurrent callers at batch 1
+  (see docs/PLUGINS.md).
   Plugin `tracing` events and `metrics` samples are forwarded to the host (logs under the
   target `mq_bridge::plugin`; metrics need the `metrics` feature on both sides).
   One library can export several endpoints with `export_endpoint_plugins!`; they are

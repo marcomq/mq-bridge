@@ -415,6 +415,8 @@ pub enum Middleware {
     Retry(RetryMiddleware),
     RandomPanic(RandomPanicMiddleware),
     Delay(DelayMiddleware),
+    /// Bounds each send; one that does not finish in time fails as retryable. Output-only.
+    Timeout(TimeoutMiddleware),
     WeakJoin(WeakJoinMiddleware),
     Limiter(LimiterMiddleware),
     Buffer(BufferMiddleware),
@@ -524,6 +526,19 @@ pub struct RetryMiddleware {
 pub struct DelayMiddleware {
     /// Delay duration in milliseconds.
     pub delay_ms: u64,
+}
+
+/// Send timeout middleware configuration.
+///
+/// Fails a `send`/`send_batch` that has not finished within `timeout_ms` with a
+/// retryable error instead of letting it block the route. The sink may still have
+/// accepted the batch, so a retry after a timeout can deliver it twice.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct TimeoutMiddleware {
+    /// Longest a single send may take, in milliseconds.
+    pub timeout_ms: u64,
 }
 
 /// Throughput limiter middleware configuration.

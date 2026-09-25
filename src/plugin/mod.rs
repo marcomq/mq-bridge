@@ -77,7 +77,7 @@ use crate::extensions::{
 };
 
 pub use crate::support::config_schema::{
-    endpoint_uri_schema, UriPosition, UriSchema, URI_ANNOTATION,
+    endpoint_uri_schema, UriPosition, UriSchema, INFER_SCALARS_ANNOTATION, URI_ANNOTATION,
 };
 pub use discovery::{
     discover_all_endpoint_plugins, discover_all_endpoint_plugins_in, discover_endpoint_plugin,

@@ -780,7 +780,7 @@ impl BridgeMcp {
             route options like `concurrency`, `batch_size`, and `exit_on_empty` (drain the source \
             then exit; otherwise the route runs continuously until stopped). Either endpoint may \
             carry a `middlewares` array — `retry`, `dlq`, `deduplication`, `limiter`, `transform`, \
-            `compression`, `encryption`, `pack`/`unpack`, `buffer`, `delay`, `weak_join`, `cookie_jar`, `metrics` — \
+            `compression`, `encryption`, `pack`/`unpack`, `buffer`, `delay`, `timeout`, `weak_join`, `cookie_jar`, `metrics` — \
             e.g. `{\"sqlx\": {...}, \"middlewares\": [{\"retry\": {\"max_attempts\": 3}}]}`. \
             `concurrency`/`batch_size` may be given inside `route` or as top-level arguments \
             — the top-level argument wins, and an unset value becomes the app default \
@@ -1487,6 +1487,9 @@ pub async fn run(
     agent_bus: bool,
     workspace_path: String,
 ) -> anyhow::Result<()> {
+    // Off the request path, so the first route using a large plugin doesn't
+    // spend its startup timeout loading the library.
+    tokio::task::spawn_blocking(mq_bridge_app::mq_bridge::plugin::discover_all_endpoint_plugins);
     let server = BridgeMcp::new().with_agent_bus(agent_bus);
     // Held for the lifetime of the transport; dropping it removes the lease,
     // including on the `bail!` below.

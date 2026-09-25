@@ -957,6 +957,7 @@ with_optional_string_setters!(DeduplicationMiddleware { with_store => store, wit
 with_value_setters!(DeduplicationMiddleware { with_ttl_seconds => ttl_seconds: u64, with_replay_response => replay_response: bool });
 with_value_setters!(RetryMiddleware { with_max_attempts => max_attempts: usize, with_initial_interval_ms => initial_interval_ms: u64, with_max_interval_ms => max_interval_ms: u64, with_multiplier => multiplier: f64 });
 with_value_setters!(DelayMiddleware { with_delay_ms => delay_ms: u64 });
+with_value_setters!(TimeoutMiddleware { with_timeout_ms => timeout_ms: u64 });
 with_value_setters!(LimiterMiddleware { with_messages_per_second => messages_per_second: f64 });
 with_value_setters!(BufferMiddleware { with_max_messages => max_messages: usize, with_max_delay_ms => max_delay_ms: u64 });
 with_string_setters!(CookieJarMiddleware { with_cookie_metadata_key => cookie_metadata_key, with_set_cookie_metadata_key => set_cookie_metadata_key });

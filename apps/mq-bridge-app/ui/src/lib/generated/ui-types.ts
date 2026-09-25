@@ -162,6 +162,10 @@ export interface DelayMiddleware {
   delay_ms: number;
 }
 
+export interface TimeoutMiddleware {
+  timeout_ms: number;
+}
+
 export interface WeakJoinMiddleware {
   group_by: string;
   expected_count: number;

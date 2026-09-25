@@ -326,6 +326,7 @@ class Middleware(TypedDict, total=False):
     pack: PackMiddleware
     random_panic: RandomPanicMiddleware
     retry: RetryMiddleware
+    timeout: TimeoutMiddleware
     transform: TransformMiddleware
     unpack: UnpackMiddleware
     weak_join: WeakJoinMiddleware
@@ -570,6 +571,11 @@ class SwitchConfig(TypedDict, total=False):
     default: Optional[Endpoint]
     metadata_key: str
     when: List[SwitchCase]
+
+
+class TimeoutMiddleware(TypedDict, total=False):
+    """Send timeout middleware configuration."""
+    timeout_ms: Required[int]
 
 
 class TlsConfig(TypedDict, total=False):

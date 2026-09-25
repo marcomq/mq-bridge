@@ -280,6 +280,7 @@ kafka_to_nats:
                     has_random_panic = true;
                 }
                 Middleware::Delay(_) => {}
+                Middleware::Timeout(_) => {}
                 Middleware::WeakJoin(_) => {}
                 Middleware::Limiter(_) => {}
                 Middleware::Buffer(_) => {}
