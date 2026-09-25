@@ -10,7 +10,8 @@
 //! [`tokio::task::spawn_blocking`] rather than on the async executor. The
 //! exceptions are the two cheap consumer queries the ABI marks as non-blocking
 //! (`commit_requires_order`, `set_exit_on_empty`), and a 1.2 plugin's receive,
-//! commit, send and flush, which complete through a callback instead.
+//! commit, send and flush, which complete through a callback instead. A plugin
+//! whose non-blocking entry answers `MQB_ERR_UNSUPPORTED` gets the blocking one.
 //!
 //! Acknowledgement stays under the route's control: `receive_batch` hands back
 //! a batch handle wrapped in [`PluginBatch`], and the plugin only learns the
@@ -19,6 +20,7 @@
 //! anything, so the broker can redeliver.
 
 use std::any::Any;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::support::plugin_abi::{
@@ -166,6 +168,7 @@ impl CustomEndpointFactory for PluginEndpointFactory {
             consumer: Arc::new(ConsumerHandle {
                 plugin: Arc::clone(&self.plugin),
                 handle: handle.0,
+                blocking: AtomicBool::new(false),
             }),
         }))
     }
@@ -215,6 +218,7 @@ impl CustomEndpointFactory for PluginEndpointFactory {
             publisher: Arc::new(PublisherHandle {
                 plugin: Arc::clone(&self.plugin),
                 handle: handle.0,
+                blocking: AtomicBool::new(false),
             }),
         }))
     }
@@ -438,10 +442,21 @@ fn blocking_cleanup(cleanup: impl FnOnce() + Send + 'static) {
 struct ConsumerHandle {
     plugin: Arc<LoadedPlugin>,
     handle: MqbConsumerHandle,
+    /// Set once the non-blocking receive answered `MQB_ERR_UNSUPPORTED`.
+    blocking: AtomicBool,
 }
 
 unsafe impl Send for ConsumerHandle {}
 unsafe impl Sync for ConsumerHandle {}
+
+impl ConsumerHandle {
+    fn async_hooks(&self) -> Option<MqbAsyncHooks> {
+        if self.blocking.load(Ordering::Relaxed) {
+            return None;
+        }
+        self.plugin.table().async_hooks()
+    }
+}
 
 impl Drop for ConsumerHandle {
     fn drop(&mut self) {
@@ -462,10 +477,17 @@ impl MessageConsumer for PluginConsumer {
     async fn receive_batch(&mut self, max_messages: usize) -> Result<ReceivedBatch, ConsumerError> {
         // The clone is what keeps the handle alive for the whole call.
         let consumer = Arc::clone(&self.consumer);
-        let async_hooks = consumer.plugin.table().async_hooks();
-        let (batch, messages) = match async_hooks {
-            Some(hooks) => receive_async(consumer, hooks, max_messages).await?,
-            None => receive_blocking(consumer, max_messages).await?,
+        let mut async_hooks = consumer.async_hooks();
+        let received = match async_hooks {
+            Some(hooks) => receive_async(Arc::clone(&consumer), hooks, max_messages).await?,
+            None => None,
+        };
+        let (batch, messages) = match received {
+            Some(received) => received,
+            None => {
+                async_hooks = None;
+                receive_blocking(consumer, max_messages).await?
+            }
         };
         let expected = messages.len();
         let commit: BatchCommitFunc = Box::new(move |dispositions| {
@@ -565,11 +587,12 @@ async fn receive_blocking(
 }
 
 /// The 1.2 receive. Dropping it mid-call releases the batch unacknowledged.
+/// `None` means the plugin has no non-blocking receive.
 async fn receive_async(
     consumer: Arc<ConsumerHandle>,
     hooks: MqbAsyncHooks,
     max_messages: usize,
-) -> Result<(PluginBatch, Vec<CanonicalMessage>), ConsumerError> {
+) -> Result<Option<(PluginBatch, Vec<CanonicalMessage>)>, ConsumerError> {
     let handle = AssertSend(consumer.handle);
     let slots = ReceiveSlots {
         consumer,
@@ -595,11 +618,16 @@ async fn receive_async(
         plugin: Arc::clone(plugin),
         handle: slots.batch,
     };
+    if status == MQB_ERR_UNSUPPORTED {
+        slots.consumer.blocking.store(true, Ordering::Relaxed);
+        let _ = plugin.take_error(slots.err);
+        return Ok(None);
+    }
     if status != MQB_OK {
         return Err(consumer_error(plugin, status, slots.err, "receive a batch"));
     }
     let messages = unsafe { super::message::from_abi(slots.messages, slots.len) };
-    Ok((guard, messages))
+    Ok(Some((guard, messages)))
 }
 
 /// Owns a plugin publisher handle, refcounted for the same reason as
@@ -608,10 +636,21 @@ async fn receive_async(
 struct PublisherHandle {
     plugin: Arc<LoadedPlugin>,
     handle: MqbPublisherHandle,
+    /// Set once the non-blocking send answered `MQB_ERR_UNSUPPORTED`.
+    blocking: AtomicBool,
 }
 
 unsafe impl Send for PublisherHandle {}
 unsafe impl Sync for PublisherHandle {}
+
+impl PublisherHandle {
+    fn async_hooks(&self) -> Option<MqbAsyncHooks> {
+        if self.blocking.load(Ordering::Relaxed) {
+            return None;
+        }
+        self.plugin.table().async_hooks()
+    }
+}
 
 impl Drop for PublisherHandle {
     fn drop(&mut self) {
@@ -652,13 +691,18 @@ impl MessagePublisher for PluginPublisher {
             return Ok(SentBatch::Ack);
         }
         let publisher = Arc::clone(&self.publisher);
-        if let Some(hooks) = publisher.plugin.table().async_hooks() {
-            return send_async(publisher, hooks, messages).await;
-        }
+        let messages = match publisher.async_hooks() {
+            Some(hooks) => match send_async(Arc::clone(&publisher), hooks, messages).await {
+                Ok(sent) => return sent,
+                Err(messages) => messages,
+            },
+            None => messages,
+        };
         tokio::task::spawn_blocking(move || {
             let plugin = &publisher.plugin;
             let messages = super::message::AbiMessages::new(messages);
             let mut err = MqbBuffer::EMPTY;
+            // A newer entry answering MQB_ERR_UNSUPPORTED falls through to the older one.
             if let Some(hooks) = plugin.table().request_reply_hooks() {
                 let mut outcomes = vec![MQB_OUTCOME_OK; messages.len()];
                 let mut result = MqbResponsesHandle::NULL;
@@ -680,53 +724,61 @@ impl MessagePublisher for PluginPublisher {
                 if !result.is_null() {
                     unsafe { (hooks.responses_free)(result) };
                 }
-                return sent_with_responses(
-                    plugin,
-                    status,
-                    err,
-                    messages.into_messages(),
-                    &outcomes,
-                    responses,
-                );
+                if status != MQB_ERR_UNSUPPORTED {
+                    return sent_with_responses(
+                        plugin,
+                        status,
+                        err,
+                        messages.into_messages(),
+                        &outcomes,
+                        responses,
+                    );
+                }
+                let _ = plugin.take_error(std::mem::replace(&mut err, MqbBuffer::EMPTY));
             }
-            let Some(hook) = plugin.table().publisher_outcomes_hook() else {
+            if let Some(hook) = plugin.table().publisher_outcomes_hook() {
+                // Host-allocated, one byte per message: the plugin writes back into
+                // this, so no payload travels the other way.
+                let mut outcomes = vec![MQB_OUTCOME_OK; messages.len()];
                 let status = unsafe {
-                    (plugin.table().publisher_send_batch)(
+                    hook(
                         publisher.handle,
                         messages.as_ptr(),
                         messages.len(),
+                        outcomes.as_mut_ptr(),
                         &mut err,
                     )
                 };
-                return if status == MQB_OK {
-                    Ok(SentBatch::Ack)
-                } else {
-                    Err(publisher_error(plugin, status, err, "publish a batch"))
-                };
-            };
-            // Host-allocated, one byte per message: the plugin writes back into
-            // this, so no payload travels the other way.
-            let mut outcomes = vec![MQB_OUTCOME_OK; messages.len()];
+                match status {
+                    MQB_OK => return Ok(SentBatch::Ack),
+                    MQB_ERR_UNSUPPORTED => {
+                        let _ = plugin.take_error(std::mem::replace(&mut err, MqbBuffer::EMPTY));
+                    }
+                    _ => {
+                        return publish_outcome(
+                            plugin,
+                            status,
+                            err,
+                            messages.into_messages(),
+                            &outcomes,
+                            None,
+                        )
+                    }
+                }
+            }
             let status = unsafe {
-                hook(
+                (plugin.table().publisher_send_batch)(
                     publisher.handle,
                     messages.as_ptr(),
                     messages.len(),
-                    outcomes.as_mut_ptr(),
                     &mut err,
                 )
             };
             if status == MQB_OK {
-                return Ok(SentBatch::Ack);
+                Ok(SentBatch::Ack)
+            } else {
+                Err(publisher_error(plugin, status, err, "publish a batch"))
             }
-            publish_outcome(
-                plugin,
-                status,
-                err,
-                messages.into_messages(),
-                &outcomes,
-                None,
-            )
         })
         .await
         .map_err(|err| PublisherError::Retryable(join_error(err)))?
@@ -734,19 +786,22 @@ impl MessagePublisher for PluginPublisher {
 
     async fn flush(&self) -> anyhow::Result<()> {
         let publisher = Arc::clone(&self.publisher);
-        if let Some(hooks) = publisher.plugin.table().async_hooks() {
+        if let Some(hooks) = publisher.async_hooks() {
             let plugin = Arc::clone(&publisher.plugin);
             let handle = AssertSend(publisher.handle);
             let slot = ErrSlot {
                 plugin,
                 err: MqbBuffer::EMPTY,
-                _owner: publisher,
+                _owner: Arc::clone(&publisher),
             };
             let pending = completion::call(slot, |slot, completion| unsafe {
                 (hooks.flush)(handle.0, std::ptr::addr_of_mut!((*slot).err), completion)
             });
             let (status, slot) = pending.finish().await?;
-            return plugin_result(&slot.plugin, status, slot.err, "flush an output");
+            if status != MQB_ERR_UNSUPPORTED {
+                return plugin_result(&slot.plugin, status, slot.err, "flush an output");
+            }
+            let _ = slot.plugin.take_error(slot.err);
         }
         tokio::task::spawn_blocking(move || {
             let mut err = MqbBuffer::EMPTY;
@@ -786,11 +841,12 @@ impl MessagePublisher for PluginPublisher {
 }
 
 /// The 1.2 publish: awaited on the plugin's runtime, no blocking thread.
+/// `Err` hands the messages back when the plugin has no non-blocking send.
 async fn send_async(
     publisher: Arc<PublisherHandle>,
     hooks: MqbAsyncHooks,
     messages: Vec<CanonicalMessage>,
-) -> Result<SentBatch, PublisherError> {
+) -> Result<Result<SentBatch, PublisherError>, Vec<CanonicalMessage>> {
     let len = messages.len();
     let handle = AssertSend(publisher.handle);
     let (pending, messages) = {
@@ -819,16 +875,24 @@ async fn send_async(
         // The plugin copied the input before returning.
         (pending, messages.into_messages())
     };
-    let (status, mut slots) = pending.finish().await.map_err(PublisherError::Retryable)?;
+    let (status, mut slots) = match pending.finish().await {
+        Ok(finished) => finished,
+        Err(err) => return Ok(Err(PublisherError::Retryable(err))),
+    };
+    if status == MQB_ERR_UNSUPPORTED {
+        slots.publisher.blocking.store(true, Ordering::Relaxed);
+        completion::Slots::abandon(slots);
+        return Err(messages);
+    }
     let responses = slots.take_responses();
-    sent_with_responses(
+    Ok(sent_with_responses(
         &slots.publisher.plugin,
         status,
         slots.err,
         messages,
         &slots.outcomes,
         responses,
-    )
+    ))
 }
 
 /// The outcome of a 1.2 publish, which may carry responses either way.
@@ -904,8 +968,9 @@ fn publish_outcome(
     Ok(SentBatch::Partial { responses, failed })
 }
 
-/// Asks a 1.2 plugin for an endpoint's status. An older plugin reports the
-/// trait default; a failed call reports unhealthy with the plugin's error.
+/// Asks a 1.2 plugin for an endpoint's status. An older plugin, or one that
+/// answers `MQB_ERR_UNSUPPORTED`, reports the trait default; a failed call
+/// reports unhealthy with the plugin's error.
 async fn plugin_status(
     plugin: Arc<LoadedPlugin>,
     call: impl FnOnce(MqbStatusHooks, *mut MqbBuffer, *mut MqbBuffer) -> MqbStatus + Send + 'static,
@@ -917,6 +982,11 @@ async fn plugin_status(
         let mut out = MqbBuffer::EMPTY;
         let mut err = MqbBuffer::EMPTY;
         let status = call(hooks, &mut out, &mut err);
+        if status == MQB_ERR_UNSUPPORTED {
+            let _ = plugin.take_buffer(out);
+            let _ = plugin.take_error(err);
+            return Ok(EndpointStatus::default());
+        }
         if status != MQB_OK {
             let _ = plugin.take_buffer(out);
             return Err(plugin_cause(&plugin, err, "report its status"));

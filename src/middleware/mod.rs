@@ -31,8 +31,8 @@ mod pack;
 mod random_panic;
 mod raw_json;
 mod retry;
-pub(crate) mod transform;
 mod timeout;
+pub(crate) mod transform;
 mod weak_join;
 
 use buffer::{BufferConsumer, BufferPublisher};
@@ -42,7 +42,6 @@ use cookie_jar::{CookieJarConsumer, CookieJarPublisher};
 #[cfg(feature = "dedup")]
 use deduplication::DeduplicationConsumer;
 use delay::{DelayConsumer, DelayPublisher};
-use timeout::TimeoutPublisher;
 use dlq::DlqPublisher;
 #[cfg(feature = "encryption")]
 use encryption::{EncryptionConsumer, EncryptionPublisher};
@@ -55,6 +54,7 @@ use metrics::{MetricsConsumer, MetricsPublisher};
 use pack::{PackPublisher, UnpackConsumer};
 use random_panic::{RandomPanicConsumer, RandomPanicPublisher};
 use retry::RetryPublisher;
+use timeout::TimeoutPublisher;
 use transform::{TransformConsumer, TransformPublisher};
 use weak_join::WeakJoinConsumer;
 

@@ -348,6 +348,9 @@ pub const MQB_HOST_VTABLE_SIZE_V1_2: usize = 4 * core::mem::size_of::<usize>();
 /// status)` exactly once, from any thread, possibly before the starting call
 /// returns; any other return means it never does. Out-parameters stay writable
 /// until the callback, which must not block.
+///
+/// A plugin that returns [`MQB_ERR_UNSUPPORTED`] from a non-blocking entry gets
+/// its blocking twin instead, from then on for that endpoint.
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub struct MqbCompletion {
@@ -503,6 +506,10 @@ pub struct MqbPluginVTable {
     /// entry's message is unspecified. Both arrays stay valid until the result
     /// is freed.
     ///
+    /// The output may point into the input: the host reads the result before it
+    /// releases the input, so an unchanged message (or its id and metadata) can
+    /// be passed back without copying.
+    ///
     /// Keeping the arrays parallel to the input is what lets the host map the
     /// route's dispositions back onto the source messages and acknowledge the
     /// ones that were dropped.
@@ -553,6 +560,7 @@ pub struct MqbPluginVTable {
     /// [`struct_size`](MqbPluginVTable::struct_size) reaches
     /// [`MQB_VTABLE_SIZE_V1_1`]; read it through
     /// [`MqbPluginVTable::publisher_outcomes_hook`], never directly.
+    /// [`MQB_ERR_UNSUPPORTED`] falls back to `publisher_send_batch`.
     pub publisher_send_batch_outcomes: MqbPublisherSendBatchOutcomes,
     /// Describes one of the plugin's configuration objects as a JSON Schema.
     ///
@@ -580,6 +588,7 @@ pub struct MqbPluginVTable {
     /// Whatever the status, the plugin may write a result handle plus a compact
     /// array of responses in input order (only messages that produced one). The
     /// array lives until the host passes the handle to `responses_free`.
+    /// [`MQB_ERR_UNSUPPORTED`] falls back to `publisher_send_batch_outcomes`.
     pub publisher_send_batch_responses: MqbPublisherSendBatchResponses,
     /// Releases a result written by `publisher_send_batch_responses`. Null is a no-op.
     pub responses_free: unsafe extern "C" fn(result: MqbResponsesHandle),
@@ -593,13 +602,15 @@ pub struct MqbPluginVTable {
         len: usize,
         err: *mut MqbBuffer,
     ) -> MqbStatus,
-    /// Writes the consumer's `EndpointStatus` as an owned UTF-8 JSON buffer.
+    /// Writes the consumer's `EndpointStatus` as an owned UTF-8 JSON buffer;
+    /// [`MQB_ERR_UNSUPPORTED`] reports a healthy default.
     pub consumer_status: unsafe extern "C" fn(
         consumer: MqbConsumerHandle,
         out: *mut MqbBuffer,
         err: *mut MqbBuffer,
     ) -> MqbStatus,
-    /// Writes the publisher's `EndpointStatus` as an owned UTF-8 JSON buffer.
+    /// Writes the publisher's `EndpointStatus` as an owned UTF-8 JSON buffer;
+    /// [`MQB_ERR_UNSUPPORTED`] reports a healthy default.
     pub publisher_status: unsafe extern "C" fn(
         publisher: MqbPublisherHandle,
         out: *mut MqbBuffer,

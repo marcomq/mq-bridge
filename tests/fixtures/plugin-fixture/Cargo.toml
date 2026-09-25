@@ -25,5 +25,7 @@ tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+cbindgen = { version = "0.29.4", default-features = false }
+libloading = "0.9"
 mq-bridge = { path = "../../..", default-features = false, features = ["plugin-sdk", "test-utils", "metrics"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

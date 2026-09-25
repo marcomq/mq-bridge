@@ -591,6 +591,90 @@ broker delays redelivery beyond a test's patience, and the metadata check off
 `build_plugin_cdylib` builds the package and reads the artifact path back out of
 cargo, so tests do not hard-code target-directory layout or file extensions.
 
+### Writing one in C or C++
+
+The ABI is plain C, so a plugin does not have to be Rust. The usual reason is an
+existing C library — a parser for a proprietary wire format, say — that should
+run as a middleware without being rewritten.
+[`include/mq_bridge_plugin.h`](../include/mq_bridge_plugin.h) declares the ABI;
+[`include/mq_bridge_plugin_helpers.h`](../include/mq_bridge_plugin_helpers.h)
+fills in every entry a plugin does not implement. A complete middleware that
+drops heartbeat messages:
+
+```c
+#include <stdlib.h>
+#include <string.h>
+#include "mq_bridge_plugin_helpers.h"
+
+static MqbStatus apply(MqbMiddlewareHandle middleware, const MqbMessage *messages, size_t len,
+                       MqbFilterHandle *out_result, const MqbMessage **out_messages,
+                       const uint8_t **out_kept, MqbBuffer *err) {
+    uint8_t *kept = malloc(len + 1);
+    if (kept == NULL) {
+        mqb_set_error(err, "out of memory");
+        return MQB_ERR_RETRYABLE;
+    }
+    for (size_t i = 0; i < len; i++) {
+        MqbSlice p = messages[i].payload;
+        int ping = p.len == 4 && memcmp(p.ptr, "ping", 4) == 0;
+        kept[i] = ping ? MQB_MESSAGE_DROPPED : MQB_MESSAGE_KEPT;
+    }
+    *out_result = kept;
+    *out_messages = messages; /* kept messages pass through unchanged */
+    *out_kept = kept;
+    return MQB_OK;
+}
+
+static const MqbPluginVTable table = {
+    MQB_TABLE_HEADER("drop_heartbeats", "0.1.0", MQB_CAP_MIDDLEWARE),
+    MQB_DEFAULT_FACTORY,
+    MQB_NO_CONSUMER,
+    MQB_NO_PUBLISHER,
+    MQB_STATELESS_MIDDLEWARE,
+    .middleware_apply = apply,
+    .middleware_result_free = free,
+};
+
+const MqbPluginVTable *mq_bridge_plugin_v1(void) { return &table; }
+```
+
+```sh
+cc -shared -fPIC -I include examples/c-plugin/minimal.c -o libdrop_heartbeats.so
+```
+
+`middleware_apply` writes back two arrays as long as the input: the messages,
+and one `MQB_MESSAGE_KEPT` / `MQB_MESSAGE_DROPPED` flag each. Both stay valid
+until the host passes the result handle to `middleware_result_free`. The output
+may point into the input, so an unchanged message — or a rewritten one's id and
+metadata — needs no copy. The rules the Rust SDK enforces for you are yours to
+keep:
+
+- **Every function pointer must be set.** The host never checks for null; the
+  helper macros cover what you don't implement.
+- Other arguments are borrowed for the call only; copy what you keep.
+- Error text goes into the `err` buffer (`mqb_set_error`), released through the
+  table's `buffer_free`.
+- Calls can arrive concurrently from several threads.
+- In C++, never let an exception escape: catch it and return `MQB_ERR_PERMANENT`.
+  The helper macros are C only; C++ fills the table in declaration order.
+
+A plugin need not implement the non-blocking (`*_async`), per-message-outcome,
+response or status entries. Where one answers `MQB_ERR_UNSUPPORTED`, the host
+falls back to the plain blocking call, on a thread of its own, and reports a
+healthy default status. `MQB_BLOCKING_PUBLISHER` fills in exactly those entries,
+so a publisher sets only `publisher_create`, `_send_batch`, `_flush`, `_close`
+and `_free`.
+
+[`examples/c-plugin/plugin.c`](../examples/c-plugin/plugin.c) shows both sides
+in one library, wrapping two unchanged "legacy" libraries. Its middleware turns
+fixed-width records into JSON and logs the ones it drops (`mqb_log`). Its output
+appends each message to a ledger file, taking the path from its config and a
+mutex around the non-thread-safe library.
+
+`mq_bridge_plugin.h` is generated from `src/support/plugin_abi.rs`, so it always
+matches the host, and its `static_assert`s refuse to compile if the table layout
+ever does not.
+
 ---
 
 ## Shipping it to Python and Node.js

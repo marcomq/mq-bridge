@@ -39,6 +39,16 @@ All notable changes to `mq-bridge`. Newest first.
 
 ### Added
 
+- **C header for the plugin ABI.** `include/mq_bridge_plugin.h` lets a plugin be written in C
+  or C++, e.g. to wrap an existing C library as a middleware; `mq_bridge_plugin_helpers.h`
+  fills in the entries a plugin does not implement. `examples/c-plugin/` has a ~35-line
+  filter, and a plugin that wraps existing C libraries as both a middleware and an output.
+  The header is generated from `src/support/plugin_abi.rs` and a test fails when it is stale.
+  `middleware_apply`'s output may now point into its input, which the host already allowed.
+- **Plugins may skip the optional ABI entries.** When a non-blocking, outcome, response or
+  status entry returns `MQB_ERR_UNSUPPORTED`, the host now falls back to the blocking send,
+  receive or flush (remembered per endpoint), or reports a default status. Before this, such
+  a plugin failed every send with a permanent error.
 - **Plugin ABI 1.2: request/reply and status.** A plugin publisher's responses now reach the
   route, so a plugin sink can answer a request. A plugin consumer receives
   `MessageDisposition::Reply` together with the reply message instead of a plain ack.
