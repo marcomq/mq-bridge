@@ -702,6 +702,9 @@ keep:
 - Error text goes into the `err` buffer (`mqb_set_error`), released through the
   table's `buffer_free`.
 - Calls can arrive concurrently from several threads.
+- A `*_async` entry that returns `MQB_OK` must call its completion exactly once,
+  errors included. The host waits without a deadline, since the plugin may still
+  write the out-parameters, so a missed callback stalls that endpoint.
 - In C++, never let an exception escape: catch it and return `MQB_ERR_PERMANENT`.
   The helper macros are C only; C++ fills the table in declaration order.
 

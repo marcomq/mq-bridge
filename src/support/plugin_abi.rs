@@ -347,7 +347,8 @@ pub const MQB_HOST_VTABLE_SIZE_V1_2: usize = 4 * core::mem::size_of::<usize>();
 /// If the starting call returns [`MQB_OK`], the plugin invokes `callback(ctx,
 /// status)` exactly once, from any thread, possibly before the starting call
 /// returns; any other return means it never does. Out-parameters stay writable
-/// until the callback, which must not block.
+/// until the callback, which must not block. The host sets no deadline: a
+/// callback that never comes holds the call and its buffers until shutdown.
 ///
 /// A plugin that returns [`MQB_ERR_UNSUPPORTED`] from a non-blocking entry gets
 /// its blocking twin instead, from then on for that endpoint.
