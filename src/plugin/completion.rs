@@ -47,6 +47,17 @@ pub(super) struct Started<S> {
 }
 
 impl<S: Slots> Started<S> {
+    /// The slots back, if the starting call refused with `status`; no await needed.
+    pub(super) fn refused_with(&mut self, status: MqbStatus) -> Option<S> {
+        match self.failed.take() {
+            Some((refused, slots)) if refused == status => Some(slots),
+            other => {
+                self.failed = other;
+                None
+            }
+        }
+    }
+
     pub(super) async fn finish(self) -> anyhow::Result<(MqbStatus, S)> {
         match self.failed {
             Some(failed) => Ok(failed),

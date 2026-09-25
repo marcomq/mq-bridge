@@ -68,12 +68,15 @@ All notable changes to `mq-bridge`. Newest first.
   A plugin's `idempotent_sink` / `acknowledges` overrides now count on the host too, so its
   delivery guarantee can depend on the config.
   Plugins built against 1.0/1.1 keep loading and behave as before.
-- **An installed plugin is found by any endpoint it provides.** When no library is named after
-  the requested endpoint, every other `libmq_bridge_*` on the search path is loaded, so a
-  library with several endpoints (such as `mq-bridge-connect`) needs no `plugins:` entry. A
-  file that does not export the plugin entry point, like a plugin's own helper library, is
-  never opened. `plugin::discover_all_endpoint_plugins` loads them all up front;
-  `mq-bridge-app` does so at startup so the UI lists them.
+- **`plugin::discover_all_endpoint_plugins` loads every installed plugin up front.**
+  `mq-bridge-app` calls it at startup so the UI lists them. A file that does not export the
+  plugin entry point, like a plugin's own helper library, is never opened. A route's own
+  lookup still opens only the file named for its endpoint.
+- **Discovery loads only libraries nobody else could have planted.** On Linux and macOS a
+  discovered library and every directory above it must belong to the current user or root
+  and must not be world-writable (sticky directories like `/tmp` are fine). As root, only
+  root-owned libraries pass. Each discovered load is logged with its path and SHA-256. A
+  library loaded by path is not checked. See "Which files discovery trusts" in PLUGINS.md.
 - **`DeliveryGuarantee` and `required_delivery`.** Each route's inferred guarantee —
   `at-most-once`, `at-least-once` or `effectively-once` — is logged at startup and available as
   `Route::delivery_guarantee()`. Setting `required_delivery` on a route fails it at startup when

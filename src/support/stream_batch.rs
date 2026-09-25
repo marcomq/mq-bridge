@@ -16,14 +16,23 @@ pub const DRAIN_FIRST_WAIT: Duration = Duration::from_millis(250);
 /// How long to wait for each further message before the batch is sent as is.
 pub const NEXT_MESSAGE_WAIT: Duration = Duration::from_millis(5);
 
+/// A stream error, with the items [`next_batch`] collected before it. Deliver
+/// those before reporting the error, or they are never acknowledged.
+#[derive(Debug, PartialEq, Eq)]
+pub struct PartialBatch<T, E> {
+    pub items: Vec<T>,
+    pub error: E,
+}
+
 /// Collects up to `max` items. A live route waits for the first item as long as
 /// it takes; a draining one (`exit_on_empty`) gives up after [`DRAIN_FIRST_WAIT`]
 /// and returns an empty batch. `Ok(None)` means the stream ended before any item.
+/// A stream error ends the batch and comes back with the items collected before it.
 pub async fn next_batch<S, T, E>(
     stream: &mut S,
     max: usize,
     exit_on_empty: bool,
-) -> Result<Option<Vec<T>>, E>
+) -> Result<Option<Vec<T>>, PartialBatch<T, E>>
 where
     S: Stream<Item = Result<T, E>> + Unpin,
 {
@@ -31,15 +40,16 @@ where
     while items.len() < max {
         let next = match wait_for(items.len(), exit_on_empty) {
             Some(wait) => match tokio::time::timeout(wait, stream.try_next()).await {
-                Ok(next) => next?,
+                Ok(next) => next,
                 Err(_) => break,
             },
-            None => stream.try_next().await?,
+            None => stream.try_next().await,
         };
         match next {
-            Some(item) => items.push(item),
-            None if items.is_empty() => return Ok(None),
-            None => break,
+            Ok(Some(item)) => items.push(item),
+            Ok(None) if items.is_empty() => return Ok(None),
+            Ok(None) => break,
+            Err(error) => return Err(PartialBatch { items, error }),
         }
     }
     Ok(Some(items))
@@ -86,8 +96,27 @@ mod tests {
 
     #[tokio::test]
     async fn an_error_is_returned_as_is() {
-        let mut source = stream::iter::<Items>(vec![Ok(1), Err("down".into())]);
-        assert_eq!(next_batch(&mut source, 5, false).await, Err("down".into()));
+        let mut source = stream::iter::<Items>(vec![Err("down".into())]);
+        assert_eq!(
+            next_batch(&mut source, 5, false).await,
+            Err(PartialBatch {
+                items: vec![],
+                error: "down".into()
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn an_error_after_items_keeps_the_items() {
+        let mut source = stream::iter::<Items>(vec![Ok(1), Err("down".into()), Ok(2)]);
+        assert_eq!(
+            next_batch(&mut source, 5, false).await,
+            Err(PartialBatch {
+                items: vec![1],
+                error: "down".into()
+            })
+        );
+        assert_eq!(next_batch(&mut source, 5, false).await, Ok(Some(vec![2])));
     }
 
     #[tokio::test(start_paused = true)]

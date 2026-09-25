@@ -125,6 +125,9 @@ static MqbStatus publisher_flush(MqbPublisherHandle handle, MqbBuffer *err) {
 
 static void publisher_free(MqbPublisherHandle handle) {
     ledger_publisher *publisher = handle;
+    if (publisher == NULL) {
+        return;
+    }
     legacy_ledger_close(publisher->ledger);
     pthread_mutex_destroy(&publisher->lock);
     free(publisher);

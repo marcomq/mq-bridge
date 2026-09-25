@@ -287,39 +287,14 @@ impl PluginBatch {
         dispositions: Vec<MessageDisposition>,
     ) -> anyhow::Result<()> {
         let len = dispositions.len();
-        let pending = {
-            let handle = std::mem::replace(&mut self.handle, MqbBatchHandle::NULL);
-            if handle.is_null() {
-                return Ok(());
+        let pending = match self.start_commit(hooks, dispositions) {
+            Some(Ok(pending)) => pending,
+            Some(Err(dispositions)) => {
+                return tokio::task::spawn_blocking(move || self.commit(dispositions))
+                    .await
+                    .map_err(join_error)?;
             }
-            // Replies cost a placeholder per message, so only when there are any.
-            let has_replies = dispositions
-                .iter()
-                .any(|disposition| matches!(disposition, MessageDisposition::Reply(_)));
-            let (codes, replies) = if has_replies {
-                let (codes, replies) = reply_dispositions(dispositions);
-                (codes, Some(replies))
-            } else {
-                (dispositions.iter().map(disposition_code).collect(), None)
-            };
-            let replies = replies
-                .as_ref()
-                .map_or(std::ptr::null(), |replies| replies.as_ptr());
-            let slot = ErrSlot {
-                plugin: Arc::clone(&self.plugin),
-                err: MqbBuffer::EMPTY,
-                _owner: (),
-            };
-            completion::call(slot, |slot, completion| unsafe {
-                (hooks.batch_commit)(
-                    handle,
-                    codes.as_ptr(),
-                    replies,
-                    len,
-                    std::ptr::addr_of_mut!((*slot).err),
-                    completion,
-                )
-            })
+            None => return Ok(()),
         };
         let (status, slot) = pending.finish().await?;
         if status == MQB_OK {
@@ -330,6 +305,57 @@ impl PluginBatch {
             self.plugin.name(),
             self.plugin.take_error(slot.err)
         ))
+    }
+
+    /// Starts the non-blocking commit. `Err` hands the dispositions back, with the
+    /// handle restored, when the plugin refused it as unsupported.
+    fn start_commit(
+        &mut self,
+        hooks: MqbAsyncHooks,
+        dispositions: Vec<MessageDisposition>,
+    ) -> Option<Result<completion::Started<ErrSlot<()>>, Vec<MessageDisposition>>> {
+        let len = dispositions.len();
+        let handle = std::mem::replace(&mut self.handle, MqbBatchHandle::NULL);
+        if handle.is_null() {
+            return None;
+        }
+        // Replies cost a placeholder per message, so only when there are any.
+        let has_replies = dispositions
+            .iter()
+            .any(|disposition| matches!(disposition, MessageDisposition::Reply(_)));
+        let (codes, replies) = if has_replies {
+            let (codes, replies) = reply_dispositions(dispositions);
+            (codes, Some(replies))
+        } else {
+            (dispositions.iter().map(disposition_code).collect(), None)
+        };
+        let replies_ptr = replies
+            .as_ref()
+            .map_or(std::ptr::null(), |replies| replies.as_ptr());
+        let slot = ErrSlot {
+            plugin: Arc::clone(&self.plugin),
+            err: MqbBuffer::EMPTY,
+            _owner: (),
+        };
+        let mut pending = completion::call(slot, |slot, completion| unsafe {
+            (hooks.batch_commit)(
+                handle,
+                codes.as_ptr(),
+                replies_ptr,
+                len,
+                std::ptr::addr_of_mut!((*slot).err),
+                completion,
+            )
+        });
+        match pending.refused_with(MQB_ERR_UNSUPPORTED) {
+            // Refused before it started, so the handle is still ours.
+            Some(slot) => {
+                let _ = self.plugin.take_error(slot.err);
+                self.handle = handle;
+                Some(Err(decode_dispositions(codes, replies)))
+            }
+            None => Some(Ok(pending)),
+        }
     }
 }
 
@@ -1029,6 +1055,25 @@ fn reply_dispositions(
         })
         .collect();
     (codes, super::message::AbiMessages::new(replies))
+}
+
+/// Undoes the ABI encoding of a commit, for its blocking fallback.
+fn decode_dispositions(
+    codes: Vec<u8>,
+    replies: Option<super::message::AbiMessages>,
+) -> Vec<MessageDisposition> {
+    let mut replies = replies.map(|replies| replies.into_messages().into_iter());
+    codes
+        .into_iter()
+        .map(|code| {
+            let reply = replies.as_mut().and_then(Iterator::next);
+            match (code, reply) {
+                (MQB_DISPOSITION_REPLY, Some(reply)) => MessageDisposition::Reply(reply),
+                (MQB_DISPOSITION_NACK, _) => MessageDisposition::Nack,
+                _ => MessageDisposition::Ack,
+            }
+        })
+        .collect()
 }
 
 fn disposition_code(disposition: &MessageDisposition) -> u8 {

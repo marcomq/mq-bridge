@@ -80,7 +80,11 @@ pub async fn receive_one_batch(
 ) -> ReceivedBatch {
     let deadline = Instant::now() + timeout;
     loop {
-        let batch = consumer.receive_batch(16).await.expect("receive batch");
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let batch = tokio::time::timeout(remaining, consumer.receive_batch(16))
+            .await
+            .unwrap_or_else(|_| panic!("no message arrived within {timeout:?}"))
+            .expect("receive batch");
         if !batch.messages.is_empty() {
             return batch;
         }
@@ -102,13 +106,17 @@ pub async fn receive_at_least(
     let deadline = Instant::now() + timeout;
     let mut messages = Vec::new();
     while messages.len() < expected {
-        messages.extend(
-            consumer
-                .receive_batch(16)
-                .await
-                .expect("receive batch")
-                .messages,
-        );
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let batch = tokio::time::timeout(remaining, consumer.receive_batch(16))
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "only {} of {expected} messages arrived within {timeout:?}",
+                    messages.len()
+                )
+            })
+            .expect("receive batch");
+        messages.extend(batch.messages);
         assert!(
             Instant::now() < deadline,
             "only {} of {expected} messages arrived within {timeout:?}",

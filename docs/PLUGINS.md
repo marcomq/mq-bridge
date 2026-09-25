@@ -116,19 +116,45 @@ prefix, so a package manager needs no special layout: `lib.install` in a brew
 formula or a conda package's default `lib` is enough, and `lib/mq-bridge` keeps
 a hand-managed install tidy.
 
-**The named file comes first.** Only when no file is named after the endpoint
-are the directories listed and every other `libmq_bridge_*` loaded, because one
-library may provide several endpoints under other names. A file that does not
-export `mq_bridge_plugin_v1` — a plugin's own helper library, such as
+**Only the named file is opened.** A route never loads a library it did not name,
+and the search runs only after the registry has missed, so it costs nothing when
+every endpoint is built in. `plugin::discover_all_endpoint_plugins()` is the one
+call that lists the directories and loads every `libmq_bridge_*` up front;
+`mq-bridge-app` makes it at startup so its UI lists those endpoints. A file that
+does not export `mq_bridge_plugin_v1` — a plugin's own helper library, such as
 `libmq_bridge_connect_go` — is recognised from its export table and never opened.
-The search runs only after the registry has missed, so it costs nothing when
-every endpoint is built in. `plugin::discover_all_endpoint_plugins()` loads
-everything installed up front; `mq-bridge-app` calls it at startup so its UI
-lists those endpoints.
 
 Set `MQB_PLUGIN_DISCOVERY=0` (or `false`, `off`, `no`) to switch the search off
 and resolve endpoints only from factories the host registered or a config listed
 by path.
+
+### Which files discovery trusts
+
+Loading a library runs its code, so a library found by discovery is loaded only
+if nobody but you or root could have put it there. On Linux and macOS the file
+and every directory above it, symlinks resolved, must:
+
+- belong to the user running mq-bridge, or to root, and
+- not be world-writable. A sticky directory such as `/tmp` is fine, because
+  others may add files there but not replace yours.
+
+Group write is allowed, because Homebrew's `lib` directory is `775`. A library
+that fails the check is refused with a message naming the offending directory.
+When `discover_all_endpoint_plugins()` finds one, it logs a warning and skips it.
+
+**Running as root, only root-owned libraries pass.** A service started as root
+therefore never picks up a plugin a user installed into their own Homebrew
+prefix or `~/.local/share`. Install system-wide plugins as root, or give the
+service a user of its own.
+
+Every library discovery loads is logged at `info` with its path and SHA-256, so
+there is a record of what ran without being named.
+
+A library loaded **by path** — `load_endpoint_plugin`, `--plugin`, a `plugins:`
+entry — is not checked: naming the file is the trust decision. Windows has no
+equivalent owner and mode to check, so discovery there relies on the directory
+permissions of the install location; set `MQB_PLUGIN_DISCOVERY=0` and load by path
+where that is not enough.
 
 A file whose name does not match the endpoint the library actually provides is an
 error naming both — and the library stays loaded, because nothing is ever
@@ -246,9 +272,10 @@ mq_bridge::export_endpoint_plugins! {
 ```
 
 Loading the library registers all of them, or none if one name is taken.
-Discovery still goes by file name: install the library under each name a route
-may ask for first (a symlink will do), or load it explicitly. A 1.0/1.1 host
-sees only the first entry.
+A route's lookup opens only the file named for the endpoint it asks for, so
+install the library under each name a route may ask for (a symlink will do), or
+load it explicitly. `discover_all_endpoint_plugins()` finds every entry either
+way. A 1.0/1.1 host sees only the first entry.
 
 ### Shared helpers
 
@@ -261,7 +288,9 @@ Three things most endpoints need, so a plugin doesn't write them itself:
 - **`mq_bridge::support::stream_batch::next_batch`.** Collects one batch from a
   client that hands out messages as a `Stream`. A live route waits for the first
   message; a draining one (`exit_on_empty`) gets an empty batch from an idle
-  source after 250 ms, which is what ends the drain.
+  source after 250 ms, which is what ends the drain. A stream error comes back as
+  a `PartialBatch` holding the messages collected before it: deliver those, then
+  report the error on the next call.
 - **`SentBatch::from_failures`.** `Ack` when nothing failed, otherwise a
   `Partial` naming the failed messages.
 

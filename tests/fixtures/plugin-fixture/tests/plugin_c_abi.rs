@@ -238,3 +238,95 @@ async fn a_blocking_c_publisher_writes_through_the_host_fallback() {
         "{error:#}"
     );
 }
+
+/// A consumer with a non-blocking receive but the stub `batch_commit_async`.
+const ASYNC_SOURCE: &str = r#"
+#include "mq_bridge_plugin_helpers.h"
+
+static uint8_t batch_token;
+static const MqbMessage message = {{1}, {(const uint8_t *)"hi", 2}, NULL, 0};
+static size_t blocking_commits;
+static uint8_t last_disposition = 0xff;
+
+size_t async_source_blocking_commits(void) { return blocking_commits; }
+uint8_t async_source_last_disposition(void) { return last_disposition; }
+
+static MqbStatus create(MqbFactoryHandle factory, MqbSlice route_name, MqbSlice config_json,
+                        MqbConsumerHandle *out, MqbBuffer *err) {
+    *out = &batch_token;
+    return MQB_OK;
+}
+static MqbStatus receive_async(MqbConsumerHandle consumer, size_t max_messages,
+                               MqbBatchHandle *out_batch, const MqbMessage **out_messages,
+                               size_t *out_len, MqbBuffer *err, MqbCompletion completion) {
+    *out_batch = &batch_token;
+    *out_messages = &message;
+    *out_len = 1;
+    completion.callback(completion.ctx, MQB_OK);
+    return MQB_OK;
+}
+static MqbStatus commit(MqbBatchHandle batch, const uint8_t *dispositions, size_t len,
+                        MqbBuffer *err) {
+    blocking_commits++;
+    last_disposition = dispositions[0];
+    return MQB_OK;
+}
+
+static const MqbPluginVTable table = {
+    MQB_TABLE_HEADER("async_source", "0.1.0", MQB_CAP_CONSUMER),
+    MQB_DEFAULT_FACTORY,
+    MQB_NO_PUBLISHER,
+    MQB_NO_MIDDLEWARE,
+    .consumer_create = create, .consumer_receive_batch = mqb_stub_receive,
+    .consumer_commit_requires_order = mqb_stub_false,
+    .consumer_set_exit_on_empty = mqb_stub_set_exit_on_empty,
+    .consumer_close = mqb_stub_handle, .consumer_free = mqb_stub_free,
+    .batch_commit = commit, .batch_free = mqb_stub_free,
+    .batch_commit_replies = mqb_stub_commit_replies, .consumer_status = mqb_stub_status,
+    .consumer_receive_batch_async = receive_async,
+    .batch_commit_async = mqb_stub_commit_async,
+};
+
+const MqbPluginVTable *mq_bridge_plugin_v1(void) { return &table; }
+"#;
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unsupported_async_commit_falls_back_to_the_blocking_one() {
+    use mq_bridge::traits::MessageDisposition;
+
+    let source = std::env::temp_dir().join(format!("mqb-async-source-{}.c", std::process::id()));
+    std::fs::write(&source, ASYNC_SOURCE).expect("write the C source");
+    let library = build_c_plugin("async_source", &[source.to_str().unwrap()]);
+    load_endpoint_plugin(&library).expect("load the C plugin");
+    let factory = get_endpoint_factory("async_source").expect("registered");
+    assert!(
+        factory.acknowledges(&json!({})),
+        "MQB_DEFAULT_FACTORY reports the schema default"
+    );
+
+    let mut consumer = factory
+        .create_consumer("async_source", &json!({}))
+        .await
+        .expect("open the consumer");
+    for disposition in [MessageDisposition::Ack, MessageDisposition::Nack] {
+        let batch = consumer.receive_batch(1).await.expect("receive");
+        assert_eq!(batch.messages[0].get_payload_str(), "hi");
+        (batch.commit)(vec![disposition]).await.expect("commit");
+    }
+
+    let (commits, last) = unsafe {
+        let library = libloading::Library::new(&library).expect("open the library");
+        let commits = library
+            .get::<unsafe extern "C" fn() -> usize>(b"async_source_blocking_commits\0")
+            .unwrap();
+        let last = library
+            .get::<unsafe extern "C" fn() -> u8>(b"async_source_last_disposition\0")
+            .unwrap();
+        (commits(), last())
+    };
+    assert_eq!(
+        commits, 2,
+        "each batch committed through the blocking entry"
+    );
+    assert_eq!(last, mq_bridge::support::plugin_abi::MQB_DISPOSITION_NACK);
+}

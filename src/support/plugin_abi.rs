@@ -620,7 +620,8 @@ pub struct MqbPluginVTable {
     /// see [`MqbCompletion`]. Read through `async_hooks`.
     pub consumer_receive_batch_async: MqbReceiveBatchAsync,
     /// Non-blocking [`batch_commit_replies`](MqbPluginVTable::batch_commit_replies).
-    /// The inputs are copied before it returns; the handle is consumed either way.
+    /// The inputs are copied before it returns. The handle is consumed unless it
+    /// returns [`MQB_ERR_UNSUPPORTED`], which falls back to the blocking commit.
     pub batch_commit_async: MqbBatchCommitAsync,
     /// Non-blocking [`publisher_send_batch_responses`](MqbPluginVTable::publisher_send_batch_responses).
     /// `messages` is copied before it returns.

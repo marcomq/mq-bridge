@@ -25,7 +25,9 @@
 
 #include "mq_bridge_plugin.h"
 
-/* The host's log/metric services, set by MQB_DEFAULT_FACTORY's plugin_init. */
+/* The host's log/metric services, set by MQB_DEFAULT_FACTORY's plugin_init. Static, so
+ * each .c file has its own copy: mqb_log works only in the file holding the table, so
+ * call it from there or pass the host to other files explicitly. */
 static const MqbHostVTable *mqb_host;
 static char mqb_token;
 
@@ -73,7 +75,8 @@ static inline MqbStatus mqb_stub_config_schema(MqbFactoryHandle factory, uint32_
 }
 static inline MqbStatus mqb_stub_delivery(MqbFactoryHandle factory, MqbSlice config_json,
                                           uint8_t *out_flags, MqbBuffer *err) {
-    *out_flags = 0;
+    /* The schema defaults: acknowledges, not an idempotent sink. */
+    *out_flags = MQB_DELIVERY_ACKNOWLEDGES;
     return MQB_OK;
 }
 static inline MqbStatus mqb_stub_middleware_create(MqbFactoryHandle factory,
@@ -171,7 +174,7 @@ static inline MqbStatus mqb_stub_middleware_apply(MqbMiddlewareHandle middleware
     .name = {(const uint8_t *)(name_), sizeof(name_) - 1},                                  \
     .version = {(const uint8_t *)(version_), sizeof(version_) - 1}
 
-/* A stateless factory with no config schema and no delivery guarantees. */
+/* A stateless factory with no config schema and the default delivery flags. */
 #define MQB_DEFAULT_FACTORY                                                                 \
     .factory_create = mqb_stub_factory_create, .factory_free = mqb_stub_free,               \
     .buffer_free = mqb_stub_buffer_free, .factory_config_schema = mqb_stub_config_schema,   \

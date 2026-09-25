@@ -335,7 +335,7 @@ zen = ["dep:zen-expression", "dep:rust_decimal"]
 metrics = ["dep:metrics"]
 # Load endpoints from native plugin libraries at runtime (`mq_bridge::plugin`).
 # The endpoint itself lives in its own crate and package; see docs/PLUGINS.md.
-plugin = ["dep:libloading", "dep:object"]
+plugin = ["dep:libloading", "dep:object", "dep:libc"]
 # Author an endpoint plugin: the export macro, the FFI adapters and the
 # conformance suite (`mq_bridge::plugin::sdk` / `::conformance`). Endpoint
 # crates enable this; hosts only need `plugin`.
@@ -464,6 +464,10 @@ required-features = ["zeromq", "zeromq-omq"]
 [[test]]
 name = "integration_test"
 required-features = ["test-utils"]
+
+[target.'cfg(unix)'.dependencies]
+# The effective uid for the plugin discovery trust check (`plugin` feature).
+libc = { version = "0.2", optional = true }
 
 [target.'cfg(windows)'.dependencies.rdkafka]
 version = "0.39"
