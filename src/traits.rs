@@ -192,7 +192,8 @@ pub type BatchCommitFunc = Box<
 >;
 
 /// Status information about an endpoint (Consumer or Publisher).
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct EndpointStatus {
     pub healthy: bool,
     pub target: String,
@@ -647,7 +648,7 @@ pub trait CustomEndpointFactory: Send + Sync + std::fmt::Debug {
     }
 }
 
-fn schema_flag(schema: Option<serde_json::Value>, key: &str) -> Option<bool> {
+pub(crate) fn schema_flag(schema: Option<serde_json::Value>, key: &str) -> Option<bool> {
     schema?.get(key)?.as_bool()
 }
 

@@ -18,6 +18,9 @@
 //!     panic_on_receive: false  # exercises the SDK's panic containment
 //!     commit_requires_order: true
 //!     requires_ordered_publish: false
+//!     respond: false           # answer each published message with `re:<payload>`
+//!     idempotent: false        # report the publisher as an idempotent sink
+//!     acknowledges: true       # report the consumer as acknowledging
 //! ```
 //!
 //! The same plugin also exports a middleware under the name `fixture`:
@@ -44,15 +47,20 @@ use anyhow::{anyhow, Context};
 use async_trait::async_trait;
 use mq_bridge::errors::{ConsumerError, PublisherError};
 use mq_bridge::traits::{
-    BatchCommitFunc, CustomEndpointFactory, MessageConsumer, MessageDisposition, MessagePublisher,
+    BatchCommitFunc, CustomEndpointFactory, EndpointStatus, MessageConsumer, MessageDisposition,
+    MessagePublisher,
 };
 use mq_bridge::{CanonicalMessage, ReceivedBatch, SentBatch};
 use serde::Deserialize;
 
-mq_bridge::export_endpoint_plugin! {
-    name: "fixture",
-    factory: FixtureFactory,
-    middleware: FixtureMiddlewareFactory,
+mq_bridge::export_endpoint_plugins! {
+    { name: "fixture", factory: FixtureFactory, middleware: FixtureMiddlewareFactory },
+    // A second plugin in the same library, sharing the fixture's queues.
+    {
+        name: "fixture-sink",
+        factory: FixtureFactory,
+        capabilities: mq_bridge::plugin::sdk::CAPABILITIES_OUTPUT_ONLY,
+    },
 }
 
 /// Injected failure for the input side.
@@ -99,6 +107,14 @@ pub struct FixtureConfig {
     /// ordered publishing has to say so and cannot pass by accident.
     #[serde(default)]
     pub requires_ordered_publish: bool,
+    /// Returns a response for every published message, for request/reply.
+    #[serde(default)]
+    pub respond: bool,
+    /// Only reported through the delivery flags; the queue itself never dedups.
+    #[serde(default)]
+    pub idempotent: bool,
+    #[serde(default = "default_true")]
+    pub acknowledges: bool,
 }
 
 fn default_true() -> bool {
@@ -131,7 +147,8 @@ pub fn queue_depth(name: &str) -> usize {
 
 /// Queue that records each committed message, so a test on the *other* side of
 /// the ABI can observe when acknowledgement actually happened. Every commit
-/// appends the message with a `disposition` of `ack` or `nack`.
+/// appends the message with a `disposition` of `ack`, `nack` or `reply`; a
+/// reply's payload is recorded under `reply`.
 pub fn commit_log_queue(name: &str) -> String {
     format!("{name}#committed")
 }
@@ -179,6 +196,9 @@ fn fixture_config_schema() -> serde_json::Value {
             "panic_on_receive": { "type": "boolean", "default": false },
             "commit_requires_order": { "type": "boolean", "default": true },
             "requires_ordered_publish": { "type": "boolean", "default": false },
+            "respond": { "type": "boolean", "default": false },
+            "idempotent": { "type": "boolean", "default": false },
+            "acknowledges": { "type": "boolean", "default": true },
         },
     })
 }
@@ -187,6 +207,14 @@ fn fixture_config_schema() -> serde_json::Value {
 impl CustomEndpointFactory for FixtureFactory {
     fn config_schema(&self) -> Option<serde_json::Value> {
         Some(fixture_config_schema())
+    }
+
+    fn idempotent_sink(&self, config: &serde_json::Value) -> bool {
+        FixtureConfig::deserialize(config).is_ok_and(|config| config.idempotent)
+    }
+
+    fn acknowledges(&self, config: &serde_json::Value) -> bool {
+        FixtureConfig::deserialize(config).map_or(true, |config| config.acknowledges)
     }
 
     async fn create_consumer(
@@ -208,8 +236,10 @@ impl CustomEndpointFactory for FixtureFactory {
         config: &serde_json::Value,
     ) -> anyhow::Result<Box<dyn MessagePublisher>> {
         let (config, name) = resolve(route_name, config)?;
+        tracing::info!(queue = %name, "fixture opened a publisher");
         Ok(Box::new(FixturePublisher {
             queue: queue(&name),
+            name,
             config,
         }))
     }
@@ -305,10 +335,19 @@ impl MessageConsumer for FixtureConsumer {
                 for (message, disposition) in in_flight.into_iter().zip(dispositions).rev() {
                     let nacked = matches!(disposition, MessageDisposition::Nack);
                     let mut record = message.clone();
-                    record.metadata.insert(
-                        "disposition".to_string(),
-                        if nacked { "nack" } else { "ack" }.to_string(),
-                    );
+                    let label = match &disposition {
+                        MessageDisposition::Ack => "ack",
+                        MessageDisposition::Nack => "nack",
+                        MessageDisposition::Reply(reply) => {
+                            record
+                                .metadata
+                                .insert("reply".to_string(), reply.get_payload_str().into_owned());
+                            "reply"
+                        }
+                    };
+                    record
+                        .metadata
+                        .insert("disposition".to_string(), label.to_string());
                     log.ready.push_back(record);
                     if nacked {
                         queue.ready.push_front(message);
@@ -324,6 +363,10 @@ impl MessageConsumer for FixtureConsumer {
         self.config.commit_requires_order
     }
 
+    async fn status(&self) -> EndpointStatus {
+        queue_status(&self.name)
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -331,10 +374,36 @@ impl MessageConsumer for FixtureConsumer {
 
 struct FixturePublisher {
     queue: SharedQueue,
+    name: String,
     config: FixtureConfig,
 }
 
+fn queue_status(name: &str) -> EndpointStatus {
+    EndpointStatus {
+        target: name.to_string(),
+        pending: Some(queue_depth(name)),
+        details: serde_json::json!({ "fixture": true }),
+        ..Default::default()
+    }
+}
+
+/// The response to one published message, when `respond` is set.
+fn response_to(message: &CanonicalMessage) -> CanonicalMessage {
+    let mut response = CanonicalMessage::from(format!("re:{}", message.get_payload_str()));
+    response.metadata.insert(
+        "request_id".to_string(),
+        format!("{:x}", message.message_id),
+    );
+    response
+}
+
 impl FixturePublisher {
+    fn responses(&self, delivered: &[CanonicalMessage]) -> Option<Vec<CanonicalMessage>> {
+        self.config
+            .respond
+            .then(|| delivered.iter().map(response_to).collect())
+    }
+
     /// Publishes everything but the indices in `fail_send_at`, which come back
     /// as failures — a batch that half landed.
     fn publish_all_but_failed(&self, messages: Vec<CanonicalMessage>) -> SentBatch {
@@ -352,15 +421,13 @@ impl FixturePublisher {
                 delivered.push(message);
             }
         }
+        let responses = self.responses(&delivered);
         self.queue
             .lock()
             .expect("fixture queue poisoned")
             .ready
             .extend(delivered);
-        SentBatch::Partial {
-            responses: None,
-            failed,
-        }
+        SentBatch::Partial { responses, failed }
     }
 }
 
@@ -390,9 +457,22 @@ impl MessagePublisher for FixturePublisher {
                 )))
             }
         }
+        let responses = self.responses(&messages);
+        metrics::counter!("fixture_published_total", "queue" => self.name.clone())
+            .increment(messages.len() as u64);
         let mut queue = self.queue.lock().expect("fixture queue poisoned");
         queue.ready.extend(messages);
-        Ok(SentBatch::Ack)
+        Ok(match responses {
+            Some(responses) => SentBatch::Partial {
+                responses: Some(responses),
+                failed: Vec::new(),
+            },
+            None => SentBatch::Ack,
+        })
+    }
+
+    async fn status(&self) -> EndpointStatus {
+        queue_status(&self.name)
     }
 
     fn as_any(&self) -> &dyn Any {

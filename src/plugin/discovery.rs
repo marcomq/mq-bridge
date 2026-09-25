@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context};
 
-use super::{load_endpoint_plugin, PluginInfo};
+use super::{load_endpoint_plugins, PluginInfo};
 
 /// Set to `0`, `false`, `off` or `no` to resolve `custom` endpoints only from
 /// factories the host registered or a config listed by path.
@@ -167,20 +167,19 @@ pub fn discover_endpoint_plugin_in(
         if !candidate.is_file() {
             continue;
         }
-        let info = load_endpoint_plugin(&candidate)
+        let infos = load_endpoint_plugins(&candidate)
             .with_context(|| format!("endpoint `{name}` resolved to {}", candidate.display()))?;
         // The file name is a convention the library itself never sees, so a
         // mismatch is possible. It stays loaded, because unloading is not safe.
-        if info.name != name {
+        let Some(info) = infos.iter().find(|info| info.name == name).cloned() else {
+            let first = &infos[0].name;
             return Err(anyhow!(
-                "{} is named for endpoint `{name}` but provides `{}`; it stays loaded for \
-                 the life of the process. Rename the file to {} or ask for `{}`.",
+                "{} is named for endpoint `{name}` but provides `{first}`; it stays loaded for \
+                 the life of the process. Rename the file to {} or ask for `{first}`.",
                 candidate.display(),
-                info.name,
-                library_file_name(&info.name),
-                info.name,
+                library_file_name(first),
             ));
-        }
+        };
         if !(info.supports_consumer || info.supports_publisher) {
             return Err(anyhow!(
                 "{} provides the `{name}` middleware but no endpoint",

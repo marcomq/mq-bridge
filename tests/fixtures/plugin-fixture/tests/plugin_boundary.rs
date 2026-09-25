@@ -518,6 +518,136 @@ async fn partial_publishes_agree_linked_and_loaded() {
     assert_eq!(direct, loaded);
 }
 
+/// Response payloads and failed payloads of one publish.
+async fn publish_with_responses(
+    factory: &dyn CustomEndpointFactory,
+    config: &serde_json::Value,
+    payloads: &[&str],
+) -> (Vec<String>, Vec<String>) {
+    let publisher = factory
+        .create_publisher("responses", config)
+        .await
+        .expect("create publisher");
+    let messages = payloads
+        .iter()
+        .map(|p| CanonicalMessage::from(*p))
+        .collect();
+    let sent = publisher.send_batch(messages).await.expect("send batch");
+    let SentBatch::Partial { responses, failed } = sent else {
+        panic!("expected responses, got {sent:?}");
+    };
+    let text = |message: &CanonicalMessage| message.get_payload_str().into_owned();
+    (
+        responses.unwrap_or_default().iter().map(text).collect(),
+        failed.iter().map(|(message, _)| text(message)).collect(),
+    )
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn publish_responses_survive_the_abi() {
+    let config = json!({ "queue": "responses", "respond": true });
+    let direct = publish_with_responses(&FixtureFactory, &config, &["a", "b"]).await;
+    let loaded = publish_with_responses(&*plugin_factory(), &config, &["a", "b"]).await;
+    assert_eq!(direct, (vec!["re:a".into(), "re:b".into()], vec![]));
+    assert_eq!(direct, loaded);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn responses_and_failures_cross_the_abi_together() {
+    let config = json!({ "queue": "responses-partial", "respond": true, "fail_send_at": [1] });
+    let direct = publish_with_responses(&FixtureFactory, &config, &["a", "b", "c"]).await;
+    let loaded = publish_with_responses(&*plugin_factory(), &config, &["a", "b", "c"]).await;
+    assert_eq!(
+        direct,
+        (vec!["re:a".into(), "re:c".into()], vec!["b".into()])
+    );
+    assert_eq!(direct, loaded);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reply_disposition_reaches_the_plugin() {
+    let factory = plugin_factory();
+    publish(factory.as_ref(), "reply-commit", &["ask", "plain"]).await;
+
+    let mut consumer = factory
+        .create_consumer("reply", &json!({ "queue": "reply-commit" }))
+        .await
+        .expect("create consumer");
+    let batch = receive_one_batch(&mut *consumer, Duration::from_secs(5)).await;
+    assert_eq!(batch.messages.len(), 2);
+    (batch.commit)(vec![
+        MessageDisposition::Reply(CanonicalMessage::from("answer")),
+        MessageDisposition::Ack,
+    ])
+    .await
+    .expect("commit");
+
+    let mut commits = factory
+        .create_consumer("log", &json!({ "queue": "reply-commit#committed" }))
+        .await
+        .expect("create commit-log consumer");
+    let logged = receive_at_least(&mut *commits, 2, Duration::from_secs(5)).await;
+    let field = |payload: &str, key: &str| {
+        logged
+            .iter()
+            .find(|message| message.get_payload_str() == payload)
+            .and_then(|message| message.metadata.get(key).cloned())
+    };
+    assert_eq!(field("ask", "disposition").as_deref(), Some("reply"));
+    assert_eq!(field("ask", "reply").as_deref(), Some("answer"));
+    assert_eq!(field("plain", "disposition").as_deref(), Some("ack"));
+    assert_eq!(field("plain", "reply"), None);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn every_plugin_of_a_library_is_registered() {
+    plugin_factory();
+    let infos = mq_bridge::plugin::load_endpoint_plugins(library("mq-bridge-plugin-fixture"))
+        .expect("loading again returns the original registration");
+    let names: Vec<_> = infos.iter().map(|info| info.name.as_str()).collect();
+    assert_eq!(names, ["fixture", "fixture-sink"]);
+    assert!(infos[1].supports_publisher && !infos[1].supports_consumer);
+    assert!(infos[0].supports_middleware && !infos[1].supports_middleware);
+
+    let sink = mq_bridge::extensions::get_endpoint_factory("fixture-sink")
+        .expect("the second plugin is registered too");
+    publish(&*sink, "second-plugin", &["one"]).await;
+    let mut consumer = plugin_factory()
+        .create_consumer("test", &json!({ "queue": "second-plugin" }))
+        .await
+        .expect("create consumer");
+    let received = receive_at_least(&mut *consumer, 1, Duration::from_secs(5)).await;
+    assert_eq!(received[0].get_payload_str(), "one");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn endpoint_status_survives_the_abi() {
+    let config = json!({ "queue": "status" });
+    async fn statuses(
+        factory: &dyn CustomEndpointFactory,
+        config: &serde_json::Value,
+    ) -> (serde_json::Value, serde_json::Value) {
+        let publisher = factory
+            .create_publisher("status", config)
+            .await
+            .expect("create publisher");
+        let consumer = factory
+            .create_consumer("status", config)
+            .await
+            .expect("create consumer");
+        (
+            serde_json::to_value(publisher.status().await).unwrap(),
+            serde_json::to_value(consumer.status().await).unwrap(),
+        )
+    }
+
+    let direct = statuses(&FixtureFactory, &config).await;
+    let loaded = statuses(&*plugin_factory(), &config).await;
+    assert_eq!(direct.0["target"], "status");
+    assert_eq!(direct.0["details"], json!({ "fixture": true }));
+    assert_eq!(direct, loaded);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_panic_inside_the_plugin_becomes_an_error() {
     let factory = plugin_factory();
@@ -623,6 +753,29 @@ fn the_configuration_schema_is_the_same_linked_and_loaded() {
         .unwrap()
     );
     assert_eq!(loaded["properties"]["queue"]["x-mqb-uri"], json!("path"));
+}
+
+/// ABI 1.2 asks the plugin per config, so a guarantee can depend on a field.
+#[test]
+fn delivery_guarantees_follow_the_config_across_the_boundary() {
+    let loaded = plugin_factory();
+    for config in [
+        json!({ "queue": "delivery" }),
+        json!({ "queue": "delivery", "idempotent": true, "acknowledges": false }),
+    ] {
+        assert_eq!(
+            loaded.idempotent_sink(&config),
+            FixtureFactory.idempotent_sink(&config),
+            "{config}"
+        );
+        assert_eq!(
+            loaded.acknowledges(&config),
+            FixtureFactory.acknowledges(&config),
+            "{config}"
+        );
+    }
+    assert!(loaded.idempotent_sink(&json!({ "idempotent": true })));
+    assert!(!loaded.acknowledges(&json!({ "acknowledges": false })));
 }
 
 /// What the schema buys: the fixture's config has no `url` field at all and

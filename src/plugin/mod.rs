@@ -45,10 +45,14 @@
 //! lets a host render a form for it and turn a URI into typed configuration.
 //! See [`crate::support::config_schema`].
 
+mod completion;
 #[cfg(feature = "plugin-sdk")]
 pub mod conformance;
 pub mod discovery;
 mod endpoint;
+#[cfg(feature = "plugin-sdk")]
+mod forward;
+mod host;
 mod message;
 mod middleware;
 #[cfg(feature = "plugin-sdk")]
@@ -61,14 +65,15 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::support::plugin_abi::{
-    check_compatibility, MqbBuffer, MqbFactoryHandle, MqbPluginEntry, MqbPluginVTable, MQB_OK,
-    MQB_PLUGIN_ENTRY_SYMBOL, MQB_SCHEMA_ENDPOINT, MQB_SCHEMA_MIDDLEWARE,
+    check_compatibility, MqbBuffer, MqbFactoryHandle, MqbPluginEntry, MqbPluginListEntry,
+    MqbPluginVTable, MQB_OK, MQB_PLUGIN_ENTRY_SYMBOL, MQB_PLUGIN_LIST_SYMBOL, MQB_SCHEMA_ENDPOINT,
+    MQB_SCHEMA_MIDDLEWARE,
 };
 use anyhow::{anyhow, Context};
 
 use crate::extensions::{
     get_endpoint_factory, get_middleware_factory, register_endpoint_factory,
-    register_middleware_factory, unregister_endpoint_factory,
+    register_middleware_factory, unregister_endpoint_factory, unregister_middleware_factory,
 };
 
 pub use crate::support::config_schema::{
@@ -79,6 +84,7 @@ pub use discovery::{
     plugin_search_path, search_path_hint,
 };
 pub use endpoint::PluginEndpointFactory;
+pub use host::PLUGIN_LOG_TARGET;
 pub use middleware::PluginMiddlewareFactory;
 
 /// What a successfully loaded plugin reported about itself.
@@ -134,7 +140,7 @@ impl PluginInfo {
 /// library nor the factory can be dropped while an endpoint still points at it.
 pub(crate) struct LoadedPlugin {
     /// Kept only to keep the library mapped; every code pointer below lives in it.
-    _library: libloading::Library,
+    _library: Arc<libloading::Library>,
     table: *const MqbPluginVTable,
     factory: MqbFactoryHandle,
     info: PluginInfo,
@@ -194,8 +200,8 @@ impl LoadedPlugin {
     }
 }
 
-fn loaded_plugins() -> &'static Mutex<HashMap<PathBuf, Arc<LoadedPlugin>>> {
-    static LOADED: OnceLock<Mutex<HashMap<PathBuf, Arc<LoadedPlugin>>>> = OnceLock::new();
+fn loaded_plugins() -> &'static Mutex<HashMap<PathBuf, Vec<Arc<LoadedPlugin>>>> {
+    static LOADED: OnceLock<Mutex<HashMap<PathBuf, Vec<Arc<LoadedPlugin>>>>> = OnceLock::new();
     LOADED.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -205,10 +211,21 @@ fn loaded_plugins() -> &'static Mutex<HashMap<PathBuf, Arc<LoadedPlugin>>> {
 /// same file twice is a no-op that returns the original registration, so
 /// several components can each ensure their endpoint is present.
 ///
+/// A library that exports several plugins has all of them registered; this
+/// returns the first. See [`load_endpoint_plugins`] for the whole list.
+///
 /// Fails if the file cannot be loaded, does not export the discovery symbol,
 /// was built against an incompatible ABI major version, or provides an endpoint
 /// name that a different factory already occupies.
 pub fn load_endpoint_plugin(path: impl AsRef<Path>) -> anyhow::Result<PluginInfo> {
+    let mut infos = load_endpoint_plugins(path)?;
+    Ok(infos.swap_remove(0))
+}
+
+/// Loads a native plugin library and registers every plugin it exports.
+///
+/// All or nothing: if one of them cannot be registered, none is.
+pub fn load_endpoint_plugins(path: impl AsRef<Path>) -> anyhow::Result<Vec<PluginInfo>> {
     let path = path.as_ref();
     let resolved = std::fs::canonicalize(path)
         .with_context(|| format!("plugin library not found: {}", path.display()))?;
@@ -217,78 +234,114 @@ pub fn load_endpoint_plugin(path: impl AsRef<Path>) -> anyhow::Result<PluginInfo
         .lock()
         .map_err(|_| anyhow!("plugin registry lock poisoned"))?;
     if let Some(existing) = loaded.get(&resolved) {
-        return Ok(existing.info.clone());
+        return Ok(existing.iter().map(|p| p.info.clone()).collect());
     }
 
-    let plugin = Arc::new(open_plugin(&resolved)?);
-    let info = plugin.info.clone();
-    // Nothing to register: returning here drops `plugin`, which frees the
-    // factory. Accepting it would leave a library mapped that no route can use.
-    if !(info.supports_consumer || info.supports_publisher || info.supports_middleware) {
-        return Err(anyhow!(
-            "plugin {} declares no capabilities: it provides neither an endpoint nor a middleware",
-            resolved.display()
-        ));
-    }
-    // A name already taken by a different factory is a configuration mistake:
-    // silently replacing it would reroute traffic to the wrong place.
-    let taken = (info.supports_consumer || info.supports_publisher)
-        && get_endpoint_factory(plugin.name()).is_some();
-    let taken_middleware =
-        info.supports_middleware && get_middleware_factory(plugin.name()).is_some();
-    if taken || taken_middleware {
-        return Err(anyhow!(
-            "`{}` from {} is already registered by another factory; \
-             unload it or rename the plugin's endpoint",
-            plugin.name(),
-            resolved.display()
-        ));
+    // Returning an error drops `plugins`, which frees their factories.
+    let plugins: Vec<Arc<LoadedPlugin>> =
+        open_plugins(&resolved)?.into_iter().map(Arc::new).collect();
+    let mut endpoints = std::collections::HashSet::new();
+    let mut middlewares = std::collections::HashSet::new();
+    for plugin in &plugins {
+        let info = &plugin.info;
+        let endpoint = info.supports_consumer || info.supports_publisher;
+        if !(endpoint || info.supports_middleware) {
+            return Err(anyhow!(
+                "plugin `{}` in {} declares no capabilities: it provides neither an endpoint \
+                 nor a middleware",
+                info.name,
+                resolved.display()
+            ));
+        }
+        // A name already taken by a different factory is a configuration mistake:
+        // silently replacing it would reroute traffic to the wrong place.
+        let taken = endpoint
+            && (get_endpoint_factory(&info.name).is_some() || !endpoints.insert(&info.name));
+        let taken_middleware = info.supports_middleware
+            && (get_middleware_factory(&info.name).is_some() || !middlewares.insert(&info.name));
+        if taken || taken_middleware {
+            return Err(anyhow!(
+                "`{}` from {} is already registered by another factory; \
+                 unload it or rename the plugin's endpoint",
+                info.name,
+                resolved.display()
+            ));
+        }
     }
 
-    if info.supports_consumer || info.supports_publisher {
+    for (index, plugin) in plugins.iter().enumerate() {
+        if let Err(error) = register_plugin(plugin) {
+            for registered in &plugins[..index] {
+                unregister_plugin(&registered.info);
+            }
+            return Err(error);
+        }
+    }
+    let infos: Vec<PluginInfo> = plugins.iter().map(|p| p.info.clone()).collect();
+    loaded.insert(resolved, plugins);
+    for info in &infos {
+        tracing::info!(
+            name = %info.name,
+            version = %info.version,
+            endpoint = info.supports_consumer || info.supports_publisher,
+            middleware = info.supports_middleware,
+            path = %info.path.display(),
+            "loaded plugin",
+        );
+    }
+    Ok(infos)
+}
+
+fn register_plugin(plugin: &Arc<LoadedPlugin>) -> anyhow::Result<()> {
+    let info = &plugin.info;
+    let endpoint = info.supports_consumer || info.supports_publisher;
+    if endpoint {
         register_endpoint_factory(
             plugin.name(),
-            Arc::new(PluginEndpointFactory::new(Arc::clone(&plugin))),
+            Arc::new(PluginEndpointFactory::new(Arc::clone(plugin))),
         )?;
     }
     if info.supports_middleware {
         if let Err(error) = register_middleware_factory(
             plugin.name(),
-            Arc::new(PluginMiddlewareFactory::new(Arc::clone(&plugin))),
+            Arc::new(PluginMiddlewareFactory::new(Arc::clone(plugin))),
         ) {
-            if info.supports_consumer || info.supports_publisher {
+            if endpoint {
                 unregister_endpoint_factory(plugin.name());
             }
             return Err(error);
         }
     }
-    loaded.insert(resolved, plugin);
-    tracing::info!(
-        name = %info.name,
-        version = %info.version,
-        endpoint = info.supports_consumer || info.supports_publisher,
-        middleware = info.supports_middleware,
-        path = %info.path.display(),
-        "loaded plugin",
-    );
-    Ok(info)
+    Ok(())
+}
+
+fn unregister_plugin(info: &PluginInfo) {
+    if info.supports_consumer || info.supports_publisher {
+        unregister_endpoint_factory(&info.name);
+    }
+    if info.supports_middleware {
+        unregister_middleware_factory(&info.name);
+    }
 }
 
 /// Endpoint names currently provided by loaded plugins.
 pub fn loaded_endpoint_plugins() -> Vec<PluginInfo> {
     loaded_plugins()
         .lock()
-        .map(|loaded| loaded.values().map(|p| p.info.clone()).collect())
+        .map(|loaded| loaded.values().flatten().map(|p| p.info.clone()).collect())
         .unwrap_or_default()
 }
 
-fn open_plugin(path: &Path) -> anyhow::Result<LoadedPlugin> {
+/// More than any real library exports; stops a list that never ends in null.
+const MAX_PLUGINS_PER_LIBRARY: usize = 256;
+
+fn open_plugins(path: &Path) -> anyhow::Result<Vec<LoadedPlugin>> {
     // Safety: dlopen runs the library's initialisers — inherently trusting the
     // file, as documented above.
     let library = unsafe { libloading::Library::new(path) }
         .with_context(|| format!("failed to load plugin library {}", path.display()))?;
 
-    let table = unsafe {
+    let first = unsafe {
         let entry: libloading::Symbol<MqbPluginEntry> =
             library.get(MQB_PLUGIN_ENTRY_SYMBOL).with_context(|| {
                 format!(
@@ -301,6 +354,35 @@ fn open_plugin(path: &Path) -> anyhow::Result<LoadedPlugin> {
             })?;
         entry()
     };
+    let mut tables = vec![first];
+    // Safety: the symbol's type is fixed by the ABI.
+    if let Ok(list) = unsafe { library.get::<MqbPluginListEntry>(MQB_PLUGIN_LIST_SYMBOL) } {
+        for index in 1..=MAX_PLUGINS_PER_LIBRARY {
+            let table = unsafe { list(index) };
+            if table.is_null() {
+                break;
+            }
+            if index == MAX_PLUGINS_PER_LIBRARY {
+                return Err(anyhow!(
+                    "plugin {} exports more than {MAX_PLUGINS_PER_LIBRARY} plugins",
+                    path.display()
+                ));
+            }
+            tables.push(table);
+        }
+    }
+    let library = Arc::new(library);
+    tables
+        .into_iter()
+        .map(|table| open_plugin(&library, table, path))
+        .collect()
+}
+
+fn open_plugin(
+    library: &Arc<libloading::Library>,
+    table: *const MqbPluginVTable,
+    path: &Path,
+) -> anyhow::Result<LoadedPlugin> {
     if table.is_null() {
         return Err(anyhow!(
             "plugin {} returned a null function table",
@@ -322,12 +404,16 @@ fn open_plugin(path: &Path) -> anyhow::Result<LoadedPlugin> {
     }
     let version = read_static_str(table_ref.version, "version").unwrap_or_default();
 
+    // Before the factory exists, so even its creation logs through the host.
+    if let Some(init) = table_ref.host_init_hook() {
+        unsafe { init(&host::HOST_VTABLE) };
+    }
     let mut factory = MqbFactoryHandle::NULL;
     let mut error = MqbBuffer::EMPTY;
     let status = unsafe { (table_ref.factory_create)(&mut factory, &mut error) };
 
     let mut plugin = LoadedPlugin {
-        _library: library,
+        _library: Arc::clone(library),
         table,
         factory,
         info: PluginInfo {

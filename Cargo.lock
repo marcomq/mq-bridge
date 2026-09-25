@@ -3706,10 +3706,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "metrics",
  "mq-bridge",
  "serde",
  "serde_json",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

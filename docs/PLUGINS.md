@@ -230,6 +230,21 @@ mq_bridge::export_endpoint_plugin! {
 }
 ```
 
+Since **ABI 1.2** one library can export several endpoints. Each entry takes
+the same arguments as `export_endpoint_plugin!`:
+
+```rust
+mq_bridge::export_endpoint_plugins! {
+    { name: "pulsar", factory: PulsarFactory },
+    { name: "pulsar-admin", factory: AdminFactory, capabilities: mq_bridge::plugin::sdk::CAPABILITIES_OUTPUT_ONLY },
+}
+```
+
+Loading the library registers all of them, or none if one name is taken.
+Discovery still goes by file name: install the library under each name a route
+may ask for first (a symlink will do), or load it explicitly. A 1.0/1.1 host
+sees only the first entry.
+
 ### Middleware
 
 A plugin can also provide a middleware. It never touches the endpoint it wraps —
@@ -434,8 +449,9 @@ common case and cross the plugin boundary unchanged:
 ```
 
 When the answer depends on the configuration — idempotent only with a key set —
-a directly linked factory overrides `CustomEndpointFactory::idempotent_sink` or
-`acknowledges` instead; both receive the endpoint's `config`. Claim idempotency
+override `CustomEndpointFactory::idempotent_sink` or `acknowledges` instead; both
+receive the endpoint's `config`. Since ABI 1.2 the host asks a loaded plugin the
+same way (`factory_delivery`); a 1.0/1.1 plugin is judged by its schema alone. Claim idempotency
 only for a write keyed on something replay-stable: the route trusts it.
 
 ### Ordered publishing
@@ -475,14 +491,47 @@ all-or-nothing send, where a partial failure is reported as the first failure's
 class and the whole batch — including the part that succeeded — is retried or
 dead-lettered.
 
+### Request/reply and status
+
+Since **ABI 1.2** request/reply works through a plugin in both directions:
+
+- **Publisher:** the responses your `send_batch` returns (`Sent::Response`,
+  `SentBatch::Partial { responses, .. }`) cross the boundary. The route matches
+  each one to its request by `message_id`, exactly as for a linked endpoint.
+  Failures and responses in the same batch both survive.
+- **Consumer:** a `MessageDisposition::Reply` reaches your batch's commit
+  together with the reply message, so a plugin source can answer the request it
+  received.
+
+`status()` crosses too: the host asks the plugin, and your endpoint's
+`EndpointStatus` is what a host shows. A consumer busy in `receive_batch`
+answers healthy with `details.state = "receiving"` rather than waiting for its
+next message.
+
+Receive, commit, send and flush no longer tie up a host thread either: the host
+starts the call and the plugin reports back through a completion callback when
+its runtime has finished. Before 1.2 each of those calls held a thread of the
+host's blocking pool for its whole duration.
+
+Your `tracing` events and `metrics` samples reach the host as well. On load the
+SDK installs a subscriber and a recorder inside the plugin that forward to the
+host's own. The host re-emits every plugin event under the target
+`mq_bridge::plugin` (`mq_bridge::plugin::PLUGIN_LOG_TARGET`), with your module
+path in the `module` field, so `RUST_LOG=mq_bridge::plugin=debug` filters them.
+Metrics keep their names and labels; forwarding them needs the `metrics` feature
+of `mq-bridge` in the plugin and in the host. A plugin that installs its own
+global subscriber or recorder first keeps it, and nothing is forwarded.
+
+The SDK wires all of this up; there is nothing new to implement. A plugin built
+against 1.0 or 1.1 publishes without responses, has a reply acknowledged like a
+plain ack, reports the default status, runs its calls on the blocking pool, and
+keeps its logs and metrics to itself.
+
 ### Limits of ABI v1
 
-- No per-message publish *responses*, so no request/reply through a plugin. A
-  `Partial`'s `responses` are dropped; only its failures cross.
-- `MessageDisposition::Reply` acknowledges the source message.
-- One plugin per shared library (the export macro defines the discovery symbol),
-  so two plugin crates cannot be statically linked into one binary. Gate the
-  macro behind a feature if that matters for your crate.
+- The export macro defines the discovery symbols, so a crate uses it once and
+  two plugin crates cannot be statically linked into one binary. Gate the macro
+  behind a feature if that matters for your crate.
 
 ### Testing it
 
@@ -595,6 +644,7 @@ Minor versions so far:
 | --- | --- |
 | 1.0 | The initial table. |
 | 1.1 | `publisher_requires_ordered_publish`, so a plugin sink can ask the route to keep its sends in source order; `publisher_send_batch_outcomes`, so a partly failed batch reports which messages failed; and `factory_config_schema`, so a plugin describes its configuration as a JSON Schema for a host to render and to map a URI onto. |
+| 1.2 | `publisher_send_batch_responses` and `responses_free`, so publish responses reach the route; `batch_commit_replies` with `MQB_DISPOSITION_REPLY`, so a plugin consumer receives the reply to send; `consumer_status` / `publisher_status`, so `status()` reports the plugin's own state; and `*_async` twins of receive, commit, send and flush that finish through an `MqbCompletion` callback instead of blocking a host thread; `plugin_init` hands the plugin an `MqbHostVTable`, through which its logs and metrics reach the host; the optional `mq_bridge_plugin_v1_at` symbol exports several tables from one library; `factory_delivery` answers `idempotent_sink` / `acknowledges` per config. |
 
 Publish the supported ABI range in your package metadata, and test each packaged
 plugin against the oldest and newest mq-bridge you claim to support.

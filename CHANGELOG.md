@@ -35,6 +35,18 @@ All notable changes to `mq-bridge`. Newest first.
 
 ### Added
 
+- **Plugin ABI 1.2: request/reply and status.** A plugin publisher's responses now reach the
+  route, so a plugin sink can answer a request. A plugin consumer receives
+  `MessageDisposition::Reply` together with the reply message instead of a plain ack.
+  `status()` of plugin endpoints reports what the plugin reports. Receive, commit, send and
+  flush complete through a callback instead of holding a host blocking thread per call.
+  Plugin `tracing` events and `metrics` samples are forwarded to the host (logs under the
+  target `mq_bridge::plugin`; metrics need the `metrics` feature on both sides).
+  One library can export several endpoints with `export_endpoint_plugins!`; they are
+  registered together (`plugin::load_endpoint_plugins`) or not at all.
+  A plugin's `idempotent_sink` / `acknowledges` overrides now count on the host too, so its
+  delivery guarantee can depend on the config.
+  Plugins built against 1.0/1.1 keep loading and behave as before.
 - **`DeliveryGuarantee` and `required_delivery`.** Each route's inferred guarantee —
   `at-most-once`, `at-least-once` or `effectively-once` — is logged at startup and available as
   `Route::delivery_guarantee()`. Setting `required_delivery` on a route fails it at startup when
