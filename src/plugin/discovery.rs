@@ -11,7 +11,7 @@
 //! is installed before any route asks calls [`discover_all_endpoint_plugins`].
 //!
 //! Loading a library runs its code, so a discovered one must pass
-//! [`check_trusted`] first. A library loaded by explicit path is the caller's choice
+//! `check_trusted` first. A library loaded by explicit path is the caller's choice
 //! and is not checked.
 
 use std::collections::HashSet;
@@ -211,7 +211,7 @@ pub fn discover_all_endpoint_plugins() -> Vec<PluginInfo> {
 /// The first directory wins for a file name, and a file whose endpoint is already
 /// registered — compiled in, or loaded before — is left alone. A file that does not
 /// export the plugin entry point, such as a plugin's own helper library, is never
-/// opened. One that fails [`check_trusted`] or fails to load is logged and skipped.
+/// opened. One that fails `check_trusted` or fails to load is logged and skipped.
 pub fn discover_all_endpoint_plugins_in(dirs: &[PathBuf]) -> Vec<PluginInfo> {
     let (prefix, suffix) = LIBRARY_AFFIXES;
     let mut seen = HashSet::new();
