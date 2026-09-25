@@ -45,7 +45,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;
-use mq_bridge::errors::{ConsumerError, PublisherError};
+use mq_bridge::errors::{ConsumerError, InvalidConfig, PublisherError};
 use mq_bridge::traits::{
     BatchCommitFunc, CustomEndpointFactory, EndpointStatus, MessageConsumer, MessageDisposition,
     MessagePublisher,
@@ -228,7 +228,7 @@ impl CustomEndpointFactory for FixtureFactory {
         route_name: &str,
         config: &serde_json::Value,
     ) -> anyhow::Result<Box<dyn MessageConsumer>> {
-        let (config, name) = resolve(route_name, config)?;
+        let (config, name) = resolve(route_name, config).map_err(InvalidConfig)?;
         Ok(Box::new(FixtureConsumer {
             queue: queue(&name),
             name,
@@ -241,7 +241,7 @@ impl CustomEndpointFactory for FixtureFactory {
         route_name: &str,
         config: &serde_json::Value,
     ) -> anyhow::Result<Box<dyn MessagePublisher>> {
-        let (config, name) = resolve(route_name, config)?;
+        let (config, name) = resolve(route_name, config).map_err(InvalidConfig)?;
         tracing::info!(queue = %name, "fixture opened a publisher");
         Ok(Box::new(FixturePublisher {
             queue: queue(&name),

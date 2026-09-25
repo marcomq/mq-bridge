@@ -250,6 +250,24 @@ Discovery still goes by file name: install the library under each name a route
 may ask for first (a symlink will do), or load it explicitly. A 1.0/1.1 host
 sees only the first entry.
 
+### Shared helpers
+
+Three things most endpoints need, so a plugin doesn't write them itself:
+
+- **`mq_bridge::errors::InvalidConfig`.** Return a config error wrapped in it from
+  `create_consumer` or `create_publisher`, and the route stops instead of
+  reconnecting forever: `config::resolve(value).map_err(InvalidConfig)?`. The
+  same wrapper works for both sides, linked directly or loaded as a plugin.
+- **`mq_bridge::support::stream_batch::next_batch`.** Collects one batch from a
+  client that hands out messages as a `Stream`. A live route waits for the first
+  message; a draining one (`exit_on_empty`) gets an empty batch from an idle
+  source after 250 ms, which is what ends the drain.
+- **`SentBatch::from_failures`.** `Ack` when nothing failed, otherwise a
+  `Partial` naming the failed messages.
+
+A batch's commit function gets exactly one disposition per message, so it needn't
+count them; the plugin host rejects any other count before calling it.
+
 ### Middleware
 
 A plugin can also provide a middleware. It never touches the endpoint it wraps —

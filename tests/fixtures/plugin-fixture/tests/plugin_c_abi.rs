@@ -223,12 +223,18 @@ async fn a_blocking_c_publisher_writes_through_the_host_fallback() {
     let written = std::fs::read_to_string(&path).unwrap();
     let _ = std::fs::remove_file(&path);
     assert_eq!(written, "a\nb\nc\n");
-    assert!(publisher.status().await.healthy, "unsupported status is the default");
+    assert!(
+        publisher.status().await.healthy,
+        "unsupported status is the default"
+    );
 
     let error = factory
         .create_publisher("ledger", &json!({}))
         .await
         .err()
         .expect("a config without a path is rejected");
-    assert!(format!("{error:#}").contains("config needs a \"path\""), "{error:#}");
+    assert!(
+        format!("{error:#}").contains("config needs a \"path\""),
+        "{error:#}"
+    );
 }

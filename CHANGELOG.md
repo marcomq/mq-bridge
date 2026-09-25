@@ -39,6 +39,11 @@ All notable changes to `mq-bridge`. Newest first.
 
 ### Added
 
+- **Helpers for endpoint and plugin authors.** `errors::InvalidConfig` marks a config error
+  as permanent on either side, so the route stops instead of reconnecting;
+  `support::stream_batch::next_batch` collects a batch from a message stream and ends a drain
+  on an idle source; `SentBatch::from_failures` builds `Ack` or `Partial` from a failure list.
+  The Pulsar, Meilisearch and connect plugins use them.
 - **C header for the plugin ABI.** `include/mq_bridge_plugin.h` lets a plugin be written in C
   or C++, e.g. to wrap an existing C library as a middleware; `mq_bridge_plugin_helpers.h`
   fills in the entries a plugin does not implement. `examples/c-plugin/` has a ~35-line

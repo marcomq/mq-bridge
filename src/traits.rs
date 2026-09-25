@@ -186,7 +186,8 @@ impl<T: AsyncHandler> Handler for SimpleHandler<T> {
 pub type CommitFunc =
     Box<dyn FnOnce(MessageDisposition) -> BoxFuture<'static, anyhow::Result<()>> + Send + 'static>;
 
-/// A closure for committing a batch of messages.
+/// A closure for committing a batch of messages. It gets one disposition per
+/// message of its batch, in order; the plugin host rejects any other count.
 pub type BatchCommitFunc = Box<
     dyn FnOnce(Vec<MessageDisposition>) -> BoxFuture<'static, anyhow::Result<()>> + Send + 'static,
 >;

@@ -1488,6 +1488,7 @@ impl Route {
                                     let is_permanent =
                                         e.downcast_ref::<ProcessingError>().is_some_and(|pe| matches!(pe, ProcessingError::NonRetryable(_)))
                                         || e.downcast_ref::<ConsumerError>().is_some_and(|ce| matches!(ce, ConsumerError::Permanent(_)))
+                                        || e.is::<crate::errors::InvalidConfig>()
                                         || is_end_of_stream;
 
                                     // EndOfStream is a clean terminal, not a failure, so

@@ -27,3 +27,4 @@ pub(crate) mod parquet;
 #[cfg(feature = "plugin")]
 pub mod plugin_abi;
 pub mod source_ranges;
+pub mod stream_batch;

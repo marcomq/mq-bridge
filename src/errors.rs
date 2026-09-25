@@ -67,10 +67,20 @@ pub enum ConsumerError {
     Permanent(#[source] anyhow::Error),
 }
 
+/// An endpoint configuration that cannot work as given. Return it from
+/// `create_consumer` or `create_publisher`, and the route stops instead of
+/// reconnecting: `config::resolve(value).map_err(InvalidConfig)?`.
+#[derive(Error, Debug)]
+#[error(transparent)]
+pub struct InvalidConfig(pub anyhow::Error);
+
 impl From<anyhow::Error> for ConsumerError {
     fn from(err: anyhow::Error) -> Self {
         // Preserve a classification the source already made — downgrading an existing
         // `Permanent` to `Connection` would make the route retry something that cannot heal.
+        if err.is::<InvalidConfig>() {
+            return ConsumerError::Permanent(err);
+        }
         match err.downcast::<ConsumerError>() {
             Ok(classified) => classified,
             // Otherwise a generic error is connection-level, and therefore retryable.
@@ -81,6 +91,9 @@ impl From<anyhow::Error> for ConsumerError {
 
 impl From<anyhow::Error> for ProcessingError {
     fn from(err: anyhow::Error) -> Self {
+        if err.is::<InvalidConfig>() {
+            return ProcessingError::NonRetryable(err);
+        }
         // Default to Retryable for generic errors. Callers should use
         // ProcessingError::NonRetryable directly for known permanent failures.
         ProcessingError::Retryable(err)
@@ -152,6 +165,21 @@ mod tests {
             "non-retryable error: error returned from database: column \"blob\" is of type bytea \
              but expression is of type text at line 586"
         );
+    }
+
+    #[test]
+    fn an_invalid_config_is_permanent_on_either_side_even_under_context() {
+        let invalid =
+            || anyhow::Error::new(InvalidConfig(anyhow::anyhow!("no url"))).context("route x");
+        assert!(matches!(
+            ConsumerError::from(invalid()),
+            ConsumerError::Permanent(_)
+        ));
+        assert!(matches!(
+            ProcessingError::from(invalid()),
+            ProcessingError::NonRetryable(_)
+        ));
+        assert_eq!(format!("{:#}", invalid()), "route x: no url");
     }
 
     #[test]
