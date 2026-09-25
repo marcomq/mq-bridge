@@ -1696,7 +1696,7 @@ where
 /// ```
 ///
 /// The macro defines the `mq_bridge_plugin_v1` symbol, so a crate may use it
-/// (or [`export_endpoint_plugins!`]) once — and two plugin crates cannot be
+/// (or [`export_endpoint_plugins!`](crate::export_endpoint_plugins)) once — and two plugin crates cannot be
 /// statically linked into the same binary. Gate the macro behind a feature if
 /// your crate is also linked directly alongside others.
 #[macro_export]
@@ -1707,7 +1707,7 @@ macro_rules! export_endpoint_plugin {
 }
 
 /// Exports several plugins from one library, each written as the arguments of
-/// [`export_endpoint_plugin!`]:
+/// [`export_endpoint_plugin!`](crate::export_endpoint_plugin):
 ///
 /// ```ignore
 /// mq_bridge::export_endpoint_plugins! {
