@@ -109,8 +109,12 @@ async function gotoView(page, hash) {
   await waitForShell(page);
 }
 
-/** The shell is up once the tab strip and a panel are on screen. */
+/**
+ * The tab strip mounts before bootstrap has loaded /config, so also wait for
+ * the ready marker; otherwise actions run against an empty config.
+ */
 async function waitForShell(page) {
+  await expect(page.locator("html[data-mqb-ready]")).toBeAttached();
   await expect(page.locator("#mainTabs")).toBeVisible();
   await expect(page.locator(".tab-content-panel.active")).toBeVisible();
 }
