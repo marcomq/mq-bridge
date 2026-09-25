@@ -344,6 +344,9 @@ fn open_plugins(path: &Path) -> anyhow::Result<Vec<LoadedPlugin>> {
     // file, as documented above.
     let library = unsafe { libloading::Library::new(path) }
         .with_context(|| format!("failed to load plugin library {}", path.display()))?;
+    let library = Arc::new(library);
+    // Never unmapped: its code may already be referenced (crash handlers, threads) if loading fails.
+    std::mem::forget(Arc::clone(&library));
 
     let first = unsafe {
         let entry: libloading::Symbol<MqbPluginEntry> =
@@ -376,7 +379,6 @@ fn open_plugins(path: &Path) -> anyhow::Result<Vec<LoadedPlugin>> {
             tables.push(table);
         }
     }
-    let library = Arc::new(library);
     tables
         .into_iter()
         .map(|table| open_plugin(&library, table, path))
