@@ -1097,20 +1097,28 @@ mod server {
         let drain = tokio::spawn(async move {
             let first = consumer.receive_batch(512).await.expect("first receive");
             let first_count = first.messages.len();
-            let second = tokio::time::timeout(Duration::from_secs(1), consumer.receive_batch(512))
-                .await
-                .expect("dispatch waited for the first batch to commit")
-                .expect("second receive");
-            let second_count = second.messages.len();
+            // A slow runner may deliver everything in the first batch; that proves it too.
+            let mut total = first_count;
+            if first_count < COUNT {
+                let second =
+                    tokio::time::timeout(Duration::from_secs(1), consumer.receive_batch(512))
+                        .await
+                        .expect("dispatch waited for the first batch to commit")
+                        .expect("second receive");
+                let second_count = second.messages.len();
+                total += second_count;
+                (first.commit)(vec![MessageDisposition::Ack; first_count])
+                    .await
+                    .expect("first commit");
+                (second.commit)(vec![MessageDisposition::Ack; second_count])
+                    .await
+                    .expect("second commit");
+            } else {
+                (first.commit)(vec![MessageDisposition::Ack; first_count])
+                    .await
+                    .expect("first commit");
+            }
 
-            (first.commit)(vec![MessageDisposition::Ack; first_count])
-                .await
-                .expect("first commit");
-            (second.commit)(vec![MessageDisposition::Ack; second_count])
-                .await
-                .expect("second commit");
-
-            let mut total = first_count + second_count;
             while total < COUNT {
                 let batch = consumer.receive_batch(512).await.expect("receive");
                 let n = batch.messages.len();
