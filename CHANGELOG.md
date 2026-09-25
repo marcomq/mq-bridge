@@ -107,6 +107,9 @@ All notable changes to `mq-bridge`. Newest first.
 
 ### Changed
 
+- A plugin endpoint that fails to start is now retried like a linked one, not stopped: only
+  an error wrapped in `InvalidConfig` (or a permanent error class) stops the route. A broker
+  that is down at startup used to stop a plugin route for good.
 - The startup inference no longer reports `effectively-once` for a sink keyed on `mqb.src.*`
   over an input that has no replay position.
 - `DeduplicationMiddleware` has a new `replay_response` field; code building it as a struct
