@@ -5621,14 +5621,7 @@ mod tests {
                     // Odd numbers succeed implicitly by not being in `failed`
                 }
 
-                if failed.is_empty() {
-                    Ok(SentBatch::Ack)
-                } else {
-                    Ok(SentBatch::Partial {
-                        responses: None,
-                        failed,
-                    })
-                }
+                Ok(SentBatch::from_failures(failed))
             }
             async fn send(
                 &self,

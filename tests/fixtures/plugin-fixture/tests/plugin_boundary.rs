@@ -485,6 +485,13 @@ async fn invalid_configuration_is_rejected_at_creation() {
         text.contains("invalid fixture endpoint configuration"),
         "{text}"
     );
+    assert!(
+        matches!(
+            error.downcast_ref::<ConsumerError>(),
+            Some(ConsumerError::Permanent(_))
+        ),
+        "a rejected config must stop the route: {text}"
+    );
 }
 
 #[test]

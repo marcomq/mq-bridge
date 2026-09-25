@@ -459,14 +459,7 @@ mod tests {
                 }
             }
             self.sent.lock().unwrap().extend(kept);
-            if failed.is_empty() {
-                Ok(SentBatch::Ack)
-            } else {
-                Ok(SentBatch::Partial {
-                    responses: None,
-                    failed,
-                })
-            }
+            Ok(SentBatch::from_failures(failed))
         }
 
         fn as_any(&self) -> &dyn Any {

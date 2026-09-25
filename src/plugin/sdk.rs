@@ -64,7 +64,7 @@ use futures::FutureExt;
 use tokio::runtime::Runtime;
 use tokio::sync::Mutex;
 
-use crate::errors::{ConsumerError, ProcessingError};
+use crate::errors::{ConsumerError, InvalidConfig, ProcessingError};
 use crate::plugin::message::{from_abi, AbiMessages};
 use crate::support::plugin_abi::{
     MqbBatchHandle, MqbBuffer, MqbCompletion, MqbConsumerHandle, MqbFactoryHandle, MqbFilterHandle,
@@ -424,6 +424,23 @@ fn processing_status(err: &ProcessingError) -> MqbStatus {
     }
 }
 
+/// Classifies a failed `create_consumer`/`create_publisher` the way a linked
+/// route would: only [`InvalidConfig`] or a permanent error class stops the
+/// route, anything else (a broker that is down) is reconnected.
+fn create_status(error: &anyhow::Error) -> MqbStatus {
+    if error.is::<InvalidConfig>() {
+        return MQB_ERR_INVALID_CONFIG;
+    }
+    match (
+        error.downcast_ref::<ConsumerError>(),
+        error.downcast_ref::<ProcessingError>(),
+    ) {
+        (Some(ConsumerError::Connection(_)), _) => MQB_ERR_CONNECTION,
+        (Some(_), _) | (_, Some(ProcessingError::NonRetryable(_))) => MQB_ERR_PERMANENT,
+        _ => MQB_ERR_CONNECTION,
+    }
+}
+
 // ------------------------------------------------------------------- factory
 
 /// Creates the factory. Generic so the export macro can name the author's type;
@@ -565,12 +582,10 @@ unsafe extern "C" fn consumer_create(
         let factory = Arc::clone(&state.factory);
         let runtime = Arc::clone(&state.runtime);
         let created = block_on(&runtime, async move {
-            // Creation and connection fail for different reasons, so they are
-            // reported separately: a bad config is never worth reconnecting.
             let consumer = factory
                 .create_consumer(&route, &config)
                 .await
-                .map_err(|error| (MQB_ERR_INVALID_CONFIG, error))?;
+                .map_err(|error| (create_status(&error), error))?;
             // The host route awaits this hook for endpoints it builds itself;
             // behind the ABI only the plugin can run it.
             if let Some(hook) = consumer.on_connect_hook() {
@@ -921,7 +936,7 @@ unsafe extern "C" fn publisher_create(
             let publisher = factory
                 .create_publisher(&route, &config)
                 .await
-                .map_err(|error| (MQB_ERR_INVALID_CONFIG, error))?;
+                .map_err(|error| (create_status(&error), error))?;
             if let Some(hook) = publisher.on_connect_hook() {
                 hook.await.map_err(|error| (MQB_ERR_CONNECTION, error))?;
             }
@@ -1822,6 +1837,24 @@ mod tests {
         let text = String::from_utf8_lossy(unsafe { slot.as_bytes() }).into_owned();
         assert!(text.contains("kaboom"), "{text}");
         unsafe { buffer_free(slot) };
+    }
+
+    #[test]
+    fn only_a_rejected_config_stops_a_route_at_creation() {
+        use anyhow::{anyhow, Context};
+        let rejected = Err::<(), _>(anyhow::Error::new(InvalidConfig(anyhow!("no url"))))
+            .context("route x")
+            .unwrap_err();
+        assert_eq!(create_status(&rejected), MQB_ERR_INVALID_CONFIG);
+        assert_eq!(
+            create_status(&anyhow::Error::new(ConsumerError::Permanent(anyhow!("x")))),
+            MQB_ERR_PERMANENT
+        );
+        assert_eq!(
+            create_status(&anyhow::Error::new(ConsumerError::Connection(anyhow!("x")))),
+            MQB_ERR_CONNECTION
+        );
+        assert_eq!(create_status(&anyhow!("broker down")), MQB_ERR_CONNECTION);
     }
 
     #[test]

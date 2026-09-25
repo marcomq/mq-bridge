@@ -477,16 +477,7 @@ impl MessagePublisher for MongoDbPublisher {
         // failure. Capped collections take unordered inserts too and still store
         // in $natural order, so `seq` and insertion order both survive.
         match self.collection.insert_many(docs).ordered(false).await {
-            Ok(_) => {
-                if failed_messages.is_empty() {
-                    Ok(SentBatch::Ack)
-                } else {
-                    Ok(SentBatch::Partial {
-                        responses: None,
-                        failed: failed_messages,
-                    })
-                }
-            }
+            Ok(_) => Ok(SentBatch::from_failures(failed_messages)),
             Err(e) => {
                 if let ErrorKind::InsertMany(ref err) = *e.kind {
                     let mut errors_by_index = HashMap::new();
