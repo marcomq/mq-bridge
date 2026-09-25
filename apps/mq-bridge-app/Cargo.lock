@@ -1458,6 +1458,7 @@ dependencies = [
  "cipher 0.5.2",
  "cpufeatures 0.3.1",
  "rand_core 0.10.1",
+ "zeroize",
 ]
 
 [[package]]
@@ -1470,6 +1471,7 @@ dependencies = [
  "chacha20",
  "cipher 0.5.2",
  "poly1305",
+ "zeroize",
 ]
 
 [[package]]
@@ -4663,6 +4665,7 @@ dependencies = [
  "uuid",
  "webpki-roots 1.0.9",
  "zen-expression",
+ "zeroize",
  "zeromq",
  "zstd",
 ]

@@ -444,4 +444,5 @@ export async function bootstrapApp() {
   runtimeStatusPoller.stop();
   runtimeStatusPoller.start();
   state.runtime_poll_timer = 1;
+  document.documentElement.dataset.mqbReady = "true";
 }
