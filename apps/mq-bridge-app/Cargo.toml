@@ -8,11 +8,11 @@ members = ["crates/core", "crates/cli", "crates/desktop"]
 resolver = "2"
 
 [workspace.package]
-version = "0.4.14"
+version = "0.4.15"
 
 [workspace.dependencies]
-mq-bridge = { version = "0.4.14", path = "../..", default-features = false }
-mq_bridge_app = { version = "0.4.14", path = "crates/core", package = "mq-bridge-app-core", default-features = false }
+mq-bridge = { version = "0.4.15", path = "../..", default-features = false }
+mq_bridge_app = { version = "0.4.15", path = "crates/core", package = "mq-bridge-app-core", default-features = false }
 mq-bridge-pulsar = { version = "0.1.4", default-features = false }
 # `default-features = false` drops its `plugin` feature: that export would collide
 # with the identical `mq_bridge_plugin_v1` symbol in mq-bridge-pulsar, as both link in.
