@@ -12,6 +12,8 @@ Two mq-bridge plugins written in C against
     into JSON. Invalid records are dropped and logged through the host.
   - as an **output**, `legacy_ledger.c` appends each message to a file. The
     library is not thread-safe, so the plugin locks around it.
+  - it registers a **crash handler** that adds a line to the host's crash dump
+    (see [docs/PLUGINS.md](../../docs/PLUGINS.md#when-it-crashes)).
 
   ```
   DE12345678000000012345EUR  ->  {"account":"DE12345678","amount_minor":12345,"currency":"EUR"}

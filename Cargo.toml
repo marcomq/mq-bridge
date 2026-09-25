@@ -200,8 +200,9 @@ arrow-schema = { version = "60", optional = true }
 base64 = { version = "0.23" }
 
 # AEAD ciphers for the `encryption` feature (payload middleware + at-rest file/object).
-chacha20poly1305 = { version = "0.11", optional = true }
-aes-gcm = { version = "0.11", optional = true }
+chacha20poly1305 = { version = "0.11", optional = true, features = ["zeroize"] }
+aes-gcm = { version = "0.11", optional = true, features = ["zeroize"] }
+zeroize = { version = "1.9", optional = true }
 
 # Expression VM for the `filter` feature. `regex-lite` keeps the regex engine
 # pure Rust; the default features pull a heavier one.
@@ -326,7 +327,7 @@ dedup = ["sled"]
 compression = ["dep:flate2", "dep:lz4_flex", "dep:zstd"]
 # AEAD payload encryption: the `encryption` middleware and the at-rest
 # `encryption` field on the file/object_store endpoints.
-encryption = ["dep:chacha20poly1305", "dep:aes-gcm"]
+encryption = ["dep:chacha20poly1305", "dep:aes-gcm", "dep:zeroize"]
 # Expression predicates: the `filter` middleware and the `switch` endpoint's
 # `when` cases. Kept out of `portable` because zen-expression pulls in psm,
 # whose build.rs assembles per-target stack-switching assembly.

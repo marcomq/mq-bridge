@@ -45,7 +45,7 @@ trailer = """
 #define MQB_VTABLE_SIZE_V1_0 (27 * sizeof(size_t))
 #define MQB_VTABLE_SIZE_V1_1 (MQB_VTABLE_SIZE_V1_0 + 3 * sizeof(size_t))
 #define MQB_VTABLE_SIZE_V1_2 (MQB_VTABLE_SIZE_V1_1 + 11 * sizeof(size_t))
-#define MQB_HOST_VTABLE_SIZE_V1_2 (4 * sizeof(size_t))
+#define MQB_HOST_VTABLE_SIZE_V1_2 (5 * sizeof(size_t))
 
 #if defined(_WIN32)
 #define MQB_PLUGIN_EXPORT __declspec(dllexport)

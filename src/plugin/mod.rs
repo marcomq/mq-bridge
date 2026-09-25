@@ -48,6 +48,7 @@
 mod completion;
 #[cfg(feature = "plugin-sdk")]
 pub mod conformance;
+mod crash;
 pub mod discovery;
 mod endpoint;
 #[cfg(feature = "plugin-sdk")]
@@ -337,6 +338,8 @@ pub fn loaded_endpoint_plugins() -> Vec<PluginInfo> {
 const MAX_PLUGINS_PER_LIBRARY: usize = 256;
 
 fn open_plugins(path: &Path) -> anyhow::Result<Vec<LoadedPlugin>> {
+    // Before dlopen, whose initialisers can crash too.
+    crash::install();
     // Safety: dlopen runs the library's initialisers — inherently trusting the
     // file, as documented above.
     let library = unsafe { libloading::Library::new(path) }
@@ -353,6 +356,7 @@ fn open_plugins(path: &Path) -> anyhow::Result<Vec<LoadedPlugin>> {
                     ),
                 )
             })?;
+        crash::record_library(path, *entry as *const std::ffi::c_void);
         entry()
     };
     let mut tables = vec![first];

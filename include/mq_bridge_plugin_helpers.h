@@ -58,6 +58,15 @@ static inline void mqb_log(uint8_t level, const char *target, const char *text) 
     }
 }
 
+/* Registers a crash handler with the host (see MqbCrashHandler for what it may do).
+ * Call it from factory_create or later, once plugin_init has run. */
+static inline MqbStatus mqb_register_crash_handler(MqbCrashHandler handler, void *user_data) {
+    if (mqb_host == NULL || mqb_host->struct_size < MQB_HOST_VTABLE_SIZE_V1_2) {
+        return MQB_ERR_UNSUPPORTED;
+    }
+    return mqb_host->register_crash_handler(handler, user_data);
+}
+
 #if defined(__GNUC__)
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunused-parameter"
@@ -174,11 +183,15 @@ static inline MqbStatus mqb_stub_middleware_apply(MqbMiddlewareHandle middleware
     .name = {(const uint8_t *)(name_), sizeof(name_) - 1},                                  \
     .version = {(const uint8_t *)(version_), sizeof(version_) - 1}
 
-/* A stateless factory with no config schema and the default delivery flags. */
-#define MQB_DEFAULT_FACTORY                                                                 \
+/* MQB_DEFAULT_FACTORY without plugin_init, for a plugin that sets its own; that one
+ * must call mqb_stub_init(host) for mqb_log and mqb_register_crash_handler to work. */
+#define MQB_FACTORY_WITHOUT_INIT                                                            \
     .factory_create = mqb_stub_factory_create, .factory_free = mqb_stub_free,               \
     .buffer_free = mqb_stub_buffer_free, .factory_config_schema = mqb_stub_config_schema,   \
-    .factory_delivery = mqb_stub_delivery, .plugin_init = mqb_stub_init
+    .factory_delivery = mqb_stub_delivery
+
+/* A stateless factory with no config schema and the default delivery flags. */
+#define MQB_DEFAULT_FACTORY MQB_FACTORY_WITHOUT_INIT, .plugin_init = mqb_stub_init
 
 #define MQB_NO_CONSUMER                                                                     \
     .consumer_create = mqb_stub_create, .consumer_receive_batch = mqb_stub_receive,         \

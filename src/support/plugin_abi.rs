@@ -74,7 +74,7 @@ pub const MQB_PLUGIN_ABI_MAJOR: u32 = 1;
 ///   [`MqbPluginVTable::responses_free`], [`MqbPluginVTable::batch_commit_replies`])
 ///   status ([`MqbPluginVTable::consumer_status`], [`MqbPluginVTable::publisher_status`])
 ///   non-blocking twins of the hot-path calls ([`MqbCompletion`]) and host
-///   services for logs and metrics ([`MqbHostVTable`]).
+///   services for logs, metrics and crash handlers ([`MqbHostVTable`]).
 pub const MQB_PLUGIN_ABI_MINOR: u32 = 2;
 
 /// Name of the discovery symbol a plugin shared library must export.
@@ -314,6 +314,35 @@ pub const MQB_METRIC_GAUGE_SET: u8 = 2;
 pub const MQB_METRIC_GAUGE_ADD: u8 = 3;
 pub const MQB_METRIC_HISTOGRAM: u8 = 4;
 
+/// What a crash handler learns about the fatal signal (ABI 1.2).
+#[repr(C)]
+pub struct MqbCrashInfo {
+    /// `size_of::<MqbCrashInfo>()` as compiled into the host; fields may be appended.
+    pub struct_size: usize,
+    /// The signal number: `SIGSEGV`, `SIGBUS`, `SIGILL`, `SIGFPE` or `SIGABRT`.
+    pub signal: i32,
+    /// `siginfo_t::si_code`.
+    pub code: i32,
+    /// `siginfo_t::si_addr`: the faulting address, for the signals that have one.
+    pub fault_address: *const c_void,
+    /// The interrupted instruction, or null where the host cannot read it.
+    pub pc: *const c_void,
+    /// The raw `siginfo_t *` the host's signal handler received.
+    pub siginfo: *const c_void,
+    /// The raw `ucontext_t *` the host's signal handler received.
+    pub ucontext: *const c_void,
+}
+
+/// A plugin's crash handler, registered through
+/// [`MqbHostVTable::register_crash_handler`] (ABI 1.2).
+///
+/// It runs inside the host's signal handler, possibly on a small alternate
+/// stack: only async-signal-safe calls (`write`, `backtrace_symbols_fd`), no
+/// `malloc`, `printf` or locks. The process dies after it returns; recovering
+/// by `siglongjmp` is unsupported.
+pub type MqbCrashHandler =
+    Option<unsafe extern "C" fn(user_data: *mut c_void, info: *const MqbCrashInfo)>;
+
 /// Services the host offers a plugin, handed over once through
 /// [`MqbPluginVTable::plugin_init`] (ABI 1.2).
 ///
@@ -336,11 +365,17 @@ pub struct MqbHostVTable {
         labels_len: usize,
         value: f64,
     ),
+    /// Runs `handler` with `user_data` when the process gets a fatal signal,
+    /// before it dies. `MQB_ERR_UNSUPPORTED` where the host has no crash
+    /// handling (Windows), `MQB_ERR_PERMANENT` for a null handler or once all
+    /// slots are taken.
+    pub register_crash_handler:
+        unsafe extern "C" fn(handler: MqbCrashHandler, user_data: *mut c_void) -> MqbStatus,
 }
 
 /// Size of the 1.2 [`MqbHostVTable`]; a plugin reads no field past a host's
 /// `struct_size`.
-pub const MQB_HOST_VTABLE_SIZE_V1_2: usize = 4 * core::mem::size_of::<usize>();
+pub const MQB_HOST_VTABLE_SIZE_V1_2: usize = 5 * core::mem::size_of::<usize>();
 
 /// Where an asynchronous 1.2 call reports that it finished.
 ///

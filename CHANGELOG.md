@@ -68,6 +68,13 @@ All notable changes to `mq-bridge`. Newest first.
   A plugin's `idempotent_sink` / `acknowledges` overrides now count on the host too, so its
   delivery guarantee can depend on the config.
   Plugins built against 1.0/1.1 keep loading and behave as before.
+- **A crashing plugin is reported instead of dying silently.** Once a plugin library loads,
+  the host catches `SIGSEGV`/`SIGBUS`/`SIGILL`/`SIGFPE`/`SIGABRT` (Linux, macOS). It
+  prints a backtrace plus each plugin's load address and build id to stderr, so a stripped
+  plugin can be symbolized offline, then chains to the previous handler and dies.
+  `MQB_PLUGIN_CRASH_REPORT=0` turns the dump off. Plugins can add their own report through
+  `MqbHostVTable::register_crash_handler` (ABI 1.2; `mqb_register_crash_handler` in the C
+  helpers).
 - **`plugin::discover_all_endpoint_plugins` loads every installed plugin up front.**
   `mq-bridge-app` calls it at startup so the UI lists them. A file that does not export the
   plugin entry point, like a plugin's own helper library, is never opened. A route's own

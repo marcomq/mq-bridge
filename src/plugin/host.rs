@@ -4,7 +4,8 @@
 //  git clone https://github.com/marcomq/mq-bridge
 
 //! The services a 1.2 plugin receives through `plugin_init`: its logs and
-//! metrics are re-emitted here, into the host's subscriber and recorder.
+//! metrics are re-emitted here, into the host's subscriber and recorder; crash
+//! handlers go to [`super::crash`].
 //!
 //! Every plugin event uses the target [`PLUGIN_LOG_TARGET`], because a
 //! `tracing` target must be known at compile time; the plugin's own module path
@@ -26,6 +27,7 @@ pub(super) static HOST_VTABLE: MqbHostVTable = MqbHostVTable {
     log_enabled,
     log,
     metric,
+    register_crash_handler: super::crash::register_crash_handler,
 };
 
 unsafe extern "C" fn log_enabled(level: u8) -> u8 {

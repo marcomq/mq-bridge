@@ -725,6 +725,45 @@ mutex around the non-thread-safe library.
 matches the host, and its `static_assert`s refuse to compile if the table layout
 ever does not.
 
+#### When it crashes
+
+A plugin has no `main()` in which to install a `SIGSEGV` handler, and a handler
+it installs itself would replace the host's and every other plugin's. So the
+host installs one when the first plugin library loads (Linux and macOS). On
+`SIGSEGV`, `SIGBUS`, `SIGILL`, `SIGFPE` or `SIGABRT` it writes to stderr:
+
+```text
+mq-bridge: fatal signal 11 (SIGSEGV), fault address 0x8, pc 0x7f3a1c2b4f10
+mq-bridge: pc is in /opt/plugins/liblegacy_payments.so at offset 0x1f10
+mq-bridge: plugin libraries (load address, path, build id):
+mq-bridge:   0x7f3a1c2b3000 /opt/plugins/liblegacy_payments.so build-id 3c9e…
+mq-bridge: backtrace (symbolize with `addr2line -e <library> <offset>` or `atos -o <library> -l <load address> <address>`):
+…
+```
+
+A stripped plugin is still symbolizable: whoever holds its debug info matches
+the build id (the UUID on macOS) and resolves the offsets offline, e.g.
+`addr2line -f -e liblegacy_payments.so.debug 0x1f10`. After the dump the host
+hands the signal to whichever handler was installed before (Rust's stack
+overflow message, Python's `faulthandler`), then dies of it, so core dumps and
+debuggers work as usual. `MQB_PLUGIN_CRASH_REPORT=0` turns the dump off.
+
+A plugin can add its own report through `register_crash_handler` on the host
+table (`mqb_register_crash_handler` in the helpers). A closed-source plugin
+might print where to send the output, or write a minidump.
+[`plugin.c`](../examples/c-plugin/plugin.c) registers one from its own
+`plugin_init`, using `MQB_FACTORY_WITHOUT_INIT`. The handler runs inside the
+signal handler, after the dump. It may only make async-signal-safe calls
+(`write`, `backtrace_symbols_fd`), with no `malloc`, `printf` or locks. The
+process dies afterwards.
+
+Limits: a thread the plugin created itself has no alternate signal stack, so a
+stack overflow on it ends the process without a report. Windows has no crash
+handling, and `register_crash_handler` returns `MQB_ERR_UNSUPPORTED` there. For
+memory bugs that don't crash where they happen, build the plugin with
+`-fsanitize=address` and preload the ASan runtime
+(`LD_PRELOAD=$(cc -print-file-name=libasan.so)`).
+
 ---
 
 ## Shipping it to Python and Node.js
@@ -807,7 +846,7 @@ Minor versions so far:
 | --- | --- |
 | 1.0 | The initial table. |
 | 1.1 | `publisher_requires_ordered_publish`, so a plugin sink can ask the route to keep its sends in source order; `publisher_send_batch_outcomes`, so a partly failed batch reports which messages failed; and `factory_config_schema`, so a plugin describes its configuration as a JSON Schema for a host to render and to map a URI onto. |
-| 1.2 | `publisher_send_batch_responses` and `responses_free`, so publish responses reach the route; `batch_commit_replies` with `MQB_DISPOSITION_REPLY`, so a plugin consumer receives the reply to send; `consumer_status` / `publisher_status`, so `status()` reports the plugin's own state; and `*_async` twins of receive, commit, send and flush that finish through an `MqbCompletion` callback instead of blocking a host thread; `plugin_init` hands the plugin an `MqbHostVTable`, through which its logs and metrics reach the host; the optional `mq_bridge_plugin_v1_at` symbol exports several tables from one library; `factory_delivery` answers `idempotent_sink` / `acknowledges` per config. |
+| 1.2 | `publisher_send_batch_responses` and `responses_free`, so publish responses reach the route; `batch_commit_replies` with `MQB_DISPOSITION_REPLY`, so a plugin consumer receives the reply to send; `consumer_status` / `publisher_status`, so `status()` reports the plugin's own state; and `*_async` twins of receive, commit, send and flush that finish through an `MqbCompletion` callback instead of blocking a host thread; `plugin_init` hands the plugin an `MqbHostVTable`, through which its logs and metrics reach the host and it registers a crash handler; the optional `mq_bridge_plugin_v1_at` symbol exports several tables from one library; `factory_delivery` answers `idempotent_sink` / `acknowledges` per config. |
 
 Publish the supported ABI range in your package metadata, and test each packaged
 plugin against the oldest and newest mq-bridge you claim to support.

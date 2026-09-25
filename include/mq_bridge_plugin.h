@@ -43,7 +43,7 @@
 //   `MqbPluginVTable::responses_free`, `MqbPluginVTable::batch_commit_replies`)
 //   status (`MqbPluginVTable::consumer_status`, `MqbPluginVTable::publisher_status`)
 //   non-blocking twins of the hot-path calls (`MqbCompletion`) and host
-//   services for logs and metrics (`MqbHostVTable`).
+//   services for logs, metrics and crash handlers (`MqbHostVTable`).
 #define MQB_PLUGIN_ABI_MINOR 2
 
 // Acknowledge the message: it was processed successfully.
@@ -205,6 +205,33 @@ typedef struct MqbCompletion {
   void *ctx;
 } MqbCompletion;
 
+// What a crash handler learns about the fatal signal (ABI 1.2).
+typedef struct MqbCrashInfo {
+  // `size_of::<MqbCrashInfo>()` as compiled into the host; fields may be appended.
+  size_t struct_size;
+  // The signal number: `SIGSEGV`, `SIGBUS`, `SIGILL`, `SIGFPE` or `SIGABRT`.
+  int32_t signal;
+  // `siginfo_t::si_code`.
+  int32_t code;
+  // `siginfo_t::si_addr`: the faulting address, for the signals that have one.
+  const void *fault_address;
+  // The interrupted instruction, or null where the host cannot read it.
+  const void *pc;
+  // The raw `siginfo_t *` the host's signal handler received.
+  const void *siginfo;
+  // The raw `ucontext_t *` the host's signal handler received.
+  const void *ucontext;
+} MqbCrashInfo;
+
+// A plugin's crash handler, registered through
+// `MqbHostVTable::register_crash_handler` (ABI 1.2).
+//
+// It runs inside the host's signal handler, possibly on a small alternate
+// stack: only async-signal-safe calls (`write`, `backtrace_symbols_fd`), no
+// `malloc`, `printf` or locks. The process dies after it returns; recovering
+// by `siglongjmp` is unsupported.
+typedef void (*MqbCrashHandler)(void *user_data, const struct MqbCrashInfo *info);
+
 // Services the host offers a plugin, handed over once through
 // `MqbPluginVTable::plugin_init` (ABI 1.2).
 //
@@ -224,6 +251,11 @@ typedef struct MqbHostVTable {
                  const struct MqbKeyValue *labels,
                  size_t labels_len,
                  double value);
+  // Runs `handler` with `user_data` when the process gets a fatal signal,
+  // before it dies. `MQB_ERR_UNSUPPORTED` where the host has no crash
+  // handling (Windows), `MQB_ERR_PERMANENT` for a null handler or once all
+  // slots are taken.
+  MqbStatus (*register_crash_handler)(MqbCrashHandler handler, void *user_data);
 } MqbHostVTable;
 
 // Signature of `MqbPluginVTable::publisher_send_batch_outcomes`, named so the
@@ -557,7 +589,7 @@ typedef const struct MqbPluginVTable *(*MqbPluginListEntry)(size_t index);
 #define MQB_VTABLE_SIZE_V1_0 (27 * sizeof(size_t))
 #define MQB_VTABLE_SIZE_V1_1 (MQB_VTABLE_SIZE_V1_0 + 3 * sizeof(size_t))
 #define MQB_VTABLE_SIZE_V1_2 (MQB_VTABLE_SIZE_V1_1 + 11 * sizeof(size_t))
-#define MQB_HOST_VTABLE_SIZE_V1_2 (4 * sizeof(size_t))
+#define MQB_HOST_VTABLE_SIZE_V1_2 (5 * sizeof(size_t))
 
 #if defined(_WIN32)
 #define MQB_PLUGIN_EXPORT __declspec(dllexport)

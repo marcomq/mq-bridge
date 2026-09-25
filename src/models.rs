@@ -378,7 +378,7 @@ pub enum CipherKind {
 /// AEAD encryption settings, shared by the `encryption` middleware (per-message
 /// payload encryption) and the at-rest `encryption` field of the file and
 /// object_store endpoints. Requires the `encryption` feature.
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[derive(Deserialize, Serialize, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct EncryptionConfig {
@@ -398,6 +398,19 @@ pub struct EncryptionConfig {
     /// Metadata keys bound into the AEAD tag; changing one then fails decryption. Middleware only.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub authenticate_metadata: Vec<String>,
+}
+
+impl std::fmt::Debug for EncryptionConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let decrypt_key_ids: Vec<&String> = self.decrypt_keys.keys().collect();
+        f.debug_struct("EncryptionConfig")
+            .field("cipher", &self.cipher)
+            .field("key_id", &self.key_id)
+            .field("key", &"<redacted>")
+            .field("decrypt_keys", &decrypt_key_ids)
+            .field("authenticate_metadata", &self.authenticate_metadata)
+            .finish()
+    }
 }
 
 /// An enumeration of all supported middleware types.

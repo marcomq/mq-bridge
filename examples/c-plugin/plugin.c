@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "legacy_ledger.h"
 #include "legacy_parser.h"
@@ -133,9 +134,23 @@ static void publisher_free(MqbPublisherHandle handle) {
     free(publisher);
 }
 
+/* Runs inside the host's signal handler, after its crash dump: async-signal-safe calls only. */
+static void on_crash(void *user_data, const MqbCrashInfo *info) {
+    static const char text[] = PLUGIN_NAME ": crashed; send this output to the plugin vendor\n";
+    (void)user_data;
+    (void)info;
+    (void)!write(2, text, sizeof(text) - 1);
+}
+
+static void init(const MqbHostVTable *host) {
+    mqb_stub_init(host);
+    mqb_register_crash_handler(on_crash, NULL);
+}
+
 static const MqbPluginVTable table = {
     MQB_TABLE_HEADER(PLUGIN_NAME, "0.1.0", MQB_CAP_MIDDLEWARE | MQB_CAP_PUBLISHER),
-    MQB_DEFAULT_FACTORY,
+    MQB_FACTORY_WITHOUT_INIT,
+    .plugin_init = init,
     MQB_NO_CONSUMER,
     MQB_STATELESS_MIDDLEWARE,
     .middleware_apply = apply,
