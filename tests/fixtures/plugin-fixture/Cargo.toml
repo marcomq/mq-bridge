@@ -21,6 +21,7 @@ metrics = "0.24"
 mq-bridge = { path = "../../..", default-features = false, features = ["plugin-sdk", "metrics"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]

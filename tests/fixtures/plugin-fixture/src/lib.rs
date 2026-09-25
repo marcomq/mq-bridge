@@ -153,6 +153,12 @@ pub fn commit_log_queue(name: &str) -> String {
     format!("{name}#committed")
 }
 
+/// Queue each dropped publisher reports to: `in-runtime`, or `outside` when a
+/// `Drop` that spawns, as the pulsar client's does, would have panicked.
+pub fn drop_log_queue(name: &str) -> String {
+    format!("{name}#dropped")
+}
+
 #[derive(Debug, Default)]
 pub struct FixtureFactory;
 
@@ -376,6 +382,18 @@ struct FixturePublisher {
     queue: SharedQueue,
     name: String,
     config: FixtureConfig,
+}
+
+impl Drop for FixturePublisher {
+    fn drop(&mut self) {
+        let context = match tokio::runtime::Handle::try_current() {
+            Ok(_) => "in-runtime",
+            Err(_) => "outside",
+        };
+        let log = queue(&drop_log_queue(&self.name));
+        let mut log = log.lock().expect("fixture queue poisoned");
+        log.ready.push_back(CanonicalMessage::from(context));
+    }
 }
 
 fn queue_status(name: &str) -> EndpointStatus {

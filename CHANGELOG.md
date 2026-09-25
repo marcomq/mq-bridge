@@ -6,6 +6,10 @@ All notable changes to `mq-bridge`. Newest first.
 
 ### Fixed
 
+- **Plugin SDK: an endpoint is dropped inside the plugin's runtime.** Freeing a consumer,
+  publisher, batch or middleware ran its `Drop` outside that runtime, so a `Drop` that spawns
+  — the Pulsar client closing its producer — panicked and skipped its cleanup. Rebuild a
+  plugin against this version to get the fix.
 - **`deduplication` no longer loses a message that failed and came straight back.** A nacked
   key stayed reserved for five seconds, so a broker that redelivers at once (AMQP requeue,
   JetStream `Nak`) — or another instance on a shared store — had the redelivery acked as a
@@ -47,6 +51,12 @@ All notable changes to `mq-bridge`. Newest first.
   A plugin's `idempotent_sink` / `acknowledges` overrides now count on the host too, so its
   delivery guarantee can depend on the config.
   Plugins built against 1.0/1.1 keep loading and behave as before.
+- **An installed plugin is found by any endpoint it provides.** When no library is named after
+  the requested endpoint, every other `libmq_bridge_*` on the search path is loaded, so a
+  library with several endpoints (such as `mq-bridge-connect`) needs no `plugins:` entry. A
+  file that does not export the plugin entry point, like a plugin's own helper library, is
+  never opened. `plugin::discover_all_endpoint_plugins` loads them all up front;
+  `mq-bridge-app` does so at startup so the UI lists them.
 - **`DeliveryGuarantee` and `required_delivery`.** Each route's inferred guarantee —
   `at-most-once`, `at-least-once` or `effectively-once` — is logged at startup and available as
   `Route::delivery_guarantee()`. Setting `required_delivery` on a route fails it at startup when

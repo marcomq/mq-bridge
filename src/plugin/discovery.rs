@@ -6,8 +6,10 @@
 //! Finding an installed plugin from the endpoint name a route asked for.
 //!
 //! A `custom` endpoint whose name no factory is registered under is the trigger:
-//! the searched directories are consulted for one file, `libmq_bridge_<name>`.
-//! Directories are never listed, so a library no route names is never opened.
+//! the searched directories are consulted for `libmq_bridge_<name>` first, then
+//! every other `libmq_bridge_*` is loaded, since one library may provide several
+//! endpoints. A host that lists what is installed before any route asks calls
+//! [`discover_all_endpoint_plugins`].
 
 use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
@@ -39,16 +41,17 @@ fn discovery_enabled_from(value: Option<&str>) -> bool {
     }
 }
 
+#[cfg(target_os = "windows")]
+const LIBRARY_AFFIXES: (&str, &str) = ("mq_bridge_", ".dll");
+#[cfg(target_os = "macos")]
+const LIBRARY_AFFIXES: (&str, &str) = ("libmq_bridge_", ".dylib");
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+const LIBRARY_AFFIXES: (&str, &str) = ("libmq_bridge_", ".so");
+
 /// The file name a plugin providing `name` is expected to have.
 pub fn library_file_name(name: &str) -> String {
-    let stem = name.replace('-', "_");
-    if cfg!(target_os = "windows") {
-        format!("mq_bridge_{stem}.dll")
-    } else if cfg!(target_os = "macos") {
-        format!("libmq_bridge_{stem}.dylib")
-    } else {
-        format!("libmq_bridge_{stem}.so")
-    }
+    let (prefix, suffix) = LIBRARY_AFFIXES;
+    format!("{prefix}{}{suffix}", name.replace('-', "_"))
 }
 
 /// Install prefixes searched when the environment does not name one, so a
@@ -143,7 +146,7 @@ fn non_empty_var(name: &str) -> Option<OsString> {
 
 /// Loads the plugin providing `name` from the search path.
 ///
-/// `Ok(None)` means no candidate file exists, which is not an error on its own —
+/// `Ok(None)` means no installed library provides it, which is not an error on its own —
 /// the caller reports the unresolved name, with [`search_path_hint`].
 pub fn discover_endpoint_plugin(name: &str) -> anyhow::Result<Option<PluginInfo>> {
     if !discovery_enabled() {
@@ -188,7 +191,83 @@ pub fn discover_endpoint_plugin_in(
         }
         return Ok(Some(info));
     }
-    Ok(None)
+    Ok(discover_all_endpoint_plugins_in(dirs)
+        .into_iter()
+        .find(|info| info.name == name && (info.supports_consumer || info.supports_publisher)))
+}
+
+/// Loads every plugin library installed on the search path, so a host can list
+/// them before any route asks. Off when [`DISCOVERY_VAR`] says so.
+pub fn discover_all_endpoint_plugins() -> Vec<PluginInfo> {
+    if !discovery_enabled() {
+        return Vec::new();
+    }
+    discover_all_endpoint_plugins_in(&plugin_search_path())
+}
+
+/// [`discover_all_endpoint_plugins`] against an explicit list of directories.
+///
+/// The first directory wins for a file name, and a file whose endpoint is already
+/// registered — compiled in, or loaded before — is left alone. A file that does not
+/// export the plugin entry point, such as a plugin's own helper library, is never
+/// opened. One that fails to load is logged and skipped.
+pub fn discover_all_endpoint_plugins_in(dirs: &[PathBuf]) -> Vec<PluginInfo> {
+    let (prefix, suffix) = LIBRARY_AFFIXES;
+    let mut seen = HashSet::new();
+    let mut infos = Vec::new();
+    for dir in dirs {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        let mut files: Vec<PathBuf> = entries.flatten().map(|entry| entry.path()).collect();
+        files.sort();
+        for path in files {
+            let Some(stem) = path
+                .file_name()
+                .and_then(OsStr::to_str)
+                .and_then(|name| name.strip_prefix(prefix)?.strip_suffix(suffix))
+            else {
+                continue;
+            };
+            if !seen.insert(stem.to_owned()) || !path.is_file() || is_registered(stem) {
+                continue;
+            }
+            match exports_plugin_entry(&path) {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(error) => {
+                    tracing::warn!(path = %path.display(), "skipping plugin library: {error:#}");
+                    continue;
+                }
+            }
+            match load_endpoint_plugins(&path) {
+                Ok(loaded) => infos.extend(loaded),
+                Err(error) => {
+                    tracing::warn!(path = %path.display(), "skipping plugin library: {error:#}")
+                }
+            }
+        }
+    }
+    infos
+}
+
+/// A file stem may spell a hyphenated endpoint name with an underscore.
+fn is_registered(stem: &str) -> bool {
+    use crate::extensions::get_endpoint_factory;
+    get_endpoint_factory(stem).is_some() || get_endpoint_factory(&stem.replace('_', "-")).is_some()
+}
+
+/// Reads the export table only, so a library that is not a plugin runs no code.
+fn exports_plugin_entry(path: &Path) -> anyhow::Result<bool> {
+    use object::{Object, ReadCache};
+    let entry = &super::MQB_PLUGIN_ENTRY_SYMBOL[..super::MQB_PLUGIN_ENTRY_SYMBOL.len() - 1];
+    let cache = ReadCache::new(std::fs::File::open(path)?);
+    let file = object::File::parse(&cache).context("not a readable shared library")?;
+    Ok(file.exports()?.iter().any(|export| {
+        // Mach-O prefixes C symbols with an underscore.
+        let name = export.name();
+        name == entry || name.strip_prefix(b"_") == Some(entry)
+    }))
 }
 
 /// Where an unresolved endpoint name was looked for, to append to that error.

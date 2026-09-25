@@ -80,8 +80,9 @@ pub use crate::support::config_schema::{
     endpoint_uri_schema, UriPosition, UriSchema, URI_ANNOTATION,
 };
 pub use discovery::{
-    discover_endpoint_plugin, discover_endpoint_plugin_in, discovery_enabled, library_file_name,
-    plugin_search_path, search_path_hint,
+    discover_all_endpoint_plugins, discover_all_endpoint_plugins_in, discover_endpoint_plugin,
+    discover_endpoint_plugin_in, discovery_enabled, library_file_name, plugin_search_path,
+    search_path_hint,
 };
 pub use endpoint::PluginEndpointFactory;
 pub use host::PLUGIN_LOG_TARGET;

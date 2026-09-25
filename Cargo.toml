@@ -110,6 +110,7 @@ once_cell = { version = "1.21" }
 # no C toolchain; the ABI itself lives in src/support/plugin_abi.rs.
 # 0.9 needs Rust 1.88+, like the amqp/mongodb/nats features.
 libloading = { version = "0.9", optional = true }
+object = { version = "0.39", default-features = false, features = ["read_core", "elf", "macho", "pe", "std"], optional = true }
 # SHA-256 for hashing connection-registry identities so secret-bearing fields
 # (URL/TLS passwords) are never retained verbatim in cache keys.
 sha2 = "0.11"
@@ -334,7 +335,7 @@ zen = ["dep:zen-expression", "dep:rust_decimal"]
 metrics = ["dep:metrics"]
 # Load endpoints from native plugin libraries at runtime (`mq_bridge::plugin`).
 # The endpoint itself lives in its own crate and package; see docs/PLUGINS.md.
-plugin = ["dep:libloading"]
+plugin = ["dep:libloading", "dep:object"]
 # Author an endpoint plugin: the export macro, the FFI adapters and the
 # conformance suite (`mq_bridge::plugin::sdk` / `::conformance`). Endpoint
 # crates enable this; hosts only need `plugin`.

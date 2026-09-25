@@ -317,6 +317,14 @@ unsafe fn reclaim<T>(handle: *mut c_void) -> Option<Box<T>> {
     (!handle.is_null()).then(|| unsafe { Box::from_raw(handle.cast::<T>()) })
 }
 
+/// Drops a handle's state inside its runtime, since an endpoint's `Drop` may spawn.
+fn drop_in_runtime<T>(state: Option<Box<T>>, runtime: fn(&T) -> &Arc<Runtime>) {
+    let Some(state) = state else { return };
+    let runtime = Arc::clone(runtime(&state));
+    let _entered = runtime.enter();
+    drop(state);
+}
+
 fn buffer_from(message: impl AsRef<str>) -> MqbBuffer {
     let mut bytes = message.as_ref().as_bytes().to_vec();
     let buffer = MqbBuffer {
@@ -442,7 +450,11 @@ where
 }
 
 unsafe extern "C" fn factory_free(factory: MqbFactoryHandle) {
-    guarded_unit(|| drop(unsafe { reclaim::<FactoryState>(factory.0) }));
+    guarded_unit(|| {
+        drop_in_runtime(unsafe { reclaim::<FactoryState>(factory.0) }, |state| {
+            &state.runtime
+        })
+    });
 }
 
 unsafe extern "C" fn buffer_free(buffer: MqbBuffer) {
@@ -732,7 +744,11 @@ unsafe extern "C" fn consumer_close(consumer: MqbConsumerHandle, err: *mut MqbBu
 }
 
 unsafe extern "C" fn consumer_free(consumer: MqbConsumerHandle) {
-    guarded_unit(|| drop(unsafe { reclaim::<ConsumerState>(consumer.0) }));
+    guarded_unit(|| {
+        drop_in_runtime(unsafe { reclaim::<ConsumerState>(consumer.0) }, |state| {
+            &state.runtime
+        })
+    });
 }
 
 // --------------------------------------------------------------------- batch
@@ -869,7 +885,11 @@ unsafe fn unit_status(
 unsafe extern "C" fn batch_free(batch: MqbBatchHandle) {
     // Dropping the commit closure without calling it acknowledges nothing,
     // which is what an uncommitted batch must do.
-    guarded_unit(|| drop(unsafe { reclaim::<BatchState>(batch.0) }));
+    guarded_unit(|| {
+        drop_in_runtime(unsafe { reclaim::<BatchState>(batch.0) }, |state| {
+            &state.runtime
+        })
+    });
 }
 
 // ----------------------------------------------------------------- publisher
@@ -1258,7 +1278,11 @@ unsafe extern "C" fn publisher_close(
 }
 
 unsafe extern "C" fn publisher_free(publisher: MqbPublisherHandle) {
-    guarded_unit(|| drop(unsafe { reclaim::<PublisherState>(publisher.0) }));
+    guarded_unit(|| {
+        drop_in_runtime(unsafe { reclaim::<PublisherState>(publisher.0) }, |state| {
+            &state.runtime
+        })
+    });
 }
 
 // -------------------------------------------------------------------- status
@@ -1530,7 +1554,12 @@ unsafe extern "C" fn middleware_result_free(result: MqbFilterHandle) {
 }
 
 unsafe extern "C" fn middleware_free(middleware: MqbMiddlewareHandle) {
-    guarded_unit(|| drop(unsafe { reclaim::<MiddlewareState>(middleware.0) }));
+    guarded_unit(|| {
+        drop_in_runtime(
+            unsafe { reclaim::<MiddlewareState>(middleware.0) },
+            |state| &state.runtime,
+        )
+    });
 }
 
 /// A function table wrapped so it can live in a `static`.

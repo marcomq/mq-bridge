@@ -22,8 +22,9 @@
 //!
 //! Listing a path is only needed for a library that is not installed under its
 //! conventional name. A route asking for an endpoint no factory provides falls
-//! back to searching for `libmq_bridge_<name>` (see `mq_bridge::plugin::discovery`),
-//! so an installed plugin needs no entry here at all.
+//! back to searching for `libmq_bridge_<name>`, then for every installed
+//! `libmq_bridge_*` (see `mq_bridge::plugin::discovery`), so an installed plugin
+//! needs no entry here at all.
 //!
 //! An extension compiled into this build wins over an installed plugin of the
 //! same name, so one binary behaves the same wherever it runs.

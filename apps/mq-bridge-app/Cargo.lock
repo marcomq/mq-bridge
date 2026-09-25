@@ -4617,6 +4617,7 @@ dependencies = [
  "metrics",
  "mongodb",
  "mqi",
+ "object",
  "object_store",
  "omq-tokio",
  "once_cell",

@@ -116,10 +116,15 @@ prefix, so a package manager needs no special layout: `lib.install` in a brew
 formula or a conda package's default `lib` is enough, and `lib/mq-bridge` keeps
 a hand-managed install tidy.
 
-**Only the requested name is ever looked up.** Directories are never listed, so
-a library no route names is never opened, and installing one has no effect on a
-process that does not ask for it. That is also why the lookup costs nothing when
-every endpoint is built in: it runs only after the registry has already missed.
+**The named file comes first.** Only when no file is named after the endpoint
+are the directories listed and every other `libmq_bridge_*` loaded, because one
+library may provide several endpoints under other names. A file that does not
+export `mq_bridge_plugin_v1` — a plugin's own helper library, such as
+`libmq_bridge_connect_go` — is recognised from its export table and never opened.
+The search runs only after the registry has missed, so it costs nothing when
+every endpoint is built in. `plugin::discover_all_endpoint_plugins()` loads
+everything installed up front; `mq-bridge-app` calls it at startup so its UI
+lists those endpoints.
 
 Set `MQB_PLUGIN_DISCOVERY=0` (or `false`, `off`, `no`) to switch the search off
 and resolve endpoints only from factories the host registered or a config listed
