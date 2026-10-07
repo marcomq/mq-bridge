@@ -190,4 +190,4 @@ The grammar and examples are in [CONFIGURATION.md](docs/CONFIGURATION.md).
 
 ### Dependencies
 
-Dependencies and the feature that gates each optional one are in `Cargo.toml`, with comments explaining the non-obvious choices. The crate has no default features.
+Dependencies and the feature that gates each optional one are in `Cargo.toml`, with comments explaining the non-obvious choices. The only default features are `file` and `dir-spool`; an endpoint whose feature is off is served by a registered factory of the same name if there is one (see `plugins/full`).

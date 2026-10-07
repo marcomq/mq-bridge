@@ -11,7 +11,8 @@ resolver = "2"
 version = "0.4.20"
 
 [workspace.dependencies]
-mq-bridge = { version = "0.4.20", path = "../..", default-features = false }
+# The CLI always ships the local-filesystem endpoints, whatever else is selected.
+mq-bridge = { version = "0.4.20", path = "../..", default-features = false, features = ["file", "dir-spool"] }
 mq_bridge_app = { version = "0.4.20", path = "crates/core", package = "mq-bridge-app-core", default-features = false }
 mq-bridge-pulsar = { version = "0.1.4", default-features = false }
 # `default-features = false` drops its `plugin` feature: that export would collide

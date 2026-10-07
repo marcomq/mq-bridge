@@ -18,4 +18,5 @@ pub(crate) const XCHACHA_NONCE_LEN: usize = 24;
 pub(crate) const AES_GCM_NONCE_LEN: usize = 12;
 
 /// Header (`version`, `cipher`, `key_id_len`) + shortest key id + shortest nonce.
+#[cfg(feature = "file")]
 pub(crate) const MIN_ENVELOPE_LEN: usize = 3 + 1 + AES_GCM_NONCE_LEN;

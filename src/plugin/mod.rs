@@ -202,6 +202,22 @@ impl LoadedPlugin {
     }
 }
 
+static LOADING_DISABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Switches plugin loading off for the rest of the process: no library is opened after
+/// this, by path or by discovery. There is no way back. Plugins already loaded stay.
+///
+/// For a host that must guarantee no native code is loaded at runtime, without relying
+/// on the environment ([`discovery::DISCOVERY_VAR`] only covers discovery).
+pub fn disable_plugin_loading() {
+    LOADING_DISABLED.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Whether [`disable_plugin_loading`] has been called.
+pub fn plugin_loading_disabled() -> bool {
+    LOADING_DISABLED.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 fn loaded_plugins() -> &'static Mutex<HashMap<PathBuf, Vec<Arc<LoadedPlugin>>>> {
     static LOADED: OnceLock<Mutex<HashMap<PathBuf, Vec<Arc<LoadedPlugin>>>>> = OnceLock::new();
     LOADED.get_or_init(|| Mutex::new(HashMap::new()))
@@ -338,6 +354,12 @@ pub fn loaded_endpoint_plugins() -> Vec<PluginInfo> {
 const MAX_PLUGINS_PER_LIBRARY: usize = 256;
 
 fn open_plugins(path: &Path) -> anyhow::Result<Vec<LoadedPlugin>> {
+    if plugin_loading_disabled() {
+        return Err(anyhow!(
+            "plugin loading is disabled in this process; not loading {}",
+            path.display()
+        ));
+    }
     // Before dlopen, whose initialisers can crash too.
     crash::install();
     // Safety: dlopen runs the library's initialisers — inherently trusting the

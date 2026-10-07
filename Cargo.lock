@@ -3805,6 +3805,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "mq-bridge-full-plugin"
+version = "0.4.20"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "mq-bridge",
+ "rustls",
+ "serde_json",
+]
+
+[[package]]
 name = "mq-bridge-node"
 version = "0.4.20"
 dependencies = [

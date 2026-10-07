@@ -29,9 +29,11 @@ pub const DISCOVERY_VAR: &str = "MQB_PLUGIN_DISCOVERY";
 /// Platform-separated list of directories searched ahead of the default ones.
 pub const SEARCH_PATH_VAR: &str = "MQB_PLUGIN_DIR";
 
-/// Whether a name may be resolved against the search path.
+/// Whether a name may be resolved against the search path. Always `false` once
+/// [`disable_plugin_loading`](super::disable_plugin_loading) was called.
 pub fn discovery_enabled() -> bool {
-    discovery_enabled_from(std::env::var(DISCOVERY_VAR).ok().as_deref())
+    !super::plugin_loading_disabled()
+        && discovery_enabled_from(std::env::var(DISCOVERY_VAR).ok().as_deref())
 }
 
 fn discovery_enabled_from(value: Option<&str>) -> bool {
@@ -406,6 +408,9 @@ fn exports_plugin_entry(path: &Path) -> anyhow::Result<bool> {
 
 /// Where an unresolved endpoint name was looked for, to append to that error.
 pub fn search_path_hint(name: &str) -> String {
+    if super::plugin_loading_disabled() {
+        return "plugin loading is disabled in this process".to_string();
+    }
     if !discovery_enabled() {
         return format!("plugin discovery is off ({DISCOVERY_VAR})");
     }

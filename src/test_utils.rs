@@ -2064,11 +2064,13 @@ pub async fn run_concurrency_test(
 /// out-of-crate dev harness, and can be split back out if it grows.
 #[doc(hidden)]
 pub mod bench {
+    #[cfg(feature = "file")]
     use crate::models::FileFormat;
     use crate::CanonicalMessage;
 
     /// Decodes a CSV corpus the way the file source does: the first record establishes the
     /// column header, every later record becomes one message.
+    #[cfg(feature = "file")]
     pub fn csv_records_to_json(records: &[&[u8]]) -> Vec<CanonicalMessage> {
         let mut header = None;
         records
@@ -2082,6 +2084,7 @@ pub mod bench {
     /// Decodes a CSV corpus in reader-sized batches, the way the file source does. This is
     /// the path that splits a batch across cores, so it is the one that shows the cost of
     /// the split itself.
+    #[cfg(feature = "file")]
     pub fn csv_batch_decode(records: &[&[u8]], batch_size: usize) -> usize {
         let mut header = None;
         let mut buf: Vec<u8> = Vec::new();
