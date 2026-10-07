@@ -32,6 +32,7 @@ one-off scheduling to a 1M-row batch is the mirror of the mistake above.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import random
@@ -247,18 +248,32 @@ class KafkaSink:
         from kafka import KafkaConsumer, TopicPartition
         from kafka.admin import KafkaAdminClient, NewTopic
         self.topic = f"bench_dst_{tag}"
-        self.admin = KafkaAdminClient(bootstrap_servers=args.brokers_host)
-        self.admin.create_topics([NewTopic(self.topic, args.partitions, 1)])
-        self.consumer = KafkaConsumer(bootstrap_servers=args.brokers_host)
-        self.parts = [TopicPartition(self.topic, p) for p in range(args.partitions)]
+        self.admin = self.consumer = None
+        try:
+            self.admin = KafkaAdminClient(bootstrap_servers=args.brokers_host)
+            self.admin.create_topics([NewTopic(self.topic, args.partitions, 1)])
+            self.consumer = KafkaConsumer(bootstrap_servers=args.brokers_host)
+            self.parts = [TopicPartition(self.topic, p) for p in range(args.partitions)]
+        except BaseException:
+            # A cleanup error here would replace the one that explains the failure.
+            with contextlib.suppress(Exception):
+                self.close()
+            raise
 
     def records(self) -> int:
         return sum(self.consumer.end_offsets(self.parts).values())
 
     def close(self):
-        self.admin.delete_topics([self.topic])
-        self.consumer.close()
-        self.admin.close()
+        if self.admin is None:
+            return
+        try:
+            self.admin.delete_topics([self.topic])
+        finally:
+            try:
+                if self.consumer is not None:
+                    self.consumer.close()
+            finally:
+                self.admin.close()
 
 
 class MqbJob:

@@ -3154,11 +3154,17 @@ mod tests {
 
         let factory = Arc::new(Recording::default());
         crate::extensions::register_endpoint_factory("kafka", factory.clone()).unwrap();
+        struct Unregister;
+        impl Drop for Unregister {
+            fn drop(&mut self) {
+                crate::extensions::unregister_endpoint_factory("kafka");
+            }
+        }
+        let _unregister = Unregister;
         create_consumer_from_route_with_source_metadata("r", &endpoint, true)
             .await
             .unwrap();
         create_publisher_from_route("r", &endpoint).await.unwrap();
-        crate::extensions::unregister_endpoint_factory("kafka");
 
         let seen = factory.0.lock().unwrap();
         assert_eq!(seen.len(), 2);
