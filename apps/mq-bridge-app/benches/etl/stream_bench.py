@@ -64,6 +64,8 @@ SOURCE_COLUMNS = """
 
 # The projection both sides perform: 4 of the 7 columns, same 4.
 PROJECTION = ["id", "first_name", "country", "amount"]
+# The same projection in Bloblang, for Redpanda Connect and the plugin's middleware.
+BLOBLANG_PROJECTION = "root = {" + ", ".join(f'"{c}": this.{c}' for c in PROJECTION) + "}"
 
 
 # --------------------------------------------------------------------------- #
@@ -229,10 +231,34 @@ def mqb_source_uri(args, tag: str) -> str:
     if args.variant in ("projection", "projection-dedup"):
         mapping = urllib.parse.quote(json.dumps({c: f"$.{c}" for c in PROJECTION}))
         uri += f"|transform?mapping={mapping}"
+    if args.variant == "projection-bloblang":
+        uri += f"|connect_mapping?mapping={urllib.parse.quote(BLOBLANG_PROJECTION, safe='')}"
     if args.variant == "projection-dedup":
         uri += (f"|deduplication?store=sled://{args.dedup_store}"
                 f"&key={urllib.parse.quote('${payload:id}', safe='')}&ttl_seconds=3600")
     return uri
+
+
+class KafkaSink:
+    """A destination topic per run, measured in records instead of file bytes."""
+
+    def __init__(self, args, tag: str):
+        # Lazy: only `--sink kafka` needs the client (`uv run --with kafka-python`).
+        from kafka import KafkaConsumer, TopicPartition
+        from kafka.admin import KafkaAdminClient, NewTopic
+        self.topic = f"bench_dst_{tag}"
+        self.admin = KafkaAdminClient(bootstrap_servers=args.brokers_host)
+        self.admin.create_topics([NewTopic(self.topic, args.partitions, 1)])
+        self.consumer = KafkaConsumer(bootstrap_servers=args.brokers_host)
+        self.parts = [TopicPartition(self.topic, p) for p in range(args.partitions)]
+
+    def records(self) -> int:
+        return sum(self.consumer.end_offsets(self.parts).values())
+
+    def close(self):
+        self.admin.delete_topics([self.topic])
+        self.consumer.close()
+        self.admin.close()
 
 
 class MqbJob:
@@ -246,6 +272,7 @@ class MqbJob:
         self.log_file = None
         self.startup = 0.0
         self.tag = tag
+        self.kafka_sink = KafkaSink(args, tag) if args.sink == "kafka" else None
 
     def start(self):
         for p in (self.out, self.args.dedup_store):
@@ -256,10 +283,14 @@ class MqbJob:
         cmd = [
             self.args.bin, "copy",
             "--from", mqb_source_uri(self.args, self.tag),
-            "--to", f"file://{self.out}?format={self.args.mqb_file_format}",
+            "--to", (f"kafka://{self.args.brokers_host}?topic={self.kafka_sink.topic}"
+                     if self.kafka_sink
+                     else f"file://{self.out}?format={self.args.mqb_file_format}"),
             "--batch-size", str(self.args.batch_size),
             "--concurrency", str(self.args.parallelism),
         ]
+        if self.args.variant == "projection-bloblang":
+            cmd[2:2] = ["--plugin", self.args.connect_plugin]
         self.log_file = open(self.log, "w")
         self.proc = subprocess.Popen(cmd, stdout=self.log_file, stderr=subprocess.STDOUT, start_new_session=True)
 
@@ -267,12 +298,16 @@ class MqbJob:
         return self.proc is not None and self.proc.poll() is None
 
     def sink_bytes(self) -> int:
+        if self.kafka_sink:
+            return self.kafka_sink.records()
         try:
             return os.path.getsize(self.out)
         except OSError:
             return 0
 
     def sink_lines(self) -> int:
+        if self.kafka_sink:
+            return self.kafka_sink.records()
         with open(self.out, "rb") as f:
             return sum(1 for _ in f)
 
@@ -284,6 +319,8 @@ class MqbJob:
     def cleanup(self):
         if self.log_file:
             self.log_file.close()
+        if self.kafka_sink:
+            self.kafka_sink.close()
 
 
 class MqbDockerJob:
@@ -346,6 +383,102 @@ class MqbDockerJob:
             print(f"KEPT_OUTPUT_DIR={self.out_dir}", flush=True)
         else:
             dexec(f"rm -rf {self.out_dir}")
+
+
+class RedpandaConnectJob(MqbJob):
+    """Redpanda Connect standalone: `redpanda` input, optional mapping, `file` output."""
+
+    # Its fetches can pause for seconds mid-backlog, which the default 2 s
+    # calibration window would take for the end of the data.
+    stable_window = 8.0
+
+    def start(self):
+        if os.path.exists(self.out):
+            os.remove(self.out)
+        pipeline = ""
+        if self.args.variant == "projection":
+            pipeline = f"pipeline:\n  processors:\n    - mapping: '{BLOBLANG_PROJECTION}'\n"
+        elif self.args.variant != "passthrough":
+            raise SystemExit(f"redpanda-connect has no {self.args.variant} variant")
+        config = (
+            "input:\n  redpanda:\n"
+            f"    seed_brokers: [\"{self.args.brokers_host}\"]\n"
+            f"    topics: [\"{self.args.topic}\"]\n"
+            f"    consumer_group: rpc_{self.tag}\n"
+            "    start_offset: earliest\n"
+            # The ordered default stalls for seconds on this backlog; unordered
+            # with the same batch size as mq-bridge-app is the fair setting.
+            "    unordered_processing:\n      enabled: true\n"
+            f"      batching:\n        count: {self.args.batch_size}\n        period: 100ms\n"
+            f"{pipeline}"
+            f"output:\n  file:\n    path: {self.out}\n    codec: lines\n"
+            "logger:\n  level: ERROR\n"
+        )
+        self.config = f"{self.out}.{self.tag}.yaml"
+        with open(self.config, "w") as f:
+            f.write(config)
+        self.log_file = open(self.log, "w")
+        self.proc = subprocess.Popen([self.args.rpc_bin, "run", self.config],
+                                     stdout=self.log_file, stderr=subprocess.STDOUT,
+                                     start_new_session=True)
+
+    def cleanup(self):
+        super().cleanup()
+        if os.path.exists(self.config):
+            os.remove(self.config)
+
+
+class VectorJob(MqbJob):
+    """Vector: `kafka` source, optional remap, `file` or `kafka` sink."""
+
+    def start(self):
+        if os.path.exists(self.out):
+            os.remove(self.out)
+        self.work = f"{self.out}.{self.tag}.vector"
+        os.makedirs(self.work, exist_ok=True)
+        # The same librdkafka option the mq-bridge-app rows set, when they set it.
+        extra = json.loads(os.environ.get("MQB_CONSUMER_OPTIONS", "[]"))
+        opts = "".join(f'      "{k}": "{v}"\n' for k, v in extra)
+        source = (
+            "sources:\n  in:\n    type: kafka\n"
+            f"    bootstrap_servers: \"{self.args.brokers_host}\"\n"
+            f"    group_id: vector_{self.tag}\n"
+            f"    topics: [\"{self.args.topic}\"]\n"
+            "    auto_offset_reset: earliest\n"
+            + (f"    librdkafka_options:\n{opts}" if opts else "")
+        )
+        if self.args.variant == "passthrough":
+            transform, sink_input, codec = "", "in", "text"
+        elif self.args.variant == "projection":
+            fields = ", ".join(f'"{c}": row.{c}' for c in PROJECTION)
+            transform = (
+                "transforms:\n  proj:\n    type: remap\n    inputs: [in]\n    source: |\n"
+                "      row = parse_json!(string!(.message))\n"
+                f"      . = {{{fields}}}\n"
+            )
+            sink_input, codec = "proj", "json"
+        else:
+            raise SystemExit(f"vector has no {self.args.variant} variant")
+        if self.kafka_sink:
+            target = (f"    type: kafka\n    bootstrap_servers: \"{self.args.brokers_host}\"\n"
+                      f"    topic: {self.kafka_sink.topic}\n")
+        else:
+            target = f"    type: file\n    path: {self.out}\n"
+        config = (
+            f"data_dir: {self.work}\n{source}{transform}"
+            f"sinks:\n  out:\n    inputs: [{sink_input}]\n{target}"
+            f"    encoding:\n      codec: {codec}\n"
+        )
+        with open(f"{self.work}/vector.yaml", "w") as f:
+            f.write(config)
+        self.log_file = open(self.log, "w")
+        self.proc = subprocess.Popen([self.args.vector_bin, "-q", "-c", f"{self.work}/vector.yaml"],
+                                     stdout=self.log_file, stderr=subprocess.STDOUT,
+                                     start_new_session=True)
+
+    def cleanup(self):
+        super().cleanup()
+        shutil.rmtree(self.work, ignore_errors=True)
 
 
 class SeaStreamerJob:
@@ -460,6 +593,10 @@ def one_run(args, expect_bytes: int | None):
         job = SeaStreamerJob(args, tag)
     elif args.tool == "mqb-docker":
         job = MqbDockerJob(args, tag)
+    elif args.tool == "redpanda-connect":
+        job = RedpandaConnectJob(args, tag)
+    elif args.tool == "vector":
+        job = VectorJob(args, tag)
     else:
         job = MqbJob(args, tag)
     sampler = RssSampler(job)
@@ -479,7 +616,7 @@ def one_run(args, expect_bytes: int | None):
                 b = job.sink_bytes()
                 if b == last and b > 0:
                     stable_since = stable_since or time.time()
-                    if time.time() - stable_since >= 2.0:
+                    if time.time() - stable_since >= getattr(job, "stable_window", 2.0):
                         break
                 else:
                     last, stable_since = b, None
@@ -514,8 +651,8 @@ def one_run(args, expect_bytes: int | None):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--tool", choices=["mqb", "mqb-docker", "arroyo", "sea-streamer"], required=True)
-    p.add_argument("--variant", choices=["passthrough", "projection", "projection-dedup"],
+    p.add_argument("--tool", choices=["mqb", "mqb-docker", "arroyo", "sea-streamer", "redpanda-connect", "vector"], required=True)
+    p.add_argument("--variant", choices=["passthrough", "projection", "projection-bloblang", "projection-dedup"],
                    default="projection")
     p.add_argument("--label", required=True)
     p.add_argument("--topic", default="bench_src")
@@ -525,6 +662,13 @@ def main():
     p.add_argument("--mqb-image", default=os.environ.get("MQB_IMAGE", "ghcr.io/marcomq/mq-bridge-app:latest"),
                    help="image for --tool mqb-docker")
     p.add_argument("--mqb-file-format", choices=["normal", "raw"], default="raw")
+    p.add_argument("--sink", choices=["file", "kafka"], default="file",
+                   help="kafka: a per-run topic; sink_bytes then counts records (mqb, vector)")
+    p.add_argument("--partitions", type=int, default=4, help="of the --sink kafka topic")
+    p.add_argument("--rpc-bin", default=os.environ.get("RPC_BIN", "benches/etl/bin/redpanda-connect"))
+    p.add_argument("--vector-bin", default=os.environ.get("VECTOR_BIN", "benches/etl/bin/vector"))
+    p.add_argument("--connect-plugin", default=os.environ.get(
+        "CONNECT_PLUGIN", "/opt/homebrew/lib/mq-bridge/libmq_bridge_connect.dylib"))
     p.add_argument("--sea-relay", default=os.environ.get("SEA_STREAMER_RELAY", "target/release/sea-streamer-relay"))
     p.add_argument("--sea-count", default=os.environ.get("SEA_STREAMER_COUNT", "target/release/sea-streamer-count"))
     p.add_argument("--sea-out-file", default="/tmp/sea_streamer_kafka_out.ss")
@@ -540,6 +684,8 @@ def main():
     p.add_argument("--results", required=True)
     p.add_argument("--keep-output", action="store_true")
     args = p.parse_args()
+    if args.sink == "kafka" and args.tool not in ("mqb", "vector"):
+        p.error("--sink kafka is implemented for --tool mqb and vector only")
 
     print(f"-- {args.label}: warmup (also calibrates the expected sink size)", flush=True)
     _, _, expect_bytes, _ = one_run(args, None)

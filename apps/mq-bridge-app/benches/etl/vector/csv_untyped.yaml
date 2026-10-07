@@ -1,0 +1,28 @@
+# Vector, CSV -> JSONL, untyped: every field stays a string, as in
+# mq-bridge-app's untyped run. Vector's file source is a tailer that never ends,
+# so the CSV comes in on stdin and Vector exits at EOF. run_csv_vector.sh fills in
+# the @…@ paths: an env-interpolated sink path wrote no file on Vector 0.59.0.
+data_dir: @DATA_DIR@
+sources:
+  in:
+    type: stdin
+transforms:
+  untyped:
+    type: remap
+    inputs: [in]
+    source: |
+      # The fixture has CRLF line ends; the stdin source splits on LF only.
+      row = parse_csv!(strip_whitespace(string!(.message)))
+      if row[0] == "id" { abort }
+      . = {
+        "id": row[0], "first_name": row[1], "country": row[2],
+        "amount": row[3], "created_at": row[4], "active": row[5],
+        "attributes": row[6]
+      }
+sinks:
+  out:
+    type: file
+    inputs: [untyped]
+    path: @OUT@
+    encoding:
+      codec: json

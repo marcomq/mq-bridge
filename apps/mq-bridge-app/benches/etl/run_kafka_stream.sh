@@ -49,6 +49,9 @@ DEDUP_STORE="${DEDUP_STORE:-/tmp/mqb_kafka_dedup}"
 SEA_STREAMER_RELAY="${SEA_STREAMER_RELAY:-$HERE/../../target/release/sea-streamer-relay}"
 SEA_STREAMER_COUNT="${SEA_STREAMER_COUNT:-$HERE/../../target/release/sea-streamer-count}"
 SEA_STREAMER_LABEL="${SEA_STREAMER_LABEL:-sea-streamer-file}"
+RPC_BIN="${RPC_BIN:-$HERE/bin/redpanda-connect}"
+VECTOR_BIN="${VECTOR_BIN:-$HERE/bin/vector}"
+CONNECT_PLUGIN="${CONNECT_PLUGIN:-/opt/homebrew/lib/mq-bridge/libmq_bridge_connect.dylib}"
 export RESULTS_CSV ROWS REPEATS
 
 # --- Topic seeding -----------------------------------------------------------
@@ -81,10 +84,11 @@ seed_topic() {
 
 cell() {
   local tool="$1" variant="$2" label="$3"
-  python3 "$HERE/stream_bench.py" \
+  "${PYTHON[@]:-python3}" "$HERE/stream_bench.py" \
     --tool "$tool" --variant "$variant" --label "$label" \
     --topic "$TOPIC" --brokers "$KAFKA_DOCKER_BROKERS" \
     --brokers-host "$KAFKA_HOST_BROKERS" --bin "$BIN" \
+    --rpc-bin "$RPC_BIN" --vector-bin "$VECTOR_BIN" --connect-plugin "$CONNECT_PLUGIN" \
     --sea-relay "$SEA_STREAMER_RELAY" --sea-count "$SEA_STREAMER_COUNT" \
     --out-file "$OUT_FILE" --dedup-store "$DEDUP_STORE" \
     --batch-size "$BATCH" --rows "$ROWS" --repeats "$REPEATS" \
@@ -131,6 +135,35 @@ case "${1:-all}" in
     cell mqb passthrough mqb-normal-passthrough --mqb-file-format normal
     cell sea-streamer passthrough "$SEA_STREAMER_LABEL"
     ;;
+  connect)
+    # Redpanda Connect standalone, then the same Bloblang projection as an
+    # mq-bridge-app middleware (mq-bridge-connect plugin) on the native source.
+    require_bin
+    [[ -x "$RPC_BIN" ]] || { echo "missing Redpanda Connect: $RPC_BIN" >&2; exit 1; }
+    [[ -f "$CONNECT_PLUGIN" ]] || { echo "missing mq-bridge-connect plugin: $CONNECT_PLUGIN" >&2; exit 1; }
+    mkdir -p "$RESULTS_DIR"
+    cell redpanda-connect passthrough redpanda-connect-passthrough
+    cell redpanda-connect projection redpanda-connect-projection
+    cell mqb projection-bloblang mqb-projection-bloblang
+    ;;
+  vector)
+    [[ -x "$VECTOR_BIN" ]] || { echo "missing Vector: $VECTOR_BIN" >&2; exit 1; }
+    mkdir -p "$RESULTS_DIR"
+    cell vector passthrough vector-passthrough
+    cell vector projection vector-projection
+    ;;
+  kafka-sink)
+    # Topic to topic, mq-bridge-app and Vector. Completion is the destination
+    # topic's end offsets, which needs a Kafka client in the harness.
+    require_bin
+    [[ -x "$VECTOR_BIN" ]] || { echo "missing Vector: $VECTOR_BIN" >&2; exit 1; }
+    mkdir -p "$RESULTS_DIR"
+    PYTHON=(uv run --quiet --with kafka-python python3)
+    for variant in passthrough projection; do
+      cell mqb "$variant" "mqb-kafka-$variant" --sink kafka --partitions "$PARTITIONS"
+      cell vector "$variant" "vector-kafka-$variant" --sink kafka --partitions "$PARTITIONS"
+    done
+    ;;
   parity)
     # Prove the two sides produced the same records before any ratio is quoted.
     # Both outputs are sorted by id first: the partitions are consumed
@@ -168,5 +201,5 @@ PY
     "$0" sea
     ;;
   *)
-    echo "usage: $0 seed|mqb|arroyo|sea|parity|all" >&2; exit 2 ;;
+    echo "usage: $0 seed|mqb|arroyo|sea|connect|vector|kafka-sink|parity|all" >&2; exit 2 ;;
 esac

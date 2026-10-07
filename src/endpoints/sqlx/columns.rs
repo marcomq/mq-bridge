@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::warn;
 
 /// Bind parameters per statement; below the limit of every supported driver.
-const MAX_BINDS: usize = 30_000;
+pub(super) const MAX_BINDS: usize = 30_000;
 
 /// `format_type` gives a name a cast accepts, without the length a cast would truncate to.
 const PG_COLUMN_CASTS_SQL: &str =

@@ -35,7 +35,9 @@ run_one() {
   # sqlx cursor reader) — the ETL "read a source table" path, akin to an Airbyte
   # incremental sync. (`delete_after_read` instead expects a queue-shaped table.)
   local from="${PG_URL}?table=${src}&cursor_column=id&sslmode=disable"
-  local to="${PG_URL}?table=${dst}&auto_create_table=true&sslmode=disable"
+  # `columns=auto` writes the row's fields into the table's columns; without it the
+  # sink stores the whole message in `payload`, the layout of a queue table.
+  local to="${PG_URL}?table=${dst}&columns=auto&sslmode=disable"
 
   # Warmup pre-roll (discarded, not timed): primes the connection pool + caches.
   reset_dst "$dst" >/dev/null

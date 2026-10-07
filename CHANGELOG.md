@@ -52,6 +52,13 @@ Kafka outputs publish faster with their default settings.
   5 ms; the producer a Kafka input uses for replies also moves to 1 ms. A
   `linger.ms` in `producer_options` overrides the default as before.
 
+### Fixed
+
+- **A large batch no longer fails a SQL output with an `insert_query`.** A batch that needed
+  more bind parameters than the database takes in one statement (65,535 on Postgres) failed
+  with `too many arguments for query`. It is now written as several statements in one
+  transaction, as `columns: auto` already did.
+
 ## 0.4.19
 
 CSV in more shapes: the reader takes other separators and quoting, and a CSV sink no longer

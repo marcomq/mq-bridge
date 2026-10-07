@@ -1013,6 +1013,35 @@ async fn test_sqlx_multicolumn_batch() {
     }
 }
 
+#[tokio::test]
+async fn token_insert_splits_a_batch_over_the_bind_limit() {
+    let (_dir, url) = setup_db_file().await;
+    let pool = AnyPool::connect(&url).await.unwrap();
+    sqlx::query("CREATE TABLE t (a INTEGER, b INTEGER)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let config = SqlxConfig {
+        url: url.clone(),
+        table: "t".to_string(),
+        insert_query: Some("INSERT INTO t (a, b) VALUES (${payload:a}, ${payload:b})".to_string()),
+        ..Default::default()
+    };
+    let publisher = SqlxPublisher::new(&config).await.unwrap();
+
+    let msgs = (0..20_000)
+        .map(|i| CanonicalMessage::new(format!(r#"{{"a":{i},"b":{i}}}"#).into_bytes(), None))
+        .collect();
+    publisher.send_batch(msgs).await.unwrap();
+
+    let row = sqlx::query("SELECT COUNT(*) AS n, COUNT(DISTINCT a) AS d FROM t")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(row.get::<i64, _>("n"), 20_000);
+    assert_eq!(row.get::<i64, _>("d"), 20_000);
+}
+
 // Regression (issue #71): a table written by the publisher with `auto_create_table` must be
 // readable by this library's own cursor reader. The generated DDL declares `locked_until`/
 // `created_at` as DATETIME, which the `Any` driver refuses to decode, so `SELECT *` failed the

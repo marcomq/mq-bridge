@@ -1,0 +1,19 @@
+# Redpanda Connect, CSV -> JSONL, typed: the mapping does what schemas/bench.json
+# does for mq-bridge-app's `transform` (id -> integer, attributes -> object).
+input:
+  file:
+    paths: ["${CSV}"]
+    scanner:
+      csv: {}
+pipeline:
+  processors:
+    - mapping: |
+        root = this
+        root.id = this.id.int64()
+        root.attributes = this.attributes.parse_json()
+output:
+  file:
+    path: ${OUT}
+    codec: lines
+logger:
+  level: ERROR

@@ -1730,40 +1730,52 @@ impl MessagePublisher for SqlxPublisher {
         }
 
         // Placeholders per row: N tokens in token mode, 1 (the payload) in legacy mode.
-        // A running global 1-based index spans the whole batch.
         let per_row = self.column_sources.len().max(1);
-        let mut placeholders = String::new();
-        let mut param_idx = 1;
-        for i in 0..messages.len() {
-            if i > 0 {
-                placeholders.push_str(", ");
-            }
-            placeholders.push('(');
-            for j in 0..per_row {
-                if j > 0 {
+        let per_statement = (columns::MAX_BINDS / per_row).max(1);
+        let retryable = |e: sqlx::Error| PublisherError::Retryable(anyhow!(e));
+        // One statement is atomic by itself; a batch split at the bind limit needs a transaction.
+        let mut tx = match messages.len() > per_statement {
+            true => Some(self.pool.begin().await.map_err(retryable)?),
+            false => None,
+        };
+        for chunk in messages.chunks(per_statement) {
+            // A running 1-based index spans the whole statement.
+            let mut placeholders = String::new();
+            let mut param_idx = 1;
+            for i in 0..chunk.len() {
+                if i > 0 {
                     placeholders.push_str(", ");
                 }
-                placeholders.push_str(&positional_placeholder(&self.driver_name, param_idx));
-                param_idx += 1;
+                placeholders.push('(');
+                for j in 0..per_row {
+                    if j > 0 {
+                        placeholders.push_str(", ");
+                    }
+                    placeholders.push_str(&positional_placeholder(&self.driver_name, param_idx));
+                    param_idx += 1;
+                }
+                placeholders.push(')');
             }
-            placeholders.push(')');
-        }
 
-        let sql = format!("{} VALUES {}{}", base_query, placeholders, values_suffix);
+            let sql = format!("{} VALUES {}{}", base_query, placeholders, values_suffix);
 
-        let mut query = sqlx::query(audited_sql(&sql));
-        for msg in &messages {
-            if self.column_sources.is_empty() {
-                query = query.bind(msg.payload.to_vec());
-            } else {
-                query = bind_message_sources(query, msg, &self.column_sources)?;
+            let mut query = sqlx::query(audited_sql(&sql));
+            for msg in chunk {
+                if self.column_sources.is_empty() {
+                    query = query.bind(msg.payload.to_vec());
+                } else {
+                    query = bind_message_sources(query, msg, &self.column_sources)?;
+                }
             }
-        }
-
-        query
-            .execute(&self.pool)
-            .await
+            match &mut tx {
+                Some(tx) => query.execute(&mut **tx).await,
+                None => query.execute(&self.pool).await,
+            }
             .map_err(classify_sql_error)?;
+        }
+        if let Some(tx) = tx {
+            tx.commit().await.map_err(retryable)?;
+        }
         Ok(SentBatch::Ack)
     }
 

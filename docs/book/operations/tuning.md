@@ -95,6 +95,31 @@ against a serial source just adds idle workers.
 through ordered sequencing or run concurrently for independent-ack transports. Rarely needs
 changing.
 
+## Writing to a Postgres table
+
+A SQL sink writes in one of three ways, and on Postgres they differ in speed:
+
+| Mode | Writes | Use it for |
+|---|---|---|
+| [`columns: auto`](../connectors/postgres.md#writing-by-column-name) | each field into the column of the same name | table → table copies; nothing to write by hand |
+| `insert_query` with `${payload:field}` tokens | the fields you name, as one multi-row `INSERT` | the fastest `INSERT`, and full control of the statement |
+| neither | the whole message into one `payload` column | a queue table that an `mq-bridge` consumer reads back |
+
+- **Batch size.** Between about 1,000 and 8,000 rows per batch is enough. Above that a multi-row
+  `INSERT` gains nothing, and with `concurrency: 4` it got slower.
+- **`bulk_copy`** switches the sink to `COPY FROM STDIN`. It pays off from roughly 8,000 rows per
+  batch and is no faster below. `COPY` cannot upsert, so it does not combine with `key` or an
+  `ON CONFLICT` clause.
+- **`insert_query` over `columns: auto`.** Mapping every record by name costs throughput: in the
+  benchmark an `insert_query` was 1.2–1.5x faster on the same rows. Write the query out when
+  the sink is the bottleneck.
+- **The server sets the ceiling.** With `insert_query`, `bulk_copy` and large batches the sink
+  reached the rate of a `psql` `COPY` pipe into the same table. Past that point the gains are
+  in Postgres itself (indexes, WAL, disk), not in the bridge.
+
+The measurements are in
+[scenario 1 of the benchmark README](https://github.com/marcomq/mq-bridge/blob/main/apps/mq-bridge-app/benches/etl/README.md#larger-batches-and-the-write-path).
+
 ## Connection pooling / reuse
 
 Publishers targeting the same server **share one underlying transport client by default** —
