@@ -4776,6 +4776,7 @@ dependencies = [
  "mq-bridge-pulsar",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
+ "percent-encoding",
  "rdkafka",
  "rust-embed",
  "rustls",

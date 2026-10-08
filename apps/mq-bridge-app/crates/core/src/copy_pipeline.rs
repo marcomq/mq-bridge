@@ -475,6 +475,14 @@ pub fn redact_param(key: &str, value: &str, parent: Option<&str>) -> String {
         // A nested endpoint URI: `fanout:?to=postgres://user:password@host/db`.
         redact_uri_segment(value)
     } else {
+        // The same, percent-encoded: `to=postgres%3A%2F%2Fuser%3Apassword%40host`.
+        let decoded = percent_encoding::percent_decode_str(value).decode_utf8_lossy();
+        if decoded.contains("://") {
+            let redacted = redact_uri(&decoded);
+            if redacted != decoded {
+                return redacted;
+            }
+        }
         value.to_string()
     }
 }
@@ -674,6 +682,19 @@ mod tests {
             "fanout:?to=meilisearch://host:7700?api_key=***&to=null:"
         );
         assert_eq!(redact_param("note", "a?token=b", None), "a?token=b");
+
+        // Percent-encoded, which a nested URI with several params of its own has to be.
+        assert_eq!(
+            redact_uri(
+                "fanout:?to=postgres%3A%2F%2Falice%3Ahunter2%40db%2Fshop%3Ftable%3Dt%26password%3Dp2&to=null:"
+            ),
+            "fanout:?to=postgres://alice:***@db/shop?table=t&password=***&to=null:"
+        );
+        // Nothing to hide leaves the encoded form as typed.
+        assert_eq!(
+            redact_uri("fanout:?to=nats%3A%2F%2Fhost%3A4222%3Fsubject%3Dorders"),
+            "fanout:?to=nats%3A%2F%2Fhost%3A4222%3Fsubject%3Dorders"
+        );
 
         // Nothing to redact must survive untouched, credential-free URIs included.
         assert_eq!(redact_uri("null:"), "null:");

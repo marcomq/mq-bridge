@@ -1,7 +1,7 @@
 //! `mqb status`: a read-only view of the local status registry.
 
 use mq_bridge_app::status_registry::{
-    list_off_thread, now_ms, InstanceKind, InstanceStatus, LocalStatusRegistry, StatusSummary,
+    InstanceKind, InstanceStatus, LocalStatusRegistry, StatusSummary, list_off_thread, now_ms,
 };
 use mq_bridge_app::ui_app::RouteOutcomeSnapshot;
 use std::io::IsTerminal;
