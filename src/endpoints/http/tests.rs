@@ -1688,45 +1688,6 @@ async fn test_http_streamable_route_handler_uses_inline_path() {
 }
 
 #[tokio::test]
-async fn test_http_reply_with_custom_status_code() {
-    use crate::traits::Handled;
-    init_crypto();
-
-    let http_config = HttpConfig {
-        url: "127.0.0.1:0".to_string(),
-        ..Default::default()
-    };
-    let mut consumer = HttpConsumer::new(&http_config).await.unwrap();
-
-    let mut response_endpoint =
-        crate::models::Endpoint::new(EndpointType::Response(crate::models::ResponseConfig {}));
-
-    let handler = |mut msg: CanonicalMessage| async move {
-        msg.metadata
-            .insert("http_status_code".to_string(), "201".to_string());
-        Ok(Handled::Publish(msg))
-    };
-    response_endpoint.handler = Some(std::sync::Arc::new(handler));
-
-    let publisher = create_publisher_from_route("test_response_handler_status", &response_endpoint)
-        .await
-        .unwrap();
-
-    tokio::spawn(async move {
-        if let Ok(received) = consumer.receive().await {
-            let outcome = publisher.send(received.message).await.unwrap();
-            let disposition = match outcome {
-                Sent::Response(msg) => crate::traits::MessageDisposition::Reply(msg),
-                Sent::Ack => crate::traits::MessageDisposition::Ack,
-            };
-            let _ = (received.commit)(disposition).await;
-        }
-    });
-
-    tokio::time::sleep(Duration::from_millis(50)).await;
-}
-
-#[tokio::test]
 async fn test_http_consumers_share_listener_by_path() {
     init_crypto();
 

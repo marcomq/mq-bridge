@@ -419,6 +419,93 @@ mod tests {
         }
     }
 
+    struct HookPublisher {
+        name: &'static str,
+        fail: bool,
+        log: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl HookPublisher {
+        fn record(&self, hook: &'static str) -> BoxFuture<'_, anyhow::Result<()>> {
+            Box::pin(async move {
+                self.log
+                    .lock()
+                    .unwrap()
+                    .push(format!("{}:{hook}", self.name));
+                if self.fail {
+                    anyhow::bail!("{} {hook} failed", self.name);
+                }
+                Ok(())
+            })
+        }
+    }
+
+    #[async_trait]
+    impl MessagePublisher for HookPublisher {
+        fn on_connect_hook(&self) -> Option<BoxFuture<'_, anyhow::Result<()>>> {
+            Some(self.record("connect"))
+        }
+        fn on_disconnect_hook(&self) -> Option<BoxFuture<'_, anyhow::Result<()>>> {
+            Some(self.record("disconnect"))
+        }
+        async fn send_batch(&self, _: Vec<CanonicalMessage>) -> Result<SentBatch, PublisherError> {
+            Ok(SentBatch::Ack)
+        }
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    fn hooked_dlq(inner_fails: bool, dlq_fails: bool) -> (DlqPublisher, Arc<Mutex<Vec<String>>>) {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let publisher = DlqPublisher {
+            inner: Box::new(HookPublisher {
+                name: "inner",
+                fail: inner_fails,
+                log: log.clone(),
+            }),
+            dlq_publisher: Arc::new(HookPublisher {
+                name: "dlq",
+                fail: dlq_fails,
+                log: log.clone(),
+            }),
+            route_name: "hooks".to_string(),
+        };
+        (publisher, log)
+    }
+
+    #[tokio::test]
+    async fn connect_runs_the_inner_hook_then_the_dlq_hook() {
+        let (publisher, log) = hooked_dlq(false, false);
+
+        publisher.on_connect_hook().unwrap().await.unwrap();
+
+        assert_eq!(*log.lock().unwrap(), ["inner:connect", "dlq:connect"]);
+    }
+
+    #[tokio::test]
+    async fn a_failed_dlq_connect_fails_the_connect() {
+        let (publisher, _log) = hooked_dlq(false, true);
+
+        let error = publisher.on_connect_hook().unwrap().await.unwrap_err();
+
+        assert!(error.to_string().contains("dlq connect failed"), "{error}");
+    }
+
+    /// A failing inner disconnect must not leave the DLQ endpoint connected.
+    #[tokio::test]
+    async fn disconnect_runs_both_hooks_and_reports_the_first_error() {
+        let (publisher, log) = hooked_dlq(true, true);
+
+        let error = publisher.on_disconnect_hook().unwrap().await.unwrap_err();
+
+        assert_eq!(*log.lock().unwrap(), ["inner:disconnect", "dlq:disconnect"]);
+        assert!(
+            error.to_string().contains("inner disconnect failed"),
+            "{error}"
+        );
+    }
+
     #[tokio::test]
     async fn test_retry_before_dlq() {
         let target_calls = Arc::new(Mutex::new(0));

@@ -324,6 +324,75 @@ fn custom_middleware_factory(name: &str) -> Result<Arc<dyn CustomMiddlewareFacto
     ))
 }
 
+#[cfg(test)]
+mod placement_tests {
+    use super::*;
+    use crate::endpoints::memory::{MemoryConsumer, MemoryPublisher};
+    use crate::models::EndpointType;
+
+    fn endpoint_with(middleware: serde_json::Value) -> Endpoint {
+        let mut endpoint = Endpoint::new(EndpointType::Null);
+        endpoint.middlewares = vec![serde_json::from_value(middleware).unwrap()];
+        endpoint
+    }
+
+    async fn consumer_error(middleware: serde_json::Value) -> anyhow::Error {
+        let consumer = Box::new(MemoryConsumer::new_local("placement_in", 1));
+        apply_middlewares_to_consumer(consumer, &endpoint_with(middleware), "placement")
+            .await
+            .err()
+            .expect("an output-only middleware on an input must be refused")
+    }
+
+    async fn publisher_error(middleware: serde_json::Value) -> anyhow::Error {
+        let publisher = Box::new(MemoryPublisher::new_local("placement_out", 1));
+        apply_middlewares_to_publisher(publisher, &endpoint_with(middleware), "placement")
+            .await
+            .err()
+            .expect("an input-only middleware on an output must be refused")
+    }
+
+    #[tokio::test]
+    async fn output_only_middleware_on_an_input_is_an_invalid_config() {
+        for (middleware, hint) in [
+            (serde_json::json!({"pack": {}}), "output-only"),
+            (
+                serde_json::json!({"timeout": {"timeout_ms": 5}}),
+                "output-only",
+            ),
+        ] {
+            let err = consumer_error(middleware).await;
+            assert!(err.downcast_ref::<InvalidConfig>().is_some(), "{err}");
+            assert!(err.to_string().contains(hint), "{err}");
+        }
+    }
+
+    #[tokio::test]
+    async fn input_only_middleware_on_an_output_is_an_invalid_config() {
+        for (middleware, hint) in [
+            (serde_json::json!({"unpack": {}}), "input-only"),
+            (
+                serde_json::json!({"id": "${payload:order_id}"}),
+                "consumer-only",
+            ),
+        ] {
+            let err = publisher_error(middleware).await;
+            assert!(err.downcast_ref::<InvalidConfig>().is_some(), "{err}");
+            assert!(err.to_string().contains(hint), "{err}");
+        }
+    }
+
+    #[tokio::test]
+    async fn retry_on_an_input_is_ignored_not_refused() {
+        let consumer = Box::new(MemoryConsumer::new_local("placement_retry_in", 1));
+        let endpoint = endpoint_with(serde_json::json!({"retry": {"max_attempts": 3}}));
+
+        let applied = apply_middlewares_to_consumer(consumer, &endpoint, "placement").await;
+
+        assert!(applied.is_ok());
+    }
+}
+
 #[cfg(all(test, feature = "dedup"))]
 mod tests {
     use super::*;

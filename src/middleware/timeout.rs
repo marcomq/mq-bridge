@@ -114,4 +114,55 @@ mod tests {
 
         assert!(publisher.send(CanonicalMessage::from("ok")).await.is_ok());
     }
+
+    #[tokio::test]
+    async fn a_single_send_that_never_returns_names_the_timeout() {
+        let config = TimeoutMiddleware { timeout_ms: 20 };
+        let publisher = TimeoutPublisher::new(Box::new(StuckPublisher), &config);
+
+        let error = publisher
+            .send(CanonicalMessage::from("stuck"))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, PublisherError::Retryable(_)), "{error}");
+        assert!(error.to_string().contains("20ms"), "{error}");
+    }
+
+    struct OrderedPublisher {
+        flushed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    #[async_trait]
+    impl MessagePublisher for OrderedPublisher {
+        async fn send_batch(&self, _: Vec<CanonicalMessage>) -> Result<SentBatch, PublisherError> {
+            Ok(SentBatch::Ack)
+        }
+        async fn flush(&self) -> anyhow::Result<()> {
+            self.flushed
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+        fn requires_ordered_publish(&self) -> bool {
+            true
+        }
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    /// The route reads both through the wrapper; dropping either breaks an ordered sink.
+    #[tokio::test]
+    async fn flush_and_ordering_reach_the_wrapped_publisher() {
+        let flushed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let inner = OrderedPublisher {
+            flushed: flushed.clone(),
+        };
+        let config = TimeoutMiddleware { timeout_ms: 1000 };
+        let publisher = TimeoutPublisher::new(Box::new(inner), &config);
+
+        assert!(publisher.requires_ordered_publish());
+        publisher.flush().await.unwrap();
+        assert!(flushed.load(std::sync::atomic::Ordering::SeqCst));
+    }
 }
