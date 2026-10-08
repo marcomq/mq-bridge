@@ -1,0 +1,60 @@
+[package]
+name = "mq-bridge-c"
+version.workspace = true
+edition = "2021"
+publish = false
+description = "C library for mq-bridge, an async message-bridging library"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/marcomq/mq-bridge"
+
+# Named after the product, not the crate: C users link `-lmq_bridge`. No rlib, so
+# nothing collides with the core crate's `libmq_bridge.rlib`.
+[lib]
+name = "mq_bridge"
+crate-type = ["cdylib", "staticlib"]
+doctest = false
+doc = false
+test = false
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+mqb = { package = "mq-bridge", path = "../..", features = ["plugin"] }
+mq-bridge-bindings-common = { path = "../../bindings-common" }
+schemars = { version = "1.2", optional = true }
+serde_json.workspace = true
+serde_yaml_ng.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time"] }
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "env-filter"] }
+
+[dev-dependencies]
+cbindgen = { version = "0.29.4", default-features = false }
+
+[features]
+default = ["full"]
+middleware = ["mqb/middleware"]
+full = ["mqb/full", "schema"]
+basic = ["http", "nats", "mqtt", "websocket", "zeromq", "rustls-ring", "schema"]
+dedup = ["mqb/dedup"]
+metrics = ["mqb/metrics"]
+schema = ["dep:schemars", "mqb/schema"]
+kafka = ["mqb/kafka"]
+amqp = ["mqb/amqp"]
+nats = ["mqb/nats"]
+mongodb = ["mqb/mongodb"]
+mqtt = ["mqb/mqtt"]
+http = ["mqb/http"]
+websocket = ["mqb/websocket"]
+aws = ["mqb/aws"]
+ibm-mq = ["mqb/ibm-mq"]
+ibm-mq-static = ["mqb/ibm-mq-static"]
+zeromq = ["mqb/zeromq"]
+redis-streams = ["mqb/redis-streams"]
+grpc = ["mqb/grpc"]
+sqlx = ["mqb/sqlx"]
+rustls-ring = ["mqb/rustls-ring"]
+rustls-aws-lc = ["mqb/rustls-aws-lc"]
+
+[lints]
+workspace = true

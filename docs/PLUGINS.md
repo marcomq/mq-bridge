@@ -840,6 +840,10 @@ mutex around the non-thread-safe library.
 matches the host, and its `static_assert`s refuse to compile if the table layout
 ever does not.
 
+A C or C++ program that embeds mq-bridge through the
+[C library](../c/mq-bridge-c/README.md) does not need a separate plugin library:
+`mqb_register_plugin(&table)` registers the same table from the program itself.
+
 #### When it crashes
 
 A plugin has no `main()` in which to install a `SIGSEGV` handler, and a handler

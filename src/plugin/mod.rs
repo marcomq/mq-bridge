@@ -142,20 +142,21 @@ impl PluginInfo {
 /// library nor the factory can be dropped while an endpoint still points at it.
 pub(crate) struct LoadedPlugin {
     /// Kept only to keep the library mapped; every code pointer below lives in it.
-    _library: Arc<libloading::Library>,
+    /// `None` for a table registered from this process.
+    _library: Option<Arc<libloading::Library>>,
     table: *const MqbPluginVTable,
     factory: MqbFactoryHandle,
     info: PluginInfo,
 }
 
 /// Safety: the ABI requires every handle to be usable from any thread, and the
-/// table is immutable `'static` data inside the library.
+/// table is immutable `'static` data in the library or the host program.
 unsafe impl Send for LoadedPlugin {}
 unsafe impl Sync for LoadedPlugin {}
 
 impl LoadedPlugin {
     pub(crate) fn table(&self) -> &MqbPluginVTable {
-        // Safety: validated at load time and kept alive by `_library`.
+        // Safety: validated at load time; kept alive by `_library` or the registrant.
         unsafe { &*self.table }
     }
 
@@ -314,6 +315,50 @@ pub fn load_endpoint_plugins(path: impl AsRef<Path>) -> anyhow::Result<Vec<Plugi
     Ok(infos)
 }
 
+/// Registers a plugin table that lives in this process instead of in a loaded
+/// library, for a host that links its endpoint or middleware in.
+///
+/// Fails like [`load_endpoint_plugin`]: on an incompatible ABI, a table without
+/// capabilities, or a name another factory already occupies. Registering the
+/// same table twice fails too, before its factory is created a second time.
+/// [`disable_plugin_loading`] does not apply: no library is opened.
+///
+/// # Safety
+/// `table` must point to a valid [`MqbPluginVTable`] that, with all the code it
+/// points at, stays valid for the life of the process.
+pub unsafe fn register_plugin_table(table: *const MqbPluginVTable) -> anyhow::Result<PluginInfo> {
+    const IN_PROCESS: &str = "<in-process>";
+    let mut loaded = loaded_plugins()
+        .lock()
+        .map_err(|_| anyhow!("plugin registry lock poisoned"))?;
+    if !table.is_null() && loaded.values().flatten().any(|p| p.table == table) {
+        return Err(anyhow!("this plugin table is already registered"));
+    }
+    let plugin = Arc::new(open_plugin(None, table, Path::new(IN_PROCESS))?);
+    let info = plugin.info.clone();
+    let endpoint = info.supports_consumer || info.supports_publisher;
+    if !(endpoint || info.supports_middleware) {
+        return Err(anyhow!(
+            "plugin `{}` declares no capabilities: it provides neither an endpoint nor a middleware",
+            info.name
+        ));
+    }
+    if (endpoint && get_endpoint_factory(&info.name).is_some())
+        || (info.supports_middleware && get_middleware_factory(&info.name).is_some())
+    {
+        return Err(anyhow!(
+            "`{}` is already registered by another factory",
+            info.name
+        ));
+    }
+    register_plugin(&plugin)?;
+    loaded
+        .entry(Path::new(IN_PROCESS).join(&info.name))
+        .or_default()
+        .push(plugin);
+    Ok(info)
+}
+
 fn register_plugin(plugin: &Arc<LoadedPlugin>) -> anyhow::Result<()> {
     let info = &plugin.info;
     let endpoint = info.supports_consumer || info.supports_publisher;
@@ -409,12 +454,12 @@ fn open_plugins(path: &Path) -> anyhow::Result<Vec<LoadedPlugin>> {
     }
     tables
         .into_iter()
-        .map(|table| open_plugin(&library, table, path))
+        .map(|table| open_plugin(Some(&library), table, path))
         .collect()
 }
 
 fn open_plugin(
-    library: &Arc<libloading::Library>,
+    library: Option<&Arc<libloading::Library>>,
     table: *const MqbPluginVTable,
     path: &Path,
 ) -> anyhow::Result<LoadedPlugin> {
@@ -448,7 +493,7 @@ fn open_plugin(
     let status = unsafe { (table_ref.factory_create)(&mut factory, &mut error) };
 
     let mut plugin = LoadedPlugin {
-        _library: Arc::clone(library),
+        _library: library.cloned(),
         table,
         factory,
         info: PluginInfo {

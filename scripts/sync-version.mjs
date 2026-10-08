@@ -105,6 +105,7 @@ function syncCargoLock(path, packageNames) {
 syncCargoLock(paths.rootLock, [
   "mq-bridge",
   "mq-bridge-bindings-common",
+  "mq-bridge-c",
   "mq-bridge-node",
   "mq-bridge-py",
 ]);

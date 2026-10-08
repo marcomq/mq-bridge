@@ -1,0 +1,37 @@
+language = "C"
+cpp_compat = true
+documentation = true
+documentation_style = "c99"
+usize_is_size_t = true
+no_includes = true
+sys_includes = ["stdbool.h", "stddef.h", "stdint.h"]
+includes = ["mq_bridge_plugin.h"]
+autogen_warning = "/* Generated from c/mq-bridge-c/src by cbindgen. Do not edit.\n * Regenerate: MQB_BLESS=1 cargo test -p mq-bridge-c --no-default-features --test c_header */"
+
+header = """
+/*
+ * mq_bridge.h - the C API of mq-bridge: publishers, consumers and routes over
+ * any supported endpoint, configured with the same YAML/JSON as the CLI.
+ *
+ * Rules:
+ *  - Every call blocks the calling thread until it is done.
+ *  - A fallible call returns an MqbStatus (MQB_OK is 0) or a null handle; the
+ *    text is in mqb_last_error(), which is per thread.
+ *  - Handles are opaque and may be shared between threads, except a message,
+ *    which must not be changed while another thread reads it.
+ *  - Every `*_new`, `*_from_*` and out-parameter handle has a matching `*_free`.
+ *  - There is no ABI stability: this header and the library ship together.
+ *    Compare MQB_API_VERSION with mqb_api_version() to catch a mismatch.
+ *  - 64-bit targets only (see mq_bridge_plugin.h, which also defines MqbSlice,
+ *    MqbStatus and the MQB_* status codes used here).
+ */
+
+#ifndef MQ_BRIDGE_H
+#define MQ_BRIDGE_H"""
+
+trailer = """
+#endif /* MQ_BRIDGE_H */
+"""
+
+[export]
+exclude = ["ABSENT", "ROUTE_END_POLL_INTERVAL"]

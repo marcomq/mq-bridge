@@ -120,6 +120,11 @@ jobs:
       - name: C plugin header is current and a C plugin loads
         run: cargo test -p mq-bridge-plugin-fixture --test plugin_c_header --test plugin_c_abi
 
+      - name: C library header is current and a C program links and runs
+        run: cargo test -p mq-bridge-c --no-default-features
+        env:
+          MQB_C_ASAN: "1" # AddressSanitizer; on Linux it also fails on leaks
+
       - name: Memory leak soak (route commit-task JoinSet)
         run: cargo test --test memory_leak_test --features=full -- --ignored --nocapture
 

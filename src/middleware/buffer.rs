@@ -370,6 +370,11 @@ pub struct BufferConsumer {
     inner: Box<dyn MessageConsumer>,
     max_messages: usize,
     max_delay: Duration,
+    // Partial batch of a linger; kept here so a cancelled `receive_batch` loses nothing.
+    held: Vec<CanonicalMessage>,
+    // Mutex only for `Sync` (commit closures are `Send` only); reached through `get_mut`.
+    held_commits: Mutex<Vec<(usize, BatchCommitFunc)>>,
+    deadline: Instant,
 }
 
 /// Consumer types whose `receive_batch` is cancel-safe: an in-flight read can be
@@ -420,6 +425,9 @@ impl BufferConsumer {
             inner,
             max_messages: config.max_messages,
             max_delay: Duration::from_millis(config.max_delay_ms),
+            held: Vec::new(),
+            held_commits: Mutex::new(Vec::new()),
+            deadline: Instant::now(),
         })
     }
 }
@@ -464,27 +472,35 @@ impl MessageConsumer for BufferConsumer {
     async fn receive_batch(&mut self, max_messages: usize) -> Result<ReceivedBatch, ConsumerError> {
         let target = max_messages.min(self.max_messages).max(1);
 
-        // Block for the first read; first-read errors propagate as-is.
-        let first = self.inner.receive_batch(target).await?;
-        let mut messages = first.messages;
+        // A cancelled call left a partial batch: resume its linger instead of reading anew.
+        if self.held.is_empty() {
+            // Block for the first read; first-read errors propagate as-is.
+            let first = self.inner.receive_batch(target).await?;
 
-        // Nothing to coalesce.
-        if messages.is_empty() || messages.len() >= target || self.max_delay.is_zero() {
-            return Ok(ReceivedBatch {
-                messages,
-                commit: first.commit,
-            });
+            // Nothing to coalesce.
+            if first.messages.is_empty()
+                || first.messages.len() >= target
+                || self.max_delay.is_zero()
+            {
+                return Ok(first);
+            }
+
+            self.held_commits
+                .get_mut()
+                .push((first.messages.len(), first.commit));
+            self.held = first.messages;
+            self.deadline = Instant::now() + self.max_delay;
         }
 
         // Fill until target or window close.
-        let mut commits: Vec<(usize, BatchCommitFunc)> = vec![(messages.len(), first.commit)];
-        let deadline = Instant::now() + self.max_delay;
-        while messages.len() < target {
-            let remaining = target - messages.len();
-            match timeout_at(deadline, self.inner.receive_batch(remaining)).await {
+        while self.held.len() < target {
+            let remaining = target - self.held.len();
+            match timeout_at(self.deadline, self.inner.receive_batch(remaining)).await {
                 Ok(Ok(batch)) if !batch.messages.is_empty() => {
-                    commits.push((batch.messages.len(), batch.commit));
-                    messages.extend(batch.messages);
+                    self.held_commits
+                        .get_mut()
+                        .push((batch.messages.len(), batch.commit));
+                    self.held.extend(batch.messages);
                 }
                 // Empty/expired/error: flush what we hold; an inner error recurs next call.
                 _ => break,
@@ -492,8 +508,8 @@ impl MessageConsumer for BufferConsumer {
         }
 
         Ok(ReceivedBatch {
-            messages,
-            commit: merge_commits(commits),
+            messages: std::mem::take(&mut self.held),
+            commit: merge_commits(std::mem::take(self.held_commits.get_mut())),
         })
     }
 
@@ -875,6 +891,34 @@ mod tests {
         let batch = consumer.receive_batch(64).await.unwrap();
         assert_eq!(batch.messages.len(), 2);
         assert!(started.elapsed() >= Duration::from_millis(30));
+    }
+
+    #[tokio::test]
+    async fn test_buffer_consumer_keeps_held_messages_when_cancelled_mid_linger() {
+        let mut consumer = BufferConsumer::new_unchecked(
+            Box::new(TrickleConsumer {
+                next_id: Arc::new(StdMutex::new(0)),
+                limit: 2,
+                block_when_empty: true,
+                committed: Arc::new(StdMutex::new(Vec::new())),
+            }),
+            &BufferMiddleware {
+                max_messages: 8,
+                max_delay_ms: 200,
+            },
+        )
+        .unwrap();
+
+        // A caller-side timeout (a binding's poll) drops the future during the linger.
+        let cancelled = timeout(Duration::from_millis(20), consumer.receive_batch(64)).await;
+        assert!(cancelled.is_err());
+
+        let batch = timeout(Duration::from_secs(1), consumer.receive_batch(64))
+            .await
+            .expect("held messages were lost with the cancelled receive")
+            .unwrap();
+        let ids: Vec<u128> = batch.messages.iter().map(|m| m.message_id).collect();
+        assert_eq!(ids, vec![0, 1]);
     }
 
     #[test]
