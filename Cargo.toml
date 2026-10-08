@@ -25,6 +25,7 @@ members = [
     "bindings-common",
     "python/mq-bridge-py",
     "node/mq-bridge-node",
+    "plugins/full",
     "tests/fixtures/plugin-fixture",
     "tests/fixtures/plugin-fixture-bad-abi",
     "tests/fixtures/plugin-fixture-middleware",
@@ -271,7 +272,7 @@ byteorder = { version = "1.5", optional = true }
 # dir_spool PRODUCER/CONSUMER locks: a pid file whose owner is checked for liveness, so a
 # crashed endpoint's lock is broken rather than wedging the next start. Pulls `nix` (unix)
 # or `windows` (Windows) for that one process-existence check.
-pidlock = "0.2.2"
+pidlock = { version = "0.2.2", optional = true }
 
 # Generate JSON schema
 schemars = { version = "1.2", optional = true }
@@ -285,14 +286,15 @@ tonic-prost-build = { version = "0.14", optional = true, default-features = fals
 protoc-bin-vendored = { version = "3.2", optional = true }
 
 [features]
-default = []
+# Local-filesystem endpoints. `default-features = false` drops them (lean embedding).
+default = ["file", "dir-spool"]
 middleware = ["metrics", "otel", "dedup", "compression", "encryption", "filter", "aggregate"]
 # Opt-in: parse JSON f64 with full precision so a number round-trips bit-exactly.
 # Off by default because it slows float parsing; without it serde_json shifts ~1 ULP
 # on ~19% of 17-significant-digit doubles (e.g. a Postgres `double precision` value
 # moved through a JSON payload). Enable if bit-exact float round-tripping matters.
 float-roundtrip = ["serde_json/float_roundtrip"]
-full-common = ["middleware", "yaml", "plugin", "mongodb", "kafka", "amqp", "nats", "mqtt", "http", "aws", "zeromq", "zeromq-omq", "redis-streams", "sled", "grpc", "sqlx", "clickhouse", "http-bulk", "websocket", "postgres-cdc", "object-store", "parquet", "avro", "rustls-aws-lc"]
+full-common = ["file", "dir-spool", "middleware", "yaml", "plugin", "mongodb", "kafka", "amqp", "nats", "mqtt", "http", "aws", "zeromq", "zeromq-omq", "redis-streams", "sled", "grpc", "sqlx", "clickhouse", "http-bulk", "websocket", "postgres-cdc", "object-store", "parquet", "avro", "rustls-aws-lc"]
 
 # ibm-mq (dlopen) is safe to include: it needs no IBM SDK at build, and at
 # runtime the client is loaded lazily only when an ibm-mq endpoint is opened
@@ -328,7 +330,7 @@ vendored-protoc = ["dep:protoc-bin-vendored"]
 # kafka (librdkafka), sqlx (libsqlite3-sys), grpc (protoc), ibm-mq/ibm-mq-static
 # (IBM C client). postgres-cdc is excluded too: its wire protocol is pure Rust
 # but it pulls in sqlx (C).
-portable = ["metrics", "otel", "dedup", "yaml", "plugin", "mongodb", "amqp", "nats", "mqtt", "http", "aws", "zeromq", "redis-streams", "clickhouse", "http-bulk", "websocket", "object-store", "rustls-aws-lc"]
+portable = ["file", "dir-spool", "metrics", "otel", "dedup", "yaml", "plugin", "mongodb", "amqp", "nats", "mqtt", "http", "aws", "zeromq", "redis-streams", "clickhouse", "http-bulk", "websocket", "object-store", "rustls-aws-lc"]
 
 # Functionality features
 # YAML config files for Route/Publisher::from_file and deploy_file; JSON works without it.
@@ -381,6 +383,10 @@ schema = ["dep:schemars"]
 url = []
 
 # Endpoint features
+# `file` endpoint (CSV/JSONL/raw files); `object-store` reuses its codecs.
+file = []
+# `dir_spool` endpoint: crash-safe directory FIFO queue.
+dir-spool = ["dep:pidlock"]
 kafka = ["rdkafka", "rdkafka/libz-static"]
 amqp = ["lapin", "rustls", "rustls-pemfile"]
 nats = ["async-nats", "rustls", "rustls-pemfile"]
@@ -414,7 +420,7 @@ clickhouse = ["dep:reqwest", "dep:flate2", "dep:lz4_flex", "dep:zstd", "dep:perc
 # Generic bulk document sink over HTTP (search engines and similar APIs).
 http-bulk = ["dep:reqwest", "dep:percent-encoding", "dep:flate2", "dep:lz4_flex", "dep:zstd"]
 # Cloud object-store checkpoint backend (S3/GCS/Azure/R2). Talks cloud REST via reqwest.
-object-store = ["dep:object_store"]
+object-store = ["dep:object_store", "file"]
 # `format: parquet` on object_store. Column codecs reuse the `compression` crates.
 parquet = ["object-store", "compression", "dep:parquet", "dep:arrow-json", "dep:arrow-array", "dep:arrow-schema"]
 # Postgres logical-replication CDC (pgoutput). Reuses the sqlx dependency for the
@@ -457,7 +463,7 @@ required-features = ["test-utils"]
 [[bench]]
 name = "csv_to_json_bench"
 harness = false
-required-features = ["test-utils"]
+required-features = ["test-utils", "file"]
 
 # Per-message cost of the `filter` and `transform` middlewares.
 [[bench]]

@@ -1,0 +1,13 @@
+# Redpanda Connect, CSV -> JSONL, untyped: the csv scanner emits every field as a
+# string, as mq-bridge-app's CSV reader does. Run by run_csv_connect.sh.
+input:
+  file:
+    paths: ["${CSV}"]
+    scanner:
+      csv: {}
+output:
+  file:
+    path: ${OUT}
+    codec: lines
+logger:
+  level: ERROR

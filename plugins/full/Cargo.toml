@@ -1,0 +1,33 @@
+[package]
+name = "mq-bridge-full-plugin"
+version.workspace = true
+edition = "2021"
+rust-version = "1.89"
+publish = false
+description = "Every built-in mq-bridge endpoint as one loadable plugin library, for hosts that embed mq-bridge without them"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/marcomq/mq-bridge"
+
+[lib]
+# `libmq_bridge_full.so`: loaded by path, not found by endpoint-name discovery.
+name = "mq_bridge_full"
+crate-type = ["cdylib"]
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+mq-bridge = { path = "../..", default-features = false, features = ["plugin-sdk"] }
+# The plugin has its own copy of rustls, so it installs its own crypto provider.
+rustls = { version = "0.23", optional = true, default-features = false, features = ["std", "tls12", "logging"] }
+serde_json.workspace = true
+
+[features]
+default = ["full"]
+full = ["mq-bridge/full", "rustls-aws-lc"]
+# No librdkafka, protoc or bundled sqlite; see `portable` in mq-bridge.
+portable = ["mq-bridge/portable", "rustls-aws-lc"]
+rustls-aws-lc = ["dep:rustls", "rustls/aws_lc_rs", "rustls/prefer-post-quantum", "mq-bridge/rustls-aws-lc"]

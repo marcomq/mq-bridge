@@ -9,7 +9,8 @@ updates:
     directory: "/" # Location of package manifests
     target-branch: "dev"
     schedule:
-      interval: "monthly"
+      # Same cadence as the app workspace below, so the two lockfiles do not drift.
+      interval: "weekly"
     groups:
       minor-and-patch:
         applies-to: version-updates

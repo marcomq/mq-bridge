@@ -31,12 +31,12 @@ These rules hold for every table on this page unless a cell says otherwise.
 | mq-bridge version | **0.4.20**, measured 2026-10-06 |
 | Build | default release build (`full` features, **mimalloc** allocator) — what Homebrew and cargo-binstall ship |
 | Machine | Apple M1, 8 cores, 8 GB RAM, in ordinary desktop use |
-| Dataset | 1,000,000 rows, seed 42, 7 mixed-type columns (scenarios 5–9); padded 256 B / 4 KiB JSON rows (scenarios 1–3) |
+| Dataset | 1,000,000 rows, seed 42, 7 mixed-type columns (scenarios 5–11); padded 256 B / 4 KiB JSON rows (scenarios 1–3) |
 | Throughput | rows ÷ median wall-clock of the whole process, start to exit |
 | Runs | one discarded warm-up, then the timed runs; run counts are next to each number |
 | Peak RSS | `/usr/bin/time -l`, measured alongside throughput |
 | Correctness | every timed run must land the full row count or the run fails |
-| Baseline versions | Sling 1.5.21 · Meltano 4.4.0 (`tap-csv` 1.3.2, `tap-postgres` 0.9.0, `target-jsonl` 0.1.4) · DuckDB 1.5.6 · Arroyo 0.15.0 · Sea Streamer 0.5.2 |
+| Baseline versions | Sling 1.5.21 · Meltano 4.4.0 (`tap-csv` 1.3.2, `tap-postgres` 0.9.0, `target-jsonl` 0.1.4) · DuckDB 1.5.6 · Arroyo 0.15.0 · Sea Streamer 0.5.2 · Redpanda Connect 4.112.0 (mq-bridge-connect plugin 0.1.1) · Vector 0.59.0 |
 
 - **Numbers are hardware-dependent.** Treat them as shape, not guarantees. Differences
   of a few percent are noise. Ratios against a baseline on the same machine are the
@@ -96,6 +96,11 @@ Three things the table shows:
 | Postgres → CSV | 495,540 rows/s | `psql \copy`: 587,199 | psql **~1.18x** faster | psql is a byte pump; expected | [8](#8--postgres--file-vs-the-tools-that-ship-with-postgres) |
 | Kafka → JSONL, projection | 599,031 rows/s | Arroyo: 566,991 | within noise, half the memory | both in containers; mq-bridge-app image 0.4.19; delivery guarantees differ | [9a](#9a--kafka--jsonl-vs-arroyo) |
 | Kafka → file, passthrough | 878,105 rows/s | Sea Streamer: 483,800 | **~1.82x** faster (1.78x vs. its mimalloc build) | sink formats differ | [9b](#9b--kafka--file-vs-sea-streamer) |
+| CSV → JSONL, typed | 1,594,896 rows/s | Redpanda Connect: 81,893 | **~19.5x** faster | equal work; outputs asserted identical; same-session native figure | [10a](#10a--csv--jsonl) |
+| Kafka → JSONL, projection | 766,280 rows/s | Redpanda Connect: 65,741 | **~11.7x** faster, under half the memory | both on the host; identical sink bytes | [10b](#10b--kafka--jsonl) |
+| CSV → JSONL, typed | 1,564,945 rows/s | Vector: 56,670 | **~27.6x** faster | equal work; outputs asserted identical; Vector is bound by its sink | [11a](#11a--csv--jsonl) |
+| Kafka → JSONL, projection | 722,337 rows/s | Vector: 57,431 | **~12.6x** faster, about half the memory | both on the host; identical sink bytes; Vector is bound by its sink | [11b](#11b--kafka--jsonl) |
+| Kafka → Kafka, passthrough | 281,489 rows/s | Vector: 154,414 | **~1.8x** faster, about half the memory | both on the host; a sink Vector is built for; record counts asserted | [11c](#11c--kafka--kafka) |
 
 ## Scenario index
 
@@ -104,7 +109,7 @@ Every scenario section below has the same four parts: **Measures**, **Run**,
 
 | § | Job | Reports | Runner | Headline |
 | --- | --- | --- | --- | --- |
-| [1 & 3](#1--3--postgres-table--table-batched-vs-unbatched) | Postgres table → Postgres table | rows/s over a payload × batch × concurrency matrix | `run_throughput.sh` | 120,192 rows/s (256 B, batch 128, conc. 4) |
+| [1 & 3](#1--3--postgres-table--table-batched-vs-unbatched) | Postgres table → Postgres table | rows/s over a payload × batch × concurrency matrix | `run_throughput.sh` | 110,448 rows/s (256 B, batch 128, conc. 4); 251,955 with `bulk_copy` at batch 32,768 |
 | [2](#2--cdc-commit-to-sink-latency) | Postgres CDC → file | latency from `COMMIT` to sink line | `run_cdc_latency.sh` | p50 ~0.2 ms, p99 < 0.8 ms |
 | [4](#4--local-ipc-throughput) | process → process over a Unix socket | sustained rows/s | `run_ipc_throughput.sh` | 1,419,025 rows/s |
 | [5](#5--postgres--jsonl-vs-sling-and-meltano) | Postgres → JSONL | rows/s, peak RSS vs. Sling, Meltano | `run_meltano_bench.sh` | 413,907 rows/s, 54.9 MiB |
@@ -112,6 +117,8 @@ Every scenario section below has the same four parts: **Measures**, **Run**,
 | [7](#7--mcp-server-tool-call-latency-throughput-token-cost) | CSV → JSONL through an MCP tool call | latency, rows/s, agent tokens | `run_mcp_bench.sh` | 2,466,515 rows/s, ~86 ms fixed cost |
 | [8](#8--postgres--file-vs-the-tools-that-ship-with-postgres) | Postgres → file | rows/s vs. `psql \copy`, `pg_dump`; seven output formats | `run_pg_vendor.sh` | 495,540 rows/s to CSV |
 | [9](#9--kafka--file-vs-arroyo-and-sea-streamer) | Kafka → file | rows/s, peak RSS vs. Arroyo, Sea Streamer | `run_kafka_stream.sh` | 878,105 rows/s, 160 MiB |
+| [10](#10--redpanda-connect-and-the-connect-plugin) | CSV → JSONL and Kafka → JSONL | rows/s, peak RSS vs. Redpanda Connect; native endpoints vs. the Connect plugin | `run_csv_connect.sh`, `run_kafka_stream.sh connect` | ~19.5x (CSV, typed), ~11.7x (Kafka, projection) |
+| [11](#11--vector) | CSV → JSONL, Kafka → JSONL, Kafka → Kafka | rows/s, peak RSS vs. Vector | `run_csv_vector.sh`, `run_kafka_stream.sh vector`, `run_kafka_stream.sh kafka-sink` | ~27.6x (CSV, typed), ~12.6x (Kafka → JSONL), ~1.8x (Kafka → Kafka) |
 
 Scenarios 5 and 6 are the two headline ETL jobs. Scenario 3 (the batching lever) is
 the `batch=1` vs. `batch=128` rows of scenario 1's matrix, which is why the two share
@@ -133,6 +140,16 @@ benches/etl/seed.sh up
 mkdir -p benches/etl/bin && curl -sL \
   "https://github.com/slingdata-io/sling-cli/releases/latest/download/sling_darwin_arm64.tar.gz" \
   | tar -xz -C benches/etl/bin sling
+
+# 4. Optional: Redpanda Connect and the mq-bridge-connect plugin for scenario 10.
+#    The runners skip whichever is absent.
+curl -sL "https://github.com/redpanda-data/connect/releases/download/v4.112.0/redpanda-connect_4.112.0_darwin_arm64.tar.gz" \
+  | tar -xz -C benches/etl/bin redpanda-connect
+brew install marcomq/tap/mq-bridge-connect
+
+# 5. Optional: Vector for scenario 11. Skipped if absent.
+curl -sL "https://github.com/vectordotdev/vector/releases/download/v0.59.0/vector-0.59.0-arm64-apple-darwin.tar.gz" \
+  | tar -xz -C benches/etl/bin --strip-components 3 ./vector-arm64-apple-darwin/bin/vector
 ```
 
 Requirements: Docker, `curl`, `python3` (sub-second timing) and `uv` (runs
@@ -170,9 +187,9 @@ not in plain `bench`.
 
 | Parameter | Value |
 | --- | --- |
-| Payload | 256 B and 4 KiB JSON rows (scenarios 1–3); the 7-column `bench` row (scenarios 5–9) |
+| Payload | 256 B and 4 KiB JSON rows (scenarios 1–3); the 7-column `bench` row (scenarios 5–11) |
 | Message count | 1,000,000 per run unless a table says otherwise |
-| Batch sizes | 1 / 128 (scenarios 1 & 3); 1024 (scenarios 4–7 and 9); 32768 (scenario 8) |
+| Batch sizes | 1 / 128 (scenarios 1 & 3); 1024 (scenarios 4–7 and 9–11); 32768 (scenario 8) |
 | Concurrency | 1 and 4 route workers |
 | Postgres | `postgres:16-alpine`, `wal_level=logical` |
 | Warm-up | one discarded run per cell, plus a 5,000-row pre-roll when seeding scenarios 1 & 3 |
@@ -201,7 +218,7 @@ The single underlying command, as a user would type it:
 ```bash
 mqb copy \
   --from 'postgres://testuser:testpass@localhost:5432/testdb?table=src_256&cursor_column=id&sslmode=disable' \
-  --to   'postgres://testuser:testpass@localhost:5432/testdb?table=dst_256&auto_create_table=true&sslmode=disable' \
+  --to   'postgres://testuser:testpass@localhost:5432/testdb?table=dst_256&columns=auto&sslmode=disable' \
   --drain --batch-size 128 --concurrency 4
 ```
 
@@ -209,19 +226,23 @@ mqb copy \
 
 | Payload | Batch | Conc. | Rows | Runs | Median | rows/s |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| 256 B | 1 | 1 | 100,000 | 2 | 46.235 s | 2,162 |
-| 256 B | 1 | 4 | 100,000 | 2 | 32.510 s | 3,075 |
-| 256 B | 128 | 1 | 1,000,000 | 3 | 14.635 s | 68,329 |
-| 256 B | 128 | 4 | 1,000,000 | 5 | 8.320 s | 120,192 |
-| 4 KiB | 1 | 1 | 100,000 | 2 | 60.170 s | 1,661 |
-| 4 KiB | 1 | 4 | 100,000 | 2 | 44.640 s | 2,240 |
-| 4 KiB | 128 | 1 | 100,000 | 3 | 8.808 s | 11,353 |
-| 4 KiB | 128 | 4 | 100,000 | 3 | 4.888 s | 20,458 |
+| 256 B | 1 | 1 | 100,000 | 2 | 65.553 s | 1,525 |
+| 256 B | 1 | 4 | 100,000 | 2 | 34.221 s | 2,922 |
+| 256 B | 128 | 1 | 1,000,000 | 3 | 19.055 s | 52,479 |
+| 256 B | 128 | 4 | 1,000,000 | 3 | 9.054 s | 110,448 |
+| 4 KiB | 1 | 1 | 100,000 | 2 | 79.854 s | 1,252 |
+| 4 KiB | 1 | 4 | 100,000 | 2 | 73.679 s ±27.008 | 1,357 |
+| 4 KiB | 128 | 1 | 100,000 | 3 | 8.446 s | 11,839 |
+| 4 KiB | 128 | 4 | 100,000 | 3 | 5.355 s | 18,674 |
 
 **Notes.**
 
-- **Batching is the lever.** At 256 B, `batch=128` is ~32x `batch=1` at concurrency 1
-  and ~39x at concurrency 4.
+- **Batching is the lever.** At 256 B, `batch=128` is ~34x `batch=1` at concurrency 1
+  and ~38x at concurrency 4.
+- **The 4 KiB, batch 1, concurrency 4 cell is not reliable**: its two runs were ~47 s
+  and ~101 s. Every other cell stayed within ±1.3 s.
+- **`columns=auto` writes the row's fields into the table's columns** (`id`, `payload`).
+  The other write modes are measured below.
 - **Row counts differ per cell.** `batch=1` cells and the 4 KiB cells use 100,000 rows
   (`MSG_COUNT=100000`); the 256 B `batch=128` cells use 1,000,000. The 4 KiB cells are
   bound by Postgres writing ~4 GB per million rows on this 8 GB machine.
@@ -229,6 +250,55 @@ mqb copy \
   `id` column (the sqlx cursor reader, an incremental-sync read like Airbyte's). Each
   moved record is the source row as JSON (`{"id":N,"payload":"…"}`).
 - The library's Criterion harness additionally covers the `memory` backend.
+
+#### Larger batches and the write path
+
+**Measures.** The same 256 B table → table copy at batch sizes above the matrix, once
+per way the Postgres sink can write. Only the `columns=auto` column is what
+`run_throughput.sh` runs; the other cells are the command above with a different `--to`:
+
+| Variant | `--to` parameters | What lands in `dst_256.payload` |
+| --- | --- | --- |
+| envelope | `auto_create_table=true`, no `columns` or `insert_query` | the whole source row, hex-encoded (see notes) |
+| envelope, `bytea` | same, table created by the sink instead of `seed.sh` | the whole source row as bytes |
+| token `INSERT` | `insert_query=INSERT INTO dst_256 (payload) VALUES (${payload:payload})` | the 256 B payload |
+| token `COPY` | the same `insert_query` plus `bulk_copy=true` | the 256 B payload |
+| `columns=auto` | `columns=auto` | `id` and the 256 B payload |
+
+**Result.** 1,000,000 rows, 1 warm-up + 3 timed runs, median rows/s (0.4.20):
+
+| Batch | Conc. | envelope | envelope, `bytea` | token `INSERT` | token `COPY` | `columns=auto` |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1,024 | 1 | 102,791 | 116,431 | 136,757 | 128,759 | 89,843 |
+| 1,024 | 4 | 201,038 | 211,126 | 233,744 | 215,668 | 185,923 |
+| 8,192 | 1 | 116,068 | 136,092 | 147,278 | 151,642 | 101,845 |
+| 8,192 | 4 | 161,539 | 197,463 | 240,182 | **251,128** | 197,796 |
+| 32,768 | 1 | 100,392 | 122,268 | 136,232 | 147,095 | 93,107 |
+| 32,768 | 4 | 140,549 | 180,091 | 193,037 | **251,955** | 182,608 |
+
+Postgres on its own, same table and machine, three runs each:
+
+| Path | rows/s |
+| --- | ---: |
+| `psql -c 'COPY (SELECT payload FROM src_256) TO STDOUT' \| psql -c 'COPY dst_256 (payload) FROM STDIN'`, inside the container | 218,752–253,371 |
+| `INSERT INTO dst_256 (payload) SELECT payload FROM src_256` | 308,053–431,848 |
+
+**Notes.**
+
+- **The server is the limit, not the protocol.** The best cell (~252k rows/s) equals the
+  `psql` COPY pipe. `INSERT … SELECT` never leaves the server, so it marks what no
+  client can beat; the 413,907 rows/s of scenario 5 is a read into a local file and
+  not a target for a table sink.
+- **Batch size.** 128 → 1,024 is worth ~1.5–1.8x; beyond that multi-row `INSERT` gains
+  little and loses at 32,768 with concurrency 4. `COPY` is ahead from 8,192 up (3–30%)
+  and slightly behind below. Which mode and batch size to pick is in the book's
+  [Performance tuning](../../../../docs/book/operations/tuning.md#writing-to-a-postgres-table) page.
+- **The envelope cell writes hex.** Without `columns` or an `insert_query` the sink binds the message
+  as bytes, for the `payload BYTEA` queue table it creates itself. `seed.sh` creates
+  `dst_256.payload` as `text`, so Postgres stores `\x7b22…` (~570 characters instead of
+  256). The sink's own table also carries a second index, on `locked_until`.
+- **One table shape only**: a `text` column and a `bigserial` primary key, source and
+  sink on the same Postgres in the Docker VM. Wide tables were not measured.
 
 ### 2 — CDC commit-to-sink latency
 
@@ -814,6 +884,268 @@ cargo build --manifest-path benches/etl/sea_streamer/Cargo.toml \
 For the allocator row, rebuild the same helper in the same target directory with
 `--features mimalloc`, then run
 `SEA_STREAMER_LABEL=sea-streamer-mimalloc REPEATS=3 ./benches/etl/run_kafka_stream.sh sea`.
+
+### 10 — Redpanda Connect, and the Connect plugin
+
+**Measures.** Two jobs this page already has, run against
+[Redpanda Connect](https://github.com/redpanda-data/connect) 4.112.0, and run again
+with Redpanda Connect components *inside* mq-bridge-app through the
+[Connect plugin](../../../../docs/book/connectors/connect.md) (mq-bridge-connect
+0.1.1). Each table therefore answers two questions: how mq-bridge-app compares with
+Redpanda Connect, and what a route pays for using a Connect component instead of a
+native endpoint or the native `transform`.
+
+All rows of one table were measured in one session, the native rows included, so the
+native figures here are a few percent off the headline ones in scenarios 6 and 9.
+Compare within a table.
+
+#### 10a — CSV → JSONL
+
+The scenario 6 job on the same fixture. "Typed" is the scenario 6 typing (`id` to an
+integer, `attributes` decoded into an object); on the Connect side it is this Bloblang
+mapping:
+
+```coffee
+root = this
+root.id = this.id.int64()
+root.attributes = this.attributes.parse_json()
+```
+
+**Run.**
+
+```bash
+benches/etl/run_csv_mqb.sh && benches/etl/run_csv_mqb.sh --untyped   # native rows
+benches/etl/run_csv_connect.sh          # Redpanda Connect + the plugin rows
+benches/etl/run_csv_connect.sh parity   # typed outputs == mq-bridge-app's typed output
+```
+
+Redpanda Connect runs [`connect/csv_untyped.yaml`](connect/csv_untyped.yaml) and
+[`connect/csv_typed.yaml`](connect/csv_typed.yaml): a `file` input with the `csv`
+scanner, the mapping, a `file` output, defaults otherwise. The plugin rows are `mqb
+copy` with `--plugin`:
+
+```bash
+# native endpoints, Bloblang as a middleware
+mqb copy --plugin …/libmq_bridge_connect.dylib \
+  --from 'file:///…/bench.csv?format=csv' \
+  --to   'file:///tmp/out.jsonl?format=raw|connect_mapping?mapping=<url-encoded mapping>' \
+  --drain --batch-size 1024 --concurrency 1
+
+# Connect `file` input and output as the endpoints
+mqb copy --plugin …/libmq_bridge_connect.dylib \
+  --from 'connect://?yaml=<url-encoded input (+ pipeline) document>' \
+  --to   'connect://?yaml=<url-encoded output document>' \
+  --drain --batch-size 1024 --concurrency 1
+```
+
+**Result.** 1 warm-up + 3 timed runs per row. `connect_mapping` is not part of
+mq-bridge: it is Redpanda Connect's `mapping` processor, provided by the Connect
+plugin. Every row marked **Connect plugin** needs the plugin loaded.
+
+| Tool | Endpoints | Typing | rows/s | Median wall-clock | Peak RSS |
+| --- | --- | --- | ---: | ---: | ---: |
+| mq-bridge-app | native | none | **2,967,359** | 0.337 s ±0.008 | 30.6 MiB |
+| mq-bridge-app | **Connect plugin** | none | 53,050 | 18.850 s ±0.195 | 137.1 MiB |
+| Redpanda Connect | its own | none | 97,885 | 10.216 s ±0.113 | 171.4 MiB |
+| mq-bridge-app | native | native `transform` (no plugin) | **1,594,896** | 0.627 s ±0.003 | 74.0 MiB |
+| mq-bridge-app | native | **Connect plugin** middleware (`connect_mapping`, Bloblang) | 142,734 | 7.006 s ±0.019 | 218.4 MiB |
+| mq-bridge-app | **Connect plugin** | **Connect plugin** (mapping in the input's `pipeline`) | 45,077 | 22.184 s ±0.464 | 138.5 MiB |
+| Redpanda Connect | its own | mapping | 81,893 | 12.211 s ±0.182 | 171.2 MiB |
+
+**Native mq-bridge-app is ~19.5x faster than Redpanda Connect typed and ~30x
+untyped.** All four typed outputs hold the same 1,000,000 records.
+
+**Notes.**
+
+- **A Connect component costs one hop into Go per message, and that hop is the
+  price.** The same typing is ~11x slower as `connect_mapping` than as the native
+  `transform` (142,734 against 1,594,896), though still ~1.7x faster than Redpanda
+  Connect running the same mapping, because the read and the write stay native.
+- **With Connect components at both ends the route is slower than Redpanda Connect
+  itself** (~1.85x): every message crosses the plugin boundary twice and Redpanda
+  Connect's own stream does not. This is why the book says to prefer a native
+  connector where one exists and to keep the plugin for systems mq-bridge has no
+  endpoint for.
+- **Parity is checked after sorting by `id`.** Redpanda Connect runs its pipeline on
+  several threads, and the plugin keeps up to 64 batches in flight, so neither
+  preserves the input order. Records are compared as parsed JSON, as in scenario 6.
+- **Redpanda Connect runs at its defaults**, like Sling and Meltano in scenario 6. Its
+  `file` output writes message by message; no batching was added on either side of
+  it.
+- **Peak RSS is from a separate single run** per row under `/usr/bin/time -l`.
+
+#### 10b — Kafka → JSONL
+
+The scenario 9 job: the same four-partition, 1,000,000-row topic, the same stopwatch
+([`stream_bench.py`](stream_bench.py)), the same four-column projection as 9a. The
+Connect plugin links no Kafka component (see the book's
+[licensing note](../../../../docs/book/connectors/connect.md#what-is-not-included)),
+so the plugin row is the native Kafka source with the projection as a
+`connect_mapping` middleware.
+
+**Run.** Setup and seeding as in scenario 9, then:
+
+```bash
+export MQB_CONSUMER_OPTIONS='[["fetch.queue.backoff.ms","10"]]'
+benches/etl/run_kafka_stream.sh mqb       # native passthrough + projection
+benches/etl/run_kafka_stream.sh connect   # Redpanda Connect + the Bloblang middleware
+```
+
+**Result.** All tools on the host. Native rows: 1 warm-up + 5 timed runs; the others
+1 warm-up + 3.
+
+| Tool | Projection | Median wall-clock | Throughput | Peak RSS |
+| ---- | ---------- | ----------------: | ---------: | -------: |
+| mq-bridge-app | none (passthrough) | 1.080 s | **925,972 rows/s** | 136 MiB |
+| Redpanda Connect | none (passthrough) | 9.792 s | 102,123 rows/s | 262 MiB |
+| mq-bridge-app | native `transform` (no plugin) | 1.305 s | **766,280 rows/s** | 174 MiB |
+| mq-bridge-app | **Connect plugin** middleware (`connect_mapping`, Bloblang) | 6.149 s | 162,618 rows/s | 292 MiB |
+| Redpanda Connect | mapping | 15.211 s | 65,741 rows/s | 382 MiB |
+
+**mq-bridge-app is ~9.1x faster on the passthrough and ~11.7x on the projection.**
+Every passthrough sink is 194,980,514 bytes and every projected sink 65,615,161.
+
+**Notes.**
+
+- **Redpanda Connect's input is not at its defaults here, in its favour.** It is the
+  `redpanda` input with `unordered_processing` enabled and `batching.count: 1024`,
+  the batch size mq-bridge-app uses. With the ordered default the same job stalled for
+  seconds at a time and had not landed the topic after 40 s. This mirrors the
+  `fetch.queue.backoff.ms` option set on the mq-bridge-app side.
+- **The plugin hop costs less here than in 10a** (~4.7x against the native
+  `transform` instead of ~11x) because the Kafka read, not the mapping, carries more
+  of the wall-clock. It is still ~2.5x faster than Redpanda Connect end to end.
+- **Delivery is at-least-once on both sides**: each resumes from the committed
+  consumer-group offset.
+- **The calibration window is 8 s for Redpanda Connect**, not the usual 2 s. Its
+  fetches can pause mid-backlog for longer than 2 s, which the harness would otherwise
+  take for the end of the data and fail on the row count.
+
+### 11 — Vector
+
+**Measures.** The same two jobs as scenario 10, and a topic-to-topic copy, against
+[Vector](https://vector.dev) 0.59.0: a single Rust binary that, like mq-bridge-app,
+runs a source → transform → sink pipeline from a config file. As in scenario 10, every
+row of a table was measured in one session, so compare within a table.
+
+**Read the JSONL figures (11a, 11b) with this attached: Vector's file sink is the
+limit, not its engine.** All four of those cells land at ~57,000 rows/s whatever work
+they do.
+The same Kafka source into Vector's `blackhole` sink read the whole topic in about
+four seconds, and a `console` sink redirected to a file was no faster than the `file`
+sink. Vector is built to ship logs and metrics to network sinks; writing a local
+JSONL file is not what it is tuned for. Those rows say that mq-bridge-app is much
+faster *at that job*, not that its engine is 12–50x faster than Vector's. **11c is the
+engine comparison**: the same source into a Kafka sink, where the gap is ~1.8x.
+
+#### 11a — CSV → JSONL
+
+The scenario 6 job on the same fixture. Vector has no CSV codec and its `file` source
+is a tailer that never ends, so the file arrives on stdin and a `remap` parses each
+line ([`vector/csv_untyped.yaml`](vector/csv_untyped.yaml),
+[`vector/csv_typed.yaml`](vector/csv_typed.yaml)); Vector exits at end of input.
+
+**Run.**
+
+```bash
+benches/etl/run_csv_mqb.sh && benches/etl/run_csv_mqb.sh --untyped   # native rows
+benches/etl/run_csv_vector.sh          # vector-untyped, vector (typed)
+benches/etl/run_csv_vector.sh parity   # both outputs == mq-bridge-app's
+```
+
+**Result.** 1 warm-up + 3 timed runs per row:
+
+| Tool | Typing | rows/s | Median wall-clock | Peak RSS |
+| --- | --- | ---: | ---: | ---: |
+| mq-bridge-app | none | **2,915,451** | 0.343 s ±0.009 | 30.6 MiB |
+| Vector | none (`remap` with `parse_csv`) | 57,823 | 17.294 s ±0.083 | 158.5 MiB |
+| mq-bridge-app | native `transform` | **1,564,945** | 0.639 s ±0.082 | 74.0 MiB |
+| Vector | `remap` (`parse_csv`, `to_int`, `parse_json`) | 56,670 | 17.646 s ±0.094 | 168.0 MiB |
+
+**mq-bridge-app is ~27.6x faster typed and ~50x untyped.** Both Vector outputs hold
+the same 1,000,000 records as the matching mq-bridge-app output.
+
+**Notes.**
+
+- **Typing costs Vector 2%**, where it halves mq-bridge-app's rate. That is the sink
+  bound showing: the `remap` is not what Vector is waiting on.
+- **Parity is checked after sorting by `id`**, because Vector runs `remap`
+  concurrently and does not keep the input order.
+- **The fixture has CRLF line ends**, which Vector's stdin source keeps on the line;
+  the `remap` strips them. Without that every row fails to parse and is dropped
+  without a log line.
+- **The config carries literal paths.** A sink path taken from an environment variable
+  (`path: ${OUT}`) wrote no file on Vector 0.59.0, so the runner fills in the paths.
+- **mq-bridge-app's peak RSS is the 10a measurement** (same build, same job); Vector's
+  is a separate single run under `/usr/bin/time -l`.
+
+#### 11b — Kafka → JSONL
+
+The scenario 9 job with the scenario 9 stopwatch and projection. Vector's `kafka`
+source is librdkafka, as mq-bridge-app's is, and gets the same
+`fetch.queue.backoff.ms: 10` through `librdkafka_options`.
+
+**Run.** Setup and seeding as in scenario 9, then:
+
+```bash
+export MQB_CONSUMER_OPTIONS='[["fetch.queue.backoff.ms","10"]]'
+benches/etl/run_kafka_stream.sh mqb      # native passthrough + projection
+benches/etl/run_kafka_stream.sh vector   # passthrough + remap projection
+```
+
+**Result.** All on the host, 1 warm-up + 3 timed runs per row:
+
+| Tool | Projection | Median wall-clock | Throughput | Peak RSS |
+| ---- | ---------- | ----------------: | ---------: | -------: |
+| mq-bridge-app | none (passthrough) | 1.082 s | **924,485 rows/s** | 126 MiB |
+| Vector | none (passthrough) | 17.203 s | 58,130 rows/s | 335 MiB |
+| mq-bridge-app | native `transform` | 1.384 s | **722,337 rows/s** | 179 MiB |
+| Vector | `remap` | 17.412 s | 57,431 rows/s | 346 MiB |
+
+**mq-bridge-app is ~15.9x faster on the passthrough and ~12.6x on the projection.**
+Every passthrough sink is 194,980,514 bytes and every projected sink 65,615,161.
+
+**Notes.**
+
+- **The passthrough and the projection cost Vector the same**, for the reason given at
+  the top of this scenario.
+- **Delivery is at-least-once on both sides.**
+
+#### 11c — Kafka → Kafka
+
+The 11b source into a Kafka topic instead of a file: a job Vector is commonly deployed
+for, and one that does not go through its file sink. Each run writes to a fresh
+4-partition topic on the same broker; the stopwatch stops when that topic's end
+offsets add up to the 1,000,000 source records.
+
+**Run.** Setup and seeding as in scenario 9. The harness reads the end offsets with
+`kafka-python`, which the runner pulls in through `uv`:
+
+```bash
+export MQB_CONSUMER_OPTIONS='[["fetch.queue.backoff.ms","10"]]'
+benches/etl/run_kafka_stream.sh kafka-sink   # both tools, passthrough + projection
+```
+
+**Result.** All on the host, 1 warm-up + 3 timed runs per row:
+
+| Tool | Projection | Median wall-clock | Throughput | Peak RSS |
+| ---- | ---------- | ----------------: | ---------: | -------: |
+| mq-bridge-app | none (passthrough) | 3.553 s ±0.238 | **281,489 rows/s** | 180 MiB |
+| Vector | none (passthrough) | 6.476 s ±0.066 | 154,414 rows/s | 337 MiB |
+| mq-bridge-app | native `transform` | 3.827 s ±0.203 | **261,322 rows/s** | 184 MiB |
+| Vector | `remap` | 6.856 s ±0.347 | 145,852 rows/s | 352 MiB |
+
+**mq-bridge-app is ~1.8x faster on both, at about half the memory.**
+
+**Notes.**
+
+- **Producer settings are each tool's defaults.** Both are librdkafka with `acks=all`
+  and no compression; mq-bridge-app adds idempotence and lingers 1 ms, Vector 5 ms.
+- **Only the record count is asserted** (exactly 1,000,000 in the destination topic on
+  every run); the destination records are not compared with each other.
+- **Both sides are producing to a single broker in a Docker VM**, and the clock
+  includes process start and the consumer group join, which weigh more on a 3.5 s run
+  than on a 17 s one. Treat ~1.8x as the size of the gap, not as two digits.
 
 ## Typed vs. untyped: how to read the Sling ratios
 

@@ -9,7 +9,9 @@ pub mod amqp;
 pub mod aws;
 #[cfg(feature = "clickhouse")]
 pub mod clickhouse;
+#[cfg(feature = "dir-spool")]
 pub mod dir_spool;
+#[cfg(feature = "file")]
 pub mod file;
 #[cfg(feature = "grpc")]
 pub mod grpc;
@@ -56,9 +58,11 @@ pub use crate::endpoints::structural::{
     fanout, null, reader, request, response, sequence, static_endpoint, stream_buffer, switch,
 };
 use crate::middleware::apply_middlewares_to_consumer;
+#[cfg(feature = "dir-spool")]
+use crate::models::SpoolDone;
 use crate::models::{
     Endpoint, EndpointType, MemoryConfig, Middleware, NameBy, ResponseConfig, SequenceConfig,
-    SpoolDone, StreamBufferConfig, TransformErrorPolicy,
+    StreamBufferConfig, TransformErrorPolicy,
 };
 use crate::route::{get_endpoint, get_endpoint_factory};
 use crate::traits::{BoxFuture, CustomEndpointFactory, MessageConsumer, MessagePublisher};
@@ -561,7 +565,9 @@ fn check_consumer_recursive(
             }
             Ok(warnings)
         }
+        #[cfg(feature = "file")]
         EndpointType::File(_) => Ok(warnings),
+        #[cfg(feature = "dir-spool")]
         EndpointType::DirSpool(cfg) => {
             dir_spool::validate_spool_layout(cfg)
                 .map_err(|error| anyhow!("[route:{route_name}] {error}"))?;
@@ -628,6 +634,9 @@ fn check_consumer_recursive(
                 if allowed.contains(&name) {
                     return Ok(warnings);
                 }
+            }
+            if get_endpoint_factory(endpoint.endpoint_type.name()).is_some() {
+                return Ok(warnings);
             }
             Err(anyhow!(
                 "[route:{}] Unsupported consumer endpoint type '{:?}'",
@@ -1627,6 +1636,22 @@ fn custom_endpoint_hint(_name: &str) -> String {
     String::new()
 }
 
+/// The factory registered under a built-in endpoint's own name (typically by a plugin) and
+/// the endpoint's config as JSON. Serves built-ins this build has no feature for.
+fn builtin_fallback(
+    endpoint_type: &EndpointType,
+) -> Result<Option<(Arc<dyn CustomEndpointFactory>, serde_json::Value)>> {
+    let Some(factory) = get_endpoint_factory(endpoint_type.name()) else {
+        return Ok(None);
+    };
+    // Externally tagged: `{"kafka": {..}}`; the factory takes the inner object.
+    let config = match serde_json::to_value(endpoint_type)? {
+        serde_json::Value::Object(tagged) => tagged.into_iter().next().map(|(_, config)| config),
+        _ => None,
+    };
+    Ok(Some((factory, config.unwrap_or_default())))
+}
+
 async fn create_base_consumer(
     route_name: &str,
     endpoint: &Endpoint,
@@ -1703,9 +1728,11 @@ async fn create_base_consumer(
                 redis_streams::RedisStreamsConsumer::new(&config).await?,
             ))
         }
+        #[cfg(feature = "file")]
         EndpointType::File(cfg) => Ok(boxed(
             file::FileConsumer::new_with_source_metadata(cfg, _source_metadata).await?,
         )),
+        #[cfg(feature = "dir-spool")]
         EndpointType::DirSpool(cfg) => Ok(boxed(
             dir_spool::DirSpoolConsumer::new_with_source_metadata(cfg, _source_metadata).await?,
         )),
@@ -1863,11 +1890,28 @@ async fn create_base_consumer(
             route_name
         )),
         #[allow(unreachable_patterns)]
-        _ => Err(anyhow!(
-            "[route:{}] Unsupported consumer endpoint type '{:?}'",
-            route_name,
-            endpoint.endpoint_type
-        )),
+        other => {
+            let Some((factory, mut config)) = builtin_fallback(other)? else {
+                return Err(anyhow!(
+                    "[route:{}] Unsupported consumer endpoint type '{:?}'",
+                    route_name,
+                    endpoint.endpoint_type
+                ));
+            };
+            // The factory only sees the config, so a position the sink requires goes in there.
+            if _source_metadata && supports_source_metadata(other) {
+                if let Some(fields) = config.as_object_mut() {
+                    fields.insert("source_metadata".to_string(), true.into());
+                }
+            }
+            if _no_resume {
+                tracing::warn!(
+                    "[route:{route_name}] endpoint '{}' is served by a registered factory; no-resume is not applied",
+                    other.name()
+                );
+            }
+            factory.create_consumer(route_name, &config).await
+        }
     }
 }
 
@@ -2192,7 +2236,9 @@ fn check_publisher_recursive(
             }
             Ok(warnings)
         }
+        #[cfg(feature = "file")]
         EndpointType::File(_) => Ok(warnings),
+        #[cfg(feature = "dir-spool")]
         EndpointType::DirSpool(cfg) => {
             for (set, option) in [
                 (!cfg.drain_on_read, "drain_on_read"),
@@ -2338,6 +2384,9 @@ fn check_publisher_recursive(
                 if allowed.contains(&name) {
                     return Ok(warnings);
                 }
+            }
+            if get_endpoint_factory(endpoint.endpoint_type.name()).is_some() {
+                return Ok(warnings);
             }
             Err(anyhow!(
                 "[route:{}] Unsupported publisher endpoint type '{:?}'",
@@ -2577,10 +2626,12 @@ async fn create_base_publisher(
             Ok(Box::new(mongodb::MongoDbPublisher::new(&config).await?)
                 as Box<dyn MessagePublisher>)
         }
+        #[cfg(feature = "file")]
         EndpointType::File(cfg) => Ok(Box::new(
             file::FilePublisher::new_with_name_by(cfg, cfg.resolved_name_by(source_has_position))
                 .await?,
         ) as Box<dyn MessagePublisher>),
+        #[cfg(feature = "dir-spool")]
         EndpointType::DirSpool(cfg) => {
             Ok(Box::new(dir_spool::DirSpoolPublisher::new(cfg).await?)
                 as Box<dyn MessagePublisher>)
@@ -2725,11 +2776,25 @@ async fn create_base_publisher(
             factory.create_publisher(route_name, config).await
         }
         #[allow(unreachable_patterns)]
-        _ => Err(anyhow!(
-            "[route:{}] Unsupported publisher endpoint type '{:?}'",
-            route_name,
-            endpoint_type
-        )),
+        other => {
+            let Some((factory, mut config)) = builtin_fallback(other)? else {
+                return Err(anyhow!(
+                    "[route:{}] Unsupported publisher endpoint type '{:?}'",
+                    route_name,
+                    endpoint_type
+                ));
+            };
+            // `auto` depends on the route's input, which only the host knows.
+            let name_by = match other {
+                EndpointType::File(cfg) => Some(cfg.resolved_name_by(source_has_position)),
+                EndpointType::ObjectStore(cfg) => Some(cfg.resolved_name_by(source_has_position)),
+                _ => None,
+            };
+            if let (Some(name_by), Some(fields)) = (name_by, config.as_object_mut()) {
+                fields.insert("name_by".to_string(), serde_json::to_value(name_by)?);
+            }
+            factory.create_publisher(route_name, &config).await
+        }
     }?;
     Ok(publisher)
 }
@@ -3047,6 +3112,69 @@ mod tests {
             .as_any()
             .is::<crate::endpoints::memory::MemoryConsumer>();
         assert!(is_subscriber, "Factory should create MemoryConsumer");
+    }
+
+    #[cfg(not(feature = "kafka"))]
+    #[tokio::test]
+    async fn a_disabled_built_in_is_served_by_a_factory_registered_under_its_name() {
+        use std::sync::Mutex;
+
+        #[derive(Debug, Default)]
+        struct Recording(Mutex<Vec<serde_json::Value>>);
+
+        #[async_trait::async_trait]
+        impl CustomEndpointFactory for Recording {
+            async fn create_consumer(
+                &self,
+                _route_name: &str,
+                config: &serde_json::Value,
+            ) -> Result<Box<dyn MessageConsumer>> {
+                self.0.lock().unwrap().push(config.clone());
+                Ok(Box::new(memory::MemoryConsumer::new(&MemoryConfig::new(
+                    "fallback-in",
+                    Some(1),
+                ))?))
+            }
+            async fn create_publisher(
+                &self,
+                _route_name: &str,
+                config: &serde_json::Value,
+            ) -> Result<Box<dyn MessagePublisher>> {
+                self.0.lock().unwrap().push(config.clone());
+                Ok(Box::new(null::NullPublisher))
+            }
+        }
+
+        let endpoint: Endpoint = serde_json::from_value(serde_json::json!({
+            "kafka": { "url": "broker:9092", "topic": "orders", "password": "s3cret" }
+        }))
+        .unwrap();
+        assert!(create_consumer_from_route("r", &endpoint).await.is_err());
+        assert!(create_publisher_from_route("r", &endpoint).await.is_err());
+
+        let factory = Arc::new(Recording::default());
+        crate::extensions::register_endpoint_factory("kafka", factory.clone()).unwrap();
+        struct Unregister;
+        impl Drop for Unregister {
+            fn drop(&mut self) {
+                crate::extensions::unregister_endpoint_factory("kafka");
+            }
+        }
+        let _unregister = Unregister;
+        create_consumer_from_route_with_source_metadata("r", &endpoint, true)
+            .await
+            .unwrap();
+        create_publisher_from_route("r", &endpoint).await.unwrap();
+
+        let seen = factory.0.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        for config in seen.iter() {
+            assert_eq!(config["topic"], "orders");
+            assert_eq!(config["password"], "s3cret");
+        }
+        assert_eq!(seen[0]["source_metadata"], true);
+        // The config a plugin receives must parse back into the built-in's own type.
+        serde_json::from_value::<crate::models::KafkaConfig>(seen[0].clone()).unwrap();
     }
 
     #[cfg(feature = "websocket")]

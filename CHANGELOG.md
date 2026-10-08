@@ -4,7 +4,28 @@ All notable changes to `mq-bridge`. Newest first.
 
 ## 0.4.20
 
-Kafka outputs publish faster with their default settings.
+Kafka outputs publish faster with their default settings. If you depend on `mq-bridge` with
+`default-features = false` and use the `file` or `dir_spool` endpoint, read "Behaviour
+changes" first: both are Cargo features now.
+
+### Behaviour changes
+
+- **`file` and `dir_spool` are Cargo features: `file` and `dir-spool`.** Both endpoints
+  were compiled into every build. They are now in the default features, and in `full` and
+  `portable`; `object-store` enables `file`.
+  - A dependency with default features, `full` or `portable` builds what it built before.
+  - A dependency with `default-features = false` loses both endpoints. A route that names
+    one fails at start with `Unsupported consumer endpoint type` (or `publisher`), and code
+    that names `endpoints::file` or `endpoints::dir_spool` no longer compiles. To keep them:
+
+    ```toml
+    mq-bridge = { version = "0.4", default-features = false, features = ["file", "dir-spool"] }
+    ```
+
+  - The config types (`FileConfig`, `DirSpoolConfig`) and the `EndpointType` variants stay
+    in every build, so a configuration still parses.
+  - `mq-bridge-app`, the Python package and the Node.js package are unchanged; they enable
+    both.
 
 ### Added
 
@@ -29,6 +50,17 @@ Kafka outputs publish faster with their default settings.
   `endpoints::http_bulk::register_preset_with(name, schema, resolve)` registers one of your
   own as a `custom` endpoint; `preset_schema`, `preset_base_url` and `preset_segment` are the
   helpers the built-in ones use.
+- **Every built-in endpoint as one plugin library.** The new `plugins/full` crate builds
+  `libmq_bridge_full`, which registers a factory for each built-in endpoint under its own
+  name. A host compiled without an endpoint's feature and with this library loaded keeps
+  using `kafka:`, `file:` and the rest unchanged: a built-in the build has no feature for
+  is now served by a factory registered under the same name, and fails as before when there
+  is none. The library has its own engine, so `memory` channels, `ref` names and factories
+  registered in the host are not shared with the endpoints it creates.
+- **`plugin::disable_plugin_loading()`.** After this call the process opens no plugin
+  library any more, neither by path nor by discovery, and there is no way to switch it back
+  on. `MQB_PLUGIN_DISCOVERY=0` only covers discovery and has to be set in the environment;
+  this is for a host that must rule out native code loaded at runtime.
 
 ### Changed
 
@@ -51,6 +83,13 @@ Kafka outputs publish faster with their default settings.
   messages per second instead of 29,000. `delayed_ack: true`, which awaits nothing, keeps
   5 ms; the producer a Kafka input uses for replies also moves to 1 ms. A
   `linger.ms` in `producer_options` overrides the default as before.
+
+### Fixed
+
+- **A large batch no longer fails a SQL output with an `insert_query`.** A batch that needed
+  more bind parameters than the database takes in one statement (65,535 on Postgres) failed
+  with `too many arguments for query`. It is now written as several statements in one
+  transaction, as `columns: auto` already did.
 
 ## 0.4.19
 

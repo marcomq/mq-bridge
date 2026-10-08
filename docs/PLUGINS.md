@@ -128,6 +128,10 @@ Set `MQB_PLUGIN_DISCOVERY=0` (or `false`, `off`, `no`) to switch the search off
 and resolve endpoints only from factories the host registered or a config listed
 by path.
 
+`plugin::disable_plugin_loading()` goes further: after it, the process opens no
+plugin library at all, by path or by discovery, and nothing switches it back on.
+Call it at startup in a deployment that must not load native code at runtime.
+
 ### Which files discovery trusts
 
 Loading a library runs its code, so a library found by discovery is loaded only
@@ -229,6 +233,33 @@ built-in. `MQB_PLUGIN_DISCOVERY=0` switches off the search, the notice and the
 override together.
 
 ---
+
+## All built-in endpoints as one plugin
+
+`plugins/full` builds `libmq_bridge_full`, a library with a factory for every
+built-in endpoint, each under the endpoint's own name. It is for an application
+that embeds mq-bridge without the endpoint features and wants them in some
+deployments only:
+
+```toml
+mq-bridge = { version = "0.4", default-features = false, features = ["plugin"] }
+```
+
+```rust,ignore
+mq_bridge::plugin::load_endpoint_plugins("/opt/app/libmq_bridge_full.so")?;
+```
+
+Routes are written as usual (`kafka:`, `file:`, `sqlx:`, not `custom:`). An
+endpoint the host has a feature for is built by the host; any other is built by
+the factory registered under its name, and without one the route fails with
+`Unsupported … endpoint type` as before. Build a smaller library with
+`--no-default-features --features portable`, or with single features such as
+`--features mq-bridge/kafka`.
+
+The library has its own engine. A `memory` channel, a `ref` name or a factory
+registered in the host is not visible to an endpoint it creates, so keep
+structural endpoints and `memory` in the host's route and let the library provide
+only the transport. `--no-resume` is not applied to an input served this way.
 
 ## Writing a plugin
 

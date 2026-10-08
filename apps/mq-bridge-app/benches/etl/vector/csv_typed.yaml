@@ -1,0 +1,28 @@
+# Vector, CSV -> JSONL, typed: the remap does what schemas/bench.json does for
+# mq-bridge-app's `transform`. Vector's file source is a tailer that never ends,
+# so the CSV comes in on stdin and Vector exits at EOF. run_csv_vector.sh fills in
+# the @…@ paths: an env-interpolated sink path wrote no file on Vector 0.59.0.
+data_dir: @DATA_DIR@
+sources:
+  in:
+    type: stdin
+transforms:
+  typed:
+    type: remap
+    inputs: [in]
+    source: |
+      # The fixture has CRLF line ends; the stdin source splits on LF only.
+      row = parse_csv!(strip_whitespace(string!(.message)))
+      if row[0] == "id" { abort }
+      . = {
+        "id": to_int!(row[0]), "first_name": row[1], "country": row[2],
+        "amount": row[3], "created_at": row[4], "active": row[5],
+        "attributes": parse_json!(row[6])
+      }
+sinks:
+  out:
+    type: file
+    inputs: [typed]
+    path: @OUT@
+    encoding:
+      codec: json

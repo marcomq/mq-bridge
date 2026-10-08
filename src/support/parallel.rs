@@ -51,17 +51,21 @@ pub(crate) fn chunk_count(len: usize) -> usize {
 /// Spawning a thread costs ~30µs here — enough that a per-batch `std::thread::scope`
 /// loses to a plain sequential decode at any batch below a few hundred records. Workers
 /// outlive the batches instead, so submitting one costs a channel push and a wake.
+#[cfg(feature = "file")]
 pub(crate) struct Pool {
     shared: std::sync::Arc<Shared>,
 }
 
+#[cfg(feature = "file")]
 type Job = Box<dyn FnOnce() + Send + 'static>;
 
+#[cfg(feature = "file")]
 struct Shared {
     queue: std::sync::Mutex<std::collections::VecDeque<Job>>,
     ready: std::sync::Condvar,
 }
 
+#[cfg(feature = "file")]
 impl Pool {
     fn new(workers: usize) -> Self {
         let shared = std::sync::Arc::new(Shared {
@@ -110,11 +114,13 @@ impl Pool {
 ///
 /// One worker short of the core count, because the thread submitting a batch keeps a
 /// chunk for itself rather than blocking on the others.
+#[cfg(feature = "file")]
 pub(crate) fn pool() -> &'static Pool {
     static POOL: std::sync::OnceLock<Pool> = std::sync::OnceLock::new();
     POOL.get_or_init(|| Pool::new(pool_workers()))
 }
 
+#[cfg(feature = "file")]
 fn pool_workers() -> usize {
     parallelism().saturating_sub(1).max(1)
 }
@@ -123,6 +129,7 @@ fn pool_workers() -> usize {
 ///
 /// One more than the pool has workers: the submitting thread keeps a chunk itself
 /// rather than blocking on the others.
+#[cfg(feature = "file")]
 pub(crate) fn decode_chunk_count(len: usize) -> usize {
     chunk_count(len).min(pool_workers() + 1)
 }

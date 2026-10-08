@@ -18,6 +18,7 @@ pub mod config_schema;
 pub mod connection_registry;
 #[cfg(feature = "encryption")]
 pub mod crypto;
+#[cfg(any(feature = "encryption", feature = "file"))]
 pub(crate) mod crypto_envelope;
 pub mod http_status;
 pub mod interpolation;
