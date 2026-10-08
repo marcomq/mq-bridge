@@ -206,6 +206,11 @@ ENTRYPOINT ["/usr/local/bin/mq-bridge-app"]
 # working no matter how the command line is overridden.
 ENV MQB__METRICS_ADDR=0.0.0.0:9090
 
+# The same for the UI that `--ui` starts: on a host it listens on loopback, in
+# here it has to be reachable through a published port. This only names the
+# address; it does not start the UI.
+ENV MQB_UI_DEFAULT_ADDR=0.0.0.0:9091
+
 # Default arguments for a bare `docker run <image>`, serving the UI that a host
 # run would stop and ask about. Docker drops CMD as soon as the caller passes
 # any argument of its own, which is exactly what keeps `docker run <image> copy …`

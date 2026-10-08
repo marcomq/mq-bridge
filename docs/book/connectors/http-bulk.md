@@ -438,11 +438,14 @@ Without `result`, a 2xx status means every document was written.
   a JSON object, a rejected result line and a delete without an id fail that
   message for good. A failed job or a refused request fails every document of
   that request for good, and the rest of the batch is still sent.
-- **Payloads are not parsed.** A payload that starts like a JSON object but is
-  not valid JSON goes out as it is, and the target refuses the whole request.
+- **Payloads are checked, not rewritten.** A payload that starts like a JSON
+  object but is not valid JSON fails that message alone (`the payload is not
+  valid JSON: …`), and the rest of the batch is sent.
 - **Compression needs a target that reads it.** The body is compressed whole
-  and named in `Content-Encoding`. `gzip` was run against Elasticsearch; check
-  your target before choosing `zstd` or `lz4`.
+  and named in `Content-Encoding`. `gzip` was run against Elasticsearch 8.19 and
+  Meilisearch 1.53. Both refuse `zstd` and `lz4` with a 400 that calls the
+  payload malformed and does not mention the encoding; check your target
+  before choosing either.
 - **Redirects are not followed**, so credentials in `headers` stay with the
   configured host.
 - **Retries follow the status.** 408, 429 and 5xx (except 501 and 505) and

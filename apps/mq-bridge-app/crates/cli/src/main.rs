@@ -71,7 +71,9 @@ const COPY_STOP_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Address the web UI falls back to when the config names none. Only ever
 /// applied after an explicit `--ui` or a `y` from [`ui_prompt`].
-const DEFAULT_UI_ADDR: &str = "0.0.0.0:9091";
+const DEFAULT_UI_ADDR: &str = "127.0.0.1:9091";
+/// Replaces [`DEFAULT_UI_ADDR`] for `--ui` and the start prompt, not a configured `ui_addr`.
+const DEFAULT_UI_ADDR_ENV: &str = "MQB_UI_DEFAULT_ADDR";
 
 /// Address the Prometheus endpoint falls back to when the config names none.
 ///
@@ -668,10 +670,15 @@ async fn main() -> anyhow::Result<()> {
     // routes or consumers is a deployment: it must never stop at a question.
     if args.no_ui {
         config.ui_addr = String::new();
-    } else if config.ui_addr.is_empty()
-        && (args.ui || (nothing_to_run(&config) && ui_prompt(DEFAULT_UI_ADDR)))
-    {
-        config.ui_addr = DEFAULT_UI_ADDR.to_string();
+    } else if config.ui_addr.is_empty() {
+        // The container image sets this to every interface; a host stays on loopback.
+        let default_addr = std::env::var(DEFAULT_UI_ADDR_ENV)
+            .ok()
+            .filter(|addr| !addr.trim().is_empty())
+            .unwrap_or_else(|| DEFAULT_UI_ADDR.to_string());
+        if args.ui || (nothing_to_run(&config) && ui_prompt(&default_addr)) {
+            config.ui_addr = default_addr;
+        }
     }
 
     let mut prom_addr = None;
@@ -753,6 +760,12 @@ async fn main() -> anyhow::Result<()> {
             "Prometheus metrics enabled on Web UI (http://{}/metrics)",
             config.ui_addr
         );
+        if !socket_addr.ip().is_loopback() {
+            warn!(
+                "The web UI has no login and listens on {}: anyone who can reach that address can read and change the configuration, secrets included",
+                config.ui_addr
+            );
+        }
 
         let web_ui_server = web_ui::start_web_server(
             addr.into(),
@@ -916,11 +929,7 @@ fn drain_result(
 
 /// Advertises a headless run: the configured entities, with running state read
 /// from the live route registry rather than assumed.
-fn cli_status_lease(
-    workspace_path: String,
-    config: AppConfig,
-    app: UiApp,
-) -> Option<StatusLease> {
+fn cli_status_lease(workspace_path: String, config: AppConfig, app: UiApp) -> Option<StatusLease> {
     let heartbeat_config = config.clone();
     StatusLease::spawn(
         InstanceKind::Cli,
@@ -1732,14 +1741,19 @@ fn copy_result(
 /// plus the argument-free `response:` and `null:`. A nested URI only needs
 /// percent-encoding when it carries `&`, `#` or `|` of its own.
 fn endpoint_from_uri(uri: &str) -> anyhow::Result<mq_bridge::models::Endpoint> {
+    let shown = copy_pipeline::redact_uri(uri);
     let mut parts = uri.split('|');
     let base = parts.next().unwrap_or(uri);
     let mut endpoint = base_endpoint_from_uri(base)?;
     for spec in parts {
-        endpoint.middlewares.push(
-            middleware_from_spec(spec)
-                .with_context(|| format!("invalid middleware '{spec}' in '{uri}'"))?,
-        );
+        endpoint
+            .middlewares
+            .push(middleware_from_spec(spec).with_context(|| {
+                format!(
+                    "invalid middleware '{}' in '{shown}'",
+                    copy_pipeline::redact_uri(spec)
+                )
+            })?);
     }
     Ok(endpoint)
 }
@@ -1749,8 +1763,13 @@ fn nested_endpoint(
     value: &str,
     outer: &str,
 ) -> anyhow::Result<mq_bridge::models::Endpoint> {
-    endpoint_from_uri(value)
-        .with_context(|| format!("invalid '{key}' endpoint '{value}' in '{outer}'"))
+    endpoint_from_uri(value).with_context(|| {
+        format!(
+            "invalid '{key}' endpoint '{}' in '{}'",
+            copy_pipeline::redact_uri(value),
+            copy_pipeline::redact_uri(outer)
+        )
+    })
 }
 
 /// Wraps a branch so it can neither answer the caller nor fail the message for
@@ -1814,13 +1833,24 @@ fn middleware_from_spec(spec: &str) -> anyhow::Result<mq_bridge::models::Middlew
         let value = if matches!(field_type(&root, variant), FieldType::StringLike) {
             let raw = percent_encoding::percent_decode_str(query)
                 .decode_utf8()
-                .with_context(|| format!("middleware spec '{spec}' is not valid UTF-8"))?;
+                .with_context(|| {
+                    format!(
+                        "middleware spec '{}' is not valid UTF-8",
+                        copy_pipeline::redact_uri(spec)
+                    )
+                })?;
             serde_json::Value::String(raw.into_owned())
         } else {
             serde_json::Value::Object(middleware_params(spec, query, Some((&root, variant)))?)
         };
-        return serde_json::from_value(serde_json::json!({ tag.as_str(): value }))
-            .with_context(|| format!("could not build a '{tag}' middleware from '{spec}'"));
+        return serde_json::from_value(serde_json::json!({ tag.as_str(): value })).with_context(
+            || {
+                format!(
+                    "could not build a '{tag}' middleware from '{}'",
+                    copy_pipeline::redact_uri(spec)
+                )
+            },
+        );
     }
 
     let Some((name, declared)) = custom_middleware(name, &tag)? else {
@@ -1915,8 +1945,13 @@ fn middleware_params(
     for (k, v) in url::form_urlencoded::parse(query.as_bytes()) {
         let (k, v) = (k.into_owned(), v.into_owned());
         let value = if endpoints.contains(&k) {
-            let endpoint = endpoint_from_uri(&v)
-                .with_context(|| format!("invalid '{k}' endpoint '{v}' in '{spec}'"))?;
+            let endpoint = endpoint_from_uri(&v).with_context(|| {
+                format!(
+                    "invalid '{k}' endpoint '{}' in '{}'",
+                    copy_pipeline::redact_uri(&v),
+                    copy_pipeline::redact_uri(spec)
+                )
+            })?;
             serde_json::to_value(endpoint)?
         } else {
             match fields.get(&k).copied() {
@@ -1926,7 +1961,9 @@ fn middleware_params(
                 // a silent fallback to a string that serde rejects later.
                 Some(FieldType::Object) => serde_json::from_str(&v).with_context(|| {
                     format!(
-                        "query param '{k}' in middleware spec '{spec}' expects a JSON literal, got '{v}'"
+                        "query param '{k}' in middleware spec '{}' expects a JSON literal, got '{}'",
+                        copy_pipeline::redact_uri(spec),
+                        copy_pipeline::redact_param(&k, &v, None)
                     )
                 })?,
                 None if schema.is_none() => serde_json::Value::String(v),
@@ -2004,11 +2041,12 @@ fn extension_schemes() -> String {
 /// query param is a string, since guessing a type there would silently turn an
 /// id like `0123` into a number.
 fn custom_endpoint_from_uri(name: &str, uri: &str) -> anyhow::Result<mq_bridge::models::Endpoint> {
+    let shown = copy_pipeline::redact_uri(uri);
     use mq_bridge::models::{Endpoint, EndpointType};
 
     let config = mq_bridge::plugin::endpoint_uri_schema(name)
         .config_from_uri(uri)
-        .with_context(|| format!("endpoint '{name}' in URI '{uri}'"))?;
+        .with_context(|| format!("endpoint '{name}' in URI '{shown}'"))?;
 
     Ok(Endpoint::new(EndpointType::Custom {
         name: name.to_string(),
@@ -2023,6 +2061,7 @@ fn plugin_of(scheme: &str) -> &str {
 }
 
 fn http_bulk_endpoint(parsed: &url::Url, uri: &str) -> anyhow::Result<mq_bridge::models::Endpoint> {
+    let shown = copy_pipeline::redact_uri(uri);
     use serde_json::Value;
 
     let mut text = None;
@@ -2032,11 +2071,11 @@ fn http_bulk_endpoint(parsed: &url::Url, uri: &str) -> anyhow::Result<mq_bridge:
             "config" | "config_file" => &mut text,
             "url" => &mut url,
             other => anyhow::bail!(
-                "unsupported query param '{other}' in http-bulk URI '{uri}'. Supported: config_file, config, url"
+                "unsupported query param '{other}' in http-bulk URI '{shown}'. Supported: config_file, config, url"
             ),
         };
         if slot.is_some() {
-            anyhow::bail!("http-bulk URI '{uri}' gives '{key}' or its alternative twice");
+            anyhow::bail!("http-bulk URI '{shown}' gives '{key}' or its alternative twice");
         }
         *slot = Some(match key.as_ref() {
             "config_file" => std::fs::read_to_string(value.as_ref())
@@ -2046,11 +2085,11 @@ fn http_bulk_endpoint(parsed: &url::Url, uri: &str) -> anyhow::Result<mq_bridge:
     }
     let Some(text) = text else {
         anyhow::bail!(
-            "http-bulk URI '{uri}' needs 'config_file=<path>' or 'config=<YAML or JSON>' holding the http_bulk fields"
+            "http-bulk URI '{shown}' needs 'config_file=<path>' or 'config=<YAML or JSON>' holding the http_bulk fields"
         );
     };
     let mut config: Value = serde_yaml_ng::from_str(&text)
-        .with_context(|| format!("http-bulk config in URI '{uri}' is not valid YAML or JSON"))?;
+        .with_context(|| format!("http-bulk config in URI '{shown}' is not valid YAML or JSON"))?;
     // A recipe copied with its `http_bulk:` key is taken as well.
     if let Some(inner) = config.as_object_mut().filter(|map| map.len() == 1)
         && let Some(inner) = inner
@@ -2063,11 +2102,12 @@ fn http_bulk_endpoint(parsed: &url::Url, uri: &str) -> anyhow::Result<mq_bridge:
         fields.insert("url".into(), Value::String(url));
     }
     let endpoint_type = serde_json::from_value(serde_json::json!({ "http_bulk": config }))
-        .with_context(|| format!("could not build an 'http_bulk' endpoint from URI '{uri}'"))?;
+        .with_context(|| format!("could not build an 'http_bulk' endpoint from URI '{shown}'"))?;
     Ok(mq_bridge::models::Endpoint::new(endpoint_type))
 }
 
 fn base_endpoint_from_uri(uri: &str) -> anyhow::Result<mq_bridge::models::Endpoint> {
+    let shown = copy_pipeline::redact_uri(uri);
     use anyhow::bail;
     use mq_bridge::models::{
         AmqpConfig, AwsConfig, ClickHouseConfig, DirSpoolConfig, Endpoint, EndpointType,
@@ -2078,7 +2118,7 @@ fn base_endpoint_from_uri(uri: &str) -> anyhow::Result<mq_bridge::models::Endpoi
     use std::collections::HashMap;
     use url::Url;
 
-    let parsed = Url::parse(uri).with_context(|| format!("not a valid URI: {uri}"))?;
+    let parsed = Url::parse(uri).with_context(|| format!("not a valid URI: {shown}"))?;
 
     // Endpoints without a connection URL are built directly — they don't fit the
     // scalar-field-routing path below (which always attaches a `url`).
@@ -2124,7 +2164,7 @@ fn base_endpoint_from_uri(uri: &str) -> anyhow::Result<mq_bridge::models::Endpoi
             tagged.insert("static".into(), serde_json::Value::Object(cfg));
             let endpoint_type: EndpointType =
                 serde_json::from_value(serde_json::Value::Object(tagged)).with_context(|| {
-                    format!("could not build a 'static' endpoint from URI '{uri}'")
+                    format!("could not build a 'static' endpoint from URI '{shown}'")
                 })?;
             return Ok(Endpoint::new(endpoint_type));
         }
@@ -2132,7 +2172,7 @@ fn base_endpoint_from_uri(uri: &str) -> anyhow::Result<mq_bridge::models::Endpoi
         "response" => {
             if let Some((key, _)) = parsed.query_pairs().next() {
                 anyhow::bail!(
-                    "unsupported query param '{key}' in response URI '{uri}'. Response takes no query parameters"
+                    "unsupported query param '{key}' in response URI '{shown}'. Response takes no query parameters"
                 );
             }
             return Ok(Endpoint::new(EndpointType::Response(Default::default())));
@@ -2146,7 +2186,7 @@ fn base_endpoint_from_uri(uri: &str) -> anyhow::Result<mq_bridge::models::Endpoi
                     "to" => false,
                     "mirror" => true,
                     other => anyhow::bail!(
-                        "unsupported query param '{other}' in fanout URI '{uri}'. Use 'to=<uri>' for a branch that may answer, 'mirror=<uri>' for one whose response and failures are discarded"
+                        "unsupported query param '{other}' in fanout URI '{shown}'. Use 'to=<uri>' for a branch that may answer, 'mirror=<uri>' for one whose response and failures are discarded"
                     ),
                 };
                 let branch = nested_endpoint(&key, &value, uri)?;
@@ -2158,7 +2198,7 @@ fn base_endpoint_from_uri(uri: &str) -> anyhow::Result<mq_bridge::models::Endpoi
             }
             if branches.is_empty() {
                 anyhow::bail!(
-                    "fanout URI '{uri}' has no branches. Add at least one 'to=<uri>' or 'mirror=<uri>'"
+                    "fanout URI '{shown}' has no branches. Add at least one 'to=<uri>' or 'mirror=<uri>'"
                 );
             }
             return Ok(Endpoint::new(EndpointType::Fanout(branches)));
@@ -2173,16 +2213,16 @@ fn base_endpoint_from_uri(uri: &str) -> anyhow::Result<mq_bridge::models::Endpoi
                     "to" => &mut to,
                     "forward_to" => &mut forward_to,
                     other => anyhow::bail!(
-                        "unsupported query param '{other}' in request URI '{uri}'. Supported: to, forward_to"
+                        "unsupported query param '{other}' in request URI '{shown}'. Supported: to, forward_to"
                     ),
                 };
                 if slot.is_some() {
-                    anyhow::bail!("duplicate query param '{key}' in request URI '{uri}'");
+                    anyhow::bail!("duplicate query param '{key}' in request URI '{shown}'");
                 }
                 *slot = Some(Box::new(nested_endpoint(&key, &value, uri)?));
             }
             let Some(to) = to else {
-                anyhow::bail!("request URI '{uri}' needs a 'to=<uri>' endpoint to send to");
+                anyhow::bail!("request URI '{shown}' needs a 'to=<uri>' endpoint to send to");
             };
             return Ok(Endpoint::new(EndpointType::Request(
                 mq_bridge::models::RequestForwardConfig {
@@ -2210,14 +2250,15 @@ fn base_endpoint_from_uri(uri: &str) -> anyhow::Result<mq_bridge::models::Endpoi
                     "when" => {
                         if let Some(previous) = condition.replace(value.into_owned()) {
                             anyhow::bail!(
-                                "switch URI '{uri}' has 'when={previous}' with no 'to=<uri>' after it"
+                                "switch URI '{shown}' has 'when={previous}' with no 'to=<uri>' after it"
                             );
                         }
                     }
                     "to" => {
                         let Some(condition) = condition.take() else {
                             anyhow::bail!(
-                                "switch URI '{uri}' has a 'to={value}' that no 'when=<expression>' precedes"
+                                "switch URI '{shown}' has a 'to={}' that no 'when=<expression>' precedes",
+                                copy_pipeline::redact_uri(&value)
                             );
                         };
                         when.push(mq_bridge::models::SwitchCase {
@@ -2233,30 +2274,30 @@ fn base_endpoint_from_uri(uri: &str) -> anyhow::Result<mq_bridge::models::Endpoi
                         );
                     }
                     other => anyhow::bail!(
-                        "unsupported query param '{other}' in switch URI '{uri}'. Supported: metadata_key, case.<value>=<uri>, when=<expression> with to=<uri>, default=<uri>"
+                        "unsupported query param '{other}' in switch URI '{shown}'. Supported: metadata_key, case.<value>=<uri>, when=<expression> with to=<uri>, default=<uri>"
                     ),
                 }
             }
             if let Some(dangling) = condition {
                 anyhow::bail!(
-                    "switch URI '{uri}' has 'when={dangling}' with no 'to=<uri>' after it"
+                    "switch URI '{shown}' has 'when={dangling}' with no 'to=<uri>' after it"
                 );
             }
             // The two modes differ in cost, not just spelling, so mixing them
             // would hide which one a message actually took.
             if !when.is_empty() && (metadata_key.is_some() || !cases.is_empty()) {
                 anyhow::bail!(
-                    "switch URI '{uri}' mixes both modes. Use either 'metadata_key=<key>' with 'case.<value>=<uri>', or 'when=<expression>' with 'to=<uri>'"
+                    "switch URI '{shown}' mixes both modes. Use either 'metadata_key=<key>' with 'case.<value>=<uri>', or 'when=<expression>' with 'to=<uri>'"
                 );
             }
             if when.is_empty() {
                 if metadata_key.is_none() {
                     anyhow::bail!(
-                        "switch URI '{uri}' needs a 'metadata_key=<key>' to branch on, or 'when=<expression>&to=<uri>' predicates"
+                        "switch URI '{shown}' needs a 'metadata_key=<key>' to branch on, or 'when=<expression>&to=<uri>' predicates"
                     );
                 }
                 if cases.is_empty() {
-                    anyhow::bail!("switch URI '{uri}' has no cases. Add 'case.<value>=<uri>'");
+                    anyhow::bail!("switch URI '{shown}' has no cases. Add 'case.<value>=<uri>'");
                 }
             }
             return Ok(Endpoint::new(EndpointType::Switch(
@@ -2281,7 +2322,7 @@ fn base_endpoint_from_uri(uri: &str) -> anyhow::Result<mq_bridge::models::Endpoi
                 format!("{host}/{path}")
             };
             if topic.is_empty() {
-                anyhow::bail!("memory URI '{uri}' must include a topic, e.g. memory://my-topic");
+                anyhow::bail!("memory URI '{shown}' must include a topic, e.g. memory://my-topic");
             }
             let mut cfg = serde_json::Map::new();
             cfg.insert("topic".into(), serde_json::Value::String(topic));
@@ -2301,7 +2342,7 @@ fn base_endpoint_from_uri(uri: &str) -> anyhow::Result<mq_bridge::models::Endpoi
                     // An in-process channel has no connection URL to carry driver
                     // options, so anything else would just be discarded.
                     other => anyhow::bail!(
-                        "unrecognised query param '{other}' in memory URI '{uri}': only 'capacity' and 'subscribe_mode' are supported"
+                        "unrecognised query param '{other}' in memory URI '{shown}': only 'capacity' and 'subscribe_mode' are supported"
                     ),
                 }
             }
@@ -2309,7 +2350,7 @@ fn base_endpoint_from_uri(uri: &str) -> anyhow::Result<mq_bridge::models::Endpoi
             tagged.insert("memory".into(), serde_json::Value::Object(cfg));
             let endpoint_type: EndpointType =
                 serde_json::from_value(serde_json::Value::Object(tagged)).with_context(|| {
-                    format!("could not build a 'memory' endpoint from URI '{uri}'")
+                    format!("could not build a 'memory' endpoint from URI '{shown}'")
                 })?;
             return Ok(Endpoint::new(endpoint_type));
         }
@@ -2392,13 +2433,13 @@ fn base_endpoint_from_uri(uri: &str) -> anyhow::Result<mq_bridge::models::Endpoi
             // installed plugin is searched for here as well as in the engine.
             let plugin = plugin_of(other);
             if mq_bridge::plugin::discover_endpoint_plugin(plugin)
-                .with_context(|| format!("endpoint scheme '{other}' in URI '{uri}'"))?
+                .with_context(|| format!("endpoint scheme '{other}' in URI '{shown}'"))?
                 .is_some()
             {
                 return custom_endpoint_from_uri(plugin, uri);
             }
             bail!(
-                "unsupported endpoint scheme '{other}' in URI '{uri}'. Supported schemes: postgres, postgresql, mysql, mariadb, sqlite, nats, mongodb, redis, file, spool, kafka, mqtt, mqtts, amqp, amqps, rabbitmq, rabbitmqs, http, https, clickhouse, clickhouses, http-bulk, ws, wss, grpc, grpcs, ibmmq, aws, zeromq, zmq, s3, gs, az, abfs, and the structural memory, null, static, fanout, request, switch, response. A scheme may also name an endpoint registered by an extension{}, loaded with --plugin, or installed on the plugin search path ({})",
+                "unsupported endpoint scheme '{other}' in URI '{shown}'. Supported schemes: postgres, postgresql, mysql, mariadb, sqlite, nats, mongodb, redis, file, spool, kafka, mqtt, mqtts, amqp, amqps, rabbitmq, rabbitmqs, http, https, clickhouse, clickhouses, http-bulk, ws, wss, grpc, grpcs, ibmmq, aws, zeromq, zmq, s3, gs, az, abfs, and the structural memory, null, static, fanout, request, switch, response. A scheme may also name an endpoint registered by an extension{}, loaded with --plugin, or installed on the plugin search path ({})",
                 extension_schemes(),
                 mq_bridge::plugin::search_path_hint(plugin),
             )
@@ -2452,13 +2493,16 @@ fn base_endpoint_from_uri(uri: &str) -> anyhow::Result<mq_bridge::models::Endpoi
             // (`?tls=true`), so only an actual `{`/`[` literal is taken as config.
             Some(FieldType::Object) if !driver_options || is_json_literal(&v) => {
                 let value: serde_json::Value = serde_json::from_str(&v).with_context(|| {
-                    format!("query param '{k}' in URI '{uri}' expects a JSON literal, got '{v}'")
+                    format!(
+                        "query param '{k}' in URI '{shown}' expects a JSON literal, got '{}'",
+                        copy_pipeline::redact_param(&k, &v, None)
+                    )
                 })?;
                 config.insert(k, value);
             }
             Some(FieldType::Object) | None if driver_options => driver_params.push((k, v)),
             None => bail!(
-                "unrecognised query param '{k}' in URI '{uri}': a '{tag}' endpoint has no connection-URL driver options, so '{k}' would have no effect"
+                "unrecognised query param '{k}' in URI '{shown}': a '{tag}' endpoint has no connection-URL driver options, so '{k}' would have no effect"
             ),
             Some(ty) => {
                 config.insert(k, coerce_scalar(v, ty));
@@ -2488,7 +2532,7 @@ fn base_endpoint_from_uri(uri: &str) -> anyhow::Result<mq_bridge::models::Endpoi
         let path = path.strip_prefix(prefix.as_str()).unwrap_or(path);
         let path = path.strip_prefix("//").unwrap_or(path);
         if path.is_empty() {
-            bail!("{tag} URI '{uri}' must include a path");
+            bail!("{tag} URI '{shown}' must include a path");
         }
         // `x.jsonl.gz` says how it is compressed; `compression=none` overrides.
         if tag == "file" && !config.contains_key("compression") {
@@ -2505,7 +2549,7 @@ fn base_endpoint_from_uri(uri: &str) -> anyhow::Result<mq_bridge::models::Endpoi
         // any leftover non-config param is ambiguous — it belongs inside `url=`.
         if let Some((k, _)) = driver_params.first() {
             bail!(
-                "in escaped mode (url=...), put driver options inside the encoded connection string; unexpected query param '{k}' in URI '{uri}'"
+                "in escaped mode (url=...), put driver options inside the encoded connection string; unexpected query param '{k}' in URI '{shown}'"
             );
         }
         config.insert("url".into(), serde_json::Value::String(url));
@@ -2601,7 +2645,7 @@ fn base_endpoint_from_uri(uri: &str) -> anyhow::Result<mq_bridge::models::Endpoi
     let mut tagged = serde_json::Map::new();
     tagged.insert(tag.to_string(), serde_json::Value::Object(config));
     let endpoint_type: EndpointType = serde_json::from_value(serde_json::Value::Object(tagged))
-        .with_context(|| format!("could not build a '{tag}' endpoint from URI '{uri}'"))?;
+        .with_context(|| format!("could not build a '{tag}' endpoint from URI '{shown}'"))?;
     Ok(Endpoint::new(endpoint_type))
 }
 
@@ -3734,6 +3778,24 @@ mod uri_tests {
         ] {
             let err = format!("{:#}", endpoint_from_uri(uri).unwrap_err());
             assert!(err.contains(expected), "{uri}: got {err}");
+        }
+    }
+
+    // A URI that fails to parse is quoted in the error without its credentials.
+    #[test]
+    fn uri_errors_do_not_quote_credentials() {
+        for uri in [
+            "mongodb://app:hunter2@db/shop?bogus=1",
+            "s3://bucket/prefix?secret_access_key=hunter2&bogus=1",
+            "http://host/x?basic_auth=%5B%22app%22%2C%22hunter2%22%5D&request_timeout_ms=soon",
+            "fanout:?to=bogus://app:hunter2@host/x",
+            "null:|encryption?key=hunter2&bogus=1",
+            "null:|dlq?endpoint=bogus://app:hunter2@host/x",
+            "http://host/x?basic_auth=[hunter2",
+            "switch:?to=bogus://app:hunter2@host/x",
+        ] {
+            let err = format!("{:#}", endpoint_from_uri(uri).unwrap_err());
+            assert!(!err.contains("hunter2"), "{uri}: got {err}");
         }
     }
 

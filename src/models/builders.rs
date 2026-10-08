@@ -1046,3 +1046,264 @@ with_value_setters!(ClickHouseConfig { with_async_insert => async_insert: bool, 
 with_optional_setters!(ClickHouseConfig { with_columns => columns: std::collections::BTreeMap<String, String>, with_wait_for_async_insert => wait_for_async_insert: bool, with_polling_interval_ms => polling_interval_ms: u64, with_max_polling_interval_ms => max_polling_interval_ms: u64, with_request_timeout_ms => request_timeout_ms: u64, with_connect_timeout_ms => connect_timeout_ms: u64 });
 with_value_setters!(TlsConfig { with_required => required: bool, with_accept_invalid_certs => accept_invalid_certs: bool });
 with_optional_string_setters!(TlsConfig { with_cert_password => cert_password });
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn endpoint_names_match_their_config_keys() {
+        let named = [
+            (EndpointType::Aws(AwsConfig::new()), "aws"),
+            (EndpointType::Kafka(KafkaConfig::new("k:9092")), "kafka"),
+            (EndpointType::Nats(NatsConfig::new("nats://n")), "nats"),
+            (EndpointType::File(FileConfig::new("f.jsonl")), "file"),
+            (
+                EndpointType::DirSpool(DirSpoolConfig::new("spool")),
+                "dir_spool",
+            ),
+            (
+                EndpointType::ObjectStore(ObjectStoreConfig::new("s3://b")),
+                "object_store",
+            ),
+            (EndpointType::Ref("other".into()), "ref"),
+            (EndpointType::Memory(MemoryConfig::new("t", None)), "memory"),
+            (EndpointType::Sled(SledConfig::new("db")), "sled"),
+            (EndpointType::Amqp(AmqpConfig::new("amqp://a")), "amqp"),
+            (
+                EndpointType::MongoDb(MongoDbConfig::new("mongodb://m", "db")),
+                "mongodb",
+            ),
+            (EndpointType::Mqtt(MqttConfig::new("mqtt://m")), "mqtt"),
+            (EndpointType::Http(HttpConfig::new("http://h")), "http"),
+            (
+                EndpointType::WebSocket(WebSocketConfig::new("ws://w")),
+                "websocket",
+            ),
+            (
+                EndpointType::IbmMq(IbmMqConfig::new("h(1414)", "QM1", "CH")),
+                "ibmmq",
+            ),
+            (EndpointType::ZeroMq(ZeroMqConfig::new("tcp://z")), "zeromq"),
+            (
+                EndpointType::RedisStreams(RedisStreamsConfig::new("redis://r")),
+                "redis_streams",
+            ),
+            (EndpointType::Grpc(GrpcConfig::new("http://g")), "grpc"),
+            (
+                EndpointType::Sqlx(SqlxConfig::new("sqlite::memory:", "t")),
+                "sqlx",
+            ),
+            (
+                EndpointType::ClickHouse(ClickHouseConfig::new("http://c", "t")),
+                "clickhouse",
+            ),
+            (
+                EndpointType::PostgresCdc(PostgresCdcConfig::new("postgres://p", "pub")),
+                "postgres_cdc",
+            ),
+            (EndpointType::Fanout(Vec::new()), "fanout"),
+            (
+                EndpointType::StreamBuffer(StreamBufferConfig::new("s")),
+                "stream_buffer",
+            ),
+            (
+                EndpointType::Reader(Box::new(Endpoint::new(EndpointType::Null))),
+                "reader",
+            ),
+            (
+                EndpointType::Custom {
+                    name: "x".into(),
+                    config: serde_json::Value::Null,
+                },
+                "custom",
+            ),
+            (EndpointType::Null, "null"),
+        ];
+        let core = [
+            "file",
+            "dir_spool",
+            "ref",
+            "memory",
+            "fanout",
+            "stream_buffer",
+            "reader",
+            "custom",
+            "null",
+        ];
+        for (endpoint, name) in named {
+            assert_eq!(endpoint.name(), name);
+            assert_eq!(endpoint.is_core(), core.contains(&name), "{name}");
+        }
+    }
+
+    #[test]
+    fn route_options_refuse_a_zero_in_any_sizing_field() {
+        let valid = RouteOptions::default();
+        assert!(valid.validate().is_ok());
+        for (options, field) in [
+            (valid.clone().with_concurrency(0), "concurrency"),
+            (valid.clone().with_batch_size(0), "batch_size"),
+            (
+                valid.clone().with_commit_concurrency_limit(0),
+                "commit_concurrency_limit",
+            ),
+        ] {
+            let error = options.validate().unwrap_err().to_string();
+            assert!(error.contains(field), "{error}");
+        }
+    }
+
+    #[test]
+    fn a_memory_topic_becomes_a_url_and_ipc_schemes_enable_nack() {
+        let plain = MemoryConfig::new("orders", Some(4));
+        assert_eq!(plain.get_transport_identifier().unwrap(), "memory://orders");
+        assert!(!plain.is_ipc_transport());
+        assert!(!plain.with_smart_defaults().enable_nack);
+
+        for url in ["ipc:///tmp/a.sock", "unix:///tmp/a.sock", "pipe://a"] {
+            let config = MemoryConfig::new_with_url(url, None);
+            assert_eq!(config.get_transport_identifier().unwrap(), url);
+            assert!(config.is_ipc_transport(), "{url}");
+            assert!(config.with_smart_defaults().enable_nack, "{url}");
+        }
+
+        let mut url_only = MemoryConfig::new_with_url("ipc://b", None);
+        url_only.topic.clear();
+        assert_eq!(url_only.get_transport_identifier().unwrap(), "ipc://b");
+
+        let mut overridden = MemoryConfig::new_with_url("ipc://c", None);
+        overridden.enable_nack_overridden = true;
+        assert!(!overridden.with_smart_defaults().enable_nack);
+
+        let empty = MemoryConfig::new("", None);
+        assert!(empty.get_transport_identifier().is_err());
+        assert!(!empty.is_ipc_transport());
+    }
+
+    #[test]
+    fn tls_settings_decide_the_url_scheme_and_what_counts_as_configured() {
+        let off = TlsConfig::new();
+        assert_eq!(off.normalize_url("host:80"), "http://host:80");
+        assert_eq!(off.normalize_url("HTTPS://host"), "HTTPS://host");
+        assert_eq!(off.normalize_url("Http://host"), "Http://host");
+        assert!(!off.is_tls_client_configured());
+
+        let ca = TlsConfig::new().with_ca_file("ca.pem");
+        assert_eq!(ca.normalize_url("host"), "https://host");
+        assert!(ca.is_tls_client_configured());
+        assert!(!ca.is_mtls_client_configured());
+
+        let mtls = TlsConfig::new()
+            .with_client_cert("c.pem", "k.pem")
+            .with_insecure(true);
+        assert!(mtls.is_mtls_client_configured());
+        assert!(mtls.is_tls_server_configured());
+        assert!(mtls.accept_invalid_certs);
+
+        // A certificate pair alone is enough for a client, even with `required` off.
+        let pair_only = mtls.with_required(false);
+        assert!(pair_only.is_tls_client_configured());
+        assert!(!pair_only.is_mtls_client_configured());
+    }
+
+    #[test]
+    fn the_deprecated_mongo_change_stream_flag_yields_to_consume() {
+        let config = MongoDbConfig::new("mongodb://m", "db").with_collection("c");
+        assert_eq!(config.resolved_consume(), MongoConsume::default());
+        let stream = config.with_change_stream(true);
+        assert_eq!(stream.resolved_consume(), MongoConsume::CaptureNew);
+        let explicit = stream.with_consume(MongoConsume::default());
+        assert_eq!(explicit.resolved_consume(), MongoConsume::default());
+    }
+
+    #[test]
+    fn http_compression_enabled_means_gzip_unless_a_codec_is_named() {
+        let plain = HttpConfig::new("http://h");
+        assert_eq!(plain.publisher_compression(), Compression::None);
+        assert!(!plain.consumer_compression_enabled());
+        assert!(plain.inline_response_fast_path_enabled());
+
+        let enabled = plain.with_compression_enabled(true);
+        assert_eq!(enabled.publisher_compression(), Compression::Gzip);
+        assert!(enabled.consumer_compression_enabled());
+
+        let named = enabled
+            .with_compression(Compression::Zstd)
+            .with_inline_response_fast_path(false);
+        assert_eq!(named.publisher_compression(), Compression::Zstd);
+        assert!(!named.inline_response_fast_path_enabled());
+    }
+
+    #[test]
+    fn sink_naming_resolves_auto_per_sink_and_folds_in_idempotency() {
+        let file = FileConfig::new("out.jsonl");
+        assert_eq!(file.resolved_name_by(true), NameBy::WriteTime);
+        let file = file.with_name_by(NameBy::SourcePosition);
+        assert_eq!(file.resolved_name_by(false), NameBy::SourcePosition);
+
+        let store = ObjectStoreConfig::new("s3://bucket");
+        assert_eq!(store.resolved_name_by(true), NameBy::SourcePosition);
+        assert_eq!(store.resolved_name_by(false), NameBy::WriteTime);
+        assert!(store.date_partition_enabled(NameBy::WriteTime));
+        assert!(!store.date_partition_enabled(NameBy::SourcePosition));
+        let flat = store
+            .with_date_partition(false)
+            .with_checkpoint("file://c", "id");
+        assert!(!flat.date_partition_enabled(NameBy::WriteTime));
+        assert_eq!(flat.cursor_id.as_deref(), Some("id"));
+    }
+
+    #[test]
+    fn spool_suffixes_drop_the_dot_and_an_empty_sidecar_extension_disables_it() {
+        let mut spool = DirSpoolConfig::new("spool");
+        spool.payload_extension = ".bin".into();
+        spool.metadata_extension = ".json".into();
+        assert_eq!(spool.payload_suffix(), "bin");
+        assert_eq!(spool.metadata_suffix(), Some("json"));
+        spool.metadata_extension.clear();
+        assert_eq!(spool.metadata_suffix(), None);
+    }
+
+    #[test]
+    fn kafka_options_accumulate_and_credentials_set_both_halves() {
+        let kafka = KafkaConfig::new("k:9092")
+            .with_topic("t")
+            .with_group_id("g")
+            .with_credentials("u", "p")
+            .with_producer_option("acks", "all")
+            .with_producer_option("linger.ms", "1")
+            .with_consumer_option("fetch.min.bytes", "1");
+        assert_eq!(kafka.producer_options.as_ref().map(Vec::len), Some(2));
+        assert_eq!(kafka.consumer_options.as_ref().map(Vec::len), Some(1));
+        assert_eq!(
+            (kafka.username.as_deref(), kafka.password.as_deref()),
+            (Some("u"), Some("p"))
+        );
+
+        let aws = AwsConfig::new()
+            .with_queue_url("q")
+            .with_topic_arn("arn")
+            .with_region("eu-central-1")
+            .with_endpoint_url("http://localhost:4566")
+            .with_credentials("ak", "sk");
+        assert_eq!(aws.queue_url.as_deref(), Some("q"));
+        assert_eq!(aws.topic_arn.as_deref(), Some("arn"));
+        assert_eq!(aws.region.as_deref(), Some("eu-central-1"));
+        assert_eq!(
+            (aws.access_key.as_deref(), aws.secret_key.as_deref()),
+            (Some("ak"), Some("sk"))
+        );
+    }
+
+    #[test]
+    fn a_new_postgres_cdc_config_creates_its_slot_and_does_not_backfill() {
+        let cdc = PostgresCdcConfig::new("postgres://p", "pub");
+        assert!(cdc.create_slot);
+        assert_eq!(cdc.slot_name, default_pg_cdc_slot());
+        assert_eq!(cdc.resolved_consume(), PostgresConsume::default());
+        let cdc = cdc.with_slot("s1").with_checkpoint_store("file://c");
+        assert_eq!(cdc.slot_name, "s1");
+        assert_eq!(cdc.checkpoint_store.as_deref(), Some("file://c"));
+    }
+}

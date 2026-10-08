@@ -49,14 +49,30 @@ in config mode depends on where the address comes from:
 | Situation | Result |
 |---|---|
 | `ui_addr` set in the config | Served on that address — configuring it *is* the consent |
-| No `ui_addr`, `--ui` passed | Served on `0.0.0.0:9091` |
+| No `ui_addr`, `--ui` passed | Served on `127.0.0.1:9091` (`0.0.0.0:9091` in the Docker image) |
 | No `ui_addr`, `--no-ui` passed | Not served, no prompt |
-| No `ui_addr`, interactive terminal | Asks `Start the web UI on 0.0.0.0:9091? [y/N]` — anything but `y`/`yes` declines |
+| No `ui_addr`, interactive terminal | Asks `Start the web UI on 127.0.0.1:9091? [y/N]` — anything but `y`/`yes` declines |
 | No `ui_addr`, no terminal (script, service, CI) | **Not served.** Pass `--ui` to opt in |
 
 The last row is the important one: a run started by a script or a service unit
 never puts the UI on the network by accident. Nothing about the bridge itself is
 gated — configured routes run either way.
+
+The UI has no login. `--ui` therefore listens on loopback, and a start with an address that
+other machines can reach logs a warning. Two more rules apply to every UI:
+
+- A UI on a loopback address answers only requests whose `Host` header names `localhost` or
+  a loopback address, which stops a web page from reaching it through DNS rebinding. Behind
+  a reverse proxy or a port forward that sends another name, list the names in
+  `MQB_UI_ALLOWED_HOSTS` (comma-separated).
+- `GET /config` shows each secret as a reference to the key it is stored under, such as
+  `${MQB__PUBLISHERS__<id>__HTTP__BASIC_AUTH__1}`, except in the `unencrypted` and
+  `temporary_messages` storage modes. A URL keeps everything but its password. A save
+  replaces each reference by the stored value, so a cloned or renamed endpoint keeps its
+  secrets; a reference to a key that is not stored is refused with 400.
+
+`MQB_UI_DEFAULT_ADDR` changes the address that `--ui` and the prompt use. It does not start
+the UI.
 
 In a container the calculation is reversed, because nothing is reachable until
 you publish it. The Docker image's `CMD` therefore asks for the UI on your

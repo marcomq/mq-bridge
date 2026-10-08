@@ -1042,3 +1042,101 @@ mod format_name_tests {
         }
     }
 }
+
+mod secret_extraction_tests {
+    use super::*;
+
+    fn secrets_of(yaml: &str) -> (Config, Vec<String>) {
+        let mut config: Config = serde_yaml_ng::from_str(yaml).expect("config parses");
+        let mut keys: Vec<String> = extract_config_secrets(&mut config).into_keys().collect();
+        keys.sort();
+        (config, keys)
+    }
+
+    #[test]
+    fn every_credentialed_endpoint_gives_up_its_url_and_login() {
+        for (kind, name, extra) in [
+            ("nats", "NATS", ""),
+            ("amqp", "AMQP", ""),
+            ("mongodb", "MONGODB", "database: d"),
+            ("mqtt", "MQTT", ""),
+            ("ibmmq", "IBMMQ", "queue_manager: qm\n      channel: c"),
+            ("redis_streams", "REDIS_STREAMS", ""),
+            ("sqlx", "SQLX", "table: t"),
+            ("clickhouse", "CLICKHOUSE", "table: t"),
+        ] {
+            let yaml = format!(
+                "r:\n  input:\n    memory: {{ topic: t }}\n  output:\n    {kind}:\n      url: \"x://u:p@host/db\"\n      username: u\n      password: p\n      {extra}\n"
+            );
+            let (config, keys) = secrets_of(&yaml);
+            let prefix = format!("MQB__R__OUTPUT__{name}__");
+            for field in ["URL", "USERNAME", "PASSWORD"] {
+                assert!(
+                    keys.contains(&format!("{prefix}{field}")),
+                    "{kind}: {keys:?}"
+                );
+            }
+            let left = serde_json::to_string(&config).unwrap();
+            assert!(!left.contains("u:p@host"), "{kind} kept its url: {left}");
+        }
+    }
+
+    #[test]
+    fn url_only_endpoints_give_up_a_url_with_credentials() {
+        for (kind, name) in [("websocket", "WEBSOCKET"), ("zeromq", "ZEROMQ")] {
+            let yaml = format!(
+                "r:\n  input:\n    memory: {{ topic: t }}\n  output:\n    {kind}:\n      url: \"x://u:p@host\"\n"
+            );
+            let (_, keys) = secrets_of(&yaml);
+            assert_eq!(keys, [format!("MQB__R__OUTPUT__{name}__URL")], "{kind}");
+        }
+    }
+
+    #[test]
+    fn nested_endpoints_are_reached_through_structural_ones() {
+        let (_, keys) = secrets_of(
+            r#"
+r:
+  input:
+    memory: { topic: t }
+  output:
+    middlewares:
+      - dlq:
+          endpoint:
+            nats: { url: "nats://h", subject: s, token: tok }
+      - encryption:
+          key: "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+    fanout:
+      - aws: { queue_url: "https://k:s@sqs/q", access_key: a, secret_key: b, session_token: c }
+      - switch:
+          metadata_key: kind
+          cases:
+            "a b": { kafka: { url: "h:9092", topic: t, password: p } }
+          default: { mqtt: { url: "mqtt://h", topic: t, password: p } }
+      - reader: { sqlx: { url: "postgres://h/db", table: t, password: p } }
+      - request:
+          to: { nats: { url: "nats://h", subject: s, password: p } }
+          forward_to: { amqp: { url: "amqp://h", queue: q, password: p } }
+"#,
+        );
+        let out = "MQB__R__OUTPUT__";
+        for expected in [
+            "MIDDLEWARES__0__DLQ__ENDPOINT__NATS__TOKEN",
+            "MIDDLEWARES__1__ENCRYPTION__KEY",
+            "FANOUT__0__AWS__QUEUE_URL",
+            "FANOUT__0__AWS__ACCESS_KEY",
+            "FANOUT__0__AWS__SECRET_KEY",
+            "FANOUT__0__AWS__SESSION_TOKEN",
+            "FANOUT__1__SWITCH__CASES__A_B__KAFKA__PASSWORD",
+            "FANOUT__1__SWITCH__DEFAULT__MQTT__PASSWORD",
+            "FANOUT__2__READER__SQLX__PASSWORD",
+            "FANOUT__3__REQUEST__TO__NATS__PASSWORD",
+            "FANOUT__3__REQUEST__FORWARD_TO__AMQP__PASSWORD",
+        ] {
+            assert!(
+                keys.contains(&format!("{out}{expected}")),
+                "{expected}: {keys:#?}"
+            );
+        }
+    }
+}

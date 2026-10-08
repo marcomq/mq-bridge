@@ -616,7 +616,7 @@ impl AmqpConsumer {
 }
 
 async fn create_amqp_connection(config: &AmqpConfig) -> anyhow::Result<Connection> {
-    info!(url = %config.url, "Connecting to AMQP broker");
+    info!(url = %crate::support::redact::url_password(&config.url), "Connecting to AMQP broker");
     let mut url = url::Url::parse(&config.url).context("Failed to parse AMQP URL")?;
 
     if let (Some(user), Some(pass)) = (&config.username, &config.password) {

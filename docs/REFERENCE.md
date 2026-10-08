@@ -543,6 +543,21 @@ Accumulates single sends and forwards them as one batch. Input and output.
 Flushes when either bound is hit. Useful in front of an endpoint whose per-call overhead
 dominates. Adds up to `max_delay_ms` of latency.
 
+On an output, each caller of a single send gets its own result back: its response, its
+error, or the acknowledgement. A response is matched to its request by message id. Placed
+after a [`lookup`](#lookup) or an [`aggregate`](#aggregate), `buffer` therefore lets
+concurrent single sends share one batched lookup or one store round trip.
+
+`max_delay_ms: 0` on an output adds no wait. A send goes out at once when nothing is in
+flight; sends that arrive while a batch is in flight leave together as the next batch, so
+batches grow with the load:
+
+```yaml middleware
+- buffer: { max_messages: 500, max_delay_ms: 0 }
+```
+
+Only one batch is in flight at a time, with any `max_delay_ms`.
+
 With route `concurrency` greater than 1, buffering preserves order inside each batch but
 does not guarantee source order across concurrent destination writes. Use `concurrency: 1`
 when destination order matters; route validation emits a warning for this combination.
@@ -620,7 +635,9 @@ Persists HTTP cookies and arbitrary session values across messages. Input and ou
 
 Reads `set-cookie` from responses and injects `cookie` into later requests. With
 `shared_scope`, instances using the same name share one store across endpoints and routes in
-the process — that is how a login route and a data route reuse one session.
+the process — that is how a login route and a data route reuse one session. A response with
+several `Set-Cookie` headers arrives as one `set-cookie` value with one cookie per line, and
+each line is stored.
 
 Cookie names are chosen by the server, so the jar is bounded: `Max-Age=0` (or negative)
 deletes a cookie, and once `max_cookies` is exceeded the least recently set entries are

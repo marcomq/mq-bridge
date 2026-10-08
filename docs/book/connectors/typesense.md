@@ -92,7 +92,7 @@ Loading 20,000 small documents this way took under a second on a laptop.
 | `collection` | required | Collection to write to; the path of the URI |
 | `api_key` | none | Sent as `X-TYPESENSE-API-KEY` |
 | `operation` | none | Template for a message's operation; `delete` or `d` removes the document |
-| `compression` | `none` | `gzip`, `zstd` or `lz4` request bodies |
+| `compression` | `none` | `gzip`, `zstd` or `lz4` request bodies; check that your server reads the codec, a refusal does not name it |
 | `request_timeout_ms` | none | Request timeout |
 
 `typesense` is the generic [`http_bulk`](./http-bulk.md) output with these

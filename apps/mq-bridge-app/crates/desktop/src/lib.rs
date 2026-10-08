@@ -110,7 +110,11 @@ impl SecretStore for DesktopKeyringSecretStore {
                 anyhow::bail!("Stored secret verification failed for '{key}'");
             }
         }
-        write_desktop_secret_metadata(&self.metadata_path, secrets.keys())?;
+        // Keys of earlier saves stay listed, so "delete secrets" still reaches the
+        // entry of an endpoint that was renamed or removed since.
+        let mut keys = read_desktop_secret_metadata(&self.metadata_path);
+        keys.extend(secrets.keys().cloned());
+        write_desktop_secret_metadata(&self.metadata_path, keys.iter())?;
         Ok(())
     }
 }

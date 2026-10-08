@@ -506,6 +506,27 @@ mod tests {
         );
     }
 
+    /// The DLQ endpoint has no hook here; the inner one must still run.
+    #[tokio::test]
+    async fn a_hook_on_one_side_only_still_runs() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let publisher = DlqPublisher {
+            inner: Box::new(HookPublisher {
+                name: "inner",
+                fail: false,
+                log: log.clone(),
+            }),
+            dlq_publisher: Arc::new(crate::endpoints::structural::null::NullPublisher),
+            route_name: "hooks".to_string(),
+        };
+
+        publisher.on_connect_hook().unwrap().await.unwrap();
+        publisher.on_disconnect_hook().unwrap().await.unwrap();
+
+        assert_eq!(*log.lock().unwrap(), ["inner:connect", "inner:disconnect"]);
+        assert!(!publisher.requires_ordered_publish());
+    }
+
     #[tokio::test]
     async fn test_retry_before_dlq() {
         let target_calls = Arc::new(Mutex::new(0));

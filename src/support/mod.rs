@@ -33,6 +33,13 @@ pub(crate) mod parquet;
 #[cfg(feature = "plugin")]
 pub mod plugin_abi;
 pub mod poll_job;
+#[cfg(any(
+    feature = "amqp",
+    feature = "mqtt",
+    feature = "http",
+    feature = "websocket"
+))]
+pub(crate) mod redact;
 pub mod source_ranges;
 #[cfg(any(feature = "http", feature = "http-bulk"))]
 pub(crate) mod sse;

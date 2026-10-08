@@ -299,4 +299,21 @@ mod tests {
         assert!(get_publisher("registry_lifecycle").is_none());
         assert!(!list_publishers().contains(&"registry_lifecycle".to_string()));
     }
+
+    #[tokio::test]
+    async fn from_config_builds_the_publisher_a_json_endpoint_describes() {
+        let topic = format!("pub_json_{}", fast_uuid_v7::gen_id_str());
+        let publisher = Publisher::from_config(serde_json::json!({ "memory": { "topic": topic } }))
+            .await
+            .unwrap();
+        assert!(matches!(
+            publisher.send("x".into()).await.unwrap(),
+            Sent::Ack
+        ));
+        let error = Publisher::from_config(serde_json::json!({ "no_such_endpoint": {} }))
+            .await
+            .err()
+            .expect("an unknown endpoint type is refused");
+        assert!(error.to_string().contains("no_such_endpoint"), "{error}");
+    }
 }

@@ -382,6 +382,101 @@ mod placement_tests {
         }
     }
 
+    /// Middlewares that sit on either side and leave the payload as it is.
+    fn pass_through() -> Vec<Middleware> {
+        let mut list = vec![
+            serde_json::json!({"delay": {"delay_ms": 1}}),
+            serde_json::json!({"random_panic": {"enabled": false}}),
+            serde_json::json!({"limiter": {"messages_per_second": 100000.0}}),
+            serde_json::json!({"cookie_jar": {}}),
+        ];
+        if cfg!(feature = "otel") {
+            list.push(serde_json::json!({"otel": {}}));
+        }
+        if cfg!(feature = "metrics") {
+            list.push(serde_json::json!({"metrics": {}}));
+        }
+        list.into_iter()
+            .map(|middleware| serde_json::from_value(middleware).unwrap())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_message_passes_every_two_sided_middleware_on_both_sides() {
+        let mut endpoint = Endpoint::new(EndpointType::Null);
+        endpoint.middlewares = pass_through();
+
+        let inner = MemoryConsumer::new_local("wiring_in", 4);
+        inner
+            .channel()
+            .send_message(crate::CanonicalMessage::from("in"))
+            .await
+            .unwrap();
+        let mut consumer = apply_middlewares_to_consumer(Box::new(inner), &endpoint, "wiring")
+            .await
+            .unwrap();
+        assert_eq!(
+            &consumer.receive().await.unwrap().message.payload[..],
+            b"in"
+        );
+
+        endpoint.middlewares.extend([
+            serde_json::from_value(serde_json::json!({"retry": {"max_attempts": 2}})).unwrap(),
+            serde_json::from_value(serde_json::json!({"timeout": {"timeout_ms": 5000}})).unwrap(),
+        ]);
+        let inner = MemoryPublisher::new_local("wiring_out", 4);
+        let channel = inner.channel();
+        let publisher = apply_middlewares_to_publisher(Box::new(inner), &endpoint, "wiring")
+            .await
+            .unwrap();
+        publisher
+            .send(crate::CanonicalMessage::from("out"))
+            .await
+            .unwrap();
+        let sent = channel.drain_messages();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(&sent[0].payload[..], b"out");
+    }
+
+    #[tokio::test]
+    async fn otel_without_the_feature_is_refused_by_name() {
+        if cfg!(feature = "otel") {
+            return;
+        }
+        let err = publisher_error(serde_json::json!({"otel": {}})).await;
+        assert!(
+            err.to_string().contains("requires the 'otel' feature"),
+            "{err}"
+        );
+        let err = consumer_error(serde_json::json!({"otel": {}})).await;
+        assert!(
+            err.to_string().contains("requires the 'otel' feature"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unknown_custom_middleware_is_named_on_both_sides() {
+        let custom = serde_json::json!({"custom": {"name": "no_such_middleware", "config": {}}});
+        for err in [
+            consumer_error(custom.clone()).await,
+            publisher_error(custom).await,
+        ] {
+            let text = err.to_string();
+            assert!(text.contains("'no_such_middleware' not found"), "{text}");
+        }
+    }
+
+    #[tokio::test]
+    async fn dlq_on_an_input_is_ignored_not_refused() {
+        let consumer = Box::new(MemoryConsumer::new_local("placement_dlq_in", 1));
+        let endpoint = endpoint_with(serde_json::json!({"dlq": {"endpoint": {"null": null}}}));
+
+        let applied = apply_middlewares_to_consumer(consumer, &endpoint, "placement").await;
+
+        assert!(applied.is_ok());
+    }
+
     #[tokio::test]
     async fn retry_on_an_input_is_ignored_not_refused() {
         let consumer = Box::new(MemoryConsumer::new_local("placement_retry_in", 1));

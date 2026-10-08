@@ -184,24 +184,20 @@ fn full_document_match_prefixes_fields_and_preserves_operators() {
 }
 
 #[test]
-fn resumable_encode_decode_roundtrips_supported_types() {
+fn encode_id_tags_supported_types() {
     let oid = mongodb::bson::oid::ObjectId::new();
     let uuid = mongodb::bson::Uuid::new();
     let cases = [
-        Bson::ObjectId(oid),
-        Bson::from(uuid),
-        Bson::Int64(123),
-        Bson::String("k1".to_string()),
+        (Bson::ObjectId(oid), format!("oid:{}", oid.to_hex())),
+        (Bson::from(uuid), format!("uuid:{uuid}")),
+        (Bson::Int64(123), "int:123".to_string()),
+        (Bson::Int32(7), "int:7".to_string()),
+        (Bson::String("k1".to_string()), "str:k1".to_string()),
     ];
-    for id in cases {
-        let encoded = encode_id(&id).expect("supported type encodes");
-        assert_eq!(decode_id(&encoded), Some(id), "roundtrip for {}", encoded);
+    for (id, expected) in cases {
+        assert_eq!(encode_id(&id), Some(expected));
     }
-    // Int32 encodes as an int and decodes back as Int64 (BSON `$gt` compares numerically).
-    assert_eq!(encode_id(&Bson::Int32(7)).as_deref(), Some("int:7"));
-    // Unsupported types are not persisted.
     assert_eq!(encode_id(&Bson::Boolean(true)), None);
-    assert_eq!(decode_id("bogus"), None);
 }
 
 #[test]
@@ -908,4 +904,36 @@ async fn mongo_update_batch_field_rejected_message_fails_alone() {
         .unwrap()
         .unwrap();
     assert!(answers[0].as_ref().unwrap().get("_mqb").is_none());
+}
+
+/// The client connects lazily, so these refusals need no server.
+#[tokio::test]
+async fn readers_refuse_a_bad_config_before_touching_the_server() {
+    let config = |collection: Option<&str>| MongoDbConfig {
+        url: "mongodb://127.0.0.1:1".to_string(),
+        database: "d".to_string(),
+        collection: collection.map(str::to_string),
+        shared: Some(false),
+        ..Default::default()
+    };
+    let refusal = |result: anyhow::Result<()>| format!("{:#}", result.unwrap_err());
+
+    let no_collection = config(None);
+    let snapshot = super::readers::MongoDbIdReader::new(&no_collection).await;
+    assert!(refusal(snapshot.map(drop)).contains("Collection name is required"));
+    let cdc = super::readers::MongoDbChangeStreamReader::new(&no_collection, true).await;
+    assert!(refusal(cdc.map(drop)).contains("Collection name is required"));
+
+    let mut bad_query = config(Some("c"));
+    bad_query.receive_query = Some("{not json".to_string());
+    let snapshot = super::readers::MongoDbIdReader::new(&bad_query).await;
+    assert!(refusal(snapshot.map(drop)).contains("receive_query"));
+    let cdc = super::readers::MongoDbChangeStreamReader::new(&bad_query, false).await;
+    assert!(refusal(cdc.map(drop)).contains("receive_query"));
+
+    // A stored `_id` position would skip documents a concurrent writer commits below it.
+    let mut resumed = config(Some("c"));
+    resumed.cursor_id = Some("pos".to_string());
+    let snapshot = super::readers::MongoDbIdReader::new(&resumed).await;
+    assert!(refusal(snapshot.map(drop)).contains("does not support 'cursor_id'"));
 }

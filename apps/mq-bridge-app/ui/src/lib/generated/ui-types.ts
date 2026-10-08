@@ -540,6 +540,8 @@ export interface HttpConfig {
   compression_enabled?: boolean | null;
   compression_threshold_bytes?: number | null;
   concurrency_limit?: number | null;
+  header_read_timeout_ms?: number | null;
+  max_body_bytes?: number | null;
   basic_auth?: unknown[] | null;
   custom_headers?: Record<string, string>;
   shared?: boolean | null;

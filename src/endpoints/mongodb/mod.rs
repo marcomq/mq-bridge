@@ -333,22 +333,6 @@ fn encode_id(id: &Bson) -> Option<String> {
     }
 }
 
-/// Decodes a tagged string produced by [`encode_id`] back into a BSON `_id` for the
-/// `$gt` query. Returns `None` on a malformed/unknown value (reader then starts from the
-/// beginning rather than silently skipping).
-fn decode_id(s: &str) -> Option<Bson> {
-    let (tag, val) = s.split_once(':')?;
-    match tag {
-        "oid" => mongodb::bson::oid::ObjectId::parse_str(val)
-            .ok()
-            .map(Bson::ObjectId),
-        "uuid" => mongodb::bson::Uuid::parse_str(val).ok().map(Bson::from),
-        "int" => val.parse::<i64>().ok().map(Bson::Int64),
-        "str" => Some(Bson::String(val.to_string())),
-        _ => None,
-    }
-}
-
 /// Checkpoint store backed by a `mqb_cursors` collection in the source database.
 struct MongoCollectionCheckpointStore {
     meta: Collection<Document>,

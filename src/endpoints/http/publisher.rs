@@ -172,9 +172,35 @@ impl HttpPublisher {
 
         let url = config.tls.normalize_url(&config.url);
 
-        let base_uri = url
-            .parse::<hyper::Uri>()
-            .map_err(|e| anyhow::anyhow!("Invalid configured URL '{}': {}", url, e))?;
+        let base_uri = url.parse::<hyper::Uri>().map_err(|e| {
+            anyhow::anyhow!(
+                "Invalid configured URL '{}': {}",
+                crate::support::redact::url_password(&url),
+                e
+            )
+        })?;
+        if base_uri.scheme_str() == Some("http") {
+            if config.tls.required {
+                anyhow::bail!(
+                    "HTTP output '{}' has tls.required set but an http:// URL; use https://",
+                    crate::support::redact::url_password(&url)
+                );
+            }
+            let host = base_uri.host().unwrap_or_default();
+            let is_loopback = host.eq_ignore_ascii_case("localhost")
+                || host
+                    .trim_matches(['[', ']'])
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|address| address.is_loopback());
+            if !is_loopback && (config.basic_auth.is_some() || !config.custom_headers.is_empty()) {
+                tracing::warn!(
+                    host,
+                    "http output sends its headers and credentials unencrypted; use an https URL"
+                );
+            }
+        }
+        // Only shown in logs, errors and status from here on.
+        let url = crate::support::redact::url_password(&url).into_owned();
 
         let method = config
             .method
@@ -342,6 +368,14 @@ impl HttpPublisher {
                 if key.as_str().eq_ignore_ascii_case("content-encoding") {
                     content_encoding = Some(value_str.to_string());
                 }
+                // One line per cookie: a response may carry several `Set-Cookie` headers.
+                if key == hyper::header::SET_COOKIE {
+                    if let Some(cookies) = response_metadata.get_mut(key.as_str()) {
+                        cookies.push('\n');
+                        cookies.push_str(value_str);
+                        continue;
+                    }
+                }
                 response_metadata.insert(key.as_str().to_string(), value_str.to_string());
             }
         }
@@ -416,10 +450,14 @@ impl HttpPublisher {
         };
 
         // Decompress response if needed
-        let response_bytes = decompress_if_needed(response_bytes_raw, content_encoding.as_deref())
-            .map_err(|e| {
-                PublisherError::Retryable(anyhow::anyhow!("Failed to decompress response: {}", e))
-            })?;
+        let response_bytes = decompress_if_needed(
+            response_bytes_raw,
+            content_encoding.as_deref(),
+            MAX_HTTP_BODY_BYTES,
+        )
+        .map_err(|e| {
+            PublisherError::Retryable(anyhow::anyhow!("Failed to decompress response: {}", e))
+        })?;
 
         if !response_status.is_success() && !self.pass_through_status {
             debug!(

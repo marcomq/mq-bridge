@@ -30,7 +30,8 @@ docker run --rm --name mq-bridge -p 9091:9091 -v "$(pwd)":/app \
 
 On a host, the UI is [never opened implicitly](../reference/cli.md#starting-the-web-ui) and
 metrics bind loopback. In a container those defaults would be wrong for the opposite reason —
-nothing is reachable until you publish it — so the image's `CMD` is `--ui`, and metrics bind
+nothing is reachable until you publish it — so the image's `CMD` is `--ui`, the UI binds
+`0.0.0.0:9091` through `ENV MQB_UI_DEFAULT_ADDR`, and metrics bind
 `0.0.0.0:9090` through `ENV MQB__METRICS_ADDR` rather than the command line: a Kubernetes pod
 that sets `args:` replaces `CMD` wholesale, and the environment survives that. The container
 boundary is the gate: without `-p` (or a Kubernetes Service), neither port leaves the container.
@@ -44,6 +45,7 @@ The two settings are carried differently, and that difference is the whole desig
 |---|---|---|
 | Metrics on `0.0.0.0:9090` | `ENV MQB__METRICS_ADDR` | **Yes** |
 | Web UI | `CMD ["--ui"]` | No |
+| UI address `0.0.0.0:9091`, once the UI is asked for | `ENV MQB_UI_DEFAULT_ADDR` | **Yes** |
 
 Metrics live in `ENV` because a Kubernetes pod almost always sets `args:`, which replaces
 `CMD` wholesale. Had the bind address ridden along in `CMD`, every such pod would silently
@@ -102,6 +104,9 @@ See [Starting the web UI](../reference/cli.md#starting-the-web-ui).
 - **TLS on every sensitive endpoint** (`tls.required: true` + `ca_file`, mTLS where supported).
   Never set `accept_invalid_certs: true`. Pick the crypto provider feature (`rustls-aws-lc` for
   FIPS-capable / post-quantum, or `rustls-ring`).
+- **Limit an exposed HTTP input**: set `header_read_timeout_ms` (for example `30000`) so a
+  half-sent request does not hold a connection, and `max_body_bytes` to the largest body you
+  expect. Both are off or wide by default; the timeout costs some throughput.
 - **Keep payloads out of logs**: run above `trace` level (payloads log at `trace`).
 - **Do not commit secrets**: source them from a secrets manager or env vars.
 - Consider the config **security modes** (plain, extracted secrets, encrypted config, encrypted

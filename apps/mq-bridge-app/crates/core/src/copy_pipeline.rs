@@ -227,6 +227,22 @@ pub fn configure_resume(
             "source `nats` has durable JetStream consumers, but resumable copy is not enabled because the durable identity cannot include the destination and filter"
         ),
         EndpointType::Mqtt(_) => unsupported("mqtt"),
+        // The preset takes the `http_bulk` read position as flat options.
+        EndpointType::Custom { name, config } if name == "meilisearch" => {
+            let has = |config: &serde_json::Value, key: &str| {
+                config.get(key).is_some_and(|value| !value.is_null())
+            };
+            if !has(config, "checkpoint_store") {
+                bail!(
+                    "source `meilisearch` needs an external `checkpoint_store` for resumable copy"
+                );
+            }
+            if !has(config, "cursor_id") {
+                config["cursor_id"] = json!(state_id);
+            }
+            Ok(ResumeCapability::ExternalCheckpoint)
+        }
+        EndpointType::Custom { name, .. } => unsupported(name),
         endpoint_type => unsupported(endpoint_kind(endpoint_type)),
     }
 }
@@ -444,11 +460,40 @@ fn redact_query_credentials(query: &str, parent: Option<&str>) -> String {
     query
         .split('&')
         .map(|pair| match pair.split_once('=') {
-            Some((key, _)) if is_credential(Some(key), parent) => format!("{key}=***"),
-            _ => pair.to_string(),
+            Some((key, value)) => format!("{key}={}", redact_param(key, value, parent)),
+            None => pair.to_string(),
         })
         .collect::<Vec<_>>()
         .join("&")
+}
+
+/// One query value as it may be logged; `parent` is the middleware it belongs to.
+pub fn redact_param(key: &str, value: &str, parent: Option<&str>) -> String {
+    if is_logged_credential(key, parent) {
+        "***".to_string()
+    } else {
+        // A nested endpoint URI: `fanout:?to=postgres://user:password@host/db`.
+        redact_uri_password(value)
+    }
+}
+
+/// [`is_credential`] plus the names that are only blanked in a log line.
+///
+/// Kept apart because `is_credential` also shapes the checkpoint identity, where
+/// a new name would fork every existing `--resume` checkpoint.
+fn is_logged_credential(key: &str, parent: Option<&str>) -> bool {
+    let lower = key.to_ascii_lowercase();
+    is_credential(Some(key), parent)
+        || matches!(lower.as_str(), "basic_auth" | "custom_headers" | "headers")
+        || [
+            "apikey",
+            "api_key",
+            "account_key",
+            "private_key",
+            "connection_string",
+        ]
+        .iter()
+        .any(|suffix| lower.ends_with(suffix))
 }
 
 /// Whether `key` names a credential rather than a pipeline setting.
@@ -603,6 +648,25 @@ mod tests {
             "kafka://broker:9092?topic=orders&partition_key=id"
         );
 
+        // Credentials that are not called a password: an HTTP sink's basic-auth pair
+        // and headers, a search engine's API key.
+        assert_eq!(
+            redact_uri(
+                "http://host/x?basic_auth=%5B%22app%22%2C%22hunter2%22%5D&custom_headers=%7B%22Authorization%22%3A%22Bearer%20t%22%7D&method=PUT"
+            ),
+            "http://host/x?basic_auth=***&custom_headers=***&method=PUT"
+        );
+        assert_eq!(
+            redact_uri("meilisearch://host:7700?index=books&api_key=hunter2"),
+            "meilisearch://host:7700?index=books&api_key=***"
+        );
+
+        // A nested endpoint URI carries a password of its own.
+        assert_eq!(
+            redact_uri("fanout:?to=postgres://alice:hunter2@db/shop&to=null:"),
+            "fanout:?to=postgres://alice:***@db/shop&to=null:"
+        );
+
         // Nothing to redact must survive untouched, credential-free URIs included.
         assert_eq!(redact_uri("null:"), "null:");
         assert_eq!(
@@ -686,6 +750,44 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "source `mqtt` does not support resumable copy"
+        );
+    }
+
+    #[test]
+    fn resume_keys_a_meilisearch_source_and_names_other_custom_sources() {
+        let output = endpoint(EndpointType::Null);
+        let custom = |name: &str, config: serde_json::Value| {
+            endpoint(EndpointType::Custom {
+                name: name.to_string(),
+                config,
+            })
+        };
+
+        let mut meili = custom(
+            "meilisearch",
+            json!({"url": "meilisearch://localhost:7700", "checkpoint_store": "file:///tmp/c.json"}),
+        );
+        assert_eq!(
+            configure_resume(&mut meili, &output, None).unwrap(),
+            ResumeCapability::ExternalCheckpoint
+        );
+        let EndpointType::Custom { config, .. } = &meili.endpoint_type else {
+            unreachable!()
+        };
+        assert!(config["cursor_id"].as_str().unwrap().starts_with("copy-"));
+
+        let mut no_store = custom(
+            "meilisearch",
+            json!({"url": "meilisearch://localhost:7700"}),
+        );
+        let error = configure_resume(&mut no_store, &output, None).unwrap_err();
+        assert!(error.to_string().contains("checkpoint_store"), "{error}");
+
+        let mut other = custom("elasticsearch", json!({}));
+        let error = configure_resume(&mut other, &output, None).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "source `elasticsearch` does not support resumable copy"
         );
     }
 

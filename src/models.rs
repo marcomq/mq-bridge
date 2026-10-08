@@ -2410,9 +2410,11 @@ pub struct HttpConfig {
     /// response items later through a normal mq-bridge consumer. Each streamed
     /// item is published with `correlation_id`, `http_stream_id`,
     /// `http_stream_index`, `http_stream_format`, and `http_stream_end`
-    /// metadata. If the request message has no `correlation_id`, the HTTP
-    /// publisher uses `format!("{:032x}", request.message_id)` so callers can
-    /// derive the consumer correlation id before calling `send`.
+    /// metadata. A stream that breaks after its first item ends with an item
+    /// marked `http_stream_error` and is not retried. If the request message
+    /// has no `correlation_id`, the HTTP publisher uses
+    /// `format!("{:032x}", request.message_id)` so callers can derive the
+    /// consumer correlation id before calling `send`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_response_to: Option<Box<Endpoint>>,
     /// (Publisher only) The number of concurrent HTTP requests to send in a batch. Defaults to 20.
@@ -2439,6 +2441,12 @@ pub struct HttpConfig {
     pub compression_threshold_bytes: Option<usize>,
     /// (Consumer only) Maximum number of concurrent requests to handle. Defaults to 100.
     pub concurrency_limit: Option<usize>,
+    /// (Consumer only) Close an HTTP/1 connection whose request head takes longer than this. Unset or 0 = no limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header_read_timeout_ms: Option<u64>,
+    /// (Consumer only) Largest request body in bytes, also after decompression; a larger one gets 413. Defaults to 256 MiB.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_body_bytes: Option<u64>,
     /// HTTP Basic Authentication credentials (username, password). For consumers: validates incoming requests. For publishers: adds Authorization header.
     #[cfg_attr(feature = "schema", schemars(extend("format"="password")))]
     #[serde(
