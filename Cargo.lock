@@ -1524,6 +1524,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4ca0197aee26d1ae37445ee532fefce43251d24cc7c166799f4d46817f1d3973"
 dependencies = [
  "crossbeam-utils",
+ "loom",
 ]
 
 [[package]]
@@ -2225,6 +2226,19 @@ checksum = "8be9f3dfaaffdae2972880079a491a1a8bb7cbed0b8dd7a347f668b4150a3b93"
 dependencies = [
  "event-listener",
  "pin-project-lite",
+]
+
+[[package]]
+name = "fanring"
+version = "0.3.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9a0a001924e64ade2c902a95dae33873344f5406798209408f19ae2504b6671a"
+dependencies = [
+ "arc-swap",
+ "atomic-waker",
+ "concurrent-queue",
+ "loom",
+ "yring",
 ]
 
 [[package]]
@@ -4221,9 +4235,9 @@ dependencies = [
 
 [[package]]
 name = "omq-proto"
-version = "0.26.1"
+version = "0.28.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6420a63f80eac3235364674f61f3b4a00dbb283354402192406cd22a96b31cd1"
+checksum = "3c0e29c61fe12c8883da6fb522304518e2e32950daa9f20c812b99b826639ad3"
 dependencies = [
  "bytes",
  "patricia_tree",
@@ -4235,13 +4249,14 @@ dependencies = [
 
 [[package]]
 name = "omq-tokio"
-version = "0.21.4"
+version = "0.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "448ae8e795f28e2f6ca624ff883ab1ebb3054c10aa8f46a72542e7f6b3b1f721"
+checksum = "80847ac1cad3799fc99d6ce7da3d74d1af12deacf247e4869827e27da42cbbf4"
 dependencies = [
  "arc-swap",
  "bytes",
  "concurrent-queue",
+ "fanring",
  "futures",
  "libc",
  "omq-proto",
