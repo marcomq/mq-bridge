@@ -47,6 +47,17 @@ changes" first: both are Cargo features now.
 
 ### Added
 
+- **A C library.** The new `c/mq-bridge-c` crate builds `libmq_bridge` (shared and static)
+  with the header `include/mq_bridge.h`: messages, publishers (send, batch, request/reply),
+  pull consumers with commit and per-batch ack/nack, and routes with handlers, configured
+  with the same YAML or JSON as the other bindings. Every call blocks. The header is
+  generated and carries no ABI stability promise: it ships with its library, and
+  `mqb_api_version()` detects a mismatch. There are no prebuilt archives yet; see
+  `c/mq-bridge-c/README.md`.
+- **Plugin tables registered from the host program.** `plugin::register_plugin_table`
+  (C: `mqb_register_plugin`) registers an `MqbPluginVTable` that lives in the running
+  program, so a C or C++ application defines custom endpoints and middleware without
+  building a separate plugin library.
 - **Live status in the CLI, the UI and MCP.** `mqb status` lists every route and consumer that
   any `mqb` process of your user is running on the machine, with state, current and average
   rate, total, pending and uptime. On a terminal it redraws every second; `--no-watch` prints
@@ -118,9 +129,9 @@ changes" first: both are Cargo features now.
   outputs quoted it too. All now show `user:***@host`; the HTTP output's `status()` target
   does the same.
 - **`mqb copy` hides more credentials.** The `copy route started` line now also blanks
-  `basic_auth`, `custom_headers`, `headers`, API keys and the password of a nested endpoint
-  URI (`fanout:?to=…`). Errors about a URI or a middleware spec quote it with the same
-  redaction instead of as typed.
+  `basic_auth`, `custom_headers`, `headers`, API keys and the credentials of a nested endpoint
+  URI (`fanout:?to=…`), percent-encoded or not. Errors about a URI or a middleware spec quote
+  it with the same redaction instead of as typed.
 - **`cookie_jar` stores every cookie of a response.** A response with several `Set-Cookie`
   headers left only the last one in the jar. The HTTP output now keeps them all in the
   `set-cookie` metadata, one per line, and an HTTP input that replies with that metadata
