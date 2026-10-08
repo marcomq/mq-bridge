@@ -474,6 +474,11 @@ fn endpoint_value(endpoint: &Endpoint) -> serde_json::Value {
 
 pub trait SecretStore: Send + Sync {
     fn store(&self, secrets: &HashMap<String, String>) -> Result<()>;
+
+    /// Drops secrets an encrypted config now holds itself. Optional.
+    fn remove(&self, _keys: &HashSet<String>) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// Renders a secret as a double-quoted `.env` value so it survives a dotenvy
@@ -596,6 +601,29 @@ impl SecretStore for EnvFileSecretStore {
         }
         write_private_file(&self.path, final_content.as_bytes())?;
         Ok(())
+    }
+
+    fn remove(&self, keys: &HashSet<String>) -> Result<()> {
+        if keys.is_empty() || !self.path.exists() {
+            return Ok(());
+        }
+        let existing_content = std::fs::read_to_string(&self.path)?;
+        let is_stale = |line: &str| {
+            line.split_once('=')
+                .is_some_and(|(key, _)| keys.contains(key.trim()))
+        };
+        if !existing_content.lines().any(is_stale) {
+            return Ok(());
+        }
+        let mut kept: String = existing_content
+            .lines()
+            .filter(|line| !is_stale(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !kept.is_empty() {
+            kept.push('\n');
+        }
+        write_private_file(&self.path, kept.as_bytes())
     }
 }
 
@@ -878,6 +906,59 @@ fn load_config_internal(
     Ok((config, persistent_file))
 }
 
+/// How the config API shows a secret: `${KEY}`, the key the secret is stored under.
+const SECRET_REFERENCE_START: &str = "${MQB__";
+
+/// The password of a `scheme://user:password@host` URL, as a byte range.
+fn url_password_range(url: &str) -> Option<std::ops::Range<usize>> {
+    let authority_start = url.find("://")? + 3;
+    let authority_end = url[authority_start..]
+        .find(['/', '?', '#'])
+        .map_or(url.len(), |offset| authority_start + offset);
+    let at = authority_start + url[authority_start..authority_end].rfind('@')?;
+    let colon = authority_start + url[authority_start..at].find(':')?;
+    Some(colon + 1..at)
+}
+
+/// A URL keeps everything but its password, so host and path stay editable.
+fn reference_secret(key: &str, value: &str) -> String {
+    let reference = format!("${{{key}}}");
+    match url_password_range(value) {
+        Some(password) => format!(
+            "{}{reference}{}",
+            &value[..password.start],
+            &value[password.end..]
+        ),
+        None if value.contains("://") && !value.contains('@') => value.to_string(),
+        None => reference,
+    }
+}
+
+/// The `${KEY}` reference in a submitted value, as a byte range.
+fn secret_reference_range(value: &str) -> Option<std::ops::Range<usize>> {
+    let start = value.find(SECRET_REFERENCE_START)?;
+    let end = start + value[start..].find('}')? + 1;
+    Some(start..end)
+}
+
+/// A submitted value with its reference replaced by the secret it names.
+fn resolve_secret_reference(
+    submitted: &str,
+    reference: std::ops::Range<usize>,
+    known: &str,
+) -> String {
+    // Inside a URL the reference stands for the password only.
+    let secret = match url_password_range(known) {
+        Some(password) if reference.len() < submitted.len() => &known[password],
+        _ => known,
+    };
+    format!(
+        "{}{secret}{}",
+        &submitted[..reference.start],
+        &submitted[reference.end..]
+    )
+}
+
 fn is_entity_secret_key(key: &str, include_routes: bool) -> bool {
     let key = key.to_ascii_uppercase();
     key.starts_with("MQB__CONSUMERS__")
@@ -957,6 +1038,8 @@ fn set_secret_at_path(node: &mut serde_json::Value, segments: &[&str], secret: &
             .keys()
             .find(|key| sanitize_name_for_env(key) == *segment)
             .cloned()
+            // The engine writes a header name as hex, which keeps its case and dashes.
+            .or_else(|| String::from_utf8(hex::decode(segment).ok()?).ok())
             .unwrap_or_else(|| segment.to_ascii_lowercase());
         map.entry(key).or_insert(serde_json::Value::Null)
     };
@@ -1244,6 +1327,12 @@ impl AppConfig {
             }
         };
         write_private_file(Path::new(path), output.as_bytes())?;
+        if Self::uses_encrypted_config_mode(mode) {
+            // The encrypted file holds these now; a copy left in the store would
+            // stay readable and override the file on the next start.
+            let stale = config_to_save.extract_secrets().into_keys().collect();
+            secret_store.remove(&stale)?;
+        }
         Ok(())
     }
 
@@ -1300,6 +1389,69 @@ impl AppConfig {
             Self::extract_publisher_header_secrets(publisher, &mut all_secrets);
         }
         all_secrets
+    }
+
+    /// Whether the config API hides secrets: every mode that keeps them out of the
+    /// plain config file.
+    pub fn masks_secrets(&self) -> bool {
+        !matches!(
+            self.security_mode(),
+            ConfigSecurityMode::Unencrypted | ConfigSecurityMode::TemporaryMessages
+        )
+    }
+
+    /// The config with every secret replaced by a `${KEY}` reference to its stored
+    /// value. A URL keeps everything but its password.
+    pub fn masked(&self) -> AppConfig {
+        let mut masked = self.clone();
+        let references = masked
+            .extract_secrets()
+            .into_iter()
+            .map(|(key, value)| {
+                let reference = reference_secret(&key, &value);
+                (key, reference)
+            })
+            .collect();
+        masked.apply_stored_secrets(&references, true);
+        masked
+    }
+
+    /// Replaces the `${KEY}` references this config carries by the secrets of `current`.
+    /// A reference names its secret, so a renamed or copied endpoint resolves too.
+    pub fn restore_masked(&mut self, current: &AppConfig) -> Result<(), String> {
+        let submitted = self.clone().extract_secrets();
+        if !submitted
+            .values()
+            .any(|value| value.contains(SECRET_REFERENCE_START))
+        {
+            return Ok(());
+        }
+        let known = current.clone().extract_secrets();
+        let mut restored = HashMap::new();
+        let mut unresolved = Vec::new();
+        for (key, value) in &submitted {
+            let Some(reference) = secret_reference_range(value) else {
+                continue;
+            };
+            let name = &value[reference.start + 2..reference.end - 1];
+            match known.get(name) {
+                Some(secret) => {
+                    let resolved = resolve_secret_reference(value, reference, secret);
+                    restored.insert(key.clone(), resolved);
+                }
+                None => unresolved.push(name.to_string()),
+            }
+        }
+        if !unresolved.is_empty() {
+            unresolved.sort();
+            unresolved.dedup();
+            return Err(format!(
+                "The configuration refers to secrets that are not stored here; enter them again: {}",
+                unresolved.join(", ")
+            ));
+        }
+        self.apply_stored_secrets(&restored, true);
+        Ok(())
     }
 
     /// Reverses [`Self::extract_secrets`] for existing entities; unknown keys are ignored.
@@ -2680,6 +2832,159 @@ publishers:
         unsafe {
             std::env::remove_var(crate::encrypted_config::CONFIG_MASTER_KEY_ENV);
         }
+    }
+
+    fn masking_sample() -> AppConfig {
+        serde_yaml_ng::from_str(
+            r#"
+config_security:
+  mode: balanced
+consumers:
+  - name: "in"
+    endpoint:
+      amqp:
+        url: "amqp://app:hunter1@broker:5672/%2f"
+        queue: "q"
+publishers:
+  - name: "orders_http"
+    headers:
+      - key: "X-Api-Key"
+        value: "hunter5"
+    endpoint:
+      http:
+        url: "https://example.test/orders"
+        basic_auth: ["app", "hunter2"]
+        custom_headers:
+          authorization: "Bearer hunter3"
+routes:
+  r1:
+    input:
+      memory: { topic: "t" }
+    output:
+      http:
+        url: "http://app:hunter4@example.test/x"
+"#,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_masked_config_holds_no_secret_and_restores_to_the_original() {
+        let mut original = masking_sample();
+        original.migrate_legacy_routes();
+        let masked = original.masked();
+        let shown = serde_json::to_string(&masked).unwrap();
+        assert!(!shown.contains("hunter"), "{shown}");
+        // What is not a secret stays readable.
+        assert!(shown.contains("amqp://app:${MQB__CONSUMERS__"), "{shown}");
+        assert!(shown.contains("}@broker:5672/%2f"), "{shown}");
+        assert!(shown.contains("}@example.test/x"), "{shown}");
+        assert!(shown.contains("https://example.test/orders"), "{shown}");
+
+        let mut submitted: AppConfig = serde_json::from_str(&shown).unwrap();
+        submitted.restore_masked(&original).unwrap();
+        assert_eq!(
+            serde_json::to_value(&submitted).unwrap(),
+            serde_json::to_value(&original).unwrap()
+        );
+    }
+
+    #[test]
+    fn restoring_keeps_edits_and_follows_a_rename() {
+        let mut original = masking_sample();
+        original.migrate_legacy_routes();
+        let mut submitted = original.masked();
+        submitted.publishers[0].name = "renamed".to_string();
+        let EndpointType::Amqp(amqp) = &mut submitted.consumers[0].endpoint.endpoint_type else {
+            panic!("amqp consumer expected")
+        };
+        amqp.url = amqp.url.replace("@broker:", "@other-broker:");
+
+        submitted.restore_masked(&original).unwrap();
+        let shown = serde_json::to_string(&submitted).unwrap();
+        assert!(
+            shown.contains("amqp://app:hunter1@other-broker:5672/%2f"),
+            "{shown}"
+        );
+        assert!(
+            shown.contains("hunter2") && shown.contains("Bearer hunter3"),
+            "{shown}"
+        );
+        assert!(!shown.contains(SECRET_REFERENCE_START), "{shown}");
+    }
+
+    #[test]
+    fn a_copied_endpoint_gets_the_secrets_its_references_name() {
+        let mut original = masking_sample();
+        original.migrate_legacy_routes();
+        let mut submitted = original.masked();
+        let mut copy = submitted.publishers[0].clone();
+        copy.name = "copied".to_string();
+        copy.id = Uuid::new_v4().to_string();
+        submitted.publishers.push(copy);
+        // The original may go in the same save.
+        submitted.publishers.remove(0);
+
+        submitted.restore_masked(&original).unwrap();
+        assert_eq!(
+            serde_json::to_value(&submitted.publishers.last().unwrap().endpoint).unwrap(),
+            serde_json::to_value(&original.publishers[0].endpoint).unwrap()
+        );
+        assert_eq!(
+            submitted.publishers.last().unwrap().headers[0].value,
+            "hunter5"
+        );
+    }
+
+    #[test]
+    fn a_reference_to_a_secret_that_is_not_stored_is_refused() {
+        let mut original = masking_sample();
+        original.migrate_legacy_routes();
+        let mut submitted = original.masked();
+        let EndpointType::Amqp(amqp) = &mut submitted.consumers[0].endpoint.endpoint_type else {
+            panic!("amqp consumer expected")
+        };
+        amqp.url = "amqp://app:${MQB__CONSUMERS__ELSEWHERE__ENDPOINT__AMQP__URL}@broker".into();
+
+        let error = submitted.restore_masked(&original).unwrap_err();
+        assert!(
+            error.contains("MQB__CONSUMERS__ELSEWHERE__ENDPOINT__AMQP__URL"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn saving_encrypted_removes_the_secrets_left_in_the_env_file() {
+        let dir = std::env::temp_dir().join(format!("mqb-stale-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.yml");
+        let env_path = dir.join(".env");
+        let store = EnvFileSecretStore::new(&env_path);
+
+        sample_security_config("balanced")
+            .save_with_secret_store(path.to_str().unwrap(), &store)
+            .unwrap();
+        let mut env = std::fs::read_to_string(&env_path).unwrap();
+        assert!(env.contains("Bearer token"));
+        env.push_str("MY_OWN=kept\n");
+        std::fs::write(&env_path, env).unwrap();
+
+        let _guard = crate::encrypted_config::test_config_master_key_lock().blocking_lock();
+        unsafe {
+            std::env::set_var(
+                crate::encrypted_config::CONFIG_MASTER_KEY_ENV,
+                "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+            );
+        }
+        sample_security_config("durable")
+            .save_with_secret_store(path.to_str().unwrap(), &store)
+            .unwrap();
+        unsafe {
+            std::env::remove_var(crate::encrypted_config::CONFIG_MASTER_KEY_ENV);
+        }
+
+        assert_eq!(std::fs::read_to_string(&env_path).unwrap(), "MY_OWN=kept\n");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

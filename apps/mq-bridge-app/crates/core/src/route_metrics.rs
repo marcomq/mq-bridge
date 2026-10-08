@@ -169,7 +169,10 @@ impl RouteMetrics {
         let mut counters = self.counters.write().await;
         counters.insert(key.to_string(), counter);
         self.samples.write().await.remove(key);
-        self.starts.write().await.insert(key.to_string(), started_at);
+        self.starts
+            .write()
+            .await
+            .insert(key.to_string(), started_at);
     }
 
     /// Total messages counted for `key` since its counter was created.
@@ -221,7 +224,10 @@ impl RouteMetrics {
     /// Wall-clock start of `key`'s route in epoch milliseconds.
     pub async fn started_at_ms(&self, key: &str) -> Option<u64> {
         let started_at = *self.starts.read().await.get(key)?;
-        Some(crate::status_registry::now_ms().saturating_sub(started_at.elapsed().as_millis() as u64))
+        Some(
+            crate::status_registry::now_ms()
+                .saturating_sub(started_at.elapsed().as_millis() as u64),
+        )
     }
 
     /// Smoothed messages per second for every sampled key.
@@ -482,7 +488,10 @@ mod tests {
 
         assert_eq!(metrics.sequence("route-a").await, 0);
         assert!(metrics.started_at_ms("route-a").await.expect("started") >= first_start);
-        assert_eq!(*metrics.starts.read().await.get("route-a").unwrap(), restarted_at);
+        assert_eq!(
+            *metrics.starts.read().await.get("route-a").unwrap(),
+            restarted_at
+        );
         tokio::time::sleep(THROUGHPUT_UPDATE_INTERVAL * 2).await;
         let timing = metrics.timing("route-a").await.expect("sampled");
         assert_eq!(timing.messages, 0);

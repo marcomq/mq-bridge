@@ -254,6 +254,7 @@ async fn test_http_cookie_jar_persists_session_headers() {
                             if request_index == 0 {
                                 builder = builder
                                     .header("set-cookie", "session_id=abc123; Path=/; HttpOnly")
+                                    .header("set-cookie", "theme=dark; Path=/")
                                     .header("x-csrf-token", "csrf-123");
                             }
 
@@ -308,10 +309,9 @@ async fn test_http_cookie_jar_persists_session_headers() {
     let observed_headers = observed_headers.lock().unwrap().clone();
     assert_eq!(observed_headers.len(), 2);
     assert!(!observed_headers[0].contains_key("cookie"));
-    assert_eq!(
-        observed_headers[1].get("cookie").map(String::as_str),
-        Some("session_id=abc123")
-    );
+    let mut cookies: Vec<&str> = observed_headers[1]["cookie"].split("; ").collect();
+    cookies.sort_unstable();
+    assert_eq!(cookies, ["session_id=abc123", "theme=dark"]);
     assert_eq!(
         observed_headers[1]
             .get("x-forwarded-csrf")

@@ -452,6 +452,32 @@ fn extract_authority(value: &str) -> Option<&str> {
     }
 }
 
+/// Extra names a loopback-bound UI answers to, comma-separated (a reverse proxy's).
+pub const UI_ALLOWED_HOSTS_ENV: &str = "MQB_UI_ALLOWED_HOSTS";
+
+/// Whether `Host` names this machine. A page that rebinds its DNS name to
+/// 127.0.0.1 still sends its own name here, which is what gives it away.
+fn is_local_host_header(msg: &CanonicalMessage) -> bool {
+    let Some(authority) = header_value(msg, "Host").and_then(extract_authority) else {
+        return true;
+    };
+    let host = match authority.strip_prefix('[') {
+        Some(bracketed) => bracketed.split(']').next().unwrap_or_default(),
+        None => authority
+            .rsplit_once(':')
+            .map_or(authority, |(host, _)| host),
+    };
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
+        || std::env::var(UI_ALLOWED_HOSTS_ENV).is_ok_and(|allowed| {
+            allowed
+                .split(',')
+                .any(|name| name.trim().eq_ignore_ascii_case(host))
+        })
+}
+
 fn is_same_origin_request(msg: &CanonicalMessage) -> bool {
     let Some(host) = header_value(msg, "Host").and_then(extract_authority) else {
         return true;
@@ -904,6 +930,15 @@ impl UiApp {
         // Use the original case for parameters if needed, but lowercase for routing
         let path = routing_path.as_str();
 
+        // Only a loopback bind can tell: on any other address the name is the operator's.
+        if request_peer_is_loopback(&msg) && !is_local_host_header(&msg) {
+            return Ok(Handled::Publish(
+                msg!("Forbidden: unexpected Host header")
+                    .with_status_code("403")
+                    .with_content_type("text/plain; charset=utf-8"),
+            ));
+        }
+
         if method == "POST"
             && matches!(
                 path,
@@ -928,7 +963,14 @@ impl UiApp {
                 let schema = crate::config::app_config_schema();
                 self.ok_json(&schema, false)
             }
-            ("GET", "/config") => self.ok_json(&self.get_config().await, false),
+            ("GET", "/config") => {
+                let config = self.get_config().await;
+                if config.masks_secrets() {
+                    self.ok_json(&config.masked(), false)
+                } else {
+                    self.ok_json(&config, false)
+                }
+            }
             ("GET", "/config-recovery") => self.ok_json(&self.config_recovery(), true),
             ("GET", "/storage-security") => self.ok_json(&self.storage_security(), true),
             ("GET", "/features") => self.ok_json(&FeatureAvailabilityResponse::detect(), true),
@@ -1959,6 +2001,13 @@ impl UiApp {
             }
         };
 
+        let mut new_config = new_config;
+        if let Err(error) = new_config.restore_masked(&*self.config.read().await) {
+            return Ok(Handled::Publish(
+                CanonicalMessage::from(error).with_status_code("400"),
+            ));
+        }
+
         match self.update_config(new_config).await {
             Ok(()) => Ok(Handled::Publish(msg!("Configuration updated"))),
             Err(e) => {
@@ -2413,6 +2462,90 @@ mod tests {
                 .to_string(),
         )
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_config_api_masks_secrets_and_takes_the_mask_back() {
+        let config: AppConfig = serde_yaml_ng::from_str(
+            r#"
+config_security:
+  mode: balanced
+publishers:
+  - name: "p1"
+    endpoint:
+      http:
+        url: "http://app:hunter1@127.0.0.1:1/x"
+        basic_auth: ["app", "hunter2"]
+"#,
+        )
+        .unwrap();
+        let app = test_app(config);
+        let call = |method: &'static str, body: Vec<u8>| {
+            let app = app.clone();
+            async move {
+                let request = CanonicalMessage::new(body, None)
+                    .with_metadata_kv("http_method", method)
+                    .with_metadata_kv("http_path", "/config");
+                let Handled::Publish(response) =
+                    app.handle_ui_message(request, false).await.unwrap()
+                else {
+                    panic!("the UI should return an HTTP response")
+                };
+                response
+            }
+        };
+
+        let shown = call("GET", Vec::new()).await;
+        let text = shown.get_payload_str().to_string();
+        assert!(!text.contains("hunter"), "{text}");
+        assert!(text.contains("http://app:${MQB__PUBLISHERS__"), "{text}");
+
+        let saved = call("POST", shown.payload.to_vec()).await;
+        assert_eq!(saved.metadata["http_status_code"], "200");
+        let kept = serde_json::to_string(&app.get_config().await).unwrap();
+        assert!(
+            kept.contains("hunter1") && kept.contains("hunter2"),
+            "{kept}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_loopback_ui_refuses_a_foreign_host_header() {
+        let app = test_app(AppConfig::default());
+        let status = |host: &'static str, loopback: &'static str| {
+            let app = app.clone();
+            async move {
+                let request = CanonicalMessage::new(Vec::new(), None)
+                    .with_metadata_kv("http_method", "GET")
+                    .with_metadata_kv("http_path", "/config")
+                    .with_metadata_kv("host", host)
+                    .with_metadata_kv("mqb_peer_loopback", loopback);
+                let Handled::Publish(response) =
+                    app.handle_ui_message(request, false).await.unwrap()
+                else {
+                    panic!("the UI should return an HTTP response")
+                };
+                response.metadata["http_status_code"].clone()
+            }
+        };
+
+        for host in [
+            "localhost:9091",
+            "127.0.0.1:9091",
+            "[::1]:9091",
+            "LOCALHOST",
+        ] {
+            assert_eq!(status(host, "true").await, "200", "{host}");
+        }
+        for host in [
+            "evil.example:9091",
+            "evil.example",
+            "127.0.0.1.evil.example",
+        ] {
+            assert_eq!(status(host, "true").await, "403", "{host}");
+        }
+        // A network bind is reached under whatever name the operator gave it.
+        assert_eq!(status("bridge.internal:9091", "false").await, "200");
     }
 
     #[tokio::test]

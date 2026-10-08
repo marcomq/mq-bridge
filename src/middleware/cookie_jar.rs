@@ -104,8 +104,7 @@ enum SetCookie {
 /// `Expires` is deliberately not honoured: parsing HTTP dates would need a date
 /// dependency, and `max_cookies` already bounds the jar. `Max-Age` is unambiguous.
 fn parse_set_cookie_header(header: &str) -> Option<SetCookie> {
-    let first = header.lines().next().unwrap_or(header).trim();
-    let mut parts = first.split(';');
+    let mut parts = header.trim().split(';');
     let (name, value) = parts.next()?.trim().split_once('=')?;
     let name = name.trim();
     if name.is_empty() {
@@ -175,12 +174,15 @@ fn capture_session_inputs(
     }
 
     if let Some(set_cookie_header) = metadata.get(set_cookie_metadata_key) {
-        match parse_set_cookie_header(set_cookie_header) {
-            Some(SetCookie::Store(name, value)) => state.set_cookie(name, value, max_cookies),
-            Some(SetCookie::Expire(name)) => {
-                state.cookies.remove(&name);
+        // One line per `Set-Cookie` header of the response.
+        for line in set_cookie_header.lines() {
+            match parse_set_cookie_header(line) {
+                Some(SetCookie::Store(name, value)) => state.set_cookie(name, value, max_cookies),
+                Some(SetCookie::Expire(name)) => {
+                    state.cookies.remove(&name);
+                }
+                None => {}
             }
-            None => {}
         }
     }
 
@@ -484,6 +486,31 @@ mod tests {
             parse_set_cookie_header("sid=abc; Max-Age=3600"),
             Some(SetCookie::Store(..))
         ));
+    }
+
+    #[tokio::test]
+    async fn every_set_cookie_line_of_a_response_is_stored() {
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let publisher = CookieJarPublisher::new(
+            Box::new(RecordingPublisher {
+                sent: sent.clone(),
+                response_metadata: HashMap::from([(
+                    "set-cookie".to_string(),
+                    "sid=abc; Path=/; HttpOnly\ncsrf=xyz; Path=/\nold=1; Max-Age=0".to_string(),
+                )]),
+            }),
+            &CookieJarMiddleware::default(),
+        );
+
+        for body in ["first", "second"] {
+            publisher.send(CanonicalMessage::from(body)).await.unwrap();
+        }
+
+        let sent = sent.lock().unwrap();
+        let cookie = sent[1].metadata.get("cookie").unwrap();
+        let mut pairs: Vec<&str> = cookie.split("; ").collect();
+        pairs.sort_unstable();
+        assert_eq!(pairs, ["csrf=xyz", "sid=abc"]);
     }
 
     /// Cookie names come from the server, so a rotating name must not grow the jar.

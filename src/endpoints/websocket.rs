@@ -4,6 +4,7 @@
 //  git clone https://github.com/marcomq/mq-bridge
 
 use crate::models::WebSocketConfig;
+use crate::support::redact::url_password;
 use crate::traits::{
     BoxFuture, CommitFunc, ConsumerError, Handled, Handler, MessageConsumer, MessageDisposition,
     MessagePublisher, PublisherError, ReceivedBatch, SentBatch,
@@ -214,12 +215,17 @@ impl WebSocketPublisher {
         let uri = self
             .url
             .parse()
-            .with_context(|| format!("Invalid WebSocket URL '{}'", self.url))
+            .with_context(|| format!("Invalid WebSocket URL '{}'", url_password(&self.url)))
             .map_err(PublisherError::Connection)?;
         let (stream, _) = ClientBuilder::from_uri(uri)
             .connect()
             .await
-            .with_context(|| format!("Failed to connect to WebSocket endpoint '{}'", self.url))
+            .with_context(|| {
+                format!(
+                    "Failed to connect to WebSocket endpoint '{}'",
+                    url_password(&self.url)
+                )
+            })
             .map_err(PublisherError::Connection)?;
         Ok(stream)
     }
@@ -778,7 +784,7 @@ impl MessagePublisher for WebSocketPublisher {
             return Ok(SentBatch::Ack);
         }
 
-        trace!(url = %self.url, count = messages.len(), "Sending WebSocket batch");
+        trace!(url = %url_password(&self.url), count = messages.len(), "Sending WebSocket batch");
         self.send_reusing_connection(messages).await
     }
 

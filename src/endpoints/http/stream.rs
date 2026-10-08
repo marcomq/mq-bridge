@@ -587,16 +587,18 @@ pub(super) async fn publish_response_stream(
         let frame = match next_frame {
             Ok(Some(Ok(frame))) => frame,
             Ok(Some(Err(error))) => {
-                if publish_error_marker(
-                    &sink,
-                    &base_metadata,
-                    &correlation_id,
-                    format,
-                    index,
-                    &format!("Failed to read HTTP response stream: {}", error),
-                )
-                .await
-                .is_ok()
+                // Nothing published yet: leave the sink untouched so a retry starts a clean stream.
+                if published_any
+                    && publish_error_marker(
+                        &sink,
+                        &base_metadata,
+                        &correlation_id,
+                        format,
+                        index,
+                        &format!("Failed to read HTTP response stream: {}", error),
+                    )
+                    .await
+                    .is_ok()
                 {
                     let _ = publish_end_marker(
                         &sink,
@@ -618,16 +620,17 @@ pub(super) async fn publish_response_stream(
             }
             Ok(None) => break,
             Err(_) => {
-                if publish_error_marker(
-                    &sink,
-                    &base_metadata,
-                    &correlation_id,
-                    format,
-                    index,
-                    "HTTP response stream timeout",
-                )
-                .await
-                .is_ok()
+                if published_any
+                    && publish_error_marker(
+                        &sink,
+                        &base_metadata,
+                        &correlation_id,
+                        format,
+                        index,
+                        "HTTP response stream timeout",
+                    )
+                    .await
+                    .is_ok()
                 {
                     let _ = publish_end_marker(
                         &sink,

@@ -627,6 +627,63 @@ mod tests {
         assert!(matches!(second.await.unwrap().unwrap(), Sent::Ack));
     }
 
+    async fn wait_for_batches(batches: &Arc<StdMutex<Vec<Vec<CanonicalMessage>>>>, count: usize) {
+        let started = Instant::now();
+        while batches.lock().unwrap().len() < count {
+            assert!(started.elapsed() < Duration::from_secs(1));
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_buffer_zero_delay_batches_sends_arriving_during_a_flush() {
+        let batches = Arc::new(StdMutex::new(Vec::new()));
+        let release = Arc::new(Notify::new());
+        let publisher = Arc::new(
+            BufferPublisher::new(
+                Box::new(BlockingPublisher {
+                    batches: batches.clone(),
+                    release: release.clone(),
+                }),
+                &BufferMiddleware {
+                    max_messages: 8,
+                    max_delay_ms: 0,
+                },
+            )
+            .unwrap(),
+        );
+        let spawn_send = |body: &'static str| {
+            let publisher = Arc::clone(&publisher);
+            tokio::spawn(async move { publisher.send(CanonicalMessage::from(body)).await })
+        };
+
+        // A lone send goes out at once, as a batch of one.
+        let first = spawn_send("one");
+        wait_for_batches(&batches, 1).await;
+        assert_eq!(batches.lock().unwrap()[0].len(), 1);
+
+        // Sends arriving while that batch is in flight wait for it.
+        let later = [spawn_send("two"), spawn_send("three"), spawn_send("four")];
+        let started = Instant::now();
+        while publisher.core.state.lock().await.pending.len() < 3 {
+            assert!(started.elapsed() < Duration::from_secs(1));
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        assert_eq!(batches.lock().unwrap().len(), 1);
+
+        release.notify_waiters();
+        assert!(matches!(first.await.unwrap().unwrap(), Sent::Ack));
+
+        // They leave together as the next batch.
+        wait_for_batches(&batches, 2).await;
+        assert_eq!(batches.lock().unwrap()[1].len(), 3);
+        release.notify_waiters();
+        for send in later {
+            assert!(matches!(send.await.unwrap().unwrap(), Sent::Ack));
+        }
+        assert_eq!(batches.lock().unwrap().len(), 2);
+    }
+
     #[tokio::test]
     async fn test_buffer_maps_partial_batch_results_back_to_callers() {
         let publisher = BufferPublisher::new(

@@ -184,3 +184,74 @@ impl MessageConsumer for MetricsConsumer {
         self
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::endpoints::memory::{MemoryConsumer, MemoryPublisher};
+    use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
+
+    /// Processed-message count recorded for `endpoint`, and how many durations.
+    fn recorded(snapshotter: &Snapshotter, endpoint: &str) -> (u64, usize) {
+        let mut result = (0, 0);
+        for (key, _, _, value) in snapshotter.snapshot().into_vec() {
+            let labels: Vec<_> = key.key().labels().map(|l| l.value().to_string()).collect();
+            if !labels.iter().any(|label| label == endpoint) {
+                continue;
+            }
+            assert!(labels.iter().any(|label| label == "metrics_route"));
+            match value {
+                DebugValue::Counter(count) => result.0 = count,
+                DebugValue::Histogram(samples) => result.1 = samples.len(),
+                DebugValue::Gauge(_) => unreachable!(),
+            }
+        }
+        result
+    }
+
+    #[tokio::test]
+    async fn the_publisher_counts_each_sent_message_and_one_duration_per_call() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let publisher = metrics::with_local_recorder(&recorder, || {
+            let inner = Box::new(MemoryPublisher::new_local("metrics_out", 10));
+            MetricsPublisher::new(inner, &MetricsMiddleware {}, "metrics_route", "output")
+        });
+
+        publisher.send(CanonicalMessage::from("a")).await.unwrap();
+        let batch = vec![CanonicalMessage::from("b"), CanonicalMessage::from("c")];
+        publisher.send_batch(batch).await.unwrap();
+        publisher.send_batch(Vec::new()).await.unwrap();
+
+        assert_eq!(recorded(&snapshotter, "output"), (3, 2));
+        assert!(!publisher.requires_ordered_publish());
+    }
+
+    #[tokio::test]
+    async fn the_consumer_counts_each_received_message() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let inner = MemoryConsumer::new_local("metrics_in", 10);
+        let channel = inner.channel();
+        for body in ["a", "b", "c"] {
+            channel
+                .send_message(CanonicalMessage::from(body))
+                .await
+                .unwrap();
+        }
+        let mut consumer = metrics::with_local_recorder(&recorder, || {
+            MetricsConsumer::new(
+                Box::new(inner),
+                &MetricsMiddleware {},
+                "metrics_route",
+                "input",
+            )
+        });
+
+        consumer.receive().await.unwrap();
+        let batch = consumer.receive_batch(10).await.unwrap();
+
+        assert_eq!(batch.messages.len(), 2);
+        assert_eq!(recorded(&snapshotter, "input"), (3, 2));
+    }
+}

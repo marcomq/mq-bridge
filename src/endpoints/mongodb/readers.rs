@@ -14,12 +14,10 @@ use super::*;
 /// be included, inserts below it may be missed, and deletes may disappear before a later page reads
 /// them. Carrying the cursor across runs would turn that visibility boundary into silent data loss,
 /// which is why `cursor_id` is rejected at startup. Incremental reads need commit order, i.e. a
-/// change stream (`capture_all`) on a replica set. The checkpoint plumbing below is kept for that
-/// future, not reachable today.
+/// change stream (`capture_all`) on a replica set.
 pub struct MongoDbIdReader {
     collection: Collection<Document>,
     db: Database,
-    checkpoint: Option<Arc<dyn crate::checkpoint::CheckpointStore>>,
     last_id: Arc<Mutex<Option<Bson>>>,
     receive_query: Option<Document>,
 }
@@ -51,48 +49,12 @@ impl MongoDbIdReader {
             ));
         }
 
-        let checkpoint: Option<Arc<dyn crate::checkpoint::CheckpointStore>> = if let Some(cid) =
-            &config.cursor_id
-        {
-            use crate::checkpoint::CheckpointBackend;
-            let backend = match &config.checkpoint_store {
-                // Absent: a dedicated per-source collection so the source is never written.
-                None => CheckpointBackend::Source {
-                    name: crate::checkpoint::default_meta_name(collection_name),
-                },
-                Some(spec) => crate::checkpoint::parse_checkpoint_store(spec)?,
-            };
-            let store: Arc<dyn crate::checkpoint::CheckpointStore> = match backend {
-                CheckpointBackend::Source { name } => Arc::new(MongoCollectionCheckpointStore {
-                    meta: db.collection::<Document>(&name),
-                    doc_id: crate::checkpoint::checkpoint_key(collection_name, cid),
-                }),
-                external => {
-                    crate::checkpoint::build_external_store(external, collection_name, cid).await?
-                }
-            };
-            Some(store)
-        } else {
-            None
-        };
-
-        let last_id = match &checkpoint {
-            Some(cp) => cp.load().await?.and_then(|s| {
-                let decoded = decode_id(&s);
-                if decoded.is_none() {
-                    warn!(value = %s, "Ignoring unparseable mongo id cursor; starting from beginning");
-                }
-                decoded
-            }),
-            None => None,
-        };
         info!(collection = %collection_name, "MongoDB snapshot reader initialized; reads the current contents once, then ends the route");
 
         Ok(Self {
             collection,
             db,
-            checkpoint,
-            last_id: Arc::new(Mutex::new(last_id)),
+            last_id: Arc::new(Mutex::new(None)),
             receive_query,
         })
     }
@@ -169,7 +131,6 @@ impl MessageConsumer for MongoDbIdReader {
             return Err(ConsumerError::EndOfStream);
         }
 
-        let checkpoint = self.checkpoint.clone();
         let last_id = self.last_id.clone();
         let commit = Box::new(move |dispositions: Vec<MessageDisposition>| {
             Box::pin(async move {
@@ -191,19 +152,7 @@ impl MessageConsumer for MongoDbIdReader {
                 // committed boundary so nacked/unprocessed docs are re-read on the next
                 // page (at-least-once) instead of being skipped until a restart.
                 if acked < ids.len() {
-                    *last_id.lock().unwrap() = boundary.clone();
-                }
-                if let (Some(id), Some(cp)) = (boundary, checkpoint) {
-                    match encode_id(&id) {
-                        Some(s) => {
-                            if let Err(e) = cp.save(&s).await {
-                                tracing::warn!(error = %e, "Failed to persist mongo id cursor. Messages may be reprocessed on restart.");
-                            }
-                        }
-                        None => tracing::warn!(
-                            "Unsupported _id type for cursor persistence; not checkpointing"
-                        ),
-                    }
+                    *last_id.lock().unwrap() = boundary;
                 }
                 Ok(())
             }) as BoxFuture<'static, anyhow::Result<()>>

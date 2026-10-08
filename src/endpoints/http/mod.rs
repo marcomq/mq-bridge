@@ -29,7 +29,7 @@ use hyper::{
 };
 use hyper_rustls::HttpsConnectorBuilder;
 use hyper_util::client::legacy::connect::HttpConnector;
-use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::server::conn::auto::Builder as AutoBuilder;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use std::any::Any;
@@ -198,6 +198,7 @@ struct HttpConsumerState {
     compression_threshold_bytes: usize,
     custom_headers: HashMap<String, String>,
     concurrency_limit: ConcurrencyLimiter,
+    max_body_bytes: u64,
     method: Option<hyper::Method>,
 }
 
@@ -328,6 +329,7 @@ struct HttpServerKey {
     tls: TlsConfig,
     workers: usize,
     server_protocol: HttpServerProtocol,
+    header_read_timeout: Option<std::time::Duration>,
 }
 
 static HTTP_SERVER_REGISTRY: OnceLock<Mutex<HashMap<HttpServerKey, Arc<SharedHttpServer>>>> =
@@ -766,6 +768,10 @@ impl HttpConsumer {
             tls: tls_config.clone(),
             workers,
             server_protocol: config.server_protocol,
+            header_read_timeout: config
+                .header_read_timeout_ms
+                .filter(|ms| *ms > 0)
+                .map(std::time::Duration::from_millis),
         };
         let shared_server =
             get_or_create_shared_http_server(&server_key, &tls_config, route_id, Arc::new(state))
@@ -857,6 +863,7 @@ fn setup_http_state_and_channel(
         compression_threshold_bytes,
         custom_headers: config.custom_headers.clone(),
         concurrency_limit: ConcurrencyLimiter::new(config.concurrency_limit.unwrap_or(100)),
+        max_body_bytes: config.max_body_bytes.unwrap_or(MAX_HTTP_BODY_BYTES),
         method,
     };
     Ok((request_rx, state, buffer_size))
@@ -924,6 +931,7 @@ async fn get_or_create_shared_http_server(
             tls: key.tls.clone(),
             workers: key.workers,
             server_protocol: key.server_protocol,
+            header_read_timeout: key.header_read_timeout,
         }
     } else {
         key.clone()
@@ -953,6 +961,7 @@ async fn get_or_create_shared_http_server(
             tls_config,
             key.workers,
             key.server_protocol,
+            key.header_read_timeout,
         )
         .await?;
     } else {
@@ -966,6 +975,7 @@ async fn get_or_create_shared_http_server(
             shutdown_rx,
             key.workers,
             key.server_protocol,
+            key.header_read_timeout,
         )
         .await?;
     }
@@ -1106,6 +1116,7 @@ async fn spawn_http_server(
     shutdown_rx: tokio::sync::watch::Receiver<()>,
     workers: usize,
     server_protocol: HttpServerProtocol,
+    header_read_timeout: Option<std::time::Duration>,
 ) -> anyhow::Result<()> {
     for i in 0..workers {
         let listeners = listeners.clone();
@@ -1139,6 +1150,9 @@ async fn spawn_http_server(
                                             // (e.g. the TechEmpower plaintext test) and is a no-op
                                             // for non-pipelined traffic.
                                             builder.http1().keep_alive(true).pipeline_flush(true);
+                                            if let Some(timeout) = header_read_timeout {
+                                                builder.http1().timer(TokioTimer::new()).header_read_timeout(timeout);
+                                            }
                                             builder.http2().max_concurrent_streams(200);
                                             builder
                                                 .serve_connection_with_upgrades(io, conn_service)
@@ -1147,6 +1161,9 @@ async fn spawn_http_server(
                                         HttpServerProtocol::Http1Only => {
                                             let mut builder = http1::Builder::new();
                                             builder.keep_alive(true).pipeline_flush(true);
+                                            if let Some(timeout) = header_read_timeout {
+                                                builder.timer(TokioTimer::new()).header_read_timeout(timeout);
+                                            }
                                             builder
                                                 .serve_connection(io, conn_service)
                                                 .await
@@ -1205,6 +1222,7 @@ async fn spawn_tls_server(
     tls_config: &TlsConfig,
     workers: usize,
     server_protocol: HttpServerProtocol,
+    header_read_timeout: Option<std::time::Duration>,
 ) -> anyhow::Result<()> {
     let rustls_server_config = create_rustls_server_config(tls_config, server_protocol)
         .context("Failed to create rustls server config")?;
@@ -1247,6 +1265,9 @@ async fn spawn_tls_server(
                                                     // See the plaintext note above: coalesce pipelined
                                                     // HTTP/1.1 responses into one buffered write.
                                                     builder.http1().keep_alive(true).pipeline_flush(true);
+                                                    if let Some(timeout) = header_read_timeout {
+                                                        builder.http1().timer(TokioTimer::new()).header_read_timeout(timeout);
+                                                    }
                                                     builder.http2().max_concurrent_streams(200);
                                                     builder
                                                         .serve_connection_with_upgrades(io, conn_service)
@@ -1255,6 +1276,9 @@ async fn spawn_tls_server(
                                                 HttpServerProtocol::Http1Only => {
                                                     let mut builder = http1::Builder::new();
                                                     builder.keep_alive(true).pipeline_flush(true);
+                                                    if let Some(timeout) = header_read_timeout {
+                                                        builder.timer(TokioTimer::new()).header_read_timeout(timeout);
+                                                    }
                                                     builder
                                                         .serve_connection(io, conn_service)
                                                         .await
@@ -1656,7 +1680,10 @@ async fn handle_request_internal(
     // Read body with a timeout to prevent hanging on abandoned client connections.
     // This prevents "zombie" tasks from saturating the runtime during retry storms.
     let body_collect_timeout = state.request_timeout;
-    let limited = http_body_util::Limited::new(body, MAX_HTTP_BODY_BYTES as usize);
+    let limited = http_body_util::Limited::new(
+        body,
+        usize::try_from(state.max_body_bytes).unwrap_or(usize::MAX),
+    );
     let body_bytes = match tokio::time::timeout(body_collect_timeout, limited.collect()).await {
         Ok(Ok(b)) => b.to_bytes(),
         Ok(Err(e)) => {
@@ -1665,7 +1692,10 @@ async fn handle_request_internal(
             {
                 return Ok(text_error_response(
                     StatusCode::PAYLOAD_TOO_LARGE,
-                    format!("Request body exceeds maximum of {MAX_HTTP_BODY_BYTES} bytes"),
+                    format!(
+                        "Request body exceeds maximum of {} bytes",
+                        state.max_body_bytes
+                    ),
                     accepts_text,
                     None,
                 ));
@@ -1690,11 +1720,20 @@ async fn handle_request_internal(
     // Decompress if needed. A malformed or oversized client-controlled body is a client
     // error (4xx), not a server failure — surface it as such instead of letting it bubble
     // up to handle_request's 500 handler.
-    let payload = match decompress_if_needed(body_bytes, content_encoding.as_deref()) {
+    let payload = match decompress_if_needed(
+        body_bytes,
+        content_encoding.as_deref(),
+        state.max_body_bytes,
+    ) {
         Ok(payload) => payload,
         Err(e) => {
+            let status = if e.downcast_ref::<DecompressedBodyTooLarge>().is_some() {
+                StatusCode::PAYLOAD_TOO_LARGE
+            } else {
+                StatusCode::BAD_REQUEST
+            };
             return Ok(text_error_response(
-                StatusCode::BAD_REQUEST,
+                status,
                 format!("Failed to decompress request body: {}", e),
                 accepts_text,
                 None,
@@ -1876,7 +1915,10 @@ async fn inline_echo_response(
     accepts_text: bool,
     permit: tokio::sync::OwnedSemaphorePermit,
 ) -> anyhow::Result<Response<BoxBody>> {
-    let limited = http_body_util::Limited::new(body, MAX_HTTP_BODY_BYTES as usize);
+    let limited = http_body_util::Limited::new(
+        body,
+        usize::try_from(state.max_body_bytes).unwrap_or(usize::MAX),
+    );
     let body_bytes = match tokio::time::timeout(state.request_timeout, limited.collect()).await {
         Ok(Ok(collected)) => collected.to_bytes(),
         Ok(Err(e)) => {
@@ -1885,7 +1927,10 @@ async fn inline_echo_response(
             {
                 return Ok(text_error_response(
                     StatusCode::PAYLOAD_TOO_LARGE,
-                    format!("Request body exceeds maximum of {MAX_HTTP_BODY_BYTES} bytes"),
+                    format!(
+                        "Request body exceeds maximum of {} bytes",
+                        state.max_body_bytes
+                    ),
                     accepts_text,
                     None,
                 ));
@@ -2004,7 +2049,14 @@ fn make_response(
                     && !key.eq_ignore_ascii_case("transfer-encoding")
                     && !key.eq_ignore_ascii_case("content-length")
                 {
-                    builder = builder.header(key.as_str(), value.as_str());
+                    if key.eq_ignore_ascii_case("set-cookie") {
+                        // The HTTP sink joins repeated `Set-Cookie` headers with a newline.
+                        for cookie in value.lines() {
+                            builder = builder.header(key.as_str(), cookie);
+                        }
+                    } else {
+                        builder = builder.header(key.as_str(), value.as_str());
+                    }
                 }
             }
 
@@ -2283,12 +2335,23 @@ fn compress_if_needed(
 /// payload that expands to gigabytes).
 const MAX_HTTP_BODY_BYTES: u64 = 256 * 1024 * 1024;
 
+/// A body that decoded past the cap, kept apart from a malformed one: 413, not 400.
+#[derive(Debug, thiserror::Error)]
+#[error("decompressed body exceeds maximum allowed size of {max_bytes} bytes")]
+struct DecompressedBodyTooLarge {
+    max_bytes: u64,
+}
+
 /// Decompresses the body if the `Content-Encoding` header indicates gzip, lz4, or zstd.
 ///
 /// Both the compressed input and the decompressed output are capped at
-/// [`MAX_HTTP_BODY_BYTES`]: an oversized compressed body is rejected before decoding, and
+/// `max_bytes`: an oversized compressed body is rejected before decoding, and
 /// decoding stops one byte past the cap so a bomb payload is never fully allocated.
-fn decompress_if_needed(data: Bytes, content_encoding: Option<&str>) -> anyhow::Result<Bytes> {
+fn decompress_if_needed(
+    data: Bytes,
+    content_encoding: Option<&str>,
+    max_bytes: u64,
+) -> anyhow::Result<Bytes> {
     use std::io::Read;
     let Some(encoding) = content_encoding else {
         return Ok(data);
@@ -2307,10 +2370,8 @@ fn decompress_if_needed(data: Bytes, content_encoding: Option<&str>) -> anyhow::
     };
 
     // Reject an oversized compressed body before spending memory decoding it.
-    if data.len() as u64 > MAX_HTTP_BODY_BYTES {
-        anyhow::bail!(
-            "compressed body exceeds maximum allowed size of {MAX_HTTP_BODY_BYTES} bytes"
-        );
+    if data.len() as u64 > max_bytes {
+        anyhow::bail!("compressed body exceeds maximum allowed size of {max_bytes} bytes");
     }
 
     // Read one byte past the cap so an over-limit decompressed payload is rejected rather
@@ -2318,12 +2379,10 @@ fn decompress_if_needed(data: Bytes, content_encoding: Option<&str>) -> anyhow::
     let mut decompressed = Vec::new();
     decoder
         .by_ref()
-        .take(MAX_HTTP_BODY_BYTES.saturating_add(1))
+        .take(max_bytes.saturating_add(1))
         .read_to_end(&mut decompressed)?;
-    if decompressed.len() as u64 > MAX_HTTP_BODY_BYTES {
-        anyhow::bail!(
-            "decompressed body exceeds maximum allowed size of {MAX_HTTP_BODY_BYTES} bytes"
-        );
+    if decompressed.len() as u64 > max_bytes {
+        return Err(DecompressedBodyTooLarge { max_bytes }.into());
     }
     Ok(Bytes::from(decompressed))
 }

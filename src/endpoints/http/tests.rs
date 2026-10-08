@@ -304,7 +304,7 @@ fn test_compress_decompress_round_trip_lz4_and_zstd() {
         let (compressed, encoding) = compress_if_needed(data.clone(), method, 16).unwrap();
         assert_eq!(encoding, Some(token));
         assert!(compressed.len() < data.len());
-        let restored = decompress_if_needed(compressed, Some(token)).unwrap();
+        let restored = decompress_if_needed(compressed, Some(token), MAX_HTTP_BODY_BYTES).unwrap();
         assert_eq!(restored, data, "method {method:?}");
     }
 }
@@ -318,10 +318,28 @@ fn test_compress_decompress_round_trip_gzip_reuses_encoder() {
             let (compressed, encoding) =
                 compress_if_needed(data.clone(), Compression::Gzip, 16).unwrap();
             assert_eq!(encoding, Some("gzip"), "len {len}");
-            let restored = decompress_if_needed(compressed, Some("gzip")).unwrap();
+            let restored =
+                decompress_if_needed(compressed, Some("gzip"), MAX_HTTP_BODY_BYTES).unwrap();
             assert_eq!(restored, data, "len {len}");
         }
     }
+}
+
+// The handler answers 413 for the first and 400 for the second.
+#[test]
+fn test_decompress_tells_an_oversized_body_from_a_malformed_one() {
+    let gzipped = Bytes::from(gzip_http(&[b'x'; 4096]).unwrap());
+    let too_large = decompress_if_needed(gzipped.clone(), Some("gzip"), 4095).unwrap_err();
+    assert!(too_large
+        .downcast_ref::<DecompressedBodyTooLarge>()
+        .is_some());
+    assert!(decompress_if_needed(gzipped, Some("gzip"), 4096).is_ok());
+
+    let malformed =
+        decompress_if_needed(Bytes::from_static(b"not gzip"), Some("gzip"), 4096).unwrap_err();
+    assert!(malformed
+        .downcast_ref::<DecompressedBodyTooLarge>()
+        .is_none());
 }
 
 #[test]
@@ -341,7 +359,8 @@ fn test_gzip_http_grows_output_past_initial_capacity() {
     for _ in 0..2 {
         let gzipped = gzip_http(&data).unwrap();
         assert!(gzipped.len() > data.len() / 2 + 64);
-        let restored = decompress_if_needed(Bytes::from(gzipped), Some("gzip")).unwrap();
+        let restored =
+            decompress_if_needed(Bytes::from(gzipped), Some("gzip"), MAX_HTTP_BODY_BYTES).unwrap();
         assert_eq!(restored, data);
     }
 }
@@ -1688,45 +1707,6 @@ async fn test_http_streamable_route_handler_uses_inline_path() {
 }
 
 #[tokio::test]
-async fn test_http_reply_with_custom_status_code() {
-    use crate::traits::Handled;
-    init_crypto();
-
-    let http_config = HttpConfig {
-        url: "127.0.0.1:0".to_string(),
-        ..Default::default()
-    };
-    let mut consumer = HttpConsumer::new(&http_config).await.unwrap();
-
-    let mut response_endpoint =
-        crate::models::Endpoint::new(EndpointType::Response(crate::models::ResponseConfig {}));
-
-    let handler = |mut msg: CanonicalMessage| async move {
-        msg.metadata
-            .insert("http_status_code".to_string(), "201".to_string());
-        Ok(Handled::Publish(msg))
-    };
-    response_endpoint.handler = Some(std::sync::Arc::new(handler));
-
-    let publisher = create_publisher_from_route("test_response_handler_status", &response_endpoint)
-        .await
-        .unwrap();
-
-    tokio::spawn(async move {
-        if let Ok(received) = consumer.receive().await {
-            let outcome = publisher.send(received.message).await.unwrap();
-            let disposition = match outcome {
-                Sent::Response(msg) => crate::traits::MessageDisposition::Reply(msg),
-                Sent::Ack => crate::traits::MessageDisposition::Ack,
-            };
-            let _ = (received.commit)(disposition).await;
-        }
-    });
-
-    tokio::time::sleep(Duration::from_millis(50)).await;
-}
-
-#[tokio::test]
 async fn test_http_consumers_share_listener_by_path() {
     init_crypto();
 
@@ -2242,4 +2222,480 @@ async fn test_http_status_for_a_message_aggregate_cannot_fold() {
         assert_eq!(unfolded.status().as_u16(), expected, "on_error: {on_error}");
         serve.abort();
     }
+}
+
+/// A self-signed certificate for 127.0.0.1, written as `cert.pem` and `key.pem`.
+fn self_signed_cert(dir: &std::path::Path) -> (String, String) {
+    let generated = rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_string()]).unwrap();
+    let cert = dir.join("cert.pem");
+    let key = dir.join("key.pem");
+    std::fs::write(&cert, generated.cert.pem()).unwrap();
+    std::fs::write(&key, generated.signing_key.serialize_pem()).unwrap();
+    (
+        cert.to_string_lossy().into_owned(),
+        key.to_string_lossy().into_owned(),
+    )
+}
+
+async fn tls_round_trip(
+    server_tls: TlsConfig,
+    client_tls: TlsConfig,
+    protocol: HttpServerProtocol,
+) {
+    init_crypto();
+    let addr = format!("127.0.0.1:{}", get_free_port());
+    let mut consumer = HttpConsumer::new(&HttpConfig {
+        url: addr.clone(),
+        tls: server_tls,
+        server_protocol: protocol,
+        ..Default::default()
+    })
+    .await
+    .expect("TLS consumer starts");
+    let publisher = HttpPublisher::new(&HttpConfig {
+        url: format!("https://{addr}"),
+        tls: client_tls,
+        ..Default::default()
+    })
+    .await
+    .expect("TLS publisher starts");
+
+    let receive_task = tokio::spawn(async move {
+        let received = consumer.receive().await.expect("receives over TLS");
+        let reply = CanonicalMessage::new(b"pong".to_vec(), None);
+        let _ = (received.commit)(crate::traits::MessageDisposition::Reply(reply)).await;
+        received.message
+    });
+    let sent = tokio::time::timeout(
+        Duration::from_secs(10),
+        publisher.send(CanonicalMessage::new(b"ping".to_vec(), None)),
+    )
+    .await
+    .expect("TLS request completes")
+    .expect("TLS request succeeds");
+    let received = receive_task.await.unwrap();
+    assert_eq!(received.payload, b"ping".to_vec());
+    let Sent::Response(response) = sent else {
+        panic!("expected a response");
+    };
+    assert_eq!(response.payload, b"pong".to_vec());
+}
+
+#[tokio::test]
+async fn https_round_trip_with_a_trusted_ca_on_every_server_protocol() {
+    let dir = tempfile::tempdir().unwrap();
+    let (cert, key) = self_signed_cert(dir.path());
+    for protocol in [
+        HttpServerProtocol::Auto,
+        HttpServerProtocol::Http1Only,
+        HttpServerProtocol::Http2Only,
+    ] {
+        let server = TlsConfig {
+            required: true,
+            cert_file: Some(cert.clone()),
+            key_file: Some(key.clone()),
+            ..Default::default()
+        };
+        let client = TlsConfig {
+            required: true,
+            ca_file: Some(cert.clone()),
+            ..Default::default()
+        };
+        tls_round_trip(server, client, protocol).await;
+    }
+}
+
+#[tokio::test]
+async fn https_round_trip_with_client_certificates() {
+    let dir = tempfile::tempdir().unwrap();
+    let (cert, key) = self_signed_cert(dir.path());
+    let both = TlsConfig {
+        required: true,
+        ca_file: Some(cert.clone()),
+        cert_file: Some(cert),
+        key_file: Some(key),
+        ..Default::default()
+    };
+    tls_round_trip(both.clone(), both, HttpServerProtocol::Auto).await;
+}
+
+#[tokio::test]
+async fn https_accept_invalid_certs_skips_verification() {
+    let dir = tempfile::tempdir().unwrap();
+    let (cert, key) = self_signed_cert(dir.path());
+    let server = TlsConfig {
+        required: true,
+        cert_file: Some(cert),
+        key_file: Some(key),
+        ..Default::default()
+    };
+    let client = TlsConfig {
+        required: true,
+        accept_invalid_certs: true,
+        ..Default::default()
+    };
+    tls_round_trip(server, client, HttpServerProtocol::Auto).await;
+}
+
+#[tokio::test]
+async fn https_refuses_an_untrusted_server_certificate() {
+    init_crypto();
+    let dir = tempfile::tempdir().unwrap();
+    let (cert, key) = self_signed_cert(dir.path());
+    let addr = format!("127.0.0.1:{}", get_free_port());
+    let _consumer = HttpConsumer::new(&HttpConfig {
+        url: addr.clone(),
+        tls: TlsConfig {
+            required: true,
+            cert_file: Some(cert),
+            key_file: Some(key),
+            ..Default::default()
+        },
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let publisher = HttpPublisher::new(&HttpConfig {
+        url: format!("https://{addr}"),
+        tls: TlsConfig {
+            required: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let result = publisher
+        .send(CanonicalMessage::new(b"ping".to_vec(), None))
+        .await;
+    assert!(result.is_err(), "an unknown issuer must not be accepted");
+}
+
+#[test]
+fn tls_server_config_names_the_missing_or_unreadable_file() {
+    init_crypto();
+    let dir = tempfile::tempdir().unwrap();
+    let (cert, key) = self_signed_cert(dir.path());
+    let error = |tls: TlsConfig| {
+        format!(
+            "{:#}",
+            create_rustls_server_config(&tls, HttpServerProtocol::Auto).unwrap_err()
+        )
+    };
+    assert!(error(TlsConfig::default()).contains("cert_file not provided"));
+    let no_key = TlsConfig {
+        cert_file: Some(cert.clone()),
+        ..Default::default()
+    };
+    assert!(error(no_key).contains("key_file not provided"));
+    let missing = TlsConfig {
+        cert_file: Some("/nonexistent/cert.pem".into()),
+        key_file: Some(key.clone()),
+        ..Default::default()
+    };
+    assert!(error(missing).contains("/nonexistent/cert.pem"));
+    // A certificate file holds no private key.
+    let cert_as_key = TlsConfig {
+        cert_file: Some(cert.clone()),
+        key_file: Some(cert.clone()),
+        ..Default::default()
+    };
+    assert!(error(cert_as_key).contains("No private key found"));
+    let missing_ca = TlsConfig {
+        cert_file: Some(cert),
+        key_file: Some(key),
+        ca_file: Some("/nonexistent/ca.pem".into()),
+        ..Default::default()
+    };
+    assert!(error(missing_ca).contains("/nonexistent/ca.pem"));
+}
+
+type StreamFrames = Vec<Result<&'static [u8], &'static str>>;
+
+/// Serves `frames` as one streamed response and returns what the publisher reported
+/// plus every message the stream sink received, as `(payload, is_error_marker)`.
+async fn stream_response_into_sink(
+    content_type: &'static str,
+    frames: StreamFrames,
+) -> (Result<Sent, PublisherError>, Vec<(String, bool)>) {
+    init_crypto();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server_task = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let service = hyper::service::service_fn(move |_req: Request<Incoming>| {
+            let frames = frames.clone();
+            async move {
+                // Fed from a task so a failing frame arrives after the headers went out.
+                let (tx, stream) = async_channel::unbounded();
+                tokio::spawn(async move {
+                    for frame in frames {
+                        let frame = match frame {
+                            Ok(data) => Ok(Frame::data(Bytes::from_static(data))),
+                            Err(reason) => {
+                                tokio::time::sleep(Duration::from_millis(100)).await;
+                                Err(anyhow::anyhow!(reason))
+                            }
+                        };
+                        let _ = tx.send(frame).await;
+                    }
+                });
+                Ok::<_, anyhow::Error>(
+                    Response::builder()
+                        .header("content-type", content_type)
+                        .body(streamed(stream))
+                        .unwrap(),
+                )
+            }
+        });
+        let _ = AutoBuilder::new(TokioExecutor::new())
+            .serve_connection(TokioIo::new(stream), service)
+            .await;
+    });
+
+    let sink_endpoint =
+        Endpoint::new_memory(&format!("http_stream_{}", fast_uuid_v7::gen_id_str()), 32);
+    let mut sink = create_consumer_from_route("http_stream_sink", &sink_endpoint)
+        .await
+        .unwrap();
+    let publisher_endpoint = Endpoint::new(EndpointType::Http(HttpConfig {
+        url: format!("http://{addr}"),
+        stream_response_to: Some(Box::new(sink_endpoint)),
+        ..Default::default()
+    }));
+    let publisher = create_publisher_from_route("http_stream_publisher", &publisher_endpoint)
+        .await
+        .unwrap();
+    let sent = publisher
+        .send(CanonicalMessage::from_vec("go").with_metadata_kv("correlation_id", "c1"))
+        .await;
+    server_task.abort();
+
+    let mut items = Vec::new();
+    // A response that was collected instead of streamed leaves the sink empty.
+    if matches!(sent, Ok(Sent::Response(_))) {
+        return (sent, items);
+    }
+    if sent.is_err() {
+        let leftover = tokio::time::timeout(Duration::from_millis(200), sink.receive()).await;
+        assert!(leftover.is_err(), "a failed send left items in the sink");
+        return (sent, items);
+    }
+    loop {
+        let received = tokio::time::timeout(Duration::from_secs(5), sink.receive())
+            .await
+            .unwrap_or_else(|_| panic!("no end marker; sent {sent:?}, got {items:?}"))
+            .unwrap();
+        let metadata = &received.message.metadata;
+        assert_eq!(
+            metadata.get("http_stream_index").map(String::as_str),
+            Some(items.len().to_string().as_str())
+        );
+        let is_end = metadata.get("http_stream_end").map(String::as_str) == Some("true");
+        let is_error = metadata.contains_key("http_stream_error");
+        let payload = received.message.get_payload_str().to_string();
+        (received.commit)(MessageDisposition::Ack).await.unwrap();
+        if is_end {
+            assert!(payload.is_empty());
+            break;
+        }
+        items.push((payload, is_error));
+    }
+    (sent, items)
+}
+
+fn stream_payloads(items: &[(String, bool)]) -> Vec<&str> {
+    items.iter().map(|(payload, _)| payload.as_str()).collect()
+}
+
+#[tokio::test]
+async fn ndjson_response_is_split_on_lines_across_frame_boundaries() {
+    let (sent, items) = stream_response_into_sink(
+        "application/x-ndjson",
+        vec![
+            Ok(b"{\"n\":1}\r\n{\"n\""),
+            Ok(b":2}\n\n   \n"),
+            Ok(b"{\"n\":3}"),
+        ],
+    )
+    .await;
+    assert!(matches!(sent, Ok(Sent::Ack)));
+    assert_eq!(
+        stream_payloads(&items),
+        ["{\"n\":1}", "{\"n\":2}", "{\"n\":3}"]
+    );
+}
+
+#[tokio::test]
+async fn a_response_that_is_neither_sse_nor_ndjson_is_returned_not_streamed() {
+    let (sent, items) = stream_response_into_sink(
+        "application/octet-stream",
+        vec![Ok(b"first"), Ok(b"second")],
+    )
+    .await;
+    let Ok(Sent::Response(response)) = sent else {
+        panic!("expected the collected body, got {sent:?}");
+    };
+    assert_eq!(response.get_payload_str(), "firstsecond");
+    assert!(items.is_empty());
+}
+
+#[tokio::test]
+async fn an_sse_event_without_its_blank_line_is_still_delivered_at_the_end() {
+    let (sent, items) = stream_response_into_sink(
+        "text/event-stream",
+        vec![Ok(b"data: one\r\n\r\nda"), Ok(b"ta: two\n")],
+    )
+    .await;
+    assert!(matches!(sent, Ok(Sent::Ack)));
+    assert_eq!(stream_payloads(&items), ["one", "two"]);
+}
+
+#[tokio::test]
+async fn a_response_that_breaks_midway_leaves_an_error_marker_and_is_not_retried() {
+    let (sent, items) = stream_response_into_sink(
+        "application/x-ndjson",
+        vec![Ok(b"{\"n\":1}\n"), Err("upstream went away")],
+    )
+    .await;
+    // Items already went out, so a retry would duplicate them: the marker reports it instead.
+    assert!(matches!(sent, Ok(Sent::Ack)), "{sent:?}");
+    assert_eq!(items[0], ("{\"n\":1}".to_string(), false));
+    let (reason, is_error) = &items[1];
+    assert!(is_error);
+    assert!(
+        reason.contains("Failed to read HTTP response stream"),
+        "{reason}"
+    );
+    assert_eq!(items.len(), 2);
+}
+
+#[tokio::test]
+async fn a_response_that_breaks_before_its_first_item_is_retryable_and_leaves_no_marker() {
+    let (sent, items) =
+        stream_response_into_sink("application/x-ndjson", vec![Err("upstream went away")]).await;
+    // A marker here would close the stream for its reader before the retry refills it.
+    assert!(
+        matches!(sent, Err(PublisherError::Retryable(_))),
+        "{sent:?}"
+    );
+    assert!(items.is_empty());
+}
+
+#[tokio::test]
+async fn client_mistakes_get_a_4xx_and_never_reach_the_route() {
+    init_crypto();
+    let addr = format!("127.0.0.1:{}", get_free_port());
+    let mut consumer = HttpConsumer::new(&HttpConfig {
+        url: addr.clone(),
+        path: Some("/orders".to_string()),
+        method: Some("POST".to_string()),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    assert!(wait_for_server_ready(&addr, Duration::from_secs(5)).await);
+    let client = test_http_client();
+    let request = |method: hyper::Method, path: &str, encoding: Option<&str>| {
+        let mut builder = Request::builder()
+            .method(method)
+            .uri(format!("http://{addr}{path}"));
+        if let Some(encoding) = encoding {
+            builder = builder.header("content-encoding", encoding);
+        }
+        builder
+            .body(http_body_util::Full::<Bytes>::new(Bytes::from_static(
+                b"not gzip",
+            )))
+            .unwrap()
+    };
+
+    let unknown = client
+        .request(request(hyper::Method::POST, "/elsewhere", None))
+        .await
+        .unwrap();
+    assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+
+    let wrong_method = client
+        .request(request(hyper::Method::GET, "/orders", None))
+        .await
+        .unwrap();
+    assert_eq!(wrong_method.status(), StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(wrong_method.headers().get("allow").unwrap(), "POST");
+
+    let corrupt = client
+        .request(request(hyper::Method::POST, "/orders", Some("gzip")))
+        .await
+        .unwrap();
+    assert_eq!(corrupt.status(), StatusCode::BAD_REQUEST);
+    let body = corrupt.into_body().collect().await.unwrap().to_bytes();
+    assert!(String::from_utf8_lossy(&body).contains("Failed to decompress request body"));
+
+    let nothing = tokio::time::timeout(Duration::from_millis(100), consumer.receive()).await;
+    assert!(nothing.is_err(), "a refused request reached the route");
+}
+
+#[tokio::test]
+async fn a_publisher_that_requires_tls_refuses_an_http_url() {
+    let config = HttpConfig {
+        url: "http://app:hunter2@localhost:1/x".to_string(),
+        tls: crate::models::TlsConfig {
+            required: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let error = match HttpPublisher::new(&config).await {
+        Ok(_) => panic!("tls.required with an http:// URL must not build"),
+        Err(error) => format!("{error:#}"),
+    };
+    assert!(error.contains("tls.required"), "{error}");
+    assert!(!error.contains("hunter2"), "{error}");
+}
+
+/// Sends `request` over a raw socket and returns what the server answers until it closes.
+async fn raw_http_exchange(addr: &str, request: &[u8]) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut socket = tokio::net::TcpStream::connect(addr).await.unwrap();
+    socket.write_all(request).await.unwrap();
+    let mut answer = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), socket.read_to_end(&mut answer))
+        .await
+        .expect("the server should close the connection")
+        .unwrap();
+    String::from_utf8_lossy(&answer).into_owned()
+}
+
+#[tokio::test]
+async fn a_request_head_that_never_completes_is_closed_after_the_timeout() {
+    let addr = format!("127.0.0.1:{}", get_free_port());
+    let _consumer = HttpConsumer::new(&HttpConfig {
+        url: addr.clone(),
+        header_read_timeout_ms: Some(200),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+
+    let answer = raw_http_exchange(&addr, b"POST / HTTP/1.1\r\nHost: x\r\n").await;
+    assert!(answer.is_empty() || answer.contains("408"), "{answer}");
+}
+
+#[tokio::test]
+async fn a_request_body_over_max_body_bytes_gets_413() {
+    let addr = format!("127.0.0.1:{}", get_free_port());
+    let _consumer = HttpConsumer::new(&HttpConfig {
+        url: addr.clone(),
+        max_body_bytes: Some(8),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+
+    let answer = raw_http_exchange(
+        &addr,
+        b"POST / HTTP/1.1\r\nHost: x\r\nConnection: close\r\nContent-Length: 9\r\n\r\n123456789",
+    )
+    .await;
+    assert!(answer.starts_with("HTTP/1.1 413"), "{answer}");
 }

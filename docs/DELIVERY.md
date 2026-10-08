@@ -348,17 +348,15 @@ source as at-least-once and make the sink idempotent.
 
 Each change event carries the full row (so the primary key is in the payload), `postgres.lsn` (a
 monotonic version), `postgres.operation`/`schema`/`table`, and — when the table has a primary key /
-replica identity — `postgres.key` (the key value). The event's `message_id` is a stable hash of
-`schema.table + key + lsn`, so a replayed change deduplicates through the `deduplication` middleware,
+replica identity — `postgres.key` (the key value; a `truncate` event names no row and has none). The event's `message_id` is a stable hash of
+`schema.table + key + operation + lsn + position in the transaction`, so a replayed change
+deduplicates through the `deduplication` middleware,
 and Mongo `id_field` or a SQL `ON CONFLICT` on the key column make the sink write idempotent. Use
 `postgres.lsn` as the version to drop stale replays
 (`... DO UPDATE ... WHERE excluded.lsn > orders.lsn`).
 
-*Known edge:* if the same primary key is changed twice **within a single transaction**, both events
-share that transaction's commit LSN, so they produce the same `message_id`. The `deduplication`
-middleware then treats the second as a duplicate and drops it. The sink still converges to the final
-row state, but the intermediate change is not delivered — if you need every intra-txn revision, do not
-rely on the `message_id`/middleware path for those rows.
+Several changes to one primary key **within a single transaction** share that transaction's commit
+LSN but differ in operation or position, so each gets its own `message_id` and all are delivered.
 
 ### The `deduplication` middleware
 

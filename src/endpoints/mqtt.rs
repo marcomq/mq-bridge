@@ -869,7 +869,7 @@ async fn create_client_and_eventloop(
         }
     };
 
-    info!(url = %config.url, "MQTT client created. Eventloop will connect.");
+    info!(url = %crate::support::redact::url_password(&config.url), "MQTT client created. Eventloop will connect.");
     Ok((client, eventloop))
 }
 

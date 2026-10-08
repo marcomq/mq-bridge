@@ -31,6 +31,7 @@ async-trait = { workspace = true }
 hex = "0.4.3"
 metrics = "0.24.6"
 metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
+percent-encoding = "2.3.2"
 # Not used by this crate's own code; kept as an optional dep so the
 # `rustls-aws-lc` feature can select the crypto provider for the whole graph.
 rustls = { version = "0.23.43", optional = true }

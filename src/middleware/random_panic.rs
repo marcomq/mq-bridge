@@ -216,3 +216,120 @@ impl MessagePublisher for RandomPanicPublisher {
         self
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::endpoints::memory::{MemoryConsumer, MemoryPublisher};
+
+    fn fault(mode: FaultMode) -> RandomPanicMiddleware {
+        RandomPanicMiddleware::default()
+            .with_enabled(true)
+            .with_mode(mode)
+    }
+
+    async fn consumer_with(topic: &str, config: &RandomPanicMiddleware) -> RandomPanicConsumer {
+        let inner = MemoryConsumer::new_local(topic, 10);
+        let channel = inner.channel();
+        for body in ["one", "two"] {
+            channel
+                .send_message(CanonicalMessage::from(body))
+                .await
+                .unwrap();
+        }
+        RandomPanicConsumer::new(Box::new(inner), config)
+    }
+
+    #[tokio::test]
+    async fn a_disabled_fault_passes_messages_through() {
+        let config = fault(FaultMode::Disconnect).with_enabled(false);
+        let mut consumer = consumer_with("fault_disabled_in", &config).await;
+        assert_eq!(
+            &consumer.receive().await.unwrap().message.payload[..],
+            b"one"
+        );
+
+        let publisher = RandomPanicPublisher::new(
+            Box::new(MemoryPublisher::new_local("fault_off", 10)),
+            &config,
+        );
+        publisher.send(CanonicalMessage::from("x")).await.unwrap();
+        let sent = publisher
+            .send_batch(vec![CanonicalMessage::from("y")])
+            .await;
+        assert!(matches!(sent, Ok(SentBatch::Ack)));
+    }
+
+    #[tokio::test]
+    async fn the_consumer_fault_fires_on_the_configured_message_only() {
+        let config = fault(FaultMode::Disconnect).with_trigger_on_message(2);
+        let mut consumer = consumer_with("fault_second_in", &config).await;
+
+        assert_eq!(
+            &consumer.receive().await.unwrap().message.payload[..],
+            b"one"
+        );
+        let error = consumer.receive_batch(10).await.err().unwrap();
+        assert!(matches!(error, ConsumerError::Connection(_)), "{error}");
+        assert!(error.to_string().contains("connection loss"), "{error}");
+        let batch = consumer.receive_batch(10).await.unwrap();
+        assert_eq!(&batch.messages[0].payload[..], b"two");
+    }
+
+    #[tokio::test]
+    async fn consumer_timeout_and_nack_surface_as_connection_errors() {
+        for (mode, text) in [(FaultMode::Timeout, "timeout"), (FaultMode::Nack, "nacked")] {
+            let mut consumer = consumer_with("fault_modes_in", &fault(mode)).await;
+            let error = consumer.receive().await.err().unwrap();
+            assert!(matches!(error, ConsumerError::Connection(_)), "{error}");
+            assert!(error.to_string().contains(text), "{error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_json_format_fault_hands_out_a_broken_payload_instead_of_the_message() {
+        let config = fault(FaultMode::JsonFormatError);
+        let mut consumer = consumer_with("fault_json_in", &config).await;
+
+        let single = consumer.receive().await.unwrap();
+        assert_eq!(&single.message.payload[..], b"{invalid json}");
+        let batch = consumer.receive_batch(10).await.unwrap();
+        assert_eq!(batch.messages.len(), 1);
+        assert_eq!(&batch.messages[0].payload[..], b"{invalid json}");
+    }
+
+    #[tokio::test]
+    async fn each_publisher_fault_maps_to_its_error_class() {
+        for mode in [
+            FaultMode::Disconnect,
+            FaultMode::Timeout,
+            FaultMode::Nack,
+            FaultMode::JsonFormatError,
+        ] {
+            let name = mode.to_string();
+            let inner = Box::new(MemoryPublisher::new_local("fault_out", 10));
+            let publisher = RandomPanicPublisher::new(inner, &fault(mode));
+
+            let single = publisher.send(CanonicalMessage::from("x")).await;
+            let batch = publisher
+                .send_batch(vec![CanonicalMessage::from("y")])
+                .await;
+            for error in [single.err().unwrap(), batch.err().unwrap()] {
+                let matches_class = match name.as_str() {
+                    "disconnect" => matches!(error, PublisherError::Connection(_)),
+                    "json_format_error" => matches!(error, PublisherError::NonRetryable(_)),
+                    _ => matches!(error, PublisherError::Retryable(_)),
+                };
+                assert!(matches_class, "{name}: {error}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "Panic fault triggered! (mode: panic)")]
+    async fn the_panic_mode_panics() {
+        let inner = Box::new(MemoryPublisher::new_local("fault_panic_out", 10));
+        let publisher = RandomPanicPublisher::new(inner, &fault(FaultMode::Panic));
+        let _ = publisher.send(CanonicalMessage::from("x")).await;
+    }
+}

@@ -51,6 +51,7 @@ jobs:
           cache-workspace-crates: true
 
       - name: Install system dependencies
+        timeout-minutes: 5
         run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev libssl-dev pkg-config zlib1g-dev protobuf-compiler libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
       - name: Test desktop crate
@@ -116,6 +117,7 @@ jobs:
           cache-dependency-path: apps/mq-bridge-app/package-lock.json
 
       - name: Install system dependencies
+        timeout-minutes: 5
         run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev libssl-dev pkg-config zlib1g-dev protobuf-compiler
 
       - name: Install frontend dependencies
@@ -193,6 +195,7 @@ jobs:
           cache-workspace-crates: true
 
       - name: Install system dependencies
+        timeout-minutes: 5
         run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev libssl-dev pkg-config zlib1g-dev protobuf-compiler
 
       - name: Run integration suite
@@ -224,6 +227,7 @@ jobs:
           cache-workspace-crates: true
 
       - name: Install system dependencies
+        timeout-minutes: 5
         run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev libssl-dev pkg-config zlib1g-dev protobuf-compiler
 
       # The test drives the CLI through `env!("CARGO_BIN_EXE_mq-bridge-app")`, an
@@ -294,6 +298,7 @@ jobs:
           chmod +x "$cli" docker-suite/test-binary
 
       - name: Install runtime libraries
+        timeout-minutes: 5
         run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev libssl-dev zlib1g-dev
 
       # The engine's own integration stacks, so there is one definition per

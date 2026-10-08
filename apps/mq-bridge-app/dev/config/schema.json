@@ -3400,7 +3400,7 @@
           "default": "auto"
         },
         "stream_response_to": {
-          "description": "(Publisher only) Optional endpoint that receives streamed HTTP response items as correlated messages.\n\nUse a `stream_buffer` endpoint here when callers need to read streamed\nresponse items later through a normal mq-bridge consumer. Each streamed\nitem is published with `correlation_id`, `http_stream_id`,\n`http_stream_index`, `http_stream_format`, and `http_stream_end`\nmetadata. If the request message has no `correlation_id`, the HTTP\npublisher uses `format!(\"{:032x}\", request.message_id)` so callers can\nderive the consumer correlation id before calling `send`.",
+          "description": "(Publisher only) Optional endpoint that receives streamed HTTP response items as correlated messages.\n\nUse a `stream_buffer` endpoint here when callers need to read streamed\nresponse items later through a normal mq-bridge consumer. Each streamed\nitem is published with `correlation_id`, `http_stream_id`,\n`http_stream_index`, `http_stream_format`, and `http_stream_end`\nmetadata. A stream that breaks after its first item ends with an item\nmarked `http_stream_error` and is not retried. If the request message\nhas no `correlation_id`, the HTTP publisher uses\n`format!(\"{:032x}\", request.message_id)` so callers can derive the\nconsumer correlation id before calling `send`.",
           "anyOf": [
             {
               "$ref": "#/$defs/Endpoint"
@@ -3466,6 +3466,24 @@
             "null"
           ],
           "format": "uint",
+          "minimum": 0
+        },
+        "header_read_timeout_ms": {
+          "description": "(Consumer only) Close an HTTP/1 connection whose request head takes longer than this. Unset or 0 = no limit.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "max_body_bytes": {
+          "description": "(Consumer only) Largest request body in bytes, also after decompression; a larger one gets 413. Defaults to 256 MiB.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
           "minimum": 0
         },
         "basic_auth": {

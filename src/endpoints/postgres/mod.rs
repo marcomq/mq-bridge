@@ -279,7 +279,17 @@ impl PostgresCdcConsumer {
                 let lsn = end_lsn.as_u64();
                 let lsn_str = format_lsn(lsn);
                 for (ordinal, mut msg) in self.tx_buffer.drain(..).enumerate() {
-                    let dedup_id = msg.metadata.get("postgres.key").map(|key| {
+                    let operation = msg
+                        .metadata
+                        .get("postgres.operation")
+                        .map_or("", |s| s.as_str());
+                    // A truncate names no row, so it has no key but still gets a stable id.
+                    let key = msg
+                        .metadata
+                        .get("postgres.key")
+                        .map(String::as_str)
+                        .or((operation == "truncate").then_some(""));
+                    let dedup_id = key.map(|key| {
                         let schema = msg
                             .metadata
                             .get("postgres.schema")
@@ -287,10 +297,6 @@ impl PostgresCdcConsumer {
                         let table = msg
                             .metadata
                             .get("postgres.table")
-                            .map_or("", |s| s.as_str());
-                        let operation = msg
-                            .metadata
-                            .get("postgres.operation")
                             .map_or("", |s| s.as_str());
                         // Include op + in-tx ordinal so multiple changes to the same key
                         // in one commit get distinct (still deterministic) ids.
@@ -492,7 +498,9 @@ fn stage_delete(rel: &Relation, d: &Delete) -> CanonicalMessage {
 }
 
 fn stage_truncate(rel: &Relation, _t: &Truncate) -> CanonicalMessage {
-    cdc_message(rel, "truncate", serde_json::json!({}))
+    let mut msg = cdc_message(rel, "truncate", serde_json::json!({}));
+    msg.metadata.remove("postgres.key");
+    msg
 }
 
 #[async_trait]
@@ -798,5 +806,104 @@ mod cdc_id_tests {
                 .map(String::as_str),
             Some("1")
         );
+    }
+
+    fn row(id: &str, body: &str) -> pgoutput::messages::TupleData {
+        use pgoutput::messages::{TupleCell, TupleData};
+        TupleData {
+            cells: vec![TupleCell::Text(id.into()), TupleCell::Text(body.into())],
+        }
+    }
+
+    fn meta<'a>(message: &'a CanonicalMessage, key: &str) -> Option<&'a str> {
+        message.metadata.get(key).map(String::as_str)
+    }
+
+    #[test]
+    fn each_change_kind_is_staged_with_its_operation_table_and_row() {
+        use pgoutput::messages::{DeleteOldKind, UpdateOldKind};
+        let rel = rel_with_key();
+        let insert = Insert {
+            relation_oid: rel.oid,
+            new: row("1", "a"),
+        };
+        let update = Update {
+            relation_oid: rel.oid,
+            old_kind: UpdateOldKind::None,
+            old: None,
+            new: row("1", "b"),
+        };
+        let delete = Delete {
+            relation_oid: rel.oid,
+            old_kind: DeleteOldKind::Key,
+            old: row("1", "b"),
+        };
+        let truncate = Truncate {
+            relation_oids: vec![rel.oid],
+            cascade: false,
+            restart_identity: false,
+        };
+
+        let staged = [
+            ("insert", stage_insert(&rel, &insert), "a"),
+            ("update", stage_update(&rel, &update), "b"),
+            ("delete", stage_delete(&rel, &delete), "b"),
+        ];
+        for (operation, message, body) in staged {
+            assert_eq!(meta(&message, "postgres.operation"), Some(operation));
+            assert_eq!(meta(&message, "postgres.schema"), Some("public"));
+            assert_eq!(meta(&message, "postgres.table"), Some("orders"));
+            assert_eq!(meta(&message, "postgres.key"), Some("[1]"));
+            let payload: serde_json::Value = serde_json::from_slice(&message.payload).unwrap();
+            assert_eq!(payload, serde_json::json!({"id": 1, "body": body}));
+        }
+
+        let truncated = stage_truncate(&rel, &truncate);
+        assert_eq!(meta(&truncated, "postgres.operation"), Some("truncate"));
+        assert_eq!(&truncated.payload[..], b"{}");
+        assert_eq!(meta(&truncated, "postgres.key"), None);
+    }
+
+    #[test]
+    fn a_vanished_slot_is_permanent_and_other_receive_failures_reconnect() {
+        let gone = recv_error("replication slot \"s\" does not exist");
+        assert!(matches!(gone, ConsumerError::Permanent(_)), "{gone}");
+        let coded = recv_error("server error 42704");
+        assert!(matches!(coded, ConsumerError::Permanent(_)), "{coded}");
+        let reset = recv_error("connection reset by peer");
+        assert!(matches!(reset, ConsumerError::Connection(_)), "{reset}");
+        assert!(reset.to_string().contains("recv failed: connection reset"));
+    }
+
+    #[tokio::test]
+    async fn a_config_that_cannot_name_a_slot_is_refused_before_connecting() {
+        let valid = PostgresCdcConfig::new("postgres://localhost:1/db", "pub1");
+        let cases = [
+            (PostgresCdcConfig::new("  ", "pub1"), "`url` is required"),
+            (
+                PostgresCdcConfig::new("postgres://localhost:1/db", "pub; DROP"),
+                "`publication` must be",
+            ),
+            (
+                PostgresCdcConfig::new("postgres://localhost:1/db", ""),
+                "`publication` must be",
+            ),
+            (valid.clone().with_slot("my-slot"), "`slot_name` must be"),
+            (valid.with_slot(""), "`slot_name` must be"),
+        ];
+        for (config, expected) in cases {
+            let error = PostgresCdcConsumer::new(&config).await.err().unwrap();
+            assert!(error.to_string().contains(expected), "{error}");
+        }
+    }
+
+    #[test]
+    fn identifiers_are_limited_to_letters_digits_and_underscores() {
+        for valid in ["mqb_slot", "Pub1", "_", "9"] {
+            assert!(is_valid_pg_ident(valid), "{valid}");
+        }
+        for invalid in ["", "a b", "a-b", "a.b", "a\"b", "ä"] {
+            assert!(!is_valid_pg_ident(invalid), "{invalid}");
+        }
     }
 }

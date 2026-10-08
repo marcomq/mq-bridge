@@ -335,7 +335,7 @@ setup above; the trigger itself is standard Postgres and was not benchmarked.
 | `operation` | output | none | Each message's change operation. |
 | `delete_values` | output | `["delete", "d"]` | Operation values that remove the document. |
 | `max_request_bytes` | output | `90000000` | Split a batch rather than exceed this body size. |
-| `compression` | output | `none` | `gzip`, `zstd` or `lz4` request bodies. |
+| `compression` | output | `none` | `gzip` request bodies. `zstd` and `lz4` are accepted here, but Meilisearch 1.53 answers them with a "payload is malformed" 400. |
 | `connect_timeout_ms` | both | `10000` | How long to wait for a connection. |
 | `request_timeout_ms` | both | none | Upper bound for one HTTP request. |
 | `fields` | input | all | Comma-separated document fields to read. |

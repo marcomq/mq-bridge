@@ -42,6 +42,13 @@ books_to_search:
 
 The document `_id` is the row's `id` column, so an update replaces the document
 and a delete finds it. Name another column with `id_field`.
+
+Every document needs a non-null value there. A string or a number is used as
+the `_id` directly; an object or an array is serialized to its JSON text, and
+that text is the `_id`. Without the field, or with `null` in it, Elasticsearch
+refuses that document with `if _id is specified it must not be empty`, which
+does not name the field.
+
 See [Postgres CDC](../tutorials/postgres-cdc.md) for the publication and the slot.
 
 ## Options
@@ -55,7 +62,7 @@ See [Postgres CDC](../tutorials/postgres-cdc.md) for the publication and the slo
 | `mode` | `index` | `index` replaces the document; `update` merges the payload into it and creates it if missing |
 | `auth` | none | `oauth2` or `aws_sigv4`, as on [`http_bulk`](./http-bulk.md#fields); in a URI, JSON: `auth={"aws_sigv4":{"region":"eu-central-1","service":"es"}}` |
 | `operation` | none | Template for a message's operation; `delete` or `d` removes the document |
-| `compression` | `none` | `gzip`, `zstd` or `lz4` request bodies |
+| `compression` | `none` | `gzip` request bodies. `zstd` and `lz4` are accepted here, but Elasticsearch 8.19 answers them with a "malformed" 400 |
 | `request_timeout_ms` | none | Request timeout |
 
 `elasticsearch` is the generic [`http_bulk`](./http-bulk.md) output with these

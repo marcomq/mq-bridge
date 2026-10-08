@@ -10,6 +10,24 @@ changes" first: both are Cargo features now.
 
 ### Behaviour changes
 
+- **`mqb --ui` listens on `127.0.0.1:9091`, not on `0.0.0.0:9091`.** The UI has no login,
+  and the old default put it on the network. The Docker image keeps `0.0.0.0:9091` through
+  `ENV MQB_UI_DEFAULT_ADDR`. To reach the UI from another machine, set `ui_addr` in the
+  config; a start on such an address logs a warning.
+- **A web UI on a loopback address refuses a request with a foreign `Host` header** (403).
+  This stops a web page from reaching the UI through DNS rebinding. Behind a reverse proxy
+  or a port forward that sends another host name, list the names in `MQB_UI_ALLOWED_HOSTS`.
+- **`GET /config` of the web UI no longer returns secrets** in any storage mode except
+  `unencrypted` and `temporary_messages`. Each secret is shown as a reference to the key it
+  is stored under, such as `${MQB__PUBLISHERS__<id>__HTTP__BASIC_AUTH__1}`; a URL keeps
+  everything but its password. A save replaces each reference by the stored value, so
+  cloning, copying and renaming an endpoint keep its secrets. A reference to a key that is
+  not stored is refused with 400. A config exported from the UI holds references, and a
+  script that read secrets from this endpoint no longer gets them.
+- **An HTTP output with `tls.required: true` and an `http://` URL fails at start.** It sent
+  its requests unencrypted before. An `http://` output to another host that carries
+  `basic_auth` or custom headers logs a warning.
+
 - **`file` and `dir_spool` are Cargo features: `file` and `dir-spool`.** Both endpoints
   were compiled into every build. They are now in the default features, and in `full` and
   `portable`; `object-store` enables `file`.
@@ -61,6 +79,11 @@ changes" first: both are Cargo features now.
   library any more, neither by path nor by discovery, and there is no way to switch it back
   on. `MQB_PLUGIN_DISCOVERY=0` only covers discovery and has to be set in the environment;
   this is for a host that must rule out native code loaded at runtime.
+- **HTTP input: `header_read_timeout_ms` and `max_body_bytes`.** The first closes an HTTP/1
+  connection whose request head is not complete in time, the second sets the largest request
+  body, also after decompression (default 256 MiB, as before). The timeout is off by default:
+  with `30000` set, a debug build served about 15 to 20 % fewer requests per second on a
+  `http` to `response` route. Set it on a listener that is reachable from an untrusted network.
 
 ### Changed
 
@@ -86,6 +109,31 @@ changes" first: both are Cargo features now.
 
 ### Fixed
 
+- `mq-bridge-app`: saving a config in `sensitive` or `durable` mode removes the secrets
+  that an earlier `balanced` save left in the `.env` file.
+- Desktop app: the list of stored secrets keeps the keys of earlier saves, so "delete
+  secrets" also reaches the secret of a renamed or removed endpoint.
+- **Passwords no longer appear in connect logs and error text.** The AMQP and MQTT connect
+  lines at INFO printed the broker URL with its password. Errors from the HTTP and WebSocket
+  outputs quoted it too. All now show `user:***@host`; the HTTP output's `status()` target
+  does the same.
+- **`mqb copy` hides more credentials.** The `copy route started` line now also blanks
+  `basic_auth`, `custom_headers`, `headers`, API keys and the password of a nested endpoint
+  URI (`fanout:?to=…`). Errors about a URI or a middleware spec quote it with the same
+  redaction instead of as typed.
+- **`cookie_jar` stores every cookie of a response.** A response with several `Set-Cookie`
+  headers left only the last one in the jar. The HTTP output now keeps them all in the
+  `set-cookie` metadata, one per line, and an HTTP input that replies with that metadata
+  sends one header per line.
+- **HTTP `stream_response_to`: a response that breaks before its first item no longer writes
+  to the stream.** The send already failed as retryable, but an error and an end marker went to
+  the stream first, so its reader saw a closed stream and a retry refilled it behind the
+  reader's back. Now nothing is written until the first item. A response that breaks later is
+  unchanged: it ends with an item marked `http_stream_error` and the send is acknowledged.
+- **`postgres_cdc`: a `truncate` event no longer carries `postgres.key`.** It had `[null]`, one
+  `null` per key column, which a sink that deletes or upserts by key would take for a row. The
+  event keeps a deterministic `message_id`, also on tables without a primary key; that id
+  differs from the one earlier versions produced.
 - **A large batch no longer fails a SQL output with an `insert_query`.** A batch that needed
   more bind parameters than the database takes in one statement (65,535 on Postgres) failed
   with `too many arguments for query`. It is now written as several statements in one

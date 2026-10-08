@@ -219,4 +219,101 @@ mod tests {
         assert_eq!(res.len(), 2);
         assert_eq!(res[0].get_payload_str(), "1");
     }
+
+    /// Replies to all but the last message, or acks when `reply` is off.
+    struct MockReplies {
+        reply: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl traits::MessagePublisher for MockReplies {
+        async fn send(&self, message: CanonicalMessage) -> Result<Sent, traits::PublisherError> {
+            if self.reply {
+                Ok(Sent::Response(message))
+            } else {
+                Ok(Sent::Ack)
+            }
+        }
+        async fn send_batch(
+            &self,
+            mut messages: Vec<CanonicalMessage>,
+        ) -> Result<SentBatch, traits::PublisherError> {
+            if !self.reply {
+                return Ok(SentBatch::Ack);
+            }
+            messages.pop();
+            Ok(SentBatch::Partial {
+                responses: Some(messages),
+                failed: vec![],
+            })
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    #[tokio::test]
+    async fn request_returns_the_response_and_rejects_a_plain_ack() {
+        let replying: Publisher = MockReplies { reply: true }.into();
+        let response = replying.request(CanonicalMessage::from("ping")).await;
+        assert_eq!(response.unwrap().get_payload_str(), "ping");
+
+        let acking: Publisher = MockReplies { reply: false }.into();
+        let error = acking
+            .request(CanonicalMessage::from("ping"))
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("only an acknowledgment"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn request_batch_rejects_acks_and_missing_responses() {
+        let batch = || vec![CanonicalMessage::from("1"), CanonicalMessage::from("2")];
+
+        let acking: Publisher = MockReplies { reply: false }.into();
+        let error = acking.request_batch(batch()).await.unwrap_err();
+        assert!(
+            error.to_string().contains("only acknowledgments"),
+            "{error}"
+        );
+
+        let short: Publisher = MockReplies { reply: true }.into();
+        let error = short.request_batch(batch()).await.unwrap_err();
+        assert!(error.to_string().contains("expected responses"), "{error}");
+
+        assert!(short.request_batch(Vec::new()).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn registry_lists_and_unregisters_by_name() {
+        let publisher: Publisher = MockReplies { reply: false }.into();
+        assert!(register_publisher("registry_lifecycle", publisher).is_none());
+
+        assert!(list_publishers().contains(&"registry_lifecycle".to_string()));
+        assert!(get_publisher("registry_lifecycle").is_some());
+
+        assert!(unregister_publisher("registry_lifecycle").is_some());
+        assert!(get_publisher("registry_lifecycle").is_none());
+        assert!(!list_publishers().contains(&"registry_lifecycle".to_string()));
+    }
+
+    #[tokio::test]
+    async fn from_config_builds_the_publisher_a_json_endpoint_describes() {
+        let topic = format!("pub_json_{}", fast_uuid_v7::gen_id_str());
+        let publisher = Publisher::from_config(serde_json::json!({ "memory": { "topic": topic } }))
+            .await
+            .unwrap();
+        assert!(matches!(
+            publisher.send("x".into()).await.unwrap(),
+            Sent::Ack
+        ));
+        let error = Publisher::from_config(serde_json::json!({ "no_such_endpoint": {} }))
+            .await
+            .err()
+            .expect("an unknown endpoint type is refused");
+        assert!(error.to_string().contains("no_such_endpoint"), "{error}");
+    }
 }
