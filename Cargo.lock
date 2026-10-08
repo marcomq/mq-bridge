@@ -207,7 +207,7 @@ version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "73cd58deff2140a0a8eae87e417bd01db68a33e148aa93d1e8cd837e55e312b6"
 dependencies = [
- "object 0.39.1",
+ "object",
 ]
 
 [[package]]
@@ -1524,7 +1524,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4ca0197aee26d1ae37445ee532fefce43251d24cc7c166799f4d46817f1d3973"
 dependencies = [
  "crossbeam-utils",
- "loom",
 ]
 
 [[package]]
@@ -2229,19 +2228,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fanring"
-version = "0.3.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9a0a001924e64ade2c902a95dae33873344f5406798209408f19ae2504b6671a"
-dependencies = [
- "arc-swap",
- "atomic-waker",
- "concurrent-queue",
- "loom",
- "yring",
-]
-
-[[package]]
 name = "fast-uuid-v7"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2649,11 +2635,6 @@ name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
-dependencies = [
- "allocator-api2",
- "equivalent",
- "foldhash 0.2.0",
-]
 
 [[package]]
 name = "hashlink"
@@ -3736,7 +3717,7 @@ dependencies = [
  "flate2",
  "futures",
  "h2",
- "hashbrown 0.17.1",
+ "hashbrown 0.16.1",
  "hex",
  "http-body",
  "http-body-util",
@@ -3754,7 +3735,7 @@ dependencies = [
  "mongodb",
  "mq-bridge",
  "mqi",
- "object 0.40.0",
+ "object",
  "object_store",
  "omq-tokio",
  "once_cell",
@@ -4182,15 +4163,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "object"
-version = "0.40.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dd229a0361b9d0d4396176e02d65897f487eebeab7caa6d443855ee152ca0b9c"
-dependencies = [
- "memchr",
-]
-
-[[package]]
 name = "object_store"
 version = "0.14.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4244,9 +4216,9 @@ dependencies = [
 
 [[package]]
 name = "omq-proto"
-version = "0.28.1"
+version = "0.26.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3c0e29c61fe12c8883da6fb522304518e2e32950daa9f20c812b99b826639ad3"
+checksum = "6420a63f80eac3235364674f61f3b4a00dbb283354402192406cd22a96b31cd1"
 dependencies = [
  "bytes",
  "patricia_tree",
@@ -4258,14 +4230,13 @@ dependencies = [
 
 [[package]]
 name = "omq-tokio"
-version = "0.24.0"
+version = "0.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "80847ac1cad3799fc99d6ce7da3d74d1af12deacf247e4869827e27da42cbbf4"
+checksum = "448ae8e795f28e2f6ca624ff883ab1ebb3054c10aa8f46a72542e7f6b3b1f721"
 dependencies = [
  "arc-swap",
  "bytes",
  "concurrent-queue",
- "fanring",
  "futures",
  "libc",
  "omq-proto",
