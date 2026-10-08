@@ -1680,7 +1680,10 @@ async fn handle_request_internal(
     // Read body with a timeout to prevent hanging on abandoned client connections.
     // This prevents "zombie" tasks from saturating the runtime during retry storms.
     let body_collect_timeout = state.request_timeout;
-    let limited = http_body_util::Limited::new(body, state.max_body_bytes as usize);
+    let limited = http_body_util::Limited::new(
+        body,
+        usize::try_from(state.max_body_bytes).unwrap_or(usize::MAX),
+    );
     let body_bytes = match tokio::time::timeout(body_collect_timeout, limited.collect()).await {
         Ok(Ok(b)) => b.to_bytes(),
         Ok(Err(e)) => {
@@ -1724,8 +1727,13 @@ async fn handle_request_internal(
     ) {
         Ok(payload) => payload,
         Err(e) => {
+            let status = if e.downcast_ref::<DecompressedBodyTooLarge>().is_some() {
+                StatusCode::PAYLOAD_TOO_LARGE
+            } else {
+                StatusCode::BAD_REQUEST
+            };
             return Ok(text_error_response(
-                StatusCode::BAD_REQUEST,
+                status,
                 format!("Failed to decompress request body: {}", e),
                 accepts_text,
                 None,
@@ -1907,7 +1915,10 @@ async fn inline_echo_response(
     accepts_text: bool,
     permit: tokio::sync::OwnedSemaphorePermit,
 ) -> anyhow::Result<Response<BoxBody>> {
-    let limited = http_body_util::Limited::new(body, state.max_body_bytes as usize);
+    let limited = http_body_util::Limited::new(
+        body,
+        usize::try_from(state.max_body_bytes).unwrap_or(usize::MAX),
+    );
     let body_bytes = match tokio::time::timeout(state.request_timeout, limited.collect()).await {
         Ok(Ok(collected)) => collected.to_bytes(),
         Ok(Err(e)) => {
@@ -2324,6 +2335,13 @@ fn compress_if_needed(
 /// payload that expands to gigabytes).
 const MAX_HTTP_BODY_BYTES: u64 = 256 * 1024 * 1024;
 
+/// A body that decoded past the cap, kept apart from a malformed one: 413, not 400.
+#[derive(Debug, thiserror::Error)]
+#[error("decompressed body exceeds maximum allowed size of {max_bytes} bytes")]
+struct DecompressedBodyTooLarge {
+    max_bytes: u64,
+}
+
 /// Decompresses the body if the `Content-Encoding` header indicates gzip, lz4, or zstd.
 ///
 /// Both the compressed input and the decompressed output are capped at
@@ -2364,7 +2382,7 @@ fn decompress_if_needed(
         .take(max_bytes.saturating_add(1))
         .read_to_end(&mut decompressed)?;
     if decompressed.len() as u64 > max_bytes {
-        anyhow::bail!("decompressed body exceeds maximum allowed size of {max_bytes} bytes");
+        return Err(DecompressedBodyTooLarge { max_bytes }.into());
     }
     Ok(Bytes::from(decompressed))
 }

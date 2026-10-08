@@ -471,9 +471,11 @@ fn redact_query_credentials(query: &str, parent: Option<&str>) -> String {
 pub fn redact_param(key: &str, value: &str, parent: Option<&str>) -> String {
     if is_logged_credential(key, parent) {
         "***".to_string()
-    } else {
+    } else if value.contains("://") {
         // A nested endpoint URI: `fanout:?to=postgres://user:password@host/db`.
-        redact_uri_password(value)
+        redact_uri_segment(value)
+    } else {
+        value.to_string()
     }
 }
 
@@ -666,6 +668,12 @@ mod tests {
             redact_uri("fanout:?to=postgres://alice:hunter2@db/shop&to=null:"),
             "fanout:?to=postgres://alice:***@db/shop&to=null:"
         );
+        // ...and so does its query string.
+        assert_eq!(
+            redact_uri("fanout:?to=meilisearch://host:7700?api_key=hunter2&to=null:"),
+            "fanout:?to=meilisearch://host:7700?api_key=***&to=null:"
+        );
+        assert_eq!(redact_param("note", "a?token=b", None), "a?token=b");
 
         // Nothing to redact must survive untouched, credential-free URIs included.
         assert_eq!(redact_uri("null:"), "null:");

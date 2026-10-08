@@ -43,10 +43,11 @@ books_to_search:
 The document `_id` is the row's `id` column, so an update replaces the document
 and a delete finds it. Name another column with `id_field`.
 
-Every document needs a string or a number there. Without the field, or with
-`null` in it, Elasticsearch refuses that document with `if _id is specified it
-must not be empty`, which does not name the field. An object or an array is sent
-as its JSON text and becomes the `_id` as written.
+Every document needs a non-null value there. A string or a number is used as
+the `_id` directly; an object or an array is serialized to its JSON text, and
+that text is the `_id`. Without the field, or with `null` in it, Elasticsearch
+refuses that document with `if _id is specified it must not be empty`, which
+does not name the field.
 
 See [Postgres CDC](../tutorials/postgres-cdc.md) for the publication and the slot.
 

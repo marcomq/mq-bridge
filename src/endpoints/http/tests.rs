@@ -325,6 +325,23 @@ fn test_compress_decompress_round_trip_gzip_reuses_encoder() {
     }
 }
 
+// The handler answers 413 for the first and 400 for the second.
+#[test]
+fn test_decompress_tells_an_oversized_body_from_a_malformed_one() {
+    let gzipped = Bytes::from(gzip_http(&[b'x'; 4096]).unwrap());
+    let too_large = decompress_if_needed(gzipped.clone(), Some("gzip"), 4095).unwrap_err();
+    assert!(too_large
+        .downcast_ref::<DecompressedBodyTooLarge>()
+        .is_some());
+    assert!(decompress_if_needed(gzipped, Some("gzip"), 4096).is_ok());
+
+    let malformed =
+        decompress_if_needed(Bytes::from_static(b"not gzip"), Some("gzip"), 4096).unwrap_err();
+    assert!(malformed
+        .downcast_ref::<DecompressedBodyTooLarge>()
+        .is_none());
+}
+
 #[test]
 fn test_gzip_http_grows_output_past_initial_capacity() {
     // Incompressible input: deflate emits more than the `len / 2 + 64` the output
