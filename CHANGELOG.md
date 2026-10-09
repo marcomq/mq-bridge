@@ -10,6 +10,10 @@ changes" first: both are Cargo features now.
 
 ### Behaviour changes
 
+- **An endpoint type policy checks a `custom` endpoint by its factory name.** `check_consumer`
+  and `check_publisher` used to let every `custom` endpoint through, so a plugin could stand
+  in for a type the list left out. Add the names of the custom endpoints you use, such as
+  `pulsar`, to the allowed list.
 - **`mqb --ui` listens on `127.0.0.1:9091`, not on `0.0.0.0:9091`.** The UI has no login,
   and the old default put it on the network. The Docker image keeps `0.0.0.0:9091` through
   `ENV MQB_UI_DEFAULT_ADDR`. To reach the UI from another machine, set `ui_addr` in the
@@ -27,6 +31,19 @@ changes" first: both are Cargo features now.
 - **An HTTP output with `tls.required: true` and an `http://` URL fails at start.** It sent
   its requests unencrypted before. An `http://` output to another host that carries
   `basic_auth` or custom headers logs a warning.
+
+- **A request that the output only acknowledges is committed, with a warning.** A message
+  with `reply_to` set whose output returned no reply was nacked, so a source that redelivers
+  sent it again and again to a sink that had already taken it. It is now acked and a warning
+  names the message. An output that fails still nacks.
+- **A route with ordered commits stops reading when `commit_concurrency_limit` is reached.**
+  The limit used to bound only sources that commit independently. With an ordered source
+  (Kafka, files, CDC) one stalled commit let the route read and send without bound, and all
+  of it was redelivered after a restart. The route now pauses reading once the limit, plus
+  the batches it is sending, wait for their commit. The default of `4096` is unchanged.
+- **`deduplication`: a copy waits for as long as the first delivery is in flight**, up to
+  five minutes; it gave up after 11 seconds and was processed as a duplicate. A holder that
+  died still frees its key after five seconds.
 
 - **`file` and `dir_spool` are Cargo features: `file` and `dir-spool`.** Both endpoints
   were compiled into every build. They are now in the default features, and in `full` and
@@ -98,6 +115,13 @@ changes" first: both are Cargo features now.
 
 ### Changed
 
+- **`on_error` on `encryption`, `compression` and `unpack` inputs** chooses between `fail`
+  (stop the route) and `drop` (log, acknowledge, read on) for a message that cannot be
+  decoded. The defaults are what each did before: `drop` for `encryption`, `fail` for the
+  other two. Rust code that builds `EncryptionConfig`, `CompressionMiddleware` or
+  `UnpackMiddleware` with a struct literal needs the new field or `..Default::default()`.
+- `compression` and `unpack` on an input log one `info` line at start when no size limit
+  (`max_decompressed_bytes`, `max_messages`) is set. The defaults are unchanged.
 - **CSV files read at their 0.4.15 speed again.** The quote scan that decides where a CSV
   record ends had become about 15% slower in 0.4.16, when it learned to handle a record
   read in pieces. It now jumps from quote to quote instead of visiting every byte, with the
@@ -120,6 +144,10 @@ changes" first: both are Cargo features now.
 
 ### Fixed
 
+- **`deduplication` no longer lets a duplicate through when the sink takes longer than five
+  seconds.** The claim on a key lapsed after five seconds even while its delivery was still
+  running, so a copy read in the meantime was processed too. The claim is now renewed until
+  the delivery is committed or fails.
 - `mq-bridge-app`: saving a config in `sensitive` or `durable` mode removes the secrets
   that an earlier `balanced` save left in the `.env` file.
 - Desktop app: the list of stored secrets keeps the keys of earlier saves, so "delete
@@ -149,6 +177,62 @@ changes" first: both are Cargo features now.
   more bind parameters than the database takes in one statement (65,535 on Postgres) failed
   with `too many arguments for query`. It is now written as several statements in one
   transaction, as `columns: auto` already did.
+- **A route with `concurrency` above 1 no longer hangs when every worker fails at once.** With
+  a sink that was down, the route stayed blocked on its full work queue: no reconnect, no
+  status change, and a stop had to abort it. It now fails, nacks the batches no worker took
+  and reconnects.
+- **`retry`: a failed later attempt no longer fails the messages an earlier attempt
+  delivered.** After a partial success, an error for the whole batch on a retry made the
+  route redeliver, or `dlq` dead-letter, messages that had reached the sink. Only the rest
+  of the batch fails now.
+- **`dlq` no longer dead-letters a message that failed with a connection error** inside a
+  partially failed batch. It stays with the route and is redelivered after the reconnect.
+- **`deduplication`: a `key` template with a missing field no longer drops messages.**
+  `${metadata:tenant}-${payload:id}` without an `id` gave every such message the key `t1-`,
+  so all but the first were acked as duplicates. Such a message is now keyed on its
+  `message_id`.
+- **`retry` and `dlq` behind a `ref` output are honoured.** The route looked only at the
+  output's own middlewares, so a failed message was dropped instead of nacked.
+- **Two concurrent `Route::deploy` calls for one name no longer leave a route running**
+  without a handle.
+- **Secrets in a `sequence` input, a `lookup` middleware and a `deduplication` or `aggregate`
+  `store` URL are extracted** like those of other endpoints. They stayed in an exported
+  config.
+- **`Unsupported consumer/publisher endpoint type` names the type only.** It printed the
+  whole endpoint config, passwords included.
+- `CanonicalMessage::from(serde_json::Value)` no longer panics on a payload whose `id` is
+  not a valid message id, such as `{"id": -1}`; the message gets a generated id.
+- A commit adapter that gets no disposition, or several, for its one message nacks it
+  instead of acking it.
+- A `limiter` with a very small `messages_per_second` no longer panics at start.
+- A panic while the publisher registry is locked no longer breaks `get_publisher` for good.
+- The file checkpoint store syncs a cursor file to disk before it replaces the old one.
+- A config error in `http_bulk`, `sequence`, `lookup`, `transform` and six other built-in
+  types names the wrong field instead of reporting an unknown custom type.
+- `compression` and `encryption` on an output give a failed message its own payload back
+  when another message in the batch has the same `message_id`.
+- `buffer` on an output fails every message that shares a `message_id` with a failed one,
+  instead of acking the second.
+- `pack` no longer reports success when the transport fails an envelope it cannot match.
+- `buffer` on an input settles the remaining sub-batches when one of their commits fails.
+- `unpack` reconnects when acking an empty envelope fails, instead of stopping the route.
+- A route waiting to reconnect stops as soon as it is asked to, not after the interval.
+- `stop_all_routes` stops the routes together, so several stuck routes no longer add up
+  their stop timeouts.
+- `Publisher::request_batch` says how many messages failed and gives the first error.
+- A `ref` cycle on an output is no longer reported as a fanout recursion.
+- The memory event log no longer drops nacked events when a later batch is acked; the
+  consumer used to fail with a `Gap` on its next read.
+- A memory publisher with `request_reply` waits for the replies of a batch instead of
+  acking it unanswered.
+- A Unix IPC consumer no longer sets an existing socket directory such as `/tmp` to mode
+  `0700`, and its socket file is removed with the last handle, not the first.
+- `close()` on a Unix IPC transport takes effect while a read or write holds the socket.
+- An `ipc://name` socket name containing `..` is rejected.
+- `lookup` treats HTTP 401 and 403 from its `from` endpoint as retryable. An expired credential
+  used to count as a fault of the message, so an input-side `lookup` acked and dropped every one.
+- `weak_join` no longer cancels the source's receive when a group times out; the receive stays
+  pending and is resumed, so a source cannot lose messages it had already read.
 
 ## 0.4.19
 

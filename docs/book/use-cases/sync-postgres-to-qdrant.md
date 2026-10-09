@@ -29,8 +29,9 @@ delete regardless of who made it.
 ```mermaid
 flowchart LR
   PG[(Postgres<br/>docs table)] -- logical replication --> B[mq-bridge route]
-  B -- "insert / update:<br/>POST /v1/embeddings" --> E[Embeddings API]
-  B -- "upsert point" --> Q[(Qdrant)]
+  B -- "insert / update: row text<br/>POST /v1/embeddings" --> E[Embeddings API]
+  E -- "vector" --> B
+  B -- "upsert point with vector" --> Q[(Qdrant)]
   B -- "delete:<br/>delete point" --> Q
 ```
 

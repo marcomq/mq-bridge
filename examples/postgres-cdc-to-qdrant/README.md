@@ -10,8 +10,9 @@ Explained in the book: [Keep a vector index in sync with Postgres](https://marco
 ```mermaid
 flowchart LR
   PG[(Postgres<br/>docs table)] -- logical replication --> B[mq-bridge]
-  B -- "POST /v1/embeddings" --> E[Ollama]
-  B -- "upsert / delete points" --> Q[(Qdrant)]
+  B -- "row text:<br/>POST /v1/embeddings" --> E[Ollama]
+  E -- "vector" --> B
+  B -- "upsert point with vector,<br/>or delete point" --> Q[(Qdrant)]
 ```
 
 ## Run it

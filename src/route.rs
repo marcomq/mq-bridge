@@ -832,20 +832,10 @@ async fn send_batch_and_commit(
         Ok(SentBatch::Ack) => {
             for id in scratch.message_ids.iter() {
                 if scratch.request_ids.contains(id) {
-                    warn!("Message {:032x} expected a reply (reply_to set), but publisher returned Ack. Response loop broken.", id);
+                    warn_reply_missing(*id);
                 }
             }
-            let dispositions = scratch
-                .message_ids
-                .iter()
-                .map(|id| {
-                    if scratch.request_ids.contains(id) {
-                        MessageDisposition::Nack
-                    } else {
-                        MessageDisposition::Ack
-                    }
-                })
-                .collect();
+            let dispositions = vec![MessageDisposition::Ack; batch_len];
             // Acquire the dispatch slot before spawning so a slow commit backstreams
             // pressure to the producer instead of queueing tasks unbounded.
             let permit = acquire_commit_permit(commit_semaphore).await;
@@ -1095,6 +1085,31 @@ impl Route {
         None
     }
 
+    /// Whether the output carries a matching middleware, following any `ref` chain.
+    fn output_has_middleware(&self, matches: impl Fn(&Middleware) -> bool) -> bool {
+        const MAX_DEPTH: usize = 16;
+        if self.output.middlewares.iter().any(&matches) {
+            return true;
+        }
+        let EndpointType::Ref(name) = &self.output.endpoint_type else {
+            return false;
+        };
+        let mut name = name.clone();
+        for _ in 0..MAX_DEPTH {
+            let Some(referenced) = get_endpoint(&name) else {
+                return false;
+            };
+            if referenced.middlewares.iter().any(&matches) {
+                return true;
+            }
+            match referenced.endpoint_type {
+                EndpointType::Ref(next) => name = next,
+                _ => return false,
+            }
+        }
+        false
+    }
+
     /// Returns the sink mechanism that makes replayed writes idempotent, when it can be
     /// established from configuration alone. This is informational: the route remains
     /// at-least-once internally, while the observable sink result is effectively-once.
@@ -1252,8 +1267,14 @@ impl Route {
         };
 
         let registry = ROUTE_REGISTRY.get_or_init(|| RwLock::new(HashMap::new()));
-        let mut map = recover_write_lock(registry, "route_registry");
-        map.insert(name.to_string(), active);
+        let replaced = {
+            let mut map = recover_write_lock(registry, "route_registry");
+            map.insert(name.to_string(), active)
+        };
+        // A concurrent deploy of the same name may have registered in between.
+        if let Some(replaced) = replaced {
+            Self::stop_active(replaced).await;
+        }
         Ok(())
     }
 
@@ -1269,31 +1290,34 @@ impl Route {
         };
 
         if let Some(active) = active_opt {
-            // Move the handle out so we can operate on its internals.
-            let handle = active.handle;
-
-            // Signal the route to stop and close the shutdown channel.
-            let _ = handle.shutdown_tx.send(()).await;
-            handle.shutdown_tx.close();
-
-            // Extract the JoinHandle so we can monitor and, if needed, abort it.
-            let mut join_handle = handle.handle;
-            tokio::select! {
-                res = &mut join_handle => {
-                    // The task finished naturally within the 5s window
-                    let _ = res;
-                }
-                _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {
-                    // The 5s timer finished first - abort the task to ensure it doesn't linger.
-                    join_handle.abort();
-                    // Await the handle one last time to ensure the task has fully shut down.
-                    let _ = join_handle.await;
-                }
-            }
-
+            Self::stop_active(active).await;
             true
         } else {
             false
+        }
+    }
+
+    async fn stop_active(active: ActiveRoute) {
+        // Move the handle out so we can operate on its internals.
+        let handle = active.handle;
+
+        // Signal the route to stop and close the shutdown channel.
+        let _ = handle.shutdown_tx.send(()).await;
+        handle.shutdown_tx.close();
+
+        // Extract the JoinHandle so we can monitor and, if needed, abort it.
+        let mut join_handle = handle.handle;
+        tokio::select! {
+            res = &mut join_handle => {
+                // The task finished naturally within the 5s window
+                let _ = res;
+            }
+            _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {
+                // The 5s timer finished first - abort the task to ensure it doesn't linger.
+                join_handle.abort();
+                // Await the handle one last time to ensure the task has fully shut down.
+                let _ = join_handle.await;
+            }
         }
     }
 
@@ -1650,7 +1674,14 @@ impl Route {
                                         reconnect_interval.as_millis()
                                     );
                                     if !reconnect_interval.is_zero() {
-                                        tokio::time::sleep(reconnect_interval).await;
+                                        select! {
+                                            _ = tokio::time::sleep(reconnect_interval) => {}
+                                            _ = shutdown_rx.recv() => {
+                                                info!("Shutdown signal received for route '{}'.", name);
+                                                outcome_guard.set(RouteOutcome::Stopped);
+                                                break 'reconnect;
+                                            }
+                                        }
                                     }
                                     break; // -> next reconnect iteration
                                 }
@@ -1683,7 +1714,14 @@ impl Route {
                                         reconnect_interval.as_millis()
                                     );
                                     if !reconnect_interval.is_zero() {
-                                        tokio::time::sleep(reconnect_interval).await;
+                                        select! {
+                                            _ = tokio::time::sleep(reconnect_interval) => {}
+                                            _ = shutdown_rx.recv() => {
+                                                info!("Shutdown signal received for route '{}'.", name);
+                                                outcome_guard.set(RouteOutcome::Stopped);
+                                                break 'reconnect;
+                                            }
+                                        }
                                     }
                                     break; // -> next reconnect iteration
                                 }
@@ -1854,8 +1892,11 @@ impl Route {
         let commit_router = CommitRouter::new(
             consumer.commit_requires_order(),
             self.options.commit_concurrency_limit,
+            1,
         );
         let commit_semaphore = commit_router.dispatch_semaphore();
+        let read_semaphore = commit_router.read_semaphore();
+        let mut read_permit = None;
         let mut seq_counter = 0u64;
 
         if let Some(tx) = ready_tx {
@@ -1863,8 +1904,9 @@ impl Route {
         }
         let mut batch_scratch = BatchScratch::with_capacity(self.options.batch_size);
         // Check if retry middleware is present on output
-        let has_retry_middleware = self.output.has_retry_middleware();
-        let has_dlq_middleware = self.output.has_dlq_middleware();
+        let has_retry_middleware =
+            self.output_has_middleware(|m| matches!(m, Middleware::Retry(_)));
+        let has_dlq_middleware = self.output_has_middleware(|m| matches!(m, Middleware::Dlq(_)));
         // Messages processed since the last cooperative yield (see YIELD_EVERY_MSGS).
         let mut since_yield = 0usize;
         let mut run_result = loop {
@@ -1875,7 +1917,12 @@ impl Route {
                     info!("Shutdown signal received in sequential runner for route '{}'.", name);
                     break Ok(true); // Stopped by shutdown signal
                 }
-                res = consumer.receive_batch(self.options.batch_size) => {
+                res = receive_with_permit(
+                    consumer.as_mut(),
+                    self.options.batch_size,
+                    read_semaphore.as_ref(),
+                    &mut read_permit,
+                ) => {
                     let received_batch = match res {
                         Ok(batch) => {
                             if batch.messages.is_empty() {
@@ -1912,7 +1959,7 @@ impl Route {
                     let seq = seq_counter;
                     seq_counter += 1;
                     let batch_len = received_batch.messages.len();
-                    let commit = commit_router.wrap(received_batch.commit, seq);
+                    let commit = commit_router.wrap(received_batch.commit, seq, read_permit.take());
                     if let Err(err) = send_batch_and_commit(
                         &publisher,
                         received_batch.messages,
@@ -2070,9 +2117,13 @@ impl Route {
         let commit_router = CommitRouter::new(
             consumer.commit_requires_order(),
             self.options.commit_concurrency_limit,
+            // One batch per worker, a full work queue, and the one being enqueued.
+            self.options.concurrency + work_capacity + 1,
         );
         // Shared across workers so the limit bounds total commits in flight, not per-worker.
         let commit_semaphore = commit_router.dispatch_semaphore();
+        let read_semaphore = commit_router.read_semaphore();
+        let mut read_permit = None;
 
         // --- Worker Pool ---
         let mut join_set = JoinSet::new();
@@ -2082,8 +2133,10 @@ impl Route {
             let err_tx = err_tx.clone();
             let commit_semaphore = commit_semaphore.clone();
             let mut commit_tasks = JoinSet::new();
-            let has_retry_middleware = self.output.has_retry_middleware();
-            let has_dlq_middleware = self.output.has_dlq_middleware();
+            let has_retry_middleware =
+                self.output_has_middleware(|m| matches!(m, Middleware::Retry(_)));
+            let has_dlq_middleware =
+                self.output_has_middleware(|m| matches!(m, Middleware::Dlq(_)));
             let batch_size = self.options.batch_size;
             // Owned per worker: the borrow cannot outlive this loop iteration.
             let drops = drops.cloned();
@@ -2092,7 +2145,10 @@ impl Route {
                 debug!("Starting worker {}", i);
                 let mut batch_scratch = BatchScratch::with_capacity(batch_size);
                 let mut since_yield = 0usize;
-                while let Ok((messages, commit_func, ticket)) = work_rx_clone.recv().await {
+                // A worker only leaves this loop when the route is going down, so closing the
+                // channel on the way out (panic included) unblocks a producer waiting on a full one.
+                let work = CloseOnDrop(work_rx_clone);
+                while let Ok((messages, commit_func, ticket)) = work.0.recv().await {
                     let batch_len = messages.len();
                     if let Err(err) = send_batch_and_commit(
                         &publisher,
@@ -2122,6 +2178,7 @@ impl Route {
                         tokio::task::yield_now().await;
                     }
                 }
+                drop(work);
                 // Wait for all in-flight commits to complete
                 while let Some(res) = commit_tasks.join_next().await {
                     report_join_result(res, "Commit task");
@@ -2141,6 +2198,10 @@ impl Route {
         // exit_on_empty, or a source reporting end of stream -- so we report a
         // completion rather than a shutdown-driven exit.
         let mut drained = false;
+        // The batch that could not be enqueued because the workers were already gone.
+        let mut leftover = None;
+        // A panicked worker never commits its batch, which leaves a gap in the commit sequence.
+        let mut worker_panicked = false;
         loop {
             select! {
                 biased; // Prioritize checking for errors
@@ -2158,6 +2219,7 @@ impl Route {
                             loop_error = Some(anyhow::anyhow!("Worker task finished unexpectedly"));
                         }
                         Err(e) => {
+                            worker_panicked |= e.is_panic();
                             error!("A worker task panicked: {}. Shutting down route.", e);
                             loop_error = Some(e.into());
                         }
@@ -2170,7 +2232,12 @@ impl Route {
                     break;
                 }
 
-                res = consumer.receive_batch(self.options.batch_size) => {
+                res = receive_with_permit(
+                    consumer.as_mut(),
+                    self.options.batch_size,
+                    read_semaphore.as_ref(),
+                    &mut read_permit,
+                ) => {
                     let (messages, commit) = match res {
                         Ok(batch) => {
                             if batch.messages.is_empty() {
@@ -2217,7 +2284,7 @@ impl Route {
                     // is closed while producing batches.
                     let seq = seq_counter;
                     let batch_len = messages.len();
-                    let wrapped_commit = commit_router.wrap(commit, seq);
+                    let wrapped_commit = commit_router.wrap(commit, seq, read_permit.take());
                     let ticket = ordered_publish.then(|| {
                         let (release, next_prev) = tokio::sync::oneshot::channel();
                         let ticket = OrderTicket {
@@ -2234,11 +2301,9 @@ impl Route {
                         }
                         Err(e) => {
                             warn!("Work channel closed, cannot process more messages concurrently. Shutting down.");
-                            // Recover the moved tuple so we can invoke the wrapped commit
-                            // and resolve the batch with a NACK. Dropping the ticket
-                            // releases whatever batch is queued behind this one.
-                            let (msgs_back, wrapped_commit_back, _) = e.into_inner();
-                            let _ = (wrapped_commit_back)(vec![crate::traits::MessageDisposition::Nack; msgs_back.len()]).await;
+                            // Keep the batch: it is nacked below, after the batches queued
+                            // ahead of it, so the commit sequence stays in order.
+                            leftover = Some(e.into_inner());
                             break;
                         }
                     }
@@ -2260,7 +2325,16 @@ impl Route {
         drop(work_tx);
         // Wait for all worker tasks to complete.
         while let Some(res) = join_set.join_next().await {
+            worker_panicked |= matches!(&res, Err(e) if e.is_panic());
             report_join_result(res, "Worker task");
+        }
+        // Batches no worker picked up are nacked for redelivery. After a panic the sequence
+        // gap would block an ordered nack forever, so those are dropped uncommitted instead.
+        let unprocessed = std::iter::from_fn(|| work_rx.try_recv().ok()).chain(leftover);
+        for (messages, commit, _) in unprocessed {
+            if !worker_panicked {
+                let _ = commit(vec![MessageDisposition::Nack; messages.len()]).await;
+            }
         }
 
         // Close sequencer (if any) now that all in-flight commits have drained.
@@ -2407,6 +2481,15 @@ impl Route {
     }
 }
 
+/// Closes the work channel when its worker exits, however it exits.
+struct CloseOnDrop<T>(async_channel::Receiver<T>);
+
+impl<T> Drop for CloseOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.close();
+    }
+}
+
 type SequencerItem = (
     Vec<MessageDisposition>,
     BatchCommitFunc,
@@ -2470,9 +2553,12 @@ fn wrap_commit(
     commit: BatchCommitFunc,
     seq: u64,
     seq_tx: Sender<(u64, SequencerItem)>,
+    permit: Option<tokio::sync::OwnedSemaphorePermit>,
 ) -> BatchCommitFunc {
     Box::new(move |dispositions| {
         Box::pin(async move {
+            // Held until the commit has run, or released when it is dropped unrun.
+            let _permit = permit;
             let (notify_tx, notify_rx) = tokio::sync::oneshot::channel();
             if seq_tx
                 .send((seq, (dispositions, commit, notify_tx)))
@@ -2511,6 +2597,8 @@ enum CommitRouter {
     Ordered {
         seq_tx: Sender<(u64, SequencerItem)>,
         handle: JoinHandle<()>,
+        /// Batches read but not yet committed. See [`CommitRouter::read_semaphore`].
+        in_flight: Arc<tokio::sync::Semaphore>,
     },
     Unordered {
         semaphore: Arc<tokio::sync::Semaphore>,
@@ -2518,11 +2606,17 @@ enum CommitRouter {
 }
 
 impl CommitRouter {
-    fn new(ordered: bool, commit_concurrency_limit: usize) -> Self {
+    /// `sending` is how many batches the runner can hold before their commit is queued.
+    fn new(ordered: bool, commit_concurrency_limit: usize, sending: usize) -> Self {
         let commit_concurrency_limit = commit_concurrency_limit.max(1);
         if ordered {
             let (seq_tx, handle) = spawn_sequencer(commit_concurrency_limit);
-            CommitRouter::Ordered { seq_tx, handle }
+            let in_flight = commit_concurrency_limit.saturating_add(sending);
+            CommitRouter::Ordered {
+                seq_tx,
+                handle,
+                in_flight: Arc::new(tokio::sync::Semaphore::new(in_flight)),
+            }
         } else {
             CommitRouter::Unordered {
                 semaphore: Arc::new(tokio::sync::Semaphore::new(commit_concurrency_limit)),
@@ -2530,11 +2624,18 @@ impl CommitRouter {
         }
     }
 
-    /// Wraps a batch commit for its dispatch mode. `seq` is only used by the
-    /// ordered path; it is ignored when commits run concurrently.
-    fn wrap(&self, commit: BatchCommitFunc, seq: u64) -> BatchCommitFunc {
+    /// Wraps a batch commit for its dispatch mode. `seq` and `permit` are only used by
+    /// the ordered path; they are ignored when commits run concurrently.
+    fn wrap(
+        &self,
+        commit: BatchCommitFunc,
+        seq: u64,
+        permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    ) -> BatchCommitFunc {
         match self {
-            CommitRouter::Ordered { seq_tx, .. } => wrap_commit(commit, seq, seq_tx.clone()),
+            CommitRouter::Ordered { seq_tx, .. } => {
+                wrap_commit(commit, seq, seq_tx.clone(), permit)
+            }
             // Unordered commits need no wrapping: the dispatcher acquires a
             // `commit_concurrency_limit` permit *before* spawning each commit
             // (see `dispatch_semaphore`), so backpressure applies at queue time
@@ -2545,8 +2646,8 @@ impl CommitRouter {
 
     /// Semaphore that bounds how many unordered commits may be queued/in-flight at
     /// once. The dispatcher acquires a permit before spawning a commit task and
-    /// holds it for the task's lifetime. `None` for the ordered path, whose
-    /// bounded sequencer channel already limits outstanding commits.
+    /// holds it for the task's lifetime. `None` for the ordered path, which is
+    /// bounded where batches are read (see `read_semaphore`).
     fn dispatch_semaphore(&self) -> Option<Arc<tokio::sync::Semaphore>> {
         match self {
             CommitRouter::Ordered { .. } => None,
@@ -2554,10 +2655,20 @@ impl CommitRouter {
         }
     }
 
+    /// Semaphore the runner takes a permit from before it reads a batch whose commit is
+    /// ordered; the permit travels with the commit. Taking it after the send instead could
+    /// deadlock: later batches would hold every permit while waiting for an earlier one.
+    fn read_semaphore(&self) -> Option<Arc<tokio::sync::Semaphore>> {
+        match self {
+            CommitRouter::Ordered { in_flight, .. } => Some(Arc::clone(in_flight)),
+            CommitRouter::Unordered { .. } => None,
+        }
+    }
+
     /// Tears down the sequencer (if any). Call only after all workers and their
     /// in-flight commit tasks have drained, so the sequencer's senders are gone.
     async fn shutdown(self) {
-        if let CommitRouter::Ordered { seq_tx, handle } = self {
+        if let CommitRouter::Ordered { seq_tx, handle, .. } = self {
             drop(seq_tx);
             let _ = handle.await;
         }
@@ -2576,6 +2687,24 @@ async fn acquire_commit_permit(
         Some(sem) => Arc::clone(sem).acquire_owned().await.ok(),
         None => None,
     }
+}
+
+/// Reads the next batch, first waiting for room to commit it when commits are ordered.
+/// A permit left in `permit` by a cancelled or empty read is reused.
+async fn receive_with_permit(
+    consumer: &mut dyn MessageConsumer,
+    batch_size: usize,
+    semaphore: Option<&Arc<tokio::sync::Semaphore>>,
+    permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
+) -> Result<crate::traits::ReceivedBatch, ConsumerError> {
+    if permit.is_none() {
+        *permit = acquire_commit_permit(semaphore).await;
+    }
+    consumer.receive_batch(batch_size).await
+}
+
+fn warn_reply_missing(id: u128) {
+    warn!("Message {id:032x} expected a reply (reply_to set), but the output only acknowledged it. Committing it without a reply.");
 }
 
 fn map_responses_to_dispositions(
@@ -2608,8 +2737,7 @@ fn map_responses_to_dispositions(
             }
         }
         if request_ids.contains(&id) {
-            error!("Message {:032x} expected a reply (reply_to set), but publisher returned Ack. Nacking to avoid committing a lost response.", id);
-            return vec![MessageDisposition::Nack];
+            warn_reply_missing(id);
         }
         return vec![MessageDisposition::Ack];
     }
@@ -2640,11 +2768,11 @@ fn map_responses_to_dispositions(
         } else if let Some(resp) = response_map.remove(id) {
             // If a response exists for this specific ID, use it.
             dispositions.push(MessageDisposition::Reply(resp));
-        } else if request_ids.contains(id) {
-            error!("Message {:032x} expected a reply (reply_to set), but publisher returned Ack. Nacking to avoid committing a lost response.", id);
-            dispositions.push(MessageDisposition::Nack);
         } else {
-            // Otherwise, it was a successful send that did not produce a response.
+            // The sink accepted it. A nack would redeliver a request it would only ack again.
+            if request_ids.contains(id) {
+                warn_reply_missing(*id);
+            }
             dispositions.push(MessageDisposition::Ack);
         }
     }
@@ -2679,7 +2807,7 @@ fn test_map_responses_to_dispositions_logic() {
     assert_eq!(dispositions.len(), 4);
     assert!(matches!(dispositions[0], MessageDisposition::Reply(_))); // from responses
     assert!(matches!(dispositions[1], MessageDisposition::Ack)); // permanent failure dropped
-    assert!(matches!(dispositions[2], MessageDisposition::Nack)); // missing reply
+    assert!(matches!(dispositions[2], MessageDisposition::Ack)); // accepted, no reply
     assert!(matches!(dispositions[3], MessageDisposition::Reply(_))); // from responses
 
     let mut dlq_msg = CanonicalMessage::from("msg2");
@@ -3457,6 +3585,129 @@ mod tests {
         assert_route_commits_are_ordered_and_non_overlapping(4).await;
     }
 
+    /// Counts the batches read from an ordered source and holds every commit until released.
+    #[derive(Debug)]
+    struct StalledCommitFactory {
+        read: Arc<std::sync::atomic::AtomicUsize>,
+        release: Arc<tokio::sync::Semaphore>,
+    }
+
+    struct StalledCommitConsumer {
+        inner: Box<dyn MessageConsumer>,
+        read: Arc<std::sync::atomic::AtomicUsize>,
+        release: Arc<tokio::sync::Semaphore>,
+    }
+
+    #[async_trait::async_trait]
+    impl CustomMiddlewareFactory for StalledCommitFactory {
+        async fn apply_consumer(
+            &self,
+            consumer: Box<dyn MessageConsumer>,
+            _route_name: &str,
+            _config: &serde_json::Value,
+        ) -> anyhow::Result<Box<dyn MessageConsumer>> {
+            Ok(Box::new(StalledCommitConsumer {
+                inner: consumer,
+                read: Arc::clone(&self.read),
+                release: Arc::clone(&self.release),
+            }))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MessageConsumer for StalledCommitConsumer {
+        fn commit_requires_order(&self) -> bool {
+            true
+        }
+
+        async fn receive_batch(
+            &mut self,
+            max_messages: usize,
+        ) -> Result<ReceivedBatch, ConsumerError> {
+            let mut batch = self.inner.receive_batch(max_messages).await?;
+            if batch.messages.is_empty() {
+                return Ok(batch);
+            }
+            self.read.fetch_add(1, Ordering::SeqCst);
+            let original_commit = batch.commit;
+            let release = Arc::clone(&self.release);
+            batch.commit = Box::new(move |dispositions| {
+                Box::pin(async move {
+                    let _released = release.acquire().await;
+                    original_commit(dispositions).await
+                })
+            });
+            Ok(batch)
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    /// While one ordered commit stalls, the runner stops reading instead of piling up
+    /// commit tasks. `allowed` is `commit_concurrency_limit` plus the batches in the runner.
+    async fn assert_stalled_ordered_commit_stops_reads(concurrency: usize, allowed: usize) {
+        const TOTAL: usize = 60;
+        let unique_id = fast_uuid_v7::gen_id().to_string();
+        let name = format!("stalled_commit_{unique_id}");
+        let read = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        register_middleware_factory(
+            &name,
+            Arc::new(StalledCommitFactory {
+                read: Arc::clone(&read),
+                release: Arc::clone(&release),
+            }),
+        )
+        .unwrap();
+
+        let input = Endpoint::new_memory(&format!("stalled_in_{unique_id}"), TOTAL)
+            .add_middleware(Middleware::Custom {
+                name,
+                config: serde_json::Value::Null,
+            });
+        let route = Route::new(input.clone(), Endpoint::new(EndpointType::Null))
+            .with_concurrency(concurrency)
+            .with_batch_size(1)
+            .with_commit_concurrency_limit(1);
+        let input_channel = input.channel().unwrap();
+        let messages = (0..TOTAL)
+            .map(|seq| crate::CanonicalMessage::from(seq.to_string()))
+            .collect();
+        input_channel.fill_messages(messages).await.unwrap();
+        input_channel.close();
+
+        let running =
+            tokio::spawn(
+                async move { route.run_until_err("stalled_ordered_commit", None, None).await },
+            );
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let stalled_at = read.load(Ordering::SeqCst);
+        assert!(
+            (1..=allowed).contains(&stalled_at),
+            "read {stalled_at} batches while the first commit was stalled, allowed {allowed}"
+        );
+
+        release.add_permits(TOTAL);
+        tokio::time::timeout(Duration::from_secs(5), running)
+            .await
+            .expect("the route must finish once commits run again")
+            .unwrap()
+            .unwrap();
+        assert_eq!(read.load(Ordering::SeqCst), TOTAL);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stalled_ordered_commit_stops_the_sequential_runner_reading() {
+        assert_stalled_ordered_commit_stops_reads(1, 2).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_stalled_ordered_commit_stops_the_concurrent_runner_reading() {
+        assert_stalled_ordered_commit_stops_reads(4, 10).await;
+    }
+
     #[derive(Debug, Default)]
     struct PublishObservation {
         /// Batch sequence numbers in the order their `send_batch` completed.
@@ -3991,6 +4242,89 @@ mod tests {
                 panic!("Route deadlocked! The sequencer likely didn't receive the Nack for the failed batch.");
             }
         }
+    }
+
+    // Regression: once every worker had failed, the producer stayed blocked on the full
+    // work channel and the batches queued in it kept the commit sequencer alive.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_concurrent_route_returns_when_every_worker_fails() {
+        let unique_id = fast_uuid_v7::gen_id().to_string();
+        let factory_name = format!("always_fail_factory_{}", unique_id);
+
+        #[derive(Debug)]
+        struct AlwaysFailingFactory;
+
+        #[async_trait::async_trait]
+        impl CustomMiddlewareFactory for AlwaysFailingFactory {
+            async fn apply_publisher(
+                &self,
+                _publisher: Box<dyn MessagePublisher>,
+                _route_name: &str,
+                _config: &serde_json::Value,
+            ) -> anyhow::Result<Box<dyn MessagePublisher>> {
+                Ok(Box::new(AlwaysFailingPublisher))
+            }
+            async fn apply_consumer(
+                &self,
+                consumer: Box<dyn MessageConsumer>,
+                _route_name: &str,
+                _config: &serde_json::Value,
+            ) -> anyhow::Result<Box<dyn MessageConsumer>> {
+                Ok(consumer)
+            }
+        }
+
+        struct AlwaysFailingPublisher;
+
+        #[async_trait::async_trait]
+        impl MessagePublisher for AlwaysFailingPublisher {
+            async fn send_batch(
+                &self,
+                _messages: Vec<crate::CanonicalMessage>,
+            ) -> Result<SentBatch, PublisherError> {
+                // Long enough for the producer to fill the work channel behind the workers.
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                Err(PublisherError::Retryable(anyhow::anyhow!("sink is down")))
+            }
+            async fn send(
+                &self,
+                _msg: crate::CanonicalMessage,
+            ) -> Result<crate::traits::Sent, PublisherError> {
+                Err(PublisherError::Retryable(anyhow::anyhow!("sink is down")))
+            }
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
+        }
+
+        register_middleware_factory(&factory_name, Arc::new(AlwaysFailingFactory)).unwrap();
+
+        let input = Endpoint::new_memory(&format!("all_fail_in_{}", unique_id), 100);
+        let output = Endpoint::new_memory(&format!("all_fail_out_{}", unique_id), 100)
+            .add_middleware(Middleware::Custom {
+                name: factory_name,
+                config: serde_json::Value::Null,
+            });
+        let route = Route::new(input.clone(), output)
+            .with_concurrency(4)
+            .with_batch_size(1);
+
+        let input_ch = input.channel().unwrap();
+        for i in 0..40 {
+            input_ch
+                .send_message(format!("msg{i}").into())
+                .await
+                .unwrap();
+        }
+
+        let (_shutdown_tx, shutdown_rx) = async_channel::bounded(1);
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            route.run_until_err("all_workers_fail_test", Some(shutdown_rx), None),
+        )
+        .await
+        .expect("route hung after every worker failed");
+        assert!(result.is_err(), "route should report the sink failure");
     }
 
     #[tokio::test]
@@ -5915,7 +6249,12 @@ mod tests {
             // 1 (ok), 2 (fail), 3 (ok), 4 (fail)
             messages.push(CanonicalMessage::from_json(serde_json::json!({"id": i})).unwrap());
         }
-        let commit = wrap_commit(Box::new(|_| Box::pin(async { Ok(()) })), 0, seq_tx.clone());
+        let commit = wrap_commit(
+            Box::new(|_| Box::pin(async { Ok(()) })),
+            0,
+            seq_tx.clone(),
+            None,
+        );
         work_tx.send((messages, commit)).await.unwrap();
 
         let dlq_channel = dlq_endpoint.channel().unwrap();

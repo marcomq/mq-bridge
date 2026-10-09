@@ -110,8 +110,16 @@ async fn settle_and_commit(
     first_err.map_or(Ok(()), Err)
 }
 
+type PendingReceive = BoxFuture<'static, Result<ReceivedBatch, ConsumerError>>;
+
 pub struct WeakJoinConsumer {
-    inner: Box<dyn MessageConsumer>,
+    inner: Arc<Mutex<Box<dyn MessageConsumer>>>,
+    /// The source's in-flight receive, which holds `inner` locked. Kept across calls: a
+    /// group timeout must not cancel it, as a source may lose what it had already read.
+    pending_receive: std::sync::Mutex<Option<PendingReceive>>,
+    commit_requires_order: bool,
+    /// False while `exit_on_empty` could not reach `inner` because a receive was in flight.
+    exit_on_empty_forwarded: bool,
     config: WeakJoinMiddleware,
     state: Arc<Mutex<JoinState>>,
     /// `None` under `ack: on_receive`, where sources are acked as they arrive.
@@ -128,15 +136,19 @@ impl WeakJoinConsumer {
                 "weak_join: 'required' is set but 'branch_by' is not; 'required' only applies in branch mode and will be ignored in count mode."
             );
         }
+        let commit_requires_order = inner.commit_requires_order();
         let tracker = (config.ack == WeakJoinAck::OnJoin).then(|| {
             Arc::new(Mutex::new(AckTracker {
-                ordered: inner.commit_requires_order(),
+                ordered: commit_requires_order,
                 base: 0,
                 batches: VecDeque::new(),
             }))
         });
         Self {
-            inner,
+            inner: Arc::new(Mutex::new(inner)),
+            pending_receive: std::sync::Mutex::new(None),
+            commit_requires_order,
+            exit_on_empty_forwarded: true,
             config: config.clone(),
             state: Arc::new(Mutex::new(JoinState {
                 pending: HashMap::new(),
@@ -145,6 +157,24 @@ impl WeakJoinConsumer {
             tracker,
             exit_on_empty: false,
         }
+    }
+
+    /// Forwards the drain flag unless a receive is in flight; `receive_batch` retries then.
+    fn forward_exit_on_empty(&mut self) {
+        if let Ok(mut inner) = self.inner.try_lock() {
+            inner.set_exit_on_empty(self.exit_on_empty);
+            self.exit_on_empty_forwarded = true;
+        }
+    }
+
+    /// Locks the source for a hook. Hooks run between receives, so a receive still pending
+    /// is cancelled: it would hold the lock forever.
+    async fn inner_for_hook(&self) -> tokio::sync::MutexGuard<'_, Box<dyn MessageConsumer>> {
+        self.pending_receive
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        self.inner.lock().await
     }
 
     /// Dispatches to branch-keyed or count-array joining depending on config.
@@ -347,18 +377,33 @@ impl MessageConsumer for WeakJoinConsumer {
         // Track the flag locally so receive_batch can flush pending groups before exposing
         // an empty batch, and still forward it so the inner source actually reports drained.
         self.exit_on_empty = exit_on_empty;
-        self.inner.set_exit_on_empty(exit_on_empty);
+        self.exit_on_empty_forwarded = false;
+        self.forward_exit_on_empty();
     }
 
     fn commit_requires_order(&self) -> bool {
-        self.inner.commit_requires_order()
+        self.commit_requires_order
     }
     fn on_connect_hook(&self) -> Option<BoxFuture<'_, anyhow::Result<()>>> {
-        self.inner.on_connect_hook()
+        Some(Box::pin(async move {
+            let inner = self.inner_for_hook().await;
+            let hook = inner.on_connect_hook();
+            match hook {
+                Some(hook) => hook.await,
+                None => Ok(()),
+            }
+        }))
     }
 
     fn on_disconnect_hook(&self) -> Option<BoxFuture<'_, anyhow::Result<()>>> {
-        self.inner.on_disconnect_hook()
+        Some(Box::pin(async move {
+            let inner = self.inner_for_hook().await;
+            let hook = inner.on_disconnect_hook();
+            match hook {
+                Some(hook) => hook.await,
+                None => Ok(()),
+            }
+        }))
     }
 
     async fn receive_batch(&mut self, max_messages: usize) -> Result<ReceivedBatch, ConsumerError> {
@@ -380,13 +425,29 @@ impl MessageConsumer for WeakJoinConsumer {
         let sleep_duration = next_timeout.saturating_duration_since(now);
         drop(state);
 
-        let batch_future = self.inner.receive_batch(max_messages);
-        let timeout_future = tokio::time::sleep(sleep_duration);
+        if !self.exit_on_empty_forwarded {
+            self.forward_exit_on_empty();
+        }
+        let pending = self
+            .pending_receive
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let received = {
+            let receive = pending.get_or_insert_with(|| {
+                let inner = Arc::clone(&self.inner);
+                Box::pin(async move { inner.lock_owned().await.receive_batch(max_messages).await })
+            });
+            tokio::select! {
+                res = receive => Some(res),
+                _ = tokio::time::sleep(sleep_duration) => None,
+            }
+        };
 
         let mut ready = Vec::new();
         let mut discarded = Vec::new();
-        tokio::select! {
-            res = batch_future => {
+        match received {
+            Some(res) => {
+                *pending = None;
                 let batch = res?;
                 let count = batch.messages.len();
                 let seq = match &self.tracker {
@@ -444,7 +505,7 @@ impl MessageConsumer for WeakJoinConsumer {
                 drop(state);
                 self.ack_then_take_ready(discarded, max_messages).await
             }
-            _ = timeout_future => {
+            None => {
                 let mut state = self.state.lock().await;
                 self.check_timeouts(&mut state, &mut ready, &mut discarded);
                 state.ready_buffer.extend(ready);
@@ -881,5 +942,68 @@ mod tests {
 
         assert!(join.receive_batch(10).await.unwrap().messages.is_empty());
         assert_eq!(logged(&log), vec![(0, vec!["ack"])]);
+    }
+
+    /// Takes a message, then waits before returning it: a cancelled receive loses it.
+    struct SlowSource {
+        queue: VecDeque<(CanonicalMessage, Duration)>,
+    }
+
+    #[async_trait]
+    impl MessageConsumer for SlowSource {
+        async fn receive_batch(&mut self, _max: usize) -> Result<ReceivedBatch, ConsumerError> {
+            let Some((message, delay)) = self.queue.pop_front() else {
+                return std::future::pending().await;
+            };
+            tokio::time::sleep(delay).await;
+            Ok(ReceivedBatch {
+                messages: vec![message],
+                commit: Box::new(|_| Box::pin(async { Ok(()) })),
+            })
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    #[tokio::test]
+    async fn a_group_timeout_does_not_cancel_the_receive_in_flight() {
+        let config = WeakJoinMiddleware {
+            group_by: "group_id".to_string(),
+            expected_count: 2,
+            timeout_ms: 30,
+            branch_by: None,
+            required: Vec::new(),
+            on_timeout: WeakJoinTimeout::Fire,
+            ack: WeakJoinAck::OnJoin,
+        };
+        let message = |val: u64| {
+            CanonicalMessage::from_json(json!({ "val": val }))
+                .unwrap()
+                .with_metadata_kv("group_id", "A")
+        };
+        // The first receive returns at once and opens a group; the second outlasts its timeout.
+        let source = SlowSource {
+            queue: VecDeque::from([
+                (message(1), Duration::ZERO),
+                (message(2), Duration::from_millis(120)),
+            ]),
+        };
+        let mut join = WeakJoinConsumer::new(Box::new(source), &config);
+        assert!(join.receive_batch(10).await.unwrap().messages.is_empty());
+
+        let mut values = Vec::new();
+        while values.len() < 2 {
+            let batch = tokio::time::timeout(Duration::from_secs(5), join.receive_batch(10))
+                .await
+                .expect("the second message was lost with the cancelled receive")
+                .unwrap();
+            for joined in batch.messages {
+                let payload: Vec<Value> = serde_json::from_slice(&joined.payload).unwrap();
+                values.extend(payload.iter().map(|p| p["val"].as_u64().unwrap()));
+            }
+        }
+        assert_eq!(values, vec![1, 2]);
     }
 }

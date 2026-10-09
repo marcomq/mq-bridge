@@ -42,6 +42,8 @@ pub(crate) fn is_known_endpoint_name(name: &str) -> bool {
             | "redis_streams"
             | "redis"
             | "grpc"
+            | "http_bulk"
+            | "sequence"
             | "fanout"
             | "stream_buffer"
             | "ref"
@@ -233,6 +235,14 @@ pub(crate) fn is_known_middleware_name(name: &str) -> bool {
             | "buffer"
             | "cookie_jar"
             | "filter"
+            | "otel"
+            | "lookup"
+            | "aggregate"
+            | "transform"
+            | "encryption"
+            | "compression"
+            | "pack"
+            | "unpack"
             | "custom"
     )
 }

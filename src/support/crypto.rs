@@ -317,7 +317,7 @@ mod tests {
             key_id: "k1".to_string(),
             key: base64::engine::general_purpose::STANDARD.encode([7u8; 32]),
             decrypt_keys: HashMap::new(),
-            authenticate_metadata: Vec::new(),
+            ..Default::default()
         }
     }
 
@@ -512,7 +512,7 @@ mod proptests {
             key_id: "k1".to_string(),
             key: base64::engine::general_purpose::STANDARD.encode([7u8; 32]),
             decrypt_keys: HashMap::new(),
-            authenticate_metadata: Vec::new(),
+            ..Default::default()
         })
         .unwrap()
     }

@@ -973,12 +973,12 @@ with_optional_setters!(TransformMiddleware { with_schema => schema: serde_json::
 with_optional_string_setters!(TransformMiddleware { with_schema_file => schema_file });
 with_value_setters!(RandomPanicMiddleware { with_mode => mode: FaultMode, with_enabled => enabled: bool });
 with_optional_setters!(RandomPanicMiddleware { with_trigger_on_message => trigger_on_message: usize });
-with_value_setters!(CompressionMiddleware { with_algorithm => algorithm: Compression });
+with_value_setters!(CompressionMiddleware { with_algorithm => algorithm: Compression, with_on_error => on_error: InputErrorPolicy });
 with_optional_setters!(CompressionMiddleware { with_max_decompressed_bytes => max_decompressed_bytes: u64 });
 
 with_value_setters!(StaticConfig { with_raw => raw: bool, with_metadata => metadata: std::collections::HashMap<String, String> });
 with_string_setters!(StaticConfig { with_body => body });
-with_value_setters!(EncryptionConfig { with_cipher => cipher: CipherKind, with_decrypt_keys => decrypt_keys: HashMap<String, String> });
+with_value_setters!(EncryptionConfig { with_cipher => cipher: CipherKind, with_decrypt_keys => decrypt_keys: HashMap<String, String>, with_on_error => on_error: InputErrorPolicy });
 with_string_setters!(EncryptionConfig { with_key_id => key_id, with_key => key });
 
 with_optional_setters!(AwsConfig { with_max_messages => max_messages: i32, with_wait_time_seconds => wait_time_seconds: i32 });

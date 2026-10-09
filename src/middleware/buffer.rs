@@ -169,8 +169,10 @@ fn distribute_batch_results(
                 .collect();
 
             for entry in entries {
-                let result = if let Some(error) = failed_map.remove(&entry.message_id) {
-                    Err(error)
+                // Entries sharing an id cannot be told apart, so a failure fails them all.
+                let result = if let Some(error) = failed_map.get_mut(&entry.message_id) {
+                    let copy = rebuild_error(error, &error.to_string());
+                    Err(std::mem::replace(error, copy))
                 } else if let Some(response) = response_map.remove(&entry.message_id) {
                     Ok(Sent::Response(response))
                 } else {
@@ -437,13 +439,17 @@ fn merge_commits(commits: Vec<(usize, BatchCommitFunc)>) -> BatchCommitFunc {
     Box::new(move |dispositions: Vec<MessageDisposition>| {
         Box::pin(async move {
             let mut offset = 0usize;
+            // A failed sub-commit must not leave the later ones unsettled.
+            let mut first_error = None;
             for (count, commit) in commits {
                 let end = (offset + count).min(dispositions.len());
                 let slice = dispositions[offset..end].to_vec();
                 offset = end;
-                commit(slice).await?;
+                if let Err(e) = commit(slice).await {
+                    first_error.get_or_insert(e);
+                }
             }
-            Ok(())
+            first_error.map_or(Ok(()), Err)
         })
     })
 }

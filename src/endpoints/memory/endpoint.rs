@@ -491,6 +491,13 @@ impl MessagePublisher for MemoryPublisher {
                 store.append_batch(messages).await;
                 Ok(SentBatch::Ack)
             }
+            PublisherBackend::Queue(_) if self.request_reply => {
+                // Each request waits for its own reply, so they go out one by one.
+                crate::traits::send_batch_helper(self, messages, |publisher, message| {
+                    Box::pin(publisher.send(message))
+                })
+                .await
+            }
             PublisherBackend::Queue(sender) => {
                 trace!(
                     topic = %self.topic,
@@ -1484,6 +1491,25 @@ mod tests {
                 .is_none(),
             "timed out request should clean up the registered waiter"
         );
+    }
+
+    #[tokio::test]
+    async fn test_memory_request_reply_batch_waits_for_replies() {
+        let publisher = MemoryPublisher::new(&MemoryConfig {
+            topic: format!("mem_rr_batch_{}", fast_uuid_v7::gen_id_str()),
+            capacity: Some(10),
+            request_reply: true,
+            request_timeout_ms: Some(25),
+            ..Default::default()
+        })
+        .unwrap();
+
+        let sent = publisher
+            .send_batch(vec!["a".into(), "b".into()])
+            .await
+            .unwrap();
+        // No responder: both requests time out instead of being acked unanswered.
+        assert!(matches!(sent, SentBatch::Partial { failed, .. } if failed.len() == 2));
     }
 
     /// A `send()` future dropped mid-flight (route shutdown, an outer timeout) must not

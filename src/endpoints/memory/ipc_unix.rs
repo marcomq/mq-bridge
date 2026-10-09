@@ -11,6 +11,7 @@ use crate::CanonicalMessage;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Mutex;
@@ -45,7 +46,7 @@ struct UnixIpcTransportInner {
     // accept. The codec owns the partial-frame buffer, which is what makes
     // reads cancel safe.
     conn: Mutex<Option<FramedIo<UnixStream>>>,
-    closed: Mutex<bool>,
+    closed: AtomicBool,
 }
 
 impl UnixIpcTransport {
@@ -60,9 +61,10 @@ impl UnixIpcTransport {
 
         // Create parent directory if needed
         if let Some(parent) = socket_path.parent() {
+            let created = !parent.exists();
             std::fs::create_dir_all(parent)?;
-            // Set restrictive permissions on directory (0700)
-            {
+            // Restrict a directory we created (0700); an existing one such as /tmp is not ours.
+            if created {
                 use std::os::unix::fs::PermissionsExt;
                 let mut perms = std::fs::metadata(parent)?.permissions();
                 perms.set_mode(0o700);
@@ -89,7 +91,7 @@ impl UnixIpcTransport {
                 role: Role::Server,
                 listener: Mutex::new(Some(listener)),
                 conn: Mutex::new(None),
-                closed: Mutex::new(false),
+                closed: AtomicBool::new(false),
             }),
         })
     }
@@ -109,7 +111,7 @@ impl UnixIpcTransport {
                 role: Role::Client,
                 listener: Mutex::new(None),
                 conn: Mutex::new(Some(framed::wrap(stream))),
-                closed: Mutex::new(false),
+                closed: AtomicBool::new(false),
             }),
         })
     }
@@ -145,7 +147,7 @@ impl UnixIpcTransport {
 #[async_trait]
 impl TransportChannel for UnixIpcTransport {
     async fn send_batch(&self, messages: Vec<CanonicalMessage>) -> Result<()> {
-        if *self.inner.closed.lock().await {
+        if self.inner.closed.load(Ordering::Acquire) {
             return Err(anyhow!("Unix IPC transport is closed"));
         }
 
@@ -177,7 +179,7 @@ impl TransportChannel for UnixIpcTransport {
 
     async fn recv_batch(&self) -> Result<Vec<CanonicalMessage>> {
         loop {
-            if *self.inner.closed.lock().await {
+            if self.inner.closed.load(Ordering::Acquire) {
                 return Err(anyhow!("Unix IPC transport is closed"));
             }
 
@@ -240,32 +242,25 @@ impl TransportChannel for UnixIpcTransport {
     }
 
     fn is_closed(&self) -> bool {
-        // This is a blocking check, but should be fast
-        if let Ok(closed) = self.inner.closed.try_lock() {
-            *closed
-        } else {
-            false
-        }
+        self.inner.closed.load(Ordering::Acquire)
     }
 
     fn close(&self) {
-        if let Ok(mut closed) = self.inner.closed.try_lock() {
-            *closed = true;
+        if !self.inner.closed.swap(true, Ordering::AcqRel) {
             info!(path = %self.inner.socket_path, "Closing Unix IPC transport");
         }
     }
 }
 
-impl Drop for UnixIpcTransport {
+// On the shared state, so the socket file goes with the last handle, not the first.
+impl Drop for UnixIpcTransportInner {
     fn drop(&mut self) {
         // Clean up socket file if we're the server
-        if let Ok(listener_guard) = self.inner.listener.try_lock() {
-            if listener_guard.is_some() {
-                let socket_path = &self.inner.socket_path;
-                if let Err(e) = std::fs::remove_file(socket_path) {
-                    if e.kind() != std::io::ErrorKind::NotFound {
-                        warn!(path = %socket_path, error = %e, "Failed to remove Unix socket file");
-                    }
+        if self.listener.get_mut().is_some() {
+            let socket_path = &self.socket_path;
+            if let Err(e) = std::fs::remove_file(socket_path) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    warn!(path = %socket_path, error = %e, "Failed to remove Unix socket file");
                 }
             }
         }

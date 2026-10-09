@@ -230,6 +230,16 @@ impl Endpoint {
     }
 }
 
+/// The name a type policy checks. A `custom` endpoint goes by its factory name, so a
+/// plugin cannot stand in for a type the policy leaves out.
+fn policy_name(endpoint_type: &EndpointType) -> Option<&str> {
+    match endpoint_type {
+        EndpointType::Custom { name, .. } => Some(name),
+        other if other.is_core() => None,
+        other => Some(other.name()),
+    }
+}
+
 /// Validates the consumer configuration for a route.
 pub fn check_consumer(
     route_name: &str,
@@ -260,16 +270,13 @@ fn check_consumer_recursive(
         );
     }
 
-    if let Some(allowed) = allowed_types {
-        if !endpoint.endpoint_type.is_core() {
-            let name = endpoint.endpoint_type.name();
-            if !allowed.contains(&name) {
-                return Err(anyhow!(
-                    "[route:{}] Endpoint type '{}' is not allowed by policy",
-                    route_name,
-                    name
-                ));
-            }
+    if let (Some(allowed), Some(name)) = (allowed_types, policy_name(&endpoint.endpoint_type)) {
+        if !allowed.contains(&name) {
+            return Err(anyhow!(
+                "[route:{}] Endpoint type '{}' is not allowed by policy",
+                route_name,
+                name
+            ));
         }
     }
     match &endpoint.endpoint_type {
@@ -639,9 +646,9 @@ fn check_consumer_recursive(
                 return Ok(warnings);
             }
             Err(anyhow!(
-                "[route:{}] Unsupported consumer endpoint type '{:?}'",
+                "[route:{}] Unsupported consumer endpoint type '{}'",
                 route_name,
-                endpoint.endpoint_type
+                endpoint.endpoint_type.name()
             ))
         }
     }
@@ -1893,9 +1900,9 @@ async fn create_base_consumer(
         other => {
             let Some((factory, mut config)) = builtin_fallback(other)? else {
                 return Err(anyhow!(
-                    "[route:{}] Unsupported consumer endpoint type '{:?}'",
+                    "[route:{}] Unsupported consumer endpoint type '{}'",
                     route_name,
-                    endpoint.endpoint_type
+                    endpoint.endpoint_type.name()
                 ));
             };
             // The factory only sees the config, so a position the sink requires goes in there.
@@ -1931,22 +1938,19 @@ fn check_publisher_recursive(
     allowed_types: Option<&[&str]>,
 ) -> Result<Vec<String>> {
     let mut warnings = Vec::new();
-    if let Some(allowed) = allowed_types {
-        if !endpoint.endpoint_type.is_core() {
-            let name = endpoint.endpoint_type.name();
-            if !allowed.contains(&name) {
-                return Err(anyhow!(
-                    "[route:{}] Endpoint type '{}' is not allowed by policy",
-                    route_name,
-                    name
-                ));
-            }
+    if let (Some(allowed), Some(name)) = (allowed_types, policy_name(&endpoint.endpoint_type)) {
+        if !allowed.contains(&name) {
+            return Err(anyhow!(
+                "[route:{}] Endpoint type '{}' is not allowed by policy",
+                route_name,
+                name
+            ));
         }
     }
     const MAX_DEPTH: usize = 16;
     if depth > MAX_DEPTH {
         return Err(anyhow!(
-            "Fanout recursion depth exceeded limit of {}",
+            "Endpoint nesting depth exceeded limit of {} (a `ref` cycle?)",
             MAX_DEPTH
         ));
     }
@@ -2389,9 +2393,9 @@ fn check_publisher_recursive(
                 return Ok(warnings);
             }
             Err(anyhow!(
-                "[route:{}] Unsupported publisher endpoint type '{:?}'",
+                "[route:{}] Unsupported publisher endpoint type '{}'",
                 route_name,
-                endpoint.endpoint_type
+                endpoint.endpoint_type.name()
             ))
         }
     }
@@ -2779,9 +2783,9 @@ async fn create_base_publisher(
         other => {
             let Some((factory, mut config)) = builtin_fallback(other)? else {
                 return Err(anyhow!(
-                    "[route:{}] Unsupported publisher endpoint type '{:?}'",
+                    "[route:{}] Unsupported publisher endpoint type '{}'",
                     route_name,
-                    endpoint_type
+                    endpoint_type.name()
                 ));
             };
             // `auto` depends on the route's input, which only the host knows.
@@ -3793,6 +3797,19 @@ mod tests {
                 "/tmp/policy_probe.jsonl",
             )));
             assert!(check_consumer("test", &file, Some(allowed)).is_ok());
+        }
+
+        #[test]
+        fn a_custom_endpoint_is_checked_by_its_factory_name() {
+            let custom = Endpoint::new(EndpointType::Custom {
+                name: "pulsar".to_string(),
+                config: serde_json::Value::Null,
+            });
+            let fanout = Endpoint::new(EndpointType::Fanout(vec![custom.clone()]));
+            assert!(check_publisher("test", &custom, Some(&["memory"])).is_err());
+            assert!(check_publisher("test", &fanout, Some(&["memory"])).is_err());
+            assert!(check_publisher("test", &custom, Some(&["pulsar"])).is_ok());
+            assert!(check_publisher("test", &custom, None).is_ok());
         }
 
         /// `null` and `fanout` are sinks. They are refused as inputs on role grounds, not policy,

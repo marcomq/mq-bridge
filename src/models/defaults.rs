@@ -128,6 +128,25 @@ impl Default for EncryptionConfig {
             key: String::new(),
             decrypt_keys: HashMap::new(),
             authenticate_metadata: Vec::new(),
+            on_error: default_on_error_drop(),
+        }
+    }
+}
+
+pub(crate) fn default_on_error_drop() -> InputErrorPolicy {
+    InputErrorPolicy::Drop
+}
+
+pub(crate) fn default_on_error_fail() -> InputErrorPolicy {
+    InputErrorPolicy::Fail
+}
+
+impl Default for UnpackMiddleware {
+    fn default() -> Self {
+        Self {
+            format: PackFormat::default(),
+            max_messages: None,
+            on_error: default_on_error_fail(),
         }
     }
 }
@@ -224,6 +243,7 @@ impl Default for CompressionMiddleware {
         Self {
             algorithm: default_compression_algorithm(),
             max_decompressed_bytes: None,
+            on_error: default_on_error_fail(),
         }
     }
 }

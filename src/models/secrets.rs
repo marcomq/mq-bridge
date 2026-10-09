@@ -330,6 +330,18 @@ impl SecretExtractor for EndpointType {
                     default.extract_secrets(&format!("{}__{}", prefix, "SWITCH__DEFAULT"), secrets);
                 }
             }
+            EndpointType::Sequence(cfg) => {
+                let prefix = format!("{}__{}", prefix, "SEQUENCE");
+                for (i, ep) in cfg.endpoints.iter_mut().enumerate() {
+                    ep.extract_secrets(&format!("{}__{}__{}", prefix, "ENDPOINTS", i), secrets);
+                }
+                extract_sensitive_optional_url(
+                    &mut cfg.checkpoint_store,
+                    &prefix,
+                    "CHECKPOINT_STORE",
+                    secrets,
+                );
+            }
             EndpointType::Reader(ep) => {
                 ep.extract_secrets(&format!("{}__{}", prefix, "READER"), secrets)
             }
@@ -372,6 +384,29 @@ impl SecretExtractor for Middleware {
             Middleware::Encryption(cfg) => {
                 cfg.extract_secrets(&format!("{}__{}", prefix, "ENCRYPTION"), secrets);
             }
+            Middleware::Lookup(cfg) => {
+                let prefix = format!("{}__{}", prefix, "LOOKUP");
+                if let Some(from) = &mut cfg.from {
+                    from.extract_secrets(&format!("{}__{}", prefix, "FROM"), secrets);
+                }
+                for (i, entry) in cfg.entries.iter_mut().enumerate() {
+                    entry
+                        .from
+                        .extract_secrets(&format!("{}__ENTRIES__{}__FROM", prefix, i), secrets);
+                }
+            }
+            Middleware::Deduplication(cfg) => extract_sensitive_optional_url(
+                &mut cfg.store,
+                &format!("{}__{}", prefix, "DEDUPLICATION"),
+                "STORE",
+                secrets,
+            ),
+            Middleware::Aggregate(cfg) => extract_sensitive_optional_url(
+                &mut cfg.store,
+                &format!("{}__{}", prefix, "AGGREGATE"),
+                "STORE",
+                secrets,
+            ),
             Middleware::Custom { config, .. } => extract_custom_config_secrets(
                 config,
                 &format!("{}__{}", prefix, "CUSTOM__CONFIG"),

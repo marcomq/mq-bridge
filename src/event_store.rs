@@ -463,6 +463,7 @@ impl EventStore {
             store: self.clone(),
             subscriber_id,
             last_offset: Arc::new(AtomicU64::new(0)),
+            rewinds: Arc::new(AtomicU64::new(0)),
             exit_on_empty: false,
         }
     }
@@ -473,6 +474,8 @@ pub struct EventStoreConsumer {
     store: Arc<EventStore>,
     subscriber_id: String,
     last_offset: Arc<AtomicU64>,
+    /// Bumped by every nack. A batch read before a rewind must not ack past it.
+    rewinds: Arc<AtomicU64>,
     /// Drain mode: only then does an idle wait time out into an empty batch.
     exit_on_empty: bool,
 }
@@ -539,6 +542,8 @@ impl MessageConsumer for EventStoreConsumer {
         let store = self.store.clone();
         let subscriber_id = self.subscriber_id.clone();
         let last_offset_arc = self.last_offset.clone();
+        let rewinds = self.rewinds.clone();
+        let read_at = rewinds.load(Ordering::SeqCst);
 
         let commit: BatchCommitFunc = Box::new(move |dispositions| {
             Box::pin(async move {
@@ -546,8 +551,9 @@ impl MessageConsumer for EventStoreConsumer {
                     .iter()
                     .any(|d| matches!(d, MessageDisposition::Nack))
                 {
+                    rewinds.fetch_add(1, Ordering::SeqCst);
                     last_offset_arc.fetch_min(last_offset_val, Ordering::SeqCst);
-                } else {
+                } else if rewinds.load(Ordering::SeqCst) == read_at {
                     store.ack(&subscriber_id, new_offset).await;
                 }
                 Ok(())
@@ -838,5 +844,27 @@ mod tests {
         (batch2.commit)(vec![MessageDisposition::Ack])
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_ack_after_an_earlier_nack_keeps_the_nacked_events() {
+        use crate::traits::MessageDisposition;
+        let store = Arc::new(EventStore::new(RetentionPolicy::default()));
+        store.append(CanonicalMessage::from("msg1")).await;
+        store.append(CanonicalMessage::from("msg2")).await;
+
+        let mut consumer = store.consumer("sub".to_string());
+        let first = consumer.receive_batch(1).await.unwrap();
+        let second = consumer.receive_batch(1).await.unwrap();
+        (first.commit)(vec![MessageDisposition::Nack])
+            .await
+            .unwrap();
+        (second.commit)(vec![MessageDisposition::Ack])
+            .await
+            .unwrap();
+        store.run_gc().await;
+
+        let again = consumer.receive_batch(10).await.unwrap();
+        assert_eq!(again.messages.len(), 2);
     }
 }

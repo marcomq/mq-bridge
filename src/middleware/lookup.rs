@@ -136,7 +136,8 @@ impl Entry {
         {
             match status {
                 404 => return Ok(None),
-                408 | 429 | 500..=504 => {
+                // 401 and 403 are a credential problem, not a fault of the message.
+                401 | 403 | 408 | 429 | 500..=504 => {
                     return Err(PublisherError::Retryable(anyhow::anyhow!(
                         "lookup: HTTP status {status}"
                     )))

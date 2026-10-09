@@ -136,7 +136,7 @@ All figures: mq-bridge 0.4.20. DuckDB is a throughput ceiling for the conversion
 
 What you get from one engine, whichever language you call it from:
 
-*   **16+ native transports, 100+ more via plugin, one API**: every connector listed above, plus `dir_spool` (a crash-safe directory FIFO queue), behind the same `receive_batch` / `send_batch` shape.
+*   **20+ native transports, 100+ more via plugin, one API**: every connector listed above, plus `dir_spool` (a crash-safe directory FIFO queue), behind the same `receive_batch` / `send_batch` shape.
 *   **Redpanda Connect reach**: the [Connect plugin](https://github.com/marcomq/mq-bridge-connect) adds Redpanda Connect's production-proven components — **56 inputs and 68 outputs as endpoints, plus 86 processors**, most of which also run as middleware on any endpoint — while mq-bridge keeps routing, batching, retries, DLQ and deduplication.
 *   **Change Data Capture**: stream row-level changes from **Postgres** (logical replication / `pgoutput`) and **MongoDB** (change streams) as flat rows with an operation marker.
 *   **Restart-safe delivery**: batch-aware ack/nack with commit sequencing for cumulative-ack brokers; the integration suite shows **no data loss during in-flight broker restarts**, including a Postgres CDC restart-safety test.

@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 static REJECTED_INPUT_MESSAGES: AtomicU64 = AtomicU64::new(0);
 
-/// Input messages the `encryption` middleware could not decrypt and acked, process-wide.
+/// Input messages a middleware could not decode and acked (`on_error: drop`), process-wide.
 /// A one-shot job reads it to tell a lossy run from a clean one.
 pub fn rejected_input_messages() -> u64 {
     REJECTED_INPUT_MESSAGES.load(Ordering::Relaxed)
@@ -322,6 +322,32 @@ fn custom_middleware_factory(name: &str) -> Result<Arc<dyn CustomMiddlewareFacto
     Err(anyhow::anyhow!(
         "Custom middleware factory '{name}' not found{hint}"
     ))
+}
+
+/// Puts the original payload back into each failed message. `originals` holds
+/// `(message_id, original, rewritten)` per sent message; messages sharing an id are
+/// told apart by the rewritten payload the failure still carries.
+#[cfg(any(feature = "compression", feature = "encryption"))]
+pub(crate) fn restore_payloads(
+    originals: Vec<(u128, bytes::Bytes, bytes::Bytes)>,
+    failed: &mut [(crate::CanonicalMessage, crate::traits::PublisherError)],
+) {
+    let mut by_id: std::collections::HashMap<u128, Vec<(bytes::Bytes, bytes::Bytes)>> =
+        std::collections::HashMap::with_capacity(originals.len());
+    for (id, original, rewritten) in originals {
+        by_id.entry(id).or_default().push((original, rewritten));
+    }
+    for (message, _) in failed {
+        let Some(candidates) = by_id.get(&message.message_id) else {
+            continue;
+        };
+        let found = candidates
+            .iter()
+            .find(|(_, rewritten)| candidates.len() == 1 || *rewritten == message.payload);
+        if let Some((original, _)) = found {
+            message.payload = original.clone();
+        }
+    }
 }
 
 #[cfg(test)]

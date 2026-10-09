@@ -168,9 +168,8 @@ pub struct RouteOptions {
     #[serde(default = "default_batch_size")]
     #[cfg_attr(feature = "schema", schemars(range(min = 1)))]
     pub batch_size: usize,
-    /// (Optional) The maximum number of in-flight commit requests queued for ordered sequencing.
-    /// Lower values apply backpressure earlier; higher values allow larger commit backlogs.
-    /// Defaults to 4096.
+    /// (Optional) The maximum number of batch commits queued or running at once. Once reached,
+    /// the route stops reading until a commit finishes. Defaults to 4096.
     #[serde(default = "default_commit_concurrency_limit")]
     #[cfg_attr(feature = "schema", schemars(range(min = 1)))]
     pub commit_concurrency_limit: usize,
@@ -400,6 +399,29 @@ pub struct EncryptionConfig {
     /// Metadata keys bound into the AEAD tag; changing one then fails decryption. Middleware only.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub authenticate_metadata: Vec<String>,
+    /// What an input does with a message that will not decrypt. Defaults to `drop`. Middleware only.
+    #[serde(
+        default = "default_on_error_drop",
+        skip_serializing_if = "InputErrorPolicy::is_drop"
+    )]
+    pub on_error: InputErrorPolicy,
+}
+
+/// What an input middleware does with a message it cannot decode.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum InputErrorPolicy {
+    /// Stop the route; the message stays uncommitted.
+    Fail,
+    /// Log and acknowledge the message, then carry on with the rest.
+    Drop,
+}
+
+impl InputErrorPolicy {
+    fn is_drop(&self) -> bool {
+        *self == Self::Drop
+    }
 }
 
 impl std::fmt::Debug for EncryptionConfig {
@@ -411,6 +433,7 @@ impl std::fmt::Debug for EncryptionConfig {
             .field("key", &"<redacted>")
             .field("decrypt_keys", &decrypt_key_ids)
             .field("authenticate_metadata", &self.authenticate_metadata)
+            .field("on_error", &self.on_error)
             .finish()
     }
 }
@@ -1221,6 +1244,9 @@ pub struct CompressionMiddleware {
     /// Consumer side only; unset means no limit.
     #[serde(default)]
     pub max_decompressed_bytes: Option<u64>,
+    /// What an input does with a payload that will not decompress. Defaults to `fail`.
+    #[serde(default = "default_on_error_fail")]
+    pub on_error: InputErrorPolicy,
 }
 
 /// Batch envelope used by the `pack` / `unpack` middlewares.
@@ -1272,7 +1298,7 @@ pub struct PackMiddleware {
 ///
 /// Splits one physical message back into the logical messages `pack` put in it.
 /// Input only.
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct UnpackMiddleware {
@@ -1282,6 +1308,9 @@ pub struct UnpackMiddleware {
     /// Reject a batch declaring more messages than this. Unset means no limit.
     #[serde(default)]
     pub max_messages: Option<usize>,
+    /// What to do with a message that is not a valid envelope. Defaults to `fail`.
+    #[serde(default = "default_on_error_fail")]
+    pub on_error: InputErrorPolicy,
 }
 
 fn default_pack_max_messages() -> usize {

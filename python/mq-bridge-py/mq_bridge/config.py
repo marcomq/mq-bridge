@@ -84,6 +84,7 @@ HttpBulkFormat = str
 HttpBulkStream = str
 HttpServerProtocol = str
 IdHash = str
+InputErrorPolicy = str
 MappingRule = str
 MongoConsume = str
 MongoDbFormat = str
@@ -161,6 +162,7 @@ __all__ = [
     "IbmMqConfig",
     "IbmTlsConfig",
     "IdHash",
+    "InputErrorPolicy",
     "KafkaConfig",
     "LimiterMiddleware",
     "LookupEntry",

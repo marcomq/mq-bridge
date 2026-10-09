@@ -399,7 +399,8 @@ input:
 after the sink accepted the write — **before** the source is acked — and *released* when the
 write failed. A copy that arrives while another is still in flight waits for it rather than
 being acked on its strength: if the first write then fails, the copy is processed; if it
-succeeds, the copy is dropped. A claim whose holder died lapses after five seconds. What each
+succeeds, the copy is dropped. A claim is renewed while its delivery is in flight, so a slow
+sink does not lose it; a claim whose holder died lapses after five seconds. What each
 crash window does:
 
 | Crash or failure between | Outcome |

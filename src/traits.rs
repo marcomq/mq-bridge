@@ -329,11 +329,11 @@ pub trait MessageConsumer: Send + Sync {
     ) -> Result<ReceivedBatch, ConsumerError> {
         let received = self.receive().await?; // The `?` now correctly handles ConsumerError
         let batch_commit = Box::new(move |dispositions: Vec<MessageDisposition>| {
-            // The default implementation only handles one message, so we take the first disposition.
+            // One message, so one disposition; a missing one is not an acknowledgement.
             let single_disposition = dispositions
                 .into_iter()
                 .next()
-                .unwrap_or(MessageDisposition::Ack);
+                .unwrap_or(MessageDisposition::Nack);
             (received.commit)(single_disposition)
         }) as BatchCommitFunc;
         Ok(ReceivedBatch {
@@ -795,15 +795,15 @@ pub fn into_commit_func(batch_commit: BatchCommitFunc) -> CommitFunc {
 /// it to the underlying single-message commit function.
 pub fn into_batch_commit_func(commit: CommitFunc) -> BatchCommitFunc {
     Box::new(move |mut dispositions: Vec<MessageDisposition>| {
-        let single_disposition = if dispositions.len() > 1 {
+        let single_disposition = if dispositions.len() == 1 {
+            dispositions.pop().unwrap_or(MessageDisposition::Nack)
+        } else {
             warn!(
-                "into_batch_commit_func called with batch of {} messages; dropping all responses to avoid partial commit (incorrect usage)",
+                "into_batch_commit_func called with {} dispositions for one message; nacking it (incorrect usage)",
                 dispositions.len()
             );
-            // Default to Ack to avoid hanging if we can't process the batch correctly
-            MessageDisposition::Ack
-        } else {
-            dispositions.pop().unwrap_or(MessageDisposition::Ack)
+            // An outcome we cannot attribute must not be acknowledged.
+            MessageDisposition::Nack
         };
         commit(single_disposition)
     })

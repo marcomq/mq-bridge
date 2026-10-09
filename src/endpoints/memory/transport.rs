@@ -91,6 +91,9 @@ impl TransportUrl {
 
     #[cfg(unix)]
     fn default_unix_socket_path(name: &str) -> Result<String> {
+        if name.split('/').any(|part| part == "..") {
+            return Err(anyhow!("IPC socket name '{name}' must not contain '..'"));
+        }
         // Try /run/mq-bridge first (systemd standard)
         let run_dir = std::path::Path::new("/run/mq-bridge");
         if run_dir.exists() || std::fs::create_dir_all(run_dir).is_ok() {

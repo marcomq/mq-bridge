@@ -289,7 +289,14 @@ impl FileCheckpointStore {
             std::process::id(),
             SEQ.fetch_add(1, Ordering::Relaxed)
         ));
-        tokio::fs::write(&tmp, &bytes)
+        // Synced before the rename, or a power loss can leave an empty file under the final name.
+        let write = async {
+            use tokio::io::AsyncWriteExt;
+            let mut file = tokio::fs::File::create(&tmp).await?;
+            file.write_all(&bytes).await?;
+            file.sync_all().await
+        };
+        write
             .await
             .with_context(|| format!("Failed to write checkpoint temp '{}'", tmp.display()))?;
         if let Err(e) = tokio::fs::rename(&tmp, &self.path).await {
