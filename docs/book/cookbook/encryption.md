@@ -37,7 +37,9 @@ MQB_ENC_KEY=… mqb copy \
 
 **Key rotation:** seal with a new `key_id`/`key` while listing the old key under `decrypt_keys`
 on the consuming side. Each payload is authenticated independently — tampering, a torn frame, or
-a wrong/missing key is a hard consumer error, not a silent drop.
+a wrong/missing key fails decryption. By default (`on_error: drop`) such a message is logged,
+acknowledged and skipped, so a reader with the wrong key drains its input; set `on_error: fail`
+to stop the route instead.
 
 > The AEAD binds only the payload (empty associated data), so a sealed payload can be replayed
 > under different metadata. Use [`deduplication`](deduplication.md) or a sink uniqueness

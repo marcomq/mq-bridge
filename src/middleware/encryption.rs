@@ -147,9 +147,24 @@ impl MessageConsumer for EncryptionConsumer {
     }
 
     async fn receive(&mut self) -> Result<Received, ConsumerError> {
-        let mut received = self.inner.receive().await?;
-        self.open_message(&mut received.message)?;
-        Ok(received)
+        loop {
+            let mut received = self.inner.receive().await?;
+            match self.open_message(&mut received.message) {
+                Ok(()) => return Ok(received),
+                Err(error) if self.on_error == InputErrorPolicy::Fail => return Err(error),
+                Err(error) => {
+                    super::note_rejected_input_message();
+                    tracing::error!(
+                        message_id = format_args!("{:032x}", received.message.message_id),
+                        "Rejecting message that failed to decrypt: {error}"
+                    );
+                    // Acked like a rejected batch slot, so the poison message is not redelivered.
+                    (received.commit)(MessageDisposition::Ack)
+                        .await
+                        .map_err(ConsumerError::Connection)?;
+                }
+            }
+        }
     }
 
     /// A message that will not open is poison: returning the whole batch as an error drops
@@ -446,6 +461,81 @@ mod tests {
         let recorded = committed.lock().unwrap();
         assert_eq!(recorded.len(), 1);
         assert!(matches!(recorded[0].as_slice(), [MessageDisposition::Ack]));
+    }
+
+    /// Serves single messages, counting the acks.
+    struct SingleConsumer {
+        messages: std::collections::VecDeque<CanonicalMessage>,
+        acked: Arc<Mutex<usize>>,
+    }
+
+    #[async_trait]
+    impl MessageConsumer for SingleConsumer {
+        async fn receive(&mut self) -> Result<Received, ConsumerError> {
+            let message = self
+                .messages
+                .pop_front()
+                .ok_or(ConsumerError::EndOfStream)?;
+            let acked = self.acked.clone();
+            Ok(Received {
+                message,
+                commit: Box::new(move |_| {
+                    *acked.lock().unwrap() += 1;
+                    Box::pin(async { Ok(()) })
+                }),
+            })
+        }
+
+        async fn receive_batch(&mut self, _max: usize) -> Result<ReceivedBatch, ConsumerError> {
+            unreachable!("only `receive` is exercised")
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    #[tokio::test]
+    async fn receive_drops_a_poison_message_and_reads_the_next() {
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let publisher = EncryptionPublisher::new(
+            Box::new(RecordingPublisher { sent: sent.clone() }),
+            &config(),
+        )
+        .unwrap();
+        publisher
+            .send_batch(vec![
+                CanonicalMessage::from("payload"),
+                CanonicalMessage::from("intact"),
+            ])
+            .await
+            .unwrap();
+        let mut wire = sent.lock().unwrap().clone();
+        let mut tampered = wire[0].payload.to_vec();
+        *tampered.last_mut().unwrap() ^= 1;
+        wire[0].payload = tampered.into();
+
+        let acked = Arc::new(Mutex::new(0));
+        let source = |messages: Vec<CanonicalMessage>| SingleConsumer {
+            messages: messages.into(),
+            acked: acked.clone(),
+        };
+        let mut consumer =
+            EncryptionConsumer::new(Box::new(source(wire.clone())), &config()).unwrap();
+        let received = consumer.receive().await.unwrap();
+        assert_eq!(received.message.payload.as_ref(), b"intact");
+        assert_eq!(*acked.lock().unwrap(), 1, "the poison message is acked");
+
+        let fail = EncryptionConfig {
+            on_error: InputErrorPolicy::Fail,
+            ..config()
+        };
+        let mut consumer = EncryptionConsumer::new(Box::new(source(wire)), &fail).unwrap();
+        assert!(matches!(
+            consumer.receive().await,
+            Err(ConsumerError::Permanent(_))
+        ));
+        assert_eq!(*acked.lock().unwrap(), 1);
     }
 
     #[tokio::test]

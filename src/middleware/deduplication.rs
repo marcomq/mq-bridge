@@ -31,6 +31,9 @@ const IN_FLIGHT_POLL: Duration = Duration::from_millis(50);
 /// How often the claims of deliveries still in flight get their lease extended.
 const LEASE_RENEW_INTERVAL: Duration = Duration::from_secs(PENDING_TTL_SECS / 2);
 
+/// Keys renewed per store call.
+const LEASE_RENEW_BATCH: usize = 1024;
+
 /// How long a delivery waits on a key whose holder keeps renewing it. A safety valve for a
 /// holder that never settles; a dead holder's claim lapses after `PENDING_TTL_SECS`.
 const IN_FLIGHT_WAIT_CAP: Duration = Duration::from_secs(300);
@@ -588,13 +591,20 @@ impl Leases {
         let table = Arc::new(Mutex::new(LeaseTable::default()));
         let weak = Arc::downgrade(&table);
         tokio::spawn(async move {
+            // A fixed cadence: a slow pass must not push the next one past the claim's TTL.
+            let mut ticks = tokio::time::interval(LEASE_RENEW_INTERVAL);
             loop {
-                tokio::time::sleep(LEASE_RENEW_INTERVAL).await;
+                ticks.tick().await;
                 let Some(table) = weak.upgrade() else { return };
-                let held: Vec<_> = lock_leases(&table).held.values().cloned().collect();
+                let keys: Vec<Vec<u8>> = lock_leases(&table)
+                    .held
+                    .values()
+                    .flat_map(|keys| keys.iter().cloned())
+                    .collect();
                 drop(table);
-                for keys in held {
-                    store.renew_many(&keys, unix_now()).await;
+                // One call per chunk rather than per delivery, each stamped when it is sent.
+                for chunk in keys.chunks(LEASE_RENEW_BATCH) {
+                    store.renew_many(chunk, unix_now()).await;
                 }
             }
         });
@@ -621,11 +631,10 @@ struct Lease {
 }
 
 impl Lease {
-    /// Stops the renewal and hands the keys back.
-    fn into_keys(self) -> Vec<Vec<u8>> {
-        let keys = lock_leases(&self.table).held.remove(&self.id);
-        keys.map(|keys| Arc::try_unwrap(keys).unwrap_or_else(|shared| (*shared).clone()))
-            .unwrap_or_default()
+    /// The leased keys; the renewal goes on until the lease is dropped.
+    fn keys(&self) -> Arc<Vec<Vec<u8>>> {
+        let keys = lock_leases(&self.table).held.get(&self.id).cloned();
+        keys.unwrap_or_default()
     }
 }
 
@@ -921,7 +930,6 @@ impl MessageConsumer for DeduplicationConsumer {
             // replays a message that is already recognised, instead of one that is not.
             let commit = Box::new(move |disposition: MessageDisposition| {
                 Box::pin(async move {
-                    drop(lease);
                     match (&disposition, stored_reply(&disposition, replay)) {
                         (_, Some(reply)) => {
                             store
@@ -931,6 +939,8 @@ impl MessageConsumer for DeduplicationConsumer {
                         (MessageDisposition::Nack, None) => store.release(&key).await,
                         (_, None) => store.mark_processed(&key, unix_now()).await,
                     }
+                    // Held until the store settled, so a slow write cannot let the claim lapse.
+                    drop(lease);
                     store.sync().await;
                     original_commit(disposition).await?;
                     in_flight.settled();
@@ -1048,13 +1058,18 @@ impl MessageConsumer for DeduplicationConsumer {
 
             let commit: crate::traits::BatchCommitFunc = Box::new(move |dispositions| {
                 Box::pin(async move {
-                    let kept_keys = lease.into_keys();
+                    // The lease stays held until the store settled, so neither the deferred
+                    // commits nor a slow store write can let these claims lapse.
+                    let kept_keys = lease.keys();
                     let mut full_dispositions = settled;
                     let mut acked = Vec::with_capacity(kept_keys.len());
                     let mut replied = Vec::new();
                     let mut failed = Vec::new();
-                    for ((key, disposition), slot) in
-                        kept_keys.into_iter().zip(dispositions).zip(kept_indices)
+                    for ((key, disposition), slot) in kept_keys
+                        .iter()
+                        .cloned()
+                        .zip(dispositions)
+                        .zip(kept_indices)
                     {
                         match (&disposition, stored_reply(&disposition, replay)) {
                             (_, Some(reply)) => replied.push((key, reply)),
@@ -1076,6 +1091,7 @@ impl MessageConsumer for DeduplicationConsumer {
                         store.mark_processed_with_response(key, now, reply).await;
                     }
                     store.release_many(&failed).await;
+                    drop(lease);
                     store.sync().await;
                     inner_commit(full_dispositions).await?;
                     in_flight.settled();
@@ -1802,6 +1818,50 @@ mod tests {
             committed.lock().unwrap().is_empty(),
             "nothing acked before processing"
         );
+    }
+
+    /// A store whose markers only land once the claim has been renewed again.
+    struct SlowMarkStore {
+        renewed: tokio::sync::Notify,
+    }
+
+    #[async_trait]
+    impl DedupStore for SlowMarkStore {
+        async fn reserve(&self, _key: &[u8], _now: u64) -> Result<Reservation, ConsumerError> {
+            Ok(Reservation::Claimed)
+        }
+        async fn mark_processed(&self, _key: &[u8], _now: u64) {
+            self.renewed.notified().await;
+        }
+        async fn mark_processed_with_response(&self, _key: &[u8], _now: u64, _response: &[u8]) {}
+        async fn stored_response(&self, _key: &[u8]) -> Option<Vec<u8>> {
+            None
+        }
+        async fn release(&self, _key: &[u8]) {}
+        async fn renew_many(&self, keys: &[Vec<u8>], _now: u64) {
+            if !keys.is_empty() {
+                self.renewed.notify_waiters();
+            }
+        }
+    }
+
+    /// The lease outlives a slow marker write; dropped before it, the claim could lapse and
+    /// another instance take the key while this delivery is still settling.
+    #[tokio::test]
+    async fn claims_stay_renewed_until_the_store_has_settled() {
+        let store: Arc<dyn DedupStore> = Arc::new(SlowMarkStore {
+            renewed: tokio::sync::Notify::new(),
+        });
+        let (mut consumer, committed) = consumer_on(&store, vec![vec![keyed("A", 1)]], false);
+        let batch = consumer.receive_batch(16).await.unwrap();
+        tokio::time::timeout(
+            LEASE_RENEW_INTERVAL * 3,
+            (batch.commit)(vec![MessageDisposition::Ack]),
+        )
+        .await
+        .expect("the claim must still be renewed while its marker is written")
+        .unwrap();
+        assert_eq!(committed.lock().unwrap().as_slice(), [vec!["ack"]]);
     }
 
     /// A store whose backend is down.

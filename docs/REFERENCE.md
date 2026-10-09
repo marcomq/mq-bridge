@@ -689,8 +689,14 @@ output. Requires the `encryption` feature.
 
 The envelope records the cipher and `key_id`, so key rotation works by sealing with a new
 `key_id`/`key` while listing the old key under `decrypt_keys` on the consuming side. Each
-payload is authenticated independently: any bit-level tampering, a torn frame, or a
-missing/wrong key is a hard consumer error, not a silent drop.
+payload is authenticated independently, so any bit-level tampering, a torn frame, or a
+missing/wrong key fails decryption.
+
+What happens then is set by `on_error`. The default, `drop`, logs the message, **acknowledges
+it** and carries on — the route keeps running and the message is gone from the source. That
+includes a wrong or missing key, where every message fails: a misconfigured reader then drains
+its input. Set `on_error: fail` to stop the route on the first decryption failure instead,
+leaving the message unacknowledged.
 
 By default the AEAD binds only the payload (empty associated data): metadata and routing
 keys are *not* authenticated against the ciphertext, since they are not guaranteed to

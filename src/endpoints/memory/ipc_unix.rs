@@ -51,6 +51,29 @@ struct UnixIpcTransportInner {
     close_notify: Notify,
 }
 
+/// Refuses a socket directory in which another local user could replace the socket: one owned
+/// by someone other than this user or root, or writable by group/others without the sticky
+/// bit. A sticky directory such as `/tmp` only lets the owner remove an entry.
+fn check_socket_dir(dir: &Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = std::fs::metadata(dir)?;
+    // std has no `geteuid`; a socket pair reports this process's own credentials.
+    let (probe, _peer) = UnixStream::pair()?;
+    let uid = probe.peer_cred()?.uid();
+    let foreign_owner = meta.uid() != uid && meta.uid() != 0;
+    let shared_writable = meta.mode() & 0o022 != 0 && meta.mode() & 0o1000 == 0;
+    if foreign_owner || shared_writable {
+        return Err(anyhow!(
+            "Unix IPC socket directory '{}' is not safe (owner uid {}, mode {:o}): it must belong \
+             to this user or root and must not be writable by group or others",
+            dir.display(),
+            meta.uid(),
+            meta.mode() & 0o7777
+        ));
+    }
+    Ok(())
+}
+
 impl UnixIpcTransport {
     /// Create a new Unix IPC transport as a server (consumer side)
     pub async fn new_server(socket_path: impl AsRef<Path>, capacity: usize) -> Result<Self> {
@@ -71,12 +94,14 @@ impl UnixIpcTransport {
         if let Some(parent) = socket_path.parent() {
             let created = !parent.exists();
             std::fs::create_dir_all(parent)?;
-            // Restrict a directory we created (0700); an existing one such as /tmp is not ours.
+            // Restrict a directory we created (0700); an existing one is checked, not changed.
             if created {
                 use std::os::unix::fs::PermissionsExt;
                 let mut perms = std::fs::metadata(parent)?.permissions();
                 perms.set_mode(0o700);
                 std::fs::set_permissions(parent, perms)?;
+            } else {
+                check_socket_dir(parent)?;
             }
         }
 
@@ -314,6 +339,30 @@ mod tests {
         assert!(stale.exists());
         UnixIpcTransport::new_server(&stale, 10).await.unwrap();
         drop(first);
+    }
+
+    #[tokio::test]
+    async fn a_directory_others_can_write_to_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp_dir = TempDir::new().unwrap();
+        let set_mode = |mode| {
+            std::fs::set_permissions(temp_dir.path(), std::fs::Permissions::from_mode(mode))
+                .unwrap()
+        };
+
+        set_mode(0o777);
+        let error = UnixIpcTransport::new_server(temp_dir.path().join("open.sock"), 10)
+            .await
+            .err()
+            .expect("a world-writable directory must be refused");
+        assert!(error.to_string().contains("not safe"), "{error}");
+
+        // The sticky bit, as on /tmp, keeps other users from replacing the socket.
+        set_mode(0o1777);
+        UnixIpcTransport::new_server(temp_dir.path().join("sticky.sock"), 10)
+            .await
+            .unwrap();
+        set_mode(0o700);
     }
 
     #[tokio::test]

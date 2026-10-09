@@ -492,7 +492,8 @@ impl MessagePublisher for MemoryPublisher {
                 Ok(SentBatch::Ack)
             }
             PublisherBackend::Queue(_) if self.request_reply => {
-                // Each request waits for its own reply, so they go out one by one.
+                // Each request waits for its own reply; the helper keeps up to
+                // `SEND_BATCH_CONCURRENCY` of them in flight.
                 crate::traits::send_batch_helper(self, messages, |publisher, message| {
                     Box::pin(publisher.send(message))
                 })

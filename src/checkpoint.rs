@@ -296,9 +296,11 @@ impl FileCheckpointStore {
             file.write_all(&bytes).await?;
             file.sync_all().await
         };
-        write
-            .await
-            .with_context(|| format!("Failed to write checkpoint temp '{}'", tmp.display()))?;
+        if let Err(e) = write.await {
+            tokio::fs::remove_file(&tmp).await.ok();
+            return Err(e)
+                .with_context(|| format!("Failed to write checkpoint temp '{}'", tmp.display()));
+        }
         if let Err(e) = tokio::fs::rename(&tmp, &self.path).await {
             tokio::fs::remove_file(&tmp).await.ok();
             return Err(e)
