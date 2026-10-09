@@ -52,9 +52,15 @@ fn redact_query(rest: &str) -> Cow<'_, str> {
         return Cow::Borrowed(rest);
     };
     let query = &rest[query_start..fragment_start];
+    // The name is compared decoded, so `tok%65n` is recognised as `token`.
     let is_secret = |pair: &str| {
         pair.split_once('=').is_some_and(|(key, value)| {
-            !value.is_empty() && SECRET_QUERY_KEYS.contains(&key.to_ascii_lowercase().as_str())
+            !value.is_empty()
+                && url::form_urlencoded::parse(key.as_bytes())
+                    .next()
+                    .is_some_and(|(name, _)| {
+                        SECRET_QUERY_KEYS.contains(&name.to_ascii_lowercase().as_str())
+                    })
         })
     };
     if !query.split('&').any(is_secret) {
@@ -97,6 +103,10 @@ mod tests {
         assert_eq!(
             url_password("redis://app:pw@host?password=pw2&db=1"),
             "redis://app:***@host?password=***&db=1"
+        );
+        assert_eq!(
+            url_password("https://host/hook?tok%65n=abc&API%5Fkey=x&id%3D=7"),
+            "https://host/hook?tok%65n=***&API%5Fkey=***&id%3D=7"
         );
     }
 

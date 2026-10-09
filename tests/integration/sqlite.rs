@@ -84,11 +84,6 @@ routes:
         concurrency: 4
         batch_size: 1024
         input:
-            middlewares:
-                - retry:
-                    max_attempts: 10
-                    initial_interval_ms: 100
-                    max_interval_ms: 1000
             sqlx:
                 url: "{db_url}"
                 table: "messages"

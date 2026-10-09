@@ -17,6 +17,9 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Mutex, Notify};
 use tracing::{debug, info, warn};
 
+/// How long `new_server` waits for an existing socket to answer or refuse.
+const STALE_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// Which end of the socket this transport owns.
 ///
 /// The socket is unidirectional in practice: the consumer binds and reads, the
@@ -79,15 +82,23 @@ impl UnixIpcTransport {
     pub async fn new_server(socket_path: impl AsRef<Path>, capacity: usize) -> Result<Self> {
         let socket_path = socket_path.as_ref();
 
-        // A socket that answers belongs to a running consumer; only a stale file is removed.
+        // Only a socket that refuses the connection is stale and removed; one that answers,
+        // or a probe that stays inconclusive, is taken as a running consumer.
         if socket_path.exists() {
-            if std::os::unix::net::UnixStream::connect(socket_path).is_ok() {
-                return Err(anyhow!(
-                    "Unix IPC socket '{}' is in use by another consumer",
-                    socket_path.display()
-                ));
+            let probe =
+                tokio::time::timeout(STALE_PROBE_TIMEOUT, UnixStream::connect(socket_path)).await;
+            match probe {
+                Ok(Err(e)) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
+                    std::fs::remove_file(socket_path)?;
+                }
+                Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => {}
+                _ => {
+                    return Err(anyhow!(
+                        "Unix IPC socket '{}' is in use by another consumer",
+                        socket_path.display()
+                    ));
+                }
             }
-            std::fs::remove_file(socket_path)?;
         }
 
         // Create parent directory if needed

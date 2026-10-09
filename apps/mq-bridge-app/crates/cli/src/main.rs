@@ -1830,7 +1830,9 @@ fn middleware_from_spec(spec: &str) -> anyhow::Result<mq_bridge::models::Middlew
     let root = serde_json::to_value(schemars::schema_for!(mq_bridge::models::Middleware))?;
 
     if let Some(variant) = middleware_variant(&root, &tag) {
-        let value = if matches!(field_type(&root, variant), FieldType::StringLike) {
+        let value = if accepts_bare_string(&root, variant)
+            && !query_sets_fields(&root, variant, query)
+        {
             let raw = percent_encoding::percent_decode_str(query)
                 .decode_utf8()
                 .with_context(|| {
@@ -1871,6 +1873,46 @@ fn middleware_from_spec(spec: &str) -> anyhow::Result<mq_bridge::models::Middlew
         name,
         config: serde_json::Value::Object(config),
     })
+}
+
+/// Whether a variant can be written as a bare string: a string variant (`id`)
+/// or a string-or-map one (`filter`).
+fn accepts_bare_string(root: &serde_json::Value, variant: &serde_json::Value) -> bool {
+    let variant = variant
+        .get("$ref")
+        .and_then(|r| r.as_str())
+        .and_then(|r| resolve_ref(root, r))
+        .unwrap_or(variant);
+    if matches!(field_type(root, variant), FieldType::StringLike) {
+        return true;
+    }
+    ["anyOf", "oneOf"].iter().any(|key| {
+        variant
+            .get(key)
+            .and_then(|a| a.as_array())
+            .is_some_and(|members| {
+                members
+                    .iter()
+                    .any(|m| m.get("type").and_then(|t| t.as_str()) == Some("string"))
+            })
+    })
+}
+
+/// Whether every `&`-separated part of `query` sets a config field of `variant`,
+/// which selects the map form of a string-or-map variant.
+fn query_sets_fields(root: &serde_json::Value, variant: &serde_json::Value, query: &str) -> bool {
+    let mut fields = std::collections::HashMap::new();
+    collect_props(
+        root,
+        variant,
+        &mut fields,
+        &mut std::collections::HashSet::new(),
+    );
+    !query.is_empty()
+        && query.split('&').all(|part| {
+            part.split_once('=')
+                .is_some_and(|(key, _)| fields.contains_key(key))
+        })
 }
 
 /// The schema of the `Middleware` variant tagged `tag`, if the enum has one.
@@ -3873,6 +3915,20 @@ mod uri_tests {
         assert_eq!(v["middlewares"][0]["id"], "${payload:order_id}");
         assert_eq!(v["middlewares"][1]["filter"], "amount > 100");
         assert!(v["middlewares"][2].get("otel").is_some(), "got: {v}");
+    }
+
+    #[test]
+    fn filter_takes_its_map_form_from_named_fields() {
+        let ep = endpoint_from_uri("null:|filter?expression=amount%20%3E%20100&on_error=drop")
+            .expect("uri should parse");
+        let v = serde_json::to_value(&ep).unwrap();
+        assert_eq!(v["middlewares"][0]["filter"]["expression"], "amount > 100");
+        assert_eq!(v["middlewares"][0]["filter"]["on_error"], "drop");
+
+        // `==` is not a field assignment, so this stays a bare expression.
+        let ep = endpoint_from_uri("null:|filter?on_error%20==%201").expect("uri should parse");
+        let v = serde_json::to_value(&ep).unwrap();
+        assert_eq!(v["middlewares"][0]["filter"], "on_error == 1");
     }
 
     // An endpoint-typed field anywhere takes a URI, not only `dlq`'s.

@@ -2331,18 +2331,24 @@ impl Route {
         // This applies on both normal shutdown AND error paths, ensuring in-flight commits
         // are not aborted mid-sequence.
         drop(work_tx);
+        // A panicked worker never commits its batch. Ordered commits behind that gap would
+        // wait on it forever, so they are failed at once and stay uncommitted for redelivery.
+        if worker_panicked {
+            commit_router.abandon();
+        }
         // Wait for all worker tasks to complete.
         while let Some(res) = join_set.join_next().await {
-            worker_panicked |= matches!(&res, Err(e) if e.is_panic());
+            if matches!(&res, Err(e) if e.is_panic()) {
+                worker_panicked = true;
+                commit_router.abandon();
+            }
             report_join_result(res, "Worker task");
         }
-        // Batches no worker picked up are nacked for redelivery. After a panic the sequence
-        // gap would block an ordered nack forever, so those are dropped uncommitted instead.
+        // Batches no worker picked up are nacked for redelivery. After a panic an ordered
+        // nack fails on the abandoned sequencer, which leaves the batch uncommitted.
         let unprocessed = std::iter::from_fn(|| work_rx.try_recv().ok()).chain(leftover);
         for (messages, commit, _) in unprocessed {
-            if !worker_panicked {
-                let _ = commit(vec![MessageDisposition::Nack; messages.len()]).await;
-            }
+            let _ = commit(vec![MessageDisposition::Nack; messages.len()]).await;
         }
 
         // Close sequencer (if any) now that all in-flight commits have drained.
@@ -2354,6 +2360,10 @@ impl Route {
         // closed/consumed) or a dropped connection the outer loop should reconnect.
         let result = if let Some(err) = loop_error {
             Err(err)
+        } else if worker_panicked {
+            Err(anyhow::anyhow!(
+                "A worker task panicked; its batch was never committed"
+            ))
         } else if let Ok(err) = err_rx.try_recv() {
             Err(err)
         } else if drained {
@@ -2670,6 +2680,14 @@ impl CommitRouter {
         match self {
             CommitRouter::Ordered { in_flight, .. } => Some(Arc::clone(in_flight)),
             CommitRouter::Unordered { .. } => None,
+        }
+    }
+
+    /// Gives up on the commit sequence after a gap: the sequencer still commits what is in
+    /// order, then fails every commit behind the gap instead of waiting on it.
+    fn abandon(&self) {
+        if let CommitRouter::Ordered { seq_tx, .. } = self {
+            seq_tx.close();
         }
     }
 
@@ -3716,6 +3734,87 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_stalled_ordered_commit_stops_the_concurrent_runner_reading() {
         assert_stalled_ordered_commit_stops_reads(4, 10).await;
+    }
+
+    #[derive(Debug)]
+    struct PanicOnFirstBatchFactory;
+
+    struct PanicOnFirstBatch(Box<dyn MessagePublisher>);
+
+    #[async_trait::async_trait]
+    impl CustomMiddlewareFactory for PanicOnFirstBatchFactory {
+        async fn apply_publisher(
+            &self,
+            publisher: Box<dyn MessagePublisher>,
+            _route_name: &str,
+            _config: &serde_json::Value,
+        ) -> anyhow::Result<Box<dyn MessagePublisher>> {
+            Ok(Box::new(PanicOnFirstBatch(publisher)))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MessagePublisher for PanicOnFirstBatch {
+        async fn send_batch(
+            &self,
+            messages: Vec<crate::CanonicalMessage>,
+        ) -> Result<SentBatch, PublisherError> {
+            if messages[0].get_payload_str() == "0" {
+                // Long enough for later batches to queue their commits behind this one.
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                panic!("injected worker panic");
+            }
+            self.0.send_batch(messages).await
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    /// The panicked worker's batch leaves a gap in the commit sequence; the commits queued
+    /// behind it must fail instead of holding the route open.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_panicked_worker_fails_the_route_instead_of_blocking_ordered_commits() {
+        const TOTAL: usize = 20;
+        let unique_id = fast_uuid_v7::gen_id().to_string();
+        let ordered = format!("panic_ordered_{unique_id}");
+        let panicking = format!("panic_publisher_{unique_id}");
+        let read = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        register_middleware_factory(
+            &ordered,
+            Arc::new(StalledCommitFactory {
+                read: Arc::clone(&read),
+                release: Arc::new(tokio::sync::Semaphore::new(TOTAL)),
+            }),
+        )
+        .unwrap();
+        register_middleware_factory(&panicking, Arc::new(PanicOnFirstBatchFactory)).unwrap();
+
+        let custom = |name| Middleware::Custom {
+            name,
+            config: serde_json::Value::Null,
+        };
+        let input = Endpoint::new_memory(&format!("panic_in_{unique_id}"), TOTAL)
+            .add_middleware(custom(ordered));
+        let output = Endpoint::new(EndpointType::Null).add_middleware(custom(panicking));
+        let route = Route::new(input.clone(), output)
+            .with_concurrency(4)
+            .with_batch_size(1);
+        let input_channel = input.channel().unwrap();
+        let messages = (0..TOTAL)
+            .map(|seq| crate::CanonicalMessage::from(seq.to_string()))
+            .collect();
+        input_channel.fill_messages(messages).await.unwrap();
+        input_channel.close();
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            route.run_until_err("panicked_worker", None, None),
+        )
+        .await
+        .expect("a worker panic must not leave the route waiting on its commit");
+        assert!(result.is_err(), "a panicked worker is not a completion");
     }
 
     #[derive(Debug, Default)]

@@ -247,7 +247,7 @@ test("an endpoint without receiveBatch cannot be an input", async () => {
           exit_on_empty: true,
           // A factory error looks like a failed connection to the route, so it
           // is retried; drop the backoff to keep the test quick.
-          reconnect_interval_ms: 0,
+          reconnect_interval_ms: 1,
           input: { [name]: {} },
           output: { memory: { topic: outTopic, capacity: 64 } },
         },
