@@ -269,10 +269,16 @@ async fn open_change_stream_checkpoint(
         Some(spec) => crate::checkpoint::parse_checkpoint_store(spec)?,
     };
     let store: Arc<dyn crate::checkpoint::CheckpointStore> = match backend {
-        CheckpointBackend::Source { name } => Arc::new(MongoCollectionCheckpointStore {
-            meta: db.collection::<Document>(&name),
-            doc_id: crate::checkpoint::checkpoint_key(collection_name, cursor_id),
-        }),
+        CheckpointBackend::Source { name } => {
+            let name = match config.checkpoint_store {
+                None => super::default_meta_collection(db, collection_name).await?,
+                Some(_) => name,
+            };
+            Arc::new(MongoCollectionCheckpointStore {
+                meta: db.collection::<Document>(&name),
+                doc_id: crate::checkpoint::checkpoint_key(collection_name, cursor_id),
+            })
+        }
         external => {
             crate::checkpoint::build_external_store(external, collection_name, cursor_id).await?
         }

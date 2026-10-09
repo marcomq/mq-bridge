@@ -763,6 +763,8 @@ struct BatchScratch {
 
 impl BatchScratch {
     fn with_capacity(capacity: usize) -> Self {
+        // Grows on demand: a large `batch_size` must not cost memory per worker up front.
+        let capacity = capacity.min(32768);
         Self {
             message_ids: Vec::with_capacity(capacity),
             request_ids: HashSet::with_capacity(capacity),
@@ -1314,6 +1316,9 @@ impl Route {
             }
             _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {
                 // The 5s timer finished first - abort the task to ensure it doesn't linger.
+                tracing::warn!(
+                    "Route did not stop within 5s; aborting it. Disconnect hooks are skipped and in-flight messages are redelivered."
+                );
                 join_handle.abort();
                 // Await the handle one last time to ensure the task has fully shut down.
                 let _ = join_handle.await;
@@ -1387,6 +1392,9 @@ impl Route {
             &self.output,
             allowed_endpoints,
         )?);
+        if let Some(warning) = self.options.in_flight_warning() {
+            warnings.push(format!("Route '{name}': {warning}"));
+        }
         if self.options.concurrency > 1
             && (endpoint_tree_has_buffer(&self.input, &mut HashSet::new())
                 || endpoint_tree_has_buffer(&self.output, &mut HashSet::new()))
@@ -3251,7 +3259,7 @@ mod tests {
         );
 
         let filtered = route_from(Endpoint {
-            middlewares: vec![Middleware::Filter("amount > 100".to_string())],
+            middlewares: vec![Middleware::Filter("amount > 100".into())],
             ..Endpoint::new(EndpointType::File(crate::models::FileConfig::new(
                 "/tmp/orders.csv",
             )))
@@ -3662,11 +3670,12 @@ mod tests {
         )
         .unwrap();
 
-        let input = Endpoint::new_memory(&format!("stalled_in_{unique_id}"), TOTAL)
-            .add_middleware(Middleware::Custom {
+        let input = Endpoint::new_memory(&format!("stalled_in_{unique_id}"), TOTAL).add_middleware(
+            Middleware::Custom {
                 name,
                 config: serde_json::Value::Null,
-            });
+            },
+        );
         let route = Route::new(input.clone(), Endpoint::new(EndpointType::Null))
             .with_concurrency(concurrency)
             .with_batch_size(1)
@@ -3678,10 +3687,11 @@ mod tests {
         input_channel.fill_messages(messages).await.unwrap();
         input_channel.close();
 
-        let running =
-            tokio::spawn(
-                async move { route.run_until_err("stalled_ordered_commit", None, None).await },
-            );
+        let running = tokio::spawn(async move {
+            route
+                .run_until_err("stalled_ordered_commit", None, None)
+                .await
+        });
         tokio::time::sleep(Duration::from_millis(300)).await;
         let stalled_at = read.load(Ordering::SeqCst);
         assert!(

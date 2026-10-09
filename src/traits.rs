@@ -504,7 +504,9 @@ pub trait MessagePublisher: Send + Sync + 'static {
     ///
     /// Defaults to `false`: with `concurrency > 1` the route's workers call
     /// `send_batch` in parallel, so whole batches can land at the sink out of source
-    /// order (rows keep their order *within* a batch). For an unkeyed SQL, Mongo or
+    /// order. Rows keep their order *within* a batch only where the sink writes the
+    /// batch as one unit; a sink built on [`send_batch_helper`] overlaps its
+    /// per-message sends unless this returns `true`. For an unkeyed SQL, Mongo or
     /// ClickHouse insert that is meaningless, and serialising sends would cost
     /// throughput for nothing.
     ///
@@ -720,6 +722,8 @@ pub const SEND_BATCH_CONCURRENCY: usize = 128;
 /// via `buffer_unordered`, then responses and failures are restored to input order
 /// before returning. This avoids head-of-line blocking when an early send is slow
 /// while still overlapping per-message round trips (e.g. JetStream PubAcks).
+/// Messages can therefore reach the sink out of order, unless the publisher's
+/// `requires_ordered_publish` is `true`: then they are sent one at a time.
 pub async fn send_batch_helper<P: MessagePublisher + ?Sized>(
     publisher: &P,
     messages: Vec<CanonicalMessage>,
@@ -742,7 +746,11 @@ pub async fn send_batch_helper<P: MessagePublisher + ?Sized>(
             (idx, msg, result)
         },
     ))
-    .buffer_unordered(SEND_BATCH_CONCURRENCY);
+    .buffer_unordered(if publisher.requires_ordered_publish() {
+        1
+    } else {
+        SEND_BATCH_CONCURRENCY
+    });
 
     while let Some((idx, msg, result)) = results.next().await {
         match result {
@@ -983,6 +991,48 @@ mod tests {
             }
             SentBatch::Ack => panic!("expected per-message responses"),
         }
+    }
+
+    struct OrderedPublisher;
+    #[async_trait]
+    impl MessagePublisher for OrderedPublisher {
+        async fn send_batch(
+            &self,
+            _msgs: Vec<CanonicalMessage>,
+        ) -> Result<SentBatch, PublisherError> {
+            Ok(SentBatch::Ack)
+        }
+        fn requires_ordered_publish(&self) -> bool {
+            true
+        }
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    #[tokio::test]
+    async fn send_batch_helper_sends_one_at_a_time_for_an_ordered_publisher() {
+        let count = 8u64;
+        let msgs: Vec<CanonicalMessage> = (0..count)
+            .map(|i| CanonicalMessage::from(i.to_string()))
+            .collect();
+        let finished = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let finished_in_send = Arc::clone(&finished);
+        send_batch_helper(&OrderedPublisher, msgs, move |_pub, msg| {
+            let finished = Arc::clone(&finished_in_send);
+            Box::pin(async move {
+                let i: u64 = msg.get_payload_str().parse().unwrap();
+                // Earlier messages sleep longer: overlapping sends would finish reversed.
+                tokio::time::sleep(std::time::Duration::from_millis(count - i)).await;
+                finished.lock().unwrap().push(i);
+                Ok(Sent::Ack)
+            })
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(*finished.lock().unwrap(), (0..count).collect::<Vec<u64>>());
     }
 
     #[tokio::test]

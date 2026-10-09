@@ -891,7 +891,7 @@ impl MessageConsumer for MemoryQueueConsumer {
                                 warn!("Requeueing nacked message {}", i);
                                 to_requeue.push(msg.clone());
                             } else {
-                                warn!("Nack for index {} but no message in retry buffer!", i);
+                                warn!(topic = %topic, "Nack for message {} dropped: `enable_nack` is off", i);
                             }
                         }
                         MessageDisposition::Ack => {}
@@ -1003,6 +1003,7 @@ impl MessageConsumer for TransportQueueConsumer {
                 }
 
                 let mut to_requeue = Vec::new();
+                let mut dropped_nacks = 0usize;
                 for (i, disposition) in dispositions.into_iter().enumerate() {
                     match disposition {
                         MessageDisposition::Nack if enable_nack => {
@@ -1013,8 +1014,12 @@ impl MessageConsumer for TransportQueueConsumer {
                         MessageDisposition::Reply(_) => {
                             tracing::warn!(topic = %topic, "IPC memory transport does not support reply dispositions");
                         }
-                        MessageDisposition::Ack | MessageDisposition::Nack => {}
+                        MessageDisposition::Nack => dropped_nacks += 1,
+                        MessageDisposition::Ack => {}
                     }
+                }
+                if dropped_nacks > 0 {
+                    tracing::warn!(topic = %topic, count = dropped_nacks, "Nacked IPC messages dropped: `enable_nack` is off");
                 }
 
                 if !to_requeue.is_empty() {

@@ -107,6 +107,9 @@ pub(crate) trait DedupStore: Send + Sync {
     /// keys are left alone. Best-effort: a missed renewal only lets the claim lapse.
     async fn renew_many(&self, keys: &[Vec<u8>], now: u64);
 
+    /// Make the markers written so far durable; runs before each source ack. Default no-op.
+    async fn sync(&self) {}
+
     /// Best-effort periodic GC of expired keys. Default no-op for backends with native TTL.
     fn maybe_cleanup(&self, _now: u64) {}
 
@@ -118,8 +121,8 @@ pub(crate) trait DedupStore: Send + Sync {
 
 /// A parsed deduplication `store:` destination.
 pub(crate) enum DedupBackend {
-    /// Local single-instance Sled directory.
-    Sled { path: String },
+    /// Local single-instance Sled directory (`sled:///path[?durable=true]`).
+    Sled { path: String, durable: bool },
     /// In-process exact-key store (`memory://[name][?max_keys=N]`); an empty name is the route's.
     Memory { name: String, max_keys: usize },
     /// Shared MongoDB collection (`mongodb://host/db[/collection]`).
@@ -149,6 +152,7 @@ pub(crate) fn parse_dedup_store(spec: &str) -> anyhow::Result<DedupBackend> {
     if scheme.len() == 1 && scheme.chars().all(|c| c.is_ascii_alphabetic()) {
         return Ok(DedupBackend::Sled {
             path: spec.to_string(),
+            durable: false,
         });
     }
     match scheme.as_str() {
@@ -157,17 +161,32 @@ pub(crate) fn parse_dedup_store(spec: &str) -> anyhow::Result<DedupBackend> {
             Ok(DedupBackend::Memory { name, max_keys })
         }
         "sled" => {
-            let path = spec
+            let rest = spec
                 .strip_prefix("sled://")
                 .or_else(|| spec.strip_prefix("sled:"))
                 .unwrap_or(spec);
+            let (path, query) = rest.split_once('?').unwrap_or((rest, ""));
+            let mut durable = false;
+            for param in query.split('&').filter(|p| !p.is_empty()) {
+                match param.split_once('=') {
+                    Some(("durable", "true")) => durable = true,
+                    Some(("durable", "false")) => durable = false,
+                    _ => {
+                        return Err(anyhow!(
+                            "unknown parameter '{param}' in deduplication store '{spec}'"
+                        ))
+                    }
+                }
+            }
             Ok(DedupBackend::Sled {
                 path: path.to_string(),
+                durable,
             })
         }
         // Schemeless (a bare filesystem path) -> local sled.
         "" => Ok(DedupBackend::Sled {
             path: spec.to_string(),
+            durable: false,
         }),
         _ => parse_networked_dedup_store(spec),
     }
@@ -216,11 +235,9 @@ async fn build_store(
             let name = if name.is_empty() { route_name } else { &name };
             Ok(memory::memory_dedup_store(name, ttl_seconds, max_keys))
         }
-        DedupBackend::Sled { path } => Ok(Arc::new(SledDedupStore::new(
-            &path,
-            ttl_seconds,
-            replay_response,
-        )?)),
+        DedupBackend::Sled { path, durable } => Ok(Arc::new(
+            SledDedupStore::new(&path, ttl_seconds, replay_response)?.durable(durable),
+        )),
         #[cfg(feature = "mongodb")]
         DedupBackend::Mongo {
             url,
@@ -377,6 +394,8 @@ struct SledDedupStore {
     last_cleanup: AtomicU64,
     /// Stored replies, only with `replay_response`.
     responses: Option<sled::Tree>,
+    /// Flush markers to disk before each source ack (`?durable=true`).
+    durable: bool,
 }
 
 impl SledDedupStore {
@@ -391,7 +410,13 @@ impl SledDedupStore {
             in_flight: Arc::new(Mutex::new(Claims::new())),
             last_cleanup: AtomicU64::new(0),
             responses,
+            durable: false,
         })
+    }
+
+    fn durable(mut self, durable: bool) -> Self {
+        self.durable = durable;
+        self
     }
 
     /// A plain ack supersedes a reply stored by an earlier, expired processing of the key.
@@ -516,6 +541,15 @@ impl DedupStore for SledDedupStore {
                 }
             }
         });
+    }
+
+    async fn sync(&self) {
+        if !self.durable {
+            return;
+        }
+        if let Err(e) = self.db.flush_async().await {
+            error!("Failed to flush the deduplication DB before the source ack: {e}");
+        }
     }
 
     async fn flush(&self) -> anyhow::Result<()> {
@@ -736,7 +770,10 @@ impl DeduplicationConsumer {
         let backend = match (&config.store, &config.sled_path) {
             (Some(store), _) => parse_dedup_store(store)?,
             // Legacy `sled_path` is always a local path (never scheme-parsed).
-            (None, Some(path)) => DedupBackend::Sled { path: path.clone() },
+            (None, Some(path)) => DedupBackend::Sled {
+                path: path.clone(),
+                durable: false,
+            },
             (None, None) => {
                 return Err(anyhow!(
                     "deduplication requires either `store` or `sled_path`"
@@ -878,6 +915,7 @@ impl MessageConsumer for DeduplicationConsumer {
             let original_commit = received.commit;
             let replay = self.replay_response;
             let lease = self.leases.hold(vec![key.clone()]);
+            let in_flight = self.deferred.track();
 
             // The marker is written before the source ack: a crash between the two then
             // replays a message that is already recognised, instead of one that is not.
@@ -893,7 +931,10 @@ impl MessageConsumer for DeduplicationConsumer {
                         (MessageDisposition::Nack, None) => store.release(&key).await,
                         (_, None) => store.mark_processed(&key, unix_now()).await,
                     }
-                    original_commit(disposition).await
+                    store.sync().await;
+                    original_commit(disposition).await?;
+                    in_flight.settled();
+                    Ok(())
                 }) as crate::traits::BoxFuture<'static, anyhow::Result<()>>
             });
 
@@ -1001,6 +1042,7 @@ impl MessageConsumer for DeduplicationConsumer {
             }
 
             let held = self.deferred.take();
+            let in_flight = self.deferred.track();
             let store = self.store.clone();
             let lease = self.leases.hold(kept_keys);
 
@@ -1034,7 +1076,10 @@ impl MessageConsumer for DeduplicationConsumer {
                         store.mark_processed_with_response(key, now, reply).await;
                     }
                     store.release_many(&failed).await;
-                    inner_commit(full_dispositions).await
+                    store.sync().await;
+                    inner_commit(full_dispositions).await?;
+                    in_flight.settled();
+                    Ok(())
                 }) as crate::traits::BoxFuture<'static, anyhow::Result<()>>
             });
 
@@ -1476,8 +1521,8 @@ mod tests {
     }
 
     /// A batch of nothing but duplicates must not surface as an empty batch — that is the
-    /// drain signal — so the wrapper skips it and fetches again. On an ordered source its
-    /// ack is held back and released just before the next retained batch commits.
+    /// drain signal — so the wrapper skips it and fetches again. On an ordered source with an
+    /// earlier batch uncommitted, its ack is held and released before the next retained commit.
     #[tokio::test]
     async fn an_all_duplicate_batch_is_acked_and_retried() {
         let dir = tempdir().unwrap();
@@ -1485,6 +1530,7 @@ mod tests {
             &dir,
             "all_dup",
             vec![
+                vec![keyed("C", 9)],
                 vec![keyed("A", 1)],
                 vec![keyed("A", 2), keyed("A", 3)],
                 vec![keyed("B", 4)],
@@ -1492,6 +1538,7 @@ mod tests {
         )
         .await;
 
+        let uncommitted = consumer.receive_batch(16).await.unwrap();
         let first = consumer.receive_batch(16).await.unwrap();
         assert_eq!(first.messages.len(), 1);
         (first.commit)(vec![MessageDisposition::Ack]).await.unwrap();
@@ -1515,12 +1562,15 @@ mod tests {
             "the skipped batch must not ack ahead of the ordered sequencer"
         );
 
+        (uncommitted.commit)(vec![MessageDisposition::Ack])
+            .await
+            .unwrap();
         (second.commit)(vec![MessageDisposition::Ack])
             .await
             .unwrap();
         assert_eq!(
             committed.lock().unwrap().as_slice(),
-            [vec!["ack"], vec!["ack", "ack"], vec!["ack"]],
+            [vec!["ack"], vec!["ack"], vec!["ack", "ack"], vec!["ack"]],
             "every message of the skipped batch is acked, in front of the batch that followed it"
         );
     }
@@ -1892,11 +1942,16 @@ mod tests {
     fn parse_sled_and_bare_paths() {
         assert!(matches!(
             parse_dedup_store("sled:///var/lib/dedup").unwrap(),
-            DedupBackend::Sled { path } if path == "/var/lib/dedup"
+            DedupBackend::Sled { path, durable: false } if path == "/var/lib/dedup"
         ));
         assert!(matches!(
             parse_dedup_store("/var/lib/dedup").unwrap(),
-            DedupBackend::Sled { path } if path == "/var/lib/dedup"
+            DedupBackend::Sled { path, durable: false } if path == "/var/lib/dedup"
         ));
+        assert!(matches!(
+            parse_dedup_store("sled:///var/lib/dedup?durable=true").unwrap(),
+            DedupBackend::Sled { path, durable: true } if path == "/var/lib/dedup"
+        ));
+        assert!(parse_dedup_store("sled:///var/lib/dedup?durabel=true").is_err());
     }
 }

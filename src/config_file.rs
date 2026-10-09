@@ -39,17 +39,34 @@ fn read_file(path: &Path) -> anyhow::Result<Value> {
     parse_str(&text).with_context(|| format!("invalid config in {}", path.display()))
 }
 
-fn unwrap_config_root(value: Value) -> Value {
+/// Strips an export's `config:` root. A `config` key next to other keys is refused: it is
+/// either a broken export or a route map with a route named `config`.
+fn unwrap_config_root(value: Value) -> anyhow::Result<Value> {
     match value {
         Value::Object(mut map) if map.contains_key("config") => {
-            map.remove("config").unwrap_or_default()
+            if map.len() > 1 {
+                let siblings: Vec<&str> = map
+                    .keys()
+                    .filter(|key| *key != "config")
+                    .map(String::as_str)
+                    .collect();
+                anyhow::bail!(
+                    "ambiguous config: the top-level key 'config' stands next to '{}'. An export \
+                     root has only 'config'; a route cannot be named 'config'.",
+                    siblings.join("', '")
+                );
+            }
+            Ok(map.remove("config").unwrap_or_default())
         }
-        other => other,
+        other => Ok(other),
     }
 }
 
 fn document_from_value(value: Value) -> anyhow::Result<ConfigDocument> {
-    let value = unwrap_config_root(value);
+    document_from_unwrapped(unwrap_config_root(value)?)
+}
+
+fn document_from_unwrapped(value: Value) -> anyhow::Result<ConfigDocument> {
     if let Value::Object(map) = &value {
         if map.contains_key("routes") || map.contains_key("publishers") {
             let routes = match map.get("routes") {
@@ -98,40 +115,48 @@ fn parse_publishers_section(value: Value) -> anyhow::Result<PublisherConfig> {
 }
 
 fn named_route(value: Value, name: &str) -> anyhow::Result<Route> {
-    let value = unwrap_config_root(value);
-    let document_error = match document_from_value(value.clone()) {
+    let value = unwrap_config_root(value)?;
+    let note = match document_from_unwrapped(value.clone()) {
         Ok(mut document) => match document.routes.remove(name) {
             Some(route) => return Ok(route),
-            None => None,
+            None => available_note(document.routes.keys()),
         },
-        Err(e) => Some(e),
+        Err(e) => document_error_note(&e),
     };
     serde_json::from_value(value).with_context(|| {
         format!(
-            "No route named '{name}' found, and the config could not be parsed as a single route{}",
-            document_error_note(document_error.as_ref())
+            "No route named '{name}' found, and the config could not be parsed as a single route{note}"
         )
     })
 }
 
+/// The names a config document does define, for the missing-name error.
+fn available_note<'a>(names: impl Iterator<Item = &'a String>) -> String {
+    let mut names: Vec<&str> = names.map(String::as_str).collect();
+    if names.is_empty() {
+        return String::new();
+    }
+    names.sort_unstable();
+    format!(" (available: {})", names.join(", "))
+}
+
 /// Why the config did not parse as a document, for the single-item fallback error.
-fn document_error_note(error: Option<&anyhow::Error>) -> String {
-    error.map_or_else(String::new, |e| format!(" (as a config document: {e:#})"))
+fn document_error_note(error: &anyhow::Error) -> String {
+    format!(" (as a config document: {error:#})")
 }
 
 fn named_publisher(value: Value, name: &str) -> anyhow::Result<Endpoint> {
-    let value = unwrap_config_root(value);
-    let document_error = match document_from_value(value.clone()) {
+    let value = unwrap_config_root(value)?;
+    let note = match document_from_unwrapped(value.clone()) {
         Ok(mut document) => match document.publishers.remove(name) {
             Some(endpoint) => return Ok(endpoint),
-            None => None,
+            None => available_note(document.publishers.keys()),
         },
-        Err(e) => Some(e),
+        Err(e) => document_error_note(&e),
     };
     serde_json::from_value(value).with_context(|| {
         format!(
-            "No publisher named '{name}' found, and the config could not be parsed as a single publisher endpoint{}",
-            document_error_note(document_error.as_ref())
+            "No publisher named '{name}' found, and the config could not be parsed as a single publisher endpoint{note}"
         )
     })
 }
@@ -248,6 +273,19 @@ mod tests {
     fn route_from_config_reports_missing_name() {
         let err = Route::from_config(document(), "missing").unwrap_err();
         assert!(err.to_string().contains("No route named 'missing'"));
+        assert!(err.to_string().contains("(available: orders)"), "{err}");
+        let err = named_publisher(document(), "missing").unwrap_err();
+        assert!(err.to_string().contains("(available: audit)"), "{err}");
+    }
+
+    #[test]
+    fn a_config_key_next_to_other_keys_is_refused_as_ambiguous() {
+        let route = json!({"input": {"memory": {"topic": "cf-amb"}}, "output": {"null": null}});
+        let mixed = json!({"config": route, "orders": route});
+        let err = Route::from_config(mixed.clone(), "orders").unwrap_err();
+        assert!(err.to_string().contains("ambiguous config"), "{err}");
+        assert!(err.to_string().contains("'orders'"), "{err}");
+        assert!(named_publisher(mixed, "orders").is_err());
     }
 
     #[test]

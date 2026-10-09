@@ -240,6 +240,33 @@ fn policy_name(endpoint_type: &EndpointType) -> Option<&str> {
     }
 }
 
+/// Applies a type policy to the endpoints a `dlq` or `lookup` middleware sends to.
+fn check_middleware_endpoints(
+    route_name: &str,
+    endpoint: &Endpoint,
+    depth: usize,
+    allowed_types: Option<&[&str]>,
+) -> Result<()> {
+    if allowed_types.is_none() {
+        return Ok(());
+    }
+    for middleware in &endpoint.middlewares {
+        let nested: Vec<&Endpoint> = match middleware {
+            Middleware::Dlq(cfg) => vec![&cfg.endpoint],
+            Middleware::Lookup(cfg) => cfg
+                .from
+                .iter()
+                .chain(cfg.entries.iter().map(|entry| &entry.from))
+                .collect(),
+            _ => continue,
+        };
+        for target in nested {
+            check_publisher_recursive(route_name, target, depth + 1, allowed_types)?;
+        }
+    }
+    Ok(())
+}
+
 /// Validates the consumer configuration for a route.
 pub fn check_consumer(
     route_name: &str,
@@ -279,6 +306,7 @@ fn check_consumer_recursive(
             ));
         }
     }
+    check_middleware_endpoints(route_name, endpoint, depth, allowed_types)?;
     match &endpoint.endpoint_type {
         EndpointType::Ref(name) => {
             let referenced = crate::route::get_endpoint(name).ok_or_else(|| {
@@ -1954,6 +1982,7 @@ fn check_publisher_recursive(
             MAX_DEPTH
         ));
     }
+    check_middleware_endpoints(route_name, endpoint, depth, allowed_types)?;
     match &endpoint.endpoint_type {
         EndpointType::Ref(name) => {
             let referenced = crate::route::get_endpoint(name).ok_or_else(|| {
@@ -3342,7 +3371,7 @@ mod tests {
         fn filtered_source() -> Endpoint {
             with_middleware(
                 Endpoint::new_memory("orders", 1),
-                Middleware::Filter("amount > 100".to_string()),
+                Middleware::Filter("amount > 100".into()),
             )
         }
 
@@ -3528,7 +3557,7 @@ mod tests {
         fn a_nested_dropper_relaxes_only_the_sinks_beneath_it() {
             let filtered_leg = with_middleware(
                 bucket(NameBy::Auto),
-                Middleware::Filter("amount > 100".to_string()),
+                Middleware::Filter("amount > 100".into()),
             );
             let fanout = Endpoint::new(EndpointType::Fanout(vec![
                 filtered_leg,
@@ -3810,6 +3839,28 @@ mod tests {
             assert!(check_publisher("test", &fanout, Some(&["memory"])).is_err());
             assert!(check_publisher("test", &custom, Some(&["pulsar"])).is_ok());
             assert!(check_publisher("test", &custom, None).is_ok());
+        }
+
+        #[test]
+        fn the_policy_reaches_endpoints_inside_dlq_and_lookup_middlewares() {
+            let custom = Endpoint::new(EndpointType::Custom {
+                name: "pulsar".to_string(),
+                config: serde_json::Value::Null,
+            });
+            let dlq = Middleware::Dlq(Box::new(crate::models::DeadLetterQueueMiddleware {
+                endpoint: custom.clone(),
+            }));
+            let lookup = Middleware::Lookup(Box::new(crate::models::LookupMiddleware {
+                from: Some(custom),
+                ..Default::default()
+            }));
+            for middleware in [dlq, lookup] {
+                let mut endpoint = null();
+                endpoint.middlewares = vec![middleware];
+                assert!(check_publisher("test", &endpoint, Some(&["memory"])).is_err());
+                assert!(check_publisher("test", &endpoint, Some(&["pulsar"])).is_ok());
+                assert!(check_publisher("test", &endpoint, None).is_ok());
+            }
         }
 
         /// `null` and `fanout` are sinks. They are refused as inputs on role grounds, not policy,

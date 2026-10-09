@@ -745,11 +745,11 @@
           "additionalProperties": false
         },
         {
-          "description": "Keeps only messages matching an expression, e.g. `filter: \"amount > 100\"`.\nReads payload fields by name and metadata as `meta.<key>`. Input and output.",
+          "description": "Keeps only messages matching an expression, e.g. `filter: \"amount > 100\"`.\nReads payload fields by name and metadata as `meta.<key>`. Input and output.\nAs a map, `on_error: drop` drops a message the expression cannot evaluate.",
           "type": "object",
           "properties": {
             "filter": {
-              "type": "string"
+              "$ref": "#/$defs/FilterMiddleware"
             }
           },
           "required": [
@@ -1740,6 +1740,37 @@
         }
       },
       "additionalProperties": false
+    },
+    "FilterMiddleware": {
+      "description": "The `filter` middleware. Accepts either a bare expression string or a map with `expression` and an optional `on_error`.",
+      "oneOf": [
+        {
+          "description": "Expression over payload fields and `meta.<key>`, e.g. `amount > 100`.",
+          "type": "string"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "expression": {
+              "description": "Expression over payload fields and `meta.<key>`, e.g. `amount > 100`.",
+              "type": "string"
+            },
+            "on_error": {
+              "description": "What to do with a message the expression cannot evaluate.",
+              "type": "string",
+              "enum": [
+                "fail",
+                "drop"
+              ],
+              "default": "fail"
+            }
+          },
+          "required": [
+            "expression"
+          ],
+          "additionalProperties": false
+        }
+      ]
     },
     "AwsConfig": {
       "type": "object",

@@ -22,7 +22,9 @@ use serde_support::*;
 pub use defaults::DEFAULT_KAFKA_PARTITIONS;
 #[cfg(feature = "grpc")]
 pub(crate) use secrets::decode_secret_map_key;
-pub use secrets::{extract_config_secrets, SecretExtractor};
+pub use secrets::{
+    check_config_secret_keys, check_secret_key_names, extract_config_secrets, SecretExtractor,
+};
 
 use serde::{
     de::{MapAccess, Visitor},
@@ -407,6 +409,30 @@ pub struct EncryptionConfig {
     pub on_error: InputErrorPolicy,
 }
 
+/// The `filter` middleware: a bare expression, or `{ expression, on_error }`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FilterMiddleware {
+    /// Expression over payload fields and `meta.<key>`, e.g. `amount > 100`.
+    pub expression: String,
+    /// What to do with a message the expression cannot evaluate. Defaults to `fail`.
+    pub on_error: InputErrorPolicy,
+}
+
+impl From<String> for FilterMiddleware {
+    fn from(expression: String) -> Self {
+        Self {
+            expression,
+            on_error: InputErrorPolicy::Fail,
+        }
+    }
+}
+
+impl From<&str> for FilterMiddleware {
+    fn from(expression: &str) -> Self {
+        Self::from(expression.to_string())
+    }
+}
+
 /// What an input middleware does with a message it cannot decode.
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -475,13 +501,8 @@ pub enum Middleware {
     Unpack(UnpackMiddleware),
     /// Keeps only messages matching an expression, e.g. `filter: "amount > 100"`.
     /// Reads payload fields by name and metadata as `meta.<key>`. Input and output.
-    Filter(
-        #[cfg_attr(
-            feature = "filter",
-            serde(deserialize_with = "deserialize_filter_expression")
-        )]
-        String,
-    ),
+    /// As a map, `on_error: drop` drops a message the expression cannot evaluate.
+    Filter(FilterMiddleware),
     Custom {
         name: String,
         config: serde_json::Value,

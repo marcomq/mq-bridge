@@ -275,13 +275,17 @@ export interface EncryptionConfig {
   key: string;
   decrypt_keys?: Record<string, string>;
   authenticate_metadata?: string[];
+  on_error?: InputErrorPolicy;
 }
 
 export type CipherKind = "xchacha20poly1305" | "aes256gcm";
 
+export type InputErrorPolicy = "fail" | "drop";
+
 export interface CompressionMiddleware {
   algorithm?: Compression;
   max_decompressed_bytes?: number | null;
+  on_error?: InputErrorPolicy;
 }
 
 export type Compression = "none" | "gzip" | "lz4" | "zstd";
@@ -298,7 +302,10 @@ export type PackFormat = "mqb" | "benthos_binary";
 export interface UnpackMiddleware {
   format?: PackFormat;
   max_messages?: number | null;
+  on_error?: InputErrorPolicy;
 }
+
+export type FilterMiddleware = string | Record<string, never>;
 
 export interface AwsConfig {
   queue_url?: string | null;

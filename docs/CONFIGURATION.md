@@ -34,16 +34,16 @@ webhook_to_mongo:
       url: "0.0.0.0:8080"
       # Force the normal route pipeline instead of the inline HTTP response fast path.
       inline_response_fast_path: false
-    middlewares:
-      - retry:
-          max_attempts: 3
-          initial_interval_ms: 500
   output:
     mongodb:
       url: "mongodb://localhost:27017"
       database: "app_db"
       collection: "webhooks"
       format: "json" # a bit slower, but better readability
+    middlewares:
+      - retry:
+          max_attempts: 3
+          initial_interval_ms: 500
 
 # Route 3: File to AMQP (RabbitMQ)
 file_ingest:
@@ -212,10 +212,18 @@ Two gotchas worth knowing before wiring up a `nats` endpoint:
 > on an **output**, the *last* middleware in the list is the outermost layer, so `dlq` goes
 > last.
 
-Middleware is defined as a list under an endpoint.
+Middleware is defined as a list under an endpoint. `retry` and `dlq` belong on the output;
+on an input the route fails at start.
 
 ```yaml
 input:
+  middlewares:
+    - deduplication:
+        sled_path: "/var/data/mq-bridge/dedup_db"
+        ttl_seconds: 3600 # 1 hour
+  kafka:
+    # ... kafka config
+output:
   middlewares:
     - retry:
         max_attempts: 5
@@ -225,11 +233,8 @@ input:
           nats:
             subject: "my-dlq-subject"
             url: "nats://localhost:4222"
-    - deduplication:
-        sled_path: "/var/data/mq-bridge/dedup_db"
-        ttl_seconds: 3600 # 1 hour
-  kafka:
-    # ... kafka config
+  nats:
+    # ... nats config
 ```
 
 ### TLS & Security Hardening

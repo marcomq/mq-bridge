@@ -14,7 +14,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 use tracing::{debug, info, warn};
 
 /// Which end of the socket this transport owns.
@@ -47,6 +47,8 @@ struct UnixIpcTransportInner {
     // reads cancel safe.
     conn: Mutex<Option<FramedIo<UnixStream>>>,
     closed: AtomicBool,
+    /// Wakes a `recv_batch` blocked on the socket when the transport closes.
+    close_notify: Notify,
 }
 
 impl UnixIpcTransport {
@@ -54,8 +56,14 @@ impl UnixIpcTransport {
     pub async fn new_server(socket_path: impl AsRef<Path>, capacity: usize) -> Result<Self> {
         let socket_path = socket_path.as_ref();
 
-        // Remove existing socket if it exists
+        // A socket that answers belongs to a running consumer; only a stale file is removed.
         if socket_path.exists() {
+            if std::os::unix::net::UnixStream::connect(socket_path).is_ok() {
+                return Err(anyhow!(
+                    "Unix IPC socket '{}' is in use by another consumer",
+                    socket_path.display()
+                ));
+            }
             std::fs::remove_file(socket_path)?;
         }
 
@@ -92,6 +100,7 @@ impl UnixIpcTransport {
                 listener: Mutex::new(Some(listener)),
                 conn: Mutex::new(None),
                 closed: AtomicBool::new(false),
+                close_notify: Notify::new(),
             }),
         })
     }
@@ -112,6 +121,7 @@ impl UnixIpcTransport {
                 listener: Mutex::new(None),
                 conn: Mutex::new(Some(framed::wrap(stream))),
                 closed: AtomicBool::new(false),
+                close_notify: Notify::new(),
             }),
         })
     }
@@ -125,6 +135,44 @@ impl UnixIpcTransport {
             Ok(stream)
         } else {
             Err(anyhow!("Unix IPC transport not in server mode"))
+        }
+    }
+
+    async fn recv_next_batch(&self) -> Result<Vec<CanonicalMessage>> {
+        loop {
+            if self.inner.closed.load(Ordering::Acquire) {
+                return Err(anyhow!("Unix IPC transport is closed"));
+            }
+
+            let mut conn_guard = self.inner.conn.lock().await;
+            if conn_guard.is_none() {
+                drop(conn_guard);
+                let stream = self.accept_connection().await?;
+                conn_guard = self.inner.conn.lock().await;
+                *conn_guard = Some(framed::wrap(stream));
+            }
+
+            let read_result = if let Some(conn) = conn_guard.as_mut() {
+                framed::recv_batch(conn).await
+            } else {
+                Err(anyhow!("Unix IPC transport has no active connection"))
+            };
+
+            match read_result {
+                Ok(messages) => {
+                    debug!(
+                        path = %self.inner.socket_path,
+                        count = messages.len(),
+                        "Received batch via Unix IPC"
+                    );
+                    return Ok(messages);
+                }
+                Err(error) if Self::is_disconnected(&error) => {
+                    warn!(path = %self.inner.socket_path, error = %error, "Unix IPC peer disconnected; waiting for a new connection");
+                    *conn_guard = None;
+                }
+                Err(error) => return Err(error),
+            }
         }
     }
 
@@ -178,40 +226,13 @@ impl TransportChannel for UnixIpcTransport {
     }
 
     async fn recv_batch(&self) -> Result<Vec<CanonicalMessage>> {
-        loop {
-            if self.inner.closed.load(Ordering::Acquire) {
-                return Err(anyhow!("Unix IPC transport is closed"));
-            }
-
-            let mut conn_guard = self.inner.conn.lock().await;
-            if conn_guard.is_none() {
-                drop(conn_guard);
-                let stream = self.accept_connection().await?;
-                conn_guard = self.inner.conn.lock().await;
-                *conn_guard = Some(framed::wrap(stream));
-            }
-
-            let read_result = if let Some(conn) = conn_guard.as_mut() {
-                framed::recv_batch(conn).await
-            } else {
-                Err(anyhow!("Unix IPC transport has no active connection"))
-            };
-
-            match read_result {
-                Ok(messages) => {
-                    debug!(
-                        path = %self.inner.socket_path,
-                        count = messages.len(),
-                        "Received batch via Unix IPC"
-                    );
-                    return Ok(messages);
-                }
-                Err(error) if Self::is_disconnected(&error) => {
-                    warn!(path = %self.inner.socket_path, error = %error, "Unix IPC peer disconnected; waiting for a new connection");
-                    *conn_guard = None;
-                }
-                Err(error) => return Err(error),
-            }
+        // Registered before the flag is read, so a concurrent `close` cannot be missed.
+        let closed = self.inner.close_notify.notified();
+        tokio::pin!(closed);
+        closed.as_mut().enable();
+        tokio::select! {
+            result = self.recv_next_batch() => result,
+            _ = closed => Err(anyhow!("Unix IPC transport is closed")),
         }
     }
 
@@ -249,6 +270,7 @@ impl TransportChannel for UnixIpcTransport {
         if !self.inner.closed.swap(true, Ordering::AcqRel) {
             info!(path = %self.inner.socket_path, "Closing Unix IPC transport");
         }
+        self.inner.close_notify.notify_waiters();
     }
 }
 
@@ -271,6 +293,49 @@ impl Drop for UnixIpcTransportInner {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn a_second_server_refuses_a_live_socket_and_replaces_a_stale_one() {
+        let temp_dir = TempDir::new().unwrap();
+        let socket_path = temp_dir.path().join("live.sock");
+
+        let first = UnixIpcTransport::new_server(&socket_path, 10)
+            .await
+            .unwrap();
+        let error = UnixIpcTransport::new_server(&socket_path, 10)
+            .await
+            .err()
+            .expect("a live socket must not be taken over");
+        assert!(error.to_string().contains("in use"), "{error}");
+
+        // A listener that went away without cleanup leaves a file nobody answers on.
+        let stale = temp_dir.path().join("stale.sock");
+        drop(std::os::unix::net::UnixListener::bind(&stale).unwrap());
+        assert!(stale.exists());
+        UnixIpcTransport::new_server(&stale, 10).await.unwrap();
+        drop(first);
+    }
+
+    #[tokio::test]
+    async fn close_wakes_a_blocked_recv_batch() {
+        let temp_dir = TempDir::new().unwrap();
+        let server = UnixIpcTransport::new_server(temp_dir.path().join("close.sock"), 10)
+            .await
+            .unwrap();
+        let blocked = {
+            let server = server.clone();
+            tokio::spawn(async move { server.recv_batch().await })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(!blocked.is_finished());
+
+        server.close();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), blocked)
+            .await
+            .expect("close must wake the blocked receive")
+            .unwrap();
+        assert!(result.is_err());
+    }
 
     #[tokio::test]
     async fn test_unix_ipc_roundtrip() {

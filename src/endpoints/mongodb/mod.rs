@@ -381,11 +381,32 @@ pub(crate) async fn build_mongo_checkpoint_store(
         .await
         .with_context(|| format!("Failed to connect checkpoint store at '{}'", url))?;
     let db = client.database(database);
-    let meta_name = collection.unwrap_or_else(|| crate::checkpoint::default_meta_name(source_name));
+    let meta_name = match collection {
+        Some(collection) => collection,
+        None => default_meta_collection(&db, source_name).await?,
+    };
     Ok(Arc::new(MongoCollectionCheckpointStore {
         meta: db.collection::<Document>(&meta_name),
         doc_id: crate::checkpoint::checkpoint_key(source_name, cursor_id),
     }))
+}
+
+/// The default meta collection for `source_name`. A name that sanitization changed gets a hash
+/// suffix, unless a collection under the unsuffixed name already holds cursors.
+pub(crate) async fn default_meta_collection(
+    db: &mongodb::Database,
+    source_name: &str,
+) -> anyhow::Result<String> {
+    let legacy = crate::checkpoint::default_meta_name(source_name);
+    let Some(unique) = crate::checkpoint::disambiguated_meta_name(source_name) else {
+        return Ok(legacy);
+    };
+    let existing = db
+        .list_collection_names()
+        .filter(doc! { "name": &legacy })
+        .await
+        .with_context(|| format!("Failed to look up meta collection '{legacy}'"))?;
+    Ok(if existing.is_empty() { unique } else { legacy })
 }
 
 /// Returns a shared MongoDB client for this connection, building one on first use.

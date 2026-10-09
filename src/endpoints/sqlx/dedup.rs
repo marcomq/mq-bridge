@@ -454,9 +454,7 @@ impl crate::middleware::deduplication::DedupStore for SqlDedupStore {
                 self.placeholder(1),
                 self.placeholders(2, chunk.len())
             );
-            let mut update = sqlx::query(audited_sql(&sql))
-                .persistent(false)
-                .bind(claim);
+            let mut update = sqlx::query(audited_sql(&sql)).persistent(false).bind(claim);
             for key in chunk {
                 update = update.bind(crate::middleware::deduplication::hex_key(key));
             }

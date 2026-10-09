@@ -6,12 +6,15 @@
 //! ordered sequencer only sees the commits `receive_batch` returns — and a crash
 //! in that window loses them. So on those sources the emptied batch's commit is
 //! held and runs from inside the next retained batch's commit, which the
-//! sequencer does order.
+//! sequencer does order. While no retained batch is uncommitted there is nothing
+//! to jump ahead of, so the commit runs at once and a middleware that drops
+//! everything still advances the source.
 //!
 //! Shared by the `filter` and `deduplication` middlewares.
 
 use std::collections::VecDeque;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use crate::traits::{BatchCommitFunc, MessageDisposition};
 
@@ -24,7 +27,8 @@ const MAX_DEFERRED_COMMITS: usize = 1024;
 /// Commits for batches this middleware emptied, held back on sources that need
 /// ordered commits.
 ///
-/// Bounded at [`MAX_DEFERRED_COMMITS`], dropping the oldest. Releasing a held
+/// Bounded at [`MAX_DEFERRED_COMMITS`], dropping the oldest plain ack; an entry that
+/// carries a reply is never dropped, its requester is waiting for it. Releasing a held
 /// commit without running it is the same at-least-once outcome as ending a drain
 /// with commits still held — those messages are re-read and re-dropped — which is
 /// why the bound costs correctness nothing. Keeping the newest is what makes it
@@ -37,6 +41,18 @@ const MAX_DEFERRED_COMMITS: usize = 1024;
 #[derive(Default)]
 pub(crate) struct DeferredCommits {
     held: Mutex<VecDeque<(BatchCommitFunc, Emptied)>>,
+    in_flight: Arc<AtomicUsize>,
+}
+
+/// A retained delivery handed to the caller whose commit has not finished.
+pub(crate) struct InFlight(Arc<AtomicUsize>);
+
+impl InFlight {
+    /// Call once the delivery's commit succeeded. A commit that fails or never runs
+    /// stays counted, which keeps later emptied batches from committing past it.
+    pub(crate) fn settled(self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 /// What a held commit settles its dropped messages with. Plain acks stay a count, so a
@@ -66,10 +82,16 @@ impl DeferredCommits {
             .expect("held commits are only reached through &mut self, never locked")
     }
 
+    /// Counts a retained delivery as uncommitted until [`InFlight::settled`].
+    pub(crate) fn track(&self) -> InFlight {
+        self.in_flight.fetch_add(1, Ordering::SeqCst);
+        InFlight(Arc::clone(&self.in_flight))
+    }
+
     /// Acknowledges a batch this middleware emptied.
     ///
-    /// On a source needing ordered commits the commit is held for the next
-    /// retained batch; otherwise it runs now.
+    /// On a source needing ordered commits the commit is held while a retained
+    /// batch is uncommitted; otherwise it runs now.
     #[cfg_attr(not(feature = "filter"), allow(dead_code))]
     pub(crate) async fn ack_emptied(
         &mut self,
@@ -108,11 +130,23 @@ impl DeferredCommits {
         if !ordered {
             return commit(emptied.into_dispositions()).await;
         }
+        let idle = self.in_flight.load(Ordering::SeqCst) == 0;
         let queue = self.queue();
-        if queue.len() >= MAX_DEFERRED_COMMITS {
-            queue.pop_front();
+        if !idle && queue.len() >= MAX_DEFERRED_COMMITS {
+            let oldest_ack = queue
+                .iter()
+                .position(|(_, emptied)| matches!(emptied, Emptied::Acked(_)));
+            if let Some(oldest_ack) = oldest_ack {
+                queue.remove(oldest_ack);
+            }
         }
         queue.push_back((commit, emptied));
+        if idle {
+            // Popped one at a time, so a cancelled caller loses at most the one running.
+            while let Some((commit, emptied)) = self.queue().pop_front() {
+                commit(emptied.into_dispositions()).await?;
+            }
+        }
         Ok(())
     }
 
@@ -142,8 +176,7 @@ pub(crate) async fn run_all(held: VecDeque<(BatchCommitFunc, Emptied)>) -> anyho
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex};
+    use std::sync::Mutex;
 
     fn counting_commit(seen: Arc<AtomicUsize>) -> BatchCommitFunc {
         Box::new(move |dispositions| {
@@ -170,6 +203,7 @@ mod tests {
     async fn an_ordered_source_holds_the_commit_until_it_is_taken() {
         let seen = Arc::new(AtomicUsize::new(0));
         let mut deferred = DeferredCommits::new();
+        let _uncommitted = deferred.track();
         deferred
             .ack_emptied(true, counting_commit(seen.clone()), 4)
             .await
@@ -191,6 +225,7 @@ mod tests {
         let seen = Arc::new(AtomicUsize::new(0));
         let executed = Arc::new(Mutex::new(Vec::new()));
         let mut deferred = DeferredCommits::new();
+        let _uncommitted = deferred.track();
         for id in 0..MAX_DEFERRED_COMMITS + 10 {
             let seen = seen.clone();
             let executed = executed.clone();
@@ -211,5 +246,65 @@ mod tests {
             *executed.lock().unwrap(),
             (10..MAX_DEFERRED_COMMITS + 10).collect::<Vec<_>>()
         );
+    }
+
+    /// With nothing retained and uncommitted, an ordered source advances batch by batch.
+    #[tokio::test]
+    async fn an_ordered_source_commits_at_once_while_nothing_is_uncommitted() {
+        let seen = Arc::new(AtomicUsize::new(0));
+        let mut deferred = DeferredCommits::new();
+        deferred
+            .ack_emptied(true, counting_commit(seen.clone()), 3)
+            .await
+            .unwrap();
+        assert_eq!(seen.load(Ordering::Relaxed), 3);
+
+        let retained = deferred.track();
+        deferred
+            .ack_emptied(true, counting_commit(seen.clone()), 2)
+            .await
+            .unwrap();
+        assert_eq!(
+            seen.load(Ordering::Relaxed),
+            3,
+            "held behind the retained batch"
+        );
+
+        retained.settled();
+        deferred
+            .ack_emptied(true, counting_commit(seen.clone()), 1)
+            .await
+            .unwrap();
+        assert_eq!(
+            seen.load(Ordering::Relaxed),
+            6,
+            "the held commit runs first"
+        );
+        assert!(deferred.take().is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_bound_never_drops_a_held_reply() {
+        let seen = Arc::new(AtomicUsize::new(0));
+        let mut deferred = DeferredCommits::new();
+        let _uncommitted = deferred.track();
+        let reply = || {
+            vec![MessageDisposition::Reply(crate::CanonicalMessage::from(
+                "stored",
+            ))]
+        };
+        deferred
+            .settle_emptied(true, counting_commit(seen.clone()), reply())
+            .await
+            .unwrap();
+        for _ in 0..MAX_DEFERRED_COMMITS + 10 {
+            deferred
+                .ack_emptied(true, counting_commit(seen.clone()), 1)
+                .await
+                .unwrap();
+        }
+        let held = deferred.take();
+        assert_eq!(held.len(), MAX_DEFERRED_COMMITS);
+        assert!(matches!(held[0].1, Emptied::Settled(_)));
     }
 }

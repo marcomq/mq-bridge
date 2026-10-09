@@ -64,6 +64,16 @@ through a `Publisher` built on a `memory` endpoint (see the
 `capacity` bounds the in-flight channel; tune it alongside the guidance in
 [Performance tuning](../operations/tuning.md).
 
+## When not to use it
+
+IPC is **at-most-once across a consumer crash**. A send is acknowledged once its bytes are
+in the kernel socket buffer, so messages the consumer had not yet processed are lost when it
+dies, and the publisher is never told. It also serves **one publisher at a time**: a second
+one connects without an error and then waits until the first disconnects.
+
+If the hand-over must survive a crash of either process, use a
+[directory spool](../connectors/dir-spool.md) between the two processes, or a broker.
+
 ## See also
 
 - [Configuration grammar](../engine/configuration.md) — this is Route 9 of the annotated example, with the full URL grammar in comments.

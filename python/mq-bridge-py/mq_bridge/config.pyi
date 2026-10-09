@@ -520,7 +520,7 @@ class Middleware(TypedDict, total=False):
     delay: DelayMiddleware
     dlq: DeadLetterQueueMiddleware
     encryption: EncryptionConfig
-    filter: str
+    filter: FilterMiddleware
     id: str
     limiter: LimiterMiddleware
     lookup: LookupMiddleware
@@ -865,6 +865,7 @@ DatePartitionStyle = Literal["nested", "hive"]
 DeliveryGuarantee = Literal["at_most_once", "at_least_once", "effectively_once"]
 FaultMode = Literal["panic", "disconnect", "timeout", "json_format_error", "nack"]
 FileFormat = Literal["normal", "json", "text", "raw", "csv", "parquet"]
+FilterMiddleware = Union[str, Dict[str, Any]]
 HttpBulkFormat = Literal["ndjson", "json_array"]
 HttpBulkStream = Literal["sse", "ndjson"]
 HttpServerProtocol = Literal["auto", "http1_only", "http2_only"]

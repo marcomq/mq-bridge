@@ -98,7 +98,7 @@ where
                 stalled_for_secs = STALLED_SEND_WARN_AFTER.as_secs(),
                 "IPC send is blocked: the batch is larger than the socket buffer and the \
                  consumer is not draining it. Check that the consumer side is running and \
-                 reading. Still waiting."
+                 reading, and that no other publisher holds its one connection. Still waiting."
             );
             send.await?
         }

@@ -128,7 +128,11 @@ Two consequences worth knowing:
 
 Redelivery over IPC is **consumer-local**. The socket carries publisher → consumer traffic only, so a nack cannot travel back to the producer — the publisher never reads, and writing to it would strand the messages and eventually block the commit on a full socket buffer. A nacked message is therefore requeued inside the consumer and redelivered ahead of new traffic. It does **not** survive a consumer crash, and the publisher is never told.
 
-If you need redelivery that survives the consumer process, use a real broker endpoint. mq-bridge deliberately does not implement a bidirectional ack protocol over IPC.
+The publisher's side is **at-most-once across a consumer crash**. A send is acknowledged once its bytes are in the kernel socket buffer, not when the consumer has read or processed them. If the consumer process dies, whatever sat in that buffer or in the consumer's memory is lost, and the publisher's source has already been committed.
+
+A second publisher on the same socket connects without an error, because the kernel queues the connection, but the consumer only reads it after the first publisher disconnects. Until then its sends fill the socket buffer and then block; the 5-second stalled-send warning is the only sign.
+
+If the hand-over must survive a crash of either process, use `dir_spool` between the two processes, or a broker endpoint. mq-bridge deliberately does not implement a bidirectional ack protocol over IPC.
 
 ### Behavioural differences vs `memory://`
 

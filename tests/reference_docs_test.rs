@@ -257,7 +257,7 @@ async fn wrong_side_middleware_matches_documented_behaviour() {
         "id on an output must fail at startup, as documented"
     );
 
-    // Documented as warn-and-skip on the consumer side: the route still starts.
+    // Documented as a hard error on the consumer side too.
     let mut input = Endpoint::new_memory("reference_docs_wrong_side_in", 10);
     input.middlewares = vec![Middleware::Retry(Default::default())];
     let consumer = match &input.endpoint_type {
@@ -273,8 +273,8 @@ async fn wrong_side_middleware_matches_documented_behaviour() {
             "reference_docs_route",
         )
         .await
-        .is_ok(),
-        "retry on an input must warn and be skipped, not fail"
+        .is_err(),
+        "retry on an input must fail at startup, as documented"
     );
 }
 

@@ -22,12 +22,7 @@ fn extract_sensitive_string_map_entries(
 ) {
     let secret_keys = values
         .keys()
-        .filter(|key| {
-            let key = key.to_ascii_lowercase();
-            ["key", "token", "auth", "secret", "password", "cookie"]
-                .iter()
-                .any(|needle| key.contains(needle))
-        })
+        .filter(|key| is_sensitive_map_key(key))
         .cloned()
         .collect::<Vec<_>>();
 
@@ -42,6 +37,94 @@ fn extract_sensitive_string_map_entries(
                 )),
                 value,
             );
+        }
+    }
+}
+
+/// `key` and `auth` count only as whole words, so `X-Author` and `X-Keyboard` stay in place.
+pub(super) fn is_sensitive_map_key(key: &str) -> bool {
+    const CONTAINS: [&str; 4] = ["token", "secret", "password", "cookie"];
+    const WORDS: [&str; 5] = ["key", "apikey", "auth", "authorization", "authentication"];
+    let key = key.to_ascii_lowercase();
+    CONTAINS.iter().any(|needle| key.contains(needle))
+        || key
+            .split(|ch: char| !ch.is_ascii_alphanumeric())
+            .any(|word| WORDS.contains(&word))
+}
+
+/// Fails when two of `names` map to one secret env key (`a-b` and `a_b`), where one secret
+/// would overwrite the other. `kind` names what is checked, e.g. `route`.
+pub fn check_secret_key_names<'a>(
+    kind: &str,
+    names: impl IntoIterator<Item = &'a str>,
+) -> anyhow::Result<()> {
+    let mut seen: HashMap<String, &str> = HashMap::new();
+    for name in names {
+        if let Some(other) = seen.insert(sanitize_secret_key(name), name) {
+            if other != name {
+                anyhow::bail!(
+                    "{kind} names '{other}' and '{name}' map to the same secret key. \
+                     Rename one of them."
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Checks the route names of `config` and the `switch` cases inside every route with
+/// [`check_secret_key_names`]. Call it before [`extract_config_secrets`].
+pub fn check_config_secret_keys(config: &Config) -> anyhow::Result<()> {
+    check_secret_key_names("route", config.keys().map(String::as_str))?;
+    for route in config.values() {
+        route.check_secret_keys()?;
+    }
+    Ok(())
+}
+
+impl Route {
+    /// Checks the `switch` cases of this route with [`check_secret_key_names`].
+    pub fn check_secret_keys(&self) -> anyhow::Result<()> {
+        self.input.check_secret_keys()?;
+        self.output.check_secret_keys()
+    }
+}
+
+impl Endpoint {
+    /// Checks the `switch` cases of this endpoint tree with [`check_secret_key_names`].
+    pub fn check_secret_keys(&self) -> anyhow::Result<()> {
+        for middleware in &self.middlewares {
+            match middleware {
+                Middleware::Dlq(cfg) => cfg.endpoint.check_secret_keys()?,
+                Middleware::Lookup(cfg) => {
+                    for from in cfg.from.iter().chain(cfg.entries.iter().map(|e| &e.from)) {
+                        from.check_secret_keys()?;
+                    }
+                }
+                _ => {}
+            }
+        }
+        match &self.endpoint_type {
+            EndpointType::Fanout(endpoints) => {
+                endpoints.iter().try_for_each(Endpoint::check_secret_keys)
+            }
+            EndpointType::Switch(cfg) => {
+                check_secret_key_names("switch case", cfg.cases.keys().map(String::as_str))?;
+                cfg.cases
+                    .values()
+                    .chain(cfg.default.as_deref())
+                    .try_for_each(Endpoint::check_secret_keys)
+            }
+            EndpointType::Sequence(cfg) => cfg
+                .endpoints
+                .iter()
+                .try_for_each(Endpoint::check_secret_keys),
+            EndpointType::Reader(endpoint) => endpoint.check_secret_keys(),
+            EndpointType::Request(cfg) => {
+                cfg.to.check_secret_keys()?;
+                cfg.forward_to.check_secret_keys()
+            }
+            _ => Ok(()),
         }
     }
 }
@@ -714,6 +797,9 @@ impl SecretExtractor for IbmTlsConfig {
 ///
 /// The keys in the returned map follow the `MQB__{ROUTE}__{ENDPOINT}__{FIELD}` pattern
 /// compatible with the `config` crate's environment variable override mechanism.
+///
+/// Two names that differ only in non-alphanumeric characters share a key, and one secret
+/// overwrites the other. [`check_config_secret_keys`] reports that case.
 pub fn extract_config_secrets(config: &mut Config) -> HashMap<String, String> {
     let mut secrets = HashMap::new();
     for (route_name, route) in config.iter_mut() {

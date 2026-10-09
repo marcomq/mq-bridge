@@ -105,12 +105,11 @@ middlewares:
 > For compressed-and-encrypted data at rest, prefer the endpoints' own
 > `compression`/`encryption` fields, which do this per write batch.
 
-**Putting a middleware on the wrong side behaves in two different ways**, so check the table
-above rather than assuming:
+**Putting a middleware on the wrong side is a hard startup error**, so check the table above:
 
-- `dlq` / `retry` on an input log a warning and are skipped. The route still starts.
-- `deduplication`, `weak_join` and `id` on an output are **hard
-  startup errors**. Deduplication
+- `dlq` / `retry` on an input. A route that started without the retries or the dead-letter
+  queue its config names would be worse than one that refuses to start.
+- `deduplication`, `weak_join` and `id` on an output. Deduplication
   cannot work on the publish side, and silently starting an un-deduplicated route is worse
   than refusing to start. `pack` on an input and `unpack` on an output are hard errors too —
   the pair is directional.
@@ -122,7 +121,7 @@ without `metrics`, `otel` without `otel`, `aggregate` without `aggregate`) is li
 
 ### `retry`
 
-Retries failed sends with exponential backoff. Output only.
+Retries failed sends with exponential backoff. Output only. On an input the route fails at start.
 
 | Field | Type | Default |
 |---|---|---|
@@ -142,6 +141,7 @@ permanent. Pair the two.
 ### `dlq`
 
 Sends permanently-failed messages to a separate endpoint instead of failing the batch. Output only.
+On an input the route fails at start.
 
 | Field | Type | Required |
 |---|---|---|
@@ -344,11 +344,22 @@ Keeps only the messages for which an expression is true; the rest are dropped. I
 output. Requires the `filter` feature (pulls the `zen-expression` engine), which is part of
 `middleware`/`full` but **not** of `portable`.
 
-The value is a bare expression string:
+The value is a bare expression string, or a map when you need `on_error`:
 
 ```yaml middleware
 - filter: "amount > 100"
 ```
+
+```yaml middleware
+- filter:
+    expression: "amount > 100"
+    on_error: drop
+```
+
+| Field | Type | Default | |
+|---|---|---|---|
+| `expression` | string | required | The expression. |
+| `on_error` | `fail` \| `drop` | `fail` | What to do with a message the expression cannot evaluate. `fail` stops the route; `drop` logs a warning and drops the message like a non-matching one. |
 
 **Put it on the input whenever you can.** A filter on the input drops the message before the
 rest of the pipeline touches it, and acknowledges it at the source; on the output the
@@ -386,7 +397,8 @@ A field that is absent is supplied to the expression as `null`, so an `or` branc
 can still match. A `null` or non-scalar field (an array or object where the expression expects
 a scalar) logs a warning. A payload that is not a JSON object, or an
 expression that does not evaluate to a boolean, is an **error** and fails the batch; those
-are configuration mistakes, and dropping every message would hide them.
+are configuration mistakes, and dropping every message would hide them. Set `on_error: drop`
+when a source legitimately mixes in messages the expression cannot read.
 
 To send the non-matching messages somewhere instead of discarding them, use
 [`switch`](#switch)'s `when` mode rather than a filter.
@@ -423,7 +435,10 @@ dedup to survive a re-read.
 
 `store` selects the backend by URL scheme:
 
-- `sled:///path` (or a bare path) — a local sled database; per-process, not cluster-wide.
+- `sled:///path[?durable=true]` (or a bare path) — a local sled database; per-process, not
+  cluster-wide. sled writes to disk in the background, about every 500 ms, so a killed
+  process can lose its newest markers and reprocess those messages. `?durable=true` flushes
+  before every source ack instead, at the price of one disk sync per batch.
 - `memory://[name][?max_keys=N]` — process memory, the fastest store (~3x sled). Keys are
   compared exactly and survive reconnects and redeploys, but not a restart. Routes that name
   the same store share it; the name defaults to the route's. `max_keys` (default 1,000,000)
@@ -454,6 +469,10 @@ default.
 
 ```yaml middleware
 - deduplication: { store: "sled:///var/lib/mq-bridge/dedup", ttl_seconds: 3600 }
+```
+
+```yaml middleware
+- deduplication: { store: "sled:///var/lib/mq-bridge/dedup?durable=true", ttl_seconds: 3600 }
 ```
 
 ```yaml middleware

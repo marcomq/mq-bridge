@@ -7,7 +7,20 @@
 
 use std::borrow::Cow;
 
-/// Blanks the password in a `scheme://user:password@host` URL.
+/// Query parameters whose value is a credential.
+const SECRET_QUERY_KEYS: [&str; 8] = [
+    "password",
+    "token",
+    "secret",
+    "api_key",
+    "apikey",
+    "access_token",
+    "sig",
+    "signature",
+];
+
+/// Blanks the password in a `scheme://user:password@host` URL and the value of every query
+/// parameter in [`SECRET_QUERY_KEYS`].
 pub(crate) fn url_password(url: &str) -> Cow<'_, str> {
     let Some(scheme_end) = url.find("://") else {
         return Cow::Borrowed(url);
@@ -17,16 +30,48 @@ pub(crate) fn url_password(url: &str) -> Cow<'_, str> {
         .find(['/', '?', '#'])
         .map_or(url.len(), |offset| authority_start + offset);
     let authority = &url[authority_start..authority_end];
-    let Some(at) = authority.rfind('@') else {
+    let userinfo = authority.rfind('@').and_then(|at| {
+        let (user, _password) = authority[..at].split_once(':')?;
+        Some(format!("{user}:***{}", &authority[at..]))
+    });
+    let rest = redact_query(&url[authority_end..]);
+    if userinfo.is_none() && matches!(rest, Cow::Borrowed(_)) {
         return Cow::Borrowed(url);
-    };
-    let Some((user, _password)) = authority[..at].split_once(':') else {
-        return Cow::Borrowed(url);
-    };
+    }
     Cow::Owned(format!(
-        "{}{user}:***{}",
+        "{}{}{rest}",
         &url[..authority_start],
-        &url[authority_start + at..]
+        userinfo.as_deref().unwrap_or(authority)
+    ))
+}
+
+/// `rest` is a URL from its path on.
+fn redact_query(rest: &str) -> Cow<'_, str> {
+    let fragment_start = rest.find('#').unwrap_or(rest.len());
+    let Some(query_start) = rest[..fragment_start].find('?').map(|at| at + 1) else {
+        return Cow::Borrowed(rest);
+    };
+    let query = &rest[query_start..fragment_start];
+    let is_secret = |pair: &str| {
+        pair.split_once('=').is_some_and(|(key, value)| {
+            !value.is_empty() && SECRET_QUERY_KEYS.contains(&key.to_ascii_lowercase().as_str())
+        })
+    };
+    if !query.split('&').any(is_secret) {
+        return Cow::Borrowed(rest);
+    }
+    let redacted: Vec<String> = query
+        .split('&')
+        .map(|pair| match pair.split_once('=') {
+            Some((key, _)) if is_secret(pair) => format!("{key}=***"),
+            _ => pair.to_string(),
+        })
+        .collect();
+    Cow::Owned(format!(
+        "{}{}{}",
+        &rest[..query_start],
+        redacted.join("&"),
+        &rest[fragment_start..]
     ))
 }
 
@@ -44,8 +89,21 @@ mod tests {
     }
 
     #[test]
+    fn credentials_in_the_query_are_blanked() {
+        assert_eq!(
+            url_password("https://host/hook?id=7&Token=abc&sig=x%2By#token=frag"),
+            "https://host/hook?id=7&Token=***&sig=***#token=frag"
+        );
+        assert_eq!(
+            url_password("redis://app:pw@host?password=pw2&db=1"),
+            "redis://app:***@host?password=***&db=1"
+        );
+    }
+
+    #[test]
     fn a_url_without_a_password_is_untouched() {
         for url in [
+            "http://host/x?tokens=3&token=&secret",
             "http://host/x?next=http://a:b@c",
             "tcp://app@host:1883",
             "host:1883",
