@@ -104,6 +104,9 @@ impl MessagePublisher for RetryPublisher {
         let mut current_messages = messages;
         let mut all_responses = Vec::new();
         let mut all_failed = Vec::new();
+        // Set once an attempt delivered part of the batch: a later whole-batch error must
+        // then fail only the remainder instead of the messages already sent.
+        let mut partial_progress = false;
 
         // We reuse the retry_op logic manually here because the state (current_messages) changes
         let mut attempt = 0;
@@ -113,8 +116,9 @@ impl MessagePublisher for RetryPublisher {
             attempt += 1;
             // `send_batch` consumes the batch and `Err` does not hand it back, so a copy is
             // kept to re-send from. Nothing is re-sent after the final attempt, so that one
-            // moves instead of deep-copying every metadata map.
-            let mut outgoing = if attempt >= self.config.max_attempts {
+            // moves instead of deep-copying every metadata map (unless a failure of it
+            // still has to name the remaining messages).
+            let mut outgoing = if attempt >= self.config.max_attempts && !partial_progress {
                 std::mem::take(&mut current_messages)
             } else {
                 current_messages.clone()
@@ -179,8 +183,37 @@ impl MessagePublisher for RetryPublisher {
                     }
                     warn!("Batch send partially failed (attempt {}/{}): {} messages failed. Retrying...", attempt, self.config.max_attempts, retryable.len());
                     current_messages = retryable.into_iter().map(|(msg, _)| msg).collect();
+                    partial_progress = true;
                 }
                 Err(e) => {
+                    let exhausted = attempt >= self.config.max_attempts;
+                    if partial_progress && (exhausted || !matches!(e, PublisherError::Retryable(_)))
+                    {
+                        let reason = e.to_string();
+                        let max_attempts = self.config.max_attempts;
+                        all_failed.extend(current_messages.into_iter().map(|msg| {
+                            let error = match &e {
+                                PublisherError::NonRetryable(_) => {
+                                    PublisherError::NonRetryable(anyhow!("{reason}"))
+                                }
+                                PublisherError::Connection(_) => {
+                                    PublisherError::Connection(anyhow!("{reason}"))
+                                }
+                                PublisherError::Retryable(_) => PublisherError::Retryable(anyhow!(
+                                    "Retries exhausted after {max_attempts} attempts: {reason}"
+                                )),
+                            };
+                            (msg, error)
+                        }));
+                        return Ok(SentBatch::Partial {
+                            responses: if all_responses.is_empty() {
+                                None
+                            } else {
+                                Some(all_responses)
+                            },
+                            failed: all_failed,
+                        });
+                    }
                     if matches!(e, PublisherError::NonRetryable(_)) {
                         return Err(e);
                     }
@@ -259,6 +292,71 @@ mod tests {
         fn as_any(&self) -> &dyn Any {
             self
         }
+    }
+
+    /// Delivers the first message of the first batch, then fails every later call outright.
+    struct PartialThenDown {
+        calls: Arc<Mutex<usize>>,
+    }
+
+    #[async_trait]
+    impl MessagePublisher for PartialThenDown {
+        async fn send(&self, _msg: CanonicalMessage) -> Result<Sent, PublisherError> {
+            Ok(Sent::Ack)
+        }
+
+        async fn send_batch(
+            &self,
+            messages: Vec<CanonicalMessage>,
+        ) -> Result<SentBatch, PublisherError> {
+            let mut calls = self.calls.lock().unwrap();
+            *calls += 1;
+            if *calls > 1 {
+                return Err(PublisherError::Retryable(anyhow!("broker blip")));
+            }
+            Ok(SentBatch::Partial {
+                responses: None,
+                failed: messages
+                    .into_iter()
+                    .skip(1)
+                    .map(|m| (m, PublisherError::Retryable(anyhow!("busy"))))
+                    .collect(),
+            })
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    /// A whole-batch error on a later attempt must not fail the messages an earlier
+    /// attempt already delivered, or the route redelivers them.
+    #[tokio::test]
+    async fn test_batch_error_after_partial_keeps_delivered_messages() {
+        let config = RetryMiddleware {
+            max_attempts: 2,
+            initial_interval_ms: 1,
+            max_interval_ms: 10,
+            multiplier: 1.0,
+        };
+        let publisher = RetryPublisher::new(
+            Box::new(PartialThenDown {
+                calls: Arc::new(Mutex::new(0)),
+            }),
+            config,
+        );
+        let batch: Vec<_> = (1..=3u128)
+            .map(|id| CanonicalMessage::new(vec![], Some(id)))
+            .collect();
+
+        let SentBatch::Partial { failed, .. } = publisher.send_batch(batch).await.unwrap() else {
+            panic!("expected a partial result");
+        };
+        let failed_ids: Vec<u128> = failed.iter().map(|(m, _)| m.message_id).collect();
+        assert_eq!(failed_ids, vec![2, 3]);
+        assert!(failed
+            .iter()
+            .all(|(_, e)| e.to_string().contains("Retries exhausted")));
     }
 
     #[tokio::test]

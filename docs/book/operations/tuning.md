@@ -92,7 +92,8 @@ against a serial source just adds idle workers.
 | MongoDB / serial-read source | `1` (widen downstream instead) |
 
 `commit_concurrency_limit` (default `4096`) caps in-flight commit operations, whether queued
-through ordered sequencing or run concurrently for independent-ack transports. Rarely needs
+through ordered sequencing or run concurrently for independent-ack transports. Once that many
+batches wait for their commit, the route stops reading until one finishes. Rarely needs
 changing.
 
 ## Writing to a Postgres table

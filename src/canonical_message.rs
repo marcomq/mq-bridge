@@ -615,7 +615,12 @@ impl From<Vec<u8>> for CanonicalMessage {
 
 impl From<serde_json::Value> for CanonicalMessage {
     fn from(v: serde_json::Value) -> Self {
-        Self::from_json(v).expect("Failed to serialize JSON value")
+        // `from_json` only fails on an `id` field it cannot read as a message id
+        // (`{"id": -1}`); the payload is still valid, so it gets a generated id.
+        match serde_json::to_vec(&v) {
+            Ok(bytes) => Self::from_json(v).unwrap_or_else(|_| Self::new(bytes, None)),
+            Err(_) => Self::new(v.to_string().into_bytes(), None),
+        }
     }
 }
 

@@ -55,7 +55,7 @@ impl ResumeCapability {
 /// compiled when the route starts, which is also where an invalid one is
 /// reported — before anything is copied.
 pub fn configure_filter(input: &mut Endpoint, expression: &str) {
-    insert_before_buffer(input, Middleware::Filter(expression.to_string()));
+    insert_before_buffer(input, Middleware::Filter(expression.into()));
 }
 
 /// Attaches a row counter next to the source and returns the shared tally.

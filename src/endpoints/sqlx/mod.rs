@@ -2847,8 +2847,42 @@ pub(crate) async fn build_sql_checkpoint_store(
         drop(conn);
         name
     };
-    let meta_table = table.unwrap_or_else(|| crate::checkpoint::default_meta_name(source_name));
+    let meta_table = match table {
+        Some(table) => table,
+        None => default_meta_table(&pool, &driver_name, source_name).await?,
+    };
     source_sql_checkpoint_store(pool, driver_name, meta_table, source_name, cursor_id).await
+}
+
+/// The default meta table for `source_name`. A name that sanitization changed gets a hash
+/// suffix, unless a table under the unsuffixed name already holds cursors.
+async fn default_meta_table(
+    pool: &AnyPool,
+    driver_name: &str,
+    source_name: &str,
+) -> anyhow::Result<String> {
+    let legacy = crate::checkpoint::default_meta_name(source_name);
+    let Some(unique) = crate::checkpoint::disambiguated_meta_name(source_name) else {
+        return Ok(legacy);
+    };
+    let sql = match driver_name {
+        "PostgreSQL" => {
+            "SELECT COUNT(*) FROM pg_class \
+             WHERE relname = $1 AND relkind IN ('r', 'p') AND pg_table_is_visible(oid)"
+        }
+        "MySQL" | "MariaDB" => {
+            "SELECT COUNT(*) FROM information_schema.tables \
+             WHERE table_schema = DATABASE() AND table_name = ?"
+        }
+        "SQLite" => "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?",
+        _ => return Ok(legacy),
+    };
+    let existing: i64 = sqlx::query_scalar(audited_sql(sql))
+        .bind(legacy.clone())
+        .fetch_one(pool)
+        .await
+        .map_err(|e| anyhow!("Failed to look up meta table '{legacy}': {e}"))?;
+    Ok(if existing > 0 { legacy } else { unique })
 }
 
 /// Build a checkpoint store on an already-connected pool (typically the source's own datastore),
@@ -2898,6 +2932,10 @@ async fn open_cursor_checkpoint(
                     let driver_name = pool.acquire().await?.backend_name().to_string();
                     (pool, driver_name)
                 }
+            };
+            let name = match config.checkpoint_store {
+                None => default_meta_table(&pool, &driver_name, &config.table).await?,
+                Some(_) => name,
             };
             source_sql_checkpoint_store(pool, driver_name, name, &config.table, cursor_id).await?
         }

@@ -22,7 +22,7 @@
 //! idempotent sink) if duplicates matter.
 
 use super::buffer::rebuild_error;
-use crate::models::{PackMiddleware, UnpackMiddleware};
+use crate::models::{InputErrorPolicy, PackMiddleware, UnpackMiddleware};
 use crate::support::pack::{unpack, Packer, UnpackLimits};
 use crate::traits::{
     BatchCommitFunc, BoxFuture, ConsumerError, EndpointStatus, MessageConsumer, MessageDisposition,
@@ -146,12 +146,13 @@ impl MessagePublisher for PackPublisher {
                     messages.into_iter().map(Some).collect();
                 let mut out = Vec::new();
                 for (packed, error) in failed {
-                    let Some(index) = packed_ids.iter().position(|id| *id == packed.message_id)
-                    else {
-                        continue;
+                    // An envelope that cannot be matched fails everything still unreported.
+                    let range = match packed_ids.iter().position(|id| *id == packed.message_id) {
+                        Some(index) => ranges[index].clone(),
+                        None => 0..originals.len(),
                     };
                     let text = error.to_string();
-                    for slot in &mut originals[ranges[index].clone()] {
+                    for slot in &mut originals[range] {
                         if let Some(message) = slot.take() {
                             out.push((message, rebuild_error(&error, &text)));
                         }
@@ -279,6 +280,9 @@ pub struct UnpackConsumer {
 
 impl UnpackConsumer {
     pub fn new(inner: Box<dyn MessageConsumer>, config: &UnpackMiddleware) -> Self {
+        if config.max_messages.is_none() {
+            tracing::info!("unpack: no max_messages set, a batch may hold any number of messages");
+        }
         Self {
             inner,
             config: config.clone(),
@@ -297,8 +301,18 @@ impl UnpackConsumer {
         for message in &batch.messages {
             // Malformed bytes never become well-formed on a re-read, so this is a
             // permanent failure rather than a reconnectable one.
-            let messages = unpack(self.config.format, &message.payload, &self.limits)
-                .map_err(ConsumerError::Permanent)?;
+            let messages = match unpack(self.config.format, &message.payload, &self.limits) {
+                Ok(messages) => messages,
+                Err(error) if self.config.on_error == InputErrorPolicy::Drop => {
+                    super::note_rejected_input_message();
+                    tracing::error!(
+                        message_id = format_args!("{:032x}", message.message_id),
+                        "Dropping message that is not a valid envelope: {error}"
+                    );
+                    Vec::new()
+                }
+                Err(error) => return Err(ConsumerError::Permanent(error)),
+            };
             slots.push(Slot {
                 total: messages.len(),
                 outstanding: messages.len(),
@@ -315,7 +329,7 @@ impl UnpackConsumer {
             // let the caller read again rather than reporting a drained input.
             (batch.commit)(vec![MessageDisposition::Ack; slots.len()])
                 .await
-                .map_err(ConsumerError::Permanent)?;
+                .map_err(ConsumerError::Connection)?;
             return Ok(0);
         }
 
@@ -721,7 +735,7 @@ mod tests {
         for algorithm in [Compression::Gzip, Compression::Lz4, Compression::Zstd] {
             let codec = CompressionMiddleware {
                 algorithm,
-                max_decompressed_bytes: None,
+                ..Default::default()
             };
             let input = rows(200);
 
@@ -777,14 +791,14 @@ mod tests {
 
         let codec = CompressionMiddleware {
             algorithm: Compression::Zstd,
-            max_decompressed_bytes: None,
+            ..Default::default()
         };
         let cipher = EncryptionConfig {
             cipher: Default::default(),
             key_id: "default".to_string(),
             key: "QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE=".to_string(),
             decrypt_keys: Default::default(),
-            authenticate_metadata: Vec::new(),
+            ..Default::default()
         };
         let input = rows(200);
 
@@ -920,6 +934,32 @@ mod tests {
         assert!(matches!(
             consumer.receive_batch(100).await,
             Err(ConsumerError::Permanent(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn on_error_drop_acks_a_malformed_envelope_and_keeps_the_rest() {
+        let mut wire = vec![CanonicalMessage::from("not an envelope")];
+        wire.extend(publish(&pack_config(1000, 1 << 20), rows(3)).await);
+        let commits = Arc::new(Mutex::new(Vec::new()));
+        let mut consumer = UnpackConsumer::new(
+            Box::new(ScriptedConsumer {
+                batches: VecDeque::from(vec![wire]),
+                commits: commits.clone(),
+            }),
+            &UnpackMiddleware {
+                on_error: InputErrorPolicy::Drop,
+                ..Default::default()
+            },
+        );
+        let batch = consumer.receive_batch(100).await.unwrap();
+        assert_eq!(batch.messages.len(), 3);
+        (batch.commit)(vec![MessageDisposition::Ack; 3])
+            .await
+            .unwrap();
+        assert!(matches!(
+            commits.lock().unwrap()[0].as_slice(),
+            [MessageDisposition::Ack, MessageDisposition::Ack]
         ));
     }
 

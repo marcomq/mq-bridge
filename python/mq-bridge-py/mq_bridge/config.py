@@ -80,10 +80,12 @@ DatePartitionStyle = str
 DeliveryGuarantee = str
 FaultMode = str
 FileFormat = str
+FilterMiddleware = str
 HttpBulkFormat = str
 HttpBulkStream = str
 HttpServerProtocol = str
 IdHash = str
+InputErrorPolicy = str
 MappingRule = str
 MongoConsume = str
 MongoDbFormat = str
@@ -140,6 +142,7 @@ __all__ = [
     "FaultMode",
     "FileConfig",
     "FileFormat",
+    "FilterMiddleware",
     "GrpcConfig",
     "HttpBulkAuth",
     "HttpBulkAwsSigV4",
@@ -161,6 +164,7 @@ __all__ = [
     "IbmMqConfig",
     "IbmTlsConfig",
     "IdHash",
+    "InputErrorPolicy",
     "KafkaConfig",
     "LimiterMiddleware",
     "LookupEntry",

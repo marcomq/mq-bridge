@@ -42,6 +42,8 @@ pub(crate) fn is_known_endpoint_name(name: &str) -> bool {
             | "redis_streams"
             | "redis"
             | "grpc"
+            | "http_bulk"
+            | "sequence"
             | "fanout"
             | "stream_buffer"
             | "ref"
@@ -233,6 +235,14 @@ pub(crate) fn is_known_middleware_name(name: &str) -> bool {
             | "buffer"
             | "cookie_jar"
             | "filter"
+            | "otel"
+            | "lookup"
+            | "aggregate"
+            | "transform"
+            | "encryption"
+            | "compression"
+            | "pack"
+            | "unpack"
             | "custom"
     )
 }
@@ -430,6 +440,96 @@ impl<'de> Deserialize<'de> for StaticConfig {
                 metadata,
             },
         })
+    }
+}
+
+// Hand-written like `StaticConfig`: a bare expression string or a map.
+#[cfg(feature = "schema")]
+impl schemars::JsonSchema for FilterMiddleware {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "FilterMiddleware".into()
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "description": "The `filter` middleware. Accepts either a bare expression string or a map with `expression` and an optional `on_error`.",
+            "oneOf": [
+                {
+                    "type": "string",
+                    "description": "Expression over payload fields and `meta.<key>`, e.g. `amount > 100`."
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "expression": {
+                            "type": "string",
+                            "description": "Expression over payload fields and `meta.<key>`, e.g. `amount > 100`."
+                        },
+                        "on_error": {
+                            "type": "string",
+                            "enum": ["fail", "drop"],
+                            "description": "What to do with a message the expression cannot evaluate.",
+                            "default": "fail"
+                        }
+                    },
+                    "required": ["expression"],
+                    "additionalProperties": false
+                }
+            ]
+        })
+    }
+}
+
+impl Serialize for FilterMiddleware {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        // A bare string unless `on_error` is set, so older versions read the config.
+        if self.on_error == InputErrorPolicy::Fail {
+            return serializer.serialize_str(&self.expression);
+        }
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("FilterMiddleware", 2)?;
+        state.serialize_field("expression", &self.expression)?;
+        state.serialize_field("on_error", &self.on_error)?;
+        state.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for FilterMiddleware {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Map {
+            expression: String,
+            #[serde(default = "default_on_error_fail")]
+            on_error: InputErrorPolicy,
+        }
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Repr {
+            Str(String),
+            Map(Map),
+        }
+        let filter = match Repr::deserialize(deserializer)? {
+            Repr::Str(expression) => FilterMiddleware::from(expression),
+            Repr::Map(Map {
+                expression,
+                on_error,
+            }) => FilterMiddleware {
+                expression,
+                on_error,
+            },
+        };
+        #[cfg(feature = "filter")]
+        crate::middleware::filter::CompiledFilter::new(&filter.expression).map_err(|error| {
+            serde::de::Error::custom(format!("invalid filter expression: {error}"))
+        })?;
+        Ok(filter)
     }
 }
 

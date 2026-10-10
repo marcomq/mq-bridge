@@ -16,16 +16,16 @@ webhook_to_mongo:
       url: "127.0.0.1:8080"
       # Force the normal route pipeline instead of the inline HTTP response fast path.
       inline_response_fast_path: false
-    middlewares:
-      - retry:
-          max_attempts: 3
-          initial_interval_ms: 500
   output:
     mongodb:
       url: "mongodb://localhost:27017"
       database: "app_db"
       collection: "webhooks"
       format: "json"   # a bit slower, but stores readable documents
+    middlewares:
+      - retry:
+          max_attempts: 3
+          initial_interval_ms: 500
 ```
 
 Run it in config mode:

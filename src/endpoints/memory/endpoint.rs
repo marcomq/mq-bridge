@@ -491,6 +491,14 @@ impl MessagePublisher for MemoryPublisher {
                 store.append_batch(messages).await;
                 Ok(SentBatch::Ack)
             }
+            PublisherBackend::Queue(_) if self.request_reply => {
+                // Each request waits for its own reply; the helper keeps up to
+                // `SEND_BATCH_CONCURRENCY` of them in flight.
+                crate::traits::send_batch_helper(self, messages, |publisher, message| {
+                    Box::pin(publisher.send(message))
+                })
+                .await
+            }
             PublisherBackend::Queue(sender) => {
                 trace!(
                     topic = %self.topic,
@@ -884,7 +892,7 @@ impl MessageConsumer for MemoryQueueConsumer {
                                 warn!("Requeueing nacked message {}", i);
                                 to_requeue.push(msg.clone());
                             } else {
-                                warn!("Nack for index {} but no message in retry buffer!", i);
+                                warn!(topic = %topic, "Nack for message {} dropped: `enable_nack` is off", i);
                             }
                         }
                         MessageDisposition::Ack => {}
@@ -996,6 +1004,7 @@ impl MessageConsumer for TransportQueueConsumer {
                 }
 
                 let mut to_requeue = Vec::new();
+                let mut dropped_nacks = 0usize;
                 for (i, disposition) in dispositions.into_iter().enumerate() {
                     match disposition {
                         MessageDisposition::Nack if enable_nack => {
@@ -1006,8 +1015,12 @@ impl MessageConsumer for TransportQueueConsumer {
                         MessageDisposition::Reply(_) => {
                             tracing::warn!(topic = %topic, "IPC memory transport does not support reply dispositions");
                         }
-                        MessageDisposition::Ack | MessageDisposition::Nack => {}
+                        MessageDisposition::Nack => dropped_nacks += 1,
+                        MessageDisposition::Ack => {}
                     }
+                }
+                if dropped_nacks > 0 {
+                    tracing::warn!(topic = %topic, count = dropped_nacks, "Nacked IPC messages dropped: `enable_nack` is off");
                 }
 
                 if !to_requeue.is_empty() {
@@ -1484,6 +1497,25 @@ mod tests {
                 .is_none(),
             "timed out request should clean up the registered waiter"
         );
+    }
+
+    #[tokio::test]
+    async fn test_memory_request_reply_batch_waits_for_replies() {
+        let publisher = MemoryPublisher::new(&MemoryConfig {
+            topic: format!("mem_rr_batch_{}", fast_uuid_v7::gen_id_str()),
+            capacity: Some(10),
+            request_reply: true,
+            request_timeout_ms: Some(25),
+            ..Default::default()
+        })
+        .unwrap();
+
+        let sent = publisher
+            .send_batch(vec!["a".into(), "b".into()])
+            .await
+            .unwrap();
+        // No responder: both requests time out instead of being acked unanswered.
+        assert!(matches!(sent, SentBatch::Partial { failed, .. } if failed.len() == 2));
     }
 
     /// A `send()` future dropped mid-flight (route shutdown, an outer timeout) must not

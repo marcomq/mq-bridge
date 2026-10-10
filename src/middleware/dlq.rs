@@ -176,14 +176,22 @@ impl MessagePublisher for DlqPublisher {
                     return Ok(SentBatch::Partial { responses, failed });
                 }
 
-                let (retryable, mut non_retryable): (Vec<_>, Vec<_>) = failed
-                    .into_iter()
-                    .partition(|(_, e)| matches!(e, PublisherError::Retryable(_)));
+                // A connection failure is transient like on the whole-batch path: it stays
+                // with the route for redelivery and is never dead-lettered.
+                let (retryable, mut non_retryable): (Vec<_>, Vec<_>) =
+                    failed.into_iter().partition(|(_, e)| {
+                        matches!(
+                            e,
+                            PublisherError::Retryable(_) | PublisherError::Connection(_)
+                        )
+                    });
 
                 // Separate exhausted retries from still-retryable ones.
-                let (exhausted, still_retryable): (Vec<_>, Vec<_>) = retryable
-                    .into_iter()
-                    .partition(|(_, e)| e.to_string().contains("Retries exhausted"));
+                let (exhausted, still_retryable): (Vec<_>, Vec<_>) =
+                    retryable.into_iter().partition(|(_, e)| {
+                        matches!(e, PublisherError::Retryable(_))
+                            && e.to_string().contains("Retries exhausted")
+                    });
 
                 non_retryable.extend(exhausted);
 

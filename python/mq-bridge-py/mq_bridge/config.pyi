@@ -96,6 +96,7 @@ class CompressionMiddleware(TypedDict, total=False):
     """Payload-compression middleware configuration."""
     algorithm: Compression
     max_decompressed_bytes: Optional[int]
+    on_error: InputErrorPolicy
 
 
 class CookieJarMiddleware(TypedDict, total=False):
@@ -172,6 +173,7 @@ class EncryptionConfig(TypedDict, total=False):
     decrypt_keys: Dict[str, str]
     key: Required[str]
     key_id: str
+    on_error: InputErrorPolicy
 
 
 class Endpoint(TypedDict, total=False):
@@ -518,7 +520,7 @@ class Middleware(TypedDict, total=False):
     delay: DelayMiddleware
     dlq: DeadLetterQueueMiddleware
     encryption: EncryptionConfig
-    filter: str
+    filter: FilterMiddleware
     id: str
     limiter: LimiterMiddleware
     lookup: LookupMiddleware
@@ -818,6 +820,7 @@ class UnpackMiddleware(TypedDict, total=False):
     """Transport batching middleware configuration (`unpack`, input side)."""
     format: PackFormat
     max_messages: Optional[int]
+    on_error: InputErrorPolicy
 
 
 class WeakJoinMiddleware(TypedDict, total=False):
@@ -862,10 +865,12 @@ DatePartitionStyle = Literal["nested", "hive"]
 DeliveryGuarantee = Literal["at_most_once", "at_least_once", "effectively_once"]
 FaultMode = Literal["panic", "disconnect", "timeout", "json_format_error", "nack"]
 FileFormat = Literal["normal", "json", "text", "raw", "csv", "parquet"]
+FilterMiddleware = Union[str, Dict[str, Any]]
 HttpBulkFormat = Literal["ndjson", "json_array"]
 HttpBulkStream = Literal["sse", "ndjson"]
 HttpServerProtocol = Literal["auto", "http1_only", "http2_only"]
 IdHash = Literal["fnv1a", "sha256"]
+InputErrorPolicy = Literal["fail", "drop"]
 MappingRule = Union[str, DetailedMappingRule]
 MongoConsume = Literal["consumer", "snapshot", "capture_new", "capture_all"]
 MongoDbFormat = Literal["normal", "json", "text", "raw"]

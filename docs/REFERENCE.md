@@ -105,12 +105,11 @@ middlewares:
 > For compressed-and-encrypted data at rest, prefer the endpoints' own
 > `compression`/`encryption` fields, which do this per write batch.
 
-**Putting a middleware on the wrong side behaves in two different ways**, so check the table
-above rather than assuming:
+**Putting a middleware on the wrong side is a hard startup error**, so check the table above:
 
-- `dlq` / `retry` on an input log a warning and are skipped. The route still starts.
-- `deduplication`, `weak_join` and `id` on an output are **hard
-  startup errors**. Deduplication
+- `dlq` / `retry` on an input. A route that started without the retries or the dead-letter
+  queue its config names would be worse than one that refuses to start.
+- `deduplication`, `weak_join` and `id` on an output. Deduplication
   cannot work on the publish side, and silently starting an un-deduplicated route is worse
   than refusing to start. `pack` on an input and `unpack` on an output are hard errors too —
   the pair is directional.
@@ -122,7 +121,7 @@ without `metrics`, `otel` without `otel`, `aggregate` without `aggregate`) is li
 
 ### `retry`
 
-Retries failed sends with exponential backoff. Output only.
+Retries failed sends with exponential backoff. Output only. On an input the route fails at start.
 
 | Field | Type | Default |
 |---|---|---|
@@ -142,6 +141,7 @@ permanent. Pair the two.
 ### `dlq`
 
 Sends permanently-failed messages to a separate endpoint instead of failing the batch. Output only.
+On an input the route fails at start.
 
 | Field | Type | Required |
 |---|---|---|
@@ -344,11 +344,22 @@ Keeps only the messages for which an expression is true; the rest are dropped. I
 output. Requires the `filter` feature (pulls the `zen-expression` engine), which is part of
 `middleware`/`full` but **not** of `portable`.
 
-The value is a bare expression string:
+The value is a bare expression string, or a map when you need `on_error`:
 
 ```yaml middleware
 - filter: "amount > 100"
 ```
+
+```yaml middleware
+- filter:
+    expression: "amount > 100"
+    on_error: drop
+```
+
+| Field | Type | Default | |
+|---|---|---|---|
+| `expression` | string | required | The expression. |
+| `on_error` | `fail` \| `drop` | `fail` | What to do with a message the expression cannot evaluate. `fail` stops the route; `drop` logs a warning and drops the message like a non-matching one. |
 
 **Put it on the input whenever you can.** A filter on the input drops the message before the
 rest of the pipeline touches it, and acknowledges it at the source; on the output the
@@ -386,7 +397,8 @@ A field that is absent is supplied to the expression as `null`, so an `or` branc
 can still match. A `null` or non-scalar field (an array or object where the expression expects
 a scalar) logs a warning. A payload that is not a JSON object, or an
 expression that does not evaluate to a boolean, is an **error** and fails the batch; those
-are configuration mistakes, and dropping every message would hide them.
+are configuration mistakes, and dropping every message would hide them. Set `on_error: drop`
+when a source legitimately mixes in messages the expression cannot read.
 
 To send the non-matching messages somewhere instead of discarding them, use
 [`switch`](#switch)'s `when` mode rather than a filter.
@@ -423,7 +435,10 @@ dedup to survive a re-read.
 
 `store` selects the backend by URL scheme:
 
-- `sled:///path` (or a bare path) — a local sled database; per-process, not cluster-wide.
+- `sled:///path[?durable=true]` (or a bare path) — a local sled database; per-process, not
+  cluster-wide. sled writes to disk in the background, about every 500 ms, so a killed
+  process can lose its newest markers and reprocess those messages. `?durable=true` flushes
+  before every source ack instead, at the price of one disk sync per batch.
 - `memory://[name][?max_keys=N]` — process memory, the fastest store (~3x sled). Keys are
   compared exactly and survive reconnects and redeploys, but not a restart. Routes that name
   the same store share it; the name defaults to the route's. `max_keys` (default 1,000,000)
@@ -444,8 +459,9 @@ dedup to survive a re-read.
 
 A shared store's default collection/table is named after the route, so replicas of one route
 must run under the same route name. A copy whose key is still in flight elsewhere waits for that
-delivery instead of being dropped; a failed delivery releases its key at once. The ordering and
-its crash windows are in [DELIVERY.md](DELIVERY.md#the-deduplication-middleware).
+delivery instead of being dropped; a failed delivery releases its key at once. A delivery in
+flight keeps its key however long the sink takes; only the key of a holder that died is freed,
+after five seconds. The ordering and its crash windows are in [DELIVERY.md](DELIVERY.md#the-deduplication-middleware).
 
 `replay_response: true` answers a duplicate request with the reply its first delivery produced,
 stored next to the marker for the TTL — for request/reply inputs whose callers retry. Off by
@@ -453,6 +469,10 @@ default.
 
 ```yaml middleware
 - deduplication: { store: "sled:///var/lib/mq-bridge/dedup", ttl_seconds: 3600 }
+```
+
+```yaml middleware
+- deduplication: { store: "sled:///var/lib/mq-bridge/dedup?durable=true", ttl_seconds: 3600 }
 ```
 
 ```yaml middleware
@@ -639,6 +659,11 @@ the process — that is how a login route and a data route reuse one session. A 
 several `Set-Cookie` headers arrives as one `set-cookie` value with one cookie per line, and
 each line is stored.
 
+A jar is one session. It also stores the `cookie` value of every message that passes it, so do
+not put it on an input that serves several clients (an `http` server): their cookies would be
+merged and sent on with each other's requests. `export_metadata_prefix` copies cookie values
+into message metadata, which travels on to sinks and a `dlq`.
+
 Cookie names are chosen by the server, so the jar is bounded: `Max-Age=0` (or negative)
 deletes a cookie, and once `max_cookies` is exceeded the least recently set entries are
 dropped. `Expires` is **not** parsed — use `Max-Age`, which every modern server also sends.
@@ -656,6 +681,7 @@ output. Requires the `encryption` feature.
 | `key` | string — base64-encoded 32-byte key; `${env:VAR}` reads it from the environment | required |
 | `decrypt_keys` | map key_id → key | `{}` |
 | `authenticate_metadata` | list of metadata keys bound into the AEAD tag (middleware only) | `[]` |
+| `on_error` | `drop` \| `fail` — what an input does with a payload it cannot decrypt (middleware only) | `drop` |
 
 ```yaml middleware
 - encryption: { key: "${env:MQB_ENC_KEY}" }
@@ -663,8 +689,14 @@ output. Requires the `encryption` feature.
 
 The envelope records the cipher and `key_id`, so key rotation works by sealing with a new
 `key_id`/`key` while listing the old key under `decrypt_keys` on the consuming side. Each
-payload is authenticated independently: any bit-level tampering, a torn frame, or a
-missing/wrong key is a hard consumer error, not a silent drop.
+payload is authenticated independently, so any bit-level tampering, a torn frame, or a
+missing/wrong key fails decryption.
+
+What happens then is set by `on_error`. The default, `drop`, logs the message, **acknowledges
+it** and carries on — the route keeps running and the message is gone from the source. That
+includes a wrong or missing key, where every message fails: a misconfigured reader then drains
+its input. Set `on_error: fail` to stop the route on the first decryption failure instead,
+leaving the message unacknowledged.
 
 By default the AEAD binds only the payload (empty associated data): metadata and routing
 keys are *not* authenticated against the ciphertext, since they are not guaranteed to
@@ -776,6 +808,7 @@ feature.
 |---|---|---|
 | `algorithm` | `none` \| `gzip` \| `lz4` \| `zstd` | `zstd` |
 | `max_decompressed_bytes` | integer — reject a payload that decompresses larger than this (bomb guard); consumer side only | unset (no limit) |
+| `on_error` | `fail` \| `drop` — what an input does with a payload it cannot decompress | `fail` |
 
 ```yaml middleware
 - compression: { algorithm: zstd }
@@ -786,6 +819,17 @@ over any transport, not just files. `algorithm: none` is a passthrough. A trunca
 corrupt frame is a **permanent** consumer error (the poison message is not re-read
 indefinitely), as is a payload that exceeds `max_decompressed_bytes`. Put the same
 `algorithm` on both the input and output side of a route.
+
+`on_error: drop` logs such a payload, acknowledges it and carries on with the rest of the
+batch, so one bad message does not stop the route:
+
+```yaml middleware
+- compression: { algorithm: zstd, on_error: drop }
+```
+
+Without `max_decompressed_bytes` a small payload can decompress to gigabytes, and a batch
+is decompressed in parallel. Set it on any input that producers you do not control can
+write to, for example `67108864` (64 MiB).
 
 Unlike the `file` / `object_store` batch `compression` field — which keeps whole write
 batches decodable with `zcat` / `lz4 -d` — this middleware frames per message and is only
@@ -847,10 +891,21 @@ Splits a physical message written by [`pack`](#pack) back into its logical messa
 |---|---|---|
 | `format` | `mqb` \| `benthos_binary` — must match the sender | `mqb` |
 | `max_messages` | integer — reject a batch declaring more messages than this | unset (no limit) |
+| `on_error` | `fail` \| `drop` — what happens to a physical message that is not a valid batch | `fail` |
 
 ```yaml middleware
 - unpack: {}
 ```
+
+A malformed batch, or one over `max_messages`, stops the route by default. `on_error: drop`
+logs it, acknowledges it and reads on; all logical messages inside it are lost with it:
+
+```yaml middleware
+- unpack: { on_error: drop }
+```
+
+Set `max_messages` on an input that producers you do not control can write to: each
+record of a few bytes becomes a full message in memory.
 
 The reading list is the **mirror** of the writing one, so `compression` comes *after*
 `unpack` — the codec then decompresses the physical message before `unpack` sees it:
@@ -929,7 +984,8 @@ something still compressed, is a permanent error on the first message.
 
 ### `metrics`
 
-Emits throughput, latency and error metrics for the endpoint. Input and output. Requires the
+Emits a message counter (`queue_messages_processed_total`) and a duration histogram
+(`queue_message_processing_duration_seconds`) for the endpoint. Input and output. Requires the
 `metrics` feature. Takes no options; its presence enables collection.
 
 ```yaml middleware
@@ -937,6 +993,10 @@ Emits throughput, latency and error metrics for the endpoint. Input and output. 
 ```
 
 Input and output are labelled separately, so attaching it to both sides is meaningful.
+
+Only successful messages are counted; there is no failure counter. On an input a message counts
+when it is received, not when it is committed, and the duration includes the time spent waiting
+for it to arrive.
 
 ### `otel`
 

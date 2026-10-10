@@ -28,6 +28,16 @@ pub(crate) const PENDING_TTL_SECS: u64 = 5;
 /// How often a delivery whose key is held elsewhere re-checks it.
 const IN_FLIGHT_POLL: Duration = Duration::from_millis(50);
 
+/// How often the claims of deliveries still in flight get their lease extended.
+const LEASE_RENEW_INTERVAL: Duration = Duration::from_secs(PENDING_TTL_SECS / 2);
+
+/// Keys renewed per store call.
+const LEASE_RENEW_BATCH: usize = 1024;
+
+/// How long a delivery waits on a key whose holder keeps renewing it. A safety valve for a
+/// holder that never settles; a dead holder's claim lapses after `PENDING_TTL_SECS`.
+const IN_FLIGHT_WAIT_CAP: Duration = Duration::from_secs(300);
+
 /// What [`DedupStore::reserve`] found for a key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Reservation {
@@ -96,6 +106,13 @@ pub(crate) trait DedupStore: Send + Sync {
         }
     }
 
+    /// Restart the lease of every key that is still a pending claim; committed and released
+    /// keys are left alone. Best-effort: a missed renewal only lets the claim lapse.
+    async fn renew_many(&self, keys: &[Vec<u8>], now: u64);
+
+    /// Make the markers written so far durable; runs before each source ack. Default no-op.
+    async fn sync(&self) {}
+
     /// Best-effort periodic GC of expired keys. Default no-op for backends with native TTL.
     fn maybe_cleanup(&self, _now: u64) {}
 
@@ -107,8 +124,8 @@ pub(crate) trait DedupStore: Send + Sync {
 
 /// A parsed deduplication `store:` destination.
 pub(crate) enum DedupBackend {
-    /// Local single-instance Sled directory.
-    Sled { path: String },
+    /// Local single-instance Sled directory (`sled:///path[?durable=true]`).
+    Sled { path: String, durable: bool },
     /// In-process exact-key store (`memory://[name][?max_keys=N]`); an empty name is the route's.
     Memory { name: String, max_keys: usize },
     /// Shared MongoDB collection (`mongodb://host/db[/collection]`).
@@ -138,6 +155,7 @@ pub(crate) fn parse_dedup_store(spec: &str) -> anyhow::Result<DedupBackend> {
     if scheme.len() == 1 && scheme.chars().all(|c| c.is_ascii_alphabetic()) {
         return Ok(DedupBackend::Sled {
             path: spec.to_string(),
+            durable: false,
         });
     }
     match scheme.as_str() {
@@ -146,17 +164,32 @@ pub(crate) fn parse_dedup_store(spec: &str) -> anyhow::Result<DedupBackend> {
             Ok(DedupBackend::Memory { name, max_keys })
         }
         "sled" => {
-            let path = spec
+            let rest = spec
                 .strip_prefix("sled://")
                 .or_else(|| spec.strip_prefix("sled:"))
                 .unwrap_or(spec);
+            let (path, query) = rest.split_once('?').unwrap_or((rest, ""));
+            let mut durable = false;
+            for param in query.split('&').filter(|p| !p.is_empty()) {
+                match param.split_once('=') {
+                    Some(("durable", "true")) => durable = true,
+                    Some(("durable", "false")) => durable = false,
+                    _ => {
+                        return Err(anyhow!(
+                            "unknown parameter '{param}' in deduplication store '{spec}'"
+                        ))
+                    }
+                }
+            }
             Ok(DedupBackend::Sled {
                 path: path.to_string(),
+                durable,
             })
         }
         // Schemeless (a bare filesystem path) -> local sled.
         "" => Ok(DedupBackend::Sled {
             path: spec.to_string(),
+            durable: false,
         }),
         _ => parse_networked_dedup_store(spec),
     }
@@ -205,11 +238,9 @@ async fn build_store(
             let name = if name.is_empty() { route_name } else { &name };
             Ok(memory::memory_dedup_store(name, ttl_seconds, max_keys))
         }
-        DedupBackend::Sled { path } => Ok(Arc::new(SledDedupStore::new(
-            &path,
-            ttl_seconds,
-            replay_response,
-        )?)),
+        DedupBackend::Sled { path, durable } => Ok(Arc::new(
+            SledDedupStore::new(&path, ttl_seconds, replay_response)?.durable(durable),
+        )),
         #[cfg(feature = "mongodb")]
         DedupBackend::Mongo {
             url,
@@ -366,6 +397,8 @@ struct SledDedupStore {
     last_cleanup: AtomicU64,
     /// Stored replies, only with `replay_response`.
     responses: Option<sled::Tree>,
+    /// Flush markers to disk before each source ack (`?durable=true`).
+    durable: bool,
 }
 
 impl SledDedupStore {
@@ -380,7 +413,13 @@ impl SledDedupStore {
             in_flight: Arc::new(Mutex::new(Claims::new())),
             last_cleanup: AtomicU64::new(0),
             responses,
+            durable: false,
         })
+    }
+
+    fn durable(mut self, durable: bool) -> Self {
+        self.durable = durable;
+        self
     }
 
     /// A plain ack supersedes a reply stored by an earlier, expired processing of the key.
@@ -416,6 +455,15 @@ impl DedupStore for SledDedupStore {
         let mut held = lock_claims(&self.in_flight);
         for key in keys {
             held.remove(key.as_slice());
+        }
+    }
+
+    async fn renew_many(&self, keys: &[Vec<u8>], now: u64) {
+        let mut held = lock_claims(&self.in_flight);
+        for key in keys {
+            if let Some(at) = held.get_mut(key.as_slice()) {
+                *at = now;
+            }
         }
     }
 
@@ -498,6 +546,15 @@ impl DedupStore for SledDedupStore {
         });
     }
 
+    async fn sync(&self) {
+        if !self.durable {
+            return;
+        }
+        if let Err(e) = self.db.flush_async().await {
+            error!("Failed to flush the deduplication DB before the source ack: {e}");
+        }
+    }
+
     async fn flush(&self) -> anyhow::Result<()> {
         self.db.flush_async().await?;
         Ok(())
@@ -514,9 +571,83 @@ pub(crate) fn hex_key(key: &[u8]) -> String {
     s
 }
 
+#[derive(Default)]
+struct LeaseTable {
+    next_id: u64,
+    held: HashMap<u64, Arc<Vec<Vec<u8>>>>,
+}
+
+fn lock_leases(table: &Mutex<LeaseTable>) -> std::sync::MutexGuard<'_, LeaseTable> {
+    table.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// The claims of deliveries still in flight. A background task extends their lease until the
+/// delivery settles, so a slow sink or a long retry backoff cannot let another copy claim the
+/// key. The task ends once the consumer and every outstanding commit are gone.
+struct Leases(Arc<Mutex<LeaseTable>>);
+
+impl Leases {
+    fn new(store: Arc<dyn DedupStore>) -> Self {
+        let table = Arc::new(Mutex::new(LeaseTable::default()));
+        let weak = Arc::downgrade(&table);
+        tokio::spawn(async move {
+            // A fixed cadence: a slow pass must not push the next one past the claim's TTL.
+            let mut ticks = tokio::time::interval(LEASE_RENEW_INTERVAL);
+            loop {
+                ticks.tick().await;
+                let Some(table) = weak.upgrade() else { return };
+                let keys: Vec<Vec<u8>> = lock_leases(&table)
+                    .held
+                    .values()
+                    .flat_map(|keys| keys.iter().cloned())
+                    .collect();
+                drop(table);
+                // One call per chunk rather than per delivery, each stamped when it is sent.
+                for chunk in keys.chunks(LEASE_RENEW_BATCH) {
+                    store.renew_many(chunk, unix_now()).await;
+                }
+            }
+        });
+        Self(table)
+    }
+
+    fn hold(&self, keys: Vec<Vec<u8>>) -> Lease {
+        let mut table = lock_leases(&self.0);
+        let id = table.next_id;
+        table.next_id += 1;
+        table.held.insert(id, Arc::new(keys));
+        Lease {
+            table: Arc::clone(&self.0),
+            id,
+        }
+    }
+}
+
+/// Keeps a delivery's claims renewed. Dropping it stops the renewal, so a commit that never
+/// runs leaves its claims to lapse.
+struct Lease {
+    table: Arc<Mutex<LeaseTable>>,
+    id: u64,
+}
+
+impl Lease {
+    /// The leased keys; the renewal goes on until the lease is dropped.
+    fn keys(&self) -> Arc<Vec<Vec<u8>>> {
+        let keys = lock_leases(&self.table).held.get(&self.id).cloned();
+        keys.unwrap_or_default()
+    }
+}
+
+impl Drop for Lease {
+    fn drop(&mut self) {
+        lock_leases(&self.table).held.remove(&self.id);
+    }
+}
+
 pub struct DeduplicationConsumer {
     inner: Box<dyn MessageConsumer>,
     store: Arc<dyn DedupStore>,
+    leases: Leases,
     /// Compiled `key` template. `None` keys on `message_id`, which most sources
     /// regenerate per read — so a re-read of the same source dedupes nothing.
     key_template: Option<CompiledTemplate>,
@@ -529,20 +660,20 @@ pub struct DeduplicationConsumer {
 
 /// The dedup key for a message: the rendered `key` template, or the raw `message_id`.
 ///
-/// An unresolved selector renders empty, and an empty key would be shared by every message
-/// missing that field — silently dropping all but the first. Such a message falls back to
-/// `message_id` instead, so it is passed through rather than swallowed.
+/// An unresolved selector renders empty, so a key with any token missing would be shared by
+/// every message missing that field — silently dropping all but the first. Such a message
+/// falls back to `message_id` instead, so it is passed through rather than swallowed.
 fn dedup_key(template: Option<&CompiledTemplate>, msg: &CanonicalMessage) -> Vec<u8> {
     match template {
-        Some(t) => match t.render(Some(msg)) {
-            key if key.is_empty() => {
+        Some(t) => match t.render_resolved(Some(msg)) {
+            Some(key) if !key.is_empty() => key,
+            _ => {
                 warn!(
                     message_id = %msg.message_id,
-                    "Deduplication `key` template resolved to nothing; keying on message_id for this message"
+                    "Deduplication `key` template did not fully resolve; keying on message_id for this message"
                 );
                 msg.message_id.to_be_bytes().to_vec()
             }
-            key => key,
         },
         None => msg.message_id.to_be_bytes().to_vec(),
     }
@@ -593,7 +724,7 @@ async fn reserve_settled(
 /// Waits out keys held by a delivery that has not committed yet. The holder either commits
 /// (the key turns `Processed`) or fails and releases it or lets its lease lapse (`Claimed`
 /// here). Acking on `InFlight` instead would lose the message whenever the holder failed.
-/// Past twice the lease — reachable only through clock skew between instances — the message
+/// Past `IN_FLIGHT_WAIT_CAP` — a holder that renews its lease but never settles — the message
 /// is processed unclaimed: a possible duplicate, never a loss.
 ///
 /// This batch's own claims are released before each wait and re-reserved after it, since
@@ -603,7 +734,7 @@ async fn settle_in_flight(
     keys: &[Vec<u8>],
     states: &mut [Reservation],
 ) -> Result<(), ConsumerError> {
-    let deadline = Instant::now() + Duration::from_secs(2 * PENDING_TTL_SECS + 1);
+    let deadline = Instant::now() + IN_FLIGHT_WAIT_CAP;
     loop {
         let waiting: Vec<usize> = (0..states.len())
             .filter(|&i| states[i] == Reservation::InFlight)
@@ -614,7 +745,7 @@ async fn settle_in_flight(
         if Instant::now() >= deadline {
             warn!(
                 count = waiting.len(),
-                "Deduplication keys are still held by another delivery past their lease; processing them anyway (may duplicate)"
+                "Deduplication keys are still held by another delivery that has not settled; processing them anyway (may duplicate)"
             );
             for i in waiting {
                 states[i] = Reservation::Claimed;
@@ -648,7 +779,10 @@ impl DeduplicationConsumer {
         let backend = match (&config.store, &config.sled_path) {
             (Some(store), _) => parse_dedup_store(store)?,
             // Legacy `sled_path` is always a local path (never scheme-parsed).
-            (None, Some(path)) => DedupBackend::Sled { path: path.clone() },
+            (None, Some(path)) => DedupBackend::Sled {
+                path: path.clone(),
+                durable: false,
+            },
             (None, None) => {
                 return Err(anyhow!(
                     "deduplication requires either `store` or `sled_path`"
@@ -670,6 +804,7 @@ impl DeduplicationConsumer {
             .context("invalid deduplication `key` template")?;
         Ok(Self {
             inner,
+            leases: Leases::new(store.clone()),
             store,
             key_template,
             deferred: DeferredCommits::new(),
@@ -706,6 +841,7 @@ impl DeduplicationConsumer {
     ) -> anyhow::Result<Self> {
         Ok(Self {
             inner,
+            leases: Leases::new(store.clone()),
             store,
             key_template: key
                 .map(|k| CompiledTemplate::compile(k, None))
@@ -787,6 +923,8 @@ impl MessageConsumer for DeduplicationConsumer {
             let store = self.store.clone();
             let original_commit = received.commit;
             let replay = self.replay_response;
+            let lease = self.leases.hold(vec![key.clone()]);
+            let in_flight = self.deferred.track();
 
             // The marker is written before the source ack: a crash between the two then
             // replays a message that is already recognised, instead of one that is not.
@@ -801,7 +939,12 @@ impl MessageConsumer for DeduplicationConsumer {
                         (MessageDisposition::Nack, None) => store.release(&key).await,
                         (_, None) => store.mark_processed(&key, unix_now()).await,
                     }
-                    original_commit(disposition).await
+                    // Held until the store settled, so a slow write cannot let the claim lapse.
+                    drop(lease);
+                    store.sync().await;
+                    original_commit(disposition).await?;
+                    in_flight.settled();
+                    Ok(())
                 }) as crate::traits::BoxFuture<'static, anyhow::Result<()>>
             });
 
@@ -909,16 +1052,24 @@ impl MessageConsumer for DeduplicationConsumer {
             }
 
             let held = self.deferred.take();
+            let in_flight = self.deferred.track();
             let store = self.store.clone();
+            let lease = self.leases.hold(kept_keys);
 
             let commit: crate::traits::BatchCommitFunc = Box::new(move |dispositions| {
                 Box::pin(async move {
+                    // The lease stays held until the store settled, so neither the deferred
+                    // commits nor a slow store write can let these claims lapse.
+                    let kept_keys = lease.keys();
                     let mut full_dispositions = settled;
                     let mut acked = Vec::with_capacity(kept_keys.len());
                     let mut replied = Vec::new();
                     let mut failed = Vec::new();
-                    for ((key, disposition), slot) in
-                        kept_keys.into_iter().zip(dispositions).zip(kept_indices)
+                    for ((key, disposition), slot) in kept_keys
+                        .iter()
+                        .cloned()
+                        .zip(dispositions)
+                        .zip(kept_indices)
                     {
                         match (&disposition, stored_reply(&disposition, replay)) {
                             (_, Some(reply)) => replied.push((key, reply)),
@@ -940,7 +1091,11 @@ impl MessageConsumer for DeduplicationConsumer {
                         store.mark_processed_with_response(key, now, reply).await;
                     }
                     store.release_many(&failed).await;
-                    inner_commit(full_dispositions).await
+                    drop(lease);
+                    store.sync().await;
+                    inner_commit(full_dispositions).await?;
+                    in_flight.settled();
+                    Ok(())
                 }) as crate::traits::BoxFuture<'static, anyhow::Result<()>>
             });
 
@@ -964,6 +1119,20 @@ mod tests {
     use crate::CanonicalMessage;
     use std::time::Duration;
     use tempfile::tempdir;
+
+    #[test]
+    fn partially_resolved_key_falls_back_to_message_id() {
+        let template = CompiledTemplate::compile("${metadata:tenant}-${payload:id}", None).unwrap();
+        let message = |id: u128, payload: &[u8]| {
+            CanonicalMessage::new(payload.to_vec(), Some(id)).with_metadata_kv("tenant", "t1")
+        };
+        let full = dedup_key(Some(&template), &message(1, br#"{"id":"a"}"#));
+        assert_eq!(full, b"t1-a");
+        // Without the fallback both would key on `t1-` and the second would be dropped.
+        let first = dedup_key(Some(&template), &message(2, b"{}"));
+        let second = dedup_key(Some(&template), &message(3, b"{}"));
+        assert_ne!(first, second);
+    }
 
     #[tokio::test]
     async fn test_deduplication_logic() {
@@ -1368,8 +1537,8 @@ mod tests {
     }
 
     /// A batch of nothing but duplicates must not surface as an empty batch — that is the
-    /// drain signal — so the wrapper skips it and fetches again. On an ordered source its
-    /// ack is held back and released just before the next retained batch commits.
+    /// drain signal — so the wrapper skips it and fetches again. On an ordered source with an
+    /// earlier batch uncommitted, its ack is held and released before the next retained commit.
     #[tokio::test]
     async fn an_all_duplicate_batch_is_acked_and_retried() {
         let dir = tempdir().unwrap();
@@ -1377,6 +1546,7 @@ mod tests {
             &dir,
             "all_dup",
             vec![
+                vec![keyed("C", 9)],
                 vec![keyed("A", 1)],
                 vec![keyed("A", 2), keyed("A", 3)],
                 vec![keyed("B", 4)],
@@ -1384,6 +1554,7 @@ mod tests {
         )
         .await;
 
+        let uncommitted = consumer.receive_batch(16).await.unwrap();
         let first = consumer.receive_batch(16).await.unwrap();
         assert_eq!(first.messages.len(), 1);
         (first.commit)(vec![MessageDisposition::Ack]).await.unwrap();
@@ -1407,12 +1578,15 @@ mod tests {
             "the skipped batch must not ack ahead of the ordered sequencer"
         );
 
+        (uncommitted.commit)(vec![MessageDisposition::Ack])
+            .await
+            .unwrap();
         (second.commit)(vec![MessageDisposition::Ack])
             .await
             .unwrap();
         assert_eq!(
             committed.lock().unwrap().as_slice(),
-            [vec!["ack"], vec!["ack", "ack"], vec!["ack"]],
+            [vec!["ack"], vec!["ack"], vec!["ack", "ack"], vec!["ack"]],
             "every message of the skipped batch is acked, in front of the batch that followed it"
         );
     }
@@ -1587,6 +1761,35 @@ mod tests {
         );
     }
 
+    /// A delivery slower than the lease keeps its claim, so a later copy still waits for it.
+    #[tokio::test]
+    async fn a_slow_delivery_keeps_its_claim_past_the_lease() {
+        let dir = tempdir().unwrap();
+        let store: Arc<dyn DedupStore> = Arc::new(sled_store(&dir, "renew", 3600));
+        let (mut consumer, _) = consumer_on(
+            &store,
+            vec![vec![keyed("A", 1)], vec![keyed("A", 2), keyed("B", 3)]],
+            false,
+        );
+
+        let holder = consumer.receive_batch(16).await.unwrap();
+        let waiter = tokio::spawn(async move { consumer.receive_batch(16).await.unwrap() });
+        tokio::time::sleep(Duration::from_secs(PENDING_TTL_SECS + 2)).await;
+        assert!(
+            !waiter.is_finished(),
+            "the claim lapsed while its delivery was still in flight"
+        );
+
+        (holder.commit)(vec![MessageDisposition::Ack])
+            .await
+            .unwrap();
+        let second = tokio::time::timeout(Duration::from_secs(2), waiter)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(ids(&second), vec![3]);
+    }
+
     /// Two instances on one shared store. The first claims a key and dies without committing;
     /// its broker hands the message to the second at once. The second must wait out the dead
     /// claim and process it — before, it acked the message as a duplicate and it was lost.
@@ -1617,6 +1820,50 @@ mod tests {
         );
     }
 
+    /// A store whose markers only land once the claim has been renewed again.
+    struct SlowMarkStore {
+        renewed: tokio::sync::Notify,
+    }
+
+    #[async_trait]
+    impl DedupStore for SlowMarkStore {
+        async fn reserve(&self, _key: &[u8], _now: u64) -> Result<Reservation, ConsumerError> {
+            Ok(Reservation::Claimed)
+        }
+        async fn mark_processed(&self, _key: &[u8], _now: u64) {
+            self.renewed.notified().await;
+        }
+        async fn mark_processed_with_response(&self, _key: &[u8], _now: u64, _response: &[u8]) {}
+        async fn stored_response(&self, _key: &[u8]) -> Option<Vec<u8>> {
+            None
+        }
+        async fn release(&self, _key: &[u8]) {}
+        async fn renew_many(&self, keys: &[Vec<u8>], _now: u64) {
+            if !keys.is_empty() {
+                self.renewed.notify_waiters();
+            }
+        }
+    }
+
+    /// The lease outlives a slow marker write; dropped before it, the claim could lapse and
+    /// another instance take the key while this delivery is still settling.
+    #[tokio::test]
+    async fn claims_stay_renewed_until_the_store_has_settled() {
+        let store: Arc<dyn DedupStore> = Arc::new(SlowMarkStore {
+            renewed: tokio::sync::Notify::new(),
+        });
+        let (mut consumer, committed) = consumer_on(&store, vec![vec![keyed("A", 1)]], false);
+        let batch = consumer.receive_batch(16).await.unwrap();
+        tokio::time::timeout(
+            LEASE_RENEW_INTERVAL * 3,
+            (batch.commit)(vec![MessageDisposition::Ack]),
+        )
+        .await
+        .expect("the claim must still be renewed while its marker is written")
+        .unwrap();
+        assert_eq!(committed.lock().unwrap().as_slice(), [vec!["ack"]]);
+    }
+
     /// A store whose backend is down.
     struct UnreachableStore;
 
@@ -1631,6 +1878,7 @@ mod tests {
             None
         }
         async fn release(&self, _key: &[u8]) {}
+        async fn renew_many(&self, _keys: &[Vec<u8>], _now: u64) {}
     }
 
     /// A store failure hands the batch back instead of dropping it: a source that does not
@@ -1754,11 +2002,16 @@ mod tests {
     fn parse_sled_and_bare_paths() {
         assert!(matches!(
             parse_dedup_store("sled:///var/lib/dedup").unwrap(),
-            DedupBackend::Sled { path } if path == "/var/lib/dedup"
+            DedupBackend::Sled { path, durable: false } if path == "/var/lib/dedup"
         ));
         assert!(matches!(
             parse_dedup_store("/var/lib/dedup").unwrap(),
-            DedupBackend::Sled { path } if path == "/var/lib/dedup"
+            DedupBackend::Sled { path, durable: false } if path == "/var/lib/dedup"
         ));
+        assert!(matches!(
+            parse_dedup_store("sled:///var/lib/dedup?durable=true").unwrap(),
+            DedupBackend::Sled { path, durable: true } if path == "/var/lib/dedup"
+        ));
+        assert!(parse_dedup_store("sled:///var/lib/dedup?durabel=true").is_err());
     }
 }

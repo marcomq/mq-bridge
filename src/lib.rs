@@ -87,8 +87,8 @@
 //!
 //! # Cargo features
 //!
-//! The core crate has no default features. Enable only the integrations your
-//! application uses:
+//! The only default features are `file` and `dir-spool`. Enable the integrations
+//! your application uses:
 //!
 //! ```toml
 //! [dependencies]
@@ -126,8 +126,9 @@
 //! | `schema` | JSON Schema for the config models |
 //! | `rustls-ring`, `rustls-aws-lc` | The TLS crypto provider; pick one when using TLS |
 //!
-//! The in-memory endpoint ([`endpoints::memory`]), the file endpoint and the
-//! `retry`, `dlq` and `transform` middlewares need no feature.
+//! The in-memory endpoint ([`endpoints::memory`]) and the `retry`, `dlq` and
+//! `transform` middlewares need no feature; the file endpoint needs `file`,
+//! which is on by default.
 //!
 //! # Capabilities
 //!

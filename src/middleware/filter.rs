@@ -20,6 +20,7 @@ use zen_expression::{compile_expression, Expression, Variable};
 
 use super::deferred_commit::{run_all, DeferredCommits};
 use super::raw_json::RawPairs;
+use crate::models::InputErrorPolicy;
 use crate::traits::{
     BatchCommitFunc, BoxFuture, CommitFunc, ConsumerError, EndpointStatus, MessageConsumer,
     MessageDisposition, MessagePublisher, PublisherError, Received, ReceivedBatch, Sent, SentBatch,
@@ -906,6 +907,7 @@ fn normalize_expression(expression: &str) -> String {
 pub struct FilterConsumer {
     inner: Box<dyn MessageConsumer>,
     filter: Arc<CompiledFilter>,
+    on_error: InputErrorPolicy,
     deferred: DeferredCommits,
 }
 
@@ -917,8 +919,26 @@ impl FilterConsumer {
                 CompiledFilter::new(expression)
                     .map_err(|e| anyhow!("invalid filter expression: {e:#}"))?,
             ),
+            on_error: InputErrorPolicy::Fail,
             deferred: DeferredCommits::new(),
         })
+    }
+
+    /// Sets what happens to a message the expression cannot evaluate.
+    pub fn with_on_error(mut self, on_error: InputErrorPolicy) -> Self {
+        self.on_error = on_error;
+        self
+    }
+}
+
+/// Applies `on_error` to a message the expression could not evaluate.
+fn keep_or_fail(result: anyhow::Result<bool>, on_error: InputErrorPolicy) -> anyhow::Result<bool> {
+    match result {
+        Err(error) if on_error == InputErrorPolicy::Drop => {
+            tracing::warn!("filter dropped a message it could not evaluate: {error:#}");
+            Ok(false)
+        }
+        other => other,
     }
 }
 
@@ -933,20 +953,21 @@ impl MessageConsumer for FilterConsumer {
     async fn receive(&mut self) -> Result<Received, ConsumerError> {
         loop {
             let received = self.inner.receive().await?;
-            if self
-                .filter
-                .matches(&received.message)
+            if keep_or_fail(self.filter.matches(&received.message), self.on_error)
                 .map_err(ConsumerError::Permanent)?
             {
-                let held = self.deferred.take();
-                if held.is_empty() {
+                if !self.inner.commit_requires_order() {
                     return Ok(received);
                 }
+                let held = self.deferred.take();
+                let in_flight = self.deferred.track();
                 let inner_commit = received.commit;
                 let commit: CommitFunc = Box::new(move |disposition| {
                     Box::pin(async move {
                         run_all(held).await?;
-                        inner_commit(disposition).await
+                        inner_commit(disposition).await?;
+                        in_flight.settled();
+                        Ok(())
                     })
                 });
                 return Ok(Received {
@@ -1018,9 +1039,7 @@ impl MessageConsumer for FilterConsumer {
             let mut kept = Vec::with_capacity(source_count);
             let mut keep_flags = Vec::with_capacity(batch.messages.len());
             for message in batch.messages {
-                let keep = self
-                    .filter
-                    .matches(&message)
+                let keep = keep_or_fail(self.filter.matches(&message), self.on_error)
                     .map_err(ConsumerError::Permanent)?;
                 keep_flags.push(keep);
                 if keep {
@@ -1072,6 +1091,7 @@ impl MessageConsumer for FilterConsumer {
             }
         }
 
+        let in_flight = self.deferred.track();
         let commit: BatchCommitFunc = Box::new(move |dispositions| {
             Box::pin(async move {
                 let expected: usize = commits.iter().map(|(count, _)| count).sum();
@@ -1088,6 +1108,7 @@ impl MessageConsumer for FilterConsumer {
                     commit(dispositions[offset..end].to_vec()).await?;
                     offset = end;
                 }
+                in_flight.settled();
                 Ok(())
             })
         });
@@ -1143,6 +1164,7 @@ impl MessageConsumer for FilterConsumer {
 pub struct FilterPublisher {
     inner: Box<dyn MessagePublisher>,
     filter: Arc<CompiledFilter>,
+    on_error: InputErrorPolicy,
 }
 
 impl FilterPublisher {
@@ -1153,7 +1175,14 @@ impl FilterPublisher {
                 CompiledFilter::new(expression)
                     .map_err(|e| anyhow!("invalid filter expression: {e:#}"))?,
             ),
+            on_error: InputErrorPolicy::Fail,
         })
+    }
+
+    /// Sets what happens to a message the expression cannot evaluate.
+    pub fn with_on_error(mut self, on_error: InputErrorPolicy) -> Self {
+        self.on_error = on_error;
+        self
     }
 }
 
@@ -1175,9 +1204,7 @@ impl MessagePublisher for FilterPublisher {
     }
 
     async fn send(&self, message: CanonicalMessage) -> Result<Sent, PublisherError> {
-        if self
-            .filter
-            .matches(&message)
+        if keep_or_fail(self.filter.matches(&message), self.on_error)
             .map_err(PublisherError::NonRetryable)?
         {
             return self.inner.send(message).await;
@@ -1192,8 +1219,9 @@ impl MessagePublisher for FilterPublisher {
         // Split across cores: an ordered sink serializes this whole call, so route
         // concurrency cannot overlap it and the batch itself is what has to parallelise.
         let filter = Arc::clone(&self.filter);
+        let on_error = self.on_error;
         let outcomes = crate::support::parallel::map_messages(messages, move |message| {
-            filter.matches(&message).map(|kept| kept.then_some(message))
+            keep_or_fail(filter.matches(&message), on_error).map(|kept| kept.then_some(message))
         })
         .await;
 
@@ -1791,14 +1819,18 @@ mod tests {
         message(&format!(r#"{{"amount":{value}}}"#), &[])
     }
 
-    /// An emptied batch must not ack ahead of the route's ordered sequencer, so its commit
+    /// An emptied batch must not ack ahead of a batch the route still holds, so its commit
     /// is held and runs from inside the next retained batch's.
     #[tokio::test]
     async fn an_emptied_batch_is_acked_in_front_of_the_batch_that_followed_it() {
-        let (source, committed) =
-            OrderedSource::new(vec![vec![amount(1), amount(2)], vec![amount(500)]]);
+        let (source, committed) = OrderedSource::new(vec![
+            vec![amount(300)],
+            vec![amount(1), amount(2)],
+            vec![amount(500)],
+        ]);
         let mut consumer = FilterConsumer::new(Box::new(source), "amount > 100").unwrap();
 
+        let uncommitted = consumer.receive_batch(1).await.unwrap();
         let batch = consumer.receive_batch(16).await.unwrap();
         assert_eq!(
             batch.messages.len(),
@@ -1810,12 +1842,28 @@ mod tests {
             "the emptied batch must not ack ahead of the route"
         );
 
+        (uncommitted.commit)(vec![MessageDisposition::Ack])
+            .await
+            .unwrap();
         (batch.commit)(vec![MessageDisposition::Ack]).await.unwrap();
         assert_eq!(
             committed.lock().unwrap().as_slice(),
-            [2, 1],
+            [1, 2, 1],
             "the emptied batch is acked first, then the retained one"
         );
+    }
+
+    /// With nothing uncommitted in the route, a filter that drops everything still
+    /// advances an ordered source instead of holding its commits until something matches.
+    #[tokio::test]
+    async fn dropped_batches_commit_while_the_route_holds_nothing() {
+        let (source, committed) =
+            OrderedSource::new(vec![vec![amount(1)], vec![amount(2)], vec![amount(500)]]);
+        let mut consumer = FilterConsumer::new(Box::new(source), "amount > 100").unwrap();
+
+        let batch = consumer.receive_batch(16).await.unwrap();
+        assert_eq!(batch.messages.len(), 1);
+        assert_eq!(committed.lock().unwrap().as_slice(), [1, 1]);
     }
 
     #[tokio::test]
@@ -1904,6 +1952,7 @@ mod tests {
         let mut consumer = FilterConsumer::new(Box::new(source), "amount > 100").unwrap();
         // Stop after the emptied batch, before the read that would drain the source.
         let batch = consumer.inner.receive_batch(16).await.unwrap();
+        let _uncommitted = consumer.deferred.track();
         consumer
             .deferred
             .ack_emptied(true, batch.commit, batch.messages.len())
@@ -1913,6 +1962,49 @@ mod tests {
 
         consumer.on_disconnect_hook().unwrap().await.unwrap();
         assert_eq!(committed.lock().unwrap().as_slice(), [1]);
+    }
+
+    #[tokio::test]
+    async fn on_error_drop_drops_what_the_expression_cannot_evaluate() {
+        use std::sync::atomic::AtomicUsize;
+        struct CountingSink(Arc<AtomicUsize>);
+
+        #[async_trait]
+        impl MessagePublisher for CountingSink {
+            async fn send_batch(
+                &self,
+                messages: Vec<CanonicalMessage>,
+            ) -> Result<SentBatch, PublisherError> {
+                self.0.fetch_add(messages.len(), Ordering::Relaxed);
+                Ok(SentBatch::Ack)
+            }
+
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+        }
+
+        let batch = || {
+            vec![
+                CanonicalMessage::from(r#"{"amount": 200}"#),
+                CanonicalMessage::from("not json"),
+            ]
+        };
+        let sent = Arc::new(AtomicUsize::new(0));
+        let sink = || Box::new(CountingSink(Arc::clone(&sent)));
+
+        let failing = FilterPublisher::new(sink(), "amount > 100").unwrap();
+        assert!(failing.send_batch(batch()).await.is_err());
+        assert_eq!(sent.load(Ordering::Relaxed), 0);
+
+        let dropping = FilterPublisher::new(sink(), "amount > 100")
+            .unwrap()
+            .with_on_error(InputErrorPolicy::Drop);
+        assert!(matches!(
+            dropping.send_batch(batch()).await,
+            Ok(SentBatch::Ack)
+        ));
+        assert_eq!(sent.load(Ordering::Relaxed), 1);
     }
 
     /// The route runs the hooks of the outermost publisher only, so a filter that did not

@@ -1298,6 +1298,7 @@ impl AppConfig {
             mode,
             ConfigSecurityMode::Balanced | ConfigSecurityMode::EnvTemporaryMessages
         ) {
+            config_to_save.check_secret_keys()?;
             // Extract secrets from config_to_save (modifies it) and store them externally.
             let secrets_to_store = config_to_save.extract_secrets();
             secret_store.store(&secrets_to_store)?;
@@ -1360,6 +1361,22 @@ impl AppConfig {
                 all_secrets.insert(format!("MQB__{}__{}{}", entity_type, id_part, suffix), v);
             }
         }
+    }
+
+    /// Fails when two names would store their secrets under one key (`a-b` and `a_b`).
+    fn check_secret_keys(&self) -> Result<()> {
+        use mq_bridge::models::check_secret_key_names;
+        check_secret_key_names("route", self.routes.keys().map(String::as_str))?;
+        check_secret_key_names("consumer", self.consumers.iter().map(|c| c.name.as_str()))?;
+        check_secret_key_names("publisher", self.publishers.iter().map(|p| p.name.as_str()))?;
+        for route in self.routes.values() {
+            route.route.check_secret_keys()?;
+        }
+        let endpoints = self.consumers.iter().map(|c| &c.endpoint);
+        for endpoint in endpoints.chain(self.publishers.iter().map(|p| &p.endpoint)) {
+            endpoint.check_secret_keys()?;
+        }
+        Ok(())
     }
 
     pub(crate) fn extract_secrets(&mut self) -> HashMap<String, String> {
@@ -2613,6 +2630,24 @@ consumers: []
         assert!(secret_store.stored.lock().unwrap().is_empty());
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_save_refuses_names_that_share_a_secret_key() {
+        let mut config = sample_security_config("balanced");
+        let mut twin = config.publishers[0].clone();
+        twin.name = "orders-http".to_string();
+        config.publishers.push(twin);
+        let secret_store = RecordingSecretStore::default();
+        let path = std::env::temp_dir().join("mqb-config-secret-key-collision.yml");
+
+        let error = config
+            .save_with_secret_store(path.to_str().unwrap(), &secret_store)
+            .unwrap_err();
+
+        assert!(error.to_string().contains("same secret key"), "{error}");
+        assert!(secret_store.stored.lock().unwrap().is_empty());
+        assert!(!path.exists());
     }
 
     #[test]

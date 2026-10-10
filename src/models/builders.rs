@@ -71,7 +71,50 @@ impl RouteOptions {
                 "route commit_concurrency_limit must be at least 1"
             ));
         }
+        if self.batch_size > Self::MAX_BATCH_SIZE {
+            return Err(anyhow::anyhow!(
+                "route batch_size {} is above the limit of {}",
+                self.batch_size,
+                Self::MAX_BATCH_SIZE
+            ));
+        }
+        if self.concurrency > Self::MAX_CONCURRENCY {
+            return Err(anyhow::anyhow!(
+                "route concurrency {} is above the limit of {}",
+                self.concurrency,
+                Self::MAX_CONCURRENCY
+            ));
+        }
+        if self.reconnect_interval_ms == 0 {
+            return Err(anyhow::anyhow!(
+                "route reconnect_interval_ms must be at least 1"
+            ));
+        }
+        if self.startup_timeout_ms == 0 {
+            return Err(anyhow::anyhow!(
+                "route startup_timeout_ms must be at least 1"
+            ));
+        }
         Ok(())
+    }
+
+    /// Largest `batch_size` a route accepts; above it the batch buffers cannot be allocated.
+    pub const MAX_BATCH_SIZE: usize = 100_000_000;
+    /// Largest `concurrency` a route accepts; each unit is a worker task.
+    pub const MAX_CONCURRENCY: usize = 1_000_000;
+    /// `batch_size * concurrency` above which [`Self::in_flight_warning`] reports.
+    pub const IN_FLIGHT_WARN_THRESHOLD: usize = 100_000_000;
+
+    /// Warns when the route may hold more messages in memory than is usually intended.
+    pub fn in_flight_warning(&self) -> Option<String> {
+        let in_flight = self.batch_size.saturating_mul(self.concurrency);
+        (in_flight > Self::IN_FLIGHT_WARN_THRESHOLD).then(|| {
+            format!(
+                "batch_size {} with concurrency {} lets up to {in_flight} messages be in memory \
+                 at once. Lower one of them unless the host has the memory for it.",
+                self.batch_size, self.concurrency
+            )
+        })
     }
 }
 
@@ -973,12 +1016,12 @@ with_optional_setters!(TransformMiddleware { with_schema => schema: serde_json::
 with_optional_string_setters!(TransformMiddleware { with_schema_file => schema_file });
 with_value_setters!(RandomPanicMiddleware { with_mode => mode: FaultMode, with_enabled => enabled: bool });
 with_optional_setters!(RandomPanicMiddleware { with_trigger_on_message => trigger_on_message: usize });
-with_value_setters!(CompressionMiddleware { with_algorithm => algorithm: Compression });
+with_value_setters!(CompressionMiddleware { with_algorithm => algorithm: Compression, with_on_error => on_error: InputErrorPolicy });
 with_optional_setters!(CompressionMiddleware { with_max_decompressed_bytes => max_decompressed_bytes: u64 });
 
 with_value_setters!(StaticConfig { with_raw => raw: bool, with_metadata => metadata: std::collections::HashMap<String, String> });
 with_string_setters!(StaticConfig { with_body => body });
-with_value_setters!(EncryptionConfig { with_cipher => cipher: CipherKind, with_decrypt_keys => decrypt_keys: HashMap<String, String> });
+with_value_setters!(EncryptionConfig { with_cipher => cipher: CipherKind, with_decrypt_keys => decrypt_keys: HashMap<String, String>, with_on_error => on_error: InputErrorPolicy });
 with_string_setters!(EncryptionConfig { with_key_id => key_id, with_key => key });
 
 with_optional_setters!(AwsConfig { with_max_messages => max_messages: i32, with_wait_time_seconds => wait_time_seconds: i32 });
@@ -1152,6 +1195,34 @@ mod tests {
             let error = options.validate().unwrap_err().to_string();
             assert!(error.contains(field), "{error}");
         }
+    }
+
+    #[test]
+    fn route_options_refuse_values_that_cannot_run_and_warn_on_a_large_product() {
+        let valid = RouteOptions::default();
+        let mut no_reconnect_pause = valid.clone();
+        no_reconnect_pause.reconnect_interval_ms = 0;
+        let mut no_startup_time = valid.clone();
+        no_startup_time.startup_timeout_ms = 0;
+        for (options, field) in [
+            (valid.clone().with_batch_size(1_000_000_000), "batch_size"),
+            (valid.clone().with_concurrency(10_000_000), "concurrency"),
+            (no_reconnect_pause, "reconnect_interval_ms"),
+            (no_startup_time, "startup_timeout_ms"),
+        ] {
+            let error = options.validate().unwrap_err().to_string();
+            assert!(error.contains(field), "{error}");
+        }
+
+        let large_batch = valid.clone().with_batch_size(10_000_000);
+        assert!(large_batch.validate().is_ok());
+        assert!(large_batch.in_flight_warning().is_none());
+        let many_workers = valid.clone().with_concurrency(16_384);
+        assert!(many_workers.validate().is_ok());
+        assert!(many_workers.in_flight_warning().is_none());
+        let both = large_batch.with_concurrency(16);
+        assert!(both.validate().is_ok());
+        assert!(both.in_flight_warning().unwrap().contains("160000000"));
     }
 
     #[test]

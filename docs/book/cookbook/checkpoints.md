@@ -51,8 +51,13 @@ Notes:
 - **Object-store sources** must point `checkpoint_store` at a *different* bucket or prefix than
   they read — a cursor object written under the source prefix would be listed and re-read as
   data. The source rejects an overlapping location.
+- **The default name carries a hash for a source name with other characters than letters,
+  digits and `_`**: `public.orders` gets `mqb_cursors_public_orders_<hash>`, so it cannot share
+  a table with a source named `public_orders`. A table that already exists as
+  `mqb_cursors_public_orders` keeps being used.
 - A file store is written atomically (temp file + rename) and concurrent writers in one process
-  are serialized, so several routes may share one file.
+  are serialized, so several routes may share one file. **Use one process per file**: two
+  processes that write the same file overwrite each other's cursors.
 - Cloud object-store checkpoints need the `object-store` feature compiled in.
 
 ## Using it with `copy`

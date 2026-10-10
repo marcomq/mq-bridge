@@ -6,8 +6,10 @@ use crate::traits::{
 use crate::CanonicalMessage;
 use anyhow::anyhow;
 use async_trait::async_trait;
+use futures::FutureExt;
 use std::any::Any;
 use std::collections::{HashMap, VecDeque};
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use tokio::sync::{oneshot, Mutex};
 use tokio::time::{timeout_at, Duration, Instant};
@@ -111,7 +113,15 @@ impl BufferCore {
     }
 
     async fn process_batch(self: Arc<Self>, batch: PendingBatch) {
-        let send_result = self.inner.send_batch(batch.messages).await;
+        // A panic must not skip the reset below, or every later send waits forever.
+        let send_result = AssertUnwindSafe(self.inner.send_batch(batch.messages))
+            .catch_unwind()
+            .await
+            .unwrap_or_else(|_| {
+                Err(PublisherError::Connection(anyhow!(
+                    "Buffered send panicked"
+                )))
+            });
         distribute_batch_results(batch.entries, send_result);
 
         let (waiters, next_timer, should_flush_again) = {
@@ -169,8 +179,10 @@ fn distribute_batch_results(
                 .collect();
 
             for entry in entries {
-                let result = if let Some(error) = failed_map.remove(&entry.message_id) {
-                    Err(error)
+                // Entries sharing an id cannot be told apart, so a failure fails them all.
+                let result = if let Some(error) = failed_map.get_mut(&entry.message_id) {
+                    let copy = rebuild_error(error, &error.to_string());
+                    Err(std::mem::replace(error, copy))
                 } else if let Some(response) = response_map.remove(&entry.message_id) {
                     Ok(Sent::Response(response))
                 } else {
@@ -437,13 +449,17 @@ fn merge_commits(commits: Vec<(usize, BatchCommitFunc)>) -> BatchCommitFunc {
     Box::new(move |dispositions: Vec<MessageDisposition>| {
         Box::pin(async move {
             let mut offset = 0usize;
+            // A failed sub-commit must not leave the later ones unsettled.
+            let mut first_error = None;
             for (count, commit) in commits {
                 let end = (offset + count).min(dispositions.len());
                 let slice = dispositions[offset..end].to_vec();
                 offset = end;
-                commit(slice).await?;
+                if let Err(e) = commit(slice).await {
+                    first_error.get_or_insert(e);
+                }
             }
-            Ok(())
+            first_error.map_or(Ok(()), Err)
         })
     })
 }
@@ -641,6 +657,48 @@ mod tests {
 
         assert!(matches!(first.await.unwrap().unwrap(), Sent::Ack));
         assert!(matches!(second.await.unwrap().unwrap(), Sent::Ack));
+    }
+
+    /// Panics on the first batch, then delivers.
+    struct PanicOncePublisher(std::sync::atomic::AtomicBool);
+
+    #[async_trait]
+    impl MessagePublisher for PanicOncePublisher {
+        async fn send_batch(
+            &self,
+            _messages: Vec<CanonicalMessage>,
+        ) -> Result<SentBatch, PublisherError> {
+            if !self.0.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                panic!("sink panicked");
+            }
+            Ok(SentBatch::Ack)
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    #[tokio::test]
+    async fn a_panicking_send_fails_its_batch_and_leaves_the_buffer_usable() {
+        let publisher = BufferPublisher::new(
+            Box::new(PanicOncePublisher(Default::default())),
+            &BufferMiddleware {
+                max_messages: 8,
+                max_delay_ms: 1,
+            },
+        )
+        .unwrap();
+
+        let first = publisher.send(CanonicalMessage::from("one")).await;
+        assert!(matches!(first, Err(PublisherError::Connection(_))));
+        let second = timeout(
+            Duration::from_secs(1),
+            publisher.send(CanonicalMessage::from("two")),
+        )
+        .await
+        .expect("the buffer must flush again after a panic");
+        assert!(matches!(second, Ok(Sent::Ack)));
     }
 
     async fn wait_for_batches(batches: &Arc<StdMutex<Vec<Vec<CanonicalMessage>>>>, count: usize) {

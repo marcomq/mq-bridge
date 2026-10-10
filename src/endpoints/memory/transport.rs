@@ -91,6 +91,9 @@ impl TransportUrl {
 
     #[cfg(unix)]
     fn default_unix_socket_path(name: &str) -> Result<String> {
+        if name.split('/').any(|part| part == "..") {
+            return Err(anyhow!("IPC socket name '{name}' must not contain '..'"));
+        }
         // Try /run/mq-bridge first (systemd standard)
         let run_dir = std::path::Path::new("/run/mq-bridge");
         if run_dir.exists() || std::fs::create_dir_all(run_dir).is_ok() {
@@ -107,7 +110,9 @@ impl TransportUrl {
 
         // Fallback to /tmp (less secure)
         let tmp_dir = std::path::Path::new("/tmp/mq-bridge");
-        std::fs::create_dir_all(tmp_dir)?;
+        // Private from the start: the consumer refuses a directory others can write to.
+        std::os::unix::fs::DirBuilderExt::mode(std::fs::DirBuilder::new().recursive(true), 0o700)
+            .create(tmp_dir)?;
         Ok(format!("/tmp/mq-bridge/{}.sock", name))
     }
 

@@ -374,6 +374,12 @@ Three things decide whether it actually works:
   [`id` middleware](#giving-a-source-an-identity) already derived one. An unresolvable template
   also falls back to `message_id` with only a warning, so a typo fails silently. Content hashing
   is deliberately not offered as a fallback: two legitimately equal payloads would collapse.
+- **Ids from producers you do not trust.** A string `message_id` that is not a UUID or a
+  number is folded to 128 bits with FNV-1a, which is fast but not collision-resistant: a
+  producer who chooses its ids can craft one that collides with another message's, and
+  deduplication on `message_id` then drops that message. Set `MQB_ID_HASH=sha256` (or call
+  `set_string_id_hash`) for such inputs. Switching changes every hashed id, so start with an
+  empty dedup store. Numeric strings are read as numbers, so `"123"` and `"0123"` are one id.
 - **`store`.** `sled` is single-instance. Point it at a shared MongoDB or SQL deployment for
   anything scaled out. The shared collection or table defaults to `mqb_dedup_<route name>`, so
   replicas must run under the **same route name** — or name the collection/table explicitly in
@@ -399,14 +405,15 @@ input:
 after the sink accepted the write — **before** the source is acked — and *released* when the
 write failed. A copy that arrives while another is still in flight waits for it rather than
 being acked on its strength: if the first write then fails, the copy is processed; if it
-succeeds, the copy is dropped. A claim whose holder died lapses after five seconds. What each
+succeeds, the copy is dropped. A claim is renewed while its delivery is in flight, so a slow
+sink does not lose it; a claim whose holder died lapses after five seconds. What each
 crash window does:
 
 | Crash or failure between | Outcome |
 |---|---|
 | claim → sink write | The claim lapses; the redelivery is processed. No loss. |
 | sink write → marker | The redelivery is processed again — **a duplicate**, unless the sink is idempotent. |
-| marker → source ack | The redelivery is recognised and acked. No duplicate. |
+| marker → source ack | The redelivery is recognised and acked. No duplicate. With a sled store this needs `?durable=true` when the process is killed: sled otherwise writes markers to disk up to about 500 ms late. |
 | a failed write (nack) | The claim is released at once; the redelivery is processed. No loss. |
 | the store is unreachable | The batch is nacked back to the source and the route reconnects. |
 
@@ -605,6 +612,12 @@ objects sort after the earlier run's). What it does not give you is deduplicatio
 records re-read after a crash are written again under new names. That is ordinary at-least-once, and
 it is the honest guarantee for a source with no durable per-record position — these modes are
 allowed, not rejected, because that guarantee is fine for plenty of pipelines.
+
+**A recreated source.** Covered ranges are keyed on the source position alone. A source that
+is dropped and created again under the same name starts at low positions the sink already
+holds, and those records are skipped as covered. This applies to a Kafka topic or a SQL table
+that was recreated, and to a file that was replaced in `consume` mode. Write to a new `path`
+or prefix, or remove the old objects, when you recreate a source.
 
 For the `file` sink, `name_by: source_position` changes what `path` means: it is the directory that receives
 the part files, not the file that is appended to. The sink creates it on startup, so pointing it at an

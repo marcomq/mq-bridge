@@ -230,6 +230,43 @@ impl Endpoint {
     }
 }
 
+/// The name a type policy checks. A `custom` endpoint goes by its factory name, so a
+/// plugin cannot stand in for a type the policy leaves out.
+fn policy_name(endpoint_type: &EndpointType) -> Option<&str> {
+    match endpoint_type {
+        EndpointType::Custom { name, .. } => Some(name),
+        other if other.is_core() => None,
+        other => Some(other.name()),
+    }
+}
+
+/// Applies a type policy to the endpoints a `dlq` or `lookup` middleware sends to.
+fn check_middleware_endpoints(
+    route_name: &str,
+    endpoint: &Endpoint,
+    depth: usize,
+    allowed_types: Option<&[&str]>,
+) -> Result<()> {
+    if allowed_types.is_none() {
+        return Ok(());
+    }
+    for middleware in &endpoint.middlewares {
+        let nested: Vec<&Endpoint> = match middleware {
+            Middleware::Dlq(cfg) => vec![&cfg.endpoint],
+            Middleware::Lookup(cfg) => cfg
+                .from
+                .iter()
+                .chain(cfg.entries.iter().map(|entry| &entry.from))
+                .collect(),
+            _ => continue,
+        };
+        for target in nested {
+            check_publisher_recursive(route_name, target, depth + 1, allowed_types)?;
+        }
+    }
+    Ok(())
+}
+
 /// Validates the consumer configuration for a route.
 pub fn check_consumer(
     route_name: &str,
@@ -260,18 +297,16 @@ fn check_consumer_recursive(
         );
     }
 
-    if let Some(allowed) = allowed_types {
-        if !endpoint.endpoint_type.is_core() {
-            let name = endpoint.endpoint_type.name();
-            if !allowed.contains(&name) {
-                return Err(anyhow!(
-                    "[route:{}] Endpoint type '{}' is not allowed by policy",
-                    route_name,
-                    name
-                ));
-            }
+    if let (Some(allowed), Some(name)) = (allowed_types, policy_name(&endpoint.endpoint_type)) {
+        if !allowed.contains(&name) {
+            return Err(anyhow!(
+                "[route:{}] Endpoint type '{}' is not allowed by policy",
+                route_name,
+                name
+            ));
         }
     }
+    check_middleware_endpoints(route_name, endpoint, depth, allowed_types)?;
     match &endpoint.endpoint_type {
         EndpointType::Ref(name) => {
             let referenced = crate::route::get_endpoint(name).ok_or_else(|| {
@@ -639,9 +674,9 @@ fn check_consumer_recursive(
                 return Ok(warnings);
             }
             Err(anyhow!(
-                "[route:{}] Unsupported consumer endpoint type '{:?}'",
+                "[route:{}] Unsupported consumer endpoint type '{}'",
                 route_name,
-                endpoint.endpoint_type
+                endpoint.endpoint_type.name()
             ))
         }
     }
@@ -1893,9 +1928,9 @@ async fn create_base_consumer(
         other => {
             let Some((factory, mut config)) = builtin_fallback(other)? else {
                 return Err(anyhow!(
-                    "[route:{}] Unsupported consumer endpoint type '{:?}'",
+                    "[route:{}] Unsupported consumer endpoint type '{}'",
                     route_name,
-                    endpoint.endpoint_type
+                    endpoint.endpoint_type.name()
                 ));
             };
             // The factory only sees the config, so a position the sink requires goes in there.
@@ -1931,25 +1966,23 @@ fn check_publisher_recursive(
     allowed_types: Option<&[&str]>,
 ) -> Result<Vec<String>> {
     let mut warnings = Vec::new();
-    if let Some(allowed) = allowed_types {
-        if !endpoint.endpoint_type.is_core() {
-            let name = endpoint.endpoint_type.name();
-            if !allowed.contains(&name) {
-                return Err(anyhow!(
-                    "[route:{}] Endpoint type '{}' is not allowed by policy",
-                    route_name,
-                    name
-                ));
-            }
+    if let (Some(allowed), Some(name)) = (allowed_types, policy_name(&endpoint.endpoint_type)) {
+        if !allowed.contains(&name) {
+            return Err(anyhow!(
+                "[route:{}] Endpoint type '{}' is not allowed by policy",
+                route_name,
+                name
+            ));
         }
     }
     const MAX_DEPTH: usize = 16;
     if depth > MAX_DEPTH {
         return Err(anyhow!(
-            "Fanout recursion depth exceeded limit of {}",
+            "Endpoint nesting depth exceeded limit of {} (a `ref` cycle?)",
             MAX_DEPTH
         ));
     }
+    check_middleware_endpoints(route_name, endpoint, depth, allowed_types)?;
     match &endpoint.endpoint_type {
         EndpointType::Ref(name) => {
             let referenced = crate::route::get_endpoint(name).ok_or_else(|| {
@@ -2389,9 +2422,9 @@ fn check_publisher_recursive(
                 return Ok(warnings);
             }
             Err(anyhow!(
-                "[route:{}] Unsupported publisher endpoint type '{:?}'",
+                "[route:{}] Unsupported publisher endpoint type '{}'",
                 route_name,
-                endpoint.endpoint_type
+                endpoint.endpoint_type.name()
             ))
         }
     }
@@ -2779,9 +2812,9 @@ async fn create_base_publisher(
         other => {
             let Some((factory, mut config)) = builtin_fallback(other)? else {
                 return Err(anyhow!(
-                    "[route:{}] Unsupported publisher endpoint type '{:?}'",
+                    "[route:{}] Unsupported publisher endpoint type '{}'",
                     route_name,
-                    endpoint_type
+                    endpoint_type.name()
                 ));
             };
             // `auto` depends on the route's input, which only the host knows.
@@ -3338,7 +3371,7 @@ mod tests {
         fn filtered_source() -> Endpoint {
             with_middleware(
                 Endpoint::new_memory("orders", 1),
-                Middleware::Filter("amount > 100".to_string()),
+                Middleware::Filter("amount > 100".into()),
             )
         }
 
@@ -3524,7 +3557,7 @@ mod tests {
         fn a_nested_dropper_relaxes_only_the_sinks_beneath_it() {
             let filtered_leg = with_middleware(
                 bucket(NameBy::Auto),
-                Middleware::Filter("amount > 100".to_string()),
+                Middleware::Filter("amount > 100".into()),
             );
             let fanout = Endpoint::new(EndpointType::Fanout(vec![
                 filtered_leg,
@@ -3793,6 +3826,41 @@ mod tests {
                 "/tmp/policy_probe.jsonl",
             )));
             assert!(check_consumer("test", &file, Some(allowed)).is_ok());
+        }
+
+        #[test]
+        fn a_custom_endpoint_is_checked_by_its_factory_name() {
+            let custom = Endpoint::new(EndpointType::Custom {
+                name: "pulsar".to_string(),
+                config: serde_json::Value::Null,
+            });
+            let fanout = Endpoint::new(EndpointType::Fanout(vec![custom.clone()]));
+            assert!(check_publisher("test", &custom, Some(&["memory"])).is_err());
+            assert!(check_publisher("test", &fanout, Some(&["memory"])).is_err());
+            assert!(check_publisher("test", &custom, Some(&["pulsar"])).is_ok());
+            assert!(check_publisher("test", &custom, None).is_ok());
+        }
+
+        #[test]
+        fn the_policy_reaches_endpoints_inside_dlq_and_lookup_middlewares() {
+            let custom = Endpoint::new(EndpointType::Custom {
+                name: "pulsar".to_string(),
+                config: serde_json::Value::Null,
+            });
+            let dlq = Middleware::Dlq(Box::new(crate::models::DeadLetterQueueMiddleware {
+                endpoint: custom.clone(),
+            }));
+            let lookup = Middleware::Lookup(Box::new(crate::models::LookupMiddleware {
+                from: Some(custom),
+                ..Default::default()
+            }));
+            for middleware in [dlq, lookup] {
+                let mut endpoint = null();
+                endpoint.middlewares = vec![middleware];
+                assert!(check_publisher("test", &endpoint, Some(&["memory"])).is_err());
+                assert!(check_publisher("test", &endpoint, Some(&["pulsar"])).is_ok());
+                assert!(check_publisher("test", &endpoint, None).is_ok());
+            }
         }
 
         /// `null` and `fanout` are sinks. They are refused as inputs on role grounds, not policy,

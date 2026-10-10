@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 static REJECTED_INPUT_MESSAGES: AtomicU64 = AtomicU64::new(0);
 
-/// Input messages the `encryption` middleware could not decrypt and acked, process-wide.
+/// Input messages a middleware could not decode and acked (`on_error: drop`), process-wide.
 /// A one-shot job reads it to tell a lossy run from a clean one.
 pub fn rejected_input_messages() -> u64 {
     REJECTED_INPUT_MESSAGES.load(Ordering::Relaxed)
@@ -156,13 +156,17 @@ pub async fn apply_middlewares_to_consumer(
                 Box::new(MetricsConsumer::new(consumer, cfg, route_name, "input"))
             }
             Middleware::Otel(_) => otel_consumer(consumer, route_name)?,
+            // Output-only. Accepting them here used to warn and do nothing, which left a
+            // route without the retries or dead-lettering its config asked for.
             Middleware::Dlq(_) => {
-                tracing::warn!("Dlq middleware is ignored on consumers (input endpoints). It is currently publisher-only.");
-                consumer
+                return Err(InvalidConfig(anyhow::anyhow!(
+                    "[middleware:{route_name}] `dlq` is an output-only middleware and does nothing on an input endpoint. Move it to the route's output endpoint."
+                )).into())
             }
             Middleware::Retry(_) => {
-                tracing::warn!("Retry middleware is ignored on consumers (input endpoints). It is currently publisher-only.");
-                consumer
+                return Err(InvalidConfig(anyhow::anyhow!(
+                    "[middleware:{route_name}] `retry` is an output-only middleware and does nothing on an input endpoint. Move it to the route's output endpoint."
+                )).into())
             }
             Middleware::Delay(cfg) => Box::new(DelayConsumer::new(consumer, cfg)),
             Middleware::RandomPanic(cfg) => Box::new(RandomPanicConsumer::new(consumer, cfg)),
@@ -193,16 +197,17 @@ pub async fn apply_middlewares_to_consumer(
                 )).into())
             }
             #[cfg(feature = "filter")]
-            Middleware::Filter(expression) => Box::new(invalid(FilterConsumer::new(consumer, expression))?),
+            Middleware::Filter(cfg) => Box::new(invalid(FilterConsumer::new(consumer, &cfg.expression))?.with_on_error(cfg.on_error)),
             Middleware::Custom { name, config } => {
                 let factory = custom_middleware_factory(name)?;
                 factory.apply_consumer(consumer, route_name, config).await?
             }
             #[allow(unreachable_patterns)]
-            _ => {
+            other => {
                 return Err(InvalidConfig(anyhow::anyhow!(
-                    "[middleware:{}] Unsupported consumer middleware",
-                    route_name
+                    "[middleware:{}] Unsupported consumer middleware: {}",
+                    route_name,
+                    missing_feature(other)
                 )).into())
             }
         };
@@ -284,7 +289,7 @@ pub async fn apply_middlewares_to_publisher(
                 )).into())
             }
             #[cfg(feature = "filter")]
-            Middleware::Filter(expression) => Box::new(invalid(FilterPublisher::new(publisher, expression))?),
+            Middleware::Filter(cfg) => Box::new(invalid(FilterPublisher::new(publisher, &cfg.expression))?.with_on_error(cfg.on_error)),
             Middleware::Custom { name, config } => {
                 let factory = custom_middleware_factory(name)?;
                 factory
@@ -292,15 +297,31 @@ pub async fn apply_middlewares_to_publisher(
                     .await?
             }
             #[allow(unreachable_patterns)]
-            _ => {
+            other => {
                 return Err(InvalidConfig(anyhow::anyhow!(
-                    "[middleware:{}] Unsupported publisher middleware",
-                    route_name
+                    "[middleware:{}] Unsupported publisher middleware: {}",
+                    route_name,
+                    missing_feature(other)
                 )).into())
             }
         };
     }
     Ok(publisher.into())
+}
+
+/// Says which Cargo feature a middleware this build cannot apply needs.
+#[allow(dead_code)]
+fn missing_feature(middleware: &Middleware) -> String {
+    let (name, feature) = match middleware {
+        Middleware::Deduplication(_) => ("deduplication", "dedup"),
+        Middleware::Metrics(_) => ("metrics", "metrics"),
+        Middleware::Aggregate(_) => ("aggregate", "aggregate"),
+        Middleware::Encryption(_) => ("encryption", "encryption"),
+        Middleware::Compression(_) => ("compression", "compression"),
+        Middleware::Filter(_) => ("filter", "filter"),
+        _ => return "not available in this build".to_string(),
+    };
+    format!("`{name}` needs the `{feature}` Cargo feature, which this build does not include")
 }
 
 /// Resolves a `custom` middleware name, loading an installed plugin that
@@ -322,6 +343,32 @@ fn custom_middleware_factory(name: &str) -> Result<Arc<dyn CustomMiddlewareFacto
     Err(anyhow::anyhow!(
         "Custom middleware factory '{name}' not found{hint}"
     ))
+}
+
+/// Puts the original payload back into each failed message. `originals` holds
+/// `(message_id, original, rewritten)` per sent message; messages sharing an id are
+/// told apart by the rewritten payload the failure still carries.
+#[cfg(any(feature = "compression", feature = "encryption"))]
+pub(crate) fn restore_payloads(
+    originals: Vec<(u128, bytes::Bytes, bytes::Bytes)>,
+    failed: &mut [(crate::CanonicalMessage, crate::traits::PublisherError)],
+) {
+    let mut by_id: std::collections::HashMap<u128, Vec<(bytes::Bytes, bytes::Bytes)>> =
+        std::collections::HashMap::with_capacity(originals.len());
+    for (id, original, rewritten) in originals {
+        by_id.entry(id).or_default().push((original, rewritten));
+    }
+    for (message, _) in failed {
+        let Some(candidates) = by_id.get(&message.message_id) else {
+            continue;
+        };
+        let found = candidates
+            .iter()
+            .find(|(_, rewritten)| candidates.len() == 1 || *rewritten == message.payload);
+        if let Some((original, _)) = found {
+            message.payload = original.clone();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -358,6 +405,14 @@ mod placement_tests {
             (serde_json::json!({"pack": {}}), "output-only"),
             (
                 serde_json::json!({"timeout": {"timeout_ms": 5}}),
+                "output-only",
+            ),
+            (
+                serde_json::json!({"retry": {"max_attempts": 3}}),
+                "output-only",
+            ),
+            (
+                serde_json::json!({"dlq": {"endpoint": {"null": null}}}),
                 "output-only",
             ),
         ] {
@@ -465,26 +520,6 @@ mod placement_tests {
             let text = err.to_string();
             assert!(text.contains("'no_such_middleware' not found"), "{text}");
         }
-    }
-
-    #[tokio::test]
-    async fn dlq_on_an_input_is_ignored_not_refused() {
-        let consumer = Box::new(MemoryConsumer::new_local("placement_dlq_in", 1));
-        let endpoint = endpoint_with(serde_json::json!({"dlq": {"endpoint": {"null": null}}}));
-
-        let applied = apply_middlewares_to_consumer(consumer, &endpoint, "placement").await;
-
-        assert!(applied.is_ok());
-    }
-
-    #[tokio::test]
-    async fn retry_on_an_input_is_ignored_not_refused() {
-        let consumer = Box::new(MemoryConsumer::new_local("placement_retry_in", 1));
-        let endpoint = endpoint_with(serde_json::json!({"retry": {"max_attempts": 3}}));
-
-        let applied = apply_middlewares_to_consumer(consumer, &endpoint, "placement").await;
-
-        assert!(applied.is_ok());
     }
 }
 

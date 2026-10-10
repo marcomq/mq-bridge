@@ -5,7 +5,7 @@ use crate::CanonicalMessage;
 use crate::Sent;
 use crate::SentBatch;
 use std::collections::HashMap;
-use std::sync::{OnceLock, RwLock};
+use std::sync::{OnceLock, PoisonError, RwLock};
 
 /// A simple wrapper around a publisher to send messages to a specific endpoint.
 #[derive(Clone)]
@@ -55,6 +55,11 @@ impl Publisher {
         match self.publisher.send_batch(messages).await? {
             SentBatch::Partial { responses: Some(resps), failed } if failed.is_empty() && resps.len() == count => Ok(resps),
             SentBatch::Ack => Err(anyhow::anyhow!("Expected responses from the endpoint, but received only acknowledgments (Ack). Ensure the endpoint and route are correctly configured for request-reply.")),
+            SentBatch::Partial { failed, .. } if !failed.is_empty() => Err(anyhow::anyhow!(
+                "Request batch failed for {} of {count} messages; first error: {}",
+                failed.len(),
+                failed[0].1
+            )),
             _ => Err(anyhow::anyhow!("Request batch failed to return the expected responses. Ensure the endpoint and route are correctly configured for request-reply.")),
         }
     }
@@ -88,21 +93,21 @@ impl Publisher {
     /// Registers this publisher globally with a given name.
     pub fn register(&self, name: &str) -> Option<Self> {
         let registry = PUBLISHER_REGISTRY.get_or_init(|| RwLock::new(HashMap::new()));
-        let mut map = registry.write().expect("Publisher registry lock poisoned");
+        let mut map = registry.write().unwrap_or_else(PoisonError::into_inner);
         map.insert(name.to_string(), self.clone())
     }
 
     /// Retrieves a registered publisher by name.
     pub fn get(name: &str) -> Option<Self> {
         let registry = PUBLISHER_REGISTRY.get_or_init(|| RwLock::new(HashMap::new()));
-        let map = registry.read().expect("Publisher registry lock poisoned");
+        let map = registry.read().unwrap_or_else(PoisonError::into_inner);
         map.get(name).cloned()
     }
 
     /// Removes a registered publisher by name.
     pub fn unregister(name: &str) -> Option<Self> {
         let registry = PUBLISHER_REGISTRY.get_or_init(|| RwLock::new(HashMap::new()));
-        let mut map = registry.write().expect("Publisher registry lock poisoned");
+        let mut map = registry.write().unwrap_or_else(PoisonError::into_inner);
         map.remove(name)
     }
 }
@@ -127,7 +132,7 @@ pub fn list_publishers() -> Vec<String> {
     let registry = PUBLISHER_REGISTRY.get_or_init(|| RwLock::new(HashMap::new()));
     registry
         .read()
-        .expect("Publisher registry lock poisoned")
+        .unwrap_or_else(PoisonError::into_inner)
         .keys()
         .cloned()
         .collect()

@@ -221,6 +221,17 @@ impl MemoryDedupStore {
         };
     }
 
+    fn renew_key(&self, key: &[u8], now: u64) {
+        let hash = hash_key(&self.hasher, key);
+        let mut shard = self.shard(hash, now);
+        if let Some(seq) = shard.find(hash, key) {
+            let entry = shard.entry_mut(seq);
+            if entry.state == State::Pending {
+                entry.at = now;
+            }
+        }
+    }
+
     fn release_key(&self, key: &[u8], now: u64) {
         let hash = hash_key(&self.hasher, key);
         let mut shard = self.shard(hash, now);
@@ -248,6 +259,12 @@ impl DedupStore for MemoryDedupStore {
         now: u64,
     ) -> Result<Vec<Reservation>, ConsumerError> {
         Ok(keys.iter().map(|key| self.reserve_key(key, now)).collect())
+    }
+
+    async fn renew_many(&self, keys: &[Vec<u8>], now: u64) {
+        for key in keys {
+            self.renew_key(key, now);
+        }
     }
 
     async fn mark_processed(&self, key: &[u8], now: u64) {

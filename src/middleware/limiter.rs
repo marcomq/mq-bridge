@@ -9,6 +9,8 @@ use std::any::Any;
 use std::sync::Mutex;
 use tokio::time::{Duration, Instant};
 
+const MAX_DELAY: Duration = Duration::from_secs(3600);
+
 #[derive(Debug)]
 struct RateState {
     next_allowed_at: Instant,
@@ -26,20 +28,24 @@ impl RateState {
     /// moment its slot opens let a single `send_batch` of N pass instantly, however large N
     /// was, and only charged the next batch for it.
     fn reserve(&mut self, count: usize, per_message: Duration) -> Duration {
-        const MAX_DELAY: Duration = Duration::from_secs(3600);
-
         if count == 0 {
             return Duration::ZERO;
         }
 
         let now = Instant::now();
         let start_at = self.next_allowed_at.max(now);
-        let additional = per_message.mul_f64(count as f64).min(MAX_DELAY);
+        let additional = Duration::try_from_secs_f64(per_message.as_secs_f64() * count as f64)
+            .map_or(MAX_DELAY, |d| d.min(MAX_DELAY));
         self.next_allowed_at = start_at
             .checked_add(additional)
             .unwrap_or_else(|| start_at + MAX_DELAY);
         self.next_allowed_at.saturating_duration_since(now)
     }
+}
+
+/// Clamped so a tiny rate cannot overflow `Duration` and panic.
+fn per_message(messages_per_second: f64) -> Duration {
+    Duration::try_from_secs_f64(1.0 / messages_per_second).map_or(MAX_DELAY, |d| d.min(MAX_DELAY))
 }
 
 pub struct LimiterConsumer {
@@ -60,7 +66,7 @@ impl LimiterConsumer {
         }
         Ok(Self {
             inner,
-            per_message: Duration::from_secs_f64(1.0 / config.messages_per_second),
+            per_message: per_message(config.messages_per_second),
             state: RateState::new(),
         })
     }
@@ -125,7 +131,7 @@ impl LimiterPublisher {
         }
         Ok(Self {
             inner,
-            per_message: Duration::from_secs_f64(1.0 / config.messages_per_second),
+            per_message: per_message(config.messages_per_second),
             state: Mutex::new(RateState::new()),
         })
     }

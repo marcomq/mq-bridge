@@ -444,6 +444,26 @@ impl crate::middleware::deduplication::DedupStore for SqlDedupStore {
         }
     }
 
+    async fn renew_many(&self, keys: &[Vec<u8>], now: u64) {
+        use crate::middleware::deduplication::PENDING_TTL_SECS;
+        let claim = -((now + PENDING_TTL_SECS) as i64);
+        for chunk in keys.chunks(lookup_batch::MAX_KEYS_PER_QUERY) {
+            let sql = format!(
+                "UPDATE {} SET expire_at = {} WHERE expire_at < 0 AND dedup_key IN ({})",
+                self.table,
+                self.placeholder(1),
+                self.placeholders(2, chunk.len())
+            );
+            let mut update = sqlx::query(audited_sql(&sql)).persistent(false).bind(claim);
+            for key in chunk {
+                update = update.bind(crate::middleware::deduplication::hex_key(key));
+            }
+            if let Err(e) = update.execute(&self.pool).await {
+                warn!("Failed to renew dedup claims in SQL: {}", e);
+            }
+        }
+    }
+
     async fn release_many(&self, keys: &[Vec<u8>]) {
         for chunk in keys.chunks(lookup_batch::MAX_KEYS_PER_QUERY) {
             let sql = format!(

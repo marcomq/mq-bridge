@@ -213,8 +213,8 @@ fn path_lock(path: &Path) -> Arc<AsyncMutex<()>> {
 
 /// A file-backed checkpoint store: a single JSON object mapping cursor keys to values,
 /// written atomically (unique temp file + rename). Concurrent saves to the same path are
-/// serialized in-process via `path_lock`; cross-process sharing still relies on the atomic
-/// rename. Suitable for read-only sources and dev/CLI one-offs.
+/// serialized in-process via `path_lock` only: two processes sharing one file can overwrite
+/// each other's keys. Suitable for read-only sources and dev/CLI one-offs.
 pub struct FileCheckpointStore {
     path: PathBuf,
     key: String,
@@ -289,13 +289,34 @@ impl FileCheckpointStore {
             std::process::id(),
             SEQ.fetch_add(1, Ordering::Relaxed)
         ));
-        tokio::fs::write(&tmp, &bytes)
-            .await
-            .with_context(|| format!("Failed to write checkpoint temp '{}'", tmp.display()))?;
+        // Synced before the rename, or a power loss can leave an empty file under the final name.
+        let write = async {
+            use tokio::io::AsyncWriteExt;
+            let mut file = tokio::fs::File::create(&tmp).await?;
+            file.write_all(&bytes).await?;
+            file.sync_all().await
+        };
+        if let Err(e) = write.await {
+            tokio::fs::remove_file(&tmp).await.ok();
+            return Err(e)
+                .with_context(|| format!("Failed to write checkpoint temp '{}'", tmp.display()));
+        }
         if let Err(e) = tokio::fs::rename(&tmp, &self.path).await {
             tokio::fs::remove_file(&tmp).await.ok();
             return Err(e)
                 .with_context(|| format!("Failed to commit checkpoint '{}'", self.path.display()));
+        }
+        // Best-effort: without it a power loss can still undo the rename.
+        #[cfg(unix)]
+        if let Some(parent) = self.path.parent() {
+            let dir = if parent.as_os_str().is_empty() {
+                std::path::Path::new(".")
+            } else {
+                parent
+            };
+            if let Ok(dir) = tokio::fs::File::open(dir).await {
+                dir.sync_all().await.ok();
+            }
         }
         Ok(())
     }
@@ -340,16 +361,30 @@ pub fn sanitize_ident(source: &str) -> String {
 /// Default meta table/collection name for a source: `mqb_cursors_<source>`, capped to a safe
 /// identifier length (63 bytes; a short hash suffix disambiguates truncated names).
 pub fn default_meta_name(source: &str) -> String {
-    const PREFIX: &str = "mqb_cursors_";
-    const MAX: usize = 63;
     let ident = sanitize_ident(source);
-    let full = format!("{PREFIX}{ident}");
-    if full.len() <= MAX {
+    let full = format!("{META_PREFIX}{ident}");
+    if full.len() <= META_MAX {
         return full;
     }
+    hashed_meta_name(source, &ident)
+}
+
+const META_PREFIX: &str = "mqb_cursors_";
+const META_MAX: usize = 63;
+
+fn hashed_meta_name(source: &str, ident: &str) -> String {
     let suffix = format!("_{:08x}", fnv1a(source.as_bytes()));
-    let keep = (MAX - PREFIX.len() - suffix.len()).min(ident.len());
-    format!("{PREFIX}{}{suffix}", &ident[..keep])
+    let keep = (META_MAX - META_PREFIX.len() - suffix.len()).min(ident.len());
+    format!("{META_PREFIX}{}{suffix}", &ident[..keep])
+}
+
+/// Meta name for a source that sanitization changed (`orders.v1`), hashed so it cannot collide
+/// with `orders_v1`. `None` when [`default_meta_name`] is already unique for the source.
+/// Callers use it only when no table exists under [`default_meta_name`].
+pub fn disambiguated_meta_name(source: &str) -> Option<String> {
+    let ident = sanitize_ident(source);
+    (ident != source && META_PREFIX.len() + ident.len() <= META_MAX)
+        .then(|| hashed_meta_name(source, &ident))
 }
 
 /// Stable FNV-1a hash, used to disambiguate identifiers that collide after sanitization.
@@ -923,6 +958,17 @@ mod tests {
         let name = default_meta_name(&long);
         assert!(name.len() <= 63, "capped: {} ({})", name, name.len());
         assert!(name.starts_with("mqb_cursors_"));
+    }
+
+    #[test]
+    fn a_sanitized_source_gets_a_name_distinct_from_its_lookalike() {
+        assert_eq!(disambiguated_meta_name("orders_v1"), None);
+        let dotted = disambiguated_meta_name("orders.v1").unwrap();
+        assert!(dotted.starts_with("mqb_cursors_orders_v1_"), "{dotted}");
+        assert_ne!(dotted, disambiguated_meta_name("orders-v1").unwrap());
+        assert!(disambiguated_meta_name(&"a.".repeat(40)).is_none());
+        let near_limit = format!("a.{}", "b".repeat(48));
+        assert!(disambiguated_meta_name(&near_limit).unwrap().len() <= 63);
     }
 
     #[test]

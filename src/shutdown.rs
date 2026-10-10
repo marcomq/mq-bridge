@@ -78,9 +78,8 @@ pub async fn shutdown_requested() {
 /// Stops every deployed route. Returns the names that were running.
 pub async fn stop_all_routes() -> Vec<String> {
     let names = crate::route::list_routes();
-    for name in &names {
-        crate::route::stop_route(name).await;
-    }
+    // Together, so stuck routes do not add up their stop timeouts.
+    futures::future::join_all(names.iter().map(|name| crate::route::stop_route(name))).await;
     names
 }
 

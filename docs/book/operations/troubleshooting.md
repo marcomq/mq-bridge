@@ -47,8 +47,12 @@ The `memory` endpoint's IPC transport is **unidirectional, publisher → consume
 - Named `ipc://name` resolves to different paths for different users/services (the
   `/run` → `$XDG_RUNTIME_DIR` → `/tmp` fallback). When both sides must agree, use an **explicit
   path** (`ipc:///run/myapp/queue.sock`).
-- IPC redelivery is **consumer-local** and does not survive a consumer crash; use a real broker
-  for durable redelivery. See [Cross-process IPC bridge](../tutorials/ipc-bridge.md).
+- A **second publisher** on the same socket connects without an error but is only read after
+  the first disconnects. Its sends block once the socket buffer is full.
+- A send is acknowledged once it is in the socket buffer, and IPC redelivery is
+  **consumer-local**: neither survives a consumer crash. Use a
+  [directory spool](../connectors/dir-spool.md) or a broker for a durable hand-over. See
+  [Cross-process IPC bridge](../tutorials/ipc-bridge.md).
 
 ## Request/reply timeouts and dropped responses
 

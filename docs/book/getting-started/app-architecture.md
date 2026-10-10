@@ -28,7 +28,7 @@ code:
 
 1. **Schema generation** — the backend uses `schemars` to generate a JSON Schema for the
    `AppConfig` struct at runtime, exposed via `/schema.json` (also available on the CLI:
-   `mqb --schema dev/config/schema.json`).
+   `mqb --schema schema.json` writes it to a file, `mqb --schema -` prints it).
 2. **Dynamic form** — the frontend uses
    [vanilla-schema-forms](https://github.com/marcomq/vanilla-schema-forms) to render a complete
    configuration form from that schema alone.

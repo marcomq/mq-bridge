@@ -571,6 +571,42 @@ async fn test_sqlx_cursor_reader_external_db_checkpoint() {
     assert!(reader2.receive_batch(10).await.unwrap().messages.is_empty());
 }
 
+// A schema-qualified source gets a hashed meta table, but keeps an unhashed one that exists.
+#[tokio::test]
+async fn a_qualified_source_keeps_an_existing_meta_table_and_hashes_a_new_one() {
+    let meta_tables = |pool: AnyPool| async move {
+        sqlx::query_scalar::<_, String>(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'mqb_cursors%'",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap()
+    };
+    let config = |url: &str| SqlxConfig {
+        url: url.to_string(),
+        table: "main.orders".to_string(),
+        cursor_column: Some("id".to_string()),
+        cursor_id: Some("copy-1".to_string()),
+        ..Default::default()
+    };
+
+    let (_dir, url, pool) = setup_arbitrary_table(1).await;
+    SqlxCursorReader::new(&config(&url)).await.unwrap();
+    let created = meta_tables(pool).await;
+    assert_eq!(created.len(), 1, "{created:?}");
+    assert!(created[0].starts_with("mqb_cursors_main_orders_"));
+
+    let (_dir, url, pool) = setup_arbitrary_table(1).await;
+    sqlx::query(
+        "CREATE TABLE mqb_cursors_main_orders (cursor_id TEXT PRIMARY KEY, last_value TEXT)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    SqlxCursorReader::new(&config(&url)).await.unwrap();
+    assert_eq!(meta_tables(pool).await, ["mqb_cursors_main_orders"]);
+}
+
 #[tokio::test]
 async fn test_sqlx_roundtrip_delete() {
     let (_dir, url) = setup_db_file().await;

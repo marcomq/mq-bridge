@@ -11,7 +11,7 @@
 //! Metadata keys listed in `authenticate_metadata` are not encrypted but are
 //! bound into the AEAD tag, so altering one in transit fails decryption.
 
-use crate::models::EncryptionConfig;
+use crate::models::{EncryptionConfig, InputErrorPolicy};
 use crate::support::crypto::Crypto;
 use crate::traits::{
     BoxFuture, ConsumerError, MessageConsumer, MessageDisposition, MessagePublisher,
@@ -20,7 +20,6 @@ use crate::traits::{
 use crate::CanonicalMessage;
 use async_trait::async_trait;
 use std::any::Any;
-use std::collections::HashMap;
 use std::sync::Arc;
 
 pub struct EncryptionPublisher {
@@ -73,10 +72,11 @@ impl MessagePublisher for EncryptionPublisher {
         // upstream (retry/dlq) in their original form, or an outer retry would
         // double-seal them. A Vec of refcount-bumped `Bytes` costs one allocation
         // for the batch.
-        let mut originals: Vec<(u128, bytes::Bytes)> = Vec::with_capacity(messages.len());
+        let mut originals = Vec::with_capacity(messages.len());
         for message in &mut messages {
-            originals.push((message.message_id, message.payload.clone()));
+            let original = message.payload.clone();
             self.seal_message(message)?;
+            originals.push((message.message_id, original, message.payload.clone()));
         }
         match self.inner.send_batch(messages).await? {
             SentBatch::Ack => Ok(SentBatch::Ack),
@@ -84,14 +84,7 @@ impl MessagePublisher for EncryptionPublisher {
                 responses,
                 mut failed,
             } => {
-                // Indexed only here: a whole batch can fail, and scanning the
-                // originals per message made that quadratic.
-                let by_id: HashMap<u128, bytes::Bytes> = originals.into_iter().collect();
-                for (msg, _) in &mut failed {
-                    if let Some(original) = by_id.get(&msg.message_id) {
-                        msg.payload = original.clone();
-                    }
-                }
+                super::restore_payloads(originals, &mut failed);
                 Ok(SentBatch::Partial { responses, failed })
             }
         }
@@ -109,6 +102,7 @@ impl MessagePublisher for EncryptionPublisher {
 pub struct EncryptionConsumer {
     inner: Box<dyn MessageConsumer>,
     crypto: Arc<Crypto>,
+    on_error: InputErrorPolicy,
 }
 
 impl EncryptionConsumer {
@@ -116,6 +110,7 @@ impl EncryptionConsumer {
         Ok(Self {
             inner,
             crypto: Arc::new(Crypto::new(config)?),
+            on_error: config.on_error,
         })
     }
 
@@ -152,9 +147,24 @@ impl MessageConsumer for EncryptionConsumer {
     }
 
     async fn receive(&mut self) -> Result<Received, ConsumerError> {
-        let mut received = self.inner.receive().await?;
-        self.open_message(&mut received.message)?;
-        Ok(received)
+        loop {
+            let mut received = self.inner.receive().await?;
+            match self.open_message(&mut received.message) {
+                Ok(()) => return Ok(received),
+                Err(error) if self.on_error == InputErrorPolicy::Fail => return Err(error),
+                Err(error) => {
+                    super::note_rejected_input_message();
+                    tracing::error!(
+                        message_id = format_args!("{:032x}", received.message.message_id),
+                        "Rejecting message that failed to decrypt: {error}"
+                    );
+                    // Acked like a rejected batch slot, so the poison message is not redelivered.
+                    (received.commit)(MessageDisposition::Ack)
+                        .await
+                        .map_err(ConsumerError::Connection)?;
+                }
+            }
+        }
     }
 
     /// A message that will not open is poison: returning the whole batch as an error drops
@@ -174,6 +184,7 @@ impl MessageConsumer for EncryptionConsumer {
                         kept_indices.push(index);
                         kept.push(message);
                     }
+                    Err(error) if self.on_error == InputErrorPolicy::Fail => return Err(error),
                     Err(error) => {
                         super::note_rejected_input_message();
                         tracing::error!(
@@ -450,5 +461,114 @@ mod tests {
         let recorded = committed.lock().unwrap();
         assert_eq!(recorded.len(), 1);
         assert!(matches!(recorded[0].as_slice(), [MessageDisposition::Ack]));
+    }
+
+    /// Serves single messages, counting the acks.
+    struct SingleConsumer {
+        messages: std::collections::VecDeque<CanonicalMessage>,
+        acked: Arc<Mutex<usize>>,
+    }
+
+    #[async_trait]
+    impl MessageConsumer for SingleConsumer {
+        async fn receive(&mut self) -> Result<Received, ConsumerError> {
+            let message = self
+                .messages
+                .pop_front()
+                .ok_or(ConsumerError::EndOfStream)?;
+            let acked = self.acked.clone();
+            Ok(Received {
+                message,
+                commit: Box::new(move |_| {
+                    *acked.lock().unwrap() += 1;
+                    Box::pin(async { Ok(()) })
+                }),
+            })
+        }
+
+        async fn receive_batch(&mut self, _max: usize) -> Result<ReceivedBatch, ConsumerError> {
+            unreachable!("only `receive` is exercised")
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    #[tokio::test]
+    async fn receive_drops_a_poison_message_and_reads_the_next() {
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let publisher = EncryptionPublisher::new(
+            Box::new(RecordingPublisher { sent: sent.clone() }),
+            &config(),
+        )
+        .unwrap();
+        publisher
+            .send_batch(vec![
+                CanonicalMessage::from("payload"),
+                CanonicalMessage::from("intact"),
+            ])
+            .await
+            .unwrap();
+        let mut wire = sent.lock().unwrap().clone();
+        let mut tampered = wire[0].payload.to_vec();
+        *tampered.last_mut().unwrap() ^= 1;
+        wire[0].payload = tampered.into();
+
+        let acked = Arc::new(Mutex::new(0));
+        let source = |messages: Vec<CanonicalMessage>| SingleConsumer {
+            messages: messages.into(),
+            acked: acked.clone(),
+        };
+        let mut consumer =
+            EncryptionConsumer::new(Box::new(source(wire.clone())), &config()).unwrap();
+        let received = consumer.receive().await.unwrap();
+        assert_eq!(received.message.payload.as_ref(), b"intact");
+        assert_eq!(*acked.lock().unwrap(), 1, "the poison message is acked");
+
+        let fail = EncryptionConfig {
+            on_error: InputErrorPolicy::Fail,
+            ..config()
+        };
+        let mut consumer = EncryptionConsumer::new(Box::new(source(wire)), &fail).unwrap();
+        assert!(matches!(
+            consumer.receive().await,
+            Err(ConsumerError::Permanent(_))
+        ));
+        assert_eq!(*acked.lock().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn on_error_fail_stops_instead_of_dropping() {
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let publisher = EncryptionPublisher::new(
+            Box::new(RecordingPublisher { sent: sent.clone() }),
+            &config(),
+        )
+        .unwrap();
+        publisher
+            .send_batch(vec![
+                CanonicalMessage::from("payload"),
+                CanonicalMessage::from("intact"),
+            ])
+            .await
+            .unwrap();
+        let wire = sent.lock().unwrap().clone();
+
+        // A reader with the wrong key: every message would be dropped under the default.
+        let wrong_key = EncryptionConfig {
+            key: base64::engine::general_purpose::STANDARD.encode([6u8; 32]),
+            on_error: InputErrorPolicy::Fail,
+            ..Default::default()
+        };
+        let inner = MockConsumer::new(wire);
+        let committed = inner.committed.clone();
+        let mut consumer = EncryptionConsumer::new(Box::new(inner), &wrong_key).unwrap();
+
+        assert!(matches!(
+            consumer.receive_batch(10).await,
+            Err(ConsumerError::Permanent(_))
+        ));
+        assert!(committed.lock().unwrap().is_empty(), "nothing is acked");
     }
 }

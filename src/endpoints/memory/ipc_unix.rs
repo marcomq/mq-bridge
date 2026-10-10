@@ -11,10 +11,14 @@ use crate::CanonicalMessage;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 use tracing::{debug, info, warn};
+
+/// How long `new_server` waits for an existing socket to answer or refuse.
+const STALE_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// Which end of the socket this transport owns.
 ///
@@ -45,7 +49,32 @@ struct UnixIpcTransportInner {
     // accept. The codec owns the partial-frame buffer, which is what makes
     // reads cancel safe.
     conn: Mutex<Option<FramedIo<UnixStream>>>,
-    closed: Mutex<bool>,
+    closed: AtomicBool,
+    /// Wakes a `recv_batch` blocked on the socket when the transport closes.
+    close_notify: Notify,
+}
+
+/// Refuses a socket directory in which another local user could replace the socket: one owned
+/// by someone other than this user or root, or writable by group/others without the sticky
+/// bit. A sticky directory such as `/tmp` only lets the owner remove an entry.
+fn check_socket_dir(dir: &Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = std::fs::metadata(dir)?;
+    // std has no `geteuid`; a socket pair reports this process's own credentials.
+    let (probe, _peer) = UnixStream::pair()?;
+    let uid = probe.peer_cred()?.uid();
+    let foreign_owner = meta.uid() != uid && meta.uid() != 0;
+    let shared_writable = meta.mode() & 0o022 != 0 && meta.mode() & 0o1000 == 0;
+    if foreign_owner || shared_writable {
+        return Err(anyhow!(
+            "Unix IPC socket directory '{}' is not safe (owner uid {}, mode {:o}): it must belong \
+             to this user or root and must not be writable by group or others",
+            dir.display(),
+            meta.uid(),
+            meta.mode() & 0o7777
+        ));
+    }
+    Ok(())
 }
 
 impl UnixIpcTransport {
@@ -53,20 +82,37 @@ impl UnixIpcTransport {
     pub async fn new_server(socket_path: impl AsRef<Path>, capacity: usize) -> Result<Self> {
         let socket_path = socket_path.as_ref();
 
-        // Remove existing socket if it exists
+        // Only a socket that refuses the connection is stale and removed; one that answers,
+        // or a probe that stays inconclusive, is taken as a running consumer.
         if socket_path.exists() {
-            std::fs::remove_file(socket_path)?;
+            let probe =
+                tokio::time::timeout(STALE_PROBE_TIMEOUT, UnixStream::connect(socket_path)).await;
+            match probe {
+                Ok(Err(e)) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
+                    std::fs::remove_file(socket_path)?;
+                }
+                Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => {}
+                _ => {
+                    return Err(anyhow!(
+                        "Unix IPC socket '{}' is in use by another consumer",
+                        socket_path.display()
+                    ));
+                }
+            }
         }
 
         // Create parent directory if needed
         if let Some(parent) = socket_path.parent() {
+            let created = !parent.exists();
             std::fs::create_dir_all(parent)?;
-            // Set restrictive permissions on directory (0700)
-            {
+            // Restrict a directory we created (0700); an existing one is checked, not changed.
+            if created {
                 use std::os::unix::fs::PermissionsExt;
                 let mut perms = std::fs::metadata(parent)?.permissions();
                 perms.set_mode(0o700);
                 std::fs::set_permissions(parent, perms)?;
+            } else {
+                check_socket_dir(parent)?;
             }
         }
 
@@ -89,7 +135,8 @@ impl UnixIpcTransport {
                 role: Role::Server,
                 listener: Mutex::new(Some(listener)),
                 conn: Mutex::new(None),
-                closed: Mutex::new(false),
+                closed: AtomicBool::new(false),
+                close_notify: Notify::new(),
             }),
         })
     }
@@ -109,7 +156,8 @@ impl UnixIpcTransport {
                 role: Role::Client,
                 listener: Mutex::new(None),
                 conn: Mutex::new(Some(framed::wrap(stream))),
-                closed: Mutex::new(false),
+                closed: AtomicBool::new(false),
+                close_notify: Notify::new(),
             }),
         })
     }
@@ -126,58 +174,9 @@ impl UnixIpcTransport {
         }
     }
 
-    fn is_disconnected(error: &anyhow::Error) -> bool {
-        error
-            .downcast_ref::<std::io::Error>()
-            .is_some_and(|io_error| {
-                matches!(
-                    io_error.kind(),
-                    std::io::ErrorKind::UnexpectedEof
-                        | std::io::ErrorKind::BrokenPipe
-                        | std::io::ErrorKind::ConnectionReset
-                        | std::io::ErrorKind::ConnectionAborted
-                        | std::io::ErrorKind::NotConnected
-                )
-            })
-    }
-}
-
-#[async_trait]
-impl TransportChannel for UnixIpcTransport {
-    async fn send_batch(&self, messages: Vec<CanonicalMessage>) -> Result<()> {
-        if *self.inner.closed.lock().await {
-            return Err(anyhow!("Unix IPC transport is closed"));
-        }
-
-        // A server writing here would push bytes at a publisher that only ever
-        // sends, silently stranding them and eventually blocking on a full
-        // socket buffer. Refuse instead.
-        if self.inner.role == Role::Server {
-            return Err(anyhow!(
-                "Unix IPC transport at '{}' is the consumer (server) side and cannot send; \
-                 the socket carries publisher -> consumer traffic only",
-                self.inner.socket_path
-            ));
-        }
-
-        let mut conn_guard = self.inner.conn.lock().await;
-        if let Some(conn) = conn_guard.as_mut() {
-            let bytes = framed::send_batch(conn, &messages, &self.inner.socket_path).await?;
-            debug!(
-                path = %self.inner.socket_path,
-                count = messages.len(),
-                bytes,
-                "Sent batch via Unix IPC"
-            );
-            Ok(())
-        } else {
-            Err(anyhow!("Unix IPC transport has no active connection"))
-        }
-    }
-
-    async fn recv_batch(&self) -> Result<Vec<CanonicalMessage>> {
+    async fn recv_next_batch(&self) -> Result<Vec<CanonicalMessage>> {
         loop {
-            if *self.inner.closed.lock().await {
+            if self.inner.closed.load(Ordering::Acquire) {
                 return Err(anyhow!("Unix IPC transport is closed"));
             }
 
@@ -213,6 +212,66 @@ impl TransportChannel for UnixIpcTransport {
         }
     }
 
+    fn is_disconnected(error: &anyhow::Error) -> bool {
+        error
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io_error| {
+                matches!(
+                    io_error.kind(),
+                    std::io::ErrorKind::UnexpectedEof
+                        | std::io::ErrorKind::BrokenPipe
+                        | std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::ConnectionAborted
+                        | std::io::ErrorKind::NotConnected
+                )
+            })
+    }
+}
+
+#[async_trait]
+impl TransportChannel for UnixIpcTransport {
+    async fn send_batch(&self, messages: Vec<CanonicalMessage>) -> Result<()> {
+        if self.inner.closed.load(Ordering::Acquire) {
+            return Err(anyhow!("Unix IPC transport is closed"));
+        }
+
+        // A server writing here would push bytes at a publisher that only ever
+        // sends, silently stranding them and eventually blocking on a full
+        // socket buffer. Refuse instead.
+        if self.inner.role == Role::Server {
+            return Err(anyhow!(
+                "Unix IPC transport at '{}' is the consumer (server) side and cannot send; \
+                 the socket carries publisher -> consumer traffic only",
+                self.inner.socket_path
+            ));
+        }
+
+        let mut conn_guard = self.inner.conn.lock().await;
+        if let Some(conn) = conn_guard.as_mut() {
+            let bytes = framed::send_batch(conn, &messages, &self.inner.socket_path).await?;
+            debug!(
+                path = %self.inner.socket_path,
+                count = messages.len(),
+                bytes,
+                "Sent batch via Unix IPC"
+            );
+            Ok(())
+        } else {
+            Err(anyhow!("Unix IPC transport has no active connection"))
+        }
+    }
+
+    async fn recv_batch(&self) -> Result<Vec<CanonicalMessage>> {
+        // Registered before the flag is read, so a concurrent `close` cannot be missed.
+        let closed = self.inner.close_notify.notified();
+        tokio::pin!(closed);
+        closed.as_mut().enable();
+        tokio::select! {
+            result = self.recv_next_batch() => result,
+            _ = closed => Err(anyhow!("Unix IPC transport is closed")),
+        }
+    }
+
     fn try_recv_batch(&self) -> Result<Option<Vec<CanonicalMessage>>> {
         // Sync context: if the connection is busy or absent there is nothing we
         // can produce without blocking.
@@ -240,32 +299,26 @@ impl TransportChannel for UnixIpcTransport {
     }
 
     fn is_closed(&self) -> bool {
-        // This is a blocking check, but should be fast
-        if let Ok(closed) = self.inner.closed.try_lock() {
-            *closed
-        } else {
-            false
-        }
+        self.inner.closed.load(Ordering::Acquire)
     }
 
     fn close(&self) {
-        if let Ok(mut closed) = self.inner.closed.try_lock() {
-            *closed = true;
+        if !self.inner.closed.swap(true, Ordering::AcqRel) {
             info!(path = %self.inner.socket_path, "Closing Unix IPC transport");
         }
+        self.inner.close_notify.notify_waiters();
     }
 }
 
-impl Drop for UnixIpcTransport {
+// On the shared state, so the socket file goes with the last handle, not the first.
+impl Drop for UnixIpcTransportInner {
     fn drop(&mut self) {
         // Clean up socket file if we're the server
-        if let Ok(listener_guard) = self.inner.listener.try_lock() {
-            if listener_guard.is_some() {
-                let socket_path = &self.inner.socket_path;
-                if let Err(e) = std::fs::remove_file(socket_path) {
-                    if e.kind() != std::io::ErrorKind::NotFound {
-                        warn!(path = %socket_path, error = %e, "Failed to remove Unix socket file");
-                    }
+        if self.listener.get_mut().is_some() {
+            let socket_path = &self.socket_path;
+            if let Err(e) = std::fs::remove_file(socket_path) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    warn!(path = %socket_path, error = %e, "Failed to remove Unix socket file");
                 }
             }
         }
@@ -276,6 +329,73 @@ impl Drop for UnixIpcTransport {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn a_second_server_refuses_a_live_socket_and_replaces_a_stale_one() {
+        let temp_dir = TempDir::new().unwrap();
+        let socket_path = temp_dir.path().join("live.sock");
+
+        let first = UnixIpcTransport::new_server(&socket_path, 10)
+            .await
+            .unwrap();
+        let error = UnixIpcTransport::new_server(&socket_path, 10)
+            .await
+            .err()
+            .expect("a live socket must not be taken over");
+        assert!(error.to_string().contains("in use"), "{error}");
+
+        // A listener that went away without cleanup leaves a file nobody answers on.
+        let stale = temp_dir.path().join("stale.sock");
+        drop(std::os::unix::net::UnixListener::bind(&stale).unwrap());
+        assert!(stale.exists());
+        UnixIpcTransport::new_server(&stale, 10).await.unwrap();
+        drop(first);
+    }
+
+    #[tokio::test]
+    async fn a_directory_others_can_write_to_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp_dir = TempDir::new().unwrap();
+        let set_mode = |mode| {
+            std::fs::set_permissions(temp_dir.path(), std::fs::Permissions::from_mode(mode))
+                .unwrap()
+        };
+
+        set_mode(0o777);
+        let error = UnixIpcTransport::new_server(temp_dir.path().join("open.sock"), 10)
+            .await
+            .err()
+            .expect("a world-writable directory must be refused");
+        assert!(error.to_string().contains("not safe"), "{error}");
+
+        // The sticky bit, as on /tmp, keeps other users from replacing the socket.
+        set_mode(0o1777);
+        UnixIpcTransport::new_server(temp_dir.path().join("sticky.sock"), 10)
+            .await
+            .unwrap();
+        set_mode(0o700);
+    }
+
+    #[tokio::test]
+    async fn close_wakes_a_blocked_recv_batch() {
+        let temp_dir = TempDir::new().unwrap();
+        let server = UnixIpcTransport::new_server(temp_dir.path().join("close.sock"), 10)
+            .await
+            .unwrap();
+        let blocked = {
+            let server = server.clone();
+            tokio::spawn(async move { server.recv_batch().await })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(!blocked.is_finished());
+
+        server.close();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), blocked)
+            .await
+            .expect("close must wake the blocked receive")
+            .unwrap();
+        assert!(result.is_err());
+    }
 
     #[tokio::test]
     async fn test_unix_ipc_roundtrip() {

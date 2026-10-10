@@ -271,6 +271,25 @@ impl crate::middleware::deduplication::DedupStore for MongoDedupStore {
         }
     }
 
+    async fn renew_many(&self, keys: &[Vec<u8>], now: u64) {
+        use crate::middleware::deduplication::{hex_key, PENDING_TTL_SECS};
+        let pending_date =
+            mongodb::bson::DateTime::from_millis((now + PENDING_TTL_SECS) as i64 * 1000);
+        for chunk in keys.chunks(crate::support::lookup_batch::MAX_KEYS_PER_QUERY) {
+            let ids: Vec<String> = chunk.iter().map(|k| hex_key(k)).collect();
+            if let Err(e) = self
+                .coll
+                .update_many(
+                    doc! { "_id": { "$in": &ids }, STATE_FIELD: STATE_PENDING },
+                    doc! { "$set": { "expireAt": pending_date } },
+                )
+                .await
+            {
+                warn!("Failed to renew dedup claims in MongoDB: {}", e);
+            }
+        }
+    }
+
     async fn release_many(&self, keys: &[Vec<u8>]) {
         use crate::middleware::deduplication::hex_key;
         for chunk in keys.chunks(crate::support::lookup_batch::MAX_KEYS_PER_QUERY) {

@@ -997,8 +997,37 @@ mod filter_expression_deserialization_tests {
         .unwrap();
 
         assert!(
-            matches!(&endpoint.middlewares[0], Middleware::Filter(expression) if expression == "amount > 100")
+            matches!(&endpoint.middlewares[0], Middleware::Filter(filter) if filter.expression == "amount > 100")
         );
+    }
+
+    #[test]
+    fn filter_accepts_a_map_and_writes_a_bare_string_without_on_error() {
+        let parse = |yaml: &str| serde_yaml_ng::from_str::<Endpoint>(yaml);
+        let bare = parse("middlewares:\n  - filter: 'amount > 100'\nnull: null\n").unwrap();
+        let map = parse(
+            "middlewares:\n  - filter: { expression: 'amount > 100', on_error: drop }\nnull: null\n",
+        )
+        .unwrap();
+        let Middleware::Filter(filter) = &map.middlewares[0] else {
+            panic!("expected a filter");
+        };
+        assert_eq!(filter.on_error, crate::models::InputErrorPolicy::Drop);
+
+        let written = |endpoint: &Endpoint| {
+            serde_json::to_value(&endpoint.middlewares[0]).unwrap()["filter"].clone()
+        };
+        assert_eq!(written(&bare), "amount > 100");
+        assert_eq!(
+            written(&map),
+            serde_json::json!({"expression": "amount > 100", "on_error": "drop"})
+        );
+
+        let error =
+            parse("middlewares:\n  - filter: { expression: 'items[0].qty > 1' }\nnull: null\n")
+                .unwrap_err();
+        assert!(error.to_string().contains("indexed path"), "{error}");
+        assert!(parse("middlewares:\n  - filter: { expresion: 'a > 1' }\nnull: null\n").is_err());
     }
 
     #[test]
@@ -1051,6 +1080,59 @@ mod secret_extraction_tests {
         let mut keys: Vec<String> = extract_config_secrets(&mut config).into_keys().collect();
         keys.sort();
         (config, keys)
+    }
+
+    #[test]
+    fn names_that_share_a_secret_key_are_reported() {
+        let routes = |first: &str, second: &str| -> Config {
+            let yaml = format!(
+                "{first}:\n  input: {{ memory: {{ topic: a }} }}\n  output: {{ \"null\": null }}\n\
+                 {second}:\n  input: {{ memory: {{ topic: b }} }}\n  output: {{ \"null\": null }}\n"
+            );
+            serde_yaml_ng::from_str(&yaml).expect("config parses")
+        };
+        assert!(check_config_secret_keys(&routes("my-route", "other")).is_ok());
+        let error = check_config_secret_keys(&routes("my-route", "my_route")).unwrap_err();
+        assert!(error.to_string().contains("route names"), "{error}");
+
+        let switch: Config = serde_yaml_ng::from_str(
+            r#"
+r:
+  input: { memory: { topic: a } }
+  output:
+    fanout:
+      - switch:
+          metadata_key: kind
+          cases:
+            a-b: { "null": null }
+            a_b: { "null": null }
+"#,
+        )
+        .expect("config parses");
+        let error = check_config_secret_keys(&switch).unwrap_err();
+        assert!(error.to_string().contains("switch case"), "{error}");
+    }
+
+    #[test]
+    fn only_whole_words_mark_a_header_as_a_secret() {
+        for (header, secret) in [
+            ("X-Api-Key", true),
+            ("X_API_KEY", true),
+            ("Authorization", true),
+            ("Proxy-Authorization", true),
+            ("X-Auth", true),
+            ("X-Access-Token", true),
+            ("Set-Cookie", true),
+            ("X-Author", false),
+            ("X-Keyboard-Layout", false),
+            ("X-Trace-Id", false),
+        ] {
+            assert_eq!(
+                super::secrets::is_sensitive_map_key(header),
+                secret,
+                "{header}"
+            );
+        }
     }
 
     #[test]
