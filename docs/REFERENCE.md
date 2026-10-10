@@ -1755,6 +1755,11 @@ key is already in metadata — for payload-derived keys you can either promote t
 metadata first (for example with [`transform`](#transform)'s `on_error: pass_through`, which
 sets `mqb.transform_error`) or just use `when`.
 
+A batch is split by destination and the parts are sent concurrently. When one destination
+fails as a whole, the batch is redelivered to all of them, so the others see those messages
+twice: delivery is at-least-once per destination, as for `fanout`. The health status is
+unhealthy when any destination is.
+
 ### `request`
 
 Sends each message to a request-capable endpoint and forwards the **response** somewhere else,
@@ -1831,6 +1836,11 @@ between loses it. Use it for polling APIs, not for guaranteed delivery.
 The reply carries the triggering request's message id, which is what matches it to its caller.
 The id of the message that was read is in the metadata `mqb.reader.message_id`.
 
+A single trigger waits until the source has a message. To bound that wait, put a
+[`timeout`](#timeout) middleware on the output; the trigger then fails as retryable. Triggers
+that arrive as a batch are answered in order with the messages the source returns for one
+read; a trigger left without a message fails as retryable, it is not acknowledged empty.
+
 ### `sequence`
 
 Reads several inputs one after another. Each is drained before the next begins, and the last
@@ -1906,7 +1916,15 @@ Consequences worth knowing:
   does. There is no exported-snapshot mode that would deduplicate this.
 * **A phase must be able to drain.** An intermediate phase is always run in drain mode, and its
   first empty batch is the handoff signal; only the last phase inherits the route's own
-  `exit_on_empty`. An endpoint that never reports empty would never hand off.
+  `exit_on_empty`. An endpoint that never reports empty would never hand off. The handoff then
+  waits, for up to 30 seconds, until the batches of that phase are acknowledged. If one of them
+  failed, the phase is polled again and the `cursor_id` marker is not advanced, so a restart
+  re-enters the phase.
+* **For a broker phase, "empty" means "nothing arrived for a moment".** A blocking source
+  reports empty after `MQ_BRIDGE_DRAIN_IDLE_TIMEOUT_MS` (1 second by default) without a
+  message. A rebalance or a slow connection can look the same, and with a marker the unread
+  rest of that phase is then not read. Use a source with a real end (SQL cursor, file, object
+  store) for intermediate phases, or raise the timeout.
 * **`postgres_cdc` needs `temporary_slot: false`** when it follows another phase. A temporary
   slot is dropped when the route stops, so a restart would resume with no retained WAL and
   silently skip every change made while the earlier phase ran. This is rejected at startup, for

@@ -467,7 +467,9 @@ load-bearing twice over: the listing is ordered by it, and a publisher opening a
 spool reads its next sequence number back out of it, resuming past the highest chunk already
 there rather than overwriting the head of the queue. `{timestamp}_{seq}` would resume from a
 13-digit timestamp, and a literal prefix would resume from zero and overwrite. Padding is
-not enforced, but an unpadded `{seq}` warns: chunk 10 sorts before chunk 2.
+not enforced, but an unpadded `{seq}` warns: chunk 10 sorts before chunk 2. The sequence
+must be followed by something that is not a digit: `{seq:09}_{timestamp}` is accepted,
+`{seq:09}{timestamp}` is rejected, because the two numbers could not be told apart.
 
 `payload_extension` and `metadata_extension` must also differ, on both sides — a consumer
 whose two extensions match would read every sidecar as a payload.

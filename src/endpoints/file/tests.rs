@@ -1371,7 +1371,7 @@ async fn test_file_consumer_group_id_persistence() {
 
     // Verify offset file exists and contains correct offset (length of "msg1\n" is 5)
     let offset_content = tokio::fs::read_to_string(&offset_path).await.unwrap();
-    assert_eq!(offset_content, "5");
+    assert_eq!(offset_content.parse::<u64>().unwrap(), 5);
 
     drop(consumer1);
 
@@ -1388,7 +1388,46 @@ async fn test_file_consumer_group_id_persistence() {
 
     // Verify offset updated (5 + length of "msg2\n" (5) = 10)
     let offset_content = tokio::fs::read_to_string(&offset_path).await.unwrap();
-    assert_eq!(offset_content, "10");
+    assert_eq!(offset_content.parse::<u64>().unwrap(), 10);
+}
+
+#[tokio::test]
+async fn test_file_group_offset_stops_before_a_nack() {
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("group_nack.log");
+    let offset_path = dir.path().join("group_nack.log.g.offset");
+    tokio::fs::write(&file_path, b"msg1\nmsg2\nmsg3\n")
+        .await
+        .unwrap();
+
+    let config = FileConfig {
+        path: file_path.to_str().unwrap().to_string(),
+        mode: Some(FileConsumerMode::GroupSubscribe {
+            group_id: "g".to_string(),
+            read_from_tail: false,
+        }),
+        ..Default::default()
+    };
+    let mut consumer = FileConsumer::new(&config).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let mut messages = Vec::new();
+    let mut commits = Vec::new();
+    while messages.len() < 3 {
+        let batch = consumer.receive_batch(3 - messages.len()).await.unwrap();
+        messages.extend(batch.messages);
+        commits.push(batch.commit);
+    }
+    assert_eq!(
+        commits.len(),
+        1,
+        "the three lines should arrive as one batch"
+    );
+
+    use crate::traits::MessageDisposition::{Ack, Nack};
+    (commits.remove(0))(vec![Ack, Nack, Ack]).await.unwrap();
+
+    let stored = tokio::fs::read_to_string(&offset_path).await.unwrap();
+    assert_eq!(stored.parse::<u64>().unwrap(), 5);
 }
 
 #[tokio::test]
@@ -2522,7 +2561,99 @@ async fn test_file_csv_blank_lines_are_not_rows() {
     .unwrap();
     assert_eq!(
         tokio::fs::read_to_string(&path).await.unwrap(),
-        "\n3,4\r\n\r\n"
+        "a,b\n\n3,4\r\n\r\n"
+    );
+}
+
+/// FILE-06: `fsync: batch` syncs before the ack, `periodic` in the background and on flush.
+#[tokio::test]
+async fn test_file_sink_fsync_modes() {
+    let dir = tempdir().unwrap();
+    for fsync in ["batch", "periodic"] {
+        let path = dir.path().join(format!("{fsync}.jsonl"));
+        let config: FileConfig = serde_json::from_value(json!({
+            "path": path.to_str().unwrap(),
+            "format": "raw",
+            "fsync": fsync,
+            "fsync_interval_ms": 20,
+        }))
+        .unwrap();
+        let sink = FilePublisher::new(&config).await.unwrap();
+        sink.send_batch(vec![msg!("one")]).await.unwrap();
+        if let super::FsyncPolicy::Periodic(dirty) = &sink.fsync {
+            assert!(dirty.load(std::sync::atomic::Ordering::Acquire));
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while dirty.load(std::sync::atomic::Ordering::Acquire) {
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("periodic sync never ran");
+            sink.send_batch(vec![msg!("two")]).await.unwrap();
+            sink.flush().await.unwrap();
+            assert!(!dirty.load(std::sync::atomic::Ordering::Acquire));
+        }
+        assert!(tokio::fs::read_to_string(&path)
+            .await
+            .unwrap()
+            .starts_with("one\n"));
+    }
+
+    let zero: FileConfig = serde_json::from_value(json!({
+        "path": dir.path().join("zero.jsonl").to_str().unwrap(),
+        "fsync": "periodic",
+        "fsync_interval_ms": 0,
+    }))
+    .unwrap();
+    assert!(FilePublisher::new(&zero).await.is_err());
+}
+
+/// FILE-02: two spellings of one path share the lock that serializes rewrites and appends.
+#[test]
+fn test_file_lock_is_shared_across_path_spellings() {
+    let dir = tempdir().unwrap();
+    let plain = dir.path().join("q.jsonl");
+    let dotted = dir.path().join(".").join("q.jsonl");
+    let a = super::get_file_lock(plain.to_str().unwrap());
+    let b = super::get_file_lock(dotted.to_str().unwrap());
+    assert!(std::sync::Arc::ptr_eq(&a, &b));
+}
+
+/// FILE-01: the header stays in a queue file, so a restart still names the columns
+/// instead of taking the first remaining row for the header.
+#[tokio::test]
+async fn test_file_csv_queue_keeps_header_across_restart() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("queue.csv");
+    tokio::fs::write(&path, "a,b\n1,2\n3,4\n5,6\n")
+        .await
+        .unwrap();
+    let config = FileConfig {
+        mode: Some(FileConsumerMode::Consume { delete: true }),
+        ..csv_config(&path)
+    };
+    let mut source = FileConsumer::new(&config).await.unwrap();
+    let batch = source.receive_batch(1).await.unwrap();
+    assert_eq!(batch.messages.len(), 1);
+    (batch.commit)(vec![crate::traits::MessageDisposition::Ack])
+        .await
+        .unwrap();
+    drop(source);
+    assert_eq!(
+        tokio::fs::read_to_string(&path).await.unwrap(),
+        "a,b\n3,4\n5,6\n"
+    );
+
+    let mut source = FileConsumer::new(&config).await.unwrap();
+    let batch = source.receive_batch(8).await.unwrap();
+    let rows: Vec<serde_json::Value> = batch
+        .messages
+        .iter()
+        .map(|m| serde_json::from_slice(&m.payload).unwrap())
+        .collect();
+    assert_eq!(
+        rows,
+        vec![json!({"a": "3", "b": "4"}), json!({"a": "5", "b": "6"})]
     );
 }
 
@@ -4166,4 +4297,152 @@ async fn blank_lines_are_not_records() {
         source.set_exit_on_empty(true);
         assert_eq!(drain_count(&mut source).await, 2);
     }
+}
+
+/// FILE-03: a final record without its delimiter may still be growing, so a delete-mode
+/// reader holds it back; one that stays unchanged is the file's last record.
+#[tokio::test]
+async fn test_file_queue_holds_back_a_record_still_being_written() {
+    use std::io::Write;
+
+    for mode in [
+        FileConsumerMode::Consume { delete: true },
+        FileConsumerMode::Subscribe { delete: true },
+    ] {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("queue.jsonl");
+        std::fs::write(&path, "{\"a\":1}\n{\"b\":").unwrap();
+        let config = FileConfig {
+            mode: Some(mode.clone()),
+            ..FileConfig::new(path.to_str().unwrap())
+        };
+        let mut source = FileConsumer::new(&config).await.unwrap();
+        let batch = source.receive_batch(8).await.unwrap();
+        assert_eq!(batch.messages.len(), 1, "{mode:?}");
+        (batch.commit)(vec![crate::traits::MessageDisposition::Ack])
+            .await
+            .unwrap();
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"2}\n{\"c\":3}")
+            .unwrap();
+
+        let mut rest = Vec::new();
+        while rest.len() < 2 {
+            let batch =
+                tokio::time::timeout(std::time::Duration::from_secs(5), source.receive_batch(8))
+                    .await
+                    .unwrap_or_else(|_| panic!("{mode:?}: got only {rest:?}"))
+                    .unwrap();
+            let acks = vec![crate::traits::MessageDisposition::Ack; batch.messages.len()];
+            rest.extend(
+                batch
+                    .messages
+                    .iter()
+                    .map(|m| String::from_utf8_lossy(&m.payload).into_owned()),
+            );
+            (batch.commit)(acks).await.unwrap();
+        }
+        assert_eq!(rest, ["{\"b\":2}", "{\"c\":3}"], "{mode:?}");
+    }
+}
+
+/// FILE-04: a compressed file whose last record has no delimiter still delivers it.
+#[cfg(feature = "compression")]
+#[tokio::test]
+async fn test_file_compressed_final_record_without_delimiter() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("tail.txt.gz");
+    let member =
+        crate::support::compression::compress_member(Compression::Gzip, b"one\ntwo").unwrap();
+    std::fs::write(&path, member).unwrap();
+    let config = FileConfig {
+        format: FileFormat::Raw,
+        compression: Compression::Gzip,
+        ..FileConfig::new(path.to_str().unwrap())
+    };
+    let mut source = FileConsumer::new(&config).await.unwrap();
+    assert_eq!(collect_compressed(&mut source, 2).await, ["one", "two"]);
+}
+
+/// FILE-05: a compressed CSV file that grows keeps its header; the first new row is data.
+#[cfg(feature = "compression")]
+#[tokio::test]
+async fn test_file_compressed_csv_keeps_header_when_the_file_grows() {
+    use std::io::Write;
+
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("grow.csv.gz");
+    let member = |data: &[u8]| {
+        crate::support::compression::compress_member(Compression::Gzip, data).unwrap()
+    };
+    std::fs::write(&path, member(b"a,b\n1,2\n")).unwrap();
+    let config = FileConfig {
+        compression: Compression::Gzip,
+        ..csv_config(&path)
+    };
+    let mut source = FileConsumer::new(&config).await.unwrap();
+    assert_eq!(collect_compressed(&mut source, 1).await.len(), 1);
+
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(&member(b"3,4\n5,6\n"))
+        .unwrap();
+    let rows: Vec<serde_json::Value> = collect_compressed(&mut source, 2)
+        .await
+        .iter()
+        .map(|payload| serde_json::from_slice(payload).unwrap())
+        .collect();
+    assert_eq!(
+        rows,
+        vec![json!({"a": "3", "b": "4"}), json!({"a": "5", "b": "6"})]
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_file_queue_does_not_redeliver_after_a_failed_delete() {
+    use crate::traits::MessageDisposition::Ack;
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("queue.jsonl");
+    std::fs::write(&path, "{\"a\":1}\n{\"b\":2}\n{\"c\":3}\n").unwrap();
+    let config = FileConfig {
+        mode: Some(FileConsumerMode::Consume { delete: true }),
+        ..FileConfig::new(path.to_str().unwrap())
+    };
+    let mut source = FileConsumer::new(&config).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    let first = source.receive_batch(1).await.unwrap();
+    // The rewrite needs a temp file next to the queue file, which a read-only directory refuses.
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+    (first.commit)(vec![Ack]).await.unwrap();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let mut seen = Vec::new();
+    while let Ok(Ok(batch)) = tokio::time::timeout(
+        std::time::Duration::from_millis(700),
+        source.receive_batch(8),
+    )
+    .await
+    {
+        let acks = vec![Ack; batch.messages.len()];
+        seen.extend(
+            batch
+                .messages
+                .iter()
+                .map(|m| String::from_utf8_lossy(&m.payload).into_owned()),
+        );
+        (batch.commit)(acks).await.unwrap();
+        if seen.len() > 4 {
+            break;
+        }
+    }
+    assert_eq!(seen, ["{\"b\":2}", "{\"c\":3}"]);
 }

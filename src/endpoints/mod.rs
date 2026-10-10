@@ -2354,6 +2354,12 @@ fn check_publisher_recursive(
         }
         EndpointType::Null => Ok(warnings),
         EndpointType::Fanout(endpoints) => {
+            if endpoints.is_empty() {
+                return Err(anyhow!(
+                    "[route:{}] fanout has no endpoints and would acknowledge every message unsent; use `null` to discard",
+                    route_name
+                ));
+            }
             for endpoint in endpoints {
                 warnings.extend(check_publisher_recursive(
                     route_name,
@@ -3807,6 +3813,27 @@ mod tests {
             .unwrap_err()
             .to_string();
             assert!(err.contains("orders_in"), "{err}");
+        }
+
+        /// STRUCT-13: outputs that can only discard are a config mistake, not a sink.
+        #[test]
+        fn an_output_that_can_only_discard_is_rejected() {
+            let empty_fanout = Endpoint::new(EndpointType::Fanout(Vec::new()));
+            let err = check_publisher("test", &empty_fanout, None)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("fanout has no endpoints"), "{err}");
+
+            let switch = Endpoint::new(EndpointType::Switch(crate::models::SwitchConfig {
+                metadata_key: "kind".to_string(),
+                cases: Default::default(),
+                when: Vec::new(),
+                default: None,
+            }));
+            let err = check_publisher("test", &switch, None)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("at least one of `cases`"), "{err}");
         }
 
         /// The policy list governs transports. Core types stay reachable whatever it says, so a

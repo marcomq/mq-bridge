@@ -10,10 +10,12 @@ Query parameters recognised as config fields for this connector. The object-type
 |------|------|----------|---------|-------------|
 | `compression` | `none` \| `gzip` \| `lz4` \| `zstd` | no | `none` | Per-batch compression (`none`, `gzip`, `lz4`, `zstd`). Requires the `compression` feature. Publishers: always. Consumers: must match, and only the default `consume` mode reads it. |
 | `csv` | object | no | [see below](#csv) | CSV dialect (separator, quote, header, columns); only read with `format: csv`. |
-| `delete` | boolean | no | `false` | If true, processed lines are physically removed from the file once they are successfully acknowledged. |
+| `delete` | boolean | no | `false` | Remove acknowledged lines from the file. Only safe if no other process writes to it. |
 | `delimiter` | string | no | — | Optional delimiter for messages. Defaults to newline ("\n"). Can be a string or a hex sequence (e.g. "0x00"). Currently only single-byte delimiters are supported. |
 | `encryption` | object | no | `null` | At-rest AEAD encryption applied after compression. Requires the `encryption` feature. Publishers: always. Consumers: must match, and only the default `consume` mode reads it. |
 | `format` | `normal` \| `json` \| `text` \| `raw` \| `csv` \| `parquet` | no | `normal` | The format for writing messages to the file (Publisher) or interpreting them (Consumer). Defaults to `normal`. |
+| `fsync` | `off` \| `batch` \| `periodic` | no | — | (Sink only) When appended data is fsynced: `off` (default), `batch` (before each ack) or `periodic`. |
+| `fsync_interval_ms` | integer | no | — | (Sink only) Interval for `fsync: periodic` in milliseconds. Defaults to 1000. |
 | `group_id` | string | no | — | The consumer group ID that is used for offset tracking. Should be unique. |
 | `idempotency` | boolean | no | — | Deprecated: use `name_by`. true = `source_position`, false = `write_time`; ignored when `name_by` is set. |
 | `mode` | `consume` \| `subscribe` \| `group_subscribe` | no | — |  |

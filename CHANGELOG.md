@@ -50,6 +50,44 @@ All notable changes to `mq-bridge`. Newest first.
   five minutes; it gave up after 11 seconds and was processed as a duplicate. A holder that
   died still frees its key after five seconds.
 
+- **A CSV file read with `delete: true` keeps its header line.** The header was deleted with
+  the first acknowledged row, and after a restart the next row was taken for the header: one
+  row lost and wrong column names for the rest. A queue file now ends as the header alone.
+- **File sources with `delete: true` hold back a final record that has no delimiter yet**
+  until it has been unchanged for 100 ms. A line that was still being written used to be
+  delivered in part and the full line deleted on ack.
+- **`reader`: a trigger the source has no message for fails as retryable.** When triggers
+  arrived as a batch and the source returned fewer messages, the rest were acknowledged with
+  no reply. Bound the wait of a single trigger with a `timeout` middleware on the output.
+- **`fanout: []` and a `switch` with a `metadata_key` but neither `cases` nor `default` are
+  refused at start.** Both acknowledged every message without sending it. Use `null` to
+  discard on purpose.
+- **`sequence` hands off to the next phase only after the batches of the current phase are
+  acknowledged**, waiting up to 30 seconds. It used to hand off, and save the `cursor_id`
+  marker, on the first empty batch; a batch that failed afterwards was skipped for good after
+  a restart. After a failed batch the phase is polled again and the marker is not advanced.
+- **`dir_spool` sources report the end of the queue only after delivered chunks are
+  settled**, waiting up to 30 seconds. A `--drain` run or a `stop_on_done` source could end
+  as complete while a chunk was still in flight, and a nack after that was not redelivered
+  in the run. A batch whose commit never runs puts its chunks back in the queue.
+- **A `dir_spool` `naming_pattern` with a digit or another placeholder directly after the
+  sequence is refused at start**, for example `{seq:09}{timestamp}`. A producer reopening
+  such a spool read both numbers as one and restarted the sequence at 0. Put a separator in
+  between: `{seq:09}_{timestamp}`.
+- **The `group_subscribe` offset file of a `file` source holds a 20-digit zero-padded
+  number** and is written in place. Files written by earlier versions are still read.
+- **A `group_subscribe` commit stores the offset only up to the first nacked message** and
+  fails when the offset file cannot be written. It stored the highest acknowledged offset,
+  so a nacked message before it was skipped after a restart, and write errors were only logged.
+- **`switch` reports unhealthy when one of its destinations is.** It always reported healthy.
+
+### Added
+
+- **`fsync` on the `file` sink:** `off` (default, as before), `batch` (sync before each batch
+  is acknowledged) or `periodic` (sync every `fsync_interval_ms`, default 1000). Without it a
+  power loss can lose acknowledged batches. Rust code that builds `FileConfig` with a struct
+  literal needs the two new fields or `..FileConfig::new(path)`.
+
 ### Changed
 
 - **`deduplication`: `sled:///path?durable=true`** flushes the markers to disk before every
@@ -71,6 +109,31 @@ All notable changes to `mq-bridge`. Newest first.
 
 ### Fixed
 
+- `stream_buffer`: a publish that raced with the last consumer of a topic going away could
+  write into a partition no later consumer could reach.
+- `file` sources with `delete: true` no longer deliver lines twice in one run after the file
+  could not be rewritten. The lines stay in the file and are delivered again after a restart.
+- `file` reader threads stop when their consumer is gone and the file cannot be opened. One
+  thread per reconnect used to stay behind while the file was missing.
+- `dir_spool` logs a warning when a sidecar holds a `message_id` it cannot read.
+- **`fanout` reports a message that failed on several legs once.** It was listed once per
+  leg, and a retryable failure of one leg could hide a permanent one of another. The error
+  kept is the most recoverable one: connection, then retryable, then permanent.
+- **`request` fails the batch when `forward_to` reports a failure it cannot match to a
+  message** (a sink that changes message ids). Those messages were acknowledged as sent. Its
+  disconnect hook now closes both `to` and `forward_to`.
+- **A `sequence` phase that cannot connect at handoff reconnects** instead of stopping the
+  route. A phase that cannot be an input still stops it.
+- **`dir_spool` with `fsync: chunk` syncs the shard directories of new chunks**, and a failed
+  directory sync fails the batch (Unix). Only the spool root was synced, and errors were
+  ignored, so a power loss could drop acknowledged chunks of a sharded spool.
+- **A compressed or encrypted file whose last record has no delimiter delivers that
+  record**, once the file has not grown for 100 ms. It was never delivered, also not under
+  `--drain`.
+- **A compressed or encrypted CSV file that grows keeps its header.** Each re-read took the
+  first new row for the header: one row lost and wrong column names for the rest.
+- **Two `file` endpoints on one file under different spellings of its path** (`./a.jsonl`,
+  a symlink) share one lock. They could interleave writes and lose records on delete.
 - **Credentials in a URL query string are blanked in logs and errors:** `password`, `token`,
   `secret`, `api_key`, `apikey`, `access_token`, `sig` and `signature`.
 - **A sink that requires ordered publishing gets its messages in order from

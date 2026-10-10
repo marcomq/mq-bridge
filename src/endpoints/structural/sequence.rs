@@ -19,12 +19,44 @@
 use crate::checkpoint::CheckpointStore;
 use crate::models::{Endpoint, SequenceConfig};
 use crate::outcomes::ReceivedBatch;
-use crate::traits::{BoxFuture, ConsumerError, EndpointStatus, MessageConsumer};
+use crate::traits::{
+    BoxFuture, ConsumerError, EndpointStatus, MessageConsumer, MessageDisposition,
+};
 use anyhow::anyhow;
 use async_trait::async_trait;
 use std::any::Any;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::Notify;
 use tracing::{info, warn};
+
+/// How long a handoff waits without progress for the route to settle the phase's batches.
+const SETTLE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Batches of the running phase the route has not settled yet.
+#[derive(Default)]
+struct Unsettled {
+    count: AtomicUsize,
+    /// A batch was nacked, failed to commit, or was dropped uncommitted.
+    failed: AtomicBool,
+    changed: Notify,
+}
+
+struct SettleGuard {
+    state: Arc<Unsettled>,
+    clean: bool,
+}
+
+impl Drop for SettleGuard {
+    fn drop(&mut self) {
+        if !self.clean {
+            self.state.failed.store(true, Ordering::Release);
+        }
+        self.state.count.fetch_sub(1, Ordering::AcqRel);
+        self.state.changed.notify_waiters();
+    }
+}
 
 pub struct SequenceConsumer {
     route_name: String,
@@ -36,6 +68,10 @@ pub struct SequenceConsumer {
     /// The route's own drain intent, forwarded only to the last phase.
     exit_on_empty: bool,
     marker: Option<Arc<dyn CheckpointStore>>,
+    unsettled: Arc<Unsettled>,
+    settle_timeout: Duration,
+    /// A phase ended with deliveries unconfirmed: the marker is not advanced any more.
+    unconfirmed: bool,
 }
 
 impl SequenceConsumer {
@@ -101,6 +137,9 @@ impl SequenceConsumer {
             current: None,
             exit_on_empty: false,
             marker,
+            unsettled: Arc::default(),
+            settle_timeout: SETTLE_TIMEOUT,
+            unconfirmed: false,
         })
     }
 
@@ -136,17 +175,29 @@ impl SequenceConsumer {
     async fn open_current(&mut self) -> Result<&mut Box<dyn MessageConsumer>, ConsumerError> {
         if self.current.is_none() {
             let endpoint = &self.endpoints[self.phase];
+            // What the static check rejects cannot heal, so it stops the route.
+            crate::endpoints::check_consumer(&self.route_name, endpoint, None).map_err(|e| {
+                ConsumerError::Permanent(anyhow!(
+                    "[route:{}] sequence phase {} of {} ({}) is not a valid input: {e}",
+                    self.route_name,
+                    self.phase + 1,
+                    self.endpoints.len(),
+                    endpoint.endpoint_type.name()
+                ))
+            })?;
             let mut consumer =
                 crate::endpoints::create_consumer_from_route(&self.route_name, endpoint)
                     .await
                     .map_err(|e| {
-                        ConsumerError::Permanent(anyhow!(
-                            "[route:{}] sequence phase {} of {} ({}) failed to start: {e}",
+                        // Past the static check a failure is taken as transient, so the
+                        // route reconnects (STRUCT-06); `InvalidConfig` still stops it.
+                        ConsumerError::from(e.context(format!(
+                            "[route:{}] sequence phase {} of {} ({}) failed to start",
                             self.route_name,
                             self.phase + 1,
                             self.endpoints.len(),
                             endpoint.endpoint_type.name()
-                        ))
+                        )))
                     })?;
             let drain = if self.is_last_phase() {
                 self.exit_on_empty
@@ -155,7 +206,7 @@ impl SequenceConsumer {
             };
             consumer.set_exit_on_empty(drain);
             if let Some(hook) = consumer.on_connect_hook() {
-                hook.await.map_err(ConsumerError::Permanent)?;
+                hook.await.map_err(ConsumerError::from)?;
             }
             info!(
                 route = %self.route_name,
@@ -167,6 +218,70 @@ impl SequenceConsumer {
             self.current = Some(consumer);
         }
         Ok(self.current.as_mut().expect("just built"))
+    }
+
+    /// Counts a batch of an intermediate phase until the route commits or drops it.
+    fn track(&self, batch: ReceivedBatch) -> ReceivedBatch {
+        self.unsettled.count.fetch_add(1, Ordering::AcqRel);
+        let guard = SettleGuard {
+            state: self.unsettled.clone(),
+            clean: false,
+        };
+        let inner = batch.commit;
+        ReceivedBatch {
+            messages: batch.messages,
+            commit: Box::new(move |dispositions: Vec<MessageDisposition>| {
+                Box::pin(async move {
+                    // Move the whole guard in; a field capture would drop it at once.
+                    let mut guard = guard;
+                    let nacked = dispositions
+                        .iter()
+                        .any(|d| matches!(d, MessageDisposition::Nack));
+                    let result = inner(dispositions).await;
+                    guard.clean = !nacked && result.is_ok();
+                    result
+                })
+            }),
+        }
+    }
+
+    /// Waits for the route to settle the drained phase's batches. `false` means one of
+    /// them failed, so the phase is polled again for whatever its source redelivers.
+    async fn phase_settled(&mut self) -> bool {
+        loop {
+            let changed = self.unsettled.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            let open = self.unsettled.count.load(Ordering::Acquire);
+            if open == 0 {
+                break;
+            }
+            if tokio::time::timeout(self.settle_timeout, changed)
+                .await
+                .is_err()
+            {
+                warn!(
+                    route = %self.route_name,
+                    phase = self.phase + 1,
+                    open_batches = open,
+                    "sequence: batches of the drained phase are still unsettled; handing off without advancing the phase marker"
+                );
+                self.unconfirmed = true;
+                return true;
+            }
+        }
+        if self.unsettled.failed.swap(false, Ordering::AcqRel) {
+            if !self.unconfirmed {
+                warn!(
+                    route = %self.route_name,
+                    phase = self.phase + 1,
+                    "sequence: a batch of this phase was not delivered; the phase marker will not advance, so a restart reads the phase again"
+                );
+            }
+            self.unconfirmed = true;
+            return false;
+        }
+        true
     }
 
     /// Closes the drained phase and records the next one, so a restart does not replay it.
@@ -188,7 +303,7 @@ impl SequenceConsumer {
             of = self.endpoints.len(),
             "sequence: previous phase drained, handing off"
         );
-        if let Some(store) = &self.marker {
+        if let Some(store) = self.marker.as_ref().filter(|_| !self.unconfirmed) {
             if let Err(e) = store.save(&self.phase.to_string()).await {
                 // The handoff itself still holds: the next phase resumes from the position
                 // pinned before the run. Only restart-skipping is lost, so this is not fatal.
@@ -212,11 +327,16 @@ impl MessageConsumer for SequenceConsumer {
                 // An empty batch from an intermediate phase is the handoff signal, not a
                 // drained route — the route would stop if this reached it.
                 Ok(batch) if batch.messages.is_empty() && !last => {
-                    self.advance().await;
+                    if self.phase_settled().await {
+                        self.advance().await;
+                    }
                 }
+                Ok(batch) if !last => return Ok(self.track(batch)),
                 Ok(batch) => return Ok(batch),
                 Err(ConsumerError::EndOfStream) if !last => {
-                    self.advance().await;
+                    if self.phase_settled().await {
+                        self.advance().await;
+                    }
                 }
                 Err(e) => return Err(e),
             }
@@ -270,7 +390,7 @@ mod tests {
     use super::*;
     use crate::endpoints::memory::MemoryPublisher;
     use crate::models::{EndpointType, MemoryConfig};
-    use crate::traits::MessagePublisher;
+    use crate::traits::{MessageDisposition, MessagePublisher};
     use crate::CanonicalMessage;
 
     fn memory_endpoint(topic: &str) -> Endpoint {
@@ -306,7 +426,10 @@ mod tests {
                 for m in &batch.messages {
                     got.push(m.get_payload_str().into_owned());
                 }
-                if batch.messages.is_empty() {
+                let empty = batch.messages.is_empty();
+                let acks = vec![MessageDisposition::Ack; batch.messages.len()];
+                (batch.commit)(acks).await.unwrap();
+                if empty {
                     break;
                 }
             }
@@ -377,6 +500,46 @@ mod tests {
         assert_eq!(drain(&mut second, 1).await, ["b2"]);
     }
 
+    /// STRUCT-01: a phase is not handed off while one of its batches is unsettled, and a
+    /// nack keeps the marker from recording the phase as done.
+    #[tokio::test]
+    async fn a_phase_with_an_unsettled_batch_is_not_handed_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("marker.json").to_str().unwrap().to_string();
+        let cfg = SequenceConfig {
+            endpoints: vec![
+                memory_endpoint("seq_settle_a"),
+                memory_endpoint("seq_settle_b"),
+            ],
+            cursor_id: Some("seq_settle".to_string()),
+            checkpoint_store: Some(store),
+        };
+        seed("seq_settle_a", &["a1"]).await;
+        seed("seq_settle_b", &["b1"]).await;
+
+        let mut consumer = SequenceConsumer::new("t", &cfg).await.unwrap();
+        let held = consumer.receive_batch(8).await.unwrap();
+        assert_eq!(held.messages.len(), 1);
+        let early =
+            tokio::time::timeout(std::time::Duration::from_secs(3), consumer.receive_batch(8))
+                .await;
+        assert!(early.is_err(), "handed off before the batch was settled");
+
+        (held.commit)(vec![MessageDisposition::Nack]).await.unwrap();
+        // Whether the source redelivers the nacked message or not, the next phase follows.
+        let mut rest = drain(&mut consumer, 1).await;
+        if rest != ["b1"] {
+            rest = drain(&mut consumer, 1).await;
+        }
+        assert_eq!(rest, ["b1"]);
+        drop(consumer);
+
+        // The nack left phase 1 unconfirmed, so a restart reads it again.
+        seed("seq_settle_a", &["a2"]).await;
+        let mut second = SequenceConsumer::new("t", &cfg).await.unwrap();
+        assert_eq!(drain(&mut second, 1).await, ["a2"]);
+    }
+
     #[tokio::test]
     async fn an_empty_sequence_is_rejected() {
         let err = SequenceConsumer::new("t", &config(vec![]))
@@ -421,7 +584,10 @@ mod tests {
             },
         ))]);
         let mut consumer = SequenceConsumer::new("t", &cfg).await.unwrap();
-        let err = consumer.receive_batch(1).await.unwrap_err().to_string();
+        let err = consumer.receive_batch(1).await.unwrap_err();
+        // STRUCT-06: a config error still stops the route; anything else reconnects.
+        assert!(matches!(err, ConsumerError::Permanent(_)), "{err}");
+        let err = err.to_string();
         assert!(err.contains("phase 1 of 1"), "{err}");
     }
 

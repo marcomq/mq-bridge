@@ -49,7 +49,7 @@ use async_trait::async_trait;
 use std::any::Any;
 use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::fs::{self, File, OpenOptions};
@@ -68,6 +68,45 @@ const READY_CACHE_CAPACITY: usize = 65_536;
 /// read stays at the head of the listing, so without a bound a single unreadable file holds
 /// the queue there for as long as the consumer lives.
 const MAX_CHUNK_READ_FAILURES: u32 = 3;
+
+/// How long the end of the queue waits for delivered chunks to be settled.
+const SETTLE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Delivered batches whose commit has not finished.
+#[derive(Debug, Default)]
+struct Unsettled {
+    count: AtomicUsize,
+    settled: AtomicU64,
+    changed: tokio::sync::Notify,
+}
+
+/// Settles one delivered batch when dropped. Chunks still in `pending` were neither acked
+/// nor nacked, so they are released for redelivery.
+struct SettleGuard {
+    pending: Vec<String>,
+    claimed: Arc<StdMutex<HashSet<String>>>,
+    requeued: Arc<StdMutex<Vec<String>>>,
+    unsettled: Arc<Unsettled>,
+}
+
+impl Drop for SettleGuard {
+    fn drop(&mut self) {
+        if !self.pending.is_empty() {
+            let mut claimed = self.claimed.lock().unwrap_or_else(|e| e.into_inner());
+            for base in &self.pending {
+                claimed.remove(base);
+            }
+            drop(claimed);
+            self.requeued
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .append(&mut self.pending);
+        }
+        self.unsettled.settled.fetch_add(1, Ordering::SeqCst);
+        self.unsettled.count.fetch_sub(1, Ordering::SeqCst);
+        self.unsettled.changed.notify_waiters();
+    }
+}
 
 /// Metadata key carrying the chunk's base name (its position in the queue).
 const SRC_CHUNK_KEY: &str = "mqb.src.spool_chunk";
@@ -351,6 +390,23 @@ async fn sync_directory(dir: &Path) {
     }
 }
 
+/// [`sync_directory`] for the publish side, where a lost rename is a lost message: a failed
+/// sync is an error. A directory the consumer already pruned has nothing left to lose.
+#[cfg(unix)]
+async fn sync_directory_strict(dir: &Path) -> std::io::Result<()> {
+    match File::open(dir).await {
+        Ok(handle) => handle.sync_all().await,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(not(unix))]
+async fn sync_directory_strict(dir: &Path) -> std::io::Result<()> {
+    sync_directory(dir).await;
+    Ok(())
+}
+
 // --- Locks ---
 
 /// Which end of the spool a lock belongs to.
@@ -424,6 +480,16 @@ pub(crate) fn validate_naming_pattern(config: &DirSpoolConfig) -> anyhow::Result
             "dir_spool 'naming_pattern' must start with the sequence, like '{{seq:09}}'; \
              '{}' does not, so lexical order would not be queue order and a publisher \
              reopening the spool would resume from whatever digits happen to come first",
+            config.naming_pattern
+        ));
+    }
+    // Digits right after the sequence would be read as part of it when the spool is reopened.
+    let after_seq = &config.naming_pattern[config.naming_pattern.find('}').map_or(0, |i| i + 1)..];
+    if after_seq.starts_with(|c: char| c.is_ascii_digit() || c == '{') {
+        return Err(anyhow::anyhow!(
+            "dir_spool 'naming_pattern' needs a separator that is not a digit after the \
+             sequence, like '{{seq:09}}-{{timestamp}}'; in '{}' the sequence cannot be told \
+             from what follows it",
             config.naming_pattern
         ));
     }
@@ -862,11 +928,7 @@ impl DirSpoolPublisher {
     /// are already written. The cost of a lock left behind is bounded — the next start
     /// finds its owner gone and breaks it.
     fn release_lock(&self) {
-        let released = self
-            .lock
-            .lock()
-            .expect("dir_spool producer lock poisoned")
-            .take();
+        let released = self.lock.lock().unwrap_or_else(|e| e.into_inner()).take();
         if released.is_some() {
             debug!(dir = %self.dir.display(), "dir_spool producer lock released");
         }
@@ -919,19 +981,41 @@ impl MessagePublisher for DirSpoolPublisher {
         messages: Vec<CanonicalMessage>,
     ) -> Result<SentBatch, PublisherError> {
         let mut failed = Vec::new();
+        // Every directory a rename of this batch landed in, with its parents: deepest first.
+        let mut touched = std::collections::BTreeSet::new();
         for message in messages {
-            if let Err(error) = self.write_chunk(&message).await {
-                // Remembered even though the batch is reported as partial and the route may
-                // well retry or DLQ it: this producer was handed a message it did not
-                // write, so it cannot claim production succeeded.
-                self.write_failed.store(true, Ordering::Relaxed);
-                failed.push((message, PublisherError::Retryable(error)));
+            match self.write_chunk(&message).await {
+                Ok(base) => {
+                    let mut shard = base.as_str();
+                    while let Some((parent, _)) = shard.rsplit_once('/') {
+                        touched.insert(std::cmp::Reverse(parent.to_string()));
+                        shard = parent;
+                    }
+                }
+                Err(error) => {
+                    // Remembered even though the batch is reported as partial and the route
+                    // may well retry or DLQ it: this producer was handed a message it did
+                    // not write, so it cannot claim production succeeded.
+                    self.write_failed.store(true, Ordering::Relaxed);
+                    failed.push((message, PublisherError::Retryable(error)));
+                }
             }
         }
-        // One directory fsync for the whole batch: the per-chunk renames are already
-        // ordered, and this only decides how much of the tail survives a power loss.
+        // One fsync per directory for the whole batch: the per-chunk renames are already
+        // ordered, and this decides how much of the tail survives a power loss.
         if matches!(self.fsync, SpoolFsync::Chunk) {
-            sync_directory(&self.dir).await;
+            let shards = touched.iter().map(|shard| self.dir.join(&shard.0));
+            for dir in shards.chain(std::iter::once(self.dir.clone())) {
+                if let Err(error) = sync_directory_strict(&dir).await {
+                    self.write_failed.store(true, Ordering::Relaxed);
+                    return Err(PublisherError::Retryable(
+                        anyhow::Error::new(error).context(format!(
+                            "Failed to sync dir_spool directory {}",
+                            dir.display()
+                        )),
+                    ));
+                }
+            }
         }
         Ok(SentBatch::from_failures(failed))
     }
@@ -991,6 +1075,8 @@ pub struct DirSpoolConsumer {
     /// Chunks a nack released, waiting to be folded back into `ready`. Written by the
     /// commit closures, which run on the route's tasks, hence the shared mutex.
     requeued: Arc<StdMutex<Vec<String>>>,
+    unsettled: Arc<Unsettled>,
+    settle_timeout: Duration,
     /// Failed read attempts per chunk, for the chunks that have any. Emptied as chunks
     /// read, so it only holds what is currently unreadable.
     read_failures: HashMap<String, u32>,
@@ -1043,6 +1129,8 @@ impl DirSpoolConsumer {
             claimed: Arc::new(StdMutex::new(HashSet::new())),
             ready: VecDeque::new(),
             requeued: Arc::new(StdMutex::new(Vec::new())),
+            unsettled: Arc::default(),
+            settle_timeout: SETTLE_TIMEOUT,
             read_failures: HashMap::new(),
             scans: 0,
             _lock: lock,
@@ -1167,7 +1255,7 @@ impl DirSpoolConsumer {
             // keeps this future `Send`.
             if claimed
                 .lock()
-                .expect("dir_spool claim set poisoned")
+                .unwrap_or_else(|e| e.into_inner())
                 .contains(&base)
             {
                 continue;
@@ -1188,7 +1276,7 @@ impl DirSpoolConsumer {
     /// not have to wait for the backlog ahead of it to drain and trigger the next scan.
     fn absorb_requeued(&mut self) {
         let mut returned = {
-            let mut requeued = self.requeued.lock().expect("dir_spool requeue poisoned");
+            let mut requeued = self.requeued.lock().unwrap_or_else(|e| e.into_inner());
             if requeued.is_empty() {
                 return;
             }
@@ -1240,7 +1328,13 @@ impl DirSpoolConsumer {
                 message_id,
                 metadata,
             }) => (
-                message_id.and_then(|id| crate::canonical_message::message_id_from_str(&id).ok()),
+                message_id.and_then(|id| {
+                    crate::canonical_message::message_id_from_str(&id)
+                        .inspect_err(|e| {
+                            warn!("dir_spool chunk {base} has an unreadable message_id ({e}); a new id is assigned")
+                        })
+                        .ok()
+                }),
                 metadata,
             ),
             None => (None, HashMap::new()),
@@ -1320,7 +1414,7 @@ impl DirSpoolConsumer {
         );
         self.claimed
             .lock()
-            .expect("dir_spool claim set poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .insert(base);
     }
 
@@ -1331,6 +1425,30 @@ impl DirSpoolConsumer {
         fs::try_exists(self.dir.join(&self.done_file))
             .await
             .unwrap_or(false)
+    }
+
+    /// Whether a rescan is worth it before the queue is reported empty: a batch settled
+    /// since `settled_before` was sampled, or one settles within the timeout. A nack puts
+    /// its chunks back, so the queue is not drained while a delivered batch is open.
+    async fn settled_since(&self, settled_before: u64) -> bool {
+        let changed = self.unsettled.changed.notified();
+        if self.unsettled.settled.load(Ordering::SeqCst) != settled_before {
+            return true;
+        }
+        if self.unsettled.count.load(Ordering::SeqCst) == 0 {
+            return false;
+        }
+        if tokio::time::timeout(self.settle_timeout, changed)
+            .await
+            .is_err()
+        {
+            warn!(
+                path = %self.path,
+                "dir_spool reports the end of the queue with delivered chunks still unsettled; a later nack is only redelivered by the next run"
+            );
+            return false;
+        }
+        true
     }
 
     /// What to hand back when the directory holds nothing to read.
@@ -1405,7 +1523,7 @@ async fn remove_file(path: &Path) -> bool {
             warn!(
                 path = %path.display(),
                 %error,
-                "dir_spool could not delete an acknowledged chunk; it stays in the directory and will not be redelivered"
+                "dir_spool could not delete an acknowledged chunk; it stays in the directory and is delivered again after a restart"
             );
             false
         }
@@ -1433,12 +1551,18 @@ impl MessageConsumer for DirSpoolConsumer {
         let done_before_scan = self.stop_on_done && self.done_present().await;
         let mut messages = Vec::new();
         let mut delivered = Vec::new();
-        for _ in 0..2 {
+        let ends_when_empty = done_before_scan || self.exit_on_empty;
+        let mut attempts = 0;
+        while attempts < 2 {
+            let settled_before = self.unsettled.settled.load(Ordering::SeqCst);
             let ready = self
                 .list_ready(max_messages)
                 .await
                 .map_err(ConsumerError::Connection)?;
             if ready.is_empty() {
+                if ends_when_empty && self.settled_since(settled_before).await {
+                    continue;
+                }
                 return self.idle(done_before_scan).await;
             }
             (messages, delivered) = self.read_ready(ready).await;
@@ -1446,6 +1570,7 @@ impl MessageConsumer for DirSpoolConsumer {
                 break;
             }
             self.ready.clear();
+            attempts += 1;
         }
         if messages.is_empty() {
             // Two listings' worth of chunks that would not read. They are still on disk, so
@@ -1457,7 +1582,7 @@ impl MessageConsumer for DirSpoolConsumer {
         }
         self.claimed
             .lock()
-            .expect("dir_spool claim set poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .extend(delivered.iter().cloned());
 
         let dir = self.dir.clone();
@@ -1467,8 +1592,17 @@ impl MessageConsumer for DirSpoolConsumer {
         let fsync = self.fsync;
         let claimed = Arc::clone(&self.claimed);
         let requeued = Arc::clone(&self.requeued);
+        self.unsettled.count.fetch_add(1, Ordering::SeqCst);
+        let guard = SettleGuard {
+            pending: delivered,
+            claimed: Arc::clone(&self.claimed),
+            requeued: Arc::clone(&self.requeued),
+            unsettled: Arc::clone(&self.unsettled),
+        };
         let commit: crate::traits::BatchCommitFunc = Box::new(move |dispositions| {
             Box::pin(async move {
+                let mut guard = guard;
+                let delivered = std::mem::take(&mut guard.pending);
                 let mut release = Vec::new();
                 let mut redeliver = Vec::new();
                 for (index, base) in delivered.iter().enumerate() {
@@ -1495,7 +1629,7 @@ impl MessageConsumer for DirSpoolConsumer {
                     // stay too — it is the only record that this chunk was already read.
                 }
                 if !release.is_empty() {
-                    let mut claimed = claimed.lock().expect("dir_spool claim set poisoned");
+                    let mut claimed = claimed.lock().unwrap_or_else(|e| e.into_inner());
                     for base in release {
                         claimed.remove(&base);
                     }
@@ -1503,7 +1637,7 @@ impl MessageConsumer for DirSpoolConsumer {
                 if !redeliver.is_empty() {
                     requeued
                         .lock()
-                        .expect("dir_spool requeue poisoned")
+                        .unwrap_or_else(|e| e.into_inner())
                         .extend(redeliver);
                 }
                 if matches!(fsync, SpoolFsync::Chunk) {

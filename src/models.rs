@@ -1437,6 +1437,32 @@ pub struct FileConfig {
     /// (Consumer only) Include authoritative `mqb.src.file_*` source positions; only `consume` mode reproduces them across restarts. Defaults to false.
     #[serde(default)]
     pub source_metadata: bool,
+    /// (Sink only) When appended data is fsynced: `off` (default), `batch` (before each ack) or `periodic`.
+    #[serde(default, skip_serializing_if = "FileFsync::is_off")]
+    pub fsync: FileFsync,
+    /// (Sink only) Interval for `fsync: periodic` in milliseconds. Defaults to 1000.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fsync_interval_ms: Option<u64>,
+}
+
+/// When the appending `file` sink forces written data to disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum FileFsync {
+    /// Never; the OS flushes. An acknowledged batch can be lost on power loss.
+    #[default]
+    Off,
+    /// Before a batch is acknowledged.
+    Batch,
+    /// In the background every `fsync_interval_ms`; at most that window is at risk.
+    Periodic,
+}
+
+impl FileFsync {
+    fn is_off(&self) -> bool {
+        *self == FileFsync::Off
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1445,10 +1471,10 @@ pub struct FileConfig {
 pub enum FileConsumerMode {
     /// **Queue Mode**: Standard point-to-point consumption. Reads from the start
     /// of the file. If `delete` is true, processed lines are physically removed
-    /// from the file once they are successfully acknowledged.
+    /// from the file once they are successfully acknowledged. Removing rewrites the
+    /// file, so `delete` is only safe when nothing outside this process appends to it.
     Consume {
-        /// If true, processed lines are physically removed from the file once
-        /// they are successfully acknowledged.
+        /// Remove acknowledged lines from the file. Only safe if no other process writes to it.
         #[serde(default)]
         delete: bool,
     },
@@ -1456,8 +1482,7 @@ pub enum FileConsumerMode {
     /// at the current end. If `delete` is true, lines are removed only after
     /// all local application subscribers for this specific file have acknowledged them.
     Subscribe {
-        /// If true, lines are removed only after all local application
-        /// subscribers for this file have acknowledged them.
+        /// Remove lines all local subscribers acknowledged. Only safe if no other process writes to it.
         #[serde(default)]
         delete: bool,
     },
@@ -2683,6 +2708,11 @@ impl SwitchConfig {
             (true, false) if self.metadata_key.is_empty() => Err(anyhow::anyhow!(
                 "switch `cases` needs a `metadata_key` to look up"
             )),
+            (true, false) if self.cases.is_empty() && self.default.is_none() => {
+                Err(anyhow::anyhow!(
+                    "switch with a `metadata_key` needs at least one of `cases` or `default`; it would drop every message"
+                ))
+            }
             _ => Ok(()),
         }
     }

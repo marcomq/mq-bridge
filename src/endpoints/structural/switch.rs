@@ -1,4 +1,4 @@
-use crate::traits::{BoxFuture, MessagePublisher, PublisherError, Sent, SentBatch};
+use crate::traits::{BoxFuture, EndpointStatus, MessagePublisher, PublisherError, Sent, SentBatch};
 use crate::CanonicalMessage;
 use async_trait::async_trait;
 use std::any::Any;
@@ -249,6 +249,22 @@ impl MessagePublisher for SwitchPublisher {
         }
     }
 
+    /// Unhealthy if any destination is, as for `fanout`.
+    async fn status(&self) -> EndpointStatus {
+        let results = futures::future::join_all(self.destinations().map(|p| p.status())).await;
+        let healthy = results.iter().all(|status| status.healthy);
+        let error = results
+            .iter()
+            .find(|status| !status.healthy)
+            .and_then(|status| status.error.clone());
+        EndpointStatus {
+            healthy,
+            error,
+            details: serde_json::json!({ "destinations": results }),
+            ..Default::default()
+        }
+    }
+
     /// Ordered if any branch is: batches for a given branch must stay in source order.
     fn requires_ordered_publish(&self) -> bool {
         self.destinations().any(|p| p.requires_ordered_publish())
@@ -265,6 +281,49 @@ mod tests {
     use crate::endpoints::memory::MemoryPublisher;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+
+    struct Unhealthy;
+
+    #[async_trait]
+    impl MessagePublisher for Unhealthy {
+        async fn send_batch(
+            &self,
+            _messages: Vec<CanonicalMessage>,
+        ) -> Result<SentBatch, PublisherError> {
+            Ok(SentBatch::Ack)
+        }
+        async fn status(&self) -> EndpointStatus {
+            EndpointStatus {
+                healthy: false,
+                error: Some("down".to_string()),
+                ..Default::default()
+            }
+        }
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    #[tokio::test]
+    async fn test_switch_status_reports_an_unhealthy_destination() {
+        let mut cases = HashMap::new();
+        cases.insert(
+            "A".to_string(),
+            Arc::new(MemoryPublisher::new_local("switch_status_topic_a", 10))
+                as Arc<dyn MessagePublisher>,
+        );
+        let healthy = SwitchPublisher::new("k".to_string(), cases.clone(), None);
+        assert!(healthy.status().await.healthy);
+
+        let switch = SwitchPublisher::new(
+            "k".to_string(),
+            cases,
+            Some(Arc::new(Unhealthy) as Arc<dyn MessagePublisher>),
+        );
+        let status = switch.status().await;
+        assert!(!status.healthy);
+        assert_eq!(status.error.as_deref(), Some("down"));
+    }
 
     #[tokio::test]
     async fn test_switch_publisher_routing() {

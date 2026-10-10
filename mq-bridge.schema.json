@@ -2249,6 +2249,19 @@
           "description": "(Consumer only) Include authoritative `mqb.src.file_*` source positions; only `consume` mode reproduces them across restarts. Defaults to false.",
           "type": "boolean",
           "default": false
+        },
+        "fsync": {
+          "description": "(Sink only) When appended data is fsynced: `off` (default), `batch` (before each ack) or `periodic`.",
+          "$ref": "#/$defs/FileFsync"
+        },
+        "fsync_interval_ms": {
+          "description": "(Sink only) Interval for `fsync: periodic` in milliseconds. Defaults to 1000.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
         }
       },
       "required": [
@@ -2258,11 +2271,11 @@
         {
           "oneOf": [
             {
-              "description": "**Queue Mode**: Standard point-to-point consumption. Reads from the start\nof the file. If `delete` is true, processed lines are physically removed\nfrom the file once they are successfully acknowledged.",
+              "description": "**Queue Mode**: Standard point-to-point consumption. Reads from the start\nof the file. If `delete` is true, processed lines are physically removed\nfrom the file once they are successfully acknowledged. Removing rewrites the\nfile, so `delete` is only safe when nothing outside this process appends to it.",
               "type": "object",
               "properties": {
                 "delete": {
-                  "description": "If true, processed lines are physically removed from the file once\nthey are successfully acknowledged.",
+                  "description": "Remove acknowledged lines from the file. Only safe if no other process writes to it.",
                   "type": "boolean",
                   "default": false
                 },
@@ -2280,7 +2293,7 @@
               "type": "object",
               "properties": {
                 "delete": {
-                  "description": "If true, lines are removed only after all local application\nsubscribers for this file have acknowledged them.",
+                  "description": "Remove lines all local subscribers acknowledged. Only safe if no other process writes to it.",
                   "type": "boolean",
                   "default": false
                 },
@@ -2428,6 +2441,26 @@
           "description": "The object's JSON text in a single cell.",
           "type": "string",
           "const": "json"
+        }
+      ]
+    },
+    "FileFsync": {
+      "description": "When the appending `file` sink forces written data to disk.",
+      "oneOf": [
+        {
+          "description": "Never; the OS flushes. An acknowledged batch can be lost on power loss.",
+          "type": "string",
+          "const": "off"
+        },
+        {
+          "description": "Before a batch is acknowledged.",
+          "type": "string",
+          "const": "batch"
+        },
+        {
+          "description": "In the background every `fsync_interval_ms`; at most that window is at risk.",
+          "type": "string",
+          "const": "periodic"
         }
       ]
     },

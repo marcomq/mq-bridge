@@ -320,6 +320,8 @@ impl FileConfig {
             compression: Compression::default(),
             encryption: None,
             source_metadata: false,
+            fsync: Default::default(),
+            fsync_interval_ms: None,
         }
     }
 
