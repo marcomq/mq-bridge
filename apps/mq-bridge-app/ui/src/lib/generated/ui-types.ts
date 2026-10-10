@@ -632,6 +632,7 @@ export interface RedisStreamsConfig {
   password?: string | null;
   internal_buffer_size?: number | null;
   reader_connections?: number | null;
+  tls?: TlsConfig;
 }
 
 export interface GrpcConfig {

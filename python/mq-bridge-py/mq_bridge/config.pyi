@@ -678,6 +678,7 @@ class RedisStreamsConfig(TypedDict, total=False):
     redelivery_timeout_ms: Optional[int]
     stream: Optional[str]
     subscriber_mode: bool
+    tls: TlsConfig
     url: Required[str]
     username: Optional[str]
 

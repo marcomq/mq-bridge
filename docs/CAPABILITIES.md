@@ -33,7 +33,7 @@ unless its `forward_to` is `null`. "depends" is not checked at start.
 whatever the route's `concurrency` is.
 
 **TLS.** Where the encryption of a connection is configured. "`tls` block" is the `tls` field
-of the endpoint; "URL" means the scheme or the query parameters of `url` only. Every input
+of the endpoint; the notes say where a URL scheme or parameter does the same. Every input
 ends when its source is empty if the route has `exit_on_empty`, so there is no column for it.
 
 <!-- generated: begin -->

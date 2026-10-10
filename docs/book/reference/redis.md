@@ -4,7 +4,7 @@
 
 Schemes: `redis://`, `rediss://`, `redis_streams://`
 
-Query parameters recognised as config fields for this connector. Any other `?key=value` pair is passed through unchanged as a driver option on the connection URL.
+Query parameters recognised as config fields for this connector. The object-typed `tls` is set with a JSON literal, e.g. `?tls={...}`. Any other `?key=value` pair is passed through unchanged as a driver option on the connection URL.
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
@@ -20,5 +20,40 @@ Query parameters recognised as config fields for this connector. Any other `?key
 | `redelivery_timeout_ms` | integer | no | — | (Consumer) Redeliver entries pending ≥ this long via `XAUTOCLAIM`; 0 disables. Default 60000ms. |
 | `stream` | string | no | — | The stream key to publish to or read from. Defaults to the route name. |
 | `subscriber_mode` | boolean | no | `false` | (Consumer) Read ephemerally via `XREAD` from new messages (no group/acks). Default false. |
+| `tls` | object | no | [see below](#tls) | TLS: a private CA in `ca_file`, a client certificate in `cert_file` and `key_file`. |
 | `url` | string | yes | — | Redis URL, `redis://` or `rediss://` for TLS. Userinfo is treated as a secret. |
 | `username` | string | no | — | Optional username for authentication (Redis ACL). |
+
+## Struct-typed fields
+
+### `tls`
+
+TLS configuration for secure connections.
+
+Configures Transport Layer Security (TLS/SSL) for encrypted communication.
+Supports both client certificate (mutual TLS) and server certificate validation.
+
+#### Examples
+
+```rust
+use mq_bridge::models::TlsConfig;
+
+let tls = TlsConfig {
+    required: true,
+    ca_file: Some("/path/to/ca.pem".to_string()),
+    cert_file: Some("/path/to/cert.pem".to_string()),
+    key_file: Some("/path/to/key.pem".to_string()),
+    ..Default::default()
+};
+```
+
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `accept_invalid_certs` | boolean | no | `false` | If true, disable server certificate verification (insecure). |
+| `ca_file` | string | no | — | Path to the CA certificate file. |
+| `cert_file` | string | no | — | Path to the client certificate file (PEM). |
+| `cert_password` | string | no | — | Password for the private key (if encrypted). |
+| `key_file` | string | no | — | Path to the client private key file (PEM). |
+| `required` | boolean | no | `false` | If true, enable TLS/SSL. |
+

@@ -66,7 +66,7 @@ pub struct EndpointCapabilities {
 }
 
 use Capability::{Depends, No, NotApplicable as Na, Unless, With, Yes};
-use Transport::{Local, Provider, TlsBlock, Unencrypted, Url};
+use Transport::{Local, Provider, TlsBlock, Unencrypted};
 
 const fn row(name: &'static str, transport: Transport) -> EndpointCapabilities {
     EndpointCapabilities {
@@ -330,7 +330,7 @@ mod tests {
     fn transport(transport: Transport) -> &'static str {
         match transport {
             TlsBlock => "`tls` block",
-            Url => "URL",
+            Transport::Url => "URL",
             Provider => "always (provider)",
             Unencrypted => "none",
             Local => "–",
