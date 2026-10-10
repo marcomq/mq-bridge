@@ -577,6 +577,55 @@ async fn emit_done_success_holds_back_when_a_chunk_could_not_be_written() {
     );
 }
 
+/// SPOOL-04: a write that `retry` repeats successfully no longer holds the sentinel back.
+#[tokio::test]
+async fn emit_done_success_recovers_once_the_failed_chunk_is_written() {
+    let dir = tempdir().unwrap();
+    let mut cfg = config(dir.path());
+    cfg.emit_done = SpoolDone::Success;
+    std::fs::create_dir(dir.path().join("000000000.bin.tmp")).unwrap();
+
+    let publisher = DirSpoolPublisher::new(&cfg).await.unwrap();
+    let sent = publisher
+        .send_batch(vec![message("retried", "x")])
+        .await
+        .unwrap();
+    let SentBatch::Partial { failed, .. } = sent else {
+        panic!("the write should have failed");
+    };
+    let (retried, _) = failed.into_iter().next().unwrap();
+
+    // Another message under the same id is not the retry and must not clear the failure.
+    let mut impostor = message("other", "x");
+    impostor.message_id = retried.message_id;
+    publisher.send_batch(vec![impostor]).await.unwrap();
+    assert_eq!(publisher.unwritten_len.load(Ordering::Relaxed), 1);
+
+    let sent = publisher.send_batch(vec![retried]).await.unwrap();
+    assert!(matches!(sent, SentBatch::Ack), "the retry should succeed");
+
+    close_producer(&publisher, DisconnectOutcome::Completed).await;
+    assert!(dir.path().join("DONE").exists());
+}
+
+/// Past the tracking limit the producer keeps the sentinel back for good.
+#[tokio::test]
+async fn emit_done_success_stays_quiet_past_the_tracking_limit() {
+    let dir = tempdir().unwrap();
+    let mut cfg = config(dir.path());
+    cfg.emit_done = SpoolDone::Success;
+    let publisher = DirSpoolPublisher::new(&cfg).await.unwrap();
+
+    for index in 0..=MAX_UNWRITTEN_TRACKED {
+        publisher.note_unwritten(&message(&index.to_string(), "x"));
+    }
+    assert_eq!(
+        publisher.unwritten_len.load(Ordering::Relaxed),
+        MAX_UNWRITTEN_TRACKED
+    );
+    assert!(publisher.write_failed.load(Ordering::Relaxed));
+}
+
 /// An unexplained close — a caller that uses the plain disconnect hook — is read as a stop,
 /// because it is not evidence that production finished.
 #[tokio::test]
@@ -779,6 +828,31 @@ async fn stamps_source_metadata_when_asked() {
         received[0].metadata.get(SRC_PATH_KEY).unwrap(),
         dir.path().to_str().unwrap()
     );
+}
+
+#[tokio::test]
+async fn reserved_source_keys_in_a_sidecar_are_dropped() {
+    let dir = tempdir().unwrap();
+    let cfg = config(dir.path());
+
+    let mut forged = message("payload", "x");
+    forged
+        .metadata
+        .insert("mqb.src.offset".to_string(), "42".to_string());
+    forged
+        .metadata
+        .insert(SRC_CHUNK_KEY.to_string(), "forged".to_string());
+    forged
+        .metadata
+        .insert("kept".to_string(), "yes".to_string());
+    let publisher = DirSpoolPublisher::new(&cfg).await.unwrap();
+    publisher.send_batch(vec![forged]).await.unwrap();
+
+    let mut consumer = DirSpoolConsumer::new(&cfg).await.unwrap();
+    let received = drain(&mut consumer, 10).await;
+    assert_eq!(received[0].metadata.get("kept").unwrap(), "yes");
+    assert!(!received[0].metadata.contains_key("mqb.src.offset"));
+    assert!(!received[0].metadata.contains_key(SRC_CHUNK_KEY));
 }
 
 #[tokio::test]
@@ -1803,4 +1877,121 @@ async fn a_chunk_that_never_reads_is_set_aside() {
         "and left on disk for the operator"
     );
     assert!(consumer.read_failures.is_empty());
+}
+
+/// The queue is not at its end while a delivered chunk can still be nacked back into it.
+#[tokio::test]
+async fn end_of_queue_waits_for_unsettled_chunks() {
+    for stop_on_done in [false, true] {
+        let dir = tempdir().unwrap();
+        let mut cfg = config(dir.path());
+        cfg.stop_on_done = stop_on_done;
+        let publisher = DirSpoolPublisher::new(&cfg).await.unwrap();
+        publisher.send_batch(vec![message("a", "x")]).await.unwrap();
+        drop(publisher);
+        std::fs::write(dir.path().join("DONE"), b"").unwrap();
+
+        let mut consumer = DirSpoolConsumer::new(&cfg).await.unwrap();
+        consumer.set_exit_on_empty(!stop_on_done);
+        let first = consumer.receive_batch(10).await.unwrap();
+        assert_eq!(first.messages.len(), 1);
+        let nack = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            (first.commit)(vec![MessageDisposition::Nack])
+                .await
+                .unwrap();
+        });
+
+        let again = consumer
+            .receive_batch(10)
+            .await
+            .expect("an unsettled chunk is not the end of the stream");
+        assert_eq!(again.messages.len(), 1, "the nacked chunk is redelivered");
+        nack.await.unwrap();
+        (again.commit)(vec![MessageDisposition::Ack]).await.unwrap();
+        assert!(drain(&mut consumer, 10).await.is_empty());
+    }
+}
+
+/// A commit that is dropped unused settles nothing, so its chunks go back in the queue.
+#[tokio::test]
+async fn a_dropped_commit_requeues_its_chunks() {
+    let dir = tempdir().unwrap();
+    let cfg = config(dir.path());
+    let publisher = DirSpoolPublisher::new(&cfg).await.unwrap();
+    publisher.send_batch(vec![message("a", "x")]).await.unwrap();
+    drop(publisher);
+
+    let mut consumer = DirSpoolConsumer::new(&cfg).await.unwrap();
+    consumer.set_exit_on_empty(true);
+    drop(consumer.receive_batch(10).await.unwrap());
+    assert_eq!(drain(&mut consumer, 10).await.len(), 1);
+}
+
+/// A slow settlement is still an open batch: the end of the queue is not reported over it.
+#[tokio::test]
+async fn end_of_queue_outlasts_the_settle_timeout() {
+    for stop_on_done in [false, true] {
+        let dir = tempdir().unwrap();
+        let mut cfg = config(dir.path());
+        cfg.stop_on_done = stop_on_done;
+        let publisher = DirSpoolPublisher::new(&cfg).await.unwrap();
+        publisher.send_batch(vec![message("a", "x")]).await.unwrap();
+        drop(publisher);
+        std::fs::write(dir.path().join("DONE"), b"").unwrap();
+
+        let mut consumer = DirSpoolConsumer::new(&cfg).await.unwrap();
+        consumer.set_exit_on_empty(!stop_on_done);
+        consumer.settle_timeout = Duration::from_millis(20);
+        let first = consumer.receive_batch(10).await.unwrap();
+        let early = tokio::time::timeout(Duration::from_millis(300), consumer.receive_batch(10));
+        assert!(early.await.is_err(), "ended with a batch still unsettled");
+
+        (first.commit)(vec![MessageDisposition::Nack])
+            .await
+            .unwrap();
+        assert_eq!(consumer.receive_batch(10).await.unwrap().messages.len(), 1);
+    }
+}
+
+/// A commit cancelled part-way releases the chunks it had not settled yet.
+#[tokio::test]
+async fn a_cancelled_commit_requeues_the_unsettled_chunks() {
+    let dir = tempdir().unwrap();
+    let cfg = config(dir.path());
+    let publisher = DirSpoolPublisher::new(&cfg).await.unwrap();
+    publisher
+        .send_batch(vec![message("a", "x"), message("b", "x")])
+        .await
+        .unwrap();
+    drop(publisher);
+
+    let mut consumer = DirSpoolConsumer::new(&cfg).await.unwrap();
+    let batch = consumer.receive_batch(10).await.unwrap();
+    assert_eq!(batch.messages.len(), 2);
+    let mut commit = (batch.commit)(vec![MessageDisposition::Ack; 2]);
+    // The first delete is a blocking call, so one poll leaves the commit in the middle.
+    assert!(futures::poll!(commit.as_mut()).is_pending());
+    drop(commit);
+
+    assert!(!consumer.claimed.lock().unwrap().contains("000000001"));
+    assert!(consumer
+        .requeued
+        .lock()
+        .unwrap()
+        .contains(&"000000001".to_string()));
+}
+
+#[test]
+fn a_pattern_with_digits_right_after_the_sequence_is_rejected() {
+    for pattern in ["{seq:09}{timestamp}", "{seq:09}{message_id}", "{seq:09}7"] {
+        let mut config = DirSpoolConfig::new("/tmp/spool");
+        config.naming_pattern = pattern.to_string();
+        assert!(validate_naming_pattern(&config).is_err(), "{pattern}");
+    }
+    for pattern in ["{seq:09}", "{seq:09}-{timestamp}", "{seq:09}_{message_id}"] {
+        let mut config = DirSpoolConfig::new("/tmp/spool");
+        config.naming_pattern = pattern.to_string();
+        assert!(validate_naming_pattern(&config).is_ok(), "{pattern}");
+    }
 }

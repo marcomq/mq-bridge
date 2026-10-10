@@ -626,6 +626,20 @@ async fn create_amqp_connection(config: &AmqpConfig) -> anyhow::Result<Connectio
             .map_err(|_| anyhow!("Failed to set password on AMQP URL"))?;
     }
 
+    let encrypted = config.tls.required || url.scheme() == "amqps";
+    let has_password = url.password().is_some_and(|password| !password.is_empty());
+    crate::support::tls_check::warn_plaintext_credentials(
+        "amqp",
+        &config.url,
+        has_password,
+        encrypted,
+    );
+    if config.tls.accept_invalid_certs {
+        tracing::warn!(
+            "amqp ignores tls.accept_invalid_certs: the server certificate is always checked"
+        );
+    }
+
     if !url.query_pairs().any(|(k, _)| k == "heartbeat") {
         url.query_pairs_mut().append_pair("heartbeat", "15");
     }
@@ -667,22 +681,32 @@ async fn create_amqp_connection(config: &AmqpConfig) -> anyhow::Result<Connectio
 }
 
 async fn build_tls_config(config: &AmqpConfig) -> anyhow::Result<OwnedTLSConfig> {
-    // For AMQP, cert_chain is the CA file.
-    let ca_file = config.tls.ca_file.clone();
+    // lapin takes the CA certificates as PEM text, not as a path.
+    let ca_pem = match &config.tls.ca_file {
+        Some(path) => Some(
+            tokio::fs::read_to_string(path)
+                .await
+                .map_err(|e| anyhow!("Failed to read AMQP tls.ca_file '{path}': {e}"))?,
+        ),
+        None => None,
+    };
 
-    let identity = if let Some(cert_file) = &config.tls.cert_file {
-        // For lapin, client identity is provided via a PKCS12 file.
-        // The `cert_file` is assumed to be the PKCS12 bundle. The `key_file` is not used.
-        let der = tokio::fs::read(cert_file).await?;
-        let password = config.tls.cert_password.clone().unwrap_or_default();
-        Some(OwnedIdentity::PKCS12 { der, password })
-    } else {
-        None
+    // With a `key_file` both files are PEM; without one `cert_file` is a PKCS#12 bundle.
+    let identity = match (&config.tls.cert_file, &config.tls.key_file) {
+        (Some(cert_file), Some(key_file)) => Some(OwnedIdentity::PKCS8 {
+            pem: tokio::fs::read(cert_file).await?,
+            key: tokio::fs::read(key_file).await?,
+        }),
+        (Some(cert_file), None) => Some(OwnedIdentity::PKCS12 {
+            der: tokio::fs::read(cert_file).await?,
+            password: config.tls.cert_password.clone().unwrap_or_default(),
+        }),
+        (None, _) => None,
     };
 
     Ok(OwnedTLSConfig {
         identity,
-        cert_chain: ca_file,
+        cert_chain: ca_pem,
     })
 }
 

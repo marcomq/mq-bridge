@@ -49,12 +49,57 @@ const DEFAULT_REDELIVERY_MS: u64 = 60_000;
 fn open_client(config: &RedisStreamsConfig) -> anyhow::Result<redis::Client> {
     // redis 1.3's ConnectionInfo has no public auth setter, so credentials are
     // injected into the URL's userinfo when provided as separate config fields.
-    let url = url_with_credentials(config);
+    let mut url = url_with_credentials(config);
+    let tls = &config.tls;
+    if tls.required {
+        if let Some(rest) = url.strip_prefix("redis://") {
+            url = format!("rediss://{rest}");
+        }
+    }
+    let encrypted = url.starts_with("rediss://");
+    crate::support::tls_check::warn_plaintext_credentials("redis_streams", &url, false, encrypted);
     let info = url
         .as_str()
         .into_connection_info()
         .map_err(|e| anyhow!("Invalid Redis URL: {}", e))?;
-    redis::Client::open(info).map_err(|e| anyhow!("Failed to open Redis client: {}", e))
+    if !encrypted {
+        return redis::Client::open(info)
+            .map_err(|e| anyhow!("Failed to open Redis client: {}", e));
+    }
+
+    if tls.accept_invalid_certs {
+        tracing::warn!(
+            "redis_streams ignores tls.accept_invalid_certs: the server certificate is always checked"
+        );
+    }
+    let read = |field: &str, path: &String| {
+        std::fs::read(path)
+            .map_err(|e| anyhow!("Failed to read redis_streams tls.{field} '{path}': {e}"))
+    };
+    let root_cert = match &tls.ca_file {
+        Some(path) => Some(read("ca_file", path)?),
+        None => None,
+    };
+    let client_tls = match (&tls.cert_file, &tls.key_file) {
+        (Some(cert), Some(key)) => Some(redis::ClientTlsConfig {
+            client_cert: read("cert_file", cert)?,
+            client_key: read("key_file", key)?,
+        }),
+        (None, None) => None,
+        _ => {
+            return Err(anyhow!(
+                "redis_streams tls needs both cert_file and key_file for a client certificate"
+            ))
+        }
+    };
+    redis::Client::build_with_tls(
+        info,
+        redis::TlsCertificates {
+            client_tls,
+            root_cert,
+        },
+    )
+    .map_err(|e| anyhow!("Failed to open Redis client: {}", e))
 }
 
 /// Percent-encodes a userinfo component per RFC 3986, escaping every character
@@ -716,6 +761,46 @@ impl MessageConsumer for RedisStreamsConsumer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::TlsConfig;
+
+    fn is_tls(client: &redis::Client) -> bool {
+        matches!(
+            client.get_connection_info().addr(),
+            redis::ConnectionAddr::TcpTls { .. }
+        )
+    }
+
+    #[test]
+    fn tls_required_turns_a_redis_url_into_a_tls_connection() {
+        let plain = RedisStreamsConfig::new("redis://localhost:6379");
+        assert!(!is_tls(&open_client(&plain).unwrap()));
+
+        let required = plain.with_tls(TlsConfig {
+            required: true,
+            ..TlsConfig::new()
+        });
+        assert!(is_tls(&open_client(&required).unwrap()));
+    }
+
+    #[test]
+    fn a_ca_file_that_cannot_be_read_is_reported_with_its_path() {
+        let config = RedisStreamsConfig::new("rediss://localhost:6379")
+            .with_tls(TlsConfig::new().with_ca_file("/nonexistent/ca.pem"));
+        let error = open_client(&config).unwrap_err().to_string();
+        assert!(
+            error.contains("tls.ca_file '/nonexistent/ca.pem'"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_client_certificate_needs_its_key() {
+        let mut tls = TlsConfig::new();
+        tls.cert_file = Some("/client.pem".to_string());
+        let config = RedisStreamsConfig::new("rediss://localhost:6379").with_tls(tls);
+        let error = open_client(&config).unwrap_err().to_string();
+        assert!(error.contains("both cert_file and key_file"), "{error}");
+    }
 
     fn bulk(s: &str) -> redis::Value {
         redis::Value::BulkString(s.as_bytes().to_vec())

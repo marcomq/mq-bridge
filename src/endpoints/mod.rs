@@ -7,6 +7,7 @@
 pub mod amqp;
 #[cfg(feature = "aws")]
 pub mod aws;
+pub mod capabilities;
 #[cfg(feature = "clickhouse")]
 pub mod clickhouse;
 #[cfg(feature = "dir-spool")]
@@ -1959,6 +1960,89 @@ pub fn check_publisher(
     check_publisher_recursive(route_name, endpoint, 0, allowed_types)
 }
 
+/// Endpoint types whose publisher has no reply path under any setting.
+const NEVER_REPLIES: &[&str] = &[
+    "aws",
+    "kafka",
+    "file",
+    "dir_spool",
+    "object_store",
+    "sled",
+    "amqp",
+    "mqtt",
+    "websocket",
+    "ibmmq",
+    "redis_streams",
+    "stream_buffer",
+    "null",
+];
+
+/// Endpoint types that reply only with the named option set.
+const REPLIES_WITH: &[(&str, &str)] = &[
+    ("memory", "request_reply: true"),
+    ("nats", "request_reply: true"),
+    ("sqlx", "lookup_query"),
+    ("clickhouse", "lookup_query"),
+];
+
+/// The reply rules as data: the types that never reply, and those that need an option.
+#[cfg(test)]
+pub(crate) fn reply_rules() -> (
+    &'static [&'static str],
+    &'static [(&'static str, &'static str)],
+) {
+    (NEVER_REPLIES, REPLIES_WITH)
+}
+
+/// Why a publisher built from `endpoint` can never answer a send with a response, or `None`
+/// when it can or when that cannot be told from the config (`custom`, a registered publisher).
+/// The reply column of `docs/CAPABILITIES.md` lists the same rules.
+pub(crate) fn never_replies(endpoint: &Endpoint, depth: usize) -> Option<String> {
+    // A custom middleware may answer on its own, whatever the endpoint below it does.
+    let custom_middleware = endpoint
+        .middlewares
+        .iter()
+        .any(|middleware| matches!(middleware, Middleware::Custom { .. }));
+    if custom_middleware || depth > 16 {
+        return None;
+    }
+    let name = endpoint.endpoint_type.name();
+    let needs = || {
+        let option = REPLIES_WITH.iter().find(|(kind, _)| *kind == name)?.1;
+        Some(format!("a '{name}' endpoint replies only with `{option}`"))
+    };
+    let first_replying = |legs: &mut dyn Iterator<Item = &Endpoint>| {
+        let mut reason = Some(format!("the '{name}' has no destination"));
+        for leg in legs {
+            reason = never_replies(leg, depth + 1);
+            if reason.is_none() {
+                break;
+            }
+        }
+        reason.map(|reason| format!("no destination of the '{name}' replies ({reason})"))
+    };
+    match &endpoint.endpoint_type {
+        _ if NEVER_REPLIES.contains(&name) => Some(format!("a '{name}' endpoint does not reply")),
+        EndpointType::Memory(cfg) if !cfg.request_reply => needs(),
+        EndpointType::Nats(cfg) if !cfg.request_reply => needs(),
+        EndpointType::Sqlx(cfg) if cfg.lookup_query.is_none() => needs(),
+        EndpointType::ClickHouse(cfg) if cfg.lookup_query.is_none() => needs(),
+        EndpointType::Ref(target) => crate::route::get_endpoint(target)
+            .and_then(|referenced| never_replies(&referenced, depth + 1)),
+        EndpointType::Fanout(legs) => first_replying(&mut legs.iter()),
+        EndpointType::Switch(cfg) => first_replying(
+            &mut cfg
+                .cases
+                .values()
+                .chain(cfg.when.iter().map(|case| &case.to))
+                .chain(cfg.default.as_deref()),
+        ),
+        // A `request` passes the outcome of its forward leg up.
+        EndpointType::Request(cfg) => never_replies(&cfg.forward_to, depth + 1),
+        _ => None,
+    }
+}
+
 fn check_publisher_recursive(
     route_name: &str,
     endpoint: &Endpoint,
@@ -2354,6 +2438,12 @@ fn check_publisher_recursive(
         }
         EndpointType::Null => Ok(warnings),
         EndpointType::Fanout(endpoints) => {
+            if endpoints.is_empty() {
+                return Err(anyhow!(
+                    "[route:{}] fanout has no endpoints and would acknowledge every message unsent; use `null` to discard",
+                    route_name
+                ));
+            }
             for endpoint in endpoints {
                 warnings.extend(check_publisher_recursive(
                     route_name,
@@ -2402,6 +2492,15 @@ fn check_publisher_recursive(
                 depth + 1,
                 allowed_types,
             )?);
+            // With a `null` forward the response is discarded anyway, so `to` need not reply.
+            let discards = matches!(cfg.forward_to.endpoint_type, EndpointType::Null);
+            if let Some(reason) = never_replies(&cfg.to, depth + 1).filter(|_| !discards) {
+                return Err(anyhow!(
+                    "[route:{}] request endpoint: `to` never returns a response, so nothing would reach `forward_to`: {}",
+                    route_name,
+                    reason
+                ));
+            }
             warnings.extend(check_publisher_recursive(
                 route_name,
                 &cfg.forward_to,
@@ -2647,7 +2746,7 @@ async fn create_base_publisher(
         }
         #[cfg(feature = "websocket")]
         EndpointType::WebSocket(cfg) => {
-            let sink = websocket::WebSocketPublisher::new(cfg);
+            let sink = websocket::WebSocketPublisher::try_new(cfg)?;
             Ok(Box::new(sink) as Box<dyn MessagePublisher>)
         }
         #[cfg(feature = "mongodb")]
@@ -3807,6 +3906,92 @@ mod tests {
             .unwrap_err()
             .to_string();
             assert!(err.contains("orders_in"), "{err}");
+        }
+
+        /// STRUCT-13: outputs that can only discard are a config mistake, not a sink.
+        #[test]
+        fn an_output_that_can_only_discard_is_rejected() {
+            let empty_fanout = Endpoint::new(EndpointType::Fanout(Vec::new()));
+            let err = check_publisher("test", &empty_fanout, None)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("fanout has no endpoints"), "{err}");
+
+            let switch = Endpoint::new(EndpointType::Switch(crate::models::SwitchConfig {
+                metadata_key: "kind".to_string(),
+                cases: Default::default(),
+                when: Vec::new(),
+                default: None,
+            }));
+            let err = check_publisher("test", &switch, None)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("at least one of `cases`"), "{err}");
+        }
+
+        /// STRUCT-13: a `request` whose `to` cannot reply would ack everything and forward nothing.
+        #[test]
+        fn a_request_to_an_endpoint_that_never_replies_is_rejected() {
+            let request_into = |to: Endpoint, forward_to: Endpoint| {
+                Endpoint::new(EndpointType::Request(RequestForwardConfig {
+                    to: Box::new(to),
+                    forward_to: Box::new(forward_to),
+                }))
+            };
+            let sink = || Endpoint::new_memory("never_replies_sink", 1);
+            let request = |to: Endpoint| request_into(to, sink());
+            let replying = || {
+                Endpoint::new(EndpointType::Static(crate::models::StaticConfig {
+                    body: "ok".to_string(),
+                    ..Default::default()
+                }))
+            };
+            let memory = |request_reply| {
+                Endpoint::new(EndpointType::Memory(crate::models::MemoryConfig {
+                    topic: "never_replies_probe".to_string(),
+                    request_reply,
+                    ..Default::default()
+                }))
+            };
+            let custom = Endpoint::new(EndpointType::Custom {
+                name: "pulsar".to_string(),
+                config: serde_json::Value::Null,
+            });
+
+            for (to, expected) in [
+                (null(), "a 'null' endpoint does not reply"),
+                (memory(false), "replies only with `request_reply: true`"),
+                (
+                    Endpoint::new(EndpointType::Fanout(vec![null(), memory(false)])),
+                    "no destination of the 'fanout' replies",
+                ),
+                (
+                    switch_over(vec![("paid", null())], Some(null())),
+                    "no destination of the 'switch' replies",
+                ),
+                (
+                    request_into(replying(), null()),
+                    "a 'null' endpoint does not reply",
+                ),
+            ] {
+                let err = check_publisher("test", &request(to), None)
+                    .unwrap_err()
+                    .to_string();
+                assert!(err.contains("`to` never returns a response"), "{err}");
+                assert!(err.contains(expected), "{err}");
+            }
+
+            for to in [
+                replying(),
+                memory(true),
+                custom,
+                Endpoint::new(EndpointType::Fanout(vec![null(), replying()])),
+                switch_over(vec![("paid", null())], Some(replying())),
+            ] {
+                assert!(check_publisher("test", &request(to), None).is_ok());
+            }
+            // Sending to a branch and discarding whatever comes back stays valid.
+            assert!(check_publisher("test", &request_into(memory(false), null()), None).is_ok());
         }
 
         /// The policy list governs transports. Core types stay reachable whatever it says, so a

@@ -58,7 +58,7 @@ impl Entry {
             .map(|t| CompiledTemplate::compile(t, None))
             .transpose()?;
         // Box::pin breaks the recursive async type, as in the dlq middleware.
-        let from = Box::pin(create_publisher_from_route(route_name, from)).await?;
+        let from = Box::pin(create_publisher_from_route(route_name, &with_status(from))).await?;
         let found_key = format!("lookup.{}.found", into.join("."));
         Ok(Self {
             from,
@@ -158,6 +158,16 @@ impl Entry {
         });
         Ok((!value.is_null()).then_some(value))
     }
+}
+
+/// An `http` source hands its status to the lookup, which decides: 404 is "not found",
+/// 401 and 403 are retried. Its own classification would drop those messages.
+fn with_status(from: &crate::models::Endpoint) -> crate::models::Endpoint {
+    let mut from = from.clone();
+    if let crate::models::EndpointType::Http(http) = &mut from.endpoint_type {
+        http.pass_through_status = true;
+    }
+    from
 }
 
 /// A copy of a batch-wide error for each message it fails.
@@ -528,6 +538,16 @@ mod tests {
     use super::*;
     use crate::endpoints::memory::MemoryPublisher;
     use serde_json::json;
+
+    #[test]
+    fn an_http_source_hands_its_status_to_the_lookup() {
+        let from: crate::models::Endpoint =
+            serde_json::from_value(json!({"http": {"url": "http://localhost:1"}})).unwrap();
+        let crate::models::EndpointType::Http(http) = with_status(&from).endpoint_type else {
+            panic!("still an http endpoint");
+        };
+        assert!(http.pass_through_status);
+    }
 
     async fn lookup(
         sink_name: &str,

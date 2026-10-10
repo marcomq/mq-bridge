@@ -44,6 +44,11 @@ automatically.
 
 ## Consumer vs. subscriber, and nack support
 
+One table per question (which inputs acknowledge, which commit in order, which outputs
+reply, where TLS is configured) is in
+[CAPABILITIES.md](https://github.com/marcomq/mq-bridge/blob/main/docs/CAPABILITIES.md). It is
+rendered from the table the engine exposes in code and checked by tests.
+
 Endpoints default to a **Consumer** pattern (a queue: messages are distributed among
 workers). To get **Subscriber** (pub/sub) behaviour, per-backend config is required.
 

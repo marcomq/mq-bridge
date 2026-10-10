@@ -4,7 +4,7 @@
 
 Schemes: `ws://`, `wss://`
 
-Query parameters recognised as config fields for this connector. Any other `?key=value` pair is passed through unchanged as a driver option on the connection URL.
+Query parameters recognised as config fields for this connector. The object-typed `tls` is set with a JSON literal, e.g. `?tls={...}`. Any other `?key=value` pair is passed through unchanged as a driver option on the connection URL.
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
@@ -13,4 +13,39 @@ Query parameters recognised as config fields for this connector. Any other `?key
 | `message_id_header` | string | no | — | (Consumer only) Header key to extract the message ID from the WebSocket handshake. Defaults to "message-id". |
 | `path` | string | no | — | (Consumer only) Optional request path filter. If set, only upgrade requests whose URI path matches exactly are delivered to this consumer. |
 | `routed_queue_capacity` | integer | no | — | (Consumer only) Queue capacity for the routed adapter. Direct response routes do not use this queue. Defaults to 100. |
+| `tls` | object | no | [see below](#tls) | TLS: a consumer listens with `cert_file` and `key_file`; a publisher uses it for a `wss://` URL. |
 | `url` | string | yes | — | For consumers, the listen address (e.g. "0.0.0.0:9000"). For publishers, the target URL. |
+
+## Struct-typed fields
+
+### `tls`
+
+TLS configuration for secure connections.
+
+Configures Transport Layer Security (TLS/SSL) for encrypted communication.
+Supports both client certificate (mutual TLS) and server certificate validation.
+
+#### Examples
+
+```rust
+use mq_bridge::models::TlsConfig;
+
+let tls = TlsConfig {
+    required: true,
+    ca_file: Some("/path/to/ca.pem".to_string()),
+    cert_file: Some("/path/to/cert.pem".to_string()),
+    key_file: Some("/path/to/key.pem".to_string()),
+    ..Default::default()
+};
+```
+
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `accept_invalid_certs` | boolean | no | `false` | If true, disable server certificate verification (insecure). |
+| `ca_file` | string | no | — | Path to the CA certificate file. |
+| `cert_file` | string | no | — | Path to the client certificate file (PEM). |
+| `cert_password` | string | no | — | Password for the private key (if encrypted). |
+| `key_file` | string | no | — | Path to the client private key file (PEM). |
+| `required` | boolean | no | `false` | If true, enable TLS/SSL. |
+

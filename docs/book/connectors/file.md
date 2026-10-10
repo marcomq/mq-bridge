@@ -92,6 +92,8 @@ Full field list: [reference/file.md](../reference/file.md).
   `csv.nested: json` writes its JSON text into one cell instead. Arrays are written as their
   JSON text, and `null` as `null`. A payload that is not an object, or a string with no UTF-8
   spelling (a lone `\ud800` escape), fails that message instead of writing a broken row.
+  A header that exists but cannot be read fails the write as retryable; nothing is appended
+  under guessed columns.
 - `delimiter` separates records (rows), not fields. It must not contain the field separator
   or the quote character.
 
@@ -116,6 +118,7 @@ input:
 | `header` | `true` | `false` when the first record is already data; a source then needs `columns`, and a sink writes rows only. |
 | `columns` | — | Source: the keys to use instead of the header's. Sink: the columns to write, in this order. |
 | `nested` | `flatten` | Sink: `flatten` or `json`, see above. |
+| `on_mismatch` | `warn` | Sink: `warn` writes a record whose keys differ from the columns, leaving missing columns empty and dropping extra keys. `fail` rejects it, so a `dlq` takes it. |
 
 | Export | Setting |
 | --- | --- |

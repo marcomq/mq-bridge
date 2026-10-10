@@ -35,7 +35,7 @@ fn error_body_excerpt(body: &[u8]) -> String {
 
 /// Builds a connection-pooling hyper client for the given TLS/connector settings.
 fn build_http_client(config: &HttpConfig) -> anyhow::Result<HttpClient> {
-    let tls_client_config = create_rustls_client_config(&config.tls)
+    let tls_client_config = crate::support::tls::client_config(&config.tls)
         .context("Failed to create rustls client config")?;
 
     let mut http_connector = HttpConnector::new();

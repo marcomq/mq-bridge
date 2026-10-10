@@ -1602,33 +1602,43 @@ async fn test_request_endpoint_forwards_response_from_configured_target() {
 }
 
 #[tokio::test]
-async fn test_request_endpoint_forwards_nothing_when_target_returns_no_response() {
+async fn test_request_endpoint_rejects_a_target_that_returns_no_response() {
     use mq_bridge::endpoints::create_publisher_from_route;
     use mq_bridge::models::{EndpointType, RequestForwardConfig};
 
-    // A plain memory sink acks without producing a response, so there is nothing to
-    // forward and the send still succeeds (the input is not blocked).
-    let target = Endpoint::new_memory(&get_unique_topic("request_no_reply_target"), 10);
-    let target_channel = target.channel().unwrap();
-    let forward_to = Endpoint::new_memory(&get_unique_topic("request_no_reply_forward"), 10);
-    let forward_channel = forward_to.channel().unwrap();
+    // A plain memory sink acks without producing a response, so nothing could ever be
+    // forwarded: the endpoint is refused instead of acking every message.
+    let request = Endpoint::new(EndpointType::Request(RequestForwardConfig {
+        to: Box::new(Endpoint::new_memory(
+            &get_unique_topic("request_no_reply_target"),
+            10,
+        )),
+        forward_to: Box::new(Endpoint::new_memory(
+            &get_unique_topic("request_no_reply_forward"),
+            10,
+        )),
+    }));
+    let err = match create_publisher_from_route("request_no_reply_test", &request).await {
+        Ok(_) => panic!("a request whose target cannot reply must be refused"),
+        Err(e) => e.to_string(),
+    };
+    assert!(err.contains("`to` never returns a response"), "{err}");
 
+    // Discarding the response is still a valid use: the target receives the request.
+    let target = Endpoint::new_memory(&get_unique_topic("request_discard_target"), 10);
+    let target_channel = target.channel().unwrap();
     let request = Endpoint::new(EndpointType::Request(RequestForwardConfig {
         to: Box::new(target),
-        forward_to: Box::new(forward_to),
+        forward_to: Box::new(Endpoint::new(EndpointType::Null)),
     }));
-
-    let publisher = create_publisher_from_route("request_no_reply_test", &request)
+    let publisher = create_publisher_from_route("request_discard_test", &request)
         .await
         .unwrap();
     publisher
         .send(CanonicalMessage::from("ping"))
         .await
         .unwrap();
-
-    // The target still received the request; only the (absent) response is not forwarded.
     let received = target_channel.drain_messages();
     assert_eq!(received.len(), 1);
     assert_eq!(received[0].get_payload_str(), "ping");
-    assert!(forward_channel.drain_messages().is_empty());
 }

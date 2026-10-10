@@ -393,9 +393,9 @@ kafka = ["rdkafka", "rdkafka/libz-static"]
 amqp = ["lapin", "rustls", "rustls-pemfile"]
 nats = ["async-nats", "rustls", "rustls-pemfile"]
 mongodb = ["dep:mongodb"]
-mqtt = ["rumqttc", "rustls", "tokio-rustls", "rustls-pemfile"]
+mqtt = ["rumqttc", "rustls", "tokio-rustls", "rustls-pemfile", "webpki-roots"]
 http = ["dep:arc-swap", "hyper", "hyper-util", "hyper-rustls", "http-body-util", "dep:http-body", "rustls", "tokio-rustls", "rustls-pemfile", "webpki-roots", "h2", "dep:flate2", "dep:lz4_flex", "dep:zstd"]
-websocket = ["dep:tokio-websockets"]
+websocket = ["dep:tokio-websockets", "tokio-websockets/rustls-bring-your-own-connector", "rustls", "tokio-rustls", "rustls-pemfile", "webpki-roots"]
 aws = ["aws-config", "aws-sdk-sqs", "aws-sdk-sns", "aws-sigv4"]
 # Runtime-loaded IBM MQ client via dlopen: builds with no SDK present; the IBM
 # redistributable client is only needed at runtime, and only if an ibm-mq

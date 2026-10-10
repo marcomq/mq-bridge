@@ -75,11 +75,13 @@ AggregateEmit = str
 AggregateOnError = str
 CipherKind = str
 Compression = str
+CsvMismatch = str
 CsvNested = str
 DatePartitionStyle = str
 DeliveryGuarantee = str
 FaultMode = str
 FileFormat = str
+FileFsync = str
 FilterMiddleware = str
 HttpBulkFormat = str
 HttpBulkStream = str
@@ -128,6 +130,7 @@ __all__ = [
     "ConfigDocument",
     "CookieJarMiddleware",
     "CsvConfig",
+    "CsvMismatch",
     "CsvNested",
     "DatePartitionStyle",
     "DeadLetterQueueMiddleware",
@@ -142,6 +145,7 @@ __all__ = [
     "FaultMode",
     "FileConfig",
     "FileFormat",
+    "FileFsync",
     "FilterMiddleware",
     "GrpcConfig",
     "HttpBulkAuth",
