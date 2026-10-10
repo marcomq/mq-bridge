@@ -51,6 +51,7 @@ pub(crate) mod tls;
     feature = "http-bulk",
     feature = "kafka",
     feature = "ibm-mq",
+    feature = "ibm-mq-static",
     feature = "postgres-cdc",
     test
 ))]
