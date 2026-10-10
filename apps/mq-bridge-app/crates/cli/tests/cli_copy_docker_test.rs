@@ -739,3 +739,216 @@ fn distinct(rows: &[String]) -> Vec<String> {
     let set: std::collections::BTreeSet<&String> = rows.iter().collect();
     set.into_iter().cloned().collect()
 }
+
+// ====================================================================== TLS
+
+/// A broker started for one test with a certificate made for that run, removed
+/// on drop. The shared stacks have no TLS listener, and adding one would make
+/// every other user of them generate certificates first.
+#[cfg(unix)]
+struct TlsContainer {
+    name: String,
+    /// The certificate clients have to trust; it is its own CA.
+    ca_file: PathBuf,
+}
+
+#[cfg(unix)]
+impl TlsContainer {
+    /// Mounts a directory holding `server.pem`, `server.key` and `files` at `/tls`
+    /// and waits for `ready` in the container's log.
+    fn start(
+        dir: &TestDir,
+        name: &str,
+        port: u16,
+        files: &[(&str, &str)],
+        image_and_command: &[&str],
+        ready: &str,
+    ) -> Self {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mount = dir.path().join("tls");
+        std::fs::create_dir(&mount).expect("create the tls directory");
+        let generated =
+            rcgen::generate_simple_self_signed(vec!["localhost".into(), "127.0.0.1".into()])
+                .expect("generate a certificate");
+        let ca_file = mount.join("server.pem");
+        std::fs::write(&ca_file, generated.cert.pem()).expect("write certificate");
+        std::fs::write(
+            mount.join("server.key"),
+            generated.signing_key.serialize_pem(),
+        )
+        .expect("write key");
+        for (file, body) in files {
+            std::fs::write(mount.join(file), body).expect("write broker file");
+        }
+        // The broker runs as its own user inside the container.
+        for path in [dir.path(), mount.as_path()] {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+                .expect("open the tls directory");
+        }
+
+        let _ = Command::new("docker").args(["rm", "-f", name]).output();
+        let container = Self {
+            name: name.to_string(),
+            ca_file,
+        };
+        let started = Command::new("docker")
+            .args(["run", "-d", "--name", name])
+            .args(["-p", &format!("127.0.0.1:{port}:{port}")])
+            .args(["-v", &format!("{}:/tls:ro", mount.display())])
+            .args(image_and_command)
+            .output()
+            .expect("run docker");
+        assert!(
+            started.status.success(),
+            "could not start {name}: {}",
+            String::from_utf8_lossy(&started.stderr)
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(120);
+        while !container.logs().contains(ready) {
+            assert!(
+                Instant::now() < deadline,
+                "{name} never logged {ready:?}: {}",
+                container.logs()
+            );
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        container
+    }
+
+    fn logs(&self) -> String {
+        let output = Command::new("docker")
+            .args(["logs", &self.name])
+            .output()
+            .expect("read container logs");
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    }
+
+    /// The `tls={...}` URI parameter that trusts this broker.
+    fn trusting(&self) -> String {
+        format!(r#"tls={{"ca_file":"{}"}}"#, self.ca_file.display())
+    }
+}
+
+#[cfg(unix)]
+impl Drop for TlsContainer {
+    fn drop(&mut self) {
+        let _ = Command::new("docker")
+            .args(["rm", "-f", "-v", &self.name])
+            .output();
+    }
+}
+
+/// Whether a draining copy ended successfully within `limit`. A copy that is
+/// still retrying its connection by then is stopped and counts as not delivered.
+#[cfg(unix)]
+fn copy_succeeds_within(from: &str, to: &str, limit: Duration) -> bool {
+    let mut child = cli()
+        .args(["copy", "--from", from, "--to", to, "--drain"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("start CLI copy");
+    let deadline = Instant::now() + limit;
+    loop {
+        if let Some(status) = child.try_wait().expect("poll CLI copy") {
+            return status.success();
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// An `mqtts://` URL has to mean TLS with a verified broker: a plain client and a
+/// client without the broker's CA must both be unable to publish.
+#[cfg(all(unix, any(feature = "full", feature = "mqtt")))]
+#[test]
+#[ignore = "requires docker"]
+fn mqtt_tls_delivers_only_from_clients_that_trust_the_broker() {
+    backend!("mqtt");
+    let dir = TestDir::new();
+    let broker = TlsContainer::start(
+        &dir,
+        "mqb-cli-mqtt-tls",
+        8883,
+        &[(
+            "mosquitto.conf",
+            "listener 8883\nallow_anonymous true\ncertfile /tls/server.pem\nkeyfile /tls/server.key\n",
+        )],
+        &[
+            "eclipse-mosquitto:2.0.22",
+            "mosquitto",
+            "-c",
+            "/tls/mosquitto.conf",
+        ],
+        "running",
+    );
+
+    let topic = unique("cli_mqtt_tls");
+    let out = dir.path().join("out.jsonl");
+    let query = format!("topic={topic}&qos=1");
+    let trusted = format!("mqtts://localhost:8883?{query}&{}", broker.trusting());
+    let source = format!("{trusted}&client_id={}", unique("sub"));
+    let client = |base: &str| format!("{base}&client_id={}", unique("pub"));
+
+    let _reader = BackgroundCopy(
+        cli()
+            .args(["copy", "--from", &source, "--to", &raw_uri(&out)])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("start background MQTT reader"),
+    );
+
+    let seeded = numbered_rows(40);
+    let input = raw_uri(seed_rows(&dir, "input.jsonl", &seeded));
+    let limit = Duration::from_secs(15);
+    assert!(
+        !copy_succeeds_within(
+            &input,
+            &client(&format!("mqtt://localhost:8883?{query}")),
+            limit
+        ),
+        "a plain mqtt:// client published to a TLS listener"
+    );
+    assert!(
+        !copy_succeeds_within(
+            &input,
+            &client(&format!("mqtts://localhost:8883?{query}")),
+            limit
+        ),
+        "a client published to a broker whose certificate it cannot verify"
+    );
+
+    // As in the plain test: republish until the subscription is established.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        copy_ok("mqtt tls: publish", &input, &client(&trusted), &[]);
+        let settle = Instant::now() + Duration::from_millis(500);
+        while Instant::now() < settle && distinct(&read_rows(&out)).len() < seeded.len() {
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        if distinct(&read_rows(&out)).len() >= seeded.len() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the MQTT subscriber never received the rows over TLS: {}",
+            broker.logs()
+        );
+    }
+    assert_rows_eq(
+        &distinct(&read_rows(&out)),
+        &sorted(&seeded),
+        "mqtt tls: what the subscriber received",
+    );
+}
