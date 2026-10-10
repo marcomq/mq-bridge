@@ -406,8 +406,9 @@ mod tests {
             std::fs::write(path, doc).unwrap();
             return;
         }
+        // A Windows checkout may convert the doc to CRLF.
         assert_eq!(
-            &DOC[begin..end],
+            DOC[begin..end].replace("\r\n", "\n"),
             rendered,
             "docs/CAPABILITIES.md is stale; see the comment on this test"
         );
