@@ -434,7 +434,10 @@ async fn build_nats_options(config: &NatsConfig) -> anyhow::Result<ConnectOption
             "nats",
             &config.url,
             has_credentials,
-            config.url.split(',').all(|server| server.trim().starts_with("tls://")),
+            config
+                .url
+                .split(',')
+                .all(|server| server.trim().starts_with("tls://")),
         );
         return Ok(options);
     }

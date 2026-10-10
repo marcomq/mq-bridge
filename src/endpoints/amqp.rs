@@ -635,7 +635,9 @@ async fn create_amqp_connection(config: &AmqpConfig) -> anyhow::Result<Connectio
         encrypted,
     );
     if config.tls.accept_invalid_certs {
-        tracing::warn!("amqp ignores tls.accept_invalid_certs: the server certificate is always checked");
+        tracing::warn!(
+            "amqp ignores tls.accept_invalid_certs: the server certificate is always checked"
+        );
     }
 
     if !url.query_pairs().any(|(k, _)| k == "heartbeat") {

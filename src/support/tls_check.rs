@@ -32,8 +32,11 @@ pub(crate) fn is_loopback(url: &str) -> bool {
 
 fn url_has_password(url: &str) -> bool {
     url.split(',').any(|server| {
-        parsed(server.trim())
-            .is_some_and(|server| server.password().is_some_and(|password| !password.is_empty()))
+        parsed(server.trim()).is_some_and(|server| {
+            server
+                .password()
+                .is_some_and(|password| !password.is_empty())
+        })
     })
 }
 
@@ -72,8 +75,16 @@ mod tests {
     #[test]
     fn a_password_to_another_host_without_tls_is_exposed() {
         assert!(exposes_credentials("amqp://broker:5672", true, false));
-        assert!(exposes_credentials("redis://user:secret@cache:6379", false, false));
-        assert!(exposes_credentials("nats://127.0.0.1:4222,nats://other:4222", true, false));
+        assert!(exposes_credentials(
+            "redis://user:secret@cache:6379",
+            false,
+            false
+        ));
+        assert!(exposes_credentials(
+            "nats://127.0.0.1:4222,nats://other:4222",
+            true,
+            false
+        ));
         assert!(exposes_credentials("broker:1883", true, false));
     }
 
@@ -81,9 +92,21 @@ mod tests {
     fn tls_a_local_server_or_no_password_is_not_exposed() {
         assert!(!exposes_credentials("amqp://broker:5672", true, true));
         assert!(!exposes_credentials("amqp://broker:5672", false, false));
-        assert!(!exposes_credentials("redis://user@cache:6379", false, false));
-        assert!(!exposes_credentials("redis://user:secret@localhost:6379", false, false));
-        assert!(!exposes_credentials("mongodb://user:secret@[::1]:27017", false, false));
+        assert!(!exposes_credentials(
+            "redis://user@cache:6379",
+            false,
+            false
+        ));
+        assert!(!exposes_credentials(
+            "redis://user:secret@localhost:6379",
+            false,
+            false
+        ));
+        assert!(!exposes_credentials(
+            "mongodb://user:secret@[::1]:27017",
+            false,
+            false
+        ));
         assert!(!exposes_credentials("127.0.0.1:4222", true, false));
     }
 }

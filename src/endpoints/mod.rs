@@ -1987,7 +1987,10 @@ const REPLIES_WITH: &[(&str, &str)] = &[
 
 /// The reply rules as data: the types that never reply, and those that need an option.
 #[cfg(test)]
-pub(crate) fn reply_rules() -> (&'static [&'static str], &'static [(&'static str, &'static str)]) {
+pub(crate) fn reply_rules() -> (
+    &'static [&'static str],
+    &'static [(&'static str, &'static str)],
+) {
     (NEVER_REPLIES, REPLIES_WITH)
 }
 
