@@ -1068,26 +1068,7 @@ fn amqp_tls_takes_only_clients_that_trust_the_broker() {
 fn amqp_tls_presents_a_pem_client_certificate() {
     backend!("amqp");
     let dir = TestDir::new();
-    // RabbitMQ does not take a self-signed leaf as its own CA, so sign one.
-    let ca_key = rcgen::KeyPair::generate().expect("generate the CA key");
-    let mut ca_params = rcgen::CertificateParams::new(Vec::<String>::new()).expect("CA parameters");
-    ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
-    // rcgen gives every certificate the same subject, which reads as self-signed.
-    ca_params
-        .distinguished_name
-        .push(rcgen::DnType::CommonName, "mqb test CA");
-    ca_params.key_usages = vec![
-        rcgen::KeyUsagePurpose::KeyCertSign,
-        rcgen::KeyUsagePurpose::DigitalSignature,
-    ];
-    let ca_pem = ca_params.self_signed(&ca_key).expect("sign the CA").pem();
-    let issuer = rcgen::Issuer::new(ca_params, ca_key);
-    let client_key = rcgen::KeyPair::generate().expect("generate the client key");
-    let client_pem = rcgen::CertificateParams::new(vec!["mqb-client".to_string()])
-        .expect("client parameters")
-        .signed_by(&client_key, &issuer)
-        .expect("sign the client certificate")
-        .pem();
+    let (ca_pem, client_pem, client_key) = signed_client_certificate();
     let broker = TlsContainer::start(
         &dir,
         "mqb-cli-amqp-mtls",
@@ -1095,7 +1076,7 @@ fn amqp_tls_presents_a_pem_client_certificate() {
         &[
             ("client-ca.pem", &ca_pem),
             ("client.pem", &client_pem),
-            ("client.key", &client_key.serialize_pem()),
+            ("client.key", &client_key),
             (
                 "rabbitmq.conf",
                 "listeners.tcp = none\nlisteners.ssl.default = 5671\n\
@@ -1129,5 +1110,122 @@ fn amqp_tls_presents_a_pem_client_certificate() {
         &format!("amqp://guest:guest@localhost:5671?queue={queue}"),
         &anonymous,
         &known,
+    );
+}
+
+/// A CA and a client certificate it signed, as PEM: (CA, certificate, key).
+/// Brokers do not take a self-signed leaf as its own CA.
+#[cfg(unix)]
+fn signed_client_certificate() -> (String, String, String) {
+    let ca_key = rcgen::KeyPair::generate().expect("generate the CA key");
+    let mut ca_params = rcgen::CertificateParams::new(Vec::<String>::new()).expect("CA parameters");
+    ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    ca_params.key_usages = vec![
+        rcgen::KeyUsagePurpose::KeyCertSign,
+        rcgen::KeyUsagePurpose::DigitalSignature,
+    ];
+    // rcgen gives every certificate the same subject, which reads as self-signed.
+    ca_params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, "mqb test CA");
+    let ca_pem = ca_params.self_signed(&ca_key).expect("sign the CA").pem();
+    let issuer = rcgen::Issuer::new(ca_params, ca_key);
+    let client_key = rcgen::KeyPair::generate().expect("generate the client key");
+    let client_pem = rcgen::CertificateParams::new(vec!["mqb-client".to_string()])
+        .expect("client parameters")
+        .signed_by(&client_key, &issuer)
+        .expect("sign the client certificate")
+        .pem();
+    (ca_pem, client_pem, client_key.serialize_pem())
+}
+
+#[cfg(all(unix, any(feature = "full", feature = "redis-streams")))]
+const REDIS_TLS: [&str; 10] = [
+    "redis:8.8-alpine",
+    "redis-server",
+    "--port",
+    "0",
+    "--tls-port",
+    "6380",
+    "--tls-cert-file",
+    "/tls/server.pem",
+    "--tls-key-file",
+    "/tls/server.key",
+];
+
+/// `stream` read from its start by a group of its own, so a drain sees the seed.
+#[cfg(all(unix, any(feature = "full", feature = "redis-streams")))]
+fn redis_tls_uri(scheme: &str, stream: &str, tls: &str) -> String {
+    format!("{scheme}://localhost:6380?stream={stream}&group=g_{stream}&read_from_start=true{tls}")
+}
+
+#[cfg(all(unix, any(feature = "full", feature = "redis-streams")))]
+#[test]
+#[ignore = "requires docker"]
+fn redis_tls_takes_only_clients_that_trust_the_server() {
+    backend!("redis");
+    let dir = TestDir::new();
+    let mut command = REDIS_TLS.to_vec();
+    command.extend(["--tls-auth-clients", "no"]);
+    let server = TlsContainer::start(
+        &dir,
+        "mqb-cli-redis-tls",
+        6380,
+        &[],
+        &command,
+        "Ready to accept connections",
+    );
+
+    let stream = unique("cli_redis_tls");
+    assert_only_trusting_tls_clients_get_through(
+        "redis tls",
+        &dir,
+        &redis_tls_uri("redis", &stream, ""),
+        &redis_tls_uri("rediss", &stream, ""),
+        &redis_tls_uri("rediss", &stream, &format!("&{}", server.trusting())),
+    );
+}
+
+#[cfg(all(unix, any(feature = "full", feature = "redis-streams")))]
+#[test]
+#[ignore = "requires docker"]
+fn redis_tls_presents_a_client_certificate() {
+    backend!("redis");
+    let dir = TestDir::new();
+    let (ca_pem, client_pem, client_key) = signed_client_certificate();
+    let mut command = REDIS_TLS.to_vec();
+    command.extend([
+        "--tls-auth-clients",
+        "yes",
+        "--tls-ca-cert-file",
+        "/tls/client-ca.pem",
+    ]);
+    let server = TlsContainer::start(
+        &dir,
+        "mqb-cli-redis-mtls",
+        6380,
+        &[
+            ("client-ca.pem", &ca_pem),
+            ("client.pem", &client_pem),
+            ("client.key", &client_key),
+        ],
+        &command,
+        "Ready to accept connections",
+    );
+
+    let stream = unique("cli_redis_mtls");
+    let tls = dir.path().join("tls");
+    let ca = server.ca_file.display();
+    let known = format!(
+        r#"&tls={{"ca_file":"{ca}","cert_file":"{}","key_file":"{}"}}"#,
+        tls.join("client.pem").display(),
+        tls.join("client.key").display()
+    );
+    assert_only_trusting_tls_clients_get_through(
+        "redis mutual tls",
+        &dir,
+        &redis_tls_uri("redis", &stream, ""),
+        &redis_tls_uri("rediss", &stream, &format!("&{}", server.trusting())),
+        &redis_tls_uri("rediss", &stream, &known),
     );
 }

@@ -2306,6 +2306,9 @@ pub struct RedisStreamsConfig {
     /// (Consumer) Parallel `XREADGROUP` reader connections fanned out across the group. Default 1.
     /// Ignored in `subscriber_mode`.
     pub reader_connections: Option<usize>,
+    /// TLS: a private CA in `ca_file`, a client certificate in `cert_file` and `key_file`.
+    #[serde(default)]
+    pub tls: TlsConfig,
 }
 
 // --- gRPC Specific Configuration ---

@@ -143,6 +143,9 @@ All notable changes to `mq-bridge`. Newest first.
 
 ### Added
 
+- **`redis_streams` has a `tls` block.** `ca_file` trusts a private CA, and `cert_file` with
+  `key_file` presents a client certificate. Before, only a server with a publicly trusted
+  certificate could be reached over TLS. `tls.required: true` turns a `redis://` URL into TLS.
 - **`fsync` on the `file` sink:** `off` (default, as before), `batch` (sync before each batch
   is acknowledged) or `periodic` (sync every `fsync_interval_ms`, default 1000). Without it a
   power loss can lose acknowledged batches. Rust code that builds `FileConfig` with a struct

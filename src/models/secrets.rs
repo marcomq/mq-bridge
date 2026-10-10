@@ -676,6 +676,8 @@ impl SecretExtractor for RedisStreamsConfig {
         if let Some(val) = self.password.take() {
             secrets.insert(format!("{}__{}", prefix, "PASSWORD"), val);
         }
+        self.tls
+            .extract_secrets(&format!("{}__{}", prefix, "TLS"), secrets);
     }
 }
 

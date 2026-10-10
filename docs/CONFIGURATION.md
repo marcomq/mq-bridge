@@ -263,7 +263,7 @@ Which endpoint has a `tls` block, and how each one authenticates, is in the last
 | `mongodb` | `mongodb://host/?tls=true&tlsCAFile=/ca.pem&tlsCertificateKeyFile=/client.pem`, or `mongodb+srv://` | Every driver option works. With `tls.required` the `tls` block replaces the TLS options of the URL. `tls.key_file` is ignored: the key belongs in `cert_file`. |
 | `sqlx`, `postgres_cdc` (Postgres) | `?sslmode=verify-full&sslrootcert=/ca.pem` | `tls.required` adds `sslmode=verify-full`, or `require` with `accept_invalid_certs`. The default `sslmode=prefer` falls back to plain text. |
 | `sqlx` (MySQL, MariaDB) | `?ssl-mode=VERIFY_IDENTITY&ssl-ca=/ca.pem&ssl-cert=/client.pem&ssl-key=/client.key` | `tls.required` with a `ca_file` gives `VERIFY_CA`: the chain is checked, the host name is not. For a host name check with a private CA, leave `tls.required` off and use the URL shown. `tls.cert_file` and `tls.key_file` are ignored here. |
-| `redis_streams` | `rediss://host:6379` | No `tls` block. The server certificate is checked against the public roots. |
+| `redis_streams` | `rediss://host:6379` | Same as `tls.required: true`. The server certificate is checked against the public roots, or against `tls.ca_file`. `tls.cert_file` and `tls.key_file` add a client certificate. `accept_invalid_certs` is ignored. |
 | `amqp` | `amqps://host:5671` | With `tls.required: true` the `tls` block adds a private CA (`ca_file`) and a client identity: `cert_file` and `key_file` as PEM, or `cert_file` alone as a PKCS#12 bundle with `cert_password`. `accept_invalid_certs` is ignored. |
 | `mqtt` | `mqtts://host:8883` or `ssl://host:8883` | Same as `tls.required: true`. |
 | `nats` | `tls://host:4222` | |

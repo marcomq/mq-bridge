@@ -1060,7 +1060,7 @@ with_optional_string_setters!(ZeroMqConfig { with_topic => topic });
 with_optional_setters!(ZeroMqConfig { with_internal_buffer_size => internal_buffer_size: usize, with_request_timeout_ms => request_timeout_ms: u64 });
 with_value_setters!(ZeroMqConfig { with_format => format: ZeroMqFormat, with_backend => backend: ZeroMqBackend });
 with_optional_string_setters!(RedisStreamsConfig { with_consumer_name => consumer_name, with_username => username, with_password => password });
-with_value_setters!(RedisStreamsConfig { with_subscriber_mode => subscriber_mode: bool, with_read_from_start => read_from_start: bool });
+with_value_setters!(RedisStreamsConfig { with_subscriber_mode => subscriber_mode: bool, with_read_from_start => read_from_start: bool, with_tls => tls: TlsConfig });
 with_optional_setters!(RedisStreamsConfig { with_block_ms => block_ms: u64, with_redelivery_timeout_ms => redelivery_timeout_ms: u64, with_maxlen => maxlen: usize, with_approx_trim => approx_trim: bool, with_internal_buffer_size => internal_buffer_size: usize });
 
 with_value_setters!(GrpcConfig { with_tls => tls: TlsConfig, with_server_streaming => server_streaming: bool, with_reflection => reflection: bool, with_metadata => metadata: HashMap<String, String>, with_binary_metadata => binary_metadata: HashMap<String, Vec<u8>> });

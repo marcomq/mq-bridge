@@ -222,8 +222,8 @@ const CAPABILITIES: &[EndpointCapabilities] = &[
     },
     EndpointCapabilities {
         ordered_commit: No,
-        security_note: "TLS with a `rediss://` URL. User and password.",
-        ..row("redis_streams", Url)
+        security_note: "TLS with a `rediss://` URL or `tls.required`. User and password. `accept_invalid_certs` is not available.",
+        ..row("redis_streams", TlsBlock)
     },
     EndpointCapabilities {
         acknowledges: Depends,

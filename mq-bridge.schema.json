@@ -4013,6 +4013,18 @@
           ],
           "format": "uint",
           "minimum": 0
+        },
+        "tls": {
+          "description": "TLS: a private CA in `ca_file`, a client certificate in `cert_file` and `key_file`.",
+          "$ref": "#/$defs/TlsConfig",
+          "default": {
+            "required": false,
+            "ca_file": null,
+            "cert_file": null,
+            "key_file": null,
+            "cert_password": null,
+            "accept_invalid_certs": false
+          }
         }
       },
       "additionalProperties": false,

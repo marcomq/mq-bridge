@@ -165,7 +165,7 @@ ends when its source is empty if the route has `exit_on_empty`, so there is no c
 | `object_store` | always (provider) | Credentials as the provider's client reads them. |
 | `postgres_cdc` | `tls` block | User and password in the URL. |
 | `reader` | – |  |
-| `redis_streams` | URL | TLS with a `rediss://` URL. User and password. |
+| `redis_streams` | `tls` block | TLS with a `rediss://` URL or `tls.required`. User and password. `accept_invalid_certs` is not available. |
 | `ref` | – |  |
 | `request` | – |  |
 | `response` | – |  |
