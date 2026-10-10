@@ -9056,9 +9056,11 @@ dependencies = [
  "futures-sink",
  "http",
  "httparse",
+ "rustls-pki-types",
  "sha1_smol",
  "simdutf8",
  "tokio",
+ "tokio-rustls",
  "tokio-util",
 ]
 

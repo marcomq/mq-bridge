@@ -33,14 +33,25 @@ pub(crate) mod parquet;
 #[cfg(feature = "plugin")]
 pub mod plugin_abi;
 pub mod poll_job;
-#[cfg(any(
-    feature = "amqp",
-    feature = "mqtt",
-    feature = "http",
-    feature = "websocket"
-))]
 pub(crate) mod redact;
 pub mod source_ranges;
 #[cfg(any(feature = "http", feature = "http-bulk"))]
 pub(crate) mod sse;
 pub mod stream_batch;
+#[cfg(any(feature = "http", feature = "websocket"))]
+pub(crate) mod tls;
+#[cfg(any(
+    feature = "amqp",
+    feature = "mqtt",
+    feature = "nats",
+    feature = "mongodb",
+    feature = "redis-streams",
+    feature = "sqlx",
+    feature = "clickhouse",
+    feature = "http-bulk",
+    feature = "kafka",
+    feature = "ibm-mq",
+    feature = "postgres-cdc",
+    test
+))]
+pub(crate) mod tls_check;

@@ -1183,6 +1183,13 @@ pub struct CsvConfig {
     /// (Sink only) Nested objects: `flatten` into `parent.child` columns (default) or `json` text in one cell.
     #[serde(default)]
     pub nested: CsvNested,
+    /// (Sink only) A record whose keys differ from the columns: `warn` (default) writes it anyway, `fail` rejects it.
+    #[serde(default, skip_serializing_if = "is_default_csv_mismatch")]
+    pub on_mismatch: CsvMismatch,
+}
+
+fn is_default_csv_mismatch(value: &CsvMismatch) -> bool {
+    *value == CsvMismatch::default()
 }
 
 impl CsvConfig {
@@ -1216,6 +1223,18 @@ impl SqlTimestamps {
 pub enum SqlColumns {
     /// Each top-level JSON field goes into the table column of the same name.
     Auto,
+}
+
+/// What a CSV sink does with a record whose keys differ from the columns.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum CsvMismatch {
+    /// Missing keys are written as empty fields and extra keys are dropped, logged once.
+    #[default]
+    Warn,
+    /// The record fails as non-retryable and is not written.
+    Fail,
 }
 
 /// How a CSV sink writes a nested JSON object.
@@ -2561,6 +2580,9 @@ pub struct WebSocketConfig {
     /// (Consumer only) Selects whether WebSocket routes run directly or through the routed pipeline.
     #[serde(default)]
     pub execution_mode: WebSocketExecutionMode,
+    /// TLS: a consumer listens with `cert_file` and `key_file`; a publisher uses it for a `wss://` URL.
+    #[serde(default)]
+    pub tls: TlsConfig,
 }
 
 // --- IBM MQ Specific Configuration ---

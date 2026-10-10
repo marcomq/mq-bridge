@@ -83,7 +83,7 @@ struct Unsettled {
 /// Settles one delivered batch when dropped. Chunks still in `pending` were neither acked
 /// nor nacked, so they are released for redelivery.
 struct SettleGuard {
-    pending: Vec<String>,
+    pending: VecDeque<String>,
     claimed: Arc<StdMutex<HashSet<String>>>,
     requeued: Arc<StdMutex<Vec<String>>>,
     unsettled: Arc<Unsettled>,
@@ -100,7 +100,7 @@ impl Drop for SettleGuard {
             self.requeued
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .append(&mut self.pending);
+                .extend(self.pending.drain(..));
         }
         self.unsettled.settled.fetch_add(1, Ordering::SeqCst);
         self.unsettled.count.fetch_sub(1, Ordering::SeqCst);
@@ -746,9 +746,13 @@ pub struct DirSpoolPublisher {
     fsync: SpoolFsync,
     done_file: String,
     emit_done: crate::models::SpoolDone,
-    /// Whether any chunk this publisher accepted failed to reach the disk, which makes the
-    /// difference between `emit_done: success` writing the sentinel and staying quiet.
+    /// Set for good by a failure that cannot be matched to a later write: a directory sync,
+    /// or more unwritten messages than are tracked. Keeps `emit_done: success` quiet.
     write_failed: AtomicBool,
+    /// Messages whose chunk write failed and has not succeeded since, by id and payload hash,
+    /// so a `retry` that writes one later clears it. Non-empty keeps the sentinel back.
+    unwritten: StdMutex<HashMap<(u128, u64), u32>>,
+    unwritten_len: AtomicUsize,
     /// Next sequence number. Seeded past the highest number already in the directory so a
     /// restart appends to the queue instead of overwriting its head.
     seq: Arc<AtomicU64>,
@@ -792,6 +796,8 @@ impl DirSpoolPublisher {
             done_file: config.done_file.clone(),
             emit_done: config.emit_done,
             write_failed: AtomicBool::new(false),
+            unwritten: StdMutex::new(HashMap::new()),
+            unwritten_len: AtomicUsize::new(0),
             seq: Arc::new(AtomicU64::new(next_seq)),
             lock: StdMutex::new(lock),
         })
@@ -901,8 +907,51 @@ impl DirSpoolPublisher {
             SpoolDone::Success => {
                 matches!(outcome, DisconnectOutcome::Completed)
                     && !self.write_failed.load(Ordering::Relaxed)
+                    && self.unwritten_len.load(Ordering::Relaxed) == 0
             }
         }
+    }
+
+    /// The payload is part of the key so two messages that share an id cannot clear each other.
+    fn unwritten_key(message: &CanonicalMessage) -> (u128, u64) {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        message.payload.hash(&mut hasher);
+        (message.message_id, hasher.finish())
+    }
+
+    /// Records a message whose chunk could not be written. Past `MAX_UNWRITTEN_TRACKED`
+    /// the producer stops tracking and holds the sentinel back for good.
+    fn note_unwritten(&self, message: &CanonicalMessage) {
+        let mut unwritten = self.unwritten.lock().unwrap_or_else(|e| e.into_inner());
+        let key = Self::unwritten_key(message);
+        if !unwritten.contains_key(&key) && unwritten.len() >= MAX_UNWRITTEN_TRACKED {
+            if !self.write_failed.swap(true, Ordering::Relaxed) {
+                warn!(
+                    limit = MAX_UNWRITTEN_TRACKED,
+                    "dir_spool has more failed chunk writes than it tracks; `emit_done: success` will not write the sentinel"
+                );
+            }
+            return;
+        }
+        *unwritten.entry(key).or_insert(0) += 1;
+        self.unwritten_len.store(unwritten.len(), Ordering::Relaxed);
+    }
+
+    /// Clears one earlier failure of a message that has now been written.
+    fn note_written(&self, message: &CanonicalMessage) {
+        if self.unwritten_len.load(Ordering::Relaxed) == 0 {
+            return;
+        }
+        let mut unwritten = self.unwritten.lock().unwrap_or_else(|e| e.into_inner());
+        let key = Self::unwritten_key(message);
+        if let Some(count) = unwritten.get_mut(&key) {
+            *count -= 1;
+            if *count == 0 {
+                unwritten.remove(&key);
+            }
+        }
+        self.unwritten_len.store(unwritten.len(), Ordering::Relaxed);
     }
 
     /// Closes this producer: sentinel down if it is owed, then the lock released.
@@ -974,6 +1023,9 @@ struct SidecarOwned {
     metadata: HashMap<String, String>,
 }
 
+/// How many unwritten messages a producer tracks for `emit_done: success`.
+const MAX_UNWRITTEN_TRACKED: usize = 10_000;
+
 #[async_trait]
 impl MessagePublisher for DirSpoolPublisher {
     async fn send_batch(
@@ -986,6 +1038,7 @@ impl MessagePublisher for DirSpoolPublisher {
         for message in messages {
             match self.write_chunk(&message).await {
                 Ok(base) => {
+                    self.note_written(&message);
                     let mut shard = base.as_str();
                     while let Some((parent, _)) = shard.rsplit_once('/') {
                         touched.insert(std::cmp::Reverse(parent.to_string()));
@@ -993,10 +1046,9 @@ impl MessagePublisher for DirSpoolPublisher {
                     }
                 }
                 Err(error) => {
-                    // Remembered even though the batch is reported as partial and the route
-                    // may well retry or DLQ it: this producer was handed a message it did
-                    // not write, so it cannot claim production succeeded.
-                    self.write_failed.store(true, Ordering::Relaxed);
+                    // Remembered even though the batch is reported as partial: until a retry
+                    // writes this message, the producer cannot claim production succeeded.
+                    self.note_unwritten(&message);
                     failed.push((message, PublisherError::Retryable(error)));
                 }
             }
@@ -1341,6 +1393,8 @@ impl DirSpoolConsumer {
         };
         let mut message = CanonicalMessage::new(payload, message_id);
         message.metadata = metadata;
+        // A sidecar is a file anyone can write; reserved keys come from this consumer only.
+        message.strip_source_metadata();
         if self.source_metadata {
             message
                 .metadata
@@ -1428,27 +1482,30 @@ impl DirSpoolConsumer {
     }
 
     /// Whether a rescan is worth it before the queue is reported empty: a batch settled
-    /// since `settled_before` was sampled, or one settles within the timeout. A nack puts
-    /// its chunks back, so the queue is not drained while a delivered batch is open.
+    /// since `settled_before` was sampled, or waits until one does. A nack puts its chunks
+    /// back, so the queue is not drained while a delivered batch is open.
     async fn settled_since(&self, settled_before: u64) -> bool {
-        let changed = self.unsettled.changed.notified();
-        if self.unsettled.settled.load(Ordering::SeqCst) != settled_before {
-            return true;
-        }
-        if self.unsettled.count.load(Ordering::SeqCst) == 0 {
-            return false;
-        }
-        if tokio::time::timeout(self.settle_timeout, changed)
-            .await
-            .is_err()
-        {
+        loop {
+            let changed = self.unsettled.changed.notified();
+            if self.unsettled.settled.load(Ordering::SeqCst) != settled_before {
+                return true;
+            }
+            let open = self.unsettled.count.load(Ordering::SeqCst);
+            if open == 0 {
+                return false;
+            }
+            if tokio::time::timeout(self.settle_timeout, changed)
+                .await
+                .is_ok()
+            {
+                return true;
+            }
             warn!(
                 path = %self.path,
-                "dir_spool reports the end of the queue with delivered chunks still unsettled; a later nack is only redelivered by the next run"
+                open_batches = open,
+                "dir_spool is at the end of the queue but delivered chunks are still unsettled; waiting for them"
             );
-            return false;
         }
-        true
     }
 
     /// What to hand back when the directory holds nothing to read.
@@ -1590,11 +1647,9 @@ impl MessageConsumer for DirSpoolConsumer {
         let metadata_suffix = self.metadata_suffix.clone();
         let drain_on_read = self.drain_on_read;
         let fsync = self.fsync;
-        let claimed = Arc::clone(&self.claimed);
-        let requeued = Arc::clone(&self.requeued);
         self.unsettled.count.fetch_add(1, Ordering::SeqCst);
         let guard = SettleGuard {
-            pending: delivered,
+            pending: delivered.into(),
             claimed: Arc::clone(&self.claimed),
             requeued: Arc::clone(&self.requeued),
             unsettled: Arc::clone(&self.unsettled),
@@ -1602,43 +1657,49 @@ impl MessageConsumer for DirSpoolConsumer {
         let commit: crate::traits::BatchCommitFunc = Box::new(move |dispositions| {
             Box::pin(async move {
                 let mut guard = guard;
-                let delivered = std::mem::take(&mut guard.pending);
-                let mut release = Vec::new();
-                let mut redeliver = Vec::new();
-                for (index, base) in delivered.iter().enumerate() {
+                let mut index = 0;
+                // A chunk leaves `pending` only once it is settled, so a cancelled commit
+                // lets the guard release the rest for redelivery.
+                while let Some(base) = guard.pending.front().cloned() {
                     // A missing disposition means the route acked the whole batch.
                     let acked = !matches!(dispositions.get(index), Some(MessageDisposition::Nack));
-                    if !acked {
+                    index += 1;
+                    let unclaim = if !acked {
                         // Put it back in the queue: a nack is a request to redeliver, and
                         // the chunk is still on disk to redeliver from. It goes back into
                         // the cached listing too, so the redelivery does not wait for a
                         // whole backlog to drain first.
-                        release.push(base.clone());
-                        redeliver.push(base.clone());
-                    } else if drain_on_read {
+                        true
+                    } else {
                         // Only unclaim once the payload is actually gone. A delete that
                         // failed would otherwise put the chunk back in the listing and
                         // redeliver a message the route has already handled.
-                        if remove_chunk(&dir, base, &payload_suffix, metadata_suffix.as_deref())
+                        // With `drain_on_read` off the files stay, so the claim stays too:
+                        // it is the only record that this chunk was already read.
+                        drain_on_read
+                            && remove_chunk(
+                                &dir,
+                                &base,
+                                &payload_suffix,
+                                metadata_suffix.as_deref(),
+                            )
                             .await
-                        {
-                            release.push(base.clone());
-                        }
+                    };
+                    guard.pending.pop_front();
+                    if unclaim {
+                        guard
+                            .claimed
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .remove(&base);
                     }
-                    // Acked with `drain_on_read` off: the files stay, so the claim has to
-                    // stay too — it is the only record that this chunk was already read.
-                }
-                if !release.is_empty() {
-                    let mut claimed = claimed.lock().unwrap_or_else(|e| e.into_inner());
-                    for base in release {
-                        claimed.remove(&base);
+                    if !acked {
+                        guard
+                            .requeued
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .push(base);
                     }
-                }
-                if !redeliver.is_empty() {
-                    requeued
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .extend(redeliver);
                 }
                 if matches!(fsync, SpoolFsync::Chunk) {
                     sync_directory(&dir).await;

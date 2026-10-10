@@ -30,7 +30,8 @@ All notable changes to `mq-bridge`. Newest first.
 - **A config with a top-level `config` key next to other keys is refused as ambiguous.** The
   other keys used to be discarded without a word. A route can no longer be named `config`.
 - **Saving a config fails when two names map to the same secret key**, such as routes
-  `a-b` and `a_b`. One secret used to overwrite the other. Rename one of them.
+  `a-b` and `a_b`. One secret used to overwrite the other. Rename one of them. The save API
+  answers `400` and leaves the running consumers untouched.
 - **A header is treated as a secret by whole words for `key`, `auth` and `apikey`.**
   `X-Author` or `X-Keyboard` used to be moved out of the config; `X-Api-Key` and
   `Authorization` still are. `token`, `secret`, `password` and `cookie` match anywhere.
@@ -50,6 +51,35 @@ All notable changes to `mq-bridge`. Newest first.
   five minutes; it gave up after 11 seconds and was processed as a duplicate. A holder that
   died still frees its key after five seconds.
 
+- **A store URL in an error no longer shows its password.** A `checkpoint_store`, a
+  `deduplication` store or an `aggregate` store that could not be reached or parsed put its
+  full URL, password included, into the error, which reaches the log and the route status.
+- **`websocket`: a client has 10 seconds to send its upgrade request.** A connection that
+  never sent one was held open without limit.
+- **`mqtt`: an `mqtts://` or `ssl://` URL connects with TLS.** Without `tls.required: true`
+  the scheme only chose port 8883 and the connection, credentials included, was not
+  encrypted.
+- **More warnings about exposed connections.** `amqp`, `mqtt`, `nats`, `mongodb`,
+  `redis_streams` and `sqlx` warn at start when a password or token would cross the network
+  without TLS (not for a server on `localhost` or a loopback address). `nats`, `mongodb`,
+  `kafka`, `clickhouse`, `http_bulk`, `ibmmq`, `sqlx` and `postgres_cdc` warn when
+  `tls.accept_invalid_certs` is set, and `amqp` warns that it ignores the setting. `sqlx` on
+  MySQL or MariaDB warns that `tls.ca_file` gives `ssl-mode=VERIFY_CA` (no host name check)
+  and that `tls.cert_file` and `tls.key_file` are ignored. Nothing else changes; see "TLS
+  through the URL" in `docs/CONFIGURATION.md`.
+- **`websocket`: a `wss://` output connects with TLS.** It connected without TLS and sent its
+  upgrade request, headers included, in the clear before the server rejected it. The server
+  certificate is checked against the public roots or `tls.ca_file`. `tls.required: true` with
+  a `ws://` URL is refused at start.
+- **A CSV sink fails the write when the file's header cannot be read.** It used to take the
+  columns from the first message instead, with a warning, and append rows that did not match
+  the header already in the file. The write now fails as retryable and the file is untouched.
+- **`csv.on_mismatch: fail` rejects a record whose keys differ from the columns.** A CSV sink
+  writes such a record with missing columns empty and extra keys dropped, and logs once per
+  process. With `on_mismatch: fail` the record fails as non-retryable instead, so a `dlq`
+  takes it; with `csv.columns` set, only a missing column counts. The default, `warn`, is the
+  behaviour so far. Sinks only: a source with `fail` is refused at start. `models` gains the
+  type `CsvMismatch` and `CsvConfig` the field `on_mismatch`.
 - **A CSV file read with `delete: true` keeps its header line.** The header was deleted with
   the first acknowledged row, and after a restart the next row was taken for the header: one
   row lost and wrong column names for the rest. A queue file now ends as the header alone.
@@ -67,19 +97,49 @@ All notable changes to `mq-bridge`. Newest first.
   marker, on the first empty batch; a batch that failed afterwards was skipped for good after
   a restart. After a failed batch the phase is polled again and the marker is not advanced.
 - **`dir_spool` sources report the end of the queue only after delivered chunks are
-  settled**, waiting up to 30 seconds. A `--drain` run or a `stop_on_done` source could end
-  as complete while a chunk was still in flight, and a nack after that was not redelivered
-  in the run. A batch whose commit never runs puts its chunks back in the queue.
+  settled**, and wait for that with a warning every 30 seconds. A `--drain` run or a
+  `stop_on_done` source could end as complete while a chunk was still in flight, and a nack
+  after that was not redelivered in the run. A batch whose commit never runs, or is
+  cancelled part-way, puts its unsettled chunks back in the queue.
 - **A `dir_spool` `naming_pattern` with a digit or another placeholder directly after the
   sequence is refused at start**, for example `{seq:09}{timestamp}`. A producer reopening
   such a spool read both numbers as one and restarted the sequence at 0. Put a separator in
   between: `{seq:09}_{timestamp}`.
 - **The `group_subscribe` offset file of a `file` source holds a 20-digit zero-padded
-  number** and is written in place. Files written by earlier versions are still read.
+  number**, is written in place and synced to disk on every commit. Files written by earlier
+  versions are still read.
 - **A `group_subscribe` commit stores the offset only up to the first nacked message** and
   fails when the offset file cannot be written. It stored the highest acknowledged offset,
   so a nacked message before it was skipped after a restart, and write errors were only logged.
+- **A `request` whose `to` can never reply is refused at start**, unless `forward_to` is
+  `null`. It used to start, ack every message and forward nothing. This concerns `to`
+  endpoints such as `kafka`, `file` or `amqp`, and `memory`/`nats` without
+  `request_reply: true` or `sqlx`/`clickhouse` without `lookup_query`. The new
+  `docs/CAPABILITIES.md` lists which endpoints reply.
 - **`switch` reports unhealthy when one of its destinations is.** It always reported healthy.
+  The status details list each destination as `{case, status}` in key order (`when[n]` for
+  predicate cases), then `{default: true, status}`, and `unmatched` counts the messages that
+  matched no case while no `default` was set. The count does not make the route unhealthy.
+- **`sequence` refuses a phase marker that was stored for other endpoints.** The marker now
+  holds the endpoint types next to the phase. Replacing or reordering `endpoints` under the
+  same `cursor_id` used to resume at the stored index of the new list. Use a new `cursor_id`
+  or remove the marker. A marker written by an earlier version is still read.
+- **`emit_done: success` writes the sentinel when every failed chunk write was repeated
+  successfully.** One failed write used to hold the sentinel back for the rest of the run,
+  even when `retry` wrote the message a moment later, and a `stop_on_done` consumer waited
+  forever. A message that was never written still holds it back.
+- **A `dir_spool` source drops `mqb.src.*` keys found in a sidecar.** They are reserved for
+  the source that reads a message, as on the other endpoints.
+- **`lookup` reads the status of an `http` source itself**, whether or not
+  `pass_through_status` is set. Without it, a 404 failed the message where the reference
+  promised `null`, and a 401 or 403 on an input still acked and dropped every message; the
+  0.4.20 fix covered only sources with `pass_through_status: true`. An `http` source behind a
+  `ref` keeps its own setting.
+- **App: middlewares on a `null` output run.** The config kept them since 0.4.17, but the
+  route acknowledged each message before the output, so a `limiter`, `delay`, `metrics` or
+  `random_panic` there did nothing. The same holds for `start_route` of the MCP server.
+- **App: an unknown top-level key in the config file logs a warning** at start, such as
+  `route:` for `routes:`. It was ignored without a word, and still is otherwise.
 
 ### Added
 
@@ -87,6 +147,16 @@ All notable changes to `mq-bridge`. Newest first.
   is acknowledged) or `periodic` (sync every `fsync_interval_ms`, default 1000). Without it a
   power loss can lose acknowledged batches. Rust code that builds `FileConfig` with a struct
   literal needs the two new fields or `..FileConfig::new(path)`.
+- **Endpoint capabilities in one place.** `docs/CAPABILITIES.md` lists for every endpoint
+  type whether it is an input or an output, whether it acknowledges, whether it commits in
+  order, whether it replies, whether it publishes in order, and how it is encrypted and
+  authenticated. The same table is in code: `mq_bridge::endpoints::capabilities::capabilities()`
+  and `EndpointType::capabilities()`. The document is rendered from the code table.
+- **`tls` on the `websocket` endpoint.** A listener with `tls.required`, `tls.cert_file` and
+  `tls.key_file` serves `wss`; `tls.ca_file` adds mutual TLS. A `wss://` source on the command
+  line is accepted and sets `tls.required`. The `websocket` Cargo feature now pulls in
+  `rustls`. Rust code that builds `WebSocketConfig` with a struct literal needs the new field
+  or `..Default::default()`.
 
 ### Changed
 

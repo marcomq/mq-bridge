@@ -2425,6 +2425,10 @@
           "description": "(Sink only) Nested objects: `flatten` into `parent.child` columns (default) or `json` text in one cell.",
           "$ref": "#/$defs/CsvNested",
           "default": "flatten"
+        },
+        "on_mismatch": {
+          "description": "(Sink only) A record whose keys differ from the columns: `warn` (default) writes it anyway, `fail` rejects it.",
+          "$ref": "#/$defs/CsvMismatch"
         }
       },
       "additionalProperties": false
@@ -2441,6 +2445,21 @@
           "description": "The object's JSON text in a single cell.",
           "type": "string",
           "const": "json"
+        }
+      ]
+    },
+    "CsvMismatch": {
+      "description": "What a CSV sink does with a record whose keys differ from the columns.",
+      "oneOf": [
+        {
+          "description": "Missing keys are written as empty fields and extra keys are dropped, logged once.",
+          "type": "string",
+          "const": "warn"
+        },
+        {
+          "description": "The record fails as non-retryable and is not written.",
+          "type": "string",
+          "const": "fail"
         }
       ]
     },
@@ -3596,6 +3615,18 @@
           "description": "(Consumer only) Selects whether WebSocket routes run directly or through the routed pipeline.",
           "$ref": "#/$defs/WebSocketExecutionMode",
           "default": "auto"
+        },
+        "tls": {
+          "description": "TLS: a consumer listens with `cert_file` and `key_file`; a publisher uses it for a `wss://` URL.",
+          "$ref": "#/$defs/TlsConfig",
+          "default": {
+            "required": false,
+            "ca_file": null,
+            "cert_file": null,
+            "key_file": null,
+            "cert_password": null,
+            "accept_invalid_certs": false
+          }
         }
       },
       "additionalProperties": false,

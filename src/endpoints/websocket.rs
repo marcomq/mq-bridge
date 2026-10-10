@@ -3,7 +3,7 @@
 //  Licensed under MIT OR Apache-2.0, see LICENSE file for more details
 //  git clone https://github.com/marcomq/mq-bridge
 
-use crate::models::WebSocketConfig;
+use crate::models::{TlsConfig, WebSocketConfig};
 use crate::support::redact::url_password;
 use crate::traits::{
     BoxFuture, CommitFunc, ConsumerError, Handled, Handler, MessageConsumer, MessageDisposition,
@@ -16,10 +16,14 @@ use futures::{SinkExt, StreamExt};
 use std::any::Any;
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context as TaskContext, Poll};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
 use tokio::sync::watch;
-use tokio_websockets::{ClientBuilder, Message, ServerBuilder, WebSocketStream};
+use tokio_rustls::TlsAcceptor;
+use tokio_websockets::{ClientBuilder, Connector, Message, ServerBuilder, WebSocketStream};
 use tracing::{debug, trace, warn};
 use uuid::Uuid;
 
@@ -28,6 +32,8 @@ type WebSocketResponseTx = tokio::sync::mpsc::Sender<Message>;
 type ClientWebSocketStream = WebSocketStream<tokio_websockets::MaybeTlsStream<TcpStream>>;
 
 const DEFAULT_WEBSOCKET_LISTEN_BACKLOG: u32 = 4096;
+/// How long a client may take to send its upgrade request.
+const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const WEBSOCKET_REUSEPORT_ENV: &str = "MQ_BRIDGE_WEBSOCKET_REUSEPORT";
 const WEBSOCKET_ACCEPT_WORKERS_ENV: &str = "MQ_BRIDGE_WEBSOCKET_ACCEPT_WORKERS";
 
@@ -131,6 +137,81 @@ fn bind_websocket_listeners(
     Ok((listeners, bound_addr))
 }
 
+/// An accepted connection, in the clear or behind TLS.
+enum ServerStream {
+    Plain(TcpStream),
+    Tls(Box<tokio_rustls::server::TlsStream<TcpStream>>),
+}
+
+impl AsyncRead for ServerStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            Self::Plain(stream) => Pin::new(stream).poll_read(cx, buf),
+            Self::Tls(stream) => Pin::new(stream).poll_read(cx, buf),
+        }
+    }
+}
+
+impl AsyncWrite for ServerStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        match self.get_mut() {
+            Self::Plain(stream) => Pin::new(stream).poll_write(cx, buf),
+            Self::Tls(stream) => Pin::new(stream).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            Self::Plain(stream) => Pin::new(stream).poll_flush(cx),
+            Self::Tls(stream) => Pin::new(stream).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            Self::Plain(stream) => Pin::new(stream).poll_shutdown(cx),
+            Self::Tls(stream) => Pin::new(stream).poll_shutdown(cx),
+        }
+    }
+
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        bufs: &[std::io::IoSlice<'_>],
+    ) -> Poll<std::io::Result<usize>> {
+        match self.get_mut() {
+            Self::Plain(stream) => Pin::new(stream).poll_write_vectored(cx, bufs),
+            Self::Tls(stream) => Pin::new(stream).poll_write_vectored(cx, bufs),
+        }
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        match self {
+            Self::Plain(stream) => stream.is_write_vectored(),
+            Self::Tls(stream) => stream.is_write_vectored(),
+        }
+    }
+}
+
+/// The acceptor of a listener with `tls.required`, built from its certificate and key.
+fn tls_acceptor(config: &WebSocketConfig) -> anyhow::Result<Option<TlsAcceptor>> {
+    if !config.tls.required {
+        return Ok(None);
+    }
+    let mut server = crate::support::tls::server_config(&config.tls)
+        .context("WebSocket listener has tls.required set but its TLS config is not usable")?;
+    server.alpn_protocols = vec![b"http/1.1".to_vec()];
+    Ok(Some(TlsAcceptor::from(Arc::new(server))))
+}
+
 pub struct WebSocketConsumer {
     request_rx: tokio::sync::mpsc::Receiver<WebSocketSourceMessage>,
     shutdown_tx: watch::Sender<bool>,
@@ -148,6 +229,7 @@ impl WebSocketConsumer {
             .url
             .parse()
             .with_context(|| format!("Invalid listen address: {}", config.url))?;
+        let tls = tls_acceptor(config)?;
         let (listeners, bound_addr) = bind_websocket_listeners(listen_addr, config.backlog)?;
         let path = config.path.as_deref().map(normalize_websocket_path);
         let message_id_header = config
@@ -162,16 +244,14 @@ impl WebSocketConsumer {
                 listener,
                 request_tx.clone(),
                 shutdown_rx.clone(),
+                tls.clone(),
                 path.clone(),
                 message_id_header.clone(),
             );
         }
 
-        let url = if let Some(path) = path {
-            format!("ws://{}{}", bound_addr, path)
-        } else {
-            format!("ws://{}", bound_addr)
-        };
+        let scheme = if tls.is_some() { "wss" } else { "ws" };
+        let url = format!("{scheme}://{bound_addr}{}", path.as_deref().unwrap_or(""));
 
         Ok(Self {
             request_rx,
@@ -200,13 +280,26 @@ impl Drop for WebSocketConsumer {
 
 pub struct WebSocketPublisher {
     url: String,
+    tls: TlsConfig,
     single_stream: tokio::sync::Mutex<Option<ClientWebSocketStream>>,
 }
 
 impl WebSocketPublisher {
+    /// A publisher for `config`, refusing `tls.required` on a URL that is not `wss://`.
+    pub fn try_new(config: &WebSocketConfig) -> anyhow::Result<Self> {
+        if config.tls.required && !config.url.starts_with("wss://") {
+            anyhow::bail!(
+                "WebSocket output '{}' has tls.required set but not a wss:// URL",
+                url_password(&config.url)
+            );
+        }
+        Ok(Self::new(config))
+    }
+
     pub fn new(config: &WebSocketConfig) -> Self {
         Self {
             url: config.url.clone(),
+            tls: config.tls.clone(),
             single_stream: tokio::sync::Mutex::new(None),
         }
     }
@@ -217,7 +310,16 @@ impl WebSocketPublisher {
             .parse()
             .with_context(|| format!("Invalid WebSocket URL '{}'", url_password(&self.url)))
             .map_err(PublisherError::Connection)?;
+        let connector = if self.url.starts_with("wss://") {
+            let client = crate::support::tls::client_config(&self.tls)
+                .context("WebSocket TLS config is not usable")
+                .map_err(PublisherError::Connection)?;
+            Connector::Rustls(tokio_rustls::TlsConnector::from(Arc::new(client)))
+        } else {
+            Connector::Plain
+        };
         let (stream, _) = ClientBuilder::from_uri(uri)
+            .connector(&connector)
             .connect()
             .await
             .with_context(|| {
@@ -268,6 +370,7 @@ fn spawn_accept_loop(
     listener: TcpListener,
     request_tx: tokio::sync::mpsc::Sender<WebSocketSourceMessage>,
     mut shutdown_rx: watch::Receiver<bool>,
+    tls: Option<TlsAcceptor>,
     expected_path: Option<String>,
     message_id_header: String,
 ) {
@@ -290,6 +393,7 @@ fn spawn_accept_loop(
                     let _ = stream.set_nodelay(true);
 
                     let request_tx = request_tx.clone();
+                    let tls = tls.clone();
                     let expected_path = expected_path.clone();
                     let message_id_header = message_id_header.clone();
                     tokio::spawn(async move {
@@ -297,6 +401,7 @@ fn spawn_accept_loop(
                             stream,
                             peer_addr,
                             request_tx,
+                            tls,
                             expected_path,
                             message_id_header,
                         )
@@ -315,11 +420,12 @@ async fn handle_routed_connection(
     stream: TcpStream,
     peer_addr: SocketAddr,
     request_tx: tokio::sync::mpsc::Sender<WebSocketSourceMessage>,
+    tls: Option<TlsAcceptor>,
     expected_path: Option<String>,
     message_id_header: String,
 ) -> anyhow::Result<()> {
     let Some((ws_stream, metadata)) =
-        accept_websocket_connection(stream, expected_path, message_id_header).await?
+        accept_websocket_connection(stream, tls, expected_path, message_id_header).await?
     else {
         return Ok(());
     };
@@ -367,6 +473,7 @@ pub(crate) async fn run_direct_response_route(
         .url
         .parse()
         .with_context(|| format!("Invalid listen address: {}", config.url))?;
+    let tls = tls_acceptor(&config)?;
     let (listeners, _) = bind_websocket_listeners(listen_addr, config.backlog)?;
     let expected_path = config.path.as_deref().map(normalize_websocket_path);
     let message_id_header = config
@@ -432,6 +539,7 @@ pub(crate) async fn run_direct_response_route(
                     Ok(parts) => parts,
                     Err(_) => break,
                 };
+                let tls = tls.clone();
                 let expected_path = expected_path.clone();
                 let message_id_header = message_id_header.clone();
                 let handler = handler.clone();
@@ -440,6 +548,7 @@ pub(crate) async fn run_direct_response_route(
                     if let Err(error) = handle_direct_connection(
                         stream,
                         peer_addr,
+                        tls,
                         expected_path,
                         message_id_header,
                         handler,
@@ -466,12 +575,13 @@ pub(crate) async fn run_direct_response_route(
 async fn handle_direct_connection(
     stream: TcpStream,
     peer_addr: SocketAddr,
+    tls: Option<TlsAcceptor>,
     expected_path: Option<String>,
     message_id_header: String,
     handler: Option<Arc<dyn Handler>>,
 ) -> anyhow::Result<()> {
     let Some((mut ws_stream, metadata)) =
-        accept_websocket_connection(stream, expected_path, message_id_header).await?
+        accept_websocket_connection(stream, tls, expected_path, message_id_header).await?
     else {
         return Ok(());
     };
@@ -575,21 +685,43 @@ async fn respond_not_found(stream: &mut TcpStream) {
 }
 
 async fn accept_websocket_connection(
-    mut stream: TcpStream,
+    stream: TcpStream,
+    tls: Option<TlsAcceptor>,
     expected_path: Option<String>,
     message_id_header: String,
-) -> anyhow::Result<Option<(WebSocketStream<TcpStream>, HandshakeMetadata)>> {
-    // If a specific path is required, peek the HTTP request line and reject a
-    // mismatch with a real 404 before completing the upgrade handshake. `accept`
-    // below re-reads the same bytes, so peeking does not consume the request.
-    if let Some(expected) = expected_path.as_deref() {
-        if let Some(requested) = peek_request_path(&stream).await? {
-            if normalize_websocket_path(&requested) != expected {
-                respond_not_found(&mut stream).await;
-                return Ok(None);
+) -> anyhow::Result<Option<(WebSocketStream<ServerStream>, HandshakeMetadata)>> {
+    tokio::time::timeout(
+        HANDSHAKE_TIMEOUT,
+        accept_websocket_handshake(stream, tls, expected_path, message_id_header),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("WebSocket handshake timed out"))?
+}
+
+async fn accept_websocket_handshake(
+    mut stream: TcpStream,
+    tls: Option<TlsAcceptor>,
+    expected_path: Option<String>,
+    message_id_header: String,
+) -> anyhow::Result<Option<(WebSocketStream<ServerStream>, HandshakeMetadata)>> {
+    let stream = if let Some(acceptor) = tls {
+        // The request line is encrypted, so a wrong path is closed after the upgrade.
+        let stream = acceptor.accept(stream).await.context("TLS handshake")?;
+        ServerStream::Tls(Box::new(stream))
+    } else {
+        // If a specific path is required, peek the HTTP request line and reject a
+        // mismatch with a real 404 before completing the upgrade handshake. `accept`
+        // below re-reads the same bytes, so peeking does not consume the request.
+        if let Some(expected) = expected_path.as_deref() {
+            if let Some(requested) = peek_request_path(&stream).await? {
+                if normalize_websocket_path(&requested) != expected {
+                    respond_not_found(&mut stream).await;
+                    return Ok(None);
+                }
             }
         }
-    }
+        ServerStream::Plain(stream)
+    };
 
     let (request, mut ws_stream) = ServerBuilder::new().accept(stream).await?;
     let actual_path = normalize_websocket_path(request.uri().path());
@@ -814,6 +946,119 @@ impl MessagePublisher for WebSocketPublisher {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn a_client_that_never_sends_its_handshake_is_dropped() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _silent_client = TcpStream::connect(addr).await.unwrap();
+        let (stream, _) = listener.accept().await.unwrap();
+
+        let accepted = tokio::time::timeout(
+            HANDSHAKE_TIMEOUT * 2,
+            accept_websocket_connection(stream, None, None, "message-id".to_string()),
+        )
+        .await
+        .expect("the handshake must not wait for ever");
+        let error = accepted.err().expect("a silent client is an error");
+        assert!(error.to_string().contains("handshake"), "got: {error:#}");
+    }
+
+    /// A self-signed certificate for 127.0.0.1, as (directory, cert path, key path).
+    fn localhost_certificate() -> (tempfile::TempDir, String, String) {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let generated = rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_string()]).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let cert = dir.path().join("cert.pem");
+        let key = dir.path().join("key.pem");
+        std::fs::write(&cert, generated.cert.pem()).unwrap();
+        std::fs::write(&key, generated.signing_key.serialize_pem()).unwrap();
+        (
+            dir,
+            cert.to_string_lossy().into_owned(),
+            key.to_string_lossy().into_owned(),
+        )
+    }
+
+    fn tls_listener_config(cert: &str, key: &str) -> WebSocketConfig {
+        WebSocketConfig::new("127.0.0.1:0")
+            .with_path("/secure")
+            .with_tls(TlsConfig::new().with_client_cert(cert, key))
+    }
+
+    #[tokio::test]
+    async fn a_listener_with_tls_takes_a_wss_publisher_that_trusts_its_certificate() {
+        let (_dir, cert, key) = localhost_certificate();
+        let mut consumer = WebSocketConsumer::new(&tls_listener_config(&cert, &key))
+            .await
+            .expect("consumer should be created");
+        assert!(consumer.url().starts_with("wss://"), "{}", consumer.url());
+
+        let publisher = WebSocketPublisher::new(
+            &WebSocketConfig::new(consumer.url().to_string())
+                .with_tls(TlsConfig::new().with_ca_file(cert.clone())),
+        );
+        publisher
+            .send(CanonicalMessage::from_vec("secret"))
+            .await
+            .expect("publisher should send over TLS");
+
+        let batch = consumer.receive_batch(1).await.expect("receives");
+        assert_eq!(batch.messages[0].get_payload_str(), "secret");
+    }
+
+    #[tokio::test]
+    async fn a_wss_publisher_refuses_a_certificate_it_does_not_trust() {
+        let (_dir, cert, key) = localhost_certificate();
+        let consumer = WebSocketConsumer::new(&tls_listener_config(&cert, &key))
+            .await
+            .expect("consumer should be created");
+
+        // No `ca_file`: only the public roots are trusted.
+        let publisher = WebSocketPublisher::new(&WebSocketConfig::new(consumer.url().to_string()));
+        let error = publisher
+            .send(CanonicalMessage::from_vec("secret"))
+            .await
+            .expect_err("an unknown certificate must not be accepted");
+        assert!(matches!(error, PublisherError::Connection(_)), "{error:?}");
+    }
+
+    #[tokio::test]
+    async fn a_tls_listener_does_not_answer_a_plain_client() {
+        let (_dir, cert, key) = localhost_certificate();
+        let consumer = WebSocketConsumer::new(&tls_listener_config(&cert, &key))
+            .await
+            .expect("consumer should be created");
+
+        let plain_url = consumer.url().replacen("wss://", "ws://", 1);
+        let publisher = WebSocketPublisher::new(&WebSocketConfig::new(plain_url));
+        publisher
+            .send(CanonicalMessage::from_vec("clear"))
+            .await
+            .expect_err("a plain client must not get through a TLS listener");
+    }
+
+    #[test]
+    fn a_publisher_with_tls_required_refuses_a_ws_url() {
+        let config =
+            WebSocketConfig::new("ws://127.0.0.1:9").with_tls(TlsConfig::new().with_required(true));
+        let error = match WebSocketPublisher::try_new(&config) {
+            Ok(_) => panic!("tls.required with a ws:// URL must not build"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("tls.required"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_tls_listener_without_a_certificate_does_not_start() {
+        let config =
+            WebSocketConfig::new("127.0.0.1:0").with_tls(TlsConfig::new().with_required(true));
+        let error = match WebSocketConsumer::new(&config).await {
+            Ok(_) => panic!("tls.required without a certificate must not listen"),
+            Err(error) => format!("{error:#}"),
+        };
+        assert!(error.contains("cert_file"), "{error}");
+    }
 
     #[tokio::test]
     async fn test_websocket_consumer_publisher_integration() {

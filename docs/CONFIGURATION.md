@@ -251,6 +251,35 @@ tls:
   accept_invalid_certs: false      # NEVER set true in production
 ```
 
+Which endpoint has a `tls` block, and how each one authenticates, is in the last table of
+[CAPABILITIES.md](CAPABILITIES.md#encryption-and-authentication).
+
+**TLS through the URL.** For several endpoints the URL can ask for TLS on its own, and the
+`tls` block is a shorter way to write the same thing and a place for secrets such as
+`cert_password`. Use one of the two for a given setting, not both:
+
+| Endpoint | In the URL | Notes |
+|---|---|---|
+| `mongodb` | `mongodb://host/?tls=true&tlsCAFile=/ca.pem&tlsCertificateKeyFile=/client.pem`, or `mongodb+srv://` | Every driver option works. With `tls.required` the `tls` block replaces the TLS options of the URL. `tls.key_file` is ignored: the key belongs in `cert_file`. |
+| `sqlx`, `postgres_cdc` (Postgres) | `?sslmode=verify-full&sslrootcert=/ca.pem` | `tls.required` adds `sslmode=verify-full`, or `require` with `accept_invalid_certs`. The default `sslmode=prefer` falls back to plain text. |
+| `sqlx` (MySQL, MariaDB) | `?ssl-mode=VERIFY_IDENTITY&ssl-ca=/ca.pem&ssl-cert=/client.pem&ssl-key=/client.key` | `tls.required` with a `ca_file` gives `VERIFY_CA`: the chain is checked, the host name is not. For a host name check with a private CA, leave `tls.required` off and use the URL shown. `tls.cert_file` and `tls.key_file` are ignored here. |
+| `redis_streams` | `rediss://host:6379` | No `tls` block. The server certificate is checked against the public roots. |
+| `amqp` | `amqps://host:5671` | The `tls` block adds a private CA and a client identity. `accept_invalid_certs` is ignored. |
+| `mqtt` | `mqtts://host:8883` or `ssl://host:8883` | Same as `tls.required: true`. |
+| `nats` | `tls://host:4222` | |
+| `http`, `http_bulk`, `clickhouse` | `https://` | `tls.required: true` with an `http://` URL is refused by `http` and `http_bulk`. |
+| `grpc` | – | TLS is set up by the `tls` block only: use `tls.required: true`. |
+| `websocket` | `wss://` | A listener takes its certificate from the `tls` block. |
+
+**What is logged as a warning at start:**
+
+- A password or token that would cross the network without TLS, for `amqp`, `mqtt`, `nats`,
+  `mongodb`, `redis_streams`, `sqlx`, `http`, `http_bulk` and `clickhouse`. A server on
+  `localhost` or a loopback address is exempt. For `sqlx` only an enforcing mode in the URL
+  counts as TLS (`sslmode=require` or stricter, `ssl-mode=REQUIRED` or stricter).
+- `tls.accept_invalid_certs: true`, on every endpoint that honours it. `amqp` warns that it
+  ignores the setting; a `grpc` client refuses it.
+
 **Hardening checklist (e.g. for PCI-DSS Req 4.2.1):**
 
 1. **Enable TLS on every endpoint carrying sensitive data** (`required: true`) and supply
@@ -288,6 +317,19 @@ tls:
   version on the broker/server side, which is the side that accepts the connection.
 - Kafka and IBM MQ use native TLS stacks, so a library-wide version policy cannot be
   applied to them — configure their minimum TLS version on the broker.
+- **Listeners.** `http` has `basic_auth` and mutual TLS (`tls.ca_file`). `websocket` and a
+  `grpc` server have mutual TLS only; without it, bind them to a trusted network or put a
+  proxy in front. The `websocket` listener has no limit on the number of connections. The
+  `grpc` server always registers the reflection service, so its service list is public to
+  whoever can connect.
+- **Memory bounds.** An `http` listener accepts up to `max_body_bytes` per request (default
+  256 MB); with many connections that is the bound on memory, so lower it for a public
+  listener. Responses that `http_bulk` and `clickhouse` read from their configured server
+  are not limited in size.
+- **`Debug` output of a config shows passwords.** The engine does not print configs that
+  way, and its own log lines and errors blank the password of a URL. Rust code that logs a
+  config struct with `{:?}` prints `password`, `token` and `cert_password` in the clear.
+- `zeromq` has no encryption and no authentication. Use it on a trusted network only.
 
 ### HTTP Consumer Fast Path
 
@@ -471,6 +513,17 @@ not enforced, but an unpadded `{seq}` warns: chunk 10 sorts before chunk 2. The 
 must be followed by something that is not a digit: `{seq:09}_{timestamp}` is accepted,
 `{seq:09}{timestamp}` is rejected, because the two numbers could not be told apart.
 
+The sequence is read from the chunks on disk, so a producer that opens a **fully drained**
+spool starts at 0 again and chunk names repeat. Two setups are affected:
+
+- A reader with `drain_on_read: false` remembers the names it has read and skips a new chunk
+  with an old name. That chunk is never delivered to it.
+- `mqb.src.spool_chunk` (with `source_metadata: true`) repeats across producer runs, so a
+  `deduplication` keyed on it takes new messages for duplicates.
+
+For both, add `{timestamp}` to the pattern, as in `{seq:09}_{timestamp}`: names are then
+unique across runs. The default consumer (drain on read, no `source_metadata`) is not affected.
+
 `payload_extension` and `metadata_extension` must also differ, on both sides — a consumer
 whose two extensions match would read every sidecar as a payload.
 
@@ -504,7 +557,11 @@ separate signal — the `done_file` sentinel:
     exhausted source, or a `--drain` that emptied it) **and** every chunk the producer
     accepted reached the disk. A route that is shut down, that fails, or that reconnects
     writes nothing, so a `stop_on_done` consumer keeps waiting for the production that did
-    not finish. A *continuously running* producer never reaches a natural end, so `success`
+    not finish. A chunk write that failed counts as written once the same message (same id
+    and payload) is written later, as a `retry` middleware does; a message that went to a
+    `dlq` or was dropped keeps the sentinel back. Up to 10,000 failed messages are tracked;
+    beyond that, and after a failed directory sync, the sentinel is not written. A
+    *continuously running* producer never reaches a natural end, so `success`
     on one of those means "never" in practice — use `end` there.
   - `end` is the loose reading: nothing more is coming from here, whatever the reason. It
     says nothing about whether everything worked, so a consumer will treat a truncated

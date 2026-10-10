@@ -94,9 +94,12 @@ pub(crate) async fn build_sql_state_store(
     table: String,
 ) -> anyhow::Result<Arc<dyn StateStore>> {
     sqlx::any::install_default_drivers();
-    let pool = AnyPool::connect(url)
-        .await
-        .with_context(|| format!("Failed to connect aggregate store at '{url}'"))?;
+    let pool = AnyPool::connect(url).await.with_context(|| {
+        format!(
+            "Failed to connect aggregate store at '{}'",
+            crate::support::redact::url_password(url)
+        )
+    })?;
     let driver_name = pool.acquire().await?.backend_name().to_string();
     if !matches!(driver_name.as_str(), "PostgreSQL" | "SQLite") {
         return Err(anyhow!(

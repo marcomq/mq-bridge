@@ -4255,6 +4255,102 @@ async fn test_file_csv_flattens_nested_objects() {
     );
 }
 
+/// FILE-12: with `on_mismatch: fail` a record that does not fit the columns is not written.
+#[tokio::test]
+async fn test_file_csv_strict_mode_fails_records_that_differ_from_the_columns() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("strict.csv");
+    let strict = CsvConfig {
+        on_mismatch: crate::models::CsvMismatch::Fail,
+        ..Default::default()
+    };
+    let sink = FilePublisher::new(&csv_dialect_config(&path, strict.clone()))
+        .await
+        .unwrap();
+    let sent = sink
+        .send_batch(vec![
+            crate::CanonicalMessage::from(r#"{"id":1,"name":"a"}"#),
+            crate::CanonicalMessage::from(r#"{"id":2}"#),
+            crate::CanonicalMessage::from(r#"{"id":3,"name":"c","extra":true}"#),
+            crate::CanonicalMessage::from(r#"{"name":"e","id":5}"#),
+        ])
+        .await
+        .unwrap();
+    let crate::outcomes::SentBatch::Partial { failed, .. } = sent else {
+        panic!("two records should have failed");
+    };
+    assert_eq!(failed.len(), 2);
+    for (_, error) in &failed {
+        assert!(
+            matches!(error, crate::traits::PublisherError::NonRetryable(_)),
+            "{error}"
+        );
+        assert!(error.to_string().contains("on_mismatch"), "{error}");
+    }
+    sink.flush().await.unwrap();
+    assert_eq!(
+        tokio::fs::read_to_string(&path).await.unwrap(),
+        "id,name\n1,a\n5,e\n"
+    );
+
+    // Configured `columns` stay a projection: extra keys are fine, a missing one is not.
+    let path = dir.path().join("projected.csv");
+    let projected = CsvConfig {
+        columns: vec!["id".to_string(), "name".to_string()],
+        ..strict
+    };
+    let sink = FilePublisher::new(&csv_dialect_config(&path, projected))
+        .await
+        .unwrap();
+    let sent = sink
+        .send_batch(vec![
+            crate::CanonicalMessage::from(r#"{"id":1}"#),
+            crate::CanonicalMessage::from(r#"{"id":2,"name":"b","extra":true}"#),
+        ])
+        .await
+        .unwrap();
+    let crate::outcomes::SentBatch::Partial { failed, .. } = sent else {
+        panic!("the first record should have failed");
+    };
+    assert_eq!(failed.len(), 1);
+    sink.flush().await.unwrap();
+    assert_eq!(
+        tokio::fs::read_to_string(&path).await.unwrap(),
+        "id,name\n2,b\n"
+    );
+}
+
+/// FILE-12: a header that cannot be read fails the write instead of guessing the columns.
+#[cfg(unix)]
+#[tokio::test]
+async fn test_file_csv_append_fails_when_the_existing_header_is_unreadable() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("broken.csv");
+    use std::os::unix::fs::PermissionsExt;
+    let existing = "id,name\n";
+    tokio::fs::write(&path, existing).await.unwrap();
+    // Write-only: appending works, reading the header back does not.
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o200)).unwrap();
+    if std::fs::File::open(&path).is_ok() {
+        return; // root reads anything
+    }
+
+    let sink = FilePublisher::new(&csv_dialect_config(&path, CsvConfig::default()))
+        .await
+        .unwrap();
+    let error = sink
+        .send_batch(vec![crate::CanonicalMessage::from(r#"{"other":1}"#)])
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, crate::traits::PublisherError::Retryable(_)),
+        "{error}"
+    );
+    assert!(error.to_string().contains("CSV header"), "{error}");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(tokio::fs::read_to_string(&path).await.unwrap(), existing);
+}
+
 #[tokio::test]
 async fn test_file_csv_rejects_ambiguous_dialects() {
     let dir = tempdir().unwrap();

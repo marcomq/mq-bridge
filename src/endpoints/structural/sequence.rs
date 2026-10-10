@@ -68,6 +68,8 @@ pub struct SequenceConsumer {
     /// The route's own drain intent, forwarded only to the last phase.
     exit_on_empty: bool,
     marker: Option<Arc<dyn CheckpointStore>>,
+    /// The endpoint types in order, stored with the marker to detect a changed list.
+    shape: String,
     unsettled: Arc<Unsettled>,
     settle_timeout: Duration,
     /// A phase ended with deliveries unconfirmed: the marker is not advanced any more.
@@ -111,8 +113,16 @@ impl SequenceConsumer {
             (None, None) => None,
         };
 
+        let shape = config
+            .endpoints
+            .iter()
+            .map(|endpoint| endpoint.endpoint_type.name())
+            .collect::<Vec<_>>()
+            .join(",");
         let phase = match &marker {
-            Some(store) => Self::load_phase(store.as_ref(), config.endpoints.len()).await?,
+            Some(store) => Self::load_phase(store.as_ref(), config.endpoints.len(), &shape)
+                .await
+                .map_err(|e| anyhow!("[route:{route_name}] {e}"))?,
             None => 0,
         };
 
@@ -137,17 +147,33 @@ impl SequenceConsumer {
             current: None,
             exit_on_empty: false,
             marker,
+            shape,
             unsettled: Arc::default(),
             settle_timeout: SETTLE_TIMEOUT,
             unconfirmed: false,
         })
     }
 
-    async fn load_phase(store: &dyn CheckpointStore, len: usize) -> anyhow::Result<usize> {
+    async fn load_phase(
+        store: &dyn CheckpointStore,
+        len: usize,
+        shape: &str,
+    ) -> anyhow::Result<usize> {
         let Some(raw) = store.load().await? else {
             return Ok(0);
         };
-        match raw.trim().parse::<usize>() {
+        // `<phase> <endpoint types>`; a marker from before 1.0 holds the phase only.
+        let (phase, stored_shape) = match raw.trim().split_once(' ') {
+            Some((phase, stored)) => (phase, Some(stored)),
+            None => (raw.trim(), None),
+        };
+        if let Some(stored) = stored_shape.filter(|stored| *stored != shape) {
+            return Err(anyhow!(
+                "sequence: the stored phase marker belongs to the endpoints [{stored}], but \
+                 this sequence has [{shape}]. Use a new cursor_id or remove the marker."
+            ));
+        }
+        match phase.parse::<usize>() {
             // A marker written by a longer sequence must not index past this one.
             Ok(phase) if phase < len => Ok(phase),
             Ok(phase) => {
@@ -249,10 +275,11 @@ impl SequenceConsumer {
     /// them failed, so the phase is polled again for whatever its source redelivers.
     async fn phase_settled(&mut self) -> bool {
         loop {
-            let changed = self.unsettled.changed.notified();
+            let unsettled = self.unsettled.clone();
+            let changed = unsettled.changed.notified();
             tokio::pin!(changed);
             changed.as_mut().enable();
-            let open = self.unsettled.count.load(Ordering::Acquire);
+            let open = unsettled.count.load(Ordering::Acquire);
             if open == 0 {
                 break;
             }
@@ -267,6 +294,8 @@ impl SequenceConsumer {
                     "sequence: batches of the drained phase are still unsettled; handing off without advancing the phase marker"
                 );
                 self.unconfirmed = true;
+                // Late settlements of this phase must not count against the next one.
+                self.unsettled = Arc::default();
                 return true;
             }
         }
@@ -304,7 +333,7 @@ impl SequenceConsumer {
             "sequence: previous phase drained, handing off"
         );
         if let Some(store) = self.marker.as_ref().filter(|_| !self.unconfirmed) {
-            if let Err(e) = store.save(&self.phase.to_string()).await {
+            if let Err(e) = store.save(&format!("{} {}", self.phase, self.shape)).await {
                 // The handoff itself still holds: the next phase resumes from the position
                 // pinned before the run. Only restart-skipping is lost, so this is not fatal.
                 warn!(
@@ -474,6 +503,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_marker_of_another_endpoint_list_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("marker.json").to_str().unwrap().to_string();
+        let mut cfg = SequenceConfig {
+            endpoints: vec![
+                memory_endpoint("seq_shape_a"),
+                memory_endpoint("seq_shape_b"),
+            ],
+            cursor_id: Some("seq_shape".to_string()),
+            checkpoint_store: Some(store.clone()),
+        };
+
+        // A marker from before the endpoint types were stored is still read.
+        let old = crate::checkpoint::FileCheckpointStore::new(
+            store,
+            crate::checkpoint::checkpoint_key("sequence", "seq_shape"),
+        );
+        old.save("1").await.unwrap();
+        seed("seq_shape_a", &["a1"]).await;
+        seed("seq_shape_b", &["b1"]).await;
+        let mut resumed = SequenceConsumer::new("t", &cfg).await.unwrap();
+        assert_eq!(drain(&mut resumed, 1).await, ["b1"]);
+        drop(resumed);
+
+        old.save("1 memory,memory").await.unwrap();
+        assert!(SequenceConsumer::new("t", &cfg).await.is_ok());
+
+        cfg.endpoints[0] = Endpoint::null();
+        let err = SequenceConsumer::new("t", &cfg).await.err().unwrap();
+        assert!(err.to_string().contains("[memory,memory]"), "{err}");
+        assert!(err.to_string().contains("[null,memory]"), "{err}");
+    }
+
+    #[tokio::test]
     async fn the_phase_marker_skips_phases_already_done() {
         let dir = tempfile::tempdir().unwrap();
         let store = dir.path().join("marker.json").to_str().unwrap().to_string();
@@ -538,6 +601,30 @@ mod tests {
         seed("seq_settle_a", &["a2"]).await;
         let mut second = SequenceConsumer::new("t", &cfg).await.unwrap();
         assert_eq!(drain(&mut second, 1).await, ["a2"]);
+    }
+
+    /// A batch that outlived its phase's handoff does not count against the next phase.
+    #[tokio::test]
+    async fn a_timed_out_handoff_starts_the_next_phase_clean() {
+        seed("seq_late_a", &["a1"]).await;
+        seed("seq_late_b", &["b1"]).await;
+        let cfg = config(vec![
+            memory_endpoint("seq_late_a"),
+            memory_endpoint("seq_late_b"),
+            memory_endpoint("seq_late_c"),
+        ]);
+        let mut consumer = SequenceConsumer::new("t", &cfg).await.unwrap();
+        consumer.settle_timeout = Duration::from_millis(20);
+
+        let held = consumer.receive_batch(8).await.unwrap();
+        let next = consumer.receive_batch(8).await.unwrap();
+        assert_eq!(next.messages[0].get_payload_str(), "b1");
+        assert_eq!(consumer.unsettled.count.load(Ordering::Acquire), 1);
+
+        drop(next);
+        (held.commit)(vec![MessageDisposition::Nack]).await.unwrap();
+        assert_eq!(consumer.unsettled.count.load(Ordering::Acquire), 0);
+        assert!(consumer.unconfirmed);
     }
 
     #[tokio::test]

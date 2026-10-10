@@ -481,6 +481,7 @@ fn path_segments(url: &url::Url) -> Vec<String> {
 }
 
 fn parse_sqlx_url(spec: &str, scheme: &str) -> anyhow::Result<CheckpointBackend> {
+    let shown = crate::support::redact::url_password(spec);
     if scheme == "sqlite" {
         // SQLite URLs are file-path based; there is no path slot for a table name.
         return Ok(CheckpointBackend::Sqlx {
@@ -489,11 +490,11 @@ fn parse_sqlx_url(spec: &str, scheme: &str) -> anyhow::Result<CheckpointBackend>
         });
     }
     let mut url =
-        url::Url::parse(spec).with_context(|| format!("Invalid checkpoint URL '{spec}'"))?;
+        url::Url::parse(spec).with_context(|| format!("Invalid checkpoint URL '{shown}'"))?;
     let segments = path_segments(&url);
     match segments.len() {
         0 => Err(anyhow!(
-            "checkpoint_store '{spec}' is missing a database name (e.g. postgres://host/db/table)"
+            "checkpoint_store '{shown}' is missing a database name (e.g. postgres://host/db/table)"
         )),
         1 => Ok(CheckpointBackend::Sqlx {
             url: spec.to_string(),
@@ -511,12 +512,13 @@ fn parse_sqlx_url(spec: &str, scheme: &str) -> anyhow::Result<CheckpointBackend>
 }
 
 fn parse_mongo_url(spec: &str) -> anyhow::Result<CheckpointBackend> {
+    let shown = crate::support::redact::url_password(spec);
     let mut url =
-        url::Url::parse(spec).with_context(|| format!("Invalid checkpoint URL '{spec}'"))?;
+        url::Url::parse(spec).with_context(|| format!("Invalid checkpoint URL '{shown}'"))?;
     let segments = path_segments(&url);
     match segments.as_slice() {
         [] => Err(anyhow!(
-            "checkpoint_store '{spec}' is missing a database name (mongodb://host/db[/collection])"
+            "checkpoint_store '{shown}' is missing a database name (mongodb://host/db[/collection])"
         )),
         [db] => Ok(CheckpointBackend::Mongo {
             url: spec.to_string(),
@@ -532,7 +534,7 @@ fn parse_mongo_url(spec: &str) -> anyhow::Result<CheckpointBackend> {
             })
         }
         _ => Err(anyhow!(
-            "checkpoint_store '{spec}' has too many path segments (expected mongodb://host/db[/collection])"
+            "checkpoint_store '{shown}' has too many path segments (expected mongodb://host/db[/collection])"
         )),
     }
 }
@@ -564,7 +566,8 @@ pub async fn build_external_store(
             {
                 let _ = (table, source_name, cursor_id);
                 Err(anyhow!(
-                    "checkpoint_store '{url}' requires the 'sqlx' feature to be enabled"
+                    "checkpoint_store '{}' requires the 'sqlx' feature to be enabled",
+                    crate::support::redact::url_password(&url)
                 ))
             }
         }
@@ -588,7 +591,8 @@ pub async fn build_external_store(
             {
                 let _ = (database, collection, source_name, cursor_id);
                 Err(anyhow!(
-                    "checkpoint_store '{url}' requires the 'mongodb' feature to be enabled"
+                    "checkpoint_store '{}' requires the 'mongodb' feature to be enabled",
+                    crate::support::redact::url_password(&url)
                 ))
             }
         }
@@ -606,7 +610,8 @@ pub async fn build_external_store(
             {
                 let _ = (source_name, cursor_id);
                 Err(anyhow!(
-                    "checkpoint_store '{url}' requires the 'object-store' feature to be enabled"
+                    "checkpoint_store '{}' requires the 'object-store' feature to be enabled",
+                    crate::support::redact::url_password(&url)
                 ))
             }
         }
@@ -635,8 +640,12 @@ pub(crate) mod object_store_backend {
     /// normalization `AmazonS3Builder::from_env` does. Unrecognized keys are ignored. Bare
     /// `parse_url` reads no env at all, which would fall through to the EC2/GCE metadata service.
     pub(crate) fn build_store(url: &str) -> anyhow::Result<(Box<dyn ObjectStore>, ObjPath)> {
-        let parsed =
-            url::Url::parse(url).with_context(|| format!("Invalid object_store url '{url}'"))?;
+        let parsed = url::Url::parse(url).with_context(|| {
+            format!(
+                "Invalid object_store url '{}'",
+                crate::support::redact::url_password(url)
+            )
+        })?;
         // `vars_os`, not `vars`: a single non-UTF-8 env var would panic the latter.
         let env = std::env::vars_os().filter_map(|(k, v)| {
             Some((
@@ -644,8 +653,12 @@ pub(crate) mod object_store_backend {
                 v.into_string().ok()?,
             ))
         });
-        object_store::parse_url_opts(&parsed, env)
-            .with_context(|| format!("Failed to build object store for '{url}'"))
+        object_store::parse_url_opts(&parsed, env).with_context(|| {
+            format!(
+                "Failed to build object store for '{}'",
+                crate::support::redact::url_password(url)
+            )
+        })
     }
 
     struct ObjectStoreCheckpointStore {
@@ -762,6 +775,19 @@ pub(crate) mod object_store_backend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_rejected_checkpoint_url_does_not_show_its_password() {
+        for spec in [
+            "postgres://app:s3cret@db.internal",
+            "mongodb://app:s3cret@db.internal",
+        ] {
+            let error = parse_checkpoint_store(spec).expect_err("no database name");
+            let text = format!("{error:#}");
+            assert!(text.contains("app:***@db.internal"), "got: {text}");
+            assert!(!text.contains("s3cret"), "got: {text}");
+        }
+    }
 
     #[tokio::test]
     async fn file_store_round_trips_and_overwrites() {

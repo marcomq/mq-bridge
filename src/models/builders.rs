@@ -1071,6 +1071,7 @@ with_optional_setters!(HttpConfig { with_request_timeout_ms => request_timeout_m
 with_optional_string_setters!(HttpConfig { with_message_id_header => message_id_header });
 with_optional_string_setters!(WebSocketConfig { with_message_id_header => message_id_header });
 with_optional_setters!(WebSocketConfig { with_routed_queue_capacity => routed_queue_capacity: usize });
+with_value_setters!(WebSocketConfig { with_tls => tls: TlsConfig });
 
 with_value_setters!(IbmTlsConfig { with_required => required: bool, with_accept_invalid_certs => accept_invalid_certs: bool });
 with_optional_string_setters!(IbmTlsConfig { with_cipher_spec => cipher_spec, with_key_repository => key_repository, with_key_repository_password => key_repository_password });

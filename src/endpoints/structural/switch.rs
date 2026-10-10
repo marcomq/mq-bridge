@@ -3,6 +3,7 @@ use crate::CanonicalMessage;
 use async_trait::async_trait;
 use std::any::Any;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tracing::warn;
 
@@ -29,6 +30,8 @@ enum Routing {
 pub struct SwitchPublisher {
     routing: Routing,
     default: Option<Arc<dyn MessagePublisher>>,
+    /// Messages that matched no case while no `default` was set.
+    unmatched: AtomicU64,
 }
 
 impl SwitchPublisher {
@@ -43,6 +46,7 @@ impl SwitchPublisher {
                 cases,
             },
             default,
+            unmatched: AtomicU64::new(0),
         }
     }
 
@@ -58,6 +62,7 @@ impl SwitchPublisher {
         Self {
             routing: Routing::Predicate(cases),
             default,
+            unmatched: AtomicU64::new(0),
         }
     }
 
@@ -153,6 +158,7 @@ impl MessagePublisher for SwitchPublisher {
         if let Some(publisher) = self.get_publisher(&message)? {
             publisher.send(message).await
         } else {
+            self.unmatched.fetch_add(1, Ordering::Relaxed);
             warn!(
                 "Switch publisher dropped message with id {:032x}: {}.",
                 message.message_id,
@@ -200,6 +206,7 @@ impl MessagePublisher for SwitchPublisher {
             }
         }
         if dropped > 0 {
+            self.unmatched.fetch_add(dropped as u64, Ordering::Relaxed);
             warn!(
                 "Switch publisher dropped {dropped} messages: {}.",
                 self.dropped_reason()
@@ -249,18 +256,56 @@ impl MessagePublisher for SwitchPublisher {
         }
     }
 
-    /// Unhealthy if any destination is, as for `fanout`.
+    /// Unhealthy if any destination is, as for `fanout`. Each destination is listed with
+    /// its case, the cases in a stable order and `default` last. `unmatched` counts the
+    /// messages dropped for matching no case; it does not affect `healthy`.
     async fn status(&self) -> EndpointStatus {
-        let results = futures::future::join_all(self.destinations().map(|p| p.status())).await;
+        let mut labelled: Vec<(serde_json::Value, &Arc<dyn MessagePublisher>)> = match &self.routing
+        {
+            Routing::Lookup { cases, .. } => {
+                let mut cases: Vec<_> = cases.iter().collect();
+                cases.sort_unstable_by_key(|(key, _)| *key);
+                cases
+                    .into_iter()
+                    .map(|(key, publisher)| (serde_json::json!({ "case": key }), publisher))
+                    .collect()
+            }
+            #[cfg(feature = "filter")]
+            Routing::Predicate(cases) => cases
+                .iter()
+                .enumerate()
+                .map(|(index, (_, publisher))| {
+                    (
+                        serde_json::json!({ "case": format!("when[{index}]") }),
+                        publisher,
+                    )
+                })
+                .collect(),
+        };
+        if let Some(default) = &self.default {
+            labelled.push((serde_json::json!({ "default": true }), default));
+        }
+        let results = futures::future::join_all(labelled.iter().map(|(_, p)| p.status())).await;
         let healthy = results.iter().all(|status| status.healthy);
         let error = results
             .iter()
             .find(|status| !status.healthy)
             .and_then(|status| status.error.clone());
+        let destinations: Vec<_> = labelled
+            .into_iter()
+            .zip(&results)
+            .map(|((mut entry, _), status)| {
+                entry["status"] = serde_json::json!(status);
+                entry
+            })
+            .collect();
         EndpointStatus {
             healthy,
             error,
-            details: serde_json::json!({ "destinations": results }),
+            details: serde_json::json!({
+                "destinations": destinations,
+                "unmatched": self.unmatched.load(Ordering::Relaxed),
+            }),
             ..Default::default()
         }
     }
@@ -279,8 +324,7 @@ impl MessagePublisher for SwitchPublisher {
 mod tests {
     use super::*;
     use crate::endpoints::memory::MemoryPublisher;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
 
     struct Unhealthy;
 
@@ -323,6 +367,60 @@ mod tests {
         let status = switch.status().await;
         assert!(!status.healthy);
         assert_eq!(status.error.as_deref(), Some("down"));
+
+        let destinations = status.details["destinations"].as_array().unwrap();
+        assert_eq!(destinations[0]["case"], "A");
+        assert_eq!(destinations[0]["status"]["healthy"], true);
+        assert_eq!(destinations[1]["default"], true);
+        assert_eq!(destinations[1]["status"]["healthy"], false);
+    }
+
+    #[tokio::test]
+    async fn test_switch_status_lists_cases_in_key_order() {
+        let mut cases = HashMap::new();
+        for key in ["c", "a", "d", "b"] {
+            cases.insert(
+                key.to_string(),
+                Arc::new(Unhealthy) as Arc<dyn MessagePublisher>,
+            );
+        }
+        let status = SwitchPublisher::new("k".to_string(), cases, None)
+            .status()
+            .await;
+        let keys: Vec<_> = status.details["destinations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["case"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(keys, ["a", "b", "c", "d"]);
+    }
+
+    /// Unmatched messages are counted in the status without making the switch unhealthy.
+    #[tokio::test]
+    async fn test_switch_status_counts_unmatched_messages() {
+        let mut cases = HashMap::new();
+        cases.insert(
+            "A".to_string(),
+            Arc::new(RecordingPublisher::default()) as Arc<dyn MessagePublisher>,
+        );
+        let switch = SwitchPublisher::new("k".to_string(), cases, None);
+        assert_eq!(switch.status().await.details["unmatched"], 0);
+
+        switch.send(CanonicalMessage::from("single")).await.unwrap();
+        switch
+            .send_batch(vec![
+                CanonicalMessage::from("a").with_metadata_kv("k", "A"),
+                CanonicalMessage::from("b").with_metadata_kv("k", "B"),
+                CanonicalMessage::from("c"),
+            ])
+            .await
+            .unwrap();
+
+        let status = switch.status().await;
+        assert_eq!(status.details["unmatched"], 3);
+        assert!(status.healthy);
+        assert!(status.error.is_none());
     }
 
     #[tokio::test]

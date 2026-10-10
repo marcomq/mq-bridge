@@ -50,6 +50,12 @@ fn open_client(config: &RedisStreamsConfig) -> anyhow::Result<redis::Client> {
     // redis 1.3's ConnectionInfo has no public auth setter, so credentials are
     // injected into the URL's userinfo when provided as separate config fields.
     let url = url_with_credentials(config);
+    crate::support::tls_check::warn_plaintext_credentials(
+        "redis_streams",
+        &url,
+        false,
+        url.starts_with("rediss://"),
+    );
     let info = url
         .as_str()
         .into_connection_info()

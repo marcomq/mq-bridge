@@ -1803,6 +1803,15 @@ impl UiApp {
             ));
         }
         new_config.migrate_legacy_routes();
+        // A request that can never succeed: answered as invalid, before anything is stopped.
+        if matches!(
+            new_config.security_mode(),
+            ConfigSecurityMode::Balanced | ConfigSecurityMode::EnvTemporaryMessages
+        ) {
+            new_config
+                .check_secret_keys()
+                .map_err(|error| UpdateConfigError::Validation(error.to_string()))?;
+        }
         let consumers: Vec<crate::config::ConsumerConfig> = new_config
             .consumers
             .iter()
@@ -2112,7 +2121,10 @@ impl UiApp {
                         match &ctx.output {
                             ResolvedConsumerOutput::None => Ok(Handled::Ack),
                             ResolvedConsumerOutput::Publisher { endpoint, .. } => {
-                                if matches!(endpoint.endpoint_type, EndpointType::Null) {
+                                // A `null` output with middlewares still runs them.
+                                if matches!(endpoint.endpoint_type, EndpointType::Null)
+                                    && endpoint.middlewares.is_empty()
+                                {
                                     Ok(Handled::Ack)
                                 } else {
                                     Ok(Handled::Publish(msg))
@@ -2331,6 +2343,45 @@ mod tests {
 
         let _ = std::fs::remove_file(temp_path);
         clear_process_config_master_key();
+    }
+
+    #[tokio::test]
+    async fn update_config_reports_a_secret_key_clash_as_invalid() {
+        let initial_config = AppConfig {
+            config_security: Some(ConfigSecurity {
+                mode: ConfigSecurityMode::Balanced,
+            }),
+            ..Default::default()
+        };
+        let temp_path =
+            std::env::temp_dir().join(format!("mqb-ui-app-test-{}.yaml", Uuid::new_v4()));
+        let app = UiApp::new_with_secret_store_and_storage_hooks(
+            initial_config.clone(),
+            metrics_exporter_prometheus::PrometheusBuilder::new()
+                .build_recorder()
+                .handle(),
+            temp_path.to_string_lossy().to_string(),
+            Arc::new(NoopSecretStore),
+            sample_storage_security(&initial_config),
+            Arc::new(sample_storage_security),
+            Arc::new(|_| Ok(())),
+        )
+        .unwrap();
+
+        let mut next_config = initial_config;
+        for name in ["orders-http", "orders_http"] {
+            next_config.publishers.push(
+                serde_json::from_value(serde_json::json!({ "name": name, "endpoint": {} }))
+                    .unwrap(),
+            );
+        }
+
+        let error = app.update_config(next_config).await.unwrap_err();
+        assert!(
+            matches!(&error, UpdateConfigError::Validation(message) if message.contains("same secret key")),
+            "{error}"
+        );
+        assert!(!temp_path.exists());
     }
 
     #[tokio::test]

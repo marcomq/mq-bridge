@@ -379,6 +379,8 @@ export interface FileConfig {
   compression?: Compression;
   encryption?: EncryptionConfig | null;
   source_metadata?: boolean;
+  fsync?: FileFsync;
+  fsync_interval_ms?: number | null;
 }
 
 export type NameBy = "auto" | "source_position" | "write_time";
@@ -391,9 +393,14 @@ export interface CsvConfig {
   header?: boolean | null;
   columns?: string[];
   nested?: CsvNested;
+  on_mismatch?: CsvMismatch;
 }
 
 export type CsvNested = "flatten" | "json";
+
+export type CsvMismatch = "warn" | "fail";
+
+export type FileFsync = "off" | "batch" | "periodic";
 
 export interface DirSpoolConfig {
   path: string;
@@ -563,6 +570,7 @@ export interface WebSocketConfig {
   routed_queue_capacity?: number | null;
   backlog?: number | null;
   execution_mode?: WebSocketExecutionMode;
+  tls?: TlsConfig;
 }
 
 export type WebSocketExecutionMode = "auto" | "direct_only" | "routed";

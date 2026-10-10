@@ -16,6 +16,18 @@ fn sqlite_url(path: &std::path::Path) -> String {
 }
 
 #[test]
+fn only_an_enforcing_ssl_mode_counts_as_encrypted() {
+    let enforces = |url: &str| url_enforces_tls(&url::Url::parse(url).unwrap());
+    assert!(enforces("postgres://db/app?sslmode=verify-full"));
+    assert!(enforces("postgres://db/app?sslmode=require"));
+    assert!(enforces("mysql://db/app?ssl-mode=VERIFY_IDENTITY"));
+    assert!(enforces("mssql://db/app?encrypt=strict"));
+    assert!(!enforces("postgres://db/app"));
+    assert!(!enforces("postgres://db/app?sslmode=prefer"));
+    assert!(!enforces("mysql://db/app?ssl-mode=PREFERRED"));
+}
+
+#[test]
 fn copy_escape_text_escapes_control_chars() {
     assert_eq!(copy_escape_text("plain"), "plain");
     assert_eq!(copy_escape_text("a\tb\nc\r\\d"), "a\\tb\\nc\\r\\\\d");

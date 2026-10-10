@@ -358,6 +358,17 @@ fn build_sqlx_url_with_tls(config: &SqlxConfig) -> anyhow::Result<String> {
     }
 
     if config.tls.required {
+        crate::support::tls_check::warn_unverified("sqlx", config.tls.accept_invalid_certs);
+    } else if url.scheme() != "sqlite" {
+        crate::support::tls_check::warn_plaintext_credentials(
+            "sqlx",
+            url.as_str(),
+            false,
+            url_enforces_tls(&url),
+        );
+    }
+
+    if config.tls.required {
         let scheme = url.scheme().to_string();
         match scheme.as_str() {
             "postgres" | "postgresql" => {
@@ -396,6 +407,7 @@ fn build_sqlx_url_with_tls(config: &SqlxConfig) -> anyhow::Result<String> {
                     query_pairs.append_pair("ssl-mode", "REQUIRED");
                 } else if config.tls.ca_file.is_some() {
                     // Verify the chain against the configured CA.
+                    warn!("MySQL/MariaDB with tls.ca_file checks the certificate chain but not the host name (ssl-mode=VERIFY_CA). For a host name check, leave tls.required off and put ssl-mode=VERIFY_IDENTITY and ssl-ca in the URL.");
                     query_pairs.append_pair("ssl-mode", "VERIFY_CA");
                 } else {
                     // Verify the chain and server identity against the system trust store.
@@ -403,6 +415,9 @@ fn build_sqlx_url_with_tls(config: &SqlxConfig) -> anyhow::Result<String> {
                 }
                 if let Some(ca) = &config.tls.ca_file {
                     query_pairs.append_pair("ssl-ca", ca);
+                }
+                if config.tls.cert_file.is_some() || config.tls.key_file.is_some() {
+                    warn!("MySQL/MariaDB ignores tls.cert_file and tls.key_file; put ssl-cert and ssl-key in the URL for a client certificate.");
                 }
             }
             "mssql" | "sqlserver" => {
@@ -419,6 +434,21 @@ fn build_sqlx_url_with_tls(config: &SqlxConfig) -> anyhow::Result<String> {
     }
 
     Ok(url.to_string())
+}
+
+/// Whether the URL itself makes the driver refuse an unencrypted connection. The drivers'
+/// defaults (`sslmode=prefer`, `ssl-mode=PREFERRED`) fall back to plain text, so they do not count.
+fn url_enforces_tls(url: &url::Url) -> bool {
+    url.query_pairs().any(|(key, value)| {
+        let value = value.to_ascii_lowercase();
+        match key.to_ascii_lowercase().as_str() {
+            "sslmode" | "ssl-mode" | "ssl_mode" => {
+                value.starts_with("verify") || value.starts_with("require")
+            }
+            "encrypt" => value == "true" || value == "strict",
+            _ => false,
+        }
+    })
 }
 
 /// For a SQLite sink whose file does not exist and whose URL names no `mode`: the URL
@@ -2838,9 +2868,12 @@ pub(crate) async fn build_sql_checkpoint_store(
     cursor_id: &str,
 ) -> anyhow::Result<Arc<dyn crate::checkpoint::CheckpointStore>> {
     sqlx::any::install_default_drivers();
-    let pool = AnyPool::connect(url)
-        .await
-        .with_context(|| format!("Failed to connect checkpoint store at '{}'", url))?;
+    let pool = AnyPool::connect(url).await.with_context(|| {
+        format!(
+            "Failed to connect checkpoint store at '{}'",
+            crate::support::redact::url_password(url)
+        )
+    })?;
     let driver_name = {
         let conn = pool.acquire().await?;
         let name = conn.backend_name().to_string();

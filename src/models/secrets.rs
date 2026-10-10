@@ -642,6 +642,8 @@ impl SecretExtractor for HttpConfig {
 impl SecretExtractor for WebSocketConfig {
     fn extract_secrets(&mut self, prefix: &str, secrets: &mut HashMap<String, String>) {
         extract_sensitive_url(&mut self.url, prefix, "URL", secrets);
+        self.tls
+            .extract_secrets(&format!("{}__{}", prefix, "TLS"), secrets);
     }
 }
 

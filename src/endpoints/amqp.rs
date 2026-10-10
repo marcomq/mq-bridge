@@ -626,6 +626,18 @@ async fn create_amqp_connection(config: &AmqpConfig) -> anyhow::Result<Connectio
             .map_err(|_| anyhow!("Failed to set password on AMQP URL"))?;
     }
 
+    let encrypted = config.tls.required || url.scheme() == "amqps";
+    let has_password = url.password().is_some_and(|password| !password.is_empty());
+    crate::support::tls_check::warn_plaintext_credentials(
+        "amqp",
+        &config.url,
+        has_password,
+        encrypted,
+    );
+    if config.tls.accept_invalid_certs {
+        tracing::warn!("amqp ignores tls.accept_invalid_certs: the server certificate is always checked");
+    }
+
     if !url.query_pairs().any(|(k, _)| k == "heartbeat") {
         url.query_pairs_mut().append_pair("heartbeat", "15");
     }

@@ -512,6 +512,38 @@ fn csv_encode_message(
 
     // Configured `columns` are a projection: keys outside them are dropped on purpose.
     let has_extra_keys = !flattened && csv.columns.is_none() && row.len() > matched;
+    if csv.strict {
+        // A flattened row hides its key count, so its columns are compared by name.
+        let uncovered = || {
+            csv_columns(&msg.payload, csv.flatten)
+                .unwrap_or_else(|| row.sorted_keys())
+                .into_iter()
+                .find(|key| {
+                    !cols.iter().any(|col| {
+                        key == col
+                            || key
+                                .strip_prefix(col.as_str())
+                                .is_some_and(|rest| rest.starts_with('.'))
+                    })
+                })
+        };
+        let extra = if csv.columns.is_some() {
+            None
+        } else {
+            uncovered()
+        };
+        if matched < cols.len() || extra.is_some() {
+            return Err(invalid_data(match extra {
+                Some(key) => format!(
+                    "CSV payload has key '{key}', which is not a column (`on_mismatch: fail`)"
+                ),
+                None => format!(
+                    "CSV payload supplies {matched} of {} columns (`on_mismatch: fail`)",
+                    cols.len()
+                ),
+            }));
+        }
+    }
     if new_cols.is_none() && (matched < cols.len() || has_extra_keys) {
         // Keys the payload has beyond the ones the header covers are dropped silently, and
         // missing ones become empty fields; both mean the file's schema drifted. Logged
@@ -1166,22 +1198,20 @@ async fn write_finalized_file(path: &Path, body: &[u8]) -> Result<(), PublisherE
 
 impl FilePublisher {
     /// Columns of the header an existing CSV file already has, so appended rows line up
-    /// with it. `None` when it has none or it can't be read; the first payload's keys
-    /// then decide, as for a new file.
-    async fn existing_csv_header(&self) -> Option<Vec<String>> {
+    /// with it. `None` when it has none. A header that cannot be read fails the write:
+    /// guessing the columns from the first payload could append rows that do not match it.
+    async fn existing_csv_header(&self) -> Result<Option<Vec<String>>, PublisherError> {
         let this = self.clone();
         let read = tokio::task::spawn_blocking(move || this.read_csv_header_sync()).await;
-        match read {
-            Ok(Ok(columns)) => columns,
-            Ok(Err(e)) => {
-                warn!(path = %self.path, error = %e, "Could not read the existing CSV header; columns follow the first payload.");
-                None
-            }
-            Err(e) => {
-                warn!(path = %self.path, error = %e, "Reading the existing CSV header failed; columns follow the first payload.");
-                None
-            }
-        }
+        let error: anyhow::Error = match read {
+            Ok(Ok(columns)) => return Ok(columns),
+            Ok(Err(e)) => e.into(),
+            Err(e) => e.into(),
+        };
+        Err(PublisherError::Retryable(error.context(format!(
+            "Could not read the CSV header of '{}'",
+            self.path
+        ))))
     }
 
     fn read_csv_header_sync(&self) -> std::io::Result<Option<Vec<String>>> {
@@ -1516,7 +1546,7 @@ impl FilePublisher {
         };
         if let Some(hdr) = csv_header_guard.as_mut() {
             if hdr.is_none() && !file_is_empty && self.csv.reads_header_back() {
-                **hdr = self.existing_csv_header().await;
+                **hdr = self.existing_csv_header().await?;
             }
         }
         let mut wrote_csv_header = false;
@@ -1731,7 +1761,7 @@ impl MessagePublisher for FilePublisher {
         };
         if let Some(hdr) = csv_header_guard.as_mut() {
             if hdr.is_none() && pre_len.is_some_and(|len| len > 0) {
-                **hdr = self.existing_csv_header().await;
+                **hdr = self.existing_csv_header().await?;
             }
         }
         // Row buffer reused for every CSV record in this batch.
@@ -3620,6 +3650,7 @@ impl FileConsumer {
                                         file.rewind().await?;
                                         file.write_all(format!("{offset:020}").as_bytes()).await?;
                                         file.flush().await?;
+                                        file.sync_data().await?;
                                     }
                                     Ok(())
                                 })
