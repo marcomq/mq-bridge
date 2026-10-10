@@ -438,14 +438,17 @@ fn build_sqlx_url_with_tls(config: &SqlxConfig) -> anyhow::Result<String> {
 
 /// Whether the URL itself makes the driver refuse an unencrypted connection. The drivers'
 /// defaults (`sslmode=prefer`, `ssl-mode=PREFERRED`) fall back to plain text, so they do not count.
+/// An option only counts for the driver that reads it.
 fn url_enforces_tls(url: &url::Url) -> bool {
+    let scheme = url.scheme();
     url.query_pairs().any(|(key, value)| {
         let value = value.to_ascii_lowercase();
-        match key.to_ascii_lowercase().as_str() {
-            "sslmode" | "ssl-mode" | "ssl_mode" => {
-                value.starts_with("verify") || value.starts_with("require")
-            }
-            "encrypt" => value == "true" || value == "strict",
+        match (scheme, key.to_ascii_lowercase().as_str()) {
+            (
+                "postgres" | "postgresql" | "mysql" | "mariadb",
+                "sslmode" | "ssl-mode" | "ssl_mode",
+            ) => value.starts_with("verify") || value.starts_with("require"),
+            ("mssql" | "sqlserver", "encrypt") => value == "true" || value == "strict",
             _ => false,
         }
     })

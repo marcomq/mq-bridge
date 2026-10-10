@@ -25,6 +25,11 @@ fn only_an_enforcing_ssl_mode_counts_as_encrypted() {
     assert!(!enforces("postgres://db/app"));
     assert!(!enforces("postgres://db/app?sslmode=prefer"));
     assert!(!enforces("mysql://db/app?ssl-mode=PREFERRED"));
+    // An option another driver reads does not encrypt this one.
+    assert!(!enforces("postgres://db/app?encrypt=true"));
+    assert!(!enforces("mysql://db/app?encrypt=strict"));
+    assert!(!enforces("mssql://db/app?sslmode=require"));
+    assert!(!enforces("sqlserver://db/app?ssl-mode=VERIFY_IDENTITY"));
 }
 
 #[test]

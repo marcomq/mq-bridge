@@ -1186,6 +1186,8 @@ async fn build_tls_config(config: &MqttConfig) -> anyhow::Result<rustls::ClientC
         for cert in certs {
             root_cert_store.add(cert)?;
         }
+    } else {
+        root_cert_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     }
 
     let client_config_builder =

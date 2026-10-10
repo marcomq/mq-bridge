@@ -62,6 +62,8 @@ pub(crate) fn warn_plaintext_credentials(
 }
 
 /// Warns that `tls.accept_invalid_certs` turns off the check of the server certificate.
+// Not every single-feature build has a caller.
+#[allow(dead_code)]
 pub(crate) fn warn_unverified(endpoint: &str, accept_invalid_certs: bool) {
     if accept_invalid_certs {
         warn!("{endpoint} tls.accept_invalid_certs is set: the server certificate is not checked. Do not use it in production.");

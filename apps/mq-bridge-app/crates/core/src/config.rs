@@ -755,16 +755,19 @@ fn unknown_top_level_keys(raw: &serde_json::Value) -> Vec<String> {
         return Vec::new();
     };
     // In a bare single-route config every other key is a route option.
-    if !map.contains_key("routes") && map.contains_key("input") {
+    let has_routes = map.contains_key("routes");
+    if !has_routes && map.contains_key("input") {
         return Vec::new();
     }
+    // With a `routes:` map nothing is lifted, so a route beside it is ignored too.
     let mut keys: Vec<String> = map
         .iter()
         .filter(|(key, value)| {
             !app_level_fields().contains(key.as_str())
-                && !value
-                    .as_object()
-                    .is_some_and(|route| route.contains_key("input"))
+                && (has_routes
+                    || !value
+                        .as_object()
+                        .is_some_and(|route| route.contains_key("input")))
         })
         .map(|(key, _)| key.clone())
         .collect();
@@ -2675,8 +2678,9 @@ consumers: []
             "config": {"foo": "bar"},
             "route": [],
             "routes": {"r1": route.clone()},
+            "stray": route.clone(),
         });
-        assert_eq!(unknown_top_level_keys(&raw), ["config", "route"]);
+        assert_eq!(unknown_top_level_keys(&raw), ["config", "route", "stray"]);
 
         let named = serde_json::json!({"orders": route.clone(), "ui_addr": ""});
         assert!(unknown_top_level_keys(&named).is_empty());

@@ -952,3 +952,182 @@ fn mqtt_tls_delivers_only_from_clients_that_trust_the_broker() {
         "mqtt tls: what the subscriber received",
     );
 }
+
+/// Seeds through `trusted` and drains it again, after showing that neither
+/// `plain` nor `untrusting` can write to the same broker.
+#[cfg(unix)]
+fn assert_only_trusting_tls_clients_get_through(
+    case: &str,
+    dir: &TestDir,
+    plain: &str,
+    untrusting: &str,
+    trusted: &str,
+) {
+    let seeded = numbered_rows(40);
+    let input = raw_uri(seed_rows(dir, "input.jsonl", &seeded));
+    let limit = Duration::from_secs(15);
+    assert!(
+        !copy_succeeds_within(&input, plain, limit),
+        "{case}: a client without TLS wrote to a TLS listener"
+    );
+    assert!(
+        !copy_succeeds_within(&input, untrusting, limit),
+        "{case}: a client wrote to a broker whose certificate it cannot verify"
+    );
+
+    copy_ok(&format!("{case}: seed"), &input, trusted, &[]);
+    let out = dir.path().join("out.jsonl");
+    copy_ok(&format!("{case}: drain"), trusted, &raw_uri(&out), &[]);
+    assert_rows_eq(
+        &sorted(&read_rows(&out)),
+        &sorted(&seeded),
+        &format!("{case}: only the trusted client's rows are there"),
+    );
+}
+
+#[cfg(all(unix, any(feature = "full", feature = "nats")))]
+#[test]
+#[ignore = "requires docker"]
+fn nats_tls_takes_only_clients_that_trust_the_server() {
+    backend!("nats");
+    let dir = TestDir::new();
+    let server = TlsContainer::start(
+        &dir,
+        "mqb-cli-nats-tls",
+        4223,
+        &[],
+        &[
+            "nats:2.12.2-alpine3.22",
+            "-js",
+            "-p",
+            "4223",
+            "--tls",
+            "--tlscert=/tls/server.pem",
+            "--tlskey=/tls/server.key",
+        ],
+        "Server is ready",
+    );
+
+    let stream = unique("CLI_NATS_TLS");
+    let base = format!("nats://localhost:4223?subject={stream}.data&stream={stream}");
+    assert_only_trusting_tls_clients_get_through(
+        "nats tls",
+        &dir,
+        &base,
+        &format!(r#"{base}&tls={{"required":true}}"#),
+        &format!(
+            r#"{base}&tls={{"required":true,"ca_file":"{}"}}"#,
+            server.ca_file.display()
+        ),
+    );
+}
+
+#[cfg(all(unix, any(feature = "full", feature = "amqp")))]
+#[test]
+#[ignore = "requires docker"]
+fn amqp_tls_takes_only_clients_that_trust_the_broker() {
+    backend!("amqp");
+    let dir = TestDir::new();
+    let broker = TlsContainer::start(
+        &dir,
+        "mqb-cli-amqp-tls",
+        5671,
+        &[(
+            "rabbitmq.conf",
+            "listeners.tcp = none\nlisteners.ssl.default = 5671\n\
+             ssl_options.cacertfile = /tls/server.pem\nssl_options.certfile = /tls/server.pem\n\
+             ssl_options.keyfile = /tls/server.key\nloopback_users = none\n",
+        )],
+        &[
+            "-e",
+            "RABBITMQ_CONFIG_FILE=/tls/rabbitmq.conf",
+            "rabbitmq:4.1.6-management-alpine",
+        ],
+        "Server startup complete",
+    );
+
+    let queue = unique("cli_amqp_tls");
+    let host = "guest:guest@localhost:5671";
+    assert_only_trusting_tls_clients_get_through(
+        "amqp tls",
+        &dir,
+        &format!("amqp://{host}?queue={queue}"),
+        &format!("amqps://{host}?queue={queue}"),
+        &format!(
+            r#"amqps://{host}?queue={queue}&tls={{"required":true,"ca_file":"{}"}}"#,
+            broker.ca_file.display()
+        ),
+    );
+}
+
+/// With `verify_peer` the broker wants a client certificate. `cert_file` and
+/// `key_file` are PEM, as on every other endpoint.
+#[cfg(all(unix, any(feature = "full", feature = "amqp")))]
+#[test]
+#[ignore = "requires docker"]
+fn amqp_tls_presents_a_pem_client_certificate() {
+    backend!("amqp");
+    let dir = TestDir::new();
+    // RabbitMQ does not take a self-signed leaf as its own CA, so sign one.
+    let ca_key = rcgen::KeyPair::generate().expect("generate the CA key");
+    let mut ca_params = rcgen::CertificateParams::new(Vec::<String>::new()).expect("CA parameters");
+    ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    // rcgen gives every certificate the same subject, which reads as self-signed.
+    ca_params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, "mqb test CA");
+    ca_params.key_usages = vec![
+        rcgen::KeyUsagePurpose::KeyCertSign,
+        rcgen::KeyUsagePurpose::DigitalSignature,
+    ];
+    let ca_pem = ca_params.self_signed(&ca_key).expect("sign the CA").pem();
+    let issuer = rcgen::Issuer::new(ca_params, ca_key);
+    let client_key = rcgen::KeyPair::generate().expect("generate the client key");
+    let client_pem = rcgen::CertificateParams::new(vec!["mqb-client".to_string()])
+        .expect("client parameters")
+        .signed_by(&client_key, &issuer)
+        .expect("sign the client certificate")
+        .pem();
+    let broker = TlsContainer::start(
+        &dir,
+        "mqb-cli-amqp-mtls",
+        5671,
+        &[
+            ("client-ca.pem", &ca_pem),
+            ("client.pem", &client_pem),
+            ("client.key", &client_key.serialize_pem()),
+            (
+                "rabbitmq.conf",
+                "listeners.tcp = none\nlisteners.ssl.default = 5671\n\
+                 ssl_options.cacertfile = /tls/client-ca.pem\nssl_options.certfile = /tls/server.pem\n\
+                 ssl_options.keyfile = /tls/server.key\nssl_options.verify = verify_peer\n\
+                 ssl_options.fail_if_no_peer_cert = true\nloopback_users = none\n",
+            ),
+        ],
+        &[
+            "-e",
+            "RABBITMQ_CONFIG_FILE=/tls/rabbitmq.conf",
+            "rabbitmq:4.1.6-management-alpine",
+        ],
+        "Server startup complete",
+    );
+
+    let queue = unique("cli_amqp_mtls");
+    let tls = dir.path().join("tls");
+    let ca = broker.ca_file.display();
+    let anonymous = format!(
+        r#"amqps://guest:guest@localhost:5671?queue={queue}&tls={{"required":true,"ca_file":"{ca}"}}"#
+    );
+    let known = format!(
+        r#"amqps://guest:guest@localhost:5671?queue={queue}&tls={{"required":true,"ca_file":"{ca}","cert_file":"{}","key_file":"{}"}}"#,
+        tls.join("client.pem").display(),
+        tls.join("client.key").display()
+    );
+    assert_only_trusting_tls_clients_get_through(
+        "amqp mutual tls",
+        &dir,
+        &format!("amqp://guest:guest@localhost:5671?queue={queue}"),
+        &anonymous,
+        &known,
+    );
+}

@@ -179,6 +179,11 @@ All notable changes to `mq-bridge`. Newest first.
 
 ### Fixed
 
+- **`amqp`: `tls.ca_file` is used.** The path itself was handed to the client as if it were the
+  certificate, so a broker with a private CA was never trusted and the connection failed.
+- **`amqp`: `tls.cert_file` with `tls.key_file` is a PEM certificate and key**, as on every other
+  endpoint. `key_file` was ignored and `cert_file` had to be a PKCS#12 bundle; without a
+  `key_file` it is still read as one, with `tls.cert_password`.
 - `stream_buffer`: a publish that raced with the last consumer of a topic going away could
   write into a partition no later consumer could reach.
 - `file` sources with `delete: true` no longer deliver lines twice in one run after the file
