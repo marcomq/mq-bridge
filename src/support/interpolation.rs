@@ -894,12 +894,9 @@ mod tests {
 
     #[test]
     fn env_is_resolved_at_compile_time() {
-        // SAFETY: single-threaded test; set then read a unique var.
-        unsafe { std::env::set_var("MQB_INTERP_TEST_VAR", "hello") };
-        assert_eq!(
-            render_str("${env:MQB_INTERP_TEST_VAR}", None, None),
-            "hello"
-        );
+        // A variable every test process has, so nothing is set here.
+        let path = std::env::var("PATH").unwrap();
+        assert_eq!(render_str("${env:PATH}", None, None), path);
     }
 
     #[test]

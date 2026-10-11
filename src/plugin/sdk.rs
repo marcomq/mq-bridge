@@ -1210,8 +1210,11 @@ unsafe fn report_sent(
                 "{} of {len} messages failed to publish; first failure: {first:#}",
                 failed.len()
             );
-            unsafe { write_outcomes(out_outcomes, ids, &failed) };
+            let placed = unsafe { write_outcomes(out_outcomes, ids, &failed) };
             unsafe { set_error(err, summary) };
+            // The host fails the whole batch then, and the delivered messages must not go
+            // down as permanent failures with it.
+            let status = if placed { status } else { MQB_ERR_RETRYABLE };
             (status, responses)
         }
         Ok(Err(error)) => {
@@ -1224,6 +1227,7 @@ unsafe fn report_sent(
 }
 
 /// Marks each failed message's slot, leaving every other one [`MQB_OUTCOME_OK`].
+/// Returns `false` when a failure had no slot and nothing was marked.
 ///
 /// # Safety
 /// `out` must be writable for `ids.len()` bytes, as the ABI requires of the
@@ -1232,9 +1236,9 @@ unsafe fn write_outcomes(
     out: *mut u8,
     ids: &[u128],
     failed: &[(CanonicalMessage, ProcessingError)],
-) {
+) -> bool {
     if out.is_null() || ids.is_empty() {
-        return;
+        return true;
     }
     let outcomes = unsafe { std::slice::from_raw_parts_mut(out, ids.len()) };
     outcomes.fill(MQB_OUTCOME_OK);
@@ -1253,7 +1257,9 @@ unsafe fn write_outcomes(
     // marked the host fails the whole batch instead.
     if placed < failed.len() {
         outcomes.fill(MQB_OUTCOME_OK);
+        return false;
     }
+    true
 }
 
 /// The per-message counterpart of [`processing_status`]. A connection fault has
@@ -2008,7 +2014,7 @@ mod tests {
     #[test]
     fn a_failure_is_marked_at_its_message_position() {
         let mut outcomes = [u8::MAX; 3];
-        unsafe { write_outcomes(outcomes.as_mut_ptr(), &[1, 2, 3], &[failed(2)]) };
+        assert!(unsafe { write_outcomes(outcomes.as_mut_ptr(), &[1, 2, 3], &[failed(2)]) });
         assert_eq!(
             outcomes,
             [MQB_OUTCOME_OK, MQB_OUTCOME_PERMANENT, MQB_OUTCOME_OK]
@@ -2020,8 +2026,25 @@ mod tests {
     #[test]
     fn a_failure_that_cannot_be_placed_marks_nothing() {
         let mut outcomes = [u8::MAX; 3];
-        unsafe { write_outcomes(outcomes.as_mut_ptr(), &[1, 2, 3], &[failed(2), failed(9)]) };
+        let placed =
+            unsafe { write_outcomes(outcomes.as_mut_ptr(), &[1, 2, 3], &[failed(2), failed(9)]) };
+        assert!(!placed);
         assert_eq!(outcomes, [MQB_OUTCOME_OK; 3]);
+    }
+
+    /// Message 1 and 3 were delivered, so the whole-batch failure must stay retryable.
+    #[test]
+    fn an_unplaceable_permanent_failure_reports_the_batch_as_retryable() {
+        let mut outcomes = [u8::MAX; 3];
+        let mut err = MqbBuffer::EMPTY;
+        let sent = Ok(Ok(SentBatch::Partial {
+            responses: None,
+            failed: vec![failed(2), failed(9)],
+        }));
+        let (status, _) = unsafe { report_sent(sent, &[1, 2, 3], outcomes.as_mut_ptr(), &mut err) };
+        assert_eq!(status, MQB_ERR_RETRYABLE);
+        assert_eq!(outcomes, [MQB_OUTCOME_OK; 3]);
+        unsafe { buffer_free(err) };
     }
 
     #[test]

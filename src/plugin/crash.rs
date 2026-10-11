@@ -505,7 +505,9 @@ mod tests {
                 "plugin::crash::tests::crash_child",
                 "--nocapture",
             ])
-            .env(CHILD, "1");
+            .env(CHILD, "1")
+            // An inherited "0" would turn the handler off for every test here.
+            .env("MQB_PLUGIN_CRASH_HANDLER", "1");
         if let Some(value) = value {
             command.env(variable, value);
         }

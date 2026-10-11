@@ -989,43 +989,39 @@ mod dlopen_tests {
         load_ibm_mq_library().expect("IBM MQ client library should load");
     }
 
+    const CHILD: &str = "MQB_IBM_MQ_TEST_CHILD";
+
     // A failed library load must be classified non-retryable so routes fail
     // fast instead of reconnecting forever. Skips on hosts that have the client
     // installed: the loader always falls back to the bare library name, so there
     // is no way to force a miss there.
     #[test]
     fn missing_library_is_non_retryable() {
-        // Save & restore the env we mutate so this test can't leak into sibling
-        // dlopen tests (e.g. loads_client reads MQ_INSTALLATION_PATH). Drop runs
-        // even if the assertions below panic.
-        struct EnvRestore {
-            lib: Option<String>,
-            path: Option<String>,
-        }
-        impl Drop for EnvRestore {
-            fn drop(&mut self) {
-                // SAFETY: test-only; no other thread of this test reads these variables.
-                unsafe {
-                    match &self.lib {
-                        Some(v) => std::env::set_var("MQB_IBM_MQ_LIB", v),
-                        None => std::env::remove_var("MQB_IBM_MQ_LIB"),
-                    }
-                    match &self.path {
-                        Some(v) => std::env::set_var("MQ_INSTALLATION_PATH", v),
-                        None => std::env::remove_var("MQ_INSTALLATION_PATH"),
-                    }
-                }
-            }
-        }
-        let _restore = EnvRestore {
-            lib: std::env::var("MQB_IBM_MQ_LIB").ok(),
-            path: std::env::var("MQ_INSTALLATION_PATH").ok(),
-        };
+        // The loader reads the environment, so it runs in a child that gets its own.
+        let child = format!(
+            "{}::missing_library_child",
+            module_path!().split_once("::").unwrap().1
+        );
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &child, "--nocapture"])
+            .env(CHILD, "1")
+            .env("MQB_IBM_MQ_LIB", "/nonexistent/path/libmqm_r")
+            .env_remove("MQ_INSTALLATION_PATH")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "{stdout}\n{stderr}"
+        );
+    }
 
-        // SAFETY: as in `EnvRestore::drop`.
-        unsafe {
-            std::env::set_var("MQB_IBM_MQ_LIB", "/nonexistent/path/libmqm_r");
-            std::env::remove_var("MQ_INSTALLATION_PATH");
+    /// Only does anything when run by [`missing_library_is_non_retryable`].
+    #[test]
+    fn missing_library_child() {
+        if std::env::var_os(CHILD).is_none() {
+            return;
         }
         let err = match load_ibm_mq_library() {
             Ok(_) => {
