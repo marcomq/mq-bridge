@@ -909,7 +909,10 @@ redacted_debug!(
 impl fmt::Debug for HttpBulkOAuth2 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("HttpBulkOAuth2")
-            .field("token_url", &self.token_url)
+            .field(
+                "token_url",
+                &crate::support::redact::url_password(&self.token_url),
+            )
             .field("client_id", &self.client_id)
             .field("client_secret", &REDACTED)
             .field("scope", &self.scope)

@@ -315,7 +315,11 @@ async fn receive(
             );
         }
         let Some(batch) = receive_before(consumer, count - collected.len(), deadline).await? else {
-            continue;
+            bail!(
+                "received {} of {count} messages within {:?}",
+                collected.len(),
+                options.receive_timeout
+            );
         };
         if batch.messages.is_empty() {
             tokio::time::sleep(Duration::from_millis(5)).await;

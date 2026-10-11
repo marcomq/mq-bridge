@@ -11,8 +11,13 @@ its findings. Several change behaviour, so read "Behaviour changes" before upgra
 
 ### Upgrading from 0.4 (Rust API)
 
-Code written against 0.4 compiles unchanged: no type, field, variant or path of the public
-API was renamed or removed. What 1.0 adds is the promise, and what it leaves open:
+No type, field, variant or path of the public API was renamed or removed, so code written
+against 0.4 compiles unchanged, with one exception: several configuration structs gained a
+field (among them `ObjectStoreConfig`, `PostgresCdcConfig`, `WebSocketConfig`,
+`KafkaConfig`, `FileConfig`, `CsvConfig` and `RedisStreamsConfig`). A struct literal that
+lists every field of one of them needs the new field or `..Default::default()`; one built
+with `::new(..)`, a builder or `..Default::default()` is not affected. What 1.0 adds is
+the promise, and what it leaves open:
 
 - **Stable API:** the crate root and the modules `models`, `traits`, `errors`, `outcomes`,
   `extensions`, `plugin` (the SDK), `type_handler`, `publisher`, `route` and `checkpoint`.
@@ -37,7 +42,8 @@ API was renamed or removed. What 1.0 adds is the promise, and what it leaves ope
   long as a source has not decoded one object, a decode failure (after five tries) is a
   permanent error that names `format`, `compression` and `encryption`, and the checkpoint
   does not move. A wrong setting used to skip every object and leave the checkpoint behind
-  the whole prefix. After the first decoded object a bad one is skipped as before.
+  the whole prefix. After the first decoded object a bad one is skipped as before, and so
+  it is for a source that resumes from a saved checkpoint.
 - **`http_bulk` input: an empty string where `read.cursor.response` points ends the read**,
   like `null`. It used to become the next position, and an API that ends its listing that
   way was read from the first page again without end.
@@ -329,7 +335,8 @@ API was renamed or removed. What 1.0 adds is the promise, and what it leaves ope
 - **`websocket`: `basic_auth` and `max_connections`.** A listener with
   `basic_auth: [user, password]` answers an upgrade request without these credentials with
   `401`; a publisher with it sends them. `max_connections` limits the connections a listener
-  holds at once, and one more gets `503` (behind TLS it is closed before the handshake).
+  holds at once, and one more gets `503` (behind TLS it is closed before the handshake, and
+  so is one that arrives while 64 refusals are still being answered).
   Both are unset by default. URI: `?basic_auth=["user","password"]&max_connections=1000`.
   Rust code that builds `WebSocketConfig` with a struct literal needs the two new fields or
   `..Default::default()`.

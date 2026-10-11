@@ -41,6 +41,8 @@ const MAX_REQUEST_HEAD: usize = 16 * 1024;
 const REPLY_WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 #[cfg(test)]
 const REPLY_WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(300);
+/// Refusals over `max_connections` that are answered with a 503 at once.
+const MAX_REFUSALS: usize = 64;
 const UNAUTHORIZED: &[u8] = b"HTTP/1.1 401 Unauthorized\r\nwww-authenticate: Basic realm=\"mq-bridge\"\r\nconnection: close\r\ncontent-length: 0\r\n\r\n";
 const OVER_LIMIT: &[u8] =
     b"HTTP/1.1 503 Service Unavailable\r\nconnection: close\r\ncontent-length: 0\r\n\r\n";
@@ -238,6 +240,8 @@ struct Admission {
     /// The `Authorization` value a client has to send.
     authorization: Option<Arc<str>>,
     connections: Option<Arc<Semaphore>>,
+    /// Bounds the refusals that are answered at once.
+    refusals: Option<Arc<Semaphore>>,
 }
 
 impl Admission {
@@ -247,7 +251,24 @@ impl Admission {
             connections: config
                 .max_connections
                 .map(|limit| Arc::new(Semaphore::new(limit))),
+            refusals: config
+                .max_connections
+                .map(|_| Arc::new(Semaphore::new(MAX_REFUSALS))),
         }
+    }
+
+    /// Answers a connection over the limit. With `MAX_REFUSALS` in flight, and behind
+    /// TLS, it is closed unanswered.
+    fn refuse(&self, stream: TcpStream, tls: bool) {
+        let refusals = self.refusals.as_ref().filter(|_| !tls);
+        let Some(permit) = refusals.and_then(|slots| Arc::clone(slots).try_acquire_owned().ok())
+        else {
+            return;
+        };
+        tokio::spawn(async move {
+            let _permit = permit;
+            refuse_over_limit(stream, tls).await;
+        });
     }
 
     /// A slot for one more connection; `Err` hands the stream back over the limit.
@@ -615,7 +636,7 @@ fn spawn_accept_loop(
                     let (stream, slot) = match admission.slot(stream) {
                         Ok(admitted) => admitted,
                         Err(stream) => {
-                            tokio::spawn(refuse_over_limit(stream, tls.is_some()));
+                            admission.refuse(stream, tls.is_some());
                             continue;
                         }
                     };
@@ -715,7 +736,10 @@ async fn handle_routed_connection(
 
     drop(response_tx);
     if !writer_done {
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(1), writer_task).await;
+        let waited = tokio::time::timeout(std::time::Duration::from_secs(1), &mut writer_task);
+        if waited.await.is_err() {
+            writer_task.abort();
+        }
     }
     Ok(())
 }
@@ -801,7 +825,7 @@ pub(crate) async fn run_direct_response_route(
                 let (stream, slot) = match admission.slot(stream) {
                     Ok(admitted) => admitted,
                     Err(stream) => {
-                        tokio::spawn(refuse_over_limit(stream, tls.is_some()));
+                        admission.refuse(stream, tls.is_some());
                         continue;
                     }
                 };

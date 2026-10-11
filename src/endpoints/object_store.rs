@@ -879,6 +879,8 @@ impl ObjectStoreConsumer {
             has_checkpoint = %last_key.is_some(),
             "Object-store source connected"
         );
+        // A cursor only moves once an object was decoded, so a resumed source has decoded one.
+        let decoded_any = last_key.is_some();
 
         // A URL naming an object reads that object alone, like DuckDB/Polars paths.
         let single_object = if base.as_ref().is_empty() {
@@ -913,7 +915,7 @@ impl ObjectStoreConsumer {
             max_object_bytes: config.max_object_bytes,
             decode_failures: 0,
             decode_failing_key: None,
-            decoded_any: false,
+            decoded_any,
             on_decode_error: config.on_decode_error,
             unordered_listing: config.url.starts_with("file:"),
             pending: Default::default(),
@@ -1262,42 +1264,20 @@ impl MessageConsumer for ObjectStoreConsumer {
 
         let commit = Box::new(move |dispositions: Vec<MessageDisposition>| {
             Box::pin(async move {
-                let batch_for_commit = unsettled.take();
-                // Count the leading run of acks; the first nack and everything after it is
-                // requeued to the front of the buffer for at-least-once re-delivery.
-                let mut leading_acks = 0usize;
-                let mut requeue = Vec::new();
-                let mut hit_nack = false;
-                for (i, d) in dispositions.iter().enumerate() {
-                    if hit_nack {
-                        if let Some(m) = batch_for_commit.get(i) {
-                            requeue.push(m.clone());
-                        }
-                        continue;
-                    }
-                    match d {
-                        MessageDisposition::Ack | MessageDisposition::Reply(_) => leading_acks += 1,
-                        MessageDisposition::Nack => {
-                            hit_nack = true;
-                            if let Some(m) = batch_for_commit.get(i) {
-                                requeue.push(m.clone());
-                            }
-                        }
-                    }
-                }
-                // Defensive: requeue any tail the dispositions didn't cover.
-                if dispositions.len() < batch_for_commit.len() {
-                    for m in &batch_for_commit[dispositions.len()..] {
-                        requeue.push(m.clone());
-                    }
-                }
+                // `unsettled` keeps what is not settled yet, so a cancelled commit gives it back.
+                // The leading run of acks counts; the first nack and everything after it, and
+                // any tail without a disposition, goes back to the front of the buffer.
+                let leading_acks = dispositions
+                    .iter()
+                    .take_while(|d| !matches!(d, MessageDisposition::Nack))
+                    .count()
+                    .min(unsettled.messages.len());
 
-                if !requeue.is_empty() {
+                if leading_acks < unsettled.messages.len() {
                     let mut buf = buffer_arc.lock().await;
-                    let old = std::mem::take(&mut *buf);
-                    let mut new = requeue;
-                    new.extend(old);
-                    *buf = new;
+                    let mut requeue = unsettled.messages.split_off(leading_acks);
+                    requeue.append(&mut buf);
+                    *buf = requeue;
                 }
 
                 if leading_acks > 0 {
@@ -1313,15 +1293,19 @@ impl MessageConsumer for ObjectStoreConsumer {
                             if let Some(cp) = &checkpoint {
                                 if let Err(e) = cp.save(&key).await {
                                     *prog = None;
+                                    // The object is listed and read again from the start.
+                                    unsettled.take();
                                     return Err(anyhow!(e).context("persist object-store cursor"));
                                 }
                             }
+                            unsettled.take();
                             *prog = None;
                             drop(prog);
                             *last_key_arc.lock().await = Some(key);
                         }
                     }
                 }
+                unsettled.take();
                 Ok(())
             }) as BoxFuture<'static, anyhow::Result<()>>
         });
