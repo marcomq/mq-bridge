@@ -1004,13 +1004,16 @@ mod dlopen_tests {
         }
         impl Drop for EnvRestore {
             fn drop(&mut self) {
-                match &self.lib {
-                    Some(v) => std::env::set_var("MQB_IBM_MQ_LIB", v),
-                    None => std::env::remove_var("MQB_IBM_MQ_LIB"),
-                }
-                match &self.path {
-                    Some(v) => std::env::set_var("MQ_INSTALLATION_PATH", v),
-                    None => std::env::remove_var("MQ_INSTALLATION_PATH"),
+                // SAFETY: test-only; no other thread of this test reads these variables.
+                unsafe {
+                    match &self.lib {
+                        Some(v) => std::env::set_var("MQB_IBM_MQ_LIB", v),
+                        None => std::env::remove_var("MQB_IBM_MQ_LIB"),
+                    }
+                    match &self.path {
+                        Some(v) => std::env::set_var("MQ_INSTALLATION_PATH", v),
+                        None => std::env::remove_var("MQ_INSTALLATION_PATH"),
+                    }
                 }
             }
         }
@@ -1019,8 +1022,11 @@ mod dlopen_tests {
             path: std::env::var("MQ_INSTALLATION_PATH").ok(),
         };
 
-        std::env::set_var("MQB_IBM_MQ_LIB", "/nonexistent/path/libmqm_r");
-        std::env::remove_var("MQ_INSTALLATION_PATH");
+        // SAFETY: as in `EnvRestore::drop`.
+        unsafe {
+            std::env::set_var("MQB_IBM_MQ_LIB", "/nonexistent/path/libmqm_r");
+            std::env::remove_var("MQ_INSTALLATION_PATH");
+        }
         let err = match load_ibm_mq_library() {
             Ok(_) => {
                 eprintln!("skipping: IBM MQ client is installed, cannot test a missing one");

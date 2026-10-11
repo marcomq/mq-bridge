@@ -1,7 +1,7 @@
 [package]
 name = "mq-bridge-c"
 version.workspace = true
-edition = "2021"
+edition = "2024"
 publish = false
 description = "C library for mq-bridge, an async message-bridging library"
 license = "MIT OR Apache-2.0"

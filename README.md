@@ -193,7 +193,7 @@ Since 1.0 the Rust API follows semantic versioning: the crate root and the modul
 
 A minor release may add a configuration field, a variant of a configuration or error enum, and raise the minimum Rust version. Code that writes config structs with `..Default::default()` and gives a `match` on these enums a `_` arm compiles unchanged across such releases.
 
-The minimum Rust version is 1.94.1.
+The minimum Rust version is 1.89. The features `aws`, `sqlx` and `postgres-cdc`, and so `full`, need 1.94.1; `zeromq-omq` needs 1.93.
 
 ## Running Tests
 The project includes integration and performance tests. Most backend tests require Docker.

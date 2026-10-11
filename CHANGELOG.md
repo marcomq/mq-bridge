@@ -28,8 +28,12 @@ the promise, and what it leaves open:
   configuration or error enum, and raise the minimum Rust version. Write config structs
   with `..Default::default()` and give a `match` on these enums a `_` arm, and such a
   release compiles unchanged.
-- **Minimum Rust version:** 1.94.1 (declared `rust-version` was 1.85, which the
-  dependencies in the lock no longer build with).
+- **Minimum Rust version:** 1.89 (declared `rust-version` was 1.85, which the
+  dependencies in the lock no longer build with). The features `aws`, `sqlx` and
+  `postgres-cdc`, and so `full`, need 1.94.1; `zeromq-omq` needs 1.93.
+- **Edition 2024.** The crate, the bindings and the `full` plugin are built with edition
+  2024. The edition of a dependency does not affect yours. The plugin export macro now
+  emits `#[unsafe(no_mangle)]`.
 
 ### Behaviour changes
 

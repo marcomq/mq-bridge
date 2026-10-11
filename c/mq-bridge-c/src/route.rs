@@ -247,7 +247,7 @@ impl mqb_route_t {
 
 /// Builds a route from a YAML or JSON config file: a `routes:` document, a
 /// `{name: route}` map, or a single route body (`name` null or `""`). Null on error.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn mqb_route_from_file(
     path: *const c_char,
     name: *const c_char,
@@ -260,7 +260,7 @@ pub unsafe extern "C" fn mqb_route_from_file(
 }
 
 /// Like `mqb_route_from_file`, from YAML or JSON text.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn mqb_route_from_str(
     config: *const c_char,
     name: *const c_char,
@@ -273,7 +273,7 @@ pub unsafe extern "C" fn mqb_route_from_str(
 }
 
 /// Runs every message through `handler` before the output. Set before `mqb_route_start`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn mqb_route_set_handler(
     route: *const mqb_route_t,
     handler: mqb_handler_fn,
@@ -290,7 +290,7 @@ pub unsafe extern "C" fn mqb_route_set_handler(
 
 /// Runs messages whose `kind` metadata equals `kind` through `handler`. May be
 /// called once per kind. Set before `mqb_route_start`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn mqb_route_add_handler(
     route: *const mqb_route_t,
     kind: *const c_char,
@@ -320,26 +320,26 @@ pub unsafe extern "C" fn mqb_route_add_handler(
 }
 
 /// Connects both endpoints and starts moving messages in the background.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn mqb_route_start(route: *const mqb_route_t) -> MqbStatus {
     guard(|| unsafe { handle(route) }?.start())
 }
 
 /// Asks a running route to stop; `mqb_route_join` waits for it.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn mqb_route_stop(route: *const mqb_route_t) -> MqbStatus {
     guard(|| unsafe { handle(route) }?.stop())
 }
 
 /// Blocks until the route has stopped, by `mqb_route_stop` or on its own (a
 /// drained source under `exit_on_empty`). Fails if it ended on a permanent error.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn mqb_route_join(route: *const mqb_route_t) -> MqbStatus {
     guard(|| unsafe { handle(route) }?.join())
 }
 
 /// Stops the route if it is running, waits for it, and frees it.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn mqb_route_free(route: *mut mqb_route_t) {
     if !route.is_null() {
         let route = unsafe { Box::from_raw(route) };

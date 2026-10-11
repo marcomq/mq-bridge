@@ -1,9 +1,9 @@
 [package]
 name = "mq-bridge"
 version.workspace = true
-edition = "2021"
+edition = "2024"
 authors = ["Marco Mengelkoch"]
-rust-version = "1.94.1"  # What `full` needs with the checked-in lock. CI job `msrv` tests it.
+rust-version = "1.89"  # With the checked-in lock; `aws`, `sqlx`, `postgres-cdc` and `full` need 1.94.1. CI job `msrv` tests both.
 description = "Embeddable async ETL and messaging library: brokers (Kafka, NATS, AMQP, MQTT), databases incl. Postgres/MongoDB CDC, Parquet on S3/GCS/Azure object storage, HTTP/gRPC."
 repository = "https://github.com/marcomq/mq-bridge"
 homepage = "https://marcomq.github.io/mq-bridge/"
@@ -48,8 +48,8 @@ resolver = "2"
 # ship. Kept at `warn` so a local `cargo check` surfaces them; CI already runs clippy
 # with `-D warnings`, which promotes them to hard errors there.
 [workspace.lints.rust]
-# Allow-by-default in edition 2021, warn-by-default from edition 2024. Turning it on now keeps
-# each unsafe operation in the plugin FFI layer marked at its own call site.
+# Warn-by-default since edition 2024; kept explicit. It keeps each unsafe operation in
+# the plugin FFI layer marked at its own call site.
 unsafe_op_in_unsafe_fn = "warn"
 
 [workspace.lints.clippy]
@@ -100,13 +100,10 @@ serde = { workspace = true, features = ["derive"] }
 anyhow.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util", "net", "signal"] }
 # Note on MSRV for optional features:
-# The crate MSRV is 1.94.1 (aws-*, sqlx 0.9); the features below need less.
-# - "amqp" (lapin 4.10) requires Rust 1.88+; "http" (hyper-rustls 0.27) requires Rust 1.85+.
-# - "websocket" (tokio-websockets 0.13) requires Rust 1.89+.
-# - "mongodb" (mongodb 3.8) requires Rust 1.88+; "nats" (async-nats 0.50) requires Rust 1.88+.
-# - "plugin" (libloading 0.9) requires Rust 1.88+.
-# - "aws" (aws-sdk-*) may require a newer stable toolchain than the base MSRV.
-# Use `rustup override set stable` or a `rust-toolchain.toml` file when enabling these features.
+# The crate MSRV is 1.89 (uuid 1.27, in every build); these features need more:
+# - "aws" (aws-sdk-*) requires Rust 1.94.1, and so does "full".
+# - "sqlx" and "postgres-cdc" (sqlx 0.9) require Rust 1.94.
+# - "zeromq-omq" (omq 0.26) requires Rust 1.93.
 async-trait.workspace = true
 serde_json.workspace = true
 thiserror = "2.0"

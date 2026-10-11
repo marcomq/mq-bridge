@@ -705,7 +705,8 @@ unsafe extern "C" fn consumer_receive_batch_async(
 fn receive(
     state: &ConsumerState,
     max_messages: usize,
-) -> impl Future<Output = Option<Result<crate::ReceivedBatch, ConsumerError>>> + Send + 'static {
+) -> impl Future<Output = Option<Result<crate::ReceivedBatch, ConsumerError>>> + Send + 'static + use<>
+{
     let shared = Arc::clone(&state.consumer);
     let mut shutdown = state.shutdown.subscribe();
     async move {
@@ -1145,7 +1146,7 @@ unsafe fn send(
     len: usize,
 ) -> (
     Vec<u128>,
-    impl Future<Output = Result<SentBatch, ProcessingError>> + Send + 'static,
+    impl Future<Output = Result<SentBatch, ProcessingError>> + Send + 'static + use<>,
 ) {
     let messages: Vec<CanonicalMessage> = unsafe { from_abi(messages, len) };
     let ids: Vec<u128> = messages.iter().map(|message| message.message_id).collect();
@@ -1824,13 +1825,13 @@ macro_rules! export_endpoint_plugins {
                 &[$($crate::__mq_bridge_plugin_vtable!($($entry)*)),+];
 
             /// Discovery symbol read by `mq_bridge::plugin::load_endpoint_plugin`.
-            #[no_mangle]
+            #[unsafe(no_mangle)]
             pub extern "C" fn mq_bridge_plugin_v1() -> *const $crate::support::plugin_abi::MqbPluginVTable {
                 MQ_BRIDGE_PLUGIN_VTABLES[0].as_ptr()
             }
 
             /// Every exported table by index, null past the last.
-            #[no_mangle]
+            #[unsafe(no_mangle)]
             pub extern "C" fn mq_bridge_plugin_v1_at(
                 index: usize,
             ) -> *const $crate::support::plugin_abi::MqbPluginVTable {

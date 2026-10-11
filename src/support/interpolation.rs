@@ -311,7 +311,7 @@ impl CompiledTemplate {
             },
             Source::Metadata(key) => msg.and_then(|m| m.metadata.get(key)).cloned(),
             Source::MessageId => msg.map(|m| format_message_id(m.message_id)),
-            Source::Gen(gen) => Some(match gen {
+            Source::Gen(generator) => Some(match generator {
                 Gen::Uuid => format_message_id(fast_uuid_v7::gen_id()),
                 Gen::Now => rfc3339_utc_now(),
                 Gen::Timestamp => unix_millis().to_string(),

@@ -16,11 +16,14 @@ const ENDPOINT: &str = "http://localhost:4566";
 
 /// Points the `object_store` crate at LocalStack S3 over plain HTTP.
 fn set_s3_env() {
-    std::env::set_var("AWS_ACCESS_KEY_ID", "test");
-    std::env::set_var("AWS_SECRET_ACCESS_KEY", "test");
-    std::env::set_var("AWS_REGION", "us-east-1");
-    std::env::set_var("AWS_ENDPOINT", ENDPOINT);
-    std::env::set_var("AWS_ALLOW_HTTP", "true");
+    // SAFETY: test-only; every caller writes the same values.
+    unsafe {
+        std::env::set_var("AWS_ACCESS_KEY_ID", "test");
+        std::env::set_var("AWS_SECRET_ACCESS_KEY", "test");
+        std::env::set_var("AWS_REGION", "us-east-1");
+        std::env::set_var("AWS_ENDPOINT", ENDPOINT);
+        std::env::set_var("AWS_ALLOW_HTTP", "true");
+    }
 }
 
 /// Creates the test bucket (path-style PUT). LocalStack accepts the unsigned request and

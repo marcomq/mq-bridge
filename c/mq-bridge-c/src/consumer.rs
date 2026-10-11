@@ -141,7 +141,7 @@ impl mqb_consumer_t {
 
 /// Builds a consumer from a YAML or JSON config file. `name` selects an entry of a
 /// `consumers:` document; null or `""` for a single bare endpoint. Null on error.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn mqb_consumer_from_file(
     path: *const c_char,
     name: *const c_char,
@@ -154,7 +154,7 @@ pub unsafe extern "C" fn mqb_consumer_from_file(
 }
 
 /// Like `mqb_consumer_from_file`, from YAML or JSON text.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn mqb_consumer_from_str(
     config: *const c_char,
     name: *const c_char,
@@ -170,7 +170,7 @@ pub unsafe extern "C" fn mqb_consumer_from_str(
 /// something arrives, and `mqb_consumer_close` / `mqb_consumer_status_json` on
 /// another thread wait for it. `*batch` is null when the timeout passed or the source is
 /// exhausted (see `mqb_consumer_exhausted`); otherwise free it with `mqb_batch_free`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn mqb_consumer_poll(
     consumer: *const mqb_consumer_t,
     max: u32,
@@ -190,13 +190,13 @@ pub unsafe extern "C" fn mqb_consumer_poll(
     })
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn mqb_batch_count(batch: *const mqb_batch_t) -> usize {
     unsafe { handle(batch) }.map_or(0, |batch| batch.messages.len())
 }
 
 /// The message at `index`, owned by the batch; null when out of range.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn mqb_batch_at(
     batch: *const mqb_batch_t,
     index: usize,
@@ -208,13 +208,13 @@ pub unsafe extern "C" fn mqb_batch_at(
 }
 
 /// The token for `mqb_consumer_ack` / `mqb_consumer_nack`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn mqb_batch_token(batch: *const mqb_batch_t) -> u32 {
     unsafe { handle(batch) }.map_or(0, |batch| batch.token)
 }
 
 /// Frees the batch and its messages. Does not acknowledge them.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn mqb_batch_free(batch: *mut mqb_batch_t) {
     if !batch.is_null() {
         drop(unsafe { Box::from_raw(batch) });
@@ -223,13 +223,13 @@ pub unsafe extern "C" fn mqb_batch_free(batch: *mut mqb_batch_t) {
 
 /// Acknowledges every outstanding batch, oldest first. Without an ack or commit
 /// the source redelivers and most brokers eventually stall.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn mqb_consumer_commit(consumer: *const mqb_consumer_t) -> MqbStatus {
     guard(|| unsafe { handle(consumer) }?.settle_all(MessageDisposition::Ack))
 }
 
 /// Acknowledges one batch by its token.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn mqb_consumer_ack(
     consumer: *const mqb_consumer_t,
     token: u32,
@@ -238,7 +238,7 @@ pub unsafe extern "C" fn mqb_consumer_ack(
 }
 
 /// Negatively acknowledges one batch so the broker can redeliver it.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn mqb_consumer_nack(
     consumer: *const mqb_consumer_t,
     token: u32,
@@ -247,14 +247,14 @@ pub unsafe extern "C" fn mqb_consumer_nack(
 }
 
 /// Negatively acknowledges every outstanding batch, oldest first.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn mqb_consumer_nack_all(consumer: *const mqb_consumer_t) -> MqbStatus {
     guard(|| unsafe { handle(consumer) }?.settle_all(MessageDisposition::Nack))
 }
 
 /// Status snapshot of the endpoint as JSON (`healthy`, `target`, optional
 /// `pending` backlog, ...), or null on error. Free with `mqb_string_free`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn mqb_consumer_status_json(consumer: *const mqb_consumer_t) -> *mut c_char {
     let mut out = std::ptr::null_mut();
     guard(|| {
@@ -273,13 +273,13 @@ pub unsafe extern "C" fn mqb_consumer_status_json(consumer: *const mqb_consumer_
 }
 
 /// True once the source signalled end-of-stream (e.g. a drained file).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn mqb_consumer_exhausted(consumer: *const mqb_consumer_t) -> bool {
     unsafe { handle(consumer) }.is_ok_and(|consumer| consumer.exhausted.load(Ordering::SeqCst))
 }
 
 /// Releases the endpoint connection. Idempotent; polling fails afterwards.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn mqb_consumer_close(consumer: *const mqb_consumer_t) -> MqbStatus {
     guard(|| {
         let consumer = unsafe { handle(consumer) }?;
@@ -293,7 +293,7 @@ pub unsafe extern "C" fn mqb_consumer_close(consumer: *const mqb_consumer_t) -> 
 }
 
 /// Closes and frees the consumer. Outstanding batches are left unacknowledged.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn mqb_consumer_free(consumer: *mut mqb_consumer_t) {
     if !consumer.is_null() {
         unsafe { mqb_consumer_close(consumer) };

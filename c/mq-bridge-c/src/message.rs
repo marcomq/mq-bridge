@@ -30,7 +30,7 @@ const ABSENT: MqbSlice = MqbSlice {
 
 /// Creates a message with a copy of `payload` and a generated id. Free it with
 /// `mqb_message_free`; sending does not consume it.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn mqb_message_new(payload: *const u8, len: usize) -> *mut mqb_message_t {
     guard_new(|| {
         if payload.is_null() && len > 0 {
@@ -45,7 +45,7 @@ pub unsafe extern "C" fn mqb_message_new(payload: *const u8, len: usize) -> *mut
 }
 
 /// Sets the id: a UUID, a `0x` hex or decimal integer, or any text (hashed).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn mqb_message_set_id(
     message: *mut mqb_message_t,
     id: *const c_char,
@@ -59,7 +59,7 @@ pub unsafe extern "C" fn mqb_message_set_id(
     })
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn mqb_message_set_metadata(
     message: *mut mqb_message_t,
     key: *const c_char,
@@ -79,7 +79,7 @@ pub unsafe extern "C" fn mqb_message_set_metadata(
 
 /// The payload. Like every slice a message returns, it is not NUL-terminated and
 /// stays valid until the message is changed or freed.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn mqb_message_payload(message: *const mqb_message_t) -> MqbSlice {
     match unsafe { handle(message) } {
         Ok(message) => MqbSlice::from_bytes(&message.inner.payload),
@@ -87,7 +87,7 @@ pub unsafe extern "C" fn mqb_message_payload(message: *const mqb_message_t) -> M
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn mqb_message_id(message: *const mqb_message_t) -> MqbSlice {
     match unsafe { handle(message) } {
         Ok(message) => MqbSlice::from_str(
@@ -100,7 +100,7 @@ pub unsafe extern "C" fn mqb_message_id(message: *const mqb_message_t) -> MqbSli
 }
 
 /// The metadata value of `key`; `ptr` is null when there is none.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn mqb_message_metadata(
     message: *const mqb_message_t,
     key: *const c_char,
@@ -113,14 +113,14 @@ pub unsafe extern "C" fn mqb_message_metadata(
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn mqb_message_metadata_count(message: *const mqb_message_t) -> usize {
     unsafe { handle(message) }.map_or(0, |message| message.inner.metadata.len())
 }
 
 /// The metadata entry at `index` (below `mqb_message_metadata_count`), in no
 /// particular order.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn mqb_message_metadata_at(
     message: *const mqb_message_t,
     index: usize,
@@ -146,7 +146,7 @@ pub unsafe extern "C" fn mqb_message_metadata_at(
     })
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn mqb_message_free(message: *mut mqb_message_t) {
     if !message.is_null() {
         drop(unsafe { Box::from_raw(message) });

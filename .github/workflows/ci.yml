@@ -86,23 +86,31 @@ jobs:
             exit 1
           fi
 
-  # The Rust version the README promises, with the checked-in lock.
+  # The Rust versions the README promises, with the checked-in lock.
   msrv:
-    name: MSRV
+    name: MSRV (${{ matrix.toolchain }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - toolchain: "1.89.0"
+            features: "file,dir-spool,middleware,yaml,plugin,mongodb,kafka,amqp,nats,mqtt,http,zeromq,redis-streams,sled,grpc,clickhouse,http-bulk,websocket,object-store,parquet,avro,rustls-aws-lc,ibm-mq"
+          - toolchain: "1.94.1"
+            features: "full"
     steps:
       - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
-          toolchain: "1.94.1"
+          toolchain: ${{ matrix.toolchain }}
 
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
 
       - name: Check with the minimum Rust version
-        run: cargo check --lib --locked --features full
+        run: cargo check --lib --locked --features ${{ matrix.features }}
 
   # Unit tests
   test:

@@ -115,27 +115,27 @@ pub(crate) fn into_c_string(text: String) -> *mut c_char {
 }
 
 /// Version of the library, e.g. `"1.0.0"`. Static; do not free.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn mqb_version() -> *const c_char {
     concat!(env!("CARGO_PKG_VERSION"), "\0").as_ptr().cast()
 }
 
 /// The `MQB_API_VERSION` this library was built with. A mismatch with the header's
 /// value means header and library come from different releases.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn mqb_api_version() -> u32 {
     MQB_API_VERSION
 }
 
 /// Text of the last failed call on this thread. Valid until the next failing call
 /// on the same thread; do not free.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn mqb_last_error() -> *const c_char {
     LAST_ERROR.with(|slot| slot.borrow().as_ptr())
 }
 
 /// Frees a string returned by this library (`mqb_config_schema`, `*_status_json`).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn mqb_string_free(text: *mut c_char) {
     if !text.is_null() {
         drop(unsafe { CString::from_raw(text) });
@@ -144,19 +144,19 @@ pub unsafe extern "C" fn mqb_string_free(text: *mut c_char) {
 
 /// Requests a graceful shutdown of every route. Returns true only for the first
 /// request; it cannot be undone.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn mqb_request_shutdown() -> bool {
     mqb::shutdown::request_shutdown()
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn mqb_is_shutdown_requested() -> bool {
     mqb::shutdown::is_shutdown_requested()
 }
 
 /// JSON Schema of the config document, or null if the library was built without
 /// the `schema` feature. Free with `mqb_string_free`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn mqb_config_schema() -> *mut c_char {
     #[cfg(feature = "schema")]
     {
@@ -177,7 +177,7 @@ pub extern "C" fn mqb_config_schema() -> *mut c_char {
 
 /// Loads a native plugin library and registers the endpoints and middleware it
 /// exports. Call before starting a route that names them.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn mqb_load_plugin(path: *const c_char) -> MqbStatus {
     guard(|| {
         let path = unsafe { text(path, "path") }?;
@@ -188,7 +188,7 @@ pub unsafe extern "C" fn mqb_load_plugin(path: *const c_char) -> MqbStatus {
 /// Registers a custom endpoint or middleware implemented in this program. `table`
 /// is the one a plugin library would export (see `mq_bridge_plugin.h`) and must
 /// stay valid for the life of the process.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn mqb_register_plugin(table: *const MqbPluginVTable) -> MqbStatus {
     guard(|| unsafe { mqb::plugin::register_plugin_table(table) }.map(drop))
 }
@@ -234,7 +234,7 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for CLogLayer {
 /// Routes the library's log events into `callback`, which may be called from any
 /// thread. `level` (null for `warn`) seeds the filter; `MQ_BRIDGE_LOG` / `RUST_LOG`
 /// override it. Fails if logging was already initialized.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn mqb_init_logging(
     callback: mqb_log_fn,
     user_data: *mut c_void,
