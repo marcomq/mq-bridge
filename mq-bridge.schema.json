@@ -3675,7 +3675,7 @@
           "maxItems": 2
         },
         "max_connections": {
-          "description": "(Consumer only) Most connections open at once; one more gets 503. Unset = no limit.",
+          "description": "(Consumer only) Maximum number of concurrent connections; additional connections receive 503. Unset = no limit.",
           "type": [
             "integer",
             "null"

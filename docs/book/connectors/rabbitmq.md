@@ -45,7 +45,8 @@ mqb copy --drain \
 
 The exchange and a binding for the routing key (the `queue` value) must exist: mq-bridge
 declares the queue, not the exchange or the binding. A message the broker can route to no
-queue fails the send; it is not dropped.
+queue fails the send; it is not dropped. With `delayed_ack: true` or `subscribe_mode: true`
+the publish is not `mandatory` and such a message is dropped.
 
 **Fan-out subscriber mode (ephemeral queue bound to the exchange):**
 

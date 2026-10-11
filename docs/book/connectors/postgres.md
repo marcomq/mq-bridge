@@ -150,7 +150,8 @@ The server must be PostgreSQL 14 or newer and run with `wal_level = logical`.
 
 TLS follows the URL (`?sslmode=verify-full&sslrootcert=/ca.pem`, with `sslcert` and
 `sslkey` for a client certificate) or the `tls` block; both connections the source
-opens use the same settings. `sslmode=prefer`, the default, is plain text.
+opens use the same settings. `sslmode=prefer`, the default, tries TLS
+first and falls back to plain text, so it does not guarantee TLS.
 
 A nacked change makes the source reconnect and deliver again from the last confirmed
 position, so the changes after it come twice. Rows of one transaction are confirmed

@@ -108,10 +108,19 @@ fn open_client(config: &RedisStreamsConfig) -> anyhow::Result<redis::Client> {
         None => None,
     };
     let client_tls = match (&tls.cert_file, &tls.key_file) {
-        (Some(cert), Some(key)) => Some(redis::ClientTlsConfig {
-            client_cert: read("cert_file", cert)?,
-            client_key: read("key_file", key)?,
-        }),
+        (Some(cert), Some(key)) => {
+            let client_key = read("key_file", key)?;
+            // The driver parses the key without a password.
+            if client_key.windows(9).any(|window| window == b"ENCRYPTED") {
+                return Err(anyhow!(
+                    "redis_streams tls.key_file '{key}' is encrypted: tls.cert_password is not supported, decrypt the key first"
+                ));
+            }
+            Some(redis::ClientTlsConfig {
+                client_cert: read("cert_file", cert)?,
+                client_key,
+            })
+        }
         (None, None) => None,
         _ => {
             return Err(anyhow!(
@@ -860,6 +869,19 @@ mod tests {
         let config = RedisStreamsConfig::new("rediss://localhost:6379").with_tls(tls);
         let error = open_client(&config).unwrap_err().to_string();
         assert!(error.contains("both cert_file and key_file"), "{error}");
+    }
+
+    #[test]
+    fn an_encrypted_client_key_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = dir.path().join("client.key");
+        std::fs::write(&key, "-----BEGIN ENCRYPTED PRIVATE KEY-----\n").unwrap();
+        let mut tls = TlsConfig::new();
+        tls.cert_file = Some("/client.pem".to_string());
+        tls.key_file = Some(key.to_string_lossy().into_owned());
+        let config = RedisStreamsConfig::new("rediss://localhost:6379").with_tls(tls);
+        let error = open_client(&config).unwrap_err().to_string();
+        assert!(error.contains("is encrypted"), "{error}");
     }
 
     fn bulk(s: &str) -> redis::Value {

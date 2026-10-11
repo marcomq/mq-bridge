@@ -2614,7 +2614,7 @@ pub struct WebSocketConfig {
         deserialize_with = "deserialize_basic_auth"
     )]
     pub basic_auth: Option<(String, String)>,
-    /// (Consumer only) Most connections open at once; one more gets 503. Unset = no limit.
+    /// (Consumer only) Maximum number of concurrent connections; additional connections receive 503. Unset = no limit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_connections: Option<usize>,
 }

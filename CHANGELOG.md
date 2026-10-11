@@ -71,6 +71,8 @@ All notable changes to `mq-bridge`. Newest first.
   working on the first. A nacked entry is re-claimed as before.
 - **`redis_streams`: a read without a reply within `block_ms` + 5 s is a connection error**,
   no longer treated as an empty read.
+- **`redis_streams`: an encrypted `tls.key_file` is an error that names the file.** The
+  driver reads no key password, so the connection used to fail with a parse error.
 
 - **`mqtt`: a nacked message is delivered again at once.** It used to stay unacked until the
   next reconnect and held a slot of the broker's inflight window, so a route stopped
