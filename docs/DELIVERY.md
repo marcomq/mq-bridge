@@ -33,7 +33,8 @@ orders_to_postgres:
 ```
 
 `at-most-once` is inferred for inputs that forget a message once handed over: `zeromq`, core NATS
-(`no_jetstream: true`), MQTT with `qos: 0`, and HTTP with `fire_and_forget: true`. A crash in the
+(`no_jetstream: true`), MQTT with `qos: 0`, HTTP with `fire_and_forget: true`, a `websocket`
+listener, and a `grpc` dynamic client (descriptor set or reflection). A crash in the
 route loses what it held.
 
 This table is **advice on how to configure an idempotent sink** — it is not a list of
@@ -205,7 +206,7 @@ What a route achieves, by what its input offers and what its output can absorb:
 | Replayable position (`kafka`, `postgres_cdc`, MongoDB CDC, `file` in `consume`, `sqlx` cursor) | effectively-once — key on a business id or on the position itself | effectively-once | at-least-once |
 | Stable identity only (JetStream, AMQP/MQTT 5 with an id, `mongodb` consumer, `dir_spool`) | effectively-once — key on the id | not available (no position) | at-least-once; `deduplication` narrows duplicates, see below |
 | Neither (`aws`, `ibm_mq`, MQTT 3, `file` re-read, …) | effectively-once only with a business key (`id` middleware) | not available | at-least-once |
-| No acknowledgement (`zeromq`, core NATS, MQTT QoS 0, HTTP `fire_and_forget`) | at-most-once | at-most-once | at-most-once |
+| No acknowledgement (`zeromq`, core NATS, MQTT QoS 0, HTTP `fire_and_forget`, `websocket`, `grpc` dynamic client) | at-most-once | at-most-once | at-most-once |
 
 A handler, or any side effect it performs, sits outside this table: see [Handlers](#handlers).
 A `custom` endpoint (or plugin) is placed in it by its own declaration — see
@@ -229,7 +230,9 @@ state store is needed. Both database sinks lean on this instead of an applicatio
 Point `id_field` at a top-level payload field and its value becomes the document `_id`. Alternatively,
 use the template form `id_field: "${metadata:mqb.id}"` to consume an identity produced by the input `id` middleware. Re-inserting
 the same business key then hits the unique `_id` index and is treated as an idempotent success (the
-duplicate is skipped, not errored):
+duplicate is skipped, not errored). Only `_id` works this way: a duplicate on another unique index
+is a refused document and fails as non-retryable, so it reaches a `dlq` if one is configured.
+
 
 ```yaml
 orders_to_mongo:
@@ -346,7 +349,9 @@ skipped) replays everything since the last asynchronous feedback tick. Set `chec
 `file://` path for a second, per-ack durable position that survives teardown regardless. Treat the
 source as at-least-once and make the sink idempotent.
 
-Each change event carries the full row (so the primary key is in the payload), `postgres.lsn` (a
+Each insert and update carries the row (so the primary key is in the payload; a delete carries
+the key columns, and an update that changes the key names the previous one in
+`postgres.old_key`), `postgres.lsn` (a
 monotonic version), `postgres.operation`/`schema`/`table`, and — when the table has a primary key /
 replica identity — `postgres.key` (the key value; a `truncate` event names no row and has none). The event's `message_id` is a stable hash of
 `schema.table + key + operation + lsn + position in the transaction`, so a replayed change

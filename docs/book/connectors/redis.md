@@ -68,8 +68,9 @@ mqb copy \
   --to 'clickhouse://localhost:8123?table=events&database=analytics'
 ```
 
-Unclaimed entries pending longer than `redelivery_timeout_ms` (default 60s)
-are re-delivered via `XAUTOCLAIM`.
+Entries pending longer than `redelivery_timeout_ms` (default 60s) are re-delivered via
+`XAUTOCLAIM`: a nacked entry, or one left behind by a consumer that is gone. An entry this
+consumer still holds is not. With `0`, a nacked entry is never delivered again.
 
 **Ephemeral tail of new messages (no group, no acks), continuous:**
 

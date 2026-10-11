@@ -62,4 +62,15 @@ mqb copy --drain \
 | `fire_and_forget` | Consumer-only: respond 202 immediately, don't wait for downstream processing. |
 | `message_id_header` | Header to extract the message ID from. Defaults to `message-id`. |
 
+**Metadata and headers.** A consumer stores each request header as metadata; a publisher
+sends each metadata entry as a request header, and a consumer sends the metadata of a reply
+as response headers. Not passed on: `host`, `connection`, `keep-alive`, `proxy-connection`,
+`upgrade` (request side), the framing headers `content-length`, `transfer-encoding`,
+`content-encoding`, and anything that is no valid header (a space in the name, a line break
+in the value). To send a fixed `Host`, use `custom_headers`. A publisher decodes a gzip,
+lz4 or zstd response and removes its `content-encoding`.
+
+**TLS on a listener** is switched on by `tls.required: true` with `cert_file` and
+`key_file`. A certificate without `required` is not used; the listener warns at start.
+
 Full field list: [reference/http.md](../reference/http.md).

@@ -9,6 +9,7 @@ Query parameters recognised as config fields for this connector. The object-type
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
 | `consumer_options` | array of array of any | no | `null` | (Consumer only) Additional librdkafka consumer configuration options (key-value pairs). |
+| `create_topic` | boolean | no | `true` | (Publisher only) Create the topic at start if it is missing (default: true). |
 | `delayed_ack` | boolean | no | `false` | (Publisher only) If true, do not wait for an acknowledgement when sending to broker. Defaults to false. |
 | `group_id` | string | no | — | (Consumer only) Consumer group ID. If not provided, the consumer acts in **Subscriber mode**: it generates a unique, ephemeral group ID and starts consuming from the latest offset. |
 | `partition_key` | string | no | `null` | (Publisher only) Name of a metadata field whose value is used as the Kafka record key (drives partitioning/ordering). Unset, or absent on a given message, falls back to the message id. Default unset. |

@@ -246,6 +246,11 @@ input:
 The same TLS fields apply to Bridge clients and servers. On an embedded server, `ca_file` enables
 client-certificate verification for mTLS.
 
+A client uses TLS when its URL is `https://` (or has no scheme and `tls.required` is set).
+`tls.required` with an `http://` URL is an error. `ca_file` is trusted in addition to the
+bundled web roots; `cert_file` and `key_file` go together, and an encrypted key
+(`cert_password`) is not supported.
+
 ## Dynamic server method
 
 A server-mode input with a descriptor, `service_name`, and `method_name` serves that unary method

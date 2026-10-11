@@ -14,5 +14,5 @@ Query parameters recognised as config fields for this connector. Unrecognised pa
 | `internal_buffer_size` | integer | no | `null` | Internal buffer size for the channel. Defaults to 128. `zmq` backend only — `omq` applies HWM backpressure on the socket itself and ignores this. |
 | `request_timeout_ms` | integer | no | `null` | (REQ publisher only) Timeout in ms for one request/reply exchange before it is reported as failed. Defaults to 30000. |
 | `socket_type` | `push` \| `pull` \| `pub` \| `sub` \| `req` \| `rep` | no | `null` | The socket type (PUSH, PULL, PUB, SUB, REQ, REP). |
-| `topic` | string | no | — | (Consumer only) The ZeroMQ topic (for SUB sockets). |
+| `topic` | string | no | — | Topic: the prefix a SUB socket filters on, or the topic frame a PUB socket sends first. |
 | `url` | string | yes | — | The ZeroMQ URL (e.g., "tcp://127.0.0.1:5555"). |
