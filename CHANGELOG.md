@@ -390,7 +390,8 @@ What 1.0 adds is the promise, and what it leaves open:
   `UnpackMiddleware` with a struct literal needs the new field or `..Default::default()`.
 - **`filter` accepts a map**, `{ expression: "amount > 100", on_error: drop }`. With
   `on_error: drop` a message the expression cannot evaluate is logged and dropped instead of
-  stopping the route. The bare string form and its behaviour are unchanged.
+  stopping the route. The bare string form and its behaviour are unchanged. The app's config
+  form edits both forms as an expression field and an `on_error` choice.
 - A `batch_size` above 32768 no longer reserves memory for a full batch per worker at start.
 - The "no route named" and "no publisher named" errors list the names the file has.
 - The error for a middleware whose Cargo feature is off names the middleware and the feature.

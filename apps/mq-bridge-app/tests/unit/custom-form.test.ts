@@ -879,6 +879,53 @@ describe("custom form runtime", () => {
     expect(textarea.classList.contains("mqb-json-invalid")).toBe(false);
   });
 
+  test("shows a filter in either form and keeps the bare string unless on_error is set", async () => {
+    const forms = await loadCustomForm();
+    const renderFilter = forms.customRenderers.filter.render as Function;
+    const node = {
+      oneOf: [
+        { type: "string" },
+        { type: "object", properties: { expression: { type: "string" }, on_error: { type: "string" } } },
+      ],
+    };
+    const store = createStore({
+      middlewares: [{ filter: "amount > 100" }, { filter: { expression: "amount > 7", on_error: "drop" } }],
+    });
+    forms.__activeStore = store;
+    const render = (index: number) => {
+      const element = renderFilter(
+        node,
+        "",
+        `root.middlewares.${index}.filter`,
+        ["root", "middlewares", index, "filter"],
+        { store },
+      ) as HTMLElement;
+      document.body.appendChild(element);
+      return {
+        expression: element.querySelector("input") as HTMLInputElement,
+        onError: element.querySelector("select") as HTMLSelectElement,
+      };
+    };
+    const change = (control: HTMLElement) => control.dispatchEvent(new Event("change", { bubbles: true }));
+
+    const bare = render(0);
+    expect(bare.expression.value).toBe("amount > 100");
+    expect(bare.onError.value).toBe("fail");
+    bare.expression.value = "amount > 200";
+    change(bare.expression);
+    expect(store.getPath(["middlewares", 0, "filter"])).toBe("amount > 200");
+    bare.onError.value = "drop";
+    change(bare.onError);
+    expect(store.getPath(["middlewares", 0, "filter"])).toEqual({ expression: "amount > 200", on_error: "drop" });
+
+    const map = render(1);
+    expect(map.expression.value).toBe("amount > 7");
+    expect(map.onError.value).toBe("drop");
+    map.onError.value = "fail";
+    change(map.onError);
+    expect(store.getPath(["middlewares", 1, "filter"])).toEqual({ expression: "amount > 7", on_error: "fail" });
+  });
+
   test("stores new transform mappings and displays them after re-render", async () => {
     const forms = await loadCustomForm();
     const renderTransformMapping = forms.customRenderers["transform.mapping"].render as Function;
