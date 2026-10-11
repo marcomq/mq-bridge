@@ -327,6 +327,15 @@ async fn test_sqlx_multicolumn() {
 #[cfg(feature = "sqlx")]
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires docker compose"]
+async fn test_sqlx_rejected_row_fails_alone() {
+    if should_run("sqlx") || should_run("postgres") {
+        integration::postgres::test_postgres_rejected_row_fails_alone().await;
+    }
+}
+
+#[cfg(feature = "sqlx")]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires docker compose"]
 async fn test_sqlx_auto_columns_changing_bind_types() {
     if should_run("sqlx") || should_run("postgres") {
         integration::postgres::test_postgres_auto_columns_changing_bind_types().await;
@@ -372,9 +381,56 @@ async fn test_postgres_cdc() {
 #[cfg(all(feature = "postgres-cdc", feature = "test-utils"))]
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires docker compose (postgres with wal_level=logical)"]
+async fn test_postgres_cdc_dates_ignore_the_role_datestyle() {
+    if should_run("postgres_cdc") || should_run("postgres") {
+        integration::postgres_cdc::test_postgres_cdc_dates_ignore_the_role_datestyle().await;
+    }
+}
+
+#[cfg(all(feature = "postgres-cdc", feature = "test-utils"))]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires docker compose (postgres with wal_level=logical)"]
+async fn test_postgres_cdc_key_change() {
+    if should_run("postgres_cdc") || should_run("postgres") {
+        integration::postgres_cdc::test_postgres_cdc_key_change().await;
+    }
+}
+
+#[cfg(all(feature = "postgres-cdc", feature = "test-utils"))]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires docker compose (postgres with wal_level=logical)"]
 async fn test_postgres_cdc_batches_a_backlog_of_small_transactions() {
     if should_run("postgres_cdc") || should_run("postgres") {
         integration::postgres_cdc::test_postgres_cdc_batches_a_backlog_of_small_transactions()
+            .await;
+    }
+}
+
+#[cfg(all(feature = "postgres-cdc", feature = "test-utils"))]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires docker compose (postgres with wal_level=logical)"]
+async fn test_postgres_cdc_keeps_the_rest_of_a_transaction_after_a_stop() {
+    if should_run("postgres_cdc") || should_run("postgres") {
+        integration::postgres_cdc::test_postgres_cdc_keeps_the_rest_of_a_transaction_after_a_stop()
+            .await;
+    }
+}
+
+#[cfg(all(feature = "postgres-cdc", feature = "test-utils"))]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires docker compose (postgres with wal_level=logical)"]
+async fn test_postgres_cdc_replays_a_nacked_row_after_later_acks() {
+    if should_run("postgres_cdc") || should_run("postgres") {
+        integration::postgres_cdc::test_postgres_cdc_replays_a_nacked_row_after_later_acks().await;
+    }
+}
+
+#[cfg(all(feature = "postgres-cdc", feature = "test-utils"))]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires docker compose (postgres with wal_level=logical)"]
+async fn test_postgres_cdc_starts_with_a_checkpoint_behind_the_slot() {
+    if should_run("postgres_cdc") || should_run("postgres") {
+        integration::postgres_cdc::test_postgres_cdc_starts_with_a_checkpoint_behind_the_slot()
             .await;
     }
 }
@@ -524,6 +580,51 @@ async fn test_mongodb_cdc_read_throughput() {
 async fn test_mongodb_cdc_latency() {
     if should_run("mongodb_cdc") || should_run("mongodb") {
         integration::mongodb::test_mongodb_cdc_latency().await;
+    }
+}
+
+#[cfg(feature = "mongodb")]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires docker compose (standalone mongodb)"]
+async fn test_mongodb_snapshot_rereads_two_nacked_pages() {
+    if should_run("mongodb_cdc") || should_run("mongodb") {
+        integration::mongodb::test_mongodb_snapshot_rereads_two_nacked_pages().await;
+    }
+}
+
+#[cfg(feature = "mongodb")]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires docker compose (mongodb replica set)"]
+async fn test_mongodb_capture_all_rereads_two_nacked_snapshot_pages() {
+    if should_run("mongodb_cdc") || should_run("mongodb") {
+        integration::mongodb::test_mongodb_capture_all_rereads_two_nacked_snapshot_pages().await;
+    }
+}
+
+#[cfg(feature = "mongodb")]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires docker compose (mongodb replica set)"]
+async fn test_mongodb_cdc_replays_a_nacked_change_without_a_cursor_id() {
+    if should_run("mongodb_cdc") || should_run("mongodb") {
+        integration::mongodb::test_mongodb_cdc_replays_a_nacked_change_without_a_cursor_id().await;
+    }
+}
+
+#[cfg(feature = "mongodb")]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires docker compose (mongodb replica set)"]
+async fn test_mongodb_cdc_replays_a_nacked_change() {
+    if should_run("mongodb_cdc") || should_run("mongodb") {
+        integration::mongodb::test_mongodb_cdc_replays_a_nacked_change().await;
+    }
+}
+
+#[cfg(feature = "mongodb")]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires docker compose (standalone mongodb)"]
+async fn test_mongodb_rejected_document_fails_alone() {
+    if should_run("mongodb_cdc") || should_run("mongodb") {
+        integration::mongodb::test_mongodb_rejected_document_fails_alone().await;
     }
 }
 

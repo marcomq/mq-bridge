@@ -183,6 +183,13 @@ impl std::fmt::Display for ChHttpError {
 
 impl std::error::Error for ChHttpError {}
 
+/// A 400 is ClickHouse refusing the data it was sent: the same rows fail again.
+fn refused_data(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<ChHttpError>()
+        .is_some_and(|e| e.status == reqwest::StatusCode::BAD_REQUEST)
+}
+
 /// Whether the URL names this machine, where a clear-text password never leaves it.
 fn is_loopback(url: &url::Url) -> bool {
     match url.host() {
@@ -237,10 +244,15 @@ impl ChClient {
         url.set_username("")
             .map_err(|_| anyhow!("ClickHouse URL cannot contain username userinfo"))?;
 
+        if config.tls.required && url.scheme() != "https" {
+            return Err(anyhow!("ClickHouse tls.required needs an https URL"));
+        }
         // No redirect following: credentials travel as plain `X-ClickHouse-*` headers, which
         // reqwest does not strip on a cross-host hop, and the HTTP interface never redirects.
         let mut builder = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
+            // Without a request timeout, this is what ends a request to a peer that is gone.
+            .tcp_keepalive(Duration::from_secs(60))
             .connect_timeout(Duration::from_millis(
                 config.connect_timeout_ms.unwrap_or(10_000),
             ));
@@ -258,6 +270,31 @@ impl ChClient {
                 reqwest::Certificate::from_pem(&pem)
                     .with_context(|| format!("Invalid ClickHouse CA certificate '{}'", ca))?,
             );
+        }
+        if config.tls.cert_password.is_some() {
+            return Err(anyhow!(
+                "ClickHouse tls.cert_password is not supported; use an unencrypted key"
+            ));
+        }
+        match (&config.tls.cert_file, &config.tls.key_file) {
+            (Some(cert), key) => {
+                let mut pem = std::fs::read(cert)
+                    .with_context(|| format!("Failed to read ClickHouse cert file '{cert}'"))?;
+                if let Some(key) = key {
+                    pem.push(b'\n');
+                    pem.extend(
+                        std::fs::read(key).with_context(|| {
+                            format!("Failed to read ClickHouse key file '{key}'")
+                        })?,
+                    );
+                }
+                builder =
+                    builder.identity(reqwest::Identity::from_pem(&pem).with_context(|| {
+                        format!("Invalid ClickHouse client certificate '{cert}'")
+                    })?);
+            }
+            (None, Some(_)) => return Err(anyhow!("ClickHouse tls.key_file needs tls.cert_file")),
+            (None, None) => {}
         }
         let http = builder
             .build()
@@ -581,13 +618,26 @@ impl MessagePublisher for ClickHousePublisher {
             .await;
         }
         let mut body = format!("INSERT INTO {} FORMAT JSONEachRow\n", self.table);
-        for msg in &messages {
-            let row = build_row(msg, &self.columns).map_err(PublisherError::NonRetryable)?;
-            let line = serde_json::to_string(&row).map_err(|e| {
-                PublisherError::NonRetryable(anyhow!("Failed to serialize row: {}", e))
-            })?;
-            body.push_str(&line);
-            body.push('\n');
+        let prefix = body.len();
+        let mut failed = Vec::new();
+        let mut rows = Vec::with_capacity(messages.len());
+        // Where each row ends in `body`, so a part of the batch can be sent again on its own.
+        let mut ends = Vec::with_capacity(messages.len());
+        for msg in messages {
+            let line = build_row(&msg, &self.columns)
+                .and_then(|row| serde_json::to_string(&row).context("Failed to serialize row"));
+            match line {
+                Ok(line) => {
+                    body.push_str(&line);
+                    body.push('\n');
+                    ends.push(body.len());
+                    rows.push(Some(msg));
+                }
+                Err(e) => failed.push((msg, PublisherError::NonRetryable(e))),
+            }
+        }
+        if rows.is_empty() {
+            return Ok(SentBatch::from_failures(failed));
         }
         let extra: &[(&str, &str)] = if self.async_insert {
             if self.wait_for_async_insert {
@@ -598,12 +648,50 @@ impl MessagePublisher for ClickHousePublisher {
         } else {
             &[]
         };
-        self.client
-            .run(&body, extra, true)
-            .await
-            .map_err(PublisherError::Retryable)?;
-        trace!(count = messages.len(), table = %self.table, "Published batch to ClickHouse");
-        Ok(SentBatch::Ack)
+        let count = rows.len();
+        match self.client.run(&body, extra, true).await {
+            Ok(_) => {}
+            Err(e) if refused_data(&e) => {
+                warn!(table = %self.table, error = %e, "ClickHouse refused a batch; looking for the rows it does not take");
+                // Halve what was refused until the refused rows stand alone.
+                let mut refused = vec![(0, count, e)];
+                while let Some((from, to, error)) = refused.pop() {
+                    if to - from == 1 {
+                        let msg = rows[from].take().expect("each row is settled once");
+                        failed.push((msg, PublisherError::NonRetryable(error)));
+                        continue;
+                    }
+                    let middle = from + (to - from) / 2;
+                    for (from, to) in [(middle, to), (from, middle)] {
+                        let start = if from == 0 { prefix } else { ends[from - 1] };
+                        let part = format!("{}{}", &body[..prefix], &body[start..ends[to - 1]]);
+                        match self.client.run(&part, extra, true).await {
+                            Ok(_) => {}
+                            Err(e) if refused_data(&e) => refused.push((from, to, e)),
+                            Err(e) => {
+                                let text = format!("{e:#}");
+                                failed.extend(rows[from..to].iter_mut().map(|row| {
+                                    let msg = row.take().expect("each row is settled once");
+                                    (msg, PublisherError::Retryable(anyhow!("{text}")))
+                                }));
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) if failed.is_empty() => return Err(PublisherError::Retryable(e)),
+            Err(e) => {
+                let text = format!("{e:#}");
+                failed.extend(
+                    rows.into_iter()
+                        .flatten()
+                        .map(|msg| (msg, PublisherError::Retryable(anyhow!("{text}")))),
+                );
+                return Ok(SentBatch::from_failures(failed));
+            }
+        }
+        trace!(count, table = %self.table, "Published batch to ClickHouse");
+        Ok(SentBatch::from_failures(failed))
     }
 
     async fn status(&self) -> EndpointStatus {
@@ -726,7 +814,43 @@ pub struct ClickHouseCursorReader {
     select_columns: String,
     backoff: PollBackoff,
     checkpoint: Option<Arc<dyn CheckpointStore>>,
-    last_value: Arc<Mutex<Option<ChCursor>>>,
+    position: Arc<Mutex<CursorPosition>>,
+}
+
+/// Where the next page starts. A nack rewinds `last` and starts a new `epoch`; batches read
+/// in an older one are read again, so their commits confirm nothing.
+#[derive(Default)]
+struct CursorPosition {
+    last: Option<ChCursor>,
+    epoch: u64,
+}
+
+/// A batch handed out and not settled yet. Dropped without a commit, its rows are read again.
+struct Unsettled {
+    position: Arc<Mutex<CursorPosition>>,
+    resume_from: Option<ChCursor>,
+    epoch: u64,
+    settled: bool,
+}
+
+impl Unsettled {
+    // A method, so the commit closure takes the whole guard and not a copy of the flag.
+    fn settle(&mut self) {
+        self.settled = true;
+    }
+}
+
+impl Drop for Unsettled {
+    fn drop(&mut self) {
+        if self.settled {
+            return;
+        }
+        let mut position = self.position.lock().unwrap();
+        if position.epoch == self.epoch {
+            position.last = self.resume_from.take();
+            position.epoch += 1;
+        }
+    }
 }
 
 impl ClickHouseCursorReader {
@@ -836,7 +960,10 @@ impl ClickHouseCursorReader {
                 config.max_polling_interval_ms.map(Duration::from_millis),
             ),
             checkpoint,
-            last_value: Arc::new(Mutex::new(last_value)),
+            position: Arc::new(Mutex::new(CursorPosition {
+                last: last_value,
+                epoch: 0,
+            })),
         })
     }
 }
@@ -851,15 +978,19 @@ impl MessageConsumer for ClickHouseCursorReader {
             });
         }
 
-        let last = self.last_value.lock().unwrap().clone();
-        // Peek one extra row so a run of equal cursor values split across the LIMIT boundary is
-        // detected (a `> last` bound would otherwise silently skip the remainder of that run).
-        let fetch_limit = max_messages.saturating_add(1);
+        let (messages, cursors, last, epoch) = loop {
+            let (last, epoch) = {
+                let position = self.position.lock().unwrap();
+                (position.last.clone(), position.epoch)
+            };
+            // Peek one extra row so a run of equal cursor values split across the LIMIT boundary is
+            // detected (a `> last` bound would otherwise silently skip the remainder of that run).
+            let fetch_limit = max_messages.saturating_add(1);
 
-        let (sql, extra): (String, Vec<(&str, String)>) = match &last {
-            Some(cur) => {
-                let (ty, val) = cur.param();
-                let sql = format!(
+            let (sql, extra): (String, Vec<(&str, String)>) = match &last {
+                Some(cur) => {
+                    let (ty, val) = cur.param();
+                    let sql = format!(
                     "SELECT {cols} FROM {table} WHERE {col} > {{last:{ty}}} ORDER BY {col} ASC LIMIT {lim} FORMAT JSONEachRow",
                     cols = self.select_columns,
                     table = self.table,
@@ -867,105 +998,119 @@ impl MessageConsumer for ClickHouseCursorReader {
                     ty = ty,
                     lim = fetch_limit,
                 );
-                (sql, vec![("param_last", val)])
-            }
-            None => {
-                let sql = format!(
+                    (sql, vec![("param_last", val)])
+                }
+                None => {
+                    let sql = format!(
                     "SELECT {cols} FROM {table} ORDER BY {col} ASC LIMIT {lim} FORMAT JSONEachRow",
                     cols = self.select_columns,
                     table = self.table,
                     col = self.cursor_column,
                     lim = fetch_limit,
                 );
-                (sql, Vec::new())
+                    (sql, Vec::new())
+                }
+            };
+            // Ask the server to gzip the (potentially large) result set; reqwest gunzips it transparently.
+            // `output_format_json_quote_64bit_integers=0` keeps Int64/UInt64 as JSON numbers (ClickHouse
+            // quotes them as strings by default), so numeric cursor values and payload ids stay numeric —
+            // otherwise a UInt64 cursor would page by lexicographic string order.
+            let mut extra_refs: Vec<(&str, &str)> = vec![
+                ("enable_http_compression", "1"),
+                ("output_format_json_quote_64bit_integers", "0"),
+            ];
+            extra_refs.extend(extra.iter().map(|(k, v)| (*k, v.as_str())));
+
+            let body = self
+                .client
+                .run(&sql, &extra_refs, false)
+                .await
+                .map_err(ConsumerError::Connection)?;
+
+            // Parse JSONEachRow: one JSON object per non-empty line.
+            let mut fetched: Vec<(ChCursor, CanonicalMessage)> = Vec::new();
+            for line in body.lines().filter(|l| !l.trim().is_empty()) {
+                let row: serde_json::Value = serde_json::from_str(line).map_err(|e| {
+                    ConsumerError::Connection(anyhow!("Invalid JSONEachRow row: {}", e))
+                })?;
+                let cursor = extract_cursor(&row, &self.cursor_column).ok_or_else(|| {
+                    // Schema-level, so re-polling fails identically: permanent, not a reconnect.
+                    ConsumerError::Permanent(anyhow!(
+                        "cursor_column '{}' missing or of unsupported type in result row",
+                        self.cursor_column
+                    ))
+                })?;
+                let payload = serde_json::to_vec(&row).unwrap_or_default();
+                fetched.push((cursor, CanonicalMessage::new(payload, None)));
             }
-        };
-        // Ask the server to gzip the (potentially large) result set; reqwest gunzips it transparently.
-        // `output_format_json_quote_64bit_integers=0` keeps Int64/UInt64 as JSON numbers (ClickHouse
-        // quotes them as strings by default), so numeric cursor values and payload ids stay numeric —
-        // otherwise a UInt64 cursor would page by lexicographic string order.
-        let mut extra_refs: Vec<(&str, &str)> = vec![
-            ("enable_http_compression", "1"),
-            ("output_format_json_quote_64bit_integers", "0"),
-        ];
-        extra_refs.extend(extra.iter().map(|(k, v)| (*k, v.as_str())));
 
-        let body = self
-            .client
-            .run(&sql, &extra_refs, false)
-            .await
-            .map_err(ConsumerError::Connection)?;
-
-        // Parse JSONEachRow: one JSON object per non-empty line.
-        let mut fetched: Vec<(ChCursor, CanonicalMessage)> = Vec::new();
-        for line in body.lines().filter(|l| !l.trim().is_empty()) {
-            let row: serde_json::Value = serde_json::from_str(line).map_err(|e| {
-                ConsumerError::Connection(anyhow!("Invalid JSONEachRow row: {}", e))
-            })?;
-            let cursor = extract_cursor(&row, &self.cursor_column).ok_or_else(|| {
-                // Schema-level, so re-polling fails identically: permanent, not a reconnect.
-                ConsumerError::Permanent(anyhow!(
-                    "cursor_column '{}' missing or of unsupported type in result row",
-                    self.cursor_column
-                ))
-            })?;
-            let payload = serde_json::to_vec(&row).unwrap_or_default();
-            fetched.push((cursor, CanonicalMessage::new(payload, None)));
-        }
-
-        if fetched.is_empty() {
-            // Drained: keep polling cadence (backing off if configured), then surface an empty batch.
-            tokio::time::sleep(self.backoff.idle_delay()).await;
-            return Ok(ReceivedBatch {
-                messages: Vec::new(),
-                commit: Box::new(|_| Box::pin(async { Ok(()) })),
-            });
-        }
-        // Rows arrived: return to the base polling interval.
-        self.backoff.reset();
-
-        // Drop the trailing run equal to the peek row's value so a group of equal cursor values is
-        // never split across pages; trimmed rows are re-read next poll via `col > last`.
-        let had_more = fetched.len() > max_messages;
-        let mut emit_len = fetched.len().min(max_messages);
-        if had_more {
-            let peek_val = fetched[max_messages].0.clone();
-            while emit_len > 0 && fetched[emit_len - 1].0 == peek_val {
-                emit_len -= 1;
+            if fetched.is_empty() {
+                // Drained: keep polling cadence (backing off if configured), then surface an empty batch.
+                tokio::time::sleep(self.backoff.idle_delay()).await;
+                return Ok(ReceivedBatch {
+                    messages: Vec::new(),
+                    commit: Box::new(|_| Box::pin(async { Ok(()) })),
+                });
             }
-            if emit_len == 0 {
-                // The whole page shares one cursor value and more rows with that value exist beyond
-                // it. Advancing past the value would silently skip the remainder, so fail loudly
-                // instead of losing rows. Permanent: re-polling returns the same page forever.
-                return Err(ConsumerError::Permanent(anyhow!(
+            // Rows arrived: return to the base polling interval.
+            self.backoff.reset();
+
+            // Drop the trailing run equal to the peek row's value so a group of equal cursor values is
+            // never split across pages; trimmed rows are re-read next poll via `col > last`.
+            let had_more = fetched.len() > max_messages;
+            let mut emit_len = fetched.len().min(max_messages);
+            if had_more {
+                let peek_val = fetched[max_messages].0.clone();
+                while emit_len > 0 && fetched[emit_len - 1].0 == peek_val {
+                    emit_len -= 1;
+                }
+                if emit_len == 0 {
+                    // The whole page shares one cursor value and more rows with that value exist beyond
+                    // it. Advancing past the value would silently skip the remainder, so fail loudly
+                    // instead of losing rows. Permanent: re-polling returns the same page forever.
+                    return Err(ConsumerError::Permanent(anyhow!(
                     "cursor_column '{}' has a group of equal values larger than batch_size ({}); \
                      cannot page without skipping rows. Increase batch_size above the size of the \
                      largest equal-value group.",
                     self.cursor_column,
                     max_messages
                 )));
+                }
             }
-        }
-        fetched.truncate(emit_len);
+            fetched.truncate(emit_len);
 
-        let mut messages = Vec::with_capacity(fetched.len());
-        let mut cursors: Vec<ChCursor> = Vec::with_capacity(fetched.len());
-        for (cursor, msg) in fetched {
-            cursors.push(cursor.clone());
-            messages.push(msg);
+            let mut messages = Vec::with_capacity(fetched.len());
+            let mut cursors: Vec<ChCursor> = Vec::with_capacity(fetched.len());
+            for (cursor, msg) in fetched {
+                cursors.push(cursor);
+                messages.push(msg);
+            }
+            let mut position = self.position.lock().unwrap();
+            // A nack rewound the cursor while this page was read: read from there instead.
+            if position.epoch != epoch {
+                continue;
+            }
             // Advance optimistically; rolled back in commit if a row is not acked.
-            *self.last_value.lock().unwrap() = Some(cursor);
-        }
+            position.last = cursors.last().cloned();
+            break (messages, cursors, last, epoch);
+        };
         trace!(
             count = messages.len(),
             "Received batch of ClickHouse cursor rows"
         );
 
         let checkpoint = self.checkpoint.clone();
-        let last_value = self.last_value.clone();
+        let position = self.position.clone();
         let resume_from = last; // cursor value before this batch (for rollback on nack)
+        let mut unsettled = Unsettled {
+            position: position.clone(),
+            resume_from: resume_from.clone(),
+            epoch,
+            settled: false,
+        };
         let commit = Box::new(move |dispositions: Vec<MessageDisposition>| {
             Box::pin(async move {
+                unsettled.settle();
                 // Count the contiguous run of Acks from the front (stop at first Nack).
                 let mut acked = 0usize;
                 for disp in dispositions.iter().take(cursors.len()) {
@@ -982,8 +1127,16 @@ impl MessageConsumer for ClickHouseCursorReader {
                 };
                 // Roll the in-memory read cursor back to the committed boundary so nacked rows are
                 // re-read next poll (at-least-once) instead of skipped until a restart.
-                if acked < cursors.len() {
-                    *last_value.lock().unwrap() = boundary.clone();
+                {
+                    let mut position = position.lock().unwrap();
+                    // Read before an earlier nack: confirming it would skip the nacked row.
+                    if position.epoch != epoch {
+                        return Ok(());
+                    }
+                    if acked < cursors.len() {
+                        position.last = boundary.clone();
+                        position.epoch += 1;
+                    }
                 }
                 if let (Some(cur), Some(cp)) = (boundary, checkpoint) {
                     if let Err(e) = cp.save(&cur.encode()).await {
@@ -1024,7 +1177,8 @@ mod tests {
     fn config(url: &str) -> ClickHouseConfig {
         serde_json::from_value(serde_json::json!({
             "url": url,
-            "table": "orders"
+            "table": "orders",
+            "compression": "none"
         }))
         .unwrap()
     }
@@ -1035,6 +1189,250 @@ mod tests {
             m.metadata.insert(k.to_string(), v.to_string());
         }
         m
+    }
+
+    /// Answers the cursor reader's queries from a table with ids 1 to 6.
+    async fn serve_six_rows() -> String {
+        serve(|request| {
+            let number_after = |key: &str| -> Option<i64> {
+                let rest = &request[request.find(key)? + key.len()..];
+                let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+                digits.parse().ok()
+            };
+            let body = match number_after("LIMIT ") {
+                None => "1\n".to_string(),
+                Some(limit) => {
+                    let last = number_after("param_last=").unwrap_or(0);
+                    (last + 1..=6)
+                        .take(limit as usize)
+                        .map(|id| format!("{{\"id\":{id}}}\n"))
+                        .collect()
+                }
+            };
+            (200, body)
+        })
+        .await
+    }
+
+    /// Refuses an insert holding a row with `"n":"bad"` and keeps the rows of every other one.
+    async fn serve_inserts() -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
+        let stored = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let rows = stored.clone();
+        let url = serve(move |request| {
+            let body = request.split_once("\r\n\r\n").unwrap().1;
+            if body.contains(r#""n":"bad""#) {
+                return (
+                    400,
+                    "Code: 27. DB::Exception: Cannot parse input".to_string(),
+                );
+            }
+            rows.lock()
+                .unwrap()
+                .extend(body.lines().skip(1).map(str::to_string));
+            (200, String::new())
+        })
+        .await;
+        (url, stored)
+    }
+
+    /// A one-table HTTP server: `respond` gets each request as text.
+    async fn serve(respond: impl Fn(&str) -> (u16, String) + Send + Sync + 'static) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let respond = Arc::new(respond);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let respond = respond.clone();
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    loop {
+                        let mut chunk = [0u8; 4096];
+                        let request = loop {
+                            let text = String::from_utf8_lossy(&buf).into_owned();
+                            if let Some((head, body)) = text.split_once("\r\n\r\n") {
+                                let length = head
+                                    .lines()
+                                    .find_map(|l| {
+                                        let l = l.to_ascii_lowercase();
+                                        l.strip_prefix("content-length:")
+                                            .map(|v| v.trim().parse::<usize>().unwrap())
+                                    })
+                                    .unwrap_or(0);
+                                if body.len() >= length {
+                                    buf.clear();
+                                    break text;
+                                }
+                            }
+                            match socket.read(&mut chunk).await {
+                                Ok(n) if n > 0 => buf.extend_from_slice(&chunk[..n]),
+                                _ => return,
+                            }
+                        };
+                        let (status, body) = respond(&request);
+                        let response = format!(
+                            "HTTP/1.1 {status} X\r\ncontent-length: {}\r\n\r\n{body}",
+                            body.len()
+                        );
+                        if socket.write_all(response.as_bytes()).await.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        url
+    }
+
+    fn failed_payloads(sent: SentBatch) -> Vec<(String, bool)> {
+        let SentBatch::Partial { failed, .. } = sent else {
+            panic!("expected a partial result");
+        };
+        failed
+            .into_iter()
+            .map(|(m, e)| {
+                let retryable = matches!(e, PublisherError::Retryable(_));
+                (String::from_utf8_lossy(&m.payload).into_owned(), retryable)
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_payload_that_is_no_row_fails_alone() {
+        let (url, stored) = serve_inserts().await;
+        let publisher = ClickHousePublisher::new(&config(&url)).await.unwrap();
+        let batch = vec![
+            msg(&serde_json::json!({"n": 1}), &[]),
+            msg(&serde_json::json!("no object"), &[]),
+            msg(&serde_json::json!({"n": 3}), &[]),
+        ];
+        let sent = publisher
+            .send_batch(batch)
+            .await
+            .expect("the batch is sent");
+        assert_eq!(
+            failed_payloads(sent),
+            vec![(r#""no object""#.to_string(), false)]
+        );
+        assert_eq!(*stored.lock().unwrap(), vec![r#"{"n":1}"#, r#"{"n":3}"#]);
+    }
+
+    #[tokio::test]
+    async fn a_row_clickhouse_refuses_fails_alone_and_is_not_retried() {
+        let (url, stored) = serve_inserts().await;
+        let publisher = ClickHousePublisher::new(&config(&url)).await.unwrap();
+        let batch = (1..=9)
+            .map(|n| match n {
+                4 | 9 => msg(&serde_json::json!({"n": "bad", "at": n}), &[]),
+                _ => msg(&serde_json::json!({"n": n}), &[]),
+            })
+            .collect();
+        let sent = publisher
+            .send_batch(batch)
+            .await
+            .expect("the batch is sent");
+        assert_eq!(
+            failed_payloads(sent),
+            vec![
+                (r#"{"n":"bad","at":4}"#.to_string(), false),
+                (r#"{"n":"bad","at":9}"#.to_string(), false)
+            ]
+        );
+        let mut rows = stored.lock().unwrap().clone();
+        rows.sort();
+        let expected: Vec<String> = [1, 2, 3, 5, 6, 7, 8]
+            .iter()
+            .map(|n| format!(r#"{{"n":{n}}}"#))
+            .collect();
+        assert_eq!(rows, expected);
+    }
+
+    #[tokio::test]
+    async fn a_server_error_keeps_the_batch_retryable() {
+        let url = serve(|request| match request.contains("INSERT") {
+            true => (503, "busy".to_string()),
+            false => (200, "1\n".to_string()),
+        })
+        .await;
+        let publisher = ClickHousePublisher::new(&config(&url)).await.unwrap();
+        let batch = vec![msg(&serde_json::json!({"n": 1}), &[])];
+        let error = publisher.send_batch(batch).await.expect_err("refused");
+        assert!(matches!(error, PublisherError::Retryable(_)), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_batch_dropped_without_a_commit_is_read_again() {
+        let config: ClickHouseConfig = serde_json::from_value(serde_json::json!({
+            "url": serve_six_rows().await,
+            "table": "orders",
+            "cursor_column": "id",
+        }))
+        .unwrap();
+        let mut reader = ClickHouseCursorReader::new(&config).await.unwrap();
+        drop(reader.receive_batch(2).await.unwrap());
+        let again = reader.receive_batch(2).await.unwrap();
+        let row: serde_json::Value = serde_json::from_slice(&again.messages[0].payload).unwrap();
+        assert_eq!(row["id"], 1, "its rows were never settled");
+    }
+
+    #[test]
+    fn tls_options_that_cannot_be_honoured_are_refused() {
+        let with_tls = |url: &str, tls: serde_json::Value| {
+            let config: ClickHouseConfig = serde_json::from_value(serde_json::json!({
+                "url": url, "table": "orders", "tls": tls
+            }))
+            .unwrap();
+            ChClient::from_config(&config).err().map(|e| e.to_string())
+        };
+        let required = with_tls("http://ch:8123", serde_json::json!({"required": true}));
+        assert!(required.unwrap().contains("https"));
+        let key_only = with_tls("https://ch:8443", serde_json::json!({"key_file": "k.pem"}));
+        assert!(key_only.unwrap().contains("cert_file"));
+        let missing = with_tls(
+            "https://ch:8443",
+            serde_json::json!({"cert_file": "/no/c.pem"}),
+        );
+        assert!(missing.unwrap().contains("/no/c.pem"));
+    }
+
+    /// Same class as SQLX-02: a later commit must not confirm or overwrite an earlier nack.
+    #[tokio::test]
+    async fn a_later_commit_does_not_move_the_cursor_past_a_nacked_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let config: ClickHouseConfig = serde_json::from_value(serde_json::json!({
+            "url": serve_six_rows().await,
+            "table": "orders",
+            "cursor_column": "id",
+            "cursor_id": "copy-1",
+            "checkpoint_store": format!("file://{}", dir.path().join("cp").display()),
+        }))
+        .unwrap();
+        let first_id = |batch: &ReceivedBatch| {
+            serde_json::from_slice::<serde_json::Value>(&batch.messages[0].payload).unwrap()["id"]
+                .as_i64()
+                .unwrap()
+        };
+
+        let mut reader = ClickHouseCursorReader::new(&config).await.unwrap();
+        let first = reader.receive_batch(2).await.unwrap();
+        let second = reader.receive_batch(2).await.unwrap();
+        let third = reader.receive_batch(2).await.unwrap();
+        (first.commit)(vec![MessageDisposition::Ack, MessageDisposition::Nack])
+            .await
+            .unwrap();
+        (second.commit)(vec![MessageDisposition::Nack; 2])
+            .await
+            .unwrap();
+        (third.commit)(vec![MessageDisposition::Ack; 2])
+            .await
+            .unwrap();
+
+        let again = reader.receive_batch(2).await.unwrap();
+        assert_eq!(first_id(&again), 2, "the nacked row is read again");
+
+        let mut restarted = ClickHouseCursorReader::new(&config).await.unwrap();
+        let resumed = restarted.receive_batch(2).await.unwrap();
+        assert_eq!(first_id(&resumed), 2, "the checkpoint stops before it");
     }
 
     #[test]

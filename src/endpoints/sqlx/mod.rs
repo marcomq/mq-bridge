@@ -392,8 +392,11 @@ fn build_sqlx_url_with_tls(config: &SqlxConfig) -> anyhow::Result<String> {
                 if let Some(key) = &config.tls.key_file {
                     query_pairs.append_pair("sslkey", key);
                 }
-                if let Some(pass) = &config.tls.cert_password {
-                    query_pairs.append_pair("sslpassword", pass);
+                // The driver reads no key password and would log one it finds in the URL.
+                if config.tls.cert_password.is_some() {
+                    warn!(
+                        "sqlx ignores tls.cert_password: the client key file must be unencrypted."
+                    );
                 }
             }
             "mysql" | "mariadb" => {
@@ -401,23 +404,32 @@ fn build_sqlx_url_with_tls(config: &SqlxConfig) -> anyhow::Result<String> {
                 // It's generally better to use a client-side configuration file (`my.cnf`)
                 // for complex TLS setups. We'll add what we can.
                 warn!("For complex MySQL/MariaDB TLS setups, using a client configuration file (my.cnf) is recommended over URL parameters.");
+                // The driver takes the last `ssl-mode`, so one in the URL is left to win.
+                let url_sets_mode = url
+                    .query_pairs()
+                    .any(|(key, _)| key == "ssl-mode" || key == "sslmode");
                 let mut query_pairs = url.query_pairs_mut();
-                if config.tls.accept_invalid_certs {
+                if url_sets_mode {
+                } else if config.tls.accept_invalid_certs {
                     // Explicitly opted out of validation: encrypt but do not verify.
                     query_pairs.append_pair("ssl-mode", "REQUIRED");
-                } else if config.tls.ca_file.is_some() {
-                    // Verify the chain against the configured CA.
-                    warn!("MySQL/MariaDB with tls.ca_file checks the certificate chain but not the host name (ssl-mode=VERIFY_CA). For a host name check, leave tls.required off and put ssl-mode=VERIFY_IDENTITY and ssl-ca in the URL.");
-                    query_pairs.append_pair("ssl-mode", "VERIFY_CA");
                 } else {
-                    // Verify the chain and server identity against the system trust store.
+                    // Chain and host name, against `ssl-ca` or the system trust store.
                     query_pairs.append_pair("ssl-mode", "VERIFY_IDENTITY");
                 }
                 if let Some(ca) = &config.tls.ca_file {
                     query_pairs.append_pair("ssl-ca", ca);
                 }
-                if config.tls.cert_file.is_some() || config.tls.key_file.is_some() {
-                    warn!("MySQL/MariaDB ignores tls.cert_file and tls.key_file; put ssl-cert and ssl-key in the URL for a client certificate.");
+                if let Some(cert) = &config.tls.cert_file {
+                    query_pairs.append_pair("ssl-cert", cert);
+                }
+                if let Some(key) = &config.tls.key_file {
+                    query_pairs.append_pair("ssl-key", key);
+                }
+                if config.tls.cert_password.is_some() {
+                    warn!(
+                        "sqlx ignores tls.cert_password: the client key file must be unencrypted."
+                    );
                 }
             }
             "mssql" | "sqlserver" => {
@@ -1690,11 +1702,58 @@ impl MessagePublisher for SqlxPublisher {
             return auto.send(&self.pool, messages).await;
         }
 
+        match self.write_batch(&messages).await {
+            Err(PublisherError::NonRetryable(e)) if messages.len() > 1 => {
+                warn!(error = %e, "SQLx batch rejected; writing it one message at a time");
+                self.send_batch_isolating(messages).await
+            }
+            other => other.map(|()| SentBatch::Ack),
+        }
+    }
+
+    async fn status(&self) -> EndpointStatus {
+        let (healthy, error) = match self.pool.acquire().await {
+            Ok(_) => (true, None),
+            Err(e) => (false, Some(e.to_string())),
+        };
+
+        EndpointStatus {
+            healthy,
+            target: self.table.clone(),
+            error,
+            details: serde_json::json!({ "driver": self.driver_name, "pool_size": self.pool.size(), "pool_idle": self.pool.num_idle() }),
+            ..Default::default()
+        }
+    }
+
+    async fn lookup_batch(
+        &self,
+        requests: &[CanonicalMessage],
+    ) -> Option<Result<Vec<Option<serde_json::Value>>, PublisherError>> {
+        match &self.lookup {
+            Some(SqlLookup::List { query, source }) => {
+                Some(self.lookup_list(query, source, requests).await)
+            }
+            Some(SqlLookup::Single(sql, sources)) => {
+                self.lookup_writing_batch(sql, sources, requests).await
+            }
+            _ => None,
+        }
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+impl SqlxPublisher {
+    /// Writes the batch with as few statements as the query allows; all of it or nothing.
+    async fn write_batch(&self, messages: &[CanonicalMessage]) -> Result<(), PublisherError> {
         if let Some(sink) = &self.copy {
             return self.send_batch_copy(sink, messages).await;
         }
 
-        trace!(count = messages.len(), message_ids = ?LazyMessageIds(&messages), "Publishing batch to SQLx");
+        trace!(count = messages.len(), message_ids = ?LazyMessageIds(messages), "Publishing batch to SQLx");
 
         // Manually construct the query with appropriate placeholders because
         // sqlx::QueryBuilder with the `Any` driver does not correctly rewrite `?` to `$N`.
@@ -1809,53 +1868,54 @@ impl MessagePublisher for SqlxPublisher {
         if let Some(tx) = tx {
             tx.commit().await.map_err(retryable)?;
         }
-        Ok(SentBatch::Ack)
+        Ok(())
     }
 
-    async fn status(&self) -> EndpointStatus {
-        let (healthy, error) = match self.pool.acquire().await {
-            Ok(_) => (true, None),
-            Err(e) => (false, Some(e.to_string())),
-        };
-
-        EndpointStatus {
-            healthy,
-            target: self.table.clone(),
-            error,
-            details: serde_json::json!({ "driver": self.driver_name, "pool_size": self.pool.size(), "pool_idle": self.pool.num_idle() }),
-            ..Default::default()
-        }
-    }
-
-    async fn lookup_batch(
+    /// Redoes a batch the database rejected, a savepoint per message: only the rejected
+    /// messages fail, any other failure rolls every write of the redo back.
+    async fn send_batch_isolating(
         &self,
-        requests: &[CanonicalMessage],
-    ) -> Option<Result<Vec<Option<serde_json::Value>>, PublisherError>> {
-        match &self.lookup {
-            Some(SqlLookup::List { query, source }) => {
-                Some(self.lookup_list(query, source, requests).await)
+        messages: Vec<CanonicalMessage>,
+    ) -> Result<SentBatch, PublisherError> {
+        use sqlx::Acquire;
+        let retryable = |e: sqlx::Error| PublisherError::Retryable(anyhow!(e));
+        let mut tx = self.pool.begin().await.map_err(retryable)?;
+        let mut failed = Vec::new();
+        for message in messages {
+            // Not cached: a statement prepared for one message's bind types fails the next.
+            let query = sqlx::query(audited_sql(&self.insert_query)).persistent(false);
+            let bound = match self.column_sources.is_empty() {
+                true => Ok(query.bind(message.payload.to_vec())),
+                false => bind_message_sources(query, &message, &self.column_sources),
+            };
+            let written = match bound {
+                Ok(query) => {
+                    let mut step = tx.begin().await.map_err(retryable)?;
+                    match query.execute(&mut *step).await.map_err(classify_sql_error) {
+                        Ok(_) => step.commit().await.map_err(retryable),
+                        Err(e) => step.rollback().await.map_err(retryable).and(Err(e)),
+                    }
+                }
+                Err(e) => Err(e),
+            };
+            match written {
+                Ok(()) => {}
+                Err(e @ PublisherError::NonRetryable(_)) => failed.push((message, e)),
+                Err(e) => return Err(e),
             }
-            Some(SqlLookup::Single(sql, sources)) => {
-                self.lookup_writing_batch(sql, sources, requests).await
-            }
-            _ => None,
         }
+        tx.commit().await.map_err(retryable)?;
+        Ok(SentBatch::from_failures(failed))
     }
 
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-}
-
-impl SqlxPublisher {
     /// Bulk-load a batch via PostgreSQL `COPY FROM STDIN` (text format). Each row is a
     /// tab-separated line of the resolved token values, `\N` for NULL. Far faster than a
     /// multi-row INSERT for large batches; retryable on transport errors (at-least-once).
     async fn send_batch_copy(
         &self,
         sink: &PgCopySink,
-        messages: Vec<CanonicalMessage>,
-    ) -> Result<SentBatch, PublisherError> {
+        messages: &[CanonicalMessage],
+    ) -> Result<(), PublisherError> {
         let stmt = format!(
             "COPY {} ({}) FROM STDIN WITH (FORMAT text)",
             sink.table,
@@ -1863,7 +1923,7 @@ impl SqlxPublisher {
         );
 
         let mut buf = String::new();
-        for msg in &messages {
+        for msg in messages {
             let payload_json: Option<serde_json::Value> = serde_json::from_slice(&msg.payload).ok();
             for (i, source) in sink.sources.iter().enumerate() {
                 if i > 0 {
@@ -1880,21 +1940,21 @@ impl SqlxPublisher {
         copy_in(copier.map_err(classify_sql_error)?, buf.as_bytes()).await?;
 
         trace!(count = messages.len(), table = %sink.table, "Bulk-copied batch to PostgreSQL");
-        Ok(SentBatch::Ack)
+        Ok(())
     }
 
     /// Fallback implementation that inserts messages one by one within a transaction.
     /// This is less performant than a single multi-row insert statement.
     async fn send_batch_iterative(
         &self,
-        messages: Vec<CanonicalMessage>,
-    ) -> Result<SentBatch, PublisherError> {
+        messages: &[CanonicalMessage],
+    ) -> Result<(), PublisherError> {
         let mut tx = self
             .pool
             .begin()
             .await
             .map_err(|e| PublisherError::Retryable(anyhow!(e)))?;
-        for msg in &messages {
+        for msg in messages {
             let query = sqlx::query(audited_sql(&self.insert_query));
             let query = if self.column_sources.is_empty() {
                 query.bind(msg.payload.to_vec())
@@ -1906,7 +1966,7 @@ impl SqlxPublisher {
         tx.commit()
             .await
             .map_err(|e| PublisherError::Retryable(anyhow!(e)))?;
-        Ok(SentBatch::Ack)
+        Ok(())
     }
 }
 
@@ -2026,9 +2086,10 @@ impl SqlxConsumer {
             .fetch_all(&mut *tx)
             .await
             .map_err(classify_queue_read_error)?
-            .into_iter()
-            .map(|row| row.get("id"))
-            .collect();
+            .iter()
+            .map(|row| row.try_get("id"))
+            .collect::<Result<_, _>>()
+            .map_err(classify_queue_read_error)?;
 
         if locked_ids.is_empty() {
             tx.commit().await.ok(); // Nothing to do, commit and return
@@ -2099,9 +2160,10 @@ impl SqlxConsumer {
             .fetch_all(&mut *tx)
             .await
             .map_err(classify_queue_read_error)?
-            .into_iter()
-            .map(|row| row.get("id"))
-            .collect();
+            .iter()
+            .map(|row| row.try_get("id"))
+            .collect::<Result<_, _>>()
+            .map_err(classify_queue_read_error)?;
 
         if locked_ids.is_empty() {
             tx.commit().await.ok();
@@ -3010,7 +3072,7 @@ pub struct SqlxCursorReader {
     driver_name: String,
     backoff: PollBackoff,
     checkpoint: Option<Arc<dyn crate::checkpoint::CheckpointStore>>,
-    last_value: Arc<Mutex<Option<SqlCursor>>>,
+    position: Arc<Mutex<CursorPosition>>,
     run_position: Option<(crate::route::RunPositions, String)>,
     /// Columns the projection renders as JSON text (Postgres `json`/`jsonb` and arrays).
     raw_json_columns: Vec<String>,
@@ -3018,6 +3080,42 @@ pub struct SqlxCursorReader {
     sql_first: String,
     sql_next: String,
     source_metadata: bool,
+}
+
+/// Where the next page starts. A nack rewinds `last` and starts a new `epoch`; batches read
+/// in an older one are read again, so their commits confirm nothing.
+#[derive(Default)]
+struct CursorPosition {
+    last: Option<SqlCursor>,
+    epoch: u64,
+}
+
+/// A batch handed out and not settled yet. Dropped without a commit, its rows are read again.
+struct Unsettled {
+    position: Arc<Mutex<CursorPosition>>,
+    resume_from: Option<SqlCursor>,
+    epoch: u64,
+    settled: bool,
+}
+
+impl Unsettled {
+    // A method, so the commit closure takes the whole guard and not a copy of the flag.
+    fn settle(&mut self) {
+        self.settled = true;
+    }
+}
+
+impl Drop for Unsettled {
+    fn drop(&mut self) {
+        if self.settled {
+            return;
+        }
+        let mut position = self.position.lock().unwrap();
+        if position.epoch == self.epoch {
+            position.last = self.resume_from.take();
+            position.epoch += 1;
+        }
+    }
 }
 
 /// Run one keyset page. `from` is the exclusive lower bound (`None` = start of table).
@@ -3160,7 +3258,10 @@ impl SqlxCursorReader {
                 config.max_polling_interval_ms.map(Duration::from_millis),
             ),
             checkpoint,
-            last_value: Arc::new(Mutex::new(last_value)),
+            position: Arc::new(Mutex::new(CursorPosition {
+                last: last_value,
+                epoch: 0,
+            })),
             run_position,
             raw_json_columns,
             source_metadata,
@@ -3228,57 +3329,61 @@ impl MessageConsumer for SqlxCursorReader {
             });
         }
 
-        let last = self.last_value.lock().unwrap().clone();
-        // Peek one extra row beyond the batch so we can detect a run of equal cursor
-        // values split across the LIMIT boundary; `col > last` would otherwise skip the
-        // remainder of that run (silent row loss for a non-unique cursor_column).
-        let fetch_limit = (max_messages as i64).saturating_add(1);
+        loop {
+            let (last, epoch) = {
+                let position = self.position.lock().unwrap();
+                (position.last.clone(), position.epoch)
+            };
+            // Peek one extra row beyond the batch so we can detect a run of equal cursor
+            // values split across the LIMIT boundary; `col > last` would otherwise skip the
+            // remainder of that run (silent row loss for a non-unique cursor_column).
+            let fetch_limit = (max_messages as i64).saturating_add(1);
 
-        let sql = self.page_sql(last.is_some());
-        let rows = match fetch_page(&self.pool, sql, last.as_ref(), fetch_limit).await {
-            Ok(rows) => rows,
-            // A decode/type-mapping failure is permanent: the same query will fail identically
-            // every poll. Surface it as a non-retryable error so the route stops instead of
-            // reconnecting forever, and point the user at the fix.
-            Err(e) if is_permanent_decode_error(&e) => {
-                return Err(ConsumerError::Connection(anyhow::Error::new(
-                    crate::errors::ProcessingError::NonRetryable(anyhow!(
+            let sql = self.page_sql(last.is_some());
+            let rows = match fetch_page(&self.pool, sql, last.as_ref(), fetch_limit).await {
+                Ok(rows) => rows,
+                // A decode/type-mapping failure is permanent: the same query will fail identically
+                // every poll. Surface it as a non-retryable error so the route stops instead of
+                // reconnecting forever, and point the user at the fix.
+                Err(e) if is_permanent_decode_error(&e) => {
+                    return Err(ConsumerError::Connection(anyhow::Error::new(
+                        crate::errors::ProcessingError::NonRetryable(anyhow!(
                         "SQLx cursor reader on table '{}' hit a column of a type the SQL `Any` \
                          driver cannot decode: {e}. This is permanent; expose the column as \
                          TEXT/BIGINT (e.g. via a view that CASTs it) and point the reader there.",
                         self.table
                     )),
-                )));
+                    )));
+                }
+                Err(e) => return Err(classify_sql_consumer_error(e)),
+            };
+
+            if rows.is_empty() {
+                // Drained: preserve polling cadence (backing off if configured), then surface an empty
+                // batch so the route can pause or terminate.
+                tokio::time::sleep(self.backoff.idle_delay()).await;
+                return Ok(ReceivedBatch {
+                    messages: Vec::new(),
+                    commit: Box::new(|_| Box::pin(async { Ok(()) })),
+                });
             }
-            Err(e) => return Err(classify_sql_consumer_error(e)),
-        };
+            // Rows arrived: return to the base polling interval.
+            self.backoff.reset();
 
-        if rows.is_empty() {
-            // Drained: preserve polling cadence (backing off if configured), then surface an empty
-            // batch so the route can pause or terminate.
-            tokio::time::sleep(self.backoff.idle_delay()).await;
-            return Ok(ReceivedBatch {
-                messages: Vec::new(),
-                commit: Box::new(|_| Box::pin(async { Ok(()) })),
-            });
-        }
-        // Rows arrived: return to the base polling interval.
-        self.backoff.reset();
+            // Resolve column positions and JSON keys once; every row in this batch shares the
+            // same query/column order. Value *kinds* are still read per row (SQLite types
+            // values, not columns).
+            let cursor_col = resolve_cursor_column(&rows[0], &self.cursor_column);
+            let mut schema = JsonRowSchema::from_row(&rows[0]);
+            schema.mark_raw_json(&rows[0], &self.raw_json_columns);
 
-        // Resolve column positions and JSON keys once; every row in this batch shares the
-        // same query/column order. Value *kinds* are still read per row (SQLite types
-        // values, not columns).
-        let cursor_col = resolve_cursor_column(&rows[0], &self.cursor_column);
-        let mut schema = JsonRowSchema::from_row(&rows[0]);
-        schema.mark_raw_json(&rows[0], &self.raw_json_columns);
-
-        // Extract (cursor, message) for every fetched row.
-        let mut fetched: Vec<(SqlCursor, CanonicalMessage)> = Vec::with_capacity(rows.len());
-        // Rows of one table are near-uniform in size, so the previous row's length is a good
-        // capacity guess and spares the payload buffer its doubling reallocations.
-        let mut size_hint = 256usize;
-        for row in &rows {
-            let cursor = cursor_col
+            // Extract (cursor, message) for every fetched row.
+            let mut fetched: Vec<(SqlCursor, CanonicalMessage)> = Vec::with_capacity(rows.len());
+            // Rows of one table are near-uniform in size, so the previous row's length is a good
+            // capacity guess and spares the payload buffer its doubling reallocations.
+            let mut size_hint = 256usize;
+            for row in &rows {
+                let cursor = cursor_col
                 .and_then(|idx| extract_cursor_at(row, idx))
                 .ok_or_else(|| {
                     // Schema-level, so re-polling fails identically: permanent, not a reconnect.
@@ -3289,90 +3394,113 @@ impl MessageConsumer for SqlxCursorReader {
                         self.cursor_column
                     ))
                 })?;
-            let mut payload = Vec::with_capacity(size_hint);
-            schema.encode_row(row, &mut payload);
-            size_hint = payload.len() + payload.len() / 8;
-            fetched.push((cursor, CanonicalMessage::new(payload, None)));
-        }
-
-        // If we fetched the peek row, more rows exist beyond this page. Drop the trailing
-        // run whose value equals the peek row's value so a group of equal cursor values is
-        // never split across pages; the trimmed rows are re-read next poll via `col > last`.
-        let had_more = fetched.len() > max_messages;
-        let mut emit_len = fetched.len().min(max_messages);
-        if had_more {
-            let peek_val = fetched[max_messages].0.clone();
-            while emit_len > 0 && fetched[emit_len - 1].0 == peek_val {
-                emit_len -= 1;
+                let mut payload = Vec::with_capacity(size_hint);
+                schema.encode_row(row, &mut payload);
+                size_hint = payload.len() + payload.len() / 8;
+                fetched.push((cursor, CanonicalMessage::new(payload, None)));
             }
-            if emit_len == 0 {
-                // A single cursor value fills the whole batch and more rows with that value exist
-                // beyond it. Advancing past the value would silently skip the remainder, so fail
-                // loudly instead of losing rows. Permanent: re-polling returns the same page forever.
-                return Err(ConsumerError::Permanent(anyhow!(
+
+            // If we fetched the peek row, more rows exist beyond this page. Drop the trailing
+            // run whose value equals the peek row's value so a group of equal cursor values is
+            // never split across pages; the trimmed rows are re-read next poll via `col > last`.
+            let had_more = fetched.len() > max_messages;
+            let mut emit_len = fetched.len().min(max_messages);
+            if had_more {
+                let peek_val = fetched[max_messages].0.clone();
+                while emit_len > 0 && fetched[emit_len - 1].0 == peek_val {
+                    emit_len -= 1;
+                }
+                if emit_len == 0 {
+                    // A single cursor value fills the whole batch and more rows with that value exist
+                    // beyond it. Advancing past the value would silently skip the remainder, so fail
+                    // loudly instead of losing rows. Permanent: re-polling returns the same page forever.
+                    return Err(ConsumerError::Permanent(anyhow!(
                     "cursor_column '{}' has a group of equal values larger than batch_size ({}); \
                      cannot page without skipping rows. Increase batch_size above the size of the \
                      largest equal-value group.",
                     self.cursor_column,
                     max_messages
                 )));
+                }
             }
-        }
-        fetched.truncate(emit_len);
+            fetched.truncate(emit_len);
 
-        let mut messages = Vec::with_capacity(fetched.len());
-        let mut cursors: Vec<SqlCursor> = Vec::with_capacity(fetched.len());
-        for (cursor, mut msg) in fetched {
-            if self.source_metadata {
-                self.stamp_source_position(&mut msg, &cursor, cursors.last())?;
+            let mut messages = Vec::with_capacity(fetched.len());
+            let mut cursors: Vec<SqlCursor> = Vec::with_capacity(fetched.len());
+            for (cursor, mut msg) in fetched {
+                if self.source_metadata {
+                    self.stamp_source_position(&mut msg, &cursor, cursors.last())?;
+                }
+                cursors.push(cursor);
+                messages.push(msg);
             }
-            cursors.push(cursor.clone());
-            messages.push(msg);
-            // Advance optimistically so the next page continues past this row; rolled back
-            // in commit if a row is not acked.
-            *self.last_value.lock().unwrap() = Some(cursor);
-        }
-        trace!(count = messages.len(), "Received batch of SQLx cursor rows");
+            {
+                let mut position = self.position.lock().unwrap();
+                // A nack rewound the cursor while this page was read: read from there instead.
+                if position.epoch != epoch {
+                    continue;
+                }
+                // Advance optimistically so the next page continues past these rows; rolled
+                // back in commit if a row is not acked.
+                position.last = cursors.last().cloned();
+            }
+            trace!(count = messages.len(), "Received batch of SQLx cursor rows");
 
-        let checkpoint = self.checkpoint.clone();
-        let run_position = self.run_position.clone();
-        let last_value = self.last_value.clone();
-        let resume_from = last; // cursor value before this batch (for rollback on nack)
-        let commit = Box::new(move |dispositions: Vec<MessageDisposition>| {
-            Box::pin(async move {
-                // Count the contiguous run of Acks from the front (stop at first Nack).
-                let mut acked = 0usize;
-                for disp in dispositions.iter().take(cursors.len()) {
-                    if matches!(disp, MessageDisposition::Ack | MessageDisposition::Reply(_)) {
-                        acked += 1;
+            let checkpoint = self.checkpoint.clone();
+            let run_position = self.run_position.clone();
+            let position = self.position.clone();
+            let resume_from = last; // cursor value before this batch (for rollback on nack)
+            let mut unsettled = Unsettled {
+                position: position.clone(),
+                resume_from: resume_from.clone(),
+                epoch,
+                settled: false,
+            };
+            let commit = Box::new(move |dispositions: Vec<MessageDisposition>| {
+                Box::pin(async move {
+                    unsettled.settle();
+                    // Count the contiguous run of Acks from the front (stop at first Nack).
+                    let mut acked = 0usize;
+                    for disp in dispositions.iter().take(cursors.len()) {
+                        if matches!(disp, MessageDisposition::Ack | MessageDisposition::Reply(_)) {
+                            acked += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    let boundary = if acked == 0 {
+                        resume_from
                     } else {
-                        break;
+                        Some(cursors[acked - 1].clone())
+                    };
+                    // If any row was not acked, roll the in-memory read cursor back to the
+                    // committed boundary so nacked/unprocessed rows are re-read next poll
+                    // (at-least-once) instead of being skipped until a restart.
+                    {
+                        let mut position = position.lock().unwrap();
+                        // Read before an earlier nack: confirming it would skip the nacked row.
+                        if position.epoch != epoch {
+                            return Ok(());
+                        }
+                        if acked < cursors.len() {
+                            position.last = boundary.clone();
+                            position.epoch += 1;
+                        }
                     }
-                }
-                let boundary = if acked == 0 {
-                    resume_from
-                } else {
-                    Some(cursors[acked - 1].clone())
-                };
-                // If any row was not acked, roll the in-memory read cursor back to the
-                // committed boundary so nacked/unprocessed rows are re-read next poll
-                // (at-least-once) instead of being skipped until a restart.
-                if acked < cursors.len() {
-                    *last_value.lock().unwrap() = boundary.clone();
-                }
-                if let (Some(cur), Some((positions, key))) = (&boundary, run_position) {
-                    positions.lock().unwrap().insert(key, cur.encode());
-                }
-                if let (Some(cur), Some(cp)) = (boundary, checkpoint) {
-                    if let Err(e) = cp.save(&cur.encode()).await {
-                        tracing::warn!(error = %e, "Failed to persist sql cursor. Rows may be reprocessed on restart.");
+                    if let (Some(cur), Some((positions, key))) = (&boundary, run_position) {
+                        positions.lock().unwrap().insert(key, cur.encode());
                     }
-                }
-                Ok(())
-            }) as BoxFuture<'static, anyhow::Result<()>>
-        });
+                    if let (Some(cur), Some(cp)) = (boundary, checkpoint) {
+                        if let Err(e) = cp.save(&cur.encode()).await {
+                            tracing::warn!(error = %e, "Failed to persist sql cursor. Rows may be reprocessed on restart.");
+                        }
+                    }
+                    Ok(())
+                }) as BoxFuture<'static, anyhow::Result<()>>
+            });
 
-        Ok(ReceivedBatch { messages, commit })
+            return Ok(ReceivedBatch { messages, commit });
+        }
     }
 
     async fn status(&self) -> EndpointStatus {

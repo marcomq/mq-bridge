@@ -1010,6 +1010,15 @@ pub(crate) fn source_is_at_most_once(endpoint_type: &EndpointType) -> bool {
         EndpointType::Nats(config) => config.no_jetstream,
         EndpointType::Mqtt(config) => config.qos == Some(0),
         EndpointType::Http(config) => config.fire_and_forget,
+        // A listener cannot tell its client that a frame was rejected.
+        EndpointType::WebSocket(_) => true,
+        // The dynamic client reads a server stream that has no acknowledgement.
+        EndpointType::Grpc(config) => {
+            !config.server_mode
+                && (config.descriptor_set_bytes.is_some()
+                    || config.descriptor_set_path.is_some()
+                    || config.reflection)
+        }
         EndpointType::Custom { name, config } => crate::extensions::get_endpoint_factory(name)
             .is_some_and(|factory| !factory.acknowledges(config)),
         _ => false,
@@ -1044,11 +1053,10 @@ fn dedup_keys_on_minted_message_id(input: &Endpoint) -> bool {
             | EndpointType::IbmMq(_)
             | EndpointType::ZeroMq(_)
             | EndpointType::ClickHouse(_) => true,
-            EndpointType::MongoDb(config) => matches!(
-                config.consume,
-                Some(crate::models::MongoConsume::CaptureNew)
-                    | Some(crate::models::MongoConsume::CaptureAll)
-            ),
+            // Only the queue mode reads back the id the publisher stored.
+            EndpointType::MongoDb(config) => {
+                config.resolved_consume() != crate::models::MongoConsume::Consumer
+            }
             _ => false,
         }
 }
@@ -3242,6 +3250,23 @@ mod tests {
         };
         assert!(warns(file_with(None)));
         assert!(!warns(file_with(Some("${payload:id}"))));
+
+        // `consume` unset is `capture_all`, which mints an id like the explicit modes.
+        #[cfg(feature = "mongodb")]
+        {
+            use crate::models::{MongoConsume, MongoDbConfig};
+            let mongo = |consume| Endpoint {
+                middlewares: vec![dedup(None)],
+                ..Endpoint::new(EndpointType::MongoDb(MongoDbConfig {
+                    collection: Some("orders".to_string()),
+                    consume,
+                    ..MongoDbConfig::new("mongodb://localhost:27017", "shop")
+                }))
+            };
+            assert!(warns(mongo(None)));
+            assert!(warns(mongo(Some(MongoConsume::Snapshot))));
+            assert!(!warns(mongo(Some(MongoConsume::Consumer))));
+        }
     }
 
     /// The object-store sink reports the mechanism it derived, so `name_by: auto` has to be

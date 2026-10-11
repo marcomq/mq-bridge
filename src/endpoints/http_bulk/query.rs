@@ -155,16 +155,19 @@ impl Query {
             .body(body);
         let response = connection.send(request).await.map_err(|e| Failure {
             retryable: e.retryable,
+            status: None,
             text: format!("{label} failed: {e}"),
         })?;
         let status = response.status();
         let text = response.text().await.map_err(|e| Failure {
             retryable: true,
+            status: None,
             text: format!("{label} response was cut off: {e}"),
         })?;
         if !status.is_success() {
             return Err(Failure {
                 retryable: http_status::is_retryable(status.as_u16()),
+                status: Some(status.as_u16()),
                 text: format!("{label} answered {status}: {}", quoted(&text)),
             });
         }

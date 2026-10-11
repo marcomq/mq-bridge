@@ -44,8 +44,8 @@ pub(crate) mod compression;
 mod cookie_jar;
 #[cfg(feature = "dedup")]
 pub(crate) mod deduplication;
-#[cfg(any(feature = "filter", feature = "dedup"))]
-mod deferred_commit;
+#[cfg(any(feature = "filter", feature = "dedup", feature = "plugin"))]
+pub(crate) mod deferred_commit;
 mod delay;
 mod dlq;
 #[cfg(feature = "encryption")]

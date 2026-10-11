@@ -53,6 +53,11 @@ fn bound_stream_buffer(buffer: &[u8]) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The same cap for a response stream: a retry would meet the same record.
+fn bound_response_buffer(buffer: &[u8]) -> Result<(), PublisherError> {
+    bound_stream_buffer(buffer).map_err(PublisherError::NonRetryable)
+}
+
 fn has_content_type_header(headers: &HashMap<String, String>) -> bool {
     headers
         .keys()
@@ -686,66 +691,60 @@ pub(super) async fn publish_response_stream(
             }
             HttpStreamFormat::Ndjson => {
                 byte_buffer.extend_from_slice(data);
-                index = match drain_ndjson_response_items(
+                let drained = drain_ndjson_response_items(
                     &sink,
                     &mut byte_buffer,
                     &base_metadata,
                     &correlation_id,
                     format,
-                    index,
+                    &mut index,
                 )
                 .await
-                {
-                    Ok(next_index) => next_index,
-                    Err(error) => {
-                        if published_any {
-                            let _ = publish_end_marker(
-                                &sink,
-                                &base_metadata,
-                                &correlation_id,
-                                format,
-                                index,
-                            )
-                            .await;
-                            return Err(PublishResponseStreamError::Partial(error));
-                        }
-                        return Err(PublishResponseStreamError::BeforePublish(error));
+                .and_then(|()| bound_response_buffer(&byte_buffer));
+                // Counts the records published before a failure too.
+                published_any = index > 0;
+                if let Err(error) = drained {
+                    if published_any {
+                        let _ = publish_end_marker(
+                            &sink,
+                            &base_metadata,
+                            &correlation_id,
+                            format,
+                            index,
+                        )
+                        .await;
+                        return Err(PublishResponseStreamError::Partial(error));
                     }
-                };
-                if index > 0 {
-                    published_any = true;
+                    return Err(PublishResponseStreamError::BeforePublish(error));
                 }
             }
             HttpStreamFormat::Sse => {
                 byte_buffer.extend_from_slice(data);
-                index = match drain_sse_response_items(
+                let drained = drain_sse_response_items(
                     &sink,
                     &mut byte_buffer,
                     &base_metadata,
                     &correlation_id,
                     format,
-                    index,
+                    &mut index,
                 )
                 .await
-                {
-                    Ok(next_index) => next_index,
-                    Err(error) => {
-                        if published_any {
-                            let _ = publish_end_marker(
-                                &sink,
-                                &base_metadata,
-                                &correlation_id,
-                                format,
-                                index,
-                            )
-                            .await;
-                            return Err(PublishResponseStreamError::Partial(error));
-                        }
-                        return Err(PublishResponseStreamError::BeforePublish(error));
+                .and_then(|()| bound_response_buffer(&byte_buffer));
+                // Counts the records published before a failure too.
+                published_any = index > 0;
+                if let Err(error) = drained {
+                    if published_any {
+                        let _ = publish_end_marker(
+                            &sink,
+                            &base_metadata,
+                            &correlation_id,
+                            format,
+                            index,
+                        )
+                        .await;
+                        return Err(PublishResponseStreamError::Partial(error));
                     }
-                };
-                if index > 0 {
-                    published_any = true;
+                    return Err(PublishResponseStreamError::BeforePublish(error));
                 }
             }
         }
@@ -834,8 +833,8 @@ async fn drain_ndjson_response_items(
     base_metadata: &HashMap<String, String>,
     correlation_id: &str,
     format: HttpStreamFormat,
-    mut index: usize,
-) -> Result<usize, PublisherError> {
+    index: &mut usize,
+) -> Result<(), PublisherError> {
     while let Some(newline_pos) = buffer.iter().position(|&b| b == b'\n') {
         let mut line: Vec<u8> = buffer.drain(..=newline_pos).collect();
         line.pop(); // drop the '\n'
@@ -851,12 +850,12 @@ async fn drain_ndjson_response_items(
             base_metadata.clone(),
             correlation_id,
             format,
-            index,
+            *index,
         )
         .await?;
-        index += 1;
+        *index += 1;
     }
-    Ok(index)
+    Ok(())
 }
 
 async fn drain_sse_response_items(
@@ -865,8 +864,8 @@ async fn drain_sse_response_items(
     base_metadata: &HashMap<String, String>,
     correlation_id: &str,
     format: HttpStreamFormat,
-    mut index: usize,
-) -> Result<usize, PublisherError> {
+    index: &mut usize,
+) -> Result<(), PublisherError> {
     while let Some(event_end) = find_sse_event_end(buffer) {
         let terminator_len = if buffer[event_end..].starts_with(b"\r\n\r\n") {
             4
@@ -879,11 +878,11 @@ async fn drain_sse_response_items(
         let Some(event) = parse_sse_event(&raw_event) else {
             continue;
         };
-        publish_sse_response_item(sink, event, base_metadata, correlation_id, format, index)
+        publish_sse_response_item(sink, event, base_metadata, correlation_id, format, *index)
             .await?;
-        index += 1;
+        *index += 1;
     }
-    Ok(index)
+    Ok(())
 }
 
 async fn publish_sse_response_item(

@@ -18,6 +18,7 @@ Query parameters recognised as config fields for this connector. The object-type
 | `publication_tables` | array of string | no | [see below](#publication_tables) | Tables to include when managing the publication (`create_publication`); may be `schema.table`. Missing ones are added to an existing publication (never removed). Empty = `FOR ALL TABLES` (needs superuser). |
 | `slot_name` | string | no | `mq_bridge_slot` | Replication slot name; created if missing when `create_slot` is true. |
 | `source_metadata` | boolean | no | `false` | Include authoritative `mqb.src.postgres_*` source positions. Defaults to false. |
+| `split_key_change` | boolean | no | — | An update that changes the primary key becomes a `delete` of the old key, then the `update`. |
 | `status_interval_ms` | integer | no | `10000` | Standby-status-update interval in ms; must be shorter than the server's `wal_sender_timeout`. |
 | `temporary_slot` | boolean | no | `false` | Ephemeral run: drop the slot when the route stops. Not restart-safe; a hard crash leaks it. |
 | `tls` | object | no | [see below](#tls) | TLS configuration for the replication connection. |

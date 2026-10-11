@@ -19,9 +19,9 @@ use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll};
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
-use tokio::sync::watch;
+use tokio::sync::{watch, OwnedSemaphorePermit, Semaphore};
 use tokio_rustls::TlsAcceptor;
 use tokio_websockets::{ClientBuilder, Connector, Message, ServerBuilder, WebSocketStream};
 use tracing::{debug, trace, warn};
@@ -34,6 +34,16 @@ type ClientWebSocketStream = WebSocketStream<tokio_websockets::MaybeTlsStream<Tc
 const DEFAULT_WEBSOCKET_LISTEN_BACKLOG: u32 = 4096;
 /// How long a client may take to send its upgrade request.
 const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// Largest upgrade request head a listener with `basic_auth` reads.
+const MAX_REQUEST_HEAD: usize = 16 * 1024;
+/// How long a listener waits on a client that does not take a reply before it drops it.
+#[cfg(not(test))]
+const REPLY_WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+#[cfg(test)]
+const REPLY_WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(300);
+const UNAUTHORIZED: &[u8] = b"HTTP/1.1 401 Unauthorized\r\nwww-authenticate: Basic realm=\"mq-bridge\"\r\nconnection: close\r\ncontent-length: 0\r\n\r\n";
+const OVER_LIMIT: &[u8] =
+    b"HTTP/1.1 503 Service Unavailable\r\nconnection: close\r\ncontent-length: 0\r\n\r\n";
 const WEBSOCKET_REUSEPORT_ENV: &str = "MQ_BRIDGE_WEBSOCKET_REUSEPORT";
 const WEBSOCKET_ACCEPT_WORKERS_ENV: &str = "MQ_BRIDGE_WEBSOCKET_ACCEPT_WORKERS";
 
@@ -141,6 +151,11 @@ fn bind_websocket_listeners(
 enum ServerStream {
     Plain(TcpStream),
     Tls(Box<tokio_rustls::server::TlsStream<TcpStream>>),
+    /// A stream whose request head was read for `basic_auth` and is handed out again.
+    Replayed {
+        head: std::io::Cursor<Vec<u8>>,
+        inner: Box<ServerStream>,
+    },
 }
 
 impl AsyncRead for ServerStream {
@@ -152,6 +167,17 @@ impl AsyncRead for ServerStream {
         match self.get_mut() {
             Self::Plain(stream) => Pin::new(stream).poll_read(cx, buf),
             Self::Tls(stream) => Pin::new(stream).poll_read(cx, buf),
+            Self::Replayed { head, inner } => {
+                let position = head.position() as usize;
+                let rest = &head.get_ref()[position..];
+                if rest.is_empty() {
+                    return Pin::new(inner.as_mut()).poll_read(cx, buf);
+                }
+                let len = rest.len().min(buf.remaining());
+                buf.put_slice(&rest[..len]);
+                head.set_position((position + len) as u64);
+                Poll::Ready(Ok(()))
+            }
         }
     }
 }
@@ -165,6 +191,7 @@ impl AsyncWrite for ServerStream {
         match self.get_mut() {
             Self::Plain(stream) => Pin::new(stream).poll_write(cx, buf),
             Self::Tls(stream) => Pin::new(stream).poll_write(cx, buf),
+            Self::Replayed { inner, .. } => Pin::new(inner.as_mut()).poll_write(cx, buf),
         }
     }
 
@@ -172,6 +199,7 @@ impl AsyncWrite for ServerStream {
         match self.get_mut() {
             Self::Plain(stream) => Pin::new(stream).poll_flush(cx),
             Self::Tls(stream) => Pin::new(stream).poll_flush(cx),
+            Self::Replayed { inner, .. } => Pin::new(inner.as_mut()).poll_flush(cx),
         }
     }
 
@@ -179,6 +207,7 @@ impl AsyncWrite for ServerStream {
         match self.get_mut() {
             Self::Plain(stream) => Pin::new(stream).poll_shutdown(cx),
             Self::Tls(stream) => Pin::new(stream).poll_shutdown(cx),
+            Self::Replayed { inner, .. } => Pin::new(inner.as_mut()).poll_shutdown(cx),
         }
     }
 
@@ -190,6 +219,7 @@ impl AsyncWrite for ServerStream {
         match self.get_mut() {
             Self::Plain(stream) => Pin::new(stream).poll_write_vectored(cx, bufs),
             Self::Tls(stream) => Pin::new(stream).poll_write_vectored(cx, bufs),
+            Self::Replayed { inner, .. } => Pin::new(inner.as_mut()).poll_write_vectored(cx, bufs),
         }
     }
 
@@ -197,12 +227,127 @@ impl AsyncWrite for ServerStream {
         match self {
             Self::Plain(stream) => stream.is_write_vectored(),
             Self::Tls(stream) => stream.is_write_vectored(),
+            Self::Replayed { inner, .. } => inner.is_write_vectored(),
         }
     }
 }
 
+/// What a listener checks before it upgrades a connection.
+#[derive(Clone, Default)]
+struct Admission {
+    /// The `Authorization` value a client has to send.
+    authorization: Option<Arc<str>>,
+    connections: Option<Arc<Semaphore>>,
+}
+
+impl Admission {
+    fn new(config: &WebSocketConfig) -> Self {
+        Self {
+            authorization: authorization_value(config).map(Arc::from),
+            connections: config
+                .max_connections
+                .map(|limit| Arc::new(Semaphore::new(limit))),
+        }
+    }
+
+    /// A slot for one more connection; `Err` hands the stream back over the limit.
+    fn slot(
+        &self,
+        stream: TcpStream,
+    ) -> Result<(TcpStream, Option<OwnedSemaphorePermit>), TcpStream> {
+        let Some(connections) = &self.connections else {
+            return Ok((stream, None));
+        };
+        match Arc::clone(connections).try_acquire_owned() {
+            Ok(permit) => Ok((stream, Some(permit))),
+            Err(_) => Err(stream),
+        }
+    }
+}
+
+/// `Basic <base64>` for a config with credentials; empty ones count as none.
+fn authorization_value(config: &WebSocketConfig) -> Option<String> {
+    use base64::Engine as _;
+    let (user, password) = config.basic_auth.as_ref()?;
+    if user.is_empty() && password.is_empty() {
+        return None;
+    }
+    let encoded = base64::engine::general_purpose::STANDARD.encode(format!("{user}:{password}"));
+    Some(format!("Basic {encoded}"))
+}
+
+/// Answers a connection over `max_connections`. Behind TLS it is closed unanswered,
+/// so that a refused client costs no handshake.
+async fn refuse_over_limit(mut stream: TcpStream, tls: bool) {
+    if !tls {
+        refuse(&mut stream, OVER_LIMIT).await;
+    }
+}
+
+/// Writes a refusal and flushes it, best-effort.
+async fn refuse<S: AsyncWrite + Unpin>(stream: &mut S, response: &[u8]) {
+    let _ = stream.write_all(response).await;
+    let _ = stream.flush().await;
+}
+
+/// Reads the upgrade request head, up to and including its empty line.
+async fn read_request_head(stream: &mut ServerStream) -> anyhow::Result<Vec<u8>> {
+    let mut head = Vec::with_capacity(1024);
+    let mut chunk = [0u8; 1024];
+    loop {
+        let len = stream.read(&mut chunk).await?;
+        if len == 0 {
+            anyhow::bail!("WebSocket client closed before its upgrade request was complete");
+        }
+        head.extend_from_slice(&chunk[..len]);
+        if head.windows(4).any(|window| window == b"\r\n\r\n") {
+            return Ok(head);
+        }
+        if head.len() > MAX_REQUEST_HEAD {
+            anyhow::bail!("WebSocket upgrade request head is larger than {MAX_REQUEST_HEAD} bytes");
+        }
+    }
+}
+
+/// The value of header `name` in a request head.
+fn header_value<'a>(head: &'a [u8], name: &str) -> Option<&'a [u8]> {
+    let end = head.windows(4).position(|window| window == b"\r\n\r\n")?;
+    head[..end]
+        .split(|byte| *byte == b'\n')
+        .skip(1)
+        .find_map(|line| {
+            let colon = line.iter().position(|byte| *byte == b':')?;
+            line[..colon]
+                .eq_ignore_ascii_case(name.as_bytes())
+                .then(|| line[colon + 1..].trim_ascii())
+        })
+}
+
+/// Compares every byte, so timing does not tell how much of a secret matched.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |diff, (x, y)| diff | (x ^ y)) == 0
+}
+
+/// Lets a client through that sent `expected` as its `Authorization`; another gets 401.
+async fn authenticate(
+    mut stream: ServerStream,
+    expected: &str,
+) -> anyhow::Result<Option<ServerStream>> {
+    let head = read_request_head(&mut stream).await?;
+    let sent = header_value(&head, "authorization").unwrap_or_default();
+    if !constant_time_eq(sent, expected.as_bytes()) {
+        refuse(&mut stream, UNAUTHORIZED).await;
+        return Ok(None);
+    }
+    Ok(Some(ServerStream::Replayed {
+        head: std::io::Cursor::new(head),
+        inner: Box::new(stream),
+    }))
+}
+
 /// The acceptor of a listener with `tls.required`, built from its certificate and key.
 fn tls_acceptor(config: &WebSocketConfig) -> anyhow::Result<Option<TlsAcceptor>> {
+    crate::support::tls_check::warn_listener_cert_unused("WebSocket listener", &config.tls);
     if !config.tls.required {
         return Ok(None);
     }
@@ -236,6 +381,7 @@ impl WebSocketConsumer {
             .message_id_header
             .clone()
             .unwrap_or_else(|| "message-id".to_string());
+        let admission = Admission::new(config);
         let (request_tx, request_rx) = tokio::sync::mpsc::channel(queue_capacity);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
@@ -245,6 +391,7 @@ impl WebSocketConsumer {
                 request_tx.clone(),
                 shutdown_rx.clone(),
                 tls.clone(),
+                admission.clone(),
                 path.clone(),
                 message_id_header.clone(),
             );
@@ -281,7 +428,47 @@ impl Drop for WebSocketConsumer {
 pub struct WebSocketPublisher {
     url: String,
     tls: TlsConfig,
-    single_stream: tokio::sync::Mutex<Option<ClientWebSocketStream>>,
+    authorization: Option<String>,
+    single_stream: tokio::sync::Mutex<Option<PublisherConnection>>,
+}
+
+/// The write half of a publisher's connection. A task reads the other half, so pings are
+/// answered and a close by the server is seen before the next send.
+struct PublisherConnection {
+    sink: futures::stream::SplitSink<ClientWebSocketStream, Message>,
+    closed: Arc<std::sync::atomic::AtomicBool>,
+    reader: tokio::task::JoinHandle<()>,
+}
+
+impl PublisherConnection {
+    fn new(stream: ClientWebSocketStream) -> Self {
+        let (sink, mut frames) = stream.split();
+        let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reader_closed = Arc::clone(&closed);
+        let reader = tokio::spawn(async move {
+            while let Some(Ok(frame)) = frames.next().await {
+                if frame.is_close() {
+                    break;
+                }
+            }
+            reader_closed.store(true, std::sync::atomic::Ordering::Release);
+        });
+        Self {
+            sink,
+            closed,
+            reader,
+        }
+    }
+
+    fn is_closed(&self) -> bool {
+        self.closed.load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
+impl Drop for PublisherConnection {
+    fn drop(&mut self) {
+        self.reader.abort();
+    }
 }
 
 impl WebSocketPublisher {
@@ -300,11 +487,12 @@ impl WebSocketPublisher {
         Self {
             url: config.url.clone(),
             tls: config.tls.clone(),
+            authorization: authorization_value(config),
             single_stream: tokio::sync::Mutex::new(None),
         }
     }
 
-    async fn connect_stream(&self) -> Result<ClientWebSocketStream, PublisherError> {
+    async fn connect_stream(&self) -> Result<PublisherConnection, PublisherError> {
         let uri = self
             .url
             .parse()
@@ -318,10 +506,20 @@ impl WebSocketPublisher {
         } else {
             Connector::Plain
         };
-        let (stream, _) = ClientBuilder::from_uri(uri)
-            .connector(&connector)
-            .connect()
+        let mut builder = ClientBuilder::from_uri(uri).connector(&connector);
+        if let Some(authorization) = &self.authorization {
+            let mut value = http_crate::HeaderValue::from_str(authorization)
+                .context("WebSocket basic_auth is not a valid header value")
+                .map_err(PublisherError::NonRetryable)?;
+            value.set_sensitive(true);
+            builder = builder
+                .add_header(http_crate::header::AUTHORIZATION, value)
+                .map_err(|error| PublisherError::NonRetryable(anyhow!(error)))?;
+        }
+        let (stream, _) = tokio::time::timeout(HANDSHAKE_TIMEOUT, builder.connect())
             .await
+            .map_err(|_| anyhow!("timed out after {HANDSHAKE_TIMEOUT:?}"))
+            .and_then(|connected| connected.map_err(anyhow::Error::from))
             .with_context(|| {
                 format!(
                     "Failed to connect to WebSocket endpoint '{}'",
@@ -329,7 +527,7 @@ impl WebSocketPublisher {
                 )
             })
             .map_err(PublisherError::Connection)?;
-        Ok(stream)
+        Ok(PublisherConnection::new(stream))
     }
 
     async fn send_reusing_connection(
@@ -337,12 +535,16 @@ impl WebSocketPublisher {
         messages: impl IntoIterator<Item = CanonicalMessage>,
     ) -> Result<SentBatch, PublisherError> {
         let mut stream_guard = self.single_stream.lock().await;
+        if stream_guard.as_ref().is_some_and(|open| open.is_closed()) {
+            *stream_guard = None;
+        }
         if stream_guard.is_none() {
             *stream_guard = Some(self.connect_stream().await?);
         }
-        let stream = stream_guard
+        let stream = &mut stream_guard
             .as_mut()
-            .expect("websocket stream was initialized above");
+            .expect("websocket stream was initialized above")
+            .sink;
 
         for message in messages {
             if let Err(error) = stream.feed(canonical_to_websocket_message(&message)).await {
@@ -371,6 +573,7 @@ fn spawn_accept_loop(
     request_tx: tokio::sync::mpsc::Sender<WebSocketSourceMessage>,
     mut shutdown_rx: watch::Receiver<bool>,
     tls: Option<TlsAcceptor>,
+    admission: Admission,
     expected_path: Option<String>,
     message_id_header: String,
 ) {
@@ -391,17 +594,27 @@ fn spawn_accept_loop(
                         }
                     };
                     let _ = stream.set_nodelay(true);
+                    let (stream, slot) = match admission.slot(stream) {
+                        Ok(admitted) => admitted,
+                        Err(stream) => {
+                            tokio::spawn(refuse_over_limit(stream, tls.is_some()));
+                            continue;
+                        }
+                    };
 
                     let request_tx = request_tx.clone();
                     let tls = tls.clone();
+                    let authorization = admission.authorization.clone();
                     let expected_path = expected_path.clone();
                     let message_id_header = message_id_header.clone();
                     tokio::spawn(async move {
+                        let _slot = slot;
                         if let Err(error) = handle_routed_connection(
                             stream,
                             peer_addr,
                             request_tx,
                             tls,
+                            authorization,
                             expected_path,
                             message_id_header,
                         )
@@ -421,27 +634,52 @@ async fn handle_routed_connection(
     peer_addr: SocketAddr,
     request_tx: tokio::sync::mpsc::Sender<WebSocketSourceMessage>,
     tls: Option<TlsAcceptor>,
+    authorization: Option<Arc<str>>,
     expected_path: Option<String>,
     message_id_header: String,
 ) -> anyhow::Result<()> {
     let Some((ws_stream, metadata)) =
-        accept_websocket_connection(stream, tls, expected_path, message_id_header).await?
+        accept_websocket_connection(stream, tls, authorization, expected_path, message_id_header)
+            .await?
     else {
         return Ok(());
     };
     let (mut write_stream, mut read_stream) = ws_stream.split();
     let (response_tx, mut response_rx) = tokio::sync::mpsc::channel::<Message>(16);
     let writer_peer_addr = peer_addr;
-    let writer_task = tokio::spawn(async move {
+    let mut writer_task = tokio::spawn(async move {
         while let Some(message) = response_rx.recv().await {
-            if let Err(error) = write_stream.send(message).await {
-                debug!(error = %error, %writer_peer_addr, "Failed to send WebSocket response");
-                break;
+            // Ending here fails every reply still queued, so their commits return.
+            match tokio::time::timeout(REPLY_WRITE_TIMEOUT, write_stream.send(message)).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    debug!(error = %error, %writer_peer_addr, "Failed to send WebSocket response");
+                    break;
+                }
+                Err(_) => {
+                    warn!(%writer_peer_addr, "WebSocket client does not read its replies, closing the connection");
+                    break;
+                }
             }
         }
     });
 
-    while let Some(frame) = read_stream.next().await {
+    let mut writer_done = false;
+    loop {
+        let frame = tokio::select! {
+            frame = read_stream.next() => frame,
+            _ = request_tx.closed() => {
+                let _ = response_tx.try_send(Message::close(None, "listener stopped"));
+                break;
+            }
+            _ = &mut writer_task => {
+                writer_done = true;
+                break;
+            }
+        };
+        let Some(frame) = frame else {
+            break;
+        };
         let frame = frame?;
         // tokio-websockets auto-queues pong/close replies for control frames and
         // flushes them on the next read poll, so we only handle data frames here.
@@ -458,7 +696,9 @@ async fn handle_routed_connection(
     }
 
     drop(response_tx);
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(1), writer_task).await;
+    if !writer_done {
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(1), writer_task).await;
+    }
     Ok(())
 }
 
@@ -474,6 +714,7 @@ pub(crate) async fn run_direct_response_route(
         .parse()
         .with_context(|| format!("Invalid listen address: {}", config.url))?;
     let tls = tls_acceptor(&config)?;
+    let admission = Admission::new(&config);
     let (listeners, _) = bind_websocket_listeners(listen_addr, config.backlog)?;
     let expected_path = config.path.as_deref().map(normalize_websocket_path);
     let message_id_header = config
@@ -539,16 +780,26 @@ pub(crate) async fn run_direct_response_route(
                     Ok(parts) => parts,
                     Err(_) => break,
                 };
+                let (stream, slot) = match admission.slot(stream) {
+                    Ok(admitted) => admitted,
+                    Err(stream) => {
+                        tokio::spawn(refuse_over_limit(stream, tls.is_some()));
+                        continue;
+                    }
+                };
                 let tls = tls.clone();
+                let authorization = admission.authorization.clone();
                 let expected_path = expected_path.clone();
                 let message_id_header = message_id_header.clone();
                 let handler = handler.clone();
                 let route_name = name.to_string();
                 connections.spawn(async move {
+                    let _slot = slot;
                     if let Err(error) = handle_direct_connection(
                         stream,
                         peer_addr,
                         tls,
+                        authorization,
                         expected_path,
                         message_id_header,
                         handler,
@@ -576,12 +827,14 @@ async fn handle_direct_connection(
     stream: TcpStream,
     peer_addr: SocketAddr,
     tls: Option<TlsAcceptor>,
+    authorization: Option<Arc<str>>,
     expected_path: Option<String>,
     message_id_header: String,
     handler: Option<Arc<dyn Handler>>,
 ) -> anyhow::Result<()> {
     let Some((mut ws_stream, metadata)) =
-        accept_websocket_connection(stream, tls, expected_path, message_id_header).await?
+        accept_websocket_connection(stream, tls, authorization, expected_path, message_id_header)
+            .await?
     else {
         return Ok(());
     };
@@ -687,12 +940,13 @@ async fn respond_not_found(stream: &mut TcpStream) {
 async fn accept_websocket_connection(
     stream: TcpStream,
     tls: Option<TlsAcceptor>,
+    authorization: Option<Arc<str>>,
     expected_path: Option<String>,
     message_id_header: String,
 ) -> anyhow::Result<Option<(WebSocketStream<ServerStream>, HandshakeMetadata)>> {
     tokio::time::timeout(
         HANDSHAKE_TIMEOUT,
-        accept_websocket_handshake(stream, tls, expected_path, message_id_header),
+        accept_websocket_handshake(stream, tls, authorization, expected_path, message_id_header),
     )
     .await
     .map_err(|_| anyhow::anyhow!("WebSocket handshake timed out"))?
@@ -701,6 +955,7 @@ async fn accept_websocket_connection(
 async fn accept_websocket_handshake(
     mut stream: TcpStream,
     tls: Option<TlsAcceptor>,
+    authorization: Option<Arc<str>>,
     expected_path: Option<String>,
     message_id_header: String,
 ) -> anyhow::Result<Option<(WebSocketStream<ServerStream>, HandshakeMetadata)>> {
@@ -721,6 +976,13 @@ async fn accept_websocket_handshake(
             }
         }
         ServerStream::Plain(stream)
+    };
+    let stream = match authorization.as_deref() {
+        Some(expected) => match authenticate(stream, expected).await? {
+            Some(stream) => stream,
+            None => return Ok(None),
+        },
+        None => stream,
     };
 
     let (request, mut ws_stream) = ServerBuilder::new().accept(stream).await?;
@@ -923,7 +1185,7 @@ impl MessagePublisher for WebSocketPublisher {
     async fn flush(&self) -> anyhow::Result<()> {
         let mut stream_guard = self.single_stream.lock().await;
         if let Some(stream) = stream_guard.as_mut() {
-            stream.flush().await?;
+            stream.sink.flush().await?;
         }
         Ok(())
     }
@@ -932,7 +1194,7 @@ impl MessagePublisher for WebSocketPublisher {
         Some(Box::pin(async move {
             let mut stream_guard = self.single_stream.lock().await;
             if let Some(mut stream) = stream_guard.take() {
-                let _ = stream.close().await;
+                let _ = stream.sink.close().await;
             }
             Ok(())
         }))
@@ -956,7 +1218,7 @@ mod tests {
 
         let accepted = tokio::time::timeout(
             HANDSHAKE_TIMEOUT * 2,
-            accept_websocket_connection(stream, None, None, "message-id".to_string()),
+            accept_websocket_connection(stream, None, None, None, "message-id".to_string()),
         )
         .await
         .expect("the handshake must not wait for ever");
@@ -984,6 +1246,91 @@ mod tests {
         WebSocketConfig::new("127.0.0.1:0")
             .with_path("/secure")
             .with_tls(TlsConfig::new().with_client_cert(cert, key))
+    }
+
+    async fn listener_with(config: WebSocketConfig) -> WebSocketConsumer {
+        WebSocketConsumer::new(&config)
+            .await
+            .expect("consumer should be created")
+    }
+
+    /// The status line a listener answers a plain upgrade request with.
+    async fn upgrade_status(addr: SocketAddr, authorization: Option<&str>) -> String {
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        let authorization = authorization
+            .map(|value| format!("authorization: {value}\r\n"))
+            .unwrap_or_default();
+        let request = format!(
+            "GET / HTTP/1.1\r\nhost: {addr}\r\nupgrade: websocket\r\nconnection: Upgrade\r\n\
+             sec-websocket-key: dGhlIHNhbXBsZSBub25jZQ==\r\nsec-websocket-version: 13\r\n\
+             {authorization}\r\n"
+        );
+        client.write_all(request.as_bytes()).await.unwrap();
+        let mut answer = vec![0u8; 256];
+        let len = client.read(&mut answer).await.unwrap();
+        let answer = String::from_utf8_lossy(&answer[..len]).into_owned();
+        answer.lines().next().unwrap_or_default().to_string()
+    }
+
+    #[tokio::test]
+    async fn a_listener_with_basic_auth_refuses_a_client_without_the_credentials() {
+        let config = WebSocketConfig::new("127.0.0.1:0")
+            .with_basic_auth(("app".to_string(), "secret".to_string()));
+        let mut consumer = listener_with(config.clone()).await;
+        let addr = consumer.bound_addr();
+
+        assert_eq!(
+            upgrade_status(addr, None).await,
+            "HTTP/1.1 401 Unauthorized"
+        );
+        // "app:wrong"
+        assert_eq!(
+            upgrade_status(addr, Some("Basic YXBwOndyb25n")).await,
+            "HTTP/1.1 401 Unauthorized"
+        );
+
+        let mut publisher_config = config;
+        publisher_config.url = consumer.url().to_string();
+        let publisher = WebSocketPublisher::new(&publisher_config);
+        publisher
+            .send(CanonicalMessage::new(b"hello".to_vec(), None))
+            .await
+            .expect("a publisher with the credentials is let in");
+        let received = consumer.receive_batch(1).await.unwrap();
+        assert_eq!(&received.messages[0].payload[..], b"hello");
+        assert!(!received.messages[0]
+            .metadata
+            .keys()
+            .any(|key| key.contains("authorization")));
+    }
+
+    #[tokio::test]
+    async fn a_listener_at_max_connections_answers_503_until_a_client_leaves() {
+        let consumer =
+            listener_with(WebSocketConfig::new("127.0.0.1:0").with_max_connections(1)).await;
+        let addr = consumer.bound_addr();
+
+        let first = TcpStream::connect(addr).await.unwrap();
+        // The first connection holds its slot from the accept on.
+        let mut status = String::new();
+        for _ in 0..50 {
+            status = upgrade_status(addr, None).await;
+            if status.contains("503") {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(status, "HTTP/1.1 503 Service Unavailable");
+
+        drop(first);
+        for _ in 0..50 {
+            status = upgrade_status(addr, None).await;
+            if status.contains("101") {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(status, "HTTP/1.1 101 Switching Protocols");
     }
 
     #[tokio::test]
@@ -1084,5 +1431,117 @@ mod tests {
             message.metadata.get("ws_message_type").map(String::as_str),
             Some("text")
         );
+    }
+
+    async fn raw_client(url: &str) -> ClientWebSocketStream {
+        let (client, _) = ClientBuilder::from_uri(url.parse().unwrap())
+            .connect()
+            .await
+            .expect("client connects");
+        client
+    }
+
+    #[tokio::test]
+    async fn a_publisher_notices_a_connection_the_server_closed() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (seen_tx, mut seen_rx) = tokio::sync::mpsc::channel::<String>(4);
+        tokio::spawn(async move {
+            // Every connection is closed after its first message.
+            while let Ok((stream, _)) = listener.accept().await {
+                let (_, mut server) = ServerBuilder::new().accept(stream).await.unwrap();
+                while let Some(Ok(frame)) = server.next().await {
+                    if let Some(text) = frame.as_text() {
+                        seen_tx.send(text.to_string()).await.unwrap();
+                        break;
+                    }
+                }
+                let _ = server.close().await;
+            }
+        });
+
+        let publisher = WebSocketPublisher::new(&WebSocketConfig::new(format!("ws://{addr}")));
+        publisher
+            .send(CanonicalMessage::from_vec("a"))
+            .await
+            .unwrap();
+        assert_eq!(seen_rx.recv().await.as_deref(), Some("a"));
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // An error is fine, the route sends again. A success has to be a delivery.
+        for _ in 0..3 {
+            if publisher
+                .send(CanonicalMessage::from_vec("b"))
+                .await
+                .is_ok()
+            {
+                break;
+            }
+        }
+        let seen = tokio::time::timeout(std::time::Duration::from_secs(5), seen_rx.recv())
+            .await
+            .expect("a message sent successfully reaches the server");
+        assert_eq!(seen.as_deref(), Some("b"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_publisher_gives_up_on_a_server_that_never_answers_the_upgrade() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let publisher = WebSocketPublisher::new(&WebSocketConfig::new(format!("ws://{addr}")));
+        let sent = tokio::time::timeout(
+            HANDSHAKE_TIMEOUT * 2,
+            publisher.send(CanonicalMessage::from_vec("a")),
+        )
+        .await
+        .expect("the connect must not wait for ever");
+        assert!(
+            matches!(sent, Err(PublisherError::Connection(_))),
+            "{sent:?}"
+        );
+        drop(listener);
+    }
+
+    #[tokio::test]
+    async fn a_dropped_listener_closes_its_idle_connections() {
+        let consumer = listener_with(WebSocketConfig::new("127.0.0.1:0")).await;
+        let mut client = raw_client(consumer.url()).await;
+        // Let the listener finish the upgrade and wait for a frame.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        drop(consumer);
+        tokio::time::timeout(std::time::Duration::from_secs(5), client.next())
+            .await
+            .expect("the client is told that the listener is gone");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reply_to_a_client_that_does_not_read_does_not_hold_the_commit() {
+        const FRAMES: usize = 40;
+        let mut consumer = listener_with(WebSocketConfig::new("127.0.0.1:0")).await;
+        let mut client = raw_client(consumer.url()).await;
+        for _ in 0..FRAMES {
+            client
+                .send(Message::text("ping".to_string()))
+                .await
+                .unwrap();
+        }
+        // More than the socket buffers and the reply queue hold together.
+        let reply = CanonicalMessage::new(vec![0u8; 2 * 1024 * 1024], None)
+            .with_metadata_kv("ws_message_type", "binary");
+        let answer_all = async {
+            let mut answered = 0;
+            while answered < FRAMES {
+                let batch = consumer.receive_batch(FRAMES).await.unwrap();
+                let count = batch.messages.len();
+                (batch.commit)(vec![MessageDisposition::Reply(reply.clone()); count])
+                    .await
+                    .unwrap();
+                answered += count;
+            }
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(10), answer_all)
+            .await
+            .expect("a client that does not read its replies must not stall the route");
+        drop(client);
     }
 }

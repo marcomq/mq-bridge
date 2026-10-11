@@ -31,7 +31,9 @@ use crate::endpoints::file::{
     csv_append_record, encode_record, parse_delimiter, parse_message, CsvDialect, CsvHeader,
     CsvQuoteState,
 };
-use crate::models::{Compression, DatePartitionStyle, FileFormat, NameBy, ObjectStoreConfig};
+use crate::models::{
+    Compression, DatePartitionStyle, DecodeErrorPolicy, FileFormat, NameBy, ObjectStoreConfig,
+};
 #[cfg(feature = "encryption")]
 use crate::support::crypto::Crypto;
 use crate::support::source_ranges::{
@@ -724,6 +726,9 @@ pub struct ObjectStoreConsumer {
     /// Consecutive decode failures on `decode_failing_key` before it is quarantined.
     decode_failures: u32,
     decode_failing_key: Option<String>,
+    /// Until one object decoded, a failure points at the settings, not at the object.
+    decoded_any: bool,
+    on_decode_error: DecodeErrorPolicy,
     /// The local filesystem lists in directory order, so its listing is sorted here.
     unordered_listing: bool,
     /// Sorted rest of an unordered listing, valid while the cursor is `handed_out`.
@@ -733,6 +738,45 @@ pub struct ObjectStoreConsumer {
     local_path: Option<std::path::PathBuf>,
     /// Set by a draining route: an empty listing then ends the read at once.
     draining: bool,
+    /// Signalled when a batch is settled or given back.
+    settled: Arc<tokio::sync::Notify>,
+}
+
+/// A batch handed out and not settled yet. Dropped without a commit, it goes back to the
+/// buffer; either way the reader is woken.
+struct Unsettled {
+    buffer: Arc<Mutex<Vec<CanonicalMessage>>>,
+    messages: Vec<CanonicalMessage>,
+    settled: Arc<tokio::sync::Notify>,
+}
+
+impl Unsettled {
+    fn take(&mut self) -> Vec<CanonicalMessage> {
+        std::mem::take(&mut self.messages)
+    }
+}
+
+impl Drop for Unsettled {
+    fn drop(&mut self) {
+        let mut messages = self.take();
+        if messages.is_empty() {
+            self.settled.notify_one();
+            return;
+        }
+        if let Ok(mut buffer) = self.buffer.try_lock() {
+            messages.append(&mut buffer);
+            *buffer = messages;
+            self.settled.notify_one();
+        } else if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let (buffer, settled) = (self.buffer.clone(), self.settled.clone());
+            runtime.spawn(async move {
+                let mut buffer = buffer.lock().await;
+                messages.append(&mut buffer);
+                *buffer = messages;
+                settled.notify_one();
+            });
+        }
+    }
 }
 
 /// Consecutive decode failures on one object before it is quarantined (skipped) so a
@@ -869,6 +913,8 @@ impl ObjectStoreConsumer {
             max_object_bytes: config.max_object_bytes,
             decode_failures: 0,
             decode_failing_key: None,
+            decoded_any: false,
+            on_decode_error: config.on_decode_error,
             unordered_listing: config.url.starts_with("file:"),
             pending: Default::default(),
             handed_out: None,
@@ -877,6 +923,7 @@ impl ObjectStoreConsumer {
                 .filter(|url| url.scheme() == "file")
                 .and_then(|url| url.to_file_path().ok()),
             draining: false,
+            settled: Default::default(),
         })
     }
 
@@ -907,11 +954,14 @@ impl ObjectStoreConsumer {
             max_object_bytes: None,
             decode_failures: 0,
             decode_failing_key: None,
+            decoded_any: false,
+            on_decode_error: DecodeErrorPolicy::Skip,
             unordered_listing: false,
             pending: Default::default(),
             handed_out: None,
             local_path: None,
             draining: false,
+            settled: Default::default(),
         }
     }
 
@@ -1079,7 +1129,7 @@ impl MessageConsumer for ObjectStoreConsumer {
         // Refill only when the current object is fully accounted for (buffer empty AND no
         // in-flight commits). This keeps objects from interleaving so the cursor advances
         // strictly in key order.
-        {
+        loop {
             let buffer_empty = self.buffer.lock().await.is_empty();
             let in_flight = self.progress.lock().await.is_some();
             if buffer_empty && !in_flight {
@@ -1112,6 +1162,7 @@ impl MessageConsumer for ObjectStoreConsumer {
                             Ok(records) => {
                                 self.decode_failing_key = None;
                                 self.decode_failures = 0;
+                                self.decoded_any = true;
                                 records
                             }
                             Err(e) => {
@@ -1122,6 +1173,17 @@ impl MessageConsumer for ObjectStoreConsumer {
                                     self.decode_failures = 1;
                                 }
                                 if self.decode_failures >= MAX_OBJECT_DECODE_FAILURES {
+                                    if self.on_decode_error == DecodeErrorPolicy::Fail {
+                                        return Err(ConsumerError::Permanent(anyhow!(
+                                            "object '{key}' cannot be decoded (on_decode_error: fail): {e:#}"
+                                        )));
+                                    }
+                                    // Skipping here would walk the checkpoint past a whole prefix.
+                                    if !self.decoded_any {
+                                        return Err(ConsumerError::Permanent(anyhow!(
+                                            "object '{key}' cannot be decoded and no object was decoded before it: check `format`, `compression` and `encryption`, or remove the object if it is damaged: {e:#}"
+                                        )));
+                                    }
                                     warn!(
                                         key = %key,
                                         error = %e,
@@ -1132,8 +1194,7 @@ impl MessageConsumer for ObjectStoreConsumer {
                                         .map_err(ConsumerError::Connection)?;
                                     self.decode_failing_key = None;
                                     self.decode_failures = 0;
-                                    tokio::time::sleep(self.idle_delay).await;
-                                    return Ok(empty_batch());
+                                    continue;
                                 }
                                 // Under the limit: retry the same object next poll, but do
                                 // NOT surface a Connection error — that would rebuild the
@@ -1149,17 +1210,20 @@ impl MessageConsumer for ObjectStoreConsumer {
                                     "object failed to decode; will retry before quarantining"
                                 );
                                 tokio::time::sleep(self.idle_delay).await;
+                                // A drain takes an empty batch as the end.
+                                if self.draining {
+                                    continue;
+                                }
                                 return Ok(empty_batch());
                             }
                         };
                         if records.is_empty() {
                             // No data records (e.g. a lone CSV header): advance past it so we
-                            // don't re-list it forever, then idle.
+                            // don't re-list it forever, and go on with the next object.
                             self.save_cursor(&key)
                                 .await
                                 .map_err(ConsumerError::Connection)?;
-                            tokio::time::sleep(self.idle_delay).await;
-                            return Ok(empty_batch());
+                            continue;
                         }
                         let n = records.len();
                         *self.buffer.lock().await = records;
@@ -1167,11 +1231,15 @@ impl MessageConsumer for ObjectStoreConsumer {
                     }
                 }
             } else if buffer_empty {
-                // Buffer drained but commits for the current object are still pending; the
-                // commit will clear `progress`. Idle rather than fetch the next object.
-                tokio::time::sleep(self.idle_delay).await;
-                return Ok(empty_batch());
+                // Commits for the current object are pending: wait for them. A drain takes
+                // an empty batch as the end, so it must not see one here.
+                let woken = tokio::time::timeout(self.idle_delay, self.settled.notified()).await;
+                if woken.is_err() && !self.draining {
+                    return Ok(empty_batch());
+                }
+                continue;
             }
+            break;
         }
 
         let batch: Vec<CanonicalMessage> = {
@@ -1184,10 +1252,15 @@ impl MessageConsumer for ObjectStoreConsumer {
         let progress_arc = self.progress.clone();
         let last_key_arc = self.last_key.clone();
         let checkpoint = self.checkpoint.clone();
-        let batch_for_commit = batch.clone();
+        let mut unsettled = Unsettled {
+            buffer: self.buffer.clone(),
+            messages: batch.clone(),
+            settled: self.settled.clone(),
+        };
 
         let commit = Box::new(move |dispositions: Vec<MessageDisposition>| {
             Box::pin(async move {
+                let batch_for_commit = unsettled.take();
                 // Count the leading run of acks; the first nack and everything after it is
                 // requeued to the front of the buffer for at-least-once re-delivery.
                 let mut leading_acks = 0usize;
@@ -2233,33 +2306,35 @@ mod tests {
             ..Default::default()
         };
         wrong.crypto = Some(Arc::new(Crypto::new(&wrong_cfg).unwrap()));
-        // A wrong-key object is bounded-retried then quarantined: it never delivers
-        // garbage and never surfaces a Connection error (which would rebuild the consumer,
-        // reset the failure counter, and loop the poison object forever).
-        for _ in 0..=MAX_OBJECT_DECODE_FAILURES {
-            let batch = wrong
-                .receive_batch(10)
-                .await
-                .expect("wrong-key object must not error out the source");
-            assert!(batch.messages.is_empty());
+        // Nothing decoded before it, so the setting is at fault: the route stops and the
+        // checkpoint stays where it is.
+        let error = fail_after_retries(&mut wrong).await;
+        assert!(error.contains("`encryption`"), "{error}");
+        assert!(wrong.last_key.lock().await.is_none());
+    }
+
+    /// Reads until the consumer gives up on the object it cannot decode.
+    #[cfg(feature = "compression")]
+    async fn fail_after_retries(consumer: &mut ObjectStoreConsumer) -> String {
+        for _ in 0..MAX_OBJECT_DECODE_FAILURES {
+            match consumer.receive_batch(10).await {
+                Ok(batch) => assert!(batch.messages.is_empty()),
+                Err(ConsumerError::Permanent(error)) => return format!("{error:#}"),
+                Err(other) => panic!("expected a permanent error, got {other}"),
+            }
         }
+        panic!("the undecodable object did not stop the source");
     }
 
     #[cfg(feature = "compression")]
-    #[tokio::test]
-    async fn gzip_source_quarantines_non_gzip_object() {
-        // A gzip source must handle a non-gzip object cleanly (not panic): the object is
-        // bounded-retried then quarantined, never delivered as data and never surfaced as a
-        // Connection error that would rebuild the consumer and loop the poison object.
+    async fn gzip_source_with(objects: &[(&str, Vec<u8>)]) -> ObjectStoreConsumer {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        store
-            .put(
-                &ObjPath::from("data/not-gzip.jsonl.gz"),
-                PutPayload::from(br#"{"n":1}"#.to_vec()),
-            )
-            .await
-            .unwrap();
-
+        for (key, body) in objects {
+            store
+                .put(&ObjPath::from(*key), PutPayload::from(body.clone()))
+                .await
+                .unwrap();
+        }
         let mut consumer = ObjectStoreConsumer::from_store(
             store,
             ObjPath::from("data"),
@@ -2268,13 +2343,65 @@ mod tests {
             None,
         );
         consumer.compression = Compression::Gzip;
-        for _ in 0..=MAX_OBJECT_DECODE_FAILURES {
-            let batch = consumer
-                .receive_batch(10)
-                .await
-                .expect("non-gzip object must not error out the source");
-            assert!(batch.messages.is_empty());
+        consumer
+    }
+
+    #[cfg(feature = "compression")]
+    fn gzipped(text: &str) -> Vec<u8> {
+        crate::support::compression::compress_member(Compression::Gzip, text.as_bytes()).unwrap()
+    }
+
+    #[cfg(feature = "compression")]
+    #[tokio::test]
+    async fn gzip_source_stops_when_its_first_object_is_no_gzip() {
+        let mut consumer =
+            gzip_source_with(&[("data/1-not-gzip.gz", br#"{"n":1}"#.to_vec())]).await;
+        let error = fail_after_retries(&mut consumer).await;
+        assert!(error.contains("`compression`"), "{error}");
+        assert!(consumer.last_key.lock().await.is_none());
+    }
+
+    #[cfg(feature = "compression")]
+    #[tokio::test]
+    async fn gzip_source_skips_a_bad_object_after_a_good_one() {
+        let mut consumer = gzip_source_with(&[
+            ("data/1-good.gz", gzipped("one")),
+            ("data/2-not-gzip.gz", b"plain".to_vec()),
+            ("data/3-good.gz", gzipped("three")),
+        ])
+        .await;
+        let mut seen = Vec::new();
+        while seen.len() < 2 {
+            let batch = consumer.receive_batch(10).await.unwrap();
+            let acks = vec![MessageDisposition::Ack; batch.messages.len()];
+            seen.extend(
+                batch
+                    .messages
+                    .iter()
+                    .map(|m| m.get_payload_str().to_string()),
+            );
+            (batch.commit)(acks).await.unwrap();
         }
+        assert_eq!(seen, ["one", "three"]);
+    }
+
+    #[cfg(feature = "compression")]
+    #[tokio::test]
+    async fn gzip_source_with_fail_policy_stops_at_a_bad_object_after_a_good_one() {
+        let mut consumer = gzip_source_with(&[
+            ("data/1-good.gz", gzipped("one")),
+            ("data/2-not-gzip.gz", b"plain".to_vec()),
+        ])
+        .await;
+        consumer.on_decode_error = DecodeErrorPolicy::Fail;
+        let batch = consumer.receive_batch(10).await.unwrap();
+        (batch.commit)(vec![MessageDisposition::Ack]).await.unwrap();
+        let error = fail_after_retries(&mut consumer).await;
+        assert!(error.contains("on_decode_error: fail"), "{error}");
+        assert_eq!(
+            consumer.last_key.lock().await.as_deref(),
+            Some("data/1-good.gz")
+        );
     }
 
     #[tokio::test]
@@ -2803,5 +2930,78 @@ mod tests {
                 serde_json::json!({"id": "2", "note": "x,y"}),
             ]
         );
+    }
+
+    /// Reads `objects` one-record files through a draining route and returns what arrived.
+    async fn drain_through_a_route(objects: usize, empty_object: bool) -> usize {
+        use crate::models::{Endpoint, EndpointType};
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..objects {
+            std::fs::write(dir.path().join(format!("part-{i}.jsonl")), format!("{i}\n")).unwrap();
+        }
+        if empty_object {
+            std::fs::write(dir.path().join("part-2x.jsonl"), "").unwrap();
+        }
+        let config: ObjectStoreConfig = serde_json::from_value(serde_json::json!({
+            "url": url::Url::from_directory_path(dir.path()).unwrap().to_string(),
+            "format": "raw",
+        }))
+        .unwrap();
+        let topic = format!("object_drain_{}", fast_uuid_v7::gen_id());
+        let route = crate::Route::new(
+            Endpoint::new(EndpointType::ObjectStore(config)),
+            Endpoint::new_memory(&topic, 100),
+        )
+        .with_exit_on_empty(true);
+        let mut output = route.connect_to_output("object_drain").await.unwrap();
+        let handle = route.run(&topic).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(20), async {
+            while handle.outcome().is_none() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the drain ends");
+        handle.join().await.unwrap();
+        let mut received = 0;
+        while let Ok(Ok(item)) =
+            tokio::time::timeout(Duration::from_millis(300), output.receive()).await
+        {
+            (item.commit)(MessageDisposition::Ack).await.unwrap();
+            received += 1;
+        }
+        received
+    }
+
+    #[tokio::test]
+    async fn a_batch_dropped_without_a_commit_is_read_again() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        store
+            .put(&ObjPath::from("data/a.jsonl"), b"1\n2\n".to_vec().into())
+            .await
+            .unwrap();
+        let mut consumer = ObjectStoreConsumer::from_store(
+            store,
+            ObjPath::from("data"),
+            FileFormat::Raw,
+            None,
+            None,
+        );
+        drop(consumer.receive_batch(10).await.unwrap());
+        let again = tokio::time::timeout(Duration::from_secs(2), consumer.receive_batch(10))
+            .await
+            .expect("the object is not stuck in flight")
+            .unwrap();
+        assert_eq!(again.messages.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_drain_reads_every_object() {
+        assert_eq!(drain_through_a_route(6, false).await, 6);
+    }
+
+    #[tokio::test]
+    async fn an_object_without_records_does_not_end_a_drain() {
+        assert_eq!(drain_through_a_route(6, true).await, 6);
     }
 }

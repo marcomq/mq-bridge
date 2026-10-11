@@ -60,9 +60,15 @@ every file its own header, taken from that batch's first row, so set `csv.column
 files must share the same columns.
 
 An object that cannot be decoded (damaged, or written with another `compression` or
-`encryption` than configured) is tried five times and then skipped with a warning; the
-checkpoint moves past it. Check the log of a first run: with a wrong setting every object is
-skipped. An object without records is passed over. With `exit_on_empty` the run ends when the
+`encryption` than configured) is tried five times. Then:
+
+- If the source has not decoded any object since it started, the route stops with an error
+  that names the settings to check. The checkpoint does not move. If that object really is
+  damaged, remove it.
+- Otherwise the object is skipped with a warning and the checkpoint moves past it.
+- With `on_decode_error: fail` the route stops at every such object and nothing is skipped.
+
+An object without records is passed over. With `exit_on_empty` the run ends when the
 listing has nothing left after the last object.
 
 ## Choosing a local connector

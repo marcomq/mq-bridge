@@ -234,3 +234,54 @@ pub async fn test_aws_status() {
     )
     .await;
 }
+
+#[tokio::test]
+#[ignore = "requires docker compose"]
+async fn test_aws_large_binary_batch_round_trips() {
+    if !mq_bridge::test_utils::should_run("aws") {
+        return;
+    }
+    use mq_bridge::traits::{MessageConsumer, MessageDisposition, MessagePublisher, SentBatch};
+
+    setup_logging();
+    run_test_with_docker("tests/integration/docker-compose/aws.yml", || async {
+        ensure_queue_exists().await;
+        let config = mq_bridge::models::AwsConfig {
+            queue_url: Some("http://localhost:4566/000000000000/test-queue".to_string()),
+            region: Some("us-east-1".to_string()),
+            endpoint_url: Some("http://localhost:4566".to_string()),
+            access_key: Some("test".to_string()),
+            secret_key: Some("test".to_string()),
+            wait_time_seconds: Some(1),
+            binary_payload_mode: true,
+            ..Default::default()
+        };
+        // Ten bodies of 200 kB: together twice what one batch request may carry.
+        let payload: Vec<u8> = (0..150_000u32).map(|i| (i % 251) as u8).collect();
+        let batch = (0..10)
+            .map(|_| mq_bridge::CanonicalMessage::new(payload.clone(), None))
+            .collect();
+        let sent = AwsPublisher::new(&config)
+            .await
+            .unwrap()
+            .send_batch(batch)
+            .await
+            .unwrap();
+        assert!(matches!(sent, SentBatch::Ack), "the batch was not sent");
+
+        let mut consumer = AwsConsumer::new(&config).await.unwrap();
+        let mut received = 0;
+        while received < 10 {
+            let batch = consumer.receive_batch(10).await.unwrap();
+            assert!(!batch.messages.is_empty(), "only {received} of 10 arrived");
+            for message in &batch.messages {
+                assert_eq!(&message.payload[..], &payload[..], "payload changed");
+            }
+            received += batch.messages.len();
+            (batch.commit)(vec![MessageDisposition::Ack; batch.messages.len()])
+                .await
+                .unwrap();
+        }
+    })
+    .await;
+}

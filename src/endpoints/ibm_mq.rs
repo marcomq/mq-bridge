@@ -318,6 +318,9 @@ impl IbmMqPublisher {
                             let _ = tx.send(Err(err));
                             return;
                         }
+                        if rx.is_closed() {
+                            return; // publisher dropped
+                        }
                         thread::sleep(Duration::from_secs(RECONNECT_DELAY_SECS));
                         continue;
                     }
@@ -526,13 +529,36 @@ enum ConsumerJob {
     },
 }
 
+/// A batch handed out and not settled yet. Dropped without a commit, it is backed out:
+/// its messages would otherwise be committed with the next batch.
+struct Unsettled {
+    tx: Option<mpsc::Sender<ConsumerJob>>,
+    epoch: u64,
+}
+
+impl Drop for Unsettled {
+    fn drop(&mut self) {
+        if let Some(tx) = self.tx.take() {
+            let (reply_tx, _) = oneshot::channel();
+            let epoch = self.epoch;
+            if tx
+                .try_send(ConsumerJob::Backout { epoch, reply_tx })
+                .is_err()
+            {
+                warn!("IBM MQ batch dropped without a commit could not be backed out");
+            }
+        }
+    }
+}
+
 async fn spawn_consumer_thread(
     config: IbmMqConfig,
 ) -> Result<mpsc::Sender<ConsumerJob>, ConsumerError> {
     info!("Starting IBM MQ consumer thread");
     let buffer_size = config.internal_buffer_size.unwrap_or(100).max(1);
     let (tx, mut rx) = mpsc::channel::<ConsumerJob>(buffer_size);
-    let tx_loop = tx.clone();
+    // Weak: a sender held by the thread would keep the channel open after the consumer is gone.
+    let tx_loop = tx.downgrade();
     let mut current_epoch = 0u64;
     let (init_tx, init_rx) = oneshot::channel();
 
@@ -546,6 +572,9 @@ async fn spawn_consumer_thread(
                     if let Some(tx) = init_tx.take() {
                         let _ = tx.send(Err(ConsumerError::Connection(e)));
                         return;
+                    }
+                    if rx.is_closed() {
+                        return; // consumer dropped
                     }
                     thread::sleep(Duration::from_secs(RECONNECT_DELAY_SECS));
                     continue;
@@ -624,8 +653,24 @@ async fn spawn_consumer_thread(
                                 get::GetWait::Wait(config.wait_timeout_ms),
                             );
 
-                            let res: Result<Option<(_, MessageFormat)>, _> =
-                                obj.get_data_with(&gmo, &mut buffer).discard_warning();
+                            let res: Result<Option<(_, MessageFormat)>, _> = match obj
+                                .get_data_with(&gmo, &mut buffer)
+                            {
+                                // Still on the queue: its cut-off start would be delivered forever.
+                                Ok(got)
+                                    if matches!(
+                                        got.warning(),
+                                        Some((constants::MQRC_TRUNCATED_MSG_FAILED, _))
+                                    ) =>
+                                {
+                                    error = Some(ConsumerError::Connection(anyhow::anyhow!(
+                                            "IBM MQ message is larger than max_message_size ({} bytes); raise max_message_size",
+                                            config.max_message_size
+                                        )));
+                                    break;
+                                }
+                                other => other.discard_warning(),
+                            };
 
                             match res {
                                 Ok(opt) => {
@@ -676,11 +721,18 @@ async fn spawn_consumer_thread(
                             let _ = reply_tx.send(Err(e));
                         } else if !messages.is_empty() {
                             trace!(count = messages.len(), message_ids = ?LazyMessageIds(&messages), "Received batch of IBM MQ messages");
-                            let tx_commit = tx_loop.clone();
+                            let Some(tx_commit) = tx_loop.upgrade() else {
+                                backout_with_logging!(&qm, "for a dropped consumer");
+                                continue;
+                            };
                             let epoch = current_epoch;
+                            let mut unsettled = Unsettled {
+                                tx: Some(tx_commit),
+                                epoch,
+                            };
                             let commit_fn: traits::BatchCommitFunc =
                                 Box::new(move |dispositions: Vec<MessageDisposition>| {
-                                    let tx = tx_commit.clone();
+                                    let tx = unsettled.tx.take().expect("settled once");
                                     Box::pin(async move {
                                         let (reply_tx, reply_rx) = oneshot::channel();
                                         let should_backout = dispositions
@@ -861,12 +913,19 @@ impl MessageConsumer for IbmMqConsumer {
             return Ok(batch);
         }
 
-        let original_commit = batch.commit;
+        // Fields drop in order: a dropped batch is backed out before the next read may start.
+        struct InFlight {
+            commit: traits::BatchCommitFunc,
+            _permit: tokio::sync::OwnedSemaphorePermit,
+        }
+        let in_flight = InFlight {
+            commit: batch.commit,
+            _permit: permit,
+        };
         let wrapped_commit = Box::new(move |dispositions| {
             Box::pin(async move {
-                let result = original_commit(dispositions).await;
-                drop(permit); // Release the permit, allowing the next receive_batch to proceed.
-                result
+                let InFlight { commit, _permit } = in_flight;
+                commit(dispositions).await
             }) as traits::BoxFuture<'static, anyhow::Result<()>>
         });
 

@@ -231,3 +231,48 @@ pub async fn test_mqtt_status() {
     )
     .await;
 }
+
+#[tokio::test]
+#[ignore = "requires docker compose"]
+async fn test_mqtt_nacked_message_is_delivered_again() {
+    if !mq_bridge::test_utils::should_run("mqtt") {
+        return;
+    }
+    use mq_bridge::traits::{MessageConsumer, MessageDisposition, MessagePublisher};
+    use std::time::Duration;
+
+    setup_logging();
+    run_test_with_docker("tests/integration/docker-compose/mqtt.yml", || async {
+        let config = mq_bridge::models::MqttConfig {
+            url: "mqtt://localhost:1883".to_string(),
+            topic: Some(format!("nack_{}", fast_uuid_v7::gen_id())),
+            clean_session: true,
+            ..Default::default()
+        };
+        let mut consumer = MqttConsumer::new(&config).await.unwrap();
+        let publisher = MqttPublisher::new(&config).await.unwrap();
+        publisher
+            .send(mq_bridge::CanonicalMessage::new(b"again".to_vec(), None))
+            .await
+            .unwrap();
+
+        let first = tokio::time::timeout(Duration::from_secs(10), consumer.receive())
+            .await
+            .expect("the message arrives")
+            .unwrap();
+        let id = first.message.message_id;
+        (first.commit)(MessageDisposition::Nack).await.unwrap();
+
+        let second = tokio::time::timeout(Duration::from_secs(5), consumer.receive())
+            .await
+            .expect("a nacked message is delivered again")
+            .unwrap();
+        assert_eq!(second.message.message_id, id);
+        assert_eq!(&second.message.payload[..], b"again");
+        (second.commit)(MessageDisposition::Ack).await.unwrap();
+
+        let third = tokio::time::timeout(Duration::from_secs(1), consumer.receive()).await;
+        assert!(third.is_err(), "an acked message is not delivered again");
+    })
+    .await;
+}

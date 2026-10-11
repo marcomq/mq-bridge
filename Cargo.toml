@@ -218,6 +218,8 @@ zeroize = { version = "1.9", optional = true }
 # pure Rust; the default features pull a heavier one.
 zen-expression = { version = "2.0", optional = true, default-features = false, features = ["regex-lite"] }
 rust_decimal = { version = "1", optional = true }
+# Header types of the `websocket` handshake; `http` itself is a feature name here.
+http-crate = { package = "http", version = "1", optional = true }
 tokio-websockets = { version = "0.13", optional = true, default-features = false, features = ["client", "server", "sha1_smol", "fastrand"] }
 
 # AWS.
@@ -391,11 +393,11 @@ file = []
 dir-spool = ["dep:pidlock"]
 kafka = ["rdkafka", "rdkafka/libz-static"]
 amqp = ["lapin", "rustls", "rustls-pemfile"]
-nats = ["async-nats", "rustls", "rustls-pemfile"]
+nats = ["async-nats", "rustls", "rustls-pemfile", "webpki-roots"]
 mongodb = ["dep:mongodb"]
 mqtt = ["rumqttc", "rustls", "tokio-rustls", "rustls-pemfile", "webpki-roots"]
 http = ["dep:arc-swap", "hyper", "hyper-util", "hyper-rustls", "http-body-util", "dep:http-body", "rustls", "tokio-rustls", "rustls-pemfile", "webpki-roots", "h2", "dep:flate2", "dep:lz4_flex", "dep:zstd"]
-websocket = ["dep:tokio-websockets", "tokio-websockets/rustls-bring-your-own-connector", "rustls", "tokio-rustls", "rustls-pemfile", "webpki-roots"]
+websocket = ["dep:tokio-websockets", "dep:http-crate", "tokio-websockets/rustls-bring-your-own-connector", "rustls", "tokio-rustls", "rustls-pemfile", "webpki-roots"]
 aws = ["aws-config", "aws-sdk-sqs", "aws-sdk-sns", "aws-sigv4"]
 # Runtime-loaded IBM MQ client via dlopen: builds with no SDK present; the IBM
 # redistributable client is only needed at runtime, and only if an ibm-mq

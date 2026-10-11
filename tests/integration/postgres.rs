@@ -208,6 +208,89 @@ pub async fn test_postgres_multicolumn() {
     .await;
 }
 
+/// A row the table rejects fails alone, whichever way the batch is written.
+pub async fn test_postgres_rejected_row_fails_alone() {
+    use mq_bridge::outcomes::SentBatch;
+    use mq_bridge::traits::MessagePublisher;
+    use mq_bridge::CanonicalMessage;
+    use sqlx::AnyPool;
+
+    setup_logging();
+    run_test_with_docker(DOCKER_COMPOSE_FILE, || async {
+        sqlx::any::install_default_drivers();
+        let pool = AnyPool::connect(DATABASE_URL).await.unwrap();
+        let insert = "INSERT INTO rejects (k, n) VALUES (${payload:k}, ${payload:n})";
+        let base = mq_bridge::models::SqlxConfig {
+            url: DATABASE_URL.to_string(),
+            table: "rejects".to_string(),
+            ..Default::default()
+        };
+        let variants = [
+            (
+                "insert",
+                mq_bridge::models::SqlxConfig {
+                    insert_query: Some(insert.to_string()),
+                    ..base.clone()
+                },
+            ),
+            (
+                "copy",
+                mq_bridge::models::SqlxConfig {
+                    insert_query: Some(insert.to_string()),
+                    bulk_copy: true,
+                    ..base.clone()
+                },
+            ),
+            (
+                "auto",
+                mq_bridge::models::SqlxConfig {
+                    columns: Some(mq_bridge::models::SqlColumns::Auto),
+                    ..base.clone()
+                },
+            ),
+            (
+                "auto copy",
+                mq_bridge::models::SqlxConfig {
+                    columns: Some(mq_bridge::models::SqlColumns::Auto),
+                    bulk_copy: true,
+                    ..base.clone()
+                },
+            ),
+        ];
+        for (name, config) in variants {
+            for sql in [
+                "DROP TABLE IF EXISTS rejects",
+                "CREATE TABLE rejects (k TEXT PRIMARY KEY, n INTEGER CHECK (n < 100))",
+            ] {
+                sqlx::query(sql).execute(&pool).await.unwrap();
+            }
+            let publisher = SqlxPublisher::new(&config).await.unwrap();
+            let message = |body: &str| CanonicalMessage::new(body.as_bytes().to_vec(), None);
+            let rejected = message(r#"{"k":"b","n":500}"#);
+            let rejected_id = rejected.message_id;
+            let sent = publisher
+                .send_batch(vec![
+                    message(r#"{"k":"a","n":1}"#),
+                    rejected,
+                    message(r#"{"k":"c","n":3}"#),
+                ])
+                .await
+                .unwrap_or_else(|e| panic!("{name}: the whole batch failed: {e}"));
+            let SentBatch::Partial { failed, .. } = sent else {
+                panic!("{name}: expected one failed message");
+            };
+            assert_eq!(failed.len(), 1, "{name}");
+            assert_eq!(failed[0].0.message_id, rejected_id, "{name}");
+            let keys: Vec<String> = sqlx::query_scalar("SELECT k FROM rejects ORDER BY k")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+            assert_eq!(keys, ["a", "c"], "{name}");
+        }
+    })
+    .await;
+}
+
 /// `columns: auto` sends one statement text with bind types that change from record to record.
 pub async fn test_postgres_auto_columns_changing_bind_types() {
     use mq_bridge::traits::MessagePublisher;

@@ -78,6 +78,7 @@ Compression = str
 CsvMismatch = str
 CsvNested = str
 DatePartitionStyle = str
+DecodeErrorPolicy = str
 DeliveryGuarantee = str
 FaultMode = str
 FileFormat = str
@@ -134,6 +135,7 @@ __all__ = [
     "CsvNested",
     "DatePartitionStyle",
     "DeadLetterQueueMiddleware",
+    "DecodeErrorPolicy",
     "DeduplicationMiddleware",
     "DelayMiddleware",
     "DeliveryGuarantee",

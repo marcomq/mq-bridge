@@ -187,10 +187,27 @@ pub(super) async fn make_endpoint(
             "gRPC clients do not support tls.accept_invalid_certs"
         ));
     }
+    // tonic picks TLS by the scheme alone and would send an `http://` url in the clear.
+    let https = url
+        .get(..8)
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("https://"));
+    if config.tls.required && !https {
+        anyhow::bail!("gRPC tls.required needs an https:// url, got '{url}'");
+    }
+    if config.tls.cert_file.is_some() != config.tls.key_file.is_some() {
+        anyhow::bail!("gRPC tls.cert_file and tls.key_file must be set together");
+    }
+    if config.tls.cert_password.is_some() {
+        anyhow::bail!("gRPC does not support tls.cert_password; use an unencrypted PEM key");
+    }
+    if https {
+        // Without a provider tonic panics instead of returning an error.
+        crate::endpoints::get_crypto_provider()?;
+    }
     let mut endpoint = tonic::transport::Endpoint::from_shared(url.to_string())?;
 
-    if config.tls.required {
-        let mut tls_config = ClientTlsConfig::new();
+    if https {
+        let mut tls_config = ClientTlsConfig::new().with_enabled_roots();
         if let Some(ca_path) = &config.tls.ca_file {
             let ca_pem = tokio::fs::read(ca_path).await?;
             let ca_cert = Certificate::from_pem(ca_pem);

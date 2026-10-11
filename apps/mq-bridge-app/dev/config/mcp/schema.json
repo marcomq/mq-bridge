@@ -1962,7 +1962,7 @@
           "default": null
         },
         "topic": {
-          "description": "(Consumer only) The ZeroMQ topic (for SUB sockets).",
+          "description": "Topic: the prefix a SUB socket filters on, or the topic frame a PUB socket sends first.",
           "type": [
             "string",
             "null"

@@ -289,11 +289,18 @@ impl HttpPublisher {
                 || key.eq_ignore_ascii_case("content-length")
                 || key.eq_ignore_ascii_case("transfer-encoding")
                 || key.eq_ignore_ascii_case("content-encoding")
+                // Belong to the connection the message came in on, not to this one.
+                || key.eq_ignore_ascii_case("host")
+                || super::is_connection_header(key)
                 || crate::canonical_message::is_source_metadata_key(key)
             {
                 continue;
             }
-            request_builder = request_builder.header(key, value);
+            let Some((name, value)) = super::metadata_header(key, value) else {
+                debug!(key = %key, "Metadata is no valid HTTP header; not sent");
+                continue;
+            };
+            request_builder = request_builder.header(name, value);
         }
 
         // Only attach Basic auth when credentials are actually configured.
@@ -458,6 +465,11 @@ impl HttpPublisher {
         .map_err(|e| {
             PublisherError::Retryable(anyhow::anyhow!("Failed to decompress response: {}", e))
         })?;
+        // The body is decoded now; a consumer replying with it must not label it as encoded.
+        if content_encoding.as_deref().is_some_and(super::is_decoded) {
+            response_metadata.remove("content-encoding");
+            response_metadata.remove("content-length");
+        }
 
         if !response_status.is_success() && !self.pass_through_status {
             debug!(

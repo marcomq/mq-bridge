@@ -1029,7 +1029,7 @@ with_string_setters!(EncryptionConfig { with_key_id => key_id, with_key => key }
 with_optional_setters!(AwsConfig { with_max_messages => max_messages: i32, with_wait_time_seconds => wait_time_seconds: i32 });
 with_value_setters!(AwsConfig { with_binary_payload_mode => binary_payload_mode: bool });
 with_value_setters!(KafkaConfig { with_tls => tls: TlsConfig, with_source_metadata => source_metadata: bool, with_delayed_ack => delayed_ack: bool });
-with_optional_setters!(KafkaConfig { with_shared => shared: bool, with_partitions => partitions: i32 });
+with_optional_setters!(KafkaConfig { with_shared => shared: bool, with_partitions => partitions: i32, with_create_topic => create_topic: bool });
 with_optional_setters!(KafkaConfig { with_producer_options => producer_options: Vec<(String, String)>, with_consumer_options => consumer_options: Vec<(String, String)> });
 with_optional_string_setters!(KafkaConfig { with_partition_key => partition_key });
 with_value_setters!(SledConfig { with_delete_after_read => delete_after_read: bool });
@@ -1070,7 +1070,7 @@ with_value_setters!(HttpConfig { with_tls => tls: TlsConfig, with_fire_and_forge
 with_optional_setters!(HttpConfig { with_request_timeout_ms => request_timeout_ms: u64, with_internal_buffer_size => internal_buffer_size: usize, with_batch_concurrency => batch_concurrency: usize, with_tcp_keepalive_ms => tcp_keepalive_ms: u64, with_pool_idle_timeout_ms => pool_idle_timeout_ms: u64, with_compression_enabled => compression_enabled: bool, with_compression_threshold_bytes => compression_threshold_bytes: usize, with_concurrency_limit => concurrency_limit: usize, with_basic_auth => basic_auth: (String, String), with_shared => shared: bool });
 with_optional_string_setters!(HttpConfig { with_message_id_header => message_id_header });
 with_optional_string_setters!(WebSocketConfig { with_message_id_header => message_id_header });
-with_optional_setters!(WebSocketConfig { with_routed_queue_capacity => routed_queue_capacity: usize });
+with_optional_setters!(WebSocketConfig { with_routed_queue_capacity => routed_queue_capacity: usize, with_basic_auth => basic_auth: (String, String), with_max_connections => max_connections: usize });
 with_value_setters!(WebSocketConfig { with_tls => tls: TlsConfig });
 
 with_value_setters!(IbmTlsConfig { with_required => required: bool, with_accept_invalid_certs => accept_invalid_certs: bool });

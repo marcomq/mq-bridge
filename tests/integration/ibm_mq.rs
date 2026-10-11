@@ -349,3 +349,106 @@ pub async fn test_ibm_mq_status() {
     )
     .await;
 }
+
+async fn receive_one(consumer: &mut IbmMqConsumer, what: &str) -> mq_bridge::traits::ReceivedBatch {
+    let deadline = Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        let batch = consumer.receive_batch(1).await.unwrap();
+        if !batch.messages.is_empty() {
+            return batch;
+        }
+        assert!(Instant::now() < deadline, "{what}");
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires docker compose and the IBM MQ client"]
+async fn test_ibm_mq_unsettled_messages_are_given_back() {
+    if !mq_bridge::test_utils::should_run("ibm-mq") || !client_available() {
+        return;
+    }
+    use mq_bridge::traits::MessageDisposition;
+    use mq_bridge::CanonicalMessage;
+
+    setup_logging();
+    run_test_with_docker("tests/integration/docker-compose/ibm_mq.yml", || async {
+        let mut config = get_config();
+        config.queue = Some("DEV.QUEUE.2".to_string());
+        let publisher = IbmMqPublisher::new(&config).await.unwrap();
+
+        // A consumer dropped with a batch in flight: its messages go back to the queue.
+        publisher
+            .send_batch(vec![CanonicalMessage::new(b"first".to_vec(), None)])
+            .await
+            .unwrap();
+        let mut dropped = IbmMqConsumer::new(&config).await.unwrap();
+        drop(receive_one(&mut dropped, "the message arrives").await);
+        drop(dropped);
+        let mut consumer = IbmMqConsumer::new(&config).await.unwrap();
+        let batch = receive_one(&mut consumer, "a dropped consumer kept its message").await;
+        assert_eq!(&batch.messages[0].payload[..], b"first");
+
+        // A batch dropped without a commit is not committed by the next batch's ack.
+        drop(batch);
+        let again = receive_one(&mut consumer, "a dropped batch is delivered again").await;
+        assert_eq!(&again.messages[0].payload[..], b"first");
+        drop(again);
+        publisher
+            .send_batch(vec![CanonicalMessage::new(b"second".to_vec(), None)])
+            .await
+            .unwrap();
+        let mut seen = Vec::new();
+        while seen.len() < 2 {
+            let batch = receive_one(&mut consumer, "both messages arrive").await;
+            seen.push(batch.messages[0].payload.to_vec());
+            (batch.commit)(vec![MessageDisposition::Ack]).await.unwrap();
+        }
+        seen.sort();
+        assert_eq!(seen, [b"first".to_vec(), b"second".to_vec()]);
+    })
+    .await;
+}
+
+#[tokio::test]
+#[ignore = "requires docker compose and the IBM MQ client"]
+async fn test_ibm_mq_message_over_max_message_size_is_an_error() {
+    if !mq_bridge::test_utils::should_run("ibm-mq") || !client_available() {
+        return;
+    }
+    use mq_bridge::CanonicalMessage;
+
+    setup_logging();
+    run_test_with_docker("tests/integration/docker-compose/ibm_mq.yml", || async {
+        let mut config = get_config();
+        config.queue = Some("DEV.QUEUE.3".to_string());
+        IbmMqPublisher::new(&config)
+            .await
+            .unwrap()
+            .send_batch(vec![CanonicalMessage::new(vec![b'x'; 100], None)])
+            .await
+            .unwrap();
+        let mut small = config.clone();
+        small.max_message_size = 16;
+        let mut consumer = IbmMqConsumer::new(&small).await.unwrap();
+        let refused = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            consumer.receive_batch(1),
+        )
+        .await
+        .expect("the read returns");
+        let error = format!(
+            "{:?}",
+            refused.expect_err("a cut-off message is not delivered")
+        );
+        assert!(error.contains("max_message_size"), "{error}");
+        drop(consumer);
+
+        let mut consumer = IbmMqConsumer::new(&config).await.unwrap();
+        let batch = receive_one(&mut consumer, "the message is still on the queue").await;
+        assert_eq!(batch.messages[0].payload.len(), 100);
+        (batch.commit)(vec![mq_bridge::traits::MessageDisposition::Ack])
+            .await
+            .unwrap();
+    })
+    .await;
+}

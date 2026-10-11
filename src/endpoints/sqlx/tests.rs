@@ -2380,3 +2380,183 @@ async fn auto_columns_rejects_a_config_it_cannot_serve() {
         .await
         .contains("`key` needs `columns: auto`"));
 }
+
+#[tokio::test]
+async fn a_rejected_row_fails_only_its_own_message() {
+    let (_dir, url) = setup_db_file().await;
+    let pool = AnyPool::connect(&url).await.unwrap();
+    sqlx::query("CREATE TABLE t (a TEXT PRIMARY KEY, b INTEGER NOT NULL)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let config = SqlxConfig {
+        url: url.clone(),
+        table: "t".to_string(),
+        insert_query: Some("INSERT INTO t (a, b) VALUES (${payload:a}, ${payload:b})".to_string()),
+        ..Default::default()
+    };
+    let publisher = SqlxPublisher::new(&config).await.unwrap();
+
+    let rejected = json_message(r#"{"a":"y"}"#);
+    let rejected_id = rejected.message_id;
+    let sent = publisher
+        .send_batch(vec![
+            json_message(r#"{"a":"x","b":1}"#),
+            rejected,
+            json_message(r#"{"a":"z","b":3}"#),
+        ])
+        .await
+        .unwrap();
+    let SentBatch::Partial { failed, .. } = sent else {
+        panic!("expected one failed message");
+    };
+    assert_eq!(failed.len(), 1);
+    assert_eq!(failed[0].0.message_id, rejected_id);
+    assert!(matches!(failed[0].1, PublisherError::NonRetryable(_)));
+    let written: Vec<String> = sqlx::query("SELECT a FROM t ORDER BY a")
+        .fetch_all(&pool)
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| r.get("a"))
+        .collect();
+    assert_eq!(written, ["x", "z"]);
+}
+
+#[tokio::test]
+async fn auto_columns_fails_only_the_record_the_table_rejects() {
+    let (_dir, pool, publisher) = auto_columns_publisher(None).await;
+    let sent = publisher
+        .send_batch(vec![
+            json_message(r#"{"id":1,"name":"a"}"#),
+            json_message(r#"{"id":1,"name":"again"}"#),
+            json_message(r#"{"id":2,"name":"b"}"#),
+        ])
+        .await
+        .unwrap();
+    let SentBatch::Partial { failed, .. } = sent else {
+        panic!("expected one failed record");
+    };
+    assert_eq!(failed.len(), 1);
+    let names: Vec<Option<String>> = auto_rows(&pool).await.into_iter().map(|r| r.1).collect();
+    assert_eq!(names, [Some("a".to_string()), Some("b".to_string())]);
+}
+
+#[tokio::test]
+async fn a_later_ack_does_not_move_the_cursor_past_a_nacked_row() {
+    let (_dir, url, _pool) = setup_arbitrary_table(6).await;
+    let config = SqlxConfig {
+        url: url.clone(),
+        table: "orders".to_string(),
+        cursor_column: Some("id".to_string()),
+        cursor_id: Some("copy-1".to_string()),
+        ..Default::default()
+    };
+    let first_id = |batch: &crate::traits::ReceivedBatch| {
+        serde_json::from_slice::<serde_json::Value>(&batch.messages[0].payload).unwrap()["id"]
+            .as_i64()
+            .unwrap()
+    };
+
+    let mut reader = SqlxCursorReader::new(&config).await.unwrap();
+    let first = reader.receive_batch(2).await.unwrap();
+    let second = reader.receive_batch(2).await.unwrap();
+    // A third batch read before the nack is known must not hide it either.
+    let third = reader.receive_batch(2).await.unwrap();
+    (first.commit)(vec![MessageDisposition::Ack, MessageDisposition::Nack])
+        .await
+        .unwrap();
+    (second.commit)(vec![MessageDisposition::Ack; 2])
+        .await
+        .unwrap();
+    (third.commit)(vec![MessageDisposition::Ack; 2])
+        .await
+        .unwrap();
+
+    let again = reader.receive_batch(2).await.unwrap();
+    assert_eq!(first_id(&again), 2, "the nacked row is read again");
+
+    let mut restarted = SqlxCursorReader::new(&config).await.unwrap();
+    let resumed = restarted.receive_batch(2).await.unwrap();
+    assert_eq!(first_id(&resumed), 2, "the checkpoint stops before it");
+}
+
+#[tokio::test]
+async fn a_batch_dropped_without_a_commit_is_read_again() {
+    let (_dir, url, _pool) = setup_arbitrary_table(6).await;
+    let config = SqlxConfig {
+        url,
+        table: "orders".to_string(),
+        cursor_column: Some("id".to_string()),
+        ..Default::default()
+    };
+    let mut reader = SqlxCursorReader::new(&config).await.unwrap();
+    drop(reader.receive_batch(2).await.unwrap());
+    let again = reader.receive_batch(2).await.unwrap();
+    let row: serde_json::Value = serde_json::from_slice(&again.messages[0].payload).unwrap();
+    assert_eq!(row["id"], 1, "its rows were never settled");
+}
+
+fn tls_url(url: &str, tls: crate::models::TlsConfig) -> String {
+    let config = SqlxConfig {
+        url: url.to_string(),
+        tls,
+        ..Default::default()
+    };
+    build_sqlx_url_with_tls(&config).unwrap()
+}
+
+#[test]
+fn the_tls_block_passes_a_client_certificate_to_mysql() {
+    let url = tls_url(
+        "mysql://db/app",
+        crate::models::TlsConfig {
+            required: true,
+            ca_file: Some("/ca.pem".to_string()),
+            cert_file: Some("/client.pem".to_string()),
+            key_file: Some("/client.key".to_string()),
+            ..Default::default()
+        },
+    );
+    let pairs: Vec<(String, String)> = url::Url::parse(&url)
+        .unwrap()
+        .query_pairs()
+        .into_owned()
+        .collect();
+    assert!(pairs.contains(&("ssl-cert".to_string(), "/client.pem".to_string())));
+    assert!(pairs.contains(&("ssl-key".to_string(), "/client.key".to_string())));
+}
+
+#[test]
+fn mysql_with_a_ca_file_checks_the_host_name_unless_the_url_says_otherwise() {
+    let tls = || crate::models::TlsConfig {
+        required: true,
+        ca_file: Some("/ca.pem".to_string()),
+        ..Default::default()
+    };
+    let modes = |url: &str| -> Vec<String> {
+        url::Url::parse(&tls_url(url, tls()))
+            .unwrap()
+            .query_pairs()
+            .filter(|(key, _)| key == "ssl-mode")
+            .map(|(_, value)| value.into_owned())
+            .collect()
+    };
+    assert_eq!(modes("mysql://db/app"), ["VERIFY_IDENTITY"]);
+    assert_eq!(modes("mysql://db/app?ssl-mode=VERIFY_CA"), ["VERIFY_CA"]);
+}
+
+#[test]
+fn the_key_password_does_not_reach_the_connection_url() {
+    let url = tls_url(
+        "postgres://db/app",
+        crate::models::TlsConfig {
+            required: true,
+            cert_file: Some("/client.pem".to_string()),
+            key_file: Some("/client.key".to_string()),
+            cert_password: Some("hunter2".to_string()),
+            ..Default::default()
+        },
+    );
+    assert!(!url.contains("hunter2"), "{url}");
+}

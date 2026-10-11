@@ -8,16 +8,11 @@ use crate::CanonicalMessage;
 use crate::APP_NAME;
 use anyhow::{anyhow, Context};
 use async_nats::connection::State;
+use async_nats::header::{HeaderMap, HeaderName, HeaderValue};
 use async_nats::jetstream::consumer::pull;
-use async_nats::{header::HeaderMap, jetstream, jetstream::stream, ConnectOptions};
+use async_nats::{jetstream, jetstream::stream, ConnectOptions};
 use async_trait::async_trait;
 use futures::{FutureExt, StreamExt, TryStreamExt};
-use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, UnixTime};
-use rustls::{ClientConfig, DigitallySignedStruct, Error as RustlsError, SignatureScheme};
-use std::io::BufReader;
-use std::sync::Arc;
 use tracing::{info, trace, warn};
 use uuid::Uuid;
 
@@ -131,33 +126,7 @@ impl MessagePublisher for NatsPublisher {
             payload_size = message.payload.len(),
             "Publishing NATS message"
         );
-        let mut headers = if !message.metadata.is_empty() {
-            let mut headers = HeaderMap::new();
-            for (key, value) in &message.metadata {
-                if crate::canonical_message::is_source_metadata_key(key) {
-                    continue; // source/provenance keys must not be forwarded
-                }
-                headers.insert(key.as_str(), value.as_str());
-            }
-            headers
-        } else {
-            HeaderMap::new()
-        };
-        headers.insert(
-            "mq_bridge.message_id",
-            format!("{:032x}", message.message_id).as_str(),
-        );
-
-        // Opt-in JetStream deduplication: set Nats-Msg-Id from the message id so the
-        // server drops redeliveries within its duplicate window. Skip if the caller
-        // already supplied an explicit Nats-Msg-Id via metadata. The consumer also
-        // recovers the message id from this header, so it round-trips either way.
-        if self.deduplicate && headers.get("Nats-Msg-Id").is_none() {
-            headers.insert(
-                "Nats-Msg-Id",
-                format!("{:032x}", message.message_id).as_str(),
-            );
-        }
+        let headers = publish_headers(&message, self.deduplicate);
 
         if self.request_reply {
             let request_id = message.message_id;
@@ -274,6 +243,44 @@ impl MessagePublisher for NatsPublisher {
     }
 }
 
+fn warn_unsendable_header(key: &str) {
+    static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        warn!(key = %key, "NATS cannot carry this metadata entry as a header (name with a space, ':' or non-ASCII, or a value with a line break); it is left out. Logged once.");
+    }
+}
+
+/// The NATS headers of an outgoing message: its metadata and the message id.
+fn publish_headers(message: &CanonicalMessage, deduplicate: bool) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    for (key, value) in &message.metadata {
+        if crate::canonical_message::is_source_metadata_key(key) {
+            continue; // source/provenance keys must not be forwarded
+        }
+        // async-nats asserts on a name or value the protocol cannot carry.
+        match (key.parse::<HeaderName>(), value.parse::<HeaderValue>()) {
+            (Ok(name), Ok(value)) if !key.is_empty() => headers.insert(name, value),
+            _ => warn_unsendable_header(key),
+        }
+    }
+    headers.insert(
+        "mq_bridge.message_id",
+        format!("{:032x}", message.message_id).as_str(),
+    );
+
+    // Opt-in JetStream deduplication: set Nats-Msg-Id from the message id so the
+    // server drops redeliveries within its duplicate window. Skip if the caller
+    // already supplied an explicit Nats-Msg-Id via metadata. The consumer also
+    // recovers the message id from this header, so it round-trips either way.
+    if deduplicate && headers.get("Nats-Msg-Id").is_none() {
+        headers.insert(
+            "Nats-Msg-Id",
+            format!("{:032x}", message.message_id).as_str(),
+        );
+    }
+    headers
+}
+
 enum NatsCore {
     Ephemeral(async_nats::Subscriber),
     JetStream {
@@ -329,7 +336,7 @@ impl NatsConsumer {
         let (durable_name, queue_group) = if config.subscriber_mode {
             (None, None)
         } else {
-            let durable = format!("{}-{}-{}", APP_NAME, stream_name, subject.replace('.', "-"));
+            let durable = durable_name(stream_name, subject);
             let queue = format!("{}-{}", APP_NAME, stream_name.replace('.', "-"));
             (Some(durable), Some(queue))
         };
@@ -420,7 +427,7 @@ impl MessageConsumer for NatsConsumer {
 
 // ... rest of the file
 async fn build_nats_options(config: &NatsConfig) -> anyhow::Result<ConnectOptions> {
-    let mut options = if let Some(token) = &config.token {
+    let options = if let Some(token) = &config.token {
         ConnectOptions::with_token(token.clone())
     } else if let (Some(user), Some(pass)) = (&config.username, &config.password) {
         ConnectOptions::with_user_and_password(user.clone(), pass.clone())
@@ -441,108 +448,10 @@ async fn build_nats_options(config: &NatsConfig) -> anyhow::Result<ConnectOption
         );
         return Ok(options);
     }
-    crate::support::tls_check::warn_unverified("nats", config.tls.accept_invalid_certs);
 
-    let mut root_store = rustls::RootCertStore::empty();
-    if let Some(ca_file) = &config.tls.ca_file {
-        let mut pem = BufReader::new(std::fs::File::open(ca_file)?);
-        for cert in rustls_pemfile::certs(&mut pem) {
-            root_store.add(cert?)?;
-        }
-    }
-
-    let tls_config = if config.tls.is_mtls_client_configured() {
-        let cert_file = config.tls.cert_file.as_ref().unwrap();
-        let key_file = config.tls.key_file.as_ref(); // key_file is optional for some certs
-        let mut client_auth_certs = Vec::new();
-        let mut pem = BufReader::new(std::fs::File::open(cert_file)?);
-        for cert in rustls_pemfile::certs(&mut pem) {
-            client_auth_certs.push(cert?);
-        }
-
-        let mut client_auth_key = None;
-        if let Some(key_file) = key_file {
-            let key_bytes = tokio::fs::read(key_file).await?;
-            let mut keys: Vec<_> = rustls_pemfile::pkcs8_private_keys(&mut key_bytes.as_slice())
-                .collect::<Result<_, _>>()?;
-            if !keys.is_empty() {
-                client_auth_key = Some(PrivateKeyDer::Pkcs8(keys.remove(0)));
-            }
-        }
-
-        let tls_config_builder =
-            ClientConfig::builder_with_provider(crate::endpoints::get_crypto_provider()?)
-                .with_protocol_versions(&[&rustls::version::TLS13])?
-                .with_root_certificates(root_store);
-
-        let tls_config_builder = tls_config_builder.with_client_auth_cert(
-            client_auth_certs,
-            client_auth_key
-                .ok_or_else(|| anyhow!("Client key is required but not found or invalid"))?,
-        )?;
-        tls_config_builder
-    } else {
-        ClientConfig::builder_with_provider(crate::endpoints::get_crypto_provider()?)
-            .with_safe_default_protocol_versions()?
-            .with_root_certificates(root_store)
-            .with_no_client_auth()
-    };
-
-    if config.tls.accept_invalid_certs {
-        #[derive(Debug)]
-        struct NoopServerCertVerifier {
-            supported_schemes: Vec<SignatureScheme>,
-        }
-        impl ServerCertVerifier for NoopServerCertVerifier {
-            fn verify_server_cert(
-                &self,
-                _end_entity: &CertificateDer<'_>,
-                _intermediates: &[CertificateDer<'_>],
-                _server_name: &rustls::pki_types::ServerName,
-                _ocsp_response: &[u8],
-                _now: UnixTime,
-            ) -> Result<ServerCertVerified, RustlsError> {
-                Ok(ServerCertVerified::assertion())
-            }
-
-            fn verify_tls12_signature(
-                &self,
-                _message: &[u8],
-                _cert: &CertificateDer<'_>,
-                _dss: &DigitallySignedStruct,
-            ) -> Result<HandshakeSignatureValid, RustlsError> {
-                Ok(HandshakeSignatureValid::assertion())
-            }
-
-            fn verify_tls13_signature(
-                &self,
-                _message: &[u8],
-                _cert: &CertificateDer<'_>,
-                _dss: &DigitallySignedStruct,
-            ) -> Result<HandshakeSignatureValid, RustlsError> {
-                Ok(HandshakeSignatureValid::assertion())
-            }
-
-            fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-                self.supported_schemes.clone()
-            }
-        }
-        let schemes = crate::endpoints::get_crypto_provider()?
-            .signature_verification_algorithms
-            .supported_schemes();
-        let verifier = NoopServerCertVerifier {
-            supported_schemes: schemes,
-        };
-        let mut new_tls_config = tls_config;
-        new_tls_config
-            .dangerous()
-            .set_certificate_verifier(Arc::new(verifier));
-        options = options.tls_client_config(new_tls_config);
-    } else {
-        options = options.tls_client_config(tls_config);
-    }
-
-    Ok(options)
+    // `require_tls`: without it the client follows the server and stays in the clear.
+    let tls_config = crate::support::tls::client_config(&config.tls)?;
+    Ok(options.require_tls(true).tls_client_config(tls_config))
 }
 
 /// True for JetStream setup failures a reconnect cannot change: the stream exists but its
@@ -925,6 +834,26 @@ fn create_nats_canonical_message(
     canonical_message
 }
 
+/// Where the reply to a JetStream message goes: its `reply_to` header.
+fn jetstream_reply_subject(message: &async_nats::Message) -> Option<async_nats::Subject> {
+    let reply_to = message.headers.as_ref()?.get("reply_to")?.as_str();
+    (!reply_to.is_empty() && !reply_to.starts_with("$JS.")).then(|| reply_to.into())
+}
+
+/// The durable consumer of a subject. A server refuses `.`, `*`, `>` and spaces in it.
+fn durable_name(stream_name: &str, subject: &str) -> String {
+    let subject: String = subject
+        .chars()
+        .map(|c| match c {
+            '*' => "_any_".to_string(),
+            '>' => "_all_".to_string(),
+            c if c == '.' || c.is_whitespace() => "-".to_string(),
+            c => c.to_string(),
+        })
+        .collect();
+    format!("{}-{}-{}", APP_NAME, stream_name, subject)
+}
+
 async fn handle_jetstream_replies(
     client: &async_nats::Client,
     messages: &[async_nats::jetstream::Message],
@@ -932,8 +861,8 @@ async fn handle_jetstream_replies(
 ) {
     let mut sent_reply = false;
     for (msg, disposition) in messages.iter().zip(dispositions.iter()) {
-        // Only send a reply if the NATS message has a reply subject and the disposition is a Reply.
-        if let Some(reply) = msg.reply.as_ref() {
+        // Only a message that names a `reply_to` gets the response.
+        if let Some(reply) = jetstream_reply_subject(msg).as_ref() {
             let payload = match disposition {
                 MessageDisposition::Reply(resp) => Some(resp.payload.clone()),
                 _ => None,
@@ -1122,6 +1051,103 @@ mod tests {
         assert_eq!(
             canonical.metadata.get("reply_to").map(String::as_str),
             Some("app.reply.subject")
+        );
+    }
+
+    /// async-nats asserts on such a name or value, which took the route down.
+    #[test]
+    fn metadata_nats_cannot_carry_as_a_header_is_left_out() {
+        let mut message = CanonicalMessage::new(b"payload".to_vec(), Some(1));
+        for (key, value) in [
+            ("content type", "a"),
+            ("a:b", "a"),
+            ("größe", "a"),
+            ("", "a"),
+            ("multiline", "one\ntwo"),
+            ("kept", "value"),
+        ] {
+            message.metadata.insert(key.to_string(), value.to_string());
+        }
+
+        let headers = publish_headers(&message, false);
+
+        assert_eq!(headers.get("kept").map(|v| v.as_str()), Some("value"));
+        assert!(headers.get("mq_bridge.message_id").is_some());
+        assert_eq!(headers.len(), 2);
+    }
+
+    /// The `reply` of a JetStream message is its ack subject, where a response body
+    /// starting with `-NAK` or `+TERM` is an ack command.
+    #[test]
+    fn a_jetstream_reply_goes_to_the_reply_to_header_and_never_to_the_ack_subject() {
+        let ack_subject = "$JS.ACK.test-stream.consumer.1.1";
+        let without_header = nats_message(Some(ack_subject), None);
+        assert_eq!(jetstream_reply_subject(&without_header), None);
+
+        let mut headers = HeaderMap::new();
+        headers.insert("reply_to", "app.reply.subject");
+        let with_header = nats_message(Some(ack_subject), Some(headers));
+        assert_eq!(
+            jetstream_reply_subject(&with_header).as_deref(),
+            Some("app.reply.subject")
+        );
+    }
+
+    /// Without `require_tls` the client followed the server, and a server that does not
+    /// ask for TLS got the password in the clear.
+    #[tokio::test]
+    async fn tls_required_holds_for_a_server_that_does_not_ask_for_tls() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        #[cfg(feature = "rustls-aws-lc")]
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        #[cfg(not(feature = "rustls-aws-lc"))]
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("nats://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let info = "INFO {\"server_id\":\"x\",\"server_name\":\"x\",\"host\":\"127.0.0.1\",\"port\":4222,\"version\":\"2.10.0\",\"go\":\"go\",\"proto\":1,\"headers\":true,\"max_payload\":1048576}\r\n";
+            stream.write_all(info.as_bytes()).await.unwrap();
+            let mut first = [0u8; 7];
+            stream.read_exact(&mut first).await.unwrap();
+            first
+        });
+        let config = NatsConfig {
+            url,
+            username: Some("user".to_string()),
+            password: Some("secret".to_string()),
+            tls: crate::models::TlsConfig {
+                required: true,
+                accept_invalid_certs: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let options = build_nats_options(&config).await.unwrap();
+        let second = std::time::Duration::from_secs(5);
+        let _ = tokio::time::timeout(second, options.connect(&config.url)).await;
+
+        let first = tokio::time::timeout(second, server).await.unwrap().unwrap();
+        assert_ne!(&first, b"CONNECT", "the client went on without TLS");
+    }
+
+    #[test]
+    fn a_durable_name_has_no_character_the_server_refuses() {
+        assert_eq!(
+            durable_name("events", "events.orders"),
+            format!("{APP_NAME}-events-events-orders")
+        );
+        for subject in ["events.>", "events.*.new", "events.a b"] {
+            let name = durable_name("events", subject);
+            assert!(
+                !name.contains(['.', '*', '>', ' ']),
+                "{subject} gave {name}"
+            );
+        }
+        assert_ne!(
+            durable_name("events", "events.>"),
+            durable_name("events", "events.*")
         );
     }
 

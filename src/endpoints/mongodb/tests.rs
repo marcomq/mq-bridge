@@ -81,13 +81,88 @@ fn change_event_source_metadata_is_opt_in_and_orders_by_cluster_time() {
 }
 
 #[test]
+fn only_a_duplicate_id_counts_as_already_stored() {
+    use super::publisher::{classify_insert_error, InsertRejection};
+    let dup = |index: &str| {
+        format!("E11000 duplicate key error collection: db.c index: {index} dup key: {{ a: 1 }}")
+    };
+    assert_eq!(
+        classify_insert_error(11000, &dup("_id_")),
+        InsertRejection::AlreadyStored
+    );
+    assert_eq!(
+        classify_insert_error(
+            11000,
+            "E11000 duplicate key error index: db.c.$_id_ dup key: {}"
+        ),
+        InsertRejection::AlreadyStored
+    );
+    assert_eq!(
+        classify_insert_error(11000, &dup("email_1")),
+        InsertRejection::Permanent
+    );
+    assert_eq!(
+        classify_insert_error(11000, &dup("seq_1")),
+        InsertRejection::Transient
+    );
+    assert_eq!(
+        classify_insert_error(121, "Document failed validation"),
+        InsertRejection::Permanent
+    );
+    assert_eq!(
+        classify_insert_error(189, "PrimarySteppedDown"),
+        InsertRejection::Transient
+    );
+}
+
+#[test]
+fn a_nack_without_a_checkpoint_replays_from_the_last_acknowledged_change() {
+    let token = |data: &str| {
+        super::readers::decode_resume_token(&format!(r#"{{"_data":"{data}"}}"#)).unwrap()
+    };
+    let mut replay = super::readers::ReplayPoint::default();
+    assert!(replay.take_replay().is_none(), "nothing was nacked");
+
+    replay.commit(0, Some(token("01")), true);
+    replay.commit(0, None, false);
+    // Read before the nack was seen, acknowledged after it: must not move the position.
+    replay.commit(0, Some(token("03")), true);
+    assert_eq!(replay.take_replay(), Some(Some(token("01"))));
+
+    // The same batch committing after the reopen belongs to the old stream.
+    replay.commit(0, Some(token("03")), true);
+    replay.commit(1, None, false);
+    assert_eq!(replay.take_replay(), Some(Some(token("01"))));
+    replay.commit(2, Some(token("02")), true);
+    assert!(replay.take_replay().is_none());
+}
+
+#[test]
+fn a_nacked_page_rewinds_the_cursor_once() {
+    use mongodb::bson::Bson;
+    let mut cursor = super::readers::IdCursor::default();
+    assert!(cursor.advance(0, Some(Bson::Int64(2)), 2));
+    assert!(cursor.advance(0, Some(Bson::Int64(4)), 4));
+
+    // Both pages are nacked in delivery order; the second must not undo the first.
+    assert!(cursor.rewind(0, None, 0));
+    assert!(cursor.rewind(0, Some(Bson::Int64(2)), 2));
+    assert_eq!(cursor.last(), None);
+
+    // A page that was being read across the rewind is thrown away.
+    assert!(!cursor.advance(0, Some(Bson::Int64(6)), 6));
+    assert!(cursor.advance(1, Some(Bson::Int64(2)), 2));
+    assert_eq!(cursor.last(), Some(&Bson::Int64(2)));
+}
+
+#[test]
 fn snapshot_source_metadata_uses_namespace_and_document_id() {
     let mut message = CanonicalMessage::new(Vec::new(), None);
     super::readers::add_snapshot_source_metadata(
         &mut message,
         "shop.orders",
         &mongodb::bson::Bson::String("order-42".into()),
-        &std::sync::Mutex::new(super::readers::OrdinalCounter::default()),
+        0,
     );
 
     assert_eq!(

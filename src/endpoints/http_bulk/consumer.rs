@@ -47,8 +47,11 @@ enum Position {
 enum CursorSource {
     /// The number of documents read so far.
     Count,
-    /// A JSON pointer into the response.
-    Response(String),
+    /// A JSON pointer into the response; `end_when_missing` reads an absent field as the end.
+    Response {
+        pointer: String,
+        end_when_missing: bool,
+    },
     /// A JSON pointer into the last document of the page.
     Item(String),
     /// The id of a server-sent event, sent back as `Last-Event-ID`.
@@ -95,6 +98,37 @@ struct Progress {
     rollbacks: u64,
     /// Pages handed out and not yet committed.
     outstanding: usize,
+}
+
+/// A batch that is out. Dropped without a commit, the read moves back to its start.
+struct Unsettled {
+    progress: Arc<Mutex<Progress>>,
+    /// Where the batch started; `None` where the read cannot move back.
+    before: Option<Position>,
+    rollbacks: u64,
+    settled: bool,
+}
+
+impl Unsettled {
+    fn settle(&mut self) {
+        self.settled = true;
+    }
+}
+
+impl Drop for Unsettled {
+    fn drop(&mut self) {
+        if self.settled {
+            return;
+        }
+        let mut progress = self.progress.lock().unwrap_or_else(|e| e.into_inner());
+        progress.outstanding = progress.outstanding.saturating_sub(1);
+        if progress.rollbacks == self.rollbacks {
+            if let Some(before) = self.before.take() {
+                progress.position = before;
+                progress.rollbacks += 1;
+            }
+        }
+    }
 }
 
 /// Names the listing in a checkpoint store: host and path, without the query.
@@ -164,12 +198,21 @@ impl HttpBulkConsumer {
             (Some(_), None, Some(_)) => {
                 bail!("http_bulk read.cursor.response does not apply to a stream; use 'item'")
             }
-            (Some(pointer), None, None) => (CursorSource::Response(pointer.clone()), Value::Null),
+            (Some(pointer), None, None) => (
+                CursorSource::Response {
+                    pointer: pointer.clone(),
+                    end_when_missing: read.cursor.end_when_missing,
+                },
+                Value::Null,
+            ),
             (None, Some(pointer), _) => (CursorSource::Item(pointer.clone()), Value::Null),
             (None, None, Some(HttpBulkStream::Sse)) => (CursorSource::EventId, Value::Null),
             (None, None, Some(HttpBulkStream::Ndjson)) => (CursorSource::Untracked, Value::Null),
             (None, None, None) => (CursorSource::Count, Value::from(0u64)),
         };
+        if read.cursor.end_when_missing && !matches!(source, CursorSource::Response { .. }) {
+            bail!("http_bulk read.cursor.end_when_missing needs read.cursor.response");
+        }
         let start = read.cursor.start.clone().unwrap_or(start);
         if matches!(source, CursorSource::Count) && !start.is_u64() {
             bail!("http_bulk read.cursor.start must be a whole number when the cursor is a count");
@@ -298,13 +341,19 @@ impl HttpBulkConsumer {
                     ))),
                 })
                 .collect(),
-            CursorSource::Response(pointer) => {
+            CursorSource::Response {
+                pointer,
+                end_when_missing,
+            } => {
                 let next = match response.pointer(pointer) {
                     Some(Value::Null) => Position::End,
+                    // Sent back, an empty position would read the first page again.
+                    Some(Value::String(text)) if text.is_empty() => Position::End,
                     Some(value) => Position::At(value.clone()),
+                    None if *end_when_missing => Position::End,
                     None => {
                         return Err(ConsumerError::Permanent(anyhow!(
-                            "http_bulk read.cursor.response '{pointer}' is missing in the response"
+                            "http_bulk read.cursor.response '{pointer}' is missing in the response; set read.cursor.end_when_missing if the API leaves it out on the last page"
                         )))
                     }
                 };
@@ -485,8 +534,15 @@ impl HttpBulkConsumer {
         let checkpoint = self.checkpoint.clone();
         let progress = self.progress.clone();
         let resumable = !matches!(self.source, CursorSource::Untracked);
+        let mut unsettled = Unsettled {
+            progress: self.progress.clone(),
+            before: resumable.then(|| before.clone()),
+            rollbacks,
+            settled: false,
+        };
         Box::new(move |dispositions: Vec<MessageDisposition>| {
             Box::pin(async move {
+                unsettled.settle();
                 let acked = dispositions
                     .iter()
                     .take(positions.len())
@@ -764,6 +820,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_page_dropped_without_a_commit_is_read_again() {
+        let server = server(|request| {
+            let page = match request.target.as_str() {
+                "/docs?offset=0&limit=2" => r#"{"results":[{"id":1},{"id":2}]}"#,
+                "/docs?offset=2&limit=2" => r#"{"results":[{"id":3}]}"#,
+                _ => r#"{"results":[]}"#,
+            };
+            (200, page.to_string())
+        })
+        .await;
+        let mut consumer = consumer(
+            &server,
+            json!({"read": {"path": "/docs?offset={cursor}&limit={limit}", "items": "/results"}}),
+        )
+        .await;
+
+        drop(consumer.receive_batch(2).await.expect("page"));
+        assert_eq!(read(&mut consumer, 2).await, [r#"{"id":1}"#, r#"{"id":2}"#]);
+        assert_eq!(read(&mut consumer, 1).await, [r#"{"id":3}"#]);
+    }
+
+    #[tokio::test]
     async fn without_a_cursor_source_the_documents_read_are_the_offset() {
         let server = server(|request| {
             let page = match request.target.as_str() {
@@ -888,6 +966,75 @@ mod tests {
         assert_eq!(requests[0].method, "POST");
         assert_eq!(requests[0].header("content-type"), Some(JSON));
         let _ = std::fs::remove_file(path);
+    }
+
+    /// Reads a two-page listing whose last page is `last` and returns the requests made.
+    async fn requests_until_the_end(last: &'static str, cursor: Value) -> Vec<String> {
+        let server = server(move |request| {
+            let page = match request.target.as_str() {
+                "/list?page=" => r#"{"items":[{"id":1}],"next":"p2"}"#,
+                "/list?page=p2" => last,
+                other => panic!("unexpected request {other}"),
+            };
+            (200, page.to_string())
+        })
+        .await;
+        let mut consumer = consumer(
+            &server,
+            json!({"read": {"path": "/list?page={cursor}", "items": "/items", "cursor": cursor}}),
+        )
+        .await;
+        assert_eq!(read(&mut consumer, 1).await, [r#"{"id":1}"#]);
+        assert_eq!(read(&mut consumer, 1).await, [r#"{"id":2}"#]);
+        assert!(read(&mut consumer, 0).await.is_empty());
+        targets(&server)
+    }
+
+    #[tokio::test]
+    async fn an_empty_string_cursor_ends_the_read() {
+        let requests = requests_until_the_end(
+            r#"{"items":[{"id":2}],"next":""}"#,
+            json!({"response": "/next", "start": ""}),
+        )
+        .await;
+        assert_eq!(requests, ["/list?page=", "/list?page=p2"]);
+    }
+
+    #[tokio::test]
+    async fn a_missing_cursor_ends_the_read_when_asked_to() {
+        let requests = requests_until_the_end(
+            r#"{"items":[{"id":2}]}"#,
+            json!({"response": "/next", "start": "", "end_when_missing": true}),
+        )
+        .await;
+        assert_eq!(requests, ["/list?page=", "/list?page=p2"]);
+    }
+
+    #[tokio::test]
+    async fn a_missing_cursor_stops_the_route_by_default() {
+        let server = server(|_| (200, r#"{"items":[{"id":1}]}"#.to_string())).await;
+        let mut consumer = consumer(
+            &server,
+            json!({"read": {"path": "/list?page={cursor}", "items": "/items", "cursor": {"response": "/next"}}}),
+        )
+        .await;
+        let error = consumer.receive_batch(2).await.expect_err("an error");
+        assert!(matches!(error, ConsumerError::Permanent(_)), "{error}");
+        assert!(error.to_string().contains("end_when_missing"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn end_when_missing_needs_a_response_cursor() {
+        let config: HttpBulkConfig = serde_json::from_value(json!({
+            "url": "http://127.0.0.1:9",
+            "read": {"path": "/list?page={cursor}", "cursor": {"item": "/id", "end_when_missing": true}},
+        }))
+        .expect("config");
+        let error = HttpBulkConsumer::new(&config, true)
+            .await
+            .err()
+            .expect("an error");
+        assert!(error.to_string().contains("end_when_missing"), "{error}");
     }
 
     #[tokio::test]

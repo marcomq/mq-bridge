@@ -6,6 +6,101 @@ All notable changes to `mq-bridge`. Newest first.
 
 ### Behaviour changes
 
+- **`amqp`: a reply the broker returns as unroutable no longer fails the request.** When
+  the `reply_to` queue is gone (the requester timed out and left), the reply is dropped
+  with a warning and the request is acked. It used to be redelivered and handled again
+  without end. A reply that fails for another reason (broker nack, timeout, lost
+  connection) still fails the commit.
+- **`object_store` source: the first object that cannot be decoded stops the route.** As
+  long as a source has not decoded one object, a decode failure (after five tries) is a
+  permanent error that names `format`, `compression` and `encryption`, and the checkpoint
+  does not move. A wrong setting used to skip every object and leave the checkpoint behind
+  the whole prefix. After the first decoded object a bad one is skipped as before.
+- **`http_bulk` input: an empty string where `read.cursor.response` points ends the read**,
+  like `null`. It used to become the next position, and an API that ends its listing that
+  way was read from the first page again without end.
+
+- **`grpc` client: TLS follows the URL scheme.** `tls.required` with a URL that is not
+  `https://` is an error; it used to connect without TLS. An `https://` URL now uses
+  `tls.ca_file`, `tls.cert_file` and `tls.key_file` also without `tls.required` (they were
+  ignored), and the bundled web roots are trusted next to `ca_file`. A certificate without
+  a key and `tls.cert_password` are refused.
+
+- **`http` output: `host`, `connection`, `keep-alive`, `proxy-connection` and `upgrade`
+  are no longer taken from message metadata.** In an `http -> http` route they were the
+  client's and reached the upstream. Set a fixed `Host` with `custom_headers`.
+- **`http`: metadata that is no valid header is left out** (a space in the name, a line
+  break in the value), in a request and in a reply. It used to fail the message, or
+  answer 500.
+
+- **`sled`: a stored value that is no mq-bridge message is delivered as a raw payload**,
+  with a warning. It used to be a connection error that the route ran into again and again.
+
+- **`clickhouse`: a row ClickHouse refuses (HTTP 400) fails alone as non-retryable.** The
+  batch is halved and sent again until the refused rows stand alone; the others are
+  inserted. The whole batch used to be retried without end. Without a `dlq` the refused
+  row is logged and dropped, as for every non-retryable failure.
+- **`clickhouse`: a payload that is no JSON object (without `columns`) fails alone**, no
+  longer together with the other messages of its batch.
+- **`clickhouse`: `tls.required` with an `http://` URL is an error**, and `tls.cert_file`
+  / `tls.key_file` are sent as the client certificate. Both were ignored; `tls.cert_password`
+  and a key without a certificate are refused.
+
+- **`zeromq`: a `pub` socket sends a topic frame first**: its `topic` (the option is no
+  longer consumer-only), or an empty frame with `raw_framed` when none is set. A `sub`
+  consumer always dropped the first frame as the topic, so `raw_framed` PUB/SUB between two
+  mq-bridge instances lost the metadata, and a `topic` filter matched nothing. A foreign
+  subscriber now sees `[topic, metadata, payload]` instead of `[metadata, payload]`.
+- **`zeromq` (`zmq` backend): a REP request that was never settled is answered with an empty
+  array**, no longer with the text `consumer_failed`, which the REQ side took for a response.
+
+- **`ibm_mq`: a message larger than `max_message_size` is a consumer error.** Its first
+  `max_message_size` bytes used to be delivered as a message, again on every read, because
+  the message never left the queue. Raise `max_message_size` to read it.
+
+- **`aws`: a consumer decodes a body sent with `binary_payload_mode`.** A message with the
+  attribute `aws_binary_encoded: true` arrives as the original bytes, without the attribute.
+  It used to arrive as base64 text.
+- **`aws`: metadata SQS and SNS cannot carry is left out**: an entry with an empty value, or
+  a key that is no valid attribute name. A message with more than 10 attributes (SQS), an
+  empty body, or a payload that is not UTF-8 without `binary_payload_mode` fails as
+  non-retryable. All of these used to be retried without end.
+
+- **`redis_streams`: an entry the consumer still holds is not re-claimed.** After
+  `redelivery_timeout_ms` it used to be delivered a second time while the sink was still
+  working on the first. A nacked entry is re-claimed as before.
+- **`redis_streams`: a read without a reply within `block_ms` + 5 s is a connection error**,
+  no longer treated as an empty read.
+
+- **`mqtt`: a nacked message is delivered again at once.** It used to stay unacked until the
+  next reconnect and held a slot of the broker's inflight window, so a route stopped
+  receiving after `max_inflight` nacks. Not with `delayed_ack: true` or QoS 0.
+- **`mqtt`: a publisher without `client_id` is named `mq-bridge-<route>-out`**, no longer
+  `mq-bridge-<route>`, which is the consumer's default. A broker ACL on the old id needs the
+  new one, or set `client_id`.
+
+- **`amqp`: a publish the broker cannot route is an error.** Messages are published with
+  `mandatory`, so a queue that is missing (with `no_declare_queue: true`) or an `exchange`
+  without a binding for the routing key fails the send as retryable. Before, the broker
+  confirmed the publish and the message was gone. Not in `subscribe_mode` and not with
+  `delayed_ack`.
+- **`amqp`: `tls.required: true` turns an `amqp://` URL into `amqps://`.** Without a port in
+  the URL the connection now goes to 5671. An `amqps://` URL uses the `tls` block
+  (`ca_file`, `cert_file`, `key_file`) without `tls.required`.
+- **`amqp`: integer, float and timestamp headers of a received message become metadata.**
+  Only strings, booleans and 32-bit integers did.
+
+- **`nats`: a JetStream consumer replies to the `reply_to` header.** The reply used to be
+  published to the message's ack subject, where nobody read it and where a body starting
+  with `-NAK` or `+TERM` acted as an ack command. A message without a `reply_to` header gets
+  no reply. Core NATS still replies to the native reply subject.
+- **`nats`: the durable consumer of a wildcard subject has a new name.** `*` is written
+  `_any_` and `>` `_all_`; the old name contained the wildcard and the server refused it.
+  Names for subjects without a wildcard are unchanged.
+- **`nats`: `tls.required: true` without `ca_file` trusts the public CAs** instead of none, a
+  client key may be PKCS#1 or SEC1 as well as PKCS#8, and a client certificate no longer
+  limits the connection to TLS 1.3.
+
 - **An endpoint type policy checks a `custom` endpoint by its factory name.** `check_consumer`
   and `check_publisher` used to let every `custom` endpoint through, so a plugin could stand
   in for a type the list left out. Add the names of the custom endpoints you use, such as
@@ -63,10 +158,32 @@ All notable changes to `mq-bridge`. Newest first.
   `redis_streams` and `sqlx` warn at start when a password or token would cross the network
   without TLS (not for a server on `localhost` or a loopback address). `nats`, `mongodb`,
   `kafka`, `clickhouse`, `http_bulk`, `ibmmq`, `sqlx` and `postgres_cdc` warn when
-  `tls.accept_invalid_certs` is set, and `amqp` warns that it ignores the setting. `sqlx` on
-  MySQL or MariaDB warns that `tls.ca_file` gives `ssl-mode=VERIFY_CA` (no host name check)
-  and that `tls.cert_file` and `tls.key_file` are ignored. Nothing else changes; see "TLS
+  `tls.accept_invalid_certs` is set, and `amqp` warns that it ignores the setting. Nothing else changes; see "TLS
   through the URL" in `docs/CONFIGURATION.md`.
+- **`sqlx` on MySQL or MariaDB checks the host name when `tls.ca_file` is set.**
+  `tls.required` with a `ca_file` used `ssl-mode=VERIFY_CA`, which accepts any certificate of
+  that CA for any host. It is now `VERIFY_IDENTITY`, as without a `ca_file`. A server reached
+  by IP address or by a name that is not in its certificate fails at start; put
+  `ssl-mode=VERIFY_CA` in the URL to keep the old check. An `ssl-mode` in the URL now wins
+  over the `tls` block; the block used to override it.
+- **`postgres_cdc` renders dates in the ISO form whatever the role's `DateStyle` is.** The
+  stream sets `datestyle=ISO` on its own session. With a role default such as `SQL, DMY` a
+  date arrived as `04/03/2026`; it is now `2026-03-04`. Nothing changes for a role that
+  already used ISO.
+- **`kafka`: a topic the publisher creates gets the cluster's replication factor.** It was
+  created with replication factor 1 on any cluster. The request now asks for the broker's
+  `default.replication.factor`, which needs Kafka 2.4 or newer; an older broker refuses the
+  request and the publisher reports it. The partition count is still `partitions`
+  (default 6).
+- **`kafka` `--drain`: a late group join is no longer an empty source.** A drain that got no
+  partition within 30 s ended with exit code 0 and nothing copied, also when the join was
+  only waiting for a crashed member of the group. It now asks the broker: if the topic has
+  partitions the route reports a connection error and retries; only a missing topic ends
+  the drain as empty.
+- **`mongodb` change streams without `cursor_id` deliver a nacked change again.** The change
+  was skipped until the process restarted, and then it was gone. The reader now reopens its
+  stream after the last acknowledged change, so the nacked change and the ones after it are
+  delivered again. A restart still starts at the current position; that needs `cursor_id`.
 - **`websocket`: a `wss://` output connects with TLS.** It connected without TLS and sent its
   upgrade request, headers included, in the clear before the server rejected it. The server
   certificate is checked against the public roots or `tls.ca_file`. `tls.required: true` with
@@ -135,6 +252,10 @@ All notable changes to `mq-bridge`. Newest first.
   promised `null`, and a 401 or 403 on an input still acked and dropped every message; the
   0.4.20 fix covered only sources with `pass_through_status: true`. An `http` source behind a
   `ref` keeps its own setting.
+- **Plugin SDK: a middleware's permanent error stays permanent.** A `BatchFilter` that
+  returns `ProcessingError::NonRetryable` or `ConsumerError::Permanent` now fails the batch
+  for good. Every error was reported as retryable, so a message the filter could never
+  handle was retried without end. Any other error is retryable as before.
 - **App: middlewares on a `null` output run.** The config kept them since 0.4.17, but the
   route acknowledged each message before the output, so a `limiter`, `delay`, `metrics` or
   `random_panic` there did nothing. The same holds for `start_route` of the MCP server.
@@ -143,9 +264,41 @@ All notable changes to `mq-bridge`. Newest first.
 
 ### Added
 
+- **`object_store`: `on_decode_error`.** `skip` (default) moves past an object that cannot
+  be decoded, `fail` stops the route there. URI: `?on_decode_error=fail`. Rust code that
+  builds `ObjectStoreConfig` with a struct literal needs the new field or
+  `..Default::default()`.
+- **`http_bulk`: `read.cursor.end_when_missing`.** With `cursor.response`, a response
+  without the field ends the read (Google's `nextPageToken`). Off by default: such a
+  response stops the route, which also catches a mistyped pointer.
+- **`http_bulk`: `upsert.split_on_reject`.** Without `upsert.result`, a request refused
+  with 400, 409, 413 or 422 is sent again in halves until the refused documents stand
+  alone, so one bad row no longer fails its whole request. Off by default; the PostgREST
+  recipe turns it on.
+- **`postgres_cdc`: `split_key_change`.** An update that changes the primary key is sent
+  as a `delete` of the old key followed by the `update`, so a sink that upserts and deletes
+  by key needs no extra step. Off by default. URI: `?split_key_change=true`. Rust code that
+  builds `PostgresCdcConfig` with a struct literal needs the new field.
+- **`zeromq` (`zmq` backend): a warning at start for a `pull` or `rep` socket that
+  connects.** The `zeromq` crate does not reconnect these; the warning says to bind on that
+  side or to use the `omq` backend.
+
+- **Plugins: `MQB_PLUGIN_CRASH_HANDLER=0`.** With it the host installs no signal handler
+  when the first plugin loads, for a process that has its own crash reporter. A plugin's
+  `register_crash_handler` then gets `MQB_ERR_UNSUPPORTED`. Unset, nothing changes.
+- **`websocket`: `basic_auth` and `max_connections`.** A listener with
+  `basic_auth: [user, password]` answers an upgrade request without these credentials with
+  `401`; a publisher with it sends them. `max_connections` limits the connections a listener
+  holds at once, and one more gets `503` (behind TLS it is closed before the handshake).
+  Both are unset by default. URI: `?basic_auth=["user","password"]&max_connections=1000`.
+  Rust code that builds `WebSocketConfig` with a struct literal needs the two new fields or
+  `..Default::default()`.
 - **`redis_streams` has a `tls` block.** `ca_file` trusts a private CA, and `cert_file` with
   `key_file` presents a client certificate. Before, only a server with a publicly trusted
   certificate could be reached over TLS. `tls.required: true` turns a `redis://` URL into TLS.
+- **`kafka`: `create_topic`.** `create_topic: false` (URI: `?create_topic=false`) stops the
+  publisher from asking the broker to create its topic at start. The default, `true`, is the
+  behaviour so far.
 - **`fsync` on the `file` sink:** `off` (default, as before), `batch` (sync before each batch
   is acknowledged) or `periodic` (sync every `fsync_interval_ms`, default 1000). Without it a
   power loss can lose acknowledged batches. Rust code that builds `FileConfig` with a struct
@@ -182,6 +335,146 @@ All notable changes to `mq-bridge`. Newest first.
 
 ### Fixed
 
+- **`http_bulk` input: a batch that is dropped without a commit is read again.** Its
+  documents used to be skipped, and the next checkpoint was saved behind them.
+- **`elasticsearch`, `typesense`, `meilisearch`: a `tls` option** (`ca_file`, `cert_file`,
+  `key_file`, `required`, `accept_invalid_certs`), passed on to `http_bulk`. An object in
+  YAML, JSON text in a URI. The presets could not reach a server with a private CA.
+- **`http_bulk`: TCP keepalive on the client**, so a request without `request_timeout_ms`
+  ends when the server is gone.
+
+- **`http -> http`: a compressed upstream response is no longer sent on decoded but with
+  `Content-Encoding`.** The publisher drops `content-encoding` and `content-length` from
+  the response metadata once it decoded the body.
+- **`http` `stream_response_to`: a sink failure inside the first chunk no longer sends the
+  request again** and publishes the records before the failure twice. A record without an
+  end is capped at 256 MB, as on the request side.
+- **`http` TLS listener: 10 s limit for the handshake**, and `TCP_NODELAY` as on the plain
+  listener.
+- **`http`, `grpc`, `websocket` listeners warn when `tls.cert_file` is set but
+  `tls.required` is off**: they serve without TLS.
+- **`grpc` Bridge input: a subscription the server closed is opened again.** The server
+  closes a subscriber that fell more than 1024 messages behind; the route used to end
+  there. It now subscribes again under its `consumer_id` and gets the retained messages.
+- **`grpc` Bridge input: an ack is bound by `request_timeout_ms` / `timeout_ms`.**
+- **`grpc` server: a `consumer_id` is free as soon as its client is gone**, not only
+  after the next message on the topic.
+- **`grpc` server: two routes starting together on one TLS listener** no longer fail with
+  "address in use".
+- **`grpc`: a missing rustls provider is an error**, no longer a panic inside tonic.
+- **A `websocket` input and a `grpc` dynamic-client input are at-most-once.** Neither can
+  give a message back to its sender: a `websocket` listener does not signal a rejected
+  frame, and a server stream read through a descriptor set or reflection has no
+  acknowledgement. Both were reported as at-least-once, so `required_delivery:
+  at_least_once` accepted them. It now refuses such a route, and the route logs
+  at-most-once at start. A Bridge client and a `grpc` server are unchanged.
+- **`deduplication` without a `key` on a `mongodb` input with `consume` unset is warned
+  about.** Unset means `capture_all`, which gives every read a new `message_id`; the
+  warning only came with `consume` written out. `snapshot` is warned about as well.
+- **`postgres_cdc` `capture_all` / `snapshot`: two tables that spell the same cursor id
+  are refused.** `a_b.c` and `a.b_c` both gave `<cursor_id>_a_b_c`, so the second
+  backfill resumed from the first table's position and skipped rows.
+- **`postgres_cdc`: an update that changes the primary key names the old one** in the
+  new metadata key `postgres.old_key`. The old key was dropped, so a sink that upserts
+  by key kept the row under both keys.
+- **`postgres_cdc`: the stream pins `extra_float_digits` and `IntervalStyle`**, as it
+  does `DateStyle`. A role or database default could round `float8` values to 15 digits.
+- **`postgres_cdc`: a row with another number of cells than its table has columns is an
+  error.** The surplus was dropped without a word.
+- **`websocket` output: a connection the server closed is seen before the next send.**
+  The batch was written into the closed socket and acked. The output now reads its
+  connection: it answers pings, drops what the server sends and connects again after a
+  close. Connect, TLS and upgrade together are limited to 10 s.
+- **`websocket` input: a client that does not read its replies is dropped after 10 s.**
+  It used to hold the commit of its batch, and the route with it.
+- **`websocket` input: open connections end with the listener** (close frame), not at
+  their next frame.
+
+- **`object_store` source with `exit_on_empty`: every object is read.** The run could end
+  after the first object, or at an object without records (an empty file, a lone CSV
+  header), and still report success.
+- **`object_store` source: no wait of one `polling_interval_ms` between two objects**, and a
+  batch dropped without a commit is read again instead of blocking the source.
+
+- **`sled` (`delete_after_read`): a message whose commit never ran goes back to the queue.**
+  It used to wait in the inflight tree until the process was restarted.
+- **`sled`: no warning per message when a route's sink response cannot be sent as a reply.**
+
+- **`clickhouse`, `sqlx` cursor sources: a batch that is dropped without a commit is read
+  again.** Its rows used to be skipped, and the next checkpoint was saved behind them.
+- **`clickhouse`: TCP keepalive on the client**, so a request without `request_timeout_ms`
+  ends when the server is gone.
+
+- **`zeromq` (`zmq` backend): a connecting `push`, `pub` or `req` socket reconnects after its
+  peer restarted.** A `push` used to fail every send from then on, a `pub` sent to nobody.
+  A connecting `pull` or `rep` on this backend still does not reconnect (see the connector
+  page); the `omq` backend does.
+- **`zeromq` (`zmq` backend): a consumer that is dropped frees its address.** A route with
+  `bind: true` that was restarted failed with "Address already in use" until the next
+  message arrived, and that message was lost.
+- **`zeromq` (`zmq` backend): a bound `req` publisher works again after a timed-out
+  request.**
+
+- **`ibm_mq`: a consumer that is dropped ends its thread and its connection.** Each rebuild
+  after a connection error used to leak both, and messages of a batch in flight stayed
+  locked until the process exited.
+- **`ibm_mq`: a batch dropped without a commit is backed out** instead of being committed
+  together with the next batch.
+
+- **`aws`: a batch whose bodies add up to more than one SQS request may carry is split**
+  instead of being refused as a whole and retried forever.
+- **`aws`: a received message attribute can no longer set `mqb.src.*` metadata.**
+- **`aws`: no warning per message when a route's sink response cannot be sent as a reply.**
+
+- **`redis_streams`: a message on an idle stream is delivered at once.** After a pause of
+  more than 500 ms the next entries were taken by a read the client had already given up
+  on, and arrived only after `redelivery_timeout_ms` (default 60 s; never with `0`).
+- **`redis_streams`: a consumer that was dropped (a route rebuilds it after a connection
+  error) no longer takes a batch of entries** that then waited for the reclaim pass.
+- **`redis_streams`: a read error met while a batch was being filled is reported.**
+
+- **`mqtt`: an mqtt-to-mqtt route on one broker without `client_id` no longer has its two
+  clients disconnect each other.**
+- **`mqtt`: a single `send` sees a session reset that happens right after the enqueue.**
+
+- **`amqp`: `tls.required: true` with an `amqp://` URL no longer connects in the clear.**
+  The scheme alone decided, so user, password and messages went out unencrypted.
+- **`amqp`: `subscribe_mode` with `no_persistence` starts.** The subscriber declared the
+  exchange durable and the publisher did not, which the broker refuses.
+- **`amqp`: a metadata key, `reply_to` or `correlation_id` over 255 bytes is left out** with
+  one warning. It corrupted the publish frame and the broker closed the connection.
+- **`amqp`: a batch on a stuck channel fails at once** instead of waiting 5 s per message.
+
+- **`nats`: `tls.required: true` is enforced.** The client followed the server: a server
+  that did not ask for TLS got the connection, with user, password or token, in the clear.
+- **`nats`: a metadata entry that cannot be a NATS header no longer panics the publisher.**
+  A key with a space, a `:` or a non-ASCII character, or a value with a line break, is left
+  out with one warning.
+
+- **`clickhouse` cursor source: a nacked row is read again when later rows were already
+  read.** With batches read ahead, the commit of a later batch saved a checkpoint beyond the
+  nacked row, and a second nack overwrote the rewind of the first, so the row was skipped for
+  the rest of the run and after a restart. Same fix as for the SQL cursor source.
+- **`postgres_cdc`: a transaction larger than one batch is no longer cut short by a stop.**
+  Every row carried the commit position of its transaction, so acking the first batch
+  confirmed the whole transaction and the rows still waiting were skipped after a restart.
+  Only the last row of a transaction confirms it now.
+- **`postgres_cdc`: a nacked change is delivered again.** A later acked batch moved the
+  confirmed position past it. After a nack the source now stops confirming and reconnects,
+  as `kafka` does; the changes after the nack are delivered again too.
+- **`postgres_cdc`: a checkpoint file behind the slot no longer stops the source from
+  starting** with "cannot advance replication slot". The slot's own position applies and a
+  warning is logged.
+- **`postgres_cdc`: `sslmode` in the URL applies to the replication stream.** Only the
+  control connection read it; with `sslmode=require` or stricter and no `tls` block the
+  stream itself, password included, went out in plain text. `sslrootcert`, `sslcert` and
+  `sslkey` are read too, and `tls.cert_file` with `tls.key_file` now sends a client
+  certificate instead of being ignored with a warning.
+- `postgres_cdc`: the slot's confirmed position follows the server while the published
+  tables are quiet, so writes to other tables no longer hold WAL back without limit.
+- `postgres_cdc`: a database name with percent-encoded characters is decoded, and `user`,
+  `password`, `dbname`, `host` and `port` given as URL parameters are used for the stream
+  as they are for the control connection. A URL that is not valid UTF-8 is refused.
 - **`amqp`: `tls.ca_file` is used.** The path itself was handed to the client as if it were the
   certificate, so a broker with a private CA was never trusted and the connection failed.
 - **`amqp`: `tls.cert_file` with `tls.key_file` is a PEM certificate and key**, as on every other
@@ -290,6 +583,60 @@ All notable changes to `mq-bridge`. Newest first.
   used to count as a fault of the message, so an input-side `lookup` acked and dropped every one.
 - `weak_join` no longer cancels the source's receive when a group times out; the receive stays
   pending and is resumed, so a source cannot lose messages it had already read.
+- A `sqlx` output fails only the message a statement rejects (constraint violation, type
+  mismatch). The whole batch used to fail as non-retryable, so every other message of it
+  was dropped, or dead-lettered with a `dlq`. A rejected batch is written again one message
+  at a time in one transaction.
+- A `sqlx` `cursor_column` input no longer moves its cursor past a nacked row when a batch
+  read after it is acked. The rows from the nacked one on are read again.
+- `sqlx` passes `tls.cert_file` and `tls.key_file` to MySQL and MariaDB as `ssl-cert` and
+  `ssl-key`; they used to be ignored with a warning.
+- `sqlx` no longer appends `tls.cert_password` to the Postgres URL as `sslpassword`. The
+  driver does not read it and logged the value in a warning. A warning now says that the
+  key file must be unencrypted.
+- A `sqlx` queue input on MySQL or SQLite reports an `id` column it cannot read as an error
+  instead of panicking.
+- A `kafka` output fails a record that exceeds the message size limit as non-retryable and
+  on its own. It was reported as retryable, so it was nacked and replayed without end, and
+  the rest of its batch was aborted with it.
+- A `kafka` output starts when the client is not allowed to create topics. The refused
+  creation stopped the publisher although the topic existed; it is now a warning.
+- A `kafka` input with `--drain` fails when an assigned partition stays short of its end for
+  `MQ_BRIDGE_DRAIN_JOIN_TIMEOUT_MS` (30 s). It ended the copy as complete with a warning.
+  A consumer that is never assigned a partition still ends as empty.
+- `kafka` passes `tls.cert_password` to librdkafka as `ssl.key.password`, and applies the
+  `tls` block (`ca_file`, client certificate, `accept_invalid_certs`) when SASL credentials
+  turn TLS on without `tls.required`.
+- **`mongodb` `snapshot` and `capture_all`: nacked pages are read again.** With two pages
+  delivered and both nacked, the second nack moved the read position past the first page and
+  its documents were skipped. `mqb.src.mongodb_snapshot_index` now stays the same when a page
+  is read again.
+- **`mongodb` `capture_new`/`capture_all` with `cursor_id`: a nacked change is delivered
+  again.** The stream went on past it until the next restart and stopped saving its resume
+  token. After a nack the source now reconnects and resumes after the last acknowledged
+  change, as `postgres_cdc` does.
+- A `mongodb` output fails a document the collection refuses (schema validation, size, a
+  duplicate on a unique index other than `_id`) as non-retryable and on its own. Such a
+  document was retried without end, and a duplicate on any unique index was acknowledged as
+  already stored without being written. A duplicate `_id` is still a success.
+- **Plugins: a source is closed when its route ends.** A route never called `consumer_close`,
+  so a plugin source kept its broker-side state until the process ended, and a source built
+  with the SDK never ran its `on_disconnect_hook`. `consumer_close` is now called once at
+  teardown, and the SDK runs the hook before `close`. Sources served by `plugins/full`
+  (`postgres_cdc` among them) get their teardown back.
+- **A plugin middleware no longer hides the endpoint it wraps.** Connect and disconnect hooks
+  and the health status of the wrapped endpoint were dropped; they pass through now.
+- A plugin middleware that drops a whole batch no longer acknowledges it ahead of earlier
+  batches still being written. On a source with cumulative acknowledgements a crash in that
+  window lost those batches. The acknowledgement is held as `filter` holds it.
+- A non-blocking plugin call that finished while its caller was being cancelled leaked its
+  result (a received batch, responses, the error text). It is handed back to the plugin.
+- Plugin SDK: when a publisher reports a failed message that is not one of the batch, the
+  whole batch fails. The other failures were marked and that one was acknowledged.
+- Plugin SDK: the plugins of one library share one runtime. `plugins/full` started 20 worker
+  pools; `MQB_PLUGIN_WORKER_THREADS` now sizes the one shared pool.
+- `http` and `websocket` outputs refuse a `tls` block with only one of `cert_file` and
+  `key_file`. They connected without a client certificate.
 
 ## 0.4.20
 

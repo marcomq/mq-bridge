@@ -642,6 +642,10 @@ impl SecretExtractor for HttpConfig {
 impl SecretExtractor for WebSocketConfig {
     fn extract_secrets(&mut self, prefix: &str, secrets: &mut HashMap<String, String>) {
         extract_sensitive_url(&mut self.url, prefix, "URL", secrets);
+        if let Some((u, p)) = self.basic_auth.take() {
+            secrets.insert(format!("{}__{}__{}", prefix, "BASIC_AUTH", 0), u);
+            secrets.insert(format!("{}__{}__{}", prefix, "BASIC_AUTH", 1), p);
+        }
         self.tls
             .extract_secrets(&format!("{}__{}", prefix, "TLS"), secrets);
     }

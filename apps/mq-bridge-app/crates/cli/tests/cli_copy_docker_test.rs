@@ -1229,3 +1229,150 @@ fn redis_tls_presents_a_client_certificate() {
         &redis_tls_uri("rediss", &stream, &known),
     );
 }
+
+/// A Postgres that takes TLS connections only, for SQL and for replication. The key is
+/// copied inside the container, as the server refuses one a bind mount leaves readable.
+#[cfg(all(unix, any(feature = "full", feature = "sqlx")))]
+fn postgres_tls(dir: &TestDir, name: &str) -> TlsContainer {
+    TlsContainer::start(
+        dir,
+        name,
+        5433,
+        &[(
+            "pg_hba.conf",
+            "local all all trust\nhostssl all all all scram-sha-256\n\
+             hostssl replication all all scram-sha-256\n",
+        )],
+        &[
+            "-e",
+            "POSTGRES_USER=testuser",
+            "-e",
+            "POSTGRES_PASSWORD=testpass",
+            "-e",
+            "POSTGRES_DB=testdb",
+            "--entrypoint",
+            "sh",
+            "postgres:16-alpine",
+            "-c",
+            "cp /tls/server.pem /tls/server.key /tls/pg_hba.conf /var/lib/postgresql/ \
+             && chown postgres /var/lib/postgresql/server.* /var/lib/postgresql/pg_hba.conf \
+             && chmod 600 /var/lib/postgresql/server.key \
+             && exec docker-entrypoint.sh postgres -p 5433 -c ssl=on \
+             -c ssl_cert_file=/var/lib/postgresql/server.pem \
+             -c ssl_key_file=/var/lib/postgresql/server.key \
+             -c hba_file=/var/lib/postgresql/pg_hba.conf -c wal_level=logical",
+        ],
+        // The server of the init phase listens on its socket only.
+        "listening on IPv4 address",
+    )
+}
+
+#[cfg(all(unix, any(feature = "full", feature = "sqlx")))]
+const POSTGRES_TLS: &str = "testuser:testpass@localhost:5433/testdb";
+
+#[cfg(all(unix, any(feature = "full", feature = "sqlx")))]
+#[test]
+#[ignore = "requires docker"]
+fn postgres_tls_takes_only_clients_that_trust_the_server() {
+    backend!("postgres");
+    let dir = TestDir::new();
+    let server = postgres_tls(&dir, "mqb-cli-postgres-tls");
+
+    let table = unique("cli_pg_tls");
+    let sink = format!("postgres://{POSTGRES_TLS}?table={table}&auto_create_table=true");
+    let trusting = format!(
+        r#"tls={{"required":true,"ca_file":"{}"}}"#,
+        server.ca_file.display()
+    );
+    let seeded = numbered_rows(40);
+    let input = raw_uri(seed_rows(&dir, "input.jsonl", &seeded));
+    let limit = Duration::from_secs(15);
+    assert!(
+        !copy_succeeds_within(&input, &format!("{sink}&sslmode=disable"), limit),
+        "a client without TLS wrote to a server that takes TLS only"
+    );
+    assert!(
+        !copy_succeeds_within(&input, &format!(r#"{sink}&tls={{"required":true}}"#), limit),
+        "a client wrote to a server whose certificate it cannot verify"
+    );
+
+    copy_ok(
+        "postgres tls: insert",
+        &input,
+        &format!("{sink}&{trusting}"),
+        &[],
+    );
+    let out = dir.path().join("out.jsonl");
+    let source = format!("postgres://{POSTGRES_TLS}?table={table}&cursor_column=id&{trusting}");
+    copy_ok("postgres tls: read back", &source, &raw_uri(&out), &[]);
+    assert_eq!(
+        read_rows(&out).len(),
+        seeded.len(),
+        "postgres tls: only the trusted client's rows are there"
+    );
+}
+
+/// The replication stream is a second connection with its own TLS setup: the server
+/// here refuses a plain one, so the changes can only arrive when the stream uses TLS.
+#[cfg(all(
+    unix,
+    any(feature = "full", all(feature = "sqlx", feature = "postgres-cdc"))
+))]
+#[test]
+#[ignore = "requires docker"]
+fn postgres_cdc_tls_streams_only_to_clients_that_trust_the_server() {
+    backend!("postgres");
+    let dir = TestDir::new();
+    let server = postgres_tls(&dir, "mqb-cli-postgres-cdc-tls");
+
+    let trusting = format!(
+        r#"tls={{"required":true,"ca_file":"{}"}}"#,
+        server.ca_file.display()
+    );
+    let table = unique("cli_cdc_tls");
+    let sink = format!("postgres://{POSTGRES_TLS}?table={table}&auto_create_table=true&{trusting}");
+    let seed = |name: &str, rows: &[String]| {
+        copy_ok(
+            &format!("postgres cdc tls: {name}"),
+            &raw_uri(seed_rows(&dir, name, rows)),
+            &sink,
+            &[],
+        );
+    };
+    // The table has to exist before the publication and the slot do.
+    seed("before.jsonl", &numbered_rows(5));
+
+    let stem = unique("cli_cdc");
+    let cdc = format!(
+        "postgres-cdc://{POSTGRES_TLS}?publication={stem}_pub&slot_name={stem}_slot\
+         &create_publication=true&consume=capture_new"
+    );
+    let limit = Duration::from_secs(15);
+    let ignored = raw_uri(dir.path().join("ignored.jsonl"));
+    assert!(
+        !copy_succeeds_within(&cdc, &ignored, limit),
+        "a client without TLS streamed from a server that takes TLS only"
+    );
+    assert!(
+        !copy_succeeds_within(
+            &format!(r#"{cdc}&tls={{"required":true}}"#),
+            &ignored,
+            limit
+        ),
+        "a client streamed from a server whose certificate it cannot verify"
+    );
+
+    let trusted = format!("{cdc}&{trusting}");
+    // Creates the publication and the slot; nothing has changed yet.
+    copy_ok("postgres cdc tls: create the slot", &trusted, &ignored, &[]);
+    let changed: Vec<String> = (5..45).map(row).collect();
+    seed("after.jsonl", &changed);
+
+    let out = dir.path().join("changes.jsonl");
+    copy_ok("postgres cdc tls: stream", &trusted, &raw_uri(&out), &[]);
+    assert_eq!(
+        read_rows(&out).len(),
+        changed.len(),
+        "postgres cdc tls: the changes made after the slot existed"
+    );
+}

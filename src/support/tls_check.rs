@@ -70,6 +70,14 @@ pub(crate) fn warn_unverified(endpoint: &str, accept_invalid_certs: bool) {
     }
 }
 
+/// Warns that a listener has a certificate but serves without TLS, as `tls.required` is off.
+#[allow(dead_code)]
+pub(crate) fn warn_listener_cert_unused(endpoint: &str, tls: &crate::models::TlsConfig) {
+    if !tls.required && tls.cert_file.is_some() {
+        warn!("{endpoint} has tls.cert_file but tls.required is off: it listens without TLS.");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

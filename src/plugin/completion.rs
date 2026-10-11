@@ -23,27 +23,52 @@ pub(super) trait Slots: Send + 'static {
     fn abandon(self);
 }
 
-struct Pending<S> {
+struct Pending<S: Slots> {
     host: Option<tokio::runtime::Handle>,
-    done: oneshot::Sender<(MqbStatus, S)>,
+    done: oneshot::Sender<(MqbStatus, Completed<S>)>,
     slots: S,
 }
 
-unsafe extern "C" fn complete<S: Slots>(ctx: *mut c_void, status: MqbStatus) {
-    let pending = unsafe { Box::from_raw(ctx.cast::<Pending<S>>()) };
-    let Pending { host, done, slots } = *pending;
-    if let Err((_, slots)) = done.send((status, slots)) {
-        match host {
+/// Slots on their way to the waiter. Abandoned when nobody takes them: the waiter may be
+/// gone already, or be cancelled between the completion and its next poll.
+struct Completed<S: Slots> {
+    host: Option<tokio::runtime::Handle>,
+    slots: Option<S>,
+}
+
+impl<S: Slots> Completed<S> {
+    fn take(mut self) -> S {
+        self.slots.take().expect("slots are taken once")
+    }
+}
+
+impl<S: Slots> Drop for Completed<S> {
+    fn drop(&mut self) {
+        let Some(slots) = self.slots.take() else {
+            return;
+        };
+        match self.host.take() {
             Some(host) => drop(host.spawn_blocking(move || slots.abandon())),
             None => slots.abandon(),
         }
     }
 }
 
+unsafe extern "C" fn complete<S: Slots>(ctx: *mut c_void, status: MqbStatus) {
+    let pending = unsafe { Box::from_raw(ctx.cast::<Pending<S>>()) };
+    let Pending { host, done, slots } = *pending;
+    let completed = Completed {
+        host,
+        slots: Some(slots),
+    };
+    // A failed send hands the value back and drops it here, which abandons it.
+    let _ = done.send((status, completed));
+}
+
 /// A started call; [`Started::finish`] awaits its completion.
-pub(super) struct Started<S> {
+pub(super) struct Started<S: Slots> {
     failed: Option<(MqbStatus, S)>,
-    finished: oneshot::Receiver<(MqbStatus, S)>,
+    finished: oneshot::Receiver<(MqbStatus, Completed<S>)>,
 }
 
 impl<S: Slots> Started<S> {
@@ -64,6 +89,7 @@ impl<S: Slots> Started<S> {
             None => self
                 .finished
                 .await
+                .map(|(status, completed)| (status, completed.take()))
                 .map_err(|_| anyhow!("endpoint plugin dropped a call without completing it")),
         }
     }
@@ -158,6 +184,24 @@ mod tests {
         let (status, _) = started.finish().await.unwrap();
         assert_eq!(status, MQB_ERR_RETRYABLE);
         assert!(!abandoned.load(Ordering::SeqCst));
+    }
+
+    /// The waiter is still there when the plugin completes, and is cancelled before it reads.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_result_completed_but_never_read_is_abandoned() {
+        let (slots, abandoned) = probe();
+        let started = call(slots, |_, completion| unsafe {
+            (completion.callback)(completion.ctx, MQB_OK);
+            MQB_OK
+        });
+        drop(started);
+        for _ in 0..200 {
+            if abandoned.load(Ordering::SeqCst) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        panic!("the unread result was never released");
     }
 
     #[tokio::test(flavor = "multi_thread")]

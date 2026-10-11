@@ -507,13 +507,67 @@ impl AutoColumns {
         messages: Vec<CanonicalMessage>,
     ) -> Result<SentBatch, PublisherError> {
         let mut rows = Vec::with_capacity(messages.len());
+        let mut kept = Vec::with_capacity(messages.len());
         let mut failed = Vec::new();
         for message in messages {
             match self.row(&message) {
-                Ok(row) => rows.push(row),
+                Ok(row) => {
+                    rows.push(row);
+                    kept.push(message);
+                }
                 Err(e) => failed.push((message, e)),
             }
         }
+        match self.write(pool, rows).await {
+            Err(PublisherError::NonRetryable(e)) if kept.len() > 1 => {
+                warn!(table = %self.table, error = %e, "SQLx batch rejected; writing it one record at a time");
+                failed.extend(self.write_isolating(pool, kept).await?);
+            }
+            other => other?,
+        }
+        Ok(SentBatch::from_failures(failed))
+    }
+
+    /// Redoes a batch the database rejected, a savepoint per record, and returns the
+    /// rejected ones; any other failure rolls every write of the redo back.
+    async fn write_isolating(
+        &self,
+        pool: &AnyPool,
+        messages: Vec<CanonicalMessage>,
+    ) -> Result<Vec<(CanonicalMessage, PublisherError)>, PublisherError> {
+        use sqlx::Acquire;
+        let retryable = |e: sqlx::Error| PublisherError::Retryable(anyhow!(e));
+        let mut tx = pool.begin().await.map_err(retryable)?;
+        let mut failed = Vec::new();
+        for message in messages {
+            let row = match self.row(&message) {
+                Ok(row) => row,
+                Err(e) => {
+                    failed.push((message, e));
+                    continue;
+                }
+            };
+            let sql = self.insert_sql(&row.columns, 1);
+            let mut query = sqlx::query(audited_sql(&sql)).persistent(false);
+            for value in row.values {
+                query = bind_value(query, value);
+            }
+            let mut step = tx.begin().await.map_err(retryable)?;
+            match query.execute(&mut *step).await.map_err(classify_sql_error) {
+                Ok(_) => step.commit().await.map_err(retryable)?,
+                Err(e @ PublisherError::NonRetryable(_)) => {
+                    step.rollback().await.map_err(retryable)?;
+                    failed.push((message, e));
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        tx.commit().await.map_err(retryable)?;
+        Ok(failed)
+    }
+
+    /// Writes the rows with as few statements as their shapes allow; all of them or none.
+    async fn write(&self, pool: &AnyPool, rows: Vec<AutoRow>) -> Result<(), PublisherError> {
         let statements = self.statements(rows);
         let retryable = |e: sqlx::Error| PublisherError::Retryable(anyhow!(e));
 
@@ -553,7 +607,7 @@ impl AutoColumns {
                     tx.commit().await.map_err(retryable)?;
                 }
             }
-            return Ok(SentBatch::from_failures(failed));
+            return Ok(());
         }
 
         // One statement is atomic by itself; several need a transaction.
@@ -579,7 +633,7 @@ impl AutoColumns {
         if let Some(tx) = tx {
             tx.commit().await.map_err(retryable)?;
         }
-        Ok(SentBatch::from_failures(failed))
+        Ok(())
     }
 }
 

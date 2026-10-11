@@ -4,7 +4,7 @@
 //! wire message type; the framing/format rules live here and are exercised by
 //! the unit tests in `zeromq.rs`.
 
-use crate::models::ZeroMqFormat;
+use crate::models::{ZeroMqConfig, ZeroMqFormat, ZeroMqSocketType};
 use crate::traits::PublisherError;
 use crate::CanonicalMessage;
 use anyhow::anyhow;
@@ -28,6 +28,25 @@ pub(crate) fn encode_frames(
     } else {
         Ok(vec![message.payload.clone()])
     }
+}
+
+/// The topic frame a PUB socket sends first: SUB peers filter on it and drop it on receive.
+/// `raw_framed` always has one, or a SUB peer would take the metadata frame for the topic.
+pub(crate) fn pub_topic(config: &ZeroMqConfig) -> Option<Bytes> {
+    if config.socket_type != Some(ZeroMqSocketType::Pub) {
+        return None;
+    }
+    match &config.topic {
+        Some(topic) => Some(Bytes::from(topic.clone())),
+        None => matches!(config.format, ZeroMqFormat::RawFramed).then(Bytes::new),
+    }
+}
+
+pub(crate) fn with_topic(topic: &Option<Bytes>, mut frames: Vec<Bytes>) -> Vec<Bytes> {
+    if let Some(topic) = topic {
+        frames.insert(0, topic.clone());
+    }
+    frames
 }
 
 /// Decode the frames of one received ZMQ message into canonical messages,

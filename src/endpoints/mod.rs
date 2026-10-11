@@ -865,7 +865,13 @@ async fn postgres_backfill_sequence(
 
     let cursor_id = backfill_cursor_id(cfg);
     let mut endpoints = Vec::with_capacity(tables.len() + 1);
+    let mut seen_cursor_ids = std::collections::HashSet::new();
     for table in &tables {
+        let table_cursor_id = cursor_id
+            .as_ref()
+            .map(|id| backfill_table_cursor_id(id, table, &mut seen_cursor_ids))
+            .transpose()
+            .map_err(|e| anyhow!("[route:{route_name}] {e}"))?;
         if source_metadata && !table.key_is_integer {
             return Err(anyhow!(
                 "[route:{route_name}] cannot back fill {} with source positions — its primary \
@@ -881,9 +887,7 @@ async fn postgres_backfill_sequence(
                 table: table.qualified(),
                 cursor_column: Some(table.key.clone()),
                 // Per table, so each backfill phase resumes on its own.
-                cursor_id: cursor_id
-                    .as_ref()
-                    .map(|id| format!("{id}_{}_{}", table.schema, table.table)),
+                cursor_id: table_cursor_id,
                 checkpoint_store: cfg.checkpoint_store.clone(),
                 source_metadata,
                 tls: cfg.tls.clone(),
@@ -910,6 +914,26 @@ async fn postgres_backfill_sequence(
         cursor_id,
         checkpoint_store,
     })
+}
+
+/// The cursor id of one table's backfill. `a_b.c` and `a.b_c` spell the same id, and two
+/// tables under one cursor would skip each other's rows, so the second one is refused.
+#[cfg(all(feature = "postgres-cdc", feature = "sqlx"))]
+fn backfill_table_cursor_id(
+    id: &str,
+    table: &postgres::replication::SnapshotTable,
+    seen: &mut std::collections::HashSet<String>,
+) -> Result<String> {
+    let cursor_id = format!("{id}_{}_{}", table.schema, table.table);
+    if !seen.insert(cursor_id.clone()) {
+        return Err(anyhow!(
+            "cannot back fill {}: its cursor id `{cursor_id}` is also that of another table \
+             in the publication. Spell the backfill out as a `sequence` input with a \
+             `cursor_id` per table.",
+            table.qualified()
+        ));
+    }
+    Ok(cursor_id)
 }
 
 /// The backfill's cursor id: with a `checkpoint_store` but no `cursor_id`, the slot name,
@@ -976,6 +1000,7 @@ fn sqlx_cfg_to_cdc(
         status_interval_ms: 10_000,
         tls: cfg.tls.clone(),
         id_hash: Default::default(),
+        split_key_change: false,
     })
 }
 
@@ -1606,7 +1631,7 @@ async fn run_http_inline_response_fast_path(
     );
     tracing::debug!(
         route = name,
-        "HTTP inline response fast path differences: no input middlewares, no fire-and-forget, only buffer/metrics output middlewares allowed, and unchanged request metadata is not echoed back as response headers"
+        "HTTP inline response fast path differences: no input middlewares, no fire-and-forget, only buffer/delay/limiter/metrics output middlewares allowed, and unchanged request metadata is not echoed back as response headers"
     );
     if let Some(tx) = ready_tx {
         let _ = tx.send(()).await;
@@ -1740,7 +1765,7 @@ async fn create_base_consumer(
             }
             if config.client_id.is_none() && !config.clean_session {
                 // For persistent sessions, default client_id to route_name if not provided
-                config.client_id = Some(format!("{}-{}", crate::APP_NAME, route_name));
+                config.client_id = Some(mqtt::default_client_id(route_name, false));
             }
             Ok(boxed(mqtt::MqttConsumer::new(&config).await?))
         }
@@ -2391,6 +2416,9 @@ fn check_publisher_recursive(
             if cfg.max_object_bytes.is_some() {
                 warnings.push("Endpoint 'object_store' is used as a publisher, but 'max_object_bytes' is a consumer-only option and will be ignored.".to_string());
             }
+            if cfg.on_decode_error != crate::models::DecodeErrorPolicy::default() {
+                warnings.push("Endpoint 'object_store' is used as a publisher, but 'on_decode_error' is a consumer-only option and will be ignored.".to_string());
+            }
             Ok(warnings)
         }
         #[cfg(feature = "websocket")]
@@ -2691,7 +2719,7 @@ async fn create_base_publisher(
                 config.topic = Some(route_name.to_string());
             }
             if config.client_id.is_none() {
-                config.client_id = Some(format!("{}-{}", crate::APP_NAME, route_name));
+                config.client_id = Some(mqtt::default_client_id(route_name, true));
             }
             Ok(Box::new(mqtt::MqttPublisher::new(&config).await?) as Box<dyn MessagePublisher>)
         }
@@ -3064,6 +3092,25 @@ mod tests {
 
         let by_position = Endpoint::new(EndpointType::Fanout(vec![bucket(NameBy::SourcePosition)]));
         assert!(!output_has_write_time_named_object_store("test", &by_position, false).unwrap());
+    }
+
+    #[cfg(all(feature = "postgres-cdc", feature = "sqlx"))]
+    #[test]
+    fn backfill_tables_that_spell_the_same_cursor_id_are_refused() {
+        let table = |schema: &str, table: &str| postgres::replication::SnapshotTable {
+            schema: schema.to_string(),
+            table: table.to_string(),
+            key: "id".to_string(),
+            key_is_integer: true,
+        };
+        let mut seen = std::collections::HashSet::new();
+        assert_eq!(
+            backfill_table_cursor_id("slot", &table("a_b", "c"), &mut seen).unwrap(),
+            "slot_a_b_c"
+        );
+        assert!(backfill_table_cursor_id("slot", &table("a", "d"), &mut seen).is_ok());
+        let err = backfill_table_cursor_id("slot", &table("a", "b_c"), &mut seen).unwrap_err();
+        assert!(err.to_string().contains("a.b_c"), "{err}");
     }
 
     /// A polling cursor is a replay position, so an idempotent sink accepts it — where a

@@ -107,9 +107,70 @@ async fn test_amqp_publisher_handles_nack() {
     .await;
 }
 
+/// The broker confirms a publish it cannot route; without `mandatory` the message was lost.
 #[tokio::test]
 #[ignore = "requires docker compose"]
-async fn test_amqp_reply_publish_failure_does_not_ack_request() {
+async fn test_amqp_publish_to_a_missing_queue_is_an_error() {
+    if !should_run("amqp") {
+        return;
+    }
+    use mq_bridge::traits::MessagePublisher;
+    setup_logging();
+    run_test_with_docker("tests/integration/docker-compose/amqp.yml", || async {
+        let config = mq_bridge::models::AmqpConfig {
+            url: "amqp://guest:guest@localhost:5672/%2f".to_string(),
+            queue: Some(format!("missing_{}", fast_uuid_v7::gen_id_str())),
+            no_declare_queue: true,
+            ..Default::default()
+        };
+        let publisher = AmqpPublisher::new(&config).await.unwrap();
+
+        let single = publisher.send("lost".into()).await;
+        assert!(
+            single.is_err(),
+            "a publish nothing received was reported sent"
+        );
+
+        let batch = publisher
+            .send_batch(vec!["lost".into(), "lost too".into()])
+            .await
+            .unwrap();
+        match batch {
+            mq_bridge::traits::SentBatch::Partial { failed, .. } => assert_eq!(failed.len(), 2),
+            mq_bridge::traits::SentBatch::Ack => panic!("a batch nothing received was acked"),
+        }
+    })
+    .await;
+}
+
+/// The subscriber declared the exchange durable whatever `no_persistence` said, and the
+/// broker refuses a second declaration that differs.
+#[tokio::test]
+#[ignore = "requires docker compose"]
+async fn test_amqp_subscribe_mode_without_persistence_starts() {
+    if !should_run("amqp") {
+        return;
+    }
+    setup_logging();
+    run_test_with_docker("tests/integration/docker-compose/amqp.yml", || async {
+        let config = mq_bridge::models::AmqpConfig {
+            url: "amqp://guest:guest@localhost:5672/%2f".to_string(),
+            queue: Some(format!("transient_{}", fast_uuid_v7::gen_id_str())),
+            subscribe_mode: true,
+            no_persistence: true,
+            ..Default::default()
+        };
+        let _publisher = AmqpPublisher::new(&config).await.unwrap();
+        AmqpConsumer::new(&config)
+            .await
+            .expect("the subscriber and the publisher declare the same exchange");
+    })
+    .await;
+}
+
+#[tokio::test]
+#[ignore = "requires docker compose"]
+async fn test_amqp_unroutable_reply_acks_the_request() {
     if !should_run("amqp") {
         return;
     }
@@ -145,29 +206,20 @@ async fn test_amqp_reply_publish_failure_does_not_ack_request() {
                     .expect("Timed out waiting for AMQP request")
                     .unwrap();
 
-            let result = (received.commit)(MessageDisposition::Reply(
+            (received.commit)(MessageDisposition::Reply(
                 mq_bridge::CanonicalMessage::from("response that cannot be routed"),
             ))
-            .await;
-
-            assert!(
-                result.is_err(),
-                "Expected AMQP reply commit to fail when reply_to queue is missing"
-            );
+            .await
+            .expect("a reply nobody can receive does not fail the commit");
         }
 
         let mut retry_consumer = AmqpConsumer::new(&config).await.unwrap();
         let redelivered =
-            tokio::time::timeout(std::time::Duration::from_secs(5), retry_consumer.receive())
-                .await
-                .expect("Timed out waiting for AMQP request redelivery")
-                .unwrap();
-
-        assert_eq!(
-            redelivered.message.get_payload_str(),
-            "request needing reply"
+            tokio::time::timeout(std::time::Duration::from_secs(3), retry_consumer.receive()).await;
+        assert!(
+            redelivered.is_err(),
+            "the request was acked, so it must not come back"
         );
-        (redelivered.commit)(MessageDisposition::Ack).await.unwrap();
     })
     .await;
 }

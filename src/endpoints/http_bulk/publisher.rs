@@ -38,6 +38,8 @@ const NDJSON: &str = "application/x-ndjson";
 /// A failed request, kept as text so every message it covered gets its own error.
 pub(super) struct Failure {
     pub(super) retryable: bool,
+    /// The HTTP status, when the target answered with one.
+    pub(super) status: Option<u16>,
     pub(super) text: String,
 }
 
@@ -45,6 +47,7 @@ impl Failure {
     pub(super) fn permanent(text: String) -> Self {
         Self {
             retryable: false,
+            status: None,
             text,
         }
     }
@@ -52,8 +55,14 @@ impl Failure {
     fn retryable(text: String) -> Self {
         Self {
             retryable: true,
+            status: None,
             text,
         }
+    }
+
+    /// The target refused the content of the request, which a smaller request may narrow down.
+    fn refused_content(&self) -> bool {
+        matches!(self.status, Some(400 | 409 | 413 | 422))
     }
 
     pub(super) fn error(&self) -> PublisherError {
@@ -165,6 +174,7 @@ pub struct HttpBulkPublisher {
     operation: Option<CompiledTemplate>,
     delete_values: Vec<String>,
     max_request_bytes: usize,
+    split_on_reject: bool,
 }
 
 impl HttpBulkPublisher {
@@ -213,6 +223,12 @@ impl HttpBulkPublisher {
             }
             None => None,
         };
+        let reports = &upsert.result;
+        if upsert.split_on_reject
+            && (reports.lines.is_some() || reports.items.is_some() || reports.job.is_some())
+        {
+            bail!("http_bulk upsert.split_on_reject applies only without upsert.result");
+        }
         let delete = match &config.delete {
             Some(delete) => {
                 if delete.max_ids == 0 {
@@ -278,6 +294,7 @@ impl HttpBulkPublisher {
                 .context("Invalid http_bulk operation template")?,
             delete_values: config.delete_values.clone(),
             max_request_bytes: config.max_request_bytes,
+            split_on_reject: upsert.split_on_reject,
         })
     }
 
@@ -389,7 +406,47 @@ impl HttpBulkPublisher {
             let body = Some((self.content_type.clone(), self.close_body(chunk.body)));
             let sent = self.send(upsert, &url, body, chunk.indices.len()).await;
             trace!(count = chunk.indices.len(), path = %upsert.path, "Upserted documents");
-            record(sent, &chunk.indices, outcomes)?;
+            match sent {
+                Err(failure) if self.splits(&failure, &chunk.indices) => {
+                    self.upsert_halves(upsert, &url, messages, &chunk.indices, outcomes)
+                        .await?
+                }
+                sent => record(sent, &chunk.indices, outcomes)?,
+            }
+        }
+        Ok(())
+    }
+
+    fn splits(&self, failure: &Failure, indices: &[usize]) -> bool {
+        self.split_on_reject && indices.len() > 1 && failure.refused_content()
+    }
+
+    /// Sends a refused request again in halves until the refused documents stand alone.
+    async fn upsert_halves(
+        &self,
+        upsert: &Request,
+        url: &str,
+        messages: &[CanonicalMessage],
+        indices: &[usize],
+        outcomes: &mut [Option<PublisherError>],
+    ) -> Result<(), (usize, Failure)> {
+        let (first, second) = indices.split_at(indices.len() / 2);
+        let mut pending = vec![second, first];
+        while let Some(part) = pending.pop() {
+            let mut body = Vec::new();
+            for index in part {
+                // The same payloads were framed for the refused request.
+                let _ = self.append_document(&mut body, &messages[*index]);
+            }
+            let body = Some((self.content_type.clone(), self.close_body(body)));
+            match self.send(upsert, url, body, part.len()).await {
+                Err(failure) if self.splits(&failure, part) => {
+                    let (first, second) = part.split_at(part.len() / 2);
+                    pending.push(second);
+                    pending.push(first);
+                }
+                sent => record(sent, part, outcomes)?,
+            }
         }
         Ok(())
     }
@@ -484,6 +541,7 @@ impl HttpBulkPublisher {
         }
         let response = self.connection.send(builder).await.map_err(|e| Failure {
             retryable: e.retryable,
+            status: None,
             text: format!("{label} failed: {e}"),
         })?;
         let status = response.status();
@@ -494,6 +552,7 @@ impl HttpBulkPublisher {
         if !status.is_success() {
             return Err(Failure {
                 retryable: http_status::is_retryable(status.as_u16()),
+                status: Some(status.as_u16()),
                 text: format!("{label} answered {status}: {}", quoted(&text)),
             });
         }
@@ -915,6 +974,82 @@ mod tests {
         );
         assert_eq!(requests[0].header("x-key"), Some("secret"));
         assert_eq!(requests[0].body, b"{\"id\":1}\n{\"id\":2}\n");
+    }
+
+    fn refuses_bad_rows(request: &StubRequest) -> (u16, String) {
+        if String::from_utf8_lossy(&request.body).contains("bad") {
+            (400, r#"{"message":"invalid input"}"#.to_string())
+        } else {
+            (201, String::new())
+        }
+    }
+
+    const ROWS: [&str; 5] = [
+        r#"{"id":1}"#,
+        r#"{"id":2}"#,
+        r#"{"id":"bad"}"#,
+        r#"{"id":4}"#,
+        r#"{"id":5}"#,
+    ];
+
+    #[tokio::test]
+    async fn a_refused_request_fails_all_its_documents_by_default() {
+        let server = server(refuses_bad_rows).await;
+        let publisher = publisher(
+            &server,
+            json!({"upsert": {"path": "/rows", "format": "json_array"}}),
+        );
+        let failed = failures(publisher.send_batch(documents(&ROWS)).await.unwrap());
+        assert_eq!(failed.len(), 5);
+        assert_eq!(server.requests().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn split_on_reject_fails_only_the_refused_document() {
+        let server = server(refuses_bad_rows).await;
+        let publisher = publisher(
+            &server,
+            json!({"upsert": {"path": "/rows", "format": "json_array", "split_on_reject": true}}),
+        );
+        let failed = failures(publisher.send_batch(documents(&ROWS)).await.unwrap());
+        assert_eq!(failed.len(), 1, "{failed:?}");
+        assert_eq!((failed[0].0.as_str(), failed[0].1), (ROWS[2], false));
+        assert!(failed[0].2.contains("invalid input"), "{}", failed[0].2);
+
+        let accepted: Vec<String> = server
+            .requests()
+            .into_iter()
+            .map(|r| String::from_utf8(r.body).unwrap())
+            .filter(|body| !body.contains("bad"))
+            .collect();
+        assert_eq!(
+            accepted,
+            [r#"[{"id":1},{"id":2}]"#, r#"[{"id":4},{"id":5}]"#]
+        );
+    }
+
+    #[tokio::test]
+    async fn split_on_reject_leaves_other_statuses_alone() {
+        let server = server(|_| (403, "no".to_string())).await;
+        let publisher = publisher(
+            &server,
+            json!({"upsert": {"path": "/rows", "split_on_reject": true}}),
+        );
+        let failed = failures(publisher.send_batch(documents(&ROWS)).await.unwrap());
+        assert_eq!(failed.len(), 5);
+        assert_eq!(server.requests().len(), 1);
+    }
+
+    #[test]
+    fn split_on_reject_is_refused_with_a_result() {
+        let config: HttpBulkConfig = serde_json::from_value(json!({
+            "url": "http://127.0.0.1:9",
+            "upsert": {"path": "/rows", "split_on_reject": true,
+                "result": {"lines": {"success": "/ok"}}},
+        }))
+        .expect("config");
+        let error = HttpBulkPublisher::new(&config).err().expect("an error");
+        assert!(error.to_string().contains("split_on_reject"), "{error}");
     }
 
     #[tokio::test]

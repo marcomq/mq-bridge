@@ -4669,6 +4669,7 @@ dependencies = [
  "futures",
  "h2",
  "hashbrown 0.16.1",
+ "http",
  "http-body",
  "http-body-util",
  "hyper",

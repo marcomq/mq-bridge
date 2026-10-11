@@ -296,6 +296,7 @@ class HttpBulkConfig(TypedDict, total=False):
 
 class HttpBulkCursor(TypedDict, total=False):
     """Where an `http_bulk` input takes its next read position from. Set at most one of"""
+    end_when_missing: bool
     item: Optional[str]
     response: Optional[str]
     start: Any
@@ -388,6 +389,7 @@ class HttpBulkUpsert(TypedDict, total=False):
     method: Optional[str]
     path: Required[str]
     result: HttpBulkResult
+    split_on_reject: bool
 
 
 class HttpConfig(TypedDict, total=False):
@@ -450,6 +452,7 @@ class IbmTlsConfig(TypedDict, total=False):
 class KafkaConfig(TypedDict, total=False):
     """General Kafka connection configuration."""
     consumer_options: Optional[List[List[Any]]]
+    create_topic: Optional[bool]
     delayed_ack: bool
     group_id: Optional[str]
     partition_key: Optional[str]
@@ -622,6 +625,7 @@ class ObjectStoreConfig(TypedDict, total=False):
     idempotency: Optional[bool]
     max_object_bytes: Optional[int]
     name_by: NameBy
+    on_decode_error: DecodeErrorPolicy
     polling_interval_ms: Optional[int]
     url: Required[str]
 
@@ -651,6 +655,7 @@ class PostgresCdcConfig(TypedDict, total=False):
     publication_tables: List[str]
     slot_name: str
     source_metadata: bool
+    split_key_change: bool
     status_interval_ms: int
     temporary_slot: bool
     tls: TlsConfig
@@ -841,7 +846,9 @@ class WeakJoinMiddleware(TypedDict, total=False):
 class WebSocketConfig(TypedDict, total=False):
     """WebSocket connection configuration."""
     backlog: Optional[int]
+    basic_auth: Optional[List[Any]]
     execution_mode: WebSocketExecutionMode
+    max_connections: Optional[int]
     message_id_header: Optional[str]
     path: Optional[str]
     routed_queue_capacity: Optional[int]
@@ -868,6 +875,7 @@ Compression = Literal["none", "gzip", "lz4", "zstd"]
 CsvMismatch = Literal["warn", "fail"]
 CsvNested = Literal["flatten", "json"]
 DatePartitionStyle = Literal["nested", "hive"]
+DecodeErrorPolicy = Literal["skip", "fail"]
 DeliveryGuarantee = Literal["at_most_once", "at_least_once", "effectively_once"]
 FaultMode = Literal["panic", "disconnect", "timeout", "json_format_error", "nack"]
 FileFormat = Literal["normal", "json", "text", "raw", "csv", "parquet"]

@@ -1,8 +1,9 @@
 name: Benchmark
 
 on:
+  # Not on `dev`: benchmarks are no gate, and the nightly run records the trend.
   push:
-    branches: [main, dev]
+    branches: [main]
   schedule:
     # Nightly full benchmark run (04:00 UTC)
     - cron: '0 4 * * *'

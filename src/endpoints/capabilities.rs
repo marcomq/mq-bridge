@@ -147,9 +147,10 @@ const CAPABILITIES: &[EndpointCapabilities] = &[
         ..row("file", Local)
     },
     EndpointCapabilities {
+        acknowledges: Depends,
         ordered_commit: No,
         replies: Depends,
-        input_note: "A server or a streaming client. A server answers the caller, who resends on failure.",
+        input_note: "A server answers the caller, who resends on failure. A Bridge client acknowledges; a dynamic client (descriptor set or reflection) does not.",
         output_note: "The dynamic client returns the RPC's reply.",
         security_note: "A server checks client certificates with `tls.ca_file` and has no other authentication; reflection is always on. A client sends `api_key` or `bearer_token`.",
         ..row("grpc", TlsBlock)
@@ -257,7 +258,7 @@ const CAPABILITIES: &[EndpointCapabilities] = &[
         replies: With("lookup_query"),
         input_note: "A queue table commits in any order; a `cursor_column` or `publication` source in order.",
         output_note: "The reply is the first row; `sqlx.found` says whether there was one.",
-        security_note: "TLS can also be set in the URL (`sslmode=`, `ssl-mode=`). MySQL with `tls.ca_file` checks the chain but not the host name, and takes a client certificate from the URL only.",
+        security_note: "TLS can also be set in the URL (`sslmode=`, `ssl-mode=`). On MySQL an `ssl-mode` in the URL wins over the `tls` block.",
         ..row("sqlx", TlsBlock)
     },
     EndpointCapabilities {
@@ -274,9 +275,10 @@ const CAPABILITIES: &[EndpointCapabilities] = &[
         ..output_only("switch", Depends)
     },
     EndpointCapabilities {
+        acknowledges: No,
         ordered_commit: No,
-        input_note: "A listener. A reply goes back on the same connection; nothing is redelivered.",
-        security_note: "A listener checks client certificates with `tls.ca_file` and has no other authentication and no connection limit.",
+        input_note: "A listener. A reply goes back on the same connection; a rejected frame is not signalled and nothing is redelivered.",
+        security_note: "A listener has `basic_auth`, checks client certificates with `tls.ca_file` and limits connections with `max_connections`. A client sends `basic_auth`.",
         ..row("websocket", TlsBlock)
     },
     EndpointCapabilities {
@@ -463,18 +465,34 @@ mod tests {
         assert!(at_most_once(EndpointType::Nats(nats)));
         assert!(at_most_once(EndpointType::Mqtt(mqtt)));
         assert!(at_most_once(EndpointType::Http(http)));
+        assert!(at_most_once(EndpointType::WebSocket(Default::default())));
+
+        // Only the Bridge protocol has an Acknowledge call; a server answers its caller.
+        let grpc = |reflection, server_mode| {
+            EndpointType::Grpc(GrpcConfig {
+                reflection,
+                server_mode,
+                ..Default::default()
+            })
+        };
+        assert!(at_most_once(grpc(true, false)));
+        assert!(!at_most_once(grpc(false, false)));
+        assert!(!at_most_once(grpc(true, true)));
 
         let lossy: Vec<_> = CAPABILITIES
             .iter()
-            .filter(|row| matches!(row.acknowledges, No | Unless(_)))
+            .filter(|row| matches!(row.acknowledges, No | Unless(_) | Depends))
+            .filter(|row| !matches!(row.name, "custom" | "ref" | "sequence"))
             .map(|row| (row.name, row.acknowledges))
             .collect();
         assert_eq!(
             lossy,
             [
+                ("grpc", Depends),
                 ("http", Unless("fire_and_forget: true")),
                 ("mqtt", Unless("qos: 0")),
                 ("nats", Unless("no_jetstream: true")),
+                ("websocket", No),
                 ("zeromq", No),
             ]
         );

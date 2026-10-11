@@ -1977,6 +1977,14 @@
           "minimum": 1,
           "default": 6
         },
+        "create_topic": {
+          "description": "(Publisher only) Create the topic at start if it is missing (default: true).",
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": true
+        },
         "partition_key": {
           "description": "(Publisher only) Name of a metadata field whose value is used as the Kafka record\nkey (drives partitioning/ordering). Unset, or absent on a given message, falls back\nto the message id. Default unset.",
           "type": [
@@ -2706,6 +2714,11 @@
           "format": "uint64",
           "minimum": 0
         },
+        "on_decode_error": {
+          "description": "(Source only) An object that cannot be decoded: `skip` it (default) or `fail` the route.",
+          "$ref": "#/$defs/DecodeErrorPolicy",
+          "default": "skip"
+        },
         "date_partition": {
           "description": "(Sink only) Prepend a `YYYY/MM/DD/` path (write time, UTC) to each object key. Applies to\n`write_time` naming only; defaults to on. Purely for readability / lifecycle rules.",
           "type": [
@@ -2747,6 +2760,21 @@
       "additionalProperties": false,
       "required": [
         "url"
+      ]
+    },
+    "DecodeErrorPolicy": {
+      "description": "What an `object_store` source does with an object it cannot decode after five tries.",
+      "oneOf": [
+        {
+          "description": "Move past it with a warning. The first object a source reads stops the route instead:\na failure there means the settings are wrong, not the object.",
+          "type": "string",
+          "const": "skip"
+        },
+        {
+          "description": "Stop the route.",
+          "type": "string",
+          "const": "fail"
+        }
       ]
     },
     "DatePartitionStyle": {
@@ -3627,6 +3655,33 @@
             "cert_password": null,
             "accept_invalid_certs": false
           }
+        },
+        "basic_auth": {
+          "description": "HTTP Basic credentials (username, password): a consumer requires them, a publisher sends them.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "format": "password",
+          "prefixItems": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "max_connections": {
+          "description": "(Consumer only) Most connections open at once; one more gets 503. Unset = no limit.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
         }
       },
       "additionalProperties": false,
@@ -3822,7 +3877,7 @@
           "default": null
         },
         "topic": {
-          "description": "(Consumer only) The ZeroMQ topic (for SUB sockets).",
+          "description": "Topic: the prefix a SUB socket filters on, or the topic frame a PUB socket sends first.",
           "type": [
             "string",
             "null"
@@ -5010,6 +5065,10 @@
           "description": "How the target reports the outcome. Unset = the HTTP status alone decides.",
           "$ref": "#/$defs/HttpBulkResult",
           "default": {}
+        },
+        "split_on_reject": {
+          "description": "Without `result`: send a request refused with 400, 409, 413 or 422 again in halves, so only the bad document fails.",
+          "type": "boolean"
         }
       },
       "additionalProperties": false,
@@ -5339,6 +5398,10 @@
         },
         "start": {
           "description": "Position before the first read. Defaults to `0` for a count, otherwise to `null`."
+        },
+        "end_when_missing": {
+          "description": "With `response`: a response without the field ends the read, instead of stopping the route.",
+          "type": "boolean"
         }
       },
       "additionalProperties": false
@@ -5505,6 +5568,10 @@
           "description": "Hash for change `message_id`s: `fnv1a` (default, keeps existing dedup state) or `sha256`.",
           "$ref": "#/$defs/IdHash",
           "default": "fnv1a"
+        },
+        "split_key_change": {
+          "description": "An update that changes the primary key becomes a `delete` of the old key, then the `update`.",
+          "type": "boolean"
         }
       },
       "additionalProperties": false,

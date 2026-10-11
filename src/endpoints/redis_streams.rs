@@ -24,13 +24,13 @@ use crate::APP_NAME;
 use anyhow::anyhow;
 use async_channel::{bounded, Receiver, Sender};
 use async_trait::async_trait;
-use redis::aio::ConnectionManager;
+use redis::aio::{ConnectionManager, ConnectionManagerConfig};
 use redis::streams::{
     StreamAutoClaimOptions, StreamAutoClaimReply, StreamReadOptions, StreamReadReply,
 };
 use redis::{AsyncCommands, IntoConnectionInfo};
 use std::any::Any;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -45,6 +45,33 @@ const DEFAULT_BLOCK_MS: u64 = 5000;
 const DEFAULT_BUFFER: usize = 128;
 /// Default idle time before a pending entry is reclaimed and redelivered.
 const DEFAULT_REDELIVERY_MS: u64 = 60_000;
+/// How long past `block_ms` the client waits for the reply to a blocking read.
+const READ_GRACE: Duration = Duration::from_secs(5);
+
+/// A blocking read answers after `block_ms`, far past redis-rs' 500 ms default. A read given
+/// up client-side stays parked on the server and takes the next entries for nobody.
+fn read_connection_config(block_ms: usize) -> ConnectionManagerConfig {
+    let timeout = (block_ms > 0).then(|| Duration::from_millis(block_ms as u64) + READ_GRACE);
+    ConnectionManagerConfig::new().set_response_timeout(timeout)
+}
+
+/// Ids of the entries this consumer holds, queued or in flight: the reclaim pass skips them.
+type HeldIds = Arc<std::sync::Mutex<HashSet<String>>>;
+
+/// The ids of one batch; gives them back to the reclaim pass once settled or dropped.
+struct BatchIds {
+    ids: Vec<String>,
+    held: HeldIds,
+}
+
+impl Drop for BatchIds {
+    fn drop(&mut self) {
+        let mut held = self.held.lock().unwrap_or_else(|e| e.into_inner());
+        for id in &self.ids {
+            held.remove(id);
+        }
+    }
+}
 
 fn open_client(config: &RedisStreamsConfig) -> anyhow::Result<redis::Client> {
     // redis 1.3's ConnectionInfo has no public auth setter, so credentials are
@@ -258,6 +285,9 @@ pub struct RedisStreamsConsumer {
     /// `Some` in consumer-group mode (entries are acked); `None` in subscriber mode.
     group: Option<String>,
     buffer: VecDeque<StreamEntry>,
+    /// A read error met while filling a batch, returned by the next read.
+    deferred_error: Option<ConsumerError>,
+    held: HeldIds,
     /// Set by the route when `exit_on_empty`/`--drain` is active. Only then does an
     /// idle read time out into an empty batch; otherwise it blocks indefinitely
     /// (event-driven, no added latency) as a streaming source should.
@@ -284,14 +314,15 @@ impl RedisStreamsConsumer {
         // A dedicated connection for the (blocking) reads, plus a separate one for
         // acks so an in-flight XREAD BLOCK never stalls XACK. Extra reader
         // connections (see `reader_connections`) are opened below from `client`.
-        let mut read_conn = ConnectionManager::new(client.clone())
+        let block_ms = config.block_ms.unwrap_or(DEFAULT_BLOCK_MS) as usize;
+        let read_config = read_connection_config(block_ms);
+        let mut read_conn = ConnectionManager::new_with_config(client.clone(), read_config.clone())
             .await
             .map_err(|e| anyhow!("Failed to connect to Redis: {}", e))?;
         let ack_conn = ConnectionManager::new(client.clone())
             .await
             .map_err(|e| anyhow!("Failed to connect to Redis: {}", e))?;
 
-        let block_ms = config.block_ms.unwrap_or(DEFAULT_BLOCK_MS) as usize;
         let count = config.internal_buffer_size.unwrap_or(DEFAULT_BUFFER).max(1);
         // 0 disables reclaiming; otherwise redeliver entries idle past this long.
         let redelivery_ms = config
@@ -342,6 +373,7 @@ impl RedisStreamsConsumer {
         let (tx, rx) =
             bounded::<Result<StreamEntry, ConsumerError>>(count.saturating_mul(readers).max(count));
 
+        let held = HeldIds::default();
         let mut consumer_names = Vec::with_capacity(readers);
         for i in 0..readers {
             // Reader 0 reuses the connection the group was created on; the rest get
@@ -349,7 +381,7 @@ impl RedisStreamsConsumer {
             let read_conn = if i == 0 {
                 read_conn.clone()
             } else {
-                ConnectionManager::new(client.clone())
+                ConnectionManager::new_with_config(client.clone(), read_config.clone())
                     .await
                     .map_err(|e| anyhow!("Failed to connect to Redis: {}", e))?
             };
@@ -383,6 +415,7 @@ impl RedisStreamsConsumer {
                 count,
                 block_ms,
                 redelivery_ms,
+                held: held.clone(),
                 tx: tx.clone(),
             });
         }
@@ -394,6 +427,8 @@ impl RedisStreamsConsumer {
             stream,
             group,
             buffer: VecDeque::new(),
+            deferred_error: None,
+            held,
             exit_on_empty: false,
             consumer_names,
             redelivery_ms,
@@ -477,6 +512,7 @@ struct ReaderCtx {
     count: usize,
     block_ms: usize,
     redelivery_ms: u64,
+    held: HeldIds,
     tx: Sender<Result<StreamEntry, ConsumerError>>,
 }
 
@@ -492,6 +528,7 @@ fn spawn_stream_reader(ctx: ReaderCtx) {
         count,
         block_ms,
         redelivery_ms,
+        held,
         tx,
     } = ctx;
     tokio::spawn(async move {
@@ -505,6 +542,9 @@ fn spawn_stream_reader(ctx: ReaderCtx) {
         // same pending entries each time; "0-0" restarts a full scan.
         let mut reclaim_cursor = String::from("0-0");
         loop {
+            if tx.is_closed() {
+                return; // consumer dropped
+            }
             // Redeliver entries left pending past redelivery_ms (Nacked, or
             // orphaned by a crashed/renamed consumer) via XAUTOCLAIM.
             if last_reclaim.is_none_or(|t| t.elapsed() >= reclaim_interval) {
@@ -526,7 +566,13 @@ fn spawn_stream_reader(ctx: ReaderCtx) {
                             // Advance the cursor; the server returns "0-0"
                             // once the pending set has been fully scanned.
                             reclaim_cursor = reply.next_stream_id;
-                            for entry in reply.claimed {
+                            // An entry a slow sink still holds is not delivered twice.
+                            let mut claimed = reply.claimed;
+                            {
+                                let mut held = held.lock().unwrap_or_else(|e| e.into_inner());
+                                claimed.retain(|entry| held.insert(entry.id.clone()));
+                            }
+                            for entry in claimed {
                                 let stream_entry = parse_entry(entry.id, entry.map);
                                 if tx.send(Ok(stream_entry)).await.is_err() {
                                     return; // consumer dropped
@@ -553,12 +599,23 @@ fn spawn_stream_reader(ctx: ReaderCtx) {
                 None => vec![last_id.as_str()],
             };
 
-            let reply: redis::RedisResult<Option<StreamReadReply>> = read_conn
-                .xread_options(&[&task_stream], read_ids.as_slice(), &opts)
-                .await;
+            // Dropping the read with the consumer closes the connection, so the server
+            // gives no entries to a reader nobody listens to.
+            let streams = [&task_stream];
+            let reply: redis::RedisResult<Option<StreamReadReply>> = tokio::select! {
+                biased;
+                _ = tx.closed() => return,
+                reply = read_conn.xread_options(&streams, read_ids.as_slice(), &opts) => reply,
+            };
 
             match reply {
                 Ok(Some(reply)) => {
+                    if task_group.is_some() {
+                        let mut held = held.lock().unwrap_or_else(|e| e.into_inner());
+                        for key in &reply.keys {
+                            held.extend(key.ids.iter().map(|entry| entry.id.clone()));
+                        }
+                    }
                     for key in reply.keys {
                         for entry in key.ids {
                             if task_group.is_none() {
@@ -573,15 +630,6 @@ fn spawn_stream_reader(ctx: ReaderCtx) {
                 }
                 // BLOCK timeout with no data — just poll again.
                 Ok(None) => {}
-                // Client-side read timeout: same "no data" condition as `Ok(None)`,
-                // it just fired before the server's empty BLOCK reply arrived.
-                Err(e) if e.is_timeout() => {
-                    trace!(
-                        stream = %task_stream,
-                        error = %e,
-                        "Redis XREAD client-side read timeout; polling again"
-                    );
-                }
                 Err(e) => {
                     if tx
                         .send(Err(ConsumerError::Connection(anyhow!(
@@ -658,6 +706,9 @@ impl MessageConsumer for RedisStreamsConsumer {
         }
 
         if self.buffer.is_empty() {
+            if let Some(error) = self.deferred_error.take() {
+                return Err(error);
+            }
             // Drain mode times out into an empty batch (async_channel recv is cancel-safe,
             // so no entry is lost); streaming blocks indefinitely for the first entry.
             let Some(res) = crate::traits::drain_gated(self.exit_on_empty, self.rx.recv()).await
@@ -672,8 +723,10 @@ impl MessageConsumer for RedisStreamsConsumer {
         while self.buffer.len() < max_messages {
             match self.rx.try_recv() {
                 Ok(Ok(entry)) => self.buffer.push_back(entry),
-                // A connection error surfaces on the next blocking recv; stop here.
-                Ok(Err(_)) => break,
+                Ok(Err(error)) => {
+                    self.deferred_error = Some(error);
+                    break;
+                }
                 Err(_) => break,
             }
         }
@@ -698,8 +751,13 @@ impl MessageConsumer for RedisStreamsConsumer {
         let stream = self.stream.clone();
         let mut ack_conn = self.ack_conn.clone();
         let settled = self.settled.clone();
+        let batch_ids = BatchIds {
+            ids,
+            held: self.held.clone(),
+        };
         let commit = Box::new(move |dispositions: Vec<MessageDisposition>| {
             Box::pin(async move {
+                let batch_ids = batch_ids;
                 settled.fetch_add(dispositions.len() as u64, Ordering::Relaxed);
                 // Subscriber mode has no group and therefore nothing to ack.
                 let Some(group) = group else {
@@ -707,8 +765,10 @@ impl MessageConsumer for RedisStreamsConsumer {
                 };
                 // Ack successfully handled entries; Nacked ones stay pending so the
                 // group can redeliver them (e.g. via XAUTOCLAIM) later.
-                let ack_ids: Vec<String> = ids
-                    .into_iter()
+                let ack_ids: Vec<&str> = batch_ids
+                    .ids
+                    .iter()
+                    .map(String::as_str)
                     .zip(dispositions)
                     .filter_map(|(id, disposition)| match disposition {
                         MessageDisposition::Ack | MessageDisposition::Reply(_) => Some(id),

@@ -59,6 +59,7 @@ impl InFlight {
 /// middleware that drops everything for a long stretch holds no per-message state.
 pub(crate) enum Emptied {
     Acked(usize),
+    #[cfg_attr(not(feature = "dedup"), allow(dead_code))]
     Settled(Vec<MessageDisposition>),
 }
 
@@ -104,6 +105,7 @@ impl DeferredCommits {
 
     /// Like [`Self::ack_emptied`], for a batch whose dropped messages are not all plain acks
     /// — a deduplicated request answered with its stored reply.
+    #[cfg_attr(not(feature = "dedup"), allow(dead_code))]
     pub(crate) async fn settle_emptied(
         &mut self,
         ordered: bool,

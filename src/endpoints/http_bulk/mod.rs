@@ -66,6 +66,8 @@ impl Connection {
         // No redirect following: reqwest would resend custom credential headers to another host.
         let mut builder = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
+            // Without a request timeout this is what ends a request to a peer that is gone.
+            .tcp_keepalive(Duration::from_secs(60))
             .connect_timeout(Duration::from_millis(
                 config.connect_timeout_ms.unwrap_or(10_000),
             ));

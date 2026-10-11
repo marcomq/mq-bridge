@@ -146,6 +146,11 @@ position after a page comes from is the only thing that differs between APIs:
 | `item: <pointer>` | a field of the last document | `id > last` paging |
 | `response: <pointer>` | a value in the response | change feeds, scroll tokens |
 
+A `response` cursor ends the read when the value is `null` or an empty string. Some APIs
+leave the field out on the last page instead (Google's `nextPageToken`): set
+`cursor.end_when_missing: true` for those. It is off by default because a mistyped pointer
+would otherwise read one page and report success.
+
 With `cursor_id` and `checkpoint_store` in `read` the position is saved after every
 acknowledged batch and a restart continues there. Without them every start
 reads from the beginning.
@@ -364,6 +369,7 @@ Elasticsearch or Qdrant.
 | `envelope` | none | `json_array` only: the body around the array; `{documents}` marks where the array goes |
 | `document` | none | Template around each document; `{document}` marks where the payload goes, e.g. `{"doc":{document},"doc_as_upsert":true}`. Values taken from the message are JSON-escaped. |
 | `result` | HTTP status | See below |
+| `split_on_reject` | `false` | Without `result`: a request the target refuses with 400, 409, 413 or 422 is sent again in halves until the refused documents stand alone |
 
 `query`:
 
@@ -395,7 +401,8 @@ Elasticsearch or Qdrant.
 | `method` | `GET`, or `POST` with a `body` | HTTP method |
 | `body` | none | JSON request body; `{cursor}` is replaced by the position as JSON (`7`, `"a"`, `null`) and `{limit}` by the batch size |
 | `items` | the response | JSON pointer to the array of documents |
-| `cursor.response` | none | JSON pointer to the next position in the response; `null` there ends the read |
+| `cursor.response` | none | JSON pointer to the next position in the response; `null` or an empty string there ends the read |
+| `cursor.end_when_missing` | `false` | With `cursor.response`: a response without that field ends the read too. Without it such a response stops the route |
 | `cursor.item` | none | JSON pointer to the position in the last document of a page |
 | `cursor.start` | `0` for a count, else `null` | Position before the first read |
 | `cursor_id` | none | Names the saved read position |
@@ -437,7 +444,12 @@ Without `result`, a 2xx status means every document was written.
 - **Failures are per document where the target says so.** A payload that is not
   a JSON object, a rejected result line and a delete without an id fail that
   message for good. A failed job or a refused request fails every document of
-  that request for good, and the rest of the batch is still sent.
+  that request for good, and the rest of the batch is still sent. With
+  `upsert.split_on_reject: true` a request refused for its content (400, 409,
+  413, 422) is sent again in halves, so only the refused documents fail. That
+  costs about `2 x log2(batch)` extra requests per bad document. Turn it on only
+  for a target that applies nothing of a request it refuses; one that applies a
+  part before refusing would get that part twice.
 - **Payloads are checked, not rewritten.** A payload that starts like a JSON
   object but is not valid JSON fails that message alone (`the payload is not
   valid JSON: …`), and the rest of the batch is sent.

@@ -1832,21 +1832,20 @@ fn middleware_from_spec(spec: &str) -> anyhow::Result<mq_bridge::models::Middlew
     let root = serde_json::to_value(schemars::schema_for!(mq_bridge::models::Middleware))?;
 
     if let Some(variant) = middleware_variant(&root, &tag) {
-        let value = if accepts_bare_string(&root, variant)
-            && !query_sets_fields(&root, variant, query)
-        {
-            let raw = percent_encoding::percent_decode_str(query)
-                .decode_utf8()
-                .with_context(|| {
-                    format!(
-                        "middleware spec '{}' is not valid UTF-8",
-                        copy_pipeline::redact_uri(spec)
-                    )
-                })?;
-            serde_json::Value::String(raw.into_owned())
-        } else {
-            serde_json::Value::Object(middleware_params(spec, query, Some((&root, variant)))?)
-        };
+        let value =
+            if accepts_bare_string(&root, variant) && !query_sets_fields(&root, variant, query) {
+                let raw = percent_encoding::percent_decode_str(query)
+                    .decode_utf8()
+                    .with_context(|| {
+                        format!(
+                            "middleware spec '{}' is not valid UTF-8",
+                            copy_pipeline::redact_uri(spec)
+                        )
+                    })?;
+                serde_json::Value::String(raw.into_owned())
+            } else {
+                serde_json::Value::Object(middleware_params(spec, query, Some((&root, variant)))?)
+            };
         return serde_json::from_value(serde_json::json!({ tag.as_str(): value })).with_context(
             || {
                 format!(

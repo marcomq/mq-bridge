@@ -3719,6 +3719,7 @@ dependencies = [
  "h2",
  "hashbrown 0.16.1",
  "hex",
+ "http",
  "http-body",
  "http-body-util",
  "hyper",

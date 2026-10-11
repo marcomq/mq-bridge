@@ -1113,6 +1113,10 @@ pub struct KafkaConfig {
         schemars(default = "default_kafka_partitions_schema", range(min = 1))
     )]
     pub partitions: Option<i32>,
+    /// (Publisher only) Create the topic at start if it is missing (default: true).
+    #[serde(default)]
+    #[cfg_attr(feature = "schema", schemars(default = "default_shared_schema"))]
+    pub create_topic: Option<bool>,
     /// (Publisher only) Name of a metadata field whose value is used as the Kafka record
     /// key (drives partitioning/ordering). Unset, or absent on a given message, falls back
     /// to the message id. Default unset.
@@ -1727,6 +1731,19 @@ pub enum SpoolClaim {
 
 // --- Object Store (local/S3/GCS/Azure) Specific Configuration ---
 
+/// What an `object_store` source does with an object it cannot decode after five tries.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum DecodeErrorPolicy {
+    /// Move past it with a warning. The first object a source reads stops the route instead:
+    /// a failure there means the settings are wrong, not the object.
+    #[default]
+    Skip,
+    /// Stop the route.
+    Fail,
+}
+
 /// Configuration for a local or cloud object-store endpoint.
 ///
 /// As a **sink**, each flushed batch is written as one immutable object under `url`,
@@ -1772,6 +1789,9 @@ pub struct ObjectStoreConfig {
     /// larger than this fails the read (surfaced as a consumer error) instead of being
     /// buffered whole. Unset means no limit (the whole object is materialized).
     pub max_object_bytes: Option<u64>,
+    /// (Source only) An object that cannot be decoded: `skip` it (default) or `fail` the route.
+    #[serde(default)]
+    pub on_decode_error: DecodeErrorPolicy,
     /// (Sink only) Prepend a `YYYY/MM/DD/` path (write time, UTC) to each object key. Applies to
     /// `write_time` naming only; defaults to on. Purely for readability / lifecycle rules.
     #[serde(default)]
@@ -2184,7 +2204,7 @@ pub struct ZeroMqConfig {
     /// The socket type (PUSH, PULL, PUB, SUB, REQ, REP).
     #[serde(default)]
     pub socket_type: Option<ZeroMqSocketType>,
-    /// (Consumer only) The ZeroMQ topic (for SUB sockets).
+    /// Topic: the prefix a SUB socket filters on, or the topic frame a PUB socket sends first.
     pub topic: Option<String>,
     /// If true, bind to the address. If false, connect.
     #[serde(default)]
@@ -2586,6 +2606,17 @@ pub struct WebSocketConfig {
     /// TLS: a consumer listens with `cert_file` and `key_file`; a publisher uses it for a `wss://` URL.
     #[serde(default)]
     pub tls: TlsConfig,
+    /// HTTP Basic credentials (username, password): a consumer requires them, a publisher sends them.
+    #[cfg_attr(feature = "schema", schemars(extend("format"="password")))]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_basic_auth"
+    )]
+    pub basic_auth: Option<(String, String)>,
+    /// (Consumer only) Most connections open at once; one more gets 503. Unset = no limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_connections: Option<usize>,
 }
 
 // --- IBM MQ Specific Configuration ---
@@ -2856,6 +2887,9 @@ pub struct PostgresCdcConfig {
     /// Hash for change `message_id`s: `fnv1a` (default, keeps existing dedup state) or `sha256`.
     #[serde(default)]
     pub id_hash: IdHash,
+    /// An update that changes the primary key becomes a `delete` of the old key, then the `update`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub split_key_change: bool,
 }
 
 // --- SQLx Specific Configuration ---
@@ -3162,6 +3196,9 @@ pub struct HttpBulkUpsert {
     /// How the target reports the outcome. Unset = the HTTP status alone decides.
     #[serde(default)]
     pub result: HttpBulkResult,
+    /// Without `result`: send a request refused with 400, 409, 413 or 422 again in halves, so only the bad document fails.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub split_on_reject: bool,
 }
 
 /// The `http_bulk` request that answers a batch of lookups, one answer per message in order.
@@ -3314,6 +3351,9 @@ pub struct HttpBulkCursor {
     /// Position before the first read. Defaults to `0` for a count, otherwise to `null`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start: Option<serde_json::Value>,
+    /// With `response`: a response without the field ends the read, instead of stopping the route.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub end_when_missing: bool,
 }
 
 /// The `http_bulk` request that removes documents by id.

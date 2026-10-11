@@ -176,12 +176,34 @@ fn common_properties(example: &str) -> serde_json::Map<String, Value> {
         "request_timeout_ms": {
             "type": "integer",
             "description": "Request timeout in milliseconds. Unset = no timeout."
+        },
+        "tls": {
+            "type": ["object", "string"],
+            "description": "TLS options as on `http_bulk` (`ca_file`, `cert_file`, `key_file`, `required`); JSON in a URI."
         }
     });
     match properties {
         Value::Object(map) => map,
         _ => unreachable!("a JSON object literal"),
     }
+}
+
+/// A nested option, which a URI carries as JSON text.
+fn nested(field: &str, value: Option<Value>) -> anyhow::Result<Option<Value>> {
+    match value {
+        Some(Value::String(text)) => Ok(Some(
+            serde_json::from_str(&text).with_context(|| format!("'{field}' is not valid JSON"))?,
+        )),
+        value => Ok(value),
+    }
+}
+
+/// Puts the preset's `tls` options, if any, into the resolved configuration.
+fn with_tls(mut resolved: Value, tls: Option<Value>) -> anyhow::Result<Value> {
+    if let Some(tls) = nested("tls", tls)? {
+        resolved["tls"] = tls;
+    }
+    Ok(resolved)
 }
 
 /// A preset's schema: the shared fields plus `own`; `example` is the URI shown for `url`.
@@ -209,6 +231,7 @@ struct Typesense {
     #[serde(default)]
     compression: Compression,
     request_timeout_ms: Option<u64>,
+    tls: Option<Value>,
 }
 
 fn typesense_schema() -> Value {
@@ -233,7 +256,7 @@ fn typesense(_route: &str, value: &Value) -> anyhow::Result<Value> {
     if let Some(key) = config.api_key {
         headers.insert("X-TYPESENSE-API-KEY".into(), json!(key));
     }
-    Ok(json!({
+    let resolved = json!({
         "url": base_url("typesense", &config.url)?,
         "headers": headers,
         "operation": config.operation,
@@ -249,7 +272,8 @@ fn typesense(_route: &str, value: &Value) -> anyhow::Result<Value> {
             "path": format!("/collections/{collection}/documents?filter_by=id:[{{ids}}]"),
             "max_ids": 100
         }
-    }))
+    });
+    with_tls(resolved, config.tls)
 }
 
 #[derive(Deserialize)]
@@ -267,6 +291,7 @@ struct Elasticsearch {
     #[serde(default)]
     compression: Compression,
     request_timeout_ms: Option<u64>,
+    tls: Option<Value>,
 }
 
 #[derive(Deserialize, Default, Clone, Copy, PartialEq)]
@@ -322,15 +347,9 @@ fn elasticsearch(_route: &str, value: &Value) -> anyhow::Result<Value> {
     }
     let path = format!("/{index}/_bulk");
     let update = config.mode == ElasticsearchMode::Update;
-    // A URI carries the object as JSON text.
-    let auth = match config.auth {
-        Some(Value::String(text)) => {
-            Some(serde_json::from_str(&text).context("'auth' is not valid JSON")?)
-        }
-        auth => auth,
-    };
+    let auth = nested("auth", config.auth)?;
     let verb = if update { "update" } else { "index" };
-    Ok(json!({
+    let resolved = json!({
         "url": base_url("elasticsearch", &config.url)?,
         "headers": headers,
         "auth": auth,
@@ -349,7 +368,8 @@ fn elasticsearch(_route: &str, value: &Value) -> anyhow::Result<Value> {
             "line": r#"{"delete":{"_id":{id}}}"#,
             "result": {"items": {"path": "/items", "error": "/delete/error/reason"}}
         }
-    }))
+    });
+    with_tls(resolved, config.tls)
 }
 
 /// Options of the `mq-bridge-meilisearch` plugin that this endpoint leaves out.
@@ -395,6 +415,7 @@ struct Meilisearch {
     checkpoint_store: Option<String>,
     polling_interval_ms: Option<u64>,
     max_polling_interval_ms: Option<u64>,
+    tls: Option<Value>,
 }
 
 fn meilisearch_schema() -> Value {
@@ -520,7 +541,7 @@ fn meilisearch(route: &str, value: &Value) -> anyhow::Result<Value> {
     if let Some(values) = config.delete_values {
         resolved["delete_values"] = json!(values);
     }
-    Ok(resolved)
+    with_tls(resolved, config.tls)
 }
 
 #[cfg(test)]
@@ -546,6 +567,34 @@ mod tests {
 
     fn delete(payload: &str) -> CanonicalMessage {
         CanonicalMessage::from(payload).with_metadata_kv("op", "delete")
+    }
+
+    #[test]
+    fn every_preset_passes_tls_options_on() {
+        for (name, own) in [
+            ("typesense", json!({"collection": "books"})),
+            ("elasticsearch", json!({"index": "books"})),
+            ("meilisearch", json!({"index": "books"})),
+        ] {
+            for tls in [
+                json!({"required": true, "ca_file": "/etc/ca.pem"}),
+                json!(r#"{"required": true, "ca_file": "/etc/ca.pem"}"#),
+            ] {
+                let mut config = own.clone();
+                config["url"] = json!(format!("{name}+https://search.example"));
+                config["tls"] = tls;
+                let resolved = resolve(name, &config).unwrap_or_else(|e| panic!("{name}: {e:#}"));
+                assert!(resolved.tls.required, "{name}");
+                assert_eq!(
+                    resolved.tls.ca_file.as_deref(),
+                    Some("/etc/ca.pem"),
+                    "{name}"
+                );
+            }
+            let mut plain = own.clone();
+            plain["url"] = json!(format!("{name}://localhost"));
+            assert!(!resolve(name, &plain).unwrap().tls.required, "{name}");
+        }
     }
 
     #[tokio::test]

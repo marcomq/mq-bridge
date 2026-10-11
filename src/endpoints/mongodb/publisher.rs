@@ -630,6 +630,47 @@ pub(crate) fn tag_outcome(
     }
 }
 
+/// What a per-document insert error means for the message that carried the document.
+#[derive(Debug, PartialEq)]
+pub(super) enum InsertRejection {
+    /// Duplicate `_id`: the document is already there, which makes a re-run idempotent.
+    AlreadyStored,
+    /// The collection refuses this document; sending it again cannot succeed.
+    Permanent,
+    Transient,
+}
+
+pub(super) fn classify_insert_error(code: i32, message: &str) -> InsertRejection {
+    match code {
+        11000 => match duplicate_index(message) {
+            None | Some("_id_") => InsertRejection::AlreadyStored,
+            // The bridge's own sequence number; a retry draws a new one.
+            Some("seq_1") => InsertRejection::Transient,
+            Some(_) => InsertRejection::Permanent,
+        },
+        // BadValue, FailedToParse, TypeMismatch, DollarPrefixedFieldName,
+        // DocumentValidationFailure, BSONObjectTooLarge, KeyTooLong.
+        2 | 9 | 14 | 52 | 121 | 10334 | 17280 => InsertRejection::Permanent,
+        _ => InsertRejection::Transient,
+    }
+}
+
+/// The index named by an E11000 message (`... index: email_1 dup key: ...`).
+fn duplicate_index(message: &str) -> Option<&str> {
+    let rest = message.split_once(" index: ")?.1;
+    let name = rest.split(" dup key").next()?.trim();
+    Some(name.rsplit(".$").next().unwrap_or(name))
+}
+
+fn insert_rejection(e: &mongodb::error::Error) -> InsertRejection {
+    match &*e.kind {
+        ErrorKind::Write(mongodb::error::WriteFailure::WriteError(w)) => {
+            classify_insert_error(w.code, &w.message)
+        }
+        _ => InsertRejection::Transient,
+    }
+}
+
 /// A server-rejected update (bad data for the pipeline) cannot succeed on retry; a network or
 /// failover error can, and so can E11000 from two upserts racing to insert the same key.
 fn update_error(e: mongodb::error::Error) -> PublisherError {
@@ -928,17 +969,17 @@ impl MessagePublisher for MongoDbPublisher {
             match self.collection.insert_one(doc).await {
                 Ok(_) => {}
                 Err(e) => {
-                    if let ErrorKind::Write(mongodb::error::WriteFailure::WriteError(ref w)) =
-                        *e.kind
-                    {
-                        if w.code == 11000 {
+                    let rejection = insert_rejection(&e);
+                    let error =
+                        anyhow::anyhow!(e).context("Failed to insert document into MongoDB");
+                    return match rejection {
+                        InsertRejection::AlreadyStored => {
                             warn!(message_id = %format!("{:032x}", message.message_id), "Duplicate key error inserting into MongoDB. Treating as idempotent success.");
-                            return Ok(self.outcome_or_ack(message, OUTCOME_EXISTED));
+                            Ok(self.outcome_or_ack(message, OUTCOME_EXISTED))
                         }
-                    }
-                    return Err(PublisherError::Retryable(
-                        anyhow::anyhow!(e).context("Failed to insert document into MongoDB"),
-                    ));
+                        InsertRejection::Permanent => Err(PublisherError::NonRetryable(error)),
+                        InsertRejection::Transient => Err(PublisherError::Retryable(error)),
+                    };
                 }
             }
 
@@ -972,8 +1013,8 @@ impl MessagePublisher for MongoDbPublisher {
         match self.collection.insert_one(doc).await {
             Ok(_) => {}
             Err(e) => {
-                let is_duplicate = matches!(&*e.kind, ErrorKind::Write(mongodb::error::WriteFailure::WriteError(w)) if w.code == 11000);
-                if is_duplicate {
+                let rejection = insert_rejection(&e);
+                if rejection == InsertRejection::AlreadyStored {
                     warn!(message_id = %format!("{:032x}", message.message_id), "Duplicate key error inserting request into MongoDB. Treating as idempotent success.");
                     self.recover_correlation_id_from_duplicate(&mut message)
                         .await?;
@@ -981,10 +1022,13 @@ impl MessagePublisher for MongoDbPublisher {
                         correlation_id = cid.clone();
                     }
                 } else {
-                    return Err(PublisherError::Retryable(
-                        anyhow::anyhow!(e)
-                            .context("Failed to insert request document into MongoDB"),
-                    ));
+                    let error = anyhow::anyhow!(e)
+                        .context("Failed to insert request document into MongoDB");
+                    return Err(if rejection == InsertRejection::Permanent {
+                        PublisherError::NonRetryable(error)
+                    } else {
+                        PublisherError::Retryable(error)
+                    });
                 }
             }
         }
@@ -1131,7 +1175,7 @@ impl MessagePublisher for MongoDbPublisher {
                     }
 
                     // If we have a write concern error, assume all failed to be safe (potential rollback).
-                    // Since we have unique indexes, retrying is idempotent.
+                    // A retry of a stored document is a duplicate `_id`, so it is idempotent.
                     if err.write_concern_error.is_some() {
                         warn!("MongoDB write concern error detected. Retrying entire batch.");
                         for msg in valid_messages {
@@ -1152,24 +1196,20 @@ impl MessagePublisher for MongoDbPublisher {
                     // error was inserted and each error stands on its own.
                     for (i, msg) in valid_messages.into_iter().enumerate() {
                         if let Some(w) = errors_by_index.get(&i) {
-                            // Duplicate `_id`: the document is already stored, which
-                            // is what `id_field` uses to make a re-run idempotent.
-                            if w.code != 11000 {
-                                failed_messages.push((
-                                    msg,
-                                    PublisherError::Retryable(anyhow::anyhow!(
-                                        "MongoDB write error: {:?}",
-                                        w
-                                    )),
-                                ));
+                            let error = anyhow::anyhow!("MongoDB write error: {:?}", w);
+                            match classify_insert_error(w.code, &w.message) {
+                                InsertRejection::AlreadyStored => {}
+                                InsertRejection::Permanent => {
+                                    failed_messages.push((msg, PublisherError::NonRetryable(error)))
+                                }
+                                InsertRejection::Transient => {
+                                    failed_messages.push((msg, PublisherError::Retryable(error)))
+                                }
                             }
                         }
                     }
 
-                    Ok(SentBatch::Partial {
-                        responses: None,
-                        failed: failed_messages,
-                    })
+                    Ok(SentBatch::from_failures(failed_messages))
                 } else {
                     Err(PublisherError::Retryable(anyhow!(e)))
                 }

@@ -18,6 +18,7 @@ output:
     upsert:
       path: /books
       format: json_array
+      split_on_reject: true
     delete:
       method: DELETE
       path: /books?id=in.({ids})
@@ -37,6 +38,7 @@ output:
     upsert:
       path: /rest/v1/books
       format: json_array
+      split_on_reject: true
     delete:
       method: DELETE
       path: /rest/v1/books?id=in.({ids})
@@ -47,8 +49,10 @@ output:
 - **The table needs a primary key.** `resolution=merge-duplicates` updates the
   row with the same key; without the header a second write of a row fails.
 - **A request is one transaction.** One row the table refuses, for example a
-  text in an integer column, fails every row of that request with the database's
-  message. A smaller `batch_size` narrows it down.
+  text in an integer column, makes PostgREST refuse the whole request with the
+  database's message. With `split_on_reject: true`, as above, the request is then
+  sent again in halves until the refused row stands alone, and only that row fails.
+  Without it every row of the request fails.
 - **Every row of a request needs the same columns**, which is what a change
   stream of one table gives.
 - **Row level security applies** to the role behind the key.

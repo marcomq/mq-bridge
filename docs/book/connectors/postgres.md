@@ -163,7 +163,11 @@ The payload is the row as a JSON object; the metadata names the change: `postgre
 `postgres.lsn` and `postgres.key` (the primary key values as a JSON array).
 
 - An `update` that changes the primary key also carries `postgres.old_key`. A sink that
-  upserts by key has to delete that row itself, or the old row stays.
+  upserts by key has to delete that row itself, or the old row stays. With
+  `split_key_change: true` the source does it: it sends a `delete` for the old key first,
+  then the `update`. That is two events for one change, and the events after it in the
+  same transaction get other message ids than without the option, so do not switch it on
+  a route whose deduplication state must stay valid across the change.
 - A `delete` carries the key columns only, the other columns are `null`. Set
   `REPLICA IDENTITY FULL` on the table to get the whole old row.
 - A large value that an update did not change (an unchanged TOAST column) is not in the

@@ -38,6 +38,7 @@ fn cfg(slot: &str) -> PostgresCdcConfig {
         status_interval_ms: 500,
         tls: Default::default(),
         id_hash: Default::default(),
+        split_key_change: false,
     }
 }
 
@@ -141,6 +142,96 @@ pub async fn test_postgres_cdc_pipeline() {
         let ids: BTreeSet<i64> = seen.iter().map(|(_, id)| *id).collect();
         for id in 1..=100 {
             assert!(ids.contains(&(id as i64)), "row {id} must be captured");
+        }
+    })
+    .await;
+}
+
+/// A role whose `DateStyle` is not ISO still gets dates in the ISO form.
+pub async fn test_postgres_cdc_dates_ignore_the_role_datestyle() {
+    setup_logging();
+    run_test_with_docker(COMPOSE, || async {
+        let slot = "mqb_cdc_datestyle_slot";
+        reset_schema(slot).await;
+        let mut conn = connect_retry().await;
+        for sql in [
+            "ALTER TABLE cdc_users ADD COLUMN born DATE",
+            "ALTER ROLE testuser SET datestyle = 'SQL, DMY'",
+        ] {
+            sqlx::query(sql).execute(&mut conn).await.expect(sql);
+        }
+        let consumer = PostgresCdcConsumer::new(&cfg(slot)).await;
+        sqlx::query("ALTER ROLE testuser RESET datestyle")
+            .execute(&mut conn)
+            .await
+            .expect("reset datestyle");
+        let mut consumer = consumer.expect("create CDC consumer");
+
+        sqlx::query("INSERT INTO cdc_users (id, name, born) VALUES (1, 'a', '2026-03-04')")
+            .execute(&mut conn)
+            .await
+            .expect("insert row");
+        let batch = tokio::time::timeout(Duration::from_secs(20), consumer.receive_batch(16))
+            .await
+            .expect("timed out waiting for CDC events")
+            .expect("receive_batch failed");
+        let body: serde_json::Value =
+            serde_json::from_slice(&batch.messages[0].payload).expect("json row");
+        assert_eq!(body["born"], "2026-03-04", "row: {body}");
+    })
+    .await;
+}
+
+/// An update that moves a row to another key: one event naming the old key, or with
+/// `split_key_change` a delete of the old key before it.
+pub async fn test_postgres_cdc_key_change() {
+    setup_logging();
+    run_test_with_docker(COMPOSE, || async {
+        for split in [false, true] {
+            let slot = "mqb_cdc_key_change_slot";
+            reset_schema(slot).await;
+            let mut config = cfg(slot);
+            config.split_key_change = split;
+            let mut consumer = PostgresCdcConsumer::new(&config)
+                .await
+                .expect("create CDC consumer");
+
+            insert_rows(1..=1).await;
+            let mut conn = connect_retry().await;
+            sqlx::query("UPDATE cdc_users SET id = 2 WHERE id = 1")
+                .execute(&mut conn)
+                .await
+                .expect("update key");
+
+            let want = if split { 3 } else { 2 };
+            let mut seen = Vec::new();
+            while seen.len() < want {
+                let batch =
+                    tokio::time::timeout(Duration::from_secs(20), consumer.receive_batch(16))
+                        .await
+                        .expect("timed out waiting for CDC events")
+                        .expect("receive_batch failed");
+                for message in &batch.messages {
+                    let meta = |key: &str| message.metadata.get(key).cloned().unwrap_or_default();
+                    seen.push((
+                        meta("postgres.operation"),
+                        meta("postgres.key"),
+                        meta("postgres.old_key"),
+                    ));
+                }
+                let acks = vec![MessageDisposition::Ack; batch.messages.len()];
+                (batch.commit)(acks).await.expect("commit");
+            }
+            let seen: Vec<(&str, &str, &str)> = seen
+                .iter()
+                .map(|(op, key, old)| (op.as_str(), key.as_str(), old.as_str()))
+                .collect();
+            let mut expected = vec![("insert", "[1]", "")];
+            if split {
+                expected.push(("delete", "[1]", ""));
+            }
+            expected.push(("update", "[2]", "[1]"));
+            assert_eq!(seen, expected, "split_key_change: {split}");
         }
     })
     .await;
@@ -284,6 +375,136 @@ pub async fn test_postgres_cdc_confirms_lsn_on_clean_stop() {
             lsn_to_u64(&confirmed) >= last_lsn,
             "confirmed_flush_lsn ({confirmed}) must cover the last acked change ({last_lsn:#x}) \
              after a clean stop"
+        );
+    })
+    .await;
+}
+
+/// Rows of one transaction share its commit position. Acking the first batch of a
+/// transaction larger than the batch must not confirm that position, or the rows still
+/// waiting are skipped after a stop.
+pub async fn test_postgres_cdc_keeps_the_rest_of_a_transaction_after_a_stop() {
+    setup_logging();
+    run_test_with_docker(COMPOSE, || async {
+        let slot = "mqb_cdc_split_tx_slot";
+        reset_schema(slot).await;
+        let mut consumer = PostgresCdcConsumer::new(&cfg(slot))
+            .await
+            .expect("create CDC consumer");
+        seed_rows(6).await;
+
+        let batch = tokio::time::timeout(Duration::from_secs(20), consumer.receive_batch(2))
+            .await
+            .expect("timed out waiting for CDC events")
+            .expect("receive_batch failed");
+        assert_eq!(batch.messages.len(), 2);
+        (batch.commit)(vec![MessageDisposition::Ack; 2])
+            .await
+            .expect("commit (ack) failed");
+        consumer.close().await.expect("clean close");
+        drop(consumer);
+
+        let mut consumer = PostgresCdcConsumer::new(&cfg(slot))
+            .await
+            .expect("recreate CDC consumer");
+        let ids: BTreeSet<i64> = drain_ids(&mut consumer, 4)
+            .await
+            .into_iter()
+            .map(|(_, id)| id)
+            .collect();
+        assert!(
+            (3..=6).all(|id| ids.contains(&id)),
+            "the unacked rows of the transaction must come again, got {ids:?}"
+        );
+    })
+    .await;
+}
+
+/// A nacked change must come again even when a later batch was acked: the confirmed
+/// position is cumulative, so the later ack must not move it past the nack.
+pub async fn test_postgres_cdc_replays_a_nacked_row_after_later_acks() {
+    setup_logging();
+    run_test_with_docker(COMPOSE, || async {
+        let slot = "mqb_cdc_nack_slot";
+        reset_schema(slot).await;
+        let mut consumer = PostgresCdcConsumer::new(&cfg(slot))
+            .await
+            .expect("create CDC consumer");
+        insert_rows(1..=3).await;
+
+        let batch = tokio::time::timeout(Duration::from_secs(20), consumer.receive_batch(1))
+            .await
+            .expect("timed out waiting for CDC events")
+            .expect("receive_batch failed");
+        (batch.commit)(vec![MessageDisposition::Nack])
+            .await
+            .expect("commit (nack) failed");
+        // Either the consumer asks for a reconnect, or it hands out the next row.
+        if let Ok(Ok(batch)) =
+            tokio::time::timeout(Duration::from_secs(20), consumer.receive_batch(1)).await
+        {
+            let n = batch.messages.len();
+            (batch.commit)(vec![MessageDisposition::Ack; n])
+                .await
+                .expect("commit (ack) failed");
+        }
+        consumer.close().await.expect("clean close");
+        drop(consumer);
+
+        let mut consumer = PostgresCdcConsumer::new(&cfg(slot))
+            .await
+            .expect("recreate CDC consumer");
+        let ids: BTreeSet<i64> = drain_ids(&mut consumer, 3)
+            .await
+            .into_iter()
+            .map(|(_, id)| id)
+            .collect();
+        assert_eq!(
+            ids,
+            BTreeSet::from([1, 2, 3]),
+            "the nacked row must come again"
+        );
+    })
+    .await;
+}
+
+/// A checkpoint file older than the slot (a failed save, a restored backup) must not stop
+/// the source from starting: the slot's own position applies.
+pub async fn test_postgres_cdc_starts_with_a_checkpoint_behind_the_slot() {
+    setup_logging();
+    run_test_with_docker(COMPOSE, || async {
+        let slot = "mqb_cdc_stale_checkpoint_slot";
+        reset_schema(slot).await;
+        let dir = tempfile::tempdir().expect("temp dir");
+        let file = dir.path().join("cdc.json");
+        let mut config = cfg(slot);
+        config.checkpoint_store = Some(file.to_string_lossy().into_owned());
+
+        let mut consumer = PostgresCdcConsumer::new(&config)
+            .await
+            .expect("create CDC consumer");
+        insert_rows(1..=1).await;
+        drain_ids(&mut consumer, 1).await;
+        let stale = std::fs::read(&file).expect("checkpoint written on ack");
+        insert_rows(2..=2).await;
+        drain_ids(&mut consumer, 1).await;
+        consumer.close().await.expect("clean close");
+        drop(consumer);
+        std::fs::write(&file, stale).expect("restore the older checkpoint");
+
+        let mut consumer = PostgresCdcConsumer::new(&config)
+            .await
+            .expect("a checkpoint behind the slot must not fail the start");
+        insert_rows(3..=3).await;
+        let ids: Vec<i64> = drain_ids(&mut consumer, 1)
+            .await
+            .into_iter()
+            .map(|(_, id)| id)
+            .collect();
+        assert_eq!(
+            ids,
+            vec![3],
+            "the slot position applies, nothing is replayed"
         );
     })
     .await;

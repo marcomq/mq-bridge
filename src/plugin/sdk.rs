@@ -83,7 +83,20 @@ use crate::traits::{
 };
 use crate::{CanonicalMessage, SentBatch};
 
-/// Builds the runtime that drives every endpoint this plugin creates.
+/// The runtime that drives every endpoint of this library, shared by all the
+/// plugins it exports and rebuilt if the last of them was freed.
+fn shared_runtime() -> anyhow::Result<Arc<Runtime>> {
+    static SHARED: std::sync::Mutex<std::sync::Weak<Runtime>> =
+        std::sync::Mutex::new(std::sync::Weak::new());
+    let mut shared = SHARED.lock().unwrap_or_else(|poison| poison.into_inner());
+    if let Some(runtime) = shared.upgrade() {
+        return Ok(runtime);
+    }
+    let runtime = build_runtime()?;
+    *shared = Arc::downgrade(&runtime);
+    Ok(runtime)
+}
+
 fn build_runtime() -> anyhow::Result<Arc<Runtime>> {
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.enable_all().thread_name("mqb-plugin");
@@ -445,6 +458,19 @@ fn create_status(error: &anyhow::Error) -> MqbStatus {
     }
 }
 
+/// A filter error is retried unless it carries a permanent error class.
+fn filter_status(error: &anyhow::Error) -> MqbStatus {
+    match (
+        error.downcast_ref::<ConsumerError>(),
+        error.downcast_ref::<ProcessingError>(),
+    ) {
+        (Some(ConsumerError::Permanent(_)), _) | (_, Some(ProcessingError::NonRetryable(_))) => {
+            MQB_ERR_PERMANENT
+        }
+        _ => MQB_ERR_RETRYABLE,
+    }
+}
+
 // ------------------------------------------------------------------- factory
 
 /// Creates the factory. Generic so the export macro can name the author's type;
@@ -454,7 +480,7 @@ where
     F: CustomEndpointFactory + Default + 'static,
 {
     guarded(err, || {
-        let runtime = match build_runtime() {
+        let runtime = match shared_runtime() {
             Ok(runtime) => runtime,
             Err(error) => {
                 unsafe { set_error(err, format!("{error:#}")) };
@@ -747,10 +773,15 @@ unsafe extern "C" fn consumer_close(consumer: MqbConsumerHandle, err: *mut MqbBu
         };
         let _ = state.shutdown.send(true);
         let shared = Arc::clone(&state.consumer);
-        let closed = block_on(
-            &state.runtime,
-            async move { shared.lock().await.close().await },
-        );
+        let closed = block_on(&state.runtime, async move {
+            let mut consumer = shared.lock().await;
+            // The host has no separate call for it, as on the publisher side.
+            let hooked = match consumer.on_disconnect_hook() {
+                Some(hook) => hook.await,
+                None => Ok(()),
+            };
+            consumer.close().await.and(hooked)
+        });
         match closed {
             Ok(Ok(())) => MQB_OK,
             Ok(Err(error)) => {
@@ -1210,10 +1241,17 @@ unsafe fn write_outcomes(
         .iter()
         .map(|(message, error)| (message.message_id, outcome_code(error)))
         .collect();
+    let mut placed = 0;
     for (outcome, id) in outcomes.iter_mut().zip(ids) {
         if let Some(code) = classes.get(id) {
             *outcome = *code;
+            placed += 1;
         }
+    }
+    // A failure whose id is not in the batch would be acknowledged; with nothing
+    // marked the host fails the whole batch instead.
+    if placed < failed.len() {
+        outcomes.fill(MQB_OUTCOME_OK);
     }
 }
 
@@ -1436,6 +1474,9 @@ unsafe fn write_status(
 #[async_trait::async_trait]
 pub trait BatchFilter: Send + Sync + 'static {
     /// Applied on an input endpoint, after the source produced the batch.
+    ///
+    /// An error is retried, unless it is a `ProcessingError::NonRetryable` or a
+    /// `ConsumerError::Permanent`; the same holds for [`Self::on_send`].
     async fn on_receive(
         &self,
         messages: Vec<CanonicalMessage>,
@@ -1578,7 +1619,7 @@ unsafe extern "C" fn middleware_apply(
             Ok(Ok(filtered)) => filtered,
             Ok(Err(error)) => {
                 unsafe { set_error(err, format!("{error:#}")) };
-                return MQB_ERR_RETRYABLE;
+                return filter_status(&error);
             }
             Err(failure) => return unsafe { task_failed(err, failure) },
         };
@@ -1937,6 +1978,49 @@ mod tests {
             processing_status(&ProcessingError::NonRetryable(anyhow::anyhow!("x"))),
             MQB_ERR_PERMANENT
         );
+    }
+
+    /// A library exporting twenty endpoints would otherwise start twenty worker pools.
+    #[test]
+    fn plugins_of_one_library_share_a_runtime() {
+        let mut first = MqbFactoryHandle::NULL;
+        let mut second = MqbFactoryHandle::NULL;
+        let mut err = MqbBuffer::EMPTY;
+        unsafe {
+            assert_eq!(factory_create::<NoEndpoint>(&mut first, &mut err), MQB_OK);
+            assert_eq!(factory_create::<NoEndpoint>(&mut second, &mut err), MQB_OK);
+            let a = borrow::<FactoryState>(first.0).unwrap();
+            let b = borrow::<FactoryState>(second.0).unwrap();
+            assert!(Arc::ptr_eq(&a.runtime, &b.runtime));
+            factory_free(first);
+            factory_free(second);
+        }
+    }
+
+    fn failed(id: u128) -> (CanonicalMessage, ProcessingError) {
+        (
+            CanonicalMessage::new(Vec::new(), Some(id)),
+            ProcessingError::NonRetryable(anyhow::anyhow!("refused")),
+        )
+    }
+
+    #[test]
+    fn a_failure_is_marked_at_its_message_position() {
+        let mut outcomes = [u8::MAX; 3];
+        unsafe { write_outcomes(outcomes.as_mut_ptr(), &[1, 2, 3], &[failed(2)]) };
+        assert_eq!(
+            outcomes,
+            [MQB_OUTCOME_OK, MQB_OUTCOME_PERMANENT, MQB_OUTCOME_OK]
+        );
+    }
+
+    /// The host reads "none marked" as a failure of the whole batch; marking only the
+    /// failures it can place would acknowledge the one it cannot.
+    #[test]
+    fn a_failure_that_cannot_be_placed_marks_nothing() {
+        let mut outcomes = [u8::MAX; 3];
+        unsafe { write_outcomes(outcomes.as_mut_ptr(), &[1, 2, 3], &[failed(2), failed(9)]) };
+        assert_eq!(outcomes, [MQB_OUTCOME_OK; 3]);
     }
 
     #[test]
