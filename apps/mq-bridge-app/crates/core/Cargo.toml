@@ -22,7 +22,6 @@ path = "src/lib.rs"
 # build must be able to honour a `plugins:` entry. It only adds `libloading`.
 mq-bridge = { workspace = true, features = ["schema", "plugin"] }
 mq-bridge-pulsar = { workspace = true, optional = true }
-mq-bridge-meilisearch = { workspace = true, optional = true }
 # The workspace dependency resolves to the root engine locally and retains a
 # registry version for publishing.
 
@@ -56,7 +55,7 @@ zeroize = "1.9"
 sha2 = "0.11"
 futures = "0.3.33"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
-fast-uuid-v7 = "0.1.9"
+fast-uuid-v7 = "0.1.10"
 # Embeds the web UI (crates/core/static) into the binary so the UI is served
 # from a single `cargo install`ed executable. In debug builds it reads the
 # files from disk for live editing; in release builds it embeds them.
@@ -127,10 +126,7 @@ redis-streams = ["mq-bridge/redis-streams"]
 object-store = ["mq-bridge/object-store"]
 # Also registers the named endpoints built on it (`meilisearch`, `typesense`, `elasticsearch`).
 http-bulk = ["mq-bridge/http-bulk"]
-# Extension endpoints maintained as separate crates. `pulsar` is in `full`, so a
-# default build addresses `pulsar://` with no install step. `meilisearch` is not:
-# the default build answers `meilisearch://` with the `http_bulk` preset, and this
-# feature compiles the plugin crate in instead, for the options only it has.
-# Either is also loadable as a plugin, so leaving it out costs no reach.
+# Extension endpoint maintained as a separate crate. `pulsar` is in `full`, so a
+# default build addresses `pulsar://` with no install step. It is also loadable
+# as a plugin, so leaving it out costs no reach.
 pulsar = ["dep:mq-bridge-pulsar"]
-meilisearch = ["dep:mq-bridge-meilisearch"]

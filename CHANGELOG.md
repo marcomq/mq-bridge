@@ -363,6 +363,10 @@ the promise, and what it leaves open:
 
 ### Changed
 
+- **`mqb`: the cargo feature `meilisearch` is removed.** It compiled the
+  `mq-bridge-meilisearch` plugin crate into the CLI in place of the built-in
+  `meilisearch` endpoint. The built-in endpoint stays; for the options only the plugin
+  has, install it and set `MQB_PLUGIN_OVERRIDE=meilisearch`.
 - **`Debug` of a config no longer prints its secrets.** Passwords, tokens, keys, the
   user info of a URL and sensitive headers show as `***` in `{:?}` of an endpoint config
   and of everything that contains one (`Endpoint`, `Route`, `Config`). The fields print

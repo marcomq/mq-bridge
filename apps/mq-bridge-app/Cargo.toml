@@ -14,10 +14,7 @@ version = "1.0.0"
 # The CLI always ships the local-filesystem endpoints, whatever else is selected.
 mq-bridge = { version = "1.0.0", path = "../..", default-features = false, features = ["file", "dir-spool"] }
 mq_bridge_app = { version = "1.0.0", path = "crates/core", package = "mq-bridge-app-core", default-features = false }
-mq-bridge-pulsar = { version = "0.1.4", default-features = false }
-# `default-features = false` drops its `plugin` feature: that export would collide
-# with the identical `mq_bridge_plugin_v1` symbol in mq-bridge-pulsar, as both link in.
-mq-bridge-meilisearch = { version = "0.1.2", default-features = false } 
+mq-bridge-pulsar = { version = "0.1.6", default-features = false }
 
 anyhow = "1.0"
 async-trait = "0.1"

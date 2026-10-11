@@ -377,9 +377,9 @@ brew install marcomq/tap/mq-bridge-meilisearch     # or: conda install -c marcom
 MQB_PLUGIN_OVERRIDE=meilisearch mqb copy … 'meilisearch://localhost:7700?index=movies'
 ```
 
-`--plugin` does not work for this, see [Native plugins](../extending/plugins.md). A build of
-`mqb` with the cargo feature `meilisearch` has the plugin compiled in instead of the built-in
-endpoint. `mqb` up to 0.4.17 had plugin 0.1.2 compiled in.
+`--plugin` does not work for this, see [Native plugins](../extending/plugins.md). `mqb` up to
+0.4.17 had plugin 0.1.2 compiled in; the cargo feature `meilisearch` that did the same in
+later builds is gone in 1.0.
 
 ## One-off copy or rebuild
 

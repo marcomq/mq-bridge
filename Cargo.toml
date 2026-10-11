@@ -3,7 +3,7 @@ name = "mq-bridge"
 version.workspace = true
 edition = "2021"
 authors = ["Marco Mengelkoch"]
-rust-version = "1.94.1"  # What `full` needs with the checked-in lock; fast-uuid-v7 0.1.9 needs 1.94 on x86_64. CI job `msrv` tests it.
+rust-version = "1.94.1"  # What `full` needs with the checked-in lock. CI job `msrv` tests it.
 description = "Embeddable async ETL and messaging library: brokers (Kafka, NATS, AMQP, MQTT), databases incl. Postgres/MongoDB CDC, Parquet on S3/GCS/Azure object storage, HTTP/gRPC."
 repository = "https://github.com/marcomq/mq-bridge"
 homepage = "https://marcomq.github.io/mq-bridge/"
@@ -64,7 +64,7 @@ version = "1.0.0"
 anyhow = "1.0"
 async-trait = "0.1"
 bytes = "1"
-fast-uuid-v7 = "0.1.9"
+fast-uuid-v7 = "0.1.10"
 # Bulk delimiter/quote scanning in the CSV row decoder.
 memchr = "2"
 serde = "1.0"
@@ -100,7 +100,7 @@ serde = { workspace = true, features = ["derive"] }
 anyhow.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util", "net", "signal"] }
 # Note on MSRV for optional features:
-# The crate MSRV is 1.94.1 (aws-*, sqlx 0.9; fast-uuid-v7 0.1.9 on x86_64); the features below need less.
+# The crate MSRV is 1.94.1 (aws-*, sqlx 0.9); the features below need less.
 # - "amqp" (lapin 4.10) requires Rust 1.88+; "http" (hyper-rustls 0.27) requires Rust 1.85+.
 # - "websocket" (tokio-websockets 0.13) requires Rust 1.89+.
 # - "mongodb" (mongodb 3.8) requires Rust 1.88+; "nats" (async-nats 0.50) requires Rust 1.88+.

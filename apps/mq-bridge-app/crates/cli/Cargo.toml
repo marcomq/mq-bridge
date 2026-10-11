@@ -116,7 +116,6 @@ grpc = ["mq_bridge_app/grpc"]
 amqp = ["mq_bridge_app/amqp"]
 redis-streams = ["mq_bridge_app/redis-streams"]
 pulsar = ["mq_bridge_app/pulsar"]
-meilisearch = ["mq_bridge_app/meilisearch"]
 http-bulk = ["mq_bridge_app/http-bulk"]
 
 [dev-dependencies]

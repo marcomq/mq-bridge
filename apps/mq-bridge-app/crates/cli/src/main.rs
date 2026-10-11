@@ -2060,9 +2060,6 @@ fn extension_schemes() -> String {
     if cfg!(feature = "pulsar") {
         names.push("pulsar");
     }
-    if cfg!(feature = "meilisearch") {
-        names.push("meilisearch");
-    }
     #[cfg(feature = "http-bulk")]
     for name in mq_bridge::endpoints::http_bulk::preset_names() {
         if !names.contains(&name) {
@@ -4004,11 +4001,10 @@ mod uri_tests {
         assert_eq!(config["subscription"], "workers");
     }
 
-    // Meilisearch reaches `copy` the same way, as the `http_bulk` preset or as
-    // the plugin crate. Either normalizes the `meilisearch://` url to the HTTP
-    // one the server speaks.
+    // Meilisearch reaches `copy` the same way, as the `http_bulk` preset, which
+    // normalizes the `meilisearch://` url to the HTTP one the server speaks.
     #[test]
-    #[cfg(any(feature = "meilisearch", feature = "http-bulk"))]
+    #[cfg(feature = "http-bulk")]
     fn meilisearch_scheme_builds_a_custom_endpoint() {
         mq_bridge_app::plugins::register_builtin_endpoints().unwrap();
 
