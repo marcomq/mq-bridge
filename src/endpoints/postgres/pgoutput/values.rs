@@ -198,7 +198,7 @@ fn finish_array_element(raw: &str, quoted: bool) -> Option<String> {
 
 fn hex_decode(s: &str) -> anyhow::Result<Vec<u8>> {
     let bytes = s.as_bytes();
-    if bytes.len() % 2 != 0 {
+    if !bytes.len().is_multiple_of(2) {
         return Err(anyhow!("pgoutput: bytea hex has odd length: {s:?}"));
     }
     let nibble = |b: u8| -> anyhow::Result<u8> {
@@ -210,7 +210,7 @@ fn hex_decode(s: &str) -> anyhow::Result<Vec<u8>> {
         }
     };
     let mut out = Vec::with_capacity(bytes.len() / 2);
-    for pair in bytes.chunks_exact(2) {
+    for pair in bytes.as_chunks::<2>().0 {
         out.push((nibble(pair[0])? << 4) | nibble(pair[1])?);
     }
     Ok(out)

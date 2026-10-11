@@ -2,7 +2,29 @@
 
 All notable changes to `mq-bridge`. Newest first.
 
-## Unreleased
+## 1.0.0
+
+The first stable release. It follows a production-readiness review of the core engine, the
+structural endpoints, every built-in endpoint and the plugin host; most entries below are
+its findings. Several change behaviour, so read "Behaviour changes" before upgrading from
+0.4.
+
+### Upgrading from 0.4 (Rust API)
+
+Code written against 0.4 compiles unchanged: no type, field, variant or path of the public
+API was renamed or removed. What 1.0 adds is the promise, and what it leaves open:
+
+- **Stable API:** the crate root and the modules `models`, `traits`, `errors`, `outcomes`,
+  `extensions`, `plugin` (the SDK), `type_handler`, `publisher`, `route` and `checkpoint`.
+  `endpoints`, `middleware`, `support` and `test_utils` are implementation and may change
+  in a minor release, and so may the major version of a re-exported driver crate
+  (`mq_bridge::sqlx`, `mq_bridge::rdkafka`, ...).
+- **A minor release may add** a field to a configuration struct, a variant to a
+  configuration or error enum, and raise the minimum Rust version. Write config structs
+  with `..Default::default()` and give a `match` on these enums a `_` arm, and such a
+  release compiles unchanged.
+- **Minimum Rust version:** 1.89 for the default features, 1.94.1 for `full` (declared
+  `rust-version` was 1.85, which the dependencies in the lock no longer build with).
 
 ### Behaviour changes
 
@@ -269,6 +291,17 @@ All notable changes to `mq-bridge`. Newest first.
 
 ### Added
 
+- **`CanonicalMessage::get_metadata`, `set_metadata`, `remove_metadata` and
+  `metadata_iter`.** The recommended way to read and write metadata; they return `&str`
+  and take anything that converts to `String`. The public `metadata` map stays.
+- **Constructors for config structs without `Default`:**
+  `DeduplicationMiddleware::new(ttl_seconds)`, `DelayMiddleware::new(delay_ms)`,
+  `TimeoutMiddleware::new(timeout_ms)`, `LimiterMiddleware::new(messages_per_second)`,
+  `BufferMiddleware::new(max_messages, max_delay_ms)`,
+  `WeakJoinMiddleware::new(group_by, expected_count, timeout_ms)`,
+  `DetailedMappingRule::new(path)`, `SequenceConfig::new(endpoints)`,
+  `SwitchCase::new(condition, to)`, `RequestForwardConfig::new(to, forward_to)`.
+  `PackMiddleware`, `MetricsMiddleware` and `SwitchConfig` implement `Default`.
 - **`object_store`: `on_decode_error`.** `skip` (default) moves past an object that cannot
   be decoded once the source has decoded at least one object, and stops the route when the
   first one fails. `fail` stops the route at every such object. URI:
@@ -323,6 +356,10 @@ All notable changes to `mq-bridge`. Newest first.
 
 ### Changed
 
+- **`Debug` of a config no longer prints its secrets.** Passwords, tokens, keys, the
+  user info of a URL and sensitive headers show as `***` in `{:?}` of an endpoint config
+  and of everything that contains one (`Endpoint`, `Route`, `Config`). The fields print
+  under their config-file names.
 - **`deduplication`: `sled:///path?durable=true`** flushes the markers to disk before every
   source ack, so a killed process does not reprocess its last messages. It costs one disk
   sync per batch and is off by default; a sled store otherwise writes about every 500 ms.
@@ -644,6 +681,17 @@ All notable changes to `mq-bridge`. Newest first.
   pools; `MQB_PLUGIN_WORKER_THREADS` now sizes the one shared pool.
 - `http` and `websocket` outputs refuse a `tls` block with only one of `cert_file` and
   `key_file`. They connected without a client certificate.
+- An error that reaches the engine through `anyhow` keeps its classification. A handler
+  returning `anyhow::Result` that failed with a `NonRetryable` (through `?`, or under a
+  `.context(...)`) was retried as `Retryable`; so was a `Connection` error.
+- `pack` / `unpack`: a packed batch with a flag this version does not know is refused. It
+  was read with the known layout, which gives wrong messages once a flag adds a field.
+- `UriSchema::config_from_uri` no longer prints the password of a URI it cannot parse.
+- `support::stream_batch::next_batch` reserves at most 32768 slots up front. A large
+  `batch_size` allocated that many slots for every batch.
+- `EventStore::get_events_since(u64::MAX)` returns nothing instead of overflowing.
+- Plugin conformance suite: a consumer that never returns fails the check at
+  `receive_timeout`. The suite used to hang.
 
 ## 0.4.20
 

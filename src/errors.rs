@@ -94,9 +94,20 @@ impl From<anyhow::Error> for ProcessingError {
         if err.is::<InvalidConfig>() {
             return ProcessingError::NonRetryable(err);
         }
-        // Default to Retryable for generic errors. Callers should use
-        // ProcessingError::NonRetryable directly for known permanent failures.
-        ProcessingError::Retryable(err)
+        // Keep a classification that travelled through `anyhow`; a generic error is retryable.
+        if err.chain().next().is_some_and(|e| e.is::<Self>()) {
+            return match err.downcast::<Self>() {
+                Ok(classified) => classified,
+                Err(err) => ProcessingError::Retryable(err),
+            };
+        }
+        // Classified under a `.context(...)`: wrap the whole error so the context stays.
+        let wrap: fn(anyhow::Error) -> Self = match err.downcast_ref::<Self>() {
+            Some(ProcessingError::NonRetryable(_)) => ProcessingError::NonRetryable,
+            Some(ProcessingError::Connection(_)) => ProcessingError::Connection,
+            _ => ProcessingError::Retryable,
+        };
+        wrap(err)
     }
 }
 
@@ -129,6 +140,21 @@ mod tests {
 
         let end = ConsumerError::from(anyhow::Error::new(ConsumerError::EndOfStream));
         assert!(matches!(end, ConsumerError::EndOfStream));
+    }
+
+    #[test]
+    fn a_processing_classification_survives_a_trip_through_anyhow() {
+        let permanent =
+            anyhow::Error::new(ProcessingError::NonRetryable(anyhow::anyhow!("bad row")));
+        let back = ProcessingError::from(permanent);
+        assert!(matches!(back, ProcessingError::NonRetryable(_)));
+        assert_eq!(back.to_string(), "non-retryable error: bad row");
+
+        let offline = anyhow::Error::new(ProcessingError::Connection(anyhow::anyhow!("offline")))
+            .context("send to orders");
+        let back = ProcessingError::from(offline);
+        assert!(back.is_connection_error());
+        assert!(back.to_string().contains("send to orders"), "{back}");
     }
 
     #[test]

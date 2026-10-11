@@ -1093,6 +1093,115 @@ with_optional_setters!(ClickHouseConfig { with_columns => columns: std::collecti
 with_value_setters!(TlsConfig { with_required => required: bool, with_accept_invalid_certs => accept_invalid_certs: bool });
 with_optional_string_setters!(TlsConfig { with_cert_password => cert_password });
 
+impl DeduplicationMiddleware {
+    /// Remembers each message id for `ttl_seconds`, in the default store.
+    pub fn new(ttl_seconds: u64) -> Self {
+        Self {
+            store: None,
+            sled_path: None,
+            ttl_seconds,
+            key: None,
+            replay_response: false,
+        }
+    }
+}
+
+impl DelayMiddleware {
+    pub fn new(delay_ms: u64) -> Self {
+        Self { delay_ms }
+    }
+}
+
+impl TimeoutMiddleware {
+    pub fn new(timeout_ms: u64) -> Self {
+        Self { timeout_ms }
+    }
+}
+
+impl LimiterMiddleware {
+    pub fn new(messages_per_second: f64) -> Self {
+        Self {
+            messages_per_second,
+        }
+    }
+}
+
+impl BufferMiddleware {
+    pub fn new(max_messages: usize, max_delay_ms: u64) -> Self {
+        Self {
+            max_messages,
+            max_delay_ms,
+        }
+    }
+}
+
+impl WeakJoinMiddleware {
+    /// Joins `expected_count` messages that share the `group_by` metadata value.
+    pub fn new(group_by: impl Into<String>, expected_count: usize, timeout_ms: u64) -> Self {
+        Self {
+            group_by: group_by.into(),
+            expected_count,
+            timeout_ms,
+            branch_by: None,
+            required: Vec::new(),
+            on_timeout: WeakJoinTimeout::default(),
+            ack: WeakJoinAck::default(),
+        }
+    }
+}
+
+impl DetailedMappingRule {
+    pub fn new(path: impl Into<String>) -> Self {
+        Self {
+            path: path.into(),
+            default: None,
+            required: false,
+        }
+    }
+}
+
+impl Default for PackMiddleware {
+    fn default() -> Self {
+        Self {
+            format: PackFormat::default(),
+            max_messages: default_pack_max_messages(),
+            max_bytes: default_pack_max_bytes(),
+            drop_message_id: false,
+        }
+    }
+}
+
+impl SequenceConfig {
+    /// Drains `endpoints` one after another, in order.
+    pub fn new(endpoints: Vec<Endpoint>) -> Self {
+        Self {
+            endpoints,
+            cursor_id: None,
+            checkpoint_store: None,
+        }
+    }
+}
+
+impl SwitchCase {
+    /// Sends a message to `to` when `condition` holds.
+    pub fn new(condition: impl Into<String>, to: Endpoint) -> Self {
+        Self {
+            condition: condition.into(),
+            to,
+        }
+    }
+}
+
+impl RequestForwardConfig {
+    /// Calls `to` and forwards its response to `forward_to`.
+    pub fn new(to: Endpoint, forward_to: Endpoint) -> Self {
+        Self {
+            to: Box::new(to),
+            forward_to: Box::new(forward_to),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

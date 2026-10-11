@@ -7,6 +7,7 @@
 //! resolved: the `SecretExtractor` trait, its impls, and the shared helpers.
 
 use super::*;
+use std::fmt;
 
 /// Trait for extracting secrets from configuration structures.
 pub trait SecretExtractor {
@@ -177,7 +178,7 @@ fn sanitize_secret_key(key: &str) -> String {
 /// consumer has to decode it before using it as the original name.
 #[cfg(feature = "grpc")]
 pub(crate) fn decode_secret_map_key(key: &str) -> Option<String> {
-    if key.is_empty() || key.len() % 2 != 0 {
+    if key.is_empty() || !key.len().is_multiple_of(2) {
         return None;
     }
     let bytes: Option<Vec<u8>> = key
@@ -796,6 +797,138 @@ impl SecretExtractor for IbmTlsConfig {
             // crate's env override resolves back to this field.
             secrets.insert(format!("{}__{}", prefix, "CERT_PASSWORD"), val);
         }
+    }
+}
+
+const REDACTED: &str = "***";
+
+/// Replaces in `shown` whatever `extract_secrets` removed or changed in `stripped`.
+fn mask_secrets(shown: &mut serde_json::Value, stripped: Option<&serde_json::Value>) {
+    use serde_json::Value;
+    match (shown, stripped) {
+        (Value::Object(shown), Some(Value::Object(stripped))) => {
+            for (key, value) in shown.iter_mut() {
+                mask_secrets(value, stripped.get(key));
+            }
+        }
+        (Value::Array(shown), Some(Value::Array(stripped))) if shown.len() == stripped.len() => {
+            for (value, stripped) in shown.iter_mut().zip(stripped) {
+                mask_secrets(value, Some(stripped));
+            }
+        }
+        (Value::Null, _) => {}
+        (shown, stripped) if stripped != Some(&*shown) => {
+            let url = shown.as_str().map(crate::support::redact::url_password);
+            *shown = match url {
+                Some(url) if Some(url.as_ref()) != shown.as_str() => Value::String(url.into()),
+                _ => Value::String(REDACTED.to_string()),
+            };
+        }
+        _ => {}
+    }
+}
+
+/// Prints a JSON value the way a derived `Debug` prints the struct it came from.
+struct ShownValue<'a>(&'a serde_json::Value);
+
+impl fmt::Debug for ShownValue<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use serde_json::Value;
+        match self.0 {
+            Value::Null => f.write_str("None"),
+            Value::Bool(value) => write!(f, "{value}"),
+            Value::Number(value) => write!(f, "{value}"),
+            Value::String(value) => write!(f, "{value:?}"),
+            Value::Array(values) => f
+                .debug_list()
+                .entries(values.iter().map(ShownValue))
+                .finish(),
+            Value::Object(fields) => {
+                let mut out = f.debug_map();
+                for (key, value) in fields {
+                    out.entry(&format_args!("{key}"), &ShownValue(value));
+                }
+                out.finish()
+            }
+        }
+    }
+}
+
+/// `Debug` for a config that holds secrets: every extracted secret prints as `***`.
+fn fmt_redacted<T>(name: &str, config: &T, f: &mut fmt::Formatter<'_>) -> fmt::Result
+where
+    T: Clone + Serialize + SecretExtractor,
+{
+    let mut stripped = config.clone();
+    stripped.extract_secrets("", &mut HashMap::new());
+    let (Ok(serde_json::Value::Object(mut shown)), Ok(stripped)) = (
+        serde_json::to_value(config),
+        serde_json::to_value(&stripped),
+    ) else {
+        return f.debug_struct(name).finish_non_exhaustive();
+    };
+    let mut out = f.debug_struct(name);
+    for (key, value) in shown.iter_mut() {
+        mask_secrets(value, stripped.get(key.as_str()));
+        out.field(key, &ShownValue(value));
+    }
+    out.finish()
+}
+
+macro_rules! redacted_debug {
+    ($($config:ident),+ $(,)?) => {$(
+        impl fmt::Debug for $config {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                fmt_redacted(stringify!($config), self, f)
+            }
+        }
+    )+};
+}
+
+redacted_debug!(
+    AwsConfig,
+    KafkaConfig,
+    NatsConfig,
+    AmqpConfig,
+    MongoDbConfig,
+    MqttConfig,
+    HttpConfig,
+    WebSocketConfig,
+    IbmMqConfig,
+    ZeroMqConfig,
+    RedisStreamsConfig,
+    SqlxConfig,
+    ClickHouseConfig,
+    HttpBulkConfig,
+    PostgresCdcConfig,
+    GrpcConfig,
+    TlsConfig,
+    IbmTlsConfig,
+);
+
+impl fmt::Debug for HttpBulkOAuth2 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HttpBulkOAuth2")
+            .field("token_url", &self.token_url)
+            .field("client_id", &self.client_id)
+            .field("client_secret", &REDACTED)
+            .field("scope", &self.scope)
+            .finish()
+    }
+}
+
+impl fmt::Debug for HttpBulkAwsSigV4 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HttpBulkAwsSigV4")
+            .field("region", &self.region)
+            .field("service", &self.service)
+            .field("access_key", &self.access_key)
+            .field("secret_key", &self.secret_key.as_ref().map(|_| REDACTED))
+            .field(
+                "session_token",
+                &self.session_token.as_ref().map(|_| REDACTED),
+            )
+            .finish()
     }
 }
 

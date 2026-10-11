@@ -540,7 +540,7 @@ pub struct DeduplicationMiddleware {
 /// enables metrics collection for the endpoint.
 ///
 /// Metrics are typically exported via Prometheus or similar monitoring systems.
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct MetricsMiddleware {}
@@ -1030,7 +1030,7 @@ pub struct RandomPanicMiddleware {
 }
 
 // --- AWS Specific Configuration ---
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[derive(Deserialize, Serialize, Clone, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct AwsConfig {
@@ -1067,7 +1067,7 @@ pub struct AwsConfig {
 // --- Kafka Specific Configuration ---
 
 /// General Kafka connection configuration.
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[derive(Deserialize, Serialize, Clone, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct KafkaConfig {
@@ -1816,7 +1816,7 @@ pub struct ObjectStoreConfig {
 // --- NATS Specific Configuration ---
 
 /// General NATS connection configuration.
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[derive(Deserialize, Serialize, Clone, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct NatsConfig {
@@ -1949,7 +1949,7 @@ pub struct StreamBufferConfig {
 // --- AMQP Specific Configuration ---
 
 /// General AMQP connection configuration.
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[derive(Deserialize, Serialize, Clone, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct AmqpConfig {
@@ -2034,7 +2034,7 @@ pub enum MongoConsume {
 // --- MongoDB Specific Configuration ---
 
 /// General MongoDB connection configuration.
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[derive(Deserialize, Serialize, Clone, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct MongoDbConfig {
@@ -2137,7 +2137,7 @@ pub struct MongoDbConfig {
 // --- MQTT Specific Configuration ---
 
 /// General MQTT connection configuration.
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[derive(Deserialize, Serialize, Clone, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct MqttConfig {
@@ -2195,7 +2195,7 @@ pub enum MqttProtocol {
 
 // --- ZeroMQ Specific Configuration ---
 
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[derive(Deserialize, Serialize, Clone, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct ZeroMqConfig {
@@ -2290,7 +2290,7 @@ pub enum ZeroMqBackend {
 /// Publishers `XADD` to the stream; consumers read via a consumer group
 /// (`XREADGROUP` + `XACK`) by default, or ephemerally via `XREAD` from new
 /// messages when `subscriber_mode` is set.
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[derive(Deserialize, Serialize, Clone, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct RedisStreamsConfig {
@@ -2334,7 +2334,7 @@ pub struct RedisStreamsConfig {
 
 // --- gRPC Specific Configuration ---
 
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[derive(Deserialize, Serialize, Clone, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct GrpcConfig {
@@ -2476,7 +2476,7 @@ pub enum WebSocketExecutionMode {
 }
 
 /// General HTTP connection configuration.
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[derive(Deserialize, Serialize, Clone, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct HttpConfig {
@@ -2584,7 +2584,7 @@ pub struct HttpConfig {
 }
 
 /// WebSocket connection configuration.
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[derive(Deserialize, Serialize, Clone, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct WebSocketConfig {
@@ -2626,7 +2626,7 @@ pub struct WebSocketConfig {
 ///
 /// The IBM MQ client doesn't consume PEM files, so this uses MQ-native field
 /// names rather than the generic [`TlsConfig`] used by the other endpoints.
-#[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq, Eq, Hash)]
+#[derive(Deserialize, Serialize, Clone, Default, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "schema", schemars(transform = ibm_tls_config_schema_transform))]
 #[serde(deny_unknown_fields)]
@@ -2655,7 +2655,7 @@ pub struct IbmTlsConfig {
 // Default is implemented manually (not derived): the numeric fields must match
 // the serde defaults, otherwise `IbmMqConfig::new()` / `..Default::default()`
 // would yield max_message_size=0 (zero-length receive buffer) and wait_timeout=0.
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Deserialize, Serialize, Clone)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct IbmMqConfig {
@@ -2713,7 +2713,7 @@ pub struct SequenceConfig {
 
 // --- Switch/Router Configuration ---
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct SwitchConfig {
@@ -2842,7 +2842,7 @@ pub enum IdHash {
 }
 
 /// Postgres logical-replication CDC source (pgoutput). Source-only.
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[derive(Deserialize, Serialize, Clone, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct PostgresCdcConfig {
@@ -2896,7 +2896,7 @@ pub struct PostgresCdcConfig {
 // --- SQLx Specific Configuration ---
 
 /// General SQLx connection configuration.
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[derive(Deserialize, Serialize, Clone, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct SqlxConfig {
@@ -3028,7 +3028,7 @@ pub struct SqlxConfig {
 /// from explicit `${payload:<field>}` / `${metadata:<key>}` tokens instead. As a **consumer** it
 /// reads an existing table **non-destructively** by paging over a monotonic `cursor_column`
 /// (ClickHouse has no native queue/pub-sub), serializing each row to a JSON payload.
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[derive(Deserialize, Serialize, Clone, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct ClickHouseConfig {
@@ -3111,7 +3111,7 @@ pub struct ClickHouseConfig {
 /// list of ids; `result` describes how the target reports success. As an input, `read` pages
 /// through a JSON listing by a cursor. With `query` it answers a batch of lookups in one
 /// request. The endpoint knows no product by name.
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[derive(Deserialize, Serialize, Clone, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct HttpBulkConfig {
@@ -3251,7 +3251,7 @@ pub struct HttpBulkAuth {
 }
 
 /// OAuth2 client credentials grant for `http_bulk`.
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[derive(Deserialize, Serialize, Clone, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct HttpBulkOAuth2 {
@@ -3268,7 +3268,7 @@ pub struct HttpBulkOAuth2 {
 }
 
 /// AWS Signature Version 4 signing for `http_bulk`.
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[derive(Deserialize, Serialize, Clone, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct HttpBulkAwsSigV4 {
@@ -3481,7 +3481,7 @@ impl Default for HttpBulkJob {
 ///     ..Default::default()
 /// };
 /// ```
-#[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq, Eq, Hash)]
+#[derive(Deserialize, Serialize, Clone, Default, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct TlsConfig {

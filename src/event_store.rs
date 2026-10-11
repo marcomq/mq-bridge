@@ -323,7 +323,7 @@ impl EventStore {
         let base = self.base_offset.load(Ordering::SeqCst);
 
         // We want events starting from offset: last_known_offset + 1
-        let start_offset = last_known_offset + 1;
+        let start_offset = last_known_offset.saturating_add(1);
 
         // If the requested start_offset is older than base, the caller has a gap.
         if start_offset < base {
@@ -617,6 +617,17 @@ mod tests {
         let events = store.get_events_since(1, 10).await.unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].offset, 2);
+    }
+
+    #[tokio::test]
+    async fn the_highest_offset_has_nothing_after_it() {
+        let store = EventStore::new(RetentionPolicy::default());
+        store.append(CanonicalMessage::from("msg1")).await;
+        assert!(store
+            .get_events_since(u64::MAX, 10)
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]

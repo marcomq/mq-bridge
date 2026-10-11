@@ -1222,3 +1222,52 @@ r:
         }
     }
 }
+
+#[test]
+fn debug_of_a_config_hides_its_secrets() {
+    let config: Config = serde_yaml_ng::from_str(
+        r#"
+orders:
+  input:
+    kafka:
+      url: "kafka://broker:9092"
+      topic: orders
+      username: alice
+      password: hunter2
+      tls: { required: true, cert_password: hunter3 }
+  output:
+    http:
+      url: "https://bob:hunter4@example.com/in"
+      custom_headers: { Authorization: "Bearer hunter5", X-Trace: "kept" }
+"#,
+    )
+    .unwrap();
+    let printed = format!("{config:?}");
+    assert!(!printed.contains("hunter"), "{printed}");
+    for kept in [
+        "KafkaConfig {",
+        "topic: \"orders\"",
+        "***",
+        "example.com/in",
+        "kept",
+    ] {
+        assert!(printed.contains(kept), "{kept} missing in {printed}");
+    }
+    assert!(format!("{config:#?}").contains("    topic: \"orders\","));
+}
+
+#[test]
+fn debug_of_http_bulk_auth_hides_its_secrets() {
+    let oauth2 = HttpBulkOAuth2 {
+        client_id: "app".into(),
+        client_secret: "hunter2".into(),
+        ..Default::default()
+    };
+    let sigv4 = HttpBulkAwsSigV4 {
+        secret_key: Some("hunter3".into()),
+        ..Default::default()
+    };
+    let printed = format!("{oauth2:?} {sigv4:?}");
+    assert!(!printed.contains("hunter"), "{printed}");
+    assert!(printed.contains("client_id: \"app\"") && printed.contains("session_token: None"));
+}

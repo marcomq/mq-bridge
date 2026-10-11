@@ -326,9 +326,10 @@ Which endpoint has a `tls` block, and how each one authenticates, is in the last
   256 MB); with many connections that is the bound on memory, so lower it for a public
   listener. Responses that `http_bulk` and `clickhouse` read from their configured server
   are not limited in size.
-- **`Debug` output of a config shows passwords.** The engine does not print configs that
-  way, and its own log lines and errors blank the password of a URL. Rust code that logs a
-  config struct with `{:?}` prints `password`, `token` and `cert_password` in the clear.
+- **`Debug` output of a config hides its secrets.** `{:?}` of an endpoint config prints
+  passwords, tokens, keys and sensitive headers as `***` and blanks the password of a URL,
+  as the engine's own log lines and errors do. A `custom` endpoint's config is printed as
+  it is.
 - `zeromq` has no encryption and no authentication. Use it on a trusted network only.
 
 ### HTTP Consumer Fast Path

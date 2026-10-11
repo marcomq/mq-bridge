@@ -242,7 +242,7 @@ that embeds mq-bridge without the endpoint features and wants them in some
 deployments only:
 
 ```toml
-mq-bridge = { version = "0.4", default-features = false, features = ["plugin"] }
+mq-bridge = { version = "1", default-features = false, features = ["plugin"] }
 ```
 
 ```rust,ignore
@@ -269,7 +269,7 @@ export the factory:
 
 ```toml
 [dependencies]
-mq-bridge = { version = "0.4", default-features = false, features = ["plugin-sdk"] }
+mq-bridge = { version = "1", default-features = false, features = ["plugin-sdk"] }
 
 [lib]
 crate-type = ["rlib", "cdylib"]

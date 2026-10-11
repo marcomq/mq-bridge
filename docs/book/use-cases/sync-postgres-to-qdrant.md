@@ -121,7 +121,7 @@ The same file runs embedded in a service. Enable the features the route uses:
 
 ```toml
 [dependencies]
-mq-bridge = { version = "0.4.18", features = ["postgres-cdc", "http-bulk", "http", "yaml"] }
+mq-bridge = { version = "1", features = ["postgres-cdc", "http-bulk", "http", "yaml"] }
 tokio = { version = "1", features = ["full"] }
 anyhow = "1"
 ```

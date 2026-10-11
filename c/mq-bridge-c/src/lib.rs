@@ -114,7 +114,7 @@ pub(crate) fn into_c_string(text: String) -> *mut c_char {
         .into_raw()
 }
 
-/// Version of the library, e.g. `"0.4.20"`. Static; do not free.
+/// Version of the library, e.g. `"1.0.0"`. Static; do not free.
 #[no_mangle]
 pub extern "C" fn mqb_version() -> *const c_char {
     concat!(env!("CARGO_PKG_VERSION"), "\0").as_ptr().cast()

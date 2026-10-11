@@ -325,6 +325,13 @@ fn unpack_mqb(payload: &Bytes, limits: &UnpackLimits) -> Result<Vec<CanonicalMes
         );
     }
     let flags = u16::from_le_bytes(payload[6..8].try_into().expect("2 bytes"));
+    let unknown = flags & !(FLAG_METADATA | FLAG_MESSAGE_ID);
+    if unknown != 0 {
+        bail!(
+            "packed batch sets unknown flags {unknown:#06x}; a newer writer may be using a \
+             record layout this version does not have"
+        );
+    }
     let with_metadata = flags & FLAG_METADATA != 0;
     let with_message_id = flags & FLAG_MESSAGE_ID != 0;
 
@@ -588,6 +595,15 @@ mod tests {
         packed[4] = 99;
         let error = unpack(PackFormat::Mqb, &packed.into(), &UnpackLimits::default()).unwrap_err();
         assert!(error.to_string().contains("version 99"), "{error}");
+    }
+
+    /// A flag this build does not know changes the record layout it cannot follow.
+    #[test]
+    fn an_unknown_flag_is_rejected() {
+        let mut packed = packer().pack(&[message("x", &[])]).to_vec();
+        packed[6] |= 1 << 2;
+        let error = unpack(PackFormat::Mqb, &packed.into(), &UnpackLimits::default()).unwrap_err();
+        assert!(error.to_string().contains("unknown flags"), "{error}");
     }
 
     /// Byte 5 is reserved for a future envelope feature, so a writer that sets it is

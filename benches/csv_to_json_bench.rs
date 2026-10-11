@@ -64,7 +64,7 @@ fn generate_csv(rows: usize) -> String {
             rng.below(24),
             rng.below(60),
             rng.below(60),
-            rng.next() % 2 == 0,
+            rng.next().is_multiple_of(2),
             attributes,
         ));
     }
@@ -85,7 +85,7 @@ fn generate_plain_csv(rows: usize) -> String {
             1 + rng.below(10_000),
             rng.below(100),
             rng.below(60),
-            rng.next() % 2 == 0,
+            rng.next().is_multiple_of(2),
             TIERS[rng.below(TIERS.len())],
         ));
     }

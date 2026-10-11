@@ -187,6 +187,17 @@ tuning use the same settings in both.
 
 It is used as rust library in [armature](https://github.com/quinnjr/armature) and as python lib in [omniload](https://github.com/panodata/omniload). 
 
+## Stability and Rust version
+
+Since 1.0 the Rust API follows semantic versioning: the crate root and the modules `models`, `traits`, `errors`, `outcomes`, `extensions`, `plugin` (the SDK), `type_handler`, `publisher`, `route` and `checkpoint`. The implementation modules `endpoints`, `middleware`, `support` and `test_utils` may change in a minor release, and so may the major version of a re-exported driver crate (`mq_bridge::sqlx`, `mq_bridge::rdkafka`, ...).
+
+A minor release may add a configuration field, a variant of a configuration or error enum, and raise the minimum Rust version. Code that writes config structs with `..Default::default()` and gives a `match` on these enums a `_` arm compiles unchanged across such releases.
+
+| Build | Minimum Rust |
+|---|---|
+| default features | 1.89 |
+| `full` | 1.94.1 |
+
 ## Running Tests
 The project includes integration and performance tests. Most backend tests require Docker.
 

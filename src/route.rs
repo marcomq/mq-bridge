@@ -6290,7 +6290,7 @@ mod tests {
                     let attempt_count = attempts.entry(msg.message_id).or_insert(0);
                     *attempt_count += 1;
 
-                    if msg_num % 2 == 0 {
+                    if msg_num.is_multiple_of(2) {
                         // Fail even numbers
                         failed.push((
                             msg,
