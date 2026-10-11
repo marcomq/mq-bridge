@@ -86,31 +86,23 @@ jobs:
             exit 1
           fi
 
-  # The Rust versions the README promises, with the checked-in lock.
+  # The Rust version the README promises, with the checked-in lock.
   msrv:
     name: MSRV
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - toolchain: "1.89"
-            features: ""
-          - toolchain: "1.94.1"
-            features: "--features full"
     steps:
       - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
-          toolchain: ${{ matrix.toolchain }}
+          toolchain: "1.94.1"
 
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
 
       - name: Check with the minimum Rust version
-        run: cargo check --lib --locked ${{ matrix.features }}
+        run: cargo check --lib --locked --features full
 
   # Unit tests
   test:
@@ -310,7 +302,8 @@ jobs:
         run: RUSTDOCFLAGS="-D warnings" cargo doc --features lint-all --no-deps
 
   # Public Rust API against the latest release on crates.io: a change that breaks a
-  # downstream crate fails here unless the version makes it a major release.
+  # downstream crate needs a major version. A new config field or enum variant
+  # needs a minor one; Cargo.toml sets that under `cargo-semver-checks.lints`.
   semver:
     name: SemVer
     runs-on: ubuntu-latest

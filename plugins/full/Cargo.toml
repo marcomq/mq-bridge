@@ -2,7 +2,7 @@
 name = "mq-bridge-full-plugin"
 version.workspace = true
 edition = "2021"
-rust-version = "1.89"
+rust-version = "1.94.1"
 publish = false
 description = "Every built-in mq-bridge endpoint as one loadable plugin library, for hosts that embed mq-bridge without them"
 license = "MIT OR Apache-2.0"

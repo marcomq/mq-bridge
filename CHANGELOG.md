@@ -23,8 +23,8 @@ API was renamed or removed. What 1.0 adds is the promise, and what it leaves ope
   configuration or error enum, and raise the minimum Rust version. Write config structs
   with `..Default::default()` and give a `match` on these enums a `_` arm, and such a
   release compiles unchanged.
-- **Minimum Rust version:** 1.89 for the default features, 1.94.1 for `full` (declared
-  `rust-version` was 1.85, which the dependencies in the lock no longer build with).
+- **Minimum Rust version:** 1.94.1 (declared `rust-version` was 1.85, which the
+  dependencies in the lock no longer build with).
 
 ### Behaviour changes
 

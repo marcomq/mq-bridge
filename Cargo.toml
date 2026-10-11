@@ -3,7 +3,7 @@ name = "mq-bridge"
 version.workspace = true
 edition = "2021"
 authors = ["Marco Mengelkoch"]
-rust-version = "1.89"  # MSRV of the default features with the checked-in lock (uuid 1.27); `full` needs 1.94.1. CI job `msrv` tests both.
+rust-version = "1.94.1"  # What `full` needs with the checked-in lock; fast-uuid-v7 0.1.9 needs 1.94 on x86_64. CI job `msrv` tests it.
 description = "Embeddable async ETL and messaging library: brokers (Kafka, NATS, AMQP, MQTT), databases incl. Postgres/MongoDB CDC, Parquet on S3/GCS/Azure object storage, HTTP/gRPC."
 repository = "https://github.com/marcomq/mq-bridge"
 homepage = "https://marcomq.github.io/mq-bridge/"
@@ -16,6 +16,14 @@ categories = ["asynchronous", "network-programming", "database"]
 # `apps/` is a sibling product, not part of the library: cargo only auto-excludes
 # the app's member crates, so the UI, book and benches would ship in the tarball.
 exclude = ["tests/fixtures/grpc_dynamic.proto", "apps/", "docs/book/"]
+
+# A new config field or enum variant is a minor release, not a major one
+# (see "Stability" in the crate docs); the defaults call both major.
+[package.metadata.cargo-semver-checks.lints]
+constructible_struct_adds_field = { required-update = "minor" }
+enum_variant_added = { required-update = "minor" }
+enum_struct_variant_field_added = { required-update = "minor" }
+enum_tuple_variant_field_added = { required-update = "minor" }
 
 [lints]
 workspace = true
@@ -92,7 +100,7 @@ serde = { workspace = true, features = ["derive"] }
 anyhow.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util", "net", "signal"] }
 # Note on MSRV for optional features:
-# The base crate MSRV is 1.89 with the default features (uuid 1.27 in the lock requires it).
+# The crate MSRV is 1.94.1 (aws-*, sqlx 0.9; fast-uuid-v7 0.1.9 on x86_64); the features below need less.
 # - "amqp" (lapin 4.10) requires Rust 1.88+; "http" (hyper-rustls 0.27) requires Rust 1.85+.
 # - "websocket" (tokio-websockets 0.13) requires Rust 1.89+.
 # - "mongodb" (mongodb 3.8) requires Rust 1.88+; "nats" (async-nats 0.50) requires Rust 1.88+.
