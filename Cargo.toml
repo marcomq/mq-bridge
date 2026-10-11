@@ -56,6 +56,8 @@ unsafe_op_in_unsafe_fn = "warn"
 todo = "warn"
 dbg_macro = "warn"
 exit = "warn"
+# Edition 2024 asks for let chains here; rustfmt formats those only in the 2024 style.
+collapsible_if = "allow"
 
 [workspace.package]
 version = "1.0.0"

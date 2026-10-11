@@ -3333,14 +3333,13 @@ impl FileConsumer {
                     let created =
                         create_file_event_store(&config.path, delimiter.clone(), format).await?;
                     let mut stores = FILE_EVENT_STORES.lock().await;
-                    let store = stores
+                    stores
                         .get(&key)
                         .and_then(|w| w.upgrade())
                         .unwrap_or_else(|| {
                             stores.insert(key.clone(), Arc::downgrade(&created));
                             created
-                        });
-                    store
+                        })
                 };
 
                 let subscriber_id = format!("file-sub-{}", fast_uuid_v7::gen_id_str());

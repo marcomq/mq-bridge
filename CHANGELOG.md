@@ -12,12 +12,17 @@ its findings. Several change behaviour, so read "Behaviour changes" before upgra
 ### Upgrading from 0.4 (Rust API)
 
 No type, field, variant or path of the public API was renamed or removed, so code written
-against 0.4 compiles unchanged, with one exception: several configuration structs gained a
-field (among them `ObjectStoreConfig`, `PostgresCdcConfig`, `WebSocketConfig`,
-`KafkaConfig`, `FileConfig`, `CsvConfig` and `RedisStreamsConfig`). A struct literal that
-lists every field of one of them needs the new field or `..Default::default()`; one built
-with `::new(..)`, a builder or `..Default::default()` is not affected. What 1.0 adds is
-the promise, and what it leaves open:
+against 0.4 compiles unchanged, with two exceptions:
+
+- Several configuration structs gained a field (among them `ObjectStoreConfig`,
+  `PostgresCdcConfig`, `WebSocketConfig`, `KafkaConfig`, `FileConfig`, `CsvConfig` and
+  `RedisStreamsConfig`). A struct literal that lists every field of one of them needs the
+  new field or `..Default::default()`; one built with `::new(..)`, a builder or
+  `..Default::default()` is not affected.
+- `Middleware::Filter` holds a `FilterMiddleware` instead of a `String`. Code that builds
+  the variant adds `.into()`; code that matches it reads `filter.expression`.
+
+What 1.0 adds is the promise, and what it leaves open:
 
 - **Stable API:** the crate root and the modules `models`, `traits`, `errors`, `outcomes`,
   `extensions`, `plugin` (the SDK), `type_handler`, `publisher`, `route` and `checkpoint`.
