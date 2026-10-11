@@ -1790,6 +1790,7 @@ pub struct ObjectStoreConfig {
     /// buffered whole. Unset means no limit (the whole object is materialized).
     pub max_object_bytes: Option<u64>,
     /// (Source only) An object that cannot be decoded: `skip` it (default) or `fail` the route.
+    /// `skip` also stops the route while no object has been decoded yet.
     #[serde(default)]
     pub on_decode_error: DecodeErrorPolicy,
     /// (Sink only) Prepend a `YYYY/MM/DD/` path (write time, UTC) to each object key. Applies to

@@ -2715,7 +2715,7 @@
           "minimum": 0
         },
         "on_decode_error": {
-          "description": "(Source only) An object that cannot be decoded: `skip` it (default) or `fail` the route.",
+          "description": "(Source only) An object that cannot be decoded: `skip` it (default) or `fail` the route.\n`skip` also stops the route while no object has been decoded yet.",
           "$ref": "#/$defs/DecodeErrorPolicy",
           "default": "skip"
         },

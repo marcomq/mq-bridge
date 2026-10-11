@@ -281,6 +281,11 @@ fn authorization_value(config: &WebSocketConfig) -> Option<String> {
 async fn refuse_over_limit(mut stream: TcpStream, tls: bool) {
     if !tls {
         refuse(&mut stream, OVER_LIMIT).await;
+        // Closing with the request unread resets the connection, and the answer is lost.
+        let _ = stream.shutdown().await;
+        let mut request = [0u8; 1024];
+        let unread = async { while matches!(stream.read(&mut request).await, Ok(1..)) {} };
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(1), unread).await;
     }
 }
 
@@ -348,6 +353,12 @@ async fn authenticate(
 /// The acceptor of a listener with `tls.required`, built from its certificate and key.
 fn tls_acceptor(config: &WebSocketConfig) -> anyhow::Result<Option<TlsAcceptor>> {
     crate::support::tls_check::warn_listener_cert_unused("WebSocket listener", &config.tls);
+    if !config.tls.required
+        && authorization_value(config).is_some()
+        && !crate::support::tls_check::is_loopback(&config.url)
+    {
+        warn!("WebSocket listener has basic_auth but tls.required is off: clients send the credentials unencrypted.");
+    }
     if !config.tls.required {
         return Ok(None);
     }
@@ -484,10 +495,17 @@ impl WebSocketPublisher {
     }
 
     pub fn new(config: &WebSocketConfig) -> Self {
+        let authorization = authorization_value(config);
+        crate::support::tls_check::warn_plaintext_credentials(
+            "websocket",
+            &config.url,
+            authorization.is_some(),
+            config.url.starts_with("wss://"),
+        );
         Self {
             url: config.url.clone(),
             tls: config.tls.clone(),
-            authorization: authorization_value(config),
+            authorization,
             single_stream: tokio::sync::Mutex::new(None),
         }
     }

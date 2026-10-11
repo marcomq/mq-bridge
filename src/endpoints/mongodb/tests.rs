@@ -123,17 +123,25 @@ fn a_nack_without_a_checkpoint_replays_from_the_last_acknowledged_change() {
     let mut replay = super::readers::ReplayPoint::default();
     assert!(replay.take_replay().is_none(), "nothing was nacked");
 
-    replay.commit(0, Some(token("01")), true);
+    // The counter after "01": one change handed out at cluster time 7.
+    let mut after_01 = super::readers::OrdinalCounter::default();
+    after_01.next_in(7);
+    let mut after_03 = after_01;
+    after_03.next_in(7);
+    after_03.next_in(7);
+
+    replay.commit(0, Some((token("01"), after_01)), true);
     replay.commit(0, None, false);
     // Read before the nack was seen, acknowledged after it: must not move the position.
-    replay.commit(0, Some(token("03")), true);
-    assert_eq!(replay.take_replay(), Some(Some(token("01"))));
+    replay.commit(0, Some((token("03"), after_03)), true);
+    // The replayed changes of cluster time 7 go on at ordinal 1, as they did the first time.
+    assert_eq!(replay.take_replay(), Some((Some(token("01")), after_01)));
 
     // The same batch committing after the reopen belongs to the old stream.
-    replay.commit(0, Some(token("03")), true);
+    replay.commit(0, Some((token("03"), after_03)), true);
     replay.commit(1, None, false);
-    assert_eq!(replay.take_replay(), Some(Some(token("01"))));
-    replay.commit(2, Some(token("02")), true);
+    assert_eq!(replay.take_replay(), Some((Some(token("01")), after_01)));
+    replay.commit(2, Some((token("02"), after_03)), true);
     assert!(replay.take_replay().is_none());
 }
 

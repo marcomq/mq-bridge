@@ -263,11 +263,16 @@ All notable changes to `mq-bridge`. Newest first.
   `random_panic` there did nothing. The same holds for `start_route` of the MCP server.
 - **App: an unknown top-level key in the config file logs a warning** at start, such as
   `route:` for `routes:`. It was ignored without a word, and still is otherwise.
+- **`object_store`: a source under a path with `~` or `%` reads each object once.** The
+  resume key was encoded a second time, so the listing began at the top again and a drain
+  did not end. A Windows short path such as `RUNNER~1` was enough.
 
 ### Added
 
 - **`object_store`: `on_decode_error`.** `skip` (default) moves past an object that cannot
-  be decoded, `fail` stops the route there. URI: `?on_decode_error=fail`. Rust code that
+  be decoded once the source has decoded at least one object, and stops the route when the
+  first one fails. `fail` stops the route at every such object. URI:
+  `?on_decode_error=fail`. Rust code that
   builds `ObjectStoreConfig` with a struct literal needs the new field or
   `..Default::default()`.
 - **`http_bulk`: `read.cursor.end_when_missing`.** With `cursor.response`, a response

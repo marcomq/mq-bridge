@@ -21,7 +21,7 @@ Query parameters recognised as config fields for this connector. The object-type
 | `idempotency` | boolean | no | — | Deprecated: use `name_by`. true = `source_position`, false = `write_time`; ignored when `name_by` is set. |
 | `max_object_bytes` | integer | no | — | (Source only) Maximum size in bytes of a single object to fetch into memory. An object larger than this fails the read (surfaced as a consumer error) instead of being buffered whole. Unset means no limit (the whole object is materialized). |
 | `name_by` | `auto` \| `source_position` \| `write_time` | no | `auto` | (Sink only) `auto`, `write_time` (uuidv7 name) or `source_position` (name carries the source range). |
-| `on_decode_error` | `skip` \| `fail` | no | `skip` | (Source only) An object that cannot be decoded: `skip` it (default) or `fail` the route. |
+| `on_decode_error` | `skip` \| `fail` | no | `skip` | (Source only) An object that cannot be decoded: `skip` it (default) or `fail` the route. `skip` also stops the route while no object has been decoded yet. |
 | `polling_interval_ms` | integer | no | — | (Source only) Idle poll interval in milliseconds when no new objects are found. Defaults to 1000. |
 | `url` | string | yes | — | Object-store URL, e.g. `file:///var/lib/mqb/incoming`, `s3://bucket/prefix`, `gs://bucket/prefix`, or `az://account/container/prefix`. Credentials are resolved from the environment by the `object_store` crate (same mechanism as the checkpoint backend); R2 uses `s3://` plus a custom `AWS_ENDPOINT_URL`. |
 

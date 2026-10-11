@@ -411,45 +411,54 @@ pub(super) struct ReplayPoint {
     /// Bumped on every reopen; a batch read before it no longer moves `last_acked`.
     epoch: u64,
     last_acked: Option<ResumeToken>,
+    /// The ordinal counter right after `last_acked`, so replayed changes keep their ordinals.
+    ordinals: OrdinalCounter,
     nacked: bool,
 }
 
 impl ReplayPoint {
     /// Records the commit of a batch read in `epoch`: `acked` is its last acknowledged
-    /// token, `complete` whether every change was acknowledged.
-    pub(super) fn commit(&mut self, epoch: u64, acked: Option<ResumeToken>, complete: bool) {
+    /// token with the ordinal counter after it, `complete` whether every change was acknowledged.
+    pub(super) fn commit(
+        &mut self,
+        epoch: u64,
+        acked: Option<(ResumeToken, OrdinalCounter)>,
+        complete: bool,
+    ) {
         if epoch != self.epoch {
             return;
         }
         if !self.nacked {
-            if let Some(token) = acked {
+            if let Some((token, ordinals)) = acked {
                 self.last_acked = Some(token);
+                self.ordinals = ordinals;
             }
         }
         self.nacked |= !complete;
     }
 
-    /// After a nack: the token to reopen after (`None` if the server never gave one).
-    /// Starts a new epoch, so batches still in flight are ignored when they commit.
-    pub(super) fn take_replay(&mut self) -> Option<Option<ResumeToken>> {
+    /// After a nack: the token to reopen after (`None` if the server never gave one) and the
+    /// ordinal counter to go on with. Starts a new epoch, so batches still in flight are
+    /// ignored when they commit.
+    pub(super) fn take_replay(&mut self) -> Option<(Option<ResumeToken>, OrdinalCounter)> {
         if !self.nacked {
             return None;
         }
         self.nacked = false;
         self.epoch += 1;
-        Some(self.last_acked.clone())
+        Some((self.last_acked.clone(), self.ordinals))
     }
 }
 
 /// Hands out consecutive ordinals within a group, restarting at 0 when the group changes.
-#[derive(Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(super) struct OrdinalCounter {
     group: Option<u64>,
     next: u64,
 }
 
 impl OrdinalCounter {
-    fn next_in(&mut self, group: u64) -> u64 {
+    pub(super) fn next_in(&mut self, group: u64) -> u64 {
         if self.group != Some(group) {
             self.group = Some(group);
             self.next = 0;
@@ -782,7 +791,7 @@ impl MongoDbChangeStreamReader {
         if self.checkpoint.is_some() {
             return Ok(false);
         }
-        let Some(token) = self.replay.lock().unwrap().take_replay() else {
+        let Some((token, ordinals)) = self.replay.lock().unwrap().take_replay() else {
             return Ok(false);
         };
         let Some(token) = token else {
@@ -792,6 +801,7 @@ impl MongoDbChangeStreamReader {
         *stream = open_change_stream(&self.collection, &self.pipeline, Some(token))
             .await
             .map_err(ConsumerError::Connection)?;
+        *self.cdc_ordinals.lock().unwrap() = ordinals;
         tracing::debug!(collection = %self.collection_name, "Reopened the MongoDB change stream after a nack");
         Ok(true)
     }
@@ -977,8 +987,9 @@ impl MessageConsumer for MongoDbChangeStreamReader {
 
         let mut messages = Vec::new();
         // Per-message resume token: resuming `after` the last acked event's token gives
-        // at-least-once (un-acked events are re-delivered on restart).
-        let mut tokens: Vec<ResumeToken> = Vec::new();
+        // at-least-once (un-acked events are re-delivered on restart). The ordinal counter
+        // after the event goes with it, for a replay after a nack.
+        let mut tokens: Vec<(ResumeToken, OrdinalCounter)> = Vec::new();
 
         // Block for the first change (the route cancels this future on shutdown), then coalesce any
         // immediately-available events into the batch with a short timeout. While idle, periodically
@@ -1018,7 +1029,7 @@ impl MessageConsumer for MongoDbChangeStreamReader {
                         &self.cdc_ordinals,
                     ) {
                         messages.push(msg);
-                        tokens.push(token);
+                        tokens.push((token, *self.cdc_ordinals.lock().unwrap()));
                     }
                     if !messages.is_empty() {
                         break;
@@ -1058,7 +1069,7 @@ impl MessageConsumer for MongoDbChangeStreamReader {
                         &self.cdc_ordinals,
                     ) {
                         messages.push(msg);
-                        tokens.push(token);
+                        tokens.push((token, *self.cdc_ordinals.lock().unwrap()));
                     }
                 }
                 Ok(Err(e)) => return Err(ConsumerError::Connection(e.into())),
@@ -1097,7 +1108,7 @@ impl MessageConsumer for MongoDbChangeStreamReader {
                 let prior_gap = !refresh_clean.load(Ordering::Acquire);
                 if acked > 0 && !prior_gap {
                     if let Some(cp) = checkpoint {
-                        match encode_resume_token(&tokens[acked - 1]) {
+                        match encode_resume_token(&tokens[acked - 1].0) {
                             Ok(s) => {
                                 if let Err(e) = cp.save(&s).await {
                                     tracing::warn!(error = %e, "Failed to persist mongo resume token. Changes may be reprocessed on restart.");

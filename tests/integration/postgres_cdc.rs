@@ -188,9 +188,9 @@ pub async fn test_postgres_cdc_key_change() {
     setup_logging();
     run_test_with_docker(COMPOSE, || async {
         for split in [false, true] {
-            let slot = "mqb_cdc_key_change_slot";
-            reset_schema(slot).await;
-            let mut config = cfg(slot);
+            let slot = format!("mqb_cdc_key_change_slot_{split}");
+            reset_schema(&slot).await;
+            let mut config = cfg(&slot);
             config.split_key_change = split;
             let mut consumer = PostgresCdcConsumer::new(&config)
                 .await
@@ -232,6 +232,7 @@ pub async fn test_postgres_cdc_key_change() {
             }
             expected.push(("update", "[2]", "[1]"));
             assert_eq!(seen, expected, "split_key_change: {split}");
+            consumer.close().await.expect("clean close");
         }
     })
     .await;

@@ -991,9 +991,11 @@ impl ObjectStoreConsumer {
             _ if self.single_object == Some(true) => {
                 futures::stream::once(self.store.head(&self.base)).boxed()
             }
-            Some(k) => self
-                .store
-                .list_with_offset(Some(&self.base), &ObjPath::from(k)),
+            // `parse` keeps a listed key as it is; `from` would encode a `~` or `%` in it again.
+            Some(k) => self.store.list_with_offset(
+                Some(&self.base),
+                &ObjPath::parse(k).unwrap_or_else(|_| ObjPath::from(k)),
+            ),
             None => self.store.list(Some(&self.base)),
         };
         if let Some(meta) = exact {
@@ -2935,15 +2937,18 @@ mod tests {
     /// Reads `objects` one-record files through a draining route and returns what arrived.
     async fn drain_through_a_route(objects: usize, empty_object: bool) -> usize {
         use crate::models::{Endpoint, EndpointType};
-        let dir = tempfile::tempdir().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        // `~` as in a Windows short path: a key has to come back from the listing unchanged.
+        let dir = temp.path().join("drain~1");
+        std::fs::create_dir(&dir).unwrap();
         for i in 0..objects {
-            std::fs::write(dir.path().join(format!("part-{i}.jsonl")), format!("{i}\n")).unwrap();
+            std::fs::write(dir.join(format!("part-{i}.jsonl")), format!("{i}\n")).unwrap();
         }
         if empty_object {
-            std::fs::write(dir.path().join("part-2x.jsonl"), "").unwrap();
+            std::fs::write(dir.join("part-2x.jsonl"), "").unwrap();
         }
         let config: ObjectStoreConfig = serde_json::from_value(serde_json::json!({
-            "url": url::Url::from_directory_path(dir.path()).unwrap().to_string(),
+            "url": url::Url::from_directory_path(&dir).unwrap().to_string(),
             "format": "raw",
         }))
         .unwrap();
