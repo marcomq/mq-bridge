@@ -625,6 +625,19 @@ existing regular file fails there with "Failed to create part-file sink director
 
 `compression` and `encryption` work as usual.
 
+**Durability of the `file` sink.** By default the sink flushes each batch to the operating
+system and does not call `fsync`, so a power loss can lose batches that were already
+acknowledged. `fsync: batch` syncs the file before each batch is acknowledged; this costs one
+disk sync per batch. `fsync: periodic` syncs in the background every `fsync_interval_ms`
+(default 1000) and bounds the loss to that interval at almost no cost in throughput.
+
+**`delete: true` needs a single writer.** Acknowledged records are removed by rewriting the
+file and renaming the copy into place. Lines that another process appends during that
+rewrite are lost. Use it only when the file is complete, or written by an mq-bridge `file`
+sink in the same process. A final record without its delimiter is held back until it has
+been unchanged for 100 ms, so a line that is still being written is not delivered in part.
+In a CSV file the header line stays in the file.
+
 Current limits, all of which the sink rejects or logs rather than silently mishandling:
 
 *   No `csv` (each part would need its own header row).

@@ -3704,3 +3704,138 @@ fn copy_infers_compression_from_the_file_extension() {
         "{\"id\":1}\n{\"id\":2}\n"
     );
 }
+
+/// A self-signed certificate for 127.0.0.1, as (certificate, key). It is its own CA.
+#[cfg(unix)]
+fn localhost_certificate(dir: &TestDir, name: &str) -> (PathBuf, PathBuf) {
+    let generated = rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_string()])
+        .expect("generate a certificate");
+    let cert = dir.path().join(format!("{name}.pem"));
+    let key = dir.path().join(format!("{name}.key"));
+    std::fs::write(&cert, generated.cert.pem()).expect("write certificate");
+    std::fs::write(&key, generated.signing_key.serialize_pem()).expect("write key");
+    (cert, key)
+}
+
+/// The `tls={...}` URI parameter for the given fields.
+#[cfg(unix)]
+fn tls_parameter(fields: &[(&str, &Path)]) -> String {
+    let fields: BTreeMap<&str, String> = fields
+        .iter()
+        .map(|(name, path)| (*name, path.display().to_string()))
+        .collect();
+    format!("tls={}", serde_json::to_string(&fields).expect("tls json"))
+}
+
+/// A `copy` that listens on a WebSocket address and writes what arrives to `destination`.
+#[cfg(unix)]
+fn websocket_listener(dir: &TestDir, from: &str, destination: &Path) -> (ContinuousCopy, u16) {
+    let port = TcpListener::bind("127.0.0.1:0")
+        .and_then(|listener| listener.local_addr())
+        .expect("pick a free port")
+        .port();
+    let from = from.replace("{port}", &port.to_string());
+    let copy = ContinuousCopy::start(dir, "listener", &from, &raw_uri(destination));
+    wait_until("the WebSocket listener to accept connections", || {
+        TcpStream::connect(("127.0.0.1", port)).is_ok()
+    });
+    (copy, port)
+}
+
+/// `wss://` on both sides of the command line has to mean TLS: the listener serves
+/// its certificate, and a client is let in only when it speaks TLS and trusts it.
+#[cfg(unix)]
+#[test]
+fn a_wss_listener_takes_only_tls_clients_that_trust_its_certificate() {
+    let dir = TestDir::new();
+    let (cert, key) = localhost_certificate(&dir, "server");
+    let destination = dir.path().join("received.jsonl");
+    let rows = numbered_rows(5);
+    let source = raw_uri(seed_rows(&dir, "rows.jsonl", &rows));
+
+    let listener_tls = tls_parameter(&[("cert_file", &cert), ("key_file", &key)]);
+    let (listener, port) = websocket_listener(
+        &dir,
+        &format!("wss://127.0.0.1:{{port}}?{listener_tls}"),
+        &destination,
+    );
+
+    let plain = copy(&source, &format!("ws://127.0.0.1:{port}"));
+    assert!(
+        !plain.status.success(),
+        "a ws:// client reached a TLS listener: {}",
+        logged(&plain)
+    );
+    let untrusting = copy(&source, &format!("wss://127.0.0.1:{port}"));
+    assert!(
+        !untrusting.status.success(),
+        "a client accepted a certificate it has no CA for: {}",
+        logged(&untrusting)
+    );
+    assert!(
+        read_rows(&destination).is_empty(),
+        "a refused client delivered rows"
+    );
+
+    let client_tls = tls_parameter(&[("ca_file", &cert)]);
+    let trusting = copy(&source, &format!("wss://127.0.0.1:{port}?{client_tls}"));
+    assert_success(&trusting, "wss copy with the listener's CA");
+    wait_for_rows(&destination, rows.len());
+    listener.stop();
+    assert_rows_eq(
+        &sorted(&read_rows(&destination)),
+        &sorted(&rows),
+        "wss copy",
+    );
+}
+
+/// With `tls.ca_file` the listener asks for a client certificate, so a client that
+/// trusts the server but presents none is turned away.
+#[cfg(unix)]
+#[test]
+fn a_wss_listener_with_a_ca_file_takes_only_clients_with_a_certificate() {
+    let dir = TestDir::new();
+    let (cert, key) = localhost_certificate(&dir, "server");
+    let (client_cert, client_key) = localhost_certificate(&dir, "client");
+    let destination = dir.path().join("received.jsonl");
+    let rows = numbered_rows(5);
+    let source = raw_uri(seed_rows(&dir, "rows.jsonl", &rows));
+
+    let listener_tls = tls_parameter(&[
+        ("cert_file", &cert),
+        ("key_file", &key),
+        ("ca_file", &client_cert),
+    ]);
+    let (listener, port) = websocket_listener(
+        &dir,
+        &format!("wss://127.0.0.1:{{port}}?{listener_tls}"),
+        &destination,
+    );
+
+    let anonymous_tls = tls_parameter(&[("ca_file", &cert)]);
+    let anonymous = copy(&source, &format!("wss://127.0.0.1:{port}?{anonymous_tls}"));
+    assert!(
+        !anonymous.status.success(),
+        "a client without a certificate passed mutual TLS: {}",
+        logged(&anonymous)
+    );
+    assert!(
+        read_rows(&destination).is_empty(),
+        "a refused client delivered rows"
+    );
+
+    let known_tls = tls_parameter(&[
+        ("ca_file", &cert),
+        ("cert_file", &client_cert),
+        ("key_file", &client_key),
+    ]);
+    let known = copy(&source, &format!("wss://127.0.0.1:{port}?{known_tls}"));
+    assert_success(&known, "wss copy with a client certificate");
+    wait_for_rows(&destination, rows.len());
+    listener.stop();
+    assert_rows_eq(
+        &sorted(&read_rows(&destination)),
+        &sorted(&rows),
+        "mutual TLS copy",
+    );
+}

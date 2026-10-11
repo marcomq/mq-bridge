@@ -4,7 +4,7 @@
 //  git clone https://github.com/marcomq/mq-bridge
 use crate::canonical_message::{deserialize_u128, tracing_support::LazyMessageIds};
 use crate::event_store::{EventStore, EventStoreConsumer, RetentionPolicy};
-use crate::models::{Compression, FileConfig, FileConsumerMode, FileFormat, NameBy};
+use crate::models::{Compression, FileConfig, FileConsumerMode, FileFormat, FileFsync, NameBy};
 #[cfg(feature = "encryption")]
 use crate::support::crypto::Crypto;
 use crate::support::source_ranges::{finalized_name, CoveredRanges};
@@ -36,11 +36,25 @@ pub(crate) use csv_dialect::{CsvDialect, CsvSyntax};
 static FILE_LOCKS: Lazy<StdMutex<HashMap<String, Arc<Mutex<()>>>>> =
     Lazy::new(|| StdMutex::new(HashMap::new()));
 
+/// One key per file however the path is spelled; the file itself may not exist yet.
+fn file_lock_key(path: &str) -> String {
+    let p = Path::new(path);
+    let resolved = std::fs::canonicalize(p).ok().or_else(|| {
+        let parent = p.parent().filter(|d| !d.as_os_str().is_empty());
+        let parent = std::fs::canonicalize(parent.unwrap_or(Path::new("."))).ok()?;
+        Some(parent.join(p.file_name()?))
+    });
+    match resolved {
+        Some(resolved) => resolved.to_string_lossy().into_owned(),
+        None => path.to_string(),
+    }
+}
+
 fn get_file_lock(path: &str) -> Arc<Mutex<()>> {
-    let mut locks = FILE_LOCKS.lock().unwrap();
+    let mut locks = FILE_LOCKS.lock().unwrap_or_else(|e| e.into_inner());
     locks.retain(|_, v| Arc::strong_count(v) > 1);
     locks
-        .entry(path.to_string())
+        .entry(file_lock_key(path))
         .or_insert_with(|| Arc::new(Mutex::new(())))
         .clone()
 }
@@ -498,6 +512,38 @@ fn csv_encode_message(
 
     // Configured `columns` are a projection: keys outside them are dropped on purpose.
     let has_extra_keys = !flattened && csv.columns.is_none() && row.len() > matched;
+    if csv.strict {
+        // A flattened row hides its key count, so its columns are compared by name.
+        let uncovered = || {
+            csv_columns(&msg.payload, csv.flatten)
+                .unwrap_or_else(|| row.sorted_keys())
+                .into_iter()
+                .find(|key| {
+                    !cols.iter().any(|col| {
+                        key == col
+                            || key
+                                .strip_prefix(col.as_str())
+                                .is_some_and(|rest| rest.starts_with('.'))
+                    })
+                })
+        };
+        let extra = if csv.columns.is_some() {
+            None
+        } else {
+            uncovered()
+        };
+        if matched < cols.len() || extra.is_some() {
+            return Err(invalid_data(match extra {
+                Some(key) => format!(
+                    "CSV payload has key '{key}', which is not a column (`on_mismatch: fail`)"
+                ),
+                None => format!(
+                    "CSV payload supplies {matched} of {} columns (`on_mismatch: fail`)",
+                    cols.len()
+                ),
+            }));
+        }
+    }
     if new_cols.is_none() && (matched < cols.len() || has_extra_keys) {
         // Keys the payload has beyond the ones the header covers are dropped silently, and
         // missing ones become empty fields; both mean the file's schema drifted. Logged
@@ -1023,6 +1069,37 @@ pub struct FilePublisher {
     /// CSV column order, locked in by the first message written. Shared across
     /// clones of this publisher so all writers to the same file agree on it.
     csv_header: Arc<Mutex<Option<Vec<String>>>>,
+    fsync: FsyncPolicy,
+}
+
+/// How the appending sink syncs; part files under `source_position` always sync.
+#[derive(Clone)]
+enum FsyncPolicy {
+    Off,
+    Batch,
+    /// Set after a write, cleared by the background sync.
+    Periodic(Arc<AtomicBool>),
+}
+
+async fn sync_path(path: &str) -> std::io::Result<()> {
+    let file = OpenOptions::new().append(true).open(path).await?;
+    file.sync_data().await
+}
+
+/// Syncs `path` every `interval` while it has unsynced writes; ends with the last publisher.
+fn spawn_periodic_sync(path: String, interval: Duration, dirty: Weak<AtomicBool>) {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(interval).await;
+            let Some(dirty) = dirty.upgrade() else { break };
+            if dirty.swap(false, Ordering::AcqRel) {
+                if let Err(e) = sync_path(&path).await {
+                    warn!(path = %path, error = %e, "Periodic fsync of file sink failed");
+                    dirty.store(true, Ordering::Release);
+                }
+            }
+        }
+    });
 }
 
 /// Validates the `format`/`compression`/`encryption` settings shared by the file
@@ -1121,22 +1198,20 @@ async fn write_finalized_file(path: &Path, body: &[u8]) -> Result<(), PublisherE
 
 impl FilePublisher {
     /// Columns of the header an existing CSV file already has, so appended rows line up
-    /// with it. `None` when it has none or it can't be read; the first payload's keys
-    /// then decide, as for a new file.
-    async fn existing_csv_header(&self) -> Option<Vec<String>> {
+    /// with it. `None` when it has none. A header that cannot be read fails the write:
+    /// guessing the columns from the first payload could append rows that do not match it.
+    async fn existing_csv_header(&self) -> Result<Option<Vec<String>>, PublisherError> {
         let this = self.clone();
         let read = tokio::task::spawn_blocking(move || this.read_csv_header_sync()).await;
-        match read {
-            Ok(Ok(columns)) => columns,
-            Ok(Err(e)) => {
-                warn!(path = %self.path, error = %e, "Could not read the existing CSV header; columns follow the first payload.");
-                None
-            }
-            Err(e) => {
-                warn!(path = %self.path, error = %e, "Reading the existing CSV header failed; columns follow the first payload.");
-                None
-            }
-        }
+        let error: anyhow::Error = match read {
+            Ok(Ok(columns)) => return Ok(columns),
+            Ok(Err(e)) => e.into(),
+            Err(e) => e.into(),
+        };
+        Err(PublisherError::Retryable(error.context(format!(
+            "Could not read the CSV header of '{}'",
+            self.path
+        ))))
     }
 
     fn read_csv_header_sync(&self) -> std::io::Result<Option<Vec<String>>> {
@@ -1275,8 +1350,27 @@ impl FilePublisher {
         } else {
             CoveredRanges::default()
         };
+        let fsync = match config.fsync {
+            FileFsync::Off => FsyncPolicy::Off,
+            FileFsync::Batch => FsyncPolicy::Batch,
+            FileFsync::Periodic => {
+                let interval = Duration::from_millis(config.fsync_interval_ms.unwrap_or(1000));
+                if interval.is_zero() {
+                    return Err(crate::errors::InvalidConfig(anyhow::anyhow!(
+                        "file 'fsync_interval_ms' must be greater than 0; use 'fsync: batch' to sync every batch"
+                    ))
+                    .into());
+                }
+                let dirty = Arc::new(AtomicBool::new(false));
+                if !by_source_position {
+                    spawn_periodic_sync(path_str.to_string(), interval, Arc::downgrade(&dirty));
+                }
+                FsyncPolicy::Periodic(dirty)
+            }
+        };
         info!(path = %path_str, format = ?format, "File sink opened for appending");
         Ok(Self {
+            fsync,
             path: path_str.to_string(),
             file_lock,
             delimiter,
@@ -1296,6 +1390,18 @@ impl FilePublisher {
             csv_header: Arc::new(Mutex::new(None)),
             csv,
         })
+    }
+
+    /// Applies the `fsync` setting to a batch that was just written and flushed.
+    async fn sync_written(&self, file: &File) -> std::io::Result<()> {
+        match &self.fsync {
+            FsyncPolicy::Off => Ok(()),
+            FsyncPolicy::Batch => file.sync_data().await,
+            FsyncPolicy::Periodic(dirty) => {
+                dirty.store(true, Ordering::Release);
+                Ok(())
+            }
+        }
     }
 
     /// Unlike the `object_store` sink, an encode failure here fails the whole batch rather than
@@ -1440,7 +1546,7 @@ impl FilePublisher {
         };
         if let Some(hdr) = csv_header_guard.as_mut() {
             if hdr.is_none() && !file_is_empty && self.csv.reads_header_back() {
-                **hdr = self.existing_csv_header().await;
+                **hdr = self.existing_csv_header().await?;
             }
         }
         let mut wrote_csv_header = false;
@@ -1545,6 +1651,21 @@ impl FilePublisher {
                         anyhow::Error::new(e).context("Failed to flush file"),
                     ));
                 }
+                if let Err(e) = self.sync_written(&file).await {
+                    if let Err(te) = file.set_len(pre_len).await {
+                        tracing::error!(
+                            "Failed to truncate file back to {} after member sync error: {}",
+                            pre_len,
+                            te
+                        );
+                        return Err(PublisherError::NonRetryable(anyhow::Error::new(e).context(
+                        "Failed to sync member to file and could not truncate the partial write",
+                    )));
+                    }
+                    return Err(PublisherError::Retryable(
+                        anyhow::Error::new(e).context("Failed to sync file"),
+                    ));
+                }
                 Ok(())
             }
             .await;
@@ -1640,7 +1761,7 @@ impl MessagePublisher for FilePublisher {
         };
         if let Some(hdr) = csv_header_guard.as_mut() {
             if hdr.is_none() && pre_len.is_some_and(|len| len > 0) {
-                **hdr = self.existing_csv_header().await;
+                **hdr = self.existing_csv_header().await?;
             }
         }
         // Row buffer reused for every CSV record in this batch.
@@ -1752,10 +1873,27 @@ impl MessagePublisher for FilePublisher {
                 anyhow::Error::new(e).context("Failed to flush file writer"),
             ));
         }
+        if let Err(e) = self.sync_written(writer.get_ref()).await {
+            roll_back_partial_batch(
+                &writer,
+                pre_len,
+                wrote_csv_header,
+                csv_header_guard.as_mut(),
+            )
+            .await;
+            return Err(PublisherError::Retryable(
+                anyhow::Error::new(e).context("Failed to sync file"),
+            ));
+        }
         Ok(SentBatch::from_failures(failed_messages))
     }
 
     async fn flush(&self) -> anyhow::Result<()> {
+        if let FsyncPolicy::Periodic(dirty) = &self.fsync {
+            if dirty.swap(false, Ordering::AcqRel) {
+                sync_path(&self.path).await?;
+            }
+        }
         Ok(())
     }
 
@@ -1822,13 +1960,9 @@ async fn create_file_event_store(
                 // Serialize file operations to prevent race conditions between multiple GCs
                 let _guard = file_op_lock.lock().await;
 
-                {
-                    let mut s = state.lock().await;
-                    s.lines_in_memory = s.lines_in_memory.saturating_sub(count);
-                }
-
                 if let Err(e) = remove_lines_from_file(
                     &path,
+                    0,
                     count,
                     &delimiter,
                     &format,
@@ -1836,10 +1970,12 @@ async fn create_file_event_store(
                 )
                 .await
                 {
+                    // The lines stay counted, so this run skips them; a restart reads
+                    // them again.
                     tracing::error!("Failed to remove lines from file {}: {}", path, e);
-                    // Note: In this simplified model, if deletion fails, lines_in_memory
-                    // might become out of sync, leading to reprocessing on restart.
                 } else {
+                    let mut s = state.lock().await;
+                    s.lines_in_memory = s.lines_in_memory.saturating_sub(count);
                     trace!("Removed {} lines from {}", count, path);
                 }
             });
@@ -1858,6 +1994,7 @@ async fn create_file_event_store(
         const MAX_SLEEP: std::time::Duration = std::time::Duration::from_millis(100);
         // CSV is not supported in this backend (Subscribe + delete); see FileConsumer::new.
         let mut csv_header: Option<CsvHeader> = None;
+        let mut held_partial = None;
 
         loop {
             // Check if the store is still alive
@@ -1926,6 +2063,7 @@ async fn create_file_event_store(
             let mut reader = BufReader::new(file);
             let mut lines_read = 0;
             let mut batch = Vec::with_capacity(128);
+            let mut pending_partial = false;
 
             loop {
                 let mut buffer = Vec::new();
@@ -1939,6 +2077,13 @@ async fn create_file_event_store(
                 .await
                 {
                     Ok(0) => break,
+                    Ok(_)
+                        if !buffer.ends_with(&delimiter)
+                            && !partial_record_settled(&mut held_partial, buffer.len()) =>
+                    {
+                        pending_partial = true;
+                        break;
+                    }
                     Ok(_) => {
                         if buffer.ends_with(&delimiter) {
                             buffer.truncate(buffer.len() - delimiter.len());
@@ -1969,6 +2114,9 @@ async fn create_file_event_store(
             if !batch.is_empty() {
                 store_clone.append_batch(batch).await;
             }
+            if !pending_partial {
+                held_partial = None;
+            }
 
             drop(state); // Release lock before sleeping
 
@@ -1985,10 +2133,27 @@ async fn create_file_event_store(
     Ok(store)
 }
 
-/// Drops the first `count` *records* from `path`. `format` matters: a CSV record can span
-/// several delimiters, and consuming the wrong number of them would corrupt the remainder.
+/// How long a final record without its delimiter must stay unchanged before a delete-mode
+/// reader takes it for complete rather than for a write in progress.
+const PARTIAL_RECORD_HOLD: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Whether an unterminated final record of `len` bytes has been unchanged long enough.
+fn partial_record_settled(held: &mut Option<(usize, std::time::Instant)>, len: usize) -> bool {
+    match held {
+        Some((seen, since)) if *seen == len => since.elapsed() >= PARTIAL_RECORD_HOLD,
+        _ => {
+            *held = Some((len, std::time::Instant::now()));
+            false
+        }
+    }
+}
+
+/// Drops `count` *records* from `path`, behind the first `keep` (a CSV header). `format`
+/// matters: a CSV record can span several delimiters, and consuming the wrong number of
+/// them would corrupt the remainder.
 async fn remove_lines_from_file(
     path: &str,
+    keep: usize,
     count: usize,
     delimiter: &[u8],
     format: &FileFormat,
@@ -2002,9 +2167,20 @@ async fn remove_lines_from_file(
     let temp_file = File::create(&temp_path).await?;
     let mut writer = BufWriter::new(temp_file);
 
+    let mut buf = Vec::new();
+    for _ in 0..keep {
+        buf.clear();
+        if read_record(&mut reader, delimiter, format, csv, &mut buf).await? == 0 {
+            break;
+        }
+        if let Err(e) = writer.write_all(&buf).await {
+            let _ = fs::remove_file(&temp_path).await;
+            return Err(e.into());
+        }
+    }
     let mut lines_skipped = 0;
     while lines_skipped < count {
-        let mut buf = Vec::new();
+        buf.clear();
         if read_record(&mut reader, delimiter, format, csv, &mut buf).await? == 0 {
             break;
         }
@@ -2215,6 +2391,10 @@ fn run_file_tail_task_sync(
                 Ok(f) => f,
                 Err(e) => {
                     tracing::error!("Failed to open {}: {}", path, e);
+                    // The consumer is gone: stop instead of polling for the file forever.
+                    if msg_tx.is_closed() {
+                        return;
+                    }
                     std::thread::sleep(std::time::Duration::from_secs(1));
                     continue;
                 }
@@ -2366,7 +2546,7 @@ fn run_file_tail_task_sync(
 
         if let Some(reason) = fatal {
             tracing::error!("{reason}; closing stream");
-            *fatal_error_slot.lock().unwrap() = Some(reason);
+            *fatal_error_slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(reason);
             break;
         }
 
@@ -2400,6 +2580,8 @@ struct FileQueueConsumer {
     msg_rx: async_channel::Receiver<Vec<CanonicalMessage>>,
     lines_in_memory: Arc<AtomicUsize>,
     extra_lines: ExtraLines,
+    /// 1 once a CSV header was read: it stays at the front of the file for a restart.
+    kept_header: Arc<AtomicUsize>,
     path: String,
     file_lock: Arc<Mutex<()>>,
     buffer: Arc<Mutex<Vec<CanonicalMessage>>>,
@@ -2425,6 +2607,7 @@ fn run_file_queue_task(
     csv: CsvDialect,
     ready: Arc<AtomicBool>,
     extra_lines: ExtraLines,
+    kept_header: Arc<AtomicUsize>,
 ) {
     let mut current_sleep = std::time::Duration::from_millis(1);
     const MAX_SLEEP: std::time::Duration = std::time::Duration::from_millis(100);
@@ -2433,21 +2616,28 @@ fn run_file_queue_task(
     let mut signaled_eof = false;
     let mut buf = Vec::new();
     let mut csv_header = matches!(format, FileFormat::Csv).then(|| CsvHeader::unread(csv.clone()));
+    let mut held_partial = None;
 
     loop {
         buf.clear();
         let mut batch = Vec::with_capacity(128);
         let mut lines_read = 0;
         let mut blanks = 0;
+        let mut pending_partial = false;
 
         {
             let _guard = runtime_handle.block_on(file_lock.lock());
             let skip_count = lines_in_memory.load(Ordering::SeqCst);
+            let kept = kept_header.load(Ordering::SeqCst);
 
             let file = match std::fs::OpenOptions::new().read(true).open(&path) {
                 Ok(f) => f,
                 Err(e) => {
                     tracing::error!("Failed to open {}: {}", path, e);
+                    // The consumer is gone: stop instead of polling for the file forever.
+                    if msg_tx.is_closed() {
+                        return;
+                    }
                     drop(_guard);
                     std::thread::sleep(std::time::Duration::from_secs(1));
                     continue;
@@ -2458,7 +2648,7 @@ fn run_file_queue_task(
             let mut skipped = 0;
             let mut error = false;
 
-            while skipped < skip_count {
+            while skipped < kept + skip_count {
                 buf.clear();
                 match read_record_sync(&mut reader, &delimiter, &format, &csv, &mut buf) {
                     Ok(0) => break,
@@ -2478,6 +2668,13 @@ fn run_file_queue_task(
                     buf.clear();
                     match read_record_sync(&mut reader, &delimiter, &format, &csv, &mut buf) {
                         Ok(0) => break,
+                        Ok(_)
+                            if !buf.ends_with(&delimiter)
+                                && !partial_record_settled(&mut held_partial, buf.len()) =>
+                        {
+                            pending_partial = true;
+                            break;
+                        }
                         Ok(_) => {
                             if buf.ends_with(&delimiter) {
                                 buf.truncate(buf.len() - delimiter.len());
@@ -2498,14 +2695,18 @@ fn run_file_queue_task(
                                     blanks = 0;
                                     batch.push(msg);
                                 }
-                                // A header or blank line at the file's front: nothing unacked
-                                // precedes it, so remove it now, outside the line accounting.
+                                // The CSV header stays in the file: a restart names the
+                                // columns by it.
+                                None if !buf.is_empty() => kept_header.store(1, Ordering::SeqCst),
+                                // A blank line at the front: nothing unacked precedes it, so
+                                // remove it now, outside the line accounting.
                                 None if skip_count == 0 && lines_read == 0 && blanks == 0 => {
+                                    let keep = kept_header.load(Ordering::SeqCst);
                                     if let Err(e) = runtime_handle.block_on(remove_lines_from_file(
-                                        &path, 1, &delimiter, &format, &csv,
+                                        &path, keep, 1, &delimiter, &format, &csv,
                                     )) {
                                         tracing::error!(
-                                            "Failed to remove CSV header line from {}: {}",
+                                            "Failed to remove blank line from {}: {}",
                                             path,
                                             e
                                         );
@@ -2525,6 +2726,9 @@ fn run_file_queue_task(
                 }
             }
         }
+        if !pending_partial {
+            held_partial = None;
+        }
 
         if lines_read > 0 {
             lines_in_memory.fetch_add(lines_read, Ordering::SeqCst);
@@ -2533,6 +2737,9 @@ fn run_file_queue_task(
             }
             current_sleep = std::time::Duration::from_millis(1);
             signaled_eof = false; // data flowed; re-arm the EOF marker
+        } else if pending_partial {
+            // Not the end of the file yet: no EOF marker while a record is held back.
+            std::thread::sleep(PARTIAL_RECORD_HOLD / 4);
         } else {
             // EOF: emit an empty batch once so a drained route can pause or,
             // with exit_on_empty, terminate. Re-armed when new data arrives.
@@ -2589,6 +2796,10 @@ fn run_file_member_consume_task_sync<F>(
     let mut buf = Vec::new();
     let mut decode_failures: u32 = 0;
     let mut failure_len: u64 = u64::MAX;
+    // Kept across passes: the header is read once, later passes skip past it.
+    let mut csv_header = matches!(format, FileFormat::Csv).then(|| CsvHeader::unread(csv.clone()));
+    // A final record without its delimiter, and since when the file has not grown past it.
+    let mut held_tail: Option<std::time::Instant> = None;
 
     loop {
         let cur_len = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
@@ -2607,25 +2818,43 @@ fn run_file_member_consume_task_sync<F>(
             decode_failures = 0;
             failure_len = u64::MAX;
             signaled_eof = false;
+            csv_header = matches!(format, FileFormat::Csv).then(|| CsvHeader::unread(csv.clone()));
         }
 
         // No growth since the last full pass: emit the drain marker once, then poll.
-        if initialized && cur_len == last_len {
-            if !signaled_eof {
-                if msg_tx.send_blocking(Vec::new()).is_err() {
-                    break;
+        let emit_tail = if initialized && cur_len == last_len {
+            match held_tail {
+                // The unterminated last record did not grow: it is the last record.
+                Some(since) if since.elapsed() >= PARTIAL_RECORD_HOLD => true,
+                Some(_) => {
+                    std::thread::sleep(PARTIAL_RECORD_HOLD / 4);
+                    continue;
                 }
-                signaled_eof = true;
+                None => {
+                    if !signaled_eof {
+                        if msg_tx.send_blocking(Vec::new()).is_err() {
+                            break;
+                        }
+                        signaled_eof = true;
+                    }
+                    std::thread::sleep(current_sleep);
+                    current_sleep = std::cmp::min(current_sleep * 2, MAX_SLEEP);
+                    continue;
+                }
             }
-            std::thread::sleep(current_sleep);
-            current_sleep = std::cmp::min(current_sleep * 2, MAX_SLEEP);
-            continue;
-        }
+        } else {
+            held_tail = None;
+            false
+        };
 
         let file = match std::fs::File::open(&path) {
             Ok(f) => f,
             Err(e) => {
                 tracing::error!("Failed to open {}: {}", path, e);
+                // The consumer is gone: stop instead of polling for the file forever.
+                if msg_tx.is_closed() {
+                    return;
+                }
                 std::thread::sleep(std::time::Duration::from_secs(1));
                 continue;
             }
@@ -2633,8 +2862,6 @@ fn run_file_member_consume_task_sync<F>(
         let mut reader = std::io::BufReader::new(make_reader(file));
 
         // Skip records emitted on a previous pass (file re-read from the start).
-        let mut csv_header =
-            matches!(format, FileFormat::Csv).then(|| CsvHeader::unread(csv.clone()));
         let mut skipped = 0;
         let mut decode_error = false;
         while skipped < records_emitted {
@@ -2673,18 +2900,21 @@ fn run_file_member_consume_task_sync<F>(
 
         let mut new_count = 0;
         let mut read_error = false;
+        let mut tail_pending = false;
         let mut batch = Vec::with_capacity(256);
         loop {
             buf.clear();
             match read_record_sync(&mut reader, &delimiter, &format, &csv, &mut buf) {
                 Ok(0) => break,
                 Ok(_) => {
-                    if !buf.ends_with(&delimiter) {
-                        // Torn final member (writer mid-append): don't emit or count
-                        // it; it completes and grows the file on a later poll.
+                    if buf.ends_with(&delimiter) {
+                        buf.truncate(buf.len() - delimiter.len());
+                    } else if !emit_tail {
+                        // Maybe a writer mid-append: held back until the file has stopped
+                        // growing, then read again and emitted.
+                        tail_pending = true;
                         break;
                     }
-                    buf.truncate(buf.len() - delimiter.len());
                     if delimiter.len() == 1 && delimiter[0] == b'\n' && buf.ends_with(b"\r") {
                         buf.pop();
                     }
@@ -2748,6 +2978,7 @@ fn run_file_member_consume_task_sync<F>(
         decode_failures = 0;
         failure_len = u64::MAX;
         last_len = cur_len;
+        held_tail = tail_pending.then(std::time::Instant::now);
         if new_count > 0 {
             signaled_eof = false;
             current_sleep = std::time::Duration::from_millis(1);
@@ -3042,6 +3273,8 @@ impl FileConsumer {
                 let lines_in_memory = Arc::new(AtomicUsize::new(0));
                 let extra_lines = ExtraLines::default();
                 let extra_lines_clone = extra_lines.clone();
+                let kept_header = Arc::new(AtomicUsize::new(0));
+                let kept_header_clone = kept_header.clone();
                 let ready = Arc::new(AtomicBool::new(false));
                 let ready_clone = ready.clone();
                 let lines_clone = lines_in_memory.clone();
@@ -3064,6 +3297,7 @@ impl FileConsumer {
                         csv_clone,
                         ready_clone,
                         extra_lines_clone,
+                        kept_header_clone,
                     );
                 });
 
@@ -3072,6 +3306,7 @@ impl FileConsumer {
                     msg_rx,
                     lines_in_memory,
                     extra_lines,
+                    kept_header,
                     path: config.path.clone(),
                     file_lock,
                     buffer: Arc::new(Mutex::new(Vec::new())),
@@ -3385,54 +3620,50 @@ impl FileConsumer {
                 let count = std::cmp::min(c.buffer.len(), max_messages);
                 let messages: Vec<_> = c.buffer.drain(0..count).collect();
 
-                let commit: crate::traits::BatchCommitFunc = if let Some(offset_file) =
-                    &c.offset_file
-                {
-                    let offset_file = offset_file.clone();
-                    let captured_messages = messages.clone();
+                let commit: crate::traits::BatchCommitFunc =
+                    if let Some(offset_file) = &c.offset_file {
+                        let offset_file = offset_file.clone();
+                        let captured_messages = messages.clone();
 
-                    Box::new(
-                        move |dispositions: Vec<crate::traits::MessageDisposition>| {
-                            Box::pin(async move {
-                                let max_offset = dispositions
-                                    .iter()
-                                    .zip(captured_messages.iter())
-                                    .filter_map(|(d, m)| match d {
-                                        crate::traits::MessageDisposition::Ack
-                                        | crate::traits::MessageDisposition::Reply(_) => m
-                                            .metadata
-                                            .get("file_offset")
-                                            .and_then(|s| s.parse::<u64>().ok()),
-                                        _ => None,
-                                    })
-                                    .max();
+                        Box::new(
+                            move |dispositions: Vec<crate::traits::MessageDisposition>| {
+                                Box::pin(async move {
+                                    // The offset stops before the first nack, so a restart
+                                    // reads that message again.
+                                    let max_offset = dispositions
+                                        .iter()
+                                        .zip(captured_messages.iter())
+                                        .take_while(|(d, _)| {
+                                            !matches!(d, crate::traits::MessageDisposition::Nack)
+                                        })
+                                        .filter_map(|(_, m)| {
+                                            m.metadata
+                                                .get("file_offset")
+                                                .and_then(|s| s.parse::<u64>().ok())
+                                        })
+                                        .max();
 
-                                if let Some(offset) = max_offset {
-                                    let mut file = offset_file.lock().await;
-                                    if let Err(e) = file.rewind().await {
-                                        tracing::error!("Failed to rewind offset file: {}", e);
-                                    } else if let Err(e) = file.set_len(0).await {
-                                        tracing::error!("Failed to truncate offset file: {}", e);
-                                    } else if let Err(e) =
-                                        file.write_all(offset.to_string().as_bytes()).await
-                                    {
-                                        tracing::error!("Failed to write offset file: {}", e);
-                                    } else if let Err(e) = file.flush().await {
-                                        tracing::error!("Failed to flush offset file: {}", e);
+                                    if let Some(offset) = max_offset {
+                                        // Fixed width, written in place: the file is never
+                                        // empty, which would read as offset 0.
+                                        let mut file = offset_file.lock().await;
+                                        file.rewind().await?;
+                                        file.write_all(format!("{offset:020}").as_bytes()).await?;
+                                        file.flush().await?;
+                                        file.sync_data().await?;
                                     }
-                                }
-                                Ok(())
-                            })
+                                    Ok(())
+                                })
+                                    as crate::traits::BoxFuture<'static, anyhow::Result<()>>
+                            },
+                        )
+                    } else {
+                        // No-op commit since we are not deleting and no group_id to track
+                        Box::new(|_dispositions: Vec<crate::traits::MessageDisposition>| {
+                            Box::pin(async move { Ok(()) })
                                 as crate::traits::BoxFuture<'static, anyhow::Result<()>>
-                        },
-                    )
-                } else {
-                    // No-op commit since we are not deleting and no group_id to track
-                    Box::new(|_dispositions: Vec<crate::traits::MessageDisposition>| {
-                        Box::pin(async move { Ok(()) })
-                            as crate::traits::BoxFuture<'static, anyhow::Result<()>>
-                    })
-                };
+                        })
+                    };
 
                 Ok(ReceivedBatch { messages, commit })
             }
@@ -3483,6 +3714,7 @@ impl FileConsumer {
                 let buffer_clone = c.buffer.clone();
                 let lines_mem = c.lines_in_memory.clone();
                 let extra_lines = c.extra_lines.clone();
+                let kept_header = c.kept_header.clone();
                 let batch_for_commit = batch.clone();
                 let delimiter = c.delimiter.clone();
                 let format = c.format.clone();
@@ -3534,13 +3766,17 @@ impl FileConsumer {
                                         .sum()
                                 };
                                 let _guard = lock.lock().await;
-                                if let Err(e) =
-                                    remove_lines_from_file(&path, lines, &delimiter, &format, &csv)
-                                        .await
+                                let keep = kept_header.load(Ordering::SeqCst);
+                                if let Err(e) = remove_lines_from_file(
+                                    &path, keep, lines, &delimiter, &format, &csv,
+                                )
+                                .await
                                 {
+                                    // The lines stay counted, so this run skips them.
                                     tracing::error!("Failed to remove lines from {}: {}", path, e);
+                                } else {
+                                    lines_mem.fetch_sub(lines, Ordering::SeqCst);
                                 }
-                                lines_mem.fetch_sub(lines, Ordering::SeqCst);
                             }
                             Ok(())
                         })

@@ -2,7 +2,7 @@ use crate::traits::{BoxFuture, EndpointStatus, MessagePublisher, PublisherError,
 use crate::CanonicalMessage;
 use async_trait::async_trait;
 use std::any::Any;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Once};
 use tracing::{debug, warn};
 
@@ -112,11 +112,12 @@ impl MessagePublisher for FanoutPublisher {
         let results = join_all(batch_sends).await;
 
         // A hard error from any publisher propagates. Otherwise per-destination failures merge:
-        // a message that failed at any destination is nacked for the whole fan-out (duplicate
-        // failures across destinations are harmless — the route keys by message_id). Responses
-        // are collected in destination order, keeping the first reply per message: the caller
-        // has one reply channel, so a second answer for the same message has nowhere to go.
-        let mut failed = Vec::new();
+        // a message that failed at any destination is nacked for the whole fan-out, listed once
+        // with its most recoverable error. Responses are collected in destination order, keeping
+        // the first reply per message: the caller has one reply channel.
+        let mut failed: Vec<(CanonicalMessage, PublisherError)> = Vec::new();
+        // Keyed by id and occurrence within a leg, so same-id messages of a batch stay apart.
+        let mut failed_at: HashMap<(u128, usize), usize> = HashMap::new();
         let mut responses: Vec<CanonicalMessage> = Vec::new();
         let mut responded: HashSet<u128> = HashSet::new();
         for result in results {
@@ -126,7 +127,22 @@ impl MessagePublisher for FanoutPublisher {
                     responses: child_responses,
                     failed: child_failed,
                 } => {
-                    failed.extend(child_failed);
+                    let mut seen: HashMap<u128, usize> = HashMap::new();
+                    for (message, error) in child_failed {
+                        let occurrence = seen.entry(message.message_id).or_default();
+                        let key = (message.message_id, *occurrence);
+                        *occurrence += 1;
+                        match failed_at.get(&key) {
+                            Some(&at) if recoverability(&error) > recoverability(&failed[at].1) => {
+                                failed[at].1 = error;
+                            }
+                            Some(_) => {}
+                            None => {
+                                failed_at.insert(key, failed.len());
+                                failed.push((message, error));
+                            }
+                        }
+                    }
                     for response in child_responses.into_iter().flatten() {
                         if responded.insert(response.message_id) {
                             responses.push(response);
@@ -192,6 +208,15 @@ impl MessagePublisher for FanoutPublisher {
     }
 }
 
+/// Which of two errors for one message wins: the one that keeps it from being dropped.
+fn recoverability(error: &PublisherError) -> u8 {
+    match error {
+        PublisherError::NonRetryable(_) => 0,
+        PublisherError::Retryable(_) => 1,
+        PublisherError::Connection(_) => 2,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -208,6 +233,8 @@ mod tests {
         batch_error: Option<String>,
         /// Payloads this publisher reports as failed instead of erroring the whole batch.
         batch_partial_failures: Vec<String>,
+        /// Report those failures as `NonRetryable` instead of `Retryable`.
+        partial_failures_permanent: bool,
     }
 
     #[async_trait]
@@ -245,10 +272,12 @@ mod tests {
                             .contains(&m.get_payload_str().to_string())
                     })
                     .map(|m| {
-                        (
-                            m,
-                            ProcessingError::Retryable(anyhow::anyhow!("destination rejected")),
-                        )
+                        let e = anyhow::anyhow!("destination rejected");
+                        if self.partial_failures_permanent {
+                            (m, ProcessingError::NonRetryable(e))
+                        } else {
+                            (m, ProcessingError::Retryable(e))
+                        }
                     })
                     .collect();
                 if !failed.is_empty() {
@@ -328,6 +357,34 @@ mod tests {
                 assert_eq!(failed[0].0.get_payload_str(), "two");
             }
             SentBatch::Ack => panic!("expected partial failure to be preserved"),
+        }
+    }
+
+    /// STRUCT-02/03: a message that fails on two legs is reported once, with the error
+    /// class that keeps it alive, whatever the order of the legs.
+    #[tokio::test]
+    async fn test_fanout_merges_one_message_failing_on_several_legs() {
+        for permanent_first in [true, false] {
+            let leg = |permanent| {
+                Arc::new(RecordingPublisher {
+                    batch_partial_failures: vec!["two".to_string()],
+                    partial_failures_permanent: permanent,
+                    ..Default::default()
+                }) as Arc<dyn MessagePublisher>
+            };
+            let fanout = FanoutPublisher::new(vec![leg(permanent_first), leg(!permanent_first)]);
+            let sent = fanout
+                .send_batch(vec![
+                    CanonicalMessage::from("one"),
+                    CanonicalMessage::from("two"),
+                ])
+                .await
+                .unwrap();
+            let SentBatch::Partial { failed, .. } = sent else {
+                panic!("expected a partial failure");
+            };
+            assert_eq!(failed.len(), 1);
+            assert!(matches!(failed[0].1, ProcessingError::Retryable(_)));
         }
     }
 

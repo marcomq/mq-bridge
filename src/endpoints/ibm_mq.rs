@@ -207,6 +207,7 @@ macro_rules! connect_mq {
         };
 
         let (tls_opt, cipher_opt) = if $config.tls.required {
+            crate::support::tls_check::warn_unverified("ibmmq", $config.tls.accept_invalid_certs);
             let cipher_spec_str = $config.tls.cipher_spec.as_deref().unwrap_or("");
             let cipher =
                 CipherSpec(MqStr::<32>::try_from(cipher_spec_str).context("Invalid cipher spec")?);

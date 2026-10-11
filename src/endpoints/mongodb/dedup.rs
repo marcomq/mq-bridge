@@ -315,9 +315,12 @@ pub(crate) async fn build_mongo_dedup_store(
     ttl_seconds: u64,
     route_name: &str,
 ) -> anyhow::Result<Arc<dyn crate::middleware::deduplication::DedupStore>> {
-    let client = Client::with_uri_str(url)
-        .await
-        .with_context(|| format!("Failed to connect deduplication store at '{}'", url))?;
+    let client = Client::with_uri_str(url).await.with_context(|| {
+        format!(
+            "Failed to connect deduplication store at '{}'",
+            crate::support::redact::url_password(url)
+        )
+    })?;
     let db = client.database(database);
     let coll_name = collection.unwrap_or_else(|| {
         format!(

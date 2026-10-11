@@ -1786,23 +1786,25 @@ fn discarding_request(branch: mq_bridge::models::Endpoint) -> mq_bridge::models:
 
 /// An `http`/`websocket` **source** is a server, so its `url` is a listen
 /// address — but a URI needs a scheme to select the endpoint at all, and the
-/// driver rejects one as part of an address. `https` asks for a TLS listener;
-/// `wss` has nowhere to keep a certificate.
+/// driver rejects one as part of an address. `https` and `wss` ask for a TLS
+/// listener; the certificate comes from `tls.cert_file` and `tls.key_file`.
 fn make_listen_address(endpoint: &mut mq_bridge::models::Endpoint) -> anyhow::Result<()> {
     use mq_bridge::models::EndpointType;
 
     let (url, tls) = match &mut endpoint.endpoint_type {
-        EndpointType::Http(config) => (&mut config.url, Some(&mut config.tls)),
-        EndpointType::WebSocket(config) => (&mut config.url, None),
+        EndpointType::Http(config) => (&mut config.url, &mut config.tls),
+        EndpointType::WebSocket(config) => (&mut config.url, &mut config.tls),
         _ => return Ok(()),
     };
-    if url.starts_with("wss://") {
-        anyhow::bail!("a 'wss://' source is not supported: websocket listeners have no TLS config");
-    }
-    for (prefix, secure) in [("https://", true), ("http://", false), ("ws://", false)] {
+    for (prefix, secure) in [
+        ("https://", true),
+        ("wss://", true),
+        ("http://", false),
+        ("ws://", false),
+    ] {
         if let Some(rest) = url.strip_prefix(prefix) {
             *url = rest.trim_end_matches('/').to_string();
-            if secure && let Some(tls) = tls {
+            if secure {
                 tls.required = true;
             }
             break;
@@ -3719,9 +3721,16 @@ mod uri_tests {
         make_listen_address(&mut ep).unwrap();
         assert_eq!(serde_json::to_value(&ep).unwrap(), before);
 
-        let err =
-            make_listen_address(&mut endpoint_from_uri("wss://0.0.0.0:9000").unwrap()).unwrap_err();
-        assert!(format!("{err:#}").contains("wss"), "got: {err:#}");
+        // `wss` asks for a TLS listener too.
+        let mut ep = endpoint_from_uri(
+            r#"wss://0.0.0.0:9000?tls={"cert_file":"/c.pem","key_file":"/k.pem"}"#,
+        )
+        .expect("uri should parse");
+        make_listen_address(&mut ep).unwrap();
+        let v = serde_json::to_value(&ep).unwrap();
+        assert_eq!(v["websocket"]["url"], "0.0.0.0:9000");
+        assert_eq!(v["websocket"]["tls"]["required"], true);
+        assert_eq!(v["websocket"]["tls"]["cert_file"], "/c.pem");
     }
 
     // The mirror-proxy shape: every branch gets the message, and only the `to`

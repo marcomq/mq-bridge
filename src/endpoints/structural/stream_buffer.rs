@@ -175,21 +175,6 @@ struct TopicState {
 static STREAM_BUFFERS: Lazy<Mutex<HashMap<String, Arc<Mutex<TopicState>>>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
-fn get_or_create_topic(topic: &str, idle_ttl: Duration) -> Arc<Mutex<TopicState>> {
-    let mut buffers = STREAM_BUFFERS
-        .lock()
-        .expect("stream buffer registry poisoned");
-    buffers
-        .entry(topic.to_string())
-        .or_insert_with(|| {
-            Arc::new(Mutex::new(TopicState {
-                partitions: HashMap::new(),
-                idle_ttl,
-            }))
-        })
-        .clone()
-}
-
 /// Drops partitions that no consumer ever attached to and that nothing has published to
 /// for `ttl`.
 ///
@@ -220,8 +205,19 @@ fn get_or_create_partition(
     capacity: usize,
     idle_ttl: Duration,
 ) -> StreamPartition {
-    let topic = get_or_create_topic(topic, idle_ttl);
-    let mut state = topic.lock().expect("stream buffer topic poisoned");
+    // The registry stays locked until the partition exists, so a consumer dropping the
+    // topic's last partition cannot remove the topic in between.
+    let mut buffers = STREAM_BUFFERS.lock().unwrap_or_else(|e| e.into_inner());
+    let topic = buffers
+        .entry(topic.to_string())
+        .or_insert_with(|| {
+            Arc::new(Mutex::new(TopicState {
+                partitions: HashMap::new(),
+                idle_ttl,
+            }))
+        })
+        .clone();
+    let mut state = topic.lock().unwrap_or_else(|e| e.into_inner());
     let ttl = state.idle_ttl;
     sweep_idle_partitions(&mut state.partitions, ttl);
     let entry = state
@@ -241,13 +237,11 @@ fn remove_partition_if_current(
     sender: &Sender<Vec<CanonicalMessage>>,
 ) {
     // Look the topic up without creating it, so a topic already removed is not resurrected.
-    let mut buffers = STREAM_BUFFERS
-        .lock()
-        .expect("stream buffer registry poisoned");
+    let mut buffers = STREAM_BUFFERS.lock().unwrap_or_else(|e| e.into_inner());
     let Some(topic_arc) = buffers.get(topic).cloned() else {
         return;
     };
-    let mut state = topic_arc.lock().expect("stream buffer topic poisoned");
+    let mut state = topic_arc.lock().unwrap_or_else(|e| e.into_inner());
     let should_remove = state
         .partitions
         .get(correlation_id)

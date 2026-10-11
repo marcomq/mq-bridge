@@ -24,6 +24,7 @@ Key facts:
 ## Connectors
 
 - [Overview and capabilities](https://marcomq.github.io/mq-bridge/reference/endpoints.html): every transport, subscriber mode, request-reply and nack support, plugin endpoints
+- [Capability tables](https://github.com/marcomq/mq-bridge/blob/main/docs/CAPABILITIES.md): per endpoint, whether it is an input or an output, acknowledges, commits in order, replies, publishes in order, and where TLS is configured; also in code as `EndpointType::capabilities()`
 - [All connectors](https://marcomq.github.io/mq-bridge/connectors/index.html): YAML and URL examples for each
 - [PostgreSQL / MySQL / SQLite](https://marcomq.github.io/mq-bridge/connectors/postgres.html)
 - [Postgres CDC tutorial](https://marcomq.github.io/mq-bridge/tutorials/postgres-cdc.html) and [CDC parameters](https://marcomq.github.io/mq-bridge/reference/postgres-cdc.html)

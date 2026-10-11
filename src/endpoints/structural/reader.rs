@@ -94,14 +94,15 @@ impl MessagePublisher for ReaderPublisher {
         if count == 0 {
             return Ok(SentBatch::Ack);
         }
-        let request_ids: Vec<u128> = messages.iter().map(|m| m.message_id).collect();
-
         let mut consumer = self.consumer.lock().await;
         match consumer.receive_batch(count).await {
             Ok(batch) => {
                 let received_count = batch.messages.len();
                 if received_count == 0 {
-                    return Ok(SentBatch::Ack);
+                    return Ok(SentBatch::Partial {
+                        responses: None,
+                        failed: messages.into_iter().map(nothing_to_read).collect(),
+                    });
                 }
 
                 // Same reasoning as `send`: the read must be committed here, because the
@@ -117,15 +118,17 @@ impl MessagePublisher for ReaderPublisher {
 
                 // Surface the read messages as responses, mirroring `send`'s
                 // `Sent::Response`, so the route can dispatch them instead of dropping them.
+                let mut triggers = messages.into_iter();
                 let responses = batch
                     .messages
                     .into_iter()
-                    .zip(request_ids)
-                    .map(|(message, request_id)| as_reply_to(message, request_id))
+                    .zip(triggers.by_ref())
+                    .map(|(message, trigger)| as_reply_to(message, trigger.message_id))
                     .collect();
+                // A trigger the source had no message for is not answered with an empty ack.
                 Ok(SentBatch::Partial {
                     responses: Some(responses),
-                    failed: Vec::new(),
+                    failed: triggers.map(nothing_to_read).collect(),
                 })
             }
             Err(e) => match e {
@@ -140,6 +143,13 @@ impl MessagePublisher for ReaderPublisher {
     fn as_any(&self) -> &dyn Any {
         self
     }
+}
+
+fn nothing_to_read(trigger: CanonicalMessage) -> (CanonicalMessage, PublisherError) {
+    let error = PublisherError::Retryable(anyhow::anyhow!(
+        "reader: the source had no message for this trigger"
+    ));
+    (trigger, error)
 }
 
 /// Metadata key holding the id the read message had before it became a reply.
@@ -374,6 +384,36 @@ mod tests {
         assert!(commit_log.lock().unwrap()[0]
             .iter()
             .all(|disposition| matches!(disposition, MessageDisposition::Ack)));
+    }
+
+    /// STRUCT-05: a trigger without a message fails as retryable instead of being acked empty.
+    #[tokio::test]
+    async fn test_reader_publisher_send_batch_fails_triggers_without_a_message() {
+        for (read, answered) in [(vec![CanonicalMessage::from("one")], 1), (Vec::new(), 0)] {
+            let publisher = ReaderPublisher::new(Box::new(MockConsumer::new_batch(
+                Ok(read),
+                StdArc::new(StdMutex::new(Vec::new())),
+            )));
+            let triggers = vec![
+                CanonicalMessage::from("trigger-1"),
+                CanonicalMessage::from("trigger-2"),
+            ];
+            let unanswered: Vec<u128> = triggers[answered..].iter().map(|m| m.message_id).collect();
+
+            let SentBatch::Partial { responses, failed } =
+                publisher.send_batch(triggers).await.unwrap()
+            else {
+                panic!("a trigger without a message must not be acked");
+            };
+            assert_eq!(responses.map_or(0, |r| r.len()), answered);
+            assert_eq!(
+                failed.iter().map(|(m, _)| m.message_id).collect::<Vec<_>>(),
+                unanswered
+            );
+            assert!(failed
+                .iter()
+                .all(|(_, e)| matches!(e, PublisherError::Retryable(_))));
+        }
     }
 
     #[tokio::test]

@@ -51,13 +51,16 @@ impl MessagePublisher for RequestForwardPublisher {
 
     fn on_disconnect_hook(&self) -> Option<BoxFuture<'_, anyhow::Result<()>>> {
         Some(Box::pin(async move {
-            if let Some(hook) = self.request.on_disconnect_hook() {
-                hook.await?;
+            // Both legs are torn down even if the first fails; the first error is reported.
+            let mut first_error = None;
+            for publisher in [&self.request, &self.forward] {
+                if let Some(hook) = publisher.on_disconnect_hook() {
+                    if let Err(e) = hook.await {
+                        first_error.get_or_insert(e);
+                    }
+                }
             }
-            if let Some(hook) = self.forward.on_disconnect_hook() {
-                hook.await?;
-            }
-            Ok(())
+            first_error.map_or(Ok(()), Err)
         }))
     }
 
@@ -170,26 +173,54 @@ impl MessagePublisher for RequestForwardPublisher {
             return Ok(SentBatch::Ack);
         };
 
-        let mut response_by_id: std::collections::HashMap<_, _> = responses
-            .unwrap_or_default()
-            .into_iter()
-            .map(|response| (response.message_id, response))
-            .collect();
-        let mut failure_by_id: std::collections::HashMap<_, _> = failed
-            .into_iter()
-            .map(|(message, error)| (message.message_id, error))
-            .collect();
+        // Queues per id, so two forwarded messages that share one each get their own result.
+        use std::collections::{HashMap, VecDeque};
+        let mut response_by_id: HashMap<u128, VecDeque<CanonicalMessage>> = HashMap::new();
+        for response in responses.unwrap_or_default() {
+            response_by_id
+                .entry(response.message_id)
+                .or_default()
+                .push_back(response);
+        }
+        let mut failure_by_id: HashMap<u128, VecDeque<PublisherError>> = HashMap::new();
+        for (message, error) in failed {
+            failure_by_id
+                .entry(message.message_id)
+                .or_default()
+                .push_back(error);
+        }
         let mut outcomes = Vec::new();
+        let mut unresolved = Vec::new();
 
         for candidate in candidates {
-            if let Some(error) = failure_by_id.remove(&candidate.forwarded_id) {
+            let id = candidate.forwarded_id;
+            if let Some(error) = failure_by_id.get_mut(&id).and_then(VecDeque::pop_front) {
                 outcomes.push((candidate.index, None, Some((candidate.original, error))));
-            } else if let Some(response) = response_by_id.remove(&candidate.forwarded_id) {
+            } else if let Some(response) = response_by_id.get_mut(&id).and_then(VecDeque::pop_front)
+            {
                 if let Some(error) = candidate.request_error {
                     outcomes.push((candidate.index, None, Some((candidate.original, error))));
                 } else {
                     outcomes.push((candidate.index, Some(response), None));
                 }
+            } else {
+                unresolved.push(candidate);
+            }
+        }
+
+        // A failure under an id nothing was forwarded with cannot be attributed, so every
+        // message without a result of its own is failed rather than acked.
+        let unmatched: usize = failure_by_id.values().map(VecDeque::len).sum();
+        if unmatched > 0 {
+            warn!(
+                unmatched,
+                "request endpoint: forward_to reported failures for unknown message ids; failing the unconfirmed messages of the batch"
+            );
+            for candidate in unresolved {
+                let error = PublisherError::Retryable(anyhow::anyhow!(
+                    "forward_to reported a failure that matches no forwarded message"
+                ));
+                outcomes.push((candidate.index, None, Some((candidate.original, error))));
             }
         }
 
@@ -324,6 +355,71 @@ mod tests {
         fn as_any(&self) -> &dyn Any {
             self
         }
+    }
+
+    /// Replies to every request with the request itself.
+    struct EchoRequest;
+
+    #[async_trait]
+    impl MessagePublisher for EchoRequest {
+        async fn send(&self, message: CanonicalMessage) -> Result<Sent, PublisherError> {
+            Ok(Sent::Response(message))
+        }
+
+        async fn send_batch(
+            &self,
+            messages: Vec<CanonicalMessage>,
+        ) -> Result<SentBatch, PublisherError> {
+            crate::traits::send_batch_helper(self, messages, |p, m| Box::pin(p.send(m))).await
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    /// A forward leg that fails the first message of a batch and reports it under a new id.
+    struct RenamingFailSink;
+
+    #[async_trait]
+    impl MessagePublisher for RenamingFailSink {
+        async fn send(&self, _message: CanonicalMessage) -> Result<Sent, PublisherError> {
+            Ok(Sent::Ack)
+        }
+
+        async fn send_batch(
+            &self,
+            mut messages: Vec<CanonicalMessage>,
+        ) -> Result<SentBatch, PublisherError> {
+            let mut renamed = messages.remove(0);
+            renamed.message_id = renamed.message_id.wrapping_add(1_000_000);
+            Ok(SentBatch::Partial {
+                responses: None,
+                failed: vec![(renamed, PublisherError::Retryable(anyhow::anyhow!("no")))],
+            })
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    /// STRUCT-04: a forward failure that matches no forwarded id must not be acked away.
+    #[tokio::test]
+    async fn an_unmatched_forward_failure_fails_the_batch() {
+        let publisher =
+            RequestForwardPublisher::new(Arc::new(EchoRequest), Arc::new(RenamingFailSink));
+        let sent = publisher
+            .send_batch(vec![
+                CanonicalMessage::from("one"),
+                CanonicalMessage::from("two"),
+            ])
+            .await
+            .unwrap();
+        let SentBatch::Partial { failed, .. } = sent else {
+            panic!("the failed forward was acknowledged");
+        };
+        assert_eq!(failed.len(), 2);
     }
 
     struct MixedRequest;

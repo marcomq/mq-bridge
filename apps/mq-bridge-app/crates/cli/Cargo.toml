@@ -129,3 +129,5 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "
 # reader can decode. Same version and a subset of the features mq-bridge already
 # builds, so it costs no extra compilation under the default feature set.
 sqlx = { version = "0.9", features = ["runtime-tokio", "sqlite"] }
+# Certificates for the TLS listener tests; the engine uses the same version in its own tests.
+rcgen = "0.14"

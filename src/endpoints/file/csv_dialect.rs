@@ -6,7 +6,7 @@
 //! The CSV dialect a `file` or `object_store` endpoint reads and writes.
 
 use crate::errors::InvalidConfig;
-use crate::models::{CsvConfig, CsvNested, FileFormat};
+use crate::models::{CsvConfig, CsvMismatch, CsvNested, FileFormat};
 use anyhow::{anyhow, bail};
 use std::sync::{Arc, OnceLock};
 
@@ -47,6 +47,8 @@ pub(crate) struct CsvDialect {
     pub(crate) columns: Option<Arc<[String]>>,
     /// (Sink) Nested objects become `parent.child` columns instead of JSON text.
     pub(crate) flatten: bool,
+    /// (Sink) A record whose keys differ from the columns fails instead of being written.
+    pub(crate) strict: bool,
 }
 
 impl Default for CsvDialect {
@@ -57,6 +59,7 @@ impl Default for CsvDialect {
             header: true,
             columns: None,
             flatten: true,
+            strict: false,
         }
     }
 }
@@ -114,6 +117,7 @@ impl CsvDialect {
             header: config.header.unwrap_or(true),
             columns: (!config.columns.is_empty()).then(|| config.columns.as_slice().into()),
             flatten: config.nested == CsvNested::Flatten,
+            strict: config.on_mismatch == CsvMismatch::Fail,
         })
     }
 
@@ -122,6 +126,12 @@ impl CsvDialect {
         if !self.header && self.columns.is_none() {
             return Err(InvalidConfig(anyhow!(
                 "csv: a source with `header: false` needs `columns`"
+            ))
+            .into());
+        }
+        if self.strict {
+            return Err(InvalidConfig(anyhow!(
+                "csv: `on_mismatch: fail` is for sinks; a source reads short and long rows as they are"
             ))
             .into());
         }
@@ -294,6 +304,10 @@ mod tests {
             .unwrap()
             .check_source()
             .is_ok());
+        csv.on_mismatch = CsvMismatch::Fail;
+        let strict = CsvDialect::from_config(&csv, b"\n").unwrap();
+        assert!(strict.check_source().is_err());
+        assert!(strict.check_sink().is_ok());
     }
 
     #[test]

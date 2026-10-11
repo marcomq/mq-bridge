@@ -524,9 +524,12 @@ pub(crate) async fn build_sql_dedup_store(
     replay_response: bool,
 ) -> anyhow::Result<Arc<dyn crate::middleware::deduplication::DedupStore>> {
     sqlx::any::install_default_drivers();
-    let pool = AnyPool::connect(url)
-        .await
-        .with_context(|| format!("Failed to connect deduplication store at '{}'", url))?;
+    let pool = AnyPool::connect(url).await.with_context(|| {
+        format!(
+            "Failed to connect deduplication store at '{}'",
+            crate::support::redact::url_password(url)
+        )
+    })?;
     let driver_name = {
         let conn = pool.acquire().await?;
         let name = conn.backend_name().to_string();

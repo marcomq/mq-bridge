@@ -115,6 +115,7 @@ class CsvConfig(TypedDict, total=False):
     columns: List[str]
     header: Optional[bool]
     nested: CsvNested
+    on_mismatch: CsvMismatch
     quote: Optional[str]
     separator: Optional[str]
 
@@ -219,6 +220,8 @@ class FileConfig(TypedDict, total=False):
     delimiter: Optional[str]
     encryption: Optional[EncryptionConfig]
     format: FileFormat
+    fsync: FileFsync
+    fsync_interval_ms: Optional[int]
     idempotency: Optional[bool]
     name_by: NameBy
     path: Required[str]
@@ -675,6 +678,7 @@ class RedisStreamsConfig(TypedDict, total=False):
     redelivery_timeout_ms: Optional[int]
     stream: Optional[str]
     subscriber_mode: bool
+    tls: TlsConfig
     url: Required[str]
     username: Optional[str]
 
@@ -841,6 +845,7 @@ class WebSocketConfig(TypedDict, total=False):
     message_id_header: Optional[str]
     path: Optional[str]
     routed_queue_capacity: Optional[int]
+    tls: TlsConfig
     url: Required[str]
 
 
@@ -860,11 +865,13 @@ AggregateEmit = Literal["updated", "previous"]
 AggregateOnError = Literal["drop", "fail", "skip"]
 CipherKind = Literal["xchacha20poly1305", "aes256gcm"]
 Compression = Literal["none", "gzip", "lz4", "zstd"]
+CsvMismatch = Literal["warn", "fail"]
 CsvNested = Literal["flatten", "json"]
 DatePartitionStyle = Literal["nested", "hive"]
 DeliveryGuarantee = Literal["at_most_once", "at_least_once", "effectively_once"]
 FaultMode = Literal["panic", "disconnect", "timeout", "json_format_error", "nack"]
 FileFormat = Literal["normal", "json", "text", "raw", "csv", "parquet"]
+FileFsync = Literal["off", "batch", "periodic"]
 FilterMiddleware = Union[str, Dict[str, Any]]
 HttpBulkFormat = Literal["ndjson", "json_array"]
 HttpBulkStream = Literal["sse", "ndjson"]

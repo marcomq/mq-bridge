@@ -377,9 +377,12 @@ pub(crate) async fn build_mongo_checkpoint_store(
     source_name: &str,
     cursor_id: &str,
 ) -> anyhow::Result<Arc<dyn crate::checkpoint::CheckpointStore>> {
-    let client = Client::with_uri_str(url)
-        .await
-        .with_context(|| format!("Failed to connect checkpoint store at '{}'", url))?;
+    let client = Client::with_uri_str(url).await.with_context(|| {
+        format!(
+            "Failed to connect checkpoint store at '{}'",
+            crate::support::redact::url_password(url)
+        )
+    })?;
     let db = client.database(database);
     let meta_name = match collection {
         Some(collection) => collection,
@@ -460,8 +463,27 @@ async fn create_client(config: &MongoDbConfig) -> anyhow::Result<Client> {
         if config.tls.accept_invalid_certs {
             tls_options.allow_invalid_certificates = Some(true);
         }
+        crate::support::tls_check::warn_unverified("mongodb", config.tls.accept_invalid_certs);
         client_options.tls = Some(mongodb::options::Tls::Enabled(tls_options));
     }
+    // The URL can turn TLS on by itself (`tls=true`, `mongodb+srv://`).
+    let encrypted = matches!(client_options.tls, Some(mongodb::options::Tls::Enabled(_)));
+    let has_password = client_options
+        .credential
+        .as_ref()
+        .is_some_and(|credential| credential.password.is_some());
+    let servers = client_options
+        .hosts
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    crate::support::tls_check::warn_plaintext_credentials(
+        "mongodb",
+        &servers,
+        has_password,
+        encrypted,
+    );
     Ok(Client::with_options(client_options)?)
 }
 

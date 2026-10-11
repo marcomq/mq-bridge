@@ -36,6 +36,7 @@ CSV dialect for `format: csv`: field separator, quoting, header and nested value
 | `columns` | array of string | no | — | Column names. A source uses them instead of the header's; a sink writes exactly these, in this order. |
 | `header` | boolean | no | — | Whether the first record names the columns. Defaults to true; a source without one needs `columns`. |
 | `nested` | `flatten` \| `json` | no | `flatten` | (Sink only) Nested objects: `flatten` into `parent.child` columns (default) or `json` text in one cell. |
+| `on_mismatch` | `warn` \| `fail` | no | — | (Sink only) A record whose keys differ from the columns: `warn` (default) writes it anyway, `fail` rejects it. |
 | `quote` | string | no | — | Quote character, or `none` for unquoted fields. Defaults to `"`. |
 | `separator` | string | no | — | Field separator: one character, `tab`, `space`, hex (`0x1f`) or `auto` (source: guessed from the first record). Defaults to `,`. |
 

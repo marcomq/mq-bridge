@@ -1183,6 +1183,13 @@ pub struct CsvConfig {
     /// (Sink only) Nested objects: `flatten` into `parent.child` columns (default) or `json` text in one cell.
     #[serde(default)]
     pub nested: CsvNested,
+    /// (Sink only) A record whose keys differ from the columns: `warn` (default) writes it anyway, `fail` rejects it.
+    #[serde(default, skip_serializing_if = "is_default_csv_mismatch")]
+    pub on_mismatch: CsvMismatch,
+}
+
+fn is_default_csv_mismatch(value: &CsvMismatch) -> bool {
+    *value == CsvMismatch::default()
 }
 
 impl CsvConfig {
@@ -1216,6 +1223,18 @@ impl SqlTimestamps {
 pub enum SqlColumns {
     /// Each top-level JSON field goes into the table column of the same name.
     Auto,
+}
+
+/// What a CSV sink does with a record whose keys differ from the columns.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum CsvMismatch {
+    /// Missing keys are written as empty fields and extra keys are dropped, logged once.
+    #[default]
+    Warn,
+    /// The record fails as non-retryable and is not written.
+    Fail,
 }
 
 /// How a CSV sink writes a nested JSON object.
@@ -1437,6 +1456,32 @@ pub struct FileConfig {
     /// (Consumer only) Include authoritative `mqb.src.file_*` source positions; only `consume` mode reproduces them across restarts. Defaults to false.
     #[serde(default)]
     pub source_metadata: bool,
+    /// (Sink only) When appended data is fsynced: `off` (default), `batch` (before each ack) or `periodic`.
+    #[serde(default, skip_serializing_if = "FileFsync::is_off")]
+    pub fsync: FileFsync,
+    /// (Sink only) Interval for `fsync: periodic` in milliseconds. Defaults to 1000.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fsync_interval_ms: Option<u64>,
+}
+
+/// When the appending `file` sink forces written data to disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum FileFsync {
+    /// Never; the OS flushes. An acknowledged batch can be lost on power loss.
+    #[default]
+    Off,
+    /// Before a batch is acknowledged.
+    Batch,
+    /// In the background every `fsync_interval_ms`; at most that window is at risk.
+    Periodic,
+}
+
+impl FileFsync {
+    fn is_off(&self) -> bool {
+        *self == FileFsync::Off
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1445,10 +1490,10 @@ pub struct FileConfig {
 pub enum FileConsumerMode {
     /// **Queue Mode**: Standard point-to-point consumption. Reads from the start
     /// of the file. If `delete` is true, processed lines are physically removed
-    /// from the file once they are successfully acknowledged.
+    /// from the file once they are successfully acknowledged. Removing rewrites the
+    /// file, so `delete` is only safe when nothing outside this process appends to it.
     Consume {
-        /// If true, processed lines are physically removed from the file once
-        /// they are successfully acknowledged.
+        /// Remove acknowledged lines from the file. Only safe if no other process writes to it.
         #[serde(default)]
         delete: bool,
     },
@@ -1456,8 +1501,7 @@ pub enum FileConsumerMode {
     /// at the current end. If `delete` is true, lines are removed only after
     /// all local application subscribers for this specific file have acknowledged them.
     Subscribe {
-        /// If true, lines are removed only after all local application
-        /// subscribers for this file have acknowledged them.
+        /// Remove lines all local subscribers acknowledged. Only safe if no other process writes to it.
         #[serde(default)]
         delete: bool,
     },
@@ -2262,6 +2306,9 @@ pub struct RedisStreamsConfig {
     /// (Consumer) Parallel `XREADGROUP` reader connections fanned out across the group. Default 1.
     /// Ignored in `subscriber_mode`.
     pub reader_connections: Option<usize>,
+    /// TLS: a private CA in `ca_file`, a client certificate in `cert_file` and `key_file`.
+    #[serde(default)]
+    pub tls: TlsConfig,
 }
 
 // --- gRPC Specific Configuration ---
@@ -2536,6 +2583,9 @@ pub struct WebSocketConfig {
     /// (Consumer only) Selects whether WebSocket routes run directly or through the routed pipeline.
     #[serde(default)]
     pub execution_mode: WebSocketExecutionMode,
+    /// TLS: a consumer listens with `cert_file` and `key_file`; a publisher uses it for a `wss://` URL.
+    #[serde(default)]
+    pub tls: TlsConfig,
 }
 
 // --- IBM MQ Specific Configuration ---
@@ -2683,6 +2733,11 @@ impl SwitchConfig {
             (true, false) if self.metadata_key.is_empty() => Err(anyhow::anyhow!(
                 "switch `cases` needs a `metadata_key` to look up"
             )),
+            (true, false) if self.cases.is_empty() && self.default.is_none() => {
+                Err(anyhow::anyhow!(
+                    "switch with a `metadata_key` needs at least one of `cases` or `default`; it would drop every message"
+                ))
+            }
             _ => Ok(()),
         }
     }

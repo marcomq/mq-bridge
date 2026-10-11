@@ -802,6 +802,13 @@ async fn create_client_and_eventloop(
 ) -> anyhow::Result<(Client, EventLoop)> {
     let (host, port) = parse_url(&config.url)?;
     let queue_capacity = config.queue_capacity.unwrap_or(100);
+    let use_tls = uses_tls(config);
+    crate::support::tls_check::warn_plaintext_credentials(
+        "mqtt",
+        &config.url,
+        config.username.is_some() && config.password.is_some(),
+        use_tls,
+    );
 
     let (client, eventloop) = match config.protocol {
         MqttProtocol::V5 => {
@@ -832,7 +839,7 @@ async fn create_client_and_eventloop(
                 mqttoptions.set_credentials(username, password);
             }
 
-            if config.tls.required {
+            if use_tls {
                 let tls_config = build_tls_config(config).await?;
                 mqttoptions.set_transport(Transport::tls_with_config(tls_config.into()));
             }
@@ -859,7 +866,7 @@ async fn create_client_and_eventloop(
                 mqttoptions.set_credentials(username, password);
             }
 
-            if config.tls.required {
+            if use_tls {
                 let tls_config = build_tls_config(config).await?;
                 mqttoptions.set_transport(Transport::tls_with_config(tls_config.into()));
             }
@@ -1179,6 +1186,8 @@ async fn build_tls_config(config: &MqttConfig) -> anyhow::Result<rustls::ClientC
         for cert in certs {
             root_cert_store.add(cert)?;
         }
+    } else {
+        root_cert_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     }
 
     let client_config_builder =
@@ -1286,6 +1295,12 @@ fn parse_url(url: &str) -> anyhow::Result<(String, u16)> {
     Ok((host, port))
 }
 
+/// TLS is on with `tls.required` and with an `mqtts://` or `ssl://` URL.
+fn uses_tls(config: &MqttConfig) -> bool {
+    let scheme = config.url.split_once("://").map(|(scheme, _)| scheme);
+    config.tls.required || matches!(scheme, Some("mqtts" | "ssl"))
+}
+
 fn parse_qos(qos: u8) -> QoS {
     match qos {
         0 => QoS::AtMostOnce,
@@ -1299,6 +1314,17 @@ fn parse_qos(qos: u8) -> QoS {
 mod tests {
     use super::*;
     use crate::CanonicalMessage;
+
+    #[test]
+    fn an_mqtts_url_turns_tls_on_without_tls_required() {
+        assert!(uses_tls(&MqttConfig::new("mqtts://broker:8883")));
+        assert!(uses_tls(&MqttConfig::new("ssl://broker:8883")));
+        assert!(!uses_tls(&MqttConfig::new("mqtt://broker:1883")));
+        assert!(!uses_tls(&MqttConfig::new("broker:1883")));
+        let required = MqttConfig::new("mqtt://broker:1883")
+            .with_tls(crate::models::TlsConfig::new().with_required(true));
+        assert!(uses_tls(&required));
+    }
 
     #[test]
     fn v3_strips_spoofed_source_metadata_and_injects_topic() {

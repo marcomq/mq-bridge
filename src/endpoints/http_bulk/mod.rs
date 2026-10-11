@@ -77,6 +77,7 @@ impl Connection {
                 None => builder.timeout(timeout),
             };
         }
+        crate::support::tls_check::warn_unverified("http_bulk", config.tls.accept_invalid_certs);
         if config.tls.accept_invalid_certs {
             builder = builder.danger_accept_invalid_certs(true);
         }

@@ -869,7 +869,8 @@ impl BridgeMcp {
         // The handler forwards every message unchanged unless the sink is `null`,
         // and counts each one once — a `retry` redelivery re-enters the handler
         // but is not a new message.
-        let publishes = !matches!(route.output.endpoint_type, EndpointType::Null);
+        let publishes = !matches!(route.output.endpoint_type, EndpointType::Null)
+            || !route.output.middlewares.is_empty();
         let input_label = endpoint_type_label(&route.input.endpoint_type);
         let output_label = endpoint_type_label(&route.output.endpoint_type);
         let counter = self.metrics.counter_for(&name).await;

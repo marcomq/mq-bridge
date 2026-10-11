@@ -749,6 +749,32 @@ fn lift_bare_routes(mut raw: serde_json::Value) -> Option<serde_json::Value> {
     Some(raw)
 }
 
+/// Top-level keys that are neither an application setting nor a route, sorted.
+fn unknown_top_level_keys(raw: &serde_json::Value) -> Vec<String> {
+    let Some(map) = raw.as_object() else {
+        return Vec::new();
+    };
+    // In a bare single-route config every other key is a route option.
+    let has_routes = map.contains_key("routes");
+    if !has_routes && map.contains_key("input") {
+        return Vec::new();
+    }
+    // With a `routes:` map nothing is lifted, so a route beside it is ignored too.
+    let mut keys: Vec<String> = map
+        .iter()
+        .filter(|(key, value)| {
+            !app_level_fields().contains(key.as_str())
+                && (has_routes
+                    || !value
+                        .as_object()
+                        .is_some_and(|route| route.contains_key("input")))
+        })
+        .map(|(key, _)| key.clone())
+        .collect();
+    keys.sort_unstable();
+    keys
+}
+
 fn take_keys(
     map: &mut serde_json::Map<String, serde_json::Value>,
     keys: Vec<String>,
@@ -858,6 +884,17 @@ fn load_config_internal(
     if let Some(override_str) = &config_str {
         eprintln!("INFO: Applying configuration override from string (assuming YAML format).");
         builder = builder.add_source(source_from_str(override_str, config::FileFormat::Yaml)?);
+    }
+
+    // Checked before the environment is merged in, so only what the user wrote is reported.
+    if let Ok(written) = builder
+        .clone()
+        .build()
+        .and_then(|settings| settings.try_deserialize::<serde_json::Value>())
+    {
+        for key in unknown_top_level_keys(&written) {
+            eprintln!("WARN: Unknown top-level config key '{key}' is ignored.");
+        }
     }
 
     let env_vars: HashMap<String, String> = std::env::vars_os()
@@ -1364,7 +1401,7 @@ impl AppConfig {
     }
 
     /// Fails when two names would store their secrets under one key (`a-b` and `a_b`).
-    fn check_secret_keys(&self) -> Result<()> {
+    pub(crate) fn check_secret_keys(&self) -> Result<()> {
         use mq_bridge::models::check_secret_key_names;
         check_secret_key_names("route", self.routes.keys().map(String::as_str))?;
         check_secret_key_names("consumer", self.consumers.iter().map(|c| c.name.as_str()))?;
@@ -2630,6 +2667,27 @@ consumers: []
         assert!(secret_store.stored.lock().unwrap().is_empty());
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_unknown_top_level_keys_are_reported() {
+        let route =
+            serde_json::json!({"input": {"memory": {"topic": "a"}}, "output": {"null": null}});
+        let raw = serde_json::json!({
+            "log_level": "info",
+            "config": {"foo": "bar"},
+            "route": [],
+            "routes": {"r1": route.clone()},
+            "stray": route.clone(),
+        });
+        assert_eq!(unknown_top_level_keys(&raw), ["config", "route", "stray"]);
+
+        let named = serde_json::json!({"orders": route.clone(), "ui_addr": ""});
+        assert!(unknown_top_level_keys(&named).is_empty());
+
+        let mut bare = route;
+        bare["exit_on_empty"] = true.into();
+        assert!(unknown_top_level_keys(&bare).is_empty());
     }
 
     #[test]

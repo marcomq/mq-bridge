@@ -1004,7 +1004,7 @@ async fn send_batch_and_commit(
 }
 
 /// Inputs that forget a message once they hand it over, so a crash in the route loses it.
-fn source_is_at_most_once(endpoint_type: &EndpointType) -> bool {
+pub(crate) fn source_is_at_most_once(endpoint_type: &EndpointType) -> bool {
     match endpoint_type {
         EndpointType::ZeroMq(_) => true,
         EndpointType::Nats(config) => config.no_jetstream,

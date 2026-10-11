@@ -107,9 +107,12 @@ pub(crate) async fn build_mongo_state_store(
     database: &str,
     collection: &str,
 ) -> anyhow::Result<Arc<dyn StateStore>> {
-    let client = Client::with_uri_str(url)
-        .await
-        .with_context(|| format!("Failed to connect aggregate store at '{url}'"))?;
+    let client = Client::with_uri_str(url).await.with_context(|| {
+        format!(
+            "Failed to connect aggregate store at '{}'",
+            crate::support::redact::url_password(url)
+        )
+    })?;
     Ok(Arc::new(MongoStateStore {
         db: client.database(database),
         collection: collection.to_string(),

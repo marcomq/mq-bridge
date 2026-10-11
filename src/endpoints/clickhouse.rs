@@ -247,6 +247,7 @@ impl ChClient {
         if let Some(ms) = config.request_timeout_ms {
             builder = builder.timeout(Duration::from_millis(ms));
         }
+        crate::support::tls_check::warn_unverified("clickhouse", config.tls.accept_invalid_certs);
         if config.tls.accept_invalid_certs {
             builder = builder.danger_accept_invalid_certs(true);
         }

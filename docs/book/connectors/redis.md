@@ -13,6 +13,33 @@ redis://[user:pass@]host[:port]?stream=<key>
 `redis://` (plain) and `rediss://` (TLS) are both accepted; `redis_streams://`
 is an explicit alias. If `stream` is omitted it defaults to the route name.
 
+## TLS
+
+A `rediss://` URL, or `tls.required: true`, connects with TLS and checks the server certificate
+and host name.
+
+| Setting | Effect |
+|---|---|
+| none | The certificate is checked against the public roots, as managed Redis services need. |
+| `tls.ca_file` | Trusts that CA instead. Needed for a server with a private or self-signed CA. |
+| `tls.cert_file` and `tls.key_file` | Presents a client certificate (PEM), for a server with `tls-auth-clients yes`. |
+
+`tls.accept_invalid_certs` is ignored: the certificate is always checked.
+
+```yaml
+output:
+  redis_streams:
+    url: "rediss://redis.internal:6380"
+    stream: "orders"
+    tls: { ca_file: /etc/mqb/ca.pem, cert_file: /etc/mqb/client.pem, key_file: /etc/mqb/client.key }
+```
+
+```bash
+mqb copy --drain \
+  --from file:///data/events.csv?format=csv \
+  --to 'rediss://redis.internal:6380?stream=events&tls={"ca_file":"/etc/mqb/ca.pem"}'
+```
+
 ## Config (YAML / library)
 
 The same settings as a route endpoint in a config file, or in `Route.from_config` /

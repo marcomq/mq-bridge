@@ -775,6 +775,7 @@ input:
 | `header` | `true` | Whether the first record names the columns. A sink with `false` writes rows only. |
 | `columns` | — | Source: the keys to use, instead of the header's. Sink: the columns to write, in this order; other keys are dropped. |
 | `nested` | `flatten` | Sink only. `flatten` writes a nested object as one `parent.child` column per leaf; `json` writes its JSON text into one cell. Arrays are always JSON text. |
+| `on_mismatch` | `warn` | Sink only. What happens to a record whose keys differ from the columns. `warn` writes it, with missing columns empty and extra keys dropped, and logs once. `fail` rejects the record as non-retryable, so a `dlq` takes it; with `columns` set, only a missing column counts. A source refuses `fail` at start. |
 
 `delimiter` stays the *record* separator and is independent of all this; it only must not
 contain the separator or the quote character. Common exports: Excel "CSV UTF-8" in a
@@ -1058,6 +1059,9 @@ whether they were found. On an input, the handler already sees the enriched mess
 - The response is parsed as JSON; a non-JSON response is written as a string. An empty
   response, or HTTP status 404, writes `null`. The metadata `lookup.found` is `true` or
   `false`, for a following [`switch`](#switch).
+- An `http` source always hands its status to the lookup: 404 is "not found", 401, 403, 408,
+  429 and 500 to 504 are retryable, any other 4xx fails the message. `pass_through_status`
+  need not be set; set it on the endpoint when the `http` source sits behind a `ref`.
 - `from` must answer: `http`, `static`, `nats` / `memory` with `request_reply: true`,
   `mongodb` with `find`, `sqlx` or `clickhouse` with `lookup_query`, `http_bulk` with `query`, or `grpc` to an
   mq-bridge `grpc` input whose route replies. An endpoint that only acknowledges fails the
@@ -1750,10 +1754,17 @@ message silently. As with `filter`, indexed payload paths such as `items[0].qty`
 and are rejected at startup.
 
 In either mode, a message that matches nothing goes to `default`; without a `default` it is
-dropped with a warning. Value lookup is the cheaper mode and stays the right choice when the
+dropped with a warning and counted as `unmatched` in the endpoint status. The count is not an
+error: the route stays healthy and a drain job still ends cleanly. Set a `default` to keep
+such messages. Value lookup is the cheaper mode and stays the right choice when the
 key is already in metadata — for payload-derived keys you can either promote the value into
 metadata first (for example with [`transform`](#transform)'s `on_error: pass_through`, which
 sets `mqb.transform_error`) or just use `when`.
+
+A batch is split by destination and the parts are sent concurrently. When one destination
+fails as a whole, the batch is redelivered to all of them, so the others see those messages
+twice: delivery is at-least-once per destination, as for `fanout`. The health status is
+unhealthy when any destination is.
 
 ### `request`
 
@@ -1773,7 +1784,10 @@ output:
 ```
 
 `to` must support request/reply: `http`, or a `nats`/`mongodb`/`memory` endpoint with
-`request_reply: true`. On error or timeout the **original** message is forwarded instead of a
+`request_reply: true`; the full list is the "Replies" column in
+[CAPABILITIES.md](CAPABILITIES.md#outputs). A `to` that can never reply is refused when the
+route starts, because every message would be acked and nothing forwarded. The exception is
+`forward_to: {}`: the response is discarded anyway, so any endpoint may be the target. On error or timeout the **original** message is forwarded instead of a
 response, so nothing is lost — distinguish the two downstream with a [`switch`](#switch) on a
 status key such as `http_status_code`.
 
@@ -1830,6 +1844,11 @@ between loses it. Use it for polling APIs, not for guaranteed delivery.
 
 The reply carries the triggering request's message id, which is what matches it to its caller.
 The id of the message that was read is in the metadata `mqb.reader.message_id`.
+
+A single trigger waits until the source has a message. To bound that wait, put a
+[`timeout`](#timeout) middleware on the output; the trigger then fails as retryable. Triggers
+that arrive as a batch are answered in order with the messages the source returns for one
+read; a trigger left without a message fails as retryable, it is not acknowledged empty.
 
 ### `sequence`
 
@@ -1906,7 +1925,15 @@ Consequences worth knowing:
   does. There is no exported-snapshot mode that would deduplicate this.
 * **A phase must be able to drain.** An intermediate phase is always run in drain mode, and its
   first empty batch is the handoff signal; only the last phase inherits the route's own
-  `exit_on_empty`. An endpoint that never reports empty would never hand off.
+  `exit_on_empty`. An endpoint that never reports empty would never hand off. The handoff then
+  waits, for up to 30 seconds, until the batches of that phase are acknowledged. If one of them
+  failed, the phase is polled again and the `cursor_id` marker is not advanced, so a restart
+  re-enters the phase.
+* **For a broker phase, "empty" means "nothing arrived for a moment".** A blocking source
+  reports empty after `MQ_BRIDGE_DRAIN_IDLE_TIMEOUT_MS` (1 second by default) without a
+  message. A rebalance or a slow connection can look the same, and with a marker the unread
+  rest of that phase is then not read. Use a source with a real end (SQL cursor, file, object
+  store) for intermediate phases, or raise the timeout.
 * **`postgres_cdc` needs `temporary_slot: false`** when it follows another phase. A temporary
   slot is dropped when the route stops, so a restart would resume with no retained WAL and
   silently skip every change made while the earlier phase ran. This is rejected at startup, for
@@ -1915,6 +1942,9 @@ Consequences worth knowing:
   that re-reads anything is then up to that phase's own cursor — a `sqlx` phase with its own
   `cursor_id` picks up where it left off. The marker records which phase was reached, so a
   restart skips the earlier ones outright.
+* **The marker belongs to one list of endpoints.** It stores the endpoint types next to the
+  phase, and a `sequence` whose types differ refuses to start. Use a new `cursor_id` or remove
+  the marker after replacing or reordering `endpoints`.
 * Phases connect lazily — a later phase opens no connection while an earlier one is still
   running, so a long snapshot does not hold a replication stream open.
 

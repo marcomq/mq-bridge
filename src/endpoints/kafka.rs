@@ -1287,6 +1287,7 @@ fn create_common_config(config: &KafkaConfig) -> ClientConfig {
             "enable.ssl.certificate.verification",
             (!config.tls.accept_invalid_certs).to_string(),
         );
+        crate::support::tls_check::warn_unverified("kafka", config.tls.accept_invalid_certs);
     }
 
     if let (Some(username), Some(password)) = (&config.username, &config.password) {

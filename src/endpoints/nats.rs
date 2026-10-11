@@ -429,8 +429,19 @@ async fn build_nats_options(config: &NatsConfig) -> anyhow::Result<ConnectOption
     };
 
     if !config.tls.required {
+        let has_credentials = config.token.is_some() || config.password.is_some();
+        crate::support::tls_check::warn_plaintext_credentials(
+            "nats",
+            &config.url,
+            has_credentials,
+            config
+                .url
+                .split(',')
+                .all(|server| server.trim().starts_with("tls://")),
+        );
         return Ok(options);
     }
+    crate::support::tls_check::warn_unverified("nats", config.tls.accept_invalid_certs);
 
     let mut root_store = rustls::RootCertStore::empty();
     if let Some(ca_file) = &config.tls.ca_file {

@@ -85,6 +85,7 @@ fn map_tls(tls: &crate::models::TlsConfig) -> PgTlsConfig {
     if !tls.required {
         return PgTlsConfig::disabled();
     }
+    crate::support::tls_check::warn_unverified("postgres_cdc", tls.accept_invalid_certs);
     if tls.accept_invalid_certs {
         // Encrypt but do not verify the server certificate.
         return PgTlsConfig::require();
