@@ -85,7 +85,7 @@ ends when its source is empty if the route has `exit_on_empty`, so there is no c
 | `custom` | depends | depends | Decided by the registered factory. |
 | `dir_spool` | yes | no |  |
 | `file` | yes | yes |  |
-| `grpc` | yes | no | A server or a streaming client. A server answers the caller, who resends on failure. |
+| `grpc` | depends | no | A server answers the caller, who resends on failure. A Bridge client acknowledges; a dynamic client (descriptor set or reflection) does not. |
 | `http` | unless `fire_and_forget: true` | no | A listener. The caller gets the outcome and resends on failure. |
 | `http_bulk` | yes | yes | A paged read of a search index. |
 | `ibmmq` | yes | yes |  |
@@ -103,7 +103,7 @@ ends when its source is empty if the route has `exit_on_empty`, so there is no c
 | `sqlx` | yes | depends | A queue table commits in any order; a `cursor_column` or `publication` source in order. |
 | `static` | yes | no | Emits the configured body. |
 | `stream_buffer` | yes | yes |  |
-| `websocket` | yes | no | A listener. A reply goes back on the same connection; nothing is redelivered. |
+| `websocket` | no | no | A listener. A reply goes back on the same connection; a rejected frame is not signalled and nothing is redelivered. |
 | `zeromq` | no | no |  |
 
 ## Outputs
@@ -171,11 +171,11 @@ ends when its source is empty if the route has `exit_on_empty`, so there is no c
 | `response` | – |  |
 | `sequence` | – |  |
 | `sled` | – |  |
-| `sqlx` | `tls` block | TLS can also be set in the URL (`sslmode=`, `ssl-mode=`). MySQL with `tls.ca_file` checks the chain but not the host name, and takes a client certificate from the URL only. |
+| `sqlx` | `tls` block | TLS can also be set in the URL (`sslmode=`, `ssl-mode=`). On MySQL an `ssl-mode` in the URL wins over the `tls` block. |
 | `static` | – |  |
 | `stream_buffer` | – |  |
 | `switch` | – |  |
-| `websocket` | `tls` block | A listener checks client certificates with `tls.ca_file` and has no other authentication and no connection limit. |
+| `websocket` | `tls` block | A listener has `basic_auth`, checks client certificates with `tls.ca_file` and limits connections with `max_connections`. A client sends `basic_auth`. |
 | `zeromq` | none | No encryption and no authentication. Use it on a trusted network only. |
 
 <!-- generated: end -->

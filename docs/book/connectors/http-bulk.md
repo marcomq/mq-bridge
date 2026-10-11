@@ -493,7 +493,8 @@ As an input:
   a [`transform`](../cookbook/transform.md) to take CouchDB's `doc` out of a
   change, for example.
 - **A draining route does not wait.** With `--drain` the first empty page ends
-  the copy.
+  the copy, also when that page names a next position.
+- **A batch that is dropped without an answer is read again**, like a failed one.
 
 Set the route's `batch_size` to a few thousand or more (`--batch-size` on the
 command line, where the default is 1024): each batch is one request, and search

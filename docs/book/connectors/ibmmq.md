@@ -68,7 +68,7 @@ mqb copy \
 | `queue` | Queue for point-to-point (defaults to the route name if omitted). |
 | `topic` | Topic string for pub/sub; enables subscriber mode on a consumer. |
 | `username` / `password` | Authentication (required if the channel enforces it). |
-| `max_message_size` | Max message size in bytes (default 4 MiB). |
+| `max_message_size` | Consumer-only: largest message that can be read, in bytes (default 4 MiB). A larger one stops the route with an error and stays on the queue. |
 | `wait_timeout_ms` | Consumer-only: polling timeout (default 1000 ms). |
 | `tls` | TLS via the MQ-native key repository (object; set with a JSON literal `?tls={...}`). |
 

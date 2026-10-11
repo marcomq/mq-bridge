@@ -59,6 +59,12 @@ drop zones. Object-store sinks write one immutable file per flushed batch. A `cs
 every file its own header, taken from that batch's first row, so set `csv.columns` when all
 files must share the same columns.
 
+An object that cannot be decoded (damaged, or written with another `compression` or
+`encryption` than configured) is tried five times and then skipped with a warning; the
+checkpoint moves past it. Check the log of a first run: with a wrong setting every object is
+skipped. An object without records is passed over. With `exit_on_empty` the run ends when the
+listing has nothing left after the last object.
+
 ## Choosing a local connector
 
 | Connector | Source model | Acknowledgement behavior | Best fit |

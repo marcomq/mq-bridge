@@ -65,6 +65,10 @@ mqb copy \
 | `request_reply` + `request_timeout_ms` | Publisher-only request/reply pattern. |
 | `deduplicate` | Publisher-only (JetStream): send `Nats-Msg-Id` so JetStream dedupes redeliveries. |
 | `username` / `password` / `token` | Authentication. |
-| `tls` | TLS configuration (object; set with a JSON literal `?tls={...}`). |
+| `tls` | TLS configuration (object; set with a JSON literal `?tls={...}`). With `required: true` the connection is TLS or fails; without `ca_file` the public CAs are trusted. |
+
+A JetStream consumer sends a reply to the subject in the message's `reply_to` header; a
+Core NATS consumer to the native reply subject. A durable consumer is named after stream and
+subject, with `*` written `_any_` and `>` `_all_`.
 
 Full field list: [reference/nats.md](../reference/nats.md).

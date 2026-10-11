@@ -71,5 +71,9 @@ mqb copy \
 | `access_key` / `secret_key` / `session_token` | Explicit credentials (otherwise the AWS provider chain is used). |
 | `max_messages` | Consumer-only: batch size per receive (1–10). |
 | `wait_time_seconds` | Consumer-only: long-poll wait (0–20). |
+| `binary_payload_mode` | Publisher-only: send the payload as base64 with the attribute `aws_binary_encoded`; a consumer decodes it. Needed for payloads that are not UTF-8 text. |
+
+Metadata travels as message attributes. SQS carries at most 10 per message; an entry with
+an empty value or a key with characters other than letters, digits, `_`, `-`, `.` is left out.
 
 Full field list: [reference/aws.md](../reference/aws.md).

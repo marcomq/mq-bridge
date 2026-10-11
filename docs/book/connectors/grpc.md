@@ -78,7 +78,10 @@ describes a wire format but not an acknowledgement protocol, so a dynamic source
 operation and its delivery semantics are the remote API's own. Where route-level ACK/NACK and
 at-least-once matter, use the built-in `mqbridge.Bridge` protocol (the default) — its ACK/NACK
 are real RPCs, and unacknowledged messages are retained and redelivered to the same
-`consumer_id` while the server process lives.
+`consumer_id` while the server process lives. The server keeps at most 1024 of them per
+subscriber and closes a subscription that falls further behind; the client subscribes
+again and is sent what was retained. Messages published while a subscriber is away are
+not kept for it.
 
 ## Serving a unary method
 

@@ -23,16 +23,33 @@ consumer the URL is the listen address (e.g. `ws://0.0.0.0:9000`).
 | Publisher | a `wss://` URL | Connects with TLS and checks the server certificate and host name against the public roots. |
 | Publisher | `tls.ca_file` | Trusts that CA instead of the public roots. |
 | Publisher | `tls.cert_file` and `tls.key_file` | Presents a client certificate. |
+| Consumer | `basic_auth: [user, password]` | An upgrade request without these credentials gets `401`. |
+| Publisher | `basic_auth: [user, password]` | Sends them as the `Authorization` header of the upgrade request. |
+| Consumer | `max_connections: N` | At most N connections at once; one more gets `503`. Unset means no limit. |
 
 A publisher with `tls.required: true` and a `ws://` URL is refused when the route starts.
 
-Mutual TLS is the only authentication the listener has. There is no password or token check
-and no limit on the number of connections, so a listener without `tls.ca_file` should be bound
-to loopback or sit behind a proxy that authenticates. A client has 10 seconds to complete the
-TLS handshake and send its upgrade request.
+A listener without `basic_auth` and without `tls.ca_file` accepts every client, so bind it
+to loopback or put a proxy in front. `basic_auth` without TLS sends the password in the clear.
+A client has 10 seconds to complete the TLS handshake and send its upgrade request. Behind
+TLS a connection over `max_connections` is closed before the handshake instead of getting a
+`503`. On the command line: `?basic_auth=["user","password"]&max_connections=1000`.
 
 With TLS a request for a path other than `path` is closed after the upgrade; without TLS it
 is answered with `404`.
+
+## Delivery
+
+WebSocket has no acknowledgement. A publisher answers pings, drops frames the server sends
+and connects again after the server closed the connection; a batch that is being written
+at the moment the server goes away is lost. Connect, TLS and upgrade together may take
+10 seconds. A send has no limit of its own: add the `timeout` middleware for a server that
+may stop reading.
+
+A listener closes its connections when its route stops. A client that does not read its
+replies for 10 seconds is disconnected. A message the route rejects is not signalled to
+the client; only a reply is. A route with a `websocket` input is therefore at-most-once, and
+`required_delivery: at_least_once` refuses it.
 
 ## Config (YAML / library)
 
@@ -102,6 +119,8 @@ mqb copy \
 | `execution_mode` | Consumer-only: `auto` (default), `direct_only`, or `routed`. |
 | `backlog` | Consumer-only: TCP listen backlog for the accept socket (default 4096). |
 | `tls` | TLS configuration (object; set with a JSON literal `?tls={...}`). See [TLS and authentication](#tls-and-authentication). |
+| `basic_auth` | `[user, password]`: required by a consumer, sent by a publisher. |
+| `max_connections` | Consumer-only: most connections open at once (default: no limit). |
 | `routed_queue_capacity` | Consumer-only: queue capacity for the routed adapter (default 100). |
 
 Full field list: [reference/websocket.md](../reference/websocket.md).

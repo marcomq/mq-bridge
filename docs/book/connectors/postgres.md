@@ -146,6 +146,35 @@ mqb copy \
 `publication` must already exist on the source (`CREATE PUBLICATION mqb_pub
 FOR TABLE orders;`); `slot_name` is created automatically if missing.
 
+The server must be PostgreSQL 14 or newer and run with `wal_level = logical`.
+
+TLS follows the URL (`?sslmode=verify-full&sslrootcert=/ca.pem`, with `sslcert` and
+`sslkey` for a client certificate) or the `tls` block; both connections the source
+opens use the same settings. `sslmode=prefer`, the default, is plain text.
+
+A nacked change makes the source reconnect and deliver again from the last confirmed
+position, so the changes after it come twice. Rows of one transaction are confirmed
+together, when its last row is acked.
+
+### What a change event contains
+
+The payload is the row as a JSON object; the metadata names the change: `postgres.operation`
+(`insert`, `update`, `delete`, `truncate`), `postgres.schema`, `postgres.table`,
+`postgres.lsn` and `postgres.key` (the primary key values as a JSON array).
+
+- An `update` that changes the primary key also carries `postgres.old_key`. A sink that
+  upserts by key has to delete that row itself, or the old row stays.
+- A `delete` carries the key columns only, the other columns are `null`. Set
+  `REPLICA IDENTITY FULL` on the table to get the whole old row.
+- A large value that an update did not change (an unchanged TOAST column) is not in the
+  log; its field is left out of the payload, which is different from `null`.
+- `numeric` is a string, to keep every digit. `bigint` is a JSON number: a reader that
+  holds numbers as doubles loses precision above 2^53. Numbers inside `json` / `jsonb`
+  are read as doubles too.
+- `bytea` is base64. Dates, times, `uuid` and `interval` are the text Postgres prints.
+  `NaN` and `Infinity` are strings. One-dimensional arrays of the common types are JSON
+  arrays; other arrays, ranges, enums and composite types are their Postgres text.
+
 Full field list: [reference/postgres-cdc.md](../reference/postgres-cdc.md).
 
 ## Writing by column name

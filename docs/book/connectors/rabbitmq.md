@@ -43,6 +43,10 @@ mqb copy --drain \
   --to 'amqp://guest:guest@localhost:5672/%2f?exchange=events&queue=events'
 ```
 
+The exchange and a binding for the routing key (the `queue` value) must exist: mq-bridge
+declares the queue, not the exchange or the binding. A message the broker can route to no
+queue fails the send; it is not dropped.
+
 **Fan-out subscriber mode (ephemeral queue bound to the exchange):**
 
 ```bash
@@ -60,5 +64,6 @@ mqb copy \
 | `subscribe_mode` | Consumer-only: fan-out (ephemeral queue) instead of point-to-point. |
 | `prefetch_count` | Consumer-only: messages to prefetch. Defaults to 100. |
 | `no_persistence` | Non-durable queues / non-persistent messages. |
+| `tls` | TLS configuration (object; set with a JSON literal `?tls={...}`). An `amqps://` URL uses it; `tls.required: true` makes an `amqp://` URL `amqps://` (port 5671 unless the URL names one). |
 
 Full field list: [reference/rabbitmq.md](../reference/rabbitmq.md).

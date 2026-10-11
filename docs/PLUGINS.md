@@ -422,6 +422,14 @@ source for you, so they are not redelivered — and a batch that is filtered awa
 entirely never reaches the route, which keeps `exit_on_empty` from mistaking it
 for a drained source.
 
+An error from `on_receive` or `on_send` fails the batch as retryable. Return a
+`ProcessingError::NonRetryable` (or a `ConsumerError::Permanent`) for a batch
+that can never pass, so that it is not retried forever:
+
+```rust
+return Err(ProcessingError::NonRetryable(anyhow!("not a JSON payload")).into());
+```
+
 A plugin that provides both uses one name for both, which is usually what a
 transport-specific middleware wants:
 
@@ -866,6 +874,11 @@ the build id (the UUID on macOS) and resolves the offsets offline, e.g.
 hands the signal to whichever handler was installed before (Rust's stack
 overflow message, Python's `faulthandler`), then dies of it, so core dumps and
 debuggers work as usual. `MQB_PLUGIN_CRASH_REPORT=0` turns the dump off.
+
+A process that brings its own crash reporter (Sentry, Crashpad, a Python or Node
+host) can set `MQB_PLUGIN_CRASH_HANDLER=0` before the first plugin loads. The
+host then installs no signal handler at all, and `register_crash_handler`
+answers `MQB_ERR_UNSUPPORTED`.
 
 A plugin can add its own report through `register_crash_handler` on the host
 table (`mqb_register_crash_handler` in the helpers). A closed-source plugin

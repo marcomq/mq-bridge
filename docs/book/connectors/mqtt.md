@@ -53,7 +53,7 @@ mqb copy \
 | Option | Purpose |
 |---|---|
 | `topic` | MQTT topic (wildcards on the source side). |
-| `client_id` | Fixed client ID; auto-generated if omitted. |
+| `client_id` | Fixed client ID. Without it a route's consumer is `mq-bridge-<route>` (persistent session) and its publisher `mq-bridge-<route>-out`. |
 | `qos` | Quality of Service (0, 1, or 2). Defaults to 1. |
 | `protocol` | `V3` or `V5`. Defaults to `V5`. |
 | `delayed_ack` | Consumer-only: ack after processing instead of on receipt (default). |

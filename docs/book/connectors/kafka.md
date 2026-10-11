@@ -69,5 +69,6 @@ options embedded.
 | `username` / `password` | SASL authentication. |
 | `tls` | TLS configuration (object; not settable via a scalar query param — use `?url=` to pass driver-level TLS options). |
 | `delayed_ack` | Publisher-only: don't wait for broker acknowledgement. |
+| `create_topic` | Publisher-only: create the topic at start if it is missing (default `true`). The topic gets `partitions` partitions (default 6) and the cluster's `default.replication.factor`. Set `false` (URI: `?create_topic=false`) on a cluster where topics are managed elsewhere. |
 
 Full field list: [reference/kafka.md](../reference/kafka.md).

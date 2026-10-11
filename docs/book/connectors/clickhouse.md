@@ -65,5 +65,14 @@ from a query param — use a YAML route config for that.)
 | `async_insert` | Server-side buffered inserts for higher publisher throughput. |
 | `cursor_column` + `cursor_id` | Non-destructive, resumable reads of an existing table. |
 | `checkpoint_store` | (Consumer, `cursor_column` mode) Where to persist the resume cursor. ClickHouse can't do per-row cursor upserts, so a durable checkpoint needs an **external** store URL: `file://`, `postgres://`/`mysql://`, `mongodb://`, or `s3://`/`gs://`/`az://`/`abfs://`. Treated as a secret since it may embed credentials. |
+| `request_timeout_ms` | Limit for one request. Unset means none, which suits very large inserts; set it when a stalled server must not stall the route. |
+| `tls` | `ca_file`, `cert_file` + `key_file` (client certificate, unencrypted key), `accept_invalid_certs`. `required: true` refuses an `http://` URL. |
+
+**Rows ClickHouse refuses.** An insert is one statement, so ClickHouse answers for the
+batch, not per row. When it refuses the data (HTTP 400, for example a string in a number
+column), the batch is halved and sent again until the refused rows stand alone. Those fail
+as non-retryable: add a `dlq` to keep them, otherwise they are logged and dropped. The
+other rows are inserted. With `async_insert` and `wait_for_async_insert: false` the server
+answers before it looked at the rows, so a bad row is never reported.
 
 Full field list: [reference/clickhouse.md](../reference/clickhouse.md).
