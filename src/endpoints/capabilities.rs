@@ -204,7 +204,7 @@ const CAPABILITIES: &[EndpointCapabilities] = &[
     EndpointCapabilities {
         ordered_commit: Depends,
         replies: Depends,
-        input_note: "`consumer` commits in any order; `snapshot`, `capture_new` and `capture_all` in order.",
+        input_note: "`delete` commits in any order; `snapshot`, `capture_new` and `capture_all` in order.",
         output_note: "Replies with `request_reply`, `report_outcome` or `find`.",
         security_note: "TLS and credentials can also be set in the URL (`tls=true`, `tlsCAFile=`).",
         ..row("mongodb", TlsBlock)
