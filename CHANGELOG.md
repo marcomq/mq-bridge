@@ -895,8 +895,9 @@ changes" first: both are Cargo features now.
   pull consumers with commit and per-batch ack/nack, and routes with handlers, configured
   with the same YAML or JSON as the other bindings. Every call blocks. The header is
   generated and carries no ABI stability promise: it ships with its library, and
-  `mqb_api_version()` detects a mismatch. There are no prebuilt archives yet; see
-  `c/mq-bridge-c/README.md`.
+  `mqb_api_version()` detects a mismatch. Each GitHub release carries a prebuilt
+  `mq-bridge-c-<target>` archive (shared library and header, every endpoint) for Linux
+  x86_64, macOS arm64 and Windows x86_64; see `c/mq-bridge-c/README.md`.
 - **Plugin tables registered from the host program.** `plugin::register_plugin_table`
   (C: `mqb_register_plugin`) registers an `MqbPluginVTable` that lives in the running
   program, so a C or C++ application defines custom endpoints and middleware without

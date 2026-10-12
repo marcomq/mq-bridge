@@ -14,7 +14,8 @@ The distributed files are:
   packages containing the native addon. The JavaScript-only root npm package
   does not ship this file.
 - `python/mq-bridge-py/THIRD_PARTY_LICENSES.txt` for Python wheels containing
-  the native extension.
+  the native extension. The C library release archives ship this file too: they
+  link the same `full` engine, so it lists PyO3 and mimalloc in excess.
 
 ## Current generation policy
 

@@ -541,6 +541,104 @@ jobs:
           tag_name: ${{ needs.metadata.outputs.release_tag }}
           files: ${{ env.ASSET_PATH }}
 
+  # The C library has no ABI stability, so each archive carries the header that
+  # matches its library. Shared library only: a `full` static archive is huge and
+  # needs a per-target native link line.
+  build-c-library:
+    name: Build C library asset for ${{ matrix.target }}
+    needs: [metadata, release]
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Same runners as the CLI assets, so both share one glibc floor.
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag_name || github.ref }}
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          toolchain: stable
+          target: ${{ matrix.target }}
+
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config zlib1g-dev cmake libcurl4-openssl-dev protobuf-compiler
+
+      - name: Install dependencies (Windows)
+        if: runner.os == 'Windows'
+        run: choco install protoc --no-progress -y
+
+      - name: Install dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: brew install cmake pkg-config openssl@3 protobuf
+
+      # `cargo rustc --crate-type` skips the static library the manifest also declares.
+      - name: Build shared library (full)
+        shell: bash
+        run: cargo rustc -p mq-bridge-c --release --target ${{ matrix.target }} --crate-type cdylib
+
+      - name: Package artifacts
+        shell: bash
+        run: |
+          ASSET_NAME="mq-bridge-c-${{ matrix.target }}"
+          OUT="target/${{ matrix.target }}/release"
+          mkdir -p staging/lib staging/include
+          case "$RUNNER_OS" in
+            Windows) cp "$OUT/mq_bridge.dll" "$OUT/mq_bridge.dll.lib" staging/lib/ ;;
+            macOS)
+              cp "$OUT/libmq_bridge.dylib" staging/lib/
+              # Pin the install name so programs find the library through their rpath.
+              install_name_tool -id @rpath/libmq_bridge.dylib staging/lib/libmq_bridge.dylib
+              codesign --force --sign - staging/lib/libmq_bridge.dylib
+              ;;
+            *) cp "$OUT/libmq_bridge.so" staging/lib/ ;;
+          esac
+          cp include/*.h staging/include/
+          cp LICENSE LICENSE-MIT LICENSE-APACHE staging/
+          cp c/mq-bridge-c/README.md staging/README.md
+          # No notice file of its own yet: the Python wheel links the same `full` engine.
+          cp python/mq-bridge-py/THIRD_PARTY_LICENSES.txt staging/
+          if [ "$RUNNER_OS" == "Windows" ]; then
+            7z a "${ASSET_NAME}.zip" ./staging/*
+            echo "ASSET_PATH=${ASSET_NAME}.zip" >> "$GITHUB_ENV"
+          else
+            tar -czf "${ASSET_NAME}.tar.gz" -C staging .
+            echo "ASSET_PATH=${ASSET_NAME}.tar.gz" >> "$GITHUB_ENV"
+          fi
+
+      # CI only links the `--no-default-features` build; this is the one place a C
+      # program meets the `full` library, and it uses the archive as a user would.
+      - name: Smoke test the archive
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          mkdir unpacked
+          tar -xzf "$ASSET_PATH" -C unpacked
+          cc -std=c11 -I unpacked/include examples/c-library/smoke.c \
+            -L unpacked/lib -lmq_bridge "-Wl,-rpath,$PWD/unpacked/lib" -o smoke
+          if [ "$RUNNER_OS" == "macOS" ]; then otool -L unpacked/lib/libmq_bridge.dylib; else ldd unpacked/lib/libmq_bridge.so; fi
+          ./smoke "$RUNNER_TEMP" | tee smoke.log
+          grep -q "smoke test passed" smoke.log
+
+      - name: Upload Release Asset
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        with:
+          tag_name: ${{ needs.metadata.outputs.release_tag }}
+          files: ${{ env.ASSET_PATH }}
+
   build-linux-amd64:
     name: Build docker linux/amd64
     needs: [metadata, preflight, test, app-checks, package-dry-run]
@@ -833,6 +931,7 @@ jobs:
     needs:
       - metadata
       - build-release
+      - build-c-library
       - build-linux-arm64-asset
       - build-tauri-release
       - publish-manifest

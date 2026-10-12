@@ -9,9 +9,21 @@ and any language that can call C, can use it too.
 - Library: `libmq_bridge.so` / `.dylib` / `mq_bridge.dll`, and `libmq_bridge.a`
 - Examples: [`examples/c-library`](../../examples/c-library)
 
+## Install
+
+Each [GitHub release](https://github.com/marcomq/mq-bridge/releases) has a
+`mq-bridge-c-<target>` archive for Linux x86_64 (glibc 2.35+), macOS arm64 and
+Windows x86_64. It holds the shared library with every endpoint in `lib/` and its
+matching header in `include/`; there is no static library in it.
+
+```sh
+cc -std=c11 -I mq-bridge-c/include app.c -L mq-bridge-c/lib -lmq_bridge -o app
+```
+
 ## Build
 
-There are no prebuilt archives yet; build it with Cargo from the repository root.
+For another target, a static library or a smaller feature set, build it with Cargo
+from the repository root.
 
 ```sh
 cargo build --release -p mq-bridge-c                 # every endpoint
