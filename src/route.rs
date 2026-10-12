@@ -455,6 +455,29 @@ pub(crate) fn route_display_name(route: &str) -> String {
     display_name_of(route).unwrap_or_else(|| route.to_string())
 }
 
+/// Swaps the route key for its display name where text embeds it: `[route:…]` or quoted.
+fn show_route_name(text: String, name: &str, shown: &str) -> String {
+    if name == shown {
+        return text;
+    }
+    [("[route:", "]"), ("'", "'"), ("`", "`")]
+        .iter()
+        .fold(text, |text, (open, close)| {
+            text.replace(
+                &format!("{open}{name}{close}"),
+                &format!("{open}{shown}{close}"),
+            )
+        })
+}
+
+/// [`show_route_name`] for an error. Left as it is, type included, without a display name.
+fn show_route_error(error: anyhow::Error, name: &str, shown: &str) -> anyhow::Error {
+    if name == shown {
+        return error;
+    }
+    anyhow::anyhow!(show_route_name(format!("{error:#}"), name, shown))
+}
+
 fn check_fault_middleware_allowed(
     endpoint: &Endpoint,
     route_name: &str,
@@ -1504,8 +1527,12 @@ impl Route {
         no_resume: bool,
     ) -> anyhow::Result<RouteHandle> {
         let shown = Arc::new(route_display_name(name_str));
-        let warnings = self.check(name_str, None)?;
+        // The checks take the key; only their text shows the display name.
+        let warnings = self
+            .check(name_str, None)
+            .map_err(|e| show_route_error(e, name_str, &shown))?;
         for warning in warnings {
+            let warning = show_route_name(warning, name_str, &shown);
             tracing::warn!(route = %shown, "Configuration warning: {}", warning);
         }
         let relaxed_output = relax_object_naming(
@@ -1513,7 +1540,8 @@ impl Route {
             self.source_has_position(),
             &self.input,
             &self.output,
-        )?
+        )
+        .map_err(|e| show_route_error(e, name_str, &shown))?
         .map(|(output, _)| output);
         let inferred_output = relaxed_output.as_ref().unwrap_or(&self.output);
         match self.inferred_delivery(inferred_output) {
@@ -1542,7 +1570,7 @@ impl Route {
         let show = {
             let name = Arc::clone(&name);
             let shown = Arc::clone(&shown);
-            move |text: String| text.replace(name.as_str(), shown.as_str())
+            move |text: String| show_route_name(text, &name, &shown)
         };
 
         // Live health cell shared with the returned `RouteHandle`. Starts unhealthy
@@ -5118,6 +5146,15 @@ mod tests {
         assert_eq!(
             route_display_name("no_display_name_set"),
             "no_display_name_set"
+        );
+        // Only the embedded route name changes, not the same word elsewhere in the text.
+        assert_eq!(
+            show_route_name(
+                "[route:orders] Route 'orders': table orders not found".to_string(),
+                "orders",
+                "short"
+            ),
+            "[route:short] Route 'short': table orders not found"
         );
     }
 

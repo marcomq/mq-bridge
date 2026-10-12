@@ -227,9 +227,9 @@ Checkpoints are **at-least-once**, never at-most-once:
   `cursor_column '…' has a group of equal values larger than batch_size` and **retries that poll
   indefinitely** rather than exiting, so a `--drain` job hangs instead of failing — watch for the
   repeating log line. Raise `batch_size` above the largest group, or pick a more unique column.
-- **The cursor column must be integer or text.** Other types the SQL `Any` driver can't decode
-  fail permanently; expose the column as `BIGINT`/`TEXT` through a view. On Postgres a
-  timestamp, `date`, `numeric` or `uuid` column works too.
+- **The cursor column must be integer or text, with more types on Postgres.** Other types the
+  SQL `Any` driver can't decode fail permanently; expose the column as `BIGINT`/`TEXT` through a
+  view. On Postgres a timestamp, `date`, `numeric` or `uuid` column works too.
 - **`cursor_column` and `delete_after_read` are mutually exclusive** — one is non-destructive,
   the other consumes.
 - **Changing `cursor_id` or `checkpoint_store` starts over.** The position is keyed by both; a

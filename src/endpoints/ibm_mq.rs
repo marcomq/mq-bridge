@@ -24,7 +24,14 @@ use mqi::{
     types::{ApplName, CipherSpec, KeyRepo, MessageId, QueueManagerName, QueueName, FORMAT_NONE},
     MqStr, Object, Subscription, Syncpoint,
 };
-use std::{sync::Arc, thread, time::Duration};
+use std::{
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    thread,
+    time::Duration,
+};
 use tokio::sync::{mpsc, oneshot, Semaphore};
 use tracing::{debug, info, trace, warn};
 
@@ -538,6 +545,8 @@ enum ConsumerJob {
 struct Unsettled {
     tx: Option<mpsc::Sender<ConsumerJob>>,
     epoch: u64,
+    /// Set when the backout could not be queued: the thread backs out before its next job.
+    backout_pending: Arc<AtomicBool>,
 }
 
 impl Drop for Unsettled {
@@ -549,7 +558,8 @@ impl Drop for Unsettled {
                 .try_send(ConsumerJob::Backout { epoch, reply_tx })
                 .is_err()
             {
-                warn!("IBM MQ batch dropped without a commit could not be backed out");
+                // The read permit is released after this, so no later batch can be read first.
+                self.backout_pending.store(true, Ordering::Release);
             }
         }
     }
@@ -564,6 +574,7 @@ async fn spawn_consumer_thread(
     // Weak: a sender held by the thread would keep the channel open after the consumer is gone.
     let tx_loop = tx.downgrade();
     let mut current_epoch = 0u64;
+    let backout_pending = Arc::new(AtomicBool::new(false));
     let (init_tx, init_rx) = oneshot::channel();
 
     thread::spawn(move || {
@@ -637,6 +648,9 @@ async fn spawn_consumer_thread(
 
             let mut connection_error = false;
             while let Some(job) = rx.blocking_recv() {
+                if backout_pending.swap(false, Ordering::AcqRel) {
+                    backout_with_logging!(&qm, "for a batch dropped without a commit");
+                }
                 match job {
                     ConsumerJob::Receive {
                         max_messages,
@@ -732,14 +746,17 @@ async fn spawn_consumer_thread(
                                 continue;
                             };
                             let epoch = current_epoch;
-                            let mut unsettled = Unsettled {
+                            let unsettled = Unsettled {
                                 tx: Some(tx_commit),
                                 epoch,
+                                backout_pending: Arc::clone(&backout_pending),
                             };
                             let commit_fn: traits::BatchCommitFunc =
                                 Box::new(move |dispositions: Vec<MessageDisposition>| {
-                                    let tx = unsettled.tx.take().expect("settled once");
                                     Box::pin(async move {
+                                        // Stays armed until the job is queued: a cancelled commit backs out.
+                                        let mut unsettled = unsettled;
+                                        let tx = unsettled.tx.clone().expect("settled once");
                                         let (reply_tx, reply_rx) = oneshot::channel();
                                         let should_backout = dispositions
                                             .iter()
@@ -753,6 +770,7 @@ async fn spawn_consumer_thread(
                                         tx.send(job)
                                             .await
                                             .map_err(|_| anyhow::anyhow!("Consumer thread dead"))?;
+                                        unsettled.tx = None;
                                         reply_rx.await.map_err(|_| {
                                             anyhow::anyhow!("Consumer thread dropped reply")
                                         })??;
