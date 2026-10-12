@@ -58,6 +58,7 @@ int main(void) {
         return 1;
     }
     const char *body = "{\"id\": 1}";
+    /* strlen suits a C string; for binary data pass the buffer's real length. */
     mqb_message_t *message = mqb_message_new((const uint8_t *)body, strlen(body));
     if (mqb_publisher_send(publisher, message) != MQB_OK) {
         fprintf(stderr, "%s\n", mqb_last_error());

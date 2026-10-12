@@ -25,7 +25,9 @@ build:
           # then refuses to compile; cc >=1.6 snapshots the env, defeating aws-lc-sys'
           # own override. cc still passes -O3 from the cargo profile.
           - for v in $(compgen -e | grep -E '^(HOST_|TARGET_)?CFLAGS'); do export "$v=$(printenv "$v" | sed -E 's/(^|[[:space:]])-O[0-9a-z]+//g')"; done
-          - cargo auditable install --locked --no-track --bins --root ${{ PREFIX }} --path apps/mq-bridge-app/crates/cli
+          # `full-dynamic` links conda's librdkafka. The bundled one (`full`) would be
+          # compiled against vendored OpenSSL headers but linked to conda's libssl.
+          - cargo auditable install --locked --no-track --bins --root ${{ PREFIX }} --path apps/mq-bridge-app/crates/cli --no-default-features --features full-dynamic
         else:
           # rattler-build >=0.68 puts CARGO_HOME under %SRC_DIR%, which pushes
           # aws-lc-sys' relative third_party includes past MAX_PATH -- cl.exe is
@@ -57,6 +59,8 @@ requirements:
       then: openssl
     - if: unix
       then: zlib
+    - if: unix
+      then: librdkafka
     # librdkafka; matches the libcurl4-openssl-dev the release workflow installs.
     - if: linux
       then: libcurl
@@ -65,6 +69,8 @@ requirements:
       then: openssl
     - if: unix
       then: zlib
+    - if: unix
+      then: librdkafka
     - if: linux
       then: libcurl
 
