@@ -14,8 +14,8 @@ The distributed files are:
   packages containing the native addon. The JavaScript-only root npm package
   does not ship this file.
 - `python/mq-bridge-py/THIRD_PARTY_LICENSES.txt` for Python wheels containing
-  the native extension. The C library release archives ship this file too: they
-  link the same `full` engine, so it lists PyO3 and mimalloc in excess.
+  the native extension.
+- `c/mq-bridge-c/THIRD_PARTY_LICENSES.txt` for the C library release archives.
 
 ## Current generation policy
 
@@ -42,7 +42,7 @@ After either Cargo lockfile or the app package lock changes:
 1. Run `cargo deny check licenses bans sources` in the repository root and in
    `apps/mq-bridge-app`.
 2. Recalculate the affected runtime dependency closure. Treat the app, Node
-   binding, and Python binding as separate distributions.
+   binding, Python binding, and C library as separate distributions.
 3. Compare component names, versions, SPDX expressions, upstream license files,
    and upstream `NOTICE` files with the applicable tracked notice file.
 4. Add new or changed copyright/attribution text. Preserve full `OR`
@@ -53,6 +53,13 @@ After either Cargo lockfile or the app package lock changes:
 
 `cargo-deny` checks whether resolved licenses are allowed, but it does not
 verify that these distributed notice files are current.
+
+CI runs `scripts/ci/check_third_party_notices.sh`, which fails when a crate in a
+distribution's runtime closure is missing from its notice file. It compares
+crate names only, so it catches a new dependency but not a changed version,
+license, copyright line or `NOTICE` file, and it does not look at the web UI's
+npm packages. Entries for crates that have left the closure are not removed
+automatically either.
 
 ## Future automation
 

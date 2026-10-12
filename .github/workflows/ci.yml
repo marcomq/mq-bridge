@@ -348,6 +348,11 @@ jobs:
         with:
           command: check bans licenses sources
 
+      # cargo-deny approves licenses; this checks the shipped notice files name
+      # every crate that ends up in a release artifact.
+      - name: Third-party notices list every shipped crate
+        run: scripts/ci/check_third_party_notices.sh
+
       # Informational: every current advisory is in a transitive dependency we
       # cannot upgrade ourselves, and RustSec updates daily. SECURITY.md records
       # the per-feature reachability analysis; deny.toml carries the reasoning.
