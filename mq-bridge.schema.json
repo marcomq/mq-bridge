@@ -3146,7 +3146,7 @@
           "default": false
         },
         "consume": {
-          "description": "(Consumer only) How to consume the collection: `capture_all` (default, read existing\ndocuments first, then watch for changes — non-destructive, for bulk reads and ETL),\n`capture_new` (watch an existing collection for changes only), `snapshot` (one-shot\nnon-destructive read that ends on drain, the option without a replica set), or\n`consumer` (competing-consumers work queue — destructive and intended for jobs).\nThe bridge selects the underlying mechanism automatically. If unset, the deprecated\n`change_stream` boolean is honored for backward compatibility.",
+          "description": "(Consumer only) How to consume the collection: `capture_all` (default, read existing\ndocuments first, then watch for changes — non-destructive, for bulk reads and ETL),\n`capture_new` (watch an existing collection for changes only), `snapshot` (one-shot\nnon-destructive read that ends on drain, the option without a replica set), or\n`delete` (competing-consumers work queue — destructive and intended for jobs; also `consumer`).\nThe bridge selects the underlying mechanism automatically. If unset, the deprecated\n`change_stream` boolean is honored for backward compatibility.",
           "anyOf": [
             {
               "$ref": "#/$defs/MongoConsume"
@@ -3239,7 +3239,7 @@
           ]
         },
         "meta_collection": {
-          "description": "(Optional) Collection to store sequence counters and cursor positions. Defaults to the message collection if not set.",
+          "description": "**Deprecated** — unused since the publisher no longer writes `seq`. Kept for compatibility.",
           "type": [
             "string",
             "null"
@@ -3264,9 +3264,9 @@
       "description": "How a MongoDB endpoint consumes a collection. One intent-named selector — the bridge picks the\nunderlying mechanism (change stream vs. polling) automatically. Defaults to `capture_all`.",
       "oneOf": [
         {
-          "description": "**Queue** — competing consumers: claim, process, delete, so each document goes to exactly one\nreader. Destructive and intended for jobs, not bulk reads.",
+          "description": "**Queue** — competing consumers: claim, process, delete, so each document goes to exactly one\nreader. Destructive and intended for jobs, not bulk reads. Also accepted as `consumer`.",
           "type": "string",
-          "const": "consumer"
+          "const": "delete"
         },
         {
           "description": "**One-shot read** — page documents by `_id`, then end the route. Non-destructive and\nnon-resumable; needs no replica set and reads arbitrary collections. This is not a\npoint-in-time snapshot: separate page queries can observe concurrent inserts and deletes,\nwhile inserts below the current `_id` high-water mark can be missed.",
@@ -3279,7 +3279,7 @@
           "const": "capture_new"
         },
         {
-          "description": "**Watch existing collection** — read the existing documents first, then capture changes.\nNon-destructive and the fastest read mode; use this for bulk reads and ETL. Default.\nNeeds a replica set; on a standalone `mongod` use `snapshot` or `consumer`.",
+          "description": "**Watch existing collection** — read the existing documents first, then capture changes.\nNon-destructive and the fastest read mode; use this for bulk reads and ETL. Default.\nNeeds a replica set; on a standalone `mongod` use `snapshot` or `delete`.",
           "type": "string",
           "const": "capture_all"
         }
@@ -5698,7 +5698,7 @@
       ]
     },
     "PostgresConsume": {
-      "description": "How a `postgres_cdc` endpoint consumes its publication. The intent-named counterpart of\n[`MongoConsume`], so the two CDC endpoints read alike.\n\n`consumer` has no Postgres meaning — a replication slot is not a work queue; use a `sqlx`\nendpoint for competing consumers.",
+      "description": "How a `postgres_cdc` endpoint consumes its publication. The intent-named counterpart of\n[`MongoConsume`], so the two CDC endpoints read alike.\n\n`delete` has no Postgres meaning — a replication slot is not a work queue; use a `sqlx`\nendpoint for competing consumers.",
       "oneOf": [
         {
           "description": "**Stream changes only** — capture what happens from the slot's position onward. Reads\nnothing that already exists; never ends on drain. Default, because it is what\n`postgres_cdc` has always done.",

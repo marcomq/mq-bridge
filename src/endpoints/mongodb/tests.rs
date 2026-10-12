@@ -102,10 +102,6 @@ fn only_a_duplicate_id_counts_as_already_stored() {
         InsertRejection::Permanent
     );
     assert_eq!(
-        classify_insert_error(11000, &dup("seq_1")),
-        InsertRejection::Transient
-    );
-    assert_eq!(
         classify_insert_error(121, "Document failed validation"),
         InsertRejection::Permanent
     );
@@ -313,6 +309,39 @@ fn message_to_document_strips_source_metadata_but_keeps_user_keys() {
         !metadata.contains_key("mqb.src.kafka_offset"),
         "source/provenance keys must not be persisted to the document"
     );
+}
+
+#[test]
+fn wrapped_documents_sort_in_the_order_they_were_built() {
+    // Ids that sort backwards: the queue position must not follow `_id`.
+    let orders: Vec<Vec<u8>> = (0..1000u128)
+        .rev()
+        .map(|id| {
+            let msg = CanonicalMessage::new(b"x".to_vec(), Some(id));
+            let doc = message_to_document(&msg, &MongoDbFormat::Normal, None, None).unwrap();
+            match doc.get(INSERT_ORDER_FIELD) {
+                Some(Bson::Binary(bin)) if bin.to_uuid().is_ok() => bin.bytes.clone(),
+                other => panic!("insert_order is not a UUID: {other:?}"),
+            }
+        })
+        .collect();
+    assert!(orders.windows(2).all(|pair| pair[0] < pair[1]));
+}
+
+#[test]
+fn a_raw_document_gets_no_queue_position() {
+    let msg = CanonicalMessage::new(br#"{"a":1}"#.to_vec(), None);
+    let doc = message_to_document(&msg, &MongoDbFormat::Raw, None, None).unwrap();
+    assert!(!doc.contains_key(INSERT_ORDER_FIELD));
+}
+
+#[test]
+fn a_stored_document_parses_back_without_its_queue_position() {
+    let msg = CanonicalMessage::new(b"hello".to_vec(), Some(7));
+    let doc = message_to_document(&msg, &MongoDbFormat::Text, None, None).unwrap();
+    let parsed = parse_mongodb_document(doc).unwrap();
+    assert_eq!(parsed.message_id, 7);
+    assert_eq!(&parsed.payload[..], b"hello");
 }
 
 #[test]

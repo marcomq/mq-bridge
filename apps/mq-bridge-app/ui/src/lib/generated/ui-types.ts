@@ -513,7 +513,7 @@ export interface MongoDbConfig {
   shared?: boolean | null;
 }
 
-export type MongoConsume = "consumer" | "snapshot" | "capture_new" | "capture_all";
+export type MongoConsume = "delete" | "snapshot" | "capture_new" | "capture_all";
 
 export type MongoDbFormat = "normal" | "json" | "text" | "raw";
 

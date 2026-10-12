@@ -13,7 +13,7 @@ use mq_bridge::test_utils::{
     run_test_with_docker_controller, setup_logging, should_run, verify_subscriber_logic,
     PerformanceResult,
 };
-// Queue pipeline: `consume: consumer` is explicit because the default (`capture_all`) needs a
+// Queue pipeline: `consume: delete` is explicit because the default (`capture_all`) needs a
 // replica set and otherwise degrades to an `_id`-ordered reader, which cannot tail a collection
 // written by 4 concurrent workers — a batch landing out of `_id` order is skipped for good.
 const CONFIG_YAML: &str = r#"
@@ -35,7 +35,7 @@ routes:
     concurrency: 4
     batch_size: 1024
     input:
-      mongodb: { url: "mongodb://localhost:27017", database: "mq_bridge_test", collection: "test_collection", consume: consumer }
+      mongodb: { url: "mongodb://localhost:27017", database: "mq_bridge_test", collection: "test_collection", consume: delete }
     output:
       memory: { topic: "test-out-mongodb", capacity: {out_capacity} }
 "#;
@@ -78,9 +78,7 @@ async fn test_mongodb_snapshot_reads_all_and_ends() {
         let route = Route::new(Endpoint::new(EndpointType::MongoDb(config)), out);
         route.deploy(&route_name).await.unwrap();
 
-        // Track the seeded payloads rather than a message count: the snapshot also emits the
-        // publisher's internal `<collection>:sequencer` document, so counting would both overshoot
-        // and race (250 messages can be 249 real ones plus the sequencer).
+        // Track the seeded payloads rather than a message count.
         let mut seen = std::collections::HashSet::new();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         while seen.len() < seeded && std::time::Instant::now() < deadline {
@@ -168,7 +166,63 @@ pub async fn test_mongodb_chaos() {
     .await;
 }
 
-// Queue mode (`consume: consumer`) is the standalone-safe reader that still round-trips the
+/// The queue is read in the order it was written, not in `_id` order, across and inside batches.
+#[tokio::test]
+#[ignore = "requires docker compose"]
+async fn test_mongodb_queue_reads_in_insert_order() {
+    if !should_run("mongodb") {
+        return;
+    }
+    use mq_bridge::traits::{MessageConsumer, MessageDisposition, MessagePublisher};
+
+    setup_logging();
+    run_test_with_docker("tests/integration/docker-compose/mongodb.yml", || async {
+        const MESSAGES: usize = 50;
+        let config = mq_bridge::models::MongoDbConfig {
+            url: "mongodb://localhost:27017".to_string(),
+            database: "mq_bridge_test".to_string(),
+            collection: Some(format!("insert_order_{}", fast_uuid_v7::gen_id())),
+            ..Default::default()
+        };
+
+        // Ids that fall while the write order rises.
+        let batch: Vec<_> = (0..MESSAGES)
+            .map(|i| {
+                let id = (MESSAGES - i) as u128;
+                mq_bridge::CanonicalMessage::new(i.to_string().into_bytes(), Some(id))
+            })
+            .collect();
+        let publisher = MongoDbPublisher::new(&config).await.unwrap();
+        publisher.send_batch(batch).await.unwrap();
+
+        let mut consumer = MongoDbConsumer::new(&config).await.unwrap();
+        let mut read = Vec::new();
+        while read.len() < MESSAGES {
+            let batch = tokio::time::timeout(
+                std::time::Duration::from_secs(20),
+                consumer.receive_batch(20),
+            )
+            .await
+            .expect("queue read timed out")
+            .expect("receive_batch failed");
+            let count = batch.messages.len();
+            read.extend(
+                batch
+                    .messages
+                    .iter()
+                    .map(|m| m.get_payload_str().to_string()),
+            );
+            (batch.commit)(vec![MessageDisposition::Ack; count])
+                .await
+                .expect("commit (ack) failed");
+        }
+        let written: Vec<String> = (0..MESSAGES).map(|i| i.to_string()).collect();
+        assert_eq!(read, written);
+    })
+    .await;
+}
+
+// Queue mode (`consume: delete`) is the standalone-safe reader that still round-trips the
 // wrapped envelope, so the handler sees the `kind` metadata. It replaces the removed subscriber
 // mode this test used to exercise.
 #[tokio::test]

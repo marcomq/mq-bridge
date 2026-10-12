@@ -108,7 +108,7 @@ load_orders:
 | `capture_all` (default) | Reads every document, then follows changes | no | yes |
 | `capture_new` | Follows changes from now on | no | yes |
 | `snapshot` | Reads every document once, then ends | no | no |
-| `consumer` | Job queue: claims a document, deletes it when done | **yes, deletes** | no |
+| `delete` | Job queue: claims a document, deletes it when done. Also accepted as `consumer` | **yes, deletes** | no |
 
 A single-node replica set is enough for the two `capture` modes; without one they refuse to
 start. The comparison in detail is under
@@ -151,7 +151,7 @@ mqb copy --drain \
 
 ### A collection as a job queue
 
-With `consume: consumer` several instances share the work: each document goes to one of them
+With `consume: delete` several instances share the work: each document goes to one of them
 and is deleted when it was processed. The documents must have been written by an mq-bridge
 output with the format `normal`, `json` or `text`, which is the shape the queue expects; do
 not point this mode at a collection of your own data.
@@ -165,10 +165,19 @@ enqueue_jobs:
 
 work_jobs:
   input:
-    mongodb: { url: "mongodb://localhost:27017", database: "work", collection: "jobs", consume: consumer }
+    mongodb: { url: "mongodb://localhost:27017", database: "work", collection: "jobs", consume: delete }
   output:
     http: { url: "http://worker.internal:9000/run" }
 ```
+
+The queue is read in the order the documents were written. The publisher stores that
+position in the field `insert_order`, apart from the `_id`, so a `message_id` from another
+system does not change the order. It is a UUIDv7 that always rises within one process;
+two writers are ordered by their clocks. A reader that needs an exact order uses
+`capture_all` or `capture_new`.
+
+Documents without `insert_order` are read first, in `_id` order: those written with
+`format: raw`, by another program, or by an earlier version.
 
 ## Examples
 
@@ -204,7 +213,7 @@ mqb copy \
 | `collection` | Collection name. |
 | `format` | Publisher: how a message is stored: `normal` (default), `json`, `text`, `raw`. |
 | `id_field` | Publisher-only: payload field that becomes `_id`. |
-| `consume` | `capture_all` (default — snapshot then change stream, replica set required), `capture_new` (changes only, replica set required), `snapshot` (one-shot read, no replica set), or `consumer` (durable work queue — destructive). |
+| `consume` | `capture_all` (default — snapshot then change stream, replica set required), `capture_new` (changes only, replica set required), `snapshot` (one-shot read, no replica set), or `delete` (durable work queue — destructive; also `consumer`). |
 | `cursor_id` | Names the saved read position of `capture_new`/`capture_all`. |
 | `checkpoint_store` | Where to persist the resume cursor for `capture_new`/`capture_all`. |
 | `username` / `password` | Take precedence over credentials embedded in `url`. |

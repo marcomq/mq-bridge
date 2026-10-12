@@ -618,7 +618,7 @@ fn bundled_chat(
     }))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "plugin", feature = "test-utils"))]
 mod tests {
     use super::*;
 

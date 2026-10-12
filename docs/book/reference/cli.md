@@ -263,7 +263,7 @@ unchanged (e.g. `postgres://…/db?table=src&sslmode=disable`).
   `?stream=…`.
 - MongoDB sources are **non-destructive by default**: `consume` defaults to `capture_all`,
   which needs a replica set (a single-node one is enough). On a standalone `mongod` pass
-  `?consume=snapshot` for a one-shot read. `?consume=consumer` opts into the destructive
+  `?consume=snapshot` for a one-shot read. `?consume=delete` opts into the destructive
   queue-drain mode.
 
 ### Middlewares in the URI

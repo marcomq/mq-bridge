@@ -1736,7 +1736,7 @@ fn copy_result(
 /// the deprecated `change_stream` is given, `consume` is set to `capture_all`
 /// (read existing documents, then watch), which needs a replica set. Pass
 /// `?consume=snapshot` for a one-shot read of a standalone mongod, or
-/// `?consume=consumer` for the destructive queue-drain mode.
+/// `?consume=delete` for the destructive queue-drain mode.
 ///
 /// Escaped mode: pass the full connection string percent-encoded as `?url=...`
 /// to use it verbatim (e.g. `mongodb://_/?url=<encoded>&collection=orders`); its
@@ -3332,10 +3332,18 @@ mod uri_tests {
     #[test]
     fn mongodb_explicit_consume_wins_over_default() {
         let cfg = config(
-            "mongodb://host/?collection=orders&database=appdb&consume=consumer",
+            "mongodb://host/?collection=orders&database=appdb&consume=delete",
             "mongodb",
         );
-        assert_eq!(cfg["consume"], "consumer");
+        assert_eq!(cfg["consume"], "delete");
+        // The old name of the mode is still read.
+        let endpoint =
+            endpoint_from_uri("mongodb://host/?collection=orders&database=appdb&consume=consumer")
+                .unwrap();
+        let EndpointType::MongoDb(mongo) = endpoint.endpoint_type else {
+            panic!("expected MongoDB endpoint");
+        };
+        assert_eq!(mongo.resolved_consume(), MongoConsume::Consumer);
 
         let cfg = config(
             "mongodb://host/?collection=orders&database=appdb&change_stream=true",

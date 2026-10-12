@@ -98,7 +98,7 @@ ends when its source is empty if the route has `exit_on_empty`, so there is no c
 | `kafka` | yes | yes |  |
 | `meilisearch` | yes | yes | A paged read of one index. |
 | `memory` | yes | no | A nacked message is retried inside the consumer and is lost if the process dies. |
-| `mongodb` | yes | depends | `consumer` commits in any order; `snapshot`, `capture_new` and `capture_all` in order. |
+| `mongodb` | yes | depends | `delete` commits in any order; `snapshot`, `capture_new` and `capture_all` in order. |
 | `mqtt` | unless `qos: 0` | no |  |
 | `nats` | unless `no_jetstream: true` | no |  |
 | `object_store` | yes | yes |  |

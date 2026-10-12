@@ -329,6 +329,12 @@ link-dynamic = ["rdkafka?/dynamic-linking"]
 # no IBM SDK.
 lint-all = ["full", "test-utils", "schema", "plugin-sdk", "perf-diagnostics", "float-roundtrip", "ibm-mq-static", "rustls-ring"]
 
+# The fast local test set: no OpenSSL, librdkafka, aws-lc-sys or protoc build, and
+# `ring` as the only TLS provider. Leaves out kafka, aws, mongodb, grpc, amqp, ibm-mq,
+# postgres-cdc and the reqwest-based endpoints (reqwest pulls aws-lc-sys); CI covers
+# those with `full`. sqlx stays for the SQLite-backed tests.
+test = ["test-utils", "file", "dir-spool", "middleware", "yaml", "plugin", "nats", "mqtt", "http", "websocket", "zeromq", "zeromq-omq", "redis-streams", "sled", "sqlx", "rustls-ring"]
+
 # `grpc` carries this, so every set containing grpc has a protoc without one
 # installed. build.rs prefers $PROTOC when set, so a distro or conda-forge build
 # still compiles against its own protobuf and this goes unused.
@@ -466,8 +472,10 @@ reqwest = { version = "0.13", default-features = false, features = ["stream"] }
 
 # TLS test helpers
 rcgen = "0.14"
-tokio-rustls = { version = "0.26", features = ["ring"] }
-rustls = { version = "0.23", features = ["ring"] }
+# No default features: they select aws_lc_rs, which would put aws-lc-sys (a C build) into
+# every test build. A set with `rustls-aws-lc` still gets it through the feature.
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging", "tls12"] }
 
 [[bench]]
 name = "performance_bench"

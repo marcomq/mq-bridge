@@ -123,12 +123,12 @@ Databases have no native pub/sub, so a database source is read one of two ways:
 | `capture_all` (default) | `_id` snapshot, then change stream | no | yes — when the stream goes quiet | **yes** | bulk read / ETL |
 | `capture_new` | change stream, new changes only | no | no — continuous by nature | **yes** | ongoing CDC |
 | `snapshot` | pages the collection by `_id`, one shot | no | yes | no | reading a standalone `mongod` |
-| `consumer` | claim → lock → re-fetch → delete | **yes** | yes | no | work queues, competing readers |
+| `delete` (also `consumer`) | claim → lock → re-fetch → delete | **yes** | yes | no | work queues, competing readers |
 
-These are not interchangeable. `consumer` buys exclusivity via four round trips per batch and
+These are not interchangeable. `delete` buys exclusivity via four round trips per batch and
 **deletes what it reads**, so it is for work queues, not for reading a collection; where you
 need a single-reader bulk read or ETL pass, the default `capture_all` is roughly 5x faster
-(500k docs: `consumer` → `null` 23,667 rows/s vs. `capture_all` → jsonl 120,308 rows/s). Note
+(500k docs: `delete` → `null` 23,667 rows/s vs. `capture_all` → jsonl 120,308 rows/s). Note
 `concurrency` does **not** speed up a MongoDB source; batches are fetched serially.
 
 Both `capture_*` modes read the oplog and therefore **require a replica set** — a single-node

@@ -803,10 +803,12 @@ impl MessagePublisher for HttpBulkPublisher {
             return Ok(SentBatch::Ack);
         }
         if let Some(query) = &self.query {
-            let answers = query
+            let (answers, refused) = query
                 .answers(&self.connection, self.max_request_bytes, &messages)
-                .await
-                .map_err(|failure| failure.error())?;
+                .await;
+            if let Some(failure) = refused {
+                return Err(failure.error());
+            }
             let mut responses = Vec::new();
             let mut failed = Vec::new();
             for (message, answer) in messages.into_iter().zip(answers) {
@@ -865,13 +867,12 @@ impl MessagePublisher for HttpBulkPublisher {
         requests: &[CanonicalMessage],
     ) -> Option<Result<Vec<Option<Value>>, PublisherError>> {
         let query = self.query.as_ref().filter(|query| !query.per_message())?;
-        let answers = query
+        let (answers, refused) = query
             .answers(&self.connection, self.max_request_bytes, requests)
             .await;
-        let answers = match answers {
-            Ok(answers) => answers,
-            Err(failure) => return Some(Err(failure.error())),
-        };
+        if let Some(failure) = refused {
+            return Some(Err(failure.error()));
+        }
         let failed = answers.iter().filter(|answer| answer.is_err()).count();
         if failed > 0 {
             warn!(
@@ -893,16 +894,15 @@ impl MessagePublisher for HttpBulkPublisher {
         requests: &[CanonicalMessage],
     ) -> Option<Vec<Result<Option<Value>, PublisherError>>> {
         let query = self.query.as_ref().filter(|query| !query.per_message())?;
-        let answers = query
+        let (answers, _) = query
             .answers(&self.connection, self.max_request_bytes, requests)
             .await;
-        Some(match answers {
-            Ok(answers) => answers
+        Some(
+            answers
                 .into_iter()
                 .map(|answer| answer.map_err(|failure| failure.error()))
                 .collect(),
-            Err(failure) => requests.iter().map(|_| Err(failure.error())).collect(),
-        })
+        )
     }
 
     /// With `operation` set the messages are changes, and a delete must not

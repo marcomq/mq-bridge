@@ -1718,7 +1718,12 @@ fn builtin_fallback(
         serde_json::Value::Object(tagged) => tagged.into_iter().next().map(|(_, config)| config),
         _ => None,
     };
-    Ok(Some((factory, config.unwrap_or_default())))
+    let mut config = config.unwrap_or_default();
+    // Unset fields are left out, as `named_endpoint` does.
+    if let serde_json::Value::Object(fields) = &mut config {
+        fields.retain(|_, value| !value.is_null());
+    }
+    Ok(Some((factory, config)))
 }
 
 async fn create_base_consumer(
@@ -1937,7 +1942,7 @@ async fn create_base_consumer(
                             anyhow!(
                                 "[route:{}] MongoDB 'capture_all' needs a replica set (a single-node one is enough). \
                                  On a standalone mongod use 'consume: snapshot' for a one-shot non-destructive read, \
-                                 or 'consume: consumer' for a destructive work queue: {}",
+                                 or 'consume: delete' for a destructive work queue: {}",
                                 route_name,
                                 e
                             )

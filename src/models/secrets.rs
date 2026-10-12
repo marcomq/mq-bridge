@@ -747,8 +747,33 @@ macro_rules! named_endpoint_secrets {
     )*};
 }
 
+impl SecretExtractor for ElasticsearchConfig {
+    fn extract_secrets(&mut self, prefix: &str, secrets: &mut HashMap<String, String>) {
+        if let Some(value) = self.api_key.take() {
+            secrets.insert(format!("{prefix}__API_KEY"), value);
+        }
+        // `auth` is untyped here; the paths are those of `HttpBulkConfig`.
+        for (kind, field) in [
+            ("oauth2", "client_secret"),
+            ("aws_sigv4", "secret_key"),
+            ("aws_sigv4", "session_token"),
+        ] {
+            let section = self.auth.as_mut().and_then(|auth| auth.get_mut(kind));
+            let Some(section) = section.and_then(serde_json::Value::as_object_mut) else {
+                continue;
+            };
+            if !section.get(field).is_some_and(serde_json::Value::is_string) {
+                continue;
+            }
+            if let Some(serde_json::Value::String(value)) = section.remove(field) {
+                let path = format!("AUTH__{kind}__{field}").to_ascii_uppercase();
+                secrets.insert(format!("{prefix}__{path}"), value);
+            }
+        }
+    }
+}
+
 named_endpoint_secrets! {
-    ElasticsearchConfig { api_key }
     MeilisearchConfig { api_key, checkpoint_store }
     OpenAiChatConfig { api_key }
     OpenAiEmbeddingsConfig { api_key }

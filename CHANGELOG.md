@@ -134,6 +134,23 @@ What 1.0 adds is the promise, and what it leaves open:
   the replay after a backout or a visibility timeout. An IBM MQ producer that reuses a
   `MsgId` for different messages gives them one id.
 
+- **`mongodb`: the publisher no longer writes `seq`** and no longer keeps the
+  `<collection>:sequencer` counter document. Nothing has read `seq` since `consume:
+  subscriber` was removed in 0.4.0; every batch saves one write. Documents and the counter
+  already in a collection stay as they are; the index `seq_1` can be dropped.
+  `meta_collection` no longer has an effect.
+- **`mongodb`: the queue is read in insert order, no longer in `_id` order.** The
+  publisher writes a UUIDv7 into the new field `insert_order` of each wrapped document,
+  and `consume: delete` sorts by it. A message whose `message_id` is no UUIDv7 (`ibm_mq`,
+  `aws`, `postgres_cdc`, a Kafka key) used to land at a random place in the queue. The
+  consumer creates the index `{insert_order: 1, _id: 1}` at startup, which takes a moment
+  on a large collection. Documents without the field are read first, in `_id` order, so
+  during a rolling upgrade those of a publisher on the older version are read ahead of
+  the new ones.
+- **`mongodb`: the destructive queue mode is named `consume: delete`.** `consume: consumer`
+  is still read. The schema lists only `delete`, and a config saved by this version is
+  not read by an older one.
+
 - **`aws`: a consumer decodes a body sent with `binary_payload_mode`.** A message with the
   attribute `aws_binary_encoded: true` arrives as the original bytes, without the attribute.
   It used to arrive as base64 text.

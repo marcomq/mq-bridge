@@ -694,6 +694,40 @@ kafka_to_nats:
     }
 
     #[test]
+    fn elasticsearch_auth_credentials_are_extracted() {
+        let mut config = ElasticsearchConfig {
+            api_key: Some("api-secret".to_string()),
+            auth: Some(serde_json::json!({
+                "oauth2": {"token_url": "https://idp/token", "client_id": "app", "client_secret": "cs"},
+                "aws_sigv4": {"region": "eu-west-1", "access_key": "AK", "secret_key": "sk", "session_token": "st"},
+            })),
+            ..Default::default()
+        };
+        let mut secrets = HashMap::new();
+        config.extract_secrets("MQB__R__OUTPUT__ELASTICSEARCH", &mut secrets);
+
+        assert!(config.api_key.is_none());
+        assert_eq!(
+            config.auth,
+            Some(serde_json::json!({
+                "oauth2": {"token_url": "https://idp/token", "client_id": "app"},
+                "aws_sigv4": {"region": "eu-west-1", "access_key": "AK"},
+            }))
+        );
+        let expected = [
+            ("API_KEY", "api-secret"),
+            ("AUTH__OAUTH2__CLIENT_SECRET", "cs"),
+            ("AUTH__AWS_SIGV4__SECRET_KEY", "sk"),
+            ("AUTH__AWS_SIGV4__SESSION_TOKEN", "st"),
+        ];
+        assert_eq!(secrets.len(), expected.len());
+        for (key, value) in expected {
+            let key = format!("MQB__R__OUTPUT__ELASTICSEARCH__{key}");
+            assert_eq!(secrets.get(&key).map(String::as_str), Some(value), "{key}");
+        }
+    }
+
+    #[test]
     fn grpc_binary_metadata_is_extracted_reversibly() {
         let mut grpc = GrpcConfig::new("https://localhost:50051");
         grpc.binary_metadata
@@ -1069,6 +1103,18 @@ mod format_name_tests {
             let mongo: MongoDbFormat = serde_json::from_value(alias.into()).unwrap();
             assert_eq!(serde_json::to_value(mongo).unwrap(), name);
         }
+    }
+
+    #[test]
+    fn the_mongo_queue_mode_is_named_delete_and_still_reads_consumer() {
+        for name in ["delete", "consumer"] {
+            let mode: MongoConsume = serde_json::from_value(name.into()).unwrap();
+            assert_eq!(mode, MongoConsume::Consumer);
+        }
+        assert_eq!(
+            serde_json::to_value(MongoConsume::Consumer).unwrap(),
+            "delete"
+        );
     }
 }
 

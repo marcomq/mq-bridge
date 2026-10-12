@@ -174,15 +174,16 @@ impl Query {
     }
 
     /// Answers every request, in order, with as few HTTP requests as `max_messages`
-    /// and `max_request_bytes` allow. A refused request fails them all.
+    /// and `max_request_bytes` allow. A refused request fails its own messages and those
+    /// of the requests after it, and is returned for a caller that fails the whole batch.
     pub(super) async fn answers(
         &self,
         connection: &Connection,
         max_request_bytes: usize,
         requests: &[CanonicalMessage],
-    ) -> Result<Vec<Answer>, Failure> {
+    ) -> (Vec<Answer>, Option<Failure>) {
         if self.per_message {
-            return Ok(self.each(connection, requests).await);
+            return (self.each(connection, requests).await, None);
         }
         let mut answers: Vec<Answer> = requests.iter().map(|_| Ok(None)).collect();
         let mut bodies = Vec::new();
@@ -220,14 +221,31 @@ impl Query {
             .map(|(body, indices)| self.ask(connection, body, indices, requests))
             .collect();
         let mut asked = futures::stream::iter(calls).buffered(self.concurrency);
-        let mut groups = groups.iter();
-        // Leaving at the first refusal drops the requests that are not sent yet.
-        while let (Some(found), Some(indices)) = (asked.next().await, groups.next()) {
-            for (index, answer) in indices.iter().zip(found?) {
-                answers[*index] = answer;
+        let mut refused: Option<Failure> = None;
+        for indices in &groups {
+            // The requests after a refused one fail with it; those not started are not sent.
+            let found = match &refused {
+                Some(failure) => Err(failure.clone()),
+                None => match asked.next().await {
+                    Some(found) => found,
+                    None => break,
+                },
+            };
+            match found {
+                Ok(found) => {
+                    for (index, answer) in indices.iter().zip(found) {
+                        answers[*index] = answer;
+                    }
+                }
+                Err(failure) => {
+                    for index in indices {
+                        answers[*index] = Err(failure.clone());
+                    }
+                    refused.get_or_insert(failure);
+                }
             }
         }
-        Ok(answers)
+        (answers, refused)
     }
 
     /// The answers of one request, in the order of `indices`.
@@ -676,6 +694,33 @@ mod tests {
             // Nothing is sent after the request that was refused.
             assert_eq!(server.requests().len(), 1);
         }
+    }
+
+    #[tokio::test]
+    async fn a_refused_request_keeps_the_answers_before_it() {
+        let server = server(
+            |request| match request.body.windows(4).any(|p| p == b"none") {
+                true => (503, "no".to_string()),
+                false => multi_search_answer(request),
+            },
+        )
+        .await;
+        let mut config = multi_search();
+        config["max_request_bytes"] = json!(60);
+        let publisher = publisher(&server, config);
+        let lookups = requests(&[r#"{"isbn":"a"}"#, r#"{"isbn":"none"}"#, r#"{"isbn":"c"}"#]);
+
+        let each = publisher.lookup_each(&lookups).await.unwrap();
+        assert_eq!(each[0].as_ref().unwrap(), &Some(json!({"title": "Dune"})));
+        for refused in &each[1..] {
+            let refused = refused.as_ref().unwrap_err();
+            assert!(
+                matches!(refused, crate::errors::PublisherError::Retryable(_)),
+                "{refused}"
+            );
+        }
+        // The third request is not sent.
+        assert_eq!(server.requests().len(), 2);
     }
 
     #[test]

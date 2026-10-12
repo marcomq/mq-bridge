@@ -1242,22 +1242,22 @@ unsafe fn write_outcomes(
     }
     let outcomes = unsafe { std::slice::from_raw_parts_mut(out, ids.len()) };
     outcomes.fill(MQB_OUTCOME_OK);
-    let classes: HashMap<u128, u8> = failed
-        .iter()
-        .map(|(message, error)| (message.message_id, outcome_code(error)))
-        .collect();
-    let mut placed = 0;
-    for (outcome, id) in outcomes.iter_mut().zip(ids) {
-        if let Some(code) = classes.get(id) {
-            *outcome = *code;
-            placed += 1;
-        }
+    // `None` = the id is in the batch more than once.
+    let mut slots: HashMap<u128, Option<usize>> = HashMap::with_capacity(ids.len());
+    for (slot, id) in ids.iter().enumerate() {
+        slots
+            .entry(*id)
+            .and_modify(|seen| *seen = None)
+            .or_insert(Some(slot));
     }
-    // A failure whose id is not in the batch would be acknowledged; with nothing
-    // marked the host fails the whole batch instead.
-    if placed < failed.len() {
-        outcomes.fill(MQB_OUTCOME_OK);
-        return false;
+    for (message, error) in failed {
+        // A failure with no slot, or with several, would acknowledge a message that
+        // failed; with nothing marked the host fails the whole batch instead.
+        let Some(Some(slot)) = slots.get(&message.message_id) else {
+            outcomes.fill(MQB_OUTCOME_OK);
+            return false;
+        };
+        outcomes[*slot] = outcome_code(error);
     }
     true
 }
@@ -2028,6 +2028,20 @@ mod tests {
         let mut outcomes = [u8::MAX; 3];
         let placed =
             unsafe { write_outcomes(outcomes.as_mut_ptr(), &[1, 2, 3], &[failed(2), failed(9)]) };
+        assert!(!placed);
+        assert_eq!(outcomes, [MQB_OUTCOME_OK; 3]);
+    }
+
+    /// Either of the two messages with id 2 may be the one that failed.
+    #[test]
+    fn a_failure_that_matches_two_slots_marks_nothing() {
+        let mut outcomes = [u8::MAX; 3];
+        let placed = unsafe { write_outcomes(outcomes.as_mut_ptr(), &[2, 1, 2], &[failed(2)]) };
+        assert!(!placed);
+        assert_eq!(outcomes, [MQB_OUTCOME_OK; 3]);
+        // A duplicate hides a failure without a slot from a count of marked slots.
+        let placed =
+            unsafe { write_outcomes(outcomes.as_mut_ptr(), &[2, 1, 2], &[failed(2), failed(9)]) };
         assert!(!placed);
         assert_eq!(outcomes, [MQB_OUTCOME_OK; 3]);
     }

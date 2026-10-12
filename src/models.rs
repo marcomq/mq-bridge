@@ -2023,7 +2023,8 @@ pub enum MongoDbFormat {
 #[serde(rename_all = "snake_case")]
 pub enum MongoConsume {
     /// **Queue** — competing consumers: claim, process, delete, so each document goes to exactly one
-    /// reader. Destructive and intended for jobs, not bulk reads.
+    /// reader. Destructive and intended for jobs, not bulk reads. Also accepted as `consumer`.
+    #[serde(rename = "delete", alias = "consumer")]
     Consumer,
     /// **One-shot read** — page documents by `_id`, then end the route. Non-destructive and
     /// non-resumable; needs no replica set and reads arbitrary collections. This is not a
@@ -2035,7 +2036,7 @@ pub enum MongoConsume {
     CaptureNew,
     /// **Watch existing collection** — read the existing documents first, then capture changes.
     /// Non-destructive and the fastest read mode; use this for bulk reads and ETL. Default.
-    /// Needs a replica set; on a standalone `mongod` use `snapshot` or `consumer`.
+    /// Needs a replica set; on a standalone `mongod` use `snapshot` or `delete`.
     #[default]
     CaptureAll,
 }
@@ -2076,7 +2077,7 @@ pub struct MongoDbConfig {
     /// documents first, then watch for changes — non-destructive, for bulk reads and ETL),
     /// `capture_new` (watch an existing collection for changes only), `snapshot` (one-shot
     /// non-destructive read that ends on drain, the option without a replica set), or
-    /// `consumer` (competing-consumers work queue — destructive and intended for jobs).
+    /// `delete` (competing-consumers work queue — destructive and intended for jobs; also `consumer`).
     /// The bridge selects the underlying mechanism automatically. If unset, the deprecated
     /// `change_stream` boolean is honored for backward compatibility.
     pub consume: Option<MongoConsume>,
@@ -2135,7 +2136,7 @@ pub struct MongoDbConfig {
     pub update_batch_field: Option<String>,
     /// The ID used for the cursor in sequenced mode. If not provided, consumption starts from the current sequence (ephemeral).
     pub cursor_id: Option<String>,
-    /// (Optional) Collection to store sequence counters and cursor positions. Defaults to the message collection if not set.
+    /// **Deprecated** — unused since the publisher no longer writes `seq`. Kept for compatibility.
     pub meta_collection: Option<String>,
     /// Share one MongoDB client per connection (default: true); false forces a dedicated client.
     #[serde(default)]
@@ -2817,7 +2818,7 @@ pub struct RequestForwardConfig {
 /// How a `postgres_cdc` endpoint consumes its publication. The intent-named counterpart of
 /// [`MongoConsume`], so the two CDC endpoints read alike.
 ///
-/// `consumer` has no Postgres meaning — a replication slot is not a work queue; use a `sqlx`
+/// `delete` has no Postgres meaning — a replication slot is not a work queue; use a `sqlx`
 /// endpoint for competing consumers.
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
