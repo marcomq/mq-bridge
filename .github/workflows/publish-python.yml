@@ -24,11 +24,12 @@ on:
   workflow_dispatch:
     inputs:
       target:
-        description: "Where to publish the packages"
+        description: "Where to publish the packages (build-only uploads nothing)"
         required: true
-        default: "testpypi"
+        default: "build-only"
         type: choice
         options:
+          - build-only
           - testpypi
           - pypi
 
@@ -262,7 +263,7 @@ jobs:
     # Direct runs only. Publishing from here under release.yml authenticates
     # (PyPI matches the reusable workflow) but the attestation is signed with the
     # *caller's* identity, which PyPI then rejects. release.yml uploads instead.
-    if: ${{ !inputs.skip_publish }}
+    if: ${{ !inputs.skip_publish && inputs.target != 'build-only' }}
     runs-on: ubuntu-latest
     needs: [build-wheels, build-sdists]
     permissions:
