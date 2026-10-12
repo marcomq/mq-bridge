@@ -16,16 +16,16 @@ mod consumer;
 mod presets;
 mod publisher;
 mod query;
+pub use crate::models::{
+    ElasticsearchConfig, ElasticsearchMode, MeilisearchConfig, OpenAiChatConfig,
+    OpenAiEmbeddingsConfig, QdrantConfig, TypesenseConfig,
+};
 pub(crate) use consumer::cursor_checkpoint;
 pub use consumer::HttpBulkConsumer;
 pub(crate) use presets::builtin as builtin_preset;
 pub use presets::{
     base_url as preset_base_url, named_endpoint, preset_names, register_preset,
     register_preset_with, schema as preset_schema, segment as preset_segment,
-};
-pub use crate::models::{
-    ElasticsearchConfig, ElasticsearchMode, MeilisearchConfig, OpenAiChatConfig,
-    OpenAiEmbeddingsConfig, QdrantConfig, TypesenseConfig,
 };
 pub use publisher::HttpBulkPublisher;
 

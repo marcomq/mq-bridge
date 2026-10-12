@@ -247,7 +247,9 @@ impl Query {
                     reason = %refused.failure.text,
                     "http_bulk query: asking again with fewer messages per request"
                 );
-                Ok(self.halves(connection, indices, requests, refused.failure).await)
+                Ok(self
+                    .halves(connection, indices, requests, refused.failure)
+                    .await)
             }
             Err(refused) => Err(refused.failure),
         }
@@ -304,10 +306,13 @@ impl Query {
         body: Vec<u8>,
         count: usize,
     ) -> Result<Vec<Answer>, Refused> {
-        let text = self.post(connection, body).await.map_err(|failure| Refused {
-            narrows: failure.refused_content(),
-            failure,
-        })?;
+        let text = self
+            .post(connection, body)
+            .await
+            .map_err(|failure| Refused {
+                narrows: failure.refused_content(),
+                failure,
+            })?;
         let entries = self.entries(&text, count).map_err(|failure| Refused {
             narrows: true,
             failure,
@@ -632,7 +637,12 @@ mod tests {
         let publisher = publisher(&server, multi_search());
         let lookups = requests(&[r#"{"isbn":"a"}"#, r#"{"isbn":"bad"}"#]);
 
-        // The batch declines, so the lookup middleware asks one by one.
+        let each = publisher.lookup_each(&lookups).await.unwrap();
+        assert_eq!(each[0].as_ref().unwrap(), &Some(json!({"title": "Dune"})));
+        let refused = each[1].as_ref().unwrap_err();
+        assert!(refused.to_string().contains("boom"), "{refused}");
+        assert_eq!(server.requests().len(), 1);
+        // As a whole the batch declines; a caller of `lookup_batch` asks one by one.
         assert!(publisher.lookup_batch(&lookups).await.is_none());
         let mut lookups = lookups.into_iter();
         let found = publisher.send(lookups.next().unwrap()).await.unwrap();

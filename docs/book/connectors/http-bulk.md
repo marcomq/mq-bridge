@@ -499,9 +499,8 @@ As a lookup (`query`):
 - **An entry whose `found` is not `true`, or that has nothing at `value`, is
   `null`.** The array must hold one entry per lookup: answers are matched by
   position, so a shorter or longer one fails the request for good.
-- **An entry that reports an error fails only its message.** The batch is then
-  asked again one lookup at a time, with a warning in the log, so the other
-  messages still get their answers.
+- **An entry that reports an error fails only its message.** The other
+  messages keep their answers; nothing is asked again.
 - **A single lookup is a batch of one**: the same request with one part.
 - **A `json_array` part must be valid JSON**; one that is not fails its message
   for good and is left out of the request.

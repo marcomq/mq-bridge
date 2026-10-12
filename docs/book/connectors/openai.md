@@ -103,11 +103,8 @@ On the command line it is one more parameter:
   twice as many requests as without bundling. Pick a size your model handles;
   how many inputs a model keeps apart depends on the model and on the length
   of the texts. Each halving logs a warning with the reason.
-- **Under a `lookup`, one failure repeats the batch.** The lookup takes a
-  batch only whole: when a message fails for good, it asks every message of
-  that batch again, one per request. Put a
-  [`filter`](../engine/reference.md#filter) before the lookup for what you
-  know the model refuses.
+- **Under a `lookup`, a failed message fails alone too.** The other messages
+  of the batch keep their answers and are not asked again.
 - **Leave room for the answers.** A `max_tokens` in `options` bounds the whole
   response, and `request_timeout_ms` the whole request. An answer that was
   cut off cannot be matched; the warning then says the response ended with

@@ -858,8 +858,8 @@ impl MessagePublisher for HttpBulkPublisher {
         SentBatch::from_outcomes(messages, outcomes)
     }
 
-    /// One request for the whole batch. An answer that reports an error sends the
-    /// lookups again one by one, so only its own message fails.
+    /// One request for the whole batch; `None` when an answer reports an error,
+    /// which `lookup_each` gives to its own message.
     async fn lookup_batch(
         &self,
         requests: &[CanonicalMessage],
@@ -877,7 +877,7 @@ impl MessagePublisher for HttpBulkPublisher {
             warn!(
                 failed,
                 of = requests.len(),
-                "http_bulk query: an answer reported an error, repeating the lookups one by one"
+                "http_bulk query: an answer reported an error, the batch is not answered as a whole"
             );
             return None;
         }
@@ -885,6 +885,24 @@ impl MessagePublisher for HttpBulkPublisher {
             .into_iter()
             .map(Result::unwrap_or_default)
             .collect()))
+    }
+
+    /// One result per lookup: a message whose answer is an error fails alone.
+    async fn lookup_each(
+        &self,
+        requests: &[CanonicalMessage],
+    ) -> Option<Vec<Result<Option<Value>, PublisherError>>> {
+        let query = self.query.as_ref().filter(|query| !query.per_message())?;
+        let answers = query
+            .answers(&self.connection, self.max_request_bytes, requests)
+            .await;
+        Some(match answers {
+            Ok(answers) => answers
+                .into_iter()
+                .map(|answer| answer.map_err(|failure| failure.error()))
+                .collect(),
+            Err(failure) => requests.iter().map(|_| Err(failure.error())).collect(),
+        })
     }
 
     /// With `operation` set the messages are changes, and a delete must not

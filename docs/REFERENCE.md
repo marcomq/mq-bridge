@@ -1118,8 +1118,8 @@ query answers the whole batch instead of one query per message:
     into: customer
 ```
 An `http_bulk` endpoint with `query` batches too: one HTTP request answers every message
-of the batch, matched by position. An entry that reports an error makes it ask again one
-message at a time, so only that message fails.
+of the batch, matched by position. An entry that reports an error fails only its message;
+the others keep their answers.
 
 ```yaml middleware
 - lookup:

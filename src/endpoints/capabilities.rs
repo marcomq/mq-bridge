@@ -572,7 +572,10 @@ mod tests {
             ("nats", has_tls_block::<NatsConfig>()),
             ("object_store", has_tls_block::<ObjectStoreConfig>()),
             ("openai_chat", has_tls_block::<OpenAiChatConfig>()),
-            ("openai_embeddings", has_tls_block::<OpenAiEmbeddingsConfig>()),
+            (
+                "openai_embeddings",
+                has_tls_block::<OpenAiEmbeddingsConfig>(),
+            ),
             ("postgres_cdc", has_tls_block::<PostgresCdcConfig>()),
             ("qdrant", has_tls_block::<QdrantConfig>()),
             ("redis_streams", has_tls_block::<RedisStreamsConfig>()),

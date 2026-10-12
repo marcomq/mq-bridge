@@ -641,7 +641,8 @@ mod tests {
         // No registration: a route finds the built-in endpoint by its name.
         assert!(builtin("qdrant").is_some() && builtin("acme").is_none());
         // A config of one's own type stays a custom endpoint, without its unset fields.
-        let EndpointType::Custom { name, config } = named_endpoint("acme", &json!({"a": 1, "b": null}))
+        let EndpointType::Custom { name, config } =
+            named_endpoint("acme", &json!({"a": 1, "b": null}))
         else {
             panic!("a custom endpoint");
         };
@@ -1271,7 +1272,10 @@ mod tests {
         for (extra, reason) in [
             (json!({"messages_per_request": 0}), "at least 1"),
             (json!({"system": "For ${payload:lang}"}), "'system' cannot"),
-            (json!({"prompt": "{index} ${payload:body}"}), "'prompt' cannot"),
+            (
+                json!({"prompt": "{index} ${payload:body}"}),
+                "'prompt' cannot",
+            ),
         ] {
             let mut bad = config.clone();
             bad.as_object_mut()
@@ -1297,8 +1301,18 @@ mod tests {
             (vec!["a", "stranger", "c", "d"], 4, None, 5),
             // Refused for its size, cut off, or declined: only that message fails.
             (vec!["a", "huge", "c", "d"], 3, Some("context length"), 5),
-            (vec!["a", "long", "c", "d"], 3, Some("ended with 'length'"), 5),
-            (vec!["a", "b", "c", "refuse"], 3, Some("no array of 1 entries"), 5),
+            (
+                vec!["a", "long", "c", "d"],
+                3,
+                Some("ended with 'length'"),
+                5,
+            ),
+            (
+                vec!["a", "b", "c", "refuse"],
+                3,
+                Some("no array of 1 entries"),
+                5,
+            ),
         ] {
             let server = StubHttpServer::start(bundling_model)
                 .await

@@ -343,6 +343,10 @@ What 1.0 adds is the promise, and what it leaves open:
   parts `messages_per_request` is made of.
   `query.concurrency` now also applies without `per_message` (default 1 there): the
   requests of one batch can be in flight together.
+- **`lookup`: a batched `from` can fail single messages.** A new trait method,
+  `MessagePublisher::lookup_each`, answers one result per request; `lookup` asks it before
+  `lookup_batch`. `http_bulk` implements it, so a lookup whose answer is an error fails
+  alone and the batch is no longer asked again one request at a time.
 - **`http_bulk`: `query.per_message`.** One request per message instead of one per batch,
   for an API that takes one question at a time. `query.concurrency` (default 8) bounds the
   requests in flight; `query.parse_value` parses an answer that is JSON text.
