@@ -200,8 +200,14 @@ jobs:
           # cmake. manylinux containers already ship it; the musllinux (Alpine)
           # container does not, so install it there. Guarded so it's a no-op
           # wherever cmake is already present. Only runs for linux builds.
+          # full's `kafka-ssl` builds OpenSSL, whose Configure needs perl modules
+          # (IPC::Cmd, ...) the manylinux image leaves out.
           before-script-linux: |
-            command -v cmake >/dev/null 2>&1 || apk add --no-cache cmake gcc g++ make musl-dev perl
+            if command -v apk >/dev/null 2>&1; then
+              command -v cmake >/dev/null 2>&1 || apk add --no-cache cmake gcc g++ make musl-dev perl
+            elif command -v yum >/dev/null 2>&1; then
+              yum install -y perl-core || yum install -y perl perl-IPC-Cmd
+            fi
 
       - name: Upload wheels
         uses: actions/upload-artifact@v7

@@ -352,7 +352,8 @@ pub mod zeromq_helper {
     }
 
     pub async fn create_consumer() -> Arc<Mutex<dyn MessageConsumer>> {
-        let port = PORT.load(Ordering::SeqCst);
+        // A fresh path per consumer: a dropped one unlinks its socket file late.
+        let port = PORT.fetch_add(1, Ordering::SeqCst).wrapping_add(1);
         let path = format!("/tmp/mq-bridge-{}.sock", port);
         let _ = std::fs::remove_file(&path);
         let config = ZeroMqConfig {

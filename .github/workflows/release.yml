@@ -496,9 +496,13 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config zlib1g-dev cmake libcurl4-openssl-dev protobuf-compiler
 
+      # `kafka-ssl` builds OpenSSL with perl. The bash build step would pick Git's
+      # perl, which lacks the modules; pin the Strawberry perl this shell resolves.
       - name: Install dependencies (Windows)
         if: runner.os == 'Windows'
-        run: choco install protoc --no-progress -y
+        run: |
+          choco install protoc --no-progress -y
+          "OPENSSL_SRC_PERL=$((Get-Command perl).Source)" >> $env:GITHUB_ENV
 
       - name: Install dependencies (macOS)
         if: runner.os == 'macOS'
@@ -577,9 +581,13 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config zlib1g-dev cmake libcurl4-openssl-dev protobuf-compiler
 
+      # `kafka-ssl` builds OpenSSL with perl. The bash build step would pick Git's
+      # perl, which lacks the modules; pin the Strawberry perl this shell resolves.
       - name: Install dependencies (Windows)
         if: runner.os == 'Windows'
-        run: choco install protoc --no-progress -y
+        run: |
+          choco install protoc --no-progress -y
+          "OPENSSL_SRC_PERL=$((Get-Command perl).Source)" >> $env:GITHUB_ENV
 
       - name: Install dependencies (macOS)
         if: runner.os == 'macOS'
