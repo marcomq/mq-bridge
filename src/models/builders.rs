@@ -144,6 +144,12 @@ impl EndpointType {
             EndpointType::ClickHouse(_) => "clickhouse",
             EndpointType::HttpBulk(_) => "http_bulk",
             EndpointType::PostgresCdc(_) => "postgres_cdc",
+            EndpointType::Elasticsearch(_) => "elasticsearch",
+            EndpointType::Meilisearch(_) => "meilisearch",
+            EndpointType::OpenAiChat(_) => "openai_chat",
+            EndpointType::OpenAiEmbeddings(_) => "openai_embeddings",
+            EndpointType::Qdrant(_) => "qdrant",
+            EndpointType::Typesense(_) => "typesense",
             EndpointType::Fanout(_) => "fanout",
             EndpointType::Sequence(_) => "sequence",
             EndpointType::StreamBuffer(_) => "stream_buffer",
@@ -1029,7 +1035,7 @@ with_string_setters!(EncryptionConfig { with_key_id => key_id, with_key => key }
 with_optional_setters!(AwsConfig { with_max_messages => max_messages: i32, with_wait_time_seconds => wait_time_seconds: i32 });
 with_value_setters!(AwsConfig { with_binary_payload_mode => binary_payload_mode: bool });
 with_value_setters!(KafkaConfig { with_tls => tls: TlsConfig, with_source_metadata => source_metadata: bool, with_delayed_ack => delayed_ack: bool });
-with_optional_setters!(KafkaConfig { with_shared => shared: bool, with_partitions => partitions: i32 });
+with_optional_setters!(KafkaConfig { with_shared => shared: bool, with_partitions => partitions: i32, with_create_topic => create_topic: bool });
 with_optional_setters!(KafkaConfig { with_producer_options => producer_options: Vec<(String, String)>, with_consumer_options => consumer_options: Vec<(String, String)> });
 with_optional_string_setters!(KafkaConfig { with_partition_key => partition_key });
 with_value_setters!(SledConfig { with_delete_after_read => delete_after_read: bool });
@@ -1070,7 +1076,7 @@ with_value_setters!(HttpConfig { with_tls => tls: TlsConfig, with_fire_and_forge
 with_optional_setters!(HttpConfig { with_request_timeout_ms => request_timeout_ms: u64, with_internal_buffer_size => internal_buffer_size: usize, with_batch_concurrency => batch_concurrency: usize, with_tcp_keepalive_ms => tcp_keepalive_ms: u64, with_pool_idle_timeout_ms => pool_idle_timeout_ms: u64, with_compression_enabled => compression_enabled: bool, with_compression_threshold_bytes => compression_threshold_bytes: usize, with_concurrency_limit => concurrency_limit: usize, with_basic_auth => basic_auth: (String, String), with_shared => shared: bool });
 with_optional_string_setters!(HttpConfig { with_message_id_header => message_id_header });
 with_optional_string_setters!(WebSocketConfig { with_message_id_header => message_id_header });
-with_optional_setters!(WebSocketConfig { with_routed_queue_capacity => routed_queue_capacity: usize });
+with_optional_setters!(WebSocketConfig { with_routed_queue_capacity => routed_queue_capacity: usize, with_basic_auth => basic_auth: (String, String), with_max_connections => max_connections: usize });
 with_value_setters!(WebSocketConfig { with_tls => tls: TlsConfig });
 
 with_value_setters!(IbmTlsConfig { with_required => required: bool, with_accept_invalid_certs => accept_invalid_certs: bool });
@@ -1092,6 +1098,115 @@ with_value_setters!(ClickHouseConfig { with_async_insert => async_insert: bool, 
 with_optional_setters!(ClickHouseConfig { with_columns => columns: std::collections::BTreeMap<String, String>, with_wait_for_async_insert => wait_for_async_insert: bool, with_polling_interval_ms => polling_interval_ms: u64, with_max_polling_interval_ms => max_polling_interval_ms: u64, with_request_timeout_ms => request_timeout_ms: u64, with_connect_timeout_ms => connect_timeout_ms: u64 });
 with_value_setters!(TlsConfig { with_required => required: bool, with_accept_invalid_certs => accept_invalid_certs: bool });
 with_optional_string_setters!(TlsConfig { with_cert_password => cert_password });
+
+impl DeduplicationMiddleware {
+    /// Remembers each message id for `ttl_seconds`, in the default store.
+    pub fn new(ttl_seconds: u64) -> Self {
+        Self {
+            store: None,
+            sled_path: None,
+            ttl_seconds,
+            key: None,
+            replay_response: false,
+        }
+    }
+}
+
+impl DelayMiddleware {
+    pub fn new(delay_ms: u64) -> Self {
+        Self { delay_ms }
+    }
+}
+
+impl TimeoutMiddleware {
+    pub fn new(timeout_ms: u64) -> Self {
+        Self { timeout_ms }
+    }
+}
+
+impl LimiterMiddleware {
+    pub fn new(messages_per_second: f64) -> Self {
+        Self {
+            messages_per_second,
+        }
+    }
+}
+
+impl BufferMiddleware {
+    pub fn new(max_messages: usize, max_delay_ms: u64) -> Self {
+        Self {
+            max_messages,
+            max_delay_ms,
+        }
+    }
+}
+
+impl WeakJoinMiddleware {
+    /// Joins `expected_count` messages that share the `group_by` metadata value.
+    pub fn new(group_by: impl Into<String>, expected_count: usize, timeout_ms: u64) -> Self {
+        Self {
+            group_by: group_by.into(),
+            expected_count,
+            timeout_ms,
+            branch_by: None,
+            required: Vec::new(),
+            on_timeout: WeakJoinTimeout::default(),
+            ack: WeakJoinAck::default(),
+        }
+    }
+}
+
+impl DetailedMappingRule {
+    pub fn new(path: impl Into<String>) -> Self {
+        Self {
+            path: path.into(),
+            default: None,
+            required: false,
+        }
+    }
+}
+
+impl Default for PackMiddleware {
+    fn default() -> Self {
+        Self {
+            format: PackFormat::default(),
+            max_messages: default_pack_max_messages(),
+            max_bytes: default_pack_max_bytes(),
+            drop_message_id: false,
+        }
+    }
+}
+
+impl SequenceConfig {
+    /// Drains `endpoints` one after another, in order.
+    pub fn new(endpoints: Vec<Endpoint>) -> Self {
+        Self {
+            endpoints,
+            cursor_id: None,
+            checkpoint_store: None,
+        }
+    }
+}
+
+impl SwitchCase {
+    /// Sends a message to `to` when `condition` holds.
+    pub fn new(condition: impl Into<String>, to: Endpoint) -> Self {
+        Self {
+            condition: condition.into(),
+            to,
+        }
+    }
+}
+
+impl RequestForwardConfig {
+    /// Calls `to` and forwards its response to `forward_to`.
+    pub fn new(to: Endpoint, forward_to: Endpoint) -> Self {
+        Self {
+            to: Box::new(to),
+            forward_to: Box::new(forward_to),
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {

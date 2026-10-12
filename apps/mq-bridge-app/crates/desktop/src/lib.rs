@@ -856,7 +856,13 @@ async fn dispatch_ui_request(
 
 fn init_logging(config: &AppConfig) {
     let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(config.log_level.clone()));
+        // The AMQP client logs each returned message with its whole payload at `warn`.
+        .unwrap_or_else(|_| {
+            EnvFilter::new(format!(
+                "{},lapin::returned_messages=error",
+                config.log_level
+            ))
+        });
 
     let logger = tracing_subscriber::fmt()
         .with_env_filter(env_filter)

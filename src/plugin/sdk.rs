@@ -83,7 +83,20 @@ use crate::traits::{
 };
 use crate::{CanonicalMessage, SentBatch};
 
-/// Builds the runtime that drives every endpoint this plugin creates.
+/// The runtime that drives every endpoint of this library, shared by all the
+/// plugins it exports and rebuilt if the last of them was freed.
+fn shared_runtime() -> anyhow::Result<Arc<Runtime>> {
+    static SHARED: std::sync::Mutex<std::sync::Weak<Runtime>> =
+        std::sync::Mutex::new(std::sync::Weak::new());
+    let mut shared = SHARED.lock().unwrap_or_else(|poison| poison.into_inner());
+    if let Some(runtime) = shared.upgrade() {
+        return Ok(runtime);
+    }
+    let runtime = build_runtime()?;
+    *shared = Arc::downgrade(&runtime);
+    Ok(runtime)
+}
+
 fn build_runtime() -> anyhow::Result<Arc<Runtime>> {
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.enable_all().thread_name("mqb-plugin");
@@ -445,6 +458,19 @@ fn create_status(error: &anyhow::Error) -> MqbStatus {
     }
 }
 
+/// A filter error is retried unless it carries a permanent error class.
+fn filter_status(error: &anyhow::Error) -> MqbStatus {
+    match (
+        error.downcast_ref::<ConsumerError>(),
+        error.downcast_ref::<ProcessingError>(),
+    ) {
+        (Some(ConsumerError::Permanent(_)), _) | (_, Some(ProcessingError::NonRetryable(_))) => {
+            MQB_ERR_PERMANENT
+        }
+        _ => MQB_ERR_RETRYABLE,
+    }
+}
+
 // ------------------------------------------------------------------- factory
 
 /// Creates the factory. Generic so the export macro can name the author's type;
@@ -454,7 +480,7 @@ where
     F: CustomEndpointFactory + Default + 'static,
 {
     guarded(err, || {
-        let runtime = match build_runtime() {
+        let runtime = match shared_runtime() {
             Ok(runtime) => runtime,
             Err(error) => {
                 unsafe { set_error(err, format!("{error:#}")) };
@@ -679,7 +705,8 @@ unsafe extern "C" fn consumer_receive_batch_async(
 fn receive(
     state: &ConsumerState,
     max_messages: usize,
-) -> impl Future<Output = Option<Result<crate::ReceivedBatch, ConsumerError>>> + Send + 'static {
+) -> impl Future<Output = Option<Result<crate::ReceivedBatch, ConsumerError>>> + Send + 'static + use<>
+{
     let shared = Arc::clone(&state.consumer);
     let mut shutdown = state.shutdown.subscribe();
     async move {
@@ -747,10 +774,15 @@ unsafe extern "C" fn consumer_close(consumer: MqbConsumerHandle, err: *mut MqbBu
         };
         let _ = state.shutdown.send(true);
         let shared = Arc::clone(&state.consumer);
-        let closed = block_on(
-            &state.runtime,
-            async move { shared.lock().await.close().await },
-        );
+        let closed = block_on(&state.runtime, async move {
+            let mut consumer = shared.lock().await;
+            // The host has no separate call for it, as on the publisher side.
+            let hooked = match consumer.on_disconnect_hook() {
+                Some(hook) => hook.await,
+                None => Ok(()),
+            };
+            consumer.close().await.and(hooked)
+        });
         match closed {
             Ok(Ok(())) => MQB_OK,
             Ok(Err(error)) => {
@@ -1114,7 +1146,7 @@ unsafe fn send(
     len: usize,
 ) -> (
     Vec<u128>,
-    impl Future<Output = Result<SentBatch, ProcessingError>> + Send + 'static,
+    impl Future<Output = Result<SentBatch, ProcessingError>> + Send + 'static + use<>,
 ) {
     let messages: Vec<CanonicalMessage> = unsafe { from_abi(messages, len) };
     let ids: Vec<u128> = messages.iter().map(|message| message.message_id).collect();
@@ -1178,8 +1210,11 @@ unsafe fn report_sent(
                 "{} of {len} messages failed to publish; first failure: {first:#}",
                 failed.len()
             );
-            unsafe { write_outcomes(out_outcomes, ids, &failed) };
+            let placed = unsafe { write_outcomes(out_outcomes, ids, &failed) };
             unsafe { set_error(err, summary) };
+            // The host fails the whole batch then, and the delivered messages must not go
+            // down as permanent failures with it.
+            let status = if placed { status } else { MQB_ERR_RETRYABLE };
             (status, responses)
         }
         Ok(Err(error)) => {
@@ -1192,6 +1227,7 @@ unsafe fn report_sent(
 }
 
 /// Marks each failed message's slot, leaving every other one [`MQB_OUTCOME_OK`].
+/// Returns `false` when a failure had no slot and nothing was marked.
 ///
 /// # Safety
 /// `out` must be writable for `ids.len()` bytes, as the ABI requires of the
@@ -1200,21 +1236,30 @@ unsafe fn write_outcomes(
     out: *mut u8,
     ids: &[u128],
     failed: &[(CanonicalMessage, ProcessingError)],
-) {
+) -> bool {
     if out.is_null() || ids.is_empty() {
-        return;
+        return true;
     }
     let outcomes = unsafe { std::slice::from_raw_parts_mut(out, ids.len()) };
     outcomes.fill(MQB_OUTCOME_OK);
-    let classes: HashMap<u128, u8> = failed
-        .iter()
-        .map(|(message, error)| (message.message_id, outcome_code(error)))
-        .collect();
-    for (outcome, id) in outcomes.iter_mut().zip(ids) {
-        if let Some(code) = classes.get(id) {
-            *outcome = *code;
-        }
+    // `None` = the id is in the batch more than once.
+    let mut slots: HashMap<u128, Option<usize>> = HashMap::with_capacity(ids.len());
+    for (slot, id) in ids.iter().enumerate() {
+        slots
+            .entry(*id)
+            .and_modify(|seen| *seen = None)
+            .or_insert(Some(slot));
     }
+    for (message, error) in failed {
+        // A failure with no slot, or with several, would acknowledge a message that
+        // failed; with nothing marked the host fails the whole batch instead.
+        let Some(Some(slot)) = slots.get(&message.message_id) else {
+            outcomes.fill(MQB_OUTCOME_OK);
+            return false;
+        };
+        outcomes[*slot] = outcome_code(error);
+    }
+    true
 }
 
 /// The per-message counterpart of [`processing_status`]. A connection fault has
@@ -1436,6 +1481,9 @@ unsafe fn write_status(
 #[async_trait::async_trait]
 pub trait BatchFilter: Send + Sync + 'static {
     /// Applied on an input endpoint, after the source produced the batch.
+    ///
+    /// An error is retried, unless it is a `ProcessingError::NonRetryable` or a
+    /// `ConsumerError::Permanent`; the same holds for [`Self::on_send`].
     async fn on_receive(
         &self,
         messages: Vec<CanonicalMessage>,
@@ -1578,7 +1626,7 @@ unsafe extern "C" fn middleware_apply(
             Ok(Ok(filtered)) => filtered,
             Ok(Err(error)) => {
                 unsafe { set_error(err, format!("{error:#}")) };
-                return MQB_ERR_RETRYABLE;
+                return filter_status(&error);
             }
             Err(failure) => return unsafe { task_failed(err, failure) },
         };
@@ -1783,13 +1831,13 @@ macro_rules! export_endpoint_plugins {
                 &[$($crate::__mq_bridge_plugin_vtable!($($entry)*)),+];
 
             /// Discovery symbol read by `mq_bridge::plugin::load_endpoint_plugin`.
-            #[no_mangle]
+            #[unsafe(no_mangle)]
             pub extern "C" fn mq_bridge_plugin_v1() -> *const $crate::support::plugin_abi::MqbPluginVTable {
                 MQ_BRIDGE_PLUGIN_VTABLES[0].as_ptr()
             }
 
             /// Every exported table by index, null past the last.
-            #[no_mangle]
+            #[unsafe(no_mangle)]
             pub extern "C" fn mq_bridge_plugin_v1_at(
                 index: usize,
             ) -> *const $crate::support::plugin_abi::MqbPluginVTable {
@@ -1937,6 +1985,80 @@ mod tests {
             processing_status(&ProcessingError::NonRetryable(anyhow::anyhow!("x"))),
             MQB_ERR_PERMANENT
         );
+    }
+
+    /// A library exporting twenty endpoints would otherwise start twenty worker pools.
+    #[test]
+    fn plugins_of_one_library_share_a_runtime() {
+        let mut first = MqbFactoryHandle::NULL;
+        let mut second = MqbFactoryHandle::NULL;
+        let mut err = MqbBuffer::EMPTY;
+        unsafe {
+            assert_eq!(factory_create::<NoEndpoint>(&mut first, &mut err), MQB_OK);
+            assert_eq!(factory_create::<NoEndpoint>(&mut second, &mut err), MQB_OK);
+            let a = borrow::<FactoryState>(first.0).unwrap();
+            let b = borrow::<FactoryState>(second.0).unwrap();
+            assert!(Arc::ptr_eq(&a.runtime, &b.runtime));
+            factory_free(first);
+            factory_free(second);
+        }
+    }
+
+    fn failed(id: u128) -> (CanonicalMessage, ProcessingError) {
+        (
+            CanonicalMessage::new(Vec::new(), Some(id)),
+            ProcessingError::NonRetryable(anyhow::anyhow!("refused")),
+        )
+    }
+
+    #[test]
+    fn a_failure_is_marked_at_its_message_position() {
+        let mut outcomes = [u8::MAX; 3];
+        assert!(unsafe { write_outcomes(outcomes.as_mut_ptr(), &[1, 2, 3], &[failed(2)]) });
+        assert_eq!(
+            outcomes,
+            [MQB_OUTCOME_OK, MQB_OUTCOME_PERMANENT, MQB_OUTCOME_OK]
+        );
+    }
+
+    /// The host reads "none marked" as a failure of the whole batch; marking only the
+    /// failures it can place would acknowledge the one it cannot.
+    #[test]
+    fn a_failure_that_cannot_be_placed_marks_nothing() {
+        let mut outcomes = [u8::MAX; 3];
+        let placed =
+            unsafe { write_outcomes(outcomes.as_mut_ptr(), &[1, 2, 3], &[failed(2), failed(9)]) };
+        assert!(!placed);
+        assert_eq!(outcomes, [MQB_OUTCOME_OK; 3]);
+    }
+
+    /// Either of the two messages with id 2 may be the one that failed.
+    #[test]
+    fn a_failure_that_matches_two_slots_marks_nothing() {
+        let mut outcomes = [u8::MAX; 3];
+        let placed = unsafe { write_outcomes(outcomes.as_mut_ptr(), &[2, 1, 2], &[failed(2)]) };
+        assert!(!placed);
+        assert_eq!(outcomes, [MQB_OUTCOME_OK; 3]);
+        // A duplicate hides a failure without a slot from a count of marked slots.
+        let placed =
+            unsafe { write_outcomes(outcomes.as_mut_ptr(), &[2, 1, 2], &[failed(2), failed(9)]) };
+        assert!(!placed);
+        assert_eq!(outcomes, [MQB_OUTCOME_OK; 3]);
+    }
+
+    /// Message 1 and 3 were delivered, so the whole-batch failure must stay retryable.
+    #[test]
+    fn an_unplaceable_permanent_failure_reports_the_batch_as_retryable() {
+        let mut outcomes = [u8::MAX; 3];
+        let mut err = MqbBuffer::EMPTY;
+        let sent = Ok(Ok(SentBatch::Partial {
+            responses: None,
+            failed: vec![failed(2), failed(9)],
+        }));
+        let (status, _) = unsafe { report_sent(sent, &[1, 2, 3], outcomes.as_mut_ptr(), &mut err) };
+        assert_eq!(status, MQB_ERR_RETRYABLE);
+        assert_eq!(outcomes, [MQB_OUTCOME_OK; 3]);
+        unsafe { buffer_free(err) };
     }
 
     #[test]

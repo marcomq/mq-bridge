@@ -506,7 +506,7 @@ mod dynamic {
 
     /// The gRPC certs are generated in-process: these are unit tests, so they must not
     /// depend on `gen_certs.sh` (the Windows runner has no bash/openssl).
-    fn grpc_cert_dir() -> &'static std::path::Path {
+    pub(super) fn grpc_cert_dir() -> &'static std::path::Path {
         static DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
         DIR.get_or_init(|| {
             use rcgen::{
@@ -1674,5 +1674,226 @@ mod server {
         .await
         .expect("Python compatibility client timed out");
         assert!(status.success(), "Python compatibility client failed");
+    }
+
+    #[tokio::test]
+    async fn a_consumer_id_is_free_again_once_its_client_is_gone() {
+        let service = service_with_topic("gone");
+        let subscribe = || {
+            service.subscribe(Request::new(SubscribeRequest {
+                topic: "gone".to_string(),
+                consumer_id: "durable".to_string(),
+            }))
+        };
+        drop(subscribe().await.expect("first subscription"));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        subscribe()
+            .await
+            .expect("the id is free without a message having to arrive first");
+    }
+
+    /// The server closes the stream of a subscriber that fell too far behind and expects
+    /// it back under the same id.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_subscriber_the_server_closed_for_lagging_subscribes_again() {
+        const COUNT: usize = 3000;
+        let mut server = server_consumer_on_free_port(GrpcConfig {
+            topic: Some("lag".into()),
+            server_mode: true,
+            ..Default::default()
+        })
+        .await;
+        let url = format!("http://{}", server.bound_addr.unwrap());
+        let drain = tokio::spawn(async move {
+            loop {
+                let batch = server.receive_batch(512).await.expect("server receive");
+                let n = batch.messages.len();
+                (batch.commit)(vec![MessageDisposition::Ack; n])
+                    .await
+                    .expect("server commit");
+            }
+        });
+        let client_config = GrpcConfig {
+            url,
+            topic: Some("lag".into()),
+            consumer_id: Some("slow".into()),
+            ..Default::default()
+        };
+        let mut subscriber = GrpcConsumer::new(&client_config).await.unwrap();
+        let publisher = GrpcPublisher::new(&client_config).await.unwrap();
+
+        // Large enough that the unread stream stalls on flow control and the server's
+        // buffer for this subscriber overflows.
+        let payload = "x".repeat(8 * 1024);
+        for _ in 0..COUNT / 500 {
+            let batch = (0..500)
+                .map(|_| CanonicalMessage::from(payload.clone()))
+                .collect();
+            publisher.send_batch(batch).await.unwrap();
+        }
+        publisher
+            .send_batch(vec![CanonicalMessage::from("after the lag")])
+            .await
+            .unwrap();
+
+        let read = async {
+            loop {
+                let batch = subscriber
+                    .receive_batch(512)
+                    .await
+                    .expect("a closed subscription is opened again, not the end of the route");
+                let n = batch.messages.len();
+                let done = batch
+                    .messages
+                    .iter()
+                    .any(|m| m.payload.as_ref() == b"after the lag");
+                (batch.commit)(vec![MessageDisposition::Ack; n])
+                    .await
+                    .expect("ack");
+                if done {
+                    break;
+                }
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(30), read)
+            .await
+            .expect("the message published last is retained and replayed");
+        drain.abort();
+    }
+
+    #[tokio::test]
+    async fn tls_options_that_cannot_be_honoured_are_refused() {
+        use crate::models::TlsConfig;
+        #[cfg(feature = "rustls-aws-lc")]
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        #[cfg(not(feature = "rustls-aws-lc"))]
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let refused = |url: &str, tls: TlsConfig| {
+            let config = GrpcConfig {
+                url: url.to_string(),
+                tls,
+                ..Default::default()
+            };
+            async move {
+                super::super::make_endpoint(&config, &config.url)
+                    .await
+                    .err()
+                    .map(|e| e.to_string())
+            }
+        };
+        let plain = TlsConfig {
+            required: true,
+            ..Default::default()
+        };
+        let error = refused("http://127.0.0.1:1", plain).await;
+        assert!(
+            error.as_deref().is_some_and(|e| e.contains("https://")),
+            "tls.required with an http:// url must not connect in the clear: {error:?}"
+        );
+        let half = TlsConfig {
+            cert_file: Some("client.pem".into()),
+            ..Default::default()
+        };
+        assert!(refused("https://127.0.0.1:1", half).await.is_some());
+        let encrypted = TlsConfig {
+            cert_password: Some("secret".into()),
+            ..Default::default()
+        };
+        assert!(refused("https://127.0.0.1:1", encrypted).await.is_some());
+        assert_eq!(
+            refused("https://127.0.0.1:1", TlsConfig::default()).await,
+            None
+        );
+    }
+
+    /// A peer that accepts the connection and never answers.
+    #[tokio::test]
+    async fn an_ack_the_server_never_answers_ends_with_the_request_timeout() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let silent = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((socket, _)) = listener.accept().await {
+                held.push(socket);
+            }
+        });
+        let channel = tonic::transport::Endpoint::from_shared(format!("http://{address}"))
+            .unwrap()
+            .connect_lazy();
+        let commit = super::super::consumer::grpc_client_commit(
+            proto::bridge_client::BridgeClient::new(channel),
+            "c".to_string(),
+            vec!["1".to_string()],
+            Some(Duration::from_millis(200)),
+        );
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            commit(vec![MessageDisposition::Ack]),
+        )
+        .await
+        .expect("the commit is bounded by the request timeout");
+        assert!(result.is_err());
+        silent.abort();
+    }
+
+    fn tls_server_config(topic: &str) -> GrpcConfig {
+        #[cfg(feature = "rustls-aws-lc")]
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        #[cfg(not(feature = "rustls-aws-lc"))]
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let certs = super::dynamic::grpc_cert_dir();
+        GrpcConfig {
+            topic: Some(topic.into()),
+            server_mode: true,
+            tls: crate::models::TlsConfig {
+                required: true,
+                cert_file: Some(certs.join("server.crt").to_string_lossy().into_owned()),
+                key_file: Some(certs.join("server.key").to_string_lossy().into_owned()),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    /// The client names no `tls.required`: an `https://` url with `tls.ca_file` is enough.
+    #[tokio::test]
+    async fn an_https_url_uses_the_configured_ca() {
+        let mut server = server_consumer_on_free_port(tls_server_config("tls")).await;
+        let ca = super::dynamic::grpc_cert_dir().join("ca.pem");
+        let publisher = GrpcPublisher::new(&GrpcConfig {
+            url: format!("https://{}", server.bound_addr.unwrap()),
+            topic: Some("tls".into()),
+            tls: crate::models::TlsConfig {
+                ca_file: Some(ca.to_string_lossy().into_owned()),
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let send = tokio::spawn(async move {
+            publisher
+                .send_batch(vec![CanonicalMessage::from("over tls")])
+                .await
+        });
+        let batch = tokio::time::timeout(Duration::from_secs(10), server.receive_batch(1))
+            .await
+            .expect("the message arrives over TLS")
+            .unwrap();
+        assert_eq!(batch.messages[0].payload.as_ref(), b"over tls");
+        (batch.commit)(vec![MessageDisposition::Ack]).await.unwrap();
+        send.await.unwrap().expect("publish over TLS");
+    }
+
+    #[tokio::test]
+    async fn two_routes_starting_together_share_one_listener() {
+        let mut first = tls_server_config("one");
+        first.url = free_server_url().await;
+        let mut second = tls_server_config("two");
+        second.url = first.url.clone();
+        let (first, second) = tokio::join!(GrpcConsumer::new(&first), GrpcConsumer::new(&second));
+        let first = first.expect("first route");
+        let second = second.expect("the second route joins the listener the first one opened");
+        assert_eq!(first.bound_addr, second.bound_addr);
     }
 }

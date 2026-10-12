@@ -126,7 +126,7 @@ async fn test_http_tls_pipeline() {
                         if received >= PERF_TEST_MESSAGE_COUNT {
                             break;
                         }
-                        if start.elapsed().as_secs() % 5 == 0 {
+                        if start.elapsed().as_secs().is_multiple_of(5) {
                             println!(
                                 "Progress: {} / {} received after {:?}",
                                 received,

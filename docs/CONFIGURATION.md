@@ -263,7 +263,7 @@ Which endpoint has a `tls` block, and how each one authenticates, is in the last
 | `mongodb` | `mongodb://host/?tls=true&tlsCAFile=/ca.pem&tlsCertificateKeyFile=/client.pem`, or `mongodb+srv://` | Every driver option works. With `tls.required` the `tls` block replaces the TLS options of the URL. `tls.key_file` is ignored: the key belongs in `cert_file`. |
 | `sqlx`, `postgres_cdc` (Postgres) | `?sslmode=verify-full&sslrootcert=/ca.pem` | `tls.required` adds `sslmode=verify-full`, or `require` with `accept_invalid_certs`. The default `sslmode=prefer` falls back to plain text. `postgres_cdc` sends a client certificate from `tls.cert_file` and `tls.key_file`, or from `sslcert` and `sslkey`. |
 | `sqlx` (MySQL, MariaDB) | `?ssl-mode=VERIFY_IDENTITY&ssl-ca=/ca.pem&ssl-cert=/client.pem&ssl-key=/client.key` | `tls.required` adds `ssl-mode=VERIFY_IDENTITY` (chain and host name), or `REQUIRED` with `accept_invalid_certs`. An `ssl-mode` in the URL wins over the block, so a server reached by IP address or by a name its certificate lacks can set `ssl-mode=VERIFY_CA` there. `tls.cert_file` and `tls.key_file` are passed as `ssl-cert` and `ssl-key`. `cert_password` is ignored by every `sqlx` driver: the key file must be unencrypted. |
-| `redis_streams` | `rediss://host:6379` | Same as `tls.required: true`. The server certificate is checked against the public roots, or against `tls.ca_file`. `tls.cert_file` and `tls.key_file` add a client certificate. `accept_invalid_certs` is ignored. |
+| `redis_streams` | `rediss://host:6379` | Same as `tls.required: true`. The server certificate is checked against the public roots, or against `tls.ca_file`. `tls.cert_file` and `tls.key_file` add a client certificate; an encrypted key (`cert_password`) is not supported. `accept_invalid_certs` is ignored. |
 | `amqp` | `amqps://host:5671` | With `tls.required: true` the `tls` block adds a private CA (`ca_file`) and a client identity: `cert_file` and `key_file` as PEM, or `cert_file` alone as a PKCS#12 bundle with `cert_password`. `accept_invalid_certs` is ignored. |
 | `mqtt` | `mqtts://host:8883` or `ssl://host:8883` | Same as `tls.required: true`. |
 | `nats` | `tls://host:4222` | |
@@ -326,9 +326,10 @@ Which endpoint has a `tls` block, and how each one authenticates, is in the last
   256 MB); with many connections that is the bound on memory, so lower it for a public
   listener. Responses that `http_bulk` and `clickhouse` read from their configured server
   are not limited in size.
-- **`Debug` output of a config shows passwords.** The engine does not print configs that
-  way, and its own log lines and errors blank the password of a URL. Rust code that logs a
-  config struct with `{:?}` prints `password`, `token` and `cert_password` in the clear.
+- **`Debug` output of a config hides its secrets.** `{:?}` of an endpoint config prints
+  passwords, tokens, keys and sensitive headers as `***` and blanks the password of a URL,
+  as the engine's own log lines and errors do. A `custom` endpoint's config is printed as
+  it is.
 - `zeromq` has no encryption and no authentication. Use it on a trusted network only.
 
 ### HTTP Consumer Fast Path

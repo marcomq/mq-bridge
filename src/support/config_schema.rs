@@ -257,7 +257,10 @@ impl UriSchema {
     /// the URI's own shape produced — the escape hatch for a transport whose
     /// address a URI cannot spell.
     pub fn config_from_uri(&self, uri: &str) -> anyhow::Result<Map<String, Value>> {
-        let parsed = url::Url::parse(uri).with_context(|| format!("`{uri}` is not a URI"))?;
+        let parsed = url::Url::parse(uri).with_context(|| {
+            let shown = crate::support::redact::url_password(uri);
+            format!("`{shown}` is not a URI")
+        })?;
         let before_query = uri.split('?').next().unwrap_or(uri);
         // Everything after the `+` describes the inner protocol, so that is the
         // scheme the address is handed over with.
@@ -694,6 +697,16 @@ mod tests {
         assert_eq!(config["url"], json!("rp://user@host:9092"));
         assert_eq!(config["topic"], json!("orders"));
         assert_eq!(config["group"], json!("g"));
+    }
+
+    #[test]
+    fn a_uri_that_cannot_be_parsed_is_reported_without_its_password() {
+        let error = UriSchema::default()
+            .config_from_uri("rp://user:hunter2@ho st:9092/orders")
+            .unwrap_err();
+        let text = format!("{error:#}");
+        assert!(!text.contains("hunter2"), "{text}");
+        assert!(text.contains("rp://user:***@"), "{text}");
     }
 
     #[test]

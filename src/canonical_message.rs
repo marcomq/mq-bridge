@@ -22,6 +22,8 @@ use crate::type_handler::KIND_KEY;
 pub struct CanonicalMessage {
     pub message_id: u128,
     pub payload: Bytes,
+    /// String key/value pairs next to the payload. Prefer [`Self::get_metadata`],
+    /// [`Self::set_metadata`] and [`Self::remove_metadata`] over the map itself.
     pub metadata: HashMap<String, String>,
 }
 
@@ -578,6 +580,32 @@ impl CanonicalMessage {
         self
     }
 
+    /// The metadata value of `key`.
+    pub fn get_metadata(&self, key: &str) -> Option<&str> {
+        self.metadata.get(key).map(String::as_str)
+    }
+
+    /// Sets the metadata value of `key`, returning the value it had.
+    pub fn set_metadata(
+        &mut self,
+        key: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Option<String> {
+        self.metadata.insert(key.into(), value.into())
+    }
+
+    /// Removes `key` from the metadata, returning its value.
+    pub fn remove_metadata(&mut self, key: &str) -> Option<String> {
+        self.metadata.remove(key)
+    }
+
+    /// The metadata pairs, in no particular order.
+    pub fn metadata_iter(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.metadata
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+    }
+
     pub fn with_metadata_kv(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.metadata.insert(key.into(), value.into());
         self
@@ -731,6 +759,16 @@ macro_rules! msg {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn metadata_accessors_read_and_write_the_map() {
+        let mut msg = CanonicalMessage::from("x");
+        assert_eq!(msg.set_metadata("kind", "order"), None);
+        assert_eq!(msg.get_metadata("kind"), Some("order"));
+        assert_eq!(msg.metadata_iter().collect::<Vec<_>>(), [("kind", "order")]);
+        assert_eq!(msg.remove_metadata("kind").as_deref(), Some("order"));
+        assert!(msg.metadata.is_empty());
+    }
 
     /// An ordinary string id must not make the whole envelope unparseable — a
     /// `file`/`json` source used to keep such a line as an opaque raw payload and throw

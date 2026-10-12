@@ -53,6 +53,24 @@ pub(crate) use publisher::{tag_outcome, OUTCOME_EXISTED, OUTCOME_INSERTED, OUTCO
 #[cfg(test)]
 pub(crate) use readers::{decode_resume_token, encode_resume_token, full_document_match};
 
+/// Queue position of a wrapped document, drawn when the document is built.
+const INSERT_ORDER_FIELD: &str = "insert_order";
+
+/// A UUIDv7 above every one drawn before it in this process.
+fn next_insert_order() -> mongodb::bson::Uuid {
+    static GENERATOR: Mutex<Option<fast_uuid_v7::SequentialGenerator>> = Mutex::new(None);
+    let mut generator = GENERATOR.lock().unwrap_or_else(|e| e.into_inner());
+    let id = generator
+        .get_or_insert_with(fast_uuid_v7::SequentialGenerator::new)
+        .next_id();
+    mongodb::bson::Uuid::from_bytes(id.to_be_bytes())
+}
+
+/// The queue reads in this order; a document without the field sorts first, by `_id`.
+fn queue_order() -> Document {
+    doc! { INSERT_ORDER_FIELD: 1, "_id": 1 }
+}
+
 /// A helper struct for deserialization that matches the BSON structure exactly.
 /// The payload is read as a BSON Binary type, which we then manually convert.
 #[derive(Serialize, Deserialize, Debug)]
@@ -229,6 +247,7 @@ fn message_to_document(
         "_id": id_bson,
         "payload": payload_bson,
         "metadata": metadata_doc,
+        INSERT_ORDER_FIELD: next_insert_order(),
         "locked_until": null,
         "created_at": mongodb::bson::DateTime::now()
     })

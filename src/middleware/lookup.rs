@@ -98,16 +98,20 @@ impl Entry {
     ) -> Vec<Result<Option<Value>, PublisherError>> {
         let requests: Vec<CanonicalMessage> = msgs.iter().map(|m| self.request(m)).collect();
         let n = requests.len();
+        let short = |answered: usize| {
+            let error = || anyhow::anyhow!("lookup: `from` answered {answered} of {n} requests");
+            (0..n)
+                .map(|_| Err(PublisherError::NonRetryable(error())))
+                .collect()
+        };
+        match self.from.lookup_each(&requests).await {
+            Some(found) if found.len() == n => return found,
+            Some(found) => return short(found.len()),
+            None => {}
+        }
         match self.from.lookup_batch(&requests).await {
             Some(Ok(found)) if found.len() == n => found.into_iter().map(Ok).collect(),
-            Some(Ok(found)) => (0..n)
-                .map(|_| {
-                    Err(PublisherError::NonRetryable(anyhow::anyhow!(
-                        "lookup: `from` answered {} of {n} requests",
-                        found.len()
-                    )))
-                })
-                .collect(),
+            Some(Ok(found)) => short(found.len()),
             Some(Err(e)) => (0..n).map(|_| Err(duplicate(&e))).collect(),
             None => {
                 futures::stream::iter(requests)
@@ -789,6 +793,52 @@ entries:
         fn as_any(&self) -> &dyn Any {
             self
         }
+    }
+
+    /// Answers `lookup_each`: the request with id 2 fails, the others are found.
+    struct Each;
+
+    #[async_trait]
+    impl MessagePublisher for Each {
+        async fn send_batch(&self, _: Vec<CanonicalMessage>) -> Result<SentBatch, PublisherError> {
+            panic!("a lookup answered one by one must not fall back to send");
+        }
+
+        async fn lookup_each(
+            &self,
+            requests: &[CanonicalMessage],
+        ) -> Option<Vec<Result<Option<Value>, PublisherError>>> {
+            let answer = |request: &CanonicalMessage| match payload(request)["id"].as_i64() {
+                Some(2) => Err(PublisherError::NonRetryable(anyhow::anyhow!("refused"))),
+                id => Ok(Some(json!({"id": id}))),
+            };
+            Some(requests.iter().map(answer).collect())
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    #[tokio::test]
+    async fn a_from_that_answers_each_request_fails_only_the_refused_message() {
+        let entry = Entry {
+            from: Arc::new(Each),
+            metadata: Vec::new(),
+            payload: None,
+            into: vec!["user".into()],
+            found_key: "lookup.user.found".into(),
+        };
+        let lookup = Lookup {
+            entries: vec![entry],
+            concurrency: 16,
+        };
+        let batch = (1..=3).map(|id| msg(json!({"id": id}))).collect();
+        let out = lookup.enrich_batch(batch).await;
+        assert_eq!(payload(out[0].as_ref().unwrap())["user"], json!({"id": 1}));
+        let (_, refused) = out[1].as_ref().unwrap_err();
+        assert!(format!("{refused:#}").contains("refused"), "{refused:#}");
+        assert_eq!(payload(out[2].as_ref().unwrap())["user"], json!({"id": 3}));
     }
 
     fn batched_lookup(answer: Answer) -> (Lookup, Arc<Batched>) {

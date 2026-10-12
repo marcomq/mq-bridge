@@ -92,7 +92,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! mq-bridge = { version = "0.4", features = ["kafka", "http"] }
+//! mq-bridge = { version = "1", features = ["kafka", "http"] }
 //! ```
 //!
 //! Common feature groups include:
@@ -151,6 +151,20 @@
 //! - Read the [documentation book](https://marcomq.github.io/mq-bridge/) for setup,
 //!   connector configuration, and recipes.
 //!
+//! # Stability
+//!
+//! From 1.0 on, the crate root and the modules [`models`], [`traits`], [`errors`],
+//! [`outcomes`], [`extensions`], `plugin` (the SDK), [`type_handler`], [`publisher`],
+//! [`route`] and [`checkpoint`] follow semantic versioning. Everything in
+//! [`endpoints`], [`middleware`], [`support`] and `test_utils` is implementation and
+//! may change in a minor release, as may the major version of a re-exported driver
+//! crate (`mq_bridge::sqlx`, `mq_bridge::rdkafka`, ...).
+//!
+//! A minor release may add a field to a configuration struct, a variant to a
+//! configuration or error enum, and raise the minimum Rust version. Write config
+//! structs with `..Default::default()` and give a `match` on these enums a `_` arm,
+//! and such a release compiles unchanged.
+//!
 //! # Reliability model
 //!
 //! Publishing can distinguish success, partial success, retryable failure, and
@@ -200,14 +214,15 @@ pub use publisher::Publisher;
 pub use endpoints::memory::get_or_create_channel;
 pub use publisher::{get_publisher, list_publishers, register_publisher, unregister_publisher};
 pub use route::{
-    get_route, list_routes, register_endpoint, route_outcome, route_status, stop_route,
-    RouteOutcome,
+    get_route, list_routes, register_endpoint, route_outcome, route_status, set_route_display_name,
+    stop_route, RouteOutcome,
 };
 
 // Re-export the underlying driver crate for each feature-gated endpoint, so
 // downstream code can depend on the exact same version mq-bridge builds against
 // (and share types with it) without adding — and keeping in sync — its own
 // dependency entry. Each is gated on the feature that pulls the crate in.
+// A driver's major version can change in a minor release of mq-bridge.
 #[cfg(feature = "nats")]
 pub use async_nats;
 #[cfg(feature = "amqp")]

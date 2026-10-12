@@ -195,7 +195,10 @@ async fn uncommitted_batch_redelivers(
 
     let deadline = Instant::now() + options.receive_timeout;
     loop {
-        let batch = consumer.receive_batch(1).await?;
+        let batch = receive_before(consumer.as_mut(), 1, deadline).await?;
+        let Some(batch) = batch else {
+            bail!("nothing was delivered within {:?}", options.receive_timeout);
+        };
         if batch.messages.iter().any(|message| {
             payload
                 .iter()
@@ -279,6 +282,19 @@ async fn send(
     publisher.flush().await.context("flushing after publish")
 }
 
+/// One `receive_batch`, or `None` once `deadline` has passed: a consumer waits for
+/// its first message as long as it takes.
+async fn receive_before(
+    consumer: &mut dyn MessageConsumer,
+    max: usize,
+    deadline: Instant,
+) -> anyhow::Result<Option<crate::ReceivedBatch>> {
+    match tokio::time::timeout_at(deadline.into(), consumer.receive_batch(max)).await {
+        Ok(batch) => Ok(Some(batch?)),
+        Err(_) => Ok(None),
+    }
+}
+
 /// Receives until `count` messages have arrived, committing each batch with
 /// `disposition`.
 async fn receive(
@@ -298,7 +314,13 @@ async fn receive(
                 options.receive_timeout
             );
         }
-        let batch = consumer.receive_batch(count - collected.len()).await?;
+        let Some(batch) = receive_before(consumer, count - collected.len(), deadline).await? else {
+            bail!(
+                "received {} of {count} messages within {:?}",
+                collected.len(),
+                options.receive_timeout
+            );
+        };
         if batch.messages.is_empty() {
             tokio::time::sleep(Duration::from_millis(5)).await;
             continue;
@@ -320,4 +342,34 @@ async fn receive(
             .context("committing a received batch")?;
     }
     Ok(collected)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::traits::{ConsumerError, ReceivedBatch};
+    use async_trait::async_trait;
+
+    struct Silent;
+
+    #[async_trait]
+    impl MessageConsumer for Silent {
+        async fn receive_batch(&mut self, _max: usize) -> Result<ReceivedBatch, ConsumerError> {
+            std::future::pending().await
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_consumer_that_never_answers_fails_the_check_at_the_timeout() {
+        let options = ConformanceOptions::new("conformance", serde_json::Value::Null);
+        let expected = vec!["never".to_string()];
+        let error = receive(&mut Silent, &expected, &options, MessageDisposition::Ack)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("received 0 of 1"), "{error}");
+    }
 }

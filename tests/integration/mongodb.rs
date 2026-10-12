@@ -13,7 +13,7 @@ use mq_bridge::test_utils::{
     run_test_with_docker_controller, setup_logging, should_run, verify_subscriber_logic,
     PerformanceResult,
 };
-// Queue pipeline: `consume: consumer` is explicit because the default (`capture_all`) needs a
+// Queue pipeline: `consume: delete` is explicit because the default (`capture_all`) needs a
 // replica set and otherwise degrades to an `_id`-ordered reader, which cannot tail a collection
 // written by 4 concurrent workers — a batch landing out of `_id` order is skipped for good.
 const CONFIG_YAML: &str = r#"
@@ -35,7 +35,7 @@ routes:
     concurrency: 4
     batch_size: 1024
     input:
-      mongodb: { url: "mongodb://localhost:27017", database: "mq_bridge_test", collection: "test_collection", consume: consumer }
+      mongodb: { url: "mongodb://localhost:27017", database: "mq_bridge_test", collection: "test_collection", consume: delete }
     output:
       memory: { topic: "test-out-mongodb", capacity: {out_capacity} }
 "#;
@@ -78,9 +78,7 @@ async fn test_mongodb_snapshot_reads_all_and_ends() {
         let route = Route::new(Endpoint::new(EndpointType::MongoDb(config)), out);
         route.deploy(&route_name).await.unwrap();
 
-        // Track the seeded payloads rather than a message count: the snapshot also emits the
-        // publisher's internal `<collection>:sequencer` document, so counting would both overshoot
-        // and race (250 messages can be 249 real ones plus the sequencer).
+        // Track the seeded payloads rather than a message count.
         let mut seen = std::collections::HashSet::new();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         while seen.len() < seeded && std::time::Instant::now() < deadline {
@@ -168,7 +166,63 @@ pub async fn test_mongodb_chaos() {
     .await;
 }
 
-// Queue mode (`consume: consumer`) is the standalone-safe reader that still round-trips the
+/// The queue is read in the order it was written, not in `_id` order, across and inside batches.
+#[tokio::test]
+#[ignore = "requires docker compose"]
+async fn test_mongodb_queue_reads_in_insert_order() {
+    if !should_run("mongodb") {
+        return;
+    }
+    use mq_bridge::traits::{MessageConsumer, MessageDisposition, MessagePublisher};
+
+    setup_logging();
+    run_test_with_docker("tests/integration/docker-compose/mongodb.yml", || async {
+        const MESSAGES: usize = 50;
+        let config = mq_bridge::models::MongoDbConfig {
+            url: "mongodb://localhost:27017".to_string(),
+            database: "mq_bridge_test".to_string(),
+            collection: Some(format!("insert_order_{}", fast_uuid_v7::gen_id())),
+            ..Default::default()
+        };
+
+        // Ids that fall while the write order rises.
+        let batch: Vec<_> = (0..MESSAGES)
+            .map(|i| {
+                let id = (MESSAGES - i) as u128;
+                mq_bridge::CanonicalMessage::new(i.to_string().into_bytes(), Some(id))
+            })
+            .collect();
+        let publisher = MongoDbPublisher::new(&config).await.unwrap();
+        publisher.send_batch(batch).await.unwrap();
+
+        let mut consumer = MongoDbConsumer::new(&config).await.unwrap();
+        let mut read = Vec::new();
+        while read.len() < MESSAGES {
+            let batch = tokio::time::timeout(
+                std::time::Duration::from_secs(20),
+                consumer.receive_batch(20),
+            )
+            .await
+            .expect("queue read timed out")
+            .expect("receive_batch failed");
+            let count = batch.messages.len();
+            read.extend(
+                batch
+                    .messages
+                    .iter()
+                    .map(|m| m.get_payload_str().to_string()),
+            );
+            (batch.commit)(vec![MessageDisposition::Ack; count])
+                .await
+                .expect("commit (ack) failed");
+        }
+        let written: Vec<String> = (0..MESSAGES).map(|i| i.to_string()).collect();
+        assert_eq!(read, written);
+    })
+    .await;
+}
+
+// Queue mode (`consume: delete`) is the standalone-safe reader that still round-trips the
 // wrapped envelope, so the handler sees the `kind` metadata. It replaces the removed subscriber
 // mode this test used to exercise.
 #[tokio::test]
@@ -602,6 +656,267 @@ pub async fn test_mongodb_cdc_latency() {
             );
         },
     )
+    .await;
+}
+
+fn ids_of(messages: &[mq_bridge::CanonicalMessage]) -> Vec<i64> {
+    messages
+        .iter()
+        .filter_map(|m| serde_json::from_slice::<serde_json::Value>(&m.payload).ok())
+        .filter_map(|body| body.get("_id").and_then(|id| id.as_i64()))
+        .collect()
+}
+
+async fn seed_numbered(url: &str, collection: &str, count: i64) {
+    let client = mongodb::Client::with_uri_str(url).await.unwrap();
+    client
+        .database(CDC_DB)
+        .collection::<mongodb::bson::Document>(collection)
+        .insert_many((1..=count).map(|i| mongodb::bson::doc! { "_id": i }))
+        .await
+        .expect("seed collection");
+}
+
+/// Reads two pages ahead, nacks both in order, and returns the ids of the next page.
+async fn next_page_after_two_nacked(
+    reader: &mut dyn mq_bridge::traits::MessageConsumer,
+) -> Vec<i64> {
+    use mq_bridge::traits::MessageDisposition;
+    let first = reader.receive_batch(2).await.expect("first page");
+    let second = reader.receive_batch(2).await.expect("second page");
+    assert_eq!(ids_of(&first.messages), vec![1, 2]);
+    assert_eq!(ids_of(&second.messages), vec![3, 4]);
+    (first.commit)(vec![MessageDisposition::Nack; 2])
+        .await
+        .unwrap();
+    (second.commit)(vec![MessageDisposition::Nack; 2])
+        .await
+        .unwrap();
+    let again = reader.receive_batch(2).await.expect("page after the nacks");
+    ids_of(&again.messages)
+}
+
+/// Two pages in flight when the sink fails: both are nacked, and the nack of the second
+/// used to move the read position to the end of the first, which was then never read again.
+pub async fn test_mongodb_snapshot_rereads_two_nacked_pages() {
+    setup_logging();
+    run_test_with_docker("tests/integration/docker-compose/mongodb.yml", || async {
+        let collection = format!("snapshot_nack_{}", fast_uuid_v7::gen_id());
+        seed_numbered("mongodb://localhost:27017", &collection, 6).await;
+        let config = mq_bridge::models::MongoDbConfig {
+            url: "mongodb://localhost:27017".to_string(),
+            database: CDC_DB.to_string(),
+            collection: Some(collection),
+            consume: Some(mq_bridge::models::MongoConsume::Snapshot),
+            ..Default::default()
+        };
+        let mut reader = MongoDbIdReader::new(&config).await.unwrap();
+
+        assert_eq!(next_page_after_two_nacked(&mut reader).await, vec![1, 2]);
+    })
+    .await;
+}
+
+pub async fn test_mongodb_capture_all_rereads_two_nacked_snapshot_pages() {
+    setup_logging();
+    run_test_with_docker(
+        "tests/integration/docker-compose/mongodb-replica.yml",
+        || async {
+            let collection = format!("capture_all_nack_{}", fast_uuid_v7::gen_id());
+            seed_numbered(CDC_URL, &collection, 6).await;
+            let mut reader = MongoDbChangeStreamReader::new(&cdc_reader_cfg(&collection), true)
+                .await
+                .unwrap();
+
+            assert_eq!(next_page_after_two_nacked(&mut reader).await, vec![1, 2]);
+        },
+    )
+    .await;
+}
+
+/// A nacked change was not delivered again while the route ran, and the checkpoint stopped
+/// moving. With a checkpoint the reader now fails its next read so the route replays.
+pub async fn test_mongodb_cdc_replays_a_nacked_change() {
+    setup_logging();
+    run_test_with_docker(
+        "tests/integration/docker-compose/mongodb-replica.yml",
+        || async {
+            use mq_bridge::traits::{MessageConsumer, MessageDisposition};
+
+            let collection = format!("cdc_nack_{}", fast_uuid_v7::gen_id());
+            let mut config = cdc_reader_cfg(&collection);
+            config.cursor_id = Some("nack-replay".to_string());
+            let client = mongodb::Client::with_uri_str(CDC_URL).await.unwrap();
+            let coll = client
+                .database(CDC_DB)
+                .collection::<mongodb::bson::Document>(&collection);
+
+            let mut reader = MongoDbChangeStreamReader::new(&config, false)
+                .await
+                .unwrap();
+            coll.insert_one(mongodb::bson::doc! { "_id": 1i64 })
+                .await
+                .unwrap();
+            assert_eq!(drain_cdc(&mut reader, 1).await, 1);
+
+            coll.insert_one(mongodb::bson::doc! { "_id": 2i64 })
+                .await
+                .unwrap();
+            coll.insert_one(mongodb::bson::doc! { "_id": 3i64 })
+                .await
+                .unwrap();
+            let nacked = reader.receive_batch(1).await.unwrap();
+            assert_eq!(ids_of(&nacked.messages), vec![2]);
+            (nacked.commit)(vec![MessageDisposition::Nack])
+                .await
+                .unwrap();
+
+            let next =
+                tokio::time::timeout(std::time::Duration::from_secs(10), reader.receive_batch(1))
+                    .await
+                    .expect("read after the nack timed out");
+            assert!(
+                matches!(next, Err(mq_bridge::traits::ConsumerError::Connection(_))),
+                "the read after a nack must ask for a reconnect"
+            );
+            drop(reader);
+
+            let mut replay = MongoDbChangeStreamReader::new(&config, false)
+                .await
+                .unwrap();
+            let batch =
+                tokio::time::timeout(std::time::Duration::from_secs(10), replay.receive_batch(1))
+                    .await
+                    .expect("replay timed out")
+                    .unwrap();
+            assert_eq!(ids_of(&batch.messages), vec![2]);
+        },
+    )
+    .await;
+}
+
+async fn read_cdc_one(reader: &mut MongoDbChangeStreamReader) -> mq_bridge::traits::ReceivedBatch {
+    use mq_bridge::traits::MessageConsumer;
+    tokio::time::timeout(std::time::Duration::from_secs(20), reader.receive_batch(1))
+        .await
+        .expect("no change within 20s")
+        .expect("receive_batch failed")
+}
+
+/// Without a `cursor_id` a nacked change was gone for the session. The reader now reopens
+/// its stream after the last acknowledged change.
+pub async fn test_mongodb_cdc_replays_a_nacked_change_without_a_cursor_id() {
+    setup_logging();
+    run_test_with_docker(
+        "tests/integration/docker-compose/mongodb-replica.yml",
+        || async {
+            use mq_bridge::traits::MessageDisposition;
+
+            let collection = format!("cdc_nack_mem_{}", fast_uuid_v7::gen_id());
+            let config = cdc_reader_cfg(&collection);
+            let client = mongodb::Client::with_uri_str(CDC_URL).await.unwrap();
+            let coll = client
+                .database(CDC_DB)
+                .collection::<mongodb::bson::Document>(&collection);
+            let mut reader = MongoDbChangeStreamReader::new(&config, false)
+                .await
+                .unwrap();
+            // Nacked as the very first change, then after an acknowledged one.
+            for id in [1i64, 2] {
+                coll.insert_one(mongodb::bson::doc! { "_id": id })
+                    .await
+                    .unwrap();
+                let nacked = read_cdc_one(&mut reader).await;
+                assert_eq!(ids_of(&nacked.messages), vec![id]);
+                (nacked.commit)(vec![MessageDisposition::Nack])
+                    .await
+                    .unwrap();
+
+                let again = read_cdc_one(&mut reader).await;
+                assert_eq!(ids_of(&again.messages), vec![id], "the nacked change again");
+                (again.commit)(vec![MessageDisposition::Ack]).await.unwrap();
+            }
+        },
+    )
+    .await;
+}
+
+/// One document the collection refuses must fail alone and for good; a duplicate on an
+/// index other than `_id` is a refusal, not a document that is already stored.
+pub async fn test_mongodb_rejected_document_fails_alone() {
+    setup_logging();
+    run_test_with_docker("tests/integration/docker-compose/mongodb.yml", || async {
+        use mq_bridge::traits::{MessagePublisher, PublisherError, SentBatch};
+
+        let collection = format!("rejected_{}", fast_uuid_v7::gen_id());
+        let client = mongodb::Client::with_uri_str("mongodb://localhost:27017")
+            .await
+            .unwrap();
+        let db = client.database(CDC_DB);
+        db.create_collection(&collection)
+            .validator(mongodb::bson::doc! { "n": { "$type": "number" } })
+            .await
+            .unwrap();
+        let coll = db.collection::<mongodb::bson::Document>(&collection);
+        coll.create_index(
+            mongodb::IndexModel::builder()
+                .keys(mongodb::bson::doc! { "email": 1 })
+                .options(
+                    mongodb::options::IndexOptions::builder()
+                        .unique(true)
+                        .sparse(true)
+                        .build(),
+                )
+                .build(),
+        )
+        .await
+        .unwrap();
+
+        let config = mq_bridge::models::MongoDbConfig {
+            url: "mongodb://localhost:27017".to_string(),
+            database: CDC_DB.to_string(),
+            collection: Some(collection),
+            format: mq_bridge::models::MongoDbFormat::Raw,
+            ..Default::default()
+        };
+        let publisher = MongoDbPublisher::new(&config).await.unwrap();
+        let message = |body: &str| mq_bridge::CanonicalMessage::new(body.as_bytes().to_vec(), None);
+        let batch = vec![
+            message(r#"{"_id": 1, "n": 1, "email": "a@example.com"}"#),
+            message(r#"{"_id": 2, "n": 2, "email": "a@example.com"}"#),
+            message(r#"{"_id": 3, "n": "three"}"#),
+            message(r#"{"_id": 4, "n": 4}"#),
+        ];
+        let rejected: Vec<u128> = vec![batch[1].message_id, batch[2].message_id];
+
+        let sent = publisher.send_batch(batch).await.unwrap();
+
+        let SentBatch::Partial { failed, .. } = sent else {
+            panic!("the two refused documents must be reported, got {sent:?}");
+        };
+        let mut failed_ids: Vec<u128> = failed.iter().map(|(m, _)| m.message_id).collect();
+        failed_ids.sort_unstable();
+        let mut expected = rejected.clone();
+        expected.sort_unstable();
+        assert_eq!(failed_ids, expected);
+        assert!(
+            failed
+                .iter()
+                .all(|(_, e)| matches!(e, PublisherError::NonRetryable(_))),
+            "a refused document must not be retried: {failed:?}"
+        );
+        assert_eq!(
+            coll.count_documents(mongodb::bson::doc! {}).await.unwrap(),
+            2
+        );
+
+        // The same document again is already stored: still a success.
+        let again = publisher
+            .send_batch(vec![message(r#"{"_id": 4, "n": 4}"#)])
+            .await
+            .unwrap();
+        assert!(matches!(again, SentBatch::Ack), "got {again:?}");
+    })
     .await;
 }
 

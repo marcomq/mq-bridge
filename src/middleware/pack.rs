@@ -534,8 +534,7 @@ mod tests {
         let recording = RecordingPublisher::default();
         let publisher = PackPublisher::new(Box::new(recording.clone()), config).unwrap();
         publisher.send_batch(messages).await.unwrap();
-        let sent = recording.sent.lock().unwrap().clone();
-        sent
+        recording.sent.lock().unwrap().clone()
     }
 
     #[tokio::test]

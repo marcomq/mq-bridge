@@ -133,6 +133,39 @@ impl MessagePublisher for SledPublisher {
     }
 }
 
+/// A message handed out in queue mode: it waits in the inflight tree until it is settled.
+/// Dropped without a commit, it goes back to the queue.
+struct Inflight {
+    tree: Tree,
+    inflight_tree: Tree,
+    key: IVec,
+    value: IVec,
+    settled: bool,
+}
+
+impl Inflight {
+    fn give_back(&self) -> anyhow::Result<()> {
+        (&self.tree, &self.inflight_tree)
+            .transaction(|(t_main, t_inflight)| {
+                if t_inflight.remove(&self.key)?.is_some() {
+                    t_main.insert(&self.key, &self.value)?;
+                }
+                Ok(())
+            })
+            .map_err(|e: sled::transaction::TransactionError<()>| anyhow!("{:?}", e))
+    }
+}
+
+impl Drop for Inflight {
+    fn drop(&mut self) {
+        if !self.settled {
+            if let Err(e) = self.give_back() {
+                tracing::warn!(error = %e, "Sled message dropped without a commit stays inflight until the next start");
+            }
+        }
+    }
+}
+
 pub struct SledConsumer {
     _db: Db,
     tree: Tree,
@@ -279,40 +312,40 @@ impl MessageConsumer for SledConsumer {
 
             if let Some((key, value)) = next_item {
                 self.last_key = Some(key.clone());
-                let message = serde_json::from_slice(&value)
-                    .map_err(|e| ConsumerError::Connection(anyhow!(e)))?;
+                // A value some other writer put there must not stop the queue.
+                let message = serde_json::from_slice(&value).unwrap_or_else(|e| {
+                    tracing::warn!(error = %e, "Sled value is not a stored message; delivering it as a raw payload");
+                    CanonicalMessage::new(value.to_vec(), None)
+                });
 
-                let tree = self.tree.clone();
-                let inflight_tree = self.inflight_tree.clone();
-                let delete = self.delete_after_read;
-                let key_clone = key.clone();
-                let value_clone = value.to_vec();
+                let inflight = self.delete_after_read.then(|| Inflight {
+                    tree: self.tree.clone(),
+                    inflight_tree: self.inflight_tree.clone(),
+                    key,
+                    value,
+                    settled: false,
+                });
 
                 let commit = Box::new(move |disposition: MessageDisposition| {
                     Box::pin(async move {
-                        if delete {
-                            match disposition {
-                                MessageDisposition::Ack | MessageDisposition::Reply(_) => {
-                                    if matches!(disposition, MessageDisposition::Reply(_)) {
-                                        tracing::warn!("Sled consumer received a Reply/StreamReply, but replying is not supported. Dropping reply.");
-                                    }
-                                    inflight_tree.remove(key_clone).map_err(|e| anyhow!(e))?;
+                        let Some(mut inflight) = inflight else {
+                            return Ok(());
+                        };
+                        inflight.settled = true;
+                        match disposition {
+                            MessageDisposition::Ack | MessageDisposition::Reply(_) => {
+                                if matches!(disposition, MessageDisposition::Reply(_)) {
+                                    tracing::debug!(
+                                        "Sled consumer cannot send a reply; dropping it"
+                                    );
                                 }
-                                MessageDisposition::Nack => {
-                                    // Re-insert on Nack in Queue mode (move back from inflight to main)
-                                    (&tree, &inflight_tree)
-                                        .transaction(|(t_main, t_inflight)| {
-                                            if t_inflight.remove(&key_clone)?.is_some() {
-                                                t_main
-                                                    .insert(&key_clone, value_clone.as_slice())?;
-                                            }
-                                            Ok(())
-                                        })
-                                        .map_err(|e: sled::transaction::TransactionError<()>| {
-                                            anyhow!("{:?}", e)
-                                        })?;
-                                }
+                                inflight
+                                    .inflight_tree
+                                    .remove(&inflight.key)
+                                    .map_err(|e| anyhow!(e))?;
                             }
+                            // Queue mode: back from inflight to the queue.
+                            MessageDisposition::Nack => inflight.give_back()?,
                         }
                         Ok(())
                     }) as crate::traits::BoxFuture<'static, anyhow::Result<()>>
@@ -503,6 +536,61 @@ mod tests {
             .unwrap();
 
         assert_eq!(received_retry.message.payload, msg.payload);
+        close_db(&path).unwrap();
+    }
+
+    fn queue(path: &str) -> SledConfig {
+        SledConfig {
+            path: path.to_string(),
+            tree: None,
+            read_from_start: true,
+            delete_after_read: true,
+        }
+    }
+
+    async fn next_payload(consumer: &mut SledConsumer) -> Vec<u8> {
+        let received = timeout(Duration::from_secs(2), consumer.receive())
+            .await
+            .expect("a message is waiting")
+            .unwrap();
+        let payload = received.message.payload.to_vec();
+        (received.commit)(MessageDisposition::Ack).await.unwrap();
+        payload
+    }
+
+    #[tokio::test]
+    async fn a_message_dropped_without_a_commit_goes_back_to_the_queue() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().to_str().unwrap().to_string();
+        let publisher = SledPublisher::new(&queue(&path)).unwrap();
+        let mut consumer = SledConsumer::new(&queue(&path)).unwrap();
+        for payload in ["one", "two", "three"] {
+            publisher.send(payload.into()).await.unwrap();
+        }
+
+        drop(consumer.receive().await.unwrap());
+        let batch = consumer.receive_batch(2).await.unwrap();
+        assert_eq!(batch.messages[0].payload.as_ref(), b"one");
+        // One disposition for two messages: the second was never settled.
+        (batch.commit)(vec![MessageDisposition::Ack]).await.unwrap();
+
+        assert_eq!(next_payload(&mut consumer).await, b"two");
+        assert_eq!(next_payload(&mut consumer).await, b"three");
+        close_db(&path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_value_that_is_no_message_does_not_stop_the_queue() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().to_str().unwrap().to_string();
+        let publisher = SledPublisher::new(&queue(&path)).unwrap();
+        let mut consumer = SledConsumer::new(&queue(&path)).unwrap();
+        publisher.tree.insert([0u8; 4], "foreign").unwrap();
+        publisher.send("ours".into()).await.unwrap();
+
+        let batch = consumer.receive_batch(2).await.unwrap();
+        let payloads: Vec<&[u8]> = batch.messages.iter().map(|m| m.payload.as_ref()).collect();
+        assert_eq!(payloads, [b"foreign".as_slice(), b"ours"]);
         close_db(&path).unwrap();
     }
 

@@ -8,12 +8,14 @@ use crate::CanonicalMessage;
 use anyhow::anyhow;
 use async_channel::{bounded, Receiver, Sender};
 use async_trait::async_trait;
+use futures::channel::mpsc;
 use std::any::Any;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::sync::oneshot;
 use tracing::trace;
-use zeromq::{Socket, SocketRecv, SocketSend, ZmqMessage};
+use zeromq::{Socket, SocketEvent, SocketOptions, SocketRecv, SocketSend, ZmqMessage};
 
 use super::codec;
 
@@ -28,10 +30,82 @@ fn frames_to_zmq(frames: Vec<bytes::Bytes>) -> ZmqMessage {
     msg
 }
 
+/// A rebuilt socket waits this long for its peer, so a queued send is not held for long.
+const REBUILD_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn socket_options(rebuild: bool) -> SocketOptions {
+    let mut options = SocketOptions::default();
+    if rebuild {
+        options.connect_timeout(REBUILD_CONNECT_TIMEOUT);
+    }
+    options
+}
+
+async fn attach<S: Socket>(mut socket: S, url: &str, bind: bool) -> zeromq::ZmqResult<S> {
+    if bind {
+        socket.bind(url).await?;
+    } else {
+        socket.connect(url).await?;
+    }
+    Ok(socket)
+}
+
 enum SenderSocket {
     Push(zeromq::PushSocket),
-    Pub(zeromq::PubSocket),
+    /// With the monitor that reports a lost peer: a PUB send does not fail without one.
+    Pub(zeromq::PubSocket, mpsc::Receiver<SocketEvent>),
     Req(zeromq::ReqSocket),
+}
+
+impl SenderSocket {
+    async fn open(
+        socket_type: &ZeroMqSocketType,
+        url: &str,
+        bind: bool,
+        rebuild: bool,
+    ) -> anyhow::Result<Self> {
+        let options = socket_options(rebuild);
+        Ok(match socket_type {
+            ZeroMqSocketType::Push => {
+                Self::Push(attach(zeromq::PushSocket::with_options(options), url, bind).await?)
+            }
+            ZeroMqSocketType::Pub => {
+                let mut socket = zeromq::PubSocket::with_options(options);
+                let monitor = socket.monitor();
+                Self::Pub(attach(socket, url, bind).await?, monitor)
+            }
+            ZeroMqSocketType::Req => {
+                Self::Req(attach(zeromq::ReqSocket::with_options(options), url, bind).await?)
+            }
+            other => {
+                return Err(anyhow!(
+                    "Unsupported socket type for publisher: {:?}",
+                    other
+                ))
+            }
+        })
+    }
+
+    /// Whether a peer went away since the last call. Only PUB has to ask.
+    fn lost_a_peer(&mut self) -> bool {
+        let Self::Pub(_, monitor) = self else {
+            return false;
+        };
+        let mut lost = false;
+        while let Ok(event) = monitor.try_recv() {
+            lost |= matches!(event, SocketEvent::Disconnected(_));
+        }
+        lost
+    }
+
+    /// Frees a bound address, so that a replacement can bind it.
+    async fn close(self) {
+        match self {
+            Self::Push(mut s) => drop(s.unbind_all().await),
+            Self::Pub(mut s, _) => drop(s.unbind_all().await),
+            Self::Req(mut s) => drop(s.unbind_all().await),
+        }
+    }
 }
 
 enum PublisherJob {
@@ -39,135 +113,108 @@ enum PublisherJob {
     Request(ZmqMessage, oneshot::Sender<zeromq::ZmqResult<ZmqMessage>>),
 }
 
+impl PublisherJob {
+    fn fail(self, error: zeromq::ZmqError) {
+        match self {
+            Self::Send(_, ack_tx) => drop(ack_tx.send(Err(error))),
+            Self::Request(_, reply_tx) => drop(reply_tx.send(Err(error))),
+        }
+    }
+}
+
 pub struct ZeroMqPublisher {
     tx: Sender<PublisherJob>,
     expects_reply: bool,
     format: ZeroMqFormat,
+    topic: Option<bytes::Bytes>,
 }
 
 impl ZeroMqPublisher {
     pub async fn new(config: &ZeroMqConfig) -> anyhow::Result<Self> {
         let socket_type = config.socket_type.clone().unwrap_or(ZeroMqSocketType::Push);
-        let mut socket = match socket_type {
-            ZeroMqSocketType::Push => {
-                let mut s = zeromq::PushSocket::new();
-                if config.bind {
-                    s.bind(&config.url).await?;
-                } else {
-                    s.connect(&config.url).await?;
-                }
-                SenderSocket::Push(s)
-            }
-            ZeroMqSocketType::Pub => {
-                let mut s = zeromq::PubSocket::new();
-                if config.bind {
-                    s.bind(&config.url).await?;
-                } else {
-                    s.connect(&config.url).await?;
-                }
-                SenderSocket::Pub(s)
-            }
-            ZeroMqSocketType::Req => {
-                let mut s = zeromq::ReqSocket::new();
-                if config.bind {
-                    s.bind(&config.url).await?;
-                } else {
-                    s.connect(&config.url).await?;
-                }
-                SenderSocket::Req(s)
-            }
-            _ => {
-                return Err(anyhow!(
-                    "Unsupported socket type for publisher: {:?}",
-                    socket_type
-                ))
-            }
-        };
+        let socket = SenderSocket::open(&socket_type, &config.url, config.bind, false).await?;
 
         let buffer_size = config.internal_buffer_size.unwrap_or(128).max(1);
         let (tx, rx) = bounded::<PublisherJob>(buffer_size);
-        let request_timeout =
-            std::time::Duration::from_millis(config.request_timeout_ms.unwrap_or(30_000));
-        // Kept so a timed-out REQ socket can be rebuilt (see the timeout arm below).
-        let req_url = config.url.clone();
-        let req_bind = config.bind;
+        let request_timeout = Duration::from_millis(config.request_timeout_ms.unwrap_or(30_000));
+        let url = config.url.clone();
+        let bind = config.bind;
+        let task_socket_type = socket_type.clone();
         tokio::spawn(async move {
-            let mut needs_req_reset = false;
+            // `None` while the socket has to be rebuilt: zmq.rs reconnects no PUSH, PUB or REQ.
+            let mut socket = Some(socket);
             while let Ok(job) = rx.recv().await {
-                if needs_req_reset {
-                    needs_req_reset = false;
-                    let mut s = zeromq::ReqSocket::new();
-                    let connected = if req_bind {
-                        s.bind(&req_url).await.map(|_| ())
-                    } else {
-                        s.connect(&req_url).await
-                    };
-                    match connected {
-                        Ok(()) => socket = SenderSocket::Req(s),
+                if !bind && socket.as_mut().is_some_and(SenderSocket::lost_a_peer) {
+                    socket = None;
+                }
+                let current = match &mut socket {
+                    Some(current) => current,
+                    None => match SenderSocket::open(&task_socket_type, &url, bind, true).await {
+                        Ok(rebuilt) => socket.insert(rebuilt),
                         Err(e) => {
-                            tracing::error!(error = %e, "Failed to rebuild ZeroMQ REQ socket after a timeout; retrying on the next request");
-                            needs_req_reset = true;
-                            let reset_error =
-                                zeromq::ZmqError::Other("ZeroMQ REQ socket reconstruction failed");
-                            match job {
-                                PublisherJob::Send(_, ack_tx) => {
-                                    let _ = ack_tx.send(Err(reset_error));
-                                }
-                                PublisherJob::Request(_, reply_tx) => {
-                                    let _ = reply_tx.send(Err(reset_error));
-                                }
-                            }
+                            tracing::error!(error = %e, "Failed to rebuild the ZeroMQ socket; retrying on the next send");
+                            job.fail(zeromq::ZmqError::Other(
+                                "ZeroMQ socket reconstruction failed",
+                            ));
                             continue;
                         }
-                    }
-                }
-                match job {
-                    PublisherJob::Send(msg, ack_tx) => match &mut socket {
-                        SenderSocket::Push(s) => {
-                            let _ = ack_tx.send(s.send(msg).await);
-                        }
-                        SenderSocket::Pub(s) => {
-                            let _ = ack_tx.send(s.send(msg).await);
-                        }
-                        SenderSocket::Req(_) => {
-                            let err_msg = "Req socket received Send job, expected Request";
-                            tracing::error!("{}", err_msg);
-                            let _ = ack_tx.send(Err(zeromq::ZmqError::Other(err_msg)));
-                        }
                     },
-                    PublisherJob::Request(msg, reply_tx) => match &mut socket {
+                };
+                let broken = match job {
+                    PublisherJob::Send(msg, ack_tx) => {
+                        let result = match current {
+                            SenderSocket::Push(s) => s.send(msg).await,
+                            SenderSocket::Pub(s, _) => s.send(msg).await,
+                            SenderSocket::Req(_) => Err(zeromq::ZmqError::Other(
+                                "Req socket received Send job, expected Request",
+                            )),
+                        };
+                        // A bound socket is found again by its peers; a connecting one is not.
+                        let broken = result.is_err() && !bind;
+                        let _ = ack_tx.send(result);
+                        broken
+                    }
+                    PublisherJob::Request(msg, reply_tx) => match current {
                         SenderSocket::Req(s) => {
-                            // Bound the send+recv exchange so an unresponsive REP peer can't
-                            // stall this task (and every queued job behind it) indefinitely.
+                            // Bound, so an unresponsive REP peer cannot stall every queued job.
                             let exchange = async {
-                                s.send(msg).await?;
-                                s.recv().await
+                                s.send(msg).await.map_err(|e| (e, false))?;
+                                s.recv().await.map_err(|e| (e, true))
                             };
-                            match tokio::time::timeout(request_timeout, exchange).await {
-                                Ok(res) => {
-                                    if res.is_err() {
-                                        needs_req_reset = true;
-                                    }
-                                    let _ = reply_tx.send(res);
-                                }
-                                Err(_) => {
-                                    let _ = reply_tx.send(Err(zeromq::ZmqError::Other(
-                                        "ZeroMQ REQ/REP exchange timed out",
-                                    )));
-                                    // REQ is strictly send/recv alternating. The cancelled
-                                    // recv leaves the socket expecting a reply that will
-                                    // never be read, so the next request would desync.
-                                    // Replace the socket instead of reusing it.
-                                    needs_req_reset = true;
-                                }
-                            }
+                            // REQ alternates strictly: once a request is out, a failed or
+                            // cancelled exchange leaves the socket waiting for its reply.
+                            let (result, broken) =
+                                match tokio::time::timeout(request_timeout, exchange).await {
+                                    Ok(Ok(reply)) => (Ok(reply), false),
+                                    Ok(Err((e, sent))) => (Err(e), sent || !bind),
+                                    Err(_) => (
+                                        Err(zeromq::ZmqError::Other(
+                                            "ZeroMQ REQ/REP exchange timed out",
+                                        )),
+                                        true,
+                                    ),
+                                };
+                            let _ = reply_tx.send(result);
+                            broken
                         }
                         _ => {
-                            let err_msg = "Push/Pub socket received Request job, expected Send";
-                            tracing::error!("{}", err_msg);
-                            let _ = reply_tx.send(Err(zeromq::ZmqError::Other(err_msg)));
+                            let _ = reply_tx.send(Err(zeromq::ZmqError::Other(
+                                "Push/Pub socket received Request job, expected Send",
+                            )));
+                            false
                         }
                     },
+                };
+                if broken {
+                    if let Some(old) = socket.take() {
+                        old.close().await;
+                    }
+                    if bind {
+                        // At once: peers connect to this address between two sends.
+                        socket = SenderSocket::open(&task_socket_type, &url, bind, true)
+                            .await
+                            .ok();
+                    }
                 }
             }
         });
@@ -176,6 +223,7 @@ impl ZeroMqPublisher {
             tx,
             expects_reply: matches!(socket_type, ZeroMqSocketType::Req),
             format: config.format.clone(),
+            topic: codec::pub_topic(config),
         })
     }
 
@@ -184,7 +232,7 @@ impl ZeroMqPublisher {
     /// per-format framing.
     fn frame_message(&self, message: &mut CanonicalMessage) -> Result<ZmqMessage, PublisherError> {
         let frames = codec::encode_frames(message, &self.format)?;
-        Ok(frames_to_zmq(frames))
+        Ok(frames_to_zmq(codec::with_topic(&self.topic, frames)))
     }
 
     /// Send each message as its own ZMQ message (one per message, not batched), used
@@ -300,7 +348,8 @@ impl MessagePublisher for ZeroMqPublisher {
         }
         let payload =
             serde_json::to_vec(&messages).map_err(|e| PublisherError::NonRetryable(anyhow!(e)))?;
-        let zmq_msg = ZmqMessage::from(bytes::Bytes::from(payload));
+        let frames = codec::with_topic(&self.topic, vec![bytes::Bytes::from(payload)]);
+        let zmq_msg = frames_to_zmq(frames);
 
         if self.expects_reply {
             let (reply_tx, reply_rx) = oneshot::channel();
@@ -354,10 +403,58 @@ impl MessagePublisher for ZeroMqPublisher {
     }
 }
 
+/// The `zeromq` crate reconnects SUB sockets only.
+fn stays_silent_after_peer_restart(socket_type: &ZeroMqSocketType, bind: bool) -> bool {
+    !bind && matches!(socket_type, ZeroMqSocketType::Pull | ZeroMqSocketType::Rep)
+}
+
 enum ReceiverSocket {
     Pull(zeromq::PullSocket),
     Sub(zeromq::SubSocket),
     Rep(zeromq::RepSocket),
+}
+
+impl ReceiverSocket {
+    async fn open(socket_type: &ZeroMqSocketType, config: &ZeroMqConfig) -> anyhow::Result<Self> {
+        let (url, bind) = (config.url.as_str(), config.bind);
+        if stays_silent_after_peer_restart(socket_type, bind) {
+            tracing::warn!(
+                url,
+                "a connecting {socket_type:?} socket on the `zmq` backend does not reconnect: after its peer restarts it receives nothing until the route is restarted. Bind on this side or use `backend: omq`"
+            );
+        }
+        Ok(match socket_type {
+            ZeroMqSocketType::Pull => {
+                Self::Pull(attach(zeromq::PullSocket::new(), url, bind).await?)
+            }
+            ZeroMqSocketType::Sub => {
+                let mut socket = attach(zeromq::SubSocket::new(), url, bind).await?;
+                socket
+                    .subscribe(config.topic.as_deref().unwrap_or(""))
+                    .await?;
+                Self::Sub(socket)
+            }
+            ZeroMqSocketType::Rep => Self::Rep(attach(zeromq::RepSocket::new(), url, bind).await?),
+            other => return Err(anyhow!("Unsupported socket type for consumer: {:?}", other)),
+        })
+    }
+
+    async fn recv(&mut self) -> zeromq::ZmqResult<ZmqMessage> {
+        match self {
+            Self::Pull(s) => s.recv().await,
+            Self::Sub(s) => s.recv().await,
+            Self::Rep(s) => s.recv().await,
+        }
+    }
+
+    /// Frees a bound address at once; a new consumer may want it.
+    async fn close(self) {
+        match self {
+            Self::Pull(mut s) => drop(s.unbind_all().await),
+            Self::Sub(mut s) => drop(s.unbind_all().await),
+            Self::Rep(mut s) => drop(s.unbind_all().await),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -399,115 +496,63 @@ impl ZeroMqConsumer {
         let socket_type = config.socket_type.clone().unwrap_or(ZeroMqSocketType::Pull);
         let is_sub = matches!(socket_type, ZeroMqSocketType::Sub);
         let format = config.format.clone();
-        let mut socket = match socket_type {
-            ZeroMqSocketType::Pull => {
-                let mut s = zeromq::PullSocket::new();
-                if config.bind {
-                    s.bind(&config.url).await?;
-                } else {
-                    s.connect(&config.url).await?;
-                }
-                ReceiverSocket::Pull(s)
-            }
-            ZeroMqSocketType::Sub => {
-                let mut s = zeromq::SubSocket::new();
-                if config.bind {
-                    s.bind(&config.url).await?;
-                } else {
-                    s.connect(&config.url).await?;
-                }
-                let topic = config.topic.as_deref().unwrap_or("");
-                s.subscribe(topic).await?;
-                ReceiverSocket::Sub(s)
-            }
-            ZeroMqSocketType::Rep => {
-                let mut s = zeromq::RepSocket::new();
-                if config.bind {
-                    s.bind(&config.url).await?;
-                } else {
-                    s.connect(&config.url).await?;
-                }
-                ReceiverSocket::Rep(s)
-            }
-            _ => {
-                return Err(anyhow!(
-                    "Unsupported socket type for consumer: {:?}",
-                    socket_type
-                ))
-            }
-        };
+        let mut socket = ReceiverSocket::open(&socket_type, config).await?;
 
         let buffer_size = config.internal_buffer_size.unwrap_or(128).max(1);
         let (tx, rx) = bounded::<Result<ConsumerItem, ConsumerError>>(buffer_size);
         tokio::spawn(async move {
             loop {
-                match &mut socket {
-                    ReceiverSocket::Pull(s) => {
-                        let item_res = s
-                            .recv()
+                // A dropped consumer ends the read: the socket would keep its address and
+                // take one more message otherwise.
+                let received = tokio::select! {
+                    biased;
+                    _ = tx.closed() => break,
+                    received = socket.recv() => received,
+                };
+                let msg = match received {
+                    Ok(msg) => msg,
+                    Err(e) => {
+                        if tx
+                            .send(Err(ConsumerError::Connection(anyhow!(e))))
                             .await
-                            .map(|msg| ConsumerItem {
-                                msg,
-                                reply_tx: None,
-                            })
-                            .map_err(|e| ConsumerError::Connection(anyhow!(e)));
-                        if tx.send(item_res).await.is_err() {
+                            .is_err()
+                        {
                             break;
                         }
+                        continue;
                     }
-                    ReceiverSocket::Sub(s) => {
-                        let item_res = s
-                            .recv()
-                            .await
-                            .map(|msg| ConsumerItem {
-                                msg,
-                                reply_tx: None,
-                            })
-                            .map_err(|e| ConsumerError::Connection(anyhow!(e)));
-                        if tx.send(item_res).await.is_err() {
-                            break;
-                        }
+                };
+                let ReceiverSocket::Rep(rep) = &mut socket else {
+                    let item = ConsumerItem {
+                        msg,
+                        reply_tx: None,
+                    };
+                    if tx.send(Ok(item)).await.is_err() {
+                        break;
                     }
-                    ReceiverSocket::Rep(s) => {
-                        // Keep the whole request/reply exchange in one branch: receive the
-                        // request, deliver it, await the consumer's reply, and send it back —
-                        // with no dummy ConsumerItem and no re-inspection of the socket after.
-                        let msg = match s.recv().await {
-                            Ok(msg) => msg,
-                            Err(e) => {
-                                // A failed receive is a genuine new connection error.
-                                let _ = tx.send(Err(ConsumerError::Connection(anyhow!(e)))).await;
-                                continue;
-                            }
-                        };
-                        let (reply_tx, reply_rx) = oneshot::channel();
-                        let item = ConsumerItem {
-                            msg,
-                            reply_tx: Some(reply_tx),
-                        };
-                        if tx.send(Ok(item)).await.is_err() {
-                            break;
-                        }
-                        // Wait for the consumer logic to produce the reply for THIS request.
-                        let reply = match reply_rx.await {
-                            Ok(reply) => reply,
-                            Err(e) => {
-                                tracing::error!(
-                                    "Failed to receive reply from consumer logic: {}",
-                                    e
-                                );
-                                ZmqMessage::from(bytes::Bytes::from("consumer_failed"))
-                            }
-                        };
-                        // A failed reply-send belongs to the request already delivered above,
-                        // not to a later unrelated one, so log it here rather than enqueueing
-                        // a stray ConsumerError into the stream.
-                        if let Err(e) = s.send(reply).await {
-                            tracing::error!("Failed to send ZeroMQ REP reply: {}", e);
-                        }
-                    }
+                    continue;
+                };
+                // REP: the reply to this request goes out before the next one is read.
+                let (reply_tx, reply_rx) = oneshot::channel();
+                let item = ConsumerItem {
+                    msg,
+                    reply_tx: Some(reply_tx),
+                };
+                if tx.send(Ok(item)).await.is_err() {
+                    break;
+                }
+                // A request nobody settled is answered with an empty array, so the REQ
+                // peer stops waiting and gets no made-up response.
+                let reply = reply_rx
+                    .await
+                    .unwrap_or_else(|_| ZmqMessage::from(bytes::Bytes::from_static(b"[]")));
+                // The failure belongs to the request delivered above, so it is logged
+                // here and not handed to a later read.
+                if let Err(e) = rep.send(reply).await {
+                    tracing::error!("Failed to send ZeroMQ REP reply: {}", e);
                 }
             }
+            socket.close().await;
         });
 
         Ok(Self {
@@ -699,6 +744,15 @@ mod tests {
             .expect("Timed out waiting for message")
             .unwrap();
         assert_eq!(received.message.get_payload_str(), "hello zeromq");
+    }
+
+    #[test]
+    fn only_a_connecting_pull_or_rep_is_warned_about() {
+        use ZeroMqSocketType::{Pull, Rep, Sub};
+        assert!(stays_silent_after_peer_restart(&Pull, false));
+        assert!(stays_silent_after_peer_restart(&Rep, false));
+        assert!(!stays_silent_after_peer_restart(&Pull, true));
+        assert!(!stays_silent_after_peer_restart(&Sub, false));
     }
 
     #[test]

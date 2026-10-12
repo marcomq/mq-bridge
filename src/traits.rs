@@ -487,6 +487,14 @@ pub trait MessagePublisher: Send + Sync + 'static {
         None
     }
 
+    /// As `lookup_batch`, but each request fails alone. `None` = use `lookup_batch`.
+    async fn lookup_each(
+        &self,
+        _requests: &[CanonicalMessage],
+    ) -> Option<Vec<Result<Option<serde_json::Value>, PublisherError>>> {
+        None
+    }
+
     async fn flush(&self) -> anyhow::Result<()> {
         Ok(())
     }
@@ -560,6 +568,13 @@ impl<T: MessagePublisher + ?Sized> MessagePublisher for Arc<T> {
         (**self).lookup_batch(requests).await
     }
 
+    async fn lookup_each(
+        &self,
+        requests: &[CanonicalMessage],
+    ) -> Option<Vec<Result<Option<serde_json::Value>, PublisherError>>> {
+        (**self).lookup_each(requests).await
+    }
+
     async fn flush(&self) -> anyhow::Result<()> {
         (**self).flush().await
     }
@@ -603,6 +618,13 @@ impl<T: MessagePublisher + ?Sized> MessagePublisher for Box<T> {
         requests: &[CanonicalMessage],
     ) -> Option<Result<Vec<Option<serde_json::Value>>, PublisherError>> {
         (**self).lookup_batch(requests).await
+    }
+
+    async fn lookup_each(
+        &self,
+        requests: &[CanonicalMessage],
+    ) -> Option<Vec<Result<Option<serde_json::Value>, PublisherError>>> {
+        (**self).lookup_each(requests).await
     }
 
     async fn flush(&self) -> anyhow::Result<()> {

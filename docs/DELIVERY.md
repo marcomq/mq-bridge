@@ -101,14 +101,16 @@ therefore useless for dedup across a restart.
 | `kafka` | **Yes** — `mq_bridge.message_id` header, else a 16-byte key, else `partition<<64 \| offset` | **Yes** — topic/partition/offset |
 | `postgres_cdc` (and `sqlx` with `publication`) | **Yes** — hash of `schema.table` + replica key + commit LSN | **Yes** — slot/LSN/ordinal |
 | `nats` | JetStream: **yes** (stream sequence). Core NATS: only if the producer set `Nats-Msg-Id` | No |
-| `mongodb` (`consumer`/`subscriber`) | **Yes** — the stored document `_id` | No |
+| `mongodb` (`delete`) | **Yes** — the stored document `_id` | No |
 | `mongodb` (`capture_new`/`capture_all`) | No — fresh id per read | No |
 | `amqp` | **Yes** when the producer set the AMQP `message_id` property — `mq-bridge` writes it; any string is accepted (a non-UUID one is hashed). Without it, a fresh id per read — never the delivery tag, which restarts at 1 on every channel | No |
 | `redis_streams` | Only if the producer wrote a `mq_bridge.message_id` field; the entry ID is **not** used | No |
 | `http` / `websocket` / `grpc` | From the request when it carries an id | No (request/reply, not replay) |
 | `dir_spool` | **Yes** — the sidecar's `message_id`, when the chunk was written by `mq-bridge`. A foreign producer's payload-only chunk gets a fresh id | No — a drained chunk is deleted |
 | `mqtt` | MQTT 5: only if the producer set the `mq_bridge.message_id` user property, which `mq-bridge` writes. MQTT 3: no | No |
-| `aws` (SQS), `zeromq`, `ibm_mq`, `file`, `object_store`, `clickhouse` | No — fresh id per read | No |
+| `ibm_mq` | **Yes** — hash of the MQMD `MsgId`, which a backout keeps. It names the queued message, not the record: a producer that puts a record twice gets two ids, and one that reuses a `MsgId` gives two messages one id | No |
+| `aws` (SQS) | **Yes** — the SQS `MessageId`, which a redelivery keeps. A record the producer sends twice gets two ids | No |
+| `zeromq`, `file`, `object_store`, `clickhouse` | No — fresh id per read | No |
 
 Two consequences worth internalising:
 
@@ -204,8 +206,8 @@ What a route achieves, by what its input offers and what its output can absorb:
 | Input ↓ / Output → | Keyed idempotent write (Mongo `id_field`, SQL `ON CONFLICT`) | Positional names (file / object_store `source_position`) | Broker or plain sink |
 |---|---|---|---|
 | Replayable position (`kafka`, `postgres_cdc`, MongoDB CDC, `file` in `consume`, `sqlx` cursor) | effectively-once — key on a business id or on the position itself | effectively-once | at-least-once |
-| Stable identity only (JetStream, AMQP/MQTT 5 with an id, `mongodb` consumer, `dir_spool`) | effectively-once — key on the id | not available (no position) | at-least-once; `deduplication` narrows duplicates, see below |
-| Neither (`aws`, `ibm_mq`, MQTT 3, `file` re-read, …) | effectively-once only with a business key (`id` middleware) | not available | at-least-once |
+| Stable identity only (JetStream, AMQP/MQTT 5 with an id, `mongodb` `delete` mode, `dir_spool`, `aws`, `ibm_mq`) | effectively-once — key on the id | not available (no position) | at-least-once; `deduplication` narrows duplicates, see below |
+| Neither (MQTT 3, `file` re-read, …) | effectively-once only with a business key (`id` middleware) | not available | at-least-once |
 | No acknowledgement (`zeromq`, core NATS, MQTT QoS 0, HTTP `fire_and_forget`, `websocket`, `grpc` dynamic client) | at-most-once | at-most-once | at-most-once |
 
 A handler, or any side effect it performs, sits outside this table: see [Handlers](#handlers).
@@ -264,8 +266,8 @@ accepts only replay-stable payload or metadata tokens.
 The field's JSON type is preserved (a number stays a BSON integer). The payload must be JSON and
 contain the field, otherwise the message is dead-lettered rather than written with a random `_id` —
 silently minting one would defeat deduplication. Use `id_field` on **sink** collections only: a
-business-key `_id` is not compatible with the `consumer`/`subscriber` competing-consumer modes, which
-require a UUID `_id`.
+business-key `_id` is not compatible with the `delete` competing-consumer mode, which
+requires a UUID `_id`.
 
 ### SQL (`sqlx`) — `ON CONFLICT` / `ON DUPLICATE KEY`
 
@@ -561,7 +563,7 @@ This needs a replayable source position. Today that means:
 | --- | --- | --- |
 | `kafka` | topic / partition / offset | — |
 | `postgres_cdc` | commit LSN + in-transaction ordinal | `sqlx` with `publication` maps onto the same consumer |
-| `mongodb` | cluster time + ordinal; the initial snapshot uses its `_id` scan index | `capture_new` / `capture_all` only — `consumer` and `snapshot` have no position |
+| `mongodb` | cluster time + ordinal; the initial snapshot uses its `_id` scan index | `capture_new` / `capture_all` only — `delete` and `snapshot` have no position |
 | `file` | record index within the file | all modes; only `consume` deduplicates across runs (see below) |
 | `sqlx` | the `cursor_column` value | cursor polling only; the column must be a unique, non-negative integer |
 

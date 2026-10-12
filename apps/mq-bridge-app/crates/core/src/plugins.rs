@@ -60,15 +60,9 @@ pub fn register_builtin_endpoints() -> anyhow::Result<()> {
 fn register_each() -> anyhow::Result<()> {
     #[cfg(feature = "pulsar")]
     register_builtin("pulsar", mq_bridge_pulsar::register)?;
-    #[cfg(feature = "meilisearch")]
-    register_builtin("meilisearch", mq_bridge_meilisearch::register)?;
     // Named endpoints that are an `http_bulk` configuration, e.g. `typesense`.
     #[cfg(feature = "http-bulk")]
     for name in mq_bridge::endpoints::http_bulk::preset_names() {
-        // The `meilisearch` feature compiled the plugin crate in under that name.
-        if cfg!(feature = "meilisearch") && name == "meilisearch" {
-            continue;
-        }
         register_builtin(name, || {
             mq_bridge::endpoints::http_bulk::register_preset(name)
         })?;
@@ -91,7 +85,7 @@ pub const OVERRIDE_VAR: &str = "MQB_PLUGIN_OVERRIDE";
 ///
 /// Preference is by name, not by version: an *older* installed plugin replaces a
 /// newer built-in, because a plugin's version cannot be read without loading it.
-#[cfg(any(feature = "pulsar", feature = "meilisearch", feature = "http-bulk"))]
+#[cfg(any(feature = "pulsar", feature = "http-bulk"))]
 fn register_builtin(
     name: &str,
     register: impl FnOnce() -> anyhow::Result<()>,
@@ -105,7 +99,7 @@ fn register_builtin(
     register_builtin_in(&dirs, name, override_requested(name), register)
 }
 
-#[cfg(any(feature = "pulsar", feature = "meilisearch", feature = "http-bulk"))]
+#[cfg(any(feature = "pulsar", feature = "http-bulk"))]
 fn register_builtin_in(
     dirs: &[PathBuf],
     name: &str,
@@ -138,7 +132,7 @@ fn register_builtin_in(
 
 /// The installed library providing `name`, found without loading it — so the
 /// built-in path stays free of another crate's initialisation.
-#[cfg(any(feature = "pulsar", feature = "meilisearch", feature = "http-bulk"))]
+#[cfg(any(feature = "pulsar", feature = "http-bulk"))]
 fn installed_plugin_path(dirs: &[PathBuf], name: &str) -> Option<PathBuf> {
     let file_name = mq_bridge::plugin::library_file_name(name);
     dirs.iter()
@@ -146,12 +140,12 @@ fn installed_plugin_path(dirs: &[PathBuf], name: &str) -> Option<PathBuf> {
         .find(|candidate| candidate.is_file())
 }
 
-#[cfg(any(feature = "pulsar", feature = "meilisearch", feature = "http-bulk"))]
+#[cfg(any(feature = "pulsar", feature = "http-bulk"))]
 fn override_requested(name: &str) -> bool {
     std::env::var(OVERRIDE_VAR).is_ok_and(|value| override_requested_in(&value, name))
 }
 
-#[cfg(any(feature = "pulsar", feature = "meilisearch", feature = "http-bulk"))]
+#[cfg(any(feature = "pulsar", feature = "http-bulk"))]
 fn override_requested_in(value: &str, name: &str) -> bool {
     let value = value.trim();
     if matches!(
@@ -237,13 +231,13 @@ mod tests {
         );
         #[cfg(feature = "pulsar")]
         assert!(mq_bridge::extensions::get_endpoint_factory("pulsar").is_some());
-        #[cfg(any(feature = "meilisearch", feature = "http-bulk"))]
+        #[cfg(feature = "http-bulk")]
         assert!(mq_bridge::extensions::get_endpoint_factory("meilisearch").is_some());
         #[cfg(feature = "http-bulk")]
         assert!(mq_bridge::extensions::get_endpoint_factory("typesense").is_some());
     }
 
-    #[cfg(any(feature = "pulsar", feature = "meilisearch", feature = "http-bulk"))]
+    #[cfg(any(feature = "pulsar", feature = "http-bulk"))]
     mod builtin_preference {
         use super::*;
         use std::sync::atomic::{AtomicUsize, Ordering};

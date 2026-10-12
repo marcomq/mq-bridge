@@ -21,12 +21,17 @@ use mqi::{
     connection::{Credentials, MqServer, ThreadNone, Tls},
     constants, get, mqstr, open,
     result::ResultCompErrExt,
-    types::{
-        ApplName, CipherSpec, KeyRepo, MessageFormat, QueueManagerName, QueueName, FORMAT_NONE,
-    },
+    types::{ApplName, CipherSpec, KeyRepo, MessageId, QueueManagerName, QueueName, FORMAT_NONE},
     MqStr, Object, Subscription, Syncpoint,
 };
-use std::{sync::Arc, thread, time::Duration};
+use std::{
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    thread,
+    time::Duration,
+};
 use tokio::sync::{mpsc, oneshot, Semaphore};
 use tracing::{debug, info, trace, warn};
 
@@ -43,6 +48,12 @@ macro_rules! backout_with_logging {
             Err(e) => warn!("Backout {} FAILED (messages may be lost): {}", $context, e),
         }
     };
+}
+
+/// The MQMD `MsgId` as a message id: a backout redelivers the message under the same one.
+fn message_id_from_msg_id(msg_id: &[u8; 24]) -> Option<u128> {
+    use crate::canonical_message::{hashed_id, string_id_hash};
+    (*msg_id != [0u8; 24]).then(|| hashed_id(string_id_hash(), &[msg_id]))
 }
 
 /// Helper function to handle status requests with timeout
@@ -318,6 +329,9 @@ impl IbmMqPublisher {
                             let _ = tx.send(Err(err));
                             return;
                         }
+                        if rx.is_closed() {
+                            return; // publisher dropped
+                        }
                         thread::sleep(Duration::from_secs(RECONNECT_DELAY_SECS));
                         continue;
                     }
@@ -526,14 +540,41 @@ enum ConsumerJob {
     },
 }
 
+/// A batch handed out and not settled yet. Dropped without a commit, it is backed out:
+/// its messages would otherwise be committed with the next batch.
+struct Unsettled {
+    tx: Option<mpsc::Sender<ConsumerJob>>,
+    epoch: u64,
+    /// Set when the backout could not be queued: the thread backs out before its next job.
+    backout_pending: Arc<AtomicBool>,
+}
+
+impl Drop for Unsettled {
+    fn drop(&mut self) {
+        if let Some(tx) = self.tx.take() {
+            let (reply_tx, _) = oneshot::channel();
+            let epoch = self.epoch;
+            if tx
+                .try_send(ConsumerJob::Backout { epoch, reply_tx })
+                .is_err()
+            {
+                // The read permit is released after this, so no later batch can be read first.
+                self.backout_pending.store(true, Ordering::Release);
+            }
+        }
+    }
+}
+
 async fn spawn_consumer_thread(
     config: IbmMqConfig,
 ) -> Result<mpsc::Sender<ConsumerJob>, ConsumerError> {
     info!("Starting IBM MQ consumer thread");
     let buffer_size = config.internal_buffer_size.unwrap_or(100).max(1);
     let (tx, mut rx) = mpsc::channel::<ConsumerJob>(buffer_size);
-    let tx_loop = tx.clone();
+    // Weak: a sender held by the thread would keep the channel open after the consumer is gone.
+    let tx_loop = tx.downgrade();
     let mut current_epoch = 0u64;
+    let backout_pending = Arc::new(AtomicBool::new(false));
     let (init_tx, init_rx) = oneshot::channel();
 
     thread::spawn(move || {
@@ -546,6 +587,9 @@ async fn spawn_consumer_thread(
                     if let Some(tx) = init_tx.take() {
                         let _ = tx.send(Err(ConsumerError::Connection(e)));
                         return;
+                    }
+                    if rx.is_closed() {
+                        return; // consumer dropped
                     }
                     thread::sleep(Duration::from_secs(RECONNECT_DELAY_SECS));
                     continue;
@@ -604,6 +648,9 @@ async fn spawn_consumer_thread(
 
             let mut connection_error = false;
             while let Some(job) = rx.blocking_recv() {
+                if backout_pending.swap(false, Ordering::AcqRel) {
+                    backout_with_logging!(&qm, "for a batch dropped without a commit");
+                }
                 match job {
                     ConsumerJob::Receive {
                         max_messages,
@@ -624,14 +671,32 @@ async fn spawn_consumer_thread(
                                 get::GetWait::Wait(config.wait_timeout_ms),
                             );
 
-                            let res: Result<Option<(_, MessageFormat)>, _> =
-                                obj.get_data_with(&gmo, &mut buffer).discard_warning();
+                            let res: Result<Option<(_, MessageId)>, _> = match obj
+                                .get_data_with(&gmo, &mut buffer)
+                            {
+                                // Still on the queue: its cut-off start would be delivered forever.
+                                Ok(got)
+                                    if matches!(
+                                        got.warning(),
+                                        Some((constants::MQRC_TRUNCATED_MSG_FAILED, _))
+                                    ) =>
+                                {
+                                    error = Some(ConsumerError::Connection(anyhow::anyhow!(
+                                            "IBM MQ message is larger than max_message_size ({} bytes); raise max_message_size",
+                                            config.max_message_size
+                                        )));
+                                    break;
+                                }
+                                other => other.discard_warning(),
+                            };
 
                             match res {
                                 Ok(opt) => {
-                                    if let Some((data, _format)) = opt {
-                                        let mut canonical =
-                                            CanonicalMessage::new(data.to_vec(), None);
+                                    if let Some((data, msg_id)) = opt {
+                                        let mut canonical = CanonicalMessage::new(
+                                            data.to_vec(),
+                                            message_id_from_msg_id(&msg_id.0),
+                                        );
                                         // Source cursor: the queue this was read from.
                                         // Opt-in via MQB_SOURCE_METADATA; off by default.
                                         if crate::canonical_message::source_metadata_enabled() {
@@ -676,12 +741,22 @@ async fn spawn_consumer_thread(
                             let _ = reply_tx.send(Err(e));
                         } else if !messages.is_empty() {
                             trace!(count = messages.len(), message_ids = ?LazyMessageIds(&messages), "Received batch of IBM MQ messages");
-                            let tx_commit = tx_loop.clone();
+                            let Some(tx_commit) = tx_loop.upgrade() else {
+                                backout_with_logging!(&qm, "for a dropped consumer");
+                                continue;
+                            };
                             let epoch = current_epoch;
+                            let unsettled = Unsettled {
+                                tx: Some(tx_commit),
+                                epoch,
+                                backout_pending: Arc::clone(&backout_pending),
+                            };
                             let commit_fn: traits::BatchCommitFunc =
                                 Box::new(move |dispositions: Vec<MessageDisposition>| {
-                                    let tx = tx_commit.clone();
                                     Box::pin(async move {
+                                        // Stays armed until the job is queued: a cancelled commit backs out.
+                                        let mut unsettled = unsettled;
+                                        let tx = unsettled.tx.clone().expect("settled once");
                                         let (reply_tx, reply_rx) = oneshot::channel();
                                         let should_backout = dispositions
                                             .iter()
@@ -695,6 +770,7 @@ async fn spawn_consumer_thread(
                                         tx.send(job)
                                             .await
                                             .map_err(|_| anyhow::anyhow!("Consumer thread dead"))?;
+                                        unsettled.tx = None;
                                         reply_rx.await.map_err(|_| {
                                             anyhow::anyhow!("Consumer thread dropped reply")
                                         })??;
@@ -861,12 +937,19 @@ impl MessageConsumer for IbmMqConsumer {
             return Ok(batch);
         }
 
-        let original_commit = batch.commit;
+        // Fields drop in order: a dropped batch is backed out before the next read may start.
+        struct InFlight {
+            commit: traits::BatchCommitFunc,
+            _permit: tokio::sync::OwnedSemaphorePermit,
+        }
+        let in_flight = InFlight {
+            commit: batch.commit,
+            _permit: permit,
+        };
         let wrapped_commit = Box::new(move |dispositions| {
             Box::pin(async move {
-                let result = original_commit(dispositions).await;
-                drop(permit); // Release the permit, allowing the next receive_batch to proceed.
-                result
+                let InFlight { commit, _permit } = in_flight;
+                commit(dispositions).await
             }) as traits::BoxFuture<'static, anyhow::Result<()>>
         });
 
@@ -920,6 +1003,16 @@ impl IbmMqConsumer {
 mod dlopen_tests {
     use super::*;
 
+    #[test]
+    fn a_msg_id_gives_the_same_message_id_on_every_read() {
+        let msg_id = [7u8; 24];
+        let id = message_id_from_msg_id(&msg_id);
+        assert!(id.is_some());
+        assert_eq!(id, message_id_from_msg_id(&msg_id));
+        assert_ne!(id, message_id_from_msg_id(&[8u8; 24]));
+        assert_eq!(message_id_from_msg_id(&[0u8; 24]), None);
+    }
+
     // Proves the runtime dlopen of the IBM client succeeds where it is installed.
     // Ignored by default (needs the client present); run with:
     //   MQ_INSTALLATION_PATH=/opt/mqm cargo test -p mq-bridge \
@@ -930,38 +1023,40 @@ mod dlopen_tests {
         load_ibm_mq_library().expect("IBM MQ client library should load");
     }
 
+    const CHILD: &str = "MQB_IBM_MQ_TEST_CHILD";
+
     // A failed library load must be classified non-retryable so routes fail
     // fast instead of reconnecting forever. Skips on hosts that have the client
     // installed: the loader always falls back to the bare library name, so there
     // is no way to force a miss there.
     #[test]
     fn missing_library_is_non_retryable() {
-        // Save & restore the env we mutate so this test can't leak into sibling
-        // dlopen tests (e.g. loads_client reads MQ_INSTALLATION_PATH). Drop runs
-        // even if the assertions below panic.
-        struct EnvRestore {
-            lib: Option<String>,
-            path: Option<String>,
-        }
-        impl Drop for EnvRestore {
-            fn drop(&mut self) {
-                match &self.lib {
-                    Some(v) => std::env::set_var("MQB_IBM_MQ_LIB", v),
-                    None => std::env::remove_var("MQB_IBM_MQ_LIB"),
-                }
-                match &self.path {
-                    Some(v) => std::env::set_var("MQ_INSTALLATION_PATH", v),
-                    None => std::env::remove_var("MQ_INSTALLATION_PATH"),
-                }
-            }
-        }
-        let _restore = EnvRestore {
-            lib: std::env::var("MQB_IBM_MQ_LIB").ok(),
-            path: std::env::var("MQ_INSTALLATION_PATH").ok(),
-        };
+        // The loader reads the environment, so it runs in a child that gets its own.
+        let child = format!(
+            "{}::missing_library_child",
+            module_path!().split_once("::").unwrap().1
+        );
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &child, "--nocapture"])
+            .env(CHILD, "1")
+            .env("MQB_IBM_MQ_LIB", "/nonexistent/path/libmqm_r")
+            .env_remove("MQ_INSTALLATION_PATH")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "{stdout}\n{stderr}"
+        );
+    }
 
-        std::env::set_var("MQB_IBM_MQ_LIB", "/nonexistent/path/libmqm_r");
-        std::env::remove_var("MQ_INSTALLATION_PATH");
+    /// Only does anything when run by [`missing_library_is_non_retryable`].
+    #[test]
+    fn missing_library_child() {
+        if std::env::var_os(CHILD).is_none() {
+            return;
+        }
         let err = match load_ibm_mq_library() {
             Ok(_) => {
                 eprintln!("skipping: IBM MQ client is installed, cannot test a missing one");

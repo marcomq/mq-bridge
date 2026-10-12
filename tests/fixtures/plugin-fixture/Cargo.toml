@@ -1,8 +1,8 @@
 [package]
 name = "mq-bridge-plugin-fixture"
 version = "0.1.0"
-edition = "2021"
-rust-version = "1.85"
+edition = "2024"
+rust-version = "1.89"
 publish = false
 description = "In-memory endpoint used to test the mq-bridge plugin ABI, loader and SDK"
 license = "MIT OR Apache-2.0"

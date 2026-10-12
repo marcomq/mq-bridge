@@ -92,12 +92,12 @@ impl KafkaPublisher {
         }
 
         // Create the topic if it doesn't exist
-        if !topic.is_empty() {
+        if !topic.is_empty() && config.create_topic.unwrap_or(true) {
             let admin_client: AdminClient<_> = client_config.create()?;
             let partitions = config
                 .partitions
                 .unwrap_or(crate::models::DEFAULT_KAFKA_PARTITIONS);
-            let new_topic = NewTopic::new(topic, partitions, TopicReplication::Fixed(1));
+            let new_topic = NewTopic::new(topic, partitions, BROKER_DEFAULT_REPLICATION);
             let results = admin_client
                 .create_topics(&[new_topic], &AdminOptions::new())
                 .await?;
@@ -112,6 +112,8 @@ impl KafkaPublisher {
                     Err((topic_name, error_code)) => {
                         if error_code == RDKafkaErrorCode::TopicAlreadyExists {
                             debug!(topic = %topic_name, "Kafka topic already exists, skipping creation.");
+                        } else if topic_may_exist(error_code) {
+                            tracing::warn!(topic = %topic_name, error = %error_code, "Not allowed to create the Kafka topic; assuming it exists");
                         } else {
                             return Err(anyhow!(
                                 "Failed to create Kafka topic '{}': {}",
@@ -141,6 +143,7 @@ impl KafkaPublisher {
             &config.tls.ca_file,
             &config.tls.cert_file,
             &config.tls.key_file,
+            &config.tls.cert_password,
             config.tls.accept_invalid_certs,
             &producer_options,
             // Sets the default `linger.ms`, so the two modes cannot share a producer.
@@ -199,7 +202,7 @@ impl MessagePublisher for KafkaPublisher {
             self.producer
                 .send(record, Duration::from_secs(0))
                 .await
-                .map_err(|(e, _)| anyhow!("Kafka message delivery failed: {}", e))?;
+                .map_err(|(e, _)| delivery_error("Kafka message delivery failed", e))?;
         } else {
             // "Fire and forget" send. This enqueues the message in the producer's buffer.
             // The `FutureProducer` will handle sending it in the background according to the
@@ -208,7 +211,7 @@ impl MessagePublisher for KafkaPublisher {
             // are sent before shutdown.
             self.producer
                 .send_result(record)
-                .map_err(|(e, _)| anyhow!("Failed to enqueue Kafka message: {}", e))?;
+                .map_err(|(e, _)| delivery_error("Failed to enqueue Kafka message", e))?;
         }
         Ok(Sent::Ack)
     }
@@ -251,10 +254,12 @@ impl MessagePublisher for KafkaPublisher {
             match self.producer.send_result(record) {
                 Ok(fut) => delivery_futures.push((message, fut)),
                 Err((e, _)) => {
-                    failed_messages.push((
-                        message,
-                        PublisherError::Retryable(anyhow!("Kafka enqueue failed: {}", e)),
-                    ));
+                    let permanent = is_permanent_delivery_error(&e);
+                    failed_messages.push((message, delivery_error("Kafka enqueue failed", e)));
+                    // Never retried, so skipping it cannot reorder anything.
+                    if permanent {
+                        continue;
+                    }
                     // Abort the batch to preserve ordering.
                     // If we continued, subsequent messages might succeed while this one failed,
                     // causing out-of-order delivery on retry.
@@ -274,10 +279,9 @@ impl MessagePublisher for KafkaPublisher {
         for (message, fut) in delivery_futures {
             match fut.await {
                 Ok(Ok(_)) => {}
-                Ok(Err((e, _))) => failed_messages.push((
-                    message,
-                    PublisherError::Retryable(anyhow!("Kafka delivery failed: {}", e)),
-                )),
+                Ok(Err((e, _))) => {
+                    failed_messages.push((message, delivery_error("Kafka delivery failed", e)))
+                }
                 Err(_) => failed_messages.push((
                     message,
                     PublisherError::Retryable(anyhow!("Kafka delivery future cancelled")),
@@ -327,6 +331,40 @@ impl MessagePublisher for KafkaPublisher {
 
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+}
+
+/// `-1`: the cluster's `default.replication.factor` (Kafka 2.4 or newer).
+const BROKER_DEFAULT_REPLICATION: TopicReplication<'static> = TopicReplication::Fixed(-1);
+
+/// Whether a failed topic creation still lets the publisher start.
+///
+/// A client without the right to create topics is refused before the broker looks whether
+/// the topic exists, so that refusal says nothing about the topic.
+fn topic_may_exist(code: RDKafkaErrorCode) -> bool {
+    matches!(
+        code,
+        RDKafkaErrorCode::TopicAlreadyExists
+            | RDKafkaErrorCode::TopicAuthorizationFailed
+            | RDKafkaErrorCode::ClusterAuthorizationFailed
+    )
+}
+
+/// A record the broker will refuse however often it is sent.
+fn is_permanent_delivery_error(error: &KafkaError) -> bool {
+    matches!(
+        error.rdkafka_error_code(),
+        Some(RDKafkaErrorCode::MessageSizeTooLarge | RDKafkaErrorCode::InvalidMessageSize)
+    )
+}
+
+fn delivery_error(what: &str, error: KafkaError) -> PublisherError {
+    let permanent = is_permanent_delivery_error(&error);
+    let error = anyhow!("{what}: {error}");
+    if permanent {
+        PublisherError::NonRetryable(error)
+    } else {
+        PublisherError::Retryable(error)
     }
 }
 
@@ -1272,16 +1310,24 @@ fn create_common_config(config: &KafkaConfig) -> ClientConfig {
     let mut client_config = ClientConfig::new();
     client_config.set("bootstrap.servers", &config.url);
 
-    if config.tls.required {
+    // SASL credentials force `sasl_ssl` below, so the `tls` block applies with them too.
+    let sasl = config.username.is_some() && config.password.is_some();
+    if config.tls.required || sasl {
         client_config.set("security.protocol", "ssl");
         if let Some(ca_file) = &config.tls.ca_file {
             client_config.set("ssl.ca.location", ca_file);
+        } else {
+            // A vendored OpenSSL has no CA directory of its own; search the system's.
+            client_config.set("ssl.ca.location", "probe");
         }
         if let Some(cert_file) = &config.tls.cert_file {
             client_config.set("ssl.certificate.location", cert_file);
         }
         if let Some(key_file) = &config.tls.key_file {
             client_config.set("ssl.key.location", key_file);
+        }
+        if let Some(password) = &config.tls.cert_password {
+            client_config.set("ssl.key.password", password);
         }
         client_config.set(
             "enable.ssl.certificate.verification",
@@ -1461,9 +1507,44 @@ async fn await_first(
     rx: &async_channel::Receiver<Result<Prefetched, PrefetchError>>,
     exit_on_empty: bool,
     topic: &str,
-    mut readiness: impl FnMut() -> DrainReadiness,
+    readiness: impl FnMut() -> DrainReadiness,
+    topic_has_partitions: impl FnOnce() -> bool,
 ) -> Option<Result<Prefetched, PrefetchError>> {
-    let start_deadline = std::time::Instant::now() + drain_join_timeout();
+    await_first_within(
+        rx,
+        exit_on_empty,
+        topic,
+        drain_join_timeout(),
+        readiness,
+        topic_has_partitions,
+    )
+    .await
+}
+
+/// Whether the broker knows `topic` with at least one partition. A failed lookup counts as
+/// yes: "empty" has to be known, not assumed. Lists all topics, so nothing is auto-created.
+fn topic_has_partitions(consumer: &StreamConsumer, topic: &str) -> bool {
+    match consumer.fetch_metadata(None, BROKER_PROBE_TIMEOUT) {
+        Ok(metadata) => metadata
+            .topics()
+            .iter()
+            .any(|t| t.name() == topic && !t.partitions().is_empty()),
+        Err(e) => {
+            debug!(topic = %topic, error = %e, "Kafka topic lookup failed");
+            true
+        }
+    }
+}
+
+async fn await_first_within(
+    rx: &async_channel::Receiver<Result<Prefetched, PrefetchError>>,
+    exit_on_empty: bool,
+    topic: &str,
+    join_timeout: Duration,
+    mut readiness: impl FnMut() -> DrainReadiness,
+    topic_has_partitions: impl FnOnce() -> bool,
+) -> Option<Result<Prefetched, PrefetchError>> {
+    let start_deadline = std::time::Instant::now() + join_timeout;
     loop {
         // A drain that is already complete shouldn't spend a whole idle timeout finding
         // that out. Nothing can still be in flight: every partition is at its target.
@@ -1475,17 +1556,31 @@ async fn await_first(
             // terminal first). Report that, rather than letting it read as a drain.
             return Some(item.unwrap_or(Err(PrefetchError::EndOfStream)));
         }
-        match readiness() {
-            DrainReadiness::Drained => return None,
-            DrainReadiness::NotStarted | DrainReadiness::Starting => {}
+        let state = readiness();
+        if state == DrainReadiness::Drained {
+            return None;
         }
         if std::time::Instant::now() >= start_deadline {
+            // Assigned and short of its target: there is data this drain has not copied.
+            if state == DrainReadiness::Starting {
+                return Some(Err(PrefetchError::Connection(format!(
+                    "Kafka drain of '{topic}' stalled for {join_timeout:?} before reaching \
+                     the end of its partitions"
+                ))));
+            }
+            // The topic exists, so the join is late (a crashed member holds the group for
+            // `session.timeout.ms`): not an empty source.
+            if topic_has_partitions() {
+                return Some(Err(PrefetchError::Connection(format!(
+                    "Kafka drain of '{topic}' was not assigned a partition within \
+                     {join_timeout:?} although the topic has partitions"
+                ))));
+            }
             tracing::warn!(
                 topic = %topic,
-                timeout = ?drain_join_timeout(),
-                "Draining Kafka consumer never became ready; treating the source as empty. \
-                 If the topic has data, the group join or first fetch did not complete in \
-                 time — raise MQ_BRIDGE_DRAIN_JOIN_TIMEOUT_MS."
+                timeout = ?join_timeout,
+                "Draining Kafka consumer was never assigned a partition and the broker has \
+                 no such topic; treating the source as empty."
             );
             return None;
         }
@@ -1556,9 +1651,13 @@ async fn receive_batch_internal(
     }
 
     // Block for the first record, then take whatever else the prefetcher already has.
-    let first = await_first(&prefetcher.rx, exit_on_empty, topic, || {
-        drain_readiness(consumer, drain_state, &prefetcher.eof_positions)
-    })
+    let first = await_first(
+        &prefetcher.rx,
+        exit_on_empty,
+        topic,
+        || drain_readiness(consumer, drain_state, &prefetcher.eof_positions),
+        || topic_has_partitions(consumer, topic),
+    )
     .await;
     let Some(first) = first else {
         return Ok(ReceivedBatch::empty());
@@ -2096,7 +2195,7 @@ mod tests {
         ));
         assert_eq!(position.get(), 11, "the later record must have been polled");
 
-        let first = await_first(&rx, true, "t", || DrainReadiness::Drained).await;
+        let first = await_first(&rx, true, "t", || DrainReadiness::Drained, || true).await;
         assert!(matches!(first, Some(Ok(record)) if record.offset == 11));
     }
 
@@ -2105,9 +2204,13 @@ mod tests {
         let (tx, rx) = prefetch_channel(1);
         tx.try_send(Ok(prefetched("t", 0, 5))).unwrap();
 
-        let first = await_first(&rx, true, "t", || {
-            panic!("readiness must not be consulted while a record is waiting")
-        })
+        let first = await_first(
+            &rx,
+            true,
+            "t",
+            || panic!("readiness must not be consulted while a record is waiting"),
+            || true,
+        )
         .await;
 
         assert!(matches!(first, Some(Ok(p)) if p.offset == 5));
@@ -2117,7 +2220,7 @@ mod tests {
     async fn test_await_first_ends_the_drain_only_when_drained() {
         let (_tx, rx) = prefetch_channel(1);
 
-        let first = await_first(&rx, true, "t", || DrainReadiness::Drained).await;
+        let first = await_first(&rx, true, "t", || DrainReadiness::Drained, || true).await;
 
         assert!(first.is_none());
     }
@@ -2129,13 +2232,19 @@ mod tests {
         let (tx, rx) = prefetch_channel(1);
         let mut polls = 0;
 
-        let first = await_first(&rx, true, "t", || {
-            polls += 1;
-            if polls == 1 {
-                tx.try_send(Ok(prefetched("t", 0, 5))).unwrap();
-            }
-            DrainReadiness::Starting
-        })
+        let first = await_first(
+            &rx,
+            true,
+            "t",
+            || {
+                polls += 1;
+                if polls == 1 {
+                    tx.try_send(Ok(prefetched("t", 0, 5))).unwrap();
+                }
+                DrainReadiness::Starting
+            },
+            || true,
+        )
         .await;
 
         assert!(matches!(first, Some(Ok(p)) if p.offset == 5));
@@ -2150,7 +2259,7 @@ mod tests {
 
         let outcome = tokio::time::timeout(
             Duration::from_millis(200),
-            await_first(&rx, false, "t", || DrainReadiness::Drained),
+            await_first(&rx, false, "t", || DrainReadiness::Drained, || true),
         )
         .await;
 
@@ -2158,6 +2267,167 @@ mod tests {
             outcome.is_err(),
             "a streaming route must not stop on drained"
         );
+    }
+
+    /// A producer that never reaches a broker: enqueue errors are local, deliveries time out.
+    fn offline_publisher() -> KafkaPublisher {
+        let producer: FutureProducer = ClientConfig::new()
+            .set("bootstrap.servers", "127.0.0.1:1")
+            .set("message.timeout.ms", "300")
+            .create()
+            .unwrap();
+        KafkaPublisher {
+            producer: Arc::new(SharedKafkaProducer { producer }),
+            topic: "t".to_string(),
+            delayed_ack: false,
+            partition_key: None,
+        }
+    }
+
+    /// A record over `message.max.bytes` can never be sent. Reported as retryable it was
+    /// nacked, replayed and rejected again, and it took the rest of its batch with it.
+    #[tokio::test]
+    async fn test_an_oversized_record_fails_alone_and_for_good() {
+        let publisher = offline_publisher();
+        let small = || CanonicalMessage::new(b"ok".to_vec(), None);
+        let oversized = CanonicalMessage::new(vec![0u8; 2_000_000], None);
+        let oversized_id = oversized.message_id;
+
+        let sent = publisher
+            .send_batch(vec![small(), oversized, small()])
+            .await
+            .unwrap();
+
+        let SentBatch::Partial { failed, .. } = sent else {
+            panic!("expected failures");
+        };
+        let (_, error) = failed
+            .iter()
+            .find(|(m, _)| m.message_id == oversized_id)
+            .expect("the oversized record must be reported");
+        assert!(
+            matches!(error, PublisherError::NonRetryable(_)),
+            "an oversized record must not be retried: {error:?}"
+        );
+        assert!(
+            failed
+                .iter()
+                .all(|(_, e)| !e.to_string().contains("aborted")),
+            "the record after the oversized one must still be attempted"
+        );
+    }
+
+    /// With `create_topic: false` no admin request is sent, so a publisher starts without
+    /// a reachable broker; with the default the request fails.
+    #[tokio::test]
+    async fn test_create_topic_false_sends_no_admin_request() {
+        let config = |create_topic| KafkaConfig {
+            url: "127.0.0.1:1".to_string(),
+            topic: Some("t".to_string()),
+            create_topic,
+            shared: Some(false),
+            producer_options: Some(vec![(
+                "socket.connection.setup.timeout.ms".to_string(),
+                "1000".to_string(),
+            )]),
+            ..Default::default()
+        };
+        assert!(KafkaPublisher::new(&config(Some(false))).await.is_ok());
+        let created =
+            tokio::time::timeout(Duration::from_secs(2), KafkaPublisher::new(&config(None))).await;
+        assert!(!matches!(created, Ok(Ok(_))), "the default asks the broker");
+    }
+
+    #[test]
+    fn test_a_missing_create_permission_does_not_stop_the_publisher() {
+        assert!(topic_may_exist(RDKafkaErrorCode::TopicAlreadyExists));
+        assert!(topic_may_exist(RDKafkaErrorCode::TopicAuthorizationFailed));
+        assert!(topic_may_exist(
+            RDKafkaErrorCode::ClusterAuthorizationFailed
+        ));
+        assert!(!topic_may_exist(RDKafkaErrorCode::InvalidPartitions));
+    }
+
+    fn sasl_config() -> KafkaConfig {
+        KafkaConfig {
+            url: "localhost:9092".to_string(),
+            username: Some("user".to_string()),
+            password: Some("secret".to_string()),
+            ..Default::default()
+        }
+    }
+
+    /// SASL credentials force `sasl_ssl`, so the `tls` block has to apply with them even
+    /// when `required` was left off.
+    #[test]
+    fn test_the_tls_block_applies_to_a_sasl_connection() {
+        let mut config = sasl_config();
+        config.tls.ca_file = Some("/ca.pem".to_string());
+
+        let client = create_common_config(&config);
+
+        assert_eq!(client.get("security.protocol"), Some("sasl_ssl"));
+        assert_eq!(client.get("ssl.ca.location"), Some("/ca.pem"));
+    }
+
+    #[test]
+    fn test_tls_without_a_ca_file_searches_the_system_ca_store() {
+        let client = create_common_config(&sasl_config());
+
+        assert_eq!(client.get("ssl.ca.location"), Some("probe"));
+    }
+
+    #[test]
+    fn test_the_key_password_reaches_librdkafka() {
+        let mut config = sasl_config();
+        config.tls.required = true;
+        config.tls.key_file = Some("/client.key".to_string());
+        config.tls.cert_password = Some("pw".to_string());
+
+        let client = create_common_config(&config);
+
+        assert_eq!(client.get("ssl.key.password"), Some("pw"));
+    }
+
+    /// A partition that is assigned but never reaches its target has data the drain did not
+    /// copy. Ending the drain there reported a truncated copy as a success.
+    #[tokio::test]
+    async fn test_a_drain_that_stalls_before_its_target_is_an_error() {
+        let (_tx, rx) = prefetch_channel(1);
+
+        let first = await_first_within(
+            &rx,
+            true,
+            "t",
+            Duration::ZERO,
+            || DrainReadiness::Starting,
+            || true,
+        )
+        .await;
+
+        assert!(matches!(first, Some(Err(PrefetchError::Connection(_)))));
+    }
+
+    #[tokio::test]
+    async fn test_a_drain_without_an_assignment_ends_empty_only_without_a_topic() {
+        let (_tx, rx) = prefetch_channel(1);
+        let wait = |topic_exists: bool| {
+            await_first_within(
+                &rx,
+                true,
+                "t",
+                Duration::ZERO,
+                || DrainReadiness::NotStarted,
+                move || topic_exists,
+            )
+        };
+
+        assert!(wait(false).await.is_none());
+        // A late group join on a topic that exists must not read as an empty source.
+        assert!(matches!(
+            wait(true).await,
+            Some(Err(PrefetchError::Connection(_)))
+        ));
     }
 
     #[test]

@@ -9,7 +9,6 @@ use mongodb::options::UpdateModifications;
 
 pub struct MongoDbPublisher {
     collection: Collection<Document>,
-    meta_collection: Collection<Document>,
     db: Database,
     // Retains the shared registry entry so concurrent publishers reuse this client/pool.
     _shared_client: std::sync::Arc<Client>,
@@ -41,19 +40,7 @@ const UPDATE_CONCURRENCY: usize = 16;
 /// Most messages of one key folded into one `update` call; bounds the snapshots it stores.
 const MAX_FOLDED_UPDATES: usize = 64;
 
-fn mongodb_uses_sequencer(request_reply: bool, format: &MongoDbFormat) -> bool {
-    !request_reply && !matches!(format, MongoDbFormat::Raw)
-}
-
-pub(crate) fn namespaced_sequencer_id(collection_name: &str) -> String {
-    format!("{}:sequencer", collection_name)
-}
-
 impl MongoDbPublisher {
-    fn uses_sequencer(&self) -> bool {
-        mongodb_uses_sequencer(self.request_reply, &self.format)
-    }
-
     pub async fn new(config: &MongoDbConfig) -> anyhow::Result<Self> {
         let id_template = config
             .id_field
@@ -133,7 +120,6 @@ impl MongoDbPublisher {
             }
             return Ok(Self {
                 collection: db.collection(collection_name),
-                meta_collection: db.collection(collection_name),
                 db,
                 _shared_client: shared_client,
                 collection_name: collection_name.to_string(),
@@ -166,29 +152,6 @@ impl MongoDbPublisher {
         }
 
         let collection = db.collection(collection_name);
-        let meta_collection_name = config
-            .meta_collection
-            .clone()
-            .unwrap_or_else(|| collection_name.to_string());
-        let meta_collection = db.collection(&meta_collection_name);
-
-        if mongodb_uses_sequencer(config.request_reply, &config.format) {
-            // Ensure unique index on seq. The sequencer doc has 'seq_counter', so it won't conflict.
-            let index_options = mongodb::options::IndexOptions::builder()
-                .unique(true)
-                .sparse(true) // Only index documents that have the seq field
-                .build();
-            let index_model = IndexModel::builder()
-                .keys(doc! { "seq": 1 })
-                .options(index_options)
-                .build();
-            if let Err(e) = collection.create_index(index_model).await {
-                warn!(
-                    "Failed to create seq index on collection {}: {}",
-                    collection_name, e
-                );
-            }
-        }
         info!(database = %config.database, collection = %collection_name, request_reply = %config.request_reply, "MongoDB publisher connected");
 
         if let Some(ttl) = config.ttl_seconds {
@@ -238,7 +201,6 @@ impl MongoDbPublisher {
         }
         Ok(Self {
             collection,
-            meta_collection,
             db,
             _shared_client: shared_client,
             collection_name: collection_name.to_string(),
@@ -630,6 +592,45 @@ pub(crate) fn tag_outcome(
     }
 }
 
+/// What a per-document insert error means for the message that carried the document.
+#[derive(Debug, PartialEq)]
+pub(super) enum InsertRejection {
+    /// Duplicate `_id`: the document is already there, which makes a re-run idempotent.
+    AlreadyStored,
+    /// The collection refuses this document; sending it again cannot succeed.
+    Permanent,
+    Transient,
+}
+
+pub(super) fn classify_insert_error(code: i32, message: &str) -> InsertRejection {
+    match code {
+        11000 => match duplicate_index(message) {
+            None | Some("_id_") => InsertRejection::AlreadyStored,
+            Some(_) => InsertRejection::Permanent,
+        },
+        // BadValue, FailedToParse, TypeMismatch, DollarPrefixedFieldName,
+        // DocumentValidationFailure, BSONObjectTooLarge, KeyTooLong.
+        2 | 9 | 14 | 52 | 121 | 10334 | 17280 => InsertRejection::Permanent,
+        _ => InsertRejection::Transient,
+    }
+}
+
+/// The index named by an E11000 message (`... index: email_1 dup key: ...`).
+fn duplicate_index(message: &str) -> Option<&str> {
+    let rest = message.split_once(" index: ")?.1;
+    let name = rest.split(" dup key").next()?.trim();
+    Some(name.rsplit(".$").next().unwrap_or(name))
+}
+
+fn insert_rejection(e: &mongodb::error::Error) -> InsertRejection {
+    match &*e.kind {
+        ErrorKind::Write(mongodb::error::WriteFailure::WriteError(w)) => {
+            classify_insert_error(w.code, &w.message)
+        }
+        _ => InsertRejection::Transient,
+    }
+}
+
 /// A server-rejected update (bad data for the pipeline) cannot succeed on retry; a network or
 /// failover error can, and so can E11000 from two upserts racing to insert the same key.
 fn update_error(e: mongodb::error::Error) -> PublisherError {
@@ -882,8 +883,8 @@ impl MessagePublisher for MongoDbPublisher {
             return self.find_one(template, &message).await;
         }
         if !self.request_reply {
-            trace!(message_id = %format!("{:032x}", message.message_id), collection = %self.collection_name, uses_sequencer = self.uses_sequencer(), "Publishing document to MongoDB");
-            let mut doc = message_to_document(
+            trace!(message_id = %format!("{:032x}", message.message_id), collection = %self.collection_name, "Publishing document to MongoDB");
+            let doc = message_to_document(
                 &message,
                 &self.format,
                 self.id_field.as_deref(),
@@ -891,54 +892,20 @@ impl MessagePublisher for MongoDbPublisher {
             )
             .map_err(PublisherError::NonRetryable)?;
 
-            if self.uses_sequencer() {
-                // Atomically increment a sequence counter. This is safe without a transaction for just getting a sequence number.
-                // If the subsequent insert fails, a sequence number might be "lost", creating a gap.
-                let filter = doc! {
-                    "_id": namespaced_sequencer_id(&self.collection_name)
-                };
-                let update = doc! { "$inc": { "seq_counter": 1_i64 } };
-                let options = FindOneAndUpdateOptions::builder()
-                    .upsert(true)
-                    .return_document(ReturnDocument::After)
-                    .build();
-
-                let counter_doc = self
-                    .meta_collection
-                    .find_one_and_update(filter, update)
-                    .with_options(options)
-                    .await
-                    .map_err(|e| PublisherError::Retryable(anyhow!(e)))?;
-                let seq = counter_doc
-                    .ok_or_else(|| {
-                        PublisherError::Retryable(anyhow!(
-                            "Sequencer document not returned after upsert"
-                        ))
-                    })?
-                    .get_i64("seq_counter")
-                    .map_err(|e| {
-                        PublisherError::Retryable(anyhow!(
-                            "Invalid seq_counter in sequencer: {}",
-                            e
-                        ))
-                    })?;
-                doc.insert("seq", seq);
-            }
-
             match self.collection.insert_one(doc).await {
                 Ok(_) => {}
                 Err(e) => {
-                    if let ErrorKind::Write(mongodb::error::WriteFailure::WriteError(ref w)) =
-                        *e.kind
-                    {
-                        if w.code == 11000 {
+                    let rejection = insert_rejection(&e);
+                    let error =
+                        anyhow::anyhow!(e).context("Failed to insert document into MongoDB");
+                    return match rejection {
+                        InsertRejection::AlreadyStored => {
                             warn!(message_id = %format!("{:032x}", message.message_id), "Duplicate key error inserting into MongoDB. Treating as idempotent success.");
-                            return Ok(self.outcome_or_ack(message, OUTCOME_EXISTED));
+                            Ok(self.outcome_or_ack(message, OUTCOME_EXISTED))
                         }
-                    }
-                    return Err(PublisherError::Retryable(
-                        anyhow::anyhow!(e).context("Failed to insert document into MongoDB"),
-                    ));
+                        InsertRejection::Permanent => Err(PublisherError::NonRetryable(error)),
+                        InsertRejection::Transient => Err(PublisherError::Retryable(error)),
+                    };
                 }
             }
 
@@ -972,8 +939,8 @@ impl MessagePublisher for MongoDbPublisher {
         match self.collection.insert_one(doc).await {
             Ok(_) => {}
             Err(e) => {
-                let is_duplicate = matches!(&*e.kind, ErrorKind::Write(mongodb::error::WriteFailure::WriteError(w)) if w.code == 11000);
-                if is_duplicate {
+                let rejection = insert_rejection(&e);
+                if rejection == InsertRejection::AlreadyStored {
                     warn!(message_id = %format!("{:032x}", message.message_id), "Duplicate key error inserting request into MongoDB. Treating as idempotent success.");
                     self.recover_correlation_id_from_duplicate(&mut message)
                         .await?;
@@ -981,10 +948,13 @@ impl MessagePublisher for MongoDbPublisher {
                         correlation_id = cid.clone();
                     }
                 } else {
-                    return Err(PublisherError::Retryable(
-                        anyhow::anyhow!(e)
-                            .context("Failed to insert request document into MongoDB"),
-                    ));
+                    let error = anyhow::anyhow!(e)
+                        .context("Failed to insert request document into MongoDB");
+                    return Err(if rejection == InsertRejection::Permanent {
+                        PublisherError::NonRetryable(error)
+                    } else {
+                        PublisherError::Retryable(error)
+                    });
                 }
             }
         }
@@ -1076,49 +1046,10 @@ impl MessagePublisher for MongoDbPublisher {
             }
         }
 
-        if self.uses_sequencer() {
-            // Atomically increment a sequence counter for the batch. This is safe without a transaction.
-            // If the subsequent insert fails, sequence numbers might be "lost", creating gaps.
-            let filter = doc! {
-                "_id": namespaced_sequencer_id(&self.collection_name)
-            };
-            let update = doc! { "$inc": { "seq_counter": docs.len() as i64 } };
-            let options = FindOneAndUpdateOptions::builder()
-                .upsert(true)
-                .return_document(ReturnDocument::After)
-                .write_concern(
-                    mongodb::options::WriteConcern::builder()
-                        .w(mongodb::options::Acknowledgment::Majority)
-                        .build(),
-                )
-                .build();
-            let counter_doc = self
-                .meta_collection
-                .find_one_and_update(filter, update)
-                .with_options(options)
-                .await
-                .map_err(|e| PublisherError::Retryable(anyhow!(e)))?;
-            let end_seq = counter_doc
-                .ok_or_else(|| {
-                    PublisherError::Retryable(anyhow!(
-                        "Sequencer document not returned after upsert"
-                    ))
-                })?
-                .get_i64("seq_counter")
-                .map_err(|e| {
-                    PublisherError::Retryable(anyhow!("Invalid seq_counter in sequencer: {}", e))
-                })?;
-            let start_seq = end_seq - docs.len() as i64 + 1;
-
-            for (i, doc) in docs.iter_mut().enumerate() {
-                doc.insert("seq", start_seq + i as i64);
-            }
-        }
-
         // Unordered: an ordered insert stops at the first error, so one duplicate
         // `_id` would leave the rest uninserted and indistinguishable from a
         // failure. Capped collections take unordered inserts too and still store
-        // in $natural order, so `seq` and insertion order both survive.
+        // in $natural order.
         match self.collection.insert_many(docs).ordered(false).await {
             Ok(_) => Ok(SentBatch::from_failures(failed_messages)),
             Err(e) => {
@@ -1131,7 +1062,7 @@ impl MessagePublisher for MongoDbPublisher {
                     }
 
                     // If we have a write concern error, assume all failed to be safe (potential rollback).
-                    // Since we have unique indexes, retrying is idempotent.
+                    // A retry of a stored document is a duplicate `_id`, so it is idempotent.
                     if err.write_concern_error.is_some() {
                         warn!("MongoDB write concern error detected. Retrying entire batch.");
                         for msg in valid_messages {
@@ -1152,24 +1083,20 @@ impl MessagePublisher for MongoDbPublisher {
                     // error was inserted and each error stands on its own.
                     for (i, msg) in valid_messages.into_iter().enumerate() {
                         if let Some(w) = errors_by_index.get(&i) {
-                            // Duplicate `_id`: the document is already stored, which
-                            // is what `id_field` uses to make a re-run idempotent.
-                            if w.code != 11000 {
-                                failed_messages.push((
-                                    msg,
-                                    PublisherError::Retryable(anyhow::anyhow!(
-                                        "MongoDB write error: {:?}",
-                                        w
-                                    )),
-                                ));
+                            let error = anyhow::anyhow!("MongoDB write error: {:?}", w);
+                            match classify_insert_error(w.code, &w.message) {
+                                InsertRejection::AlreadyStored => {}
+                                InsertRejection::Permanent => {
+                                    failed_messages.push((msg, PublisherError::NonRetryable(error)))
+                                }
+                                InsertRejection::Transient => {
+                                    failed_messages.push((msg, PublisherError::Retryable(error)))
+                                }
                             }
                         }
                     }
 
-                    Ok(SentBatch::Partial {
-                        responses: None,
-                        failed: failed_messages,
-                    })
+                    Ok(SentBatch::from_failures(failed_messages))
                 } else {
                     Err(PublisherError::Retryable(anyhow!(e)))
                 }

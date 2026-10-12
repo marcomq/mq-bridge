@@ -34,7 +34,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("cargo:rerun-if-env-changed=PROTOC");
         #[cfg(feature = "vendored-protoc")]
         if std::env::var_os("PROTOC").is_none() {
-            std::env::set_var("PROTOC", protoc_bin_vendored::protoc_bin_path()?);
+            // SAFETY: a build script is single-threaded here; nothing reads the environment concurrently.
+            unsafe { std::env::set_var("PROTOC", protoc_bin_vendored::protoc_bin_path()?) };
         }
         println!("cargo:rerun-if-changed=src/endpoints/grpc/proto/mqbridge/bridge.proto");
         tonic_prost_build::configure()

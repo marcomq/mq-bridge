@@ -137,6 +137,14 @@ const CAPABILITIES: &[EndpointCapabilities] = &[
         ..row("dir_spool", Local)
     },
     EndpointCapabilities {
+        input: false,
+        acknowledges: Na,
+        ordered_commit: Na,
+        ordered_publish: With("operation"),
+        security_note: "API key, or `auth` for OAuth2 and AWS SigV4.",
+        ..row("elasticsearch", TlsBlock)
+    },
+    EndpointCapabilities {
         ordered_publish: Depends,
         output_note: "Replies when one of its endpoints does; the first in list order wins. Ordered when one of them is.",
         ..output_only("fanout", Depends)
@@ -147,9 +155,10 @@ const CAPABILITIES: &[EndpointCapabilities] = &[
         ..row("file", Local)
     },
     EndpointCapabilities {
+        acknowledges: Depends,
         ordered_commit: No,
         replies: Depends,
-        input_note: "A server or a streaming client. A server answers the caller, who resends on failure.",
+        input_note: "A server answers the caller, who resends on failure. A Bridge client acknowledges; a dynamic client (descriptor set or reflection) does not.",
         output_note: "The dynamic client returns the RPC's reply.",
         security_note: "A server checks client certificates with `tls.ca_file` and has no other authentication; reflection is always on. A client sends `api_key` or `bearer_token`.",
         ..row("grpc", TlsBlock)
@@ -180,6 +189,12 @@ const CAPABILITIES: &[EndpointCapabilities] = &[
         ..row("kafka", TlsBlock)
     },
     EndpointCapabilities {
+        ordered_publish: With("operation"),
+        input_note: "A paged read of one index.",
+        security_note: "API key.",
+        ..row("meilisearch", TlsBlock)
+    },
+    EndpointCapabilities {
         ordered_commit: No,
         replies: With("request_reply: true"),
         input_note: "A nacked message is retried inside the consumer and is lost if the process dies.",
@@ -189,7 +204,7 @@ const CAPABILITIES: &[EndpointCapabilities] = &[
     EndpointCapabilities {
         ordered_commit: Depends,
         replies: Depends,
-        input_note: "`consumer` commits in any order; `snapshot`, `capture_new` and `capture_all` in order.",
+        input_note: "`delete` commits in any order; `snapshot`, `capture_new` and `capture_all` in order.",
         output_note: "Replies with `request_reply`, `report_outcome` or `find`.",
         security_note: "TLS and credentials can also be set in the URL (`tls=true`, `tlsCAFile=`).",
         ..row("mongodb", TlsBlock)
@@ -213,8 +228,32 @@ const CAPABILITIES: &[EndpointCapabilities] = &[
         ..row("object_store", Provider)
     },
     EndpointCapabilities {
+        input: false,
+        acknowledges: Na,
+        ordered_commit: Na,
+        replies: Yes,
+        output_note: "The reply is the model's answer.",
+        security_note: "API key.",
+        ..row("openai_chat", TlsBlock)
+    },
+    EndpointCapabilities {
+        input: false,
+        acknowledges: Na,
+        ordered_commit: Na,
+        replies: Yes,
+        output_note: "The reply is the vector.",
+        security_note: "API key.",
+        ..row("openai_embeddings", TlsBlock)
+    },
+    EndpointCapabilities {
         security_note: "User and password in the URL.",
         ..input_only("postgres_cdc", TlsBlock)
+    },
+    EndpointCapabilities {
+        ordered_publish: With("operation"),
+        input_note: "A scroll through one collection.",
+        security_note: "API key.",
+        ..row("qdrant", TlsBlock)
     },
     EndpointCapabilities {
         output_note: "The reply is the message read from the wrapped input.",
@@ -257,7 +296,7 @@ const CAPABILITIES: &[EndpointCapabilities] = &[
         replies: With("lookup_query"),
         input_note: "A queue table commits in any order; a `cursor_column` or `publication` source in order.",
         output_note: "The reply is the first row; `sqlx.found` says whether there was one.",
-        security_note: "TLS can also be set in the URL (`sslmode=`, `ssl-mode=`). MySQL with `tls.ca_file` checks the chain but not the host name, and takes a client certificate from the URL only.",
+        security_note: "TLS can also be set in the URL (`sslmode=`, `ssl-mode=`). On MySQL an `ssl-mode` in the URL wins over the `tls` block.",
         ..row("sqlx", TlsBlock)
     },
     EndpointCapabilities {
@@ -274,9 +313,18 @@ const CAPABILITIES: &[EndpointCapabilities] = &[
         ..output_only("switch", Depends)
     },
     EndpointCapabilities {
+        input: false,
+        acknowledges: Na,
+        ordered_commit: Na,
+        ordered_publish: With("operation"),
+        security_note: "API key.",
+        ..row("typesense", TlsBlock)
+    },
+    EndpointCapabilities {
+        acknowledges: No,
         ordered_commit: No,
-        input_note: "A listener. A reply goes back on the same connection; nothing is redelivered.",
-        security_note: "A listener checks client certificates with `tls.ca_file` and has no other authentication and no connection limit.",
+        input_note: "A listener. A reply goes back on the same connection; a rejected frame is not signalled and nothing is redelivered.",
+        security_note: "A listener has `basic_auth`, checks client certificates with `tls.ca_file` and limits connections with `max_connections`. A client sends `basic_auth`.",
         ..row("websocket", TlsBlock)
     },
     EndpointCapabilities {
@@ -463,18 +511,34 @@ mod tests {
         assert!(at_most_once(EndpointType::Nats(nats)));
         assert!(at_most_once(EndpointType::Mqtt(mqtt)));
         assert!(at_most_once(EndpointType::Http(http)));
+        assert!(at_most_once(EndpointType::WebSocket(Default::default())));
+
+        // Only the Bridge protocol has an Acknowledge call; a server answers its caller.
+        let grpc = |reflection, server_mode| {
+            EndpointType::Grpc(GrpcConfig {
+                reflection,
+                server_mode,
+                ..Default::default()
+            })
+        };
+        assert!(at_most_once(grpc(true, false)));
+        assert!(!at_most_once(grpc(false, false)));
+        assert!(!at_most_once(grpc(true, true)));
 
         let lossy: Vec<_> = CAPABILITIES
             .iter()
-            .filter(|row| matches!(row.acknowledges, No | Unless(_)))
+            .filter(|row| matches!(row.acknowledges, No | Unless(_) | Depends))
+            .filter(|row| !matches!(row.name, "custom" | "ref" | "sequence"))
             .map(|row| (row.name, row.acknowledges))
             .collect();
         assert_eq!(
             lossy,
             [
+                ("grpc", Depends),
                 ("http", Unless("fire_and_forget: true")),
                 ("mqtt", Unless("qos: 0")),
                 ("nats", Unless("no_jetstream: true")),
+                ("websocket", No),
                 ("zeromq", No),
             ]
         );
@@ -495,20 +559,29 @@ mod tests {
             ("aws", has_tls_block::<AwsConfig>()),
             ("clickhouse", has_tls_block::<ClickHouseConfig>()),
             ("dir_spool", has_tls_block::<DirSpoolConfig>()),
+            ("elasticsearch", has_tls_block::<ElasticsearchConfig>()),
             ("grpc", has_tls_block::<GrpcConfig>()),
             ("http", has_tls_block::<HttpConfig>()),
             ("http_bulk", has_tls_block::<HttpBulkConfig>()),
             ("ibmmq", has_tls_block::<IbmMqConfig>()),
             ("kafka", has_tls_block::<KafkaConfig>()),
+            ("meilisearch", has_tls_block::<MeilisearchConfig>()),
             ("memory", has_tls_block::<MemoryConfig>()),
             ("mongodb", has_tls_block::<MongoDbConfig>()),
             ("mqtt", has_tls_block::<MqttConfig>()),
             ("nats", has_tls_block::<NatsConfig>()),
             ("object_store", has_tls_block::<ObjectStoreConfig>()),
+            ("openai_chat", has_tls_block::<OpenAiChatConfig>()),
+            (
+                "openai_embeddings",
+                has_tls_block::<OpenAiEmbeddingsConfig>(),
+            ),
             ("postgres_cdc", has_tls_block::<PostgresCdcConfig>()),
+            ("qdrant", has_tls_block::<QdrantConfig>()),
             ("redis_streams", has_tls_block::<RedisStreamsConfig>()),
             ("sled", has_tls_block::<SledConfig>()),
             ("sqlx", has_tls_block::<SqlxConfig>()),
+            ("typesense", has_tls_block::<TypesenseConfig>()),
             ("websocket", has_tls_block::<WebSocketConfig>()),
             ("zeromq", has_tls_block::<ZeroMqConfig>()),
         ];

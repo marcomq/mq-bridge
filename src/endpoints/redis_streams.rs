@@ -24,13 +24,13 @@ use crate::APP_NAME;
 use anyhow::anyhow;
 use async_channel::{bounded, Receiver, Sender};
 use async_trait::async_trait;
-use redis::aio::ConnectionManager;
+use redis::aio::{ConnectionManager, ConnectionManagerConfig};
 use redis::streams::{
     StreamAutoClaimOptions, StreamAutoClaimReply, StreamReadOptions, StreamReadReply,
 };
 use redis::{AsyncCommands, IntoConnectionInfo};
 use std::any::Any;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -45,6 +45,33 @@ const DEFAULT_BLOCK_MS: u64 = 5000;
 const DEFAULT_BUFFER: usize = 128;
 /// Default idle time before a pending entry is reclaimed and redelivered.
 const DEFAULT_REDELIVERY_MS: u64 = 60_000;
+/// How long past `block_ms` the client waits for the reply to a blocking read.
+const READ_GRACE: Duration = Duration::from_secs(5);
+
+/// A blocking read answers after `block_ms`, far past redis-rs' 500 ms default. A read given
+/// up client-side stays parked on the server and takes the next entries for nobody.
+fn read_connection_config(block_ms: usize) -> ConnectionManagerConfig {
+    let timeout = (block_ms > 0).then(|| Duration::from_millis(block_ms as u64) + READ_GRACE);
+    ConnectionManagerConfig::new().set_response_timeout(timeout)
+}
+
+/// Ids of the entries this consumer holds, queued or in flight: the reclaim pass skips them.
+type HeldIds = Arc<std::sync::Mutex<HashSet<String>>>;
+
+/// The ids of one batch; gives them back to the reclaim pass once settled or dropped.
+struct BatchIds {
+    ids: Vec<String>,
+    held: HeldIds,
+}
+
+impl Drop for BatchIds {
+    fn drop(&mut self) {
+        let mut held = self.held.lock().unwrap_or_else(|e| e.into_inner());
+        for id in &self.ids {
+            held.remove(id);
+        }
+    }
+}
 
 fn open_client(config: &RedisStreamsConfig) -> anyhow::Result<redis::Client> {
     // redis 1.3's ConnectionInfo has no public auth setter, so credentials are
@@ -81,10 +108,19 @@ fn open_client(config: &RedisStreamsConfig) -> anyhow::Result<redis::Client> {
         None => None,
     };
     let client_tls = match (&tls.cert_file, &tls.key_file) {
-        (Some(cert), Some(key)) => Some(redis::ClientTlsConfig {
-            client_cert: read("cert_file", cert)?,
-            client_key: read("key_file", key)?,
-        }),
+        (Some(cert), Some(key)) => {
+            let client_key = read("key_file", key)?;
+            // The driver parses the key without a password.
+            if client_key.windows(9).any(|window| window == b"ENCRYPTED") {
+                return Err(anyhow!(
+                    "redis_streams tls.key_file '{key}' is encrypted: tls.cert_password is not supported, decrypt the key first"
+                ));
+            }
+            Some(redis::ClientTlsConfig {
+                client_cert: read("cert_file", cert)?,
+                client_key,
+            })
+        }
         (None, None) => None,
         _ => {
             return Err(anyhow!(
@@ -258,6 +294,9 @@ pub struct RedisStreamsConsumer {
     /// `Some` in consumer-group mode (entries are acked); `None` in subscriber mode.
     group: Option<String>,
     buffer: VecDeque<StreamEntry>,
+    /// A read error met while filling a batch, returned by the next read.
+    deferred_error: Option<ConsumerError>,
+    held: HeldIds,
     /// Set by the route when `exit_on_empty`/`--drain` is active. Only then does an
     /// idle read time out into an empty batch; otherwise it blocks indefinitely
     /// (event-driven, no added latency) as a streaming source should.
@@ -284,14 +323,15 @@ impl RedisStreamsConsumer {
         // A dedicated connection for the (blocking) reads, plus a separate one for
         // acks so an in-flight XREAD BLOCK never stalls XACK. Extra reader
         // connections (see `reader_connections`) are opened below from `client`.
-        let mut read_conn = ConnectionManager::new(client.clone())
+        let block_ms = config.block_ms.unwrap_or(DEFAULT_BLOCK_MS) as usize;
+        let read_config = read_connection_config(block_ms);
+        let mut read_conn = ConnectionManager::new_with_config(client.clone(), read_config.clone())
             .await
             .map_err(|e| anyhow!("Failed to connect to Redis: {}", e))?;
         let ack_conn = ConnectionManager::new(client.clone())
             .await
             .map_err(|e| anyhow!("Failed to connect to Redis: {}", e))?;
 
-        let block_ms = config.block_ms.unwrap_or(DEFAULT_BLOCK_MS) as usize;
         let count = config.internal_buffer_size.unwrap_or(DEFAULT_BUFFER).max(1);
         // 0 disables reclaiming; otherwise redeliver entries idle past this long.
         let redelivery_ms = config
@@ -311,11 +351,25 @@ impl RedisStreamsConsumer {
             let created: redis::RedisResult<()> = read_conn
                 .xgroup_create_mkstream(&stream, &group, start_id)
                 .await;
-            if let Err(e) = created {
+            match created {
                 // BUSYGROUP: the group already exists, which is expected on restart.
-                if e.code() != Some("BUSYGROUP") {
-                    return Err(anyhow!("Failed to create Redis consumer group: {}", e));
+                Err(e) if e.code() == Some("BUSYGROUP") => {}
+                Err(e) => return Err(anyhow!("Failed to create Redis consumer group: {}", e)),
+                Ok(()) if !config.read_from_start => {
+                    let held: redis::RedisResult<u64> = redis::cmd("XLEN")
+                        .arg(&stream)
+                        .query_async(&mut read_conn)
+                        .await;
+                    if let Ok(entries @ 1..) = held {
+                        warn!(
+                            stream = %stream,
+                            group = %group,
+                            entries,
+                            "The new Redis consumer group starts after the entries the stream already holds; set `read_from_start: true` to read them"
+                        );
+                    }
                 }
+                Ok(()) => {}
             }
             Some(group)
         };
@@ -342,6 +396,7 @@ impl RedisStreamsConsumer {
         let (tx, rx) =
             bounded::<Result<StreamEntry, ConsumerError>>(count.saturating_mul(readers).max(count));
 
+        let held = HeldIds::default();
         let mut consumer_names = Vec::with_capacity(readers);
         for i in 0..readers {
             // Reader 0 reuses the connection the group was created on; the rest get
@@ -349,7 +404,7 @@ impl RedisStreamsConsumer {
             let read_conn = if i == 0 {
                 read_conn.clone()
             } else {
-                ConnectionManager::new(client.clone())
+                ConnectionManager::new_with_config(client.clone(), read_config.clone())
                     .await
                     .map_err(|e| anyhow!("Failed to connect to Redis: {}", e))?
             };
@@ -383,6 +438,7 @@ impl RedisStreamsConsumer {
                 count,
                 block_ms,
                 redelivery_ms,
+                held: held.clone(),
                 tx: tx.clone(),
             });
         }
@@ -394,6 +450,8 @@ impl RedisStreamsConsumer {
             stream,
             group,
             buffer: VecDeque::new(),
+            deferred_error: None,
+            held,
             exit_on_empty: false,
             consumer_names,
             redelivery_ms,
@@ -477,6 +535,7 @@ struct ReaderCtx {
     count: usize,
     block_ms: usize,
     redelivery_ms: u64,
+    held: HeldIds,
     tx: Sender<Result<StreamEntry, ConsumerError>>,
 }
 
@@ -492,6 +551,7 @@ fn spawn_stream_reader(ctx: ReaderCtx) {
         count,
         block_ms,
         redelivery_ms,
+        held,
         tx,
     } = ctx;
     tokio::spawn(async move {
@@ -505,40 +565,56 @@ fn spawn_stream_reader(ctx: ReaderCtx) {
         // same pending entries each time; "0-0" restarts a full scan.
         let mut reclaim_cursor = String::from("0-0");
         loop {
+            if tx.is_closed() {
+                return; // consumer dropped
+            }
             // Redeliver entries left pending past redelivery_ms (Nacked, or
             // orphaned by a crashed/renamed consumer) via XAUTOCLAIM.
             if last_reclaim.is_none_or(|t| t.elapsed() >= reclaim_interval) {
                 last_reclaim = Some(Instant::now());
                 if let (Some(group), Some(conn)) = (&task_group, reclaim_conn.as_mut()) {
-                    let claim_opts = StreamAutoClaimOptions::default().count(count);
-                    let claimed: redis::RedisResult<StreamAutoClaimReply> = conn
-                        .xautoclaim_options(
-                            &task_stream,
-                            group,
-                            &consumer_name,
-                            redelivery_ms as usize,
-                            &reclaim_cursor,
-                            claim_opts,
-                        )
-                        .await;
-                    match claimed {
-                        Ok(reply) => {
-                            // Advance the cursor; the server returns "0-0"
-                            // once the pending set has been fully scanned.
-                            reclaim_cursor = reply.next_stream_id;
-                            for entry in reply.claimed {
-                                let stream_entry = parse_entry(entry.id, entry.map);
-                                if tx.send(Ok(stream_entry)).await.is_err() {
-                                    return; // consumer dropped
+                    // Page until the scan is through, or a drain ends with entries left pending.
+                    loop {
+                        let claim_opts = StreamAutoClaimOptions::default().count(count);
+                        let claimed: redis::RedisResult<StreamAutoClaimReply> = conn
+                            .xautoclaim_options(
+                                &task_stream,
+                                group,
+                                &consumer_name,
+                                redelivery_ms as usize,
+                                &reclaim_cursor,
+                                claim_opts,
+                            )
+                            .await;
+                        match claimed {
+                            Ok(reply) => {
+                                // Advance the cursor; the server returns "0-0"
+                                // once the pending set has been fully scanned.
+                                reclaim_cursor = reply.next_stream_id;
+                                // An entry a slow sink still holds is not delivered twice.
+                                let mut claimed = reply.claimed;
+                                {
+                                    let mut held = held.lock().unwrap_or_else(|e| e.into_inner());
+                                    claimed.retain(|entry| held.insert(entry.id.clone()));
+                                }
+                                for entry in claimed {
+                                    let stream_entry = parse_entry(entry.id, entry.map);
+                                    if tx.send(Ok(stream_entry)).await.is_err() {
+                                        return; // consumer dropped
+                                    }
+                                }
+                                if reclaim_cursor == "0-0" {
+                                    break;
                                 }
                             }
-                        }
-                        // Transient; a hard error surfaces on the read below. Warn
-                        // anyway: a claim that fails after the server applied it
-                        // leaves entries pending under this consumer, and silence
-                        // makes that indistinguishable from an idle stream.
-                        Err(e) => {
-                            warn!(stream = %task_stream, error = %e, "Redis XAUTOCLAIM failed")
+                            // Transient; a hard error surfaces on the read below. Warn
+                            // anyway: a claim that fails after the server applied it
+                            // leaves entries pending under this consumer, and silence
+                            // makes that indistinguishable from an idle stream.
+                            Err(e) => {
+                                warn!(stream = %task_stream, error = %e, "Redis XAUTOCLAIM failed");
+                                break;
+                            }
                         }
                     }
                 }
@@ -553,12 +629,23 @@ fn spawn_stream_reader(ctx: ReaderCtx) {
                 None => vec![last_id.as_str()],
             };
 
-            let reply: redis::RedisResult<Option<StreamReadReply>> = read_conn
-                .xread_options(&[&task_stream], read_ids.as_slice(), &opts)
-                .await;
+            // Dropping the read with the consumer closes the connection, so the server
+            // gives no entries to a reader nobody listens to.
+            let streams = [&task_stream];
+            let reply: redis::RedisResult<Option<StreamReadReply>> = tokio::select! {
+                biased;
+                _ = tx.closed() => return,
+                reply = read_conn.xread_options(&streams, read_ids.as_slice(), &opts) => reply,
+            };
 
             match reply {
                 Ok(Some(reply)) => {
+                    if task_group.is_some() {
+                        let mut held = held.lock().unwrap_or_else(|e| e.into_inner());
+                        for key in &reply.keys {
+                            held.extend(key.ids.iter().map(|entry| entry.id.clone()));
+                        }
+                    }
                     for key in reply.keys {
                         for entry in key.ids {
                             if task_group.is_none() {
@@ -573,15 +660,6 @@ fn spawn_stream_reader(ctx: ReaderCtx) {
                 }
                 // BLOCK timeout with no data — just poll again.
                 Ok(None) => {}
-                // Client-side read timeout: same "no data" condition as `Ok(None)`,
-                // it just fired before the server's empty BLOCK reply arrived.
-                Err(e) if e.is_timeout() => {
-                    trace!(
-                        stream = %task_stream,
-                        error = %e,
-                        "Redis XREAD client-side read timeout; polling again"
-                    );
-                }
                 Err(e) => {
                     if tx
                         .send(Err(ConsumerError::Connection(anyhow!(
@@ -658,6 +736,9 @@ impl MessageConsumer for RedisStreamsConsumer {
         }
 
         if self.buffer.is_empty() {
+            if let Some(error) = self.deferred_error.take() {
+                return Err(error);
+            }
             // Drain mode times out into an empty batch (async_channel recv is cancel-safe,
             // so no entry is lost); streaming blocks indefinitely for the first entry.
             let Some(res) = crate::traits::drain_gated(self.exit_on_empty, self.rx.recv()).await
@@ -672,8 +753,10 @@ impl MessageConsumer for RedisStreamsConsumer {
         while self.buffer.len() < max_messages {
             match self.rx.try_recv() {
                 Ok(Ok(entry)) => self.buffer.push_back(entry),
-                // A connection error surfaces on the next blocking recv; stop here.
-                Ok(Err(_)) => break,
+                Ok(Err(error)) => {
+                    self.deferred_error = Some(error);
+                    break;
+                }
                 Err(_) => break,
             }
         }
@@ -698,8 +781,13 @@ impl MessageConsumer for RedisStreamsConsumer {
         let stream = self.stream.clone();
         let mut ack_conn = self.ack_conn.clone();
         let settled = self.settled.clone();
+        let batch_ids = BatchIds {
+            ids,
+            held: self.held.clone(),
+        };
         let commit = Box::new(move |dispositions: Vec<MessageDisposition>| {
             Box::pin(async move {
+                let batch_ids = batch_ids;
                 settled.fetch_add(dispositions.len() as u64, Ordering::Relaxed);
                 // Subscriber mode has no group and therefore nothing to ack.
                 let Some(group) = group else {
@@ -707,8 +795,10 @@ impl MessageConsumer for RedisStreamsConsumer {
                 };
                 // Ack successfully handled entries; Nacked ones stay pending so the
                 // group can redeliver them (e.g. via XAUTOCLAIM) later.
-                let ack_ids: Vec<String> = ids
-                    .into_iter()
+                let ack_ids: Vec<&str> = batch_ids
+                    .ids
+                    .iter()
+                    .map(String::as_str)
                     .zip(dispositions)
                     .filter_map(|(id, disposition)| match disposition {
                         MessageDisposition::Ack | MessageDisposition::Reply(_) => Some(id),
@@ -800,6 +890,19 @@ mod tests {
         let config = RedisStreamsConfig::new("rediss://localhost:6379").with_tls(tls);
         let error = open_client(&config).unwrap_err().to_string();
         assert!(error.contains("both cert_file and key_file"), "{error}");
+    }
+
+    #[test]
+    fn an_encrypted_client_key_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = dir.path().join("client.key");
+        std::fs::write(&key, "-----BEGIN ENCRYPTED PRIVATE KEY-----\n").unwrap();
+        let mut tls = TlsConfig::new();
+        tls.cert_file = Some("/client.pem".to_string());
+        tls.key_file = Some(key.to_string_lossy().into_owned());
+        let config = RedisStreamsConfig::new("rediss://localhost:6379").with_tls(tls);
+        let error = open_client(&config).unwrap_err().to_string();
+        assert!(error.contains("is encrypted"), "{error}");
     }
 
     fn bulk(s: &str) -> redis::Value {

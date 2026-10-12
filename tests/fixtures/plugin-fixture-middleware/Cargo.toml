@@ -1,8 +1,8 @@
 [package]
 name = "mq-bridge-plugin-fixture-middleware"
 version = "0.1.0"
-edition = "2021"
-rust-version = "1.85"
+edition = "2024"
+rust-version = "1.89"
 publish = false
 description = "A plugin that provides only a middleware, to test that it cannot answer an endpoint name"
 license = "MIT OR Apache-2.0"

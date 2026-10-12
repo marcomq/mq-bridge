@@ -1,9 +1,9 @@
 [package]
 name = "mq-bridge"
 version.workspace = true
-edition = "2021"
+edition = "2024"
 authors = ["Marco Mengelkoch"]
-rust-version = "1.85"  # Base crate MSRV (non-optional uuid 1.24 needs 1.85); optional amqp/mongodb/nats need Rust 1.88.
+rust-version = "1.89"  # With the checked-in lock; `aws`, `sqlx`, `postgres-cdc` and `full` need 1.94.1. CI job `msrv` tests both.
 description = "Embeddable async ETL and messaging library: brokers (Kafka, NATS, AMQP, MQTT), databases incl. Postgres/MongoDB CDC, Parquet on S3/GCS/Azure object storage, HTTP/gRPC."
 repository = "https://github.com/marcomq/mq-bridge"
 homepage = "https://marcomq.github.io/mq-bridge/"
@@ -16,6 +16,14 @@ categories = ["asynchronous", "network-programming", "database"]
 # `apps/` is a sibling product, not part of the library: cargo only auto-excludes
 # the app's member crates, so the UI, book and benches would ship in the tarball.
 exclude = ["tests/fixtures/grpc_dynamic.proto", "apps/", "docs/book/"]
+
+# A new config field or enum variant is a minor release, not a major one
+# (see "Stability" in the crate docs); the defaults call both major.
+[package.metadata.cargo-semver-checks.lints]
+constructible_struct_adds_field = { required-update = "minor" }
+enum_variant_added = { required-update = "minor" }
+enum_struct_variant_field_added = { required-update = "minor" }
+enum_tuple_variant_field_added = { required-update = "minor" }
 
 [lints]
 workspace = true
@@ -40,23 +48,25 @@ resolver = "2"
 # ship. Kept at `warn` so a local `cargo check` surfaces them; CI already runs clippy
 # with `-D warnings`, which promotes them to hard errors there.
 [workspace.lints.rust]
-# Allow-by-default in edition 2021, warn-by-default from edition 2024. Turning it on now keeps
-# each unsafe operation in the plugin FFI layer marked at its own call site.
+# Warn-by-default since edition 2024; kept explicit. It keeps each unsafe operation in
+# the plugin FFI layer marked at its own call site.
 unsafe_op_in_unsafe_fn = "warn"
 
 [workspace.lints.clippy]
 todo = "warn"
 dbg_macro = "warn"
 exit = "warn"
+# Edition 2024 asks for let chains here; rustfmt formats those only in the 2024 style.
+collapsible_if = "allow"
 
 [workspace.package]
-version = "0.4.20"
+version = "1.0.0"
 
 [workspace.dependencies]
 anyhow = "1.0"
 async-trait = "0.1"
 bytes = "1"
-fast-uuid-v7 = "0.1.9"
+fast-uuid-v7 = "0.1.10"
 # Bulk delimiter/quote scanning in the CSV row decoder.
 memchr = "2"
 serde = "1.0"
@@ -92,13 +102,10 @@ serde = { workspace = true, features = ["derive"] }
 anyhow.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util", "net", "signal"] }
 # Note on MSRV for optional features:
-# The base crate MSRV is 1.85 with default = [] (non-optional uuid 1.24 requires 1.85).
-# - "amqp" (lapin 4.10) requires Rust 1.88+; "http" (hyper-rustls 0.27) requires Rust 1.85+.
-# - "websocket" (tokio-websockets 0.13) requires Rust 1.89+.
-# - "mongodb" (mongodb 3.8) requires Rust 1.88+; "nats" (async-nats 0.50) requires Rust 1.88+.
-# - "plugin" (libloading 0.9) requires Rust 1.88+.
-# - "aws" (aws-sdk-*) may require a newer stable toolchain than the base MSRV.
-# Use `rustup override set stable` or a `rust-toolchain.toml` file when enabling these features.
+# The crate MSRV is 1.89 (uuid 1.27, in every build); these features need more:
+# - "aws" (aws-sdk-*) requires Rust 1.94.1, and so does "full".
+# - "sqlx" and "postgres-cdc" (sqlx 0.9) require Rust 1.94.
+# - "zeromq-omq" (omq 0.26) requires Rust 1.93.
 async-trait.workspace = true
 serde_json.workspace = true
 thiserror = "2.0"
@@ -218,6 +225,8 @@ zeroize = { version = "1.9", optional = true }
 # pure Rust; the default features pull a heavier one.
 zen-expression = { version = "2.0", optional = true, default-features = false, features = ["regex-lite"] }
 rust_decimal = { version = "1", optional = true }
+# Header types of the `websocket` handshake; `http` itself is a feature name here.
+http-crate = { package = "http", version = "1", optional = true }
 tokio-websockets = { version = "0.13", optional = true, default-features = false, features = ["client", "server", "sha1_smol", "fastrand"] }
 
 # AWS.
@@ -302,14 +311,15 @@ full-common = ["file", "dir-spool", "middleware", "yaml", "plugin", "mongodb", "
 # runtime the client is loaded lazily only when an ibm-mq endpoint is opened
 # (clear error if the client isn't installed). Use `ibm-mq-static` instead for
 # static linking.
-full = ["full-common", "ibm-mq"]
+full = ["full-common", "ibm-mq", "kafka-ssl"]
 
 # The two build variants. `full` compiles librdkafka from bundled sources and
 # needs nothing installed. `full-dynamic` adds `link-dynamic`, which links the
 # shared librdkafka found via pkg-config -- what a conda-forge recipe or a distro
 # package wants, so the library stays patchable. Purely additive: enabling both
-# just gives you the dynamic one.
-full-dynamic = ["full", "link-dynamic"]
+# just gives you the dynamic one. It leaves `kafka-ssl` out: the system librdkafka
+# brings its own OpenSSL.
+full-dynamic = ["full-common", "ibm-mq", "link-dynamic"]
 link-dynamic = ["rdkafka?/dynamic-linking"]
 
 # The feature set for lint and doc builds. NOT `--all-features`: that turns on
@@ -318,6 +328,12 @@ link-dynamic = ["rdkafka?/dynamic-linking"]
 # gates code is here, `ibm-mq-static` included -- clippy never links, so it needs
 # no IBM SDK.
 lint-all = ["full", "test-utils", "schema", "plugin-sdk", "perf-diagnostics", "float-roundtrip", "ibm-mq-static", "rustls-ring"]
+
+# The fast local test set: no OpenSSL, librdkafka, aws-lc-sys or protoc build, and
+# `ring` as the only TLS provider. Leaves out kafka, aws, mongodb, grpc, amqp, ibm-mq,
+# postgres-cdc and the reqwest-based endpoints (reqwest pulls aws-lc-sys); CI covers
+# those with `full`. sqlx stays for the SQLite-backed tests.
+test = ["test-utils", "file", "dir-spool", "middleware", "yaml", "plugin", "nats", "mqtt", "http", "websocket", "zeromq", "zeromq-omq", "redis-streams", "sled", "sqlx", "rustls-ring"]
 
 # `grpc` carries this, so every set containing grpc has a protoc without one
 # installed. build.rs prefers $PROTOC when set, so a distro or conda-forge build
@@ -390,12 +406,15 @@ file = []
 # `dir_spool` endpoint: crash-safe directory FIFO queue.
 dir-spool = ["dep:pidlock"]
 kafka = ["rdkafka", "rdkafka/libz-static"]
+# TLS and SASL for the bundled librdkafka, which has neither without OpenSSL. Compiles
+# OpenSSL from source: needs perl and make, and adds minutes to a clean build.
+kafka-ssl = ["kafka", "rdkafka/ssl-vendored"]
 amqp = ["lapin", "rustls", "rustls-pemfile"]
-nats = ["async-nats", "rustls", "rustls-pemfile"]
+nats = ["async-nats", "rustls", "rustls-pemfile", "webpki-roots"]
 mongodb = ["dep:mongodb"]
 mqtt = ["rumqttc", "rustls", "tokio-rustls", "rustls-pemfile", "webpki-roots"]
 http = ["dep:arc-swap", "hyper", "hyper-util", "hyper-rustls", "http-body-util", "dep:http-body", "rustls", "tokio-rustls", "rustls-pemfile", "webpki-roots", "h2", "dep:flate2", "dep:lz4_flex", "dep:zstd"]
-websocket = ["dep:tokio-websockets", "tokio-websockets/rustls-bring-your-own-connector", "rustls", "tokio-rustls", "rustls-pemfile", "webpki-roots"]
+websocket = ["dep:tokio-websockets", "dep:http-crate", "tokio-websockets/rustls-bring-your-own-connector", "rustls", "tokio-rustls", "rustls-pemfile", "webpki-roots"]
 aws = ["aws-config", "aws-sdk-sqs", "aws-sdk-sns", "aws-sigv4"]
 # Runtime-loaded IBM MQ client via dlopen: builds with no SDK present; the IBM
 # redistributable client is only needed at runtime, and only if an ibm-mq
@@ -453,8 +472,10 @@ reqwest = { version = "0.13", default-features = false, features = ["stream"] }
 
 # TLS test helpers
 rcgen = "0.14"
-tokio-rustls = { version = "0.26", features = ["ring"] }
-rustls = { version = "0.23", features = ["ring"] }
+# No default features: they select aws_lc_rs, which would put aws-lc-sys (a C build) into
+# every test build. A set with `rustls-aws-lc` still gets it through the feature.
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging", "tls12"] }
 
 [[bench]]
 name = "performance_bench"

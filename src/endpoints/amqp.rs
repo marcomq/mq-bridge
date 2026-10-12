@@ -60,6 +60,85 @@ async fn with_setup_timeout<T>(
     }
 }
 
+/// AMQP short strings (header names, `reply_to`, `correlation_id`) hold 255 bytes.
+const MAX_SHORT_STRING: usize = 255;
+
+/// `value` as a short string, or `None` with one warning if it is too long to be one.
+fn short_string(what: &str, value: &str) -> Option<ShortString> {
+    if value.len() <= MAX_SHORT_STRING {
+        return Some(value.into());
+    }
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    if !WARNED.swap(true, Ordering::Relaxed) {
+        tracing::warn!(
+            what,
+            bytes = value.len(),
+            "AMQP cannot carry a short string over 255 bytes; it is left out. Logged once."
+        );
+    }
+    None
+}
+
+/// The properties of an outgoing message: persistence, identity and metadata as headers.
+fn publish_properties(message: &CanonicalMessage, no_persistence: bool) -> BasicProperties {
+    let mut properties = if no_persistence {
+        BasicProperties::default()
+    } else {
+        // Delivery mode 2 makes the message persistent
+        BasicProperties::default().with_delivery_mode(2)
+    };
+    let metadata = &message.metadata;
+    if let Some(reply_to) = metadata
+        .get("reply_to")
+        .and_then(|v| short_string("reply_to", v))
+    {
+        properties = properties.with_reply_to(reply_to);
+    }
+    if let Some(correlation_id) = metadata
+        .get("correlation_id")
+        .and_then(|v| short_string("correlation_id", v))
+    {
+        properties = properties.with_correlation_id(correlation_id);
+    }
+    // Carries identity across the hop; the consumer would otherwise fall back to a fresh id.
+    properties = properties
+        .with_message_id(crate::canonical_message::format_message_id(message.message_id).into());
+    if !metadata.is_empty() {
+        let mut table = FieldTable::default();
+        for (key, value) in metadata {
+            // reply_to and correlation_id are native properties; source keys are not forwarded.
+            if key == "reply_to"
+                || key == "correlation_id"
+                || crate::canonical_message::is_source_metadata_key(key)
+            {
+                continue;
+            }
+            if let Some(name) = short_string("a header name", key) {
+                table.insert(
+                    name,
+                    lapin::types::AMQPValue::LongString(value.clone().into()),
+                );
+            }
+        }
+        properties = properties.with_headers(table);
+    }
+    properties
+}
+
+/// Why a confirmed publish did not arrive, if it did not.
+fn confirmation_error(confirmation: Confirmation) -> Option<anyhow::Error> {
+    match confirmation {
+        Confirmation::Ack(None) | Confirmation::NotRequested => None,
+        // `mandatory`: the broker hands back what it could not route to a queue.
+        Confirmation::Ack(Some(returned)) | Confirmation::Nack(Some(returned)) => Some(anyhow!(
+            "Broker returned the message as unroutable: {} {}",
+            returned.reply_code,
+            returned.reply_text
+        )),
+        Confirmation::Nack(None) => Some(anyhow!("Broker Nacked the message")),
+    }
+}
+
 struct AmqpState {
     connection: Connection,
     channel: Channel,
@@ -77,6 +156,9 @@ pub struct AmqpPublisher {
     queue: String,
     no_persistence: bool,
     delayed_ack: bool,
+    /// Ask the broker to return what it cannot route. Not for a fanout exchange, where
+    /// no subscriber is a normal state.
+    mandatory: bool,
 }
 
 impl AmqpPublisher {
@@ -109,6 +191,7 @@ impl AmqpPublisher {
             queue,
             no_persistence: config.no_persistence,
             delayed_ack: config.delayed_ack,
+            mandatory: !config.subscribe_mode && !config.delayed_ack,
         })
     }
 
@@ -212,45 +295,16 @@ impl MessagePublisher for AmqpPublisher {
             payload_size = message.payload.len(),
             "Publishing AMQP message"
         );
-        let mut properties = if self.no_persistence {
-            BasicProperties::default()
-        } else {
-            // Delivery mode 2 makes the message persistent
-            BasicProperties::default().with_delivery_mode(2)
-        };
-        if let Some(reply_to) = message.metadata.get("reply_to") {
-            properties = properties.with_reply_to(reply_to.clone().into());
-        }
-        if let Some(correlation_id) = message.metadata.get("correlation_id") {
-            properties = properties.with_correlation_id(correlation_id.clone().into());
-        }
-        // Carries identity across the hop; the consumer would otherwise fall back to a fresh id.
-        properties = properties.with_message_id(
-            crate::canonical_message::format_message_id(message.message_id).into(),
-        );
-        if !message.metadata.is_empty() {
-            let mut table = FieldTable::default();
-            for (key, value) in &message.metadata {
-                // Skip reply_to and correlation_id since they are already set as native properties
-                if key == "reply_to" || key == "correlation_id" {
-                    continue;
-                }
-                if crate::canonical_message::is_source_metadata_key(key) {
-                    continue; // source/provenance keys must not be forwarded
-                }
-                table.insert(
-                    ShortString::from(key.as_str()),
-                    lapin::types::AMQPValue::LongString(value.clone().into()),
-                );
-            }
-            properties = properties.with_headers(table);
-        }
+        let properties = publish_properties(&message, self.no_persistence);
 
         let (channel, generation) = self.get_channel().await;
         let publish_fut = channel.basic_publish(
             self.exchange.clone().into(),
             self.queue.clone().into(),
-            BasicPublishOptions::default(),
+            BasicPublishOptions {
+                mandatory: self.mandatory,
+                ..Default::default()
+            },
             &message.payload,
             properties,
         );
@@ -298,10 +352,8 @@ impl MessagePublisher for AmqpPublisher {
                     )));
                 }
             };
-            if let Confirmation::Nack(_) = confirm {
-                return Err(PublisherError::Retryable(anyhow::anyhow!(
-                    "Broker Nacked the message"
-                )));
+            if let Some(error) = confirmation_error(confirm) {
+                return Err(PublisherError::Retryable(error));
             }
         }
         Ok(Sent::Ack)
@@ -324,45 +376,16 @@ impl MessagePublisher for AmqpPublisher {
         let mut pending_confirms = Vec::with_capacity(messages.len());
         let mut failed_messages = Vec::new();
 
-        for message in messages {
-            let mut properties = if self.no_persistence {
-                BasicProperties::default()
-            } else {
-                BasicProperties::default().with_delivery_mode(2)
-            };
-            if let Some(reply_to) = message.metadata.get("reply_to") {
-                properties = properties.with_reply_to(reply_to.clone().into());
-            }
-            if let Some(correlation_id) = message.metadata.get("correlation_id") {
-                properties = properties.with_correlation_id(correlation_id.clone().into());
-            }
-            // Carries identity across the hop; the consumer would otherwise fall back to a fresh id.
-            properties = properties.with_message_id(
-                crate::canonical_message::format_message_id(message.message_id).into(),
-            );
-
-            if !message.metadata.is_empty() {
-                let mut table = FieldTable::default();
-                for (key, value) in &message.metadata {
-                    // Skip reply_to and correlation_id since they are already set as native properties
-                    if key == "reply_to" || key == "correlation_id" {
-                        continue;
-                    }
-                    if crate::canonical_message::is_source_metadata_key(key) {
-                        continue; // source/provenance keys must not be forwarded
-                    }
-                    table.insert(
-                        ShortString::from(key.clone()),
-                        lapin::types::AMQPValue::LongString(value.clone().into()),
-                    );
-                }
-                properties = properties.with_headers(table);
-            }
-
+        let mut messages = messages.into_iter();
+        while let Some(message) = messages.next() {
+            let properties = publish_properties(&message, self.no_persistence);
             let publish_fut = channel.basic_publish(
                 self.exchange.clone().into(),
                 self.queue.clone().into(),
-                BasicPublishOptions::default(),
+                BasicPublishOptions {
+                    mandatory: self.mandatory,
+                    ..Default::default()
+                },
                 &message.payload,
                 properties,
             );
@@ -389,6 +412,15 @@ impl MessagePublisher for AmqpPublisher {
                             "Timed out submitting AMQP publish in batch"
                         )),
                     ));
+                    // The channel is stuck: the rest would wait out the same timeout each.
+                    failed_messages.extend(messages.by_ref().map(|message| {
+                        (
+                            message,
+                            PublisherError::Retryable(anyhow!(
+                                "Not sent: the AMQP channel stopped accepting publishes"
+                            )),
+                        )
+                    }));
                 }
             }
         }
@@ -402,13 +434,9 @@ impl MessagePublisher for AmqpPublisher {
                     for (message, confirmation) in pending_messages.into_iter().zip(confirmations) {
                         match confirmation {
                             Ok(confirm) => {
-                                if let Confirmation::Nack(_) = confirm {
-                                    failed_messages.push((
-                                        message,
-                                        PublisherError::Retryable(anyhow::anyhow!(
-                                            "Broker Nacked the message"
-                                        )),
-                                    ));
+                                if let Some(error) = confirmation_error(confirm) {
+                                    failed_messages
+                                        .push((message, PublisherError::Retryable(error)));
                                 }
                             }
                             Err(e) => {
@@ -519,7 +547,7 @@ impl AmqpConsumer {
                     exchange_name.into(),
                     ExchangeKind::Fanout,
                     ExchangeDeclareOptions {
-                        durable: true,
+                        durable: !config.no_persistence,
                         ..Default::default()
                     },
                     FieldTable::default(),
@@ -615,8 +643,9 @@ impl AmqpConsumer {
     }
 }
 
-async fn create_amqp_connection(config: &AmqpConfig) -> anyhow::Result<Connection> {
-    info!(url = %crate::support::redact::url_password(&config.url), "Connecting to AMQP broker");
+/// The URI to connect to, and whether it is TLS. lapin picks TLS from the scheme alone,
+/// so `tls.required` turns an `amqp://` URL into `amqps://`.
+fn connection_uri(config: &AmqpConfig) -> anyhow::Result<(String, bool)> {
     let mut url = url::Url::parse(&config.url).context("Failed to parse AMQP URL")?;
 
     if let (Some(user), Some(pass)) = (&config.username, &config.password) {
@@ -626,7 +655,11 @@ async fn create_amqp_connection(config: &AmqpConfig) -> anyhow::Result<Connectio
             .map_err(|_| anyhow!("Failed to set password on AMQP URL"))?;
     }
 
-    let encrypted = config.tls.required || url.scheme() == "amqps";
+    if config.tls.required && url.scheme() == "amqp" {
+        url.set_scheme("amqps")
+            .map_err(|_| anyhow!("Failed to make the AMQP URL amqps:// for tls.required"))?;
+    }
+    let encrypted = url.scheme() == "amqps";
     let has_password = url.password().is_some_and(|password| !password.is_empty());
     crate::support::tls_check::warn_plaintext_credentials(
         "amqp",
@@ -643,7 +676,12 @@ async fn create_amqp_connection(config: &AmqpConfig) -> anyhow::Result<Connectio
     if !url.query_pairs().any(|(k, _)| k == "heartbeat") {
         url.query_pairs_mut().append_pair("heartbeat", "15");
     }
-    let conn_uri = url.to_string();
+    Ok((url.to_string(), encrypted))
+}
+
+async fn create_amqp_connection(config: &AmqpConfig) -> anyhow::Result<Connection> {
+    info!(url = %crate::support::redact::url_password(&config.url), "Connecting to AMQP broker");
+    let (conn_uri, encrypted) = connection_uri(config)?;
 
     let mut last_error: Option<anyhow::Error> = None;
     for attempt in 1..=5 {
@@ -652,7 +690,7 @@ async fn create_amqp_connection(config: &AmqpConfig) -> anyhow::Result<Connectio
         let conn_props = ConnectionProperties::default();
         // Bound the connect itself: a hung TLS/AMQP handshake against a broker
         // that is restarting must not stall the reconnect indefinitely.
-        let result = if config.tls.required {
+        let result = if encrypted {
             let tls_config = build_tls_config(config).await?;
             let builder = DefaultConnectionBuilder::new()?
                 .with_uri_str(conn_uri.clone())
@@ -768,6 +806,15 @@ fn delivery_to_canonical_message(
                 lapin::types::AMQPValue::ShortString(s) => s.to_string(),
                 lapin::types::AMQPValue::Boolean(b) => b.to_string(),
                 lapin::types::AMQPValue::LongInt(i) => i.to_string(),
+                lapin::types::AMQPValue::ShortShortInt(i) => i.to_string(),
+                lapin::types::AMQPValue::ShortShortUInt(i) => i.to_string(),
+                lapin::types::AMQPValue::ShortInt(i) => i.to_string(),
+                lapin::types::AMQPValue::ShortUInt(i) => i.to_string(),
+                lapin::types::AMQPValue::LongUInt(i) => i.to_string(),
+                lapin::types::AMQPValue::LongLongInt(i) => i.to_string(),
+                lapin::types::AMQPValue::Timestamp(i) => i.to_string(),
+                lapin::types::AMQPValue::Float(f) => f.to_string(),
+                lapin::types::AMQPValue::Double(f) => f.to_string(),
                 _ => continue,
             };
             canonical_message
@@ -1033,10 +1080,11 @@ async fn handle_replies(
 
             match confirmation {
                 Confirmation::Ack(None) => {}
+                // Nobody reads that queue any more; failing here would redeliver the request forever.
                 Confirmation::Ack(Some(returned)) | Confirmation::Nack(Some(returned)) => {
-                    bail!(
-                        "AMQP reply to {} was returned by broker: {} {}",
-                        rt,
+                    tracing::warn!(
+                        reply_to = %rt,
+                        "AMQP reply was returned by the broker ({} {}); the request is acked without it",
                         returned.reply_code,
                         returned.reply_text
                     );
@@ -1120,6 +1168,75 @@ mod tests {
                 crate::canonical_message::message_id_from_str(id).unwrap()
             );
         }
+    }
+
+    /// lapin picks TLS from the scheme alone, so `tls.required` on `amqp://` sent the
+    /// password in the clear.
+    #[test]
+    fn tls_required_makes_an_amqp_url_amqps() {
+        let mut config = AmqpConfig {
+            url: "amqp://user:secret@broker/%2f".to_string(),
+            ..Default::default()
+        };
+        let (uri, tls) = connection_uri(&config).unwrap();
+        assert!(uri.starts_with("amqp://") && !tls);
+
+        config.tls.required = true;
+        let (uri, tls) = connection_uri(&config).unwrap();
+        assert!(uri.starts_with("amqps://user:secret@broker/"), "{uri}");
+        assert!(tls);
+
+        // An `amqps://` URL uses the `tls` block without `required`.
+        config.tls.required = false;
+        config.url = "amqps://broker:5671/%2f".to_string();
+        assert!(connection_uri(&config).unwrap().1);
+    }
+
+    #[test]
+    fn a_numeric_header_becomes_metadata() {
+        use lapin::types::AMQPValue;
+        let mut table = FieldTable::default();
+        table.insert("count".into(), AMQPValue::LongLongInt(7));
+        table.insert("ratio".into(), AMQPValue::Double(0.5));
+        table.insert("small".into(), AMQPValue::ShortInt(-3));
+        let mut delivery = delivery(1, None);
+        delivery.properties = BasicProperties::default().with_headers(table);
+
+        let message = delivery_to_canonical_message(&delivery, false);
+
+        assert_eq!(message.metadata.get("count").map(String::as_str), Some("7"));
+        assert_eq!(
+            message.metadata.get("ratio").map(String::as_str),
+            Some("0.5")
+        );
+        assert_eq!(
+            message.metadata.get("small").map(String::as_str),
+            Some("-3")
+        );
+    }
+
+    /// A short string holds 255 bytes; a longer one is a debug assertion in lapin and a
+    /// corrupt frame in a release build.
+    #[test]
+    fn a_string_over_255_bytes_is_left_out_of_the_properties() {
+        let long = "k".repeat(256);
+        let mut message = CanonicalMessage::new(b"x".to_vec(), Some(1));
+        message.metadata.insert(long.clone(), "value".to_string());
+        message
+            .metadata
+            .insert("reply_to".to_string(), long.clone());
+        message.metadata.insert("correlation_id".to_string(), long);
+        message
+            .metadata
+            .insert("kept".to_string(), "value".to_string());
+
+        let properties = publish_properties(&message, false);
+
+        assert!(properties.reply_to().is_none());
+        assert!(properties.correlation_id().is_none());
+        let headers = properties.headers().as_ref().unwrap();
+        assert_eq!(headers.inner().len(), 1);
+        assert!(headers.inner().contains_key("kept"));
     }
 
     #[test]

@@ -25,7 +25,7 @@ fn build(endpoint: Endpoint) -> anyhow::Result<mqb_publisher_t> {
 
 /// Builds a publisher from a YAML or JSON config file. `name` selects an entry of
 /// a `publishers:` document; null or `""` for a single bare endpoint. Null on error.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn mqb_publisher_from_file(
     path: *const c_char,
     name: *const c_char,
@@ -38,7 +38,7 @@ pub unsafe extern "C" fn mqb_publisher_from_file(
 }
 
 /// Like `mqb_publisher_from_file`, from YAML or JSON text.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn mqb_publisher_from_str(
     config: *const c_char,
     name: *const c_char,
@@ -51,7 +51,7 @@ pub unsafe extern "C" fn mqb_publisher_from_str(
 }
 
 /// Publishes one message and waits for the endpoint to accept it.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn mqb_publisher_send(
     publisher: *const mqb_publisher_t,
     message: *const mqb_message_t,
@@ -67,7 +67,7 @@ pub unsafe extern "C" fn mqb_publisher_send(
 }
 
 /// Publishes `count` messages in one call. Fails if any of them was rejected.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn mqb_publisher_send_batch(
     publisher: *const mqb_publisher_t,
     messages: *const *const mqb_message_t,
@@ -97,7 +97,7 @@ pub unsafe extern "C" fn mqb_publisher_send_batch(
 
 /// Sends a request and stores the reply in `*response` (free it with
 /// `mqb_message_free`; null on failure). Needs an endpoint that supports request-reply.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn mqb_publisher_request(
     publisher: *const mqb_publisher_t,
     message: *const mqb_message_t,
@@ -118,7 +118,7 @@ pub unsafe extern "C" fn mqb_publisher_request(
     })
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn mqb_publisher_free(publisher: *mut mqb_publisher_t) {
     if !publisher.is_null() {
         drop(unsafe { Box::from_raw(publisher) });

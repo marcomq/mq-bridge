@@ -6,6 +6,7 @@ features such as a previous value or a moving average (for counters and averages
 no database, see [running aggregates](aggregate.md)). The endpoint asked must answer:
 `http`, `static`, `mongodb` with `find`, `sqlx` or `clickhouse` with `lookup_query`, `nats` /
 `memory` with `request_reply: true`, or `grpc` to an mq-bridge `grpc` input whose route replies.
+For a model's answer or an embedding, see [LLM calls in a pipeline](llm.md).
 
 ## Enrich, then route on the result
 

@@ -16,6 +16,7 @@ use tracing::warn;
 
 /// A server config from `tls`: `cert_file` and `key_file`, and client certificates
 /// checked against `ca_file` if that is set. ALPN is left to the caller.
+#[cfg(any(feature = "http", feature = "websocket"))]
 pub(crate) fn server_config(tls_config: &TlsConfig) -> anyhow::Result<rustls::ServerConfig> {
     let cert_file = tls_config
         .cert_file
@@ -66,6 +67,9 @@ pub(crate) fn server_config(tls_config: &TlsConfig) -> anyhow::Result<rustls::Se
 
 /// A client config from `tls`: its CA or the public roots, and a client certificate if given.
 pub(crate) fn client_config(tls_config: &TlsConfig) -> anyhow::Result<rustls::ClientConfig> {
+    if tls_config.cert_file.is_some() != tls_config.key_file.is_some() {
+        anyhow::bail!("a TLS client certificate needs both cert_file and key_file");
+    }
     let mut root_cert_store = rustls::RootCertStore::empty();
 
     if let Some(ca_file) = &tls_config.ca_file {
@@ -169,4 +173,24 @@ pub(crate) fn load_private_key(path: &str) -> anyhow::Result<PrivateKeyDer<'stat
     let mut key_file =
         BufReader::new(File::open(path).with_context(|| format!("Cannot open key file {}", path))?);
     rustls_pemfile::private_key(&mut key_file)?.context("No private key found in file")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// With one of the pair missing no certificate was sent, and only the server said so.
+    #[test]
+    fn half_a_client_certificate_is_refused() {
+        for (cert_file, key_file) in [(Some("c.pem"), None), (None, Some("k.pem"))] {
+            let tls = TlsConfig {
+                required: true,
+                cert_file: cert_file.map(str::to_owned),
+                key_file: key_file.map(str::to_owned),
+                ..Default::default()
+            };
+            let error = client_config(&tls).unwrap_err().to_string();
+            assert!(error.contains("cert_file and key_file"), "{error}");
+        }
+    }
 }

@@ -35,6 +35,9 @@ impl MongoDbConsumer {
             .keys(doc! { "locked_until": 1 })
             .build();
         collection.create_index(index_model).await?;
+        // Serves the claim query's sort.
+        let order_index = IndexModel::builder().keys(queue_order()).build();
+        collection.create_index(order_index).await?;
 
         // Attempt to create a change stream. If it fails because it's a standalone instance,
         // fall back to polling.
@@ -256,7 +259,7 @@ impl MongoDbConsumer {
             .find(base_filter.clone())
             .limit(limit as i64)
             .projection(doc! { "_id": 1 })
-            .sort(doc! { "_id": 1 })
+            .sort(queue_order())
             .await?;
 
         // Any `_id` type is claimable — ObjectId, string, integer, UUID binary. Restricting
@@ -310,7 +313,7 @@ impl MongoDbConsumer {
 
         let options = FindOneAndUpdateOptions::builder()
             .projection(doc! { "_id": 1, "payload": 1, "metadata": 1 })
-            .sort(doc! { "_id": 1 }) // Process oldest documents first (FIFO)
+            .sort(queue_order()) // Oldest insert first
             .build();
 
         match self
@@ -417,6 +420,7 @@ impl MongoDbConsumer {
             .collection
             .find(filter)
             .projection(doc! { "_id": 1, "payload": 1, "metadata": 1 })
+            .sort(queue_order())
             .await?;
 
         let mut documents = Vec::new();

@@ -88,7 +88,7 @@ by `_id`, which only ever returns documents above its high-water mark, so anythi
 writer committed below that mark was dropped silently.
 
 - One-shot, non-destructive read of a standalone `mongod`: `consume: snapshot`.
-- Work queue (destructive, competing readers): `consume: consumer`.
+- Work queue (destructive, competing readers): `consume: delete`.
 - Turning the standalone into a single-node replica set (`replSet` + `rs.initiate()`) restores
   `capture_all`, and with it resumable reads.
 

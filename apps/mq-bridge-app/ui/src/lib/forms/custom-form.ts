@@ -887,6 +887,8 @@ const middlewaresRenderer = {
       toggleButton.remove();
       addClassTokens(typeSelect, rendererConfig.classes.buttonPrimary);
       typeSelect.style.display = "inline-block";
+      // Size to the label, not to the longest middleware name a plugin adds to the list.
+      typeSelect.style.setProperty("field-sizing", "content");
     }
 
     return element;
@@ -1071,6 +1073,65 @@ const transformSchemaRenderer = {
   },
 };
 
+// `filter` is a bare expression or a map with `on_error`. The library shows neither value for
+// that union, so edit it as two fields and keep the bare form unless `on_error` is needed.
+const filterRenderer = {
+  render: (node: SchemaNode, _path: string, elementId: string, dataPath: Array<string | number>, context: RendererContext) => {
+    const store = context.store;
+    const storePath = toStorePath(dataPath);
+    const current = store.getPath(storePath);
+    const isMap = Boolean(current) && typeof current === "object" && !Array.isArray(current);
+    const mapSchema = (node.oneOf || []).find((branch: SchemaNode) => branch.properties)?.properties || {};
+
+    const expression = document.createElement("input");
+    expression.type = "text";
+    expression.className = rendererConfig.classes.input;
+    expression.id = `${elementId}.expression`;
+    expression.spellcheck = false;
+    expression.placeholder = "amount > 100";
+    expression.value = String((isMap ? current.expression : current) ?? "");
+
+    const onError = document.createElement("select");
+    onError.className = rendererConfig.classes.input;
+    onError.id = `${elementId}.on_error`;
+    for (const option of ["fail", "drop"]) {
+      onError.appendChild(new Option(option, option));
+    }
+    onError.value = isMap && current.on_error === "drop" ? "drop" : "fail";
+
+    const commit = () => {
+      const next = isMap || onError.value !== "fail"
+        ? { expression: expression.value, on_error: onError.value }
+        : expression.value;
+      store.setPath(storePath, next);
+    };
+
+    // Left to bubble, the library would also store each field under its own element id.
+    for (const control of [expression, onError]) {
+      control.addEventListener("input", (event) => event.stopPropagation());
+      control.addEventListener("change", (event) => {
+        event.stopPropagation();
+        commit();
+      });
+    }
+
+    const fields = document.createDocumentFragment();
+    fields.append(
+      domRenderer.renderFieldWrapper(
+        { ...mapSchema.expression, type: "string", title: "Expression", required: true },
+        expression.id,
+        expression,
+      ),
+      domRenderer.renderFieldWrapper(
+        { ...mapSchema.on_error, type: "string", title: "On Error" },
+        onError.id,
+        onError,
+      ),
+    );
+    return domRenderer.renderObject(node, elementId, createWrappedContainer(fields, "mqb-form-block"));
+  },
+};
+
 const transformMappingRenderer = {
   render: (node: SchemaNode, _path: string, elementId: string, dataPath: Array<string | number>, context: RendererContext) => {
     const storePath = toStorePath(dataPath);
@@ -1135,6 +1196,7 @@ const CUSTOM_RENDERERS: Record<string, unknown> = {
   routes: routesRenderer,
   middlewares: middlewaresRenderer,
   description: descriptionRenderer,
+  filter: filterRenderer,
   "transform.mapping": transformMappingRenderer,
   "transform.schema": transformSchemaRenderer,
   "root.endpoint": renderObject,

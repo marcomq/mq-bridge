@@ -67,7 +67,7 @@ typedef MqbStatus (*mqb_handler_fn)(const struct mqb_message_t *message,
 extern "C" {
 #endif // __cplusplus
 
-// Version of the library, e.g. `"0.4.20"`. Static; do not free.
+// Version of the library, e.g. `"1.0.0"`. Static; do not free.
 const char *mqb_version(void);
 
 // The `MQB_API_VERSION` this library was built with. A mismatch with the header's

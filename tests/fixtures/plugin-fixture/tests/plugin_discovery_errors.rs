@@ -29,7 +29,7 @@ fn a_library_under_the_wrong_name_is_refused_and_says_what_it_provides() {
     std::fs::copy(&built, dir.join(library_file_name("not-the-fixture")))
         .expect("install the cdylib under a name it does not provide");
 
-    let error = discover_endpoint_plugin_in(&[dir.clone()], "not-the-fixture")
+    let error = discover_endpoint_plugin_in(std::slice::from_ref(&dir), "not-the-fixture")
         .map(|_| ())
         .expect_err("a library providing another endpoint cannot answer this name");
     let message = format!("{error:#}");
@@ -58,7 +58,7 @@ fn a_file_that_is_not_a_library_is_a_load_failure_not_a_missing_endpoint() {
     )
     .expect("install the file");
 
-    let error = discover_endpoint_plugin_in(&[dir.clone()], name)
+    let error = discover_endpoint_plugin_in(std::slice::from_ref(&dir), name)
         .map(|_| ())
         .expect_err("a candidate that fails to load is an error, not a miss");
     let message = format!("{error:#}");
@@ -80,7 +80,7 @@ fn a_plugin_with_only_a_middleware_cannot_answer_an_endpoint_name() {
     let dir = plugin_dir("middleware-only");
     std::fs::copy(&built, dir.join(library_file_name(name))).expect("install the cdylib");
 
-    let error = discover_endpoint_plugin_in(&[dir.clone()], name)
+    let error = discover_endpoint_plugin_in(std::slice::from_ref(&dir), name)
         .map(|_| ())
         .expect_err("a middleware is not an endpoint");
     let message = format!("{error:#}");
@@ -102,8 +102,9 @@ fn a_plugin_with_only_a_middleware_cannot_answer_an_endpoint_name() {
 fn a_name_with_no_file_is_not_an_error() {
     let dir = plugin_dir("empty");
 
-    let found = discover_endpoint_plugin_in(&[dir.clone()], "nothing-is-installed-for-this")
-        .expect("a miss is not an error");
+    let found =
+        discover_endpoint_plugin_in(std::slice::from_ref(&dir), "nothing-is-installed-for-this")
+            .expect("a miss is not an error");
 
     assert!(found.is_none());
 

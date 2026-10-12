@@ -70,7 +70,7 @@ never lands in mq-bridge's build or CI.
 ```toml
 # Cargo.toml
 [dependencies]
-mq-bridge = { version = "0.4", default-features = false }
+mq-bridge = { version = "1", default-features = false }
 pulsar = "6"
 async-trait = "0.1"
 anyhow = "1"

@@ -97,7 +97,7 @@ and its test cover Kafka only.
 
 ```toml
 [dependencies]
-mq-bridge = { version = "0.4.18", features = ["postgres-cdc", "kafka", "yaml"] }
+mq-bridge = { version = "1", features = ["postgres-cdc", "kafka", "yaml"] }
 tokio = { version = "1", features = ["full"] }
 anyhow = "1"
 ```

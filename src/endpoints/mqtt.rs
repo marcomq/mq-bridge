@@ -311,6 +311,8 @@ impl MessagePublisher for MqttPublisher {
         );
 
         let client = self.state.read().await.client.clone();
+        // Before the enqueue, so a session reset right after it is seen.
+        let start_epoch = self.confirm.as_ref().map_or(0, |c| c.current_epoch());
         let publish_future = client.publish(&self.topic, self.qos, message);
 
         // We use a longer timeout here (10s) to allow for transient connection drops/reconnects
@@ -334,7 +336,6 @@ impl MessagePublisher for MqttPublisher {
         // reporting success. On enqueue-only success the broker can still drop the
         // publish on a session reset, which is silent message loss.
         if let Some(confirm) = &self.confirm {
-            let start_epoch = confirm.current_epoch();
             let target = confirm.reserve();
             let deadline = Instant::now() + CONFIRMATION_TIMEOUT;
             if !confirm.wait_for(target, start_epoch, deadline).await {
@@ -521,10 +522,33 @@ enum MqttAck {
     None,
 }
 
+impl MqttAck {
+    /// The delivery again, for a nack: MQTT has none, and a broker resends only after a reconnect.
+    fn redelivery(self, message_id: u128) -> Option<MqttInternalMessage> {
+        let mut msg = match &self {
+            MqttAck::V3(p) => publish_to_canonical_message_v3(p),
+            MqttAck::V5(p) => publish_to_canonical_message_v5(p),
+            MqttAck::None => return None,
+        };
+        msg.message_id = message_id;
+        Some(MqttInternalMessage { msg, ack: self })
+    }
+}
+
+/// The id the factory gives a route's client when none is configured.
+pub(crate) fn default_client_id(route_name: &str, publisher: bool) -> String {
+    // A broker allows one connection per id: both ends of an mqtt-to-mqtt route need their own.
+    let suffix = if publisher { "-out" } else { "" };
+    format!("{APP_NAME}-{route_name}{suffix}")
+}
+
 struct MqttListener {
     client: Client,
     _stop_tx: mpsc::Sender<()>,
     message_rx: Receiver<MqttInternalMessage>,
+    /// Nacked deliveries, read before `message_rx`. Bounded by the broker's inflight window.
+    redeliver_tx: Sender<MqttInternalMessage>,
+    redeliver_rx: Receiver<MqttInternalMessage>,
     capacity: usize,
     is_connected: Arc<AtomicBool>,
     topic: String,
@@ -598,15 +622,35 @@ impl MqttListener {
         }
         info!(topic = %topic, client_id = %client_id, "MQTT subscribed");
 
+        let (redeliver_tx, redeliver_rx) = async_channel::unbounded();
         Ok(Self {
             client,
             _stop_tx: stop_tx,
             message_rx: rx,
+            redeliver_tx,
+            redeliver_rx,
             capacity: queue_capacity,
             is_connected,
             topic: topic.to_string(),
             exit_on_empty: false,
         })
+    }
+}
+
+impl MqttListener {
+    async fn next_message(&self) -> Result<MqttInternalMessage, async_channel::RecvError> {
+        tokio::select! {
+            biased;
+            Ok(redelivered) = self.redeliver_rx.recv() => Ok(redelivered),
+            received = self.message_rx.recv() => received,
+        }
+    }
+
+    fn try_next_message(&self) -> Option<MqttInternalMessage> {
+        self.redeliver_rx
+            .try_recv()
+            .or_else(|_| self.message_rx.try_recv())
+            .ok()
     }
 }
 
@@ -621,12 +665,13 @@ impl MessageConsumer for MqttListener {
     }
     async fn receive(&mut self) -> Result<Received, ConsumerError> {
         let internal = self
-            .message_rx
-            .recv()
+            .next_message()
             .await
             .map_err(|_| ConsumerError::EndOfStream)?;
 
         let message = internal.msg;
+        let message_id = message.message_id;
+        let redeliver_tx = self.redeliver_tx.clone();
         let client = self.client.clone();
         let reply_topic = message.metadata.get("reply_to").cloned();
         let correlation_data = message.metadata.get("correlation_id").cloned();
@@ -635,7 +680,12 @@ impl MessageConsumer for MqttListener {
         let commit = Box::new(move |disposition: MessageDisposition| {
             Box::pin(async move {
                 match disposition {
-                    MessageDisposition::Nack => return Ok(()),
+                    MessageDisposition::Nack => {
+                        if let Some(again) = ack_info.redelivery(message_id) {
+                            let _ = redeliver_tx.try_send(again);
+                        }
+                        return Ok(());
+                    }
                     MessageDisposition::Reply(resp) => {
                         handle_mqtt_reply(&client, reply_topic, correlation_data, resp).await?;
                         // Fallthrough to Ack
@@ -662,8 +712,7 @@ impl MessageConsumer for MqttListener {
         let mut acks = Vec::with_capacity(max_messages);
 
         // Block for the first message; drain mode times out into an empty batch.
-        let Some(first) =
-            crate::traits::drain_gated(self.exit_on_empty, self.message_rx.recv()).await
+        let Some(first) = crate::traits::drain_gated(self.exit_on_empty, self.next_message()).await
         else {
             return Ok(ReceivedBatch::empty());
         };
@@ -681,8 +730,8 @@ impl MessageConsumer for MqttListener {
 
         // Greedily consume more messages if they are already buffered, up to max_messages.
         while messages.len() < max_messages {
-            match self.message_rx.try_recv() {
-                Ok(internal) => {
+            match self.try_next_message() {
+                Some(internal) => {
                     reply_infos.push((
                         internal.msg.metadata.get("reply_to").cloned(),
                         internal.msg.metadata.get("correlation_id").cloned(),
@@ -690,10 +739,16 @@ impl MessageConsumer for MqttListener {
                     messages.push(internal.msg);
                     acks.push(internal.ack);
                 }
-                Err(_) => break, // Empty or Disconnected
+                None => break, // Empty or Disconnected
             }
         }
 
+        let acks: Vec<(u128, MqttAck)> = messages
+            .iter()
+            .map(|message| message.message_id)
+            .zip(acks)
+            .collect();
+        let redeliver_tx = self.redeliver_tx.clone();
         let client = self.client.clone();
         let commit = Box::new(move |dispositions: Vec<MessageDisposition>| {
             Box::pin(async move {
@@ -706,10 +761,11 @@ impl MessageConsumer for MqttListener {
                 }
                 let mut ack_futures = Vec::with_capacity(dispositions.len());
 
-                for (((reply_topic, correlation_data), ack), disposition) in
+                for (((reply_topic, correlation_data), (message_id, ack)), disposition) in
                     reply_infos.into_iter().zip(acks).zip(dispositions)
                 {
                     let client = client.clone();
+                    let redeliver_tx = redeliver_tx.clone();
                     ack_futures.push(async move {
                         match disposition {
                             MessageDisposition::Reply(resp) => {
@@ -724,7 +780,12 @@ impl MessageConsumer for MqttListener {
                                 error!("Failed to ack MQTT message in batch: {}", e);
                                 e
                             }),
-                            MessageDisposition::Nack => Ok(()),
+                            MessageDisposition::Nack => {
+                                if let Some(again) = ack.redelivery(message_id) {
+                                    let _ = redeliver_tx.try_send(again);
+                                }
+                                Ok(())
+                            }
                         }
                     });
                 }
@@ -1314,6 +1375,14 @@ fn parse_qos(qos: u8) -> QoS {
 mod tests {
     use super::*;
     use crate::CanonicalMessage;
+
+    #[test]
+    fn the_two_ends_of_a_route_get_different_client_ids() {
+        let consumer = default_client_id("orders", false);
+        let publisher = default_client_id("orders", true);
+        assert_eq!(consumer, "mq-bridge-orders");
+        assert_ne!(consumer, publisher);
+    }
 
     #[test]
     fn an_mqtts_url_turns_tls_on_without_tls_required() {

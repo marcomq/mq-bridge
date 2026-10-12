@@ -123,12 +123,12 @@ Databases have no native pub/sub, so a database source is read one of two ways:
 | `capture_all` (default) | `_id` snapshot, then change stream | no | yes — when the stream goes quiet | **yes** | bulk read / ETL |
 | `capture_new` | change stream, new changes only | no | no — continuous by nature | **yes** | ongoing CDC |
 | `snapshot` | pages the collection by `_id`, one shot | no | yes | no | reading a standalone `mongod` |
-| `consumer` | claim → lock → re-fetch → delete | **yes** | yes | no | work queues, competing readers |
+| `delete` (also `consumer`) | claim → lock → re-fetch → delete | **yes** | yes | no | work queues, competing readers |
 
-These are not interchangeable. `consumer` buys exclusivity via four round trips per batch and
+These are not interchangeable. `delete` buys exclusivity via four round trips per batch and
 **deletes what it reads**, so it is for work queues, not for reading a collection; where you
 need a single-reader bulk read or ETL pass, the default `capture_all` is roughly 5x faster
-(500k docs: `consumer` → `null` 23,667 rows/s vs. `capture_all` → jsonl 120,308 rows/s). Note
+(500k docs: `delete` → `null` 23,667 rows/s vs. `capture_all` → jsonl 120,308 rows/s). Note
 `concurrency` does **not** speed up a MongoDB source; batches are fetched serially.
 
 Both `capture_*` modes read the oplog and therefore **require a replica set** — a single-node
@@ -153,8 +153,9 @@ Azure Blob, Cloudflare R2, and anything else the `object_store` crate speaks. En
 `object-store` feature. Use `local-store:///absolute/path` in CLI URLs (it becomes
 `file:///absolute/path` internally), or use `url: file:///absolute/path` in structured YAML.
 Credentials and cloud backend options come from the environment
-(`AWS_ACCESS_KEY_ID`, `AWS_REGION`, `GOOGLE_SERVICE_ACCOUNT`, `AZURE_STORAGE_ACCOUNT`, …); the
-URL scheme picks the backend (`file://`, `s3://`, `gs://`, `az://`).
+(`AWS_ACCESS_KEY_ID`, `AWS_REGION`, `GOOGLE_SERVICE_ACCOUNT`, `AZURE_STORAGE_ACCOUNT_NAME`, …); the
+URL scheme picks the backend (`file://`, `s3://`, `gs://`, `az://`). The variables and URL form
+of each cloud are on the [object storage connector page](../connectors/object-store.md).
 
 - **As a sink**, each flushed batch is encoded with the file formats (`normal` JSONL, `json`,
   `text`, `raw`) and written as **one immutable object** at

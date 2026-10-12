@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 
 /// Hash of the header that `MQB_API_VERSION` was last reviewed against.
-const REVIEWED_HEADER_HASH: u64 = 0x3427_f899_9040_7a8b;
+const REVIEWED_HEADER_HASH: u64 = 0x845b_f4ed_ebd8_37f2;
 
 fn crate_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

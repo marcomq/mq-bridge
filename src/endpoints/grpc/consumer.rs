@@ -143,9 +143,30 @@ impl MessageConsumer for GrpcConsumer {
 pub(super) struct ClientModeConsumer {
     client: BridgeClient<Channel>,
     stream: tonic::Streaming<BridgeMessage>,
+    topic: String,
     consumer_id: String,
+    request_timeout: Option<Duration>,
     /// Drain mode: only then does an idle first-message read time out into an empty batch.
     exit_on_empty: bool,
+}
+
+async fn subscribe(
+    client: &mut BridgeClient<Channel>,
+    topic: &str,
+    consumer_id: &str,
+    request_timeout: Option<Duration>,
+) -> Result<tonic::Streaming<BridgeMessage>> {
+    let request = Request::new(SubscribeRequest {
+        topic: topic.to_string(),
+        consumer_id: consumer_id.to_string(),
+    });
+    let response = match request_timeout {
+        Some(timeout) => tokio::time::timeout(timeout, client.subscribe(request))
+            .await
+            .map_err(|_| anyhow::anyhow!("gRPC subscribe timed out"))??,
+        None => client.subscribe(request).await?,
+    };
+    Ok(response.into_inner())
 }
 
 impl ClientModeConsumer {
@@ -168,27 +189,18 @@ impl ClientModeConsumer {
             .consumer_id
             .clone()
             .unwrap_or_else(|| fast_uuid_v7::gen_id().to_string());
-        let request = Request::new(SubscribeRequest {
-            topic: topic.clone(),
-            consumer_id: consumer_id.clone(),
-        });
         let request_timeout = config
             .request_timeout_ms
             .or(config.timeout_ms)
             .map(Duration::from_millis);
-        let stream = if let Some(timeout) = request_timeout {
-            tokio::time::timeout(timeout, client.subscribe(request))
-                .await
-                .map_err(|_| anyhow::anyhow!("gRPC subscribe timed out"))??
-        } else {
-            client.subscribe(request).await?
-        }
-        .into_inner();
+        let stream = subscribe(&mut client, &topic, &consumer_id, request_timeout).await?;
         info!(grpc_url = %url, "gRPC client consumer connected and subscription started");
         Ok(Self {
             client,
             stream,
+            topic,
             consumer_id,
+            request_timeout,
             exit_on_empty: false,
         })
     }
@@ -199,18 +211,75 @@ impl MessageConsumer for ClientModeConsumer {
     fn set_exit_on_empty(&mut self, exit_on_empty: bool) {
         self.exit_on_empty = exit_on_empty;
     }
+
+    /// Blocks on the first message; polls briefly for subsequent ones to fill the batch.
     async fn receive_batch(
         &mut self,
         max_messages: usize,
     ) -> Result<crate::outcomes::ReceivedBatch, ConsumerError> {
-        receive_from_stream(
-            &mut self.stream,
+        let max_messages = max_messages.max(1);
+        let mut messages = Vec::with_capacity(max_messages);
+        let mut message_ids = Vec::with_capacity(max_messages);
+        let mut resubscribed = false;
+        loop {
+            let result = if messages.is_empty() {
+                // Drain mode: a brief idle timeout on the first message yields an empty batch.
+                match crate::traits::drain_gated(self.exit_on_empty, self.stream.message()).await {
+                    Some(r) => Ok(r),
+                    None => return Ok(crate::outcomes::ReceivedBatch::empty()),
+                }
+            } else {
+                tokio::time::timeout(
+                    Duration::from_millis(GRPC_BATCH_POLL_MS),
+                    self.stream.message(),
+                )
+                .await
+            };
+            match result {
+                Ok(Ok(Some(msg))) => {
+                    message_ids.push(msg.id.clone());
+                    messages.push(bridge_to_canonical(msg));
+                    if messages.len() >= max_messages {
+                        break;
+                    }
+                }
+                Ok(Ok(None)) if !messages.is_empty() => break,
+                // The server closes a subscriber that fell behind and replays what it
+                // retained to the next subscription under the same id.
+                Ok(Ok(None)) if !resubscribed => {
+                    debug!(consumer_id = %self.consumer_id, "gRPC stream closed by server, subscribing again");
+                    self.stream = subscribe(
+                        &mut self.client,
+                        &self.topic,
+                        &self.consumer_id,
+                        self.request_timeout,
+                    )
+                    .await
+                    .map_err(ConsumerError::Connection)?;
+                    resubscribed = true;
+                }
+                Ok(Ok(None)) => {
+                    return Err(ConsumerError::Connection(anyhow::anyhow!(
+                        "gRPC server closed the subscription again right after it was opened"
+                    )));
+                }
+                Err(_) => {
+                    trace!("gRPC stream poll timed out while filling batch (normal exit)");
+                    break;
+                }
+                Ok(Err(e)) => {
+                    error!("gRPC stream returned error while receiving: {:?}", e);
+                    return Err(ConsumerError::Connection(e.into()));
+                }
+            }
+        }
+        let commit = grpc_client_commit(
             self.client.clone(),
             self.consumer_id.clone(),
-            max_messages,
-            self.exit_on_empty,
-        )
-        .await
+            message_ids,
+            self.request_timeout,
+        );
+        Ok(crate::outcomes::ReceivedBatch { messages, commit })
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -218,62 +287,11 @@ impl MessageConsumer for ClientModeConsumer {
     }
 }
 
-/// Reads a batch from a tonic server-streaming response.
-/// Blocks on the first message; polls briefly for subsequent ones to fill the batch.
-async fn receive_from_stream(
-    stream: &mut tonic::Streaming<BridgeMessage>,
-    client: BridgeClient<Channel>,
-    consumer_id: String,
-    max_messages: usize,
-    exit_on_empty: bool,
-) -> Result<crate::outcomes::ReceivedBatch, ConsumerError> {
-    let max_messages = max_messages.max(1);
-    let mut messages = Vec::with_capacity(max_messages);
-    let mut message_ids = Vec::with_capacity(max_messages);
-    loop {
-        let result = if messages.is_empty() {
-            // Drain mode: a brief idle timeout on the first message yields an empty batch.
-            match crate::traits::drain_gated(exit_on_empty, stream.message()).await {
-                Some(r) => Ok(r),
-                None => return Ok(crate::outcomes::ReceivedBatch::empty()),
-            }
-        } else {
-            tokio::time::timeout(Duration::from_millis(GRPC_BATCH_POLL_MS), stream.message()).await
-        };
-        match result {
-            Ok(Ok(Some(msg))) => {
-                message_ids.push(msg.id.clone());
-                messages.push(bridge_to_canonical(msg));
-                if messages.len() >= max_messages {
-                    break;
-                }
-            }
-            Ok(Ok(None)) => {
-                trace!("gRPC stream closed by server (None)");
-                break;
-            }
-            Err(_) => {
-                trace!("gRPC stream poll timed out while filling batch (normal exit)");
-                break;
-            }
-            Ok(Err(e)) => {
-                error!("gRPC stream returned error while receiving: {:?}", e);
-                return Err(ConsumerError::Connection(e.into()));
-            }
-        }
-    }
-    if messages.is_empty() {
-        Err(ConsumerError::EndOfStream)
-    } else {
-        let commit = grpc_client_commit(client, consumer_id, message_ids);
-        Ok(crate::outcomes::ReceivedBatch { messages, commit })
-    }
-}
-
-fn grpc_client_commit(
+pub(super) fn grpc_client_commit(
     client: BridgeClient<Channel>,
     consumer_id: String,
     message_ids: Vec<String>,
+    ack_timeout: Option<Duration>,
 ) -> crate::traits::BatchCommitFunc {
     Box::new(move |dispositions| {
         Box::pin(async move {
@@ -298,16 +316,22 @@ fn grpc_client_commit(
                     };
                     let mut metadata = HashMap::new();
                     metadata.insert("mq_bridge.consumer_id".to_string(), consumer_id.clone());
-                    let response = client
-                        .clone()
-                        .acknowledge(Request::new(proto::Ack {
-                            id: id.clone(),
-                            status: status as i32,
-                            reason: String::new(),
-                            metadata,
-                        }))
-                        .await?
-                        .into_inner();
+                    let mut client = client.clone();
+                    let call = client.acknowledge(Request::new(proto::Ack {
+                        id: id.clone(),
+                        status: status as i32,
+                        reason: String::new(),
+                        metadata,
+                    }));
+                    let response = match ack_timeout {
+                        Some(limit) => {
+                            tokio::time::timeout(limit, call).await.map_err(|_| {
+                                tonic::Status::deadline_exceeded("gRPC ack timed out")
+                            })??
+                        }
+                        None => call.await?,
+                    }
+                    .into_inner();
                     if !response.success {
                         warn!(ack_id = %id, error = %response.error, "gRPC acknowledge rejected");
                     }

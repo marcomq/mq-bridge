@@ -427,6 +427,9 @@ pub const HTTP_STATUS_CODE: &str = "http_status_code";
 /// `http_trailer.grpc-status` (gRPC over HTTP/2).
 pub const HTTP_TRAILER_PREFIX: &str = "http_trailer.";
 
+/// How long a client of a TLS listener may take for the handshake.
+const TLS_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Reads the request line and headers a handler receives from an [`http`]
 /// consumer, which exposes them as message metadata. These accessors save a
 /// handler from hardcoding the metadata keys and the `metadata.get(..)` dance:
@@ -941,6 +944,7 @@ async fn get_or_create_shared_http_server(
     };
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(());
 
+    crate::support::tls_check::warn_listener_cert_unused("HTTP listener", tls_config);
     if tls_config.required {
         if !tls_config.is_tls_server_configured() {
             return Err(anyhow!(
@@ -1244,10 +1248,20 @@ async fn spawn_tls_server(
                     result = listener.accept() => {
                         match result {
                             Ok((socket, _)) => {
+                                let _ = socket.set_nodelay(true);
                                 let acceptor = acceptor.clone();
                                 let mut conn_service = service.clone();
                                 tokio::spawn(async move {
-                                    match acceptor.accept(socket).await {
+                                    let handshake = tokio::time::timeout(
+                                        TLS_HANDSHAKE_TIMEOUT,
+                                        acceptor.accept(socket),
+                                    );
+                                    match handshake.await.unwrap_or_else(|_| {
+                                        Err(std::io::Error::new(
+                                            std::io::ErrorKind::TimedOut,
+                                            "no TLS handshake in time",
+                                        ))
+                                    }) {
                                         Ok(stream) => {
                                             let mut conn_info = HttpConnInfo::default();
                                             let (_, session) = stream.get_ref();
@@ -2008,14 +2022,24 @@ fn make_response(
                     continue; // source/provenance keys must not leak as response headers
                 }
                 if let Some(name) = key.strip_prefix(HTTP_TRAILER_PREFIX) {
-                    trailers.insert(
-                        hyper::header::HeaderName::from_bytes(name.as_bytes())
-                            .with_context(|| format!("Invalid trailer name '{name}'"))?,
-                        hyper::header::HeaderValue::from_str(value)
-                            .with_context(|| format!("Invalid value for trailer '{name}'"))?,
-                    );
+                    match metadata_header(name, value) {
+                        Some((name, value)) => {
+                            trailers.insert(name, value);
+                        }
+                        None => debug!(key = %key, "Reply metadata is no valid trailer; not sent"),
+                    }
                     continue;
                 }
+                // `set-cookie` holds one cookie per line and is checked per cookie below.
+                let is_set_cookie = key.eq_ignore_ascii_case("set-cookie");
+                let header = match metadata_header(key, value) {
+                    Some(header) => Some(header),
+                    None if is_set_cookie => None,
+                    None => {
+                        debug!(key = %key, "Reply metadata is no valid HTTP header; not sent");
+                        continue;
+                    }
+                };
                 let is_content_type = key.eq_ignore_ascii_case("content-type");
                 // Request-echo suppression drops reply metadata that byte-matches the incoming
                 // request header of the same name (so echo routes don't re-emit `x-request-id`).
@@ -2046,13 +2070,15 @@ fn make_response(
                     && !key.eq_ignore_ascii_case("transfer-encoding")
                     && !key.eq_ignore_ascii_case("content-length")
                 {
-                    if key.eq_ignore_ascii_case("set-cookie") {
+                    if is_set_cookie {
                         // The HTTP sink joins repeated `Set-Cookie` headers with a newline.
                         for cookie in value.lines() {
-                            builder = builder.header(key.as_str(), cookie);
+                            if let Some((name, cookie)) = metadata_header(key, cookie) {
+                                builder = builder.header(name, cookie);
+                            }
                         }
-                    } else {
-                        builder = builder.header(key.as_str(), value.as_str());
+                    } else if let Some((name, value)) = header {
+                        builder = builder.header(name, value);
                     }
                 }
             }
@@ -2192,6 +2218,32 @@ struct DecompressedBodyTooLarge {
 /// Both the compressed input and the decompressed output are capped at
 /// `max_bytes`: an oversized compressed body is rejected before decoding, and
 /// decoding stops one byte past the cap so a bomb payload is never fully allocated.
+/// Whether `decompress_if_needed` decodes a body with this `content-encoding`.
+fn is_decoded(content_encoding: &str) -> bool {
+    let encoding = content_encoding.to_ascii_lowercase();
+    ["gzip", "lz4", "zstd"]
+        .iter()
+        .any(|codec| encoding.contains(codec))
+}
+
+/// Metadata as a header; `None` for what HTTP cannot carry (a space in the name, a line break in the value).
+fn metadata_header(
+    key: &str,
+    value: &str,
+) -> Option<(hyper::header::HeaderName, hyper::header::HeaderValue)> {
+    Some((
+        hyper::header::HeaderName::from_bytes(key.as_bytes()).ok()?,
+        hyper::header::HeaderValue::from_str(value).ok()?,
+    ))
+}
+
+/// Headers that describe one connection and are not passed on to the next one.
+fn is_connection_header(key: &str) -> bool {
+    ["connection", "keep-alive", "proxy-connection", "upgrade"]
+        .iter()
+        .any(|name| key.eq_ignore_ascii_case(name))
+}
+
 fn decompress_if_needed(
     data: Bytes,
     content_encoding: Option<&str>,

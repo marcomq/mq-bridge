@@ -19,6 +19,107 @@ answers a whole batch of lookups at once. See [Lookups](#lookups).
 
 It needs the `http-bulk` feature, which `full` includes.
 
+## A complete example
+
+A route that copies a PostgreSQL table to a REST API, 2,000 rows per request. The API in this
+example takes `POST /v1/products/batch` with the body `{"items": [ … ]}` and a bearer token:
+
+```yaml
+products_to_api:
+  batch_size: 2000
+  input:
+    sqlx:
+      url: "postgres://app:secret@localhost/shop"
+      table: "products"
+      cursor_column: "id"
+      cursor_id: "products-to-api"
+  output:
+    middlewares:
+      - retry: { max_attempts: 5, initial_interval_ms: 500 }
+      - dlq: { endpoint: { file: { path: "refused-products.jsonl" } } }
+    http_bulk:
+      url: https://api.example.com
+      headers:
+        Authorization: "Bearer ${API_TOKEN}"
+      upsert:
+        path: /v1/products/batch
+        format: json_array
+        envelope: '{"items": {documents}}'
+        split_on_reject: true
+      max_request_bytes: 5000000
+```
+
+Save it as `products.yaml` and run it with `mqb --config products.yaml`. What happens:
+
+1. The input reads up to 2,000 rows; each row is one message with a JSON object as payload.
+2. The output puts the payloads into one array, wraps it in the `envelope` and sends one
+   `POST`. If the body would exceed `max_request_bytes`, it sends several.
+3. A 2xx answer means all rows were written, and the input saves its position.
+4. A `429` or `5xx` answer is tried again by `retry`. A `400` or `422` is sent again in halves
+   (`split_on_reject`) until the rows the API refuses stand alone; those go to the file of the
+   `dlq`, and the rest is written.
+
+Which fields your API needs follows from a few questions:
+
+| Question about the API | Field |
+| :--- | :--- |
+| One JSON document per line, or one JSON array? | `upsert.format`: `ndjson` or `json_array` |
+| Is the array inside an object? | `upsert.envelope`, e.g. `'{"items": {documents}}'` |
+| Does every document need a line before it (Elasticsearch `_bulk`)? | `upsert.action` |
+| Does the response report each document? | `upsert.result`: `lines` or `items`; none if the status says it all |
+| Does it answer with a job to wait for? | `upsert.result.job` |
+
+## Authentication
+
+A fixed key or token goes in `headers`. Take the value from the environment so that it is
+not in the file:
+
+```yaml
+output:
+  http_bulk:
+    url: https://search.example.com
+    headers:
+      X-API-Key: "${SEARCH_API_KEY}"
+    upsert: { path: /docs/_bulk }
+```
+
+An OAuth2 client (client credentials grant). The token is fetched once, reused, and renewed
+before it expires:
+
+```yaml
+output:
+  http_bulk:
+    url: https://api.example.com
+    auth:
+      oauth2:
+        token_url: https://login.example.com/oauth2/token
+        client_id: "bridge"
+        client_secret: "${OAUTH_CLIENT_SECRET}"
+        scope: "products.write"
+    upsert:
+      path: /v1/products/batch
+      format: json_array
+```
+
+Amazon OpenSearch Service, with requests signed by the AWS credentials of the environment
+(`service: aoss` for OpenSearch Serverless):
+
+```yaml
+output:
+  http_bulk:
+    url: https://search-shop-abc123.eu-central-1.es.amazonaws.com
+    auth:
+      aws_sigv4: { region: eu-central-1, service: es }
+    upsert:
+      path: /products/_bulk
+      action: '{"index":{"_id":"${payload:id}"}}'
+      result:
+        items: { path: /items, error: /index/error/reason }
+```
+
+The OAuth2 and SigV4 examples were checked for their configuration only, not run against
+those services.
+
 ## On the command line
 
 The configuration is too nested for query parameters, so the `http-bulk:` scheme
@@ -93,6 +194,8 @@ documents took the same time with either (about 4 to 5 s at a batch size of
 
 ### Qdrant
 
+The [`qdrant`](./qdrant.md) endpoint is this recipe under a name.
+
 A point is `{id, vector, payload}`, and the id is an unsigned integer or a UUID,
 so shape the message with a [`transform`](../cookbook/transform.md) first.
 `wait=true` makes Qdrant answer after the points are stored.
@@ -145,6 +248,11 @@ position after a page comes from is the only thing that differs between APIs:
 | unset | the number of documents read so far | `offset=` paging |
 | `item: <pointer>` | a field of the last document | `id > last` paging |
 | `response: <pointer>` | a value in the response | change feeds, scroll tokens |
+
+A `response` cursor ends the read when the value is `null` or an empty string. Some APIs
+leave the field out on the last page instead (Google's `nextPageToken`): set
+`cursor.end_when_missing: true` for those. It is off by default because a mistyped pointer
+would otherwise read one page and report success.
 
 With `cursor_id` and `checkpoint_store` in `read` the position is saved after every
 acknowledged batch and a restart continues there. Without them every start
@@ -348,7 +456,7 @@ Elasticsearch or Qdrant.
 | `delete_values` | `delete`, `d` | Operation values that mean delete, ignoring case |
 | `max_request_bytes` | 10 MiB | A larger batch is split into several requests |
 | `compression` | `none` | `gzip`, `zstd` or `lz4` for request bodies, named in `Content-Encoding` |
-| `request_timeout_ms` | none | Timeout of one request; with `read.stream`, the longest silence on the open response |
+| `request_timeout_ms` | see right | Timeout of one request; `0`: none. Unset: a request fails after 300 s without a response byte. With `read.stream` it is the longest silence on the open response, and unset means none |
 | `connect_timeout_ms` | 10000 | Connection timeout |
 | `tls` | none | `ca_file` and `accept_invalid_certs` for `https://`; `required: true` refuses a `url` or OAuth2 `token_url` that is not `https://` |
 
@@ -364,6 +472,7 @@ Elasticsearch or Qdrant.
 | `envelope` | none | `json_array` only: the body around the array; `{documents}` marks where the array goes |
 | `document` | none | Template around each document; `{document}` marks where the payload goes, e.g. `{"doc":{document},"doc_as_upsert":true}`. Values taken from the message are JSON-escaped. |
 | `result` | HTTP status | See below |
+| `split_on_reject` | `false` | Without `result`: a request the target refuses with 400, 409, 413 or 422 is sent again in halves until the refused documents stand alone |
 
 `query`:
 
@@ -373,12 +482,22 @@ Elasticsearch or Qdrant.
 | `method` | `POST` | HTTP method |
 | `format` | `ndjson` | `ndjson` (each lookup adds its lines) or `json_array` (each lookup adds one entry) |
 | `content_type` | by format | `application/x-ndjson` or `application/json` |
-| `request` | required | Template of one lookup's part of the body. Values taken from the message are JSON-escaped; `\| raw` inserts a JSON value as it is. With `ndjson` it may hold several lines. |
+| `request` | required | Template of one lookup's part of the body. Values taken from the message are JSON-escaped; `\| raw` inserts a JSON value as it is. With `ndjson` it may hold several lines. `{index}`, at most once, is the part's number in its request, from 1 |
 | `envelope` | none | `json_array` only: the body around the array; `{requests}` marks where the array goes |
 | `responses` | the response | JSON pointer to the array with one answer per lookup, in order |
 | `value` | the entry | JSON pointer, inside an entry, to what the lookup answers |
 | `found` | none | JSON pointer, inside an entry, to a boolean; anything but `true` answers `null` |
 | `error` | none | JSON pointer, inside an entry, to an error text; set, it fails that lookup |
+| `per_message` | `false` | One request per message; the response itself is the entry. Excludes `envelope` and `responses` |
+| `parse_value` | `false` | The value is JSON text: parse it. Text that is not JSON fails its message for good |
+| `concurrency` | 8 with `per_message`, else 1 | Requests in flight for one batch |
+| `max_messages` | none | Most messages in one request; a larger batch is split, as it is at `max_request_bytes` |
+| `responses_text` | none | JSON pointer to JSON text in the response that holds the answers; `responses` then points into that text. For an API that answers inside a string, such as a chat completion |
+| `index` | none | JSON pointer, inside an entry, to the `{index}` of its message. Entries are then matched by that number instead of by position; a number that is missing, repeated or unknown makes the response unusable |
+| `stop_reason` | none | JSON pointer to why the response ended, e.g. `/choices/0/finish_reason`; named in the error when the answers cannot be matched |
+| `split_on_reject` | `false` | A request refused with 400, 409, 413 or 422, or a response whose answers cannot be matched: ask again in halves until the messages at fault stand alone, so only they fail. Without it the batch fails for good |
+
+`max_messages`, `responses_text`, `index` and `split_on_reject` exclude `per_message`.
 
 `auth` takes one of:
 
@@ -395,7 +514,8 @@ Elasticsearch or Qdrant.
 | `method` | `GET`, or `POST` with a `body` | HTTP method |
 | `body` | none | JSON request body; `{cursor}` is replaced by the position as JSON (`7`, `"a"`, `null`) and `{limit}` by the batch size |
 | `items` | the response | JSON pointer to the array of documents |
-| `cursor.response` | none | JSON pointer to the next position in the response; `null` there ends the read |
+| `cursor.response` | none | JSON pointer to the next position in the response; `null` or an empty string there ends the read |
+| `cursor.end_when_missing` | `false` | With `cursor.response`: a response without that field ends the read too. Without it such a response stops the route |
 | `cursor.item` | none | JSON pointer to the position in the last document of a page |
 | `cursor.start` | `0` for a count, else `null` | Position before the first read |
 | `cursor_id` | none | Names the saved read position |
@@ -437,7 +557,12 @@ Without `result`, a 2xx status means every document was written.
 - **Failures are per document where the target says so.** A payload that is not
   a JSON object, a rejected result line and a delete without an id fail that
   message for good. A failed job or a refused request fails every document of
-  that request for good, and the rest of the batch is still sent.
+  that request for good, and the rest of the batch is still sent. With
+  `upsert.split_on_reject: true` a request refused for its content (400, 409,
+  413, 422) is sent again in halves, so only the refused documents fail. That
+  costs about `2 x log2(batch)` extra requests per bad document. Turn it on only
+  for a target that applies nothing of a request it refuses; one that applies a
+  part before refusing would get that part twice.
 - **Payloads are checked, not rewritten.** A payload that starts like a JSON
   object but is not valid JSON fails that message alone (`the payload is not
   valid JSON: …`), and the rest of the batch is sent.
@@ -475,12 +600,15 @@ As a lookup (`query`):
 - **An entry whose `found` is not `true`, or that has nothing at `value`, is
   `null`.** The array must hold one entry per lookup: answers are matched by
   position, so a shorter or longer one fails the request for good.
-- **An entry that reports an error fails only its message.** The batch is then
-  asked again one lookup at a time, with a warning in the log, so the other
-  messages still get their answers.
+- **An entry that reports an error fails only its message.** The other
+  messages keep their answers; nothing is asked again.
 - **A single lookup is a batch of one**: the same request with one part.
 - **A `json_array` part must be valid JSON**; one that is not fails its message
   for good and is left out of the request.
+- **With `per_message` every message is its own request**, for an API that
+  takes one question at a time, such as a chat completion. A refused request
+  fails only its message, retryable by its status. Under a `lookup` the
+  lookup's `concurrency` decides how many are in flight.
 
 As an input:
 
@@ -511,7 +639,10 @@ everything in one response (Typesense) is not a paged listing; read it with
 
 ## A named endpoint of your own
 
-`typesense` and `elasticsearch` are this endpoint with the requests filled in. A
+`typesense`, `elasticsearch`, [`qdrant`](./qdrant.md) and the
+[OpenAI-compatible endpoints](./openai.md) are this endpoint with the requests
+filled in. From Rust each has a typed configuration, such as `QdrantConfig`,
+that converts into an `Endpoint` with `.into()` and needs no registration. A
 Rust crate can add one the same way: a function that turns a few fields into an
 `http_bulk` configuration, registered under a name.
 
@@ -541,12 +672,15 @@ register_preset_with("acme", acme_schema, acme)?;
 ```
 
 Call it before any route starts and address the endpoint as
-`custom: { name: acme, config: { url: ..., table: ... } }`. The value `acme`
+`acme: { url: ..., table: ... }`. The value `acme`
 returns is checked as an `http_bulk` configuration, so every field under
 [Fields](#fields) is available. `preset_schema` adds `url`, `api_key`,
 `operation`, `compression` and `request_timeout_ms` to the fields you list;
 `acme` decides what to do with them. A unit test registers the same endpoint;
 it was not run against a server.
+
+For a typed configuration of your own, derive `Serialize` on it and build the
+endpoint with `named_endpoint("acme", &config)`.
 
 This registers the endpoint in your own program. `mqb` only knows the endpoints
 compiled into it or installed as plugins.

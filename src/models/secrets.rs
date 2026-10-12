@@ -7,6 +7,7 @@
 //! resolved: the `SecretExtractor` trait, its impls, and the shared helpers.
 
 use super::*;
+use std::fmt;
 
 /// Trait for extracting secrets from configuration structures.
 pub trait SecretExtractor {
@@ -177,7 +178,7 @@ fn sanitize_secret_key(key: &str) -> String {
 /// consumer has to decode it before using it as the original name.
 #[cfg(feature = "grpc")]
 pub(crate) fn decode_secret_map_key(key: &str) -> Option<String> {
-    if key.is_empty() || key.len() % 2 != 0 {
+    if key.is_empty() || !key.len().is_multiple_of(2) {
         return None;
     }
     let bytes: Option<Vec<u8>> = key
@@ -388,6 +389,22 @@ impl SecretExtractor for EndpointType {
             }
             EndpointType::PostgresCdc(cfg) => {
                 cfg.extract_secrets(&format!("{}__{}", prefix, "POSTGRES_CDC"), secrets)
+            }
+            EndpointType::Elasticsearch(cfg) => {
+                cfg.extract_secrets(&format!("{prefix}__ELASTICSEARCH"), secrets)
+            }
+            EndpointType::Meilisearch(cfg) => {
+                cfg.extract_secrets(&format!("{prefix}__MEILISEARCH"), secrets)
+            }
+            EndpointType::OpenAiChat(cfg) => {
+                cfg.extract_secrets(&format!("{prefix}__OPENAI_CHAT"), secrets)
+            }
+            EndpointType::OpenAiEmbeddings(cfg) => {
+                cfg.extract_secrets(&format!("{prefix}__OPENAI_EMBEDDINGS"), secrets)
+            }
+            EndpointType::Qdrant(cfg) => cfg.extract_secrets(&format!("{prefix}__QDRANT"), secrets),
+            EndpointType::Typesense(cfg) => {
+                cfg.extract_secrets(&format!("{prefix}__TYPESENSE"), secrets)
             }
             EndpointType::Grpc(cfg) => {
                 cfg.extract_secrets(&format!("{}__{}", prefix, "GRPC"), secrets)
@@ -642,6 +659,10 @@ impl SecretExtractor for HttpConfig {
 impl SecretExtractor for WebSocketConfig {
     fn extract_secrets(&mut self, prefix: &str, secrets: &mut HashMap<String, String>) {
         extract_sensitive_url(&mut self.url, prefix, "URL", secrets);
+        if let Some((u, p)) = self.basic_auth.take() {
+            secrets.insert(format!("{}__{}__{}", prefix, "BASIC_AUTH", 0), u);
+            secrets.insert(format!("{}__{}__{}", prefix, "BASIC_AUTH", 1), p);
+        }
         self.tls
             .extract_secrets(&format!("{}__{}", prefix, "TLS"), secrets);
     }
@@ -710,6 +731,54 @@ impl SecretExtractor for ClickHouseConfig {
         self.tls
             .extract_secrets(&format!("{}__{}", prefix, "TLS"), secrets);
     }
+}
+
+/// The named `http_bulk` endpoints keep their secrets in these optional fields.
+macro_rules! named_endpoint_secrets {
+    ($($config:ident { $($field:ident),* })*) => {$(
+        impl SecretExtractor for $config {
+            fn extract_secrets(&mut self, prefix: &str, secrets: &mut HashMap<String, String>) {
+                $(if let Some(value) = self.$field.take() {
+                    let key = stringify!($field).to_ascii_uppercase();
+                    secrets.insert(format!("{prefix}__{key}"), value);
+                })*
+            }
+        }
+    )*};
+}
+
+impl SecretExtractor for ElasticsearchConfig {
+    fn extract_secrets(&mut self, prefix: &str, secrets: &mut HashMap<String, String>) {
+        if let Some(value) = self.api_key.take() {
+            secrets.insert(format!("{prefix}__API_KEY"), value);
+        }
+        // `auth` is untyped here; the paths are those of `HttpBulkConfig`.
+        for (kind, field) in [
+            ("oauth2", "client_secret"),
+            ("aws_sigv4", "secret_key"),
+            ("aws_sigv4", "session_token"),
+        ] {
+            let section = self.auth.as_mut().and_then(|auth| auth.get_mut(kind));
+            let Some(section) = section.and_then(serde_json::Value::as_object_mut) else {
+                continue;
+            };
+            if !section.get(field).is_some_and(serde_json::Value::is_string) {
+                continue;
+            }
+            if let Some(serde_json::Value::String(value)) = section.remove(field) {
+                let path = format!("AUTH__{kind}__{field}").to_ascii_uppercase();
+                secrets.insert(format!("{prefix}__{path}"), value);
+            }
+        }
+    }
+}
+
+named_endpoint_secrets! {
+    MeilisearchConfig { api_key, checkpoint_store }
+    OpenAiChatConfig { api_key }
+    OpenAiEmbeddingsConfig { api_key }
+    QdrantConfig { api_key, checkpoint_store }
+    TypesenseConfig { api_key }
 }
 
 impl SecretExtractor for HttpBulkConfig {
@@ -792,6 +861,141 @@ impl SecretExtractor for IbmTlsConfig {
             // crate's env override resolves back to this field.
             secrets.insert(format!("{}__{}", prefix, "CERT_PASSWORD"), val);
         }
+    }
+}
+
+const REDACTED: &str = "***";
+
+/// Replaces in `shown` whatever `extract_secrets` removed or changed in `stripped`.
+fn mask_secrets(shown: &mut serde_json::Value, stripped: Option<&serde_json::Value>) {
+    use serde_json::Value;
+    match (shown, stripped) {
+        (Value::Object(shown), Some(Value::Object(stripped))) => {
+            for (key, value) in shown.iter_mut() {
+                mask_secrets(value, stripped.get(key));
+            }
+        }
+        (Value::Array(shown), Some(Value::Array(stripped))) if shown.len() == stripped.len() => {
+            for (value, stripped) in shown.iter_mut().zip(stripped) {
+                mask_secrets(value, Some(stripped));
+            }
+        }
+        (Value::Null, _) => {}
+        (shown, stripped) if stripped != Some(&*shown) => {
+            let url = shown.as_str().map(crate::support::redact::url_password);
+            *shown = match url {
+                Some(url) if Some(url.as_ref()) != shown.as_str() => Value::String(url.into()),
+                _ => Value::String(REDACTED.to_string()),
+            };
+        }
+        _ => {}
+    }
+}
+
+/// Prints a JSON value the way a derived `Debug` prints the struct it came from.
+struct ShownValue<'a>(&'a serde_json::Value);
+
+impl fmt::Debug for ShownValue<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use serde_json::Value;
+        match self.0 {
+            Value::Null => f.write_str("None"),
+            Value::Bool(value) => write!(f, "{value}"),
+            Value::Number(value) => write!(f, "{value}"),
+            Value::String(value) => write!(f, "{value:?}"),
+            Value::Array(values) => f
+                .debug_list()
+                .entries(values.iter().map(ShownValue))
+                .finish(),
+            Value::Object(fields) => {
+                let mut out = f.debug_map();
+                for (key, value) in fields {
+                    out.entry(&format_args!("{key}"), &ShownValue(value));
+                }
+                out.finish()
+            }
+        }
+    }
+}
+
+/// `Debug` for a config that holds secrets: every extracted secret prints as `***`.
+fn fmt_redacted<T>(name: &str, config: &T, f: &mut fmt::Formatter<'_>) -> fmt::Result
+where
+    T: Clone + Serialize + SecretExtractor,
+{
+    let mut stripped = config.clone();
+    stripped.extract_secrets("", &mut HashMap::new());
+    let (Ok(serde_json::Value::Object(mut shown)), Ok(stripped)) = (
+        serde_json::to_value(config),
+        serde_json::to_value(&stripped),
+    ) else {
+        return f.debug_struct(name).finish_non_exhaustive();
+    };
+    let mut out = f.debug_struct(name);
+    for (key, value) in shown.iter_mut() {
+        mask_secrets(value, stripped.get(key.as_str()));
+        out.field(key, &ShownValue(value));
+    }
+    out.finish()
+}
+
+macro_rules! redacted_debug {
+    ($($config:ident),+ $(,)?) => {$(
+        impl fmt::Debug for $config {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                fmt_redacted(stringify!($config), self, f)
+            }
+        }
+    )+};
+}
+
+redacted_debug!(
+    AwsConfig,
+    KafkaConfig,
+    NatsConfig,
+    AmqpConfig,
+    MongoDbConfig,
+    MqttConfig,
+    HttpConfig,
+    WebSocketConfig,
+    IbmMqConfig,
+    ZeroMqConfig,
+    RedisStreamsConfig,
+    SqlxConfig,
+    ClickHouseConfig,
+    HttpBulkConfig,
+    PostgresCdcConfig,
+    GrpcConfig,
+    TlsConfig,
+    IbmTlsConfig,
+);
+
+impl fmt::Debug for HttpBulkOAuth2 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HttpBulkOAuth2")
+            .field(
+                "token_url",
+                &crate::support::redact::url_password(&self.token_url),
+            )
+            .field("client_id", &self.client_id)
+            .field("client_secret", &REDACTED)
+            .field("scope", &self.scope)
+            .finish()
+    }
+}
+
+impl fmt::Debug for HttpBulkAwsSigV4 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HttpBulkAwsSigV4")
+            .field("region", &self.region)
+            .field("service", &self.service)
+            .field("access_key", &self.access_key)
+            .field("secret_key", &self.secret_key.as_ref().map(|_| REDACTED))
+            .field(
+                "session_token",
+                &self.session_token.as_ref().map(|_| REDACTED),
+            )
+            .finish()
     }
 }
 

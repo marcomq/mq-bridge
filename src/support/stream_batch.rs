@@ -16,6 +16,9 @@ pub const DRAIN_FIRST_WAIT: Duration = Duration::from_millis(250);
 /// How long to wait for each further message before the batch is sent as is.
 pub const NEXT_MESSAGE_WAIT: Duration = Duration::from_millis(5);
 
+/// Slots reserved for a batch up front; beyond it the batch grows as items arrive.
+const MAX_RESERVED: usize = 32768;
+
 /// A stream error, with the items [`next_batch`] collected before it. Deliver
 /// those before reporting the error, or they are never acknowledged.
 #[derive(Debug, PartialEq, Eq)]
@@ -36,7 +39,8 @@ pub async fn next_batch<S, T, E>(
 where
     S: Stream<Item = Result<T, E>> + Unpin,
 {
-    let mut items = Vec::with_capacity(max);
+    // `max` is a route's `batch_size`, which may be far above what one batch holds.
+    let mut items = Vec::with_capacity(max.min(MAX_RESERVED));
     while items.len() < max {
         let next = match wait_for(items.len(), exit_on_empty) {
             Some(wait) => match tokio::time::timeout(wait, stream.try_next()).await {
@@ -92,6 +96,15 @@ mod tests {
         );
         assert_eq!(next_batch(&mut source, 2, false).await, Ok(Some(vec![3])));
         assert_eq!(next_batch(&mut source, 2, false).await, Ok(None));
+    }
+
+    #[tokio::test]
+    async fn a_huge_max_reserves_no_memory_up_front() {
+        let mut source = stream::iter::<Items>(vec![Ok(1)]);
+        assert_eq!(
+            next_batch(&mut source, usize::MAX, false).await,
+            Ok(Some(vec![1]))
+        );
     }
 
     #[tokio::test]

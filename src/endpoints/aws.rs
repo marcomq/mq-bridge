@@ -17,6 +17,134 @@ use std::collections::HashMap;
 use tracing::{error, trace};
 
 const AWS_BINARY_ENCODED_METADATA_KEY: &str = "aws_binary_encoded";
+/// SQS limits: attributes per message, entries per batch, bytes per batch request.
+const SQS_MAX_ATTRIBUTES: usize = 10;
+const SQS_BATCH_ENTRIES: usize = 10;
+const SQS_BATCH_BYTES: usize = 256 * 1024;
+
+/// One received SQS message. A body marked `aws_binary_encoded` is decoded again.
+fn canonical_from_sqs(
+    body: String,
+    attributes: Option<HashMap<String, aws_sdk_sqs::types::MessageAttributeValue>>,
+    sqs_message_id: Option<&str>,
+) -> CanonicalMessage {
+    let mut metadata = HashMap::new();
+    for (key, value) in attributes.unwrap_or_default() {
+        // A sender must not set the reserved `mqb.src.*` keys.
+        if crate::canonical_message::is_source_metadata_key(&key) {
+            continue;
+        }
+        if let Some(text) = value.string_value {
+            metadata.insert(key, text);
+        }
+    }
+    let encoded = metadata
+        .get(AWS_BINARY_ENCODED_METADATA_KEY)
+        .is_some_and(|flag| flag == "true");
+    let payload = match encoded.then(|| general_purpose::STANDARD.decode(&body)) {
+        Some(Ok(bytes)) => {
+            metadata.remove(AWS_BINARY_ENCODED_METADATA_KEY);
+            bytes
+        }
+        Some(Err(e)) => {
+            tracing::warn!(error = %e, "SQS body is marked aws_binary_encoded but is not base64");
+            body.into_bytes()
+        }
+        None => body.into_bytes(),
+    };
+    // The SQS `MessageId` stays the same when the message is delivered again.
+    let message_id =
+        sqs_message_id.and_then(|id| crate::canonical_message::message_id_from_str(id).ok());
+    let mut canonical = CanonicalMessage::new(payload, message_id);
+    canonical.metadata = metadata;
+    canonical
+}
+
+/// Whether SQS and SNS accept `name` as a message attribute name.
+fn valid_attribute_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    !name.is_empty()
+        && name.len() <= 256
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
+        && !name.starts_with('.')
+        && !name.ends_with('.')
+        && !name.contains("..")
+        && !lower.starts_with("aws.")
+        && !lower.starts_with("amazon.")
+}
+
+/// Body and attributes of one outgoing message.
+struct Outgoing {
+    body: String,
+    attributes: HashMap<String, String>,
+}
+
+impl Outgoing {
+    /// Metadata the services cannot carry is left out; a message they would refuse is an error.
+    fn new(message: &CanonicalMessage, binary: bool, to_sqs: bool) -> anyhow::Result<Self> {
+        let mut attributes = HashMap::with_capacity(message.metadata.len());
+        for (key, value) in &message.metadata {
+            if crate::canonical_message::is_source_metadata_key(key) || value.is_empty() {
+                continue;
+            }
+            if !valid_attribute_name(key) {
+                warn_invalid_attribute_name(key);
+                continue;
+            }
+            attributes.insert(key.clone(), value.clone());
+        }
+        let body = encode_aws_payload(&message.payload, &mut attributes, binary)?;
+        if body.is_empty() {
+            return Err(anyhow!("AWS cannot carry an empty message body"));
+        }
+        if to_sqs && attributes.len() > SQS_MAX_ATTRIBUTES {
+            return Err(anyhow!(
+                "SQS carries at most {SQS_MAX_ATTRIBUTES} message attributes, the message has {}",
+                attributes.len()
+            ));
+        }
+        Ok(Self { body, attributes })
+    }
+
+    fn bytes(&self) -> usize {
+        let attributes: usize = self
+            .attributes
+            .iter()
+            .map(|(key, value)| key.len() + value.len() + "String".len())
+            .sum();
+        self.body.len() + attributes
+    }
+}
+
+fn warn_invalid_attribute_name(name: &str) {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    WARNED.call_once(|| {
+        tracing::warn!(
+            name,
+            "Metadata key is not a valid SQS/SNS attribute name; such keys are left out"
+        );
+    });
+}
+
+/// Splits into batch requests SQS accepts: its entry count and its total size.
+fn sqs_chunks<T>(sized: Vec<(usize, T)>) -> Vec<Vec<T>> {
+    let mut chunks: Vec<Vec<T>> = Vec::new();
+    let mut chunk_bytes = 0;
+    for (bytes, item) in sized {
+        let fits = chunks.last().is_some_and(|chunk| {
+            chunk.len() < SQS_BATCH_ENTRIES && chunk_bytes + bytes <= SQS_BATCH_BYTES
+        });
+        if !fits {
+            chunks.push(Vec::new());
+            chunk_bytes = 0;
+        }
+        chunk_bytes += bytes;
+        chunks.last_mut().expect("pushed above").push(item);
+    }
+    chunks
+}
 
 pub struct AwsConsumer {
     client: SqsClient,
@@ -110,18 +238,11 @@ impl MessageConsumer for AwsConsumer {
                     );
                 }
 
-                let body = body_str.into_bytes();
-                let mut canonical = CanonicalMessage::new(body, None);
-
-                if let Some(attrs) = msg.message_attributes {
-                    for (k, v) in attrs {
-                        if let Some(s) = v.string_value {
-                            canonical.metadata.insert(k, s);
-                        }
-                    }
-                }
-
-                messages.push(canonical);
+                messages.push(canonical_from_sqs(
+                    body_str,
+                    msg.message_attributes,
+                    msg.message_id.as_deref(),
+                ));
                 receipt_handles.push(receipt_handle);
             }
 
@@ -250,7 +371,8 @@ fn prepare_aws_entries(
             match disposition {
                 MessageDisposition::Ack => { /* proceed to delete */ }
                 MessageDisposition::Reply(_) => {
-                    tracing::warn!("AWS consumer received a Reply/StreamReply, but replying is not supported. The reply is dropped.");
+                    // A route hands over every sink response this way: not worth a warning each.
+                    tracing::debug!("AWS consumer cannot reply; the reply is dropped");
                 }
                 MessageDisposition::Nack => { /* handle below */ }
             }
@@ -407,13 +529,15 @@ impl MessagePublisher for AwsPublisher {
             "Publishing AWS message"
         );
 
-        let mut message_attrs = message.metadata.clone();
-        message_attrs.retain(|key, _| !crate::canonical_message::is_source_metadata_key(key));
-        let body = encode_aws_payload(
-            &message.payload,
-            &mut message_attrs,
+        let Outgoing {
+            body,
+            attributes: message_attrs,
+        } = Outgoing::new(
+            &message,
             self.binary_payload_mode,
-        )?;
+            self.sqs_client.is_some(),
+        )
+        .map_err(PublisherError::NonRetryable)?;
         let mut errors = Vec::new();
 
         if let (Some(client), Some(url)) = (&self.sqs_client, &self.queue_url) {
@@ -486,32 +610,24 @@ impl MessagePublisher for AwsPublisher {
 
         if let (Some(client), Some(url)) = (&self.sqs_client, &self.queue_url) {
             let mut failed_messages = Vec::new();
+            let mut outgoing = Vec::with_capacity(messages.len());
+            for (index, message) in messages.iter().enumerate() {
+                match Outgoing::new(message, self.binary_payload_mode, true) {
+                    Ok(out) => outgoing.push((out.bytes(), (index, out))),
+                    Err(e) => {
+                        failed_messages.push((message.clone(), PublisherError::NonRetryable(e)))
+                    }
+                }
+            }
 
-            for chunk in messages.chunks(10) {
+            for chunk in sqs_chunks(outgoing) {
+                let indices: Vec<usize> = chunk.iter().map(|(index, _)| *index).collect();
                 let mut entries = Vec::with_capacity(chunk.len());
-                let mut valid_indices = Vec::with_capacity(chunk.len());
-                for (i, msg) in chunk.iter().enumerate() {
-                    let mut message_attrs = msg.metadata.clone();
-                    message_attrs
-                        .retain(|key, _| !crate::canonical_message::is_source_metadata_key(key));
-                    let body = match encode_aws_payload(
-                        &msg.payload,
-                        &mut message_attrs,
-                        self.binary_payload_mode,
-                    ) {
-                        Ok(body) => body,
-                        Err(e) => {
-                            failed_messages
-                                .push((msg.clone(), PublisherError::NonRetryable(anyhow!(e))));
-                            continue;
-                        }
-                    };
-
+                for (index, out) in chunk {
                     let mut entry = aws_sdk_sqs::types::SendMessageBatchRequestEntry::builder()
-                        .id(format!("{}", i))
-                        .message_body(body);
-
-                    for (k, v) in &message_attrs {
+                        .id(index.to_string())
+                        .message_body(out.body);
+                    for (k, v) in out.attributes {
                         entry = entry.message_attributes(
                             k,
                             aws_sdk_sqs::types::MessageAttributeValue::builder()
@@ -522,11 +638,6 @@ impl MessagePublisher for AwsPublisher {
                         );
                     }
                     entries.push(entry.build().unwrap());
-                    valid_indices.push(i);
-                }
-
-                if entries.is_empty() {
-                    continue;
                 }
 
                 let resp_result = client
@@ -538,36 +649,29 @@ impl MessagePublisher for AwsPublisher {
 
                 match resp_result {
                     Ok(resp) => {
-                        if !resp.failed.is_empty() {
-                            for failure in resp.failed {
-                                if let Ok(id_idx) = failure.id.parse::<usize>() {
-                                    if let Some(msg) = chunk.get(id_idx) {
-                                        let err = if failure.sender_fault {
-                                            PublisherError::NonRetryable(anyhow!(failure
-                                                .message
-                                                .unwrap_or_default()))
-                                        } else {
-                                            PublisherError::Retryable(anyhow!(failure
-                                                .message
-                                                .unwrap_or_default()))
-                                        };
-                                        failed_messages.push((msg.clone(), err));
-                                    } else {
-                                        error!(id = %failure.id, index = id_idx, chunk_size = chunk.len(), "Invalid index parsed from SQS failure ID. Skipping failure.");
-                                    }
-                                } else {
-                                    error!(
-                                        id = %failure.id,
-                                        "Failed to parse index from SQS failure ID. Skipping failure."
-                                    );
-                                }
-                            }
+                        for failure in resp.failed {
+                            let Some(msg) = failure
+                                .id
+                                .parse::<usize>()
+                                .ok()
+                                .and_then(|index| messages.get(index))
+                            else {
+                                error!(id = %failure.id, "SQS reported a failure for an unknown batch entry id. Skipping failure.");
+                                continue;
+                            };
+                            let reason = anyhow!(failure.message.unwrap_or_default());
+                            let err = if failure.sender_fault {
+                                PublisherError::NonRetryable(reason)
+                            } else {
+                                PublisherError::Retryable(reason)
+                            };
+                            failed_messages.push((msg.clone(), err));
                         }
                     }
                     Err(e) => {
-                        for i in valid_indices {
+                        for index in indices {
                             failed_messages.push((
-                                chunk[i].clone(),
+                                messages[index].clone(),
                                 PublisherError::Retryable(anyhow!("Batch send failed: {}", e)),
                             ));
                         }
@@ -649,4 +753,100 @@ pub(crate) async fn load_aws_config(config: &AwsConfig) -> aws_config::SdkConfig
     }
 
     loader.load().await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn attribute(value: &str) -> aws_sdk_sqs::types::MessageAttributeValue {
+        aws_sdk_sqs::types::MessageAttributeValue::builder()
+            .data_type("String")
+            .string_value(value)
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn a_binary_payload_comes_back_as_the_bytes_that_were_sent() {
+        let sent = CanonicalMessage::new(vec![0, 159, 146, 150], None);
+        let out = Outgoing::new(&sent, true, true).unwrap();
+        let attributes = out
+            .attributes
+            .iter()
+            .map(|(key, value)| (key.clone(), attribute(value)))
+            .collect();
+
+        let received = canonical_from_sqs(out.body, Some(attributes), None);
+        assert_eq!(&received.payload[..], &[0, 159, 146, 150]);
+        assert!(!received
+            .metadata
+            .contains_key(AWS_BINARY_ENCODED_METADATA_KEY));
+    }
+
+    #[test]
+    fn a_received_attribute_cannot_set_source_metadata() {
+        let attributes = HashMap::from([
+            ("mqb.src.kafka_offset".to_string(), attribute("7")),
+            ("kept".to_string(), attribute("yes")),
+        ]);
+        let received = canonical_from_sqs("body".to_string(), Some(attributes), None);
+        assert!(!received.metadata.contains_key("mqb.src.kafka_offset"));
+        assert_eq!(
+            received.metadata.get("kept").map(String::as_str),
+            Some("yes")
+        );
+    }
+
+    #[test]
+    fn a_redelivered_message_keeps_its_message_id() {
+        let sqs_id = Some("5fea7756-0ea4-451a-a703-a558b933e274");
+        let first = canonical_from_sqs("body".to_string(), None, sqs_id);
+        let again = canonical_from_sqs("body".to_string(), None, sqs_id);
+        assert_eq!(first.message_id, again.message_id);
+        assert_eq!(
+            first.message_id,
+            0x5fea7756_0ea4_451a_a703_a558b933e274_u128
+        );
+    }
+
+    #[test]
+    fn metadata_sqs_cannot_carry_is_left_out() {
+        let mut message = CanonicalMessage::new(b"body".to_vec(), None);
+        for (key, value) in [("empty", ""), ("http:header", "x"), ("AWS.reserved", "x")] {
+            message.metadata.insert(key.to_string(), value.to_string());
+        }
+        message
+            .metadata
+            .insert("trace.id".to_string(), "1".to_string());
+
+        let out = Outgoing::new(&message, false, true).unwrap();
+        assert_eq!(out.attributes.keys().collect::<Vec<_>>(), ["trace.id"]);
+    }
+
+    #[test]
+    fn a_message_sqs_would_refuse_fails_before_the_request() {
+        let empty = CanonicalMessage::new(Vec::new(), None);
+        assert!(Outgoing::new(&empty, false, true).is_err());
+
+        let mut crowded = CanonicalMessage::new(b"body".to_vec(), None);
+        for i in 0..=SQS_MAX_ATTRIBUTES {
+            crowded.metadata.insert(format!("key{i}"), "v".to_string());
+        }
+        assert!(Outgoing::new(&crowded, false, true).is_err());
+        // SNS has no such limit.
+        assert!(Outgoing::new(&crowded, false, false).is_ok());
+    }
+
+    #[test]
+    fn a_batch_request_stays_within_the_size_and_count_sqs_accepts() {
+        let large = SQS_BATCH_BYTES / 2 + 1;
+        let sizes = |chunks: Vec<Vec<usize>>| chunks.iter().map(Vec::len).collect::<Vec<_>>();
+
+        let chunks = sqs_chunks((0..3).map(|i| (large, i)).collect());
+        assert_eq!(sizes(chunks), [1, 1, 1]);
+
+        let chunks = sqs_chunks((0..25).map(|i| (10, i)).collect());
+        assert_eq!(sizes(chunks), [10, 10, 5]);
+    }
 }

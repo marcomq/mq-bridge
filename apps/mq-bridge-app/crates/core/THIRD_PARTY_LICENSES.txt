@@ -35,16 +35,11 @@ License: MIT OR Apache-2.0
 Source: https://github.com/RustCrypto/block-ciphers
 Copyright/attribution: Copyright (c) 2018 Artyom Pavlov
 
-aes@0.9.2
+aes@0.9.3
 License: MIT OR Apache-2.0
 Source: https://github.com/RustCrypto/block-ciphers
 Copyright/attribution: Copyright (c) 2018-2024 The RustCrypto Project Developers
 Copyright/attribution: Copyright (c) 2018 Artyom Pavlov
-
-ahash@0.7.8
-License: MIT OR Apache-2.0
-Source: https://github.com/tkaitchuck/ahash
-Copyright/attribution: Copyright (c) 2016 Amanieu d'Antras
 
 ahash@0.8.12
 License: MIT OR Apache-2.0
@@ -56,12 +51,17 @@ License: Unlicense OR MIT
 Source: https://github.com/BurntSushi/aho-corasick
 Copyright/attribution: Copyright (c) 2015 Andrew Gallant
 
-alloc-no-stdlib@2.0.4
+aliasable@0.1.3
+License: MIT
+Source: https://github.com/avitex/rust-aliasable
+Copyright/attribution: Copyright (c) 2020 James Dyson <avitex@wfxlabs.com>
+
+alloc-no-stdlib@3.0.0
 License: BSD-3-Clause
 Source: https://github.com/dropbox/rust-alloc-no-stdlib
 Copyright/attribution: Copyright (c) 2016 Dropbox, Inc.
 
-alloc-stdlib@0.2.4
+alloc-stdlib@0.3.0
 License: BSD-3-Clause
 Source: https://github.com/dropbox/rust-alloc-no-stdlib
 Copyright/attribution: Copyright (c) 2016 Dropbox, Inc.
@@ -120,6 +120,10 @@ anyhow@1.0.104
 License: MIT OR Apache-2.0
 Source: https://github.com/dtolnay/anyhow
 
+apache-avro@0.22.0
+License: Apache-2.0
+Source: https://github.com/apache/avro-rs
+
 arc-swap@1.9.2
 License: MIT OR Apache-2.0
 Source: https://github.com/vorner/arc-swap
@@ -140,6 +144,47 @@ arrayvec@0.7.8
 License: MIT OR Apache-2.0
 Source: https://github.com/bluss/arrayvec
 
+arrow-array@60.0.0
+License: Apache-2.0 AND MIT
+Source: https://github.com/apache/arrow-rs
+Copyright/attribution: Copyright (c) 2020-2022 Oliver Margetts
+
+arrow-buffer@60.0.0
+License: Apache-2.0
+Source: https://github.com/apache/arrow-rs
+
+arrow-cast@60.0.0
+License: Apache-2.0
+Source: https://github.com/apache/arrow-rs
+
+arrow-cmp@60.0.0
+License: Apache-2.0
+Source: https://github.com/apache/arrow-rs
+
+arrow-data@60.0.0
+License: Apache-2.0
+Source: https://github.com/apache/arrow-rs
+
+arrow-ipc@60.0.0
+License: Apache-2.0
+Source: https://github.com/apache/arrow-rs
+
+arrow-json@60.0.0
+License: Apache-2.0
+Source: https://github.com/apache/arrow-rs
+
+arrow-ord@60.0.0
+License: Apache-2.0
+Source: https://github.com/apache/arrow-rs
+
+arrow-schema@60.0.0
+License: Apache-2.0
+Source: https://github.com/apache/arrow-rs
+
+arrow-select@60.0.0
+License: Apache-2.0
+Source: https://github.com/apache/arrow-rs
+
 asn1-rs-derive@0.6.0
 License: MIT OR Apache-2.0
 Source: https://github.com/rusticata/asn1-rs.git
@@ -159,11 +204,11 @@ async-channel@2.5.0
 License: Apache-2.0 OR MIT
 Source: https://github.com/smol-rs/async-channel
 
-async-compat@0.2.5
+async-compat@0.2.6
 License: Apache-2.0 OR MIT
 Source: https://github.com/smol-rs/async-compat
 
-async-compression@0.4.43
+async-compression@0.4.50
 License: MIT OR Apache-2.0
 Source: https://github.com/Nullus157/async-compression
 Copyright/attribution: Copyright (c) 2018 the rustasync developers
@@ -189,7 +234,7 @@ License: Apache-2.0
 Source: https://github.com/nats-io/nats.rs
 Copyright/attribution: Copyright 2019 The NATS Authors
 
-async-rs@0.8.12
+async-rs@0.8.13
 License: BSD-2-Clause
 Source: https://github.com/amqp-rs/async-rs
 Copyright/attribution: Copyright (c) 2025-2026, Marc-Antoine Perennou <Marc-Antoine@Perennou.com>
@@ -221,11 +266,16 @@ License: MIT
 Source: https://github.com/pacman82/atoi-rs
 Copyright/attribution: Copyright (c) 2017
 
+atoi@3.1.0
+License: MIT
+Source: https://github.com/pacman82/atoi-rs
+Copyright/attribution: Copyright (c) 2017
+
 atomic-waker@1.1.2
 License: Apache-2.0 OR MIT
 Source: https://github.com/smol-rs/atomic-waker
 
-aws-config@1.11.0
+aws-config@1.12.0
 License: Apache-2.0
 Source: https://github.com/smithy-lang/smithy-rs
 
@@ -233,11 +283,12 @@ aws-credential-types@1.3.0
 License: Apache-2.0
 Source: https://github.com/smithy-lang/smithy-rs
 
-aws-lc-rs@1.18.0
+aws-lc-rs@1.18.1
 License: ISC AND (Apache-2.0 OR ISC)
 Source: https://github.com/aws/aws-lc-rs
+Copyright/attribution: Copyright Amazon.com, Inc. or its affiliates.
 
-aws-lc-sys@0.44.0
+aws-lc-sys@0.45.0
 License: ISC AND (Apache-2.0 OR ISC) AND Apache-2.0 AND MIT AND BSD-3-Clause AND (Apache-2.0 OR ISC OR MIT) AND (Apache-2.0 OR ISC OR MIT-0)
 Source: https://github.com/aws/aws-lc-rs
 Copyright/attribution: Copyright (c) 2014-2024 Google Inc.
@@ -247,27 +298,31 @@ Copyright/attribution: Copyright (c) 1995-1998 Eric Young (eay@cryptsoft.com). A
 Copyright/attribution: Copyright (c) 2015-2020 the fiat-crypto authors.
 Copyright/attribution: Copyright (C) 2017 - 2025, Stephan Mueller <smueller@chronox.de>.
 Copyright/attribution: Copyright 2008 Google Inc.
+Copyright/attribution: Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+Copyright/attribution: Copyright (c) The mlkem-native project authors.
+Copyright/attribution: Copyright (c) The mldsa-native project authors.
+Copyright/attribution: Copyright (c) The Go Authors. All rights reserved.
 
-aws-runtime@1.9.1
+aws-runtime@1.10.0
 License: Apache-2.0
 Source: https://github.com/smithy-lang/smithy-rs
 
-aws-sdk-sns@1.110.0
+aws-sdk-sns@1.116.0
 License: Apache-2.0
 Source: https://github.com/awslabs/aws-sdk-rust
 Copyright/attribution: Copyright 2018-2020 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 
-aws-sdk-sqs@1.108.0
+aws-sdk-sqs@1.114.0
 License: Apache-2.0
 Source: https://github.com/awslabs/aws-sdk-rust
 Copyright/attribution: Copyright 2018-2020 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 
-aws-sdk-sts@1.113.0
+aws-sdk-sts@1.119.0
 License: Apache-2.0
 Source: https://github.com/awslabs/aws-sdk-rust
 Copyright/attribution: Copyright 2018-2020 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 
-aws-sigv4@1.5.1
+aws-sigv4@1.6.0
 License: Apache-2.0
 Source: https://github.com/smithy-lang/smithy-rs
 
@@ -275,15 +330,15 @@ aws-smithy-async@1.3.0
 License: Apache-2.0
 Source: https://github.com/smithy-lang/smithy-rs
 
-aws-smithy-http-client@1.4.0
+aws-smithy-http-client@1.5.0
 License: Apache-2.0
 Source: https://github.com/smithy-lang/smithy-rs
 
-aws-smithy-http@0.64.0
+aws-smithy-http@0.64.1
 License: Apache-2.0
 Source: https://github.com/smithy-lang/smithy-rs
 
-aws-smithy-json@0.63.0
+aws-smithy-json@0.63.1
 License: Apache-2.0
 Source: https://github.com/smithy-lang/smithy-rs
 
@@ -291,7 +346,7 @@ aws-smithy-observability@0.3.0
 License: Apache-2.0
 Source: https://github.com/awslabs/smithy-rs
 
-aws-smithy-query@0.62.0
+aws-smithy-query@0.62.1
 License: Apache-2.0
 Source: https://github.com/smithy-lang/smithy-rs
 
@@ -299,27 +354,27 @@ aws-smithy-runtime-api-macros@1.1.0
 License: Apache-2.0
 Source: https://github.com/smithy-lang/smithy-rs
 
-aws-smithy-runtime-api@1.15.0
+aws-smithy-runtime-api@1.19.0
 License: Apache-2.0
 Source: https://github.com/smithy-lang/smithy-rs
 
-aws-smithy-runtime@1.14.0
+aws-smithy-runtime@1.16.0
 License: Apache-2.0
 Source: https://github.com/smithy-lang/smithy-rs
 
-aws-smithy-schema@0.2.0
+aws-smithy-schema@0.2.1
 License: Apache-2.0
 Source: https://github.com/smithy-lang/smithy-rs
 
-aws-smithy-types@1.6.2
+aws-smithy-types@1.8.1
 License: Apache-2.0
 Source: https://github.com/smithy-lang/smithy-rs
 
-aws-smithy-xml@0.62.0
+aws-smithy-xml@0.62.1
 License: Apache-2.0
 Source: https://github.com/smithy-lang/smithy-rs
 
-aws-types@1.5.0
+aws-types@1.6.0
 License: Apache-2.0
 Source: https://github.com/smithy-lang/smithy-rs
 
@@ -355,6 +410,12 @@ Source: https://github.com/RustCrypto/formats
 Copyright/attribution: Copyright (c) 2014 Steve "Sc00bz" Thomas (steve at tobtu dot com)
 Copyright/attribution: Copyright (c) 2021-2025 The RustCrypto Project Developers
 
+bigdecimal@0.4.11
+License: MIT/Apache-2.0
+Source: https://github.com/akubera/bigdecimal-rs
+Copyright/attribution: Copyright 2023 The BigDecimal-rs Contributors
+Copyright/attribution: Copyright (c) 2023 The BigDecimal-rs Contributors
+
 bit-set@0.8.0
 License: Apache-2.0 OR MIT
 Source: https://github.com/contain-rs/bit-set
@@ -370,7 +431,7 @@ License: MIT/Apache-2.0
 Source: https://github.com/bitflags/bitflags
 Copyright/attribution: Copyright (c) 2014 The Rust Project Developers
 
-bitflags@2.13.1
+bitflags@2.13.2
 License: MIT OR Apache-2.0
 Source: https://github.com/bitflags/bitflags
 Copyright/attribution: Copyright (c) 2014 The Rust Project Developers
@@ -409,6 +470,16 @@ blocking@1.7.0
 License: Apache-2.0 OR MIT
 Source: https://github.com/smol-rs/blocking
 
+bon-macros@3.10.2
+License: MIT OR Apache-2.0
+Source: https://github.com/elastio/bon
+Copyright/attribution: Copyright (c) 2024 Elastio Software Inc
+
+bon@3.10.2
+License: MIT OR Apache-2.0
+Source: https://github.com/elastio/bon
+Copyright/attribution: Copyright (c) 2024 Elastio Software Inc
+
 borsh-derive@1.8.1
 License: Apache-2.0
 Source: https://github.com/near/borsh-rs
@@ -419,12 +490,12 @@ License: MIT OR Apache-2.0
 Source: https://github.com/near/borsh-rs
 Copyright/attribution: Copyright 2019 Near
 
-brotli-decompressor@5.0.3
+brotli-decompressor@6.0.1
 License: BSD-3-Clause/MIT
 Source: https://github.com/dropbox/rust-brotli-decompressor
 Copyright/attribution: Copyright (c) 2016 Dropbox, Inc.
 
-brotli@8.0.4
+brotli@9.0.0
 License: BSD-3-Clause AND MIT
 Source: https://github.com/dropbox/rust-brotli
 Copyright/attribution: Copyright (c) 2009, 2010, 2013-2016 by the Brotli Authors.
@@ -483,7 +554,7 @@ cairo-sys-rs@0.18.2
 License: MIT
 Source: https://github.com/gtk-rs/gtk-rs-core
 
-camino@1.2.5
+camino@1.2.6
 License: MIT OR Apache-2.0
 Source: https://github.com/camino-rs/camino
 
@@ -523,12 +594,12 @@ Copyright/attribution: Copyright (C) 2007-2012 Mozilla Foundation.
 Copyright/attribution: Copyright (C) 2009-2014 Facebook, Inc.
 Copyright/attribution: Copyright holders/authors: Eric Kidd <git@randomhacks.net>
 
-cfb@0.7.3
+cfb@0.14.0
 License: MIT
 Source: https://github.com/mdsteele/rust-cfb
 Copyright/attribution: Copyright (c) 2017 Matthew D. Steele
 
-cfg-if@1.0.4
+cfg-if@1.0.5
 License: MIT OR Apache-2.0
 Source: https://github.com/rust-lang/cfg-if
 Copyright/attribution: Copyright (c) 2014 Alex Crichton
@@ -564,21 +635,29 @@ License: MIT OR Apache-2.0
 Source: https://github.com/RustCrypto/traits
 Copyright/attribution: Copyright (c) 2016-2025 RustCrypto Developers
 
-clap_builder@4.6.6
+clap_builder@4.6.7
 License: MIT OR Apache-2.0
 Source: https://github.com/clap-rs/clap
+Copyright/attribution: Copyright Individual contributors
+Copyright/attribution: Copyright (c) Individual contributors
 
-clap_derive@4.6.4
+clap_derive@4.6.7
 License: MIT OR Apache-2.0
 Source: https://github.com/clap-rs/clap
+Copyright/attribution: Copyright Individual contributors
+Copyright/attribution: Copyright (c) Individual contributors
 
-clap_lex@1.1.0
+clap_lex@1.1.1
 License: MIT OR Apache-2.0
 Source: https://github.com/clap-rs/clap
+Copyright/attribution: Copyright Individual contributors
+Copyright/attribution: Copyright (c) Individual contributors
 
-clap@4.6.6
+clap@4.6.7
 License: MIT OR Apache-2.0
 Source: https://github.com/clap-rs/clap
+Copyright/attribution: Copyright Individual contributors
+Copyright/attribution: Copyright (c) Individual contributors
 
 cmov@0.5.4
 License: Apache-2.0 OR MIT
@@ -599,12 +678,12 @@ License: MIT
 Source: https://github.com/Marwes/combine
 Copyright/attribution: Copyright (c) 2015 Markus Westerlind
 
-compression-codecs@0.4.38
+compression-codecs@0.4.45
 License: MIT OR Apache-2.0
 Source: https://github.com/Nullus157/async-compression
 Copyright/attribution: Copyright (c) 2018 the rustasync developers
 
-compression-core@0.4.32
+compression-core@0.4.33
 License: MIT OR Apache-2.0
 Source: https://github.com/Nullus157/async-compression
 Copyright/attribution: Copyright (c) 2018 the rustasync developers
@@ -613,9 +692,11 @@ concurrent-queue@2.5.0
 License: Apache-2.0 OR MIT
 Source: https://github.com/smol-rs/concurrent-queue
 
-config@0.15.25
+config@0.15.27
 License: MIT OR Apache-2.0
 Source: https://github.com/rust-cli/config-rs
+Copyright/attribution: Copyright Individual contributors
+Copyright/attribution: Copyright (c) Individual contributors
 
 const-oid@0.10.2
 License: Apache-2.0 OR MIT
@@ -660,6 +741,11 @@ Copyright/attribution: Copyright (c) 2017 Sergio Benitez
 Copyright/attribution: Copyright (c) 2014 Alex Crichton
 Copyright/attribution: Copyright 2017 Sergio Benitez
 Copyright/attribution: Copyright 2014 Alex Chricton
+
+core_detect@1.0.0
+License: MIT/Apache-2.0
+Source: https://github.com/thomcc/core_detect
+Copyright/attribution: Copyright (c) 2017-2020 The Rust Project Developers
 
 core-foundation-sys@0.8.7
 License: MIT OR Apache-2.0
@@ -716,7 +802,7 @@ License: MIT OR Apache-2.0
 Source: https://github.com/mrhooray/crc-rs.git
 Copyright/attribution: Copyright (c) 2017 crc-rs Developers
 
-crc32fast@1.5.1
+crc32fast@1.5.2
 License: MIT OR Apache-2.0
 Source: https://github.com/srijs/rust-crc32fast
 Copyright/attribution: Copyright (c) 2018 Sam Rijs, Alex Crichton and contributors
@@ -726,22 +812,23 @@ License: MIT OR Apache-2.0
 Source: https://github.com/rust-embedded/critical-section
 Copyright/attribution: Copyright (c) 2022 The critical-section authors
 
-crossbeam-channel@0.5.16
+crossbeam-channel@0.5.17
+License: MIT OR Apache-2.0
+Source: https://github.com/crossbeam-rs/crossbeam
+Copyright/attribution: Copyright (c) 2019 The Crossbeam Project Developers
+Copyright/attribution: Copyright (c) 2009 The Go Authors. All rights reserved.
+
+crossbeam-epoch@0.9.21
 License: MIT OR Apache-2.0
 Source: https://github.com/crossbeam-rs/crossbeam
 Copyright/attribution: Copyright (c) 2019 The Crossbeam Project Developers
 
-crossbeam-epoch@0.9.20
+crossbeam-queue@0.3.14
 License: MIT OR Apache-2.0
 Source: https://github.com/crossbeam-rs/crossbeam
 Copyright/attribution: Copyright (c) 2019 The Crossbeam Project Developers
 
-crossbeam-queue@0.3.13
-License: MIT OR Apache-2.0
-Source: https://github.com/crossbeam-rs/crossbeam
-Copyright/attribution: Copyright (c) 2019 The Crossbeam Project Developers
-
-crossbeam-utils@0.8.22
+crossbeam-utils@0.8.23
 License: MIT OR Apache-2.0
 Source: https://github.com/crossbeam-rs/crossbeam
 Copyright/attribution: Copyright (c) 2019 The Crossbeam Project Developers
@@ -761,11 +848,11 @@ License: MIT OR Apache-2.0
 Source: https://github.com/RustCrypto/traits
 Copyright/attribution: Copyright (c) 2021-2026 RustCrypto Developers
 
-cssparser-macros@0.6.1
+cssparser-macros@0.7.1
 License: MPL-2.0
 Source: https://github.com/servo/rust-cssparser
 
-cssparser@0.36.0
+cssparser@0.37.0
 License: MPL-2.0
 Source: https://github.com/servo/rust-cssparser
 
@@ -773,7 +860,7 @@ ctor-proc-macro@0.0.7
 License: Apache-2.0 OR MIT
 Source: https://github.com/mmastrac/rust-ctor
 
-ctor@0.8.0
+ctor@1.0.13
 License: Apache-2.0 OR MIT
 Source: https://github.com/mmastrac/rust-ctor
 
@@ -783,7 +870,7 @@ Source: https://github.com/RustCrypto/block-modes
 Copyright/attribution: Copyright (c) 2018-2022 RustCrypto Developers
 Copyright/attribution: Copyright (c) 2018 Artyom Pavlov
 
-ctutils@0.4.2
+ctutils@0.4.3
 License: Apache-2.0 OR MIT
 Source: https://github.com/RustCrypto/utils
 Copyright/attribution: Copyright (c) 2025-2026 The RustCrypto Project Developers
@@ -799,27 +886,12 @@ Copyright/attribution: Copyright (c) 2016-2021 isis agora lovecruft. All rights 
 Copyright/attribution: Copyright (c) 2016-2021 Henry de Valence. All rights reserved.
 Copyright/attribution: Copyright (c) 2012 The Go Authors. All rights reserved.
 
-darling_core@0.23.0
-License: MIT
-Source: https://github.com/TedDriggs/darling
-Copyright/attribution: Copyright (c) 2017 Ted Driggs
-
 darling_core@0.24.1
 License: MIT
 Source: https://github.com/TedDriggs/darling
 Copyright/attribution: Copyright (c) 2017 Ted Driggs
 
-darling_macro@0.23.0
-License: MIT
-Source: https://github.com/TedDriggs/darling
-Copyright/attribution: Copyright (c) 2017 Ted Driggs
-
 darling_macro@0.24.1
-License: MIT
-Source: https://github.com/TedDriggs/darling
-Copyright/attribution: Copyright (c) 2017 Ted Driggs
-
-darling@0.23.0
 License: MIT
 Source: https://github.com/TedDriggs/darling
 Copyright/attribution: Copyright (c) 2017 Ted Driggs
@@ -874,7 +946,7 @@ License: Apache-2.0 OR MIT
 Source: https://github.com/RustCrypto/formats/tree/master/der
 Copyright/attribution: Copyright (c) 2020-2023 The RustCrypto Project Developers
 
-der@0.8.1
+der@0.8.2
 License: Apache-2.0 OR MIT
 Source: https://github.com/RustCrypto/formats
 Copyright/attribution: Copyright (c) 2020-2026 The RustCrypto Project Developers
@@ -899,7 +971,7 @@ derive-syn-parse@0.2.0
 License: MIT OR Apache-2.0
 Source: https://github.com/sharnoff/derive-syn-parse
 
-derive-where@1.6.1
+derive-where@1.7.0
 License: MIT OR Apache-2.0
 Source: https://github.com/ModProg/derive-where
 Copyright/attribution: Copyright (c) 2021 Roland Fredenhagen
@@ -927,6 +999,11 @@ Source: https://github.com/dirs-dev/dirs-sys-rs
 Copyright/attribution: Copyright (c) 2018-2019 dirs-rs contributors
 
 dirs@6.0.0
+License: MIT OR Apache-2.0
+Source: https://github.com/soc/dirs-rs
+Copyright/attribution: Copyright (c) 2018-2019 dirs-rs contributors
+
+dirs@7.0.0
 License: MIT OR Apache-2.0
 Source: https://github.com/soc/dirs-rs
 Copyright/attribution: Copyright (c) 2018-2019 dirs-rs contributors
@@ -961,7 +1038,7 @@ License: MIT OR Apache-2.0
 Source: https://github.com/sgodwincs/dlv-list-rs
 Copyright/attribution: Copyright (c) 2022 Scott Godwin
 
-dom_query@0.27.0
+dom_query@0.28.0
 License: MIT
 Source: https://github.com/niklak/dom_query
 Copyright/attribution: Copyright (c) 2023 Mykola Humanov
@@ -1010,7 +1087,7 @@ Source: https://github.com/RustCrypto/signatures/tree/master/ed25519
 Copyright/attribution: Copyright (c) 2018-2023 RustCrypto Developers
 Copyright/attribution: Copyright 2018-2022 RustCrypto Developers
 
-either@1.18.0
+either@1.19.0
 License: MIT OR Apache-2.0
 Source: https://github.com/rayon-rs/either
 Copyright/attribution: Copyright (c) 2015
@@ -1020,9 +1097,11 @@ License: MIT OR Apache-2.0
 Source: https://github.com/nvzqz/embed-plist-rs
 Copyright/attribution: Copyright (c) 2020 Nikolai Vazquez
 
-encoding_rs@0.8.35
+encoding_rs@0.8.42
 License: (Apache-2.0 OR MIT) AND BSD-3-Clause
 Source: https://github.com/hsivonen/encoding_rs
+Copyright/attribution: Copyright Mozilla Foundation
+Copyright/attribution: Copyright © WHATWG (Apple, Google, Mozilla, Microsoft).
 
 equivalent@1.0.2
 License: Apache-2.0 OR MIT
@@ -1055,7 +1134,7 @@ License: MIT OR Apache-2.0
 Source: https://github.com/jonhoo/evmap.git
 Copyright/attribution: Copyright (c) 2017 Jon Gjengset
 
-fast-uuid-v7@0.1.9
+fast-uuid-v7@0.1.10
 License: MIT
 Source: https://github.com/marcomq/fast-uuid-v7
 Copyright/attribution: Copyright (c) 2026 Marco Mengelkoch
@@ -1087,6 +1166,10 @@ Copyright/attribution: Copyright (c) 2015-2017
 flagset@0.4.7
 License: Apache-2.0
 Source: https://github.com/enarx/flagset
+
+flatbuffers@25.12.19
+License: Apache-2.0
+Source: https://github.com/google/flatbuffers
 
 flate2@1.1.10
 License: MIT OR Apache-2.0
@@ -1253,7 +1336,7 @@ gdkx11@0.18.2
 License: MIT
 Source: https://github.com/gtk-rs/gtk3-rs
 
-generator@0.8.9
+generator@0.8.10
 License: MIT/Apache-2.0
 Source: https://github.com/Xudong-Huang/generator-rs.git
 Copyright/attribution: Copyright (c) 2017 Xudong Huang
@@ -1327,10 +1410,14 @@ gtk3-macros@0.18.2
 License: MIT
 Source: https://github.com/gtk-rs/gtk3-rs
 
-h2@0.4.19
+h2@0.4.20
 License: MIT
 Source: https://github.com/hyperium/h2
 Copyright/attribution: Copyright (c) 2017 h2 authors
+
+half@2.7.1
+License: MIT OR Apache-2.0
+Source: https://github.com/VoidStarKat/half-rs
 
 hashbag@0.1.13
 License: MIT OR Apache-2.0
@@ -1372,7 +1459,7 @@ License: MIT OR Apache-2.0
 Source: https://github.com/withoutboats/heck
 Copyright/attribution: Copyright (c) 2015 The Rust Project Developers
 
-hermit-abi@0.5.2
+hermit-abi@0.5.3
 License: MIT OR Apache-2.0
 Source: https://github.com/hermit-os/hermit-rs
 
@@ -1382,19 +1469,19 @@ Source: https://github.com/KokaKiwi/rust-hex
 Copyright/attribution: Copyright (c) 2013-2014 The Rust Project Developers.
 Copyright/attribution: Copyright (c) 2015-2020 The rust-hex Developers
 
-hickory-net@0.26.1
+hickory-net@0.26.3
 License: MIT OR Apache-2.0
 Source: https://github.com/hickory-dns/hickory-dns
 Copyright/attribution: Copyright (c) 2015 The Hickory DNS Developers
 Copyright/attribution: Copyright (c) 2017 Google LLC.
 
-hickory-proto@0.26.1
+hickory-proto@0.26.3
 License: MIT OR Apache-2.0
 Source: https://github.com/hickory-dns/hickory-dns
 Copyright/attribution: Copyright (c) 2015 The Hickory DNS Developers
 Copyright/attribution: Copyright (c) 2017 Google LLC.
 
-hickory-resolver@0.26.1
+hickory-resolver@0.26.3
 License: MIT OR Apache-2.0
 Source: https://github.com/hickory-dns/hickory-dns
 Copyright/attribution: Copyright (c) 2015 The Hickory DNS Developers
@@ -1421,7 +1508,7 @@ License: MIT OR Apache-2.0
 Source: https://github.com/RustCrypto/MACs
 Copyright/attribution: Copyright (c) 2017 Artyom Pavlov
 
-html5ever@0.38.0
+html5ever@0.39.0
 License: MIT OR Apache-2.0
 Source: https://github.com/servo/html5ever
 Copyright/attribution: Copyright (c) 2014 The html5ever Project Developers
@@ -1430,11 +1517,6 @@ http-body-util@0.1.5
 License: MIT
 Source: https://github.com/hyperium/http-body
 Copyright/attribution: Copyright (c) 2019-2026 Sean McArthur & Hyper Contributors
-
-http-body@0.4.6
-License: MIT
-Source: https://github.com/hyperium/http-body
-Copyright/attribution: Copyright (c) 2019 Hyper Contributors
 
 http-body@1.1.0
 License: MIT
@@ -1445,12 +1527,6 @@ http-range@0.1.5
 License: MIT
 Source: https://github.com/bancek/rust-http-range.git
 Copyright/attribution: Copyright (c) 2016 Luka Zakrajšek
-
-http@0.2.12
-License: MIT OR Apache-2.0
-Source: https://github.com/hyperium/http
-Copyright/attribution: Copyright 2017 http-rs authors
-Copyright/attribution: Copyright (c) 2017 http-rs authors
 
 http@1.5.0
 License: MIT OR Apache-2.0
@@ -1475,12 +1551,12 @@ Copyright/attribution: Copyright (c) 2016 The humantime Developers
 Copyright/attribution: Copyright (c) 2016 Pyfisch
 Copyright/attribution: Copyright © 2005-2013 Rich Felker
 
-hybrid-array@0.4.14
+hybrid-array@0.4.15
 License: MIT OR Apache-2.0
 Source: https://github.com/RustCrypto/hybrid-array
 Copyright/attribution: Copyright (c) 2022-2026 The RustCrypto Project Developers
 
-hyper-rustls@0.27.9
+hyper-rustls@0.27.10
 License: Apache-2.0 OR ISC OR MIT
 Source: https://github.com/rustls/hyper-rustls
 Copyright/attribution: Copyright (c) 2016 Joseph Birr-Pixton <jpixton@gmail.com>
@@ -1491,12 +1567,12 @@ License: MIT OR Apache-2.0
 Source: https://github.com/hjr3/hyper-timeout
 Copyright/attribution: Copyright (c) 2016 The weldr Project Developers
 
-hyper-util@0.1.20
+hyper-util@0.1.21
 License: MIT
 Source: https://github.com/hyperium/hyper-util
 Copyright/attribution: Copyright (c) 2023-2025 Sean McArthur
 
-hyper@1.11.1
+hyper@1.12.0
 License: MIT
 Source: https://github.com/hyperium/hyper
 Copyright/attribution: Copyright (c) 2014-2026 Sean McArthur
@@ -1571,12 +1647,12 @@ License: Apache-2.0 OR MIT
 Source: https://github.com/bluss/indexmap
 Copyright/attribution: Copyright (c) 2016--2017
 
-indexmap@2.14.0
+indexmap@2.14.2
 License: Apache-2.0 OR MIT
 Source: https://github.com/indexmap-rs/indexmap
 Copyright/attribution: Copyright (c) 2016--2017
 
-infer@0.19.0
+infer@0.22.0
 License: MIT
 Source: https://github.com/bojand/infer
 Copyright/attribution: Copyright (c) 2019 Bojan
@@ -1603,7 +1679,7 @@ License: MIT/Apache-2.0
 Source: https://github.com/liranringel/ipconfig
 Copyright/attribution: Copyright (c) 2017 Liran Ringel
 
-ipnet@2.12.1
+ipnet@2.12.2
 License: MIT OR Apache-2.0
 Source: https://github.com/krisprice/ipnet
 Copyright/attribution: Copyright 2017 Juniper Networks, Inc.
@@ -1692,28 +1768,28 @@ License: MIT OR Apache-2.0
 Source: https://github.com/jni-rs/jni-rs
 Copyright/attribution: Copyright holders/authors: jni team
 
-js-sys@0.3.104
+js-sys@0.3.106
 License: MIT OR Apache-2.0
 Source: https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/js-sys
 Copyright/attribution: Copyright (c) 2014 Alex Crichton
 
-json-patch@3.0.1
+json-patch@4.2.0
 License: MIT/Apache-2.0
 Source: https://github.com/idubrov/json-patch
 Copyright/attribution: Copyright (c) 2017 Ivan Dubrov
 
-json5@0.4.1
-License: ISC
+json5@1.3.1
+License: MIT
 Source: https://github.com/callum-oakley/json5-rs
-Copyright/attribution: Copyright 2018 Callum Oakley
+Copyright/attribution: Copyright (c) 2025 Callum Oakley
 
-jsonptr@0.6.3
+jsonptr@0.7.1
 License: MIT OR Apache-2.0
 Source: https://github.com/chanced/jsonptr
 Copyright/attribution: Copyright (c) 2022 Chance Dinkins
 Copyright/attribution: Copyright 2024 Chance Dinkins
 
-keyboard-types@0.7.0
+keyboard-types@0.8.3
 License: MIT OR Apache-2.0
 Source: https://github.com/pyfisch/keyboard-types
 Copyright/attribution: Copyright (c) 2017 Pyfisch
@@ -1723,13 +1799,13 @@ License: MIT OR Apache-2.0
 Source: https://github.com/hwchen/keyring-rs.git
 Copyright/attribution: Copyright (c) 2016 keyring Developers
 
-lapin@4.10.0
+lapin@4.12.0
 License: MIT
 Source: https://github.com/amqp-rs/lapin
 Copyright/attribution: Copyright (c) 2017-2026, Marc-Antoine Perennou <Marc-Antoine@Perennou.com>
 Copyright/attribution: Copyright (c) 2017 Geoffroy Couprie
 
-lazy_static@1.5.0
+lazy_static@1.5.1
 License: MIT OR Apache-2.0
 Source: https://github.com/rust-lang-nursery/lazy-static.rs
 Copyright/attribution: Copyright (c) 2010 The Rust Project Developers
@@ -1738,6 +1814,30 @@ left-right@0.11.8
 License: MIT OR Apache-2.0
 Source: https://github.com/jonhoo/left-right.git
 Copyright/attribution: Copyright (c) 2017 Jon Gjengset
+
+lexical-core@1.0.6
+License: MIT/Apache-2.0
+Source: https://github.com/Alexhuszagh/rust-lexical
+
+lexical-parse-float@1.0.6
+License: MIT/Apache-2.0
+Source: https://github.com/Alexhuszagh/rust-lexical
+
+lexical-parse-integer@1.0.6
+License: MIT/Apache-2.0
+Source: https://github.com/Alexhuszagh/rust-lexical
+
+lexical-util@1.0.7
+License: MIT/Apache-2.0
+Source: https://github.com/Alexhuszagh/rust-lexical
+
+lexical-write-float@1.0.6
+License: MIT/Apache-2.0
+Source: https://github.com/Alexhuszagh/rust-lexical
+
+lexical-write-integer@1.0.6
+License: MIT/Apache-2.0
+Source: https://github.com/Alexhuszagh/rust-lexical
 
 libappindicator-sys@0.9.0
 License: Apache-2.0 OR MIT
@@ -1750,9 +1850,10 @@ Source: https://crates.io/crates/libappindicator/0.9.0
 Copyright/attribution: Copyright (c) 2017-2021 qDot
 Copyright/attribution: Copyright (c) 2021 Tauri Apps Contributors
 
-libc@0.2.189
+libc@0.2.190
 License: MIT OR Apache-2.0
 Source: https://github.com/rust-lang/libc
+Copyright/attribution: Copyright (c) The Rust Project Developers
 
 libdbus-sys@0.2.7
 License: Apache-2.0/MIT
@@ -1760,15 +1861,22 @@ Source: https://github.com/diwic/dbus-rs
 Copyright/attribution: Copyright 2014-2018 David Henningsson <diwic@ubuntu.com> and other contributors
 Copyright/attribution: Copyright (c) 2014-2018 David Henningsson <diwic@ubuntu.com> and other contributors
 
-libloading@0.7.4
-License: ISC
-Source: https://github.com/nagisa/rust_libloading/
-Copyright/attribution: Copyright © 2015, Simonas Kazlauskas
-
 libloading@0.9.0
 License: ISC
 Source: https://github.com/nagisa/rust_libloading/
 Copyright/attribution: Copyright © 2015, Simonas Kazlauskas
+
+libm@0.2.16
+License: MIT
+Source: https://github.com/rust-lang/compiler-builtins
+Copyright/attribution: Copyright (c) 2018 Jorge Aparicio
+Copyright/attribution: Copyright © 2005-2020 Rich Felker, et al.
+Copyright/attribution: Copyright © 1993,2004 Sun Microsystems or
+Copyright/attribution: Copyright © 2003-2011 David Schultz or
+Copyright/attribution: Copyright © 2003-2009 Steven G. Kargl or
+Copyright/attribution: Copyright © 2003-2009 Bruce D. Evans or
+Copyright/attribution: Copyright © 2008 Stephen L. Moshier or
+Copyright/attribution: Copyright © 2017-2018 Arm Limited
 
 libmimalloc-sys@0.1.49
 License: MIT
@@ -1787,7 +1895,7 @@ libmqm-sys@0.10.2
 License: Apache-2.0
 Source: https://github.com/advantic-au/libmqm-sys
 
-libredox@0.1.21
+libredox@0.1.25
 License: MIT
 Source: https://gitlab.redox-os.org/redox-os/libredox.git
 Copyright/attribution: Copyright (c) 2023 4lDO2
@@ -1857,7 +1965,7 @@ License: MIT
 Source: https://github.com/sam0x17/macro_magic
 Copyright/attribution: Copyright 2023 Sam Johnson
 
-markup5ever@0.38.0
+markup5ever@0.39.0
 License: MIT OR Apache-2.0
 Source: https://github.com/servo/html5ever
 Copyright/attribution: Copyright (c) 2014 The html5ever Project Developers
@@ -1948,7 +2056,7 @@ Copyright/attribution: Copyright (c) 2017 Frommi
 Copyright/attribution: Copyright (c) 2017-2024 oyvindln
 Copyright/attribution: Copyright (c) 2020 Frommi
 
-mio@1.2.2
+mio@1.2.4
 License: MIT
 Source: https://github.com/tokio-rs/mio
 Copyright/attribution: Copyright (c) 2014 Carl Lerche and other MIO contributors
@@ -1969,17 +2077,17 @@ License: Apache-2.0
 Source: https://github.com/mongodb/libmongocrypt-rust
 Copyright/attribution: Copyright 2019-2021 MongoDB, Inc.
 
-mongodb-internal-macros@3.8.2
+mongodb-internal-macros@3.9.1
 License: Apache-2.0
 Source: https://github.com/mongodb/mongo-rust-driver
 Copyright/attribution: Copyright 2019-2021 MongoDB, Inc.
 
-mongodb@3.8.2
+mongodb@3.9.1
 License: Apache-2.0
 Source: https://github.com/mongodb/mongo-rust-driver
 Copyright/attribution: Copyright 2019-2021 MongoDB, Inc.
 
-mq-bridge-pulsar@0.1.4
+mq-bridge-pulsar@0.1.6
 License: MIT
 Source: https://github.com/marcomq/mq-bridge-pulsar
 Copyright/attribution: Copyright holders/authors: mq-bridge-pulsar contributors
@@ -1988,10 +2096,15 @@ mqi@0.3.0
 License: Apache-2.0
 Source: https://github.com/advantic-au/mqi
 
-muda@0.19.3
+muda@0.20.0
 License: Apache-2.0 OR MIT
 Source: https://github.com/tauri-apps/muda
 Copyright/attribution: Copyright (c) 2022-2022 Tauri Programme within The Commons Conservancy
+
+multiversion_no_op@1.0.0
+License: Apache-2.0 OR MIT
+Source: https://github.com/hsivonen/multiversion_no_op
+Copyright/attribution: Copyright Mozilla Foundation
 
 murmur3@0.5.2
 License: MIT/Apache-2.0
@@ -2075,6 +2188,16 @@ Copyright/attribution: Copyright (c) 2018, Daniel Wagner-Hall
 num-bigint@0.4.8
 License: MIT OR Apache-2.0
 Source: https://github.com/rust-num/num-bigint
+Copyright/attribution: Copyright (c) 2014 The Rust Project Developers
+
+num-bigint@0.5.1
+License: MIT OR Apache-2.0
+Source: https://github.com/rust-num/num-bigint
+Copyright/attribution: Copyright (c) 2014 The Rust Project Developers
+
+num-complex@0.4.6
+License: MIT OR Apache-2.0
+Source: https://github.com/rust-num/num-complex
 Copyright/attribution: Copyright (c) 2014 The Rust Project Developers
 
 num-conv@0.2.2
@@ -2171,14 +2294,19 @@ License: Zlib OR Apache-2.0 OR MIT
 Source: https://github.com/madsmtm/objc2
 Copyright/attribution: Copyright holders/authors: objc2-web-kit contributors
 
-objc2@0.6.4
+objc2@0.6.5
 License: MIT
 Source: https://github.com/madsmtm/objc2
 Copyright/attribution: Copyright holders/authors: Mads Marquart <mads@marquart.dk>
 
-object_store@0.14.1
+object_store@0.14.2
 License: MIT/Apache-2.0
 Source: https://github.com/apache/arrow-rs-object-store
+
+object@0.39.1
+License: Apache-2.0 OR MIT
+Source: https://github.com/gimli-rs/object
+Copyright/attribution: Copyright (c) 2015 The Gimli Developers
 
 oid-registry@0.8.1
 License: MIT OR Apache-2.0
@@ -2222,6 +2350,31 @@ openssl@0.10.81
 License: Apache-2.0
 Source: https://github.com/rust-openssl/rust-openssl
 
+OpenSSL 3.6.3 (C library; compiled into the bundled librdkafka by openssl-src@300.6.1+3.6.3)
+License: Apache-2.0
+Source: https://github.com/openssl/openssl
+Copyright/attribution: Copyright 1995-2026 The OpenSSL Project Authors. All Rights Reserved.
+
+opentelemetry_sdk@0.33.0
+License: Apache-2.0
+Source: https://github.com/open-telemetry/opentelemetry-rust/tree/main/opentelemetry-sdk
+
+opentelemetry-http@0.33.0
+License: Apache-2.0
+Source: https://github.com/open-telemetry/opentelemetry-rust/tree/main/opentelemetry-http
+
+opentelemetry-otlp@0.33.0
+License: Apache-2.0
+Source: https://github.com/open-telemetry/opentelemetry-rust/tree/main/opentelemetry-otlp
+
+opentelemetry-proto@0.33.0
+License: Apache-2.0
+Source: https://github.com/open-telemetry/opentelemetry-rust/tree/main/opentelemetry-proto
+
+opentelemetry@0.33.0
+License: Apache-2.0
+Source: https://github.com/open-telemetry/opentelemetry-rust/tree/main/opentelemetry
+
 option-ext@0.2.0
 License: MPL-2.0
 Source: https://github.com/soc/option-ext.git
@@ -2235,6 +2388,18 @@ ordered-multimap@0.7.3
 License: MIT
 Source: https://github.com/sgodwincs/ordered-multimap-rs
 Copyright/attribution: Copyright (c) 2018 sgodwincs
+
+ouroboros_macro@0.18.5
+License: MIT OR Apache-2.0
+Source: https://github.com/someguynamedjosh/ouroboros
+Copyright/attribution: Copyright 2021 Josh
+Copyright/attribution: Copyright (c) 2021 Josh
+
+ouroboros@0.18.5
+License: MIT OR Apache-2.0
+Source: https://github.com/someguynamedjosh/ouroboros
+Copyright/attribution: Copyright 2021 Josh
+Copyright/attribution: Copyright (c) 2021 Josh
 
 outref@0.5.2
 License: MIT
@@ -2278,6 +2443,10 @@ parking@2.2.1
 License: Apache-2.0 OR MIT
 Source: https://github.com/smol-rs/parking
 
+parquet@60.0.0
+License: Apache-2.0
+Source: https://github.com/apache/arrow-rs
+
 pastey@0.2.3
 License: MIT OR Apache-2.0
 Source: https://github.com/as1100k/pastey
@@ -2287,7 +2456,7 @@ License: MIT/Apache-2.0
 Source: https://github.com/Manishearth/pathdiff
 Copyright/attribution: Copyright 2017 The Rust Project Developers
 
-patricia_tree@0.10.1
+patricia_tree@0.10.2
 License: MIT
 Source: https://github.com/sile/patricia_tree
 Copyright/attribution: Copyright (c) 2017 Takeru Ohta <phjgt308@gmail.com>
@@ -2335,7 +2504,7 @@ pest@2.9.0
 License: MIT OR Apache-2.0
 Source: https://github.com/pest-parser/pest
 
-pgwire-replication@0.4.0
+pgwire-replication@0.4.1
 License: Apache-2.0 OR MIT
 Source: https://github.com/vnvo/pgwire-replication
 Copyright/attribution: Copyright (c) 2025
@@ -2387,7 +2556,7 @@ pin-project@1.1.13
 License: Apache-2.0 OR MIT
 Source: https://github.com/taiki-e/pin-project
 
-pin-utils@0.1.0
+pin-utils@0.1.1
 License: MIT OR Apache-2.0
 Source: https://github.com/rust-lang-nursery/pin-utils
 Copyright/attribution: Copyright 2018 The pin-utils authors
@@ -2422,7 +2591,7 @@ License: Apache-2.0 OR MIT
 Source: https://github.com/RustCrypto/formats
 Copyright/attribution: Copyright (c) 2020-2026 The RustCrypto Project Developers
 
-plist@1.10.0
+plist@1.10.1
 License: MIT
 Source: https://github.com/ebarnard/rust-plist/
 Copyright/attribution: Copyright (c) 2015 Edward Barnard
@@ -2464,7 +2633,7 @@ License: Unicode-3.0
 Source: https://github.com/unicode-org/icu4x
 Copyright/attribution: Copyright © 2020-2024 Unicode, Inc.
 
-powerfmt@0.2.0
+powerfmt@0.2.1
 License: MIT OR Apache-2.0
 Source: https://github.com/jhpratt/powerfmt
 Copyright/attribution: Copyright 2023 Jacob Pratt et al.
@@ -2486,6 +2655,10 @@ License: MIT OR Apache-2.0
 Source: https://github.com/tiborschneider/prefix-trie
 Copyright/attribution: Copyright 2017 Juniper Networks, Inc.
 Copyright/attribution: Copyright 2022 Tibor Schneider
+
+prettyplease@0.3.0
+License: MIT OR Apache-2.0
+Source: https://github.com/dtolnay/prettyplease
 
 proc-macro-crate@1.3.1
 License: MIT OR Apache-2.0
@@ -2510,6 +2683,11 @@ License: MIT OR Apache-2.0
 Source: https://gitlab.com/CreepySkeleton/proc-macro-error
 Copyright/attribution: Copyright 2019-2020 CreepySkeleton <creepy-skeleton@yandex.ru>
 Copyright/attribution: Copyright (c) 2019-2020 CreepySkeleton
+
+proc-macro2-diagnostics@0.10.1
+License: MIT/Apache-2.0
+Source: https://github.com/SergioBenitez/proc-macro2-diagnostics
+Copyright/attribution: Copyright (c) 2016-2020 Sergio Benitez
 
 proc-macro2@1.0.107
 License: MIT OR Apache-2.0
@@ -2558,11 +2736,20 @@ pulsar@6.9.0
 License: MIT OR Apache-2.0
 Source: https://github.com/streamnative/pulsar-rs
 
+quad-rand@0.2.3
+License: MIT
+Source: https://github.com/not-fl3/quad-rand
+
 quanta@0.12.6
 License: MIT
 Source: https://github.com/metrics-rs/quanta
 
 quick-xml@0.41.0
+License: MIT
+Source: https://github.com/tafia/quick-xml
+Copyright/attribution: Copyright (c) 2016 Johann Tuffe
+
+quick-xml@0.42.0
 License: MIT
 Source: https://github.com/tafia/quick-xml
 Copyright/attribution: Copyright (c) 2016 Johann Tuffe
@@ -2641,7 +2828,7 @@ License: MIT OR Apache-2.0
 Source: https://github.com/rust-random/rngs
 Copyright/attribution: Copyright (c) 2018 Developers of the Rand project
 
-rand@0.10.2
+rand@0.10.3
 License: MIT OR Apache-2.0
 Source: https://github.com/rust-random/rand
 Copyright/attribution: Copyright 2018 Developers of the Rand project
@@ -2703,7 +2890,7 @@ License: MIT
 Source: https://github.com/orlp/recursive
 Copyright/attribution: Copyright 2024, Orson R. L. Peters
 
-redis@1.6.0
+redis@1.7.1
 License: BSD-3-Clause
 Source: https://github.com/redis-rs/redis-rs
 Copyright/attribution: Copyright (c) 2022 by redis-rs contributors
@@ -2718,7 +2905,7 @@ License: MIT
 Source: https://gitlab.redox-os.org/redox-os/syscall
 Copyright/attribution: Copyright (c) 2017 Redox OS Developers
 
-redox_users@0.5.2
+redox_users@0.5.3
 License: MIT
 Source: https://gitlab.redox-os.org/redox-os/users
 Copyright/attribution: Copyright (c) 2017 Jose Narvaez
@@ -2756,7 +2943,7 @@ License: MIT
 Source: https://github.com/djkoloski/rend
 Copyright/attribution: Copyright 2021 David Koloski
 
-reqwest@0.13.4
+reqwest@0.13.5
 License: MIT OR Apache-2.0
 Source: https://github.com/seanmonstar/reqwest
 Copyright/attribution: Copyright 2016 Sean McArthur
@@ -2786,12 +2973,12 @@ License: MIT
 Source: https://github.com/rkyv/rkyv
 Copyright/attribution: Copyright 2021 David Koloski
 
-rmcp-macros@3.1.4
+rmcp-macros@3.5.1
 License: Apache-2.0
 Source: https://github.com/modelcontextprotocol/rust-sdk/
 Copyright/attribution: Copyright (c) 2024-2025 Model Context Protocol a Series of LF Projects, LLC.
 
-rmcp@3.1.4
+rmcp@3.5.1
 License: Apache-2.0
 Source: https://github.com/modelcontextprotocol/rust-sdk/
 Copyright/attribution: Copyright (c) 2024-2025 Model Context Protocol a Series of LF Projects, LLC.
@@ -2820,22 +3007,22 @@ License: MIT
 Source: https://github.com/paupino/rust-decimal
 Copyright/attribution: Copyright (c) 2016 Paul Mason
 
-rust_decimal@1.42.1
+rust_decimal@1.43.0
 License: MIT
 Source: https://github.com/paupino/rust-decimal
 Copyright/attribution: Copyright (c) 2016 Paul Mason
 
-rust-embed-impl@8.12.0
+rust-embed-impl@8.13.0
 License: MIT
 Source: https://pyrossh.dev/repos/rust-embed
 Copyright/attribution: Copyright (c) 2018 pyros2097
 
-rust-embed-utils@8.12.0
+rust-embed-utils@8.13.0
 License: MIT
 Source: https://pyrossh.dev/repos/rust-embed
 Copyright/attribution: Copyright (c) 2018 pyros2097
 
-rust-embed@8.12.0
+rust-embed@8.13.0
 License: MIT
 Source: https://pyrossh.dev/repos/rust-embed
 Copyright/attribution: Copyright (c) 2018 pyros2097
@@ -2864,11 +3051,11 @@ License: MIT/Apache-2.0
 Source: https://github.com/rusticata/rusticata-macros.git
 Copyright/attribution: Copyright (c) 2017 Pierre Chifflier
 
-rustix@1.1.4
+rustix@1.1.5
 License: Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT
 Source: https://github.com/bytecodealliance/rustix
 
-rustls-connector@0.23.8
+rustls-connector@0.23.9
 License: BSD-2-Clause
 Source: https://github.com/amqp-rs/rustls-connector
 Copyright/attribution: Copyright (c) 2019-2026, Marc-Antoine Perennou <Marc-Antoine@Perennou.com>
@@ -2891,12 +3078,12 @@ Source: https://github.com/rustls/pki-types
 Copyright/attribution: Copyright 2023 Dirkjan Ochtman
 Copyright/attribution: Copyright (c) 2023 Dirkjan Ochtman <dirkjan@ochtman.nl>
 
-rustls-platform-verifier-android@0.1.1
+rustls-platform-verifier-android@0.2.0
 License: MIT OR Apache-2.0
 Source: https://github.com/rustls/rustls-platform-verifier
 Copyright/attribution: Copyright holders/authors: rustls-platform-verifier-android contributors
 
-rustls-platform-verifier@0.7.0
+rustls-platform-verifier@0.7.1
 License: MIT OR Apache-2.0
 Source: https://github.com/rustls/rustls-platform-verifier
 Copyright/attribution: Copyright (c) 2022 1Password
@@ -2911,7 +3098,7 @@ License: ISC
 Source: https://github.com/rustls/webpki
 Copyright/attribution: Copyright 2015 Brian Smith.
 
-rustls@0.23.43
+rustls@0.23.45
 License: Apache-2.0 OR ISC OR MIT
 Source: https://github.com/rustls/rustls
 Copyright/attribution: Copyright (c) 2016 Joseph Birr-Pixton <jpixton@gmail.com>
@@ -2925,7 +3112,7 @@ ryu@1.0.23
 License: Apache-2.0 OR BSL-1.0
 Source: https://github.com/dtolnay/ryu
 
-saa@5.6.0
+saa@5.6.2
 License: Apache-2.0
 Source: https://codeberg.org/wvwwvwwv/synchronous-and-asynchronous
 Copyright/attribution: Copyright 2025-present Changgyoo Park
@@ -2946,7 +3133,7 @@ License: Unlicense/MIT
 Source: https://github.com/BurntSushi/same-file
 Copyright/attribution: Copyright (c) 2017 Andrew Gallant
 
-scc@3.8.6
+scc@3.8.8
 License: Apache-2.0
 Source: https://codeberg.org/wvwwvwwv/scalable-concurrent-containers/
 Copyright/attribution: Copyright 2020-present Changgyoo Park
@@ -2967,11 +3154,6 @@ Source: https://github.com/GREsau/schemars
 Copyright/attribution: Copyright (c) 2019 Graham Esau
 
 schemars@0.8.22
-License: MIT
-Source: https://github.com/GREsau/schemars
-Copyright/attribution: Copyright (c) 2019 Graham Esau
-
-schemars@0.9.0
 License: MIT
 Source: https://github.com/GREsau/schemars
 Copyright/attribution: Copyright (c) 2019 Graham Esau
@@ -3001,7 +3183,7 @@ License: MIT OR Apache-2.0
 Source: https://github.com/RustCrypto/password-hashes
 Copyright/attribution: Copyright (c) 2021-2026 The RustCrypto Project Developers
 
-sdd@4.8.10
+sdd@4.8.11
 License: Apache-2.0
 Source: https://codeberg.org/wvwwvwwv/scalable-delayed-dealloc
 Copyright/attribution: Copyright 2024-present Changgyoo Park
@@ -3026,13 +3208,17 @@ License: MIT OR Apache-2.0
 Source: https://github.com/kornelski/rust-security-framework
 Copyright/attribution: Copyright (c) 2015 Steven Fackler
 
-selectors@0.36.1
+selectors@0.38.0
 License: MPL-2.0
 Source: https://github.com/servo/stylo
 
 semver@1.0.28
 License: MIT OR Apache-2.0
 Source: https://github.com/dtolnay/semver
+
+seq-macro@0.3.6
+License: MIT OR Apache-2.0
+Source: https://github.com/dtolnay/seq-macro
 
 serde_bytes@0.11.19
 License: MIT OR Apache-2.0
@@ -3079,12 +3265,12 @@ License: MIT/Apache-2.0
 Source: https://github.com/nox/serde_urlencoded
 Copyright/attribution: Copyright (c) 2016 Anthony Ramine
 
-serde_with_macros@3.22.0
+serde_with_macros@3.24.0
 License: MIT OR Apache-2.0
 Source: https://github.com/jonasbb/serde_with/
 Copyright/attribution: Copyright (c) 2015
 
-serde_with@3.22.0
+serde_with@3.24.0
 License: MIT OR Apache-2.0
 Source: https://github.com/jonasbb/serde_with/
 Copyright/attribution: Copyright (c) 2015
@@ -3195,8 +3381,8 @@ simdutf8@0.1.5
 License: MIT OR Apache-2.0
 Source: https://github.com/rusticstuff/simdutf8
 
-siphasher@1.0.3
-License: MIT/Apache-2.0
+siphasher@1.0.4
+License: MIT OR Apache-2.0
 Source: https://github.com/jedisct1/rust-siphash
 Copyright/attribution: Copyright 2012-2016 The Rust Project Developers.
 Copyright/attribution: Copyright 2016-2026 Frank Denis.
@@ -3221,10 +3407,15 @@ Copyright/attribution: Copyright 2019 Tyler Neely
 Copyright/attribution: Copyright (c) 2018 Tyler Neely
 Copyright/attribution: Copyright (c) 2019 Tyler Neely
 
-smallvec@1.15.2
+smallvec@1.16.2
 License: MIT OR Apache-2.0
 Source: https://github.com/servo/rust-smallvec
 Copyright/attribution: Copyright (c) 2018 The Servo Project Developers
+
+snap@1.1.2
+License: BSD-3-Clause
+Source: https://github.com/BurntSushi/rust-snappy
+Copyright/attribution: Copyright 2011, The Snappy-Rust Authors. All rights reserved.
 
 socket2@0.6.5
 License: MIT OR Apache-2.0
@@ -3261,7 +3452,7 @@ License: Apache-2.0 OR MIT
 Source: https://github.com/RustCrypto/formats/tree/master/spki
 Copyright/attribution: Copyright (c) 2021-2023 The RustCrypto Project Developers
 
-spki@0.8.0
+spki@0.8.1
 License: Apache-2.0 OR MIT
 Source: https://github.com/RustCrypto/formats
 Copyright/attribution: Copyright (c) 2021-2026 The RustCrypto Project Developers
@@ -3294,7 +3485,7 @@ sqlx@0.9.0
 License: MIT OR Apache-2.0
 Source: https://github.com/launchbadge/sqlx
 
-sse-stream@0.2.5
+sse-stream@0.2.6
 License: MIT OR Apache-2.0
 Source: https://github.com/4t145/sse-stream/
 Copyright/attribution: Copyright (c) 2024 4t145
@@ -3308,6 +3499,11 @@ stacker@0.1.25
 License: MIT OR Apache-2.0
 Source: https://github.com/rust-lang/stacker
 Copyright/attribution: Copyright (c) 2014 Alex Crichton
+
+static_assertions@1.1.0
+License: MIT OR Apache-2.0
+Source: https://github.com/nvzqz/static-assertions-rs
+Copyright/attribution: Copyright (c) 2017 Nikolai Vazquez
 
 string_cache@0.9.0
 License: MIT OR Apache-2.0
@@ -3331,7 +3527,17 @@ License: MIT
 Source: https://github.com/Peternator7/strum
 Copyright/attribution: Copyright (c) 2019 Peter Glotfelty
 
+strum_macros@0.28.0
+License: MIT
+Source: https://github.com/Peternator7/strum
+Copyright/attribution: Copyright (c) 2019 Peter Glotfelty
+
 strum@0.27.2
+License: MIT
+Source: https://github.com/Peternator7/strum
+Copyright/attribution: Copyright (c) 2019 Peter Glotfelty
+
+strum@0.28.0
 License: MIT
 Source: https://github.com/Peternator7/strum
 Copyright/attribution: Copyright (c) 2019 Peter Glotfelty
@@ -3361,7 +3567,7 @@ syn@2.0.119
 License: MIT OR Apache-2.0
 Source: https://github.com/dtolnay/syn
 
-syn@3.0.4
+syn@3.0.6
 License: MIT OR Apache-2.0
 Source: https://github.com/dtolnay/syn
 
@@ -3370,6 +3576,11 @@ License: Apache-2.0
 Source: https://github.com/Actyx/sync_wrapper
 
 synstructure@0.13.2
+License: MIT
+Source: https://github.com/mystor/synstructure
+Copyright/attribution: Copyright 2016 Nika Layzell
+
+synstructure@0.14.0
 License: MIT
 Source: https://github.com/mystor/synstructure
 Copyright/attribution: Copyright 2016 Nika Layzell
@@ -3400,7 +3611,7 @@ License: MIT OR Apache-2.0
 Source: https://github.com/tauri-apps/tao
 Copyright/attribution: Copyright (c) 2022 - Present Tauri Apps Contributors
 
-tao@0.35.3
+tao@0.37.1
 License: Apache-2.0
 Source: https://github.com/tauri-apps/tao
 
@@ -3409,42 +3620,42 @@ License: MIT
 Source: https://github.com/myrrlyn/tap
 Copyright/attribution: Copyright (c) 2017 Elliot Linder <darfink@gmail.com>
 
-tauri-codegen@2.6.3
+tauri-codegen@2.7.1
 License: Apache-2.0 OR MIT
 Source: https://github.com/tauri-apps/tauri
 Copyright/attribution: Copyright (c) 2017 - Present Tauri Apps Contributors
 
-tauri-macros@2.6.3
+tauri-macros@2.7.1
 License: Apache-2.0 OR MIT
 Source: https://github.com/tauri-apps/tauri
 Copyright/attribution: Copyright (c) 2017 - Present Tauri Apps Contributors
 
-tauri-plugin-dialog@2.7.2
+tauri-plugin-dialog@2.8.1
 License: Apache-2.0 OR MIT
 Source: https://github.com/tauri-apps/plugins-workspace
 Copyright/attribution: Copyright (c) 2017 - Present Tauri Apps Contributors
 
-tauri-plugin-fs@2.5.1
+tauri-plugin-fs@2.6.0
 License: Apache-2.0 OR MIT
 Source: https://github.com/tauri-apps/plugins-workspace
 Copyright/attribution: Copyright (c) 2017 - Present Tauri Apps Contributors
 
-tauri-runtime-wry@2.11.4
+tauri-runtime-wry@2.12.1
 License: Apache-2.0 OR MIT
 Source: https://github.com/tauri-apps/tauri
 Copyright/attribution: Copyright (c) 2017 - Present Tauri Apps Contributors
 
-tauri-runtime@2.11.3
+tauri-runtime@2.12.1
 License: Apache-2.0 OR MIT
 Source: https://github.com/tauri-apps/tauri
 Copyright/attribution: Copyright (c) 2017 - Present Tauri Apps Contributors
 
-tauri-utils@2.9.3
+tauri-utils@2.10.1
 License: Apache-2.0 OR MIT
 Source: https://github.com/tauri-apps/tauri
 Copyright/attribution: Copyright (c) 2017 - Present Tauri Apps Contributors
 
-tauri@2.11.5
+tauri@2.12.1
 License: Apache-2.0 OR MIT
 Source: https://github.com/tauri-apps/tauri
 Copyright/attribution: Copyright (c) 2017 - Present Tauri Apps Contributors
@@ -3468,7 +3679,7 @@ thiserror-impl@1.0.69
 License: MIT OR Apache-2.0
 Source: https://github.com/dtolnay/thiserror
 
-thiserror-impl@2.0.20
+thiserror-impl@2.0.21
 License: MIT OR Apache-2.0
 Source: https://github.com/dtolnay/thiserror
 
@@ -3476,7 +3687,7 @@ thiserror@1.0.69
 License: MIT OR Apache-2.0
 Source: https://github.com/dtolnay/thiserror
 
-thiserror@2.0.20
+thiserror@2.0.21
 License: MIT OR Apache-2.0
 Source: https://github.com/dtolnay/thiserror
 
@@ -3513,7 +3724,7 @@ Copyright/attribution: (C) 2020 Tomasz "Soveu" Marx
 Copyright/attribution: Copyright (c) 2020 Soveu
 Copyright/attribution: Copyright 2020 Tomasz "Soveu" Marx
 
-tinyvec@1.12.0
+tinyvec@1.13.3
 License: Zlib OR Apache-2.0 OR MIT
 Source: https://github.com/Lokathor/tinyvec
 Copyright/attribution: Copyright (c) 2019 Daniel "Lokathor" Gee.
@@ -3528,7 +3739,7 @@ License: MIT
 Source: https://github.com/tokio-rs/tls
 Copyright/attribution: Copyright (c) 2019 Tokio Contributors
 
-tokio-rustls@0.26.4
+tokio-rustls@0.26.6
 License: MIT OR Apache-2.0
 Source: https://github.com/rustls/tokio-rustls
 Copyright/attribution: Copyright (c) 2017 quininer kel
@@ -3552,9 +3763,10 @@ License: MIT
 Source: https://github.com/Gelbpunkt/tokio-websockets/
 Copyright/attribution: Copyright (c) 2021 Jens Reidel
 
-tokio@1.53.1
+tokio@1.53.2
 License: MIT
 Source: https://github.com/tokio-rs/tokio
+Copyright/attribution: Copyright (c) Tokio Contributors
 
 toml_datetime@0.6.3
 License: MIT OR Apache-2.0
@@ -3573,9 +3785,10 @@ toml_edit@0.20.2
 License: MIT OR Apache-2.0
 Source: https://github.com/toml-rs/toml
 
-toml_edit@0.25.13+spec-1.1.0
+toml_edit@0.25.15+spec-1.1.0
 License: MIT OR Apache-2.0
 Source: https://github.com/toml-rs/toml
+Copyright/attribution: Copyright (c) Individual contributors
 
 toml_parser@1.1.3+spec-1.1.0
 License: MIT OR Apache-2.0
@@ -3585,9 +3798,10 @@ toml_writer@1.1.2+spec-1.1.0
 License: MIT OR Apache-2.0
 Source: https://github.com/toml-rs/toml
 
-toml@1.1.4+spec-1.1.0
+toml@1.1.6+spec-1.1.0
 License: MIT OR Apache-2.0
 Source: https://github.com/toml-rs/toml
+Copyright/attribution: Copyright (c) Individual contributors
 
 tonic-prost@0.14.6
 License: MIT
@@ -3676,7 +3890,7 @@ License: MIT OR Apache-2.0
 Source: https://github.com/EmbarkStudios/tryhard
 Copyright/attribution: Copyright (c) 2019 Embark Studios
 
-twox-hash@2.1.4
+twox-hash@2.1.5
 License: MIT
 Source: https://github.com/shepmaster/twox-hash
 Copyright/attribution: Copyright (c) 2015 Jake Goulding
@@ -3729,7 +3943,7 @@ License: MIT/Apache-2.0
 Source: https://github.com/open-i18n/rust-unic/
 Copyright/attribution: Copyright holders/authors: The UNIC Project Developers
 
-unicase@2.9.0
+unicase@2.10.0
 License: MIT OR Apache-2.0
 Source: https://github.com/seanmonstar/unicase
 Copyright/attribution: Copyright (c) 2014-2026 Sean McArthur
@@ -3739,7 +3953,7 @@ License: MIT OR Apache-2.0
 Source: https://github.com/servo/unicode-bidi
 Copyright/attribution: Copyright (c) 2015 The Rust Project Developers
 
-unicode-ident@1.0.24
+unicode-ident@1.0.26
 License: (MIT OR Apache-2.0) AND Unicode-3.0
 Source: https://github.com/dtolnay/unicode-ident
 Copyright/attribution: Copyright © 1991-2023 Unicode, Inc.
@@ -3788,7 +4002,7 @@ Source: https://github.com/kornelski/rust_urlencoding
 Copyright/attribution: © 2016 Bertram Truong
 Copyright/attribution: © 2021 Kornel Lesiński
 
-urlpattern@0.3.0
+urlpattern@0.6.0
 License: MIT
 Source: https://github.com/denoland/rust-urlpattern
 Copyright/attribution: Copyright (c) 2021 the Deno authors
@@ -3802,7 +4016,7 @@ License: Apache-2.0 OR MIT
 Source: https://github.com/alacritty/vte
 Copyright/attribution: Copyright (c) 2016 Joe Wilm
 
-uuid@1.26.0
+uuid@1.27.0
 License: Apache-2.0 OR MIT
 Source: https://github.com/uuid-rs/uuid
 Copyright/attribution: Copyright (c) 2014 The Rust Project Developers
@@ -3825,7 +4039,7 @@ License: Unlicense/MIT
 Source: https://github.com/BurntSushi/walkdir
 Copyright/attribution: Copyright (c) 2015 Andrew Gallant
 
-want@0.3.1
+want@0.3.2
 License: MIT
 Source: https://github.com/seanmonstar/want
 Copyright/attribution: Copyright (c) 2018-2019 Sean McArthur
@@ -3838,27 +4052,27 @@ wasip2@1.0.4+wasi-0.2.12
 License: Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT
 Source: https://github.com/bytecodealliance/wasi-rs
 
-wasm-bindgen-futures@0.4.77
+wasm-bindgen-futures@0.4.79
 License: MIT OR Apache-2.0
 Source: https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/futures
 Copyright/attribution: Copyright (c) 2014 Alex Crichton
 
-wasm-bindgen-macro-support@0.2.127
+wasm-bindgen-macro-support@0.2.129
 License: MIT OR Apache-2.0
 Source: https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/macro-support
 Copyright/attribution: Copyright (c) 2014 Alex Crichton
 
-wasm-bindgen-macro@0.2.127
+wasm-bindgen-macro@0.2.129
 License: MIT OR Apache-2.0
 Source: https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/macro
 Copyright/attribution: Copyright (c) 2014 Alex Crichton
 
-wasm-bindgen-shared@0.2.127
+wasm-bindgen-shared@0.2.129
 License: MIT OR Apache-2.0
 Source: https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/shared
 Copyright/attribution: Copyright (c) 2014 Alex Crichton
 
-wasm-bindgen@0.2.127
+wasm-bindgen@0.2.129
 License: MIT OR Apache-2.0
 Source: https://github.com/wasm-bindgen/wasm-bindgen
 Copyright/attribution: Copyright (c) 2014 Alex Crichton
@@ -3872,7 +4086,7 @@ License: MIT OR Apache-2.0
 Source: https://github.com/servo/html5ever
 Copyright/attribution: Copyright (c) 2014 The html5ever Project Developers
 
-web-sys@0.3.104
+web-sys@0.3.106
 License: MIT OR Apache-2.0
 Source: https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/web-sys
 Copyright/attribution: Copyright (c) 2014 Alex Crichton
@@ -3913,13 +4127,13 @@ Source: https://github.com/wravery/webview2-rs
 Copyright/attribution: Copyright (c) 2021 Bill Avery
 Copyright/attribution: Copyright holders/authors: webview2-com-macros contributors
 
-webview2-com-sys@0.38.2
+webview2-com-sys@0.39.1
 License: MIT
 Source: https://github.com/wravery/webview2-rs
 Copyright/attribution: Copyright (c) 2021 Bill Avery
 Copyright/attribution: Copyright holders/authors: webview2-com-sys contributors
 
-webview2-com@0.38.2
+webview2-com@0.39.1
 License: MIT
 Source: https://github.com/wravery/webview2-rs
 Copyright/attribution: Copyright (c) 2021 Bill Avery
@@ -3957,7 +4171,7 @@ License: MIT/Apache-2.0
 Source: https://github.com/retep998/winapi-rs
 Copyright/attribution: Copyright (c) 2015-2018 The winapi-rs Developers
 
-window-vibrancy@0.6.0
+window-vibrancy@0.8.1
 License: Apache-2.0 OR MIT
 Source: https://github.com/tauri-apps/tauri-plugin-vibrancy
 Copyright/attribution: Copyright (c) 2020-2022 Tauri Programme within The Commons Conservancy
@@ -4054,23 +4268,11 @@ windows_x86_64_msvc@0.53.1
 License: MIT OR Apache-2.0
 Source: https://github.com/microsoft/windows-rs
 
-windows-collections@0.2.0
-License: MIT OR Apache-2.0
-Source: https://github.com/microsoft/windows-rs
-
 windows-collections@0.3.2
 License: MIT OR Apache-2.0
 Source: https://github.com/microsoft/windows-rs
 
-windows-core@0.61.2
-License: MIT OR Apache-2.0
-Source: https://github.com/microsoft/windows-rs
-
 windows-core@0.62.2
-License: MIT OR Apache-2.0
-Source: https://github.com/microsoft/windows-rs
-
-windows-future@0.2.1
 License: MIT OR Apache-2.0
 Source: https://github.com/microsoft/windows-rs
 
@@ -4086,15 +4288,7 @@ windows-interface@0.59.3
 License: MIT OR Apache-2.0
 Source: https://github.com/microsoft/windows-rs
 
-windows-link@0.1.3
-License: MIT OR Apache-2.0
-Source: https://github.com/microsoft/windows-rs
-
 windows-link@0.2.1
-License: MIT OR Apache-2.0
-Source: https://github.com/microsoft/windows-rs
-
-windows-numerics@0.2.0
 License: MIT OR Apache-2.0
 Source: https://github.com/microsoft/windows-rs
 
@@ -4106,15 +4300,7 @@ windows-registry@0.6.1
 License: MIT OR Apache-2.0
 Source: https://github.com/microsoft/windows-rs
 
-windows-result@0.3.4
-License: MIT OR Apache-2.0
-Source: https://github.com/microsoft/windows-rs
-
 windows-result@0.4.1
-License: MIT OR Apache-2.0
-Source: https://github.com/microsoft/windows-rs
-
-windows-strings@0.4.2
 License: MIT OR Apache-2.0
 Source: https://github.com/microsoft/windows-rs
 
@@ -4127,10 +4313,6 @@ License: MIT OR Apache-2.0
 Source: https://github.com/microsoft/windows-rs
 
 windows-sys@0.52.0
-License: MIT OR Apache-2.0
-Source: https://github.com/microsoft/windows-rs
-
-windows-sys@0.59.0
 License: MIT OR Apache-2.0
 Source: https://github.com/microsoft/windows-rs
 
@@ -4154,19 +4336,11 @@ windows-targets@0.53.5
 License: MIT OR Apache-2.0
 Source: https://github.com/microsoft/windows-rs
 
-windows-threading@0.1.0
-License: MIT OR Apache-2.0
-Source: https://github.com/microsoft/windows-rs
-
 windows-threading@0.2.1
 License: MIT OR Apache-2.0
 Source: https://github.com/microsoft/windows-rs
 
 windows-version@0.1.7
-License: MIT OR Apache-2.0
-Source: https://github.com/microsoft/windows-rs
-
-windows@0.61.3
 License: MIT OR Apache-2.0
 Source: https://github.com/microsoft/windows-rs
 
@@ -4191,7 +4365,7 @@ License: Unicode-3.0
 Source: https://github.com/unicode-org/icu4x
 Copyright/attribution: Copyright © 2020-2024 Unicode, Inc.
 
-wry@0.55.1
+wry@0.57.0
 License: Apache-2.0 OR MIT
 Source: https://github.com/tauri-apps/wry
 Copyright/attribution: Copyright (c) 2020-2023 Ngo Iok Ui & Tauri Programme within The Commons Conservancy
@@ -4224,7 +4398,7 @@ License: MIT/Apache-2.0
 Source: https://github.com/RazrFalcon/xmlparser
 Copyright/attribution: Copyright (c) 2018 Reizner Evgeniy
 
-xxhash-rust@0.8.18
+xxhash-rust@0.8.19
 License: BSL-1.0
 Source: https://github.com/DoumanAsh/xxhash-rust
 
@@ -4234,7 +4408,13 @@ Source: https://github.com/Ethiraric/yaml-rust2
 Copyright/attribution: Copyright (c) 2015 Chen Yuheng
 Copyright/attribution: Copyright (c) 2023 Ethiraric
 
-yoke-derive@0.8.2
+yansi@1.0.1
+License: MIT OR Apache-2.0
+Source: https://github.com/SergioBenitez/yansi
+Copyright/attribution: Copyright 2017 Sergio Benitez
+Copyright/attribution: Copyright (c) 2017 Sergio Benitez
+
+yoke-derive@0.8.4
 License: Unicode-3.0
 Source: https://github.com/unicode-org/icu4x
 Copyright/attribution: Copyright © 2020-2024 Unicode, Inc.
@@ -4244,42 +4424,42 @@ License: Unicode-3.0
 Source: https://github.com/unicode-org/icu4x
 Copyright/attribution: Copyright © 2020-2024 Unicode, Inc.
 
-yring@0.3.14
+yring@0.3.20
 License: ISC
 Source: https://github.com/paddor/omq.rs
 Copyright/attribution: Copyright (c) 2026 Patrik Wenger
 
-zen-expression@2.0.1
+zen-expression@2.1.2
 License: MIT
 Source: https://github.com/gorules/zen.git
 Copyright/attribution: Copyright 2023 GoRules.io
 Copyright/attribution: Copyright holders/authors: GoRules Team <bot@gorules.io>
 
-zen-macros@2.0.1
+zen-macros@2.1.2
 License: MIT
 Source: https://github.com/gorules/zen.git
 Copyright/attribution: Copyright holders/authors: zen-macros contributors
 Copyright/attribution: Copyright 2023 GoRules.io
 
-zen-types@2.0.1
+zen-types@2.1.2
 License: MIT
 Source: https://github.com/gorules/zen.git
 Copyright/attribution: Copyright 2023 GoRules.io
 Copyright/attribution: Copyright holders/authors: zen-types contributors
 
-zerocopy-derive@0.8.56
+zerocopy-derive@0.8.61
 License: BSD-2-Clause OR Apache-2.0 OR MIT
 Source: https://github.com/google/zerocopy
 Copyright/attribution: Copyright 2019 The Fuchsia Authors.
 Copyright/attribution: Copyright 2023 The Fuchsia Authors
 
-zerocopy@0.8.56
+zerocopy@0.8.61
 License: BSD-2-Clause OR Apache-2.0 OR MIT
 Source: https://github.com/google/zerocopy
 Copyright/attribution: Copyright 2019 The Fuchsia Authors.
 Copyright/attribution: Copyright 2023 The Fuchsia Authors
 
-zerofrom-derive@0.1.7
+zerofrom-derive@0.1.8
 License: Unicode-3.0
 Source: https://github.com/unicode-org/icu4x
 Copyright/attribution: Copyright © 2020-2024 Unicode, Inc.
@@ -4294,7 +4474,7 @@ License: Apache-2.0 OR MIT
 Source: https://github.com/RustCrypto/utils
 Copyright/attribution: Copyright (c) 2019-2026 The RustCrypto Project Developers
 
-zeroize@1.9.0
+zeroize@1.9.1
 License: Apache-2.0 OR MIT
 Source: https://github.com/RustCrypto/utils
 Copyright/attribution: Copyright (c) 2018-2026 The RustCrypto Project Developers
@@ -4328,20 +4508,21 @@ zmij@1.0.23
 License: MIT
 Source: https://github.com/dtolnay/zmij
 
-zstd-safe@7.2.4
-License: MIT OR Apache-2.0
+zstd-safe@8.0.0
+License: BSD-3-Clause
 Source: https://github.com/gyscos/zstd-rs
-Copyright/attribution: Copyright (c) 2016 Alexandre Bury
+Copyright/attribution: Copyright (c) 2026, Alexandre Bury
 
-zstd-sys@2.0.16+zstd.1.5.7
-License: MIT/Apache-2.0
+zstd-sys@2.1.0+zstd.1.5.7
+License: BSD-3-Clause
 Source: https://github.com/gyscos/zstd-rs
-Copyright/attribution: Copyright (c) 2016 Alexandre Bury
+Copyright/attribution: Copyright (c) 2026, Alexandre Bury
+Copyright/attribution: Copyright (c) Meta Platforms, Inc. and affiliates. All rights reserved.
 
-zstd@0.13.3
-License: MIT
+zstd@0.14.0
+License: BSD-3-Clause
 Source: https://github.com/gyscos/zstd-rs
-Copyright/attribution: Copyright (c) 2016 Alexandre Bury
+Copyright/attribution: Copyright (c) 2026, Alexandre Bury
 
 ================================================================================
 EMBEDDED WEB UI COMPONENTS
@@ -4352,7 +4533,7 @@ License: MIT
 Source: https://github.com/APIDevTools/json-schema-ref-parser.git
 Copyright/attribution: Copyright (c) 2015 James Messinger
 
-@awesome.me/webawesome@3.12.0
+@awesome.me/webawesome@3.14.0
 License: MIT
 Source: git+https://github.com/shoelace-style/webawesome.git
 Copyright/attribution: Copyright (c) 2025 Fonticons, Inc.
@@ -4362,7 +4543,7 @@ License: MIT
 Source: git+https://code.haverbeke.berlin/codemirror/autocomplete.git
 Copyright/attribution: Copyright (C) 2018-2021 by Marijn Haverbeke <marijn@haverbeke.berlin> and others
 
-@codemirror/commands@6.11.0
+@codemirror/commands@6.11.1
 License: MIT
 Source: git+https://code.haverbeke.berlin/codemirror/commands.git
 Copyright/attribution: Copyright (C) 2018-2021 by Marijn Haverbeke <marijn@haverbeke.berlin> and others
@@ -4376,6 +4557,11 @@ Copyright/attribution: Copyright (C) 2018-2021 by Marijn Haverbeke <marijn@haver
 License: MIT
 Source: https://github.com/codemirror/lang-xml.git
 Copyright/attribution: Copyright (C) 2018-2021 by Marijn Haverbeke <marijn@haverbeke.berlin> and others
+
+@codemirror/lang-yaml@6.1.3
+License: MIT
+Source: git+https://github.com/codemirror/lang-yaml.git
+Copyright/attribution: Copyright (C) 2024 by Marijn Haverbeke <marijn@haverbeke.berlin> and others
 
 @codemirror/language@6.12.3
 License: MIT
@@ -4392,12 +4578,12 @@ License: MIT
 Source: git+https://code.haverbeke.berlin/codemirror/search.git
 Copyright/attribution: Copyright (C) 2018-2021 by Marijn Haverbeke <marijn@haverbeke.berlin> and others
 
-@codemirror/state@6.7.1
+@codemirror/state@6.7.6
 License: MIT
 Source: git+https://code.haverbeke.berlin/codemirror/state.git
 Copyright/attribution: Copyright (C) 2018-2021 by Marijn Haverbeke <marijn@haverbeke.berlin> and others
 
-@codemirror/view@6.43.9
+@codemirror/view@6.43.13
 License: MIT
 Source: git+https://code.haverbeke.berlin/codemirror/view.git
 Copyright/attribution: Copyright (C) 2018-2021 by Marijn Haverbeke <marijn@haverbeke.berlin> and others
@@ -4452,6 +4638,11 @@ License: MIT
 Source: https://github.com/lezer-parser/xml.git
 Copyright/attribution: Copyright (C) 2018 by Marijn Haverbeke <marijn@haverbeke.berlin> and others
 
+@lezer/yaml@1.0.4
+License: MIT
+Source: https://github.com/lezer-parser/yaml.git
+Copyright/attribution: Copyright (C) 2024 by Marijn Haverbeke <marijnh@gmail.com> and others
+
 @lit-labs/ssr-client@1.1.8
 License: BSD-3-Clause
 Source: git+https://github.com/lit/lit.git
@@ -4502,12 +4693,12 @@ License: MIT
 Source: git+https://github.com/shoelace-style/localize.git
 Copyright/attribution: Copyright (c) 2020 A Beautiful Site, LLC
 
-@tauri-apps/api@2.11.1
+@tauri-apps/api@2.12.0
 License: Apache-2.0 OR MIT
 Source: git+https://github.com/tauri-apps/tauri.git
 Copyright/attribution: Copyright (c) 2017 - Present Tauri Apps Contributors
 
-@tauri-apps/plugin-dialog@2.7.2
+@tauri-apps/plugin-dialog@2.8.1
 License: MIT OR Apache-2.0
 Source: https://github.com/tauri-apps/plugins-workspace
 
@@ -4589,7 +4780,7 @@ License: MIT
 Source: git+https://github.com/epoberezkin/fast-deep-equal.git
 Copyright/attribution: Copyright (c) 2017 Evgeny Poberezkin
 
-fast-uri@3.1.5
+fast-uri@3.1.8
 License: BSD-3-Clause
 Source: git+https://github.com/fastify/fast-uri.git
 Copyright/attribution: Copyright (c) 2011-2021, Gary Court until https://github.com/garycourt/uri-js/commit/a1acf730b4bba3f1097c9f52e7d9d3aba8cdcaae
@@ -4615,7 +4806,7 @@ License: BSD-3-Clause
 Source: git://github.com/feross/ieee754.git
 Copyright/attribution: Copyright 2008 Fair Oaks Labs, Inc.
 
-js-yaml@4.3.1
+js-yaml@4.3.2
 License: MIT
 Source: nodeca/js-yaml
 Copyright/attribution: Copyright (C) 2011-2015 by Vitaly Puzrin
@@ -4706,6 +4897,11 @@ Source: git+https://github.com/MattiasBuelens/web-streams-polyfill.git
 Copyright/attribution: Copyright (c) 2024 Mattias Buelens
 Copyright/attribution: Copyright (c) 2016 Diwank Singh Tomer
 
+yaml@2.9.1
+License: ISC
+Source: github:eemeli/yaml
+Copyright/attribution: Copyright Eemeli Aro <eemeli@gmail.com>
+
 tslib (bundled by @tauri-apps/api)
 License: 0BSD
 Source: https://github.com/microsoft/tslib
@@ -4717,12 +4913,12 @@ MPL 2.0 SOURCE AVAILABILITY
 Source code for the MPL-2.0-covered components is available from the following
 locations. These are unmodified third-party components in this distribution.
 
-cssparser-macros@0.6.1
-Source archive: https://crates.io/api/v1/crates/cssparser-macros/0.6.1/download
+cssparser-macros@0.7.1
+Source archive: https://crates.io/api/v1/crates/cssparser-macros/0.7.1/download
 Repository: https://github.com/servo/rust-cssparser
 
-cssparser@0.36.0
-Source archive: https://crates.io/api/v1/crates/cssparser/0.36.0/download
+cssparser@0.37.0
+Source archive: https://crates.io/api/v1/crates/cssparser/0.37.0/download
 Repository: https://github.com/servo/rust-cssparser
 
 dtoa-short@0.3.5
@@ -4733,13 +4929,39 @@ option-ext@0.2.0
 Source archive: https://crates.io/api/v1/crates/option-ext/0.2.0/download
 Repository: https://github.com/soc/option-ext.git
 
-selectors@0.36.1
-Source archive: https://crates.io/api/v1/crates/selectors/0.36.1/download
+selectors@0.38.0
+Source archive: https://crates.io/api/v1/crates/selectors/0.38.0/download
 Repository: https://github.com/servo/stylo
 
 ================================================================================
 UPSTREAM NOTICE FILES
 ================================================================================
+
+----- apache-avro@0.22.0 — NOTICE -----
+Apache Avro
+Copyright 2010-2025 The Apache Software Foundation
+
+This product includes software developed at
+The Apache Software Foundation (https://www.apache.org/).
+
+The initial implementation of the Apache Avro Rust SDK has been 
+developed by Flavien Raynaud (https://github.com/flavray/avro-rs)
+and donated to the Apache Avro project in 2020.
+
+----- arrow-array@60.0.0, arrow-buffer@60.0.0, arrow-cast@60.0.0, arrow-cmp@60.0.0, arrow-data@60.0.0, arrow-ipc@60.0.0, arrow-json@60.0.0, arrow-ord@60.0.0, arrow-schema@60.0.0, arrow-select@60.0.0, parquet@60.0.0 — NOTICE.txt -----
+Apache Arrow
+Copyright 2016-2026 The Apache Software Foundation
+
+This product includes software developed at
+The Apache Software Foundation (http://www.apache.org/).
+
+This product includes software from the chronoutil crate (MIT)
+ * Copyright (c) 2020-2022 Oliver Margetts
+ * https://github.com/olliemath/chronoutil
+
+This product includes software from the compact-thrift project (Apache 2.0)
+ * Copyright Jörn Horstmann
+ * https://github.com/jhorstmann/compact-thrift
 
 ----- moka@0.12.16 — NOTICE -----
 Additional Notices for Moka
@@ -4757,7 +4979,7 @@ These files were ported from the Java Caffeine library and are not dual-licensed
 
 Please refer to the LICENSE-APACHE file for more details on the Apache License 2.0.
 
------ object_store@0.14.1 — NOTICE.txt -----
+----- object_store@0.14.2 — NOTICE.txt -----
 Apache Arrow Object Store
 Copyright 2020-2026 The Apache Software Foundation
 
@@ -4768,8 +4990,44 @@ The Apache Software Foundation (http://www.apache.org/).
 COMPONENT-SPECIFIC LICENSE AND ATTRIBUTION TEXTS
 ================================================================================
 
+----- Additional text 08728d1c12d6 -----
+Applies to: zstd-sys@2.1.0+zstd.1.5.7
+
+The auto-generated bindings are under the 3-clause BSD license:
+
+BSD License
+
+For Zstandard software
+
+Copyright (c) Meta Platforms, Inc. and affiliates. All rights reserved.
+
+Redistribution and use in source and binary forms, with or without modification,
+are permitted provided that the following conditions are met:
+
+ * Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+
+ * Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+ * Neither the name Facebook, nor Meta, nor the names of its contributors may
+   be used to endorse or promote products derived from this software without
+   specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR
+ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
 ----- Additional text 09d59db01536 -----
-Applies to: rustls-connector@0.23.8, tcp-stream@0.34.14
+Applies to: rustls-connector@0.23.9, tcp-stream@0.34.14
 
 Copyright (c) 2019-2026, Marc-Antoine Perennou <Marc-Antoine@Perennou.com>
 All rights reserved.
@@ -4792,7 +5050,7 @@ WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWIS
 THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ----- Additional text 0a8f13f22b5a -----
-Applies to: async-rs@0.8.12
+Applies to: async-rs@0.8.13
 
 Copyright (c) 2025-2026, Marc-Antoine Perennou <Marc-Antoine@Perennou.com>
 All rights reserved.
@@ -4869,7 +5127,7 @@ freely, subject to the following restrictions:
 3. This notice may not be removed or altered from any source distribution.
 
 ----- Additional text 1aa0a3422448 -----
-Applies to: block2@0.6.2, dispatch2@0.3.1, objc2-app-kit@0.3.2, objc2-cloud-kit@0.3.2, objc2-core-data@0.3.2, objc2-core-foundation@0.3.2, objc2-core-graphics@0.3.2, objc2-core-image@0.3.2, objc2-core-location@0.3.2, objc2-core-text@0.3.2, objc2-encode@4.1.0, objc2-exception-helper@0.1.1, objc2-foundation@0.3.2, objc2-io-surface@0.3.2, objc2-quartz-core@0.3.2, objc2-ui-kit@0.3.2, objc2-user-notifications@0.3.2, objc2-web-kit@0.3.2, objc2@0.6.4
+Applies to: block2@0.6.2, dispatch2@0.3.1, objc2-app-kit@0.3.2, objc2-cloud-kit@0.3.2, objc2-core-data@0.3.2, objc2-core-foundation@0.3.2, objc2-core-graphics@0.3.2, objc2-core-image@0.3.2, objc2-core-location@0.3.2, objc2-core-text@0.3.2, objc2-encode@4.1.0, objc2-exception-helper@0.1.1, objc2-foundation@0.3.2, objc2-io-surface@0.3.2, objc2-quartz-core@0.3.2, objc2-ui-kit@0.3.2, objc2-user-notifications@0.3.2, objc2-web-kit@0.3.2, objc2@0.6.5
 
 # License
 
@@ -4940,7 +5198,7 @@ NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ----- Additional text 33198f6982ee -----
-Applies to: omq-proto@0.26.1, omq-tokio@0.21.4, yring@0.3.14
+Applies to: omq-proto@0.26.1, omq-tokio@0.21.4, yring@0.3.20
 
 ISC License
 
@@ -5046,7 +5304,7 @@ OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ----- Additional text 49f5cc2a2e4d -----
-Applies to: aws-lc-sys@0.44.0
+Applies to: aws-lc-sys@0.45.0
 
 AWS Libcrypto (AWS-LC)
 
@@ -5358,240 +5616,6 @@ DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
 THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-
-BSD 2-Clause License
---------------------
-Reproduced from amq-protocol-types. The copyright below is that component's own;
-each component's copyright is listed with the component above.
-
-Copyright (c) 2017-2026, Marc-Antoine Perennou <Marc-Antoine@Perennou.com>
-All rights reserved.
-
-Redistribution and use in source and binary forms, with or without modification, are permitted provided that the
-following conditions are met:
-
-1. Redistributions of source code must retain the above copyright notice, this list of conditions and the following
-disclaimer.
-
-2. Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the following
-disclaimer in the documentation and/or other materials provided with the distribution.
-
-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES,
-INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
-SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
-WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
-THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-
-Boost Software License 1.0
---------------------------
-Boost Software License - Version 1.0 - August 17th, 2003
-
-Permission is hereby granted, free of charge, to any person or organization
-obtaining a copy of the software and accompanying documentation covered by
-this license (the "Software") to use, reproduce, display, distribute,
-execute, and transmit the Software, and to prepare derivative works of the
-Software, and to permit third-parties to whom the Software is furnished to
-do so, all subject to the following:
-
-The copyright notices in the Software and this entire statement, including
-the above license grant, this restriction and the following disclaimer,
-must be included in all copies of the Software, in whole or in part, and
-all derivative works of the Software, unless such copies or derivative
-works are solely in the form of machine-executable object code generated by
-a source language processor.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE, TITLE AND NON-INFRINGEMENT. IN NO EVENT
-SHALL THE COPYRIGHT HOLDERS OR ANYONE DISTRIBUTING THE SOFTWARE BE LIABLE
-FOR ANY DAMAGES OR OTHER LIABILITY, WHETHER IN CONTRACT, TORT OR OTHERWISE,
-ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-DEALINGS IN THE SOFTWARE.
-
-CDLA Permissive 2.0
--------------------
-# Community Data License Agreement - Permissive - Version 2.0
-
-This is the Community Data License Agreement - Permissive, Version
-2.0 (the "agreement"). Data Provider(s) and Data Recipient(s) agree
-as follows:
-
-## 1. Provision of the Data
-
-1.1. A Data Recipient may use, modify, and share the Data made
-available by Data Provider(s) under this agreement if that Data
-Recipient follows the terms of this agreement.
-
-1.2. This agreement does not impose any restriction on a Data
-Recipient's use, modification, or sharing of any portions of the
-Data that are in the public domain or that may be used, modified,
-or shared under any other legal exception or limitation.
-
-## 2. Conditions for Sharing Data
-
-2.1. A Data Recipient may share Data, with or without modifications, so
-long as the Data Recipient makes available the text of this agreement
-with the shared Data.
-
-## 3. No Restrictions on Results
-
-3.1. This agreement does not impose any restriction or obligations
-with respect to the use, modification, or sharing of Results.
-
-## 4. No Warranty; Limitation of Liability
-
-4.1. All Data Recipients receive the Data subject to the following
-terms:
-
-THE DATA IS PROVIDED ON AN "AS IS" BASIS, WITHOUT REPRESENTATIONS,
-WARRANTIES OR CONDITIONS OF ANY KIND, EITHER EXPRESS OR IMPLIED
-INCLUDING, WITHOUT LIMITATION, ANY WARRANTIES OR CONDITIONS OF TITLE,
-NON-INFRINGEMENT, MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE.
-
-NO DATA PROVIDER SHALL HAVE ANY LIABILITY FOR ANY DIRECT, INDIRECT,
-INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING
-WITHOUT LIMITATION LOST PROFITS), HOWEVER CAUSED AND ON ANY THEORY OF
-LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
-NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE DATA OR RESULTS,
-EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGES.
-
-## 5. Definitions
-
-5.1. "Data" means the material received by a Data Recipient under
-this agreement.
-
-5.2. "Data Provider" means any person who is the source of Data
-provided under this agreement and in reliance on a Data Recipient's
-agreement to its terms.
-
-5.3. "Data Recipient" means any person who receives Data directly
-or indirectly from a Data Provider and agrees to the terms of this
-agreement.
-
-5.4. "Results" means any outcome obtained by computational analysis
-of Data, including for example machine learning models and models'
-insights.
-
-Unicode License v3
-------------------
-UNICODE LICENSE V3
-
-COPYRIGHT AND PERMISSION NOTICE
-
-Copyright © 2020-2024 Unicode, Inc.
-
-NOTICE TO USER: Carefully read the following legal agreement. BY
-DOWNLOADING, INSTALLING, COPYING OR OTHERWISE USING DATA FILES, AND/OR
-SOFTWARE, YOU UNEQUIVOCALLY ACCEPT, AND AGREE TO BE BOUND BY, ALL OF THE
-TERMS AND CONDITIONS OF THIS AGREEMENT. IF YOU DO NOT AGREE, DO NOT
-DOWNLOAD, INSTALL, COPY, DISTRIBUTE OR USE THE DATA FILES OR SOFTWARE.
-
-Permission is hereby granted, free of charge, to any person obtaining a
-copy of data files and any associated documentation (the "Data Files") or
-software and any associated documentation (the "Software") to deal in the
-Data Files or Software without restriction, including without limitation
-the rights to use, copy, modify, merge, publish, distribute, and/or sell
-copies of the Data Files or Software, and to permit persons to whom the
-Data Files or Software are furnished to do so, provided that either (a)
-this copyright and permission notice appear with all copies of the Data
-Files or Software, or (b) this copyright and permission notice appear in
-associated Documentation.
-
-THE DATA FILES AND SOFTWARE ARE PROVIDED "AS IS", WITHOUT WARRANTY OF ANY
-KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
-MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT OF
-THIRD PARTY RIGHTS.
-
-IN NO EVENT SHALL THE COPYRIGHT HOLDER OR HOLDERS INCLUDED IN THIS NOTICE
-BE LIABLE FOR ANY CLAIM, OR ANY SPECIAL INDIRECT OR CONSEQUENTIAL DAMAGES,
-OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS,
-WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION,
-ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THE DATA
-FILES OR SOFTWARE.
-
-Except as contained in this notice, the name of a copyright holder shall
-not be used in advertising or otherwise to promote the sale, use or other
-dealings in these Data Files or Software without prior written
-authorization of the copyright holder.
-
-SPDX-License-Identifier: Unicode-3.0
-
-—
-
-Portions of ICU4X may have been adapted from ICU4C and/or ICU4J.
-ICU 1.8.1 to ICU 57.1 © 1995-2016 International Business Machines Corporation and others.
-
-The Unlicense
--------------
-This is free and unencumbered software released into the public domain.
-
-Anyone is free to copy, modify, publish, use, compile, sell, or
-distribute this software, either in source code form or as a compiled
-binary, for any purpose, commercial or non-commercial, and by any
-means.
-
-In jurisdictions that recognize copyright laws, the author or authors
-of this software dedicate any and all copyright interest in the
-software to the public domain. We make this dedication for the benefit
-of the public at large and to the detriment of our heirs and
-successors. We intend this dedication to be an overt act of
-relinquishment in perpetuity of all present and future rights to this
-software under copyright law.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
-EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
-MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
-IN NO EVENT SHALL THE AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES OR
-OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
-ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
-OTHER DEALINGS IN THE SOFTWARE.
-
-For more information, please refer to <https://unlicense.org/>
-
-zlib License
-------------
-Reproduced from zlib-rs. The copyright below is that component's own;
-each component's copyright is listed with the component above.
-
-(C) 2024 Trifecta Tech Foundation 
-
-This software is provided 'as-is', without any express or implied
-warranty. In no event will the authors be held liable for any damages
-arising from the use of this software.
-
-Permission is granted to anyone to use this software for any purpose,
-including commercial applications, and to alter it and redistribute it
-freely, subject to the following restrictions:
-
-1. The origin of this software must not be misrepresented; you must not
-   claim that you wrote the original software. If you use this software
-   in a product, an acknowledgment in the product documentation would be
-   appreciated but is not required.
-
-2. Altered source versions must be plainly marked as such, and must not be
-   misrepresented as being the original software.
-
-3. This notice may not be removed or altered from any source distribution.
-
-BSD Zero Clause License
------------------------
-Reproduced from tslib. The copyright below is that component's own;
-each component's copyright is listed with the component above.
-
-Copyright (c) Microsoft Corporation.
-
-Permission to use, copy, modify, and/or distribute this software for any
-purpose with or without fee is hereby granted.
-
-THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH
-REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY
-AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT,
-INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM
-LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR
-OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
-PERFORMANCE OF THIS SOFTWARE.
 
 MIT No Attribution (MIT-0)
 --------------------------
@@ -5977,7 +6001,7 @@ Exhibit B - "Incompatible With Secondary Licenses" Notice
   defined by the Mozilla Public License, v. 2.0.
 
 ----- Additional text 64707037595e -----
-Applies to: redis@1.6.0
+Applies to: redis@1.7.1
 
 Copyright (c) 2022 by redis-rs contributors
 
@@ -6014,7 +6038,7 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ----- Additional text 6c91ec82929f -----
-Applies to: alloc-no-stdlib@2.0.4, alloc-stdlib@0.2.4, brotli-decompressor@5.0.3, brotli@8.0.4
+Applies to: alloc-no-stdlib@3.0.0, alloc-stdlib@0.3.0, brotli-decompressor@6.0.1, brotli@9.0.0
 
 Copyright (c) 2016 Dropbox, Inc.
 All rights reserved.
@@ -6200,6 +6224,38 @@ ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
 WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
 ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR
 IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+----- Additional text 769153f04f13 -----
+Applies to: zstd-safe@8.0.0, zstd-sys@2.1.0+zstd.1.5.7, zstd@0.14.0
+
+BSD 3-Clause License
+
+Copyright (c) 2026, Alexandre Bury
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+3. Neither the name of the copyright holder nor the names of its
+   contributors may be used to endorse or promote products derived from
+   this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ----- Additional text 82771e440a23 -----
 Applies to: curve25519-dalek@4.1.3
@@ -7019,7 +7075,7 @@ Applies to: untrusted@0.9.0
 // OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 ----- Additional text b010b0dfdfdb -----
-Applies to: fast-uri@3.1.5
+Applies to: fast-uri@3.1.8
 
 Copyright (c) 2011-2021, Gary Court until https://github.com/garycourt/uri-js/commit/a1acf730b4bba3f1097c9f52e7d9d3aba8cdcaae
 Copyright (c) 2021-present The Fastify team <https://github.com/fastify/fastify#team>
@@ -7052,23 +7108,6 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 The complete list of contributors can be found at:
 - https://github.com/garycourt/uri-js/graphs/contributors
 
------ Additional text b0b1c80d1d25 -----
-Applies to: json5@0.4.1
-
-Copyright 2018 Callum Oakley
-
-Permission to use, copy, modify, and/or distribute this software for any
-purpose with or without fee is hereby granted, provided that the above
-copyright notice and this permission notice appear in all copies.
-
-THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH
-REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND
-FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT,
-INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM
-LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR
-OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
-PERFORMANCE OF THIS SOFTWARE.
-
 ----- Additional text b1181a40b2a7 -----
 Applies to: foldhash@0.2.0
 
@@ -7093,7 +7132,7 @@ the following restrictions:
 3. This notice may not be removed or altered from any source distribution.
 
 ----- Additional text b1d6d97b0476 -----
-Applies to: encoding_rs@0.8.35
+Applies to: encoding_rs@0.8.42
 
 Copyright © WHATWG (Apple, Google, Mozilla, Microsoft).
 
@@ -7123,7 +7162,7 @@ OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ----- Additional text bbf1ea3140c4 -----
-Applies to: libloading@0.7.4, libloading@0.9.0
+Applies to: libloading@0.9.0
 
 Copyright © 2015, Simonas Kazlauskas
 
@@ -7139,7 +7178,7 @@ NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE US
 THIS SOFTWARE.
 
 ----- Additional text c76f740d1521 -----
-Applies to: cssparser-macros@0.6.1, cssparser@0.36.0, selectors@0.36.1
+Applies to: cssparser-macros@0.7.1, cssparser@0.37.0, selectors@0.38.0
 
 Mozilla Public License Version 2.0
 ==================================
@@ -7548,6 +7587,54 @@ CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
 OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+----- Additional text cf12d35c36ba -----
+Applies to: yaml@2.9.1
+
+Copyright Eemeli Aro <eemeli@gmail.com>
+
+Permission to use, copy, modify, and/or distribute this software for any purpose
+with or without fee is hereby granted, provided that the above copyright notice
+and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH
+REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND
+FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT,
+INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS
+OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER
+TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF
+THIS SOFTWARE.
+
+----- Additional text cf8eaf09486d -----
+Applies to: snap@1.1.2
+
+Copyright 2011, The Snappy-Rust Authors. All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are
+met:
+
+    * Redistributions of source code must retain the above copyright
+notice, this list of conditions and the following disclaimer.
+    * Redistributions in binary form must reproduce the above
+copyright notice, this list of conditions and the following disclaimer
+in the documentation and/or other materials provided with the
+distribution.
+    * Neither the name of the copyright holder nor the names of its
+contributors may be used to endorse or promote products derived from
+this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
 ----- Additional text d2778eb7f5d0 -----
 Applies to: ed25519-dalek@2.2.0
 
@@ -7713,7 +7800,7 @@ See src/polyfill/once_cell/LICENSE-APACHE and src/polyfill/once_cell/LICENSE-MIT
 for the license to code that was sourced from the once_cell project.
 
 ----- Additional text f5854c00454b -----
-Applies to: rmcp-macros@3.1.4, rmcp@3.1.4
+Applies to: rmcp-macros@3.5.1, rmcp@3.5.1
 
 The MCP project is undergoing a licensing transition from the MIT License to the Apache License, Version 2.0 ("Apache-2.0"). All new code and specification contributions to the project are licensed under Apache-2.0. Documentation contributions (excluding specifications) are licensed under CC-BY-4.0.
 

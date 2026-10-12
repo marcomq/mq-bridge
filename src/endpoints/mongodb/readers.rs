@@ -5,6 +5,53 @@
 
 use super::*;
 
+/// `_id` paging position. A nack rewinds it and starts a new epoch, so a page read before the
+/// rewind can neither move it forward again nor rewind it a second time. Commits run in
+/// delivery order, so the first nack of an epoch is the earliest one.
+#[derive(Default)]
+pub(super) struct IdCursor {
+    last: Option<Bson>,
+    /// Messages delivered up to `last`: the snapshot index of the next one.
+    delivered: u64,
+    epoch: u64,
+    /// The scan ended and the change stream took over; a rewind would not be read any more.
+    closed: bool,
+}
+
+impl IdCursor {
+    fn position(&self) -> (Option<Bson>, u64, u64) {
+        (self.last.clone(), self.delivered, self.epoch)
+    }
+
+    /// Moves past a page read in `epoch`; false when a nack rewound the cursor meanwhile.
+    pub(super) fn advance(&mut self, epoch: u64, last: Option<Bson>, delivered: u64) -> bool {
+        if epoch != self.epoch {
+            return false;
+        }
+        self.last = last;
+        self.delivered = delivered;
+        true
+    }
+
+    /// Goes back to `last` for a batch read in `epoch`; false when the scan is already over.
+    pub(super) fn rewind(&mut self, epoch: u64, last: Option<Bson>, delivered: u64) -> bool {
+        if epoch != self.epoch {
+            return true;
+        }
+        if self.closed {
+            return false;
+        }
+        self.last = last;
+        self.delivered = delivered;
+        self.epoch += 1;
+        true
+    }
+
+    pub(super) fn last(&self) -> Option<&Bson> {
+        self.last.as_ref()
+    }
+}
+
 /// A non-destructive, **one-shot** reader over an arbitrary MongoDB collection (`consume: snapshot`).
 /// Pages by `_id` (`find({_id:{$gt:last}}).sort({_id:1})`), never mutates the source, and ends the
 /// route once the collection is drained. At-least-once.
@@ -18,7 +65,7 @@ use super::*;
 pub struct MongoDbIdReader {
     collection: Collection<Document>,
     db: Database,
-    last_id: Arc<Mutex<Option<Bson>>>,
+    cursor: Arc<Mutex<IdCursor>>,
     receive_query: Option<Document>,
 }
 
@@ -54,7 +101,7 @@ impl MongoDbIdReader {
         Ok(Self {
             collection,
             db,
-            last_id: Arc::new(Mutex::new(None)),
+            cursor: Arc::new(Mutex::new(IdCursor::default())),
             receive_query,
         })
     }
@@ -63,67 +110,73 @@ impl MongoDbIdReader {
 #[async_trait]
 impl MessageConsumer for MongoDbIdReader {
     async fn receive_batch(&mut self, max_messages: usize) -> Result<ReceivedBatch, ConsumerError> {
-        // `_id` before this batch, for rollback on nack (see the commit closure).
-        let resume_from = self.last_id.lock().unwrap().clone();
+        // Read again from the top when a nack rewound the cursor while a page was being read.
+        let (messages, ids, resume_from, epoch) = loop {
+            let (resume_from, _, epoch) = self.cursor.lock().unwrap().position();
+            let mut last = resume_from.clone();
+            let mut messages = Vec::new();
+            let mut ids: Vec<Bson> = Vec::new();
 
-        let mut messages = Vec::new();
-        let mut ids: Vec<Bson> = Vec::new();
-
-        // Page until we collect at least one message or a query returns no documents (truly
-        // drained). This keeps an empty batch meaning "drained": a whole page of unreadable
-        // docs is skipped-with-progress rather than stalling the reader or exiting early.
-        loop {
-            let last = self.last_id.lock().unwrap().clone();
-            // Never snapshot the bridge's own sequencer bookkeeping doc.
-            let mut filter = match &last {
-                Some(v) => {
-                    doc! { "_id": { "$gt": v.clone() }, "seq_counter": { "$exists": false } }
-                }
-                None => doc! { "seq_counter": { "$exists": false } },
-            };
-            if let Some(extra) = &self.receive_query {
-                filter = doc! { "$and": [filter, extra.clone()] };
-            }
-
-            let find_options = FindOptions::builder()
-                .sort(doc! { "_id": 1 })
-                .limit(max_messages as i64)
-                .build();
-
-            let mut cursor = self
-                .collection
-                .find(filter)
-                .with_options(find_options)
-                .await
-                .map_err(|e| ConsumerError::Connection(e.into()))?;
-
-            let mut docs_in_page = 0usize;
-            while let Some(result) = cursor.next().await {
-                // A cursor error mid-page is a real failure; surface it instead of treating the
-                // truncated page as "drained".
-                let doc = result.map_err(|e| ConsumerError::Connection(e.into()))?;
-                docs_in_page += 1;
-                let Some(id) = doc.get("_id").cloned() else {
-                    warn!("MongoDB document without an `_id`; skipping");
-                    continue;
-                };
-                match parse_mongodb_document(doc) {
-                    Ok(msg) => {
-                        messages.push(msg);
-                        ids.push(id.clone());
+            // Page until we collect at least one message or a query returns no documents (truly
+            // drained). This keeps an empty batch meaning "drained": a whole page of unreadable
+            // docs is skipped-with-progress rather than stalling the reader or exiting early.
+            loop {
+                // Never snapshot the bridge's own sequencer bookkeeping doc.
+                let mut filter = match &last {
+                    Some(v) => {
+                        doc! { "_id": { "$gt": v.clone() }, "seq_counter": { "$exists": false } }
                     }
-                    Err(e) => warn!(error = %e, "Skipping unparseable MongoDB document"),
+                    None => doc! { "seq_counter": { "$exists": false } },
+                };
+                if let Some(extra) = &self.receive_query {
+                    filter = doc! { "$and": [filter, extra.clone()] };
                 }
-                // Advance past this `_id` whether or not it parsed, so a bad doc can't stall paging.
-                *self.last_id.lock().unwrap() = Some(id);
+
+                let find_options = FindOptions::builder()
+                    .sort(doc! { "_id": 1 })
+                    .limit(max_messages as i64)
+                    .build();
+
+                let mut cursor = self
+                    .collection
+                    .find(filter)
+                    .with_options(find_options)
+                    .await
+                    .map_err(|e| ConsumerError::Connection(e.into()))?;
+
+                let mut docs_in_page = 0usize;
+                while let Some(result) = cursor.next().await {
+                    // A cursor error mid-page is a real failure; surface it instead of treating
+                    // the truncated page as "drained".
+                    let doc = result.map_err(|e| ConsumerError::Connection(e.into()))?;
+                    docs_in_page += 1;
+                    let Some(id) = doc.get("_id").cloned() else {
+                        warn!("MongoDB document without an `_id`; skipping");
+                        continue;
+                    };
+                    match parse_mongodb_document(doc) {
+                        Ok(msg) => {
+                            messages.push(msg);
+                            ids.push(id.clone());
+                        }
+                        Err(e) => warn!(error = %e, "Skipping unparseable MongoDB document"),
+                    }
+                    // Advance past this `_id` whether or not it parsed, so a bad doc can't stall
+                    // paging.
+                    last = Some(id);
+                }
+
+                // Got messages, or the collection is exhausted -> stop; otherwise the whole page
+                // was skipped and more may follow, so page again.
+                if !messages.is_empty() || docs_in_page == 0 {
+                    break;
+                }
             }
 
-            // Got messages, or the collection is exhausted -> stop; otherwise the whole page was
-            // skipped and more may follow, so page again.
-            if !messages.is_empty() || docs_in_page == 0 {
-                break;
+            if self.cursor.lock().unwrap().advance(epoch, last, 0) {
+                break (messages, ids, resume_from, epoch);
             }
-        }
+        };
 
         if messages.is_empty() {
             // Drained. End the route rather than returning an empty batch: polling on would turn a
@@ -131,7 +184,7 @@ impl MessageConsumer for MongoDbIdReader {
             return Err(ConsumerError::EndOfStream);
         }
 
-        let last_id = self.last_id.clone();
+        let cursor = self.cursor.clone();
         let commit = Box::new(move |dispositions: Vec<MessageDisposition>| {
             Box::pin(async move {
                 // Highest `_id` of a contiguous run of Acks from the front (stop at first Nack).
@@ -152,7 +205,7 @@ impl MessageConsumer for MongoDbIdReader {
                 // committed boundary so nacked/unprocessed docs are re-read on the next
                 // page (at-least-once) instead of being skipped until a restart.
                 if acked < ids.len() {
-                    *last_id.lock().unwrap() = boundary;
+                    cursor.lock().unwrap().rewind(epoch, boundary, 0);
                 }
                 Ok(())
             }) as BoxFuture<'static, anyhow::Result<()>>
@@ -171,7 +224,7 @@ impl MessageConsumer for MongoDbIdReader {
             }
         };
         let pending = if healthy {
-            let last = self.last_id.lock().unwrap().clone();
+            let last = self.cursor.lock().unwrap().last().cloned();
             let filter = match &last {
                 Some(v) => doc! { "_id": { "$gt": v.clone() } },
                 None => doc! {},
@@ -331,7 +384,7 @@ pub struct MongoDbChangeStreamReader {
     // Stream start position captured before the snapshot; the stream is opened here after it drains.
     pending_resume: Mutex<Option<ResumeToken>>,
     // Snapshot paging position (`_id > last`), shared with the commit closure for nack rollback.
-    snapshot_last_id: Arc<Mutex<Option<Bson>>>,
+    snapshot_cursor: Arc<Mutex<IdCursor>>,
     // Idle resume-token refresh state. `inflight` counts delivered-but-not-yet-committed batches;
     // `refresh_clean` is cleared for the session's remainder once a streaming batch is nacked (a
     // redelivery gap then exists). Idle refresh only persists the postBatchResumeToken when nothing
@@ -344,23 +397,68 @@ pub struct MongoDbChangeStreamReader {
     source_metadata: bool,
     /// `<database>.<collection>`, precomputed for the `mqb.src.mongodb_namespace` key.
     namespace: String,
-    /// Contiguous positions an idempotent sink needs. Kept apart so the two phases cannot
-    /// share a sequence: snapshot documents are numbered within the scan, changes within
-    /// their cluster time.
-    snapshot_ordinals: Arc<Mutex<OrdinalCounter>>,
+    /// Contiguous positions an idempotent sink needs: changes are numbered within their
+    /// cluster time. Snapshot documents are numbered by `snapshot_cursor`.
     cdc_ordinals: Arc<Mutex<OrdinalCounter>>,
     exit_on_empty: bool,
+    /// Without a checkpoint: where to reopen the stream after a nack.
+    replay: Arc<Mutex<ReplayPoint>>,
+}
+
+/// The last acknowledged position of a reader without a checkpoint, kept for the session.
+#[derive(Default)]
+pub(super) struct ReplayPoint {
+    /// Bumped on every reopen; a batch read before it no longer moves `last_acked`.
+    epoch: u64,
+    last_acked: Option<ResumeToken>,
+    /// The ordinal counter right after `last_acked`, so replayed changes keep their ordinals.
+    ordinals: OrdinalCounter,
+    nacked: bool,
+}
+
+impl ReplayPoint {
+    /// Records the commit of a batch read in `epoch`: `acked` is its last acknowledged
+    /// token with the ordinal counter after it, `complete` whether every change was acknowledged.
+    pub(super) fn commit(
+        &mut self,
+        epoch: u64,
+        acked: Option<(ResumeToken, OrdinalCounter)>,
+        complete: bool,
+    ) {
+        if epoch != self.epoch {
+            return;
+        }
+        if !self.nacked {
+            if let Some((token, ordinals)) = acked {
+                self.last_acked = Some(token);
+                self.ordinals = ordinals;
+            }
+        }
+        self.nacked |= !complete;
+    }
+
+    /// After a nack: the token to reopen after (`None` if the server never gave one) and the
+    /// ordinal counter to go on with. Starts a new epoch, so batches still in flight are
+    /// ignored when they commit.
+    pub(super) fn take_replay(&mut self) -> Option<(Option<ResumeToken>, OrdinalCounter)> {
+        if !self.nacked {
+            return None;
+        }
+        self.nacked = false;
+        self.epoch += 1;
+        Some((self.last_acked.clone(), self.ordinals))
+    }
 }
 
 /// Hands out consecutive ordinals within a group, restarting at 0 when the group changes.
-#[derive(Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(super) struct OrdinalCounter {
     group: Option<u64>,
     next: u64,
 }
 
 impl OrdinalCounter {
-    fn next_in(&mut self, group: u64) -> u64 {
+    pub(super) fn next_in(&mut self, group: u64) -> u64 {
         if self.group != Some(group) {
             self.group = Some(group);
             self.next = 0;
@@ -469,7 +567,31 @@ impl MongoDbChangeStreamReader {
             )
         };
 
+        let mut saved_token = resume_token
+            .as_ref()
+            .and_then(|t| encode_resume_token(t).ok());
+        // A first start without a snapshot: store where the stream begins, so a change made
+        // before the first delivered one is not lost when the reader stops in between.
+        if let (None, Some(cp), Some(opened)) = (&saved_token, &checkpoint, &stream) {
+            if let Some(encoded) = opened
+                .resume_token()
+                .and_then(|t| encode_resume_token(&t).ok())
+            {
+                match cp.save(&encoded).await {
+                    Ok(()) => saved_token = Some(encoded),
+                    Err(e) => warn!(error = %e, "Failed to persist the initial mongo resume token"),
+                }
+            }
+        }
+
         info!(collection = %collection_name, cursor_id = ?config.cursor_id, resumed = %resume_token.is_some(), snapshot = %pending_resume.is_some(), "MongoDB CDC reader initialized");
+
+        let replay = ReplayPoint {
+            last_acked: pending_resume
+                .clone()
+                .or_else(|| stream.as_ref().and_then(|s| s.resume_token())),
+            ..Default::default()
+        };
 
         Ok(Self {
             collection,
@@ -481,19 +603,15 @@ impl MongoDbChangeStreamReader {
             pipeline,
             stream: tokio::sync::Mutex::new(stream),
             pending_resume: Mutex::new(pending_resume),
-            snapshot_last_id: Arc::new(Mutex::new(None)),
+            snapshot_cursor: Arc::new(Mutex::new(IdCursor::default())),
             inflight: Arc::new(AtomicUsize::new(0)),
             refresh_clean: Arc::new(AtomicBool::new(true)),
-            last_saved_token: Arc::new(Mutex::new(
-                resume_token
-                    .as_ref()
-                    .and_then(|t| encode_resume_token(t).ok()),
-            )),
+            last_saved_token: Arc::new(Mutex::new(saved_token)),
             source_metadata,
             namespace: format!("{}.{}", config.database, collection_name),
-            snapshot_ordinals: Arc::new(Mutex::new(OrdinalCounter::default())),
             cdc_ordinals: Arc::new(Mutex::new(OrdinalCounter::default())),
             exit_on_empty: false,
+            replay: Arc::new(Mutex::new(replay)),
         })
     }
 
@@ -503,67 +621,92 @@ impl MongoDbChangeStreamReader {
         &self,
         max_messages: usize,
     ) -> Result<Option<ReceivedBatch>, ConsumerError> {
-        let resume_from = self.snapshot_last_id.lock().unwrap().clone();
-        let last = resume_from.clone();
-        // Never snapshot the bridge's own sequencer bookkeeping doc (see `available_message_filter`).
-        let mut filter = match &last {
-            Some(v) => doc! { "_id": { "$gt": v.clone() }, "seq_counter": { "$exists": false } },
-            None => doc! { "seq_counter": { "$exists": false } },
-        };
-        if let Some(extra) = &self.receive_query {
-            filter = doc! { "$and": [filter, extra.clone()] };
-        }
-        let find_options = FindOptions::builder()
-            .sort(doc! { "_id": 1 })
-            .limit(max_messages as i64)
-            .build();
-        let mut cursor = self
-            .collection
-            .find(filter)
-            .with_options(find_options)
-            .await
-            .map_err(|e| ConsumerError::Connection(e.into()))?;
+        // Read again from the top when a nack rewound the cursor while a page was being read.
+        let (messages, ids, resume_from, first_index, epoch) = loop {
+            let (resume_from, first_index, epoch) = self.snapshot_cursor.lock().unwrap().position();
+            let mut last = resume_from.clone();
+            let mut messages = Vec::new();
+            let mut ids: Vec<Bson> = Vec::new();
 
-        let mut messages = Vec::new();
-        let mut ids: Vec<Bson> = Vec::new();
-        while let Some(result) = cursor.next().await {
-            let doc = result.map_err(|e| ConsumerError::Connection(e.into()))?;
-            let Some(id) = doc.get("_id").cloned() else {
-                warn!("MongoDB snapshot document without an `_id`; skipping");
-                continue;
-            };
-            match serde_json::to_vec(&doc) {
-                Ok(payload) => {
-                    let mut msg = CanonicalMessage::new(payload, None);
-                    msg.metadata
-                        .insert("mongodb.operation".to_string(), "insert".to_string());
-                    msg.metadata
-                        .insert("mongodb.snapshot".to_string(), "true".to_string());
-                    if let Some(enc) = encode_id(&id) {
-                        msg.metadata.insert("mongodb.document_id".to_string(), enc);
+            // A page whose documents were all skipped is not the end of the collection.
+            loop {
+                // Never snapshot the bridge's own sequencer bookkeeping doc.
+                let mut filter = match &last {
+                    Some(v) => {
+                        doc! { "_id": { "$gt": v.clone() }, "seq_counter": { "$exists": false } }
                     }
-                    if self.source_metadata {
-                        add_snapshot_source_metadata(
-                            &mut msg,
-                            &self.namespace,
-                            &id,
-                            &self.snapshot_ordinals,
-                        );
-                    }
-                    messages.push(msg);
-                    ids.push(id.clone());
+                    None => doc! { "seq_counter": { "$exists": false } },
+                };
+                if let Some(extra) = &self.receive_query {
+                    filter = doc! { "$and": [filter, extra.clone()] };
                 }
-                Err(e) => warn!(error = %e, "Skipping unserializable MongoDB snapshot document"),
-            }
-            *self.snapshot_last_id.lock().unwrap() = Some(id);
-        }
+                let find_options = FindOptions::builder()
+                    .sort(doc! { "_id": 1 })
+                    .limit(max_messages as i64)
+                    .build();
+                let mut cursor = self
+                    .collection
+                    .find(filter)
+                    .with_options(find_options)
+                    .await
+                    .map_err(|e| ConsumerError::Connection(e.into()))?;
 
-        // Exhausted: no more snapshot documents. The caller hands off to the change stream.
+                let mut docs_in_page = 0usize;
+                while let Some(result) = cursor.next().await {
+                    let doc = result.map_err(|e| ConsumerError::Connection(e.into()))?;
+                    docs_in_page += 1;
+                    let Some(id) = doc.get("_id").cloned() else {
+                        warn!("MongoDB snapshot document without an `_id`; skipping");
+                        continue;
+                    };
+                    match serde_json::to_vec(&doc) {
+                        Ok(payload) => {
+                            let mut msg = CanonicalMessage::new(payload, None);
+                            msg.metadata
+                                .insert("mongodb.operation".to_string(), "insert".to_string());
+                            msg.metadata
+                                .insert("mongodb.snapshot".to_string(), "true".to_string());
+                            if let Some(enc) = encode_id(&id) {
+                                msg.metadata.insert("mongodb.document_id".to_string(), enc);
+                            }
+                            if self.source_metadata {
+                                add_snapshot_source_metadata(
+                                    &mut msg,
+                                    &self.namespace,
+                                    &id,
+                                    first_index + messages.len() as u64,
+                                );
+                            }
+                            messages.push(msg);
+                            ids.push(id.clone());
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "Skipping unserializable MongoDB snapshot document")
+                        }
+                    }
+                    last = Some(id);
+                }
+                if !messages.is_empty() || docs_in_page == 0 {
+                    break;
+                }
+            }
+
+            let settled = {
+                let mut cursor = self.snapshot_cursor.lock().unwrap();
+                let moved = cursor.advance(epoch, last, first_index + messages.len() as u64);
+                // Exhausted: no more snapshot documents. The caller hands off to the stream.
+                cursor.closed = moved && messages.is_empty();
+                moved
+            };
+            if settled {
+                break (messages, ids, resume_from, first_index, epoch);
+            }
+        };
         if messages.is_empty() {
             return Ok(None);
         }
 
-        let last_id = self.snapshot_last_id.clone();
+        let cursor = self.snapshot_cursor.clone();
         // Gate idle refresh: an un-acked snapshot batch still in flight when streaming begins must
         // block the postBatchResumeToken from being persisted, or its docs would be lost on restart.
         let inflight = self.inflight.clone();
@@ -585,11 +728,12 @@ impl MongoDbChangeStreamReader {
                     } else {
                         Some(ids[acked - 1].clone())
                     };
-                    *last_id.lock().unwrap() = boundary;
-                    // Latch the gap: once the stream opens, snapshot docs can only be recovered by
-                    // re-snapshotting from the start, so no resume token may be persisted this
-                    // session. Blocks both idle refresh and later streaming-batch commits.
-                    refresh_clean.store(false, Ordering::Release);
+                    let index = first_index + acked as u64;
+                    // Once the stream is open the documents can only be read again by a new
+                    // snapshot, so latch the gap: no resume token is persisted any more.
+                    if !cursor.lock().unwrap().rewind(epoch, boundary, index) {
+                        refresh_clean.store(false, Ordering::Release);
+                    }
                 }
                 inflight.fetch_sub(1, Ordering::AcqRel);
                 Ok(())
@@ -637,6 +781,42 @@ impl MongoDbChangeStreamReader {
             add_source_metadata(&mut msg, event, namespace, ordinals);
         }
         Some(msg)
+    }
+
+    /// A nacked change is only read again by resuming after the last acknowledged one, so with
+    /// a checkpoint the reader asks for a reconnect instead of streaming past the gap.
+    fn replay_if_nacked(&self) -> Result<(), ConsumerError> {
+        if self.checkpoint.is_some() && !self.refresh_clean.load(Ordering::Acquire) {
+            return Err(ConsumerError::Connection(anyhow!(
+                "a MongoDB change of '{}' was not acknowledged; reconnecting to read it again",
+                self.collection_name
+            )));
+        }
+        Ok(())
+    }
+
+    /// Without a checkpoint a reconnect would start at "now", so a nacked change is read
+    /// again by reopening the stream after the last acknowledged one. `true` if reopened.
+    async fn reopen_if_nacked(
+        &self,
+        stream: &mut ChangeStream<ChangeStreamEvent<Document>>,
+    ) -> Result<bool, ConsumerError> {
+        if self.checkpoint.is_some() {
+            return Ok(false);
+        }
+        let Some((token, ordinals)) = self.replay.lock().unwrap().take_replay() else {
+            return Ok(false);
+        };
+        let Some(token) = token else {
+            warn!(collection = %self.collection_name, "A MongoDB change was not acknowledged and the server gave no resume token; it is not read again");
+            return Ok(false);
+        };
+        *stream = open_change_stream(&self.collection, &self.pipeline, Some(token))
+            .await
+            .map_err(ConsumerError::Connection)?;
+        *self.cdc_ordinals.lock().unwrap() = ordinals;
+        tracing::debug!(collection = %self.collection_name, "Reopened the MongoDB change stream after a nack");
+        Ok(true)
     }
 
     /// Called while the stream is idle: persist the change stream's postBatchResumeToken so the
@@ -761,7 +941,7 @@ pub(super) fn add_snapshot_source_metadata(
     message: &mut CanonicalMessage,
     namespace: &str,
     id: &Bson,
-    ordinals: &Mutex<OrdinalCounter>,
+    index: u64,
 ) {
     message.metadata.insert(
         "mqb.src.mongodb_namespace".to_string(),
@@ -772,13 +952,8 @@ pub(super) fn add_snapshot_source_metadata(
             .metadata
             .insert("mqb.src.mongodb_document_id".to_string(), document_id);
     }
-    // The scan is ordered by ascending `_id`, so this index is deterministic: a restart
-    // re-scans from the start and reproduces the same names, which an idempotent sink skips.
-    // Group 0 — the whole snapshot is one sequence.
-    let index = ordinals
-        .lock()
-        .expect("ordinal counter poisoned")
-        .next_in(0);
+    // The scan is ordered by ascending `_id`, so this index is deterministic: a re-read after a
+    // nack or a restart reproduces the same names, which an idempotent sink skips.
     message.metadata.insert(
         "mqb.src.mongodb_snapshot_index".to_string(),
         index.to_string(),
@@ -813,7 +988,8 @@ impl MessageConsumer for MongoDbChangeStreamReader {
             if let Some(batch) = self.snapshot_batch(max_messages).await? {
                 return Ok(batch);
             }
-            let token = self.pending_resume.lock().unwrap().take();
+            // Kept, not taken: a failed open must not restart the stream at the current position.
+            let token = self.pending_resume.lock().unwrap().clone();
             let opened = open_change_stream(&self.collection, &self.pipeline, token)
                 .await
                 .map_err(ConsumerError::Connection)?;
@@ -824,8 +1000,9 @@ impl MessageConsumer for MongoDbChangeStreamReader {
 
         let mut messages = Vec::new();
         // Per-message resume token: resuming `after` the last acked event's token gives
-        // at-least-once (un-acked events are re-delivered on restart).
-        let mut tokens: Vec<ResumeToken> = Vec::new();
+        // at-least-once (un-acked events are re-delivered on restart). The ordinal counter
+        // after the event goes with it, for a replay after a nack.
+        let mut tokens: Vec<(ResumeToken, OrdinalCounter)> = Vec::new();
 
         // Block for the first change (the route cancels this future on shutdown), then coalesce any
         // immediately-available events into the batch with a short timeout. While idle, periodically
@@ -837,10 +1014,15 @@ impl MessageConsumer for MongoDbChangeStreamReader {
         // other state. `next_if_any` borrows the stream instead of replacing that state, so the
         // token stays readable when the timeout fires mid-poll.
         let mut last_refresh = Instant::now();
-        let drain_deadline = self
+        let mut drain_deadline = self
             .exit_on_empty
             .then(|| Instant::now() + crate::traits::drain_idle_timeout());
         loop {
+            self.replay_if_nacked()?;
+            // The replayed changes need a full idle wait of their own before a drain ends.
+            if self.reopen_if_nacked(stream).await? && drain_deadline.is_some() {
+                drain_deadline = Some(Instant::now() + crate::traits::drain_idle_timeout());
+            }
             let poll = if let Some(deadline) = drain_deadline {
                 tokio::time::timeout_at(
                     tokio::time::Instant::from_std(deadline),
@@ -860,7 +1042,7 @@ impl MessageConsumer for MongoDbChangeStreamReader {
                         &self.cdc_ordinals,
                     ) {
                         messages.push(msg);
-                        tokens.push(token);
+                        tokens.push((token, *self.cdc_ordinals.lock().unwrap()));
                     }
                     if !messages.is_empty() {
                         break;
@@ -873,14 +1055,20 @@ impl MessageConsumer for MongoDbChangeStreamReader {
                     if !stream.is_alive() {
                         return Err(anyhow!("MongoDB change stream ended unexpectedly").into());
                     }
-                    if last_refresh.elapsed() >= IDLE_RESUME_REFRESH {
+                    // Nothing stored yet (the snapshot just ended): do not wait for the interval.
+                    let unsaved = self.last_saved_token.lock().unwrap().is_none();
+                    if unsaved || last_refresh.elapsed() >= IDLE_RESUME_REFRESH {
                         // Extract the token synchronously (stream ref isn't `Send`), then persist.
                         let token = stream.resume_token();
                         self.refresh_idle_checkpoint(token).await;
                         last_refresh = Instant::now();
                     }
                 }
-                Err(_) if self.exit_on_empty => return Ok(ReceivedBatch::empty()),
+                Err(_) if self.exit_on_empty => {
+                    let token = stream.resume_token();
+                    self.refresh_idle_checkpoint(token).await;
+                    return Ok(ReceivedBatch::empty());
+                }
                 Err(_) => {
                     let token = stream.resume_token();
                     self.refresh_idle_checkpoint(token).await;
@@ -900,7 +1088,7 @@ impl MessageConsumer for MongoDbChangeStreamReader {
                         &self.cdc_ordinals,
                     ) {
                         messages.push(msg);
-                        tokens.push(token);
+                        tokens.push((token, *self.cdc_ordinals.lock().unwrap()));
                     }
                 }
                 Ok(Err(e)) => return Err(ConsumerError::Connection(e.into())),
@@ -914,6 +1102,8 @@ impl MessageConsumer for MongoDbChangeStreamReader {
         let inflight = self.inflight.clone();
         let refresh_clean = self.refresh_clean.clone();
         let last_saved_token = self.last_saved_token.clone();
+        let replay = self.replay.clone();
+        let epoch = replay.lock().unwrap().epoch;
         let commit = Box::new(move |dispositions: Vec<MessageDisposition>| {
             Box::pin(async move {
                 // Resume token of the last contiguous Ack from the front (stop at first Nack).
@@ -925,6 +1115,11 @@ impl MessageConsumer for MongoDbChangeStreamReader {
                         break;
                     }
                 }
+                replay.lock().unwrap().commit(
+                    epoch,
+                    acked.checked_sub(1).map(|last| tokens[last].clone()),
+                    acked == tokens.len(),
+                );
                 // An earlier batch (a snapshot batch, or a prior streaming batch) left an un-acked
                 // redelivery gap and latched `refresh_clean` off. Commits run in delivery order
                 // (ordered sequencer), so a token from this batch would sit past that gap: do not
@@ -932,7 +1127,7 @@ impl MessageConsumer for MongoDbChangeStreamReader {
                 let prior_gap = !refresh_clean.load(Ordering::Acquire);
                 if acked > 0 && !prior_gap {
                     if let Some(cp) = checkpoint {
-                        match encode_resume_token(&tokens[acked - 1]) {
+                        match encode_resume_token(&tokens[acked - 1].0) {
                             Ok(s) => {
                                 if let Err(e) = cp.save(&s).await {
                                     tracing::warn!(error = %e, "Failed to persist mongo resume token. Changes may be reprocessed on restart.");

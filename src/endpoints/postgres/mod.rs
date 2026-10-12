@@ -39,7 +39,9 @@ use std::sync::Arc;
 use tracing::{debug, info, warn};
 
 use pgoutput::decoder::decode_message;
-use pgoutput::messages::{Delete, Insert, Message, Relation, Truncate, Update};
+use pgoutput::messages::{
+    Delete, Insert, Message, Relation, Truncate, TupleData, Update, UpdateOldKind,
+};
 use pgoutput::registry::RelationRegistry;
 use pgoutput::tuple_to_json_object;
 use state::{format_lsn, parse_lsn};
@@ -51,8 +53,14 @@ pub struct PostgresCdcConsumer {
     /// Rows decoded within the currently-open transaction (flushed to `ready`
     /// on COMMIT, once their durable resume position — the commit `end_lsn` — is known).
     tx_buffer: Vec<CanonicalMessage>,
-    /// Committed rows awaiting delivery, each paired with the LSN to confirm on ack.
+    /// Committed rows awaiting delivery, each with the LSN its ack confirms: the commit
+    /// `end_lsn` on the last row of a transaction, 0 on the rows before it.
     ready: VecDeque<(CanonicalMessage, u64)>,
+    /// Highest confirm LSN handed out in a batch so far.
+    handed_out: u64,
+    in_transaction: bool,
+    /// Set by the first nack; see [`NackLatch`].
+    nacked: NackLatch,
     /// Highest durably-acknowledged LSN; fed back to the server as the slot's confirmed position.
     confirmed: Arc<AtomicU64>,
     checkpoint: Option<Arc<VersionedCheckpoint>>,
@@ -74,6 +82,7 @@ pub struct PostgresCdcConsumer {
     /// Resolved once at construction from endpoint config and the legacy fallback.
     source_metadata: bool,
     id_hash: IdHash,
+    split_key_change: bool,
 }
 
 impl PostgresCdcConsumer {
@@ -214,6 +223,9 @@ impl PostgresCdcConsumer {
             registry: RelationRegistry::new(),
             tx_buffer: Vec::new(),
             ready: VecDeque::new(),
+            handed_out: 0,
+            in_transaction: false,
+            nacked: NackLatch::default(),
             confirmed: Arc::new(AtomicU64::new(start_lsn.unwrap_or(0))),
             checkpoint,
             url: config.url.clone(),
@@ -226,6 +238,7 @@ impl PostgresCdcConsumer {
             exit_on_empty: false,
             source_metadata,
             id_hash: config.id_hash,
+            split_key_change: config.split_key_change,
         })
     }
 
@@ -268,16 +281,36 @@ impl PostgresCdcConsumer {
         self.client.update_applied_lsn(Lsn::from_u64(lsn));
     }
 
+    /// Confirm a position that carried no rows, once nothing is buffered or waiting for an
+    /// ack. Otherwise writes to tables outside the publication would pin WAL on the server
+    /// for as long as the published tables stay quiet.
+    fn confirm_when_idle(&self, lsn: u64) {
+        let idle = !self.in_transaction
+            && self.tx_buffer.is_empty()
+            && self.ready.is_empty()
+            && !self.nacked.is_tripped()
+            && self.confirmed.load(Ordering::Acquire) >= self.handed_out;
+        if idle {
+            self.confirmed.fetch_max(lsn, Ordering::AcqRel);
+        }
+    }
+
     /// Handle one replication event, staging rows and flushing committed
     /// transactions into the ready queue.
     fn handle_event(&mut self, ev: ReplicationEvent) -> anyhow::Result<()> {
         match ev {
             ReplicationEvent::Begin { .. } => {
                 self.tx_buffer.clear();
+                self.in_transaction = true;
             }
             ReplicationEvent::Commit { end_lsn, .. } => {
                 let lsn = end_lsn.as_u64();
                 let lsn_str = format_lsn(lsn);
+                let rows = self.tx_buffer.len();
+                self.in_transaction = false;
+                if rows == 0 {
+                    self.confirm_when_idle(lsn);
+                }
                 for (ordinal, mut msg) in self.tx_buffer.drain(..).enumerate() {
                     let operation = msg
                         .metadata
@@ -310,15 +343,16 @@ impl PostgresCdcConsumer {
                     if self.source_metadata {
                         add_source_metadata(&mut msg, &self.slot_name, lsn, ordinal);
                     }
-                    self.ready.push_back((msg, lsn));
+                    self.ready.push_back((msg, confirm_lsn(ordinal, rows, lsn)));
                 }
             }
             ReplicationEvent::XLogData { data, .. } => {
                 let msg = decode_message(&data)?;
                 self.stage_message(msg)?;
             }
-            ReplicationEvent::KeepAlive { .. } => {
+            ReplicationEvent::KeepAlive { wal_end, .. } => {
                 // The library replies to keepalives itself; nothing to stage.
+                self.confirm_when_idle(wal_end.as_u64());
             }
             ReplicationEvent::Message { prefix, .. } => {
                 // Logical decoding messages (pg_logical_emit_message) carry no
@@ -340,15 +374,19 @@ impl PostgresCdcConsumer {
         match msg {
             Message::Relation(r) => self.registry.insert(r),
             Message::Insert(i) => {
-                let m = stage_insert(self.registry.get(i.relation_oid)?, &i);
+                let m = stage_insert(self.registry.get(i.relation_oid)?, &i)?;
                 self.tx_buffer.push(m);
             }
             Message::Update(u) => {
-                let m = stage_update(self.registry.get(u.relation_oid)?, &u);
+                let rel = self.registry.get(u.relation_oid)?;
+                if self.split_key_change {
+                    self.tx_buffer.extend(stage_old_key_delete(rel, &u)?);
+                }
+                let m = stage_update(rel, &u)?;
                 self.tx_buffer.push(m);
             }
             Message::Delete(d) => {
-                let m = stage_delete(self.registry.get(d.relation_oid)?, &d);
+                let m = stage_delete(self.registry.get(d.relation_oid)?, &d)?;
                 self.tx_buffer.push(m);
             }
             Message::Truncate(t) => {
@@ -369,6 +407,73 @@ impl PostgresCdcConsumer {
         }
         Ok(())
     }
+}
+
+/// The confirmed LSN is cumulative: confirming a later change also confirms every change
+/// before it, a nacked one included. So after a nack this consumer stops confirming and its
+/// next read fails, which makes the route reconnect and replay from the confirmed position.
+#[derive(Clone, Default)]
+struct NackLatch(Arc<NackLatchInner>);
+
+#[derive(Default)]
+struct NackLatchInner {
+    tripped: AtomicBool,
+    /// Wakes a read blocked on a quiet stream, so the replay doesn't wait for new changes.
+    notify: tokio::sync::Notify,
+}
+
+impl NackLatch {
+    fn trip(&self) {
+        self.0.tripped.store(true, Ordering::Release);
+        self.0.notify.notify_waiters();
+    }
+
+    fn is_tripped(&self) -> bool {
+        self.0.tripped.load(Ordering::Acquire)
+    }
+
+    fn error() -> ConsumerError {
+        ConsumerError::Connection(anyhow!(
+            "postgres_cdc: a change was nacked; reconnecting to replay from the confirmed position"
+        ))
+    }
+
+    async fn tripped(&self) {
+        let notified = self.0.notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if !self.is_tripped() {
+            notified.await;
+        }
+    }
+}
+
+/// The LSN an ack of row `ordinal` confirms. Rows of a transaction share its `end_lsn`,
+/// so only the last one may confirm it; a batch can end in the middle of a transaction.
+fn confirm_lsn(ordinal: usize, rows: usize, end_lsn: u64) -> u64 {
+    if ordinal + 1 == rows {
+        end_lsn
+    } else {
+        0
+    }
+}
+
+/// The LSN a batch's dispositions confirm, and whether a row was nacked. Nothing after
+/// the first row that was not acked counts.
+fn confirmed_by(dispositions: &[MessageDisposition], lsns: &[u64]) -> (u64, bool) {
+    let mut target = 0;
+    for (i, lsn) in lsns.iter().enumerate() {
+        match dispositions.get(i) {
+            Some(MessageDisposition::Ack | MessageDisposition::Reply(_)) => {
+                if *lsn > 0 {
+                    target = *lsn;
+                }
+            }
+            Some(MessageDisposition::Nack) => return (target, true),
+            None => return (target, false),
+        }
+    }
+    (target, false)
 }
 
 /// Build a change-event message: JSON body + `postgres.operation`/schema/table metadata.
@@ -480,21 +585,55 @@ pub(crate) fn is_valid_pg_ident(s: &str) -> bool {
     !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-fn stage_insert(rel: &Relation, i: &Insert) -> CanonicalMessage {
-    let body = serde_json::Value::Object(tuple_to_json_object(rel, &i.new));
-    cdc_message(rel, "insert", body)
+/// The row as a JSON object. A row that has not one cell per column would be paired
+/// with the wrong names, so it is refused; the reconnect brings a fresh relation.
+fn row_object(
+    rel: &Relation,
+    tuple: &TupleData,
+) -> anyhow::Result<serde_json::Map<String, serde_json::Value>> {
+    if tuple.cells.len() != rel.columns.len() {
+        return Err(anyhow!(
+            "postgres_cdc: {}.{} sent {} cells for {} columns",
+            rel.namespace,
+            rel.name,
+            tuple.cells.len(),
+            rel.columns.len()
+        ));
+    }
+    Ok(tuple_to_json_object(rel, tuple))
 }
 
-fn stage_update(rel: &Relation, u: &Update) -> CanonicalMessage {
-    let body = serde_json::Value::Object(tuple_to_json_object(rel, &u.new));
-    cdc_message(rel, "update", body)
+fn stage_insert(rel: &Relation, i: &Insert) -> anyhow::Result<CanonicalMessage> {
+    let body = serde_json::Value::Object(row_object(rel, &i.new)?);
+    Ok(cdc_message(rel, "insert", body))
 }
 
-fn stage_delete(rel: &Relation, d: &Delete) -> CanonicalMessage {
+fn stage_update(rel: &Relation, u: &Update) -> anyhow::Result<CanonicalMessage> {
+    let body = serde_json::Value::Object(row_object(rel, &u.new)?);
+    let mut msg = cdc_message(rel, "update", body);
+    // Postgres sends the old key only when the update changed it.
+    if let (UpdateOldKind::Key, Some(old)) = (u.old_kind, &u.old) {
+        if let Some(old_key) = replica_key_string(rel, &row_object(rel, old)?) {
+            msg.metadata.insert("postgres.old_key".to_string(), old_key);
+        }
+    }
+    Ok(msg)
+}
+
+/// The `delete` of the row an update moved to another key; `None` when the key is unchanged.
+fn stage_old_key_delete(rel: &Relation, u: &Update) -> anyhow::Result<Option<CanonicalMessage>> {
+    let (UpdateOldKind::Key, Some(old)) = (u.old_kind, &u.old) else {
+        return Ok(None);
+    };
+    let body = serde_json::Value::Object(row_object(rel, old)?);
+    Ok(Some(cdc_message(rel, "delete", body)))
+}
+
+fn stage_delete(rel: &Relation, d: &Delete) -> anyhow::Result<CanonicalMessage> {
     // For a delete the only data available is the old tuple (key columns, or the
     // full row under REPLICA IDENTITY FULL).
-    let body = serde_json::Value::Object(tuple_to_json_object(rel, &d.old));
-    cdc_message(rel, "delete", body)
+    let body = serde_json::Value::Object(row_object(rel, &d.old)?);
+    Ok(cdc_message(rel, "delete", body))
 }
 
 fn stage_truncate(rel: &Relation, _t: &Truncate) -> CanonicalMessage {
@@ -525,6 +664,9 @@ impl MessageConsumer for PostgresCdcConsumer {
             });
         }
 
+        if self.nacked.is_tripped() {
+            return Err(NackLatch::error());
+        }
         // Report the latest durably-acknowledged position before blocking.
         self.feedback();
 
@@ -544,8 +686,12 @@ impl MessageConsumer for PostgresCdcConsumer {
             // `recv()` is cancel-safe — it awaits a channel; wire framing runs in a
             // background worker with its own resumable reader — so the timeout drop here
             // loses nothing.
-            let Some(ev) = crate::traits::drain_gated(self.exit_on_empty, self.client.recv()).await
-            else {
+            let latch = self.nacked.clone();
+            let ev = tokio::select! {
+                _ = latch.tripped() => return Err(NackLatch::error()),
+                ev = crate::traits::drain_gated(self.exit_on_empty, self.client.recv()) => ev,
+            };
+            let Some(ev) = ev else {
                 return Ok(ReceivedBatch::empty());
             };
             match ev {
@@ -592,37 +738,25 @@ impl MessageConsumer for PostgresCdcConsumer {
         let mut lsns = Vec::with_capacity(n);
         for _ in 0..n {
             let (msg, lsn) = self.ready.pop_front().expect("ready is non-empty");
+            self.handed_out = self.handed_out.max(lsn);
             messages.push(msg);
             lsns.push(lsn);
         }
 
         let confirmed = self.confirmed.clone();
         let checkpoint = self.checkpoint.clone();
+        let nacked = self.nacked.clone();
         let commit: BatchCommitFunc = Box::new(move |dispositions: Vec<MessageDisposition>| {
             Box::pin(async move {
-                // Advance to the LSN of the last consecutively-acked message.
-                // A Nack (or an absent disposition) stops the advance there so
-                // the un-acked change is redelivered on reconnect.
-                let mut target = 0u64;
-                for (disp, lsn) in dispositions.iter().zip(lsns.iter()) {
-                    match disp {
-                        MessageDisposition::Nack => break,
-                        MessageDisposition::Ack | MessageDisposition::Reply(_) => target = *lsn,
-                    }
+                if nacked.is_tripped() {
+                    return Ok(());
+                }
+                let (target, refused) = confirmed_by(&dispositions, &lsns);
+                if refused {
+                    nacked.trip();
                 }
                 if target > 0 {
-                    let mut cur = confirmed.load(Ordering::Acquire);
-                    while target > cur {
-                        match confirmed.compare_exchange(
-                            cur,
-                            target,
-                            Ordering::AcqRel,
-                            Ordering::Acquire,
-                        ) {
-                            Ok(_) => break,
-                            Err(actual) => cur = actual,
-                        }
-                    }
+                    confirmed.fetch_max(target, Ordering::AcqRel);
                     if let Some(cp) = &checkpoint {
                         if let Err(e) = cp.save(&format_lsn(target)).await {
                             warn!(error = %e, "postgres_cdc: checkpoint save failed");
@@ -695,6 +829,28 @@ impl Drop for PostgresCdcConsumer {
 mod cdc_id_tests {
     use super::*;
     use pgoutput::messages::{ColumnDesc, ReplicaIdentity};
+
+    #[test]
+    fn only_the_last_row_of_a_transaction_confirms_its_lsn() {
+        let lsns: Vec<u64> = (0..3).map(|row| confirm_lsn(row, 3, 40)).collect();
+        assert_eq!(lsns, vec![0, 0, 40]);
+        // A batch that ends inside the transaction confirms nothing.
+        let acks = vec![MessageDisposition::Ack; 2];
+        assert_eq!(confirmed_by(&acks, &lsns[..2]), (0, false));
+        let acks = vec![MessageDisposition::Ack; 3];
+        assert_eq!(confirmed_by(&acks, &lsns), (40, false));
+    }
+
+    #[test]
+    fn a_nack_confirms_only_the_transactions_before_it() {
+        use MessageDisposition::{Ack, Nack};
+        // Two transactions of two rows each; the last row of the second is nacked.
+        let lsns = [0, 10, 0, 20];
+        assert_eq!(confirmed_by(&[Ack, Ack, Ack, Nack], &lsns), (10, true));
+        assert_eq!(confirmed_by(&[Ack, Nack, Ack, Ack], &lsns), (0, true));
+        // A missing disposition stops the advance without asking for a replay.
+        assert_eq!(confirmed_by(&[Ack, Ack], &lsns), (10, false));
+    }
 
     fn rel_with_key() -> Relation {
         Relation {
@@ -845,9 +1001,9 @@ mod cdc_id_tests {
         };
 
         let staged = [
-            ("insert", stage_insert(&rel, &insert), "a"),
-            ("update", stage_update(&rel, &update), "b"),
-            ("delete", stage_delete(&rel, &delete), "b"),
+            ("insert", stage_insert(&rel, &insert).unwrap(), "a"),
+            ("update", stage_update(&rel, &update).unwrap(), "b"),
+            ("delete", stage_delete(&rel, &delete).unwrap(), "b"),
         ];
         for (operation, message, body) in staged {
             assert_eq!(meta(&message, "postgres.operation"), Some(operation));
@@ -865,10 +1021,71 @@ mod cdc_id_tests {
     }
 
     #[test]
+    fn an_update_that_changes_the_key_names_the_old_key() {
+        use pgoutput::messages::{TupleCell, TupleData, UpdateOldKind};
+        let rel = rel_with_key();
+        let update = Update {
+            relation_oid: rel.oid,
+            old_kind: UpdateOldKind::Key,
+            old: Some(TupleData {
+                cells: vec![TupleCell::Text("1".into()), TupleCell::Null],
+            }),
+            new: row("2", "b"),
+        };
+        let message = stage_update(&rel, &update).unwrap();
+        assert_eq!(meta(&message, "postgres.key"), Some("[2]"));
+        assert_eq!(meta(&message, "postgres.old_key"), Some("[1]"));
+    }
+
+    #[test]
+    fn a_key_change_can_be_split_into_a_delete_of_the_old_key() {
+        use pgoutput::messages::{TupleCell, TupleData, UpdateOldKind};
+        let rel = rel_with_key();
+        let moved = Update {
+            relation_oid: rel.oid,
+            old_kind: UpdateOldKind::Key,
+            old: Some(TupleData {
+                cells: vec![TupleCell::Text("1".into()), TupleCell::Null],
+            }),
+            new: row("2", "b"),
+        };
+        let delete = stage_old_key_delete(&rel, &moved).unwrap().unwrap();
+        assert_eq!(meta(&delete, "postgres.operation"), Some("delete"));
+        assert_eq!(meta(&delete, "postgres.key"), Some("[1]"));
+        let payload: serde_json::Value = serde_json::from_slice(&delete.payload).unwrap();
+        assert_eq!(payload, serde_json::json!({"id": 1, "body": null}));
+
+        let in_place = Update {
+            relation_oid: rel.oid,
+            old_kind: UpdateOldKind::None,
+            old: None,
+            new: row("2", "c"),
+        };
+        assert!(stage_old_key_delete(&rel, &in_place).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_row_that_does_not_match_its_relation_is_refused() {
+        use pgoutput::messages::{TupleCell, TupleData};
+        let rel = rel_with_key();
+        let short = Insert {
+            relation_oid: rel.oid,
+            new: TupleData {
+                cells: vec![TupleCell::Text("1".into())],
+            },
+        };
+        let error = stage_insert(&rel, &short).unwrap_err();
+        assert!(
+            error.to_string().contains("1 cells for 2 columns"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn a_vanished_slot_is_permanent_and_other_receive_failures_reconnect() {
         let gone = recv_error("replication slot \"s\" does not exist");
         assert!(matches!(gone, ConsumerError::Permanent(_)), "{gone}");
-        let coded = recv_error("server error 42704");
+        let coded = recv_error("server error: gone (SQLSTATE 42704)");
         assert!(matches!(coded, ConsumerError::Permanent(_)), "{coded}");
         let reset = recv_error("connection reset by peer");
         assert!(matches!(reset, ConsumerError::Connection(_)), "{reset}");

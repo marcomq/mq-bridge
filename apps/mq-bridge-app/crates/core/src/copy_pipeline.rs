@@ -153,7 +153,7 @@ pub fn configure_resume(
             MongoConsume::Snapshot => bail!(
                 "source `mongodb` does not support resumable copy in snapshot mode; use capture_all or capture_new"
             ),
-            MongoConsume::Consumer => unsupported("mongodb consumer mode"),
+            MongoConsume::Consumer => unsupported("mongodb delete mode"),
         },
         EndpointType::PostgresCdc(config) => {
             if config.temporary_slot {
@@ -227,7 +227,23 @@ pub fn configure_resume(
             "source `nats` has durable JetStream consumers, but resumable copy is not enabled because the durable identity cannot include the destination and filter"
         ),
         EndpointType::Mqtt(_) => unsupported("mqtt"),
-        // The preset takes the `http_bulk` read position as flat options.
+        EndpointType::Meilisearch(config) => {
+            if config.checkpoint_store.is_none() {
+                bail!(
+                    "source `meilisearch` needs an external `checkpoint_store` for resumable copy"
+                );
+            }
+            config.cursor_id.get_or_insert_with(|| state_id.clone());
+            Ok(ResumeCapability::ExternalCheckpoint)
+        }
+        EndpointType::Qdrant(config) => {
+            if config.checkpoint_store.is_none() {
+                bail!("source `qdrant` needs an external `checkpoint_store` for resumable copy");
+            }
+            config.cursor_id.get_or_insert_with(|| state_id.clone());
+            Ok(ResumeCapability::ExternalCheckpoint)
+        }
+        // A plugin that stands in for `meilisearch` takes the same flat options.
         EndpointType::Custom { name, config } if name == "meilisearch" => {
             let has = |config: &serde_json::Value, key: &str| {
                 config.get(key).is_some_and(|value| !value.is_null())
@@ -243,7 +259,7 @@ pub fn configure_resume(
             Ok(ResumeCapability::ExternalCheckpoint)
         }
         EndpointType::Custom { name, .. } => unsupported(name),
-        endpoint_type => unsupported(endpoint_kind(endpoint_type)),
+        endpoint_type => unsupported(endpoint_type.name()),
     }
 }
 
@@ -251,36 +267,54 @@ fn unsupported(source: &str) -> anyhow::Result<ResumeCapability> {
     bail!("source `{source}` does not support resumable copy")
 }
 
-fn endpoint_kind(endpoint_type: &EndpointType) -> &'static str {
-    match endpoint_type {
-        EndpointType::Amqp(_) => "amqp",
-        EndpointType::Aws(_) => "aws",
-        EndpointType::DirSpool(_) => "dir_spool",
-        EndpointType::File(_) => "file",
-        EndpointType::Grpc(_) => "grpc",
-        EndpointType::Http(_) => "http",
-        EndpointType::IbmMq(_) => "ibm_mq",
-        EndpointType::Kafka(_) => "kafka",
-        EndpointType::Memory(_) => "memory",
-        EndpointType::MongoDb(_) => "mongodb",
-        EndpointType::Mqtt(_) => "mqtt",
-        EndpointType::Nats(_) => "nats",
-        EndpointType::Null => "null",
-        EndpointType::ObjectStore(_) => "object_store",
-        EndpointType::PostgresCdc(_) => "postgres_cdc",
-        EndpointType::RedisStreams(_) => "redis_streams",
-        EndpointType::Sqlx(_) => "sql",
-        EndpointType::WebSocket(_) => "websocket",
-        EndpointType::ZeroMq(_) => "zeromq",
-        _ => "this endpoint",
-    }
-}
-
 fn postgres_slot_name(state_id: &str) -> String {
     format!("mqb_{}", state_id.replace('-', "_"))
 }
 
-fn checkpoint_identity(
+/// Names the table of every SQL or MongoDB dedup store that has none after the copy.
+///
+/// The engine's default is the route name, which is new on every run of a copy.
+pub fn name_dedup_tables(endpoint: &mut Endpoint, copy_id: &str) {
+    let table = format!("mqb_dedup_{}", copy_id.replace('-', "_"));
+    for middleware in &mut endpoint.middlewares {
+        if let Middleware::Deduplication(config) = middleware
+            && let Some(named) = config
+                .store
+                .as_deref()
+                .and_then(|store| store_with_table(store, &table))
+        {
+            config.store = Some(named);
+        }
+    }
+}
+
+/// `scheme://host/db` with `/table` appended; `None` when the URL names one or cannot.
+fn store_with_table(store: &str, table: &str) -> Option<String> {
+    let (scheme, rest) = store.split_once("://")?;
+    if !matches!(
+        scheme.to_ascii_lowercase().as_str(),
+        "postgres" | "postgresql" | "mysql" | "mariadb" | "mongodb" | "mongodb+srv"
+    ) {
+        return None;
+    }
+    let (location, query) = match rest.split_once('?') {
+        Some((location, query)) => (location, Some(query)),
+        None => (rest, None),
+    };
+    let (_, path) = location.split_once('/')?;
+    let database = path.trim_end_matches('/');
+    if database.is_empty() || database.contains('/') {
+        return None;
+    }
+    let location = location.trim_end_matches('/');
+    Some(match query {
+        Some(query) => format!("{scheme}://{location}/{table}?{query}"),
+        None => format!("{scheme}://{location}/{table}"),
+    })
+}
+
+/// The stable id of a copy: source, destination and filter, without credentials.
+pub fn checkpoint_identity(
     input: &Endpoint,
     output: &Endpoint,
     filter: Option<&str>,
@@ -433,7 +467,7 @@ fn redact_uri_segment(segment: &str) -> String {
     redacted
 }
 
-/// Blanks the password in a `scheme://user:password@host` authority.
+/// Blanks the password in a `scheme://user:password@host` authority, and a lone `token@`.
 fn redact_uri_password(head: &str) -> String {
     let Some(scheme_end) = head.find("://") else {
         return head.to_string();
@@ -447,7 +481,12 @@ fn redact_uri_password(head: &str) -> String {
         return head.to_string();
     };
     let Some((user, _password)) = authority[..at].split_once(':') else {
-        return head.to_string();
+        // Userinfo without a colon may be a token (`nats://<token>@host`).
+        return format!(
+            "{}***{}",
+            &head[..authority_start],
+            &head[authority_start + at..]
+        );
     };
     format!(
         "{}{user}:***{}",
@@ -625,7 +664,7 @@ impl MessageConsumer for CountingConsumer {
 mod tests {
     use super::*;
     use mq_bridge::models::{
-        BufferMiddleware, KafkaConfig, MetricsMiddleware, MqttConfig, SqlxConfig,
+        BufferMiddleware, KafkaConfig, MetricsMiddleware, MqttConfig, QdrantConfig, SqlxConfig,
     };
 
     fn endpoint(endpoint_type: EndpointType) -> Endpoint {
@@ -698,6 +737,10 @@ mod tests {
 
         // Nothing to redact must survive untouched, credential-free URIs included.
         assert_eq!(redact_uri("null:"), "null:");
+        assert_eq!(
+            redact_uri("nats://tok3n@host:4222?subject=orders"),
+            "nats://***@host:4222?subject=orders"
+        );
         assert_eq!(
             redact_uri("nats://host:4222?subject=orders"),
             "nats://host:4222?subject=orders"
@@ -812,12 +855,64 @@ mod tests {
         let error = configure_resume(&mut no_store, &output, None).unwrap_err();
         assert!(error.to_string().contains("checkpoint_store"), "{error}");
 
+        let qdrant = |checkpoint_store: Option<&str>| {
+            endpoint(EndpointType::Qdrant(QdrantConfig {
+                url: "qdrant://localhost:6333".to_string(),
+                collection: "books".to_string(),
+                checkpoint_store: checkpoint_store.map(str::to_string),
+                ..Default::default()
+            }))
+        };
+        let mut keyed = qdrant(Some("file:///tmp/c.json"));
+        assert_eq!(
+            configure_resume(&mut keyed, &output, None).unwrap(),
+            ResumeCapability::ExternalCheckpoint
+        );
+        let EndpointType::Qdrant(config) = &keyed.endpoint_type else {
+            unreachable!()
+        };
+        assert!(config.cursor_id.as_deref().unwrap().starts_with("copy-"));
+        let error = configure_resume(&mut qdrant(None), &output, None).unwrap_err();
+        assert!(error.to_string().contains("checkpoint_store"), "{error}");
+
+        let mut typesense = endpoint(EndpointType::Typesense(Default::default()));
+        let error = configure_resume(&mut typesense, &output, None).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "source `typesense` does not support resumable copy"
+        );
+
         let mut other = custom("elasticsearch", json!({}));
         let error = configure_resume(&mut other, &output, None).unwrap_err();
         assert_eq!(
             error.to_string(),
             "source `elasticsearch` does not support resumable copy"
         );
+    }
+
+    #[test]
+    fn a_dedup_store_without_a_table_gets_the_copy_s_table() {
+        let table = "mqb_dedup_copy_ab";
+        for (store, expected) in [
+            (
+                "postgres://u:p@h/db",
+                Some("postgres://u:p@h/db/mqb_dedup_copy_ab"),
+            ),
+            (
+                "mongodb://a:1,b:2/db/?replicaSet=rs",
+                Some("mongodb://a:1,b:2/db/mqb_dedup_copy_ab?replicaSet=rs"),
+            ),
+            ("mysql://h/db/mine", None),
+            ("postgres://h", None),
+            ("sqlite:///tmp/dedup.db", None),
+            ("sled:///tmp/dedup", None),
+        ] {
+            assert_eq!(
+                store_with_table(store, table).as_deref(),
+                expected,
+                "{store}"
+            );
+        }
     }
 
     #[test]

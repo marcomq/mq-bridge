@@ -44,7 +44,8 @@ impl IntoHandled for Option<CanonicalMessage> {
 /// - `Handled`: The original enum (for full control).
 ///
 /// ### Supported Error Types (via `ToHandlerError`):
-/// - `anyhow::Error`: Treated as `Retryable` by default.
+/// - `anyhow::Error`: Treated as `Retryable`, unless it wraps a `HandlerError` or an
+///   `InvalidConfig`, whose classification is kept.
 /// - `String` / `&str`: Treated as `NonRetryable`.
 /// - `HandlerError`: The internal error type for explicit control.
 ///
@@ -169,7 +170,7 @@ impl ToHandlerError for HandlerError {
 
 impl ToHandlerError for anyhow::Error {
     fn to_handler_error(self) -> HandlerError {
-        crate::errors::ProcessingError::Retryable(self)
+        self.into()
     }
 }
 
@@ -249,6 +250,12 @@ mod tests {
             .into_handler_result()
             .unwrap_err();
         assert!(matches!(non_retryable, ProcessingError::NonRetryable(_)));
+
+        let classified = anyhow::Error::new(ProcessingError::NonRetryable(anyhow::anyhow!("bad")));
+        let kept = Result::<(), anyhow::Error>::Err(classified)
+            .into_handler_result()
+            .unwrap_err();
+        assert!(matches!(kept, ProcessingError::NonRetryable(_)));
 
         let string_error = "string failure".to_string().to_handler_error();
         assert!(matches!(string_error, ProcessingError::NonRetryable(_)));

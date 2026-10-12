@@ -266,18 +266,14 @@ jobs:
           path: docker-suite
           retention-days: 1
 
-  # One backend per runner, so the servers never compete for memory or for the
-  # fixed host ports the test URIs use. `run_docker_tests.sh` does the same loop
-  # locally, one at a time.
+  # One backend at a time on one runner, so the servers never compete for memory
+  # or for the fixed host ports the test URIs use. `run_docker_tests.sh` does the
+  # same loop locally. Nine runners for ~20 s of tests each held slots the rest
+  # of the workflows were queuing for.
   docker:
-    name: App docker (${{ matrix.backend }})
+    name: App docker
     runs-on: ubuntu-latest
     needs: docker-build
-    strategy:
-      fail-fast: false
-      matrix:
-        backend:
-          [postgres, mysql, mariadb, kafka, nats, mongodb, redis, amqp, mqtt]
     steps:
       - uses: actions/checkout@v7
 
@@ -303,24 +299,39 @@ jobs:
 
       # The engine's own integration stacks, so there is one definition per
       # service rather than a second copy that can drift.
-      - name: Start ${{ matrix.backend }}
-        run: docker compose -f tests/integration/docker-compose/${{ matrix.backend }}.yml up -d --wait --wait-timeout 300
-
+      #
       # The backend name filters the test names as well as MQB_TEST_BACKEND:
       # `backend!` skips by returning, so without the name filter every excluded
       # test still reports `ok` and a broken service would look green.
-      - name: Run ${{ matrix.backend }} tests
+      #
+      # A failing backend does not stop the loop; the step fails at the end and
+      # names every backend that failed.
+      - name: Run the backends one after another
+        timeout-minutes: 45
         # `shell: bash` for pipefail: the default shell would take `tee`'s exit
         # status and report a failing test run as a pass.
         shell: bash
-        env:
-          MQB_TEST_BACKEND: ${{ matrix.backend }}
         run: |
-          ./docker-suite/test-binary \
-            --ignored --test-threads=1 ${{ matrix.backend }} 2>&1 | tee result.log
-          grep -qE 'test result: ok\. [1-9]' result.log \
-            || { echo "no ${{ matrix.backend }} tests ran"; exit 1; }
-
-      - name: Service logs
-        if: failure()
-        run: docker compose -f tests/integration/docker-compose/${{ matrix.backend }}.yml logs --tail 200
+          failed=()
+          for backend in postgres mysql mariadb kafka nats mongodb redis amqp mqtt; do
+            compose="tests/integration/docker-compose/$backend.yml"
+            echo "::group::$backend"
+            ok=1
+            docker compose -f "$compose" up -d --wait --wait-timeout 300 || ok=0
+            if [ "$ok" = 1 ]; then
+              MQB_TEST_BACKEND="$backend" ./docker-suite/test-binary \
+                --ignored --test-threads=1 "$backend" 2>&1 | tee result.log || ok=0
+              grep -qE 'test result: ok\. [1-9]' result.log \
+                || { echo "no $backend tests ran"; ok=0; }
+            fi
+            if [ "$ok" = 0 ]; then
+              failed+=("$backend")
+              docker compose -f "$compose" logs --tail 200 || true
+            fi
+            docker compose -f "$compose" down -v --remove-orphans || true
+            echo "::endgroup::"
+          done
+          if [ "${#failed[@]}" -gt 0 ]; then
+            echo "::error::failed backends: ${failed[*]}"
+            exit 1
+          fi

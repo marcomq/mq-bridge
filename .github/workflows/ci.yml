@@ -86,6 +86,32 @@ jobs:
             exit 1
           fi
 
+  # The Rust versions the README promises, with the checked-in lock.
+  msrv:
+    name: MSRV (${{ matrix.toolchain }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - toolchain: "1.89.0"
+            features: "file,dir-spool,middleware,yaml,plugin,mongodb,kafka,amqp,nats,mqtt,http,zeromq,redis-streams,sled,grpc,clickhouse,http-bulk,websocket,object-store,parquet,avro,rustls-aws-lc,ibm-mq"
+          - toolchain: "1.94.1"
+            features: "full"
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: ${{ matrix.toolchain }}
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check with the minimum Rust version
+        run: cargo check --lib --locked --features ${{ matrix.features }}
+
   # Unit tests
   test:
     name: Test
@@ -283,6 +309,27 @@ jobs:
       - name: Build documentation (deny warnings)
         run: RUSTDOCFLAGS="-D warnings" cargo doc --features lint-all --no-deps
 
+  # Public Rust API against the latest release on crates.io: a change that breaks a
+  # downstream crate needs a major version. A new config field or enum variant
+  # needs a minor one; Cargo.toml sets that under `cargo-semver-checks.lints`.
+  semver:
+    name: SemVer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      # Not a gate until it has passed once; see production-review-decisions-4.md, 4-7.
+      - name: Check semver
+        continue-on-error: true
+        uses: obi1kenobi/cargo-semver-checks-action@v2
+        with:
+          package: mq-bridge
+          feature-group: only-explicit-features
+          features: full,plugin-sdk
+
   # Supply chain: licenses, banned crates, source registries, RustSec advisories
   supply-chain:
     name: Supply Chain
@@ -300,6 +347,11 @@ jobs:
         uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check bans licenses sources
+
+      # cargo-deny approves licenses; this checks the shipped notice files name
+      # every crate that ends up in a release artifact.
+      - name: Third-party notices list every shipped crate
+        run: scripts/ci/check_third_party_notices.sh
 
       # Informational: every current advisory is in a transitive dependency we
       # cannot upgrade ourselves, and RustSec updates daily. SECURITY.md records

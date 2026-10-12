@@ -81,13 +81,92 @@ fn change_event_source_metadata_is_opt_in_and_orders_by_cluster_time() {
 }
 
 #[test]
+fn only_a_duplicate_id_counts_as_already_stored() {
+    use super::publisher::{classify_insert_error, InsertRejection};
+    let dup = |index: &str| {
+        format!("E11000 duplicate key error collection: db.c index: {index} dup key: {{ a: 1 }}")
+    };
+    assert_eq!(
+        classify_insert_error(11000, &dup("_id_")),
+        InsertRejection::AlreadyStored
+    );
+    assert_eq!(
+        classify_insert_error(
+            11000,
+            "E11000 duplicate key error index: db.c.$_id_ dup key: {}"
+        ),
+        InsertRejection::AlreadyStored
+    );
+    assert_eq!(
+        classify_insert_error(11000, &dup("email_1")),
+        InsertRejection::Permanent
+    );
+    assert_eq!(
+        classify_insert_error(121, "Document failed validation"),
+        InsertRejection::Permanent
+    );
+    assert_eq!(
+        classify_insert_error(189, "PrimarySteppedDown"),
+        InsertRejection::Transient
+    );
+}
+
+#[test]
+fn a_nack_without_a_checkpoint_replays_from_the_last_acknowledged_change() {
+    let token = |data: &str| {
+        super::readers::decode_resume_token(&format!(r#"{{"_data":"{data}"}}"#)).unwrap()
+    };
+    let mut replay = super::readers::ReplayPoint::default();
+    assert!(replay.take_replay().is_none(), "nothing was nacked");
+
+    // The counter after "01": one change handed out at cluster time 7.
+    let mut after_01 = super::readers::OrdinalCounter::default();
+    after_01.next_in(7);
+    let mut after_03 = after_01;
+    after_03.next_in(7);
+    after_03.next_in(7);
+
+    replay.commit(0, Some((token("01"), after_01)), true);
+    replay.commit(0, None, false);
+    // Read before the nack was seen, acknowledged after it: must not move the position.
+    replay.commit(0, Some((token("03"), after_03)), true);
+    // The replayed changes of cluster time 7 go on at ordinal 1, as they did the first time.
+    assert_eq!(replay.take_replay(), Some((Some(token("01")), after_01)));
+
+    // The same batch committing after the reopen belongs to the old stream.
+    replay.commit(0, Some((token("03"), after_03)), true);
+    replay.commit(1, None, false);
+    assert_eq!(replay.take_replay(), Some((Some(token("01")), after_01)));
+    replay.commit(2, Some((token("02"), after_03)), true);
+    assert!(replay.take_replay().is_none());
+}
+
+#[test]
+fn a_nacked_page_rewinds_the_cursor_once() {
+    use mongodb::bson::Bson;
+    let mut cursor = super::readers::IdCursor::default();
+    assert!(cursor.advance(0, Some(Bson::Int64(2)), 2));
+    assert!(cursor.advance(0, Some(Bson::Int64(4)), 4));
+
+    // Both pages are nacked in delivery order; the second must not undo the first.
+    assert!(cursor.rewind(0, None, 0));
+    assert!(cursor.rewind(0, Some(Bson::Int64(2)), 2));
+    assert_eq!(cursor.last(), None);
+
+    // A page that was being read across the rewind is thrown away.
+    assert!(!cursor.advance(0, Some(Bson::Int64(6)), 6));
+    assert!(cursor.advance(1, Some(Bson::Int64(2)), 2));
+    assert_eq!(cursor.last(), Some(&Bson::Int64(2)));
+}
+
+#[test]
 fn snapshot_source_metadata_uses_namespace_and_document_id() {
     let mut message = CanonicalMessage::new(Vec::new(), None);
     super::readers::add_snapshot_source_metadata(
         &mut message,
         "shop.orders",
         &mongodb::bson::Bson::String("order-42".into()),
-        &std::sync::Mutex::new(super::readers::OrdinalCounter::default()),
+        0,
     );
 
     assert_eq!(
@@ -230,6 +309,39 @@ fn message_to_document_strips_source_metadata_but_keeps_user_keys() {
         !metadata.contains_key("mqb.src.kafka_offset"),
         "source/provenance keys must not be persisted to the document"
     );
+}
+
+#[test]
+fn wrapped_documents_sort_in_the_order_they_were_built() {
+    // Ids that sort backwards: the queue position must not follow `_id`.
+    let orders: Vec<Vec<u8>> = (0..1000u128)
+        .rev()
+        .map(|id| {
+            let msg = CanonicalMessage::new(b"x".to_vec(), Some(id));
+            let doc = message_to_document(&msg, &MongoDbFormat::Normal, None, None).unwrap();
+            match doc.get(INSERT_ORDER_FIELD) {
+                Some(Bson::Binary(bin)) if bin.to_uuid().is_ok() => bin.bytes.clone(),
+                other => panic!("insert_order is not a UUID: {other:?}"),
+            }
+        })
+        .collect();
+    assert!(orders.windows(2).all(|pair| pair[0] < pair[1]));
+}
+
+#[test]
+fn a_raw_document_gets_no_queue_position() {
+    let msg = CanonicalMessage::new(br#"{"a":1}"#.to_vec(), None);
+    let doc = message_to_document(&msg, &MongoDbFormat::Raw, None, None).unwrap();
+    assert!(!doc.contains_key(INSERT_ORDER_FIELD));
+}
+
+#[test]
+fn a_stored_document_parses_back_without_its_queue_position() {
+    let msg = CanonicalMessage::new(b"hello".to_vec(), Some(7));
+    let doc = message_to_document(&msg, &MongoDbFormat::Text, None, None).unwrap();
+    let parsed = parse_mongodb_document(doc).unwrap();
+    assert_eq!(parsed.message_id, 7);
+    assert_eq!(&parsed.payload[..], b"hello");
 }
 
 #[test]

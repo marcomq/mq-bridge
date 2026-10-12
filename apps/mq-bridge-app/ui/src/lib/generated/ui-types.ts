@@ -333,6 +333,7 @@ export interface KafkaConfig {
   consumer_options?: unknown[][] | null;
   shared?: boolean | null;
   partitions?: number | null;
+  create_topic?: boolean | null;
   partition_key?: string | null;
 }
 
@@ -439,12 +440,15 @@ export interface ObjectStoreConfig {
   cursor_id?: string | null;
   polling_interval_ms?: number | null;
   max_object_bytes?: number | null;
+  on_decode_error?: DecodeErrorPolicy;
   date_partition?: boolean | null;
   date_partition_style?: DatePartitionStyle;
   extension?: string | null;
   compression?: Compression;
   encryption?: EncryptionConfig | null;
 }
+
+export type DecodeErrorPolicy = "skip" | "fail";
 
 export type DatePartitionStyle = "nested" | "hive";
 
@@ -509,7 +513,7 @@ export interface MongoDbConfig {
   shared?: boolean | null;
 }
 
-export type MongoConsume = "consumer" | "snapshot" | "capture_new" | "capture_all";
+export type MongoConsume = "delete" | "snapshot" | "capture_new" | "capture_all";
 
 export type MongoDbFormat = "normal" | "json" | "text" | "raw";
 
@@ -571,6 +575,8 @@ export interface WebSocketConfig {
   backlog?: number | null;
   execution_mode?: WebSocketExecutionMode;
   tls?: TlsConfig;
+  basic_auth?: unknown[] | null;
+  max_connections?: number | null;
 }
 
 export type WebSocketExecutionMode = "auto" | "direct_only" | "routed";
@@ -774,6 +780,7 @@ export interface HttpBulkUpsert {
   envelope?: string | null;
   document?: string | null;
   result?: HttpBulkResult;
+  split_on_reject?: boolean;
 }
 
 export type HttpBulkFormat = "ndjson" | "json_array";
@@ -815,6 +822,14 @@ export interface HttpBulkQuery {
   value?: string | null;
   found?: string | null;
   error?: string | null;
+  per_message?: boolean;
+  parse_value?: boolean;
+  concurrency?: number | null;
+  max_messages?: number | null;
+  responses_text?: string | null;
+  index?: string | null;
+  stop_reason?: string | null;
+  split_on_reject?: boolean;
 }
 
 export interface HttpBulkRead {
@@ -834,6 +849,7 @@ export interface HttpBulkCursor {
   response?: string | null;
   item?: string | null;
   start?: unknown;
+  end_when_missing?: boolean;
 }
 
 export type HttpBulkStream = "sse" | "ndjson";
@@ -863,11 +879,95 @@ export interface PostgresCdcConfig {
   status_interval_ms?: number;
   tls?: TlsConfig;
   id_hash?: IdHash;
+  split_key_change?: boolean;
 }
 
 export type PostgresConsume = "capture_new" | "capture_all" | "snapshot";
 
 export type IdHash = "fnv1a" | "sha256";
+
+export interface ElasticsearchConfig {
+  url: string;
+  index: string;
+  api_key?: string | null;
+  id_field?: string | null;
+  mode?: ElasticsearchMode;
+  auth?: unknown;
+  operation?: string | null;
+  compression?: Compression;
+  request_timeout_ms?: number | null;
+  tls?: unknown;
+}
+
+export type ElasticsearchMode = "index" | "update";
+
+export interface MeilisearchConfig {
+  url: string;
+  api_key?: string | null;
+  index?: string | null;
+  primary_key?: string | null;
+  operation?: string | null;
+  delete_values?: string[] | null;
+  max_request_bytes?: number | null;
+  compression?: Compression;
+  connect_timeout_ms?: number | null;
+  request_timeout_ms?: number | null;
+  fields?: string | null;
+  cursor_id?: string | null;
+  checkpoint_store?: string | null;
+  polling_interval_ms?: number | null;
+  max_polling_interval_ms?: number | null;
+  tls?: unknown;
+}
+
+export interface OpenAiChatConfig {
+  url?: string | null;
+  api_key?: string | null;
+  model: string;
+  system?: string | null;
+  prompt: string;
+  json?: boolean;
+  options?: unknown;
+  concurrency?: number | null;
+  messages_per_request?: number | null;
+  max_request_bytes?: number | null;
+  request_timeout_ms?: number | null;
+  tls?: unknown;
+}
+
+export interface OpenAiEmbeddingsConfig {
+  url?: string | null;
+  api_key?: string | null;
+  model: string;
+  input: string;
+  dimensions?: number | null;
+  max_request_bytes?: number | null;
+  request_timeout_ms?: number | null;
+  tls?: unknown;
+}
+
+export interface QdrantConfig {
+  url: string;
+  collection: string;
+  api_key?: string | null;
+  wait?: boolean | null;
+  operation?: string | null;
+  compression?: Compression;
+  request_timeout_ms?: number | null;
+  cursor_id?: string | null;
+  checkpoint_store?: string | null;
+  tls?: unknown;
+}
+
+export interface TypesenseConfig {
+  url: string;
+  collection: string;
+  api_key?: string | null;
+  operation?: string | null;
+  compression?: Compression;
+  request_timeout_ms?: number | null;
+  tls?: unknown;
+}
 
 export interface SequenceConfig {
   endpoints: Endpoint[];

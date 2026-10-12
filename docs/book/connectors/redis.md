@@ -88,7 +88,7 @@ mqb copy \
 | `group` | Consumer-only: group name. Defaults to `{APP_NAME}-{stream}`. |
 | `consumer_name` | Consumer-only: consumer within the group. |
 | `subscriber_mode` | Consumer-only: ephemeral `XREAD` from new messages (no group/acks). |
-| `read_from_start` | Consumer-only: on group creation, start from the beginning (`0`) not `$`. |
+| `read_from_start` | Consumer-only: on group creation, start from the beginning (`0`) not `$`. A new group that starts at `$` on a stream with entries logs a warning. |
 | `redelivery_timeout_ms` | Consumer-only: re-claim entries pending ≥ this long; `0` disables. |
 | `reader_connections` | Consumer-only: parallel `XREADGROUP` readers across the group. |
 | `maxlen` + `approx_trim` | Publisher-only: cap stream length with `XADD MAXLEN`. |

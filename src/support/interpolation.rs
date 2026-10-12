@@ -311,7 +311,7 @@ impl CompiledTemplate {
             },
             Source::Metadata(key) => msg.and_then(|m| m.metadata.get(key)).cloned(),
             Source::MessageId => msg.map(|m| format_message_id(m.message_id)),
-            Source::Gen(gen) => Some(match gen {
+            Source::Gen(generator) => Some(match generator {
                 Gen::Uuid => format_message_id(fast_uuid_v7::gen_id()),
                 Gen::Now => rfc3339_utc_now(),
                 Gen::Timestamp => unix_millis().to_string(),
@@ -894,12 +894,9 @@ mod tests {
 
     #[test]
     fn env_is_resolved_at_compile_time() {
-        // SAFETY: single-threaded test; set then read a unique var.
-        unsafe { std::env::set_var("MQB_INTERP_TEST_VAR", "hello") };
-        assert_eq!(
-            render_str("${env:MQB_INTERP_TEST_VAR}", None, None),
-            "hello"
-        );
+        // A variable every test process has, so nothing is set here.
+        let path = std::env::var("PATH").unwrap();
+        assert_eq!(render_str("${env:PATH}", None, None), path);
     }
 
     #[test]

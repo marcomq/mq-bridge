@@ -16,11 +16,16 @@ mod consumer;
 mod presets;
 mod publisher;
 mod query;
+pub use crate::models::{
+    ElasticsearchConfig, ElasticsearchMode, MeilisearchConfig, OpenAiChatConfig,
+    OpenAiEmbeddingsConfig, QdrantConfig, TypesenseConfig,
+};
 pub(crate) use consumer::cursor_checkpoint;
 pub use consumer::HttpBulkConsumer;
+pub(crate) use presets::builtin as builtin_preset;
 pub use presets::{
-    base_url as preset_base_url, preset_names, register_preset, register_preset_with,
-    schema as preset_schema, segment as preset_segment,
+    base_url as preset_base_url, named_endpoint, preset_names, register_preset,
+    register_preset_with, schema as preset_schema, segment as preset_segment,
 };
 pub use publisher::HttpBulkPublisher;
 
@@ -33,6 +38,8 @@ use tracing::warn;
 const JSON: &str = "application/json";
 /// Most characters of a response body quoted in an error.
 const QUOTED_RESPONSE_CHARS: usize = 500;
+/// Longest wait for a response byte when `request_timeout_ms` is unset.
+const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// The client, base URL, headers and credentials both directions of the endpoint share.
 struct Connection {
@@ -66,17 +73,21 @@ impl Connection {
         // No redirect following: reqwest would resend custom credential headers to another host.
         let mut builder = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
+            // Without a request timeout this is what ends a request to a peer that is gone.
+            .tcp_keepalive(Duration::from_secs(60))
             .connect_timeout(Duration::from_millis(
                 config.connect_timeout_ms.unwrap_or(10_000),
             ));
-        if let Some(ms) = config.request_timeout_ms {
-            let timeout = Duration::from_millis(ms);
+        let streams = config.read.as_ref().and_then(|read| read.stream).is_some();
+        builder = match config.request_timeout_ms {
+            Some(0) => builder,
             // An open stream has no total duration: the timeout bounds each silence.
-            builder = match config.read.as_ref().and_then(|read| read.stream) {
-                Some(_) => builder.read_timeout(timeout),
-                None => builder.timeout(timeout),
-            };
-        }
+            Some(ms) if streams => builder.read_timeout(Duration::from_millis(ms)),
+            Some(ms) => builder.timeout(Duration::from_millis(ms)),
+            None if streams => builder,
+            // A pooled connection the server stopped reading would hang without end.
+            None => builder.read_timeout(DEFAULT_READ_TIMEOUT),
+        };
         crate::support::tls_check::warn_unverified("http_bulk", config.tls.accept_invalid_certs);
         if config.tls.accept_invalid_certs {
             builder = builder.danger_accept_invalid_certs(true);
@@ -191,14 +202,22 @@ mod tests {
     use super::*;
     use serde_json::Value;
 
+    /// The named endpoint an endpoint node holds, with its config.
+    fn named(endpoint: &Value) -> Option<(&'static str, &Value)> {
+        preset_names().find_map(|name| Some((name, endpoint.get(name)?)))
+    }
+
     #[test]
     fn the_recipes_in_the_book_are_valid_configurations() {
         let book = concat!(env!("CARGO_MANIFEST_DIR"), "/docs/book/connectors/");
         for (name, recipes) in [
-            ("http-bulk.md", 10),
+            ("http-bulk.md", 14),
             ("typesense.md", 2),
             ("elasticsearch.md", 2),
             ("postgrest.md", 2),
+            ("qdrant.md", 2),
+            ("openai.md", 6),
+            ("../cookbook/llm.md", 4),
         ] {
             // The book is not part of the published crate.
             let Ok(page) = std::fs::read_to_string(format!("{book}{name}")) else {
@@ -231,11 +250,24 @@ mod tests {
                     continue;
                 }
                 let output = &route["output"];
-                let config = match output.get("custom") {
-                    Some(custom) => {
-                        presets::resolve(custom["name"].as_str().unwrap(), &custom["config"])
+                let lookups = output["middlewares"].as_array().into_iter().flatten();
+                let asked = lookups.map(|middleware| &middleware["lookup"]["from"]);
+                let asked = asked.chain([
+                    &output["request"]["to"],
+                    &output["switch"]["cases"]["delete"],
+                ]);
+                for (preset, config) in asked.filter_map(named) {
+                    let config = presets::resolve(preset, config)
+                        .unwrap_or_else(|error| panic!("{name}: {error:#}"));
+                    HttpBulkPublisher::new(&config)
+                        .unwrap_or_else(|error| panic!("{name}: {error}"));
+                }
+                let config = match (named(output), output.get("http_bulk")) {
+                    (Some((preset, config)), _) => presets::resolve(preset, config),
+                    (None, Some(config)) => {
+                        serde_json::from_value(config.clone()).map_err(Into::into)
                     }
-                    None => serde_json::from_value(output["http_bulk"].clone()).map_err(Into::into),
+                    (None, None) => continue,
                 };
                 let config: HttpBulkConfig =
                     config.unwrap_or_else(|error| panic!("{name}: {error:#}"));

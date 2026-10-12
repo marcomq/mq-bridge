@@ -38,7 +38,7 @@ fn custom_endpoint(name: &str) -> Endpoint {
 #[tokio::test]
 async fn a_route_finds_an_installed_plugin_by_the_endpoint_name_it_asks_for() {
     let dir = install_plugin();
-    std::env::set_var(mq_bridge::plugin::discovery::SEARCH_PATH_VAR, &dir);
+    unsafe { std::env::set_var(mq_bridge::plugin::discovery::SEARCH_PATH_VAR, &dir) };
 
     assert!(
         mq_bridge::extensions::get_endpoint_factory("fixture").is_none(),

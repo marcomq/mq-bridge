@@ -23,7 +23,7 @@ static VTABLE: ExportedVTable = {
     table
 };
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn mq_bridge_plugin_v1() -> *const MqbPluginVTable {
     VTABLE.as_ptr()
 }

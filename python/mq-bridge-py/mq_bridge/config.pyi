@@ -167,6 +167,20 @@ class DirSpoolConfig(TypedDict, total=False):
     stop_on_done: bool
 
 
+class ElasticsearchConfig(TypedDict, total=False):
+    """The `elasticsearch` endpoint: documents into one index through `_bulk`."""
+    api_key: Optional[str]
+    auth: Any
+    compression: Compression
+    id_field: Optional[str]
+    index: Required[str]
+    mode: ElasticsearchMode
+    operation: Optional[str]
+    request_timeout_ms: Optional[int]
+    tls: Any
+    url: Required[str]
+
+
 class EncryptionConfig(TypedDict, total=False):
     """AEAD encryption settings, shared by the `encryption` middleware (per-message"""
     authenticate_metadata: List[str]
@@ -184,6 +198,7 @@ class Endpoint(TypedDict, total=False):
     clickhouse: ClickHouseConfig
     custom: Dict[str, Any]
     dir_spool: DirSpoolConfig
+    elasticsearch: ElasticsearchConfig
     fanout: List[Endpoint]
     file: FileConfig
     grpc: GrpcConfig
@@ -191,6 +206,7 @@ class Endpoint(TypedDict, total=False):
     http_bulk: HttpBulkConfig
     ibmmq: IbmMqConfig
     kafka: KafkaConfig
+    meilisearch: MeilisearchConfig
     memory: MemoryConfig
     middlewares: List[Middleware]
     mongodb: MongoDbConfig
@@ -198,7 +214,10 @@ class Endpoint(TypedDict, total=False):
     nats: NatsConfig
     null: Any
     object_store: ObjectStoreConfig
+    openai_chat: OpenAiChatConfig
+    openai_embeddings: OpenAiEmbeddingsConfig
     postgres_cdc: PostgresCdcConfig
+    qdrant: QdrantConfig
     reader: Endpoint
     redis_streams: RedisStreamsConfig
     ref: str
@@ -210,6 +229,7 @@ class Endpoint(TypedDict, total=False):
     static: StaticConfig
     stream_buffer: StreamBufferConfig
     switch: SwitchConfig
+    typesense: TypesenseConfig
     websocket: WebSocketConfig
     zeromq: ZeroMqConfig
 
@@ -296,6 +316,7 @@ class HttpBulkConfig(TypedDict, total=False):
 
 class HttpBulkCursor(TypedDict, total=False):
     """Where an `http_bulk` input takes its next read position from. Set at most one of"""
+    end_when_missing: bool
     item: Optional[str]
     response: Optional[str]
     start: Any
@@ -345,15 +366,23 @@ class HttpBulkOAuth2(TypedDict, total=False):
 
 class HttpBulkQuery(TypedDict, total=False):
     """The `http_bulk` request that answers a batch of lookups, one answer per message in order."""
+    concurrency: Optional[int]
     content_type: Optional[str]
     envelope: Optional[str]
     error: Optional[str]
     format: HttpBulkFormat
     found: Optional[str]
+    index: Optional[str]
+    max_messages: Optional[int]
     method: Optional[str]
+    parse_value: bool
     path: Required[str]
+    per_message: bool
     request: Required[str]
     responses: str
+    responses_text: Optional[str]
+    split_on_reject: bool
+    stop_reason: Optional[str]
     value: Optional[str]
 
 
@@ -388,6 +417,7 @@ class HttpBulkUpsert(TypedDict, total=False):
     method: Optional[str]
     path: Required[str]
     result: HttpBulkResult
+    split_on_reject: bool
 
 
 class HttpConfig(TypedDict, total=False):
@@ -450,6 +480,7 @@ class IbmTlsConfig(TypedDict, total=False):
 class KafkaConfig(TypedDict, total=False):
     """General Kafka connection configuration."""
     consumer_options: Optional[List[List[Any]]]
+    create_topic: Optional[bool]
     delayed_ack: bool
     group_id: Optional[str]
     partition_key: Optional[str]
@@ -495,6 +526,26 @@ LookupMiddleware = TypedDict(
     },
     total=False,
 )
+
+
+class MeilisearchConfig(TypedDict, total=False):
+    """The `meilisearch` endpoint: documents into one index, or a read of it."""
+    api_key: Optional[str]
+    checkpoint_store: Optional[str]
+    compression: Compression
+    connect_timeout_ms: Optional[int]
+    cursor_id: Optional[str]
+    delete_values: Optional[List[str]]
+    fields: Optional[str]
+    index: Optional[str]
+    max_polling_interval_ms: Optional[int]
+    max_request_bytes: Optional[int]
+    operation: Optional[str]
+    polling_interval_ms: Optional[int]
+    primary_key: Optional[str]
+    request_timeout_ms: Optional[int]
+    tls: Any
+    url: Required[str]
 
 
 class MemoryConfig(TypedDict, total=False):
@@ -622,8 +673,37 @@ class ObjectStoreConfig(TypedDict, total=False):
     idempotency: Optional[bool]
     max_object_bytes: Optional[int]
     name_by: NameBy
+    on_decode_error: DecodeErrorPolicy
     polling_interval_ms: Optional[int]
     url: Required[str]
+
+
+class OpenAiChatConfig(TypedDict, total=False):
+    """The `openai_chat` endpoint: one chat completion per message, or per `messages_per_request`."""
+    api_key: Optional[str]
+    concurrency: Optional[int]
+    json: bool
+    max_request_bytes: Optional[int]
+    messages_per_request: Optional[int]
+    model: Required[str]
+    options: Any
+    prompt: Required[str]
+    request_timeout_ms: Optional[int]
+    system: Optional[str]
+    tls: Any
+    url: Optional[str]
+
+
+class OpenAiEmbeddingsConfig(TypedDict, total=False):
+    """The `openai_embeddings` endpoint: one embeddings request per batch."""
+    api_key: Optional[str]
+    dimensions: Optional[int]
+    input: Required[str]
+    max_request_bytes: Optional[int]
+    model: Required[str]
+    request_timeout_ms: Optional[int]
+    tls: Any
+    url: Optional[str]
 
 
 class OtelMiddleware(TypedDict, total=False):
@@ -651,10 +731,25 @@ class PostgresCdcConfig(TypedDict, total=False):
     publication_tables: List[str]
     slot_name: str
     source_metadata: bool
+    split_key_change: bool
     status_interval_ms: int
     temporary_slot: bool
     tls: TlsConfig
     url: Required[str]
+
+
+class QdrantConfig(TypedDict, total=False):
+    """The `qdrant` endpoint: points into one collection, or a scroll through it."""
+    api_key: Optional[str]
+    checkpoint_store: Optional[str]
+    collection: Required[str]
+    compression: Compression
+    cursor_id: Optional[str]
+    operation: Optional[str]
+    request_timeout_ms: Optional[int]
+    tls: Any
+    url: Required[str]
+    wait: Optional[bool]
 
 
 class RandomPanicMiddleware(TypedDict, total=False):
@@ -820,6 +915,17 @@ class TransformMiddleware(TypedDict, total=False):
     schema_file: Optional[str]
 
 
+class TypesenseConfig(TypedDict, total=False):
+    """The `typesense` endpoint: documents into one Typesense collection."""
+    api_key: Optional[str]
+    collection: Required[str]
+    compression: Compression
+    operation: Optional[str]
+    request_timeout_ms: Optional[int]
+    tls: Any
+    url: Required[str]
+
+
 class UnpackMiddleware(TypedDict, total=False):
     """Transport batching middleware configuration (`unpack`, input side)."""
     format: PackFormat
@@ -841,7 +947,9 @@ class WeakJoinMiddleware(TypedDict, total=False):
 class WebSocketConfig(TypedDict, total=False):
     """WebSocket connection configuration."""
     backlog: Optional[int]
+    basic_auth: Optional[List[Any]]
     execution_mode: WebSocketExecutionMode
+    max_connections: Optional[int]
     message_id_header: Optional[str]
     path: Optional[str]
     routed_queue_capacity: Optional[int]
@@ -868,7 +976,9 @@ Compression = Literal["none", "gzip", "lz4", "zstd"]
 CsvMismatch = Literal["warn", "fail"]
 CsvNested = Literal["flatten", "json"]
 DatePartitionStyle = Literal["nested", "hive"]
+DecodeErrorPolicy = Literal["skip", "fail"]
 DeliveryGuarantee = Literal["at_most_once", "at_least_once", "effectively_once"]
+ElasticsearchMode = Literal["index", "update"]
 FaultMode = Literal["panic", "disconnect", "timeout", "json_format_error", "nack"]
 FileFormat = Literal["normal", "json", "text", "raw", "csv", "parquet"]
 FileFsync = Literal["off", "batch", "periodic"]
@@ -879,7 +989,7 @@ HttpServerProtocol = Literal["auto", "http1_only", "http2_only"]
 IdHash = Literal["fnv1a", "sha256"]
 InputErrorPolicy = Literal["fail", "drop"]
 MappingRule = Union[str, DetailedMappingRule]
-MongoConsume = Literal["consumer", "snapshot", "capture_new", "capture_all"]
+MongoConsume = Literal["delete", "snapshot", "capture_new", "capture_all"]
 MongoDbFormat = Literal["normal", "json", "text", "raw"]
 MqttProtocol = Literal["v5", "v3"]
 NameBy = Literal["auto", "source_position", "write_time"]

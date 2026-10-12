@@ -101,6 +101,7 @@ Every row works from the Rust crate, the Python and Node.js packages, and the ze
 | **MongoDB** as source or sink | `mongodb` endpoint · `mongodb` | [MongoDB](https://marcomq.github.io/mq-bridge/connectors/mongodb.html) |
 | **ClickHouse** bulk insert and resumable reads | `clickhouse` endpoint · `clickhouse` | [ClickHouse](https://marcomq.github.io/mq-bridge/connectors/clickhouse.html) |
 | **Search engines** and other bulk document APIs (Meilisearch, Typesense, Elasticsearch, Qdrant, PostgREST / Supabase) | `http_bulk` endpoint · `http-bulk` | [HTTP bulk](https://marcomq.github.io/mq-bridge/connectors/http-bulk.html) |
+| **LLMs and embeddings** over an OpenAI-compatible API (OpenAI, Ollama, vLLM, …): classify, summarise or embed each message | `openai_chat`, `openai_embeddings` endpoints · `http-bulk` | [OpenAI-compatible APIs](https://marcomq.github.io/mq-bridge/connectors/openai.html) · [LLM cookbook](https://marcomq.github.io/mq-bridge/cookbook/llm.html) |
 | **Object storage**: S3 (and S3-compatible, e.g. R2), GCS, Azure Blob, or a local directory, as **Parquet**, **JSONL** or **CSV** | `object_store` endpoint with `format: parquet \| raw \| json \| csv` · `object-store`, `parquet` | [Object storage](https://marcomq.github.io/mq-bridge/connectors/object-store.html) |
 | **Files**: CSV and JSONL, read and write | `file` endpoint · built in | [File](https://marcomq.github.io/mq-bridge/connectors/file.html) |
 | **Analytics / warehouses**: Snowflake, BigQuery, Databricks / Spark, Athena / Trino, DuckDB **via Parquet on S3/GCS/Azure**. These are not native connectors: mq-bridge writes the Parquet files, the warehouse loads or queries them | `object_store` with `format: parquet` · `parquet` | [Snowflake](https://marcomq.github.io/mq-bridge/cookbook/snowflake.html) · [BigQuery](https://marcomq.github.io/mq-bridge/cookbook/bigquery.html) · [Databricks / Spark](https://marcomq.github.io/mq-bridge/cookbook/databricks.html) · [Athena / Trino](https://marcomq.github.io/mq-bridge/cookbook/athena.html) · [DuckDB](https://marcomq.github.io/mq-bridge/cookbook/duckdb.html) |
@@ -186,6 +187,14 @@ tuning use the same settings in both.
 *   Postgres CDC has a **restart-safety test**: an un-acked, in-flight batch is redelivered after a database restart with no loss and no gap.
 
 It is used as rust library in [armature](https://github.com/quinnjr/armature) and as python lib in [omniload](https://github.com/panodata/omniload). 
+
+## Stability and Rust version
+
+Since 1.0 the Rust API follows semantic versioning: the crate root and the modules `models`, `traits`, `errors`, `outcomes`, `extensions`, `plugin` (the SDK), `type_handler`, `publisher`, `route` and `checkpoint`. The implementation modules `endpoints`, `middleware`, `support` and `test_utils` may change in a minor release, and so may the major version of a re-exported driver crate (`mq_bridge::sqlx`, `mq_bridge::rdkafka`, ...).
+
+A minor release may add a configuration field, a variant of a configuration or error enum, and raise the minimum Rust version. Code that writes config structs with `..Default::default()` and gives a `match` on these enums a `_` arm compiles unchanged across such releases.
+
+The minimum Rust version is 1.89. The features `aws`, `sqlx` and `postgres-cdc`, and so `full`, need 1.94.1; `zeromq-omq` needs 1.93.
 
 ## Running Tests
 The project includes integration and performance tests. Most backend tests require Docker.

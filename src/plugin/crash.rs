@@ -13,6 +13,8 @@
 //! and finally hands the signal to whichever handler was installed before.
 //!
 //! `MQB_PLUGIN_CRASH_REPORT=0` turns the dump off; registered handlers still run.
+//! `MQB_PLUGIN_CRASH_HANDLER=0` installs nothing, for a process that brings its
+//! own crash reporter; `register_crash_handler` then answers `MQB_ERR_UNSUPPORTED`.
 
 use std::ffi::c_void;
 
@@ -34,10 +36,10 @@ mod imp {
     use std::path::Path;
     use std::ptr::{null, null_mut};
     use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
-    use std::sync::Once;
+    use std::sync::{Once, OnceLock};
 
     use crate::support::plugin_abi::{
-        MqbCrashHandler, MqbCrashInfo, MqbStatus, MQB_ERR_PERMANENT, MQB_OK,
+        MqbCrashHandler, MqbCrashInfo, MqbStatus, MQB_ERR_PERMANENT, MQB_ERR_UNSUPPORTED, MQB_OK,
     };
 
     const SIGNALS: [c_int; 5] = [
@@ -79,6 +81,9 @@ mod imp {
         handler: MqbCrashHandler,
         user_data: *mut c_void,
     ) -> MqbStatus {
+        if !enabled() {
+            return MQB_ERR_UNSUPPORTED;
+        }
         let Some(handler) = handler else {
             return MQB_ERR_PERMANENT;
         };
@@ -136,7 +141,16 @@ mod imp {
         ))
     }
 
+    fn enabled() -> bool {
+        static ENABLED: OnceLock<bool> = OnceLock::new();
+        *ENABLED
+            .get_or_init(|| std::env::var_os("MQB_PLUGIN_CRASH_HANDLER").is_none_or(|v| v != "0"))
+    }
+
     pub(in crate::plugin) fn install() {
+        if !enabled() {
+            return;
+        }
         INSTALL.call_once(|| unsafe {
             let report = std::env::var_os("MQB_PLUGIN_CRASH_REPORT").is_none_or(|v| v != "0");
             DUMP.store(report, Ordering::Relaxed);
@@ -347,7 +361,7 @@ mod imp {
     }
 
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
-    extern "C" {
+    unsafe extern "C" {
         fn backtrace(buffer: *mut *mut c_void, size: c_int) -> c_int;
         fn backtrace_symbols_fd(buffer: *const *mut c_void, size: c_int, fd: c_int);
     }
@@ -434,7 +448,9 @@ mod tests {
     use std::os::unix::process::ExitStatusExt;
     use std::process::Command;
 
-    use crate::support::plugin_abi::{MqbCrashInfo, MQB_ERR_PERMANENT, MQB_OK};
+    use crate::support::plugin_abi::{
+        MqbCrashInfo, MQB_ERR_PERMANENT, MQB_ERR_UNSUPPORTED, MQB_OK,
+    };
 
     const CHILD: &str = "MQB_CRASH_TEST_CHILD";
 
@@ -458,6 +474,13 @@ mod tests {
         super::install();
         super::record_library(&exe, crash_child as *const c_void);
         unsafe {
+            if std::env::var_os("MQB_PLUGIN_CRASH_HANDLER").is_some_and(|v| v == "0") {
+                assert_eq!(
+                    super::register_crash_handler(Some(on_crash), 7 as *mut c_void),
+                    MQB_ERR_UNSUPPORTED
+                );
+                std::ptr::read_volatile(std::hint::black_box(8 as *const u8));
+            }
             assert_eq!(
                 super::register_crash_handler(None, std::ptr::null_mut()),
                 MQB_ERR_PERMANENT
@@ -471,6 +494,10 @@ mod tests {
     }
 
     fn crash(report: Option<&str>) -> (Option<i32>, String) {
+        crash_with("MQB_PLUGIN_CRASH_REPORT", report)
+    }
+
+    fn crash_with(variable: &str, value: Option<&str>) -> (Option<i32>, String) {
         let mut command = Command::new(std::env::current_exe().unwrap());
         command
             .args([
@@ -478,9 +505,11 @@ mod tests {
                 "plugin::crash::tests::crash_child",
                 "--nocapture",
             ])
-            .env(CHILD, "1");
-        if let Some(report) = report {
-            command.env("MQB_PLUGIN_CRASH_REPORT", report);
+            .env(CHILD, "1")
+            // An inherited "0" would turn the handler off for every test here.
+            .env("MQB_PLUGIN_CRASH_HANDLER", "1");
+        if let Some(value) = value {
+            command.env(variable, value);
         }
         let output = command.output().unwrap();
         (
@@ -514,5 +543,16 @@ mod tests {
         );
         assert!(!stderr.contains("mq-bridge: fatal signal"), "{stderr}");
         assert!(stderr.contains("handler ran with pc"), "{stderr}");
+    }
+
+    #[test]
+    fn the_handler_can_be_left_out_for_a_process_with_its_own() {
+        let (signal, stderr) = crash_with("MQB_PLUGIN_CRASH_HANDLER", Some("0"));
+        assert!(
+            matches!(signal, Some(libc::SIGSEGV | libc::SIGBUS)),
+            "{signal:?}\n{stderr}"
+        );
+        assert!(!stderr.contains("mq-bridge: fatal signal"), "{stderr}");
+        assert!(!stderr.contains("handler ran"), "{stderr}");
     }
 }

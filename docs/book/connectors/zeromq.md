@@ -82,6 +82,7 @@ no topic is set), and a `sub` socket drops that frame on receive. A foreign subs
 **Reconnecting.** A socket that binds is found again by its peers. A socket that connects
 reconnects after its peer restarted, with one exception: on the `zmq` backend a `pull` or
 `rep` socket that connects does not, and receives nothing more until the route is restarted.
-Bind on that side, or use the `omq` backend.
+Bind on that side, or use the `omq` backend. The route logs a warning at start when it is
+configured that way.
 
 Full field list: [reference/zeromq.md](../reference/zeromq.md).

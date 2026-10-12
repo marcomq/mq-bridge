@@ -1118,8 +1118,8 @@ query answers the whole batch instead of one query per message:
     into: customer
 ```
 An `http_bulk` endpoint with `query` batches too: one HTTP request answers every message
-of the batch, matched by position. An entry that reports an error makes it ask again one
-message at a time, so only that message fails.
+of the batch, matched by position. An entry that reports an error fails only its message;
+the others keep their answers.
 
 ```yaml middleware
 - lookup:
@@ -1796,6 +1796,21 @@ concurrently unless `to` requires ordered publishing, in which case they are iss
 time in source order. Their responses and error fallbacks are restored to input order and
 passed to `forward_to` in one `send_batch` call. Batch-capable sinks such as MongoDB can
 therefore use their native bulk write for the forwarding leg.
+
+Where `to` answers a whole batch in one call (`openai_embeddings`, `openai_chat` with
+`messages_per_request`, an `http_bulk` query), put a [`buffer`](#buffer) with
+`max_delay_ms: 0` on `to`. The concurrent requests of a batch then reach it as one batch,
+and each message still gets its own answer or error:
+
+```yaml endpoint
+output:
+  request:
+    to:
+      openai_embeddings: { model: text-embedding-3-small, input: "${payload:text}" }
+      middlewares:
+        - buffer: { max_messages: 500, max_delay_ms: 0 }
+    forward_to: { file: { path: "vectors.jsonl", format: raw } }
+```
 
 Whatever `forward_to` returns is passed back up. A plain sink acks, `forward_to: {}` (the
 `null` endpoint, also spelled `null`) discards, and `forward_to: { response: {} }` replies to

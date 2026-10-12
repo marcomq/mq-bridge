@@ -811,7 +811,12 @@ impl proto::bridge_server::Bridge for BridgeService {
                 }
             }
             loop {
-                match rx.recv().await {
+                // A client that left is noticed here, not only when the next message arrives.
+                let received = tokio::select! {
+                    received = rx.recv() => received,
+                    _ = tx_stream.closed() => break,
+                };
+                match received {
                     Ok(msg) => {
                         // A dispatch racing the replay snapshot is both retained and broadcast.
                         // The retained copy was already sent above, so do not send it twice.
@@ -913,6 +918,9 @@ async fn get_or_create_shared_grpc_server(
     topic: String,
     txs: Vec<mpsc::Sender<InboundDelivery>>,
 ) -> Result<Arc<SharedGrpcServer>> {
+    // Two routes starting together would otherwise both find no listener and both bind.
+    static CREATING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _creating = CREATING.lock().await;
     if let Ok(registry) = grpc_server_registry().lock() {
         for (existing_key, server) in registry.iter() {
             if existing_key.listen_addr != key.listen_addr {
@@ -953,12 +961,14 @@ async fn get_or_create_shared_grpc_server(
         builder = builder.timeout(Duration::from_millis(ms));
     }
 
+    crate::support::tls_check::warn_listener_cert_unused("gRPC listener", &config.tls);
     if config.tls.required {
         if !config.tls.is_tls_server_configured() {
             return Err(anyhow::anyhow!(
                 "gRPC server TLS enabled but no cert/key provided in GrpcConfig"
             ));
         }
+        crate::endpoints::get_crypto_provider()?;
         let cert_path = config.tls.cert_file.as_ref().unwrap();
         let key_path = config.tls.key_file.as_ref().unwrap();
         let cert = tokio::fs::read(cert_path).await?;

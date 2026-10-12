@@ -66,6 +66,24 @@ are the bulk of the mechanical diffs.
   spirit); upstream's broader checkpoint/state machinery was dropped in favor of
   mq-bridge's `CheckpointStore`.
 
+## Upstream audit findings applied after the pin
+
+Upstream fixed these in `70ca00b2`, `db56d8c6` and `f2f7942c` (audits #321, #654, #789).
+They were applied by hand on 2026-10-10; the pin above is unchanged because the files were
+not re-synced.
+
+| Upstream finding | Here |
+|---|---|
+| Control connections ignore the TLS policy (#321 M5, SQL-87) | Already in `control_conn`. The reverse gap was ours: the stream ignored the URL's `sslmode`; fixed in `map_tls`. |
+| Errors classified by message text (#654 H8, SQL-137) | `is_missing_slot_error` matches the `(SQLSTATE 42704)` suffix. |
+| URL not percent-decoded, query overrides ignored (SQL-86) | `parse_url`. |
+| Slot advance to a position behind the slot fails (SQL-154) | `advance_slot` skips it. |
+| Temporary slot is gone before the stream starts (SQL-47) | Not affected: `temporary_slot` is drop-on-stop. |
+| Slow sink lets `wal_sender_timeout` end the stream (SQL-88) | Not affected: `pgwire-replication` 0.4 sends status updates while its event channel is full. |
+| Cycle bound, commit batching (SQL-08, SQL-118) | Not applicable: the consumer confirms continuously. Empty commits and keepalives confirm while idle. |
+| Temporal values depend on `DateStyle` (SQL-119) | Not taken: the text stays as Postgres prints it. The stream sets `datestyle=ISO` on its own session (`STREAM_SESSION_OPTIONS`), so the role's setting cannot change it. |
+| PostgreSQL 13 rejects the `messages` option (SQL-153) | Documented: 14 or newer. |
+
 ## Re-syncing an upstream fix
 
 1. Note the current pin above (`OLD`) and pick the upstream commit with the fix

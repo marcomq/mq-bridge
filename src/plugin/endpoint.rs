@@ -170,6 +170,7 @@ impl CustomEndpointFactory for PluginEndpointFactory {
                 plugin: Arc::clone(&self.plugin),
                 handle: handle.0,
                 blocking: AtomicBool::new(false),
+                closed: AtomicBool::new(false),
             }),
         }))
     }
@@ -471,6 +472,8 @@ struct ConsumerHandle {
     handle: MqbConsumerHandle,
     /// Set once the non-blocking receive answered `MQB_ERR_UNSUPPORTED`.
     blocking: AtomicBool,
+    /// Set once `consumer_close` was called, so teardown and `close` share one call.
+    closed: AtomicBool,
 }
 
 unsafe impl Send for ConsumerHandle {}
@@ -482,6 +485,20 @@ impl ConsumerHandle {
             return None;
         }
         self.plugin.table().async_hooks()
+    }
+
+    /// Calls `consumer_close` once; later calls are no-ops.
+    async fn close(self: Arc<Self>) -> anyhow::Result<()> {
+        if self.closed.swap(true, Ordering::AcqRel) {
+            return Ok(());
+        }
+        tokio::task::spawn_blocking(move || {
+            let mut err = MqbBuffer::EMPTY;
+            let status = unsafe { (self.plugin.table().consumer_close)(self.handle, &mut err) };
+            plugin_result(&self.plugin, status, err, "close an input")
+        })
+        .await
+        .map_err(join_error)?
     }
 }
 
@@ -551,16 +568,13 @@ impl MessageConsumer for PluginConsumer {
         };
     }
 
+    /// The route's only teardown call for a source, so the close goes here.
+    fn on_disconnect_hook(&self) -> Option<crate::traits::BoxFuture<'_, anyhow::Result<()>>> {
+        Some(Box::pin(Arc::clone(&self.consumer).close()))
+    }
+
     async fn close(&mut self) -> anyhow::Result<()> {
-        let consumer = Arc::clone(&self.consumer);
-        tokio::task::spawn_blocking(move || {
-            let mut err = MqbBuffer::EMPTY;
-            let status =
-                unsafe { (consumer.plugin.table().consumer_close)(consumer.handle, &mut err) };
-            plugin_result(&consumer.plugin, status, err, "close an input")
-        })
-        .await
-        .map_err(join_error)?
+        Arc::clone(&self.consumer).close().await
     }
 
     async fn status(&self) -> EndpointStatus {
@@ -1192,6 +1206,88 @@ pub(super) fn publisher_error_from(status: MqbStatus, cause: anyhow::Error) -> P
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "plugin-sdk")]
+    mod teardown {
+        use super::*;
+        use crate::plugin::sdk::{
+            build_vtable, ExportedVTable, NoMiddleware, CAPABILITIES_INPUT_ONLY,
+        };
+        use crate::traits::{BoxFuture, CustomEndpointFactory};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        static DISCONNECTS: AtomicUsize = AtomicUsize::new(0);
+        static CLOSES: AtomicUsize = AtomicUsize::new(0);
+
+        struct Source;
+
+        #[async_trait]
+        impl MessageConsumer for Source {
+            fn on_disconnect_hook(&self) -> Option<BoxFuture<'_, anyhow::Result<()>>> {
+                Some(Box::pin(async {
+                    DISCONNECTS.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                }))
+            }
+
+            async fn receive_batch(&mut self, _: usize) -> Result<ReceivedBatch, ConsumerError> {
+                Err(ConsumerError::EndOfStream)
+            }
+
+            async fn close(&mut self) -> anyhow::Result<()> {
+                CLOSES.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
+        }
+
+        #[derive(Debug, Default)]
+        struct SourceFactory;
+
+        #[async_trait]
+        impl CustomEndpointFactory for SourceFactory {
+            async fn create_consumer(
+                &self,
+                _: &str,
+                _: &serde_json::Value,
+            ) -> anyhow::Result<Box<dyn MessageConsumer>> {
+                Ok(Box::new(Source))
+            }
+        }
+
+        static TABLE: ExportedVTable = build_vtable::<SourceFactory, NoMiddleware>(
+            "teardown-source",
+            "0.0.0",
+            CAPABILITIES_INPUT_ONLY,
+        );
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn a_plugin_source_is_told_when_the_route_disconnects() {
+            unsafe { crate::plugin::register_plugin_table(TABLE.as_ptr()) }.unwrap();
+            let factory = crate::extensions::get_endpoint_factory("teardown-source").unwrap();
+            let mut consumer = factory
+                .create_consumer("r", &serde_json::json!({}))
+                .await
+                .unwrap();
+
+            // All the route does at teardown: run the hook, then drop the consumer.
+            consumer
+                .on_disconnect_hook()
+                .expect("a plugin source has a disconnect hook")
+                .await
+                .unwrap();
+            assert_eq!(DISCONNECTS.load(Ordering::SeqCst), 1);
+            assert_eq!(CLOSES.load(Ordering::SeqCst), 1);
+
+            // `sequence` closes explicitly as well; that must not repeat the work.
+            consumer.close().await.unwrap();
+            assert_eq!(DISCONNECTS.load(Ordering::SeqCst), 1);
+            assert_eq!(CLOSES.load(Ordering::SeqCst), 1);
+        }
+    }
 
     #[test]
     fn dispositions_map_to_abi_codes() {

@@ -8,7 +8,7 @@
 //! Apache-2.0 OR MIT), adapted to mq-bridge's config and error types.
 //! Pinned upstream commit and per-file changes: `./VENDORED.md`.
 
-use crate::endpoints::postgres::state::format_lsn;
+use crate::endpoints::postgres::state::{format_lsn, parse_lsn};
 use crate::models::PostgresCdcConfig;
 use anyhow::{anyhow, Context};
 use percent_encoding::percent_decode_str;
@@ -22,77 +22,108 @@ use tracing::{debug, warn};
 pub use pgwire_replication::ReplicationEvent;
 
 /// Postgres connection coordinates parsed from the configured URL.
+#[derive(Debug, Default)]
 struct PgCoords {
     host: String,
     port: u16,
     user: String,
     password: String,
     dbname: String,
+    sslmode: Option<String>,
+    sslrootcert: Option<String>,
+    sslcert: Option<String>,
+    sslkey: Option<String>,
 }
 
+/// Read the URL the way libpq and the sqlx control connections do: userinfo and path
+/// are percent-encoded, and query parameters override them.
 fn parse_url(url: &str) -> anyhow::Result<PgCoords> {
     let parsed = url::Url::parse(url).context("postgres-cdc: invalid connection URL")?;
-    let host = parsed
-        .host_str()
-        .filter(|h| !h.is_empty())
-        .ok_or_else(|| {
-            anyhow!(
-                "postgres-cdc: connection URL is missing a host \
-                 (expected postgres://user@host[:port]/dbname)"
-            )
-        })?
-        .to_owned();
-    let port = parsed.port().unwrap_or(5432);
-    // The `url` crate leaves userinfo percent-encoded; decode it so credentials
-    // with reserved characters (e.g. `@`, `:`, `/`) reach the server intact.
-    let user = percent_decode_str(parsed.username())
-        .decode_utf8_lossy()
-        .into_owned();
-    if user.is_empty() {
+    let decode = |s: &str| -> anyhow::Result<String> {
+        Ok(percent_decode_str(s)
+            .decode_utf8()
+            .context("postgres-cdc: connection URL is not valid UTF-8")?
+            .into_owned())
+    };
+    let mut coords = PgCoords {
+        host: parsed.host_str().unwrap_or_default().to_owned(),
+        port: parsed.port().unwrap_or(5432),
+        user: decode(parsed.username())?,
+        password: decode(parsed.password().unwrap_or(""))?,
+        dbname: decode(parsed.path().trim_start_matches('/'))?,
+        ..PgCoords::default()
+    };
+    for (key, value) in parsed.query_pairs() {
+        let value = value.into_owned();
+        match key.as_ref() {
+            "host" => coords.host = value,
+            "port" => {
+                coords.port = value
+                    .parse()
+                    .context("postgres-cdc: connection URL has an invalid `port`")?
+            }
+            "user" => coords.user = value,
+            "password" => coords.password = value,
+            "dbname" => coords.dbname = value,
+            "sslmode" => coords.sslmode = Some(value),
+            "sslrootcert" => coords.sslrootcert = Some(value),
+            "sslcert" => coords.sslcert = Some(value),
+            "sslkey" => coords.sslkey = Some(value),
+            _ => {}
+        }
+    }
+    if coords.host.is_empty() {
+        return Err(anyhow!(
+            "postgres-cdc: connection URL is missing a host \
+             (expected postgres://user@host[:port]/dbname)"
+        ));
+    }
+    if coords.user.is_empty() {
         return Err(anyhow!(
             "postgres-cdc: connection URL is missing a user \
              (expected postgres://user@host[:port]/dbname)"
         ));
     }
-    let password = percent_decode_str(parsed.password().unwrap_or(""))
-        .decode_utf8_lossy()
-        .into_owned();
-    let dbname = parsed.path().trim_start_matches('/').to_owned();
-    let dbname = if dbname.is_empty() {
-        "postgres".to_owned()
-    } else {
-        dbname
-    };
-    Ok(PgCoords {
-        host,
-        port,
-        user,
-        password,
-        dbname,
-    })
+    if coords.dbname.is_empty() {
+        coords.dbname = "postgres".to_owned();
+    }
+    Ok(coords)
 }
 
-/// Map mq-bridge's shared [`TlsConfig`](crate::models::TlsConfig) onto
-/// pgwire-replication's TLS model. Client-certificate mTLS is not exposed by
-/// the replication transport in this version — warn if it was requested.
-fn map_tls(tls: &crate::models::TlsConfig) -> PgTlsConfig {
-    if tls.cert_file.is_some() || tls.key_file.is_some() {
-        warn!(
-            "postgres-cdc: client-certificate mTLS is not supported by the replication \
-             transport yet; ignoring cert_file/key_file"
-        );
+/// TLS for the replication stream: the `tls` block when it asks for TLS, otherwise the
+/// URL's `sslmode`, so the stream is never weaker than the control connection.
+/// `prefer` and `allow` stay plain text, as they cannot enforce anything.
+fn map_tls(tls: &crate::models::TlsConfig, coords: &PgCoords) -> anyhow::Result<PgTlsConfig> {
+    let root = || {
+        tls.ca_file
+            .clone()
+            .or_else(|| coords.sslrootcert.clone())
+            .map(PathBuf::from)
+    };
+    let config = if tls.required {
+        crate::support::tls_check::warn_unverified("postgres_cdc", tls.accept_invalid_certs);
+        if tls.accept_invalid_certs {
+            PgTlsConfig::require()
+        } else {
+            PgTlsConfig::verify_full(root())
+        }
+    } else {
+        match coords.sslmode.as_deref() {
+            Some("require") => PgTlsConfig::require(),
+            Some("verify-ca") => PgTlsConfig::verify_ca(root()),
+            Some("verify-full") => PgTlsConfig::verify_full(root()),
+            _ => return Ok(PgTlsConfig::disabled()),
+        }
+    };
+    let cert = tls.cert_file.clone().or_else(|| coords.sslcert.clone());
+    let key = tls.key_file.clone().or_else(|| coords.sslkey.clone());
+    match (cert, key) {
+        (Some(cert), Some(key)) => Ok(config.with_client_cert(cert, key)),
+        (None, None) => Ok(config),
+        _ => Err(anyhow!(
+            "postgres-cdc: a client certificate needs both `tls.cert_file` and `tls.key_file`"
+        )),
     }
-    if !tls.required {
-        return PgTlsConfig::disabled();
-    }
-    crate::support::tls_check::warn_unverified("postgres_cdc", tls.accept_invalid_certs);
-    if tls.accept_invalid_certs {
-        // Encrypt but do not verify the server certificate.
-        return PgTlsConfig::require();
-    }
-    // Verify the server certificate (and hostname), optionally against a
-    // supplied CA bundle; falls back to the system roots when `ca_file` is None.
-    PgTlsConfig::verify_full(tls.ca_file.clone().map(PathBuf::from))
 }
 
 /// Open a plain SQL connection for control-plane slot operations, applying the
@@ -111,6 +142,9 @@ async fn control_conn(url: &str, tls: &crate::models::TlsConfig) -> anyhow::Resu
         if let Some(ca_file) = &tls.ca_file {
             opts = opts.ssl_root_cert(ca_file);
         }
+    }
+    if let (Some(cert), Some(key)) = (&tls.cert_file, &tls.key_file) {
+        opts = opts.ssl_client_cert(cert).ssl_client_key(key);
     }
     opts.connect()
         .await
@@ -354,7 +388,9 @@ async fn wait_for_slot_release(conn: &mut PgConnection, slot_name: &str) -> anyh
 /// `undefined_object`). Reconnecting cannot recreate it, so the route must fail
 /// permanently rather than retry on the reconnect interval forever.
 pub fn is_missing_slot_error(msg: &str) -> bool {
-    msg.contains("42704") || (msg.contains("replication slot") && msg.contains("does not exist"))
+    // The replication client renders a server error as `<message> (SQLSTATE <code>)`.
+    msg.contains("(SQLSTATE 42704)")
+        || (msg.contains("replication slot") && msg.contains("does not exist"))
 }
 
 /// A publication table reference is a plain identifier or a single `schema.table`,
@@ -503,8 +539,8 @@ async fn add_missing_publication_tables(
 
 /// Advance the slot's `confirmed_flush_lsn` to `lsn` while the slot is inactive
 /// (before the stream is opened), so a resumed run skips already-persisted
-/// changes. `pg_replication_slot_advance` never moves a slot backwards or past
-/// the server's insert pointer, so a stale `lsn` is a safe no-op.
+/// changes. `pg_replication_slot_advance` refuses to move a slot backwards, so
+/// an `lsn` at or behind the slot is not sent: the slot's own position applies.
 pub async fn advance_slot(
     url: &str,
     slot_name: &str,
@@ -515,6 +551,28 @@ pub async fn advance_slot(
         return Ok(());
     }
     let mut conn = control_conn(url, tls).await?;
+    let confirmed: Option<(Option<String>,)> = sqlx::query_as(
+        "SELECT confirmed_flush_lsn::text FROM pg_replication_slots WHERE slot_name = $1",
+    )
+    .bind(slot_name)
+    .fetch_optional(&mut conn)
+    .await
+    .map_err(|e| anyhow!("postgres-cdc: slot position lookup failed: {e}"))?;
+    let confirmed = confirmed
+        .and_then(|(lsn,)| lsn)
+        .map(|lsn| parse_lsn(&lsn))
+        .transpose()?;
+    if let Some(at) = confirmed.filter(|at| lsn <= *at) {
+        if lsn < at {
+            warn!(
+                slot = slot_name,
+                checkpoint = %format_lsn(lsn),
+                slot_confirmed = %format_lsn(at),
+                "postgres-cdc: the checkpoint is behind the slot; resuming from the slot"
+            );
+        }
+        return Ok(());
+    }
     sqlx::query("SELECT pg_replication_slot_advance($1, $2::pg_lsn)")
         .bind(slot_name)
         .bind(format_lsn(lsn))
@@ -553,6 +611,12 @@ pub async fn advance_slot_when_inactive(
     Ok(())
 }
 
+/// The walsender renders values with the session's settings; a role default such as
+/// `DateStyle SQL, DMY` or `extra_float_digits 0` would make dates ambiguous or round
+/// floats, so the stream pins the output format.
+const STREAM_SESSION_OPTIONS: &str =
+    "-c datestyle=ISO -c intervalstyle=postgres -c extra_float_digits=3";
+
 /// Open the logical replication stream. `pgwire-replication` handles TCP, TLS,
 /// auth, `START_REPLICATION`, keepalives, and standby-status feedback.
 pub async fn start_replication(
@@ -560,6 +624,7 @@ pub async fn start_replication(
     start_lsn: Option<u64>,
 ) -> anyhow::Result<ReplicationClient> {
     let coords = parse_url(&config.url)?;
+    let tls = map_tls(&config.tls, &coords)?;
     let status_interval = Duration::from_millis(config.status_interval_ms.max(1));
 
     let cfg = ReplicationConfig::new(
@@ -571,10 +636,11 @@ pub async fn start_replication(
         config.publication.clone(),
     )
     .with_port(coords.port)
-    .with_tls(map_tls(&config.tls))
+    .with_tls(tls)
     .with_start_lsn(Lsn::from_u64(start_lsn.unwrap_or(0)))
     .with_status_interval(status_interval)
-    .with_wakeup_interval(status_interval);
+    .with_wakeup_interval(status_interval)
+    .with_options(STREAM_SESSION_OPTIONS);
 
     ReplicationClient::connect(cfg).await.map_err(|e| {
         let msg = format!("postgres-cdc: start_replication failed: {e}");
@@ -590,7 +656,68 @@ pub async fn start_replication(
 
 #[cfg(test)]
 mod tests {
-    use super::sqlstate_hint;
+    use super::{is_missing_slot_error, map_tls, parse_url, sqlstate_hint};
+    use crate::models::TlsConfig;
+    use pgwire_replication::SslMode;
+
+    #[test]
+    fn the_url_sslmode_applies_to_the_replication_stream() {
+        let mode = |url: &str| {
+            map_tls(&TlsConfig::new(), &parse_url(url).unwrap())
+                .unwrap()
+                .mode
+        };
+        assert_eq!(mode("postgres://u@db/x"), SslMode::Disable);
+        assert_eq!(mode("postgres://u@db/x?sslmode=prefer"), SslMode::Disable);
+        assert_eq!(mode("postgres://u@db/x?sslmode=require"), SslMode::Require);
+        assert_eq!(
+            mode("postgres://u@db/x?sslmode=verify-ca"),
+            SslMode::VerifyCa
+        );
+        assert_eq!(
+            mode("postgres://u@db/x?sslmode=verify-full&sslrootcert=/ca.pem"),
+            SslMode::VerifyFull
+        );
+    }
+
+    #[test]
+    fn the_tls_block_wins_over_the_url_and_carries_a_client_certificate() {
+        let coords = parse_url("postgres://u@db/x?sslmode=require").unwrap();
+        let tls = TlsConfig::new().with_client_cert("/c.pem", "/c.key");
+        let mapped = map_tls(&tls, &coords).unwrap();
+        assert_eq!(mapped.mode, SslMode::VerifyFull);
+        assert!(mapped.is_mtls());
+
+        let half = TlsConfig {
+            cert_file: Some("/c.pem".into()),
+            ..TlsConfig::new()
+        };
+        let coords = parse_url("postgres://u@db/x?sslmode=require").unwrap();
+        assert!(map_tls(&half, &coords).is_err());
+    }
+
+    #[test]
+    fn the_url_is_decoded_and_its_query_overrides_it() {
+        let c = parse_url("postgres://al%40ice:p%40ss%2Fw@db:5433/my%20db").unwrap();
+        assert_eq!((c.user.as_str(), c.password.as_str()), ("al@ice", "p@ss/w"));
+        assert_eq!((c.dbname.as_str(), c.port), ("my db", 5433));
+        let c = parse_url("postgres://db/x?user=bob&password=s%26t&dbname=other").unwrap();
+        assert_eq!((c.user.as_str(), c.password.as_str()), ("bob", "s&t"));
+        assert_eq!(c.dbname, "other");
+        assert_eq!(parse_url("postgres://u@db").unwrap().dbname, "postgres");
+        assert!(parse_url("postgres://u:%FF@db/x").is_err());
+        assert!(parse_url("postgres://db/x").is_err(), "a user is required");
+    }
+
+    #[test]
+    fn a_missing_slot_is_recognised_by_its_sqlstate() {
+        assert!(is_missing_slot_error(
+            "replication slot \"s\" does not exist (SQLSTATE 42704)"
+        ));
+        assert!(!is_missing_slot_error(
+            "replication slot \"s\" is active for PID 42704 (SQLSTATE 55006)"
+        ));
+    }
 
     #[test]
     fn a_missing_prerequisite_names_its_fix() {

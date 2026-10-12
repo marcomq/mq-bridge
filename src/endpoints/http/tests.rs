@@ -2699,3 +2699,167 @@ async fn a_request_body_over_max_body_bytes_gets_413() {
     .await;
     assert!(answer.starts_with("HTTP/1.1 413"), "{answer}");
 }
+
+/// An upstream that answers with the `host` it was asked for, gzipped when the request allows it.
+async fn serve_host_echo() -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            tokio::spawn(async move {
+                let service = hyper::service::service_fn(|req: Request<Incoming>| async move {
+                    let header = |name: &str| {
+                        req.headers()
+                            .get(name)
+                            .and_then(|value| value.to_str().ok())
+                            .unwrap_or_default()
+                            .to_string()
+                    };
+                    let mut response = Response::builder();
+                    let mut body = header("host").into_bytes();
+                    if header("accept-encoding").contains("gzip") {
+                        body = gzip_http(&body).unwrap();
+                        response = response.header("content-encoding", "gzip");
+                    }
+                    Ok::<_, anyhow::Error>(response.body(full(body)).unwrap())
+                });
+                let _ = AutoBuilder::new(TokioExecutor::new())
+                    .serve_connection(TokioIo::new(stream), service)
+                    .await;
+            });
+        }
+    });
+    addr
+}
+
+async fn proxied(
+    addr: SocketAddr,
+    metadata: &[(&str, &str)],
+) -> Result<CanonicalMessage, PublisherError> {
+    init_crypto();
+    let publisher = HttpPublisher::new(&HttpConfig {
+        url: format!("http://{addr}/"),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let mut request = CanonicalMessage::from_vec("request");
+    for (key, value) in metadata {
+        request.metadata.insert(key.to_string(), value.to_string());
+    }
+    match publisher.send(request).await? {
+        Sent::Response(response) => Ok(response),
+        Sent::Ack => panic!("the upstream answered"),
+    }
+}
+
+#[tokio::test]
+async fn a_forwarded_request_is_addressed_to_the_upstream() {
+    let addr = serve_host_echo().await;
+    let response = proxied(addr, &[("host", "bridge.example:8080")])
+        .await
+        .unwrap();
+    assert_eq!(response.get_payload_str(), addr.to_string());
+}
+
+#[tokio::test]
+async fn a_decoded_upstream_response_is_not_labelled_as_encoded() {
+    let addr = serve_host_echo().await;
+    let response = proxied(addr, &[("accept-encoding", "gzip")]).await.unwrap();
+    assert_eq!(response.get_payload_str(), addr.to_string());
+    assert_eq!(response.metadata.get("content-encoding"), None);
+}
+
+#[tokio::test]
+async fn metadata_that_is_no_header_does_not_fail_the_request() {
+    let addr = serve_host_echo().await;
+    let response = proxied(addr, &[("note", "two\nlines"), ("not a header", "x")]).await;
+    assert_eq!(response.unwrap().get_payload_str(), addr.to_string());
+}
+
+#[test]
+fn reply_metadata_that_is_no_header_does_not_fail_the_response() {
+    let mut reply = CanonicalMessage::from_vec("reply");
+    for (key, value) in [
+        ("note", "two\nlines"),
+        ("not a header", "x"),
+        ("x-kept", "yes"),
+    ] {
+        reply.metadata.insert(key.to_string(), value.to_string());
+    }
+    let response = make_response(
+        crate::traits::MessageDisposition::Reply(reply),
+        Compression::None,
+        1024,
+        &HashMap::new(),
+        true,
+        None,
+    )
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers().get("x-kept").unwrap(), "yes");
+}
+
+/// A sink that takes two messages and refuses every later one that is no end marker.
+#[derive(Default)]
+struct RefusingSink {
+    taken: std::sync::Mutex<Vec<CanonicalMessage>>,
+}
+
+#[async_trait::async_trait]
+impl MessagePublisher for RefusingSink {
+    async fn send(&self, message: CanonicalMessage) -> Result<Sent, PublisherError> {
+        let mut taken = self.taken.lock().unwrap();
+        let is_end = message.metadata.get("http_stream_end").map(String::as_str) == Some("true");
+        if taken.len() >= 2 && !is_end {
+            return Err(PublisherError::Retryable(anyhow::anyhow!("sink is full")));
+        }
+        taken.push(message);
+        Ok(Sent::Ack)
+    }
+
+    async fn send_batch(
+        &self,
+        _messages: Vec<CanonicalMessage>,
+    ) -> Result<crate::traits::SentBatch, PublisherError> {
+        unreachable!("a response stream is published one record at a time")
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+#[tokio::test]
+async fn a_response_stream_that_fails_half_way_is_not_sent_again() {
+    init_crypto();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let service = hyper::service::service_fn(|_req: Request<Incoming>| async {
+            let response = Response::builder().header("content-type", "application/x-ndjson");
+            Ok::<_, anyhow::Error>(response.body(full("1\n2\n3\n4\n")).unwrap())
+        });
+        let _ = AutoBuilder::new(TokioExecutor::new())
+            .serve_connection(TokioIo::new(stream), service)
+            .await;
+    });
+
+    let sink = Arc::new(RefusingSink::default());
+    let config = HttpConfig {
+        url: format!("http://{addr}/"),
+        ..Default::default()
+    };
+    let publisher = HttpPublisher::new_with_stream_response_sink(&config, Some(sink.clone()))
+        .await
+        .unwrap();
+
+    // A retryable error here would send the request again and publish records 1 and 2 twice.
+    let sent = publisher.send(CanonicalMessage::from_vec("request")).await;
+    assert!(matches!(sent, Ok(Sent::Ack)), "{sent:?}");
+    let taken = sink.taken.lock().unwrap();
+    let payloads: Vec<&[u8]> = taken.iter().map(|m| m.payload.as_ref()).collect();
+    assert_eq!(payloads, [b"1".as_slice(), b"2", b""]);
+}

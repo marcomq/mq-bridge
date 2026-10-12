@@ -59,7 +59,8 @@ impl DlqPublisher {
         config: &DeadLetterQueueMiddleware,
         route_name: &str,
     ) -> anyhow::Result<Self> {
-        info!("DLQ Middleware enabled for route '{}'", route_name);
+        let shown = crate::route::route_display_name(route_name);
+        info!("DLQ Middleware enabled for route '{}'", shown);
         // Box::pin is used here to break the recursive async type definition.
         // create_publisher -> apply_middlewares -> DlqPublisher::new -> create_publisher
         let dlq_publisher =
@@ -67,7 +68,7 @@ impl DlqPublisher {
         Ok(Self {
             inner,
             dlq_publisher,
-            route_name: route_name.to_string(),
+            route_name: shown,
         })
     }
 }

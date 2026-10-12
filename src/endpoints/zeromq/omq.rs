@@ -119,6 +119,7 @@ enum Sender {
 pub struct ZeroMqOmqPublisher {
     sender: Sender,
     format: ZeroMqFormat,
+    topic: Option<bytes::Bytes>,
     request_timeout: Duration,
 }
 
@@ -156,6 +157,7 @@ impl ZeroMqOmqPublisher {
         Ok(Self {
             sender,
             format: config.format.clone(),
+            topic: codec::pub_topic(config),
             request_timeout: Duration::from_millis(config.request_timeout_ms.unwrap_or(30_000)),
         })
     }
@@ -218,7 +220,8 @@ impl MessagePublisher for ZeroMqOmqPublisher {
             }
             let payload = serde_json::to_vec(&messages)
                 .map_err(|e| PublisherError::NonRetryable(anyhow!(e)))?;
-            let msg = Message::single(bytes::Bytes::from(payload));
+            let frames = codec::with_topic(&self.topic, vec![bytes::Bytes::from(payload)]);
+            let msg = frames_to_message(frames);
             if self.expects_reply() {
                 // One exchange for the whole batch, so one reply covers it.
                 let responses = self.request(msg).await?;
@@ -244,7 +247,7 @@ impl MessagePublisher for ZeroMqOmqPublisher {
                     continue;
                 }
             };
-            let msg = frames_to_message(frames);
+            let msg = frames_to_message(codec::with_topic(&self.topic, frames));
             if expects_reply {
                 match self.request(msg).await {
                     Ok(decoded) => responses.extend(decoded),

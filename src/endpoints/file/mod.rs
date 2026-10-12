@@ -1695,6 +1695,10 @@ async fn roll_back_partial_batch(
     csv_header: Option<&mut tokio::sync::MutexGuard<'_, Option<Vec<String>>>>,
 ) {
     let Some(pl) = pre_len else { return };
+    // A pipe or terminal (stdout) has nothing to roll back.
+    if !matches!(writer.get_ref().metadata().await, Ok(m) if m.is_file()) {
+        return;
+    }
     if let Err(te) = writer.get_ref().set_len(pl).await {
         tracing::error!(
             "Failed to truncate file back to {} after write error: {}",
@@ -2483,6 +2487,7 @@ fn run_file_tail_task_sync(
                                 // record. Emit it once, advancing past it; the next read
                                 // returns 0 (EOF) and the empty marker fires normally.
                                 last_position += n as u64;
+                                strip_leading_bom(&mut buf, last_position - n as u64, &format);
                                 if delimiter.len() == 1
                                     && delimiter[0] == b'\n'
                                     && buf.ends_with(b"\r")
@@ -2505,6 +2510,7 @@ fn run_file_tail_task_sync(
                             reader = None;
                             break;
                         }
+                        strip_leading_bom(&mut buf, last_position, &format);
                         last_position += n as u64;
                         buf.truncate(buf.len() - delimiter.len());
                         if delimiter.len() == 1 && delimiter[0] == b'\n' && buf.ends_with(b"\r") {
@@ -2664,6 +2670,7 @@ fn run_file_queue_task(
             if !error {
                 // Bounded by emitted rows, not records: a run of blank records must not end the
                 // read early, or an empty batch would pose as EOF.
+                let mut at_start = skipped == 0;
                 while batch.len() < 128 {
                     buf.clear();
                     match read_record_sync(&mut reader, &delimiter, &format, &csv, &mut buf) {
@@ -2682,6 +2689,9 @@ fn run_file_queue_task(
                             if delimiter.len() == 1 && delimiter[0] == b'\n' && buf.ends_with(b"\r")
                             {
                                 buf.pop();
+                            }
+                            if std::mem::take(&mut at_start) {
+                                strip_leading_bom(&mut buf, 0, &format);
                             }
                             match parse_message(&buf, &format, &mut csv_header) {
                                 Some(msg) => {
@@ -2902,6 +2912,7 @@ fn run_file_member_consume_task_sync<F>(
         let mut read_error = false;
         let mut tail_pending = false;
         let mut batch = Vec::with_capacity(256);
+        let mut at_start = skipped == 0;
         loop {
             buf.clear();
             match read_record_sync(&mut reader, &delimiter, &format, &csv, &mut buf) {
@@ -2917,6 +2928,9 @@ fn run_file_member_consume_task_sync<F>(
                     }
                     if delimiter.len() == 1 && delimiter[0] == b'\n' && buf.ends_with(b"\r") {
                         buf.pop();
+                    }
+                    if std::mem::take(&mut at_start) {
+                        strip_leading_bom(&mut buf, 0, &format);
                     }
                     if let Some(msg) = parse_message(&buf, &format, &mut csv_header) {
                         batch.push(msg);
@@ -3333,14 +3347,13 @@ impl FileConsumer {
                     let created =
                         create_file_event_store(&config.path, delimiter.clone(), format).await?;
                     let mut stores = FILE_EVENT_STORES.lock().await;
-                    let store = stores
+                    stores
                         .get(&key)
                         .and_then(|w| w.upgrade())
                         .unwrap_or_else(|| {
                             stores.insert(key.clone(), Arc::downgrade(&created));
                             created
-                        });
-                    store
+                        })
                 };
 
                 let subscriber_id = format!("file-sub-{}", fast_uuid_v7::gen_id_str());
@@ -3948,6 +3961,13 @@ fn encode_byte_payload(msg: &CanonicalMessage) -> Result<Bytes, serde_json::Erro
 /// which establish the schema but carry no data of their own.
 /// One buffered record: its span in the batch buffer, and the file offset just past it.
 pub(crate) type RecordSpan = (usize, usize, u64);
+
+/// Drops a UTF-8 byte-order mark from the first record of a file. CSV strips its own.
+fn strip_leading_bom(record: &mut Vec<u8>, position: u64, format: &FileFormat) {
+    if position == 0 && !matches!(format, FileFormat::Csv) && record.starts_with(UTF8_BOM) {
+        record.drain(..UTF8_BOM.len());
+    }
+}
 
 /// Decodes one buffered record, stamping the file offset when the source tracks them.
 fn decode_one(

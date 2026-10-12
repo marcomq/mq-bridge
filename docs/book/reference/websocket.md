@@ -11,7 +11,7 @@ Query parameters recognised as config fields for this connector. The object-type
 | `backlog` | integer | no | — | (Consumer only) TCP listen backlog (pending-connection queue depth) for the accept socket. Raise this if high-concurrency handshake bursts are being dropped/reset before `accept()` can keep up. Defaults to 4096, which is higher than the OS/tokio default of 1024. |
 | `basic_auth` | array of any | no | — | HTTP Basic credentials (username, password): a consumer requires them, a publisher sends them. |
 | `execution_mode` | `auto` \| `direct_only` \| `routed` | no | `auto` | (Consumer only) Selects whether WebSocket routes run directly or through the routed pipeline. |
-| `max_connections` | integer | no | — | (Consumer only) Most connections open at once; one more gets 503. Unset = no limit. |
+| `max_connections` | integer | no | — | (Consumer only) Maximum number of concurrent connections; additional connections receive 503. Unset = no limit. |
 | `message_id_header` | string | no | — | (Consumer only) Header key to extract the message ID from the WebSocket handshake. Defaults to "message-id". |
 | `path` | string | no | — | (Consumer only) Optional request path filter. If set, only upgrade requests whose URI path matches exactly are delivered to this consumer. |
 | `routed_queue_capacity` | integer | no | — | (Consumer only) Queue capacity for the routed adapter. Direct response routes do not use this queue. Defaults to 100. |

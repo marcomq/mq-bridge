@@ -26,7 +26,7 @@ orders_to_mongo:
 The field's JSON type is preserved (a number stays a BSON integer). The payload must contain the
 field, otherwise the message is dead-lettered rather than written with a random `_id`. Use
 `id_field` on **sink** collections only — a business-key `_id` is incompatible with the
-`consumer` competing-consumer mode, which requires a UUID `_id`.
+`delete` competing-consumer mode, which requires a UUID `_id`.
 
 ## SQL (`sqlx`) — `ON CONFLICT` / `ON DUPLICATE KEY`
 

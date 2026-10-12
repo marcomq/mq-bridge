@@ -19,7 +19,7 @@ fn a_middleware_only_plugin_answers_its_middleware_name() {
     std::fs::copy(&built, dir.join(library_file_name(name))).expect("install the cdylib");
 
     assert!(mq_bridge::extensions::get_middleware_factory(name).is_none());
-    let info = discover_middleware_plugin_in(&[dir.clone()], name)
+    let info = discover_middleware_plugin_in(std::slice::from_ref(&dir), name)
         .expect("the middleware plugin loads")
         .expect("the installed library answers the name");
 

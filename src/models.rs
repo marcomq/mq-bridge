@@ -341,6 +341,14 @@ pub enum EndpointType {
     HttpBulk(HttpBulkConfig),
     #[serde(rename = "postgres_cdc", alias = "postgres-cdc")]
     PostgresCdc(PostgresCdcConfig),
+    Elasticsearch(ElasticsearchConfig),
+    Meilisearch(MeilisearchConfig),
+    #[serde(rename = "openai_chat")]
+    OpenAiChat(OpenAiChatConfig),
+    #[serde(rename = "openai_embeddings")]
+    OpenAiEmbeddings(OpenAiEmbeddingsConfig),
+    Qdrant(QdrantConfig),
+    Typesense(TypesenseConfig),
     #[cfg_attr(feature = "schema", schemars(extend("format" = "structural_endpoint")))]
     Fanout(Vec<Endpoint>),
     #[cfg_attr(feature = "schema", schemars(extend("format" = "structural_endpoint")))]
@@ -540,7 +548,7 @@ pub struct DeduplicationMiddleware {
 /// enables metrics collection for the endpoint.
 ///
 /// Metrics are typically exported via Prometheus or similar monitoring systems.
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct MetricsMiddleware {}
@@ -1030,7 +1038,7 @@ pub struct RandomPanicMiddleware {
 }
 
 // --- AWS Specific Configuration ---
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[derive(Deserialize, Serialize, Clone, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct AwsConfig {
@@ -1067,7 +1075,7 @@ pub struct AwsConfig {
 // --- Kafka Specific Configuration ---
 
 /// General Kafka connection configuration.
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[derive(Deserialize, Serialize, Clone, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct KafkaConfig {
@@ -1113,6 +1121,10 @@ pub struct KafkaConfig {
         schemars(default = "default_kafka_partitions_schema", range(min = 1))
     )]
     pub partitions: Option<i32>,
+    /// (Publisher only) Create the topic at start if it is missing (default: true).
+    #[serde(default)]
+    #[cfg_attr(feature = "schema", schemars(default = "default_shared_schema"))]
+    pub create_topic: Option<bool>,
     /// (Publisher only) Name of a metadata field whose value is used as the Kafka record
     /// key (drives partitioning/ordering). Unset, or absent on a given message, falls back
     /// to the message id. Default unset.
@@ -1727,6 +1739,19 @@ pub enum SpoolClaim {
 
 // --- Object Store (local/S3/GCS/Azure) Specific Configuration ---
 
+/// What an `object_store` source does with an object it cannot decode after five tries.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum DecodeErrorPolicy {
+    /// Move past it with a warning. The first object a source reads stops the route instead:
+    /// a failure there means the settings are wrong, not the object.
+    #[default]
+    Skip,
+    /// Stop the route.
+    Fail,
+}
+
 /// Configuration for a local or cloud object-store endpoint.
 ///
 /// As a **sink**, each flushed batch is written as one immutable object under `url`,
@@ -1739,9 +1764,10 @@ pub enum SpoolClaim {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ObjectStoreConfig {
     /// Object-store URL, e.g. `file:///var/lib/mqb/incoming`, `s3://bucket/prefix`,
-    /// `gs://bucket/prefix`, or `az://account/container/prefix`. Credentials are resolved
+    /// `gs://bucket/prefix`, or `az://container/prefix`. Credentials are resolved
     /// from the environment by the `object_store` crate (same mechanism as the checkpoint
-    /// backend); R2 uses `s3://` plus a custom `AWS_ENDPOINT_URL`.
+    /// backend); Azure takes the account from `AZURE_STORAGE_ACCOUNT_NAME`, R2 uses `s3://`
+    /// plus a custom `AWS_ENDPOINT_URL`.
     pub url: String,
     /// (Sink only) `auto`, `write_time` (uuidv7 name) or `source_position` (name carries the source range).
     #[serde(default)]
@@ -1772,6 +1798,10 @@ pub struct ObjectStoreConfig {
     /// larger than this fails the read (surfaced as a consumer error) instead of being
     /// buffered whole. Unset means no limit (the whole object is materialized).
     pub max_object_bytes: Option<u64>,
+    /// (Source only) An object that cannot be decoded: `skip` it (default) or `fail` the route.
+    /// `skip` also stops the route while no object has been decoded yet.
+    #[serde(default)]
+    pub on_decode_error: DecodeErrorPolicy,
     /// (Sink only) Prepend a `YYYY/MM/DD/` path (write time, UTC) to each object key. Applies to
     /// `write_time` naming only; defaults to on. Purely for readability / lifecycle rules.
     #[serde(default)]
@@ -1795,7 +1825,7 @@ pub struct ObjectStoreConfig {
 // --- NATS Specific Configuration ---
 
 /// General NATS connection configuration.
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[derive(Deserialize, Serialize, Clone, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct NatsConfig {
@@ -1928,7 +1958,7 @@ pub struct StreamBufferConfig {
 // --- AMQP Specific Configuration ---
 
 /// General AMQP connection configuration.
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[derive(Deserialize, Serialize, Clone, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct AmqpConfig {
@@ -1993,7 +2023,8 @@ pub enum MongoDbFormat {
 #[serde(rename_all = "snake_case")]
 pub enum MongoConsume {
     /// **Queue** — competing consumers: claim, process, delete, so each document goes to exactly one
-    /// reader. Destructive and intended for jobs, not bulk reads.
+    /// reader. Destructive and intended for jobs, not bulk reads. Also accepted as `consumer`.
+    #[serde(rename = "delete", alias = "consumer")]
     Consumer,
     /// **One-shot read** — page documents by `_id`, then end the route. Non-destructive and
     /// non-resumable; needs no replica set and reads arbitrary collections. This is not a
@@ -2005,7 +2036,7 @@ pub enum MongoConsume {
     CaptureNew,
     /// **Watch existing collection** — read the existing documents first, then capture changes.
     /// Non-destructive and the fastest read mode; use this for bulk reads and ETL. Default.
-    /// Needs a replica set; on a standalone `mongod` use `snapshot` or `consumer`.
+    /// Needs a replica set; on a standalone `mongod` use `snapshot` or `delete`.
     #[default]
     CaptureAll,
 }
@@ -2013,7 +2044,7 @@ pub enum MongoConsume {
 // --- MongoDB Specific Configuration ---
 
 /// General MongoDB connection configuration.
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[derive(Deserialize, Serialize, Clone, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct MongoDbConfig {
@@ -2046,7 +2077,7 @@ pub struct MongoDbConfig {
     /// documents first, then watch for changes — non-destructive, for bulk reads and ETL),
     /// `capture_new` (watch an existing collection for changes only), `snapshot` (one-shot
     /// non-destructive read that ends on drain, the option without a replica set), or
-    /// `consumer` (competing-consumers work queue — destructive and intended for jobs).
+    /// `delete` (competing-consumers work queue — destructive and intended for jobs; also `consumer`).
     /// The bridge selects the underlying mechanism automatically. If unset, the deprecated
     /// `change_stream` boolean is honored for backward compatibility.
     pub consume: Option<MongoConsume>,
@@ -2105,7 +2136,7 @@ pub struct MongoDbConfig {
     pub update_batch_field: Option<String>,
     /// The ID used for the cursor in sequenced mode. If not provided, consumption starts from the current sequence (ephemeral).
     pub cursor_id: Option<String>,
-    /// (Optional) Collection to store sequence counters and cursor positions. Defaults to the message collection if not set.
+    /// **Deprecated** — unused since the publisher no longer writes `seq`. Kept for compatibility.
     pub meta_collection: Option<String>,
     /// Share one MongoDB client per connection (default: true); false forces a dedicated client.
     #[serde(default)]
@@ -2116,7 +2147,7 @@ pub struct MongoDbConfig {
 // --- MQTT Specific Configuration ---
 
 /// General MQTT connection configuration.
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[derive(Deserialize, Serialize, Clone, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct MqttConfig {
@@ -2174,7 +2205,7 @@ pub enum MqttProtocol {
 
 // --- ZeroMQ Specific Configuration ---
 
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[derive(Deserialize, Serialize, Clone, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct ZeroMqConfig {
@@ -2184,7 +2215,7 @@ pub struct ZeroMqConfig {
     /// The socket type (PUSH, PULL, PUB, SUB, REQ, REP).
     #[serde(default)]
     pub socket_type: Option<ZeroMqSocketType>,
-    /// (Consumer only) The ZeroMQ topic (for SUB sockets).
+    /// Topic: the prefix a SUB socket filters on, or the topic frame a PUB socket sends first.
     pub topic: Option<String>,
     /// If true, bind to the address. If false, connect.
     #[serde(default)]
@@ -2269,7 +2300,7 @@ pub enum ZeroMqBackend {
 /// Publishers `XADD` to the stream; consumers read via a consumer group
 /// (`XREADGROUP` + `XACK`) by default, or ephemerally via `XREAD` from new
 /// messages when `subscriber_mode` is set.
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[derive(Deserialize, Serialize, Clone, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct RedisStreamsConfig {
@@ -2313,7 +2344,7 @@ pub struct RedisStreamsConfig {
 
 // --- gRPC Specific Configuration ---
 
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[derive(Deserialize, Serialize, Clone, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct GrpcConfig {
@@ -2455,7 +2486,7 @@ pub enum WebSocketExecutionMode {
 }
 
 /// General HTTP connection configuration.
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[derive(Deserialize, Serialize, Clone, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct HttpConfig {
@@ -2563,7 +2594,7 @@ pub struct HttpConfig {
 }
 
 /// WebSocket connection configuration.
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[derive(Deserialize, Serialize, Clone, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct WebSocketConfig {
@@ -2586,6 +2617,17 @@ pub struct WebSocketConfig {
     /// TLS: a consumer listens with `cert_file` and `key_file`; a publisher uses it for a `wss://` URL.
     #[serde(default)]
     pub tls: TlsConfig,
+    /// HTTP Basic credentials (username, password): a consumer requires them, a publisher sends them.
+    #[cfg_attr(feature = "schema", schemars(extend("format"="password")))]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_basic_auth"
+    )]
+    pub basic_auth: Option<(String, String)>,
+    /// (Consumer only) Maximum number of concurrent connections; additional connections receive 503. Unset = no limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_connections: Option<usize>,
 }
 
 // --- IBM MQ Specific Configuration ---
@@ -2594,7 +2636,7 @@ pub struct WebSocketConfig {
 ///
 /// The IBM MQ client doesn't consume PEM files, so this uses MQ-native field
 /// names rather than the generic [`TlsConfig`] used by the other endpoints.
-#[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq, Eq, Hash)]
+#[derive(Deserialize, Serialize, Clone, Default, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "schema", schemars(transform = ibm_tls_config_schema_transform))]
 #[serde(deny_unknown_fields)]
@@ -2623,7 +2665,7 @@ pub struct IbmTlsConfig {
 // Default is implemented manually (not derived): the numeric fields must match
 // the serde defaults, otherwise `IbmMqConfig::new()` / `..Default::default()`
 // would yield max_message_size=0 (zero-length receive buffer) and wait_timeout=0.
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Deserialize, Serialize, Clone)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct IbmMqConfig {
@@ -2681,7 +2723,7 @@ pub struct SequenceConfig {
 
 // --- Switch/Router Configuration ---
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct SwitchConfig {
@@ -2776,7 +2818,7 @@ pub struct RequestForwardConfig {
 /// How a `postgres_cdc` endpoint consumes its publication. The intent-named counterpart of
 /// [`MongoConsume`], so the two CDC endpoints read alike.
 ///
-/// `consumer` has no Postgres meaning — a replication slot is not a work queue; use a `sqlx`
+/// `delete` has no Postgres meaning — a replication slot is not a work queue; use a `sqlx`
 /// endpoint for competing consumers.
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -2810,7 +2852,7 @@ pub enum IdHash {
 }
 
 /// Postgres logical-replication CDC source (pgoutput). Source-only.
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[derive(Deserialize, Serialize, Clone, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct PostgresCdcConfig {
@@ -2856,12 +2898,15 @@ pub struct PostgresCdcConfig {
     /// Hash for change `message_id`s: `fnv1a` (default, keeps existing dedup state) or `sha256`.
     #[serde(default)]
     pub id_hash: IdHash,
+    /// An update that changes the primary key becomes a `delete` of the old key, then the `update`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub split_key_change: bool,
 }
 
 // --- SQLx Specific Configuration ---
 
 /// General SQLx connection configuration.
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[derive(Deserialize, Serialize, Clone, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct SqlxConfig {
@@ -2993,7 +3038,7 @@ pub struct SqlxConfig {
 /// from explicit `${payload:<field>}` / `${metadata:<key>}` tokens instead. As a **consumer** it
 /// reads an existing table **non-destructively** by paging over a monotonic `cursor_column`
 /// (ClickHouse has no native queue/pub-sub), serializing each row to a JSON payload.
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[derive(Deserialize, Serialize, Clone, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct ClickHouseConfig {
@@ -3076,7 +3121,7 @@ pub struct ClickHouseConfig {
 /// list of ids; `result` describes how the target reports success. As an input, `read` pages
 /// through a JSON listing by a cursor. With `query` it answers a batch of lookups in one
 /// request. The endpoint knows no product by name.
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[derive(Deserialize, Serialize, Clone, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct HttpBulkConfig {
@@ -3113,7 +3158,7 @@ pub struct HttpBulkConfig {
     /// (Publisher only) Compression of request bodies (`none`, `gzip`, `zstd`, `lz4`).
     #[serde(default)]
     pub compression: Compression,
-    /// Request timeout in milliseconds. Unset = no timeout.
+    /// Request timeout in milliseconds. Unset = 300 s without a response byte; `0` = none.
     pub request_timeout_ms: Option<u64>,
     /// Connection timeout in milliseconds. Defaults to 10000ms.
     pub connect_timeout_ms: Option<u64>,
@@ -3162,6 +3207,9 @@ pub struct HttpBulkUpsert {
     /// How the target reports the outcome. Unset = the HTTP status alone decides.
     #[serde(default)]
     pub result: HttpBulkResult,
+    /// Without `result`: send a request refused with 400, 409, 413 or 422 again in halves, so only the bad document fails.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub split_on_reject: bool,
 }
 
 /// The `http_bulk` request that answers a batch of lookups, one answer per message in order.
@@ -3180,7 +3228,7 @@ pub struct HttpBulkQuery {
     /// `Content-Type` header. Defaults to `application/x-ndjson` or `application/json`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_type: Option<String>,
-    /// Template of one message's part of the body, e.g. `{"_id": "${payload:id}"}`.
+    /// Template of one message's part of the body, e.g. `{"_id": "${payload:id}"}`. `{index}` is its number in the request.
     pub request: String,
     /// `json_array` only: the body around the array, e.g. `{"docs": {requests}}`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3197,6 +3245,30 @@ pub struct HttpBulkQuery {
     /// JSON pointer in an answer to its error text. An answer that has it fails its message.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// One request per message; the response is the answer. Excludes `envelope` and `responses`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub per_message: bool,
+    /// The value is JSON text: parse it. Text that is not JSON fails its message.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub parse_value: bool,
+    /// Requests in flight for one batch. Defaults to 8 with `per_message`, else 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub concurrency: Option<usize>,
+    /// Most messages in one request; a larger batch is split. Unset = `max_request_bytes` alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_messages: Option<usize>,
+    /// JSON pointer to JSON text that holds the answers; `responses` then points into that text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub responses_text: Option<String>,
+    /// JSON pointer, inside an entry, to the `{index}` of its message; entries are matched by it, not by position.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index: Option<String>,
+    /// JSON pointer to why the response ended; named when its answers cannot be matched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<String>,
+    /// A refused request (400, 409, 413, 422) or unmatched answers: ask again in halves.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub split_on_reject: bool,
 }
 
 /// How `http_bulk` requests are authenticated beyond `headers`. Set at most one field.
@@ -3213,7 +3285,7 @@ pub struct HttpBulkAuth {
 }
 
 /// OAuth2 client credentials grant for `http_bulk`.
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[derive(Deserialize, Serialize, Clone, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct HttpBulkOAuth2 {
@@ -3230,7 +3302,7 @@ pub struct HttpBulkOAuth2 {
 }
 
 /// AWS Signature Version 4 signing for `http_bulk`.
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[derive(Deserialize, Serialize, Clone, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct HttpBulkAwsSigV4 {
@@ -3314,6 +3386,9 @@ pub struct HttpBulkCursor {
     /// Position before the first read. Defaults to `0` for a count, otherwise to `null`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start: Option<serde_json::Value>,
+    /// With `response`: a response without the field ends the read, instead of stopping the route.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub end_when_missing: bool,
 }
 
 /// The `http_bulk` request that removes documents by id.
@@ -3420,6 +3495,266 @@ impl Default for HttpBulkJob {
     }
 }
 
+// --- Named endpoints on `http_bulk` ---
+//
+// Each is an `http_bulk` configuration underneath; `endpoints::http_bulk` fills in the requests.
+
+/// Ties each named endpoint's variant to the name its factory is found by.
+macro_rules! named_endpoints {
+    ($($variant:ident($config:ident) => $name:literal),* $(,)?) => {
+        impl EndpointType {
+            /// Name and config of a `custom` endpoint or of a named one such as `qdrant`.
+            pub fn as_custom(&self) -> Option<(&str, std::borrow::Cow<'_, serde_json::Value>)> {
+                match self {
+                    EndpointType::Custom { name, config } => Some((name, std::borrow::Cow::Borrowed(config))),
+                    $(EndpointType::$variant(config) => Some((
+                        $name,
+                        std::borrow::Cow::Owned(serde_json::to_value(config).unwrap_or_default()),
+                    )),)*
+                    _ => None,
+                }
+            }
+        }
+
+        $(
+            impl From<$config> for EndpointType {
+                fn from(config: $config) -> Self {
+                    EndpointType::$variant(config)
+                }
+            }
+
+            impl From<$config> for Endpoint {
+                fn from(config: $config) -> Self {
+                    Endpoint::new(config.into())
+                }
+            }
+        )*
+    };
+}
+
+named_endpoints!(
+    Elasticsearch(ElasticsearchConfig) => "elasticsearch",
+    Meilisearch(MeilisearchConfig) => "meilisearch",
+    OpenAiChat(OpenAiChatConfig) => "openai_chat",
+    OpenAiEmbeddings(OpenAiEmbeddingsConfig) => "openai_embeddings",
+    Qdrant(QdrantConfig) => "qdrant",
+    Typesense(TypesenseConfig) => "typesense",
+);
+
+/// The `typesense` endpoint: documents into one Typesense collection.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schema", schemars(title = "Typesense"))]
+#[serde(deny_unknown_fields)]
+pub struct TypesenseConfig {
+    /// Address of the server, e.g. `typesense://localhost:8108`.
+    #[cfg_attr(feature = "schema", schemars(extend("x-mqb-uri" = "origin")))]
+    pub url: String,
+    /// Collection the documents are written to. It must exist.
+    #[cfg_attr(feature = "schema", schemars(extend("x-mqb-uri" = "path")))]
+    pub collection: String,
+    /// API key sent with every request.
+    #[cfg_attr(feature = "schema", schemars(extend("format" = "password")))]
+    pub api_key: Option<String>,
+    /// Template for a message's operation, e.g. `${metadata:postgres.operation}`.
+    pub operation: Option<String>,
+    /// Compression of request bodies.
+    #[serde(default)]
+    pub compression: Compression,
+    /// Request timeout in milliseconds. Unset = 300 s without a response byte; `0` = none.
+    pub request_timeout_ms: Option<u64>,
+    /// TLS options as on `http_bulk` (`ca_file`, `cert_file`, `key_file`, `required`); JSON in a URI.
+    pub tls: Option<serde_json::Value>,
+}
+
+/// The `elasticsearch` endpoint: documents into one index through `_bulk`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schema", schemars(title = "Elasticsearch"))]
+#[serde(deny_unknown_fields)]
+pub struct ElasticsearchConfig {
+    /// Address of the server, e.g. `elasticsearch://localhost:9200`.
+    #[cfg_attr(feature = "schema", schemars(extend("x-mqb-uri" = "origin")))]
+    pub url: String,
+    /// Index the documents are written to.
+    #[cfg_attr(feature = "schema", schemars(extend("x-mqb-uri" = "path")))]
+    pub index: String,
+    /// API key sent with every request.
+    #[cfg_attr(feature = "schema", schemars(extend("format" = "password")))]
+    pub api_key: Option<String>,
+    /// Top-level payload field that becomes the document `_id`. Defaults to `id`.
+    pub id_field: Option<String>,
+    /// `index` replaces a document; `update` merges the payload into it.
+    #[serde(default)]
+    pub mode: ElasticsearchMode,
+    /// `oauth2` or `aws_sigv4` credentials, as on `http_bulk`; JSON in a URI.
+    pub auth: Option<serde_json::Value>,
+    /// Template for a message's operation, e.g. `${metadata:postgres.operation}`.
+    pub operation: Option<String>,
+    /// Compression of request bodies.
+    #[serde(default)]
+    pub compression: Compression,
+    /// Request timeout in milliseconds. Unset = 300 s without a response byte; `0` = none.
+    pub request_timeout_ms: Option<u64>,
+    /// TLS options as on `http_bulk` (`ca_file`, `cert_file`, `key_file`, `required`); JSON in a URI.
+    pub tls: Option<serde_json::Value>,
+}
+
+/// How `elasticsearch` writes a document.
+#[derive(Debug, Serialize, Deserialize, Default, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum ElasticsearchMode {
+    /// Replaces the stored document.
+    #[default]
+    Index,
+    /// Merges the payload into the stored document, creating it if missing.
+    Update,
+}
+
+/// The `meilisearch` endpoint: documents into one index, or a read of it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schema", schemars(title = "Meilisearch"))]
+// Meilisearch indexes one large request far faster than many small ones.
+#[cfg_attr(
+    feature = "schema",
+    schemars(extend("x-mqb-default-batch-size" = 50000))
+)]
+#[serde(deny_unknown_fields)]
+pub struct MeilisearchConfig {
+    /// Address of the server, e.g. `meilisearch://localhost:7700`.
+    #[cfg_attr(feature = "schema", schemars(extend("x-mqb-uri" = "url")))]
+    pub url: String,
+    /// API key sent with every request.
+    #[cfg_attr(feature = "schema", schemars(extend("format" = "password")))]
+    pub api_key: Option<String>,
+    /// Index UID. Defaults to the route name.
+    pub index: Option<String>,
+    /// The document field Meilisearch keys documents by.
+    pub primary_key: Option<String>,
+    /// Template for a message's operation, e.g. `${metadata:postgres.operation}`.
+    pub operation: Option<String>,
+    /// Operation values that mean delete. Defaults to `delete` and `d`.
+    pub delete_values: Option<Vec<String>>,
+    /// Largest request body in bytes; a bigger batch is split. Defaults to 90 MB.
+    pub max_request_bytes: Option<u64>,
+    /// Compression of request bodies.
+    #[serde(default)]
+    pub compression: Compression,
+    /// Connection timeout in milliseconds. Defaults to 10000ms.
+    pub connect_timeout_ms: Option<u64>,
+    /// Request timeout in milliseconds. Unset = 300 s without a response byte; `0` = none.
+    pub request_timeout_ms: Option<u64>,
+    /// (Consumer only) Comma-separated document fields to read. Default: all.
+    pub fields: Option<String>,
+    /// (Consumer only) Cursor id that keys the saved read position.
+    pub cursor_id: Option<String>,
+    /// (Consumer only) Where the read position is saved, e.g. `file:///var/lib/mqb/cursors.json`.
+    #[cfg_attr(feature = "schema", schemars(extend("format" = "password")))]
+    pub checkpoint_store: Option<String>,
+    /// (Consumer only) Wait in milliseconds after an empty page. Defaults to 1000ms.
+    pub polling_interval_ms: Option<u64>,
+    /// (Consumer only) If set, the wait doubles after each empty page up to this value.
+    pub max_polling_interval_ms: Option<u64>,
+    /// TLS options as on `http_bulk` (`ca_file`, `cert_file`, `key_file`, `required`); JSON in a URI.
+    pub tls: Option<serde_json::Value>,
+}
+
+/// The `qdrant` endpoint: points into one collection, or a scroll through it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schema", schemars(title = "Qdrant"))]
+#[serde(deny_unknown_fields)]
+pub struct QdrantConfig {
+    /// Address of the server, e.g. `qdrant://localhost:6333`.
+    #[cfg_attr(feature = "schema", schemars(extend("x-mqb-uri" = "origin")))]
+    pub url: String,
+    /// Collection the points are written to. It must exist.
+    #[cfg_attr(feature = "schema", schemars(extend("x-mqb-uri" = "path")))]
+    pub collection: String,
+    /// API key sent with every request.
+    #[cfg_attr(feature = "schema", schemars(extend("format" = "password")))]
+    pub api_key: Option<String>,
+    /// Answer after the points are stored, not when they are queued. Defaults to true.
+    pub wait: Option<bool>,
+    /// Template for a message's operation, e.g. `${metadata:postgres.operation}`.
+    pub operation: Option<String>,
+    /// Compression of request bodies.
+    #[serde(default)]
+    pub compression: Compression,
+    /// Request timeout in milliseconds. Unset = 300 s without a response byte; `0` = none.
+    pub request_timeout_ms: Option<u64>,
+    /// (Consumer only) Cursor id that keys the saved read position.
+    pub cursor_id: Option<String>,
+    /// (Consumer only) Where the read position is saved, e.g. `file:///var/lib/mqb/cursors.json`.
+    #[cfg_attr(feature = "schema", schemars(extend("format" = "password")))]
+    pub checkpoint_store: Option<String>,
+    /// TLS options as on `http_bulk` (`ca_file`, `cert_file`, `key_file`, `required`); JSON in a URI.
+    pub tls: Option<serde_json::Value>,
+}
+
+/// The `openai_embeddings` endpoint: one embeddings request per batch.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schema", schemars(title = "OpenAI embeddings"))]
+#[serde(deny_unknown_fields)]
+pub struct OpenAiEmbeddingsConfig {
+    /// Base URL of the API, e.g. `http://localhost:11434`. Defaults to `https://api.openai.com/v1`.
+    #[cfg_attr(feature = "schema", schemars(extend("x-mqb-uri" = "url")))]
+    pub url: Option<String>,
+    /// API key sent as a bearer token.
+    #[cfg_attr(feature = "schema", schemars(extend("format" = "password")))]
+    pub api_key: Option<String>,
+    /// Model name, e.g. `text-embedding-3-small`.
+    pub model: String,
+    /// Template of the text to embed, e.g. `${payload:body}`.
+    pub input: String,
+    /// Length of the vectors, for models that can shorten them.
+    pub dimensions: Option<u64>,
+    /// Largest request body in bytes; a bigger batch is split. Defaults to 10 MiB.
+    pub max_request_bytes: Option<u64>,
+    /// Request timeout in milliseconds. Unset = 300 s without a response byte; `0` = none.
+    pub request_timeout_ms: Option<u64>,
+    /// TLS options as on `http_bulk` (`ca_file`, `cert_file`, `key_file`, `required`); JSON in a URI.
+    pub tls: Option<serde_json::Value>,
+}
+
+/// The `openai_chat` endpoint: one chat completion per message, or per `messages_per_request`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schema", schemars(title = "OpenAI chat completion"))]
+#[serde(deny_unknown_fields)]
+pub struct OpenAiChatConfig {
+    /// Base URL of the API, e.g. `http://localhost:11434`. Defaults to `https://api.openai.com/v1`.
+    #[cfg_attr(feature = "schema", schemars(extend("x-mqb-uri" = "url")))]
+    pub url: Option<String>,
+    /// API key sent as a bearer token.
+    #[cfg_attr(feature = "schema", schemars(extend("format" = "password")))]
+    pub api_key: Option<String>,
+    /// Model name, e.g. `gpt-4o-mini`.
+    pub model: String,
+    /// Template of the system message.
+    pub system: Option<String>,
+    /// Template of the user message, e.g. `Summarise: ${payload:body}`.
+    pub prompt: String,
+    /// Ask for a JSON object and parse the answer.
+    #[serde(default)]
+    pub json: bool,
+    /// Further request fields, e.g. `{"temperature": 0}`; JSON in a URI.
+    pub options: Option<serde_json::Value>,
+    /// Requests in flight for one batch sent to this endpoint. Defaults to 8.
+    pub concurrency: Option<usize>,
+    /// Messages answered by one request, as numbered inputs. Unset = one request each.
+    pub messages_per_request: Option<usize>,
+    /// With `messages_per_request`: largest request body in bytes. Defaults to 10 MiB.
+    pub max_request_bytes: Option<usize>,
+    /// Request timeout in milliseconds. Unset = 300 s without a response byte; `0` = none.
+    pub request_timeout_ms: Option<u64>,
+    /// TLS options as on `http_bulk` (`ca_file`, `cert_file`, `key_file`, `required`); JSON in a URI.
+    pub tls: Option<serde_json::Value>,
+}
+
 // --- Common Configuration ---
 
 /// TLS configuration for secure connections.
@@ -3440,7 +3775,7 @@ impl Default for HttpBulkJob {
 ///     ..Default::default()
 /// };
 /// ```
-#[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq, Eq, Hash)]
+#[derive(Deserialize, Serialize, Clone, Default, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct TlsConfig {

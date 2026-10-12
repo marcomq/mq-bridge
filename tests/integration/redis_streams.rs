@@ -432,3 +432,139 @@ pub async fn test_redis_partial_batch_is_delivered() {
     })
     .await;
 }
+
+fn idle_config(name: &str) -> mq_bridge::models::RedisStreamsConfig {
+    mq_bridge::models::RedisStreamsConfig {
+        url: URL.to_string(),
+        stream: Some(format!("{name}_{}", fast_uuid_v7::gen_id())),
+        group: Some(format!("g_{name}")),
+        ..Default::default()
+    }
+}
+
+/// Reads until `expected` messages arrived or `within` passed; returns the count.
+async fn receive_within(
+    consumer: &mut RedisStreamsConsumer,
+    expected: usize,
+    within: std::time::Duration,
+) -> usize {
+    use mq_bridge::traits::{MessageConsumer, MessageDisposition};
+    let deadline = tokio::time::Instant::now() + within;
+    let mut received = 0;
+    while received < expected {
+        let Ok(batch) = tokio::time::timeout_at(deadline, consumer.receive_batch(64)).await else {
+            break;
+        };
+        let batch = batch.unwrap();
+        received += batch.messages.len();
+        (batch.commit)(vec![MessageDisposition::Ack; batch.messages.len()])
+            .await
+            .unwrap();
+    }
+    received
+}
+
+#[tokio::test]
+#[ignore = "requires docker compose"]
+async fn test_redis_message_on_an_idle_stream_arrives_at_once() {
+    if !mq_bridge::test_utils::should_run("redis_streams") {
+        return;
+    }
+    use mq_bridge::traits::MessagePublisher;
+    use std::time::Duration;
+
+    setup_logging();
+    run_test_with_docker(COMPOSE, || async {
+        let config = idle_config("idle");
+        let mut consumer = RedisStreamsConsumer::new(&config).await.unwrap();
+        let publisher = RedisStreamsPublisher::new(&config).await.unwrap();
+        // Long enough for several client-side response timeouts of the blocking read.
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        for i in 0..5 {
+            publisher
+                .send(mq_bridge::CanonicalMessage::new(vec![i], None))
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(700)).await;
+        }
+        let received = receive_within(&mut consumer, 5, Duration::from_secs(8)).await;
+        assert_eq!(received, 5, "messages on an idle stream are delayed");
+    })
+    .await;
+}
+
+#[tokio::test]
+#[ignore = "requires docker compose"]
+async fn test_redis_dropped_consumer_takes_no_entries() {
+    if !mq_bridge::test_utils::should_run("redis_streams") {
+        return;
+    }
+    use mq_bridge::traits::MessagePublisher;
+    use std::time::Duration;
+
+    setup_logging();
+    run_test_with_docker(COMPOSE, || async {
+        let config = idle_config("dropped");
+        // What a route does after a connection error: drop the consumer, build another.
+        for _ in 0..3 {
+            drop(RedisStreamsConsumer::new(&config).await.unwrap());
+        }
+        let mut consumer = RedisStreamsConsumer::new(&config).await.unwrap();
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let publisher = RedisStreamsPublisher::new(&config).await.unwrap();
+        for i in 0..20 {
+            publisher
+                .send(mq_bridge::CanonicalMessage::new(vec![i], None))
+                .await
+                .unwrap();
+        }
+        let received = receive_within(&mut consumer, 20, Duration::from_secs(8)).await;
+        assert_eq!(received, 20, "a dropped consumer's reader took entries");
+    })
+    .await;
+}
+
+#[tokio::test]
+#[ignore = "requires docker compose"]
+async fn test_redis_entry_in_flight_is_not_delivered_twice() {
+    if !mq_bridge::test_utils::should_run("redis_streams") {
+        return;
+    }
+    use mq_bridge::traits::{MessageConsumer, MessageDisposition, MessagePublisher};
+    use std::time::Duration;
+
+    setup_logging();
+    run_test_with_docker(COMPOSE, || async {
+        let mut config = idle_config("inflight");
+        config.read_from_start = true;
+        config.redelivery_timeout_ms = Some(1000);
+        config.block_ms = Some(1000);
+        RedisStreamsPublisher::new(&config)
+            .await
+            .unwrap()
+            .send(mq_bridge::CanonicalMessage::new(b"slow".to_vec(), None))
+            .await
+            .unwrap();
+        let mut consumer = RedisStreamsConsumer::new(&config).await.unwrap();
+        let first = tokio::time::timeout(Duration::from_secs(10), consumer.receive_batch(8))
+            .await
+            .expect("the message arrives")
+            .unwrap();
+        assert_eq!(first.messages.len(), 1);
+
+        // A sink slower than `redelivery_timeout_ms` still holds the entry.
+        let again = tokio::time::timeout(Duration::from_secs(4), consumer.receive_batch(8)).await;
+        assert!(
+            again.is_err(),
+            "an entry still in flight was delivered again"
+        );
+
+        // A nack hands it back to the reclaim pass.
+        (first.commit)(vec![MessageDisposition::Nack])
+            .await
+            .unwrap();
+        let received = receive_within(&mut consumer, 1, Duration::from_secs(8)).await;
+        assert_eq!(received, 1, "a nacked entry is delivered again");
+    })
+    .await;
+}

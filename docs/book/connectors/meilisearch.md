@@ -39,14 +39,12 @@ movies_to_search:
   output:
     middlewares:
       - retry: { max_attempts: 5 }
-    custom:
-      name: meilisearch
-      config:
-        url: "http://localhost:7700"
-        api_key: "${MEILI_MASTER_KEY}"
-        index: "movies"
-        primary_key: "id"
-        operation: "${metadata:postgres.operation}"
+    meilisearch:
+      url: "http://localhost:7700"
+      api_key: "${MEILI_MASTER_KEY}"
+      index: "movies"
+      primary_key: "id"
+      operation: "${metadata:postgres.operation}"
 ```
 
 Apply the index settings once before the first run; see
@@ -208,14 +206,12 @@ articles_to_search:
       - retry: { max_attempts: 5 }
       - dlq:
           endpoint: { file: { path: "articles-rejected.jsonl" } }
-    custom:
-      name: meilisearch
-      config:
-        url: "http://localhost:7700"
-        api_key: "${MEILI_MASTER_KEY}"
-        index: "articles"
-        primary_key: "id"
-        operation: "${metadata:postgres.operation}"
+    meilisearch:
+      url: "http://localhost:7700"
+      api_key: "${MEILI_MASTER_KEY}"
+      index: "articles"
+      primary_key: "id"
+      operation: "${metadata:postgres.operation}"
 ```
 
 Declare the embedder before the first run (with the plugin, the same object goes under
@@ -282,9 +278,7 @@ assembled before it is indexed. Two tools do that:
               table: "authors"
               lookup_query: "SELECT id, name FROM authors WHERE id IN (${payload:author_id}::int)"
           into: author
-    custom:
-      name: meilisearch
-      config: { url: "http://localhost:7700", index: "books", primary_key: "id" }
+    meilisearch: { url: "http://localhost:7700", index: "books", primary_key: "id" }
   ```
 
 - **A table sharing the document's key is merged with `method: update`** (plugin only), from a second route
@@ -337,7 +331,7 @@ setup above; the trigger itself is standard Postgres and was not benchmarked.
 | `max_request_bytes` | output | `90000000` | Split a batch rather than exceed this body size. |
 | `compression` | output | `none` | `gzip` request bodies. `zstd` and `lz4` are accepted here, but Meilisearch 1.53 answers them with a "payload is malformed" 400. |
 | `connect_timeout_ms` | both | `10000` | How long to wait for a connection. |
-| `request_timeout_ms` | both | none | Upper bound for one HTTP request. |
+| `request_timeout_ms` | both | see right | Upper bound for one HTTP request; `0`: none. Unset: a request fails after 300 s without a response byte. |
 | `tls` | both | none | TLS options as on [`http_bulk`](http-bulk.md): `ca_file`, `cert_file` + `key_file`, `required`, `accept_invalid_certs`. JSON text in a URI. Built-in endpoint only. |
 | `fields` | input | all | Comma-separated document fields to read. |
 | `cursor_id`, `checkpoint_store` | input | none | Persist the read position (a `file://` store). |
@@ -377,9 +371,9 @@ brew install marcomq/tap/mq-bridge-meilisearch     # or: conda install -c marcom
 MQB_PLUGIN_OVERRIDE=meilisearch mqb copy … 'meilisearch://localhost:7700?index=movies'
 ```
 
-`--plugin` does not work for this, see [Native plugins](../extending/plugins.md). A build of
-`mqb` with the cargo feature `meilisearch` has the plugin compiled in instead of the built-in
-endpoint. `mqb` up to 0.4.17 had plugin 0.1.2 compiled in.
+`--plugin` does not work for this, see [Native plugins](../extending/plugins.md). `mqb` up to
+0.4.17 had plugin 0.1.2 compiled in; the cargo feature `meilisearch` that did the same in
+later builds is gone in 1.0.
 
 ## One-off copy or rebuild
 
@@ -428,9 +422,9 @@ composite primary keys and reading an index back out.
 
 ## Outside `mqb`
 
-From Rust, the built-in endpoint is part of the `http-bulk` feature: call
-`mq_bridge::endpoints::http_bulk::register_preset("meilisearch")?` before any route starts and
-address it as a `custom` endpoint named `meilisearch`.
+From Rust, the built-in endpoint is part of the `http-bulk` feature. A route file names it as
+above; in code, `mq_bridge::endpoints::http_bulk::MeilisearchConfig` holds the same fields and
+converts into an `Endpoint` with `.into()`.
 
 The plugin is a separate package for the library and the bindings:
 

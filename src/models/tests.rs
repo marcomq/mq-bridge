@@ -694,6 +694,40 @@ kafka_to_nats:
     }
 
     #[test]
+    fn elasticsearch_auth_credentials_are_extracted() {
+        let mut config = ElasticsearchConfig {
+            api_key: Some("api-secret".to_string()),
+            auth: Some(serde_json::json!({
+                "oauth2": {"token_url": "https://idp/token", "client_id": "app", "client_secret": "cs"},
+                "aws_sigv4": {"region": "eu-west-1", "access_key": "AK", "secret_key": "sk", "session_token": "st"},
+            })),
+            ..Default::default()
+        };
+        let mut secrets = HashMap::new();
+        config.extract_secrets("MQB__R__OUTPUT__ELASTICSEARCH", &mut secrets);
+
+        assert!(config.api_key.is_none());
+        assert_eq!(
+            config.auth,
+            Some(serde_json::json!({
+                "oauth2": {"token_url": "https://idp/token", "client_id": "app"},
+                "aws_sigv4": {"region": "eu-west-1", "access_key": "AK"},
+            }))
+        );
+        let expected = [
+            ("API_KEY", "api-secret"),
+            ("AUTH__OAUTH2__CLIENT_SECRET", "cs"),
+            ("AUTH__AWS_SIGV4__SECRET_KEY", "sk"),
+            ("AUTH__AWS_SIGV4__SESSION_TOKEN", "st"),
+        ];
+        assert_eq!(secrets.len(), expected.len());
+        for (key, value) in expected {
+            let key = format!("MQB__R__OUTPUT__ELASTICSEARCH__{key}");
+            assert_eq!(secrets.get(&key).map(String::as_str), Some(value), "{key}");
+        }
+    }
+
+    #[test]
     fn grpc_binary_metadata_is_extracted_reversibly() {
         let mut grpc = GrpcConfig::new("https://localhost:50051");
         grpc.binary_metadata
@@ -1070,6 +1104,18 @@ mod format_name_tests {
             assert_eq!(serde_json::to_value(mongo).unwrap(), name);
         }
     }
+
+    #[test]
+    fn the_mongo_queue_mode_is_named_delete_and_still_reads_consumer() {
+        for name in ["delete", "consumer"] {
+            let mode: MongoConsume = serde_json::from_value(name.into()).unwrap();
+            assert_eq!(mode, MongoConsume::Consumer);
+        }
+        assert_eq!(
+            serde_json::to_value(MongoConsume::Consumer).unwrap(),
+            "delete"
+        );
+    }
 }
 
 mod secret_extraction_tests {
@@ -1221,4 +1267,53 @@ r:
             );
         }
     }
+}
+
+#[test]
+fn debug_of_a_config_hides_its_secrets() {
+    let config: Config = serde_yaml_ng::from_str(
+        r#"
+orders:
+  input:
+    kafka:
+      url: "kafka://broker:9092"
+      topic: orders
+      username: alice
+      password: hunter2
+      tls: { required: true, cert_password: hunter3 }
+  output:
+    http:
+      url: "https://bob:hunter4@example.com/in"
+      custom_headers: { Authorization: "Bearer hunter5", X-Trace: "kept" }
+"#,
+    )
+    .unwrap();
+    let printed = format!("{config:?}");
+    assert!(!printed.contains("hunter"), "{printed}");
+    for kept in [
+        "KafkaConfig {",
+        "topic: \"orders\"",
+        "***",
+        "example.com/in",
+        "kept",
+    ] {
+        assert!(printed.contains(kept), "{kept} missing in {printed}");
+    }
+    assert!(format!("{config:#?}").contains("    topic: \"orders\","));
+}
+
+#[test]
+fn debug_of_http_bulk_auth_hides_its_secrets() {
+    let oauth2 = HttpBulkOAuth2 {
+        client_id: "app".into(),
+        client_secret: "hunter2".into(),
+        ..Default::default()
+    };
+    let sigv4 = HttpBulkAwsSigV4 {
+        secret_key: Some("hunter3".into()),
+        ..Default::default()
+    };
+    let printed = format!("{oauth2:?} {sigv4:?}");
+    assert!(!printed.contains("hunter"), "{printed}");
+    assert!(printed.contains("client_id: \"app\"") && printed.contains("session_token: None"));
 }
