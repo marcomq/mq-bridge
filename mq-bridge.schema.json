@@ -373,6 +373,72 @@
         },
         {
           "type": "object",
+          "properties": {
+            "elasticsearch": {
+              "$ref": "#/$defs/ElasticsearchConfig"
+            }
+          },
+          "required": [
+            "elasticsearch"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "meilisearch": {
+              "$ref": "#/$defs/MeilisearchConfig"
+            }
+          },
+          "required": [
+            "meilisearch"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "openai_chat": {
+              "$ref": "#/$defs/OpenAiChatConfig"
+            }
+          },
+          "required": [
+            "openai_chat"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "openai_embeddings": {
+              "$ref": "#/$defs/OpenAiEmbeddingsConfig"
+            }
+          },
+          "required": [
+            "openai_embeddings"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "qdrant": {
+              "$ref": "#/$defs/QdrantConfig"
+            }
+          },
+          "required": [
+            "qdrant"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "typesense": {
+              "$ref": "#/$defs/TypesenseConfig"
+            }
+          },
+          "required": [
+            "typesense"
+          ]
+        },
+        {
+          "type": "object",
           "format": "structural_endpoint",
           "properties": {
             "fanout": {
@@ -5253,7 +5319,7 @@
           ]
         },
         "request": {
-          "description": "Template of one message's part of the body, e.g. `{\"_id\": \"${payload:id}\"}`.",
+          "description": "Template of one message's part of the body, e.g. `{\"_id\": \"${payload:id}\"}`. `{index}` is its number in the request.",
           "type": "string"
         },
         "envelope": {
@@ -5288,6 +5354,57 @@
             "string",
             "null"
           ]
+        },
+        "per_message": {
+          "description": "One request per message; the response is the answer. Excludes `envelope` and `responses`.",
+          "type": "boolean"
+        },
+        "parse_value": {
+          "description": "The value is JSON text: parse it. Text that is not JSON fails its message.",
+          "type": "boolean"
+        },
+        "concurrency": {
+          "description": "Requests in flight for one batch. Defaults to 8 with `per_message`, else 1.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "max_messages": {
+          "description": "Most messages in one request; a larger batch is split. Unset = `max_request_bytes` alone.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "responses_text": {
+          "description": "JSON pointer to JSON text that holds the answers; `responses` then points into that text.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "index": {
+          "description": "JSON pointer, inside an entry, to the `{index}` of its message; entries are matched by it, not by position.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "stop_reason": {
+          "description": "JSON pointer to why the response ended; named when its answers cannot be matched.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "split_on_reject": {
+          "description": "A refused request (400, 409, 413, 422) or unmatched answers: ask again in halves.",
+          "type": "boolean"
         }
       },
       "additionalProperties": false,
@@ -5613,6 +5730,507 @@
           "type": "string",
           "const": "sha256"
         }
+      ]
+    },
+    "ElasticsearchConfig": {
+      "title": "Elasticsearch",
+      "description": "The `elasticsearch` endpoint: documents into one index through `_bulk`.",
+      "type": "object",
+      "properties": {
+        "url": {
+          "description": "Address of the server, e.g. `elasticsearch://localhost:9200`.",
+          "type": "string",
+          "x-mqb-uri": "origin"
+        },
+        "index": {
+          "description": "Index the documents are written to.",
+          "type": "string",
+          "x-mqb-uri": "path"
+        },
+        "api_key": {
+          "description": "API key sent with every request.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "password"
+        },
+        "id_field": {
+          "description": "Top-level payload field that becomes the document `_id`. Defaults to `id`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mode": {
+          "description": "`index` replaces a document; `update` merges the payload into it.",
+          "$ref": "#/$defs/ElasticsearchMode",
+          "default": "index"
+        },
+        "auth": {
+          "description": "`oauth2` or `aws_sigv4` credentials, as on `http_bulk`; JSON in a URI."
+        },
+        "operation": {
+          "description": "Template for a message's operation, e.g. `${metadata:postgres.operation}`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "compression": {
+          "description": "Compression of request bodies.",
+          "$ref": "#/$defs/Compression",
+          "default": "none"
+        },
+        "request_timeout_ms": {
+          "description": "Request timeout in milliseconds. Unset = no timeout.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "tls": {
+          "description": "TLS options as on `http_bulk` (`ca_file`, `cert_file`, `key_file`, `required`); JSON in a URI."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "url",
+        "index"
+      ]
+    },
+    "ElasticsearchMode": {
+      "description": "How `elasticsearch` writes a document.",
+      "oneOf": [
+        {
+          "description": "Replaces the stored document.",
+          "type": "string",
+          "const": "index"
+        },
+        {
+          "description": "Merges the payload into the stored document, creating it if missing.",
+          "type": "string",
+          "const": "update"
+        }
+      ]
+    },
+    "MeilisearchConfig": {
+      "title": "Meilisearch",
+      "description": "The `meilisearch` endpoint: documents into one index, or a read of it.",
+      "type": "object",
+      "properties": {
+        "url": {
+          "description": "Address of the server, e.g. `meilisearch://localhost:7700`.",
+          "type": "string",
+          "x-mqb-uri": "url"
+        },
+        "api_key": {
+          "description": "API key sent with every request.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "password"
+        },
+        "index": {
+          "description": "Index UID. Defaults to the route name.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "primary_key": {
+          "description": "The document field Meilisearch keys documents by.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "operation": {
+          "description": "Template for a message's operation, e.g. `${metadata:postgres.operation}`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "delete_values": {
+          "description": "Operation values that mean delete. Defaults to `delete` and `d`.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "max_request_bytes": {
+          "description": "Largest request body in bytes; a bigger batch is split. Defaults to 90 MB.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "compression": {
+          "description": "Compression of request bodies.",
+          "$ref": "#/$defs/Compression",
+          "default": "none"
+        },
+        "connect_timeout_ms": {
+          "description": "Connection timeout in milliseconds. Defaults to 10000ms.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "request_timeout_ms": {
+          "description": "Request timeout in milliseconds. Unset = no timeout.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "fields": {
+          "description": "(Consumer only) Comma-separated document fields to read. Default: all.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cursor_id": {
+          "description": "(Consumer only) Cursor id that keys the saved read position.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "checkpoint_store": {
+          "description": "(Consumer only) Where the read position is saved, e.g. `file:///var/lib/mqb/cursors.json`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "password"
+        },
+        "polling_interval_ms": {
+          "description": "(Consumer only) Wait in milliseconds after an empty page. Defaults to 1000ms.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "max_polling_interval_ms": {
+          "description": "(Consumer only) If set, the wait doubles after each empty page up to this value.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "tls": {
+          "description": "TLS options as on `http_bulk` (`ca_file`, `cert_file`, `key_file`, `required`); JSON in a URI."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "url"
+      ],
+      "x-mqb-default-batch-size": 50000
+    },
+    "OpenAiChatConfig": {
+      "title": "OpenAI chat completion",
+      "description": "The `openai_chat` endpoint: one chat completion per message, or per `messages_per_request`.",
+      "type": "object",
+      "properties": {
+        "url": {
+          "description": "Base URL of the API, e.g. `http://localhost:11434`. Defaults to `https://api.openai.com/v1`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-mqb-uri": "url"
+        },
+        "api_key": {
+          "description": "API key sent as a bearer token.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "password"
+        },
+        "model": {
+          "description": "Model name, e.g. `gpt-4o-mini`.",
+          "type": "string"
+        },
+        "system": {
+          "description": "Template of the system message.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "prompt": {
+          "description": "Template of the user message, e.g. `Summarise: ${payload:body}`.",
+          "type": "string"
+        },
+        "json": {
+          "description": "Ask for a JSON object and parse the answer.",
+          "type": "boolean",
+          "default": false
+        },
+        "options": {
+          "description": "Further request fields, e.g. `{\"temperature\": 0}`; JSON in a URI."
+        },
+        "concurrency": {
+          "description": "Requests in flight for one batch sent to this endpoint. Defaults to 8.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "messages_per_request": {
+          "description": "Messages answered by one request, as numbered inputs. Unset = one request each.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "max_request_bytes": {
+          "description": "With `messages_per_request`: largest request body in bytes. Defaults to 10 MiB.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "request_timeout_ms": {
+          "description": "Request timeout in milliseconds. Unset = no timeout.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "tls": {
+          "description": "TLS options as on `http_bulk` (`ca_file`, `cert_file`, `key_file`, `required`); JSON in a URI."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "model",
+        "prompt"
+      ]
+    },
+    "OpenAiEmbeddingsConfig": {
+      "title": "OpenAI embeddings",
+      "description": "The `openai_embeddings` endpoint: one embeddings request per batch.",
+      "type": "object",
+      "properties": {
+        "url": {
+          "description": "Base URL of the API, e.g. `http://localhost:11434`. Defaults to `https://api.openai.com/v1`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-mqb-uri": "url"
+        },
+        "api_key": {
+          "description": "API key sent as a bearer token.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "password"
+        },
+        "model": {
+          "description": "Model name, e.g. `text-embedding-3-small`.",
+          "type": "string"
+        },
+        "input": {
+          "description": "Template of the text to embed, e.g. `${payload:body}`.",
+          "type": "string"
+        },
+        "dimensions": {
+          "description": "Length of the vectors, for models that can shorten them.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "max_request_bytes": {
+          "description": "Largest request body in bytes; a bigger batch is split. Defaults to 10 MiB.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "request_timeout_ms": {
+          "description": "Request timeout in milliseconds. Unset = no timeout.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "tls": {
+          "description": "TLS options as on `http_bulk` (`ca_file`, `cert_file`, `key_file`, `required`); JSON in a URI."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "model",
+        "input"
+      ]
+    },
+    "QdrantConfig": {
+      "title": "Qdrant",
+      "description": "The `qdrant` endpoint: points into one collection, or a scroll through it.",
+      "type": "object",
+      "properties": {
+        "url": {
+          "description": "Address of the server, e.g. `qdrant://localhost:6333`.",
+          "type": "string",
+          "x-mqb-uri": "origin"
+        },
+        "collection": {
+          "description": "Collection the points are written to. It must exist.",
+          "type": "string",
+          "x-mqb-uri": "path"
+        },
+        "api_key": {
+          "description": "API key sent with every request.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "password"
+        },
+        "wait": {
+          "description": "Answer after the points are stored, not when they are queued. Defaults to true.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "operation": {
+          "description": "Template for a message's operation, e.g. `${metadata:postgres.operation}`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "compression": {
+          "description": "Compression of request bodies.",
+          "$ref": "#/$defs/Compression",
+          "default": "none"
+        },
+        "request_timeout_ms": {
+          "description": "Request timeout in milliseconds. Unset = no timeout.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "cursor_id": {
+          "description": "(Consumer only) Cursor id that keys the saved read position.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "checkpoint_store": {
+          "description": "(Consumer only) Where the read position is saved, e.g. `file:///var/lib/mqb/cursors.json`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "password"
+        },
+        "tls": {
+          "description": "TLS options as on `http_bulk` (`ca_file`, `cert_file`, `key_file`, `required`); JSON in a URI."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "url",
+        "collection"
+      ]
+    },
+    "TypesenseConfig": {
+      "title": "Typesense",
+      "description": "The `typesense` endpoint: documents into one Typesense collection.",
+      "type": "object",
+      "properties": {
+        "url": {
+          "description": "Address of the server, e.g. `typesense://localhost:8108`.",
+          "type": "string",
+          "x-mqb-uri": "origin"
+        },
+        "collection": {
+          "description": "Collection the documents are written to. It must exist.",
+          "type": "string",
+          "x-mqb-uri": "path"
+        },
+        "api_key": {
+          "description": "API key sent with every request.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "password"
+        },
+        "operation": {
+          "description": "Template for a message's operation, e.g. `${metadata:postgres.operation}`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "compression": {
+          "description": "Compression of request bodies.",
+          "$ref": "#/$defs/Compression",
+          "default": "none"
+        },
+        "request_timeout_ms": {
+          "description": "Request timeout in milliseconds. Unset = no timeout.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "tls": {
+          "description": "TLS options as on `http_bulk` (`ca_file`, `cert_file`, `key_file`, `required`); JSON in a URI."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "url",
+        "collection"
       ]
     },
     "SequenceConfig": {

@@ -341,6 +341,14 @@ pub enum EndpointType {
     HttpBulk(HttpBulkConfig),
     #[serde(rename = "postgres_cdc", alias = "postgres-cdc")]
     PostgresCdc(PostgresCdcConfig),
+    Elasticsearch(ElasticsearchConfig),
+    Meilisearch(MeilisearchConfig),
+    #[serde(rename = "openai_chat")]
+    OpenAiChat(OpenAiChatConfig),
+    #[serde(rename = "openai_embeddings")]
+    OpenAiEmbeddings(OpenAiEmbeddingsConfig),
+    Qdrant(QdrantConfig),
+    Typesense(TypesenseConfig),
     #[cfg_attr(feature = "schema", schemars(extend("format" = "structural_endpoint")))]
     Fanout(Vec<Endpoint>),
     #[cfg_attr(feature = "schema", schemars(extend("format" = "structural_endpoint")))]
@@ -3218,7 +3226,7 @@ pub struct HttpBulkQuery {
     /// `Content-Type` header. Defaults to `application/x-ndjson` or `application/json`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_type: Option<String>,
-    /// Template of one message's part of the body, e.g. `{"_id": "${payload:id}"}`.
+    /// Template of one message's part of the body, e.g. `{"_id": "${payload:id}"}`. `{index}` is its number in the request.
     pub request: String,
     /// `json_array` only: the body around the array, e.g. `{"docs": {requests}}`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3235,6 +3243,30 @@ pub struct HttpBulkQuery {
     /// JSON pointer in an answer to its error text. An answer that has it fails its message.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// One request per message; the response is the answer. Excludes `envelope` and `responses`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub per_message: bool,
+    /// The value is JSON text: parse it. Text that is not JSON fails its message.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub parse_value: bool,
+    /// Requests in flight for one batch. Defaults to 8 with `per_message`, else 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub concurrency: Option<usize>,
+    /// Most messages in one request; a larger batch is split. Unset = `max_request_bytes` alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_messages: Option<usize>,
+    /// JSON pointer to JSON text that holds the answers; `responses` then points into that text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub responses_text: Option<String>,
+    /// JSON pointer, inside an entry, to the `{index}` of its message; entries are matched by it, not by position.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index: Option<String>,
+    /// JSON pointer to why the response ended; named when its answers cannot be matched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<String>,
+    /// A refused request (400, 409, 413, 422) or unmatched answers: ask again in halves.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub split_on_reject: bool,
 }
 
 /// How `http_bulk` requests are authenticated beyond `headers`. Set at most one field.
@@ -3459,6 +3491,266 @@ impl Default for HttpBulkJob {
             timeout_ms: default_http_bulk_job_timeout_ms(),
         }
     }
+}
+
+// --- Named endpoints on `http_bulk` ---
+//
+// Each is an `http_bulk` configuration underneath; `endpoints::http_bulk` fills in the requests.
+
+/// Ties each named endpoint's variant to the name its factory is found by.
+macro_rules! named_endpoints {
+    ($($variant:ident($config:ident) => $name:literal),* $(,)?) => {
+        impl EndpointType {
+            /// Name and config of a `custom` endpoint or of a named one such as `qdrant`.
+            pub fn as_custom(&self) -> Option<(&str, std::borrow::Cow<'_, serde_json::Value>)> {
+                match self {
+                    EndpointType::Custom { name, config } => Some((name, std::borrow::Cow::Borrowed(config))),
+                    $(EndpointType::$variant(config) => Some((
+                        $name,
+                        std::borrow::Cow::Owned(serde_json::to_value(config).unwrap_or_default()),
+                    )),)*
+                    _ => None,
+                }
+            }
+        }
+
+        $(
+            impl From<$config> for EndpointType {
+                fn from(config: $config) -> Self {
+                    EndpointType::$variant(config)
+                }
+            }
+
+            impl From<$config> for Endpoint {
+                fn from(config: $config) -> Self {
+                    Endpoint::new(config.into())
+                }
+            }
+        )*
+    };
+}
+
+named_endpoints!(
+    Elasticsearch(ElasticsearchConfig) => "elasticsearch",
+    Meilisearch(MeilisearchConfig) => "meilisearch",
+    OpenAiChat(OpenAiChatConfig) => "openai_chat",
+    OpenAiEmbeddings(OpenAiEmbeddingsConfig) => "openai_embeddings",
+    Qdrant(QdrantConfig) => "qdrant",
+    Typesense(TypesenseConfig) => "typesense",
+);
+
+/// The `typesense` endpoint: documents into one Typesense collection.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schema", schemars(title = "Typesense"))]
+#[serde(deny_unknown_fields)]
+pub struct TypesenseConfig {
+    /// Address of the server, e.g. `typesense://localhost:8108`.
+    #[cfg_attr(feature = "schema", schemars(extend("x-mqb-uri" = "origin")))]
+    pub url: String,
+    /// Collection the documents are written to. It must exist.
+    #[cfg_attr(feature = "schema", schemars(extend("x-mqb-uri" = "path")))]
+    pub collection: String,
+    /// API key sent with every request.
+    #[cfg_attr(feature = "schema", schemars(extend("format" = "password")))]
+    pub api_key: Option<String>,
+    /// Template for a message's operation, e.g. `${metadata:postgres.operation}`.
+    pub operation: Option<String>,
+    /// Compression of request bodies.
+    #[serde(default)]
+    pub compression: Compression,
+    /// Request timeout in milliseconds. Unset = no timeout.
+    pub request_timeout_ms: Option<u64>,
+    /// TLS options as on `http_bulk` (`ca_file`, `cert_file`, `key_file`, `required`); JSON in a URI.
+    pub tls: Option<serde_json::Value>,
+}
+
+/// The `elasticsearch` endpoint: documents into one index through `_bulk`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schema", schemars(title = "Elasticsearch"))]
+#[serde(deny_unknown_fields)]
+pub struct ElasticsearchConfig {
+    /// Address of the server, e.g. `elasticsearch://localhost:9200`.
+    #[cfg_attr(feature = "schema", schemars(extend("x-mqb-uri" = "origin")))]
+    pub url: String,
+    /// Index the documents are written to.
+    #[cfg_attr(feature = "schema", schemars(extend("x-mqb-uri" = "path")))]
+    pub index: String,
+    /// API key sent with every request.
+    #[cfg_attr(feature = "schema", schemars(extend("format" = "password")))]
+    pub api_key: Option<String>,
+    /// Top-level payload field that becomes the document `_id`. Defaults to `id`.
+    pub id_field: Option<String>,
+    /// `index` replaces a document; `update` merges the payload into it.
+    #[serde(default)]
+    pub mode: ElasticsearchMode,
+    /// `oauth2` or `aws_sigv4` credentials, as on `http_bulk`; JSON in a URI.
+    pub auth: Option<serde_json::Value>,
+    /// Template for a message's operation, e.g. `${metadata:postgres.operation}`.
+    pub operation: Option<String>,
+    /// Compression of request bodies.
+    #[serde(default)]
+    pub compression: Compression,
+    /// Request timeout in milliseconds. Unset = no timeout.
+    pub request_timeout_ms: Option<u64>,
+    /// TLS options as on `http_bulk` (`ca_file`, `cert_file`, `key_file`, `required`); JSON in a URI.
+    pub tls: Option<serde_json::Value>,
+}
+
+/// How `elasticsearch` writes a document.
+#[derive(Debug, Serialize, Deserialize, Default, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum ElasticsearchMode {
+    /// Replaces the stored document.
+    #[default]
+    Index,
+    /// Merges the payload into the stored document, creating it if missing.
+    Update,
+}
+
+/// The `meilisearch` endpoint: documents into one index, or a read of it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schema", schemars(title = "Meilisearch"))]
+// Meilisearch indexes one large request far faster than many small ones.
+#[cfg_attr(
+    feature = "schema",
+    schemars(extend("x-mqb-default-batch-size" = 50000))
+)]
+#[serde(deny_unknown_fields)]
+pub struct MeilisearchConfig {
+    /// Address of the server, e.g. `meilisearch://localhost:7700`.
+    #[cfg_attr(feature = "schema", schemars(extend("x-mqb-uri" = "url")))]
+    pub url: String,
+    /// API key sent with every request.
+    #[cfg_attr(feature = "schema", schemars(extend("format" = "password")))]
+    pub api_key: Option<String>,
+    /// Index UID. Defaults to the route name.
+    pub index: Option<String>,
+    /// The document field Meilisearch keys documents by.
+    pub primary_key: Option<String>,
+    /// Template for a message's operation, e.g. `${metadata:postgres.operation}`.
+    pub operation: Option<String>,
+    /// Operation values that mean delete. Defaults to `delete` and `d`.
+    pub delete_values: Option<Vec<String>>,
+    /// Largest request body in bytes; a bigger batch is split. Defaults to 90 MB.
+    pub max_request_bytes: Option<u64>,
+    /// Compression of request bodies.
+    #[serde(default)]
+    pub compression: Compression,
+    /// Connection timeout in milliseconds. Defaults to 10000ms.
+    pub connect_timeout_ms: Option<u64>,
+    /// Request timeout in milliseconds. Unset = no timeout.
+    pub request_timeout_ms: Option<u64>,
+    /// (Consumer only) Comma-separated document fields to read. Default: all.
+    pub fields: Option<String>,
+    /// (Consumer only) Cursor id that keys the saved read position.
+    pub cursor_id: Option<String>,
+    /// (Consumer only) Where the read position is saved, e.g. `file:///var/lib/mqb/cursors.json`.
+    #[cfg_attr(feature = "schema", schemars(extend("format" = "password")))]
+    pub checkpoint_store: Option<String>,
+    /// (Consumer only) Wait in milliseconds after an empty page. Defaults to 1000ms.
+    pub polling_interval_ms: Option<u64>,
+    /// (Consumer only) If set, the wait doubles after each empty page up to this value.
+    pub max_polling_interval_ms: Option<u64>,
+    /// TLS options as on `http_bulk` (`ca_file`, `cert_file`, `key_file`, `required`); JSON in a URI.
+    pub tls: Option<serde_json::Value>,
+}
+
+/// The `qdrant` endpoint: points into one collection, or a scroll through it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schema", schemars(title = "Qdrant"))]
+#[serde(deny_unknown_fields)]
+pub struct QdrantConfig {
+    /// Address of the server, e.g. `qdrant://localhost:6333`.
+    #[cfg_attr(feature = "schema", schemars(extend("x-mqb-uri" = "origin")))]
+    pub url: String,
+    /// Collection the points are written to. It must exist.
+    #[cfg_attr(feature = "schema", schemars(extend("x-mqb-uri" = "path")))]
+    pub collection: String,
+    /// API key sent with every request.
+    #[cfg_attr(feature = "schema", schemars(extend("format" = "password")))]
+    pub api_key: Option<String>,
+    /// Answer after the points are stored, not when they are queued. Defaults to true.
+    pub wait: Option<bool>,
+    /// Template for a message's operation, e.g. `${metadata:postgres.operation}`.
+    pub operation: Option<String>,
+    /// Compression of request bodies.
+    #[serde(default)]
+    pub compression: Compression,
+    /// Request timeout in milliseconds. Unset = no timeout.
+    pub request_timeout_ms: Option<u64>,
+    /// (Consumer only) Cursor id that keys the saved read position.
+    pub cursor_id: Option<String>,
+    /// (Consumer only) Where the read position is saved, e.g. `file:///var/lib/mqb/cursors.json`.
+    #[cfg_attr(feature = "schema", schemars(extend("format" = "password")))]
+    pub checkpoint_store: Option<String>,
+    /// TLS options as on `http_bulk` (`ca_file`, `cert_file`, `key_file`, `required`); JSON in a URI.
+    pub tls: Option<serde_json::Value>,
+}
+
+/// The `openai_embeddings` endpoint: one embeddings request per batch.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schema", schemars(title = "OpenAI embeddings"))]
+#[serde(deny_unknown_fields)]
+pub struct OpenAiEmbeddingsConfig {
+    /// Base URL of the API, e.g. `http://localhost:11434`. Defaults to `https://api.openai.com/v1`.
+    #[cfg_attr(feature = "schema", schemars(extend("x-mqb-uri" = "url")))]
+    pub url: Option<String>,
+    /// API key sent as a bearer token.
+    #[cfg_attr(feature = "schema", schemars(extend("format" = "password")))]
+    pub api_key: Option<String>,
+    /// Model name, e.g. `text-embedding-3-small`.
+    pub model: String,
+    /// Template of the text to embed, e.g. `${payload:body}`.
+    pub input: String,
+    /// Length of the vectors, for models that can shorten them.
+    pub dimensions: Option<u64>,
+    /// Largest request body in bytes; a bigger batch is split. Defaults to 10 MiB.
+    pub max_request_bytes: Option<u64>,
+    /// Request timeout in milliseconds. Unset = no timeout.
+    pub request_timeout_ms: Option<u64>,
+    /// TLS options as on `http_bulk` (`ca_file`, `cert_file`, `key_file`, `required`); JSON in a URI.
+    pub tls: Option<serde_json::Value>,
+}
+
+/// The `openai_chat` endpoint: one chat completion per message, or per `messages_per_request`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schema", schemars(title = "OpenAI chat completion"))]
+#[serde(deny_unknown_fields)]
+pub struct OpenAiChatConfig {
+    /// Base URL of the API, e.g. `http://localhost:11434`. Defaults to `https://api.openai.com/v1`.
+    #[cfg_attr(feature = "schema", schemars(extend("x-mqb-uri" = "url")))]
+    pub url: Option<String>,
+    /// API key sent as a bearer token.
+    #[cfg_attr(feature = "schema", schemars(extend("format" = "password")))]
+    pub api_key: Option<String>,
+    /// Model name, e.g. `gpt-4o-mini`.
+    pub model: String,
+    /// Template of the system message.
+    pub system: Option<String>,
+    /// Template of the user message, e.g. `Summarise: ${payload:body}`.
+    pub prompt: String,
+    /// Ask for a JSON object and parse the answer.
+    #[serde(default)]
+    pub json: bool,
+    /// Further request fields, e.g. `{"temperature": 0}`; JSON in a URI.
+    pub options: Option<serde_json::Value>,
+    /// Requests in flight for one batch sent to this endpoint. Defaults to 8.
+    pub concurrency: Option<usize>,
+    /// Messages answered by one request, as numbered inputs. Unset = one request each.
+    pub messages_per_request: Option<usize>,
+    /// With `messages_per_request`: largest request body in bytes. Defaults to 10 MiB.
+    pub max_request_bytes: Option<usize>,
+    /// Request timeout in milliseconds. Unset = no timeout.
+    pub request_timeout_ms: Option<u64>,
+    /// TLS options as on `http_bulk` (`ca_file`, `cert_file`, `key_file`, `required`); JSON in a URI.
+    pub tls: Option<serde_json::Value>,
 }
 
 // --- Common Configuration ---

@@ -124,7 +124,7 @@ grpc = ["mq-bridge/grpc"]
 amqp = ["mq-bridge/amqp"]
 redis-streams = ["mq-bridge/redis-streams"]
 object-store = ["mq-bridge/object-store"]
-# Also registers the named endpoints built on it (`meilisearch`, `typesense`, `elasticsearch`).
+# Also registers the named endpoints built on it (`meilisearch`, `typesense`, `qdrant`, `openai_chat`, …).
 http-bulk = ["mq-bridge/http-bulk"]
 # Extension endpoint maintained as a separate crate. `pulsar` is in `full`, so a
 # default build addresses `pulsar://` with no install step. It is also loadable

@@ -17,6 +17,7 @@ DeduplicationMiddleware = dict
 DelayMiddleware = dict
 DetailedMappingRule = dict
 DirSpoolConfig = dict
+ElasticsearchConfig = dict
 EncryptionConfig = dict
 Endpoint = dict
 FileConfig = dict
@@ -41,6 +42,7 @@ KafkaConfig = dict
 LimiterMiddleware = dict
 LookupEntry = dict
 LookupMiddleware = dict
+MeilisearchConfig = dict
 MemoryConfig = dict
 MetricsMiddleware = dict
 Middleware = dict
@@ -48,9 +50,12 @@ MongoDbConfig = dict
 MqttConfig = dict
 NatsConfig = dict
 ObjectStoreConfig = dict
+OpenAiChatConfig = dict
+OpenAiEmbeddingsConfig = dict
 OtelMiddleware = dict
 PackMiddleware = dict
 PostgresCdcConfig = dict
+QdrantConfig = dict
 RandomPanicMiddleware = dict
 RedisStreamsConfig = dict
 RequestForwardConfig = dict
@@ -66,6 +71,7 @@ SwitchConfig = dict
 TimeoutMiddleware = dict
 TlsConfig = dict
 TransformMiddleware = dict
+TypesenseConfig = dict
 UnpackMiddleware = dict
 WeakJoinMiddleware = dict
 WebSocketConfig = dict
@@ -80,6 +86,7 @@ CsvNested = str
 DatePartitionStyle = str
 DecodeErrorPolicy = str
 DeliveryGuarantee = str
+ElasticsearchMode = str
 FaultMode = str
 FileFormat = str
 FileFsync = str
@@ -141,6 +148,8 @@ __all__ = [
     "DeliveryGuarantee",
     "DetailedMappingRule",
     "DirSpoolConfig",
+    "ElasticsearchConfig",
+    "ElasticsearchMode",
     "EncryptionConfig",
     "Endpoint",
     "EndpointConfig",
@@ -176,6 +185,7 @@ __all__ = [
     "LookupEntry",
     "LookupMiddleware",
     "MappingRule",
+    "MeilisearchConfig",
     "MemoryConfig",
     "MetricsMiddleware",
     "Middleware",
@@ -188,11 +198,14 @@ __all__ = [
     "NatsConfig",
     "NatsDeliverPolicy",
     "ObjectStoreConfig",
+    "OpenAiChatConfig",
+    "OpenAiEmbeddingsConfig",
     "OtelMiddleware",
     "PackFormat",
     "PackMiddleware",
     "PostgresCdcConfig",
     "PostgresConsume",
+    "QdrantConfig",
     "RandomPanicMiddleware",
     "RedisStreamsConfig",
     "RequestForwardConfig",
@@ -217,6 +230,7 @@ __all__ = [
     "TlsConfig",
     "TransformErrorPolicy",
     "TransformMiddleware",
+    "TypesenseConfig",
     "UnpackMiddleware",
     "WeakJoinAck",
     "WeakJoinMiddleware",

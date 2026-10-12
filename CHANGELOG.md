@@ -323,6 +323,37 @@ What 1.0 adds is the promise, and what it leaves open:
   `?on_decode_error=fail`. Rust code that
   builds `ObjectStoreConfig` with a struct literal needs the new field or
   `..Default::default()`.
+- **`openai_chat` and `openai_embeddings` endpoints**, for any API that speaks the OpenAI
+  wire format (OpenAI, Ollama, vLLM, …). `openai_chat` sends one chat completion per
+  message, with `json: true` parsing the answer; `openai_embeddings` sends one request per
+  batch. Both answer a `lookup`. URIs: `openai://host?model=…&prompt=…` and
+  `openai-embeddings://host?model=…&input=…`. Run against Ollama, not against OpenAI. See the
+  [LLM cookbook](docs/book/cookbook/llm.md).
+- **`qdrant` endpoint.** Upserts points, deletes them by id and reads a collection by
+  scrolling: `qdrant://host:6333/<collection>`. Upserts and the read
+  were run against Qdrant 1.19, a delete through this endpoint was not.
+- **`openai_chat`: `messages_per_request`.** Sends that many messages as numbered inputs
+  of one completion and hands each message its own answer, so the system message is paid
+  for once per request. Each answer carries the number of its input and is matched by it.
+  Answers that cannot be matched, or a request refused with 400, 409, 413 or 422, are
+  asked again in halves until the message at fault stands alone. Off by default. Not run
+  against OpenAI; how many inputs a model keeps apart was not measured.
+- **`http_bulk`: `query.max_messages`, `query.responses_text`, `query.index`,
+  `query.stop_reason`, `query.split_on_reject` and `{index}` in `query.request`**, the
+  parts `messages_per_request` is made of.
+  `query.concurrency` now also applies without `per_message` (default 1 there): the
+  requests of one batch can be in flight together.
+- **`http_bulk`: `query.per_message`.** One request per message instead of one per batch,
+  for an API that takes one question at a time. `query.concurrency` (default 8) bounds the
+  requests in flight; `query.parse_value` parses an answer that is JSON text.
+- **`qdrant`, `openai_chat`, `openai_embeddings`, `typesense`, `elasticsearch` and
+  `meilisearch` are endpoint types of their own.** `EndpointType` has a variant for each,
+  with a typed config (`QdrantConfig`, `OpenAiChatConfig`, …) that converts into an
+  `Endpoint` with `.into()`. A route file names them by their key (`qdrant: {..}`) and is
+  written back that way; they are in `mq-bridge.schema.json`, the UI and the Python
+  config types, and need no `register_preset`. Code that matches `EndpointType`
+  without a `_` arm needs the six new variants. An API key moved out of a config file is
+  now stored under the endpoint's key, e.g. `…__QDRANT__API_KEY`.
 - **`http_bulk`: `read.cursor.end_when_missing`.** With `cursor.response`, a response
   without the field ends the read (Google's `nextPageToken`). Off by default: such a
   response stops the route, which also catches a mistyped pointer.

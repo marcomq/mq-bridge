@@ -36,6 +36,7 @@ const LINE_ID: &str = "{id}";
 const NDJSON: &str = "application/x-ndjson";
 
 /// A failed request, kept as text so every message it covered gets its own error.
+#[derive(Clone)]
 pub(super) struct Failure {
     pub(super) retryable: bool,
     /// The HTTP status, when the target answered with one.
@@ -61,7 +62,7 @@ impl Failure {
     }
 
     /// The target refused the content of the request, which a smaller request may narrow down.
-    fn refused_content(&self) -> bool {
+    pub(super) fn refused_content(&self) -> bool {
         matches!(self.status, Some(400 | 409 | 413 | 422))
     }
 
@@ -816,9 +817,7 @@ impl MessagePublisher for HttpBulkPublisher {
                         let id = Some(message.message_id);
                         responses.push(CanonicalMessage::new(value.into_bytes(), id));
                     }
-                    Err(reason) => {
-                        failed.push((message, PublisherError::NonRetryable(anyhow!(reason))));
-                    }
+                    Err(failure) => failed.push((message, failure.error())),
                 }
             }
             return Ok(SentBatch::Partial {
@@ -865,7 +864,7 @@ impl MessagePublisher for HttpBulkPublisher {
         &self,
         requests: &[CanonicalMessage],
     ) -> Option<Result<Vec<Option<Value>>, PublisherError>> {
-        let query = self.query.as_ref()?;
+        let query = self.query.as_ref().filter(|query| !query.per_message())?;
         let answers = query
             .answers(&self.connection, self.max_request_bytes, requests)
             .await;

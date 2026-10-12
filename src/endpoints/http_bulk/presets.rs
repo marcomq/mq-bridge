@@ -8,11 +8,14 @@
 
 use super::{HttpBulkConsumer, HttpBulkPublisher};
 use crate::errors::InvalidConfig;
-use crate::models::{Compression, HttpBulkConfig};
+use crate::models::{
+    ElasticsearchConfig, ElasticsearchMode, EndpointType, HttpBulkConfig, MeilisearchConfig,
+    OpenAiChatConfig, OpenAiEmbeddingsConfig, QdrantConfig, TypesenseConfig,
+};
 use crate::traits::{CustomEndpointFactory, MessageConsumer, MessagePublisher};
 use anyhow::{anyhow, bail, Context};
 use async_trait::async_trait;
-use serde::Deserialize;
+use serde::Serialize;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
@@ -20,25 +23,41 @@ use std::sync::Arc;
 #[derive(Debug)]
 struct Preset {
     name: &'static str,
-    schema: fn() -> Value,
+    /// `None` for a built-in one in a build without the `schema` feature.
+    schema: Option<fn() -> Value>,
     /// Takes the route name and the endpoint's config.
     resolve: fn(&str, &Value) -> anyhow::Result<Value>,
 }
 
-const PRESETS: [Preset; 3] = [
+const PRESETS: [Preset; 6] = [
     Preset {
         name: "elasticsearch",
-        schema: elasticsearch_schema,
+        schema: derived::<ElasticsearchConfig>(),
         resolve: elasticsearch,
     },
     Preset {
         name: "meilisearch",
-        schema: meilisearch_schema,
+        schema: derived::<MeilisearchConfig>(),
         resolve: meilisearch,
     },
     Preset {
+        name: "openai_chat",
+        schema: derived::<OpenAiChatConfig>(),
+        resolve: openai_chat,
+    },
+    Preset {
+        name: "openai_embeddings",
+        schema: derived::<OpenAiEmbeddingsConfig>(),
+        resolve: openai_embeddings,
+    },
+    Preset {
+        name: "qdrant",
+        schema: derived::<QdrantConfig>(),
+        resolve: qdrant,
+    },
+    Preset {
         name: "typesense",
-        schema: typesense_schema,
+        schema: derived::<TypesenseConfig>(),
         resolve: typesense,
     },
 ];
@@ -68,10 +87,40 @@ pub fn register_preset_with(
 ) -> anyhow::Result<()> {
     let preset = Preset {
         name,
-        schema,
+        schema: Some(schema),
         resolve,
     };
     crate::extensions::register_endpoint_factory(name, Arc::new(preset))
+}
+
+/// The built-in named endpoint, for a route that names one nobody registered.
+pub(crate) fn builtin(name: &str) -> Option<Arc<dyn CustomEndpointFactory>> {
+    let preset = PRESETS.into_iter().find(|preset| preset.name == name)?;
+    Some(Arc::new(preset))
+}
+
+#[cfg(feature = "schema")]
+const fn derived<T: schemars::JsonSchema>() -> Option<fn() -> Value> {
+    Some(|| serde_json::to_value(schemars::schema_for!(T)).unwrap_or_default())
+}
+
+#[cfg(not(feature = "schema"))]
+const fn derived<T>() -> Option<fn() -> Value> {
+    None
+}
+
+/// The endpoint a typed config of the named endpoint stands for; unset fields are left out.
+///
+/// For a config type of your own, registered with [`register_preset_with`].
+pub fn named_endpoint(name: &str, config: &impl Serialize) -> EndpointType {
+    let mut config = serde_json::to_value(config).unwrap_or_default();
+    if let Value::Object(fields) = &mut config {
+        fields.retain(|_, value| !value.is_null());
+    }
+    EndpointType::Custom {
+        name: name.to_string(),
+        config,
+    }
 }
 
 /// The `http_bulk` configuration a named endpoint stands for.
@@ -120,7 +169,7 @@ impl CustomEndpointFactory for Preset {
     }
 
     fn config_schema(&self) -> Option<Value> {
-        Some((self.schema)())
+        self.schema.map(|schema| schema())
     }
 }
 
@@ -221,36 +270,8 @@ pub fn schema(title: &str, example: &str, own: Value, required: &[&str]) -> Valu
     })
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Typesense {
-    url: String,
-    collection: String,
-    api_key: Option<String>,
-    operation: Option<String>,
-    #[serde(default)]
-    compression: Compression,
-    request_timeout_ms: Option<u64>,
-    tls: Option<Value>,
-}
-
-fn typesense_schema() -> Value {
-    schema(
-        "Typesense",
-        "typesense://localhost:8108",
-        json!({
-            "collection": {
-                "type": "string",
-                "description": "Collection the documents are written to. It must exist.",
-                "x-mqb-uri": "path"
-            }
-        }),
-        &["url", "collection"],
-    )
-}
-
 fn typesense(_route: &str, value: &Value) -> anyhow::Result<Value> {
-    let config: Typesense = serde_json::from_value(value.clone())?;
+    let config: TypesenseConfig = serde_json::from_value(value.clone())?;
     let collection = segment("collection", &config.collection)?;
     let mut headers = serde_json::Map::new();
     if let Some(key) = config.api_key {
@@ -276,68 +297,10 @@ fn typesense(_route: &str, value: &Value) -> anyhow::Result<Value> {
     with_tls(resolved, config.tls)
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Elasticsearch {
-    url: String,
-    index: String,
-    api_key: Option<String>,
-    #[serde(default = "default_id_field")]
-    id_field: String,
-    #[serde(default)]
-    mode: ElasticsearchMode,
-    auth: Option<Value>,
-    operation: Option<String>,
-    #[serde(default)]
-    compression: Compression,
-    request_timeout_ms: Option<u64>,
-    tls: Option<Value>,
-}
-
-#[derive(Deserialize, Default, Clone, Copy, PartialEq)]
-#[serde(rename_all = "snake_case")]
-enum ElasticsearchMode {
-    /// Replaces the stored document.
-    #[default]
-    Index,
-    /// Merges the payload into the stored document, creating it if missing.
-    Update,
-}
-
-fn elasticsearch_schema() -> Value {
-    schema(
-        "Elasticsearch",
-        "elasticsearch://localhost:9200",
-        json!({
-            "index": {
-                "type": "string",
-                "description": "Index the documents are written to.",
-                "x-mqb-uri": "path"
-            },
-            "id_field": {
-                "type": "string",
-                "default": "id",
-                "description": "Top-level payload field that becomes the document `_id`."
-            },
-            "mode": {
-                "type": "string",
-                "enum": ["index", "update"],
-                "default": "index",
-                "description": "`index` replaces a document; `update` merges the payload into it."
-            },
-            "auth": {
-                "type": ["object", "string"],
-                "description": "`oauth2` or `aws_sigv4` credentials, as on `http_bulk`; JSON in a URI."
-            }
-        }),
-        &["url", "index"],
-    )
-}
-
 fn elasticsearch(_route: &str, value: &Value) -> anyhow::Result<Value> {
-    let config: Elasticsearch = serde_json::from_value(value.clone())?;
+    let config: ElasticsearchConfig = serde_json::from_value(value.clone())?;
     let index = segment("index", &config.index)?;
-    let id_field = &config.id_field;
+    let id_field = &config.id_field.clone().unwrap_or_else(default_id_field);
     if id_field.is_empty() || id_field.contains(['}', '"', '\\']) {
         bail!("'id_field' must be a plain field name, got '{id_field}'");
     }
@@ -384,99 +347,13 @@ const MEILISEARCH_PLUGIN_ONLY: [&str; 8] = [
     "task_timeout_ms",
 ];
 
+const MEILISEARCH_REQUEST_BYTES: u64 = 90_000_000;
+
 fn plugin_only(what: &str) -> anyhow::Error {
     anyhow!(
         "{what} needs the mq-bridge-meilisearch plugin: install it and set \
          MQB_PLUGIN_OVERRIDE=meilisearch"
     )
-}
-
-fn default_meilisearch_request_bytes() -> u64 {
-    90_000_000
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Meilisearch {
-    url: String,
-    api_key: Option<String>,
-    index: Option<String>,
-    primary_key: Option<String>,
-    operation: Option<String>,
-    delete_values: Option<Vec<String>>,
-    #[serde(default = "default_meilisearch_request_bytes")]
-    max_request_bytes: u64,
-    #[serde(default)]
-    compression: Compression,
-    connect_timeout_ms: Option<u64>,
-    request_timeout_ms: Option<u64>,
-    fields: Option<String>,
-    cursor_id: Option<String>,
-    checkpoint_store: Option<String>,
-    polling_interval_ms: Option<u64>,
-    max_polling_interval_ms: Option<u64>,
-    tls: Option<Value>,
-}
-
-fn meilisearch_schema() -> Value {
-    let mut schema = schema(
-        "Meilisearch",
-        "meilisearch://localhost:7700",
-        json!({
-            "url": {
-                "type": "string",
-                "description": "Address of the server, e.g. `meilisearch://localhost:7700`.",
-                "x-mqb-uri": "url"
-            },
-            "index": {
-                "type": "string",
-                "description": "Index UID. Defaults to the route name."
-            },
-            "primary_key": {
-                "type": "string",
-                "description": "The document field Meilisearch keys documents by."
-            },
-            "delete_values": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": "Operation values that mean delete. Defaults to `delete` and `d`."
-            },
-            "max_request_bytes": {
-                "type": "integer",
-                "default": default_meilisearch_request_bytes(),
-                "description": "Largest request body in bytes; a bigger batch is split."
-            },
-            "connect_timeout_ms": {
-                "type": "integer",
-                "description": "Connection timeout in milliseconds. Defaults to 10000ms."
-            },
-            "fields": {
-                "type": "string",
-                "description": "(Consumer only) Comma-separated document fields to read. Default: all."
-            },
-            "cursor_id": {
-                "type": "string",
-                "description": "(Consumer only) Cursor id that keys the saved read position."
-            },
-            "checkpoint_store": {
-                "type": "string",
-                "format": "password",
-                "description": "(Consumer only) Where the read position is saved, e.g. `file:///var/lib/mqb/cursors.json`."
-            },
-            "polling_interval_ms": {
-                "type": "integer",
-                "description": "(Consumer only) Wait in milliseconds after an empty page. Defaults to 1000ms."
-            },
-            "max_polling_interval_ms": {
-                "type": "integer",
-                "description": "(Consumer only) If set, the wait doubles after each empty page up to this value."
-            }
-        }),
-        &["url"],
-    );
-    // Meilisearch indexes one large request far faster than many small ones.
-    schema["x-mqb-default-batch-size"] = json!(50_000);
-    schema
 }
 
 fn meilisearch(route: &str, value: &Value) -> anyhow::Result<Value> {
@@ -486,7 +363,7 @@ fn meilisearch(route: &str, value: &Value) -> anyhow::Result<Value> {
     {
         return Err(plugin_only(&format!("'{field}'")));
     }
-    let config: Meilisearch = serde_json::from_value(value.clone())?;
+    let config: MeilisearchConfig = serde_json::from_value(value.clone())?;
     let index = config.index.as_deref().unwrap_or(route);
     if index.contains("${") {
         return Err(plugin_only("a template in 'index'"));
@@ -519,7 +396,7 @@ fn meilisearch(route: &str, value: &Value) -> anyhow::Result<Value> {
         "url": base_url("meilisearch", &config.url)?,
         "headers": headers,
         "operation": config.operation,
-        "max_request_bytes": config.max_request_bytes,
+        "max_request_bytes": config.max_request_bytes.unwrap_or(MEILISEARCH_REQUEST_BYTES),
         "compression": config.compression,
         "connect_timeout_ms": config.connect_timeout_ms,
         "request_timeout_ms": config.request_timeout_ms,
@@ -544,9 +421,232 @@ fn meilisearch(route: &str, value: &Value) -> anyhow::Result<Value> {
     with_tls(resolved, config.tls)
 }
 
+fn qdrant(_route: &str, value: &Value) -> anyhow::Result<Value> {
+    let config: QdrantConfig = serde_json::from_value(value.clone())?;
+    let points = format!(
+        "/collections/{}/points",
+        segment("collection", &config.collection)?
+    );
+    let wait = config.wait.unwrap_or(true);
+    let mut headers = serde_json::Map::new();
+    if let Some(key) = config.api_key {
+        headers.insert("api-key".into(), json!(key));
+    }
+    let resolved = json!({
+        "url": base_url("qdrant", &config.url)?,
+        "headers": headers,
+        "operation": config.operation,
+        "compression": config.compression,
+        "request_timeout_ms": config.request_timeout_ms,
+        "upsert": {
+            "method": "PUT",
+            "path": format!("{points}?wait={wait}"),
+            "format": "json_array",
+            "envelope": r#"{"points":{documents}}"#
+        },
+        "delete": {
+            "path": format!("{points}/delete?wait={wait}"),
+            "envelope": r#"{"points":{ids}}"#
+        },
+        "read": {
+            "path": format!("{points}/scroll"),
+            "body": r#"{"limit":{limit},"offset":{cursor},"with_payload":true,"with_vector":true}"#,
+            "items": "/result/points",
+            "cursor": {"response": "/result/next_page_offset"},
+            "cursor_id": config.cursor_id,
+            "checkpoint_store": config.checkpoint_store
+        }
+    });
+    with_tls(resolved, config.tls)
+}
+
+const OPENAI_URL: &str = "https://api.openai.com/v1";
+
+/// The API's base URL; one without a path gets `/v1`, which every compatible server uses.
+fn openai_url(name: &str, url: Option<&str>) -> anyhow::Result<String> {
+    let url = url.unwrap_or(OPENAI_URL);
+    // `openai://` is the short form of `openai-chat://`.
+    let base = base_url(name, url).or_else(|error| match name {
+        "openai-chat" => base_url("openai", url),
+        _ => Err(error),
+    })?;
+    let parsed = url::Url::parse(&base).with_context(|| format!("'url' {base} is not a URL"))?;
+    Ok(match parsed.path() {
+        "" | "/" => format!("{base}/v1"),
+        _ => base,
+    })
+}
+
+fn bearer(api_key: Option<String>) -> serde_json::Map<String, Value> {
+    let mut headers = serde_json::Map::new();
+    if let Some(key) = api_key {
+        headers.insert("Authorization".into(), json!(format!("Bearer {key}")));
+    }
+    headers
+}
+
+fn openai_embeddings(_route: &str, value: &Value) -> anyhow::Result<Value> {
+    let config: OpenAiEmbeddingsConfig = serde_json::from_value(value.clone())?;
+    let mut envelope = format!(r#"{{"model":{},"input":{{requests}}"#, json!(config.model));
+    if let Some(dimensions) = config.dimensions {
+        envelope.push_str(&format!(r#","dimensions":{dimensions}"#));
+    }
+    envelope.push('}');
+    let mut resolved = json!({
+        "url": openai_url("openai-embeddings", config.url.as_deref())?,
+        "headers": bearer(config.api_key),
+        "request_timeout_ms": config.request_timeout_ms,
+        "query": {
+            "path": "/embeddings",
+            "format": "json_array",
+            // The text is one JSON string; the template escapes what a message puts in.
+            "request": json!(config.input).to_string(),
+            "envelope": envelope,
+            "responses": "/data",
+            "value": "/embedding"
+        }
+    });
+    if let Some(bytes) = config.max_request_bytes {
+        resolved["max_request_bytes"] = json!(bytes);
+    }
+    with_tls(resolved, config.tls)
+}
+
+fn openai_chat(_route: &str, value: &Value) -> anyhow::Result<Value> {
+    let config: OpenAiChatConfig = serde_json::from_value(value.clone())?;
+    let mut body = match nested("options", config.options)? {
+        Some(Value::Object(options)) => options,
+        None => serde_json::Map::new(),
+        Some(_) => bail!("'options' must be a JSON object"),
+    };
+    if let Some(field) = ["model", "messages", "stream"]
+        .into_iter()
+        .find(|field| body.contains_key(*field))
+    {
+        bail!("'options' cannot set '{field}'");
+    }
+    if config.json && !body.contains_key("response_format") {
+        body.insert("response_format".into(), json!({"type": "json_object"}));
+    }
+    body.insert("model".into(), json!(config.model));
+    let system = config.system.as_deref();
+    let query = match config.messages_per_request {
+        Some(0) => bail!("'messages_per_request' must be at least 1"),
+        Some(count) => bundled_chat(body, system, &config.prompt, config.json, count)?,
+        None => {
+            let mut messages = Vec::new();
+            if let Some(system) = system {
+                messages.push(json!({"role": "system", "content": system}));
+            }
+            messages.push(json!({"role": "user", "content": config.prompt}));
+            body.insert("messages".into(), json!(messages));
+            json!({
+                "path": "/chat/completions",
+                "format": "json_array",
+                // Serializing escapes the literal text; the template escapes what a message puts in.
+                "request": Value::Object(body).to_string(),
+                "per_message": true,
+                "value": "/choices/0/message/content",
+                "error": "/error/message",
+                "parse_value": config.json
+            })
+        }
+    };
+    let mut resolved = json!({
+        "url": openai_url("openai-chat", config.url.as_deref())?,
+        "headers": bearer(config.api_key),
+        "request_timeout_ms": config.request_timeout_ms,
+        "query": query
+    });
+    resolved["query"]["concurrency"] = json!(config.concurrency.unwrap_or(8));
+    if let Some(bytes) = config.max_request_bytes {
+        resolved["max_request_bytes"] = json!(bytes);
+    }
+    with_tls(resolved, config.tls)
+}
+
+/// What a bundled request adds to the system message.
+const BUNDLED: &str = "The user message holds numbered inputs; each starts with its number and \
+    a colon. Treat every input on its own. Answer with one JSON object \
+    {\"answers\": [{\"n\": 1, \"answer\": ...}, ...]} that has exactly one entry per input; \
+    \"n\" is the number of the input.";
+
+/// The query that sends `count` messages as numbered inputs of one completion.
+fn bundled_chat(
+    mut body: serde_json::Map<String, Value>,
+    system: Option<&str>,
+    prompt: &str,
+    json: bool,
+    count: usize,
+) -> anyhow::Result<Value> {
+    const REQUESTS: &str = "{requests}";
+    // The system message is sent once per request, so it has no message to read from.
+    if system.is_some_and(|system| system.contains("${") || system.contains(REQUESTS)) {
+        bail!("'system' cannot hold '${{…}}' or '{REQUESTS}' with 'messages_per_request'");
+    }
+    if prompt.contains("{index}") {
+        bail!("'prompt' cannot hold '{{index}}' with 'messages_per_request'");
+    }
+    let entry = match json {
+        true => "Each \"answer\" is the JSON object that answers its input.",
+        false => "Each \"answer\" is a string, the answer to its input.",
+    };
+    let system = [system.unwrap_or_default(), BUNDLED, entry].join("\n");
+    // The answers arrive as one JSON object whatever a single answer is.
+    body.entry("response_format")
+        .or_insert_with(|| json!({"type": "json_object"}));
+    body.insert(
+        "messages".into(),
+        json!([
+            {"role": "system", "content": system.trim_start()},
+            {"role": "user", "content": REQUESTS}
+        ]),
+    );
+    let envelope = Value::Object(body).to_string();
+    Ok(json!({
+        "path": "/chat/completions",
+        "format": "json_array",
+        "request": json!({"type": "text", "text": format!("{{index}}: {prompt}")}).to_string(),
+        "envelope": envelope.replace(&format!("\"{REQUESTS}\""), REQUESTS),
+        "max_messages": count,
+        "responses_text": "/choices/0/message/content",
+        "responses": "/answers",
+        "index": "/n",
+        "value": "/answer",
+        "stop_reason": "/choices/0/finish_reason",
+        "split_on_reject": true
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_typed_config_is_the_endpoint_of_its_name() {
+        use crate::models::Endpoint;
+        let endpoint: Endpoint = QdrantConfig {
+            url: "http://localhost:6333".into(),
+            collection: "docs".into(),
+            ..Default::default()
+        }
+        .into();
+        assert!(matches!(endpoint.endpoint_type, EndpointType::Qdrant(_)));
+        assert_eq!(endpoint.endpoint_type.name(), "qdrant");
+        // A route file names it by its key and gets the same variant back.
+        let written = serde_json::to_value(&endpoint).expect("serializes");
+        assert_eq!(written["qdrant"]["collection"], "docs");
+        let parsed: Endpoint = serde_json::from_value(written).expect("parses");
+        assert!(matches!(parsed.endpoint_type, EndpointType::Qdrant(_)));
+        // No registration: a route finds the built-in endpoint by its name.
+        assert!(builtin("qdrant").is_some() && builtin("acme").is_none());
+        // A config of one's own type stays a custom endpoint, without its unset fields.
+        let EndpointType::Custom { name, config } = named_endpoint("acme", &json!({"a": 1, "b": null}))
+        else {
+            panic!("a custom endpoint");
+        };
+        assert_eq!((name.as_str(), config), ("acme", json!({"a": 1})));
+    }
     use crate::plugin::test_support::StubHttpServer;
     use crate::CanonicalMessage;
 
@@ -575,13 +675,18 @@ mod tests {
             ("typesense", json!({"collection": "books"})),
             ("elasticsearch", json!({"index": "books"})),
             ("meilisearch", json!({"index": "books"})),
+            ("qdrant", json!({"collection": "books"})),
+            ("openai_chat", json!({"model": "m", "prompt": "p"})),
+            ("openai_embeddings", json!({"model": "m", "input": "i"})),
         ] {
+            // A scheme cannot hold `_`, so the URI of `openai_embeddings` spells it with `-`.
+            let scheme = name.replace('_', "-");
             for tls in [
                 json!({"required": true, "ca_file": "/etc/ca.pem"}),
                 json!(r#"{"required": true, "ca_file": "/etc/ca.pem"}"#),
             ] {
                 let mut config = own.clone();
-                config["url"] = json!(format!("{name}+https://search.example"));
+                config["url"] = json!(format!("{scheme}+https://search.example"));
                 config["tls"] = tls;
                 let resolved = resolve(name, &config).unwrap_or_else(|e| panic!("{name}: {e:#}"));
                 assert!(resolved.tls.required, "{name}");
@@ -592,7 +697,7 @@ mod tests {
                 );
             }
             let mut plain = own.clone();
-            plain["url"] = json!(format!("{name}://localhost"));
+            plain["url"] = json!(format!("{scheme}://localhost"));
             assert!(!resolve(name, &plain).unwrap().tls.required, "{name}");
         }
     }
@@ -752,9 +857,32 @@ mod tests {
                 "meilisearch",
                 json!({"url": "http://h", "index": "a", "primary_key": "id&x=1"}),
             ),
+            ("qdrant", json!({"url": "http://h", "collection": "a/b"})),
+            ("openai_chat", json!({"prompt": "p"})),
+            (
+                "openai_chat",
+                json!({"model": "m", "prompt": "p", "options": {"stream": true}}),
+            ),
+            (
+                "openai_chat",
+                json!({"model": "m", "prompt": "p", "options": "[1]"}),
+            ),
+            (
+                "openai_chat",
+                json!({"model": "m", "prompt": "p", "concurrency": 0}),
+            ),
+            ("openai_embeddings", json!({"model": "m"})),
+            (
+                "openai_embeddings",
+                json!({"model": "m", "input": "i", "url": "ftp://h"}),
+            ),
         ] {
-            let error = preset(name).config("route", &bad).expect_err("refused");
-            assert!(error.is::<InvalidConfig>(), "{name}: {error:#}");
+            let refused = preset(name)
+                .config("route", &bad)
+                .and_then(|config| HttpBulkPublisher::new(&config).map(|_| ()));
+            let error = refused.expect_err("refused");
+            let named = error.is::<InvalidConfig>() || error.to_string().contains("http_bulk");
+            assert!(named, "{name}: {error:#}");
         }
     }
 
@@ -791,21 +919,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn every_preset_declares_a_uri_and_only_meilisearch_is_an_input() {
+    async fn every_preset_declares_a_uri_and_only_two_are_inputs() {
         for name in preset_names() {
             let preset = preset(name);
-            let schema = preset.config_schema().expect("schema");
-            assert!(
-                schema["properties"]["url"]["x-mqb-uri"].is_string(),
-                "{name}"
-            );
+            #[cfg(feature = "schema")]
+            {
+                let schema = preset.config_schema().expect("schema");
+                let properties = &schema["properties"];
+                assert!(properties["url"]["x-mqb-uri"].is_string(), "{name}");
+                assert_eq!(properties["api_key"]["format"], "password", "{name}");
+                assert_eq!(schema["additionalProperties"], false, "{name}");
+            }
             let config = match name {
-                "typesense" => json!({"url": "http://localhost:1", "collection": "a"}),
+                "typesense" | "qdrant" => json!({"url": "http://localhost:1", "collection": "a"}),
+                "openai_chat" => json!({"model": "m", "prompt": "p"}),
+                "openai_embeddings" => json!({"model": "m", "input": "i"}),
                 _ => json!({"url": "http://localhost:1", "index": "a"}),
             };
             let consumer = preset.create_consumer("route", &config).await;
             match name {
-                "meilisearch" => assert!(consumer.is_ok()),
+                "meilisearch" | "qdrant" => assert!(consumer.is_ok(), "{name}"),
                 _ => assert!(consumer.err().expect("output only").is::<InvalidConfig>()),
             }
         }
@@ -854,6 +987,374 @@ mod tests {
             ]
         );
         assert_eq!(calls[2].2, r#"["b"]"#);
+    }
+
+    #[tokio::test]
+    async fn qdrant_puts_points_deletes_by_id_and_scrolls() {
+        let server = StubHttpServer::start(|request| {
+            let body = match request.target.as_str() {
+                "/collections/books/points/scroll" => {
+                    r#"{"result":{"points":[{"id":1,"vector":[0.1]}],"next_page_offset":null}}"#
+                }
+                _ => r#"{"result":{"status":"completed"},"status":"ok"}"#,
+            };
+            (200, body.to_string())
+        })
+        .await
+        .expect("stub server");
+        let config = json!({
+            "url": server.url(), "collection": "books", "api_key": "k",
+            "operation": "${metadata:op}"
+        });
+        let preset = preset("qdrant");
+        let publisher = preset.create_publisher("route", &config).await.unwrap();
+        let point = r#"{"id":1,"vector":[0.1],"payload":{"title":"Dune"}}"#;
+        publisher
+            .send_batch(vec![point.into(), delete(r#"{"id":2}"#)])
+            .await
+            .unwrap();
+        let mut consumer = preset.create_consumer("route", &config).await.unwrap();
+        let read = consumer.receive_batch(10).await.unwrap();
+        assert_eq!(read.messages.len(), 1);
+
+        assert_eq!(server.requests()[0].header("api-key"), Some("k"));
+        let scroll = r#"{"limit":10,"offset":null,"with_payload":true,"with_vector":true}"#;
+        assert_eq!(
+            calls(&server),
+            vec![
+                (
+                    "PUT".to_string(),
+                    "/collections/books/points?wait=true".to_string(),
+                    format!(r#"{{"points":[{point}]}}"#)
+                ),
+                (
+                    "POST".to_string(),
+                    "/collections/books/points/delete?wait=true".to_string(),
+                    r#"{"points":[2]}"#.to_string()
+                ),
+                (
+                    "POST".to_string(),
+                    "/collections/books/points/scroll".to_string(),
+                    scroll.to_string()
+                ),
+            ]
+        );
+
+        let config = json!({"url": "qdrant://h:6333", "collection": "books", "wait": false});
+        let resolved = resolve("qdrant", &config).unwrap();
+        assert_eq!(resolved.url, "http://h:6333");
+        assert_eq!(
+            resolved.upsert.unwrap().path,
+            "/collections/books/points?wait=false"
+        );
+    }
+
+    #[test]
+    fn an_openai_url_without_a_path_gets_v1() {
+        let url = |name: &str, url: Option<&str>| openai_url(name, url).unwrap();
+        assert_eq!(url("openai-chat", None), "https://api.openai.com/v1");
+        assert_eq!(
+            url("openai-chat", Some("openai-chat://localhost:11434")),
+            "http://localhost:11434/v1"
+        );
+        assert_eq!(
+            url("openai-chat", Some("openai-chat+https://h/api/v3/")),
+            "https://h/api/v3"
+        );
+        assert_eq!(
+            url("openai-embeddings", Some("openai-embeddings://h:1/")),
+            "http://h:1/v1"
+        );
+        assert_eq!(url("openai-chat", Some("http://h/v1")), "http://h/v1");
+        assert_eq!(url("openai-chat", Some("openai://h:1")), "http://h:1/v1");
+        assert!(openai_url("openai-embeddings", Some("openai://h:1")).is_err());
+    }
+
+    #[tokio::test]
+    async fn openai_embeddings_asks_once_for_a_batch() {
+        let answer =
+            r#"{"data":[{"index":0,"embedding":[0.1,0.2]},{"index":1,"embedding":[0.3,0.4]}]}"#;
+        let server = StubHttpServer::start(move |_| (200, answer.to_string()))
+            .await
+            .expect("stub server");
+        let config = json!({
+            "url": server.url(), "api_key": "k", "model": "all-minilm",
+            "input": "${payload:title}: ${payload:body}", "dimensions": 2
+        });
+        let publisher = preset("openai_embeddings")
+            .create_publisher("route", &config)
+            .await
+            .unwrap();
+        let rows: Vec<CanonicalMessage> = vec![
+            r#"{"title":"Dune","body":"a \"desert\"\nplanet"}"#.into(),
+            r#"{"title":"Emma","body":"a village"}"#.into(),
+        ];
+        let vectors = publisher.lookup_batch(&rows).await.unwrap().unwrap();
+
+        assert_eq!(
+            vectors,
+            vec![Some(json!([0.1, 0.2])), Some(json!([0.3, 0.4]))]
+        );
+        assert_eq!(
+            server.requests()[0].header("authorization"),
+            Some("Bearer k")
+        );
+        let body = concat!(
+            r#"{"model":"all-minilm","input":["#,
+            r#""Dune: a \"desert\"\nplanet","Emma: a village"],"dimensions":2}"#
+        );
+        assert_eq!(
+            calls(&server),
+            vec![(
+                "POST".to_string(),
+                "/v1/embeddings".to_string(),
+                body.to_string()
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn openai_chat_asks_per_message_and_a_busy_answer_fails_only_its_message() {
+        let server = StubHttpServer::start(|request| {
+            let body = String::from_utf8_lossy(&request.body);
+            if body.contains("busy") {
+                return (429, r#"{"error":{"message":"slow down"}}"#.to_string());
+            }
+            let content = if body.contains("json_object") {
+                r#"{\"label\":\"spam\"}"#
+            } else {
+                "a summary"
+            };
+            let answer = format!(r#"{{"choices":[{{"message":{{"content":"{content}"}}}}]}}"#);
+            (200, answer)
+        })
+        .await
+        .expect("stub server");
+        let config = json!({
+            "url": server.url(), "api_key": "k", "model": "m",
+            "system": "Answer in \"one\" line.", "prompt": "Summarise: ${payload:body}",
+            "options": {"temperature": 0}
+        });
+        let publisher = preset("openai_chat")
+            .create_publisher("route", &config)
+            .await
+            .unwrap();
+        let rows: Vec<CanonicalMessage> = vec![
+            r#"{"body":"a \"quoted\" text"}"#.into(),
+            r#"{"body":"busy"}"#.into(),
+        ];
+        // The lookup middleware asks one by one, with its own concurrency.
+        assert!(publisher.lookup_batch(&rows).await.is_none());
+        let sent = publisher.send_batch(rows).await.unwrap();
+
+        let crate::outcomes::SentBatch::Partial { responses, failed } = sent else {
+            panic!("a query answers with responses");
+        };
+        let responses = responses.unwrap();
+        assert_eq!(responses.len(), 1);
+        assert_eq!(responses[0].payload.as_ref(), br#""a summary""#);
+        assert_eq!(failed.len(), 1);
+        assert!(
+            matches!(failed[0].1, crate::errors::PublisherError::Retryable(_)),
+            "{}",
+            failed[0].1
+        );
+        let first = &calls(&server)[0];
+        assert_eq!(first.1, "/v1/chat/completions");
+        // Compared as JSON: the field order depends on serde_json's `preserve_order`.
+        let body: Value = serde_json::from_str(&first.2).unwrap();
+        let expected = json!({
+            "model": "m",
+            "temperature": 0,
+            "messages": [
+                {"role": "system", "content": "Answer in \"one\" line."},
+                {"role": "user", "content": "Summarise: a \"quoted\" text"}
+            ]
+        });
+        assert_eq!(body, expected);
+
+        let mut config = config;
+        config["json"] = json!(true);
+        let publisher = preset("openai_chat")
+            .create_publisher("route", &config)
+            .await
+            .unwrap();
+        let sent = publisher.send(r#"{"body":"x"}"#.into()).await.unwrap();
+        let crate::outcomes::Sent::Response(answer) = sent else {
+            panic!("a query answers with a response");
+        };
+        assert_eq!(answer.payload.as_ref(), br#"{"label":"spam"}"#);
+    }
+
+    /// A model that answers each numbered input with its text in capitals, last input first.
+    /// Words in an input make it misbehave the way a real one does.
+    fn bundling_model(request: &crate::plugin::test_support::StubRequest) -> (u16, String) {
+        let body: Value = serde_json::from_slice(&request.body).unwrap();
+        let parts = body["messages"][1]["content"].as_array().unwrap();
+        let texts: Vec<&str> = parts.iter().map(|p| p["text"].as_str().unwrap()).collect();
+        let has = |word: &str| texts.iter().any(|text| text.contains(word));
+        if has("busy") {
+            return (429, r#"{"error":{"message":"slow down"}}"#.to_string());
+        }
+        if has("huge") {
+            return (400, r#"{"error":{"message":"context length"}}"#.to_string());
+        }
+        let mut answers: Vec<Value> = texts
+            .iter()
+            .map(|text| {
+                let (number, text) = text.split_once(": Text: ").unwrap();
+                json!({"n": number.parse::<u64>().unwrap(), "answer": text.to_uppercase()})
+            })
+            .rev()
+            .collect();
+        let many = texts.len() > 1;
+        if has("lost") && many {
+            answers.pop();
+        }
+        if has("twice") && many {
+            answers[0]["n"] = answers[1]["n"].clone();
+        }
+        if has("stranger") && many {
+            answers[0]["n"] = json!(99);
+        }
+        let mut choice = json!({
+            "message": {"content": json!({"answers": answers}).to_string()},
+            "finish_reason": "stop"
+        });
+        if has("long") {
+            choice = json!({"message": {"content": "{\"answers\":[{\"n\":1,\"ans"},
+                "finish_reason": "length"});
+        }
+        if has("refuse") {
+            choice["message"] = json!({"content": null, "refusal": "I cannot help with that."});
+        }
+        (200, json!({"choices": [choice]}).to_string())
+    }
+
+    #[tokio::test]
+    async fn openai_chat_bundles_messages_and_matches_the_answers_by_number() {
+        let server = StubHttpServer::start(bundling_model)
+            .await
+            .expect("stub server");
+        let config = json!({
+            "url": server.url(), "model": "m", "system": "Shout.",
+            "prompt": "Text: ${payload:body}", "messages_per_request": 2, "concurrency": 1
+        });
+        let publisher = preset("openai_chat")
+            .create_publisher("route", &config)
+            .await
+            .unwrap();
+        let answers = publisher.lookup_batch(&rows(&["a", "b \"c\"", "d"])).await;
+        // The model answers the last input first; the number puts each answer in its place.
+        assert_eq!(
+            answers.unwrap().unwrap(),
+            vec![Some(json!("A")), Some(json!("B \"C\"")), Some(json!("D"))]
+        );
+        let sent = calls(&server);
+        assert_eq!(sent.len(), 2);
+        let body: Value = serde_json::from_str(&sent[0].2).unwrap();
+        assert_eq!(body["response_format"], json!({"type": "json_object"}));
+        let system = body["messages"][0]["content"].as_str().unwrap();
+        assert!(system.starts_with("Shout.\nThe user message holds numbered inputs"));
+        assert_eq!(
+            body["messages"][1]["content"],
+            json!([
+                {"type": "text", "text": "1: Text: a"},
+                {"type": "text", "text": "2: Text: b \"c\""}
+            ])
+        );
+        // The third message opens the next request and is its first input.
+        let body: Value = serde_json::from_str(&sent[1].2).unwrap();
+        let expected = json!([{"type": "text", "text": "1: Text: d"}]);
+        assert_eq!(body["messages"][1]["content"], expected);
+
+        for (extra, reason) in [
+            (json!({"messages_per_request": 0}), "at least 1"),
+            (json!({"system": "For ${payload:lang}"}), "'system' cannot"),
+            (json!({"prompt": "{index} ${payload:body}"}), "'prompt' cannot"),
+        ] {
+            let mut bad = config.clone();
+            bad.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            let error = preset("openai_chat").config("route", &bad).unwrap_err();
+            assert!(format!("{error:#}").contains(reason), "{error:#}");
+        }
+    }
+
+    fn rows(bodies: &[&str]) -> Vec<CanonicalMessage> {
+        let row = |body: &&str| json!({"body": body}).to_string().into();
+        bodies.iter().map(row).collect()
+    }
+
+    #[tokio::test]
+    async fn openai_chat_halves_a_bundle_until_the_bad_message_stands_alone() {
+        // (inputs, answers, reason of the one failure, requests sent)
+        for (inputs, answered, reason, requests) in [
+            // Too few entries, a number twice, a number nobody has: nothing can be matched.
+            (vec!["a", "lost", "c", "d"], 4, None, 5),
+            (vec!["a", "twice", "c", "d"], 4, None, 5),
+            (vec!["a", "stranger", "c", "d"], 4, None, 5),
+            // Refused for its size, cut off, or declined: only that message fails.
+            (vec!["a", "huge", "c", "d"], 3, Some("context length"), 5),
+            (vec!["a", "long", "c", "d"], 3, Some("ended with 'length'"), 5),
+            (vec!["a", "b", "c", "refuse"], 3, Some("no array of 1 entries"), 5),
+        ] {
+            let server = StubHttpServer::start(bundling_model)
+                .await
+                .expect("stub server");
+            let config = json!({
+                "url": server.url(), "model": "m",
+                "prompt": "Text: ${payload:body}", "messages_per_request": 4
+            });
+            let publisher = preset("openai_chat")
+                .create_publisher("route", &config)
+                .await
+                .unwrap();
+            let sent = publisher.send_batch(rows(&inputs)).await.unwrap();
+            let crate::outcomes::SentBatch::Partial { responses, failed } = sent else {
+                panic!("a query answers with responses");
+            };
+            let responses = responses.unwrap();
+            assert_eq!(responses.len(), answered, "{inputs:?}");
+            assert_eq!(responses[0].payload.as_ref(), br#""A""#, "{inputs:?}");
+            assert_eq!(calls(&server).len(), requests, "{inputs:?}");
+            match reason {
+                Some(reason) => {
+                    assert_eq!(failed.len(), 1, "{inputs:?}");
+                    let error = &failed[0].1;
+                    assert!(error.to_string().contains(reason), "{error}");
+                    let permanent = matches!(error, crate::errors::PublisherError::NonRetryable(_));
+                    assert!(permanent, "{error}");
+                }
+                None => assert!(failed.is_empty(), "{inputs:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn openai_chat_fails_a_busy_bundle_as_retryable_without_splitting_it() {
+        let server = StubHttpServer::start(bundling_model)
+            .await
+            .expect("stub server");
+        let config = json!({
+            "url": server.url(), "model": "m",
+            "prompt": "Text: ${payload:body}", "messages_per_request": 2, "concurrency": 1
+        });
+        let publisher = preset("openai_chat")
+            .create_publisher("route", &config)
+            .await
+            .unwrap();
+        let error = publisher
+            .send_batch(rows(&["busy", "b", "c", "d"]))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, crate::errors::PublisherError::Retryable(_)),
+            "{error}"
+        );
+        // Neither halves nor the bundle after it.
+        assert_eq!(calls(&server).len(), 1);
     }
 
     #[test]

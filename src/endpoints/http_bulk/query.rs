@@ -4,7 +4,8 @@
 //  git clone https://github.com/marcomq/mq-bridge
 
 //! A batch of lookups answered by one request: every message renders its part
-//! of the body, and the answers are matched to the messages by position.
+//! of the body, and the answers are matched to the messages by position. With
+//! `per_message` each message is a request of its own.
 
 use super::publisher::{around, scalar_text, Failure};
 use super::{quoted, Connection, JSON};
@@ -13,14 +14,23 @@ use crate::support::http_status;
 use crate::support::interpolation::CompiledTemplate;
 use crate::CanonicalMessage;
 use anyhow::{bail, Context};
+use futures::StreamExt;
 use reqwest::header::{HeaderValue, CONTENT_TYPE};
 use serde_json::Value;
 
 const REQUESTS: &str = "{requests}";
+const INDEX: &str = "{index}";
 const NDJSON: &str = "application/x-ndjson";
+const DEFAULT_CONCURRENCY: usize = 8;
 
 /// What one message's lookup found (`None` = nothing), or why it failed.
-pub(super) type Answer = Result<Option<Value>, String>;
+pub(super) type Answer = Result<Option<Value>, Failure>;
+
+/// A request that gave no answers, and whether one with fewer messages may.
+struct Refused {
+    failure: Failure,
+    narrows: bool,
+}
 
 pub(super) struct Query {
     method: reqwest::Method,
@@ -28,11 +38,21 @@ pub(super) struct Query {
     format: HttpBulkFormat,
     content_type: HeaderValue,
     request: CompiledTemplate,
+    /// The rest of the request after `{index}`, when the template numbers its messages.
+    numbered: Option<CompiledTemplate>,
     envelope: (String, String),
     responses: String,
+    responses_text: Option<String>,
+    max_messages: usize,
+    index: Option<String>,
+    stop_reason: Option<String>,
+    split_on_reject: bool,
     value: Option<String>,
     found: Option<String>,
     error: Option<String>,
+    per_message: bool,
+    parse_value: bool,
+    concurrency: usize,
 }
 
 impl Query {
@@ -48,6 +68,39 @@ impl Query {
             Some(envelope) => around(envelope, REQUESTS, "query.envelope")?,
             None => Default::default(),
         };
+        if config.per_message && (config.envelope.is_some() || !config.responses.is_empty()) {
+            bail!("http_bulk query.per_message excludes 'envelope' and 'responses'");
+        }
+        let batched_only = config.responses_text.is_some()
+            || config.max_messages.is_some()
+            || config.index.is_some()
+            || config.split_on_reject;
+        if config.per_message && batched_only {
+            bail!(
+                "http_bulk query.per_message excludes 'responses_text', 'max_messages', \
+                 'index' and 'split_on_reject'"
+            );
+        }
+        let concurrency = match config.concurrency {
+            Some(0) => bail!("http_bulk query.concurrency must be at least 1"),
+            Some(concurrency) => concurrency,
+            None if config.per_message => DEFAULT_CONCURRENCY,
+            None => 1,
+        };
+        if config.max_messages == Some(0) {
+            bail!("http_bulk query.max_messages must be at least 1");
+        }
+        let compile = |template: &str| {
+            CompiledTemplate::compile(template, Some(JSON))
+                .context("Invalid http_bulk query.request template")
+        };
+        let (request, numbered) = match config.request.split_once(INDEX) {
+            Some((_, after)) if after.contains(INDEX) => {
+                bail!("http_bulk query.request may contain '{INDEX}' only once")
+            }
+            Some((before, after)) => (before, Some(compile(after)?)),
+            None => (config.request.as_str(), None),
+        };
         let content_type =
             config
                 .content_type
@@ -60,19 +113,36 @@ impl Query {
             format: config.format,
             content_type: HeaderValue::from_str(content_type)
                 .context("http_bulk query.content_type is not a valid header value")?,
-            request: CompiledTemplate::compile(&config.request, Some(JSON))
-                .context("Invalid http_bulk query.request template")?,
+            request: compile(request)?,
+            numbered,
             envelope,
             responses: config.responses.clone(),
+            responses_text: config.responses_text.clone(),
+            max_messages: config.max_messages.unwrap_or(usize::MAX),
+            index: config.index.clone(),
+            stop_reason: config.stop_reason.clone(),
+            split_on_reject: config.split_on_reject,
             value: config.value.clone(),
             found: config.found.clone(),
             error: config.error.clone(),
+            per_message: config.per_message,
+            parse_value: config.parse_value,
+            concurrency,
         })
     }
 
+    pub(super) fn per_message(&self) -> bool {
+        self.per_message
+    }
+
     /// One message's part of the body: lines for `ndjson`, one JSON value otherwise.
-    fn part(&self, message: &CanonicalMessage) -> Result<Vec<u8>, String> {
-        let rendered = self.request.render(Some(message));
+    /// `number` is its place in the request, from 1.
+    fn part(&self, message: &CanonicalMessage, number: usize) -> Result<Vec<u8>, String> {
+        let mut rendered = self.request.render(Some(message)).to_vec();
+        if let Some(rest) = &self.numbered {
+            rendered.extend_from_slice(number.to_string().as_bytes());
+            rendered.extend_from_slice(&rest.render(Some(message)));
+        }
         let part = rendered.trim_ascii();
         if part.is_empty() {
             return Err("the rendered query request is empty".to_string());
@@ -103,51 +173,245 @@ impl Query {
         }
     }
 
-    /// Answers every request, in order, with as few HTTP requests as
-    /// `max_request_bytes` allows. A refused request fails them all.
+    /// Answers every request, in order, with as few HTTP requests as `max_messages`
+    /// and `max_request_bytes` allow. A refused request fails them all.
     pub(super) async fn answers(
         &self,
         connection: &Connection,
         max_request_bytes: usize,
         requests: &[CanonicalMessage],
     ) -> Result<Vec<Answer>, Failure> {
+        if self.per_message {
+            return Ok(self.each(connection, requests).await);
+        }
         let mut answers: Vec<Answer> = requests.iter().map(|_| Ok(None)).collect();
+        let mut bodies = Vec::new();
+        let mut groups: Vec<Vec<usize>> = Vec::new();
         let mut body = Vec::new();
         let mut indices = Vec::new();
         for (index, message) in requests.iter().enumerate() {
-            let part = match self.part(message) {
-                Ok(part) => part,
-                Err(reason) => {
-                    answers[index] = Err(reason);
-                    continue;
+            let mut part = self.part(message, indices.len() + 1);
+            let size = part.as_ref().map_or(0, Vec::len);
+            let full = indices.len() >= self.max_messages
+                || (!indices.is_empty() && body.len() + size + 1 > max_request_bytes);
+            if full {
+                bodies.push(std::mem::take(&mut body));
+                groups.push(std::mem::take(&mut indices));
+                if self.numbered.is_some() {
+                    part = self.part(message, 1);
                 }
-            };
-            if !indices.is_empty() && body.len() + part.len() + 1 > max_request_bytes {
-                let sent = std::mem::take(&mut body);
-                self.ask(connection, sent, &indices, &mut answers).await?;
-                indices.clear();
             }
-            self.append(&mut body, &part);
-            indices.push(index);
+            match part {
+                Ok(part) => {
+                    self.append(&mut body, &part);
+                    indices.push(index);
+                }
+                Err(reason) => answers[index] = Err(Failure::permanent(reason)),
+            }
         }
         if !indices.is_empty() {
-            self.ask(connection, body, &indices, &mut answers).await?;
+            bodies.push(body);
+            groups.push(indices);
+        }
+        // Collected first: a closure passed to `map` is not general enough over the borrow.
+        let calls: Vec<_> = bodies
+            .into_iter()
+            .zip(&groups)
+            .map(|(body, indices)| self.ask(connection, body, indices, requests))
+            .collect();
+        let mut asked = futures::stream::iter(calls).buffered(self.concurrency);
+        let mut groups = groups.iter();
+        // Leaving at the first refusal drops the requests that are not sent yet.
+        while let (Some(found), Some(indices)) = (asked.next().await, groups.next()) {
+            for (index, answer) in indices.iter().zip(found?) {
+                answers[*index] = answer;
+            }
         }
         Ok(answers)
     }
 
+    /// The answers of one request, in the order of `indices`.
     async fn ask(
         &self,
         connection: &Connection,
         mut body: Vec<u8>,
         indices: &[usize],
-        answers: &mut [Answer],
-    ) -> Result<(), Failure> {
+        requests: &[CanonicalMessage],
+    ) -> Result<Vec<Answer>, Failure> {
+        self.close(&mut body);
+        match self.matched(connection, body, indices.len()).await {
+            Ok(answers) => Ok(answers),
+            Err(refused) if self.split_on_reject && refused.narrows => {
+                tracing::warn!(
+                    messages = indices.len(),
+                    reason = %refused.failure.text,
+                    "http_bulk query: asking again with fewer messages per request"
+                );
+                Ok(self.halves(connection, indices, requests, refused.failure).await)
+            }
+            Err(refused) => Err(refused.failure),
+        }
+    }
+
+    /// Asks again in halves until the messages that cannot be answered stand alone.
+    async fn halves(
+        &self,
+        connection: &Connection,
+        indices: &[usize],
+        requests: &[CanonicalMessage],
+        failure: Failure,
+    ) -> Vec<Answer> {
+        if indices.len() == 1 {
+            return vec![Err(failure)];
+        }
+        let mut answers: Vec<Answer> = indices.iter().map(|_| Ok(None)).collect();
+        let middle = indices.len() / 2;
+        let mut pending = vec![middle..indices.len(), 0..middle];
+        while let Some(range) = pending.pop() {
+            let mut body = Vec::new();
+            for (place, index) in indices[range.clone()].iter().enumerate() {
+                // The same messages were rendered for the request that is split.
+                if let Ok(part) = self.part(&requests[*index], place + 1) {
+                    self.append(&mut body, &part);
+                }
+            }
+            self.close(&mut body);
+            match self.matched(connection, body, range.len()).await {
+                Ok(found) => {
+                    for (slot, answer) in answers[range].iter_mut().zip(found) {
+                        *slot = answer;
+                    }
+                }
+                Err(refused) if refused.narrows && range.len() > 1 => {
+                    let middle = range.start + range.len() / 2;
+                    pending.push(middle..range.end);
+                    pending.push(range.start..middle);
+                }
+                Err(refused) => {
+                    for slot in &mut answers[range] {
+                        *slot = Err(refused.failure.clone());
+                    }
+                }
+            }
+        }
+        answers
+    }
+
+    /// Sends one body and matches its `count` answers to the messages.
+    async fn matched(
+        &self,
+        connection: &Connection,
+        body: Vec<u8>,
+        count: usize,
+    ) -> Result<Vec<Answer>, Refused> {
+        let text = self.post(connection, body).await.map_err(|failure| Refused {
+            narrows: failure.refused_content(),
+            failure,
+        })?;
+        let entries = self.entries(&text, count).map_err(|failure| Refused {
+            narrows: true,
+            failure,
+        })?;
+        Ok(entries.iter().map(|entry| self.answer(entry)).collect())
+    }
+
+    fn close(&self, body: &mut Vec<u8>) {
         if self.format == HttpBulkFormat::JsonArray {
             body.push(b']');
             body.extend_from_slice(self.envelope.1.as_bytes());
         }
-        let label = format!("{} {}", self.method, self.path);
+    }
+
+    /// The `count` answers of a response, in the order of the messages: by `index` when
+    /// the entries carry one, else by position.
+    fn entries(&self, text: &str, count: usize) -> Result<Vec<Value>, Failure> {
+        let outer: Option<Value> = serde_json::from_str(text).ok();
+        let mut answer = match &self.responses_text {
+            Some(pointer) => outer
+                .as_ref()
+                .and_then(|outer| outer.pointer(pointer)?.as_str())
+                .and_then(|inner| serde_json::from_str(inner).ok()),
+            None => outer.clone(),
+        };
+        let entries = answer
+            .as_mut()
+            .and_then(|answer| answer.pointer_mut(&self.responses))
+            .and_then(Value::as_array_mut)
+            .filter(|entries| entries.len() == count)
+            .map(std::mem::take)
+            .and_then(|entries| self.ordered(entries));
+        entries.ok_or_else(|| {
+            let stop = self.stop_reason.as_ref().and_then(|pointer| {
+                let reason = outer.as_ref()?.pointer(pointer)?.as_str()?;
+                Some(format!(" (the response ended with '{reason}')"))
+            });
+            let numbered = match self.index {
+                Some(_) => format!(" numbered 1 to {count}"),
+                None => String::new(),
+            };
+            Failure::permanent(format!(
+                "{} answered no array of {count} entries{numbered} at '{}'{}: {}",
+                self.label(),
+                self.responses,
+                stop.unwrap_or_default(),
+                quoted(text)
+            ))
+        })
+    }
+
+    /// The entries by their `index`; `None` when a number is missing, repeated or unknown.
+    fn ordered(&self, entries: Vec<Value>) -> Option<Vec<Value>> {
+        let Some(pointer) = &self.index else {
+            return Some(entries);
+        };
+        let mut ordered: Vec<Option<Value>> = entries.iter().map(|_| None).collect();
+        for entry in entries {
+            let number = match entry.pointer(pointer)? {
+                Value::Number(number) => number.as_u64()?,
+                Value::String(number) => number.trim().parse().ok()?,
+                _ => return None,
+            };
+            let slot = ordered.get_mut(usize::try_from(number).ok()?.checked_sub(1)?)?;
+            if slot.replace(entry).is_some() {
+                return None;
+            }
+        }
+        ordered.into_iter().collect()
+    }
+
+    /// One request per message, `concurrency` at a time; a refused one fails its message alone.
+    async fn each(&self, connection: &Connection, requests: &[CanonicalMessage]) -> Vec<Answer> {
+        // Collected first: a closure passed to `map` is not general enough over the borrow.
+        let calls: Vec<_> = requests
+            .iter()
+            .map(|message| self.one(connection, message))
+            .collect();
+        futures::stream::iter(calls)
+            .buffered(self.concurrency)
+            .collect()
+            .await
+    }
+
+    async fn one(&self, connection: &Connection, message: &CanonicalMessage) -> Answer {
+        let part = self.part(message, 1).map_err(Failure::permanent)?;
+        let text = self.post(connection, part).await?;
+        let answer: Value = serde_json::from_str(&text).map_err(|_| {
+            Failure::permanent(format!(
+                "{} answered no JSON: {}",
+                self.label(),
+                quoted(&text)
+            ))
+        })?;
+        self.answer(&answer)
+    }
+
+    fn label(&self) -> String {
+        format!("{} {}", self.method, self.path)
+    }
+
+    /// Sends one body and returns the text of a 2xx response.
+    async fn post(&self, connection: &Connection, body: Vec<u8>) -> Result<String, Failure> {
+        let label = self.label();
         let url = format!("{}{}", connection.base, self.path);
         let request = connection
             .request(self.method.clone(), &url)
@@ -171,24 +435,7 @@ impl Query {
                 text: format!("{label} answered {status}: {}", quoted(&text)),
             });
         }
-        let answer: Option<Value> = serde_json::from_str(&text).ok();
-        let entries = answer
-            .as_ref()
-            .and_then(|answer| answer.pointer(&self.responses))
-            .and_then(Value::as_array);
-        // Answers are matched by position, so a short array cannot be assigned.
-        let Some(entries) = entries.filter(|entries| entries.len() == indices.len()) else {
-            return Err(Failure::permanent(format!(
-                "{label} answered no array of {} entries at '{}': {}",
-                indices.len(),
-                self.responses,
-                quoted(&text)
-            )));
-        };
-        for (index, entry) in indices.iter().zip(entries) {
-            answers[*index] = self.answer(entry);
-        }
-        Ok(())
+        Ok(text)
     }
 
     fn answer(&self, entry: &Value) -> Answer {
@@ -197,7 +444,8 @@ impl Query {
             None => None,
         };
         if let Some(reason) = at(&self.error) {
-            return Err(scalar_text(reason).unwrap_or_else(|| reason.to_string()));
+            let reason = scalar_text(reason).unwrap_or_else(|| reason.to_string());
+            return Err(Failure::permanent(reason));
         }
         if self.found.is_some() && at(&self.found).and_then(Value::as_bool) != Some(true) {
             return Ok(None);
@@ -206,7 +454,14 @@ impl Query {
             Some(_) => at(&self.value),
             None => Some(entry).filter(|entry| !entry.is_null()),
         };
-        Ok(value.cloned())
+        match value {
+            Some(Value::String(text)) if self.parse_value => {
+                serde_json::from_str(text).map(Some).map_err(|error| {
+                    Failure::permanent(format!("the value is not JSON ({error}): {}", quoted(text)))
+                })
+            }
+            value => Ok(value.cloned()),
+        }
     }
 }
 
@@ -402,10 +657,14 @@ mod tests {
 
         for (status, retryable) in [(503, true), (400, false)] {
             let server = self::server(move |_| (status, "no".to_string())).await;
-            let publisher = publisher(&server, multi_search());
+            let mut config = multi_search();
+            config["max_request_bytes"] = json!(60);
+            let publisher = publisher(&server, config);
             let error = publisher.lookup_batch(&lookups).await.unwrap().unwrap_err();
             let retried = matches!(error, crate::errors::PublisherError::Retryable(_));
             assert_eq!(retried, retryable, "{error}");
+            // Nothing is sent after the request that was refused.
+            assert_eq!(server.requests().len(), 1);
         }
     }
 
@@ -424,6 +683,24 @@ mod tests {
         config(json!({})).unwrap();
         let error = config(json!({"upsert": {"path": "/_bulk"}})).unwrap_err();
         assert!(error.to_string().contains("excludes 'upsert'"), "{error}");
+        for (extra, reason) in [
+            (
+                json!({"per_message": true}),
+                "excludes 'envelope' and 'responses'",
+            ),
+            (
+                json!({"per_message": true, "envelope": null, "responses": "", "max_messages": 2}),
+                "'index' and 'split_on_reject'",
+            ),
+        ] {
+            let mut query = multi_search();
+            query["url"] = json!("http://localhost:1");
+            let fields = query["query"].as_object_mut().unwrap();
+            fields.extend(extra.as_object().unwrap().clone());
+            let query: HttpBulkConfig = serde_json::from_value(query).unwrap();
+            let error = HttpBulkPublisher::new(&query).map(|_| ()).unwrap_err();
+            assert!(error.to_string().contains(reason), "{error}");
+        }
         let none: HttpBulkConfig =
             serde_json::from_value(json!({"url": "http://localhost:1"})).unwrap();
         let error = HttpBulkPublisher::new(&none).map(|_| ()).unwrap_err();

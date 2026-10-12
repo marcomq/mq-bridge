@@ -47,6 +47,7 @@ ends when its source is empty if the route has `exit_on_empty`, so there is no c
 | `clickhouse` | yes | yes |
 | `custom` | yes | yes |
 | `dir_spool` | yes | yes |
+| `elasticsearch` | no | yes |
 | `fanout` | no | yes |
 | `file` | yes | yes |
 | `grpc` | yes | yes |
@@ -54,13 +55,17 @@ ends when its source is empty if the route has `exit_on_empty`, so there is no c
 | `http_bulk` | yes | yes |
 | `ibmmq` | yes | yes |
 | `kafka` | yes | yes |
+| `meilisearch` | yes | yes |
 | `memory` | yes | yes |
 | `mongodb` | yes | yes |
 | `mqtt` | yes | yes |
 | `nats` | yes | yes |
 | `null` | no | yes |
 | `object_store` | yes | yes |
+| `openai_chat` | no | yes |
+| `openai_embeddings` | no | yes |
 | `postgres_cdc` | yes | no |
+| `qdrant` | yes | yes |
 | `reader` | no | yes |
 | `redis_streams` | yes | yes |
 | `ref` | yes | yes |
@@ -72,6 +77,7 @@ ends when its source is empty if the route has `exit_on_empty`, so there is no c
 | `static` | yes | yes |
 | `stream_buffer` | yes | yes |
 | `switch` | no | yes |
+| `typesense` | no | yes |
 | `websocket` | yes | yes |
 | `zeromq` | yes | yes |
 
@@ -90,12 +96,14 @@ ends when its source is empty if the route has `exit_on_empty`, so there is no c
 | `http_bulk` | yes | yes | A paged read of a search index. |
 | `ibmmq` | yes | yes |  |
 | `kafka` | yes | yes |  |
+| `meilisearch` | yes | yes | A paged read of one index. |
 | `memory` | yes | no | A nacked message is retried inside the consumer and is lost if the process dies. |
 | `mongodb` | yes | depends | `consumer` commits in any order; `snapshot`, `capture_new` and `capture_all` in order. |
 | `mqtt` | unless `qos: 0` | no |  |
 | `nats` | unless `no_jetstream: true` | no |  |
 | `object_store` | yes | yes |  |
 | `postgres_cdc` | yes | yes |  |
+| `qdrant` | yes | yes | A scroll through one collection. |
 | `redis_streams` | yes | no |  |
 | `ref` | depends | depends | Follows the referenced endpoint. |
 | `sequence` | depends | yes | Follows the endpoint of the current phase; commits always in order. |
@@ -115,6 +123,7 @@ ends when its source is empty if the route has `exit_on_empty`, so there is no c
 | `clickhouse` | with `lookup_query` | no | The reply is the first row; `clickhouse.found` says whether there was one. |
 | `custom` | depends | depends | Decided by the registered factory. |
 | `dir_spool` | no | yes |  |
+| `elasticsearch` | no | with `operation` |  |
 | `fanout` | depends | depends | Replies when one of its endpoints does; the first in list order wins. Ordered when one of them is. |
 | `file` | no | yes |  |
 | `grpc` | depends | no | The dynamic client returns the RPC's reply. |
@@ -122,12 +131,16 @@ ends when its source is empty if the route has `exit_on_empty`, so there is no c
 | `http_bulk` | depends | with `operation` | Replies with `query` set. |
 | `ibmmq` | no | no |  |
 | `kafka` | no | no |  |
+| `meilisearch` | no | with `operation` |  |
 | `memory` | with `request_reply: true` | no |  |
 | `mongodb` | depends | no | Replies with `request_reply`, `report_outcome` or `find`. |
 | `mqtt` | no | no |  |
 | `nats` | with `request_reply: true` | no |  |
 | `null` | no | no |  |
 | `object_store` | no | no |  |
+| `openai_chat` | yes | no | The reply is the model's answer. |
+| `openai_embeddings` | yes | no | The reply is the vector. |
+| `qdrant` | no | with `operation` |  |
 | `reader` | yes | no | The reply is the message read from the wrapped input. |
 | `redis_streams` | no | no |  |
 | `ref` | depends | depends | Follows the referenced endpoint; a publisher registered in code is not checked. |
@@ -138,6 +151,7 @@ ends when its source is empty if the route has `exit_on_empty`, so there is no c
 | `static` | yes | no | The reply is the configured body. |
 | `stream_buffer` | no | no |  |
 | `switch` | depends | depends | Replies when the chosen destination does. Ordered when one of them is. |
+| `typesense` | no | with `operation` |  |
 | `websocket` | no | no |  |
 | `zeromq` | depends | no | Replies on a `req` socket. |
 
@@ -150,6 +164,7 @@ ends when its source is empty if the route has `exit_on_empty`, so there is no c
 | `clickhouse` | `tls` block | User and password. |
 | `custom` | – | Decided by the registered factory. |
 | `dir_spool` | – |  |
+| `elasticsearch` | `tls` block | API key, or `auth` for OAuth2 and AWS SigV4. |
 | `fanout` | – |  |
 | `file` | – | At-rest encryption with `encryption`. |
 | `grpc` | `tls` block | A server checks client certificates with `tls.ca_file` and has no other authentication; reflection is always on. A client sends `api_key` or `bearer_token`. |
@@ -157,13 +172,17 @@ ends when its source is empty if the route has `exit_on_empty`, so there is no c
 | `http_bulk` | `tls` block | `auth` and custom headers. |
 | `ibmmq` | `tls` block | Its own `tls` block (`cipher_spec`, key repository). User and password. |
 | `kafka` | `tls` block | SASL user and password; they force `sasl_ssl`. |
+| `meilisearch` | `tls` block | API key. |
 | `memory` | – | In-process, or a local socket that checks the peer's user id. |
 | `mongodb` | `tls` block | TLS and credentials can also be set in the URL (`tls=true`, `tlsCAFile=`). |
 | `mqtt` | `tls` block | User and password. |
 | `nats` | `tls` block | User and password, or a token. |
 | `null` | – |  |
 | `object_store` | always (provider) | Credentials as the provider's client reads them. |
+| `openai_chat` | `tls` block | API key. |
+| `openai_embeddings` | `tls` block | API key. |
 | `postgres_cdc` | `tls` block | User and password in the URL. |
+| `qdrant` | `tls` block | API key. |
 | `reader` | – |  |
 | `redis_streams` | `tls` block | TLS with a `rediss://` URL or `tls.required`. User and password. `accept_invalid_certs` is not available. |
 | `ref` | – |  |
@@ -175,6 +194,7 @@ ends when its source is empty if the route has `exit_on_empty`, so there is no c
 | `static` | – |  |
 | `stream_buffer` | – |  |
 | `switch` | – |  |
+| `typesense` | `tls` block | API key. |
 | `websocket` | `tls` block | A listener has `basic_auth`, checks client certificates with `tls.ca_file` and limits connections with `max_connections`. A client sends `basic_auth`. |
 | `zeromq` | none | No encryption and no authentication. Use it on a trusted network only. |
 

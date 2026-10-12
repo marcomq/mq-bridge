@@ -41,7 +41,74 @@ Postgres needs `wal_level = logical` and a publication on the table:
 CREATE PUBLICATION docs_pub FOR TABLE docs WITH (publish = 'insert, update, delete');
 ```
 
-The route, as it runs in the example (`routes.yaml`):
+The route:
+
+```yaml
+docs_to_qdrant:
+  input:
+    postgres_cdc:
+      url: "postgres://app:app@postgres:5432/app"
+      publication: "docs_pub"
+      slot_name: "docs_to_qdrant"
+      consume: capture_all                             # copy existing rows, then follow changes
+      checkpoint_store: "file:///app/checkpoint.json"  # a restart does not repeat the copy
+  output:
+    switch:
+      metadata_key: "postgres.operation"
+      cases:
+        # Deletes carry only the primary key: remove the point, call no model.
+        delete:
+          qdrant: &qdrant
+            url: "http://qdrant:6333"
+            collection: docs
+            operation: "${metadata:postgres.operation}"
+      # Inserts and updates. Output middlewares run bottom-up.
+      default:
+        middlewares:
+          # 2. Shape the Qdrant point: {id, vector, payload}.
+          - transform:
+              mapping:
+                id: "$.id"
+                vector: "$.vector"
+                "payload.title": "$.title"
+                "payload.body": "$.body"
+          # 1. One embeddings request per batch; the vector lands in `vector`.
+          - lookup:
+              from:
+                openai_embeddings:
+                  url: "http://ollama:11434"
+                  model: all-minilm
+                  input: "${payload:body}"
+              into: vector
+          - retry: { max_attempts: 5 }
+        qdrant: *qdrant
+```
+
+How it fits together:
+
+- [`postgres_cdc`](../connectors/postgres.md#postgresql-cdc) emits one message per changed row.
+  The payload is the row as flat JSON; the operation is in the `postgres.operation` metadata key.
+- [`switch`](../cookbook/switch.md) sends deletes straight to Qdrant. Everything else goes through
+  the embedding step first.
+- [`openai_embeddings`](../connectors/openai.md#openai_embeddings) sends the texts of a whole batch
+  in one request to an API that speaks the OpenAI wire format, which Ollama also serves. A hosted
+  provider needs another `url`, a model name and an `api_key`.
+- [`qdrant`](../connectors/qdrant.md) batches points into Qdrant's upsert and delete requests. The
+  row's primary key is the point id, so an update overwrites the point of that row.
+
+This route was run with a file as its input against Ollama and Qdrant 1.19; with `postgres_cdc`
+as its input it was not.
+
+The collection must exist with the vector size of the model (384 for `all-minilm`); the example's
+compose file creates it.
+
+### The same route by hand
+
+`qdrant` and `openai_embeddings` are requests filled in for you. Written out with the generic
+[`http_bulk`](../connectors/http-bulk.md#qdrant) and [`http`](../reference/http.md) endpoints, the
+route looks like this. It is the form to start from for a vector store or an embeddings API with
+another request shape, and it is what the runnable example uses (`routes.yaml`), since its
+container image predates the two endpoints.
 
 ```yaml
 docs_to_qdrant:
@@ -99,29 +166,18 @@ docs_to_qdrant:
         http_bulk: *qdrant
 ```
 
-How it fits together:
-
-- [`postgres_cdc`](../connectors/postgres.md#postgresql-cdc) emits one message per changed row.
-  The payload is the row as flat JSON; the operation is in the `postgres.operation` metadata key.
-- [`switch`](../cookbook/switch.md) sends deletes straight to Qdrant. Everything else goes through
-  the embedding steps first.
-- [`lookup`](../cookbook/lookup.md) posts the message to the embeddings API and stores the
-  response under `embedding`. The request and response shape is the one of the OpenAI embeddings
-  API, which Ollama also serves, so a hosted provider needs only a different `url`, a model name
-  and an authorization header (`custom_headers` on the [`http`](../reference/http.md) endpoint).
-- [`http_bulk`](../connectors/http-bulk.md#qdrant) batches points into Qdrant's upsert and delete
-  requests. The row's primary key is the point id, so an update overwrites the point of that row.
-
-The collection must exist with the vector size of the model (384 for `all-minilm`); the example's
-compose file creates it.
+Here the first `transform` builds the request the embeddings API expects, the `lookup` stores the
+whole response under `embedding`, and the last `transform` picks the vector out of it. One request
+is sent per row.
 
 ### Run the route from Rust
 
-The same file runs embedded in a service. Enable the features the route uses:
+The same file runs embedded in a service. Enable the features the route uses; the route written
+by hand also needs `http`:
 
 ```toml
 [dependencies]
-mq-bridge = { version = "1", features = ["postgres-cdc", "http-bulk", "http", "yaml"] }
+mq-bridge = { version = "1", features = ["postgres-cdc", "http-bulk", "yaml"] }
 tokio = { version = "1", features = ["full"] }
 anyhow = "1"
 ```
@@ -169,8 +225,8 @@ and a semantic search; it runs in CI.
 | **Duplicates** | Delivery is [at-least-once](../engine/delivery.md): a change can be delivered again after a crash or restart. A repeated upsert writes the same point id again and a repeated delete removes nothing, so the index converges. The cost of a replay is the repeated embedding calls. |
 | **Deletes** | A delete event carries only the key columns. The table needs a primary key (or a replica identity), and the point id must be that key. |
 | **`TRUNCATE`** | Not synchronized. A truncate event names no rows, so the route has nothing to delete by; the publication leaves it out (`publish = 'insert, update, delete'`). After truncating the table, delete the points or recreate the collection yourself. |
-| **Qdrant unavailable** | `http_bulk` treats 408, 429 and most 5xx responses as retryable and `retry` repeats the request. A message is acknowledged to Postgres only after the output accepted it, so unconfirmed changes stay in the replication slot. |
-| **Embeddings API unavailable or rejecting** | A temporary error is retried. A permanent error (an HTTP 4xx, a non-JSON row) is logged and drops only that message; add a [`dlq`](../cookbook/dlq.md) after the `lookup` to keep such rows. |
+| **Qdrant unavailable** | `qdrant` treats 408, 429 and most 5xx responses as retryable and `retry` repeats the request. A message is acknowledged to Postgres only after the output accepted it, so unconfirmed changes stay in the replication slot. |
+| **Embeddings API unavailable or rejecting** | A temporary error is retried. A permanent error (an HTTP 4xx) is logged and drops the rows of that request, which is the whole batch; add a [`dlq`](../cookbook/dlq.md) after the `lookup` to keep them. |
 | **mq-bridge stays down** | Postgres keeps the WAL the slot has not confirmed. Monitor the slot's lag and drop the slot if you retire the route. |
 
 Limits of this recipe:
@@ -185,9 +241,9 @@ Limits of this recipe:
   TOASTed columns.
 - **Point ids** are the unsigned integer primary key here. Qdrant accepts
   [unsigned integers and UUIDs](https://qdrant.tech/documentation/concepts/points/#point-ids) as point ids, so a table with another key type needs a `transform` that derives one.
-- **The request to the embeddings API is the message payload.** Build it with a `transform` as
-  above. The `lookup` middleware's `payload` template does not JSON-escape values, so a row
-  containing a double quote breaks a templated request.
+- **An empty text fails its batch.** OpenAI refuses a request with an empty input, and one
+  request covers the whole batch. Drop such rows with a [`filter`](../engine/reference.md#filter)
+  first.
 
 ## When not to use mq-bridge for this
 
@@ -207,8 +263,8 @@ Limits of this recipe:
 | | mq-bridge | Debezium | Redpanda Connect |
 | :--- | :--- | :--- | :--- |
 | Postgres CDC | `postgres_cdc` endpoint, built in | Postgres connector | [`postgres_cdc` input](https://docs.redpanda.com/redpanda-connect/components/inputs/postgres_cdc/); its page states "This component requires an enterprise license" |
-| Embedding step | `lookup` middleware calling an HTTP embeddings API | [Embeddings transformation](https://debezium.io/documentation/reference/stable/ai/embeddings.html) (Hugging Face, Ollama, ONNX MiniLM, OpenAI, Voyage AI) | Embedding processors for several providers |
-| Writing to Qdrant | `http_bulk` endpoint with a Qdrant request shape | Not part of Debezium's documented sinks; a separate consumer or sink connector | `qdrant` output |
+| Embedding step | `openai_embeddings` endpoint, for any OpenAI-compatible API | [Embeddings transformation](https://debezium.io/documentation/reference/stable/ai/embeddings.html) (Hugging Face, Ollama, ONNX MiniLM, OpenAI, Voyage AI) | Embedding processors for several providers |
+| Writing to Qdrant | `qdrant` endpoint | Not part of Debezium's documented sinks; a separate consumer or sink connector | `qdrant` output |
 | How it runs | Library in a Rust, Python or Node.js process, or one binary | ["Most commonly"](https://debezium.io/documentation/reference/stable/architecture.html) on Kafka Connect; also Debezium Server or an embedded Java engine | One binary, YAML config |
 | Sources with CDC | Postgres, MongoDB | Postgres, MySQL, SQL Server, Oracle, Db2, MongoDB and more | See its component list |
 
@@ -229,9 +285,9 @@ Limits of this recipe:
 - **The route is testable without infrastructure.** The same route and handler code runs against
   in-memory endpoints; see [Test without a broker](test-without-a-broker.md).
 
-Where the alternatives are the better fit: Debezium covers more databases, and Redpanda Connect
-has ready-made embedding processors and a `qdrant` output, so neither needs the request shaping
-shown above.
+Where the alternatives are the better fit: Debezium covers more databases and embedding
+providers, and Redpanda Connect has embedding processors for providers that do not speak the
+OpenAI wire format.
 
 No throughput comparison against these tools has been measured, so none is claimed. mq-bridge's own
 numbers are on the

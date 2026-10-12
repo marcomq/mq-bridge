@@ -59,13 +59,11 @@ books_to_search:
             properties:
               id: { type: string }
       - retry: { max_attempts: 5 }
-    custom:
-      name: typesense
-      config:
-        url: "typesense://localhost:8108"
-        api_key: "<api key>"
-        collection: books
-        operation: "${metadata:postgres.operation}"
+    typesense:
+      url: "typesense://localhost:8108"
+      api_key: "<api key>"
+      collection: books
+      operation: "${metadata:postgres.operation}"
 ```
 
 Inserts and updates become upserts. A delete removes the document whose `id`

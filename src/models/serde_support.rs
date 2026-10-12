@@ -15,7 +15,9 @@ use super::*;
 /// A name listed here keeps the original field error when its config fails to parse;
 /// anything else is treated as a custom endpoint. Omitting a built-in would turn a typo
 /// in, say, a `clickhouse` block into an opaque unknown-custom-endpoint failure instead
-/// of naming the offending field.
+/// of naming the offending field. The named `http_bulk` endpoints such as `qdrant` are
+/// left out: a plugin may serve the name with fields of its own, and their factory
+/// names the offending field when the route starts.
 pub(crate) fn is_known_endpoint_name(name: &str) -> bool {
     matches!(
         name,

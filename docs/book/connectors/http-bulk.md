@@ -93,6 +93,8 @@ documents took the same time with either (about 4 to 5 s at a batch size of
 
 ### Qdrant
 
+The [`qdrant`](./qdrant.md) endpoint is this recipe under a name.
+
 A point is `{id, vector, payload}`, and the id is an unsigned integer or a UUID,
 so shape the message with a [`transform`](../cookbook/transform.md) first.
 `wait=true` makes Qdrant answer after the points are stored.
@@ -379,12 +381,22 @@ Elasticsearch or Qdrant.
 | `method` | `POST` | HTTP method |
 | `format` | `ndjson` | `ndjson` (each lookup adds its lines) or `json_array` (each lookup adds one entry) |
 | `content_type` | by format | `application/x-ndjson` or `application/json` |
-| `request` | required | Template of one lookup's part of the body. Values taken from the message are JSON-escaped; `\| raw` inserts a JSON value as it is. With `ndjson` it may hold several lines. |
+| `request` | required | Template of one lookup's part of the body. Values taken from the message are JSON-escaped; `\| raw` inserts a JSON value as it is. With `ndjson` it may hold several lines. `{index}`, at most once, is the part's number in its request, from 1 |
 | `envelope` | none | `json_array` only: the body around the array; `{requests}` marks where the array goes |
 | `responses` | the response | JSON pointer to the array with one answer per lookup, in order |
 | `value` | the entry | JSON pointer, inside an entry, to what the lookup answers |
 | `found` | none | JSON pointer, inside an entry, to a boolean; anything but `true` answers `null` |
 | `error` | none | JSON pointer, inside an entry, to an error text; set, it fails that lookup |
+| `per_message` | `false` | One request per message; the response itself is the entry. Excludes `envelope` and `responses` |
+| `parse_value` | `false` | The value is JSON text: parse it. Text that is not JSON fails its message for good |
+| `concurrency` | 8 with `per_message`, else 1 | Requests in flight for one batch |
+| `max_messages` | none | Most messages in one request; a larger batch is split, as it is at `max_request_bytes` |
+| `responses_text` | none | JSON pointer to JSON text in the response that holds the answers; `responses` then points into that text. For an API that answers inside a string, such as a chat completion |
+| `index` | none | JSON pointer, inside an entry, to the `{index}` of its message. Entries are then matched by that number instead of by position; a number that is missing, repeated or unknown makes the response unusable |
+| `stop_reason` | none | JSON pointer to why the response ended, e.g. `/choices/0/finish_reason`; named in the error when the answers cannot be matched |
+| `split_on_reject` | `false` | A request refused with 400, 409, 413 or 422, or a response whose answers cannot be matched: ask again in halves until the messages at fault stand alone, so only they fail. Without it the batch fails for good |
+
+`max_messages`, `responses_text`, `index` and `split_on_reject` exclude `per_message`.
 
 `auth` takes one of:
 
@@ -493,6 +505,10 @@ As a lookup (`query`):
 - **A single lookup is a batch of one**: the same request with one part.
 - **A `json_array` part must be valid JSON**; one that is not fails its message
   for good and is left out of the request.
+- **With `per_message` every message is its own request**, for an API that
+  takes one question at a time, such as a chat completion. A refused request
+  fails only its message, retryable by its status. Under a `lookup` the
+  lookup's `concurrency` decides how many are in flight.
 
 As an input:
 
@@ -523,7 +539,10 @@ everything in one response (Typesense) is not a paged listing; read it with
 
 ## A named endpoint of your own
 
-`typesense` and `elasticsearch` are this endpoint with the requests filled in. A
+`typesense`, `elasticsearch`, [`qdrant`](./qdrant.md) and the
+[OpenAI-compatible endpoints](./openai.md) are this endpoint with the requests
+filled in. From Rust each has a typed configuration, such as `QdrantConfig`,
+that converts into an `Endpoint` with `.into()` and needs no registration. A
 Rust crate can add one the same way: a function that turns a few fields into an
 `http_bulk` configuration, registered under a name.
 
@@ -553,12 +572,15 @@ register_preset_with("acme", acme_schema, acme)?;
 ```
 
 Call it before any route starts and address the endpoint as
-`custom: { name: acme, config: { url: ..., table: ... } }`. The value `acme`
+`acme: { url: ..., table: ... }`. The value `acme`
 returns is checked as an `http_bulk` configuration, so every field under
 [Fields](#fields) is available. `preset_schema` adds `url`, `api_key`,
 `operation`, `compression` and `request_timeout_ms` to the fields you list;
 `acme` decides what to do with them. A unit test registers the same endpoint;
 it was not run against a server.
+
+For a typed configuration of your own, derive `Serialize` on it and build the
+endpoint with `named_endpoint("acme", &config)`.
 
 This registers the endpoint in your own program. `mqb` only knows the endpoints
 compiled into it or installed as plugins.

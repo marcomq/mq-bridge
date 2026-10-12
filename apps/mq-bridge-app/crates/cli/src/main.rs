@@ -42,13 +42,11 @@ pub(crate) const DEFAULT_BATCH_SIZE: usize = 1024;
 /// The batch size for a run that names none: what the sink's schema asks for
 /// (`x-mqb-default-batch-size`), else [`DEFAULT_BATCH_SIZE`].
 pub(crate) fn default_batch_size(output: &mq_bridge::models::Endpoint) -> usize {
-    match &output.endpoint_type {
-        mq_bridge::models::EndpointType::Custom { name, .. } => {
-            mq_bridge::extensions::endpoint_default_batch_size(name)
-        }
-        _ => None,
-    }
-    .unwrap_or(DEFAULT_BATCH_SIZE)
+    let name = match &output.endpoint_type {
+        mq_bridge::models::EndpointType::Custom { name, .. } => name,
+        named => named.name(),
+    };
+    mq_bridge::extensions::endpoint_default_batch_size(name).unwrap_or(DEFAULT_BATCH_SIZE)
 }
 
 /// App-level default route concurrency for headless routes (`copy`, MCP) when the
@@ -2058,10 +2056,12 @@ fn endpoint_fields(
 fn extension_schemes() -> String {
     let mut names = Vec::new();
     if cfg!(feature = "pulsar") {
-        names.push("pulsar");
+        names.push("pulsar".to_string());
     }
     #[cfg(feature = "http-bulk")]
     for name in mq_bridge::endpoints::http_bulk::preset_names() {
+        // As a scheme, which cannot hold `_`.
+        let name = name.replace('_', "-");
         if !names.contains(&name) {
             names.push(name);
         }
@@ -2072,7 +2072,8 @@ fn extension_schemes() -> String {
     format!(" ({})", names.join(", "))
 }
 
-/// Builds a `custom` endpoint for a scheme that names a registered factory.
+/// Builds the endpoint for a scheme that names a registered factory: a named one such as
+/// `qdrant` as its own type, any other as `custom`.
 ///
 /// The factory owns its config shape, so the mapping comes from the JSON Schema
 /// it declares: which field takes the address, which takes the path, and what
@@ -2082,20 +2083,25 @@ fn extension_schemes() -> String {
 /// id like `0123` into a number.
 fn custom_endpoint_from_uri(name: &str, uri: &str) -> anyhow::Result<mq_bridge::models::Endpoint> {
     let shown = copy_pipeline::redact_uri(uri);
-    use mq_bridge::models::{Endpoint, EndpointType};
-
     let config = mq_bridge::plugin::endpoint_uri_schema(name)
         .config_from_uri(uri)
         .with_context(|| format!("endpoint '{name}' in URI '{shown}'"))?;
 
-    Ok(Endpoint::new(EndpointType::Custom {
-        name: name.to_string(),
-        config: serde_json::Value::Object(config),
-    }))
+    // The endpoint's own key; one that is no built-in type parses as `custom`.
+    serde_json::from_value(serde_json::json!({ name: config }))
+        .with_context(|| format!("endpoint '{name}' in URI '{shown}'"))
 }
 
 /// The plugin a `plugin+component` scheme names. Built-in schemes are matched
 /// before this is consulted, so none of them can be shadowed by it.
+/// The factory a scheme names when none is registered under the scheme itself.
+fn scheme_factory(scheme: &str) -> String {
+    match plugin_of(scheme) {
+        "openai" => "openai_chat".to_string(),
+        plugin => plugin.replace('-', "_"),
+    }
+}
+
 fn plugin_of(scheme: &str) -> &str {
     scheme.split_once('+').map_or(scheme, |(plugin, _)| plugin)
 }
@@ -2467,6 +2473,11 @@ fn base_endpoint_from_uri(uri: &str) -> anyhow::Result<mq_bridge::models::Endpoi
         // URI still goes to the factory, whose schema reads the component.
         other if mq_bridge::extensions::get_endpoint_factory(plugin_of(other)).is_some() => {
             return custom_endpoint_from_uri(plugin_of(other), uri);
+        }
+        // A scheme cannot hold `_`, so `openai-chat://` names `openai_chat`; `openai://` is its
+        // short form.
+        other if mq_bridge::extensions::get_endpoint_factory(&scheme_factory(other)).is_some() => {
+            return custom_endpoint_from_uri(&scheme_factory(other), uri);
         }
         other => {
             // A URI names the endpoint before any route is built, so an
@@ -4001,23 +4012,29 @@ mod uri_tests {
         assert_eq!(config["subscription"], "workers");
     }
 
-    // Meilisearch reaches `copy` the same way, as the `http_bulk` preset, which
-    // normalizes the `meilisearch://` url to the HTTP one the server speaks.
+    /// A named endpoint's key and config, as a route file writes them.
+    #[cfg(feature = "http-bulk")]
+    fn named(endpoint: &super::mq_bridge::models::Endpoint) -> (String, serde_json::Value) {
+        let written = serde_json::to_value(&endpoint.endpoint_type).unwrap();
+        let (name, config) = written.as_object().unwrap().iter().next().unwrap();
+        (name.clone(), config.clone())
+    }
+
+    // Meilisearch reaches `copy` as its own endpoint type, which normalizes the
+    // `meilisearch://` url to the HTTP one the server speaks.
     #[test]
     #[cfg(feature = "http-bulk")]
-    fn meilisearch_scheme_builds_a_custom_endpoint() {
+    fn meilisearch_scheme_builds_its_endpoint() {
         mq_bridge_app::plugins::register_builtin_endpoints().unwrap();
 
         let endpoint =
             endpoint_from_uri("meilisearch://localhost:7700?index=orders&primary_key=id").unwrap();
 
-        let EndpointType::Custom { name, config } = endpoint.endpoint_type else {
-            panic!(
-                "expected a custom endpoint, got {:?}",
-                endpoint.endpoint_type
-            );
-        };
-        assert_eq!(name, "meilisearch");
+        assert!(matches!(
+            endpoint.endpoint_type,
+            EndpointType::Meilisearch(_)
+        ));
+        let (_, config) = named(&endpoint);
         assert_eq!(config["url"], "meilisearch://localhost:7700");
         assert_eq!(config["index"], "orders");
         assert_eq!(config["primary_key"], "id");
@@ -4027,7 +4044,7 @@ mod uri_tests {
     // from the URI, so a load needs no config file.
     #[test]
     #[cfg(feature = "http-bulk")]
-    fn http_bulk_preset_schemes_build_custom_endpoints() {
+    fn http_bulk_preset_schemes_build_their_endpoints() {
         mq_bridge_app::plugins::register_builtin_endpoints().unwrap();
 
         for (uri, url, field) in [
@@ -4043,12 +4060,53 @@ mod uri_tests {
             ),
         ] {
             let endpoint = endpoint_from_uri(uri).unwrap();
-            let EndpointType::Custom { config, .. } = endpoint.endpoint_type else {
-                panic!("expected a custom endpoint for {uri}");
-            };
+            let (_, config) = named(&endpoint);
             assert_eq!(config["url"], url);
             assert_eq!(config[field], "books");
             assert_eq!(config["api_key"], "k");
+        }
+        for (uri, name, url, field, value) in [
+            (
+                "qdrant://localhost:6333/books?wait=false",
+                "qdrant",
+                "qdrant://localhost:6333",
+                "wait",
+                serde_json::json!(false),
+            ),
+            (
+                "openai-chat://localhost:11434?model=m&prompt=Hi&json=true",
+                "openai_chat",
+                "openai-chat://localhost:11434",
+                "json",
+                serde_json::json!(true),
+            ),
+            (
+                "openai+https://llm.example.com/v1?model=m&prompt=Hi&concurrency=2",
+                "openai_chat",
+                "https://llm.example.com/v1",
+                "concurrency",
+                serde_json::json!(2),
+            ),
+            (
+                "openai://localhost:11434?model=m&prompt=Hi&messages_per_request=20",
+                "openai_chat",
+                "openai://localhost:11434",
+                "messages_per_request",
+                serde_json::json!(20),
+            ),
+            (
+                "openai-embeddings+https://llm.example.com/v1?model=m&input=x&dimensions=8",
+                "openai_embeddings",
+                "https://llm.example.com/v1",
+                "dimensions",
+                serde_json::json!(8),
+            ),
+        ] {
+            let endpoint = endpoint_from_uri(uri).unwrap();
+            let (found, config) = named(&endpoint);
+            assert_eq!(found, name);
+            assert_eq!(config["url"], url);
+            assert_eq!(config[field], value, "{uri}");
         }
         let error = endpoint_from_uri("typesense://h/books?request_timeout_ms=soon").unwrap_err();
         assert!(
@@ -4066,10 +4124,18 @@ mod uri_tests {
         mq_bridge_app::plugins::register_builtin_endpoints().unwrap();
         let schemes = super::extension_schemes();
 
-        for name in ["pulsar", "meilisearch", "typesense", "elasticsearch"] {
+        for name in [
+            "pulsar",
+            "meilisearch",
+            "typesense",
+            "elasticsearch",
+            "qdrant",
+            "openai_chat",
+            "openai_embeddings",
+        ] {
             if super::mq_bridge::extensions::get_endpoint_factory(name).is_some() {
                 assert!(
-                    schemes.contains(name),
+                    schemes.contains(&name.replace('_', "-")),
                     "`{name}` is registered but missing from `{schemes}`: enable the \
                      `{name}` feature of this crate alongside the core one"
                 );

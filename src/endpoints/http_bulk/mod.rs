@@ -18,9 +18,14 @@ mod publisher;
 mod query;
 pub(crate) use consumer::cursor_checkpoint;
 pub use consumer::HttpBulkConsumer;
+pub(crate) use presets::builtin as builtin_preset;
 pub use presets::{
-    base_url as preset_base_url, preset_names, register_preset, register_preset_with,
-    schema as preset_schema, segment as preset_segment,
+    base_url as preset_base_url, named_endpoint, preset_names, register_preset,
+    register_preset_with, schema as preset_schema, segment as preset_segment,
+};
+pub use crate::models::{
+    ElasticsearchConfig, ElasticsearchMode, MeilisearchConfig, OpenAiChatConfig,
+    OpenAiEmbeddingsConfig, QdrantConfig, TypesenseConfig,
 };
 pub use publisher::HttpBulkPublisher;
 
@@ -193,6 +198,11 @@ mod tests {
     use super::*;
     use serde_json::Value;
 
+    /// The named endpoint an endpoint node holds, with its config.
+    fn named(endpoint: &Value) -> Option<(&'static str, &Value)> {
+        preset_names().find_map(|name| Some((name, endpoint.get(name)?)))
+    }
+
     #[test]
     fn the_recipes_in_the_book_are_valid_configurations() {
         let book = concat!(env!("CARGO_MANIFEST_DIR"), "/docs/book/connectors/");
@@ -201,6 +211,9 @@ mod tests {
             ("typesense.md", 2),
             ("elasticsearch.md", 2),
             ("postgrest.md", 2),
+            ("qdrant.md", 2),
+            ("openai.md", 5),
+            ("../cookbook/llm.md", 4),
         ] {
             // The book is not part of the published crate.
             let Ok(page) = std::fs::read_to_string(format!("{book}{name}")) else {
@@ -233,11 +246,24 @@ mod tests {
                     continue;
                 }
                 let output = &route["output"];
-                let config = match output.get("custom") {
-                    Some(custom) => {
-                        presets::resolve(custom["name"].as_str().unwrap(), &custom["config"])
+                let lookups = output["middlewares"].as_array().into_iter().flatten();
+                let asked = lookups.map(|middleware| &middleware["lookup"]["from"]);
+                let asked = asked.chain([
+                    &output["request"]["to"],
+                    &output["switch"]["cases"]["delete"],
+                ]);
+                for (preset, config) in asked.filter_map(named) {
+                    let config = presets::resolve(preset, config)
+                        .unwrap_or_else(|error| panic!("{name}: {error:#}"));
+                    HttpBulkPublisher::new(&config)
+                        .unwrap_or_else(|error| panic!("{name}: {error}"));
+                }
+                let config = match (named(output), output.get("http_bulk")) {
+                    (Some((preset, config)), _) => presets::resolve(preset, config),
+                    (None, Some(config)) => {
+                        serde_json::from_value(config.clone()).map_err(Into::into)
                     }
-                    None => serde_json::from_value(output["http_bulk"].clone()).map_err(Into::into),
+                    (None, None) => continue,
                 };
                 let config: HttpBulkConfig =
                     config.unwrap_or_else(|error| panic!("{name}: {error:#}"));

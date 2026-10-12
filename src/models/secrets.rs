@@ -390,6 +390,22 @@ impl SecretExtractor for EndpointType {
             EndpointType::PostgresCdc(cfg) => {
                 cfg.extract_secrets(&format!("{}__{}", prefix, "POSTGRES_CDC"), secrets)
             }
+            EndpointType::Elasticsearch(cfg) => {
+                cfg.extract_secrets(&format!("{prefix}__ELASTICSEARCH"), secrets)
+            }
+            EndpointType::Meilisearch(cfg) => {
+                cfg.extract_secrets(&format!("{prefix}__MEILISEARCH"), secrets)
+            }
+            EndpointType::OpenAiChat(cfg) => {
+                cfg.extract_secrets(&format!("{prefix}__OPENAI_CHAT"), secrets)
+            }
+            EndpointType::OpenAiEmbeddings(cfg) => {
+                cfg.extract_secrets(&format!("{prefix}__OPENAI_EMBEDDINGS"), secrets)
+            }
+            EndpointType::Qdrant(cfg) => cfg.extract_secrets(&format!("{prefix}__QDRANT"), secrets),
+            EndpointType::Typesense(cfg) => {
+                cfg.extract_secrets(&format!("{prefix}__TYPESENSE"), secrets)
+            }
             EndpointType::Grpc(cfg) => {
                 cfg.extract_secrets(&format!("{}__{}", prefix, "GRPC"), secrets)
             }
@@ -715,6 +731,29 @@ impl SecretExtractor for ClickHouseConfig {
         self.tls
             .extract_secrets(&format!("{}__{}", prefix, "TLS"), secrets);
     }
+}
+
+/// The named `http_bulk` endpoints keep their secrets in these optional fields.
+macro_rules! named_endpoint_secrets {
+    ($($config:ident { $($field:ident),* })*) => {$(
+        impl SecretExtractor for $config {
+            fn extract_secrets(&mut self, prefix: &str, secrets: &mut HashMap<String, String>) {
+                $(if let Some(value) = self.$field.take() {
+                    let key = stringify!($field).to_ascii_uppercase();
+                    secrets.insert(format!("{prefix}__{key}"), value);
+                })*
+            }
+        }
+    )*};
+}
+
+named_endpoint_secrets! {
+    ElasticsearchConfig { api_key }
+    MeilisearchConfig { api_key, checkpoint_store }
+    OpenAiChatConfig { api_key }
+    OpenAiEmbeddingsConfig { api_key }
+    QdrantConfig { api_key, checkpoint_store }
+    TypesenseConfig { api_key }
 }
 
 impl SecretExtractor for HttpBulkConfig {

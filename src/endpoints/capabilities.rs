@@ -137,6 +137,14 @@ const CAPABILITIES: &[EndpointCapabilities] = &[
         ..row("dir_spool", Local)
     },
     EndpointCapabilities {
+        input: false,
+        acknowledges: Na,
+        ordered_commit: Na,
+        ordered_publish: With("operation"),
+        security_note: "API key, or `auth` for OAuth2 and AWS SigV4.",
+        ..row("elasticsearch", TlsBlock)
+    },
+    EndpointCapabilities {
         ordered_publish: Depends,
         output_note: "Replies when one of its endpoints does; the first in list order wins. Ordered when one of them is.",
         ..output_only("fanout", Depends)
@@ -181,6 +189,12 @@ const CAPABILITIES: &[EndpointCapabilities] = &[
         ..row("kafka", TlsBlock)
     },
     EndpointCapabilities {
+        ordered_publish: With("operation"),
+        input_note: "A paged read of one index.",
+        security_note: "API key.",
+        ..row("meilisearch", TlsBlock)
+    },
+    EndpointCapabilities {
         ordered_commit: No,
         replies: With("request_reply: true"),
         input_note: "A nacked message is retried inside the consumer and is lost if the process dies.",
@@ -214,8 +228,32 @@ const CAPABILITIES: &[EndpointCapabilities] = &[
         ..row("object_store", Provider)
     },
     EndpointCapabilities {
+        input: false,
+        acknowledges: Na,
+        ordered_commit: Na,
+        replies: Yes,
+        output_note: "The reply is the model's answer.",
+        security_note: "API key.",
+        ..row("openai_chat", TlsBlock)
+    },
+    EndpointCapabilities {
+        input: false,
+        acknowledges: Na,
+        ordered_commit: Na,
+        replies: Yes,
+        output_note: "The reply is the vector.",
+        security_note: "API key.",
+        ..row("openai_embeddings", TlsBlock)
+    },
+    EndpointCapabilities {
         security_note: "User and password in the URL.",
         ..input_only("postgres_cdc", TlsBlock)
+    },
+    EndpointCapabilities {
+        ordered_publish: With("operation"),
+        input_note: "A scroll through one collection.",
+        security_note: "API key.",
+        ..row("qdrant", TlsBlock)
     },
     EndpointCapabilities {
         output_note: "The reply is the message read from the wrapped input.",
@@ -273,6 +311,14 @@ const CAPABILITIES: &[EndpointCapabilities] = &[
         ordered_publish: Depends,
         output_note: "Replies when the chosen destination does. Ordered when one of them is.",
         ..output_only("switch", Depends)
+    },
+    EndpointCapabilities {
+        input: false,
+        acknowledges: Na,
+        ordered_commit: Na,
+        ordered_publish: With("operation"),
+        security_note: "API key.",
+        ..row("typesense", TlsBlock)
     },
     EndpointCapabilities {
         acknowledges: No,
@@ -513,20 +559,26 @@ mod tests {
             ("aws", has_tls_block::<AwsConfig>()),
             ("clickhouse", has_tls_block::<ClickHouseConfig>()),
             ("dir_spool", has_tls_block::<DirSpoolConfig>()),
+            ("elasticsearch", has_tls_block::<ElasticsearchConfig>()),
             ("grpc", has_tls_block::<GrpcConfig>()),
             ("http", has_tls_block::<HttpConfig>()),
             ("http_bulk", has_tls_block::<HttpBulkConfig>()),
             ("ibmmq", has_tls_block::<IbmMqConfig>()),
             ("kafka", has_tls_block::<KafkaConfig>()),
+            ("meilisearch", has_tls_block::<MeilisearchConfig>()),
             ("memory", has_tls_block::<MemoryConfig>()),
             ("mongodb", has_tls_block::<MongoDbConfig>()),
             ("mqtt", has_tls_block::<MqttConfig>()),
             ("nats", has_tls_block::<NatsConfig>()),
             ("object_store", has_tls_block::<ObjectStoreConfig>()),
+            ("openai_chat", has_tls_block::<OpenAiChatConfig>()),
+            ("openai_embeddings", has_tls_block::<OpenAiEmbeddingsConfig>()),
             ("postgres_cdc", has_tls_block::<PostgresCdcConfig>()),
+            ("qdrant", has_tls_block::<QdrantConfig>()),
             ("redis_streams", has_tls_block::<RedisStreamsConfig>()),
             ("sled", has_tls_block::<SledConfig>()),
             ("sqlx", has_tls_block::<SqlxConfig>()),
+            ("typesense", has_tls_block::<TypesenseConfig>()),
             ("websocket", has_tls_block::<WebSocketConfig>()),
             ("zeromq", has_tls_block::<ZeroMqConfig>()),
         ];

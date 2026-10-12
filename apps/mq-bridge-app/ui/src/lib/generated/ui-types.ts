@@ -822,6 +822,14 @@ export interface HttpBulkQuery {
   value?: string | null;
   found?: string | null;
   error?: string | null;
+  per_message?: boolean;
+  parse_value?: boolean;
+  concurrency?: number | null;
+  max_messages?: number | null;
+  responses_text?: string | null;
+  index?: string | null;
+  stop_reason?: string | null;
+  split_on_reject?: boolean;
 }
 
 export interface HttpBulkRead {
@@ -877,6 +885,89 @@ export interface PostgresCdcConfig {
 export type PostgresConsume = "capture_new" | "capture_all" | "snapshot";
 
 export type IdHash = "fnv1a" | "sha256";
+
+export interface ElasticsearchConfig {
+  url: string;
+  index: string;
+  api_key?: string | null;
+  id_field?: string | null;
+  mode?: ElasticsearchMode;
+  auth?: unknown;
+  operation?: string | null;
+  compression?: Compression;
+  request_timeout_ms?: number | null;
+  tls?: unknown;
+}
+
+export type ElasticsearchMode = "index" | "update";
+
+export interface MeilisearchConfig {
+  url: string;
+  api_key?: string | null;
+  index?: string | null;
+  primary_key?: string | null;
+  operation?: string | null;
+  delete_values?: string[] | null;
+  max_request_bytes?: number | null;
+  compression?: Compression;
+  connect_timeout_ms?: number | null;
+  request_timeout_ms?: number | null;
+  fields?: string | null;
+  cursor_id?: string | null;
+  checkpoint_store?: string | null;
+  polling_interval_ms?: number | null;
+  max_polling_interval_ms?: number | null;
+  tls?: unknown;
+}
+
+export interface OpenAiChatConfig {
+  url?: string | null;
+  api_key?: string | null;
+  model: string;
+  system?: string | null;
+  prompt: string;
+  json?: boolean;
+  options?: unknown;
+  concurrency?: number | null;
+  messages_per_request?: number | null;
+  max_request_bytes?: number | null;
+  request_timeout_ms?: number | null;
+  tls?: unknown;
+}
+
+export interface OpenAiEmbeddingsConfig {
+  url?: string | null;
+  api_key?: string | null;
+  model: string;
+  input: string;
+  dimensions?: number | null;
+  max_request_bytes?: number | null;
+  request_timeout_ms?: number | null;
+  tls?: unknown;
+}
+
+export interface QdrantConfig {
+  url: string;
+  collection: string;
+  api_key?: string | null;
+  wait?: boolean | null;
+  operation?: string | null;
+  compression?: Compression;
+  request_timeout_ms?: number | null;
+  cursor_id?: string | null;
+  checkpoint_store?: string | null;
+  tls?: unknown;
+}
+
+export interface TypesenseConfig {
+  url: string;
+  collection: string;
+  api_key?: string | null;
+  operation?: string | null;
+  compression?: Compression;
+  request_timeout_ms?: number | null;
+  tls?: unknown;
+}
 
 export interface SequenceConfig {
   endpoints: Endpoint[];

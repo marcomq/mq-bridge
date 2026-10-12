@@ -185,8 +185,8 @@ virtualenv — which is why the search covers `HOMEBREW_PREFIX` and
 ### Replacing an endpoint `mqb` already has
 
 Some endpoints are compiled into `mqb` itself — Pulsar is a separate crate
-linked into the `full` build, and `meilisearch`, `typesense` and `elasticsearch`
-are built on `http_bulk` — and a registered factory is found before the search
+linked into the `full` build, and `meilisearch`, `typesense`, `elasticsearch`,
+`qdrant`, `openai_chat` and `openai_embeddings` are built on `http_bulk` — and a registered factory is found before the search
 above ever runs. The built-in copy therefore wins by default,
 so one binary behaves the same wherever it runs.
 

@@ -30,14 +30,12 @@ books_to_search:
   output:
     middlewares:
       - retry: { max_attempts: 5 }
-    custom:
-      name: elasticsearch
-      config:
-        url: "elasticsearch://localhost:9200"
-        api_key: "<api key>"
-        index: books
-        operation: "${metadata:postgres.operation}"
-        compression: gzip
+    elasticsearch:
+      url: "elasticsearch://localhost:9200"
+      api_key: "<api key>"
+      index: books
+      operation: "${metadata:postgres.operation}"
+      compression: gzip
 ```
 
 The document `_id` is the row's `id` column, so an update replaces the document

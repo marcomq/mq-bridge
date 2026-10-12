@@ -671,7 +671,7 @@ fn check_consumer_recursive(
                     return Ok(warnings);
                 }
             }
-            if get_endpoint_factory(endpoint.endpoint_type.name()).is_some() {
+            if named_endpoint_factory(endpoint.endpoint_type.name()).is_some() {
                 return Ok(warnings);
             }
             Err(anyhow!(
@@ -1662,7 +1662,7 @@ async fn run_http_inline_response_fast_path(
 /// Resolves a `custom` endpoint name, loading an installed plugin that provides
 /// it when no factory is registered under the name yet.
 fn custom_endpoint_factory(name: &str) -> Result<Arc<dyn CustomEndpointFactory>> {
-    if let Some(factory) = get_endpoint_factory(name) {
+    if let Some(factory) = named_endpoint_factory(name) {
         return Ok(factory);
     }
     if let Some(factory) = discover_custom_endpoint(name)? {
@@ -1697,12 +1697,20 @@ fn custom_endpoint_hint(_name: &str) -> String {
     String::new()
 }
 
-/// The factory registered under a built-in endpoint's own name (typically by a plugin) and
-/// the endpoint's config as JSON. Serves built-ins this build has no feature for.
+/// The factory for a name: a registered one, else a named `http_bulk` endpoint such as `qdrant`.
+fn named_endpoint_factory(name: &str) -> Option<Arc<dyn CustomEndpointFactory>> {
+    let factory = get_endpoint_factory(name);
+    #[cfg(feature = "http-bulk")]
+    let factory = factory.or_else(|| http_bulk::builtin_preset(name));
+    factory
+}
+
+/// The factory under a built-in endpoint's own name and the endpoint's config as JSON.
+/// Serves the named `http_bulk` endpoints and built-ins this build has no feature for.
 fn builtin_fallback(
     endpoint_type: &EndpointType,
 ) -> Result<Option<(Arc<dyn CustomEndpointFactory>, serde_json::Value)>> {
-    let Some(factory) = get_endpoint_factory(endpoint_type.name()) else {
+    let Some(factory) = named_endpoint_factory(endpoint_type.name()) else {
         return Ok(None);
     };
     // Externally tagged: `{"kafka": {..}}`; the factory takes the inner object.
@@ -2000,6 +2008,10 @@ const NEVER_REPLIES: &[&str] = &[
     "redis_streams",
     "stream_buffer",
     "null",
+    "elasticsearch",
+    "meilisearch",
+    "qdrant",
+    "typesense",
 ];
 
 /// Endpoint types that reply only with the named option set.
@@ -2545,7 +2557,7 @@ fn check_publisher_recursive(
                     return Ok(warnings);
                 }
             }
-            if get_endpoint_factory(endpoint.endpoint_type.name()).is_some() {
+            if named_endpoint_factory(endpoint.endpoint_type.name()).is_some() {
                 return Ok(warnings);
             }
             Err(anyhow!(

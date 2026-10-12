@@ -227,7 +227,16 @@ pub fn configure_resume(
             "source `nats` has durable JetStream consumers, but resumable copy is not enabled because the durable identity cannot include the destination and filter"
         ),
         EndpointType::Mqtt(_) => unsupported("mqtt"),
-        // The preset takes the `http_bulk` read position as flat options.
+        EndpointType::Meilisearch(config) => {
+            if config.checkpoint_store.is_none() {
+                bail!(
+                    "source `meilisearch` needs an external `checkpoint_store` for resumable copy"
+                );
+            }
+            config.cursor_id.get_or_insert_with(|| state_id.clone());
+            Ok(ResumeCapability::ExternalCheckpoint)
+        }
+        // A plugin that stands in for `meilisearch` takes the same flat options.
         EndpointType::Custom { name, config } if name == "meilisearch" => {
             let has = |config: &serde_json::Value, key: &str| {
                 config.get(key).is_some_and(|value| !value.is_null())

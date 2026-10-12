@@ -39,14 +39,12 @@ movies_to_search:
   output:
     middlewares:
       - retry: { max_attempts: 5 }
-    custom:
-      name: meilisearch
-      config:
-        url: "http://localhost:7700"
-        api_key: "${MEILI_MASTER_KEY}"
-        index: "movies"
-        primary_key: "id"
-        operation: "${metadata:postgres.operation}"
+    meilisearch:
+      url: "http://localhost:7700"
+      api_key: "${MEILI_MASTER_KEY}"
+      index: "movies"
+      primary_key: "id"
+      operation: "${metadata:postgres.operation}"
 ```
 
 Apply the index settings once before the first run; see
@@ -208,14 +206,12 @@ articles_to_search:
       - retry: { max_attempts: 5 }
       - dlq:
           endpoint: { file: { path: "articles-rejected.jsonl" } }
-    custom:
-      name: meilisearch
-      config:
-        url: "http://localhost:7700"
-        api_key: "${MEILI_MASTER_KEY}"
-        index: "articles"
-        primary_key: "id"
-        operation: "${metadata:postgres.operation}"
+    meilisearch:
+      url: "http://localhost:7700"
+      api_key: "${MEILI_MASTER_KEY}"
+      index: "articles"
+      primary_key: "id"
+      operation: "${metadata:postgres.operation}"
 ```
 
 Declare the embedder before the first run (with the plugin, the same object goes under
@@ -282,9 +278,7 @@ assembled before it is indexed. Two tools do that:
               table: "authors"
               lookup_query: "SELECT id, name FROM authors WHERE id IN (${payload:author_id}::int)"
           into: author
-    custom:
-      name: meilisearch
-      config: { url: "http://localhost:7700", index: "books", primary_key: "id" }
+    meilisearch: { url: "http://localhost:7700", index: "books", primary_key: "id" }
   ```
 
 - **A table sharing the document's key is merged with `method: update`** (plugin only), from a second route
@@ -428,9 +422,9 @@ composite primary keys and reading an index back out.
 
 ## Outside `mqb`
 
-From Rust, the built-in endpoint is part of the `http-bulk` feature: call
-`mq_bridge::endpoints::http_bulk::register_preset("meilisearch")?` before any route starts and
-address it as a `custom` endpoint named `meilisearch`.
+From Rust, the built-in endpoint is part of the `http-bulk` feature. A route file names it as
+above; in code, `mq_bridge::endpoints::http_bulk::MeilisearchConfig` holds the same fields and
+converts into an `Endpoint` with `.into()`.
 
 The plugin is a separate package for the library and the bindings:
 

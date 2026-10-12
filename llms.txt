@@ -36,6 +36,8 @@ Key facts:
 - [ClickHouse](https://marcomq.github.io/mq-bridge/connectors/clickhouse.html)
 - [HTTP bulk](https://marcomq.github.io/mq-bridge/connectors/http-bulk.html): JSON documents in bulk to and from search engines and similar HTTP APIs (Meilisearch, Typesense, Elasticsearch, Qdrant, PostgREST, CouchDB); reads page by page with a resumable cursor
 - [Typesense](https://marcomq.github.io/mq-bridge/connectors/typesense.html): `typesense://host/collection` output; Postgres CDC to Typesense with backfill and deletes
+- [Qdrant](https://marcomq.github.io/mq-bridge/connectors/qdrant.html): `qdrant://host/collection` output and full-scan input; Postgres CDC to Qdrant with embeddings
+- [OpenAI-compatible APIs](https://marcomq.github.io/mq-bridge/connectors/openai.html): `openai_chat` (one chat completion per message) and `openai_embeddings` (one request per batch) for OpenAI, Ollama, vLLM and similar
 - [Elasticsearch](https://marcomq.github.io/mq-bridge/connectors/elasticsearch.html): `elasticsearch://host/index` output over the `_bulk` API; Postgres CDC to Elasticsearch
 - [PostgREST and Supabase](https://marcomq.github.io/mq-bridge/connectors/postgrest.html): upserts and deletes through the REST data API
 - [Object storage](https://marcomq.github.io/mq-bridge/connectors/object-store.html): S3, GCS, Azure Blob, local directory; Parquet, JSONL, CSV
@@ -55,6 +57,7 @@ Key facts:
 - [Checkpoints and resumable copies](https://marcomq.github.io/mq-bridge/cookbook/checkpoints.html)
 - [Content-based routing](https://marcomq.github.io/mq-bridge/cookbook/switch.html)
 - [Enrichment and lookups](https://marcomq.github.io/mq-bridge/cookbook/lookup.html)
+- [LLM calls in a pipeline](https://marcomq.github.io/mq-bridge/cookbook/llm.html): classify, summarise or embed messages with an OpenAI-compatible API
 - [Running aggregates](https://marcomq.github.io/mq-bridge/cookbook/aggregate.html): per-key sums, counters, moving averages
 - [Fan-out](https://marcomq.github.io/mq-bridge/cookbook/fanout.html)
 - [Weak join / correlation](https://marcomq.github.io/mq-bridge/cookbook/weak-join.html)
