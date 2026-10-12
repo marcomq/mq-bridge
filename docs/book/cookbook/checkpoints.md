@@ -185,7 +185,8 @@ updated: 2026-09-30T08:12:44.120+00:00
 - `reset` deletes the position, so the next run starts from the beginning. It prints the old
   value first.
 - `set --value V` overwrites it, e.g. to replay from a known row (`int:1000`) or to undo a reset.
-  Use the format `show` prints.
+  Use the format `show` prints. For a SQL `cursor_column` source a value in another form
+  than `int:<number>` or `str:<text>` is refused.
 - **Stop the route or copy first.** `reset` and `set` do not coordinate with a running reader:
   its next acknowledged batch saves its own position over the edit.
 - A `copy --resume` job is named by the same SOURCE, TARGET and `--filter` it ran with.
@@ -227,7 +228,8 @@ Checkpoints are **at-least-once**, never at-most-once:
   indefinitely** rather than exiting, so a `--drain` job hangs instead of failing — watch for the
   repeating log line. Raise `batch_size` above the largest group, or pick a more unique column.
 - **The cursor column must be integer or text.** Other types the SQL `Any` driver can't decode
-  fail permanently; expose the column as `BIGINT`/`TEXT` through a view.
+  fail permanently; expose the column as `BIGINT`/`TEXT` through a view. On Postgres a
+  timestamp, `date`, `numeric` or `uuid` column works too.
 - **`cursor_column` and `delete_after_read` are mutually exclusive** — one is non-destructive,
   the other consumes.
 - **Changing `cursor_id` or `checkpoint_store` starts over.** The position is keyed by both; a

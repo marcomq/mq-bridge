@@ -256,9 +256,7 @@ pub struct BridgeMcp {
     /// above. This is the same machinery the web UI uses for its consumers, so
     /// `messages_per_second` means the same thing on both surfaces.
     metrics: RouteMetrics,
-    // Required by the `#[tool_router]` / `#[tool_handler]` macro convention; the
-    // generated handler builds the router, so the field itself isn't read directly.
-    #[allow(dead_code)]
+    // The router the handler serves; without `--agent-bus` it lacks the agent tools.
     tool_router: ToolRouter<BridgeMcp>,
     /// This server's agent-bus name, claimed by `agent_listen` once its inbox is
     /// actually open. `None` means the inbox was never opened: this process can
@@ -1320,7 +1318,7 @@ impl Default for BridgeMcp {
     }
 }
 
-#[tool_handler]
+#[tool_handler(router = self.tool_router)]
 impl ServerHandler for BridgeMcp {
     fn get_info(&self) -> ServerConfig {
         // `Implementation` is `#[non_exhaustive]`, so build via Default then set fields.
@@ -1657,6 +1655,11 @@ mod tests {
             assert!(!names.contains(&tool.to_string()), "{tool} in {names:?}");
         }
         assert!(names.contains(&"start_route".to_string()), "{names:?}");
+        // The handler must serve the filtered router, not the macro's full one.
+        for tool in AGENT_TOOLS {
+            assert!(ServerHandler::get_tool(&off, tool).is_none(), "{tool}");
+        }
+        assert!(ServerHandler::get_tool(&off, "start_route").is_some());
         assert!(!off.get_info().instructions.unwrap().contains("agent_send"));
 
         let on = BridgeMcp::new().with_agent_bus(true);

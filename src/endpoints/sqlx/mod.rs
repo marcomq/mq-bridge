@@ -2825,6 +2825,35 @@ fn pg_rfc3339(
     }
 }
 
+/// The type of a Postgres cursor column the projection renders as text (timestamps, `numeric`,
+/// `uuid`, `date`), so a stored cursor can be compared with it. `None` for integer and text.
+async fn pg_cursor_cast_type(
+    pool: &AnyPool,
+    driver_name: &str,
+    config: &SqlxConfig,
+    cursor_column: &str,
+) -> Option<String> {
+    if driver_name != "PostgreSQL" {
+        return None;
+    }
+    let row = sqlx::query(
+        "SELECT t.typname::text AS typname, a.atttypid::regtype::text AS pg_type \
+         FROM pg_attribute a JOIN pg_type t ON t.oid = a.atttypid \
+         WHERE a.attrelid = $1::regclass AND a.attnum > 0 AND NOT a.attisdropped \
+         AND a.attname IN ($2, LOWER($2))",
+    )
+    .bind(config.table.clone())
+    .bind(cursor_column.trim_matches('"').to_string())
+    .fetch_optional(pool)
+    .await
+    .ok()??;
+    let typname: String = row.try_get("typname").ok()?;
+    if pg_typname_is_any_safe(&typname) {
+        return None;
+    }
+    row.try_get("pg_type").ok()
+}
+
 /// A permanent (non-transient) failure: the `Any` driver cannot decode a column type, so
 /// retrying the identical query will fail identically. Detected so the route fails fast with
 /// a clear message instead of reconnecting on a 5s loop forever.
@@ -3213,13 +3242,16 @@ impl SqlxCursorReader {
                 }),
         };
         let last_value = match &checkpoint {
-            Some(cp) => cp.load().await?.and_then(|s| {
-                let decoded = SqlCursor::decode(&s);
-                if decoded.is_none() {
-                    warn!(value = %s, "Ignoring unparseable sql cursor; starting from beginning");
-                }
-                decoded
-            }),
+            // Starting over on a cursor that cannot be read would copy the whole table again.
+            Some(cp) => match cp.load().await? {
+                Some(s) => Some(SqlCursor::decode(&s).ok_or_else(|| {
+                    crate::errors::InvalidConfig(anyhow!(
+                        "the stored cursor '{s}' of table '{}' cannot be read; expected `int:<number>` or `str:<text>`. Set it again or reset the checkpoint (`mqb checkpoint set|reset`)",
+                        config.table
+                    ))
+                })?),
+                None => None,
+            },
             None => run_position.as_ref().and_then(|(positions, key)| {
                 let saved = positions.lock().unwrap().get(key).cloned();
                 saved.and_then(|s| SqlCursor::decode(&s))
@@ -3230,20 +3262,32 @@ impl SqlxCursorReader {
         let (projection, raw_json_columns) =
             build_cursor_projection(&pool, &driver_name, &config.table, config.timestamps).await;
 
+        let lower_bound = positional_placeholder(&driver_name, 1);
+        // Postgres has no `timestamptz > text`; the cursor is read as text, so cast it back.
+        // The table prefix makes ORDER BY sort the column, not its text form in the projection.
+        let (lower_bound, order_column) =
+            match pg_cursor_cast_type(&pool, &driver_name, config, &cursor_column).await {
+                Some(pg_type) => (
+                    format!("CAST({lower_bound} AS {pg_type})"),
+                    format!("{}.{cursor_column}", config.table),
+                ),
+                None => (lower_bound, cursor_column.clone()),
+            };
         let sql_first = format!(
             "SELECT {0} FROM {1} ORDER BY {2} ASC LIMIT {3}",
             projection,
             config.table,
-            cursor_column,
+            order_column,
             positional_placeholder(&driver_name, 1),
         );
         let sql_next = format!(
-            "SELECT {0} FROM {1} WHERE {2} > {3} ORDER BY {2} ASC LIMIT {4}",
+            "SELECT {0} FROM {1} WHERE {2} > {3} ORDER BY {5} ASC LIMIT {4}",
             projection,
             config.table,
             cursor_column,
-            positional_placeholder(&driver_name, 1),
+            lower_bound,
             positional_placeholder(&driver_name, 2),
+            order_column,
         );
 
         Ok(Self {

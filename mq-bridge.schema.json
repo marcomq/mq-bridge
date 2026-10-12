@@ -2717,7 +2717,7 @@
       "type": "object",
       "properties": {
         "url": {
-          "description": "Object-store URL, e.g. `file:///var/lib/mqb/incoming`, `s3://bucket/prefix`,\n`gs://bucket/prefix`, or `az://account/container/prefix`. Credentials are resolved\nfrom the environment by the `object_store` crate (same mechanism as the checkpoint\nbackend); R2 uses `s3://` plus a custom `AWS_ENDPOINT_URL`.",
+          "description": "Object-store URL, e.g. `file:///var/lib/mqb/incoming`, `s3://bucket/prefix`,\n`gs://bucket/prefix`, or `az://container/prefix`. Credentials are resolved\nfrom the environment by the `object_store` crate (same mechanism as the checkpoint\nbackend); Azure takes the account from `AZURE_STORAGE_ACCOUNT_NAME`, R2 uses `s3://`\nplus a custom `AWS_ENDPOINT_URL`.",
           "type": "string"
         },
         "name_by": {
@@ -4941,7 +4941,7 @@
           "default": "none"
         },
         "request_timeout_ms": {
-          "description": "Request timeout in milliseconds. Unset = no timeout.",
+          "description": "Request timeout in milliseconds. Unset = 300 s without a response byte; `0` = none.",
           "type": [
             "integer",
             "null"
@@ -5783,7 +5783,7 @@
           "default": "none"
         },
         "request_timeout_ms": {
-          "description": "Request timeout in milliseconds. Unset = no timeout.",
+          "description": "Request timeout in milliseconds. Unset = 300 s without a response byte; `0` = none.",
           "type": [
             "integer",
             "null"
@@ -5889,7 +5889,7 @@
           "minimum": 0
         },
         "request_timeout_ms": {
-          "description": "Request timeout in milliseconds. Unset = no timeout.",
+          "description": "Request timeout in milliseconds. Unset = 300 s without a response byte; `0` = none.",
           "type": [
             "integer",
             "null"
@@ -6019,7 +6019,7 @@
           "minimum": 0
         },
         "request_timeout_ms": {
-          "description": "Request timeout in milliseconds. Unset = no timeout.",
+          "description": "Request timeout in milliseconds. Unset = 300 s without a response byte; `0` = none.",
           "type": [
             "integer",
             "null"
@@ -6085,7 +6085,7 @@
           "minimum": 0
         },
         "request_timeout_ms": {
-          "description": "Request timeout in milliseconds. Unset = no timeout.",
+          "description": "Request timeout in milliseconds. Unset = 300 s without a response byte; `0` = none.",
           "type": [
             "integer",
             "null"
@@ -6146,7 +6146,7 @@
           "default": "none"
         },
         "request_timeout_ms": {
-          "description": "Request timeout in milliseconds. Unset = no timeout.",
+          "description": "Request timeout in milliseconds. Unset = 300 s without a response byte; `0` = none.",
           "type": [
             "integer",
             "null"
@@ -6215,7 +6215,7 @@
           "default": "none"
         },
         "request_timeout_ms": {
-          "description": "Request timeout in milliseconds. Unset = no timeout.",
+          "description": "Request timeout in milliseconds. Unset = 300 s without a response byte; `0` = none.",
           "type": [
             "integer",
             "null"

@@ -1764,9 +1764,10 @@ pub enum DecodeErrorPolicy {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ObjectStoreConfig {
     /// Object-store URL, e.g. `file:///var/lib/mqb/incoming`, `s3://bucket/prefix`,
-    /// `gs://bucket/prefix`, or `az://account/container/prefix`. Credentials are resolved
+    /// `gs://bucket/prefix`, or `az://container/prefix`. Credentials are resolved
     /// from the environment by the `object_store` crate (same mechanism as the checkpoint
-    /// backend); R2 uses `s3://` plus a custom `AWS_ENDPOINT_URL`.
+    /// backend); Azure takes the account from `AZURE_STORAGE_ACCOUNT_NAME`, R2 uses `s3://`
+    /// plus a custom `AWS_ENDPOINT_URL`.
     pub url: String,
     /// (Sink only) `auto`, `write_time` (uuidv7 name) or `source_position` (name carries the source range).
     #[serde(default)]
@@ -3156,7 +3157,7 @@ pub struct HttpBulkConfig {
     /// (Publisher only) Compression of request bodies (`none`, `gzip`, `zstd`, `lz4`).
     #[serde(default)]
     pub compression: Compression,
-    /// Request timeout in milliseconds. Unset = no timeout.
+    /// Request timeout in milliseconds. Unset = 300 s without a response byte; `0` = none.
     pub request_timeout_ms: Option<u64>,
     /// Connection timeout in milliseconds. Defaults to 10000ms.
     pub connect_timeout_ms: Option<u64>,
@@ -3559,7 +3560,7 @@ pub struct TypesenseConfig {
     /// Compression of request bodies.
     #[serde(default)]
     pub compression: Compression,
-    /// Request timeout in milliseconds. Unset = no timeout.
+    /// Request timeout in milliseconds. Unset = 300 s without a response byte; `0` = none.
     pub request_timeout_ms: Option<u64>,
     /// TLS options as on `http_bulk` (`ca_file`, `cert_file`, `key_file`, `required`); JSON in a URI.
     pub tls: Option<serde_json::Value>,
@@ -3592,7 +3593,7 @@ pub struct ElasticsearchConfig {
     /// Compression of request bodies.
     #[serde(default)]
     pub compression: Compression,
-    /// Request timeout in milliseconds. Unset = no timeout.
+    /// Request timeout in milliseconds. Unset = 300 s without a response byte; `0` = none.
     pub request_timeout_ms: Option<u64>,
     /// TLS options as on `http_bulk` (`ca_file`, `cert_file`, `key_file`, `required`); JSON in a URI.
     pub tls: Option<serde_json::Value>,
@@ -3642,7 +3643,7 @@ pub struct MeilisearchConfig {
     pub compression: Compression,
     /// Connection timeout in milliseconds. Defaults to 10000ms.
     pub connect_timeout_ms: Option<u64>,
-    /// Request timeout in milliseconds. Unset = no timeout.
+    /// Request timeout in milliseconds. Unset = 300 s without a response byte; `0` = none.
     pub request_timeout_ms: Option<u64>,
     /// (Consumer only) Comma-separated document fields to read. Default: all.
     pub fields: Option<String>,
@@ -3681,7 +3682,7 @@ pub struct QdrantConfig {
     /// Compression of request bodies.
     #[serde(default)]
     pub compression: Compression,
-    /// Request timeout in milliseconds. Unset = no timeout.
+    /// Request timeout in milliseconds. Unset = 300 s without a response byte; `0` = none.
     pub request_timeout_ms: Option<u64>,
     /// (Consumer only) Cursor id that keys the saved read position.
     pub cursor_id: Option<String>,
@@ -3712,7 +3713,7 @@ pub struct OpenAiEmbeddingsConfig {
     pub dimensions: Option<u64>,
     /// Largest request body in bytes; a bigger batch is split. Defaults to 10 MiB.
     pub max_request_bytes: Option<u64>,
-    /// Request timeout in milliseconds. Unset = no timeout.
+    /// Request timeout in milliseconds. Unset = 300 s without a response byte; `0` = none.
     pub request_timeout_ms: Option<u64>,
     /// TLS options as on `http_bulk` (`ca_file`, `cert_file`, `key_file`, `required`); JSON in a URI.
     pub tls: Option<serde_json::Value>,
@@ -3747,7 +3748,7 @@ pub struct OpenAiChatConfig {
     pub messages_per_request: Option<usize>,
     /// With `messages_per_request`: largest request body in bytes. Defaults to 10 MiB.
     pub max_request_bytes: Option<usize>,
-    /// Request timeout in milliseconds. Unset = no timeout.
+    /// Request timeout in milliseconds. Unset = 300 s without a response byte; `0` = none.
     pub request_timeout_ms: Option<u64>,
     /// TLS options as on `http_bulk` (`ca_file`, `cert_file`, `key_file`, `required`); JSON in a URI.
     pub tls: Option<serde_json::Value>,

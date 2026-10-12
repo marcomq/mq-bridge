@@ -108,7 +108,9 @@ therefore useless for dedup across a restart.
 | `http` / `websocket` / `grpc` | From the request when it carries an id | No (request/reply, not replay) |
 | `dir_spool` | **Yes** — the sidecar's `message_id`, when the chunk was written by `mq-bridge`. A foreign producer's payload-only chunk gets a fresh id | No — a drained chunk is deleted |
 | `mqtt` | MQTT 5: only if the producer set the `mq_bridge.message_id` user property, which `mq-bridge` writes. MQTT 3: no | No |
-| `aws` (SQS), `zeromq`, `ibm_mq`, `file`, `object_store`, `clickhouse` | No — fresh id per read | No |
+| `ibm_mq` | **Yes** — hash of the MQMD `MsgId`, which a backout keeps. It names the queued message, not the record: a producer that puts a record twice gets two ids, and one that reuses a `MsgId` gives two messages one id | No |
+| `aws` (SQS) | **Yes** — the SQS `MessageId`, which a redelivery keeps. A record the producer sends twice gets two ids | No |
+| `zeromq`, `file`, `object_store`, `clickhouse` | No — fresh id per read | No |
 
 Two consequences worth internalising:
 
@@ -204,8 +206,8 @@ What a route achieves, by what its input offers and what its output can absorb:
 | Input ↓ / Output → | Keyed idempotent write (Mongo `id_field`, SQL `ON CONFLICT`) | Positional names (file / object_store `source_position`) | Broker or plain sink |
 |---|---|---|---|
 | Replayable position (`kafka`, `postgres_cdc`, MongoDB CDC, `file` in `consume`, `sqlx` cursor) | effectively-once — key on a business id or on the position itself | effectively-once | at-least-once |
-| Stable identity only (JetStream, AMQP/MQTT 5 with an id, `mongodb` consumer, `dir_spool`) | effectively-once — key on the id | not available (no position) | at-least-once; `deduplication` narrows duplicates, see below |
-| Neither (`aws`, `ibm_mq`, MQTT 3, `file` re-read, …) | effectively-once only with a business key (`id` middleware) | not available | at-least-once |
+| Stable identity only (JetStream, AMQP/MQTT 5 with an id, `mongodb` consumer, `dir_spool`, `aws`, `ibm_mq`) | effectively-once — key on the id | not available (no position) | at-least-once; `deduplication` narrows duplicates, see below |
+| Neither (MQTT 3, `file` re-read, …) | effectively-once only with a business key (`id` middleware) | not available | at-least-once |
 | No acknowledgement (`zeromq`, core NATS, MQTT QoS 0, HTTP `fire_and_forget`, `websocket`, `grpc` dynamic client) | at-most-once | at-most-once | at-most-once |
 
 A handler, or any side effect it performs, sits outside this table: see [Handlers](#handlers).

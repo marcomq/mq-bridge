@@ -224,7 +224,7 @@ fn common_properties(example: &str) -> serde_json::Map<String, Value> {
         },
         "request_timeout_ms": {
             "type": "integer",
-            "description": "Request timeout in milliseconds. Unset = no timeout."
+            "description": "Request timeout in milliseconds. Unset = 300 s without a response byte; `0` = none."
         },
         "tls": {
             "type": ["object", "string"],

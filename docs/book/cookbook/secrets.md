@@ -17,7 +17,8 @@ orders_out:
       topic: "orders"
       url: "${KAFKA_URL:-localhost:9092}"
       # a password sourced from the environment, never committed
-      sasl_password: "${KAFKA_PASSWORD}"
+      username: "svc-orders"
+      password: "${KAFKA_PASSWORD}"
 ```
 
 For local development, drop a `.env` file in the working directory — it is loaded automatically.

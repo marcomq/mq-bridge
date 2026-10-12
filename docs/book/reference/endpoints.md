@@ -153,8 +153,9 @@ Azure Blob, Cloudflare R2, and anything else the `object_store` crate speaks. En
 `object-store` feature. Use `local-store:///absolute/path` in CLI URLs (it becomes
 `file:///absolute/path` internally), or use `url: file:///absolute/path` in structured YAML.
 Credentials and cloud backend options come from the environment
-(`AWS_ACCESS_KEY_ID`, `AWS_REGION`, `GOOGLE_SERVICE_ACCOUNT`, `AZURE_STORAGE_ACCOUNT`, …); the
-URL scheme picks the backend (`file://`, `s3://`, `gs://`, `az://`).
+(`AWS_ACCESS_KEY_ID`, `AWS_REGION`, `GOOGLE_SERVICE_ACCOUNT`, `AZURE_STORAGE_ACCOUNT_NAME`, …); the
+URL scheme picks the backend (`file://`, `s3://`, `gs://`, `az://`). The variables and URL form
+of each cloud are on the [object storage connector page](../connectors/object-store.md).
 
 - **As a sink**, each flushed batch is encoded with the file formats (`normal` JSONL, `json`,
   `text`, `raw`) and written as **one immutable object** at

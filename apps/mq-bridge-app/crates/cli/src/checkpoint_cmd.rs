@@ -7,7 +7,7 @@
 
 use anyhow::{Context, anyhow, bail};
 use mq_bridge::checkpoint::{CheckpointEntry, CheckpointStore, VersionedCheckpoint};
-use mq_bridge::models::Endpoint;
+use mq_bridge::models::{Endpoint, EndpointType};
 use mq_bridge_app::{config::load_config, copy_pipeline, mq_bridge};
 use std::sync::Arc;
 
@@ -106,6 +106,7 @@ pub(crate) async fn run(
             println!("{RUNNING_READER_NOTE}");
         }
         CheckpointAction::Set { value, .. } => {
+            check_sql_cursor(&input.endpoint_type, &value)?;
             let previous = match checkpoint.entry().await {
                 Ok(previous) => previous.map_or("unset".to_string(), |e| e.value),
                 Err(e) => format!("unreadable: {e:#}"),
@@ -114,6 +115,27 @@ pub(crate) async fn run(
             println!("set: {value} (was {previous})");
             println!("{RUNNING_READER_NOTE}");
         }
+    }
+    Ok(())
+}
+
+/// A SQL cursor reader stops on a value in another form, so `set` refuses it.
+fn check_sql_cursor(source: &EndpointType, value: &str) -> anyhow::Result<()> {
+    let EndpointType::Sqlx(config) = source else {
+        return Ok(());
+    };
+    if config.cursor_column.is_none() || config.publication.is_some() {
+        return Ok(());
+    }
+    let readable = match value.split_once(':') {
+        Some(("int", number)) => number.parse::<i64>().is_ok(),
+        Some(("str", _)) => true,
+        _ => false,
+    };
+    if !readable {
+        bail!(
+            "`{value}` is not a SQL cursor: use `int:<number>` or `str:<text>`, as `show` prints it"
+        );
     }
     Ok(())
 }
@@ -164,5 +186,38 @@ fn print_entry(checkpoint: &Arc<VersionedCheckpoint>, entry: Option<CheckpointEn
         .and_then(|ms| chrono::DateTime::from_timestamp_millis(ms as i64))
     {
         println!("updated: {}", updated.to_rfc3339());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn set_refuses_a_sql_cursor_the_reader_cannot_read() {
+        let (_, input) = resolve_source(
+            &CheckpointTarget {
+                route: None,
+                source: Some("sqlite:///tmp/a.db?table=t&cursor_column=id".into()),
+                target: Some("null:".into()),
+                filter: None,
+                verbose: false,
+            },
+            None,
+            None,
+        )
+        .unwrap();
+        for (value, ok) in [
+            ("int:42", true),
+            ("str:a:b", true),
+            ("1000", false),
+            ("int:x", false),
+        ] {
+            assert_eq!(
+                check_sql_cursor(&input.endpoint_type, value).is_ok(),
+                ok,
+                "{value}"
+            );
+        }
     }
 }

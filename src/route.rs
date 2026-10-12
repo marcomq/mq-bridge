@@ -435,6 +435,26 @@ pub fn get_endpoint(name: &str) -> Option<Endpoint> {
     reader.get(name).cloned()
 }
 
+static ROUTE_DISPLAY_NAMES: OnceLock<RwLock<HashMap<String, String>>> = OnceLock::new();
+
+/// Sets the name `route` is shown under in log lines, error text and DLQ metadata.
+/// `route` stays the key: the registry, metric labels and default store tables keep it.
+pub fn set_route_display_name(route: &str, display: &str) {
+    let registry = ROUTE_DISPLAY_NAMES.get_or_init(|| RwLock::new(HashMap::new()));
+    recover_write_lock(registry, "route_display_names")
+        .insert(route.to_string(), display.to_string());
+}
+
+fn display_name_of(route: &str) -> Option<String> {
+    let reader = recover_read_lock(ROUTE_DISPLAY_NAMES.get()?, "route_display_names");
+    reader.get(route).cloned()
+}
+
+/// The name to print for `route`: its display name, or `route` itself.
+pub(crate) fn route_display_name(route: &str) -> String {
+    display_name_of(route).unwrap_or_else(|| route.to_string())
+}
+
 fn check_fault_middleware_allowed(
     endpoint: &Endpoint,
     route_name: &str,
@@ -1483,9 +1503,10 @@ impl Route {
         name_str: &str,
         no_resume: bool,
     ) -> anyhow::Result<RouteHandle> {
+        let shown = Arc::new(route_display_name(name_str));
         let warnings = self.check(name_str, None)?;
         for warning in warnings {
-            tracing::warn!(route = name_str, "Configuration warning: {}", warning);
+            tracing::warn!(route = %shown, "Configuration warning: {}", warning);
         }
         let relaxed_output = relax_object_naming(
             name_str,
@@ -1497,13 +1518,13 @@ impl Route {
         let inferred_output = relaxed_output.as_ref().unwrap_or(&self.output);
         match self.inferred_delivery(inferred_output) {
             (delivery, Some(mechanism)) => tracing::info!(
-                route = name_str,
+                route = %shown,
                 delivery = %delivery,
                 mechanism,
                 "Inferred delivery guarantee from idempotent sink configuration"
             ),
             (delivery, None) => tracing::info!(
-                route = name_str,
+                route = %shown,
                 delivery = %delivery,
                 "Inferred delivery guarantee"
             ),
@@ -1516,6 +1537,13 @@ impl Route {
         // Use `Arc` so route/name clones are cheap (pointer copy) in the reconnect loop.
         let route = Arc::new(self.clone());
         let name = Arc::new(name_str.to_string());
+        let shown_loop = Arc::clone(&shown);
+        // Errors embed the route name (`[route:…]`); print the display name there too.
+        let show = {
+            let name = Arc::clone(&name);
+            let shown = Arc::clone(&shown);
+            move |text: String| text.replace(name.as_str(), shown.as_str())
+        };
 
         // Live health cell shared with the returned `RouteHandle`. Starts unhealthy
         // ("connecting") and is flipped to healthy once the route reports ready, back
@@ -1583,7 +1611,7 @@ impl Route {
                 loop {
                     select! {
                         _ = shutdown_rx.recv() => {
-                            info!("Shutdown signal received for route '{}'.", name);
+                            info!("Shutdown signal received for route '{}'.", shown_loop);
                             // Notify the inner task to shut down.
                             let _ = internal_shutdown_tx.send(()).await;
                             // Wait for the inner task to finish gracefully.
@@ -1624,7 +1652,7 @@ impl Route {
                             forward_buffered_ready(&mut startup_notified, &iter_ready_rx, &ready_tx).await;
                             match res {
                                 Ok(Ok(should_continue)) if !should_continue => {
-                                    info!("Route '{}' completed gracefully. Shutting down.", name);
+                                    info!("Route '{}' completed gracefully. Shutting down.", shown_loop);
                                     outcome_guard.set(RouteOutcome::Completed);
                                     break 'reconnect;
                                 }
@@ -1644,7 +1672,7 @@ impl Route {
                                     if !is_end_of_stream {
                                         let mut s = recover_write_lock(&status_loop, "route_handle_status");
                                         s.healthy = false;
-                                        s.error = Some(e.to_string());
+                                        s.error = Some(show(e.to_string()));
                                         consecutive_failures += 1;
                                     }
 
@@ -1661,12 +1689,12 @@ impl Route {
                                         if delivered_anything {
                                             error!(
                                                 "Route '{}' failed {} times in a row while draining; giving up. Last error: {}",
-                                                name, consecutive_failures, e
+                                                shown_loop, consecutive_failures, show(e.to_string())
                                             );
                                         } else {
                                             error!(
                                                 "Route '{}' failed before it delivered anything; a drain does not wait for an endpoint to become available. Error: {}",
-                                                name, e
+                                                shown_loop, show(e.to_string())
                                             );
                                         }
                                         break 'reconnect;
@@ -1675,25 +1703,25 @@ impl Route {
                                     if is_permanent {
                                         if is_end_of_stream {
                                             outcome_guard.set(RouteOutcome::Completed);
-                                            info!("Route '{}' completed: end of stream. Shutting down.", name);
+                                            info!("Route '{}' completed: end of stream. Shutting down.", shown_loop);
                                         } else {
                                             outcome_guard.set(RouteOutcome::Failed);
-                                            error!("Route '{}' failed with a permanent error: {}. Shutting down.", name, e);
+                                            error!("Route '{}' failed with a permanent error: {}. Shutting down.", shown_loop, show(e.to_string()));
                                         }
                                         break 'reconnect;
                                     }
 
                                     warn!(
                                         "Route '{}' failed: {}. Reconnecting in {}ms...",
-                                        name,
-                                        e,
+                                        shown_loop,
+                                        show(e.to_string()),
                                         reconnect_interval.as_millis()
                                     );
                                     if !reconnect_interval.is_zero() {
                                         select! {
                                             _ = tokio::time::sleep(reconnect_interval) => {}
                                             _ = shutdown_rx.recv() => {
-                                                info!("Shutdown signal received for route '{}'.", name);
+                                                info!("Shutdown signal received for route '{}'.", shown_loop);
                                                 outcome_guard.set(RouteOutcome::Stopped);
                                                 break 'reconnect;
                                             }
@@ -1719,13 +1747,13 @@ impl Route {
                                         outcome_guard.set(RouteOutcome::Failed);
                                         error!(
                                             "Route '{}' panicked {} times in a row while draining; giving up. Last error: {}",
-                                            name, consecutive_failures, e
+                                            shown_loop, consecutive_failures, e
                                         );
                                         break 'reconnect;
                                     }
                                     error!(
                                         "Route '{}' task panicked: {}. Reconnecting in {}ms...",
-                                        name,
+                                        shown_loop,
                                         e,
                                         reconnect_interval.as_millis()
                                     );
@@ -1733,7 +1761,7 @@ impl Route {
                                         select! {
                                             _ = tokio::time::sleep(reconnect_interval) => {}
                                             _ = shutdown_rx.recv() => {
-                                                info!("Shutdown signal received for route '{}'.", name);
+                                                info!("Shutdown signal received for route '{}'.", shown_loop);
                                                 outcome_guard.set(RouteOutcome::Stopped);
                                                 break 'reconnect;
                                             }
@@ -1782,7 +1810,7 @@ impl Route {
                 let terminal = *recover_read_lock(&outcome, "route_handle_outcome");
                 anyhow::anyhow!(
                     "Route '{}' failed to start: ended before it signalled ready (outcome: {}){}",
-                    name_str,
+                    shown,
                     terminal.map_or("unknown", |o| match o {
                         RouteOutcome::Completed => "completed",
                         RouteOutcome::Stopped => "stopped",
@@ -1793,7 +1821,7 @@ impl Route {
             }
             _ => anyhow::anyhow!(
                 "Route '{}' failed to start: did not become ready within {}ms{}",
-                name_str,
+                shown,
                 startup_timeout.as_millis(),
                 if cause.is_empty() {
                     ": an endpoint was still connecting and had reported no error"
@@ -1930,7 +1958,7 @@ impl Route {
                 Ok(err) = err_rx.recv() => break Err(err),
 
                 _ = shutdown_rx.recv() => {
-                    info!("Shutdown signal received in sequential runner for route '{}'.", name);
+                    info!("Shutdown signal received in sequential runner for route '{}'.", route_display_name(name));
                     break Ok(true); // Stopped by shutdown signal
                 }
                 res = receive_with_permit(
@@ -1943,7 +1971,7 @@ impl Route {
                         Ok(batch) => {
                             if batch.messages.is_empty() {
                                 if self.options.exit_on_empty {
-                                    info!("Consumer for route '{}' drained (empty batch, exit_on_empty). Shutting down.", name);
+                                    info!("Consumer for route '{}' drained (empty batch, exit_on_empty). Shutting down.", route_display_name(name));
                                     break Ok(false); // Graceful drain-then-exit
                                 }
                                 pause_after_empty_batch(self.options.empty_batch_delay_ms).await;
@@ -1952,7 +1980,7 @@ impl Route {
                             batch
                         }
                         Err(ConsumerError::EndOfStream) => {
-                            info!("Consumer for route '{}' reached end of stream. Shutting down.", name);
+                            info!("Consumer for route '{}' reached end of stream. Shutting down.", route_display_name(name));
                             break Ok(false); // Graceful exit
                         }
                         Err(ConsumerError::Connection(e)) => {
@@ -2244,7 +2272,7 @@ impl Route {
                 }
 
                 _ = shutdown_rx.recv() => {
-                    info!("Shutdown signal received in concurrent runner for route '{}'.", name);
+                    info!("Shutdown signal received in concurrent runner for route '{}'.", route_display_name(name));
                     break;
                 }
 
@@ -2258,7 +2286,7 @@ impl Route {
                         Ok(batch) => {
                             if batch.messages.is_empty() {
                                 if self.options.exit_on_empty {
-                                    info!("Consumer for route '{}' drained (empty batch, exit_on_empty). Shutting down.", name);
+                                    info!("Consumer for route '{}' drained (empty batch, exit_on_empty). Shutting down.", route_display_name(name));
                                     drained = true;
                                     break; // Graceful drain-then-exit
                                 }
@@ -2268,7 +2296,7 @@ impl Route {
                             (batch.messages, batch.commit)
                         }
                         Err(ConsumerError::EndOfStream) => {
-                            info!("Consumer for route '{}' reached end of stream. Shutting down.", name);
+                            info!("Consumer for route '{}' reached end of stream. Shutting down.", route_display_name(name));
                             // Without this the tail below reads "no shutdown was
                             // requested" as "reconnect", and the outer loop reruns
                             // the whole source again, forever.
@@ -5050,6 +5078,46 @@ mod tests {
             err.contains("failed to start: ended before it signalled ready")
                 && err.contains("outcome: failed"),
             "got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_display_name_replaces_the_route_key_in_a_start_failure() {
+        let factory_name = format!("display_name_{}", fast_uuid_v7::gen_id());
+        register_endpoint_factory(
+            &factory_name,
+            Arc::new(MockEndpointFactory {
+                create_consumer_fail: true,
+                ..MockEndpointFactory::new()
+            }),
+        )
+        .unwrap();
+        let input = Endpoint {
+            endpoint_type: EndpointType::Custom {
+                name: factory_name,
+                config: serde_json::Value::Null,
+            },
+            middlewares: vec![],
+            handler: None,
+        };
+        let route = Route::new(input, Endpoint::new_memory("out", 10))
+            .with_exit_on_empty(true)
+            .with_reconnect_interval_ms(1);
+
+        set_route_display_name("test_display_name_long_key", "short");
+        let err = route
+            .run("test_display_name_long_key")
+            .await
+            .expect_err("must fail")
+            .to_string();
+        assert!(
+            err.contains("Route 'short' failed to start")
+                && !err.contains("test_display_name_long_key"),
+            "got: {err}"
+        );
+        assert_eq!(
+            route_display_name("no_display_name_set"),
+            "no_display_name_set"
         );
     }
 

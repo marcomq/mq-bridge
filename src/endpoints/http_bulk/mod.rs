@@ -38,6 +38,8 @@ use tracing::warn;
 const JSON: &str = "application/json";
 /// Most characters of a response body quoted in an error.
 const QUOTED_RESPONSE_CHARS: usize = 500;
+/// Longest wait for a response byte when `request_timeout_ms` is unset.
+const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// The client, base URL, headers and credentials both directions of the endpoint share.
 struct Connection {
@@ -76,14 +78,16 @@ impl Connection {
             .connect_timeout(Duration::from_millis(
                 config.connect_timeout_ms.unwrap_or(10_000),
             ));
-        if let Some(ms) = config.request_timeout_ms {
-            let timeout = Duration::from_millis(ms);
+        let streams = config.read.as_ref().and_then(|read| read.stream).is_some();
+        builder = match config.request_timeout_ms {
+            Some(0) => builder,
             // An open stream has no total duration: the timeout bounds each silence.
-            builder = match config.read.as_ref().and_then(|read| read.stream) {
-                Some(_) => builder.read_timeout(timeout),
-                None => builder.timeout(timeout),
-            };
-        }
+            Some(ms) if streams => builder.read_timeout(Duration::from_millis(ms)),
+            Some(ms) => builder.timeout(Duration::from_millis(ms)),
+            None if streams => builder,
+            // A pooled connection the server stopped reading would hang without end.
+            None => builder.read_timeout(DEFAULT_READ_TIMEOUT),
+        };
         crate::support::tls_check::warn_unverified("http_bulk", config.tls.accept_invalid_certs);
         if config.tls.accept_invalid_certs {
             builder = builder.danger_accept_invalid_certs(true);
@@ -212,7 +216,7 @@ mod tests {
             ("elasticsearch.md", 2),
             ("postgrest.md", 2),
             ("qdrant.md", 2),
-            ("openai.md", 5),
+            ("openai.md", 6),
             ("../cookbook/llm.md", 4),
         ] {
             // The book is not part of the published crate.

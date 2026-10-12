@@ -311,14 +311,15 @@ full-common = ["file", "dir-spool", "middleware", "yaml", "plugin", "mongodb", "
 # runtime the client is loaded lazily only when an ibm-mq endpoint is opened
 # (clear error if the client isn't installed). Use `ibm-mq-static` instead for
 # static linking.
-full = ["full-common", "ibm-mq"]
+full = ["full-common", "ibm-mq", "kafka-ssl"]
 
 # The two build variants. `full` compiles librdkafka from bundled sources and
 # needs nothing installed. `full-dynamic` adds `link-dynamic`, which links the
 # shared librdkafka found via pkg-config -- what a conda-forge recipe or a distro
 # package wants, so the library stays patchable. Purely additive: enabling both
-# just gives you the dynamic one.
-full-dynamic = ["full", "link-dynamic"]
+# just gives you the dynamic one. It leaves `kafka-ssl` out: the system librdkafka
+# brings its own OpenSSL.
+full-dynamic = ["full-common", "ibm-mq", "link-dynamic"]
 link-dynamic = ["rdkafka?/dynamic-linking"]
 
 # The feature set for lint and doc builds. NOT `--all-features`: that turns on
@@ -399,6 +400,9 @@ file = []
 # `dir_spool` endpoint: crash-safe directory FIFO queue.
 dir-spool = ["dep:pidlock"]
 kafka = ["rdkafka", "rdkafka/libz-static"]
+# TLS and SASL for the bundled librdkafka, which has neither without OpenSSL. Compiles
+# OpenSSL from source: needs perl and make, and adds minutes to a clean build.
+kafka-ssl = ["kafka", "rdkafka/ssl-vendored"]
 amqp = ["lapin", "rustls", "rustls-pemfile"]
 nats = ["async-nats", "rustls", "rustls-pemfile", "webpki-roots"]
 mongodb = ["dep:mongodb"]

@@ -26,6 +26,7 @@ const SQS_BATCH_BYTES: usize = 256 * 1024;
 fn canonical_from_sqs(
     body: String,
     attributes: Option<HashMap<String, aws_sdk_sqs::types::MessageAttributeValue>>,
+    sqs_message_id: Option<&str>,
 ) -> CanonicalMessage {
     let mut metadata = HashMap::new();
     for (key, value) in attributes.unwrap_or_default() {
@@ -51,7 +52,10 @@ fn canonical_from_sqs(
         }
         None => body.into_bytes(),
     };
-    let mut canonical = CanonicalMessage::new(payload, None);
+    // The SQS `MessageId` stays the same when the message is delivered again.
+    let message_id =
+        sqs_message_id.and_then(|id| crate::canonical_message::message_id_from_str(id).ok());
+    let mut canonical = CanonicalMessage::new(payload, message_id);
     canonical.metadata = metadata;
     canonical
 }
@@ -234,7 +238,11 @@ impl MessageConsumer for AwsConsumer {
                     );
                 }
 
-                messages.push(canonical_from_sqs(body_str, msg.message_attributes));
+                messages.push(canonical_from_sqs(
+                    body_str,
+                    msg.message_attributes,
+                    msg.message_id.as_deref(),
+                ));
                 receipt_handles.push(receipt_handle);
             }
 
@@ -769,7 +777,7 @@ mod tests {
             .map(|(key, value)| (key.clone(), attribute(value)))
             .collect();
 
-        let received = canonical_from_sqs(out.body, Some(attributes));
+        let received = canonical_from_sqs(out.body, Some(attributes), None);
         assert_eq!(&received.payload[..], &[0, 159, 146, 150]);
         assert!(!received
             .metadata
@@ -782,11 +790,23 @@ mod tests {
             ("mqb.src.kafka_offset".to_string(), attribute("7")),
             ("kept".to_string(), attribute("yes")),
         ]);
-        let received = canonical_from_sqs("body".to_string(), Some(attributes));
+        let received = canonical_from_sqs("body".to_string(), Some(attributes), None);
         assert!(!received.metadata.contains_key("mqb.src.kafka_offset"));
         assert_eq!(
             received.metadata.get("kept").map(String::as_str),
             Some("yes")
+        );
+    }
+
+    #[test]
+    fn a_redelivered_message_keeps_its_message_id() {
+        let sqs_id = Some("5fea7756-0ea4-451a-a703-a558b933e274");
+        let first = canonical_from_sqs("body".to_string(), None, sqs_id);
+        let again = canonical_from_sqs("body".to_string(), None, sqs_id);
+        assert_eq!(first.message_id, again.message_id);
+        assert_eq!(
+            first.message_id,
+            0x5fea7756_0ea4_451a_a703_a558b933e274_u128
         );
     }
 

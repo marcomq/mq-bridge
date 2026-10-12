@@ -1124,6 +1124,18 @@ async fn stop_and_settle(
     .ok()
 }
 
+/// As `shutdown_requested`, and also once the reader of stdout is gone.
+async fn copy_interrupted() {
+    tokio::select! {
+        _ = shutdown_requested() => {}
+        _ = async {
+            while !STDOUT_CLOSED.load(std::sync::atomic::Ordering::Relaxed) {
+                tokio::time::sleep(COPY_POLL_INTERVAL).await;
+            }
+        } => {}
+    }
+}
+
 /// Runs the `copy` subcommand: builds a single in-memory route from the `--from`
 /// and `--to` URIs and awaits its completion. With `--drain` the underlying route
 /// exits once the source is empty; otherwise it runs until Ctrl-C.
@@ -1134,6 +1146,7 @@ async fn run_copy(args: CopyArgs, stop_when: StopWhen) -> anyhow::Result<()> {
     let (from, to) = copy_endpoints(&args)?;
     let (mut input, output) = copy_route_endpoints(from, to)?;
     warn_about_surprising_copy(&input, &output);
+    let copy_id = copy_pipeline::checkpoint_identity(&input, &output, args.filter.as_deref())?;
     let resume = if args.resume {
         Some(copy_pipeline::configure_resume(
             &mut input,
@@ -1143,6 +1156,8 @@ async fn run_copy(args: CopyArgs, stop_when: StopWhen) -> anyhow::Result<()> {
     } else {
         None
     };
+    // After `configure_resume`, which derives its id from the endpoints as given.
+    copy_pipeline::name_dedup_tables(&mut input, &copy_id);
     // The label names the steady-state source, not the `sequence` wrapper below.
     let input_endpoint_label = endpoint_type_label(&input.endpoint_type);
     // Attached outside every other source middleware, so it sees only what the
@@ -1232,7 +1247,7 @@ async fn run_copy(args: CopyArgs, stop_when: StopWhen) -> anyhow::Result<()> {
                         None => std::future::pending::<()>().await,
                     }
                 } => info!("nothing arrived within the wait budget"),
-                _ = shutdown_requested() => info!("Shutdown requested; stopping listen"),
+                _ = copy_interrupted() => info!("Shutdown requested; stopping listen"),
             }
             let outcome = stop_and_settle(&handle).await;
             return copy_result(
@@ -1246,7 +1261,7 @@ async fn run_copy(args: CopyArgs, stop_when: StopWhen) -> anyhow::Result<()> {
             // Continuous bridge: run until Ctrl-C, then stop gracefully. A source
             // that ends by itself (stdin at end of input) ends the copy too.
             tokio::select! {
-                _ = shutdown_requested() => info!("Shutdown requested; stopping copy"),
+                _ = copy_interrupted() => info!("Shutdown requested; stopping copy"),
                 _ = async {
                     while handle.outcome().is_none() {
                         tokio::time::sleep(COPY_POLL_INTERVAL).await;
@@ -1281,7 +1296,7 @@ async fn run_copy(args: CopyArgs, stop_when: StopWhen) -> anyhow::Result<()> {
                     tokio::time::sleep(COPY_POLL_INTERVAL).await;
                 }
             } => Some(outcome),
-            _ = shutdown_requested() => {
+            _ = copy_interrupted() => {
                 info!("Shutdown requested; aborting copy");
                 None
             }
@@ -1311,7 +1326,7 @@ async fn run_copy(args: CopyArgs, stop_when: StopWhen) -> anyhow::Result<()> {
             drop(copy_status);
             tokio::select! {
                 _ = tokio::time::sleep(COPY_WAIT_RETRY_INTERVAL) => continue,
-                _ = shutdown_requested() => {
+                _ = copy_interrupted() => {
                     info!("Shutdown requested; aborting copy");
                     return copy_result(None, None, &throughput(&copied, &read, started));
                 }
@@ -1664,6 +1679,9 @@ fn copy_result(
     use mq_bridge::route::RouteOutcome;
 
     clear_progress();
+    if STDOUT_CLOSED.load(std::sync::atomic::Ordering::Relaxed) {
+        anyhow::bail!("stdout was closed; stopped after {}", moved.rows_display());
+    }
     if matches!(outcome, Some(RouteOutcome::Failed)) {
         let cause = error.unwrap_or_else(|| "no error reported".to_string());
         anyhow::bail!("copy failed after {}: {cause}", moved.rows_display());
@@ -2877,6 +2895,13 @@ fn coerce_scalar(s: String, ty: FieldType) -> serde_json::Value {
     }
 }
 
+/// `RUST_LOG` if set, else `level`. The AMQP client logs each returned message with its
+/// whole payload at `warn`; the bridge reports the return itself, so that target is quiet.
+fn default_log_filter(level: &str) -> EnvFilter {
+    EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new(format!("{level},lapin::returned_messages=error")))
+}
+
 /// Minimal logging setup for the headless `copy` subcommand (no AppConfig).
 ///
 /// A one-shot `copy` answers with its summary line, not with a log, so the
@@ -2888,7 +2913,7 @@ fn init_copy_logging(color: ColorChoice, verbose: bool) {
     use tracing_subscriber::fmt::writer::BoxMakeWriter;
 
     let default = if verbose { "info" } else { "warn" };
-    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default));
+    let env_filter = default_log_filter(default);
     // stderr, so stdout carries only the summary line; `MQB_LOG_STDOUT` restores the old stream.
     let to_stdout = std::env::var_os("MQB_LOG_STDOUT").is_some_and(|v| !v.is_empty() && v != "0");
     let (writer, is_terminal) = if to_stdout {
@@ -2902,12 +2927,53 @@ fn init_copy_logging(color: ColorChoice, verbose: bool) {
             std::io::stderr().is_terminal(),
         )
     };
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+
     let _ = tracing_subscriber::fmt()
         .with_env_filter(env_filter)
         .with_target(false)
         .with_writer(writer)
         .with_ansi(color.enabled(is_terminal, no_color_requested()))
+        .finish()
+        .with(ClosedStdoutLayer)
         .try_init();
+}
+
+/// Set once a copy to stdout hit a closed pipe (`mqb copy … - | head`).
+static STDOUT_CLOSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Drops the engine's lines about a closed stdout; `copy_result` reports it in one.
+struct ClosedStdoutLayer;
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for ClosedStdoutLayer {
+    fn event_enabled(
+        &self,
+        event: &tracing::Event<'_>,
+        _: tracing_subscriber::layer::Context<'_, S>,
+    ) -> bool {
+        use std::sync::atomic::Ordering::Relaxed;
+
+        struct BrokenPipe(bool);
+        impl tracing::field::Visit for BrokenPipe {
+            fn record_debug(&mut self, _: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                self.0 |= format!("{value:?}").contains("Broken pipe");
+            }
+        }
+
+        if STDOUT_CLOSED.load(Relaxed) {
+            return false;
+        }
+        if !SUMMARY_TO_STDERR.load(Relaxed) {
+            return true;
+        }
+        let mut found = BrokenPipe(false);
+        event.record(&mut found);
+        if found.0 {
+            STDOUT_CLOSED.store(true, Relaxed);
+        }
+        !found.0
+    }
 }
 
 /// Logging for the `mcp` subcommand. Writes to **stderr** because the `stdio`
@@ -2916,7 +2982,7 @@ fn init_copy_logging(color: ColorChoice, verbose: bool) {
 fn init_mcp_logging(color: ColorChoice) {
     use std::io::IsTerminal;
 
-    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let env_filter = default_log_filter("info");
     let _ = tracing_subscriber::fmt()
         .with_env_filter(env_filter)
         .with_target(false)
@@ -2937,8 +3003,7 @@ fn init_logging(config: &AppConfig, color: ColorChoice) {
         return;
     }
 
-    let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(config.log_level.clone()));
+    let env_filter = default_log_filter(&config.log_level);
 
     let logger = tracing_subscriber::fmt()
         .with_env_filter(env_filter)

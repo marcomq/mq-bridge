@@ -2222,6 +2222,11 @@ openssl@0.10.81
 License: Apache-2.0
 Source: https://github.com/rust-openssl/rust-openssl
 
+OpenSSL 3.6.3 (C library; compiled into the bundled librdkafka by openssl-src@300.6.1+3.6.3)
+License: Apache-2.0
+Source: https://github.com/openssl/openssl
+Copyright/attribution: Copyright 1995-2026 The OpenSSL Project Authors. All Rights Reserved.
+
 option-ext@0.2.0
 License: MPL-2.0
 Source: https://github.com/soc/option-ext.git

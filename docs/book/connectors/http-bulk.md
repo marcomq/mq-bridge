@@ -19,6 +19,107 @@ answers a whole batch of lookups at once. See [Lookups](#lookups).
 
 It needs the `http-bulk` feature, which `full` includes.
 
+## A complete example
+
+A route that copies a PostgreSQL table to a REST API, 2,000 rows per request. The API in this
+example takes `POST /v1/products/batch` with the body `{"items": [ … ]}` and a bearer token:
+
+```yaml
+products_to_api:
+  batch_size: 2000
+  input:
+    sqlx:
+      url: "postgres://app:secret@localhost/shop"
+      table: "products"
+      cursor_column: "id"
+      cursor_id: "products-to-api"
+  output:
+    middlewares:
+      - retry: { max_attempts: 5, initial_interval_ms: 500 }
+      - dlq: { endpoint: { file: { path: "refused-products.jsonl" } } }
+    http_bulk:
+      url: https://api.example.com
+      headers:
+        Authorization: "Bearer ${API_TOKEN}"
+      upsert:
+        path: /v1/products/batch
+        format: json_array
+        envelope: '{"items": {documents}}'
+        split_on_reject: true
+      max_request_bytes: 5000000
+```
+
+Save it as `products.yaml` and run it with `mqb --config products.yaml`. What happens:
+
+1. The input reads up to 2,000 rows; each row is one message with a JSON object as payload.
+2. The output puts the payloads into one array, wraps it in the `envelope` and sends one
+   `POST`. If the body would exceed `max_request_bytes`, it sends several.
+3. A 2xx answer means all rows were written, and the input saves its position.
+4. A `429` or `5xx` answer is tried again by `retry`. A `400` or `422` is sent again in halves
+   (`split_on_reject`) until the rows the API refuses stand alone; those go to the file of the
+   `dlq`, and the rest is written.
+
+Which fields your API needs follows from a few questions:
+
+| Question about the API | Field |
+| :--- | :--- |
+| One JSON document per line, or one JSON array? | `upsert.format`: `ndjson` or `json_array` |
+| Is the array inside an object? | `upsert.envelope`, e.g. `'{"items": {documents}}'` |
+| Does every document need a line before it (Elasticsearch `_bulk`)? | `upsert.action` |
+| Does the response report each document? | `upsert.result`: `lines` or `items`; none if the status says it all |
+| Does it answer with a job to wait for? | `upsert.result.job` |
+
+## Authentication
+
+A fixed key or token goes in `headers`. Take the value from the environment so that it is
+not in the file:
+
+```yaml
+output:
+  http_bulk:
+    url: https://search.example.com
+    headers:
+      X-API-Key: "${SEARCH_API_KEY}"
+    upsert: { path: /docs/_bulk }
+```
+
+An OAuth2 client (client credentials grant). The token is fetched once, reused, and renewed
+before it expires:
+
+```yaml
+output:
+  http_bulk:
+    url: https://api.example.com
+    auth:
+      oauth2:
+        token_url: https://login.example.com/oauth2/token
+        client_id: "bridge"
+        client_secret: "${OAUTH_CLIENT_SECRET}"
+        scope: "products.write"
+    upsert:
+      path: /v1/products/batch
+      format: json_array
+```
+
+Amazon OpenSearch Service, with requests signed by the AWS credentials of the environment
+(`service: aoss` for OpenSearch Serverless):
+
+```yaml
+output:
+  http_bulk:
+    url: https://search-shop-abc123.eu-central-1.es.amazonaws.com
+    auth:
+      aws_sigv4: { region: eu-central-1, service: es }
+    upsert:
+      path: /products/_bulk
+      action: '{"index":{"_id":"${payload:id}"}}'
+      result:
+        items: { path: /items, error: /index/error/reason }
+```
+
+The OAuth2 and SigV4 examples were checked for their configuration only, not run against
+those services.
+
 ## On the command line
 
 The configuration is too nested for query parameters, so the `http-bulk:` scheme
@@ -355,7 +456,7 @@ Elasticsearch or Qdrant.
 | `delete_values` | `delete`, `d` | Operation values that mean delete, ignoring case |
 | `max_request_bytes` | 10 MiB | A larger batch is split into several requests |
 | `compression` | `none` | `gzip`, `zstd` or `lz4` for request bodies, named in `Content-Encoding` |
-| `request_timeout_ms` | none | Timeout of one request; with `read.stream`, the longest silence on the open response |
+| `request_timeout_ms` | see right | Timeout of one request; `0`: none. Unset: a request fails after 300 s without a response byte. With `read.stream` it is the longest silence on the open response, and unset means none |
 | `connect_timeout_ms` | 10000 | Connection timeout |
 | `tls` | none | `ca_file` and `accept_invalid_certs` for `https://`; `required: true` refuses a `url` or OAuth2 `token_url` that is not `https://` |
 

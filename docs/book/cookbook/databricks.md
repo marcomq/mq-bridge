@@ -24,7 +24,7 @@ orders_to_lake:
               amount: { type: number }
               note: { type: string, default: "" }
     object_store:
-      url: "s3://my-bucket/orders"        # or gs://…, az://account/container/…
+      url: "s3://my-bucket/orders"        # or gs://…, az://container/…
       format: parquet
       compression: zstd
 ```

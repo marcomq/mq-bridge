@@ -42,6 +42,39 @@ What 1.0 adds is the promise, and what it leaves open:
 
 ### Behaviour changes
 
+- **`http_bulk` and its presets: a request fails after 300 s without a response byte.**
+  It applies when `request_timeout_ms` is unset and affects `meilisearch`, `typesense`,
+  `elasticsearch`, `qdrant`, `openai_chat` and `openai_embeddings`; a `read.stream` is
+  not affected. A server that refuses a large request early (a 401 before the body was
+  read) and keeps the connection open left the next request on it without an answer, and
+  the route stood still without a log line. `request_timeout_ms: 0` is no timeout; set
+  a value above 300 s for a response that takes longer to start.
+- **`mqb copy`: a SQL or MongoDB dedup store without a table gets `mqb_dedup_copy_<id>`.**
+  The default was `mqb_dedup_<route>`, and a copy's route name is new on every run, so
+  each run made its own table and no run saw the keys of the one before. The id comes
+  from source, destination and `--filter` without credentials, like the one of
+  `--resume`. The `mqb_dedup_copy_<uuid>` tables of earlier runs can be dropped. A
+  `sqlite://` store has no place for a table name and is not changed.
+- **`mqb checkpoint set`: a SQL cursor value that the reader cannot read is refused.**
+  `--value 1000` in place of `int:1000` was stored and reported as set.
+- **`mqb copy` to stdout: a closed stdout ends the copy with one line and exit code 1**
+  (`mqb copy … - | head -2`). It printed about ten log lines, among them `failed before
+  it delivered anything`.
+- **`redis_streams`: a warning when a new consumer group starts behind existing entries.**
+  A copy from a stream that holds entries reported `copied 0 rows` and nothing pointed to
+  `read_from_start`.
+- **`sqlx` cursor source: a stored cursor that cannot be read stops the start.** It was
+  ignored with a warning and the whole table was copied again, for example after
+  `mqb checkpoint set --value 1000` in place of `int:1000`. The error names the value and
+  the two forms, `int:<number>` and `str:<text>`.
+- **`nats`: a message over the server's payload limit fails alone, as non-retryable.** It
+  was retryable, so a route without `retry` and `dlq` sent the messages around it again
+  and again and never got past it.
+- **`mqb`: a URI with a user name and no password is logged as `***@host`.**
+  `nats://<token>@host` is the NATS form for a token, and `copy -v` printed it.
+- **App: the AMQP client's line for a returned message is not logged by default.** It
+  printed every unroutable message with its whole payload at `warn`; the bridge reports
+  the return itself. Setting `RUST_LOG` shows it again.
 - **`amqp`: a reply the broker returns as unroutable no longer fails the request.** When
   the `reply_to` queue is gone (the requester timed out and left), the reply is dropped
   with a warning and the request is acked. It used to be redelivered and handled again
@@ -94,6 +127,12 @@ What 1.0 adds is the promise, and what it leaves open:
 - **`ibm_mq`: a message larger than `max_message_size` is a consumer error.** Its first
   `max_message_size` bytes used to be delivered as a message, again on every read, because
   the message never left the queue. Raise `max_message_size` to read it.
+
+- **`ibm_mq` and `aws` (SQS): a redelivered message keeps its `message_id`.** It is the
+  hash of the MQMD `MsgId`, or the SQS `MessageId`; both used to get a fresh id on every
+  read. A sink keyed on `${message_id}` and a `deduplication` without a `key` now absorb
+  the replay after a backout or a visibility timeout. An IBM MQ producer that reuses a
+  `MsgId` for different messages gives them one id.
 
 - **`aws`: a consumer decodes a body sent with `binary_payload_mode`.** A message with the
   attribute `aws_binary_encoded: true` arrives as the original bytes, without the attribute.
@@ -306,6 +345,10 @@ What 1.0 adds is the promise, and what it leaves open:
 
 ### Added
 
+- **`set_route_display_name(route, display)`.** An embedder that runs a route under a
+  generated name can give it a readable one. Log lines, error text and the DLQ metadata
+  key `mq_bridge.dlq.route` show the display name; the route name stays the key for the
+  registry, metric labels and default store tables.
 - **`CanonicalMessage::get_metadata`, `set_metadata`, `remove_metadata` and
   `metadata_iter`.** The recommended way to read and write metadata; they return `&str`
   and take anything that converts to `String`. The public `metadata` map stays.
@@ -435,6 +478,42 @@ What 1.0 adds is the promise, and what it leaves open:
 
 ### Fixed
 
+- **`kafka`: TLS and SASL work.** The bundled librdkafka was built without OpenSSL, so a
+  connection with `tls.required`, or with `username` and `password`, failed at start with
+  `OpenSSL not available at build time`. The new feature `kafka-ssl` builds OpenSSL in
+  (`rdkafka/ssl-vendored`), which also makes `SCRAM-SHA-256` and `SCRAM-SHA-512` available
+  through `producer_options` / `consumer_options`. `full` enables it, so the prebuilt
+  `mqb`, the Python wheels and the Node packages have it; `kafka` alone stays without, and
+  so does `full-dynamic`, where the system librdkafka brings its own. Building `kafka-ssl`
+  needs perl and make.
+- **`kafka`: TLS without `ca_file` finds the system's CA certificates** (`ssl.ca.location`
+  is `probe`). A built-in OpenSSL does not know where the system keeps them.
+- **`nats`: `url` takes a comma-separated list of servers**, as documented. It used to fail
+  with `invalid port number`.
+- **`mq-bridge-app`: logs and DLQ metadata no longer show `ui_collector_route_<hex>`.** A
+  consumer's route is shown as `ui_` plus the last 8 characters of its id, for example
+  `ui_3e9a41c7`, instead of a 90-character name. Default store tables keep their names,
+  so no stored state is lost.
+- **`mongodb` change capture stores its position before the first change.** A
+  `capture_new` source with a `cursor_id` saves where its stream begins when it starts,
+  and a `capture_all` source saves it once the snapshot is delivered and when a drain
+  ends. Until a change had arrived nothing was stored: `capture_new` lost a change made
+  between two runs, and `capture_all` copied the collection again at every start.
+- **`nats`: a consumer and a publisher that start together on a new stream both start.**
+  The one that lost the creation of the stream failed with `stream name already in use`
+  (error 10058) and was reported as a configuration mismatch.
+- **`redis_streams`: a drain takes back every pending entry that has timed out.** One
+  pass claimed at most one batch, so a drain ended with the rest still pending.
+- **`sqlx` cursor source on Postgres: a timestamp, `numeric`, `uuid` or `date` cursor
+  column works.** The second page failed with `operator does not exist: timestamp with
+  time zone > text`.
+- **`file` source: a UTF-8 byte-order mark at the start of a file is dropped.** It
+  stayed on the first line, which then failed a `filter`. CSV already dropped it.
+- **`file` sink on a pipe: a failed write no longer logs `Failed to truncate file`.**
+- **MCP server: `agent_listen` and `agent_send` are not offered without `--agent-bus`.**
+  They were listed and could be called; only the instructions text followed the flag.
+- **App: a config saved through the UI with route options that cannot run is refused**
+  with 400. It was saved, and the consumer then did not start, without a message.
 - **`http_bulk` input: a batch that is dropped without a commit is read again.** Its
   documents used to be skipped, and the next checkpoint was saved behind them.
 - **`elasticsearch`, `typesense`, `meilisearch`: a `tls` option** (`ca_file`, `cert_file`,

@@ -32,7 +32,7 @@ key, and the part before the query string becomes `url` (or `path`):
 | `aws://` | `aws` | no `url`; `queue_url` / `topic_arn` |
 | `file:///path` | `file` | `path: "/path"` |
 | `dir-spool:///path` | `dir_spool` | `path: "/path"` |
-| `s3://`, `gs://`, `az://`, `local-store://` | `object_store` | `url: "s3://bucket/prefix"` (`local-store://` → `file://`) |
+| `s3://`, `gs://`, `az://`, `local-store://` | `object_store` | `url: "s3://bucket/prefix"`, `"gs://bucket/prefix"`, `"az://container/prefix"` (`local-store://` → `file://`); credentials come from the [environment](./object-store.md#credentials) |
 
 So `kafka://localhost:9092?topic=orders&group_id=sync` becomes:
 
@@ -61,7 +61,7 @@ polling, file formats, plugins — is on [Overview & capabilities](../reference/
 - [IBM MQ](./ibmmq.md)
 - [File (CSV / JSON / JSONL)](./file.md)
 - [Directory spool](./dir-spool.md)
-- [Object storage (local / cloud)](./object-store.md)
+- [Object storage: S3, MinIO / R2, Google Cloud Storage, Azure Blob, local directory](./object-store.md)
 - [Apache Pulsar](./pulsar.md)
 - [Meilisearch](./meilisearch.md)
 - [HTTP bulk (search engines)](./http-bulk.md)

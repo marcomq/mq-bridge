@@ -331,7 +331,7 @@ setup above; the trigger itself is standard Postgres and was not benchmarked.
 | `max_request_bytes` | output | `90000000` | Split a batch rather than exceed this body size. |
 | `compression` | output | `none` | `gzip` request bodies. `zstd` and `lz4` are accepted here, but Meilisearch 1.53 answers them with a "payload is malformed" 400. |
 | `connect_timeout_ms` | both | `10000` | How long to wait for a connection. |
-| `request_timeout_ms` | both | none | Upper bound for one HTTP request. |
+| `request_timeout_ms` | both | see right | Upper bound for one HTTP request; `0`: none. Unset: a request fails after 300 s without a response byte. |
 | `tls` | both | none | TLS options as on [`http_bulk`](http-bulk.md): `ca_file`, `cert_file` + `key_file`, `required`, `accept_invalid_certs`. JSON text in a URI. Built-in endpoint only. |
 | `fields` | input | all | Comma-separated document fields to read. |
 | `cursor_id`, `checkpoint_store` | input | none | Persist the read position (a `file://` store). |

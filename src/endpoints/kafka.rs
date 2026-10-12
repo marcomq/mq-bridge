@@ -1316,6 +1316,9 @@ fn create_common_config(config: &KafkaConfig) -> ClientConfig {
         client_config.set("security.protocol", "ssl");
         if let Some(ca_file) = &config.tls.ca_file {
             client_config.set("ssl.ca.location", ca_file);
+        } else {
+            // A vendored OpenSSL has no CA directory of its own; search the system's.
+            client_config.set("ssl.ca.location", "probe");
         }
         if let Some(cert_file) = &config.tls.cert_file {
             client_config.set("ssl.certificate.location", cert_file);
@@ -2365,6 +2368,13 @@ mod tests {
 
         assert_eq!(client.get("security.protocol"), Some("sasl_ssl"));
         assert_eq!(client.get("ssl.ca.location"), Some("/ca.pem"));
+    }
+
+    #[test]
+    fn test_tls_without_a_ca_file_searches_the_system_ca_store() {
+        let client = create_common_config(&sasl_config());
+
+        assert_eq!(client.get("ssl.ca.location"), Some("probe"));
     }
 
     #[test]

@@ -4542,3 +4542,25 @@ async fn test_file_queue_does_not_redeliver_after_a_failed_delete() {
     }
     assert_eq!(seen, ["{\"b\":2}", "{\"c\":3}"]);
 }
+
+#[tokio::test]
+async fn a_byte_order_mark_is_dropped_from_the_first_line_only() {
+    for mode in [None, Some(FileConsumerMode::Consume { delete: false })] {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("bom.jsonl");
+        std::fs::write(&path, "\u{feff}{\"id\":1}\n{\"id\":2}\n").unwrap();
+        let config = FileConfig {
+            format: FileFormat::Raw,
+            mode: mode.clone(),
+            ..FileConfig::new(path.to_str().unwrap())
+        };
+        let mut source = FileConsumer::new(&config).await.unwrap();
+        let batch = source.receive_batch(10).await.unwrap();
+        let lines = batch
+            .messages
+            .iter()
+            .map(|m| String::from_utf8_lossy(&m.payload).into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(lines, ["{\"id\":1}", "{\"id\":2}"], "{mode:?}");
+    }
+}

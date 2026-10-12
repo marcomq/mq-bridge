@@ -153,6 +153,9 @@ pg_dump_rows | mqb copy '-?format=raw' 'kafka://localhost:9092?topic=rows'
 mqb copy 'postgres://…/shop?table=orders&cursor_column=id' '-?format=raw' --limit 5
 ```
 
+When the reader of stdout goes away (`mqb copy … - | head -2`), the copy ends with one
+line, `Error: stdout was closed; stopped after … rows`, and exit code 1.
+
 On a terminal a copy that runs longer than two seconds shows a running row count on stderr;
 it is not written to a pipe or a log file.
 

@@ -14,6 +14,24 @@ Both answer; they write nothing. Use them as the `from` of a
 as the `to` of a [`request`](../engine/reference.md#request) endpoint, which
 forwards the answer. Recipes are in the [LLM cookbook](../cookbook/llm.md).
 
+A `request` endpoint sends its messages one by one, so under it both endpoints
+make one API request per message: `messages_per_request` bundles nothing and
+`openai_embeddings` embeds one text per request. Put a
+[`buffer`](../engine/reference.md#buffer) on the `to` endpoint and the sends
+of a batch leave together again, 40 messages as one embeddings request:
+
+```yaml
+output:
+  request:
+    to:
+      openai_embeddings: { model: text-embedding-3-small, input: "${payload:text}" }
+      middlewares:
+        - buffer: { max_messages: 500, max_delay_ms: 0 }
+    forward_to: { file: { path: "vectors.jsonl", format: raw } }
+```
+
+A `lookup`, or the endpoint as the output itself, batches without it.
+
 mq-bridge is not affiliated with OpenAI; the names say which API the endpoints
 speak.
 
@@ -106,7 +124,9 @@ On the command line it is one more parameter:
 - **Under a `lookup`, a failed message fails alone too.** The other messages
   of the batch keep their answers and are not asked again.
 - **Leave room for the answers.** A `max_tokens` in `options` bounds the whole
-  response, and `request_timeout_ms` the whole request. An answer that was
+  response, and `request_timeout_ms` the whole request. Unset, a request fails
+  when no response byte arrives for 300 s; set `request_timeout_ms` higher for
+  a model that takes longer to answer, or to `0` for no limit. An answer that was
   cut off cannot be matched; the warning then says the response ended with
   `length`.
 - **Size is counted in messages and bytes, not tokens.** `max_request_bytes`
@@ -149,7 +169,7 @@ On the command line it is one more parameter:
 | `concurrency` | 8 | Requests in flight when a batch is sent to the endpoint as an output. Under a `lookup`, the lookup's own `concurrency` (default 16) decides, unless `messages_per_request` is set |
 | `messages_per_request` | none | Messages answered by one request, see [above](#several-messages-in-one-request). Unset: one request per message |
 | `max_request_bytes` | 10 MiB | With `messages_per_request`: a bundle over this size is cut earlier |
-| `request_timeout_ms` | none | Timeout of one request |
+| `request_timeout_ms` | see right | Timeout of one request; `0`: none. Unset: a request fails after 300 s without a response byte |
 | `tls` | none | TLS options as on [`http_bulk`](http-bulk.md). JSON text in a URI |
 
 ## `openai_embeddings`
@@ -182,7 +202,7 @@ on the [Qdrant](./qdrant.md) page. On the command line the scheme is
 | `input` | required | Template of the text to embed |
 | `dimensions` | none | Length of the vectors, for models that can shorten them |
 | `max_request_bytes` | 10 MiB | A larger batch is split into several requests |
-| `request_timeout_ms` | none | Timeout of one request |
+| `request_timeout_ms` | see right | Timeout of one request; `0`: none. Unset: a request fails after 300 s without a response byte |
 | `tls` | none | TLS options as on [`http_bulk`](http-bulk.md). JSON text in a URI |
 
 ## From Rust

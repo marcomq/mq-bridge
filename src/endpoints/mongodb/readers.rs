@@ -567,6 +567,23 @@ impl MongoDbChangeStreamReader {
             )
         };
 
+        let mut saved_token = resume_token
+            .as_ref()
+            .and_then(|t| encode_resume_token(t).ok());
+        // A first start without a snapshot: store where the stream begins, so a change made
+        // before the first delivered one is not lost when the reader stops in between.
+        if let (None, Some(cp), Some(opened)) = (&saved_token, &checkpoint, &stream) {
+            if let Some(encoded) = opened
+                .resume_token()
+                .and_then(|t| encode_resume_token(&t).ok())
+            {
+                match cp.save(&encoded).await {
+                    Ok(()) => saved_token = Some(encoded),
+                    Err(e) => warn!(error = %e, "Failed to persist the initial mongo resume token"),
+                }
+            }
+        }
+
         info!(collection = %collection_name, cursor_id = ?config.cursor_id, resumed = %resume_token.is_some(), snapshot = %pending_resume.is_some(), "MongoDB CDC reader initialized");
 
         let replay = ReplayPoint {
@@ -589,11 +606,7 @@ impl MongoDbChangeStreamReader {
             snapshot_cursor: Arc::new(Mutex::new(IdCursor::default())),
             inflight: Arc::new(AtomicUsize::new(0)),
             refresh_clean: Arc::new(AtomicBool::new(true)),
-            last_saved_token: Arc::new(Mutex::new(
-                resume_token
-                    .as_ref()
-                    .and_then(|t| encode_resume_token(t).ok()),
-            )),
+            last_saved_token: Arc::new(Mutex::new(saved_token)),
             source_metadata,
             namespace: format!("{}.{}", config.database, collection_name),
             cdc_ordinals: Arc::new(Mutex::new(OrdinalCounter::default())),
@@ -1042,14 +1055,20 @@ impl MessageConsumer for MongoDbChangeStreamReader {
                     if !stream.is_alive() {
                         return Err(anyhow!("MongoDB change stream ended unexpectedly").into());
                     }
-                    if last_refresh.elapsed() >= IDLE_RESUME_REFRESH {
+                    // Nothing stored yet (the snapshot just ended): do not wait for the interval.
+                    let unsaved = self.last_saved_token.lock().unwrap().is_none();
+                    if unsaved || last_refresh.elapsed() >= IDLE_RESUME_REFRESH {
                         // Extract the token synchronously (stream ref isn't `Send`), then persist.
                         let token = stream.resume_token();
                         self.refresh_idle_checkpoint(token).await;
                         last_refresh = Instant::now();
                     }
                 }
-                Err(_) if self.exit_on_empty => return Ok(ReceivedBatch::empty()),
+                Err(_) if self.exit_on_empty => {
+                    let token = stream.resume_token();
+                    self.refresh_idle_checkpoint(token).await;
+                    return Ok(ReceivedBatch::empty());
+                }
                 Err(_) => {
                     let token = stream.resume_token();
                     self.refresh_idle_checkpoint(token).await;

@@ -23,7 +23,7 @@ Query parameters recognised as config fields for this connector. The object-type
 | `name_by` | `auto` \| `source_position` \| `write_time` | no | `auto` | (Sink only) `auto`, `write_time` (uuidv7 name) or `source_position` (name carries the source range). |
 | `on_decode_error` | `skip` \| `fail` | no | `skip` | (Source only) An object that cannot be decoded: `skip` it (default) or `fail` the route. `skip` also stops the route while no object has been decoded yet. |
 | `polling_interval_ms` | integer | no | — | (Source only) Idle poll interval in milliseconds when no new objects are found. Defaults to 1000. |
-| `url` | string | yes | — | Object-store URL, e.g. `file:///var/lib/mqb/incoming`, `s3://bucket/prefix`, `gs://bucket/prefix`, or `az://account/container/prefix`. Credentials are resolved from the environment by the `object_store` crate (same mechanism as the checkpoint backend); R2 uses `s3://` plus a custom `AWS_ENDPOINT_URL`. |
+| `url` | string | yes | — | Object-store URL, e.g. `file:///var/lib/mqb/incoming`, `s3://bucket/prefix`, `gs://bucket/prefix`, or `az://container/prefix`. Credentials are resolved from the environment by the `object_store` crate (same mechanism as the checkpoint backend); Azure takes the account from `AZURE_STORAGE_ACCOUNT_NAME`, R2 uses `s3://` plus a custom `AWS_ENDPOINT_URL`. |
 
 ## Struct-typed fields
 

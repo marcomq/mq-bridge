@@ -543,6 +543,18 @@ pub fn collector_route_name(consumer_key: &str) -> String {
     )
 }
 
+/// The short name a collector route is shown under in logs and DLQ metadata. It takes
+/// the tail of the id, which is random in every id shape; the front can be a prefix or a
+/// timestamp.
+fn collector_display_name(consumer: &ConsumerConfig) -> String {
+    let id = consumer.id.trim();
+    if id.is_empty() {
+        return consumer.name.trim().to_string();
+    }
+    let skip = id.chars().count().saturating_sub(8);
+    format!("ui_{}", id.chars().skip(skip).collect::<String>())
+}
+
 fn consumer_matches_lookup(consumer: &ConsumerConfig, lookup: &str) -> bool {
     consumer_runtime_key(consumer) == lookup || consumer.name == lookup
 }
@@ -1832,7 +1844,9 @@ impl UiApp {
                 ResolvedConsumerOutput::Response { .. } => Endpoint::new_response(),
                 ResolvedConsumerOutput::Publisher { endpoint, .. } => (*endpoint).as_ref().clone(),
             };
-            let temp_route = Route::new(consumer.endpoint.clone(), output_endpoint);
+            // With the consumer's options, so one that cannot run is refused here.
+            let temp_route = Route::new(consumer.endpoint.clone(), output_endpoint)
+                .with_options(consumer.options.clone());
             let consumer_key = consumer_runtime_key(consumer);
             temp_route.check(&consumer_key, None).map_err(|e| {
                 UpdateConfigError::Validation(format!(
@@ -2143,7 +2157,12 @@ impl UiApp {
                     }
                 });
             let internal_route_name = collector_route_name(&consumer_key);
-            let handle = route.run(&internal_route_name).await?;
+            let shown = collector_display_name(consumer);
+            mq_bridge::set_route_display_name(&internal_route_name, &shown);
+            // A config error names the engine route before the engine can show `shown`.
+            let handle = route.run(&internal_route_name).await.map_err(|e| {
+                anyhow::anyhow!(format!("{e:#}").replace(&internal_route_name, &shown))
+            })?;
             self.metrics
                 .replace(&consumer_key, sequence_counter, started_at)
                 .await;
@@ -2485,6 +2504,15 @@ mod tests {
         assert!(storage_security_for_cli(&config).config_encrypted);
 
         clear_process_config_master_key();
+    }
+
+    #[test]
+    fn collector_display_name_is_the_tail_of_the_id() {
+        let shown = |id: &str| collector_display_name(&memory_consumer(id, "orders", "t"));
+        assert_eq!(shown("b750d4a7-9f31-488b-a1c2-0d5f3e9a41c7"), "ui_3e9a41c7");
+        assert_eq!(shown("ui_1760000000000_k3j9x2ab"), "ui_k3j9x2ab");
+        assert_eq!(shown("c1"), "ui_c1");
+        assert_eq!(shown(" "), "orders");
     }
 
     fn memory_consumer(id: &str, name: &str, topic: &str) -> crate::config::ConsumerConfig {

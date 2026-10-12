@@ -90,7 +90,7 @@
     - [Parameters](reference/file.md)
   - [Directory spool](connectors/dir-spool.md)
     - [Parameters](reference/dir-spool.md)
-  - [Object storage (local / cloud)](connectors/object-store.md)
+  - [Object storage (S3 / GCS / Azure / local)](connectors/object-store.md)
     - [Parameters](reference/object-store.md)
   - [Apache Pulsar](connectors/pulsar.md)
   - [Meilisearch](connectors/meilisearch.md)

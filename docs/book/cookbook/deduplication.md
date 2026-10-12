@@ -29,7 +29,10 @@ process-local or **shared across every instance of the route**:
 | `mongodb://host/db[/collection]` | shared between instances | `mongodb` |
 | `postgres` / `mysql` / `mariadb` / `sqlite` `://…[/table]` | shared between instances | `sqlx` |
 
-The collection/table defaults to `mqb_dedup_<route>`. Point a shared store at the deployment
+The collection/table defaults to `mqb_dedup_<route>`. Under `mqb copy`, whose route name
+is new on every run, it defaults to `mqb_dedup_copy_<id>`: the id is derived from source,
+destination and `--filter` without credentials, so the same command finds its keys again.
+A `sqlite://` URL has no place for a table name and keeps the per-run default. Point a shared store at the deployment
 your sink already uses rather than standing up extra infrastructure. `sled_path` is the legacy
 spelling of a local sled store, equivalent to `store: "sled://<path>"`. `memory://` is the
 fastest store (~3x sled) but forgets every key on restart, so redeliveries after a restart go

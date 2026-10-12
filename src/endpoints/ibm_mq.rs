@@ -21,9 +21,7 @@ use mqi::{
     connection::{Credentials, MqServer, ThreadNone, Tls},
     constants, get, mqstr, open,
     result::ResultCompErrExt,
-    types::{
-        ApplName, CipherSpec, KeyRepo, MessageFormat, QueueManagerName, QueueName, FORMAT_NONE,
-    },
+    types::{ApplName, CipherSpec, KeyRepo, MessageId, QueueManagerName, QueueName, FORMAT_NONE},
     MqStr, Object, Subscription, Syncpoint,
 };
 use std::{sync::Arc, thread, time::Duration};
@@ -43,6 +41,12 @@ macro_rules! backout_with_logging {
             Err(e) => warn!("Backout {} FAILED (messages may be lost): {}", $context, e),
         }
     };
+}
+
+/// The MQMD `MsgId` as a message id: a backout redelivers the message under the same one.
+fn message_id_from_msg_id(msg_id: &[u8; 24]) -> Option<u128> {
+    use crate::canonical_message::{hashed_id, string_id_hash};
+    (*msg_id != [0u8; 24]).then(|| hashed_id(string_id_hash(), &[msg_id]))
 }
 
 /// Helper function to handle status requests with timeout
@@ -653,7 +657,7 @@ async fn spawn_consumer_thread(
                                 get::GetWait::Wait(config.wait_timeout_ms),
                             );
 
-                            let res: Result<Option<(_, MessageFormat)>, _> = match obj
+                            let res: Result<Option<(_, MessageId)>, _> = match obj
                                 .get_data_with(&gmo, &mut buffer)
                             {
                                 // Still on the queue: its cut-off start would be delivered forever.
@@ -674,9 +678,11 @@ async fn spawn_consumer_thread(
 
                             match res {
                                 Ok(opt) => {
-                                    if let Some((data, _format)) = opt {
-                                        let mut canonical =
-                                            CanonicalMessage::new(data.to_vec(), None);
+                                    if let Some((data, msg_id)) = opt {
+                                        let mut canonical = CanonicalMessage::new(
+                                            data.to_vec(),
+                                            message_id_from_msg_id(&msg_id.0),
+                                        );
                                         // Source cursor: the queue this was read from.
                                         // Opt-in via MQB_SOURCE_METADATA; off by default.
                                         if crate::canonical_message::source_metadata_enabled() {
@@ -978,6 +984,16 @@ impl IbmMqConsumer {
 #[cfg(all(test, feature = "ibm-mq", not(feature = "ibm-mq-static")))]
 mod dlopen_tests {
     use super::*;
+
+    #[test]
+    fn a_msg_id_gives_the_same_message_id_on_every_read() {
+        let msg_id = [7u8; 24];
+        let id = message_id_from_msg_id(&msg_id);
+        assert!(id.is_some());
+        assert_eq!(id, message_id_from_msg_id(&msg_id));
+        assert_ne!(id, message_id_from_msg_id(&[8u8; 24]));
+        assert_eq!(message_id_from_msg_id(&[0u8; 24]), None);
+    }
 
     // Proves the runtime dlopen of the IBM client succeeds where it is installed.
     // Ignored by default (needs the client present); run with:

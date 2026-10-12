@@ -91,7 +91,7 @@ Loading 20,000 small documents this way took under a second on a laptop.
 | `api_key` | none | Sent as `X-TYPESENSE-API-KEY` |
 | `operation` | none | Template for a message's operation; `delete` or `d` removes the document |
 | `compression` | `none` | `gzip`, `zstd` or `lz4` request bodies; check that your server reads the codec, a refusal does not name it |
-| `request_timeout_ms` | none | Request timeout |
+| `request_timeout_ms` | see right | Request timeout; `0`: none. Unset: a request fails after 300 s without a response byte |
 | `tls` | none | TLS options as on [`http_bulk`](http-bulk.md): `ca_file`, `cert_file` + `key_file`, `required`, `accept_invalid_certs`. JSON text in a URI. |
 
 `typesense` is the generic [`http_bulk`](./http-bulk.md) output with these

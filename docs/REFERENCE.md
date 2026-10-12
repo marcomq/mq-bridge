@@ -1797,6 +1797,21 @@ time in source order. Their responses and error fallbacks are restored to input 
 passed to `forward_to` in one `send_batch` call. Batch-capable sinks such as MongoDB can
 therefore use their native bulk write for the forwarding leg.
 
+Where `to` answers a whole batch in one call (`openai_embeddings`, `openai_chat` with
+`messages_per_request`, an `http_bulk` query), put a [`buffer`](#buffer) with
+`max_delay_ms: 0` on `to`. The concurrent requests of a batch then reach it as one batch,
+and each message still gets its own answer or error:
+
+```yaml endpoint
+output:
+  request:
+    to:
+      openai_embeddings: { model: text-embedding-3-small, input: "${payload:text}" }
+      middlewares:
+        - buffer: { max_messages: 500, max_delay_ms: 0 }
+    forward_to: { file: { path: "vectors.jsonl", format: raw } }
+```
+
 Whatever `forward_to` returns is passed back up. A plain sink acks, `forward_to: {}` (the
 `null` endpoint, also spelled `null`) discards, and `forward_to: { response: {} }` replies to
 the origin of the current request — which is how a [`fanout`](#fanout) branch answers the

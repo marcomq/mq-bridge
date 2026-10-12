@@ -351,11 +351,25 @@ impl RedisStreamsConsumer {
             let created: redis::RedisResult<()> = read_conn
                 .xgroup_create_mkstream(&stream, &group, start_id)
                 .await;
-            if let Err(e) = created {
+            match created {
                 // BUSYGROUP: the group already exists, which is expected on restart.
-                if e.code() != Some("BUSYGROUP") {
-                    return Err(anyhow!("Failed to create Redis consumer group: {}", e));
+                Err(e) if e.code() == Some("BUSYGROUP") => {}
+                Err(e) => return Err(anyhow!("Failed to create Redis consumer group: {}", e)),
+                Ok(()) if !config.read_from_start => {
+                    let held: redis::RedisResult<u64> = redis::cmd("XLEN")
+                        .arg(&stream)
+                        .query_async(&mut read_conn)
+                        .await;
+                    if let Ok(entries @ 1..) = held {
+                        warn!(
+                            stream = %stream,
+                            group = %group,
+                            entries,
+                            "The new Redis consumer group starts after the entries the stream already holds; set `read_from_start: true` to read them"
+                        );
+                    }
                 }
+                Ok(()) => {}
             }
             Some(group)
         };
@@ -559,41 +573,48 @@ fn spawn_stream_reader(ctx: ReaderCtx) {
             if last_reclaim.is_none_or(|t| t.elapsed() >= reclaim_interval) {
                 last_reclaim = Some(Instant::now());
                 if let (Some(group), Some(conn)) = (&task_group, reclaim_conn.as_mut()) {
-                    let claim_opts = StreamAutoClaimOptions::default().count(count);
-                    let claimed: redis::RedisResult<StreamAutoClaimReply> = conn
-                        .xautoclaim_options(
-                            &task_stream,
-                            group,
-                            &consumer_name,
-                            redelivery_ms as usize,
-                            &reclaim_cursor,
-                            claim_opts,
-                        )
-                        .await;
-                    match claimed {
-                        Ok(reply) => {
-                            // Advance the cursor; the server returns "0-0"
-                            // once the pending set has been fully scanned.
-                            reclaim_cursor = reply.next_stream_id;
-                            // An entry a slow sink still holds is not delivered twice.
-                            let mut claimed = reply.claimed;
-                            {
-                                let mut held = held.lock().unwrap_or_else(|e| e.into_inner());
-                                claimed.retain(|entry| held.insert(entry.id.clone()));
-                            }
-                            for entry in claimed {
-                                let stream_entry = parse_entry(entry.id, entry.map);
-                                if tx.send(Ok(stream_entry)).await.is_err() {
-                                    return; // consumer dropped
+                    // Page until the scan is through, or a drain ends with entries left pending.
+                    loop {
+                        let claim_opts = StreamAutoClaimOptions::default().count(count);
+                        let claimed: redis::RedisResult<StreamAutoClaimReply> = conn
+                            .xautoclaim_options(
+                                &task_stream,
+                                group,
+                                &consumer_name,
+                                redelivery_ms as usize,
+                                &reclaim_cursor,
+                                claim_opts,
+                            )
+                            .await;
+                        match claimed {
+                            Ok(reply) => {
+                                // Advance the cursor; the server returns "0-0"
+                                // once the pending set has been fully scanned.
+                                reclaim_cursor = reply.next_stream_id;
+                                // An entry a slow sink still holds is not delivered twice.
+                                let mut claimed = reply.claimed;
+                                {
+                                    let mut held = held.lock().unwrap_or_else(|e| e.into_inner());
+                                    claimed.retain(|entry| held.insert(entry.id.clone()));
+                                }
+                                for entry in claimed {
+                                    let stream_entry = parse_entry(entry.id, entry.map);
+                                    if tx.send(Ok(stream_entry)).await.is_err() {
+                                        return; // consumer dropped
+                                    }
+                                }
+                                if reclaim_cursor == "0-0" {
+                                    break;
                                 }
                             }
-                        }
-                        // Transient; a hard error surfaces on the read below. Warn
-                        // anyway: a claim that fails after the server applied it
-                        // leaves entries pending under this consumer, and silence
-                        // makes that indistinguishable from an idle stream.
-                        Err(e) => {
-                            warn!(stream = %task_stream, error = %e, "Redis XAUTOCLAIM failed")
+                            // Transient; a hard error surfaces on the read below. Warn
+                            // anyway: a claim that fails after the server applied it
+                            // leaves entries pending under this consumer, and silence
+                            // makes that indistinguishable from an idle stream.
+                            Err(e) => {
+                                warn!(stream = %task_stream, error = %e, "Redis XAUTOCLAIM failed");
+                                break;
+                            }
                         }
                     }
                 }

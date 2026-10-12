@@ -6,7 +6,7 @@ use crate::traits::{
 };
 use crate::CanonicalMessage;
 use crate::APP_NAME;
-use anyhow::{anyhow, Context};
+use anyhow::anyhow;
 use async_nats::connection::State;
 use async_nats::header::{HeaderMap, HeaderName, HeaderValue};
 use async_nats::jetstream::consumer::pull;
@@ -69,7 +69,7 @@ impl NatsPublisher {
             config.shared.unwrap_or(true),
             move || async move {
                 let options = build_nats_options(&config_clone).await?;
-                Ok(options.connect(&config_clone.url).await?)
+                Ok(options.connect(server_list(&config_clone.url)).await?)
             },
         )
         .await?;
@@ -84,15 +84,17 @@ impl NatsPublisher {
             } else {
                 vec![format!("{}.>", stream_name)]
             };
-            jetstream
-                .get_or_create_stream(stream::Config {
+            ensure_stream(
+                &jetstream,
+                stream::Config {
                     name: stream_name.to_string(),
                     subjects,
                     max_messages: config.stream_max_messages.unwrap_or(1_000_000),
                     max_bytes: config.stream_max_bytes.unwrap_or(1024 * 1024 * 1024), // 1GB
                     ..Default::default()
-                })
-                .await?;
+                },
+            )
+            .await?;
             NatsClient::JetStream(jetstream)
         } else {
             info!("NATS publisher is in Core mode (non-persistent).");
@@ -140,7 +142,10 @@ impl MessagePublisher for NatsPublisher {
             )
             .await
             .map_err(|_| PublisherError::Retryable(anyhow!("NATS request timed out")))?
-            .map_err(|e| PublisherError::Retryable(anyhow!("NATS request failed: {}", e)))?;
+            .map_err(|e| {
+                let oversize = e.kind() == async_nats::RequestErrorKind::MaxPayloadExceeded;
+                publish_error(anyhow!("NATS request failed: {}", e), oversize)
+            })?;
 
             // A batch matches each reply to its request by id.
             let mut response_msg = create_nats_canonical_message(&response, None, false, false);
@@ -154,7 +159,14 @@ impl MessagePublisher for NatsPublisher {
                 let ack_future = jetstream
                     .publish_with_headers(self.subject.clone(), headers, message.payload)
                     .await
-                    .context("Failed to publish to NATS JetStream")?;
+                    .map_err(|e| {
+                        let oversize =
+                            e.kind() == jetstream::context::PublishErrorKind::MaxPayloadExceeded;
+                        publish_error(
+                            anyhow!("Failed to publish to NATS JetStream: {e}"),
+                            oversize,
+                        )
+                    })?;
                 tracing::trace!("Published to NATS JetStream, waiting for ack");
 
                 if !self.delayed_ack {
@@ -177,7 +189,11 @@ impl MessagePublisher for NatsPublisher {
                 client
                     .publish_with_headers(self.subject.clone(), headers, message.payload)
                     .await
-                    .context("Failed to publish to NATS Core")?;
+                    .map_err(|e| {
+                        let oversize =
+                            e.kind() == async_nats::client::PublishErrorKind::MaxPayloadExceeded;
+                        publish_error(anyhow!("Failed to publish to NATS Core: {e}"), oversize)
+                    })?;
             }
         }
 
@@ -240,6 +256,15 @@ impl MessagePublisher for NatsPublisher {
             },
             ..Default::default()
         }
+    }
+}
+
+/// A message over the server's payload limit fails alone; resending it cannot succeed.
+fn publish_error(error: anyhow::Error, oversize: bool) -> PublisherError {
+    if oversize {
+        PublisherError::NonRetryable(error)
+    } else {
+        PublisherError::Retryable(error)
     }
 }
 
@@ -425,6 +450,14 @@ impl MessageConsumer for NatsConsumer {
     }
 }
 
+/// The servers of a comma-separated `url`; async-nats parses a `&str` as one address.
+fn server_list(url: &str) -> Vec<&str> {
+    url.split(',')
+        .map(str::trim)
+        .filter(|server| !server.is_empty())
+        .collect()
+}
+
 // ... rest of the file
 async fn build_nats_options(config: &NatsConfig) -> anyhow::Result<ConnectOptions> {
     let options = if let Some(token) = &config.token {
@@ -452,6 +485,26 @@ async fn build_nats_options(config: &NatsConfig) -> anyhow::Result<ConnectOption
     // `require_tls`: without it the client follows the server and stays in the clear.
     let tls_config = crate::support::tls::client_config(&config.tls)?;
     Ok(options.require_tls(true).tls_client_config(tls_config))
+}
+
+/// `get_or_create_stream`, tolerant of another client creating the stream at the same moment.
+async fn ensure_stream(
+    jetstream: &jetstream::Context,
+    config: stream::Config,
+) -> anyhow::Result<stream::Stream> {
+    let name = config.name.clone();
+    match jetstream.get_or_create_stream(config).await {
+        Ok(stream) => Ok(stream),
+        // Lost the creation race: the stream exists now, so take it as a later start would.
+        Err(e)
+            if e.to_string()
+                .to_ascii_lowercase()
+                .contains("stream name already in use") =>
+        {
+            jetstream.get_stream(&name).await.map_err(|_| anyhow!(e))
+        }
+        Err(e) => Err(anyhow!(e)),
+    }
 }
 
 /// True for JetStream setup failures a reconnect cannot change: the stream exists but its
@@ -493,23 +546,25 @@ impl NatsCore {
         queue_group: Option<String>,
     ) -> anyhow::Result<(Self, async_nats::Client)> {
         let options = build_nats_options(config).await?;
-        let client = options.connect(&config.url).await?;
+        let client = options.connect(server_list(&config.url)).await?;
         let client_clone = client.clone();
 
         if !config.no_jetstream {
             let jetstream = jetstream::new(client);
             info!(stream = %stream_name, subject = %subject, "NATS endpoint is in JetStream mode.");
 
-            jetstream
-                .get_or_create_stream(stream::Config {
+            ensure_stream(
+                &jetstream,
+                stream::Config {
                     name: stream_name.to_string(),
                     subjects: vec![subject.to_string()],
                     max_messages: config.stream_max_messages.unwrap_or(1_000_000),
                     max_bytes: config.stream_max_bytes.unwrap_or(1024 * 1024 * 1024), // 1GB
                     ..Default::default()
-                })
-                .await
-                .map_err(|e| classify_jetstream_setup_error(e, stream_name, subject))?;
+                },
+            )
+            .await
+            .map_err(|e| classify_jetstream_setup_error(e, stream_name, subject))?;
 
             let stream = jetstream.get_stream(stream_name).await?;
 
@@ -1130,6 +1185,19 @@ mod tests {
 
         let first = tokio::time::timeout(second, server).await.unwrap().unwrap();
         assert_ne!(&first, b"CONNECT", "the client went on without TLS");
+    }
+
+    #[test]
+    fn a_comma_separated_url_is_a_list_of_servers() {
+        use async_nats::ToServerAddrs;
+
+        let servers = server_list("nats://n1:4222, nats://n2:4223,");
+        assert_eq!(servers, ["nats://n1:4222", "nats://n2:4223"]);
+        let parsed: Vec<_> = servers.to_server_addrs().unwrap().collect();
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[1].port(), 4223);
+
+        assert_eq!(server_list("localhost:4222"), ["localhost:4222"]);
     }
 
     #[test]

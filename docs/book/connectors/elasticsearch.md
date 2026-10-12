@@ -61,7 +61,7 @@ See [Postgres CDC](../tutorials/postgres-cdc.md) for the publication and the slo
 | `auth` | none | `oauth2` or `aws_sigv4`, as on [`http_bulk`](./http-bulk.md#fields); in a URI, JSON: `auth={"aws_sigv4":{"region":"eu-central-1","service":"es"}}` |
 | `operation` | none | Template for a message's operation; `delete` or `d` removes the document |
 | `compression` | `none` | `gzip` request bodies. `zstd` and `lz4` are accepted here, but Elasticsearch 8.19 answers them with a "malformed" 400 |
-| `request_timeout_ms` | none | Request timeout |
+| `request_timeout_ms` | see right | Request timeout; `0`: none. Unset: a request fails after 300 s without a response byte |
 | `tls` | none | TLS options as on [`http_bulk`](http-bulk.md): `ca_file`, `cert_file` + `key_file`, `required`, `accept_invalid_certs`. JSON text in a URI. |
 
 `elasticsearch` is the generic [`http_bulk`](./http-bulk.md) output with these

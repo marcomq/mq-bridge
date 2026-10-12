@@ -63,6 +63,12 @@ articles_summarise:
       forward_to: { file: { path: "summaries.jsonl", format: raw } }
 ```
 
+A `request` endpoint sends one message at a time, so this form makes one API
+request per message. For `messages_per_request` and batched embeddings use a
+`lookup`, or put a `buffer` on the `to` endpoint
+(`middlewares: [{ buffer: { max_messages: 500, max_delay_ms: 0 } }]` next to
+`openai_chat`), which hands the sends of a batch to the endpoint together.
+
 On the command line the endpoint is `openai://host?model=…&prompt=…`.
 `openai://host` is plain HTTP, for a local server such as Ollama;
 `openai+https://host` is HTTPS. Without a `url` the endpoint calls

@@ -98,7 +98,7 @@ change feed: points written behind the read position are missed. Set
 | `wait` | `true` | Qdrant answers after the points are stored. `false` answers when they are queued, so a later failure is not reported |
 | `operation` | none | Template for a message's operation; `delete` or `d` removes the point |
 | `compression` | `none` | `gzip`, `zstd` or `lz4` request bodies; not tried against Qdrant |
-| `request_timeout_ms` | none | Request timeout |
+| `request_timeout_ms` | see right | Request timeout; `0`: none. Unset: a request fails after 300 s without a response byte |
 | `cursor_id` | none | Input only: names the saved read position |
 | `checkpoint_store` | none | Input only: where the position is saved, e.g. `file:///var/lib/mqb/cursors.json` |
 | `tls` | none | TLS options as on [`http_bulk`](http-bulk.md): `ca_file`, `cert_file` + `key_file`, `required`, `accept_invalid_certs`. JSON text in a URI. |

@@ -109,6 +109,141 @@ URL untouched and passed to the driver as-is.
 
 Full field list, types, and defaults: [reference/postgres.md](../reference/postgres.md).
 
+## Reading a table
+
+With `cursor_column` the source pages through the table and leaves it unchanged:
+
+```sql
+SELECT … FROM orders WHERE id > <last value> ORDER BY id LIMIT <batch size>
+```
+
+Each row becomes one message whose payload is a JSON object with one field per column:
+
+```json
+{"id": 42, "sku": "A-1", "qty": 3, "price": "19.90", "created_at": "2026-10-04 09:15:23.923277+00"}
+```
+
+**The cursor column** must be unique and only grow, because the next page starts after the
+last value read:
+
+- A row whose value equals the last one read is skipped, so a column with repeated values
+  (a plain `updated_at`) loses rows.
+- A row that appears later with a smaller value is never read. This happens with a sequence
+  when a long transaction commits after a shorter one that took a higher number.
+- Updates and deletes of rows already read are not seen. Use [PostgreSQL CDC](#postgresql-cdc)
+  for those.
+- The column can be an integer or a text type. On PostgreSQL it can also be a `timestamp`,
+  `timestamptz`, `date`, `numeric` or `uuid`.
+
+**Column types.** Integers, floats, booleans and text keep their JSON type. The other types
+arrive as text:
+
+| Database | As a string | As JSON |
+|---|---|---|
+| PostgreSQL | `numeric`, `uuid`, dates and timestamps, `interval`, `inet`, enums | `json` / `jsonb` and arrays, embedded as they are |
+| MySQL / MariaDB | `decimal`, dates and times, `json`, `bit`, and `tinyint` (so a `BOOLEAN` is `"0"` / `"1"`) | |
+| SQLite | columns declared `BOOLEAN`, `DATE`, `TIME`, `DATETIME`, `TIMESTAMP` | |
+
+Binary columns (`bytea`, `blob`) are written as a hex string. To get numbers or timestamps in
+another form, add a [`transform`](../cookbook/transform.md), or set `timestamps: rfc3339` on
+PostgreSQL.
+
+**Progress.** `cursor_id` stores the last value, by default in a table `mqb_cursors_<table>`
+of the source database. For a read-only user, point `checkpoint_store` somewhere else; see
+[Checkpoints & resumable copies](../cookbook/checkpoints.md). Without `cursor_id` the position
+is kept for the current run only.
+
+**Polling.** With `--drain` (`exit_on_empty`) the run ends at the last row. Otherwise the
+source asks for new rows every `polling_interval_ms` (default 100); set
+`max_polling_interval_ms` to let the interval grow while the table is idle.
+
+## Queue tables
+
+Without `cursor_column` the table is used as a queue between mq-bridge routes: one route writes
+messages into it, another takes them out. This is not a way to read an existing table.
+
+A sink without `columns` and `insert_query` writes the whole payload into a `payload` column.
+`auto_create_table: true` creates the table; on PostgreSQL it is:
+
+```sql
+CREATE TABLE jobs (
+  id BIGSERIAL PRIMARY KEY,
+  payload BYTEA NOT NULL,
+  locked_until TIMESTAMPTZ,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+```
+
+```yaml
+enqueue:
+  input:  { http: { url: "0.0.0.0:8080" } }
+  output: { sqlx: { url: "postgres://localhost/app", table: "jobs", auto_create_table: true } }
+
+work:
+  input:  { sqlx: { url: "postgres://localhost/app", table: "jobs", delete_after_read: true } }
+  output: { kafka: { url: "localhost:9092", topic: "jobs" } }
+```
+
+- The source claims a batch of rows for 60 seconds (`locked_until`) and skips rows another
+  consumer has claimed, so several consumers can share one table.
+- With `delete_after_read: true` an acknowledged row is deleted. A row that failed stays and
+  is delivered again when its claim ends.
+- **Set `delete_after_read: true` for a queue.** Without it a row is only hidden for the
+  60 seconds of its claim: nothing marks it as done, so it is delivered again and again, once
+  a minute, for as long as the route runs. The default is off so that a route deletes nothing
+  unless told to; it is only useful if something else removes the processed rows.
+- **To copy a table instead of emptying it, use `cursor_column`** ([Reading a table](#reading-a-table)).
+  The `mqb copy` command warns when a source has neither setting; a route in a config file
+  starts without a warning.
+- Only the payload is stored. Message metadata does not pass through the table.
+
+## Writing
+
+| Goal | Setting |
+|---|---|
+| Fields into the columns of the same name, with upsert | `columns: auto`, `key`; see [Writing by column name](#writing-by-column-name) |
+| Your own statement, renamed fields, casts, `ON CONFLICT … DO NOTHING` | `insert_query` with `${payload:field}` tokens; see [Upserts](../cookbook/upserts.md) |
+| Fastest load into PostgreSQL | `bulk_copy: true`, with `columns: auto` or a token `insert_query` |
+| The whole payload in one column | neither; see [Queue tables](#queue-tables) |
+
+A row the database rejects for a reason that will not change (a type error, a violated
+constraint) fails as non-retryable and goes to a [`dlq`](../cookbook/dlq.md) if one is
+configured. Connection errors and deadlocks are reported as retryable, for a
+[`retry`](../cookbook/retries.md) middleware to repeat.
+
+## Connection, TLS and pool
+
+- **Credentials** can be in the URL or in `username` / `password`, which take precedence. Keep
+  them out of the config file with [secrets](../cookbook/secrets.md).
+- **TLS.** Either put the driver's option into the URL (`?sslmode=verify-full` on PostgreSQL,
+  `?ssl-mode=VERIFY_IDENTITY` on MySQL/MariaDB), or set `tls.required: true`, which selects
+  exactly these modes. `tls.ca_file` names a private CA, `tls.cert_file` and `tls.key_file` a
+  client certificate; the key file must be unencrypted. The drivers' default mode falls back
+  to plain text when the server offers no TLS.
+- **Pool.** Endpoints with the same URL share one pool of at most `max_connections` (10)
+  connections. Raise it when a route's `concurrency` is higher, and set `shared: false` to
+  give an endpoint a pool of its own.
+
+## Database notes
+
+- **PostgreSQL.** A table in another schema is `table: "sales.orders"`. `bulk_copy` and the
+  type casts of `columns: auto` exist only here.
+- **MySQL / MariaDB.** Both schemes use the same driver. A `key` needs a `UNIQUE` or
+  `PRIMARY KEY` index and becomes `ON DUPLICATE KEY UPDATE`.
+- **SQLite.** `sqlite:///var/data/app.db` is an absolute path, `sqlite://app.db` a relative
+  one. A sink creates the file when it does not exist.
+
+## Recipes
+
+- [Upserts & insert-if-absent](../cookbook/upserts.md): `ON CONFLICT` and `ON DUPLICATE KEY`.
+- [Enrichment & lookups](../cookbook/lookup.md): `lookup_query` reads a row for each message.
+- [Checkpoints & resumable copies](../cookbook/checkpoints.md): where the cursor is stored and
+  how to reset it.
+- [Deduplication](../cookbook/deduplication.md) and [Running aggregates](../cookbook/aggregate.md)
+  can keep their state in a SQL table.
+- [Postgres CDC → JSONL](../tutorials/postgres-cdc.md), and
+  [MySQL, SQL Server & Oracle CDC via Debezium](../cookbook/debezium.md).
+
 ## PostgreSQL CDC
 
 A separate connector for streaming logical-replication changes (insert/
