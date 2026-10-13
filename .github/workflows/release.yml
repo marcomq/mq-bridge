@@ -451,6 +451,10 @@ jobs:
     name: Build CLI asset for ${{ matrix.target }}
     needs: [metadata, release]
     runs-on: ${{ matrix.os }}
+    # Asset builds must not fail on warnings: MSVC emits LNK4099 for the vendored
+    # OpenSSL objects. Presetting this stops setup-rust-toolchain from denying them.
+    env:
+      CARGO_BUILD_WARNINGS: warn
     permissions:
       contents: write
     strategy:
@@ -552,6 +556,9 @@ jobs:
     name: Build C library asset for ${{ matrix.target }}
     needs: [metadata, release]
     runs-on: ${{ matrix.os }}
+    # Same LNK4099 reason as build-release.
+    env:
+      CARGO_BUILD_WARNINGS: warn
     permissions:
       contents: write
     strategy:
