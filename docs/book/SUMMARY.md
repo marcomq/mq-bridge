@@ -40,6 +40,7 @@
   - [LLM calls in a pipeline](cookbook/llm.md)
   - [Running aggregates](cookbook/aggregate.md)
   - [Fan-out](cookbook/fanout.md)
+  - [SMS & email notifications](cookbook/notifications.md)
   - [Weak join / correlation](cookbook/weak-join.md)
 - [Security & payloads]()
   - [Secrets & interpolation](cookbook/secrets.md)

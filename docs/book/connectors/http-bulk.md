@@ -158,7 +158,8 @@ API is a few lines of configuration away, but has not been tried.
 ## Recipes
 
 In the recipes `operation` reads the operation a Postgres change stream sets,
-which tells an upsert from a delete.
+which tells an upsert from a delete. For sending mail in bulk (SendGrid, Amazon
+SES) see [SMS & email notifications](../cookbook/notifications.md).
 
 ### Meilisearch
 
