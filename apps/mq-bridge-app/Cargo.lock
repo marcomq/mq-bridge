@@ -4723,6 +4723,7 @@ dependencies = [
  "tonic-prost",
  "tonic-prost-build",
  "tonic-reflection",
+ "tower-service",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",

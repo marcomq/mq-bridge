@@ -198,6 +198,7 @@ arc-swap = { version = "1", optional = true }
 hyper = { version = "1.11", optional = true, features = ["client", "server", "http1", "http2"] }
 hyper-util = { version = "0.1", optional = true, features = ["tokio", "client", "client-legacy", "server", "http1", "http2"] }
 hyper-rustls = { version = "0.27", optional = true, default-features = false, features = ["http1", "http2", "tls12", "logging", "native-tokio"] }
+tower-service = { version = "0.3", optional = true }
 http-body-util = { version = "0.1", optional = true }
 http-body = { version = "1.1", optional = true }
 h2 = { version = "0.4", optional = true }
@@ -413,7 +414,7 @@ amqp = ["lapin", "rustls", "rustls-pemfile"]
 nats = ["async-nats", "rustls", "rustls-pemfile", "webpki-roots"]
 mongodb = ["dep:mongodb"]
 mqtt = ["rumqttc", "rustls", "tokio-rustls", "rustls-pemfile", "webpki-roots"]
-http = ["dep:arc-swap", "hyper", "hyper-util", "hyper-rustls", "http-body-util", "dep:http-body", "rustls", "tokio-rustls", "rustls-pemfile", "webpki-roots", "h2", "dep:flate2", "dep:lz4_flex", "dep:zstd"]
+http = ["dep:arc-swap", "hyper", "hyper-util", "hyper-rustls", "dep:tower-service", "http-body-util", "dep:http-body", "rustls", "tokio-rustls", "rustls-pemfile", "webpki-roots", "h2", "dep:flate2", "dep:lz4_flex", "dep:zstd"]
 websocket = ["dep:tokio-websockets", "dep:http-crate", "tokio-websockets/rustls-bring-your-own-connector", "rustls", "tokio-rustls", "rustls-pemfile", "webpki-roots"]
 aws = ["aws-config", "aws-sdk-sqs", "aws-sdk-sns", "aws-sigv4"]
 # Runtime-loaded IBM MQ client via dlopen: builds with no SDK present; the IBM
