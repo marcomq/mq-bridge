@@ -376,8 +376,11 @@ jobs:
         shell: bash
         run: |
           failed=()
-          for backend in kafka postgres; do
-            compose="tests/integration/docker-compose/$backend.yml"
+          for backend in kafka postgres nats; do
+            stack="$backend"
+            # CDC needs logical replication; the cursor scenarios run on it too.
+            [ "$backend" = postgres ] && stack=postgres_cdc
+            compose="tests/integration/docker-compose/$stack.yml"
             echo "::group::$backend"
             ok=1
             docker compose -f "$compose" up -d --wait --wait-timeout 300 || ok=0

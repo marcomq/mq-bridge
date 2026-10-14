@@ -342,6 +342,259 @@ mod kafka {
             union.len() - distinct(&union).len()
         );
     }
+
+    fn spawn_copy(from: &str, out: &Path) -> Child {
+        cli()
+            .args(["copy", "--from", from, "--to", &raw_uri(out), "--drain"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("start copy")
+    }
+
+    fn wait_until(what: &str, timeout: Duration, mut done: impl FnMut() -> bool) {
+        let deadline = Instant::now() + timeout;
+        while !done() {
+            assert!(Instant::now() < deadline, "{what} within {timeout:?}");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// Redpanda Connect #2299: partitions move while the first member has records
+    /// prefetched. Whatever it commits must not pass a record nobody delivered, so a
+    /// final drain of the group finds every row the two members missed.
+    #[test]
+    #[ignore = "requires docker compose"]
+    fn kafka_rebalance_between_two_processes_loses_nothing() {
+        backend!("kafka");
+        let dir = TestDir::new();
+        let topic = unique("cli_scn_kafka_rebalance");
+        let sink = format!("kafka://{BROKER}?topic={topic}");
+        let group = format!("{sink}&group_id=g_{topic}");
+        let seeded = numbered_rows(100_000);
+        copy_ok(
+            "kafka rebalance: seed",
+            &raw_uri(seed_rows(&dir, "input.jsonl", &seeded)),
+            &sink,
+            &["--batch-size", "1024"],
+        );
+
+        // Paced, so the prefetcher runs ahead of the route when the partitions move.
+        let paced = format!("{group}|limiter?messages_per_second=5000");
+        let (out_a, out_b) = (dir.path().join("a.jsonl"), dir.path().join("b.jsonl"));
+        let mut a = spawn_copy(&paced, &out_a);
+        wait_until("member A started", Duration::from_secs(60), || {
+            complete_rows(&out_a).len() >= 5_000
+        });
+        let mut b = spawn_copy(&paced, &out_b);
+        wait_until("member B got partitions", Duration::from_secs(60), || {
+            !complete_rows(&out_b).is_empty()
+        });
+        assert!(
+            a.try_wait().expect("poll A").is_none(),
+            "member A finished before B joined; no rebalance happened"
+        );
+        signal(&a, "TERM");
+        let a_status = exit_within(&mut a, Duration::from_secs(60));
+        assert!(
+            a_status.is_some_and(|status| status.success()),
+            "member A after SIGTERM: {a_status:?}"
+        );
+        let b_status = exit_within(&mut b, Duration::from_secs(180));
+        if b_status.is_none() {
+            let _ = b.kill();
+        }
+
+        let out_c = dir.path().join("c.jsonl");
+        copy_ok(
+            "kafka rebalance: final drain",
+            &group,
+            &raw_uri(&out_c),
+            &[],
+        );
+        let (rows_a, rows_b, rows_c) = (
+            complete_rows(&out_a),
+            complete_rows(&out_b),
+            complete_rows(&out_c),
+        );
+        let mut union = rows_a.clone();
+        union.extend(rows_b.iter().cloned());
+        union.extend(rows_c.iter().cloned());
+        assert_all_arrived(&seeded, &union, "kafka rebalance");
+        eprintln!(
+            "kafka rebalance: A {} rows, B {} rows (exit {b_status:?}), final drain {} rows, \
+             {} duplicates",
+            rows_a.len(),
+            rows_b.len(),
+            rows_c.len(),
+            union.len() - distinct(&union).len()
+        );
+    }
+}
+
+// ======================================================================= NATS
+
+#[cfg(any(feature = "full", feature = "nats"))]
+mod nats {
+    use super::*;
+
+    /// JetStream, with the subject under the stream name: a publisher creates the
+    /// stream as `<stream>.>`, so a subject outside that prefix would not be kept.
+    fn endpoint() -> String {
+        let stream = unique("CLI_SCN_NATS");
+        format!("nats://localhost:4222?subject={stream}.data&stream={stream}")
+    }
+
+    fn routes(input: &Path, output: &Path, uri: &str) -> String {
+        let (subject, stream) = uri
+            .split_once("subject=")
+            .and_then(|(_, rest)| rest.split_once("&stream="))
+            .expect("nats uri");
+        format!(
+            r#"  file_to_nats:
+    concurrency: 2
+    batch_size: 1024
+    exit_on_empty: true
+    input:
+      file: {{ path: '{input}', format: raw }}
+    output:
+      middlewares:
+        - retry:
+            max_attempts: 20
+            initial_interval_ms: 500
+            max_interval_ms: 2000
+      nats:
+        url: "nats://localhost:4222"
+        subject: "{subject}"
+        stream: "{stream}"
+  nats_to_file:
+    concurrency: 2
+    batch_size: 1024
+    input:
+      nats:
+        url: "nats://localhost:4222"
+        subject: "{subject}"
+        stream: "{stream}"
+    output:
+      file: {{ path: '{output}', format: raw }}
+"#,
+            input = input.display(),
+            output = output.display(),
+        )
+    }
+
+    #[test]
+    #[ignore = "requires docker compose"]
+    fn nats_pipeline_delivers_every_row_and_stops_on_sigterm() {
+        backend!("nats");
+        let dir = TestDir::new();
+        let seeded = numbered_rows(50_000);
+        let input = seed_rows(&dir, "input.jsonl", &seeded);
+        let output = dir.path().join("output.jsonl");
+
+        let run = Headless::start(&dir, &routes(&input, &output, &endpoint()));
+        let got = wait_for_rows(&output, seeded.len(), Duration::from_secs(120), &run);
+        assert_all_arrived(&seeded, &got, "nats pipeline");
+
+        let status = run.terminate(Duration::from_secs(30));
+        assert!(status.success(), "SIGTERM exit: {status}");
+    }
+
+    /// The engine's chaos test: the server goes away mid-stream and comes back with
+    /// its JetStream store. Every row must still arrive; duplicates are allowed.
+    #[test]
+    #[ignore = "requires docker compose, restarts the server"]
+    fn nats_server_restart_mid_stream_loses_nothing() {
+        backend!("nats");
+        let dir = TestDir::new();
+        let seeded = numbered_rows(100_000);
+        let input = seed_rows(&dir, "input.jsonl", &seeded);
+        let output = dir.path().join("output.jsonl");
+        let compose = Compose::new("nats");
+
+        let run = Headless::start(&dir, &routes(&input, &output, &endpoint()));
+        wait_for_rows(&output, 1, Duration::from_secs(60), &run);
+        compose.stop("nats");
+        let at_stop = distinct(&complete_rows(&output)).len();
+        std::thread::sleep(Duration::from_secs(2));
+        compose.start("nats");
+        assert!(
+            at_stop < seeded.len(),
+            "every row had arrived before the server stopped; the restart proved nothing"
+        );
+
+        let got = wait_for_rows(&output, seeded.len(), Duration::from_secs(300), &run);
+        assert_all_arrived(&seeded, &got, "nats chaos");
+        eprintln!(
+            "nats chaos: {} rows at stop, {} duplicates",
+            at_stop,
+            got.len() - distinct(&got).len()
+        );
+
+        let status = run.terminate(Duration::from_secs(30));
+        assert!(status.success(), "SIGTERM exit: {status}");
+    }
+
+    /// `kill -9` mid-copy, then the same durable consumer again: what the first run
+    /// did not ack is redelivered, so the two outputs together hold every row.
+    #[test]
+    #[ignore = "requires docker compose"]
+    fn nats_copy_killed_mid_run_resumes_without_loss() {
+        backend!("nats");
+        let dir = TestDir::new();
+        let uri = endpoint();
+        let seeded = numbered_rows(100_000);
+        copy_ok(
+            "nats kill: seed",
+            &raw_uri(seed_rows(&dir, "input.jsonl", &seeded)),
+            &uri,
+            &["--batch-size", "1024"],
+        );
+
+        let first = dir.path().join("first.jsonl");
+        let mut child = cli()
+            .args(["copy", "--from", &uri, "--to", &raw_uri(&first), "--drain"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("start copy");
+        let deadline = Instant::now() + Duration::from_secs(120);
+        while complete_rows(&first).len() < seeded.len() / 4 {
+            assert!(
+                Instant::now() < deadline,
+                "first run never got a quarter in"
+            );
+            assert!(
+                child.try_wait().expect("poll copy").is_none(),
+                "the first run finished before it could be killed"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        signal(&child, "KILL");
+        let _ = child.wait();
+        let first_rows = complete_rows(&first);
+        assert!(
+            first_rows.len() < seeded.len(),
+            "the first run copied everything before the kill; nothing to resume"
+        );
+
+        // What the killed run held stays unacked until `ack_wait` (30 s) ends; a drain
+        // started sooner finds nothing and exits (U13 in upstream-issue-triage.md).
+        std::thread::sleep(Duration::from_secs(31));
+        let second = dir.path().join("second.jsonl");
+        copy_ok("nats kill: resume", &uri, &raw_uri(&second), &[]);
+        let second_rows = complete_rows(&second);
+
+        let mut union = first_rows.clone();
+        union.extend(second_rows.iter().cloned());
+        assert_all_arrived(&seeded, &union, "nats kill -9 resume");
+        eprintln!(
+            "nats kill: first {} rows, second {} rows, {} duplicates",
+            first_rows.len(),
+            second_rows.len(),
+            union.len() - distinct(&union).len()
+        );
+    }
 }
 
 // =================================================================== Postgres
@@ -352,6 +605,9 @@ mod postgres {
     use std::io::Write;
 
     const URL: &str = "postgres://testuser:testpass@localhost:5432/testdb";
+    /// The logical-replication stack: CDC needs it, and the cursor tests run on it
+    /// too, so one server serves the whole module.
+    const STACK: &str = "postgres_cdc";
 
     fn psql(compose: &Compose) -> Command {
         let mut command = Command::new("docker");
@@ -379,6 +635,212 @@ mod postgres {
         assert!(status.success(), "psql failed: {statement}");
     }
 
+    fn query(compose: &Compose, statement: &str) -> String {
+        let out = psql(compose)
+            .args(["-tA", "-c", statement])
+            .output()
+            .expect("run psql");
+        assert!(out.status.success(), "psql failed: {statement}");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    fn file_store(path: &Path) -> String {
+        url::form_urlencoded::byte_serialize(format!("file://{}", path.display()).as_bytes())
+            .collect()
+    }
+
+    /// The `id` of each complete row; snapshot rows and change events are both flat rows.
+    fn ids(path: &Path) -> Vec<i64> {
+        complete_rows(path)
+            .iter()
+            .filter_map(|row| serde_json::from_str::<serde_json::Value>(row).ok()?["id"].as_i64())
+            .collect()
+    }
+
+    /// Redpanda Connect #4584: a crash mid-snapshot must not lose rows. Rows inserted
+    /// during the snapshot arrive through it or through the slot; duplicates are allowed.
+    #[test]
+    #[ignore = "requires docker compose"]
+    fn postgres_cdc_capture_all_killed_mid_snapshot_resumes_without_loss() {
+        backend!("postgres");
+        let dir = TestDir::new();
+        let compose = Compose::new(STACK);
+        let table = unique("cli_scn_snap");
+        const SEEDED: i64 = 500_000;
+        const DURING: i64 = 1_000;
+        sql(
+            &compose,
+            &format!(
+                "CREATE TABLE {table} (id BIGINT PRIMARY KEY, name TEXT); \
+                 INSERT INTO {table} SELECT g, 'row-' || g FROM generate_series(1, {SEEDED}) g; \
+                 CREATE PUBLICATION {table}_pub FOR TABLE {table}"
+            ),
+        );
+        let source = format!(
+            "postgres-cdc://testuser:testpass@localhost:5432/testdb?publication={table}_pub\
+             &slot_name={table}_slot&consume=capture_all&cursor_id={table}\
+             &checkpoint_store={}",
+            file_store(&dir.path().join("checkpoint.json"))
+        );
+
+        let first = dir.path().join("first.jsonl");
+        let mut child = cli()
+            .args([
+                "copy",
+                "--from",
+                &source,
+                "--to",
+                &raw_uri(&first),
+                "--drain",
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("start copy");
+        let wait_for = |rows: usize, child: &mut Child| {
+            let deadline = Instant::now() + Duration::from_secs(120);
+            while complete_rows(&first).len() < rows {
+                assert!(
+                    Instant::now() < deadline,
+                    "first run stalled below {rows} rows"
+                );
+                assert!(
+                    child.try_wait().expect("poll copy").is_none(),
+                    "the first run finished before it could be killed"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        };
+        wait_for(1, &mut child);
+        sql(
+            &compose,
+            &format!(
+                "INSERT INTO {table} SELECT g, 'during-' || g \
+                 FROM generate_series({}, {}) g",
+                SEEDED + 1,
+                SEEDED + DURING
+            ),
+        );
+        wait_for(SEEDED as usize / 4, &mut child);
+        signal(&child, "KILL");
+        let _ = child.wait();
+        let first_ids = ids(&first);
+        assert!(
+            (first_ids.len() as i64) < SEEDED,
+            "the snapshot finished before the kill; nothing to resume"
+        );
+
+        let second = dir.path().join("second.jsonl");
+        copy_ok("cdc snapshot kill: resume", &source, &raw_uri(&second), &[]);
+        let second_ids = ids(&second);
+        query(
+            &compose,
+            &format!("SELECT pg_drop_replication_slot('{table}_slot')"),
+        );
+
+        let union: BTreeSet<i64> = first_ids.iter().chain(&second_ids).copied().collect();
+        let missing: Vec<i64> = (1..=SEEDED + DURING)
+            .filter(|id| !union.contains(id))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "{} rows missing, first {:?}; first run {}, second run {}",
+            missing.len(),
+            missing.first(),
+            first_ids.len(),
+            second_ids.len()
+        );
+        eprintln!(
+            "cdc snapshot kill: first {} rows, second {} rows, {} duplicates",
+            first_ids.len(),
+            second_ids.len(),
+            first_ids.len() + second_ids.len() - union.len()
+        );
+    }
+
+    /// Debezium's idle-table WAL growth: while only an unpublished table is written, the
+    /// slot must still confirm the server's position, so the server can drop old WAL.
+    #[test]
+    #[ignore = "requires docker compose"]
+    fn postgres_cdc_slot_advances_while_published_tables_are_idle() {
+        backend!("postgres");
+        let dir = TestDir::new();
+        let compose = Compose::new(STACK);
+        let table = unique("cli_scn_idle");
+        sql(
+            &compose,
+            &format!(
+                "CREATE TABLE {table}_a (id BIGINT PRIMARY KEY); \
+                 CREATE TABLE {table}_b (id BIGINT PRIMARY KEY, pad TEXT); \
+                 CREATE PUBLICATION {table}_pub FOR TABLE {table}_a"
+            ),
+        );
+        let slot = format!("{table}_slot");
+        let out = dir.path().join("out.jsonl");
+        let run = Headless::start(
+            &dir,
+            &format!(
+                r#"  idle:
+    input:
+      postgres_cdc:
+        url: "{URL}"
+        publication: {table}_pub
+        slot_name: {slot}
+        status_interval_ms: 500
+    output:
+      file: {{ path: '{}', format: raw }}
+"#,
+                out.display()
+            ),
+        );
+        let active = format!("SELECT active FROM pg_replication_slots WHERE slot_name = '{slot}'");
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while query(&compose, &active) != "t" {
+            assert!(
+                Instant::now() < deadline,
+                "slot never became active\n{}",
+                run.log_tail()
+            );
+            std::thread::sleep(Duration::from_millis(200));
+        }
+
+        sql(
+            &compose,
+            &format!(
+                "INSERT INTO {table}_b SELECT g, repeat('x', 200) FROM generate_series(1, 200000) g"
+            ),
+        );
+        let written = query(&compose, "SELECT pg_current_wal_lsn()");
+        let caught_up = format!(
+            "SELECT confirmed_flush_lsn >= '{written}'::pg_lsn FROM pg_replication_slots \
+             WHERE slot_name = '{slot}'"
+        );
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while query(&compose, &caught_up) != "t" {
+            assert!(
+                Instant::now() < deadline,
+                "slot stuck at {} behind {written} while only {table}_b was written\n{}",
+                query(
+                    &compose,
+                    &format!(
+                        "SELECT confirmed_flush_lsn FROM pg_replication_slots WHERE slot_name = '{slot}'"
+                    )
+                ),
+                run.log_tail()
+            );
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        assert!(run.terminate(Duration::from_secs(30)).success());
+        query(
+            &compose,
+            &format!("SELECT pg_drop_replication_slot('{slot}')"),
+        );
+        assert!(
+            complete_rows(&out).is_empty(),
+            "nothing of {table}_a changed"
+        );
+    }
+
     /// Kafka Connect's `timestamp.delay.interval.ms` case: id=1 commits after id=2 was
     /// read. A cursor that moved past 2 must not skip 1 for good.
     #[test]
@@ -386,7 +848,7 @@ mod postgres {
     fn postgres_cursor_keeps_a_row_whose_transaction_commits_late() {
         backend!("postgres");
         let dir = TestDir::new();
-        let compose = Compose::new("postgres");
+        let compose = Compose::new(STACK);
         let table = unique("cli_scn_late");
         sql(
             &compose,

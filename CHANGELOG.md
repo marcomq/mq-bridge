@@ -16,6 +16,10 @@ All notable changes to `mq-bridge`. Newest first.
   partition". The dead member holds the group for `session.timeout.ms` (45 s), longer than the
   30 s the drain waited; the wait now outlasts the configured session timeout by 15 s.
   `MQ_BRIDGE_DRAIN_JOIN_TIMEOUT_MS` still overrides it.
+- **`postgres_cdc` no longer pins WAL while its published tables are quiet.** Writes to other
+  tables advanced the confirmed position in memory, but it reached the server only with the
+  next batch, so the slot stayed put and the server kept every WAL segment since. The position
+  is now reported as soon as the stream is idle.
 
 ## 1.0.0
 
