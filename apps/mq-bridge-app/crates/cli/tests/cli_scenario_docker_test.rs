@@ -578,9 +578,8 @@ mod nats {
             "the first run copied everything before the kill; nothing to resume"
         );
 
-        // What the killed run held stays unacked until `ack_wait` (30 s) ends; a drain
-        // started sooner finds nothing and exits (U13 in upstream-issue-triage.md).
-        std::thread::sleep(Duration::from_secs(31));
+        // Started right away: the drain must wait out `ack_wait` for what the killed
+        // run held instead of exiting early (U13 in upstream-issue-triage.md).
         let second = dir.path().join("second.jsonl");
         copy_ok("nats kill: resume", &uri, &raw_uri(&second), &[]);
         let second_rows = complete_rows(&second);

@@ -20,6 +20,11 @@ All notable changes to `mq-bridge`. Newest first.
   tables advanced the confirmed position in memory, but it reached the server only with the
   next batch, so the slot stayed put and the server kept every WAL segment since. The position
   is now reported as soon as the stream is idle.
+- **A NATS JetStream drain started right after a crash no longer ends early.** What the crashed
+  run had pulled stays unacked until the consumer's `ack_wait` (30 s) runs out, so a drain
+  started sooner saw nothing, reported success and left those messages for the next run. An
+  idle drain now waits, at most `ack_wait`, while the consumer still has undelivered messages
+  or unacked ones this process does not hold.
 
 ## 1.0.0
 
