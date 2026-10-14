@@ -238,24 +238,29 @@ jobs:
       # cargo reports the binary it just built; a restored cache can leave several
       # older `cli_copy_docker_test-<hash>` files next to it, so globbing deps/
       # would pick an arbitrary one.
-      - name: Build the docker test binary
+      - name: Build the docker test binaries
         working-directory: apps/mq-bridge-app
         shell: bash
         run: |
-          cargo test -p mq-bridge-app --test cli_copy_docker_test --no-run \
+          cargo test -p mq-bridge-app --test cli_copy_docker_test \
+            --test cli_scenario_docker_test --no-run \
             --message-format=json > "$RUNNER_TEMP/build.json"
           jq -r 'select(.target.name == "cli_copy_docker_test") | .executable // empty' \
             "$RUNNER_TEMP/build.json" | tail -1 > "$RUNNER_TEMP/test-binary"
+          jq -r 'select(.target.name == "cli_scenario_docker_test") | .executable // empty' \
+            "$RUNNER_TEMP/build.json" | tail -1 > "$RUNNER_TEMP/scenario-binary"
           jq -r 'select(.target.name == "mq-bridge-app"
                         and (.target.kind // [] | index("bin"))) | .executable // empty' \
             "$RUNNER_TEMP/build.json" | tail -1 > "$RUNNER_TEMP/cli-binary"
-          test -s "$RUNNER_TEMP/test-binary" && test -s "$RUNNER_TEMP/cli-binary"
+          test -s "$RUNNER_TEMP/test-binary" && test -s "$RUNNER_TEMP/scenario-binary" \
+            && test -s "$RUNNER_TEMP/cli-binary"
 
       - name: Collect binaries
         shell: bash
         run: |
           mkdir -p docker-suite
           cp "$(cat "$RUNNER_TEMP/test-binary")" docker-suite/test-binary
+          cp "$(cat "$RUNNER_TEMP/scenario-binary")" docker-suite/scenario-binary
           cp "$(cat "$RUNNER_TEMP/cli-binary")" docker-suite/mq-bridge-app
           cp "$RUNNER_TEMP/cli-binary" docker-suite/cli-path
 
@@ -291,7 +296,7 @@ jobs:
           cli="$(cat docker-suite/cli-path)"
           mkdir -p "$(dirname "$cli")"
           mv docker-suite/mq-bridge-app "$cli"
-          chmod +x "$cli" docker-suite/test-binary
+          chmod +x "$cli" docker-suite/test-binary docker-suite/scenario-binary
 
       - name: Install runtime libraries
         timeout-minutes: 5
@@ -323,6 +328,64 @@ jobs:
                 --ignored --test-threads=1 "$backend" 2>&1 | tee result.log || ok=0
               grep -qE 'test result: ok\. [1-9]' result.log \
                 || { echo "no $backend tests ran"; ok=0; }
+            fi
+            if [ "$ok" = 0 ]; then
+              failed+=("$backend")
+              docker compose -f "$compose" logs --tail 200 || true
+            fi
+            docker compose -f "$compose" down -v --remove-orphans || true
+            echo "::endgroup::"
+          done
+          if [ "${#failed[@]}" -gt 0 ]; then
+            echo "::error::failed backends: ${failed[*]}"
+            exit 1
+          fi
+
+  # Route-level scenarios through the binary: broker restarts, SIGTERM and
+  # `kill -9` resumes. A job of its own so these slower runs never hold up the
+  # copy matrix above; same binaries, same one-backend-at-a-time loop.
+  docker-scenario:
+    name: App docker — Scenarios
+    runs-on: ubuntu-latest
+    needs: docker-build
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download docker suite binaries
+        uses: actions/download-artifact@v8
+        with:
+          name: app-docker-suite
+          path: docker-suite
+
+      - name: Restore binaries
+        shell: bash
+        run: |
+          cli="$(cat docker-suite/cli-path)"
+          mkdir -p "$(dirname "$cli")"
+          mv docker-suite/mq-bridge-app "$cli"
+          chmod +x "$cli" docker-suite/scenario-binary
+
+      - name: Install runtime libraries
+        timeout-minutes: 5
+        run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev libssl-dev zlib1g-dev
+
+      # Name filter plus MQB_TEST_BACKEND, and a zero-test run fails, for the
+      # reasons given on the copy loop above.
+      - name: Run the scenarios one backend after another
+        timeout-minutes: 30
+        shell: bash
+        run: |
+          failed=()
+          for backend in kafka postgres; do
+            compose="tests/integration/docker-compose/$backend.yml"
+            echo "::group::$backend"
+            ok=1
+            docker compose -f "$compose" up -d --wait --wait-timeout 300 || ok=0
+            if [ "$ok" = 1 ]; then
+              MQB_TEST_BACKEND="$backend" ./docker-suite/scenario-binary \
+                --ignored --test-threads=1 "$backend" 2>&1 | tee result.log || ok=0
+              grep -qE 'test result: ok\. [1-9]' result.log \
+                || { echo "no $backend scenarios ran"; ok=0; }
             fi
             if [ "$ok" = 0 ]; then
               failed+=("$backend")
