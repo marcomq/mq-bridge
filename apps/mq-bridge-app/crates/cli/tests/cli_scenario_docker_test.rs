@@ -56,12 +56,8 @@ impl Headless {
             let _ = self.child.kill();
             let _ = self.child.wait();
         }
-        status.unwrap_or_else(|| {
-            panic!(
-                "no exit within {timeout:?} of SIGTERM\n{}",
-                self.log_tail()
-            )
-        })
+        status
+            .unwrap_or_else(|| panic!("no exit within {timeout:?} of SIGTERM\n{}", self.log_tail()))
     }
 }
 
@@ -298,14 +294,24 @@ mod kafka {
 
         let first = dir.path().join("first.jsonl");
         let mut child = cli()
-            .args(["copy", "--from", &source, "--to", &raw_uri(&first), "--drain"])
+            .args([
+                "copy",
+                "--from",
+                &source,
+                "--to",
+                &raw_uri(&first),
+                "--drain",
+            ])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
             .expect("start copy");
         let deadline = Instant::now() + Duration::from_secs(120);
         while complete_rows(&first).len() < seeded.len() / 4 {
-            assert!(Instant::now() < deadline, "first run never got a quarter in");
+            assert!(
+                Instant::now() < deadline,
+                "first run never got a quarter in"
+            );
             assert!(
                 child.try_wait().expect("poll copy").is_none(),
                 "the first run finished before it could be killed"
@@ -320,6 +326,8 @@ mod kafka {
             "the first run copied everything before the kill; nothing to resume"
         );
 
+        // The killed member still holds the group for `session.timeout.ms`; the
+        // drain must wait it out rather than fail.
         let second = dir.path().join("second.jsonl");
         copy_ok("kafka kill: resume", &source, &raw_uri(&second), &[]);
         let second_rows = complete_rows(&second);
@@ -332,6 +340,130 @@ mod kafka {
             first_rows.len(),
             second_rows.len(),
             union.len() - distinct(&union).len()
+        );
+    }
+}
+
+// =================================================================== Postgres
+
+#[cfg(any(feature = "full", feature = "sqlx"))]
+mod postgres {
+    use super::*;
+    use std::io::Write;
+
+    const URL: &str = "postgres://testuser:testpass@localhost:5432/testdb";
+
+    fn psql(compose: &Compose) -> Command {
+        let mut command = Command::new("docker");
+        command.arg("compose").arg("-f").arg(&compose.0).args([
+            "exec",
+            "-T",
+            "postgres",
+            "psql",
+            "-q",
+            "-v",
+            "ON_ERROR_STOP=1",
+            "-U",
+            "testuser",
+            "-d",
+            "testdb",
+        ]);
+        command
+    }
+
+    fn sql(compose: &Compose, statement: &str) {
+        let status = psql(compose)
+            .args(["-c", statement])
+            .status()
+            .expect("run psql");
+        assert!(status.success(), "psql failed: {statement}");
+    }
+
+    /// Kafka Connect's `timestamp.delay.interval.ms` case: id=1 commits after id=2 was
+    /// read. A cursor that moved past 2 must not skip 1 for good.
+    #[test]
+    #[ignore = "requires docker compose"]
+    fn postgres_cursor_keeps_a_row_whose_transaction_commits_late() {
+        backend!("postgres");
+        let dir = TestDir::new();
+        let compose = Compose::new("postgres");
+        let table = unique("cli_scn_late");
+        sql(
+            &compose,
+            &format!("CREATE TABLE {table} (id BIGSERIAL PRIMARY KEY, name TEXT)"),
+        );
+
+        let mut slow = psql(&compose)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .spawn()
+            .expect("start slow transaction");
+        let mut stdin = slow.stdin.take().expect("psql stdin");
+        writeln!(stdin, "BEGIN; INSERT INTO {table}(name) VALUES ('slow');").unwrap();
+        stdin.flush().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        // The open insert holds id=1 once the sequence has been called.
+        let probe = format!("SELECT is_called FROM {table}_id_seq");
+        loop {
+            let out = psql(&compose)
+                .args(["-tA", "-c", &probe])
+                .output()
+                .expect("read sequence");
+            if String::from_utf8_lossy(&out.stdout).trim() == "t" {
+                break;
+            }
+            assert!(Instant::now() < deadline, "the slow insert never took id=1");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        sql(
+            &compose,
+            &format!("INSERT INTO {table}(name) VALUES ('fast')"),
+        );
+
+        let checkpoint = dir.path().join("cursor.json");
+        let checkpoint_uri: String = url::form_urlencoded::byte_serialize(
+            format!("file://{}", checkpoint.display()).as_bytes(),
+        )
+        .collect();
+        let source = format!(
+            "{URL}?table={table}&cursor_column=id&cursor_id=late&checkpoint_store={checkpoint_uri}"
+        );
+        let first = dir.path().join("first.jsonl");
+        copy_ok(
+            "late commit: first",
+            &source,
+            &raw_uri(&first),
+            &["--resume"],
+        );
+
+        writeln!(stdin, "COMMIT;").unwrap();
+        drop(stdin);
+        assert!(slow.wait().expect("slow transaction").success());
+
+        let second = dir.path().join("second.jsonl");
+        copy_ok(
+            "late commit: second",
+            &source,
+            &raw_uri(&second),
+            &["--resume"],
+        );
+
+        let mut ids: Vec<i64> = complete_rows(&first)
+            .iter()
+            .chain(complete_rows(&second).iter())
+            .map(|row| {
+                serde_json::from_str::<serde_json::Value>(row).unwrap()["id"]
+                    .as_i64()
+                    .unwrap()
+            })
+            .collect();
+        ids.sort();
+        assert_eq!(
+            ids,
+            vec![1, 2],
+            "first {:?}, second {:?}",
+            read_rows(&first),
+            read_rows(&second)
         );
     }
 }

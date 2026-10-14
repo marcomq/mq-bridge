@@ -3147,6 +3147,43 @@ impl Drop for Unsettled {
     }
 }
 
+/// `age()` of the oldest transaction still in flight, as the 32-bit xid row `xmin`s compare to.
+const PG_OLDEST_IN_FLIGHT_AGE: &str =
+    "age((pg_snapshot_xmin(pg_current_snapshot())::text::bigint % 4294967296)::text::xid)";
+
+/// Whether the table has an `xmin` to guard on; a view or a Postgres-compatible server may not.
+async fn pg_xmin_readable(pool: &AnyPool, table: &str) -> bool {
+    let probe =
+        format!("SELECT 1 FROM {table} WHERE age(xmin) <= {PG_OLDEST_IN_FLIGHT_AGE} LIMIT 0");
+    match sqlx::query(audited_sql(&probe)).fetch_all(pool).await {
+        Ok(_) => true,
+        Err(e) => {
+            warn!(table = %table, error = %e, "SQLx cursor reader cannot read xmin; rows of transactions that commit out of cursor order may be skipped");
+            false
+        }
+    }
+}
+
+/// Ends a page before the first row written by a transaction no older than the oldest one
+/// still open: that one may yet commit a lower cursor value, which `col > last` would skip.
+/// Only the page window is checked, so the cost stays one page.
+fn pg_in_flight_cut(
+    table: &str,
+    cursor_column: &str,
+    order_column: &str,
+    lower: Option<&str>,
+    limit: &str,
+) -> String {
+    let window_filter = lower
+        .map(|lower| format!(" WHERE {cursor_column} > {lower}"))
+        .unwrap_or_default();
+    format!(
+        "{cursor_column} < ALL (SELECT mqb_w.mqb_c FROM (SELECT {cursor_column} AS mqb_c, \
+         xmin AS mqb_x FROM {table}{window_filter} ORDER BY {order_column} ASC LIMIT {limit}) \
+         mqb_w WHERE age(mqb_w.mqb_x) <= {PG_OLDEST_IN_FLIGHT_AGE})"
+    )
+}
+
 /// Run one keyset page. `from` is the exclusive lower bound (`None` = start of table).
 async fn fetch_page(
     pool: &AnyPool,
@@ -3273,21 +3310,36 @@ impl SqlxCursorReader {
                 ),
                 None => (lower_bound, cursor_column.clone()),
             };
+        let commit_order_guard =
+            driver_name == "PostgreSQL" && pg_xmin_readable(&pool, &config.table).await;
+        let guard = |lower: Option<&str>, limit: &str, joiner: &str| {
+            if commit_order_guard {
+                let cut =
+                    pg_in_flight_cut(&config.table, &cursor_column, &order_column, lower, limit);
+                format!(" {joiner} {cut}")
+            } else {
+                String::new()
+            }
+        };
+        let first_limit = positional_placeholder(&driver_name, 1);
         let sql_first = format!(
-            "SELECT {0} FROM {1} ORDER BY {2} ASC LIMIT {3}",
+            "SELECT {0} FROM {1}{2} ORDER BY {3} ASC LIMIT {4}",
             projection,
             config.table,
+            guard(None, &first_limit, "WHERE"),
             order_column,
-            positional_placeholder(&driver_name, 1),
+            first_limit,
         );
+        let next_limit = positional_placeholder(&driver_name, 2);
         let sql_next = format!(
-            "SELECT {0} FROM {1} WHERE {2} > {3} ORDER BY {5} ASC LIMIT {4}",
+            "SELECT {0} FROM {1} WHERE {2} > {3}{4} ORDER BY {5} ASC LIMIT {6}",
             projection,
             config.table,
             cursor_column,
             lower_bound,
-            positional_placeholder(&driver_name, 2),
+            guard(Some(&lower_bound), &next_limit, "AND"),
             order_column,
+            next_limit,
         );
 
         Ok(Self {

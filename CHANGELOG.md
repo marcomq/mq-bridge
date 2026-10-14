@@ -2,6 +2,21 @@
 
 All notable changes to `mq-bridge`. Newest first.
 
+## Unreleased
+
+### Fixes
+
+- **A PostgreSQL `cursor_column` source no longer skips a row whose transaction commits
+  after a later row was read.** A `serial` id taken by a long transaction used to be passed
+  by the cursor and never read. Each page now stops before the first row written by a
+  transaction that is not older than every open one; a view, which has no `xmin`, keeps the
+  old behaviour and logs a warning. While a write transaction stays open on the server, newer
+  rows wait for it.
+- **A Kafka drain restarted right after a crash no longer fails** with "was not assigned a
+  partition". The dead member holds the group for `session.timeout.ms` (45 s), longer than the
+  30 s the drain waited; the wait now outlasts the configured session timeout by 15 s.
+  `MQ_BRIDGE_DRAIN_JOIN_TIMEOUT_MS` still overrides it.
+
 ## 1.0.0
 
 The first stable release. It follows a production-readiness review of the core engine, the

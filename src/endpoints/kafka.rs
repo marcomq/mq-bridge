@@ -541,6 +541,7 @@ impl KafkaConsumer {
         // the records. `position()` alone can advance while a fetched record is still waiting
         // in librdkafka or the prefetch task, which used to make a drain silently lose its tail.
         client_config.set("enable.partition.eof", "true");
+        let session_timeout = session_timeout(&client_config);
 
         let consumer: StreamConsumer = client_config.create_with_context(QuietEofContext)?;
         // librdkafka connects in the background and retries forever; probe once so an
@@ -600,7 +601,10 @@ impl KafkaConsumer {
             exit_on_empty: false,
             prefetcher: None,
             source_metadata,
-            drain_state: DrainState::default(),
+            drain_state: DrainState {
+                session_timeout,
+                ..DrainState::default()
+            },
             nacked: NackLatch::default(),
         })
     }
@@ -1356,17 +1360,31 @@ fn has_assignment(consumer: &StreamConsumer) -> bool {
 /// different question: that one is "is the source idle", this one is "has it started".
 ///
 /// A fresh consumer group needs a join/rebalance before any record can arrive, and that
-/// routinely outlasts the idle timeout. Defaults to 30s — only ever paid by a consumer
-/// that never gets an assignment. Override via `MQ_BRIDGE_DRAIN_JOIN_TIMEOUT_MS`.
-fn drain_join_timeout() -> Duration {
-    static V: std::sync::OnceLock<Duration> = std::sync::OnceLock::new();
-    *V.get_or_init(|| {
+/// routinely outlasts the idle timeout. A member that crashed holds the group until its
+/// session times out, so the wait is at least 30s and outlasts `session_timeout` by
+/// [`JOIN_AFTER_SESSION_MARGIN`]. Override via `MQ_BRIDGE_DRAIN_JOIN_TIMEOUT_MS`.
+fn drain_join_timeout(session_timeout: Duration) -> Duration {
+    static V: std::sync::OnceLock<Option<Duration>> = std::sync::OnceLock::new();
+    let configured = *V.get_or_init(|| {
         std::env::var("MQ_BRIDGE_DRAIN_JOIN_TIMEOUT_MS")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
             .map(Duration::from_millis)
-            .unwrap_or(Duration::from_secs(30))
-    })
+    });
+    configured
+        .unwrap_or_else(|| Duration::from_secs(30).max(session_timeout + JOIN_AFTER_SESSION_MARGIN))
+}
+
+/// Time for the rebalance that follows a dead member's eviction.
+const JOIN_AFTER_SESSION_MARGIN: Duration = Duration::from_secs(15);
+
+/// librdkafka's `session.timeout.ms`, with its default when not set.
+fn session_timeout(config: &ClientConfig) -> Duration {
+    let ms = config
+        .get("session.timeout.ms")
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(45_000);
+    Duration::from_millis(ms)
 }
 
 /// What an idle wait means in drain mode. An idle timeout on its own says nothing: the
@@ -1406,6 +1424,8 @@ struct DrainState {
     pending_terminal: Option<PrefetchError>,
     /// When the next watermark lookup may block again — see [`drain_target`].
     watermark_retry_at: Option<std::time::Instant>,
+    /// The group's `session.timeout.ms`; sizes the join wait, see [`drain_join_timeout`].
+    session_timeout: Duration,
 }
 
 /// How long a failed watermark lookup suppresses further broker calls. `fetch_watermarks`
@@ -1503,6 +1523,7 @@ fn drain_offset_reached(high: i64, delivered: Option<i64>, eof: Option<i64>) -> 
 ///
 /// Split from the Kafka specifics so the waiting rule can be tested without a broker:
 /// `readiness` is the only thing that knows what a consumer is doing.
+#[cfg(test)]
 async fn await_first(
     rx: &async_channel::Receiver<Result<Prefetched, PrefetchError>>,
     exit_on_empty: bool,
@@ -1514,7 +1535,7 @@ async fn await_first(
         rx,
         exit_on_empty,
         topic,
-        drain_join_timeout(),
+        drain_join_timeout(Duration::ZERO),
         readiness,
         topic_has_partitions,
     )
@@ -1573,7 +1594,8 @@ async fn await_first_within(
             if topic_has_partitions() {
                 return Some(Err(PrefetchError::Connection(format!(
                     "Kafka drain of '{topic}' was not assigned a partition within \
-                     {join_timeout:?} although the topic has partitions"
+                     {join_timeout:?} although the topic has partitions; a crashed member \
+                     may still hold the group (raise MQ_BRIDGE_DRAIN_JOIN_TIMEOUT_MS)"
                 ))));
             }
             tracing::warn!(
@@ -1651,10 +1673,11 @@ async fn receive_batch_internal(
     }
 
     // Block for the first record, then take whatever else the prefetcher already has.
-    let first = await_first(
+    let first = await_first_within(
         &prefetcher.rx,
         exit_on_empty,
         topic,
+        drain_join_timeout(drain_state.session_timeout),
         || drain_readiness(consumer, drain_state, &prefetcher.eof_positions),
         || topic_has_partitions(consumer, topic),
     )
@@ -2197,6 +2220,26 @@ mod tests {
 
         let first = await_first(&rx, true, "t", || DrainReadiness::Drained, || true).await;
         assert!(matches!(first, Some(Ok(record)) if record.offset == 11));
+    }
+
+    #[test]
+    fn test_drain_join_wait_outlasts_a_crashed_members_session() {
+        assert_eq!(
+            session_timeout(&ClientConfig::new()),
+            Duration::from_secs(45)
+        );
+        let mut config = ClientConfig::new();
+        config.set("session.timeout.ms", "6000");
+        assert_eq!(session_timeout(&config), Duration::from_secs(6));
+
+        assert_eq!(
+            drain_join_timeout(Duration::from_secs(45)),
+            Duration::from_secs(60)
+        );
+        assert_eq!(
+            drain_join_timeout(Duration::from_secs(6)),
+            Duration::from_secs(30)
+        );
     }
 
     #[tokio::test]

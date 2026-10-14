@@ -129,7 +129,13 @@ last value read:
 - A row whose value equals the last one read is skipped, so a column with repeated values
   (a plain `updated_at`) loses rows.
 - A row that appears later with a smaller value is never read. This happens with a sequence
-  when a long transaction commits after a shorter one that took a higher number.
+  when a long transaction commits after a shorter one that took a higher number. On
+  PostgreSQL the reader stops each page before the first row written by a transaction that
+  is not older than every open one, so a sequence column is safe; while a write transaction
+  stays open anywhere on the server, newer rows wait for it. A column filled from `now()`
+  (the transaction's start time) or by the application can still go wrong, and so can a view,
+  which has no `xmin` (the reader logs a warning). On MySQL, MariaDB and SQLite there is no
+  such guard. Where writers run concurrently, prefer [PostgreSQL CDC](#postgresql-cdc).
 - Updates and deletes of rows already read are not seen. Use [PostgreSQL CDC](#postgresql-cdc)
   for those.
 - The column can be an integer or a text type. On PostgreSQL it can also be a `timestamp`,
