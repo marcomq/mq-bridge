@@ -34,7 +34,7 @@ page is a short orientation.
 ## Building this book
 
 The documentation lives in the repository under `docs/book/`. To build it locally,
-see [`docs/book/README.md`](../README.md).
+see [`docs/book/README.md`](https://github.com/marcomq/mq-bridge/blob/main/docs/book/README.md).
 
 ## See also
 

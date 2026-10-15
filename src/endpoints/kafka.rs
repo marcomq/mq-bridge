@@ -1397,6 +1397,10 @@ enum DrainReadiness {
     /// Assigned, but some partition has not reached the offset the drain is aiming for:
     /// a fetch is still in flight. Not a drain.
     Starting,
+    /// This member's partitions are done, but partitions it does not hold still have rows
+    /// the group has not committed. A peer that left hands them over in a rebalance this
+    /// member may not have heard of yet; a live peer is still copying them.
+    PeersBehind,
     /// Assigned and there is nothing left to read.
     Drained,
 }
@@ -1426,6 +1430,8 @@ struct DrainState {
     watermark_retry_at: Option<std::time::Instant>,
     /// The group's `session.timeout.ms`; sizes the join wait, see [`drain_join_timeout`].
     session_timeout: Duration,
+    /// Every partition of the topic, looked up once — see [`peers_behind`].
+    partitions: Option<Vec<i32>>,
 }
 
 /// How long a failed watermark lookup suppresses further broker calls. `fetch_watermarks`
@@ -1481,6 +1487,7 @@ fn drain_target(
 fn drain_readiness(
     consumer: &StreamConsumer,
     state: &mut DrainState,
+    topic: &str,
     eof_positions: &std::sync::Mutex<PartitionOffsets>,
 ) -> DrainReadiness {
     if !has_assignment(consumer) {
@@ -1507,7 +1514,86 @@ fn drain_readiness(
         }
         return DrainReadiness::Starting;
     }
+    if peers_behind(consumer, state, topic, &positions) {
+        return DrainReadiness::PeersBehind;
+    }
     DrainReadiness::Drained
+}
+
+/// Whether a partition this member does not hold has rows the group has not committed.
+/// A failed lookup counts as yes; `await_first_within` bounds how long that is waited out.
+fn peers_behind(
+    consumer: &StreamConsumer,
+    state: &mut DrainState,
+    topic: &str,
+    owned: &TopicPartitionList,
+) -> bool {
+    let Some(partitions) = topic_partitions(consumer, state, topic) else {
+        return true;
+    };
+    let mut unowned = TopicPartitionList::new();
+    for partition in partitions {
+        if owned.find_partition(topic, partition).is_none() {
+            unowned.add_partition(topic, partition);
+        }
+    }
+    if unowned.count() == 0 {
+        return false;
+    }
+    let Ok(committed) = consumer.committed_offsets(unowned, BROKER_PROBE_TIMEOUT) else {
+        return true;
+    };
+    committed.elements().iter().any(|elem| {
+        let key = (topic.to_string(), elem.partition());
+        drain_target(consumer, state, &key).is_none_or(|high| group_behind(high, elem.offset()))
+    })
+}
+
+/// A committed offset is the next one to read, so the group is done at `high`.
+fn group_behind(high: i64, committed: Offset) -> bool {
+    match committed {
+        Offset::Offset(offset) => offset < high,
+        _ => high > 0,
+    }
+}
+
+/// The topic's partitions, read from the broker once; failures back off like
+/// [`drain_target`].
+fn topic_partitions(
+    consumer: &StreamConsumer,
+    state: &mut DrainState,
+    topic: &str,
+) -> Option<Vec<i32>> {
+    if let Some(partitions) = &state.partitions {
+        return Some(partitions.clone());
+    }
+    if state
+        .watermark_retry_at
+        .is_some_and(|at| std::time::Instant::now() < at)
+    {
+        return None;
+    }
+    let lookup = consumer
+        .fetch_metadata(None, BROKER_PROBE_TIMEOUT)
+        .map(|metadata| {
+            metadata
+                .topics()
+                .iter()
+                .filter(|t| t.name() == topic)
+                .flat_map(|t| t.partitions().iter().map(|p| p.id()))
+                .collect::<Vec<_>>()
+        });
+    match lookup {
+        Ok(partitions) => {
+            state.partitions = Some(partitions.clone());
+            Some(partitions)
+        }
+        Err(e) => {
+            debug!(topic = %topic, error = %e, "Kafka partition lookup failed; backing off");
+            state.watermark_retry_at = Some(std::time::Instant::now() + WATERMARK_RETRY_BACKOFF);
+            None
+        }
+    }
 }
 
 /// A librdkafka position is deliberately not accepted here: it advances when a record is
@@ -1582,6 +1668,11 @@ async fn await_first_within(
             return None;
         }
         if std::time::Instant::now() >= start_deadline {
+            // No rebalance handed the lagging partitions over, so a live peer owns them.
+            if state == DrainReadiness::PeersBehind {
+                debug!(topic = %topic, timeout = ?join_timeout, "Kafka drain done; peers still hold lagging partitions");
+                return None;
+            }
             // Assigned and short of its target: there is data this drain has not copied.
             if state == DrainReadiness::Starting {
                 return Some(Err(PrefetchError::Connection(format!(
@@ -1678,7 +1769,7 @@ async fn receive_batch_internal(
         exit_on_empty,
         topic,
         drain_join_timeout(drain_state.session_timeout),
-        || drain_readiness(consumer, drain_state, &prefetcher.eof_positions),
+        || drain_readiness(consumer, drain_state, topic, &prefetcher.eof_positions),
         || topic_has_partitions(consumer, topic),
     )
     .await;
@@ -2471,6 +2562,51 @@ mod tests {
             wait(true).await,
             Some(Err(PrefetchError::Connection(_)))
         ));
+    }
+
+    /// A member done with its own partitions must not end while a peer's still lag: the
+    /// peer may have left, and the rebalance handing them over not have reached it yet.
+    #[tokio::test]
+    async fn test_a_drain_waits_for_peers_then_ends_cleanly() {
+        let (tx, rx) = prefetch_channel(1);
+        let mut polls = 0;
+
+        let first = await_first(
+            &rx,
+            true,
+            "t",
+            || {
+                polls += 1;
+                if polls == 2 {
+                    tx.try_send(Ok(prefetched("t", 1, 7))).unwrap();
+                }
+                DrainReadiness::PeersBehind
+            },
+            || true,
+        )
+        .await;
+        assert!(matches!(first, Some(Ok(p)) if p.offset == 7));
+
+        // No rebalance came within the join wait: a live peer owns them, not an error.
+        let (_tx, rx) = prefetch_channel(1);
+        let first = await_first_within(
+            &rx,
+            true,
+            "t",
+            Duration::ZERO,
+            || DrainReadiness::PeersBehind,
+            || true,
+        )
+        .await;
+        assert!(first.is_none());
+    }
+
+    #[test]
+    fn test_group_behind_compares_the_commit_with_the_target() {
+        assert!(group_behind(10, Offset::Offset(9)));
+        assert!(!group_behind(10, Offset::Offset(10)));
+        assert!(group_behind(10, Offset::Invalid));
+        assert!(!group_behind(0, Offset::Invalid));
     }
 
     #[test]
