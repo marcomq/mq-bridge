@@ -583,7 +583,7 @@ Elasticsearch or Qdrant.
 | Field | Meaning |
 | --- | --- |
 | `lines` | The response has one JSON line per document, in order. `success` is a JSON pointer to a boolean; `error` points to the reason. |
-| `items` | The response is one JSON document with an array entry per document, in order. `path` is a JSON pointer to the array (empty when the response is the array); `error` points to an entry's error text, and an entry that has it failed. With `index`, a JSON pointer inside an entry to its document's position in the request (from 0), the array may list only the failures, e.g. BigQuery's `insertErrors`, and is left out or `null` when none failed; a position outside the request fails it. |
+| `items` | The response is one JSON document with an array entry per document, in order. `path` is a JSON pointer to the array (empty when the response is the array); `error` points to an entry's error text, and an entry that has it failed. With `index`, a JSON pointer inside an entry to its document's position in the request (from 0), the array may list only the failures, e.g. BigQuery's `insertErrors`, and is left out or `null` when none failed; a position outside the request fails it. With `success: { path, equals }`, an entry whose value at `path` is not `equals` failed too, e.g. SES's `/Status` other than `SUCCESS` without an `Error`. |
 | `job` | The response names a job. `id` points to it, `poll` is the path asked with GET (`{id}` is replaced), `status` points to its state. `succeeded` and `failed` list the final states; any other state is polled again. `error` points to the reason. `timeout_ms` (default `300000`) is how long the job may run. |
 
 Without `result`, a 2xx status means every document was written.

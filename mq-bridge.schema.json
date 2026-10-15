@@ -5246,11 +5246,40 @@
             "string",
             "null"
           ]
+        },
+        "success": {
+          "description": "An entry whose value at `path` is not `equals` failed, even without an error text.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HttpBulkItemSuccess"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false,
       "required": [
         "error"
+      ]
+    },
+    "HttpBulkItemSuccess": {
+      "description": "The value an `items` entry carries when its document was written, e.g. SES's `/Status: SUCCESS`.",
+      "type": "object",
+      "properties": {
+        "path": {
+          "description": "JSON pointer, inside an entry, to its status, e.g. `/Status`.",
+          "type": "string"
+        },
+        "equals": {
+          "description": "The status of a written document, e.g. `SUCCESS` or `true`."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "equals"
       ]
     },
     "HttpBulkJob": {

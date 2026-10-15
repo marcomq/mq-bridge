@@ -20,6 +20,8 @@ All notable changes to `mq-bridge`. Newest first.
 - **`http_bulk` `upsert.max_documents`** caps the documents per request.
 - **`http_bulk` `result.items.index`** matches entries by the position they name, so a response
   may list only the failures (BigQuery `insertErrors`).
+- **`http_bulk` `result.items.success`** fails an entry whose status is not the given value,
+  even without an error text (SES `Status` other than `SUCCESS`).
 - **`http_bulk` reads follow next-page URLs**: `read.cursor.next_url` (a URL in the body) or
   `read.cursor.link` (the `Link` header's `rel="next"`). The next URL is checkpointed; one on
   another host stops the read, so credentials stay with the configured host.

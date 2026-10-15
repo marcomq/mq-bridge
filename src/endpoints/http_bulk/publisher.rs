@@ -836,9 +836,16 @@ fn rejected_items(
             quoted(text)
         )));
     };
-    let failed = |entry: &Value| match entry.pointer(&items.error) {
-        None | Some(Value::Null) => None,
-        Some(reason) => Some(scalar_text(reason).unwrap_or_else(|| reason.to_string())),
+    let failed = |entry: &Value| {
+        let status = items.success.as_ref().and_then(|success| {
+            let status = entry.pointer(&success.path).unwrap_or(&Value::Null);
+            (*status != success.equals).then_some(status)
+        });
+        match (entry.pointer(&items.error), status) {
+            (None | Some(Value::Null), None) => None,
+            (None | Some(Value::Null), Some(status)) => Some(format!("status {status}")),
+            (Some(reason), _) => Some(scalar_text(reason).unwrap_or_else(|| reason.to_string())),
+        }
     };
     let mut rejected = Vec::new();
     for (position, entry) in entries.iter().enumerate() {
@@ -1700,6 +1707,27 @@ mod tests {
         assert!(failed[0].2.contains("index"), "{failed:?}");
         let sent = publisher.send_batch(documents(&[r#"{"a":1}"#])).await;
         assert!(failures(sent.unwrap()).is_empty());
+    }
+
+    #[tokio::test]
+    async fn result_items_with_a_success_value_fail_other_statuses_without_an_error() {
+        let answer = r#"{"Results": [{"Status": "SUCCESS"}, {"Status": "FAILED"}, {"Status": "SUCCESS", "Error": "late"}, {}]}"#;
+        let server = server(move |_| (200, answer.to_string())).await;
+        let publisher = publisher(
+            &server,
+            json!({"upsert": {"path": "/bulk", "format": "json_array", "result": {"items":
+                {"path": "/Results", "error": "/Error", "success": {"path": "/Status", "equals": "SUCCESS"}}}}}),
+        );
+        let batch = documents(&[r#"{"a":1}"#, r#"{"a":2}"#, r#"{"a":3}"#, r#"{"a":4}"#]);
+        let failed = failures(publisher.send_batch(batch).await.unwrap());
+        let reasons: Vec<&str> = failed.iter().map(|failure| failure.2.as_str()).collect();
+        assert_eq!(failed.len(), 3, "{failed:?}");
+        assert!(
+            reasons.iter().any(|r| r.contains("\"FAILED\"")),
+            "{failed:?}"
+        );
+        assert!(reasons.iter().any(|r| r.contains("late")), "{failed:?}");
+        assert!(reasons.iter().any(|r| r.contains("null")), "{failed:?}");
     }
 
     #[test]

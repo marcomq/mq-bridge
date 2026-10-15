@@ -335,11 +335,18 @@ class HttpBulkDelete(TypedDict, total=False):
     result: HttpBulkResult
 
 
+class HttpBulkItemSuccess(TypedDict, total=False):
+    """The value an `items` entry carries when its document was written, e.g. SES's `/Status: SUCCESS`."""
+    equals: Required[Any]
+    path: Required[str]
+
+
 class HttpBulkItems(TypedDict, total=False):
     """A JSON response holding an array with one entry per document, in request order."""
     error: Required[str]
     index: Optional[str]
     path: str
+    success: Optional[HttpBulkItemSuccess]
 
 
 class HttpBulkJob(TypedDict, total=False):

@@ -2435,11 +2435,13 @@ fn base_endpoint_from_uri(uri: &str) -> anyhow::Result<mq_bridge::models::Endpoi
             schema_fields(schemars::schema_for!(PostgresCdcConfig)),
         ),
         "nats" => ("nats", schema_fields(schemars::schema_for!(NatsConfig))),
-        "mongodb" => (
+        "mongodb" | "mongodb+srv" => (
             "mongodb",
             schema_fields(schemars::schema_for!(MongoDbConfig)),
         ),
-        "redis" | "rediss" | "redis_streams" => (
+        // Valkey speaks the Redis protocol; its schemes are rewritten below.
+        "redis" | "rediss" | "redis+unix" | "valkey" | "valkeys" | "valkey+unix"
+        | "redis_streams" => (
             "redis",
             schema_fields(schemars::schema_for!(RedisStreamsConfig)),
         ),
@@ -2508,7 +2510,7 @@ fn base_endpoint_from_uri(uri: &str) -> anyhow::Result<mq_bridge::models::Endpoi
                 return custom_endpoint_from_uri(plugin, uri);
             }
             bail!(
-                "unsupported endpoint scheme '{other}' in URI '{shown}'. Supported schemes: postgres, postgresql, mysql, mariadb, sqlite, nats, mongodb, redis, file, spool, kafka, mqtt, mqtts, amqp, amqps, rabbitmq, rabbitmqs, http, https, clickhouse, clickhouses, http-bulk, ws, wss, grpc, grpcs, ibmmq, aws, zeromq, zmq, s3, gs, az, abfs, and the structural memory, null, static, fanout, request, switch, response. A scheme may also name an endpoint registered by an extension{}, loaded with --plugin, or installed on the plugin search path ({})",
+                "unsupported endpoint scheme '{other}' in URI '{shown}'. Supported schemes: postgres, postgresql, mysql, mariadb, sqlite, nats, mongodb, mongodb+srv, redis, rediss, redis+unix, valkey, valkeys, valkey+unix, file, spool, kafka, mqtt, mqtts, amqp, amqps, rabbitmq, rabbitmqs, http, https, clickhouse, clickhouses, http-bulk, ws, wss, grpc, grpcs, ibmmq, aws, zeromq, zmq, s3, gs, az, abfs, and the structural memory, null, static, fanout, request, switch, response. A scheme may also name an endpoint registered by an extension{}, loaded with --plugin, or installed on the plugin search path ({})",
                 extension_schemes(),
                 mq_bridge::plugin::search_path_hint(plugin),
             )
@@ -2669,6 +2671,12 @@ fn base_endpoint_from_uri(uri: &str) -> anyhow::Result<mq_bridge::models::Endpoi
             "clickhouse" => &[("clickhouses://", "https://"), ("clickhouse://", "http://")],
             "grpc" => &[("grpcs://", "https://"), ("grpc://", "http://")],
             "zeromq" => &[("zeromq://", "tcp://"), ("zmq://", "tcp://")],
+            // The endpoint's TLS handling keys on `rediss://`.
+            "redis" => &[
+                ("valkeys://", "rediss://"),
+                ("valkey+unix://", "redis+unix://"),
+                ("valkey://", "redis://"),
+            ],
             // Normalize CLI-only aliases to schemes recognized by `object_store`.
             "object_store" => &[("gcs://", "gs://"), ("local-store://", "file://")],
             _ => &[],
@@ -3313,6 +3321,39 @@ mod uri_tests {
         );
         assert_eq!(cfg["collection"], "orders");
         assert_eq!(cfg["url"], "mongodb://host/?replicaSet=rs0");
+    }
+
+    #[test]
+    fn mongodb_srv_scheme_is_mongodb() {
+        let cfg = config(
+            "mongodb+srv://app:pw@cluster0.example.net/?database=shop&retryWrites=true",
+            "mongodb",
+        );
+        assert_eq!(
+            cfg["url"],
+            "mongodb+srv://app:pw@cluster0.example.net/?retryWrites=true"
+        );
+        assert_eq!(cfg["database"], "shop");
+    }
+
+    #[test]
+    fn redis_socket_and_valkey_schemes_are_redis() {
+        for (uri, url) in [
+            (
+                "redis+unix:///tmp/redis.sock?stream=s",
+                "redis+unix:///tmp/redis.sock",
+            ),
+            ("valkey://host:6379?stream=s", "redis://host:6379"),
+            ("valkeys://host:6380?stream=s", "rediss://host:6380"),
+            (
+                "valkey+unix:///tmp/v.sock?stream=s",
+                "redis+unix:///tmp/v.sock",
+            ),
+        ] {
+            let cfg = config(uri, "redis_streams");
+            assert_eq!(cfg["url"], url, "{uri}");
+            assert_eq!(cfg["stream"], "s", "{uri}");
+        }
     }
 
     // MongoDB sources are non-destructive by default in the CLI: `consume` is set

@@ -147,8 +147,14 @@ SES refused:
         format: json_array
         envelope: '{"FromEmailAddress": "hello@example.com", "DefaultContent": {"Template": {"TemplateName": "welcome", "TemplateData": "{}"}}, "BulkEmailEntries": {documents}}'
         result:
-          items: { path: /BulkEmailEntryResults, error: /Error }
+          items:
+            path: /BulkEmailEntryResults
+            error: /Error
+            success: { path: /Status, equals: SUCCESS }
 ```
+
+SES may leave out `Error` for a refused recipient, so `success` fails every
+entry whose `Status` is not `SUCCESS`.
 
 Here every payload must already be one SES entry, such as
 `{"Destination": {"ToAddresses": ["ada@example.com"]}, "ReplacementEmailContent": {"ReplacementTemplate": {"ReplacementTemplateData": "{\"name\":\"Ada\"}"}}}`:

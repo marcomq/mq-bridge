@@ -801,6 +801,12 @@ export interface HttpBulkItems {
   path?: string;
   error: string;
   index?: string | null;
+  success?: HttpBulkItemSuccess | null;
+}
+
+export interface HttpBulkItemSuccess {
+  path: string;
+  equals: unknown;
 }
 
 export interface HttpBulkJob {

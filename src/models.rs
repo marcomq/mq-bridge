@@ -3456,6 +3456,20 @@ pub struct HttpBulkItems {
     /// JSON pointer, inside an entry, to its document's position; the array may then list only failures, or be absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub index: Option<String>,
+    /// An entry whose value at `path` is not `equals` failed, even without an error text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub success: Option<HttpBulkItemSuccess>,
+}
+
+/// The value an `items` entry carries when its document was written, e.g. SES's `/Status: SUCCESS`.
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct HttpBulkItemSuccess {
+    /// JSON pointer, inside an entry, to its status, e.g. `/Status`.
+    pub path: String,
+    /// The status of a written document, e.g. `SUCCESS` or `true`.
+    pub equals: serde_json::Value,
 }
 
 /// A response with one JSON line per document, in request order.
