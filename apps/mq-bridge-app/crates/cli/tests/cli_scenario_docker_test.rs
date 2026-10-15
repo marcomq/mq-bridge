@@ -926,7 +926,7 @@ mod postgres {
         );
     }
 
-    /// id=1 commits after id=2 was read. A cursor that moved past 2 must not skip 1 for good.
+    /// id=1 commits after id=2. The cursor must hold 2 back until 1 commits, not skip 1.
     #[test]
     #[ignore = "requires docker compose"]
     fn postgres_cursor_keeps_a_row_whose_transaction_commits_late() {
@@ -974,17 +974,53 @@ mod postgres {
         let source = format!(
             "{URL}?table={table}&cursor_column=id&cursor_id=late&checkpoint_store={checkpoint_uri}"
         );
+        // The drain waits for the open transaction, so it can only end after the COMMIT.
         let first = dir.path().join("first.jsonl");
-        copy_ok(
-            "late commit: first",
-            &source,
-            &raw_uri(&first),
-            &["--resume"],
+        let first_log = dir.path().join("first.log");
+        let mut first_run = cli()
+            .args([
+                "copy",
+                "--from",
+                &source,
+                "--to",
+                &raw_uri(&first),
+                "--drain",
+            ])
+            .arg("--resume")
+            .stdout(Stdio::null())
+            .stderr(std::fs::File::create(&first_log).expect("create log"))
+            .spawn()
+            .expect("start first copy");
+        std::thread::sleep(Duration::from_secs(3));
+        assert!(
+            first_run.try_wait().expect("poll copy").is_none(),
+            "the first copy ended while id=1 was still open\n{}",
+            tail(&first_log)
+        );
+        assert!(
+            complete_rows(&first).is_empty(),
+            "id=2 was read past the open id=1: {:?}",
+            read_rows(&first)
         );
 
         writeln!(stdin, "COMMIT;").unwrap();
         drop(stdin);
         assert!(slow.wait().expect("slow transaction").success());
+        let status = exit_within(&mut first_run, Duration::from_secs(60));
+        if status.is_none() {
+            let _ = first_run.kill();
+        }
+        let status = status.unwrap_or_else(|| {
+            panic!(
+                "first copy did not end after the COMMIT\n{}",
+                tail(&first_log)
+            )
+        });
+        assert!(
+            status.success(),
+            "late commit: first failed\n{}",
+            tail(&first_log)
+        );
 
         let second = dir.path().join("second.jsonl");
         copy_ok(
