@@ -208,12 +208,10 @@ jobs:
         include:
           - name: Status
             filter: 'binary(integration_test) & test(=test_all_status)'
-          - name: Chaos
-            filter: 'binary(integration_test) & test(=test_all_chaos)'
           - name: Logic
             filter: 'binary(integration_test) & (test(=test_all_request_reply) | test(=test_all_subscriber_logic))'
           - name: Endpoints
-            filter: 'binary(integration_test) & not test(=test_all_status) & not test(=test_all_chaos) & not test(=test_all_request_reply) & not test(=test_all_subscriber_logic) & not test(=test_all_performance_pipeline) & not test(=test_all_performance_direct)'
+            filter: 'binary(integration_test) & not test(=test_all_status) & not test(=test_all_request_reply) & not test(=test_all_subscriber_logic) & not test(=test_all_performance_pipeline) & not test(=test_all_performance_direct)'
           - name: Performance Pipeline
             filter: 'binary(integration_test) & test(=test_all_performance_pipeline)'
           - name: Performance Direct

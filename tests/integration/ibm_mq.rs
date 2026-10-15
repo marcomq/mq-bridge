@@ -154,7 +154,12 @@ pub async fn test_ibm_mq_performance_pipeline() {
     .await;
 }
 
-pub async fn test_ibm_mq_chaos() {
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires docker compose and the IBM MQ client"]
+async fn test_ibm_mq_chaos() {
+    if !mq_bridge::test_utils::should_run("ibm-mq") || !client_available() {
+        return;
+    }
     setup_logging();
     run_test_with_docker_controller(
         "tests/integration/docker-compose/ibm_mq.yml",

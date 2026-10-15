@@ -79,6 +79,8 @@ for entry in "${FILES[@]}"; do
       # Anything outside docs/ (../README.md, ../CONTRIBUTING.md, ../benches/, …) is not
       # vendored — point it at the GitHub source so the book has no broken relative links.
       s{\]\(\.\./}{]('"$ENGINE_RAW_BASE"'/}g;
+      # Engine docs that are not vendored (CAPABILITIES.md, GRPC.md, …) also go to GitHub.
+      s{\]\(([A-Z][A-Z_]*\.md)}{]('"$ENGINE_RAW_BASE"'/docs/$1}g;
     ' \
   > "$dst"
 

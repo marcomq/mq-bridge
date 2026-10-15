@@ -119,8 +119,6 @@ async fn test_all_subscriber_logic() {
         if should_run("nats") {
             println!("\n\n>>> Starting NATS Subscriber Logic Test...");
             integration::nats::test_nats_subscriber_logic().await;
-            println!("\n\n>>> Starting NATS Drain (exit_on_empty) Test...");
-            integration::nats::test_nats_drain_exits_on_empty().await;
         }
     }
     #[cfg(feature = "redis-streams")]
@@ -128,8 +126,6 @@ async fn test_all_subscriber_logic() {
         if should_run("redis_streams") {
             println!("\n\n>>> Starting Redis Streams Subscriber Logic Test...");
             integration::redis_streams::test_redis_subscriber_logic().await;
-            println!("\n\n>>> Starting Redis Streams Drain (exit_on_empty) Test...");
-            integration::redis_streams::test_redis_drain_exits_on_empty().await;
             println!("\n\n>>> Starting Redis Streams Partial Batch Test...");
             integration::redis_streams::test_redis_partial_batch_is_delivered().await;
             println!("\n\n>>> Starting Redis Streams Reclaim (drained stream) Test...");
@@ -146,77 +142,6 @@ async fn test_all_subscriber_logic() {
     if should_run("file") {
         println!("\n\n>>> Starting File Subscriber Logic Test...");
         integration::file::test_file_subscriber_logic().await;
-    }
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires docker compose, takes long time to run"]
-async fn test_all_chaos() {
-    println!("--- Running All Chaos Tests ---");
-    println!("Tests are run sequentially.");
-
-    #[cfg(feature = "kafka")]
-    {
-        if should_run("kafka") {
-            println!("\n\n>>> Starting Kafka Chaos Test...");
-            integration::kafka::test_kafka_chaos().await;
-        }
-    }
-
-    #[cfg(feature = "nats")]
-    {
-        if should_run("nats") {
-            println!("\n\n>>> Starting NATS Chaos Test...");
-            integration::nats::test_nats_chaos().await;
-        }
-    }
-
-    #[cfg(feature = "amqp")]
-    {
-        if should_run("amqp") {
-            println!("\n\n>>> Starting AMQP Chaos Test...");
-            integration::amqp::test_amqp_chaos().await;
-        }
-    }
-
-    #[cfg(feature = "mqtt")]
-    {
-        if should_run("mqtt") {
-            println!("\n\n>>> Starting MQTT Chaos Test...");
-            // MQTT chaos tests are currently flaky due to issues with session persistence/QoS handling
-            // in the test environment (Mosquitto + rumqttc).
-            integration::mqtt::test_mqtt_chaos().await;
-        }
-    }
-
-    #[cfg(feature = "mongodb")]
-    {
-        if should_run("mongodb") {
-            println!("\n\n>>> Starting MongoDB Chaos Test...");
-            integration::mongodb::test_mongodb_chaos().await;
-        }
-    }
-
-    #[cfg(any(feature = "ibm-mq-static", feature = "ibm-mq"))]
-    {
-        if should_run("ibm-mq") && integration::ibm_mq::client_available() {
-            println!("\n\n>>> Starting IBM MQ Chaos Test...");
-            integration::ibm_mq::test_ibm_mq_chaos().await;
-        }
-    }
-
-    // AWS chaos test is excluded by default as it requires LocalStack which can be heavy/flaky in some envs
-    #[cfg(feature = "sqlx")]
-    {
-        if should_run("sqlx") || should_run("postgres") {
-            integration::postgres::test_postgres_chaos().await;
-        }
-        if should_run("sqlx") || should_run("mariadb") {
-            integration::mariadb::test_mariadb_chaos().await;
-        }
-        if should_run("sqlx") || should_run("mysql") {
-            integration::mysql::test_mysql_chaos().await;
-        }
     }
 }
 

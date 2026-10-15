@@ -54,13 +54,6 @@ routes:
       memory: { topic: "sqlx-mariadb-out", capacity: {out_capacity} }
 "#;
 
-pub async fn test_mariadb_pipeline() {
-    run_mariadb_test(|config_yaml| async move {
-        run_pipeline_test("sqlx", &config_yaml).await;
-    })
-    .await;
-}
-
 pub async fn test_mariadb_performance_pipeline() {
     run_mariadb_test(|config_yaml| async move {
         run_performance_pipeline_test_named(
@@ -103,16 +96,6 @@ pub async fn test_mariadb_checkpoint_table() {
     setup_logging();
     run_test_with_docker(DOCKER_COMPOSE_FILE, || async {
         super::mysql::assert_sql_checkpoint_round_trip(DATABASE_URL, "mariadb").await;
-    })
-    .await;
-}
-
-pub async fn test_mariadb_chaos() {
-    setup_logging();
-    run_test_with_docker_controller(DOCKER_COMPOSE_FILE, |controller| async move {
-        setup_db().await;
-        let config_yaml = CONFIG_YAML.replace("{out_capacity}", &(10000 + 1000).to_string());
-        run_chaos_pipeline_test("sqlx", &config_yaml, controller, "mariadb").await;
     })
     .await;
 }

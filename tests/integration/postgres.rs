@@ -56,19 +56,6 @@ routes:
       memory: { topic: "sqlx-test-out", capacity: {out_capacity} }
 "#;
 
-pub async fn test_postgres_pipeline() {
-    setup_logging();
-    run_test_with_docker(DOCKER_COMPOSE_FILE, || async {
-        setup_db().await;
-        let config_yaml = CONFIG_YAML.replace(
-            "{out_capacity}",
-            &(PERF_TEST_MESSAGE_COUNT + 1000).to_string(),
-        );
-        run_pipeline_test("sqlx", &config_yaml).await;
-    })
-    .await;
-}
-
 pub async fn test_postgres_performance_pipeline() {
     setup_logging();
     run_test_with_docker(DOCKER_COMPOSE_FILE, || async {
@@ -84,19 +71,6 @@ pub async fn test_postgres_performance_pipeline() {
             PERF_TEST_MESSAGE_COUNT,
         )
         .await;
-    })
-    .await;
-}
-
-pub async fn test_postgres_chaos() {
-    setup_logging();
-    run_test_with_docker_controller(DOCKER_COMPOSE_FILE, |controller| async move {
-        setup_db().await;
-        let config_yaml = CONFIG_YAML.replace(
-            "{out_capacity}",
-            &(10000 + 1000).to_string(), // Using a smaller number for chaos tests
-        );
-        run_chaos_pipeline_test("sqlx", &config_yaml, controller, "postgres").await;
     })
     .await;
 }

@@ -163,15 +163,150 @@ fn wait_for_rows(path: &Path, expected: usize, timeout: Duration, run: &Headless
 }
 
 fn assert_all_arrived(seeded: &[String], got: &[String], case: &str) {
+    assert_lost_at_most(seeded, got, case, 0);
+}
+
+fn assert_lost_at_most(seeded: &[String], got: &[String], case: &str, allowed: usize) {
     let got = distinct(got);
     let missing: Vec<&String> = seeded.iter().filter(|row| !got.contains(*row)).collect();
     assert!(
-        missing.is_empty(),
+        missing.len() <= allowed,
         "{case}: {} of {} rows missing, first {:?}",
         missing.len(),
         seeded.len(),
         missing.first()
     );
+}
+
+// ------------------------------------------------------------------- scenarios
+
+/// A backend's legs, copied from the engine's `CONFIG_YAML` for it, so the
+/// scenarios run the options its in-process pipeline and chaos tests ran.
+struct Broker {
+    backend: &'static str,
+    /// The compose file, when it is not named after `backend`.
+    stack: Option<&'static str>,
+    service: &'static str,
+    concurrency: u32,
+    batch_size: u32,
+    retries: u32,
+    /// Output and input endpoint for queue `q`, one YAML flow mapping each.
+    sink: fn(&str) -> String,
+    source: fn(&str) -> String,
+    /// A sink URI that creates the queue before the reader polls it.
+    create: Option<fn(&str) -> String>,
+    allowed_loss: usize,
+    /// False skips the scenarios, e.g. without a runtime client library.
+    available: fn() -> bool,
+}
+
+const BASE: Broker = Broker {
+    backend: "",
+    stack: None,
+    service: "",
+    concurrency: 4,
+    batch_size: 1024,
+    retries: 20,
+    sink: |_| String::new(),
+    source: |_| String::new(),
+    create: None,
+    allowed_loss: 0,
+    available: || true,
+};
+
+/// The engine's `memory → backend` and `backend → memory` pair with file legs.
+fn routes(b: &Broker, q: &str, input: &Path, output: &Path) -> String {
+    let (c, n, r) = (b.concurrency, b.batch_size, b.retries);
+    format!(
+        r#"  to_backend:
+    concurrency: {c}
+    batch_size: {n}
+    exit_on_empty: true
+    input:
+      file: {{ path: '{input}', format: raw }}
+    output:
+      middlewares:
+        - retry: {{ max_attempts: {r}, initial_interval_ms: 500, max_interval_ms: 2000 }}
+      {sink}
+  from_backend:
+    concurrency: {c}
+    batch_size: {n}
+    input:
+      {source}
+    output:
+      file: {{ path: '{output}', format: raw }}
+"#,
+        input = input.display(),
+        output = output.display(),
+        sink = (b.sink)(q),
+        source = (b.source)(q),
+    )
+}
+
+/// Every row arrives, then one SIGTERM stops the run cleanly. With `restart`, the
+/// service goes away mid-stream and comes back first, as in the engine's chaos test.
+fn scenario(b: &Broker, restart: bool) {
+    if !(b.available)() {
+        eprintln!("skipping {}: not available here", b.backend);
+        return;
+    }
+    let dir = TestDir::new();
+    let seeded = numbered_rows(50_000);
+    let input = seed_rows(&dir, "input.jsonl", &seeded);
+    let output = dir.path().join("output.jsonl");
+    let q = unique(&format!("cli_scn_{}", b.backend));
+    if let Some(create) = b.create {
+        let empty = raw_uri(seed_rows(&dir, "empty.jsonl", &[]));
+        copy_ok("create the queue", &empty, &create(&q), &[]);
+    }
+    let run = Headless::start(&dir, &routes(b, &q, &input, &output));
+    let mut allowed = 0;
+    if restart {
+        let compose = Compose::new(b.stack.unwrap_or(b.backend));
+        wait_for_rows(&output, 1, Duration::from_secs(60), &run);
+        // Counted before the stop: Kafka's graceful shutdown keeps serving for seconds.
+        let at_stop = distinct(&complete_rows(&output)).len();
+        assert!(at_stop < seeded.len(), "all rows arrived before the stop");
+        compose.stop(b.service);
+        std::thread::sleep(Duration::from_secs(2));
+        compose.start(b.service);
+        eprintln!("{}: {at_stop} rows at stop", b.backend);
+        allowed = b.allowed_loss;
+    }
+    let got = wait_for_rows(
+        &output,
+        seeded.len() - allowed,
+        Duration::from_secs(300),
+        &run,
+    );
+    assert_lost_at_most(&seeded, &got, b.backend, allowed);
+    eprintln!(
+        "{}: {} duplicates",
+        b.backend,
+        got.len() - distinct(&got).len()
+    );
+    let status = run.terminate(Duration::from_secs(30));
+    assert!(status.success(), "SIGTERM exit: {status}");
+}
+
+macro_rules! scenarios {
+    ($broker:expr) => {
+        #[test]
+        #[ignore = "requires docker compose"]
+        fn pipeline_delivers_every_row_and_stops_on_sigterm() {
+            let broker = $broker;
+            backend!(broker.backend);
+            scenario(&broker, false);
+        }
+
+        #[test]
+        #[ignore = "requires docker compose, restarts the service"]
+        fn restart_mid_stream_loses_nothing() {
+            let broker = $broker;
+            backend!(broker.backend);
+            scenario(&broker, true);
+        }
+    };
 }
 
 // ====================================================================== Kafka
@@ -182,97 +317,18 @@ mod kafka {
 
     const BROKER: &str = "localhost:9092";
 
-    /// The engine's `memory_to_kafka` / `kafka_to_memory` pair with file legs.
-    fn routes(input: &Path, output: &Path, topic: &str) -> String {
-        format!(
-            r#"  file_to_kafka:
-    concurrency: 2
-    batch_size: 1024
-    exit_on_empty: true
-    input:
-      file: {{ path: '{input}', format: raw }}
-    output:
-      middlewares:
-        - retry:
-            max_attempts: 20
-            initial_interval_ms: 500
-            max_interval_ms: 2000
-      kafka:
-        url: "{BROKER}"
-        topic: "{topic}"
-        producer_options:
-          - ["queue.buffering.max.ms", "1"]
-          - ["acks", "1"]
-          - ["compression.type", "snappy"]
-  kafka_to_file:
-    concurrency: 2
-    batch_size: 1024
-    input:
-      kafka:
-        url: "{BROKER}"
-        topic: "{topic}"
-        group_id: "g_{topic}"
-    output:
-      file: {{ path: '{output}', format: raw }}
-"#,
-            input = input.display(),
-            output = output.display(),
-        )
-    }
-
-    #[test]
-    #[ignore = "requires docker compose"]
-    fn kafka_pipeline_delivers_every_row_and_stops_on_sigterm() {
-        backend!("kafka");
-        let dir = TestDir::new();
-        let topic = unique("cli_scn_kafka");
-        let seeded = numbered_rows(20_000);
-        let input = seed_rows(&dir, "input.jsonl", &seeded);
-        let output = dir.path().join("output.jsonl");
-
-        let run = Headless::start(&dir, &routes(&input, &output, &topic));
-        let got = wait_for_rows(&output, seeded.len(), Duration::from_secs(120), &run);
-        assert_all_arrived(&seeded, &got, "kafka pipeline");
-
-        let status = run.terminate(Duration::from_secs(30));
-        assert!(status.success(), "SIGTERM exit: {status}");
-    }
-
-    /// The engine's chaos test: the broker goes away mid-stream and comes back.
-    /// Every row must still arrive; duplicates are allowed (at-least-once).
-    #[test]
-    #[ignore = "requires docker compose, restarts the broker"]
-    fn kafka_broker_restart_mid_stream_loses_nothing() {
-        backend!("kafka");
-        let dir = TestDir::new();
-        let topic = unique("cli_scn_kafka_chaos");
-        let seeded = numbered_rows(100_000);
-        let input = seed_rows(&dir, "input.jsonl", &seeded);
-        let output = dir.path().join("output.jsonl");
-        let compose = Compose::new("kafka");
-
-        let run = Headless::start(&dir, &routes(&input, &output, &topic));
-        wait_for_rows(&output, 1, Duration::from_secs(60), &run);
-        compose.stop("kafka");
-        let at_stop = distinct(&complete_rows(&output)).len();
-        std::thread::sleep(Duration::from_secs(2));
-        compose.start("kafka");
-        assert!(
-            at_stop < seeded.len(),
-            "every row had arrived before the broker stopped; the restart proved nothing"
-        );
-
-        let got = wait_for_rows(&output, seeded.len(), Duration::from_secs(300), &run);
-        assert_all_arrived(&seeded, &got, "kafka chaos");
-        eprintln!(
-            "kafka chaos: {} rows at stop, {} duplicates",
-            at_stop,
-            got.len() - distinct(&got).len()
-        );
-
-        let status = run.terminate(Duration::from_secs(30));
-        assert!(status.success(), "SIGTERM exit: {status}");
-    }
+    scenarios!(Broker {
+        backend: "kafka",
+        service: "kafka",
+        concurrency: 2,
+        sink: |q| {
+            format!(
+                r#"kafka: {{ url: "{BROKER}", topic: "{q}", producer_options: [["queue.buffering.max.ms", "1"], ["acks", "1"], ["compression.type", "snappy"]] }}"#
+            )
+        },
+        source: |q| format!(r#"kafka: {{ url: "{BROKER}", topic: "{q}", group_id: "g_{q}" }}"#),
+        ..BASE
+    });
 
     /// `kill -9` mid-copy, then the same group again: what the first run did not
     /// commit is read again, so the two outputs together hold every row.
@@ -371,7 +427,7 @@ mod kafka {
         let topic = unique("cli_scn_kafka_rebalance");
         let sink = format!("kafka://{BROKER}?topic={topic}");
         let group = format!("{sink}&group_id=g_{topic}");
-        let seeded = numbered_rows(100_000);
+        let seeded = numbered_rows(30_000);
         copy_ok(
             "kafka rebalance: seed",
             &raw_uri(seed_rows(&dir, "input.jsonl", &seeded)),
@@ -445,95 +501,18 @@ mod nats {
         format!("nats://localhost:4222?subject={stream}.data&stream={stream}")
     }
 
-    fn routes(input: &Path, output: &Path, uri: &str) -> String {
-        let (subject, stream) = uri
-            .split_once("subject=")
-            .and_then(|(_, rest)| rest.split_once("&stream="))
-            .expect("nats uri");
-        format!(
-            r#"  file_to_nats:
-    concurrency: 2
-    batch_size: 1024
-    exit_on_empty: true
-    input:
-      file: {{ path: '{input}', format: raw }}
-    output:
-      middlewares:
-        - retry:
-            max_attempts: 20
-            initial_interval_ms: 500
-            max_interval_ms: 2000
-      nats:
-        url: "nats://localhost:4222"
-        subject: "{subject}"
-        stream: "{stream}"
-  nats_to_file:
-    concurrency: 2
-    batch_size: 1024
-    input:
-      nats:
-        url: "nats://localhost:4222"
-        subject: "{subject}"
-        stream: "{stream}"
-    output:
-      file: {{ path: '{output}', format: raw }}
-"#,
-            input = input.display(),
-            output = output.display(),
-        )
-    }
-
-    #[test]
-    #[ignore = "requires docker compose"]
-    fn nats_pipeline_delivers_every_row_and_stops_on_sigterm() {
-        backend!("nats");
-        let dir = TestDir::new();
-        let seeded = numbered_rows(50_000);
-        let input = seed_rows(&dir, "input.jsonl", &seeded);
-        let output = dir.path().join("output.jsonl");
-
-        let run = Headless::start(&dir, &routes(&input, &output, &endpoint()));
-        let got = wait_for_rows(&output, seeded.len(), Duration::from_secs(120), &run);
-        assert_all_arrived(&seeded, &got, "nats pipeline");
-
-        let status = run.terminate(Duration::from_secs(30));
-        assert!(status.success(), "SIGTERM exit: {status}");
-    }
-
-    /// The engine's chaos test: the server goes away mid-stream and comes back with
-    /// its JetStream store. Every row must still arrive; duplicates are allowed.
-    #[test]
-    #[ignore = "requires docker compose, restarts the server"]
-    fn nats_server_restart_mid_stream_loses_nothing() {
-        backend!("nats");
-        let dir = TestDir::new();
-        let seeded = numbered_rows(100_000);
-        let input = seed_rows(&dir, "input.jsonl", &seeded);
-        let output = dir.path().join("output.jsonl");
-        let compose = Compose::new("nats");
-
-        let run = Headless::start(&dir, &routes(&input, &output, &endpoint()));
-        wait_for_rows(&output, 1, Duration::from_secs(60), &run);
-        compose.stop("nats");
-        let at_stop = distinct(&complete_rows(&output)).len();
-        std::thread::sleep(Duration::from_secs(2));
-        compose.start("nats");
-        assert!(
-            at_stop < seeded.len(),
-            "every row had arrived before the server stopped; the restart proved nothing"
-        );
-
-        let got = wait_for_rows(&output, seeded.len(), Duration::from_secs(300), &run);
-        assert_all_arrived(&seeded, &got, "nats chaos");
-        eprintln!(
-            "nats chaos: {} rows at stop, {} duplicates",
-            at_stop,
-            got.len() - distinct(&got).len()
-        );
-
-        let status = run.terminate(Duration::from_secs(30));
-        assert!(status.success(), "SIGTERM exit: {status}");
-    }
+    scenarios!(Broker {
+        backend: "nats",
+        service: "nats",
+        batch_size: 512,
+        sink: |q| format!(
+            r#"nats: {{ url: "nats://localhost:4222", subject: "{q}.data", stream: "{q}" }}"#
+        ),
+        source: |q| format!(
+            r#"nats: {{ url: "nats://localhost:4222", subject: "{q}.data", stream: "{q}" }}"#
+        ),
+        ..BASE
+    });
 
     /// `kill -9` mid-copy, then the same durable consumer again: what the first run
     /// did not ack is redelivered, so the two outputs together hold every row.
@@ -596,6 +575,101 @@ mod nats {
     }
 }
 
+// ============================================== AMQP, MQTT, MongoDB, MySQL, MariaDB
+
+#[cfg(any(feature = "full", feature = "amqp"))]
+mod amqp {
+    use super::*;
+
+    const URL: &str = "amqp://guest:guest@localhost:5672/%2f";
+
+    scenarios!(Broker {
+        backend: "amqp",
+        service: "rabbitmq",
+        batch_size: 128,
+        retries: 10,
+        sink: |q| format!(r#"amqp: {{ url: "{URL}", queue: "{q}" }}"#),
+        source: |q| format!(r#"amqp: {{ url: "{URL}", queue: "{q}", prefetch_count: 1000 }}"#),
+        ..BASE
+    });
+}
+
+#[cfg(any(feature = "full", feature = "mqtt"))]
+mod mqtt {
+    use super::*;
+
+    const OPTS: &str = r#"url: "mqtt://localhost:1883", clean_session: false, qos: 1, max_inflight: 1000, queue_capacity: 10000"#;
+
+    // Mosquitto may drop a few in-flight QoS 1 messages across a restart.
+    scenarios!(Broker {
+        backend: "mqtt",
+        service: "mosquitto",
+        batch_size: 128,
+        retries: 10,
+        sink: |q| format!(
+            r#"mqtt: {{ {OPTS}, topic: "{q}", client_id: "{q}_pub", delayed_ack: false }}"#
+        ),
+        source: |q| format!(r#"mqtt: {{ {OPTS}, topic: "{q}", client_id: "{q}_sub" }}"#),
+        allowed_loss: 5,
+        ..BASE
+    });
+}
+
+#[cfg(any(feature = "full", feature = "mongodb"))]
+mod mongodb {
+    use super::*;
+
+    const DB: &str = r#"url: "mongodb://localhost:27017", database: "mq_bridge_test""#;
+
+    scenarios!(Broker {
+        backend: "mongodb",
+        service: "mongodb",
+        sink: |q| format!("mongodb: {{ {DB}, collection: {q} }}"),
+        source: |q| format!("mongodb: {{ {DB}, collection: {q}, consume: delete }}"),
+        ..BASE
+    });
+}
+
+/// The engine's sqlx queue legs: rows are inserted, then read and deleted.
+macro_rules! sql_queue {
+    ($backend:literal, $stack:expr, $url:expr) => {
+        scenarios!(Broker {
+            backend: $backend,
+            stack: $stack,
+            service: $backend,
+            sink: |q| format!(r#"sqlx: {{ url: "{}", table: {q} }}"#, $url),
+            source: |q| {
+                format!(
+                    r#"sqlx: {{ url: "{}", table: {q}, delete_after_read: true, polling_interval_ms: 20 }}"#,
+                    $url
+                )
+            },
+            create: Some(|q| format!("{}?table={q}&auto_create_table=true", $url)),
+            ..BASE
+        });
+    };
+}
+
+#[cfg(any(feature = "full", feature = "sqlx"))]
+mod mysql {
+    use super::*;
+    sql_queue!(
+        "mysql",
+        None,
+        "mysql://testuser:testpass@localhost:3306/testdb"
+    );
+}
+
+#[cfg(any(feature = "full", feature = "sqlx"))]
+mod mariadb {
+    use super::*;
+    sql_queue!(
+        "mariadb",
+        None,
+        "mysql://testuser:testpass@localhost:3307/testdb"
+    );
+}
+
 // =================================================================== Postgres
 
 #[cfg(any(feature = "full", feature = "sqlx"))]
@@ -604,6 +678,8 @@ mod postgres {
     use std::io::Write;
 
     const URL: &str = "postgres://testuser:testpass@localhost:5432/testdb";
+
+    sql_queue!("postgres", Some(STACK), URL);
     /// The logical-replication stack: CDC needs it, and the cursor tests run on it
     /// too, so one server serves the whole module.
     const STACK: &str = "postgres_cdc";

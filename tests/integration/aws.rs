@@ -59,35 +59,6 @@ async fn ensure_queue_exists() {
     let _ = client.purge_queue().queue_url(queue_url).send().await;
 }
 
-pub async fn test_aws_pipeline() {
-    setup_logging();
-    run_test_with_docker("tests/integration/docker-compose/aws.yml", || async {
-        ensure_queue_exists().await;
-        let config_yaml = CONFIG_YAML.replace(
-            "{out_capacity}",
-            &(PERF_TEST_MESSAGE_COUNT + 1000).to_string(),
-        );
-        run_pipeline_test("aws", &config_yaml).await;
-    })
-    .await;
-}
-
-pub async fn test_aws_chaos() {
-    setup_logging();
-    run_test_with_docker_controller(
-        "tests/integration/docker-compose/aws.yml",
-        |controller| async move {
-            ensure_queue_exists().await;
-            let config_yaml = CONFIG_YAML.replace(
-                "{out_capacity}",
-                &(PERF_TEST_MESSAGE_COUNT + 1000).to_string(),
-            );
-            run_chaos_pipeline_test("aws", &config_yaml, controller, "localstack").await;
-        },
-    )
-    .await;
-}
-
 pub async fn test_aws_performance_pipeline() {
     setup_logging();
     run_test_with_docker("tests/integration/docker-compose/aws.yml", || async {

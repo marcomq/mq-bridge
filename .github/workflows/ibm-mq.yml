@@ -188,7 +188,7 @@ jobs:
             --ignored --nocapture --test-threads=1 \
             test_all_subscriber_logic \
             test_all_performance_pipeline \
-            test_all_chaos \
+            test_ibm_mq_chaos \
             test_all_status
 
       - name: Run IBM MQ TLS tests

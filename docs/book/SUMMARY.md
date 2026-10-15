@@ -20,6 +20,12 @@
 - [MCP server (for AI agents)](MCP.md)
 - [How the app is built](getting-started/app-architecture.md)
 
+# Use cases
+- [Overview](use-cases/README.md)
+  - [Keep a vector index in sync with Postgres](use-cases/sync-postgres-to-qdrant.md)
+  - [Transactional outbox with Postgres and Kafka](use-cases/transactional-outbox-postgres-kafka.md)
+  - [Test message handlers without a broker](use-cases/test-without-a-broker.md)
+
 # Tutorials
 - [Postgres CDC → JSONL](tutorials/postgres-cdc.md)
 - [HTTP webhook → MongoDB](tutorials/http-to-mongo.md)

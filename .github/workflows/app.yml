@@ -376,7 +376,7 @@ jobs:
         shell: bash
         run: |
           failed=()
-          for backend in kafka postgres nats; do
+          for backend in kafka postgres nats amqp mqtt mongodb mysql mariadb; do
             stack="$backend"
             # CDC needs logical replication; the cursor scenarios run on it too.
             [ "$backend" = postgres ] && stack=postgres_cdc

@@ -2,9 +2,9 @@
 
 All notable changes to `mq-bridge`. Newest first.
 
-## Unreleased
+## 1.0.1
 
-### Fixes
+### Fixed
 
 - **A PostgreSQL `cursor_column` source no longer skips a row whose transaction commits
   after a later row was read.** A `serial` id taken by a long transaction used to be passed
@@ -25,6 +25,19 @@ All notable changes to `mq-bridge`. Newest first.
   started sooner saw nothing, reported success and left those messages for the next run. An
   idle drain now waits, at most `ack_wait`, while the consumer still has undelivered messages
   or unacked ones this process does not hold.
+- **A Kafka drain no longer ends while another member's partitions still lag.** A member that
+  finished its own partitions could report success just before the rebalance gave it those of
+  a member that had left, and the rows stayed for the next run. Before ending, a drain now
+  compares the group's committed offsets on the other partitions with their targets and waits
+  while any lag, at most the join wait (`session.timeout.ms` + 15 s); past that, a live member
+  owns them and the drain ends as before.
+
+### Performance
+
+- **The `http` output spends 1.5 to 2.4 µs less per request.** It keeps its own connection
+  pool instead of hyper's legacy client: idle HTTP/1 connections are reused most recently used
+  first, and an HTTP/2 connection negotiated by ALPN is shared by all requests.
+  `pool_idle_timeout_ms` (default 90 s) and `tcp_keepalive_ms` apply as before.
 
 ## 1.0.0
 
