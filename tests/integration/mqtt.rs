@@ -2,9 +2,8 @@
 
 use mq_bridge::endpoints::mqtt::{MqttConsumer, MqttPublisher};
 use mq_bridge::test_utils::{
-    add_performance_result, run_chaos_pipeline_test, run_direct_perf_test,
-    run_performance_pipeline_test, run_pipeline_test, run_test_with_docker,
-    run_test_with_docker_controller, setup_logging, verify_subscriber_logic,
+    add_performance_result, run_direct_perf_test, run_performance_pipeline_test,
+    run_test_with_docker, run_test_with_docker_controller, setup_logging, verify_subscriber_logic,
     PERF_TEST_BATCH_MESSAGE_COUNT,
 };
 use std::sync::Arc;

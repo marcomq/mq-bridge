@@ -3,9 +3,8 @@ use std::sync::Arc;
 
 use mq_bridge::endpoints::redis_streams::{RedisStreamsConsumer, RedisStreamsPublisher};
 use mq_bridge::test_utils::{
-    run_performance_pipeline_test, run_pipeline_test, run_test_with_docker,
-    run_test_with_docker_controller, setup_logging, verify_subscriber_logic,
-    PERF_TEST_MESSAGE_COUNT,
+    run_performance_pipeline_test, run_test_with_docker, run_test_with_docker_controller,
+    setup_logging, verify_subscriber_logic, PERF_TEST_MESSAGE_COUNT,
 };
 
 const COMPOSE: &str = "tests/integration/docker-compose/redis.yml";

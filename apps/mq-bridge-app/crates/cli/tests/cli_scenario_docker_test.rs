@@ -196,6 +196,8 @@ struct Broker {
     /// A sink URI that creates the queue before the reader polls it.
     create: Option<fn(&str) -> String>,
     allowed_loss: usize,
+    /// Paces the sink in the restart scenario, so the stream is still running at the stop.
+    restart_rate: Option<u32>,
     /// False skips the scenarios, e.g. without a runtime client library.
     available: fn() -> bool,
 }
@@ -211,12 +213,16 @@ const BASE: Broker = Broker {
     source: |_| String::new(),
     create: None,
     allowed_loss: 0,
+    restart_rate: None,
     available: || true,
 };
 
 /// The engine's `memory → backend` and `backend → memory` pair with file legs.
-fn routes(b: &Broker, q: &str, input: &Path, output: &Path) -> String {
+fn routes(b: &Broker, q: &str, input: &Path, output: &Path, rate: Option<u32>) -> String {
     let (c, n, r) = (b.concurrency, b.batch_size, b.retries);
+    let limiter = rate
+        .map(|rate| format!("\n        - limiter: {{ messages_per_second: {rate} }}"))
+        .unwrap_or_default();
     format!(
         r#"  to_backend:
     concurrency: {c}
@@ -226,7 +232,7 @@ fn routes(b: &Broker, q: &str, input: &Path, output: &Path) -> String {
       file: {{ path: '{input}', format: raw }}
     output:
       middlewares:
-        - retry: {{ max_attempts: {r}, initial_interval_ms: 500, max_interval_ms: 2000 }}
+        - retry: {{ max_attempts: {r}, initial_interval_ms: 500, max_interval_ms: 2000 }}{limiter}
       {sink}
   from_backend:
     concurrency: {c}
@@ -259,7 +265,8 @@ fn scenario(b: &Broker, restart: bool) {
         let empty = raw_uri(seed_rows(&dir, "empty.jsonl", &[]));
         copy_ok("create the queue", &empty, &create(&q), &[]);
     }
-    let run = Headless::start(&dir, &routes(b, &q, &input, &output));
+    let rate = b.restart_rate.filter(|_| restart);
+    let run = Headless::start(&dir, &routes(b, &q, &input, &output, rate));
     let mut allowed = 0;
     if restart {
         let compose = Compose::new(b.stack.unwrap_or(b.backend));
@@ -327,6 +334,7 @@ mod kafka {
             )
         },
         source: |q| format!(r#"kafka: {{ url: "{BROKER}", topic: "{q}", group_id: "g_{q}" }}"#),
+        restart_rate: Some(10_000),
         ..BASE
     });
 

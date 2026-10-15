@@ -3,6 +3,8 @@
 
 use mq_bridge::endpoints::ibm_mq::{IbmMqConsumer, IbmMqPublisher};
 use mq_bridge::models::{Endpoint, EndpointType, IbmMqConfig, Route};
+#[cfg(test)]
+use mq_bridge::test_utils::run_chaos_pipeline_test;
 /// This test requires a running IBM MQ instance.
 /// You can use the provided docker-compose file:
 /// `docker-compose -f tests/integration/docker-compose/ibm_mq.yml up -d`
@@ -27,8 +29,8 @@ use mq_bridge::models::{Endpoint, EndpointType, IbmMqConfig, Route};
 /// `ALTER AUTHINFO(SYSTEM.DEFAULT.AUTHINFO.IDPWOS) AUTHTYPE(IDPWOS) ADOPTCTX(YES)`
 /// `REFRESH SECURITY(*)`
 use mq_bridge::test_utils::{
-    add_performance_result, generate_test_messages, run_chaos_pipeline_test, run_direct_perf_test,
-    run_test_with_docker, run_test_with_docker_controller, setup_logging, verify_subscriber_logic,
+    add_performance_result, generate_test_messages, run_direct_perf_test, run_test_with_docker,
+    run_test_with_docker_controller, setup_logging, verify_subscriber_logic,
 };
 use mq_bridge::traits::{MessageConsumer, MessagePublisher};
 use std::sync::Arc;
