@@ -22,6 +22,7 @@ output:
     delete:
       method: DELETE
       path: /books?id=in.({ids})
+      line: "{id}"
 ```
 
 For Supabase, the documented form is the project URL with `/rest/v1` before the
@@ -42,6 +43,7 @@ output:
     delete:
       method: DELETE
       path: /rest/v1/books?id=in.({ids})
+      line: "{id}"
 ```
 
 ## What to know
@@ -55,6 +57,9 @@ output:
   Without it every row of the request fails.
 - **Every row of a request needs the same columns**, which is what a change
   stream of one table gives.
+- **Text ids are quoted.** `line: "{id}"` writes each id of the `in` list as JSON, so
+  `"a,b"` stays one value, as PostgREST's URL grammar asks for. Without `line` an id
+  holding a comma cannot be deleted.
 - **Row level security applies** to the role behind the key.
 
 All fields and the behaviour on errors are on the [`http_bulk`](./http-bulk.md) page.

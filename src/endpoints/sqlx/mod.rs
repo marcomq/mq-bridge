@@ -3108,6 +3108,9 @@ pub struct SqlxCursorReader {
     /// Page queries, built once: only the bound cursor and limit vary between polls.
     sql_first: String,
     sql_next: String,
+    /// Unguarded `sql_first`/`sql_next` probes, set when the commit-order guard is on.
+    sql_unguarded: Option<(String, String)>,
+    hidden_rows_warned: bool,
     source_metadata: bool,
 }
 
@@ -3341,6 +3344,15 @@ impl SqlxCursorReader {
             order_column,
             next_limit,
         );
+        let sql_unguarded = commit_order_guard.then(|| {
+            (
+                format!("SELECT 1 FROM {} LIMIT {first_limit}", config.table),
+                format!(
+                    "SELECT 1 FROM {} WHERE {cursor_column} > {lower_bound} LIMIT {next_limit}",
+                    config.table
+                ),
+            )
+        });
 
         Ok(Self {
             pool,
@@ -3349,6 +3361,8 @@ impl SqlxCursorReader {
             driver_name,
             sql_first,
             sql_next,
+            sql_unguarded,
+            hidden_rows_warned: false,
             backoff: PollBackoff::new(
                 Duration::from_millis(config.polling_interval_ms.unwrap_or(100)),
                 config.max_polling_interval_ms.map(Duration::from_millis),
@@ -3372,6 +3386,28 @@ impl SqlxCursorReader {
         } else {
             &self.sql_first
         }
+    }
+
+    /// Whether an empty guarded page hides committed rows behind a transaction still open.
+    async fn rows_hidden_by_open_transaction(
+        &mut self,
+        last: Option<&SqlCursor>,
+    ) -> Result<bool, ConsumerError> {
+        let Some((first, next)) = &self.sql_unguarded else {
+            return Ok(false);
+        };
+        let sql = if last.is_some() { next } else { first };
+        let rows = fetch_page(&self.pool, sql, last, 1)
+            .await
+            .map_err(classify_sql_consumer_error)?;
+        if rows.is_empty() {
+            return Ok(false);
+        }
+        if !self.hidden_rows_warned {
+            self.hidden_rows_warned = true;
+            warn!(table = %self.table, "SQLx cursor reader is waiting for an open transaction elsewhere on the server; committed rows after it are held back until it ends");
+        }
+        Ok(true)
     }
 
     /// Stamp the replay position an idempotent sink names its objects from. The cursor value
@@ -3458,6 +3494,11 @@ impl MessageConsumer for SqlxCursorReader {
                 // Drained: preserve polling cadence (backing off if configured), then surface an empty
                 // batch so the route can pause or terminate.
                 tokio::time::sleep(self.backoff.idle_delay()).await;
+                // Committed rows held back by the guard are not drained; keep polling for them.
+                if self.rows_hidden_by_open_transaction(last.as_ref()).await? {
+                    continue;
+                }
+                self.hidden_rows_warned = false;
                 return Ok(ReceivedBatch {
                     messages: Vec::new(),
                     commit: Box::new(|_| Box::pin(async { Ok(()) })),
@@ -3465,6 +3506,7 @@ impl MessageConsumer for SqlxCursorReader {
             }
             // Rows arrived: return to the base polling interval.
             self.backoff.reset();
+            self.hidden_rows_warned = false;
 
             // Resolve column positions and JSON keys once; every row in this batch shares the
             // same query/column order. Value *kinds* are still read per row (SQLite types

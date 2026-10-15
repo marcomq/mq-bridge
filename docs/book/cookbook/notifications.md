@@ -176,8 +176,9 @@ alerts_sns:
 
 On the command line: `--to 'aws://?topic_arn=arn:aws:sns:eu-central-1:123456789012:ops-alerts&region=eu-central-1'`.
 
-- Every subscriber gets every message. To reach different people, use one topic
-  per audience and a [`switch`](switch.md) to choose between them.
+- A subscriber without a filter policy gets every message; one with a filter
+  policy gets only the messages it matches. To reach different people, use one
+  topic per audience and a [`switch`](switch.md) to choose between them.
 - The payload is the text that is sent. Emails arrive as plain text with the
   subject "AWS Notification", and each address must confirm its subscription
   before it receives anything.
@@ -190,7 +191,7 @@ This example was checked for its configuration only.
 
 Notifications have answers too: delivery reports, bounces, SMS replies.
 
-- Providers that call a webhook (SendGrid, Postmark, Twilio, ntfy) reach an
+- Providers that call a webhook (SendGrid, Postmark, Twilio) reach an
   [`http`](../connectors/http.md) input, which writes each call on to any output.
 - SES reports bounces and complaints to an SNS topic. Subscribe an SQS queue to
   it and read the queue with an [`aws`](../connectors/aws.md) input with

@@ -2,6 +2,40 @@
 
 All notable changes to `mq-bridge`. Newest first.
 
+## Unreleased
+
+### Added
+
+- **`aggregate` `fields` take `decayed_count(half_life)` and `decayed_sum(path, half_life)`.**
+  Counts and totals that fade instead of dropping out of a window: at a steady rate they
+  settle at about the last 1.44 half-lives. A short and a long half-life side by side show
+  whether a key's activity rises above its own usual level.
+- **`mqb.aggregate.overwrite: true` metadata folds a message as the newest one**, even if it is
+  older: `last` takes its value and the state's clock moves to its time. It repairs a state
+  that a wrong `time` pushed into the future.
+- **`http_bulk` `delete.line` works in every shape.** It is a template per id
+  (`${payload:_rev}` works) and becomes an array entry with `envelope` or a list entry with
+  `{ids}` in the path, e.g. a quoted PostgREST `in.(…)` list or CouchDB `_deleted` documents.
+  A line that is no JSON fails only its message.
+- **`http_bulk` `upsert.max_documents`** caps the documents per request.
+- **`http_bulk` `result.items.index`** matches entries by the position they name, so a response
+  may list only the failures (BigQuery `insertErrors`).
+- **`http_bulk` reads follow next-page URLs**: `read.cursor.next_url` (a URL in the body) or
+  `read.cursor.link` (the `Link` header's `rel="next"`). The next URL is checkpointed; one on
+  another host stops the read, so credentials stay with the configured host.
+- **`openai_chat` and `openai_embeddings` take `auth`** (`oauth2` or `aws_sigv4`) as `http_bulk`
+  does, e.g. for Amazon Bedrock.
+- `StubHttpServer::start_with_headers` in `plugin::test_support` adds response headers.
+
+### Changed
+
+- **A late message in `aggregate` `fields` now counts with the weight it would have had by
+  then**, 0.5 per half-life it is late, instead of fully. `ema`, `ema_stddev` and
+  `ema_variance` with a half-life now give the same result in any arrival order, across
+  batches and instances too. `ema(path, alpha)` is unchanged.
+- **With `time` or a half-life field, `last` keeps the value of the newest message**; a late
+  message used to overwrite it.
+
 ## 1.0.1
 
 ### Fixed

@@ -546,6 +546,62 @@ mod tests {
 
     #[cfg(feature = "aws")]
     #[tokio::test]
+    async fn sigv4_signs_the_path_exactly_as_it_is_sent() {
+        use aws_sigv4::http_request::{sign, SignableBody, SignableRequest, SigningSettings};
+        let server = server(|_| (200, "{}".to_string())).await;
+        let auth = json!({"aws_sigv4": {
+            "region": "us-east-1", "service": "bedrock",
+            "access_key": "AKIDEXAMPLE", "secret_key": "secret"
+        }});
+        let config =
+            json!({"url": server.url(), "upsert": {"path": "/model/a:b%2Fc/invoke"}, "auth": auth});
+        let config: HttpBulkConfig = serde_json::from_value(config).expect("config");
+        let publisher = HttpBulkPublisher::new(&config).expect("publisher");
+        publisher
+            .send_batch(vec![r#"{"id":1}"#.into()])
+            .await
+            .unwrap();
+
+        // Sign again what the server received, as AWS does, and compare.
+        let request = &server.requests()[0];
+        assert_eq!(request.target, "/model/a:b%2Fc/invoke");
+        let authorization = request.header("authorization").expect("signed");
+        let names = authorization.split("SignedHeaders=").nth(1).unwrap();
+        let names: Vec<&str> = names.split(',').next().unwrap().split(';').collect();
+        let headers = request
+            .headers
+            .iter()
+            .filter(|(name, _)| names.contains(&name.as_str()) && !name.starts_with("x-amz-"));
+        let date = request.header("x-amz-date").unwrap();
+        let time = chrono::NaiveDateTime::parse_from_str(date, "%Y%m%dT%H%M%SZ").unwrap();
+        let identity =
+            aws_sdk_sns::config::Credentials::new("AKIDEXAMPLE", "secret", None, None, "t");
+        let mut settings = SigningSettings::default();
+        settings.payload_checksum_kind = aws_sigv4::http_request::PayloadChecksumKind::XAmzSha256;
+        let identity = identity.into();
+        let params = aws_sigv4::sign::v4::SigningParams::builder()
+            .identity(&identity)
+            .region("us-east-1")
+            .name("bedrock")
+            .time(time.and_utc().into())
+            .settings(settings)
+            .build()
+            .unwrap()
+            .into();
+        let url = format!("{}{}", server.url(), request.target);
+        let headers = headers.map(|(name, value)| (name.as_str(), value.as_str()));
+        let signable =
+            SignableRequest::new("POST", &url, headers, SignableBody::Bytes(&request.body))
+                .unwrap();
+        let (expected, _) = sign(signable, &params).unwrap().into_parts();
+        let expected = expected
+            .headers()
+            .find(|(name, _)| *name == "authorization");
+        assert_eq!(expected.map(|(_, value)| value), Some(authorization));
+    }
+
+    #[cfg(feature = "aws")]
+    #[tokio::test]
     async fn sigv4_signs_every_request_with_the_static_keys() {
         let server = server(|_| (200, "{}".to_string())).await;
         let publisher = publisher(

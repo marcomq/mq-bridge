@@ -44,6 +44,8 @@ const META: &str = "meta";
 pub const SKIPPED_KEY: &str = "mqb.aggregate.skipped";
 /// Metadata naming the entries, by `into`, whose state had already seen a later `time`.
 pub const LATE_KEY: &str = "mqb.aggregate.late";
+/// Metadata that, set to `true` on a message, folds it as the newest even when it is late.
+pub const OVERWRITE_KEY: &str = "mqb.aggregate.overwrite";
 
 type Folded = Result<CanonicalMessage, (CanonicalMessage, PublisherError)>;
 /// One entry's result for a message: entry index, key, new state, JSON to write, late.
@@ -113,15 +115,6 @@ enum Decay {
     HalfLife(f64),
 }
 
-impl Decay {
-    fn over(self, elapsed: f64) -> f64 {
-        match self {
-            Self::Count(decay) => decay,
-            Self::HalfLife(seconds) => 0.5f64.powf(elapsed / seconds),
-        }
-    }
-}
-
 enum Op {
     Count,
     Sum,
@@ -135,6 +128,20 @@ enum Op {
         decay: Decay,
         root: bool,
     },
+    /// Count, or sum, whose earlier values fade to half over this many seconds.
+    Decayed {
+        half_life: f64,
+        sum: bool,
+    },
+}
+
+/// When a value comes, relative to the newest time its state has seen.
+#[derive(Clone, Copy)]
+enum Step {
+    /// This many seconds after it.
+    After(f64),
+    /// This many seconds before it.
+    Late(f64),
 }
 
 /// One built-in aggregate: reads the value at `source` and owns the state slots from `at`.
@@ -148,9 +155,9 @@ struct Field {
 }
 
 impl Field {
-    /// Parses `count`, `sum(path)`, `min`, `max`, `last`, `mean`, `stddev`, `variance`, or
-    /// `ema(path, alpha)`, `ema_stddev`, `ema_variance`; a duration such as `5m` in place
-    /// of `alpha` is a half-life.
+    /// Parses `count`, `sum(path)`, `min`, `max`, `last`, `mean`, `stddev`, `variance`,
+    /// `ema(path, alpha)`, `ema_stddev`, `ema_variance`, where a duration such as `5m` in
+    /// place of `alpha` is a half-life, or `decayed_count(half_life)`, `decayed_sum(path, half_life)`.
     fn new(
         name: &str,
         spec: &str,
@@ -159,7 +166,7 @@ impl Field {
     ) -> anyhow::Result<Self> {
         let invalid = || {
             anyhow::anyhow!(
-                "aggregate: invalid field '{name}: {spec}'; a field is `count` or one of sum, min, max, last, mean, stddev, variance (path), ema, ema_stddev, ema_variance (path, alpha or half-life)"
+                "aggregate: invalid field '{name}: {spec}'; a field is `count`, `decayed_count(half-life)` or one of sum, min, max, last, mean, stddev, variance (path), ema, ema_stddev, ema_variance (path, alpha or half-life), decayed_sum (path, half-life)"
             )
         };
         let mut label = serde_json::to_vec(name)?;
@@ -177,6 +184,25 @@ impl Field {
             .strip_suffix(')')
             .and_then(|s| s.split_once('('))
             .ok_or_else(invalid)?;
+        let half_life = |arg: &str| {
+            if arg.parse::<f64>().is_ok() {
+                anyhow::bail!(
+                    "aggregate: field '{name}' takes a half-life such as `1h`, not an alpha"
+                );
+            }
+            seconds(arg).ok_or_else(invalid)
+        };
+        if function.trim() == "decayed_count" {
+            return Ok(Self {
+                label,
+                op: Op::Decayed {
+                    half_life: half_life(args.trim())?,
+                    sum: false,
+                },
+                source: 0,
+                at,
+            });
+        }
         let mut args = args.split(',').map(str::trim);
         let path: Vec<String> = args
             .next()
@@ -209,6 +235,10 @@ impl Field {
             "ema" => Op::Ema(decay()?),
             "ema_stddev" => spread(decay()?, true),
             "ema_variance" => spread(decay()?, false),
+            "decayed_sum" => Op::Decayed {
+                half_life: half_life(args.next().ok_or_else(invalid)?)?,
+                sum: true,
+            },
             _ => return Err(invalid()),
         };
         if args.next().is_some() {
@@ -239,58 +269,79 @@ impl Field {
 
     /// Whether it decays by time and so needs the state's clock.
     fn timed(&self) -> bool {
-        let (Op::Ema(decay) | Op::Spread { decay, .. }) = self.op else {
-            return false;
-        };
-        matches!(decay, Decay::HalfLife(_))
+        match self.op {
+            Op::Ema(decay) | Op::Spread { decay, .. } => matches!(decay, Decay::HalfLife(_)),
+            Op::Decayed { .. } => true,
+            _ => false,
+        }
     }
 
-    /// Folds `x` into the slots, `elapsed` seconds after the last value; `first` on a
-    /// zeroed state. A result that is no longer finite is not kept.
-    fn apply(&self, slots: &mut [f64], x: f64, first: bool, elapsed: f64) {
+    /// Folds `x` into the slots at `step`; `first` on a zeroed state. A late value weighs
+    /// `0.5^(lateness / half_life)`, so the result does not depend on the order of arrival.
+    /// A result that is no longer finite is not kept.
+    fn apply(&self, slots: &mut [f64], x: f64, first: bool, step: Step) {
         let a = self.at;
-        let keep = |slot: &mut f64| {
+        let keep = |slot: &mut f64, x: f64| {
             let next = *slot + x;
             if next.is_finite() {
                 *slot = next;
             }
         };
+        // How much earlier values fade, and what the new one weighs.
+        let by_time = |half_life: f64| match step {
+            Step::After(elapsed) => (0.5f64.powf(elapsed / half_life), 1.0),
+            Step::Late(early) => (1.0, 0.5f64.powf(early / half_life)),
+        };
+        let weigh = |decay: Decay| match decay {
+            Decay::HalfLife(seconds) => by_time(seconds),
+            Decay::Count(decay) => (decay, 1.0),
+        };
         match self.op {
             Op::Count => slots[a] += 1.0,
-            Op::Sum => keep(&mut slots[a]),
+            Op::Sum => keep(&mut slots[a], x),
             Op::Min => slots[a] = if first { x } else { slots[a].min(x) },
             Op::Max => slots[a] = if first { x } else { slots[a].max(x) },
+            Op::Last if matches!(step, Step::Late(_)) => {}
             Op::Last => slots[a] = x,
             Op::Mean => {
-                keep(&mut slots[a]);
+                keep(&mut slots[a], x);
                 slots[a + 1] += 1.0;
             }
             // Weighted sum and weight: the mean of the values seen, without a start bias.
             Op::Ema(decay) => {
-                let decay = decay.over(elapsed);
-                slots[a] = slots[a] * decay + x;
-                slots[a + 1] = slots[a + 1] * decay + 1.0;
+                let (fade, w) = weigh(decay);
+                slots[a] = slots[a] * fade + x * w;
+                slots[a + 1] = slots[a + 1] * fade + w;
             }
             // Weight, mean, weighted squared deviations, sum of squared weights (West 1979).
             Op::Spread { decay, .. } => {
-                let decay = decay.over(elapsed);
-                let weight = slots[a] * decay + 1.0;
-                let mean = slots[a + 1] + (x - slots[a + 1]) / weight;
-                let squares = slots[a + 2] * decay + (x - slots[a + 1]) * (x - mean);
+                let (fade, w) = weigh(decay);
+                let weight = slots[a] * fade + w;
+                let mean = slots[a + 1] + (x - slots[a + 1]) * w / weight;
+                let squares = slots[a + 2] * fade + w * (x - slots[a + 1]) * (x - mean);
                 if squares.is_finite() {
                     slots[a] = weight;
                     slots[a + 1] = mean;
                     slots[a + 2] = squares;
-                    slots[a + 3] = slots[a + 3] * decay * decay + 1.0;
+                    slots[a + 3] = slots[a + 3] * fade * fade + w * w;
                 }
+            }
+            Op::Decayed { half_life, sum } => {
+                let (fade, w) = by_time(half_life);
+                slots[a] *= fade;
+                keep(&mut slots[a], if sum { x * w } else { w });
             }
         }
     }
 
-    fn write(&self, slots: &[f64], out: &mut Vec<u8>) -> anyhow::Result<()> {
+    /// Writes the result, `since` seconds after the state's newest time.
+    fn write(&self, slots: &[f64], since: f64, out: &mut Vec<u8>) -> anyhow::Result<()> {
         let a = self.at;
         out.extend_from_slice(&self.label);
         match self.op {
+            Op::Decayed { half_life, .. } => {
+                serde_json::to_writer(out, &(slots[a] * 0.5f64.powf(since / half_life)))?
+            }
             Op::Count => write!(out, "{}", slots[a] as u64)?,
             Op::Mean | Op::Ema(_) => serde_json::to_writer(out, &(slots[a] / slots[a + 1]))?,
             Op::Spread { root, .. } => {
@@ -310,8 +361,8 @@ impl Field {
 }
 
 /// Folds the values of one message, at time `now`, into the slots of a `fields` entry.
-/// `true` when the state had already seen a later time: the message is then folded as if
-/// it came at that time.
+/// `true` when the state had already seen a later time: the message then weighs less, and
+/// `last` keeps its value. With `overwrite` it is folded as the newest and sets the clock.
 fn fold_slots(
     fields: &[Field],
     clock: Option<usize>,
@@ -319,19 +370,41 @@ fn fold_slots(
     values: &[f64],
     now: f64,
     first: bool,
+    overwrite: bool,
 ) -> bool {
     let elapsed = match clock {
         Some(at) if !first => now - slots[at],
         _ => 0.0,
     };
+    let late = elapsed < 0.0 && !overwrite;
+    let step = match late {
+        true => Step::Late(-elapsed),
+        false => Step::After(elapsed.max(0.0)),
+    };
     for field in fields {
         let x = values.get(field.source).copied().unwrap_or(0.0);
-        field.apply(slots, x, first, elapsed.max(0.0));
+        field.apply(slots, x, first, step);
     }
     if let Some(at) = clock {
-        slots[at] = if first { now } else { slots[at].max(now) };
+        slots[at] = if first || overwrite {
+            now
+        } else {
+            slots[at].max(now)
+        };
     }
-    elapsed < 0.0
+    late
+}
+
+/// Seconds from the state's newest time to `now`; 0 without a clock or for a late `now`.
+fn since(clock: Option<usize>, slots: &[f64], now: f64) -> f64 {
+    clock.map_or(0.0, |at| (now - slots[at]).max(0.0))
+}
+
+/// Whether the message asks to be folded as the newest, see [`OVERWRITE_KEY`].
+fn overwrites(msg: &CanonicalMessage) -> bool {
+    msg.metadata
+        .get(OVERWRITE_KEY)
+        .is_some_and(|v| v.trim().eq_ignore_ascii_case("true"))
 }
 
 /// Seconds of a duration such as `500ms`, `30s`, `5m`, `2h` or `7d`.
@@ -407,13 +480,18 @@ fn timestamp(text: &str) -> Option<f64> {
 }
 
 /// Writes the result object of a `fields` entry.
-fn write_fields(fields: &[Field], slots: &[f64], out: &mut Vec<u8>) -> anyhow::Result<()> {
+fn write_fields(
+    fields: &[Field],
+    slots: &[f64],
+    since: f64,
+    out: &mut Vec<u8>,
+) -> anyhow::Result<()> {
     out.push(b'{');
     for (i, field) in fields.iter().enumerate() {
         if i > 0 {
             out.push(b',');
         }
-        field.write(slots, out)?;
+        field.write(slots, since, out)?;
     }
     out.push(b'}');
     Ok(())
@@ -585,7 +663,10 @@ impl Entry {
         let Fold::Fields { fields, clock, .. } = &self.fold else {
             return true;
         };
-        let read = |field: &Field| matches!(field.op, Op::Count) || !values[field.source].is_nan();
+        let read = |field: &Field| {
+            matches!(field.op, Op::Count | Op::Decayed { sum: false, .. })
+                || !values[field.source].is_nan()
+        };
         fields.iter().all(read) && !(clock.is_some() && now.is_nan())
     }
 
@@ -595,6 +676,7 @@ impl Entry {
         previous: Option<&Stored>,
         values: &[f64],
         now: f64,
+        overwrite: bool,
     ) -> anyhow::Result<(Stored, Vec<u8>, bool)> {
         let Fold::Fields {
             fields,
@@ -611,12 +693,14 @@ impl Entry {
         };
         match (self.emit, first) {
             (AggregateEmit::Previous, true) => json.extend_from_slice(b"null"),
-            (AggregateEmit::Previous, false) => write_fields(fields, &slots, &mut json)?,
+            (AggregateEmit::Previous, false) => {
+                write_fields(fields, &slots, since(*clock, &slots, now), &mut json)?
+            }
             (AggregateEmit::Updated, _) => {}
         }
-        let late = fold_slots(fields, *clock, &mut slots, values, now, first);
+        let late = fold_slots(fields, *clock, &mut slots, values, now, first, overwrite);
         if self.emit == AggregateEmit::Updated {
-            write_fields(fields, &slots, &mut json)?;
+            write_fields(fields, &slots, 0.0, &mut json)?;
         }
         Ok((Stored::Floats(slots), json, late))
     }
@@ -1267,6 +1351,7 @@ impl Aggregate {
         };
         let now = self.read_values(&doc, &mut scratch.values)?;
         let lenient = self.on_error == AggregateOnError::Skip;
+        let overwrite = overwrites(msg);
         let mut notes = Notes::default();
         let mut keys = Vec::with_capacity(self.entries.len());
         for entry in &self.entries {
@@ -1314,14 +1399,24 @@ impl Aggregate {
             out.extend_from_slice(label);
             match (entry.emit, first) {
                 (AggregateEmit::Previous, true) => out.extend_from_slice(b"null"),
-                (AggregateEmit::Previous, false) => write_fields(fields, slots, &mut out)?,
+                (AggregateEmit::Previous, false) => {
+                    write_fields(fields, slots, since(*clock, slots, now), &mut out)?
+                }
                 (AggregateEmit::Updated, _) => {}
             }
-            if fold_slots(fields, *clock, slots, &scratch.values, now, first) {
+            if fold_slots(
+                fields,
+                *clock,
+                slots,
+                &scratch.values,
+                now,
+                first,
+                overwrite,
+            ) {
                 notes.late.push(i);
             }
             if entry.emit == AggregateEmit::Updated {
-                write_fields(fields, slots, &mut out)?;
+                write_fields(fields, slots, 0.0, &mut out)?;
             }
         }
         out.push(b'}');
@@ -1399,7 +1494,8 @@ impl Aggregate {
                     skip(entry, anyhow::anyhow!(missing))?;
                     continue;
                 }
-                let (next, json, late) = entry.fold_fields(previous, &values, now)?;
+                let (next, json, late) =
+                    entry.fold_fields(previous, &values, now, overwrites(msg))?;
                 updates.push((i, key, next, json, late));
                 continue;
             };

@@ -6,7 +6,8 @@
 //! Input for HTTP APIs that list JSON documents page by page.
 //!
 //! One request reads one page. Where the next page starts is configuration: a
-//! value in the response, a field of the last document, or the documents read.
+//! value in the response, a field of the last document, the documents read, or a
+//! next-page URL from the response or its `Link` header.
 //! With `read.stream` one response stays open and is read event by event.
 
 use super::{quoted, Connection, JSON};
@@ -23,7 +24,7 @@ use anyhow::{anyhow, bail, Context};
 use async_trait::async_trait;
 use bytes::Bytes;
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
-use reqwest::header::{ACCEPT, CONTENT_TYPE};
+use reqwest::header::{ACCEPT, CONTENT_TYPE, LINK};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::{Arc, Mutex};
@@ -56,6 +57,8 @@ enum CursorSource {
     Item(String),
     /// The id of a server-sent event, sent back as `Last-Event-ID`.
     EventId,
+    /// The URL of the next page, at this JSON pointer or, with `None`, in the `Link` header.
+    NextUrl(Option<String>),
     /// A stream of lines without a position: it cannot be resumed.
     Untracked,
 }
@@ -176,7 +179,11 @@ impl HttpBulkConsumer {
             bail!("http_bulk read.path must start with '/'");
         }
         let in_body = read.body.as_deref().is_some_and(|b| b.contains(CURSOR));
-        if read.stream.is_none() && !read.path.contains(CURSOR) && !in_body {
+        let by_url = read.cursor.link || read.cursor.next_url.is_some();
+        if by_url && (read.path.contains(CURSOR) || in_body) {
+            bail!("http_bulk read follows next-page URLs, so it takes no '{CURSOR}'");
+        }
+        if read.stream.is_none() && !by_url && !read.path.contains(CURSOR) && !in_body {
             bail!(
                 "http_bulk read needs '{CURSOR}' in its path or body, or every page is the first"
             );
@@ -193,8 +200,22 @@ impl HttpBulkConsumer {
             .as_deref()
             .unwrap_or(default_method)
             .to_ascii_uppercase();
+        let cursor = &read.cursor;
+        let sources = [
+            cursor.response.is_some(),
+            cursor.item.is_some(),
+            cursor.next_url.is_some(),
+            cursor.link,
+        ];
+        if sources.iter().filter(|set| **set).count() > 1 {
+            bail!("http_bulk read.cursor sets more than one of 'response', 'item', 'next_url', 'link'");
+        }
+        if by_url && read.stream.is_some() {
+            bail!("http_bulk read.cursor.next_url and link do not apply to a stream");
+        }
         let (source, start) = match (&read.cursor.response, &read.cursor.item, read.stream) {
-            (Some(_), Some(_), _) => bail!("http_bulk read.cursor sets both 'response' and 'item'"),
+            _ if by_url => (CursorSource::NextUrl(cursor.next_url.clone()), Value::Null),
+            (Some(_), Some(_), _) => unreachable!("refused above"),
             (Some(_), None, Some(_)) => {
                 bail!("http_bulk read.cursor.response does not apply to a stream; use 'item'")
             }
@@ -272,17 +293,19 @@ impl HttpBulkConsumer {
     /// The read request at `cursor`.
     fn request(&self, cursor: &Value, limit: usize) -> reqwest::RequestBuilder {
         let limit = limit.to_string();
-        let in_url = cursor_text(cursor);
-        let url = format!(
-            "{}{}",
-            self.connection.base,
-            self.path
-                .replace(
-                    CURSOR,
-                    &utf8_percent_encode(&in_url, NON_ALPHANUMERIC).to_string()
-                )
-                .replace(LIMIT, &limit)
-        );
+        let url = match (&self.source, cursor) {
+            (CursorSource::NextUrl(_), Value::String(next)) => next.clone(),
+            _ => format!(
+                "{}{}",
+                self.connection.base,
+                self.path
+                    .replace(
+                        CURSOR,
+                        &utf8_percent_encode(&cursor_text(cursor), NON_ALPHANUMERIC).to_string()
+                    )
+                    .replace(LIMIT, &limit)
+            ),
+        };
         let mut request = self.connection.request(self.method.clone(), &url);
         if let Some(body) = &self.body {
             request = request.header(CONTENT_TYPE, JSON).body(
@@ -293,9 +316,20 @@ impl HttpBulkConsumer {
         request
     }
 
-    /// Requests the page at `cursor` and returns the parsed response.
-    async fn page(&self, cursor: &Value, limit: usize) -> Result<Value, ConsumerError> {
+    /// Requests the page at `cursor` and returns the parsed response, with the URL of the
+    /// next page when the cursor follows URLs.
+    async fn page(
+        &self,
+        cursor: &Value,
+        limit: usize,
+    ) -> Result<(Value, Option<Position>), ConsumerError> {
         let label = format!("{} {}", self.method, self.path);
+        let base = url::Url::parse(&self.connection.base)
+            .map_err(|e| ConsumerError::Permanent(anyhow!("http_bulk URL: {e}")))?;
+        if let (CursorSource::NextUrl(_), Value::String(next)) = (&self.source, cursor) {
+            // A saved URL may predate a change of `url`.
+            same_origin(&base, &base, next)?;
+        }
         let request = self.request(cursor, limit);
         let response = self
             .connection
@@ -303,6 +337,13 @@ impl HttpBulkConsumer {
             .await
             .map_err(|e| send_error(&label, e))?;
         let status = response.status();
+        let link = response
+            .headers()
+            .get_all(LINK)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .find_map(next_link);
+        let page_url = response.url().clone();
         let text = response
             .text()
             .await
@@ -310,12 +351,32 @@ impl HttpBulkConsumer {
         if !status.is_success() {
             return Err(status_error(&label, status, &text));
         }
-        serde_json::from_str(&text).map_err(|e| {
+        let body: Value = serde_json::from_str(&text).map_err(|e| {
             ConsumerError::Permanent(anyhow!(
                 "{label} did not answer with JSON ({e}): {}",
                 quoted(&text)
             ))
-        })
+        })?;
+        let CursorSource::NextUrl(pointer) = &self.source else {
+            return Ok((body, None));
+        };
+        let next = match pointer {
+            Some(pointer) => match body.pointer(pointer) {
+                Some(Value::String(next)) => Some(next.clone()),
+                None | Some(Value::Null) => None,
+                Some(other) => {
+                    return Err(ConsumerError::Permanent(anyhow!(
+                        "http_bulk read.cursor.next_url '{pointer}' is not a URL: {other}"
+                    )))
+                }
+            },
+            None => link,
+        };
+        let next = match next.filter(|next| !next.is_empty()) {
+            Some(next) => Position::At(Value::from(same_origin(&base, &page_url, &next)?)),
+            None => Position::End,
+        };
+        Ok((body, Some(next)))
     }
 
     /// The position after each document of a page; `None` where a page cannot be split.
@@ -324,8 +385,10 @@ impl HttpBulkConsumer {
         response: &Value,
         items: &[Value],
         cursor: &Value,
+        next_url: Option<Position>,
     ) -> Result<Vec<Option<Position>>, ConsumerError> {
         match &self.source {
+            CursorSource::NextUrl(_) => Ok(after_page(items, next_url.unwrap_or(Position::End))),
             CursorSource::Count => {
                 let read = cursor.as_u64().unwrap_or_default();
                 Ok((1..=items.len() as u64)
@@ -357,13 +420,7 @@ impl HttpBulkConsumer {
                         )))
                     }
                 };
-                let mut positions = vec![None; items.len()];
-                match positions.last_mut() {
-                    Some(last) => *last = Some(next),
-                    // An empty page may still move on, or end the read.
-                    None => positions.push(Some(next)),
-                }
-                Ok(positions)
+                Ok(after_page(items, next))
             }
             // Only a stream has these, and it does not read pages.
             CursorSource::EventId | CursorSource::Untracked => Ok(vec![None; items.len()]),
@@ -581,6 +638,56 @@ impl HttpBulkConsumer {
     }
 }
 
+/// Positions for a page whose end is `next`; an empty page may still move on, or end the read.
+fn after_page(items: &[Value], next: Position) -> Vec<Option<Position>> {
+    let mut positions = vec![None; items.len()];
+    match positions.last_mut() {
+        Some(last) => *last = Some(next),
+        None => positions.push(Some(next)),
+    }
+    positions
+}
+
+/// The `rel="next"` target of one `Link` header value (RFC 8288).
+fn next_link(value: &str) -> Option<String> {
+    let mut rest = value;
+    while let Some(start) = rest.find('<') {
+        let after = &rest[start + 1..];
+        let end = after.find('>')?;
+        let params = &after[end + 1..];
+        let until = params.find('<').unwrap_or(params.len());
+        let next = params[..until].split(';').any(|param| {
+            param.split_once('=').is_some_and(|(name, value)| {
+                name.trim().eq_ignore_ascii_case("rel")
+                    && (value.trim().trim_matches('"').split_ascii_whitespace())
+                        .any(|rel| rel.eq_ignore_ascii_case("next"))
+            })
+        });
+        if next {
+            return Some(after[..end].to_string());
+        }
+        rest = &params[until..];
+    }
+    None
+}
+
+/// `next` resolved against the page it came from, if on the origin of `base`: another host
+/// would receive the credentials.
+fn same_origin(base: &url::Url, page: &url::Url, next: &str) -> Result<String, ConsumerError> {
+    let resolved = page.join(next).map_err(|e| {
+        ConsumerError::Permanent(anyhow!(
+            "http_bulk next-page URL '{next}' is not valid: {e}"
+        ))
+    })?;
+    if resolved.origin() != base.origin() {
+        return Err(ConsumerError::Permanent(anyhow!(
+            "http_bulk next-page URL '{next}' leaves {}; only the same scheme, host and port are followed",
+            base.origin().ascii_serialization()
+        )));
+    }
+    Ok(resolved.into())
+}
+
 /// The position as it stands in a URL or a header.
 fn cursor_text(cursor: &Value) -> String {
     match cursor {
@@ -704,7 +811,7 @@ impl MessageConsumer for HttpBulkConsumer {
             let Position::At(cursor) = &before else {
                 return Ok(self.idle().await);
             };
-            let response = self.page(cursor, max_messages).await?;
+            let (response, next_url) = self.page(cursor, max_messages).await?;
             let items = match response.pointer(&self.items) {
                 Some(Value::Array(items)) => items,
                 _ => {
@@ -714,7 +821,7 @@ impl MessageConsumer for HttpBulkConsumer {
                     )))
                 }
             };
-            let mut positions = self.positions(&response, items, cursor)?;
+            let mut positions = self.positions(&response, items, cursor, next_url)?;
             if items.is_empty() {
                 if let Some(next) = positions.pop().flatten().filter(|next| *next != before) {
                     let settled = {
@@ -1139,7 +1246,19 @@ mod tests {
             (json!({"read": {"path": "/docs"}}), "'{cursor}'"),
             (
                 json!({"read": {"path": "/d?o={cursor}", "cursor": {"response": "/a", "item": "/b"}}}),
-                "both",
+                "more than one",
+            ),
+            (
+                json!({"read": {"path": "/d", "cursor": {"link": true, "response": "/a"}}}),
+                "more than one",
+            ),
+            (
+                json!({"read": {"path": "/d?o={cursor}", "cursor": {"link": true}}}),
+                "takes no '{cursor}'",
+            ),
+            (
+                json!({"read": {"path": "/d", "stream": "ndjson", "cursor": {"next_url": "/next"}}}),
+                "stream",
             ),
             (
                 json!({"read": {"path": "/d?o={cursor}", "cursor": {"start": "a"}}}),
@@ -1159,6 +1278,107 @@ mod tests {
                 .expect("refused");
             assert!(error.to_string().contains(text), "{error}");
         }
+    }
+
+    #[tokio::test]
+    async fn link_headers_chain_the_pages_until_one_has_no_next() {
+        let server = StubHttpServer::start_with_headers(|request| {
+            let link = |next: &str| vec![("Link".to_string(), next.to_string())];
+            match request.target.as_str() {
+                "/list?limit=2" => (
+                    200,
+                    link(r#"</list?limit=2>; rel="first", </list?page=2>; rel="next""#),
+                    r#"[{"id":1},{"id":2}]"#.to_string(),
+                ),
+                "/list?page=2" => (
+                    200,
+                    link("</list?page=3>; rel=next"),
+                    r#"[{"id":3}]"#.to_string(),
+                ),
+                "/list?page=3" => (200, Vec::new(), r#"[{"id":4}]"#.to_string()),
+                other => panic!("unexpected request {other}"),
+            }
+        })
+        .await
+        .expect("stub server");
+        let mut consumer = consumer(
+            &server,
+            json!({"read": {"path": "/list?limit={limit}", "cursor": {"link": true}}}),
+        )
+        .await;
+
+        assert_eq!(read(&mut consumer, 2).await.len(), 2);
+        assert_eq!(read(&mut consumer, 1).await, [r#"{"id":3}"#]);
+        assert_eq!(read(&mut consumer, 1).await, [r#"{"id":4}"#]);
+        assert!(read(&mut consumer, 0).await.is_empty());
+        assert_eq!(targets(&server).len(), 3);
+    }
+
+    #[tokio::test]
+    async fn a_next_url_in_the_body_resumes_from_the_checkpointed_page() {
+        let server = server(|request| {
+            let page = match request.target.as_str() {
+                "/list" => r#"{"data":[{"id":1}],"links":{"next":"/list?page=2"}}"#,
+                "/list?page=2" => r#"{"data":[{"id":2}],"links":{"next":"list?page=3"}}"#,
+                "/list?page=3" => r#"{"data":[{"id":3}],"links":{"next":null}}"#,
+                other => panic!("unexpected request {other}"),
+            };
+            (200, page.to_string())
+        })
+        .await;
+        let (path, url) = store();
+        let config = json!({"read": {
+            "path": "/list", "items": "/data", "cursor": {"next_url": "/links/next"},
+            "cursor_id": "pages", "checkpoint_store": url,
+        }});
+        let mut first = consumer(&server, config.clone()).await;
+        assert_eq!(read(&mut first, 1).await, [r#"{"id":1}"#]);
+
+        let mut second = consumer(&server, config).await;
+        assert_eq!(read(&mut second, 1).await, [r#"{"id":2}"#]);
+        assert_eq!(read(&mut second, 1).await, [r#"{"id":3}"#]);
+        assert!(read(&mut second, 0).await.is_empty());
+        assert_eq!(targets(&server), ["/list", "/list?page=2", "/list?page=3"]);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn a_next_url_on_another_host_is_refused() {
+        let server = server(|_| {
+            let page = r#"{"data":[{"id":1}],"next":"http://other.example/list?page=2"}"#;
+            (200, page.to_string())
+        })
+        .await;
+        let mut consumer = consumer(
+            &server,
+            json!({"read": {"path": "/list", "items": "/data", "cursor": {"next_url": "/next"}}}),
+        )
+        .await;
+        let Err(error) = consumer.receive_batch(2).await else {
+            panic!("another host is refused");
+        };
+        assert!(matches!(error, ConsumerError::Permanent(_)), "{error:#}");
+    }
+
+    #[tokio::test]
+    async fn a_saved_next_url_is_not_followed_once_the_url_points_elsewhere() {
+        let respond = |_: &StubRequest| (200, r#"{"data":[{"id":1}],"next":"/p2"}"#.to_string());
+        let (old, new) = (server(respond).await, server(respond).await);
+        let (path, url) = store();
+        let config = json!({"read": {
+            "path": "/list", "items": "/data", "cursor": {"next_url": "/next"},
+            "cursor_id": "pages", "checkpoint_store": url,
+        }});
+        let mut first = consumer(&old, config.clone()).await;
+        assert_eq!(read(&mut first, 1).await.len(), 1);
+
+        let mut second = consumer(&new, config).await;
+        let Err(error) = second.receive_batch(2).await else {
+            panic!("the saved URL is on the old host");
+        };
+        assert!(error.to_string().contains("leaves"), "{error:#}");
+        assert!(new.requests().is_empty());
+        let _ = std::fs::remove_file(path);
     }
 
     fn item_texts(
