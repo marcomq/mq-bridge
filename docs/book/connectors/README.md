@@ -16,10 +16,10 @@ key, and the part before the query string becomes `url` (or `path`):
 | `nats://host:4222` | `nats` | `url: "nats://host:4222"` |
 | `amqp://`, `rabbitmq://` | `amqp` | `url: "amqp://host:5672/%2f"` |
 | `mqtt://`, `mqtts://` | `mqtt` | `url: "mqtt://host:1883"` |
-| `redis://`, `rediss://` | `redis_streams` | `url: "redis://host:6379"` |
+| `redis://`, `rediss://`, `redis+unix://`, `valkey(s)://` | `redis_streams` | `url: "redis://host:6379"` |
 | `postgres://`, `mysql://`, `sqlite://` | `sqlx` | the connection string as `url` |
 | `postgres-cdc://`, `pgcdc://` | `postgres_cdc` | `url: "postgres://…"` |
-| `mongodb://` | `mongodb` | `url: "mongodb://host:27017"` |
+| `mongodb://`, `mongodb+srv://` | `mongodb` | `url: "mongodb://host:27017"` |
 | `clickhouse://`, `clickhouses://` | `clickhouse` | `url: "http://host:8123"` / `https://` |
 | `http-bulk:?config_file=<path>` | `http_bulk` | nested config from a file, or inline with `config=<YAML or JSON>` |
 | `typesense://host:8108/<collection>`, `elasticsearch://host:9200/<index>`, `qdrant://host:6333/<collection>` | the endpoint of that name | `+https` in the scheme for HTTPS; see [Typesense](./typesense.md), [Elasticsearch](./elasticsearch.md), [Qdrant](./qdrant.md) |

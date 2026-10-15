@@ -99,7 +99,7 @@ fn main() -> std::io::Result<()> {
         Connector {
             slug: "mongodb",
             title: "MongoDB",
-            schemes: &["mongodb"],
+            schemes: &["mongodb", "mongodb+srv"],
             schema: schemars::schema_for!(MongoDbConfig),
         },
         Connector {
@@ -139,7 +139,15 @@ fn main() -> std::io::Result<()> {
         Connector {
             slug: "redis",
             title: "Redis Streams",
-            schemes: &["redis", "rediss", "redis_streams"],
+            schemes: &[
+                "redis",
+                "rediss",
+                "redis+unix",
+                "valkey",
+                "valkeys",
+                "valkey+unix",
+                "redis_streams",
+            ],
             schema: schemars::schema_for!(RedisStreamsConfig),
         },
         Connector {

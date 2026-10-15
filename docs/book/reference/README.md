@@ -12,12 +12,12 @@ Auto-generated from the same JSON Schemas `mqb copy` uses to parse `--from`/`--t
 - [RabbitMQ (AMQP)](./rabbitmq.md) — schemes: `amqp://`, `amqps://`, `rabbitmq://`, `rabbitmqs://`
 - [HTTP](./http.md) — schemes: `http://`, `https://`
 - [WebSocket](./websocket.md) — schemes: `ws://`, `wss://`
-- [MongoDB](./mongodb.md) — schemes: `mongodb://`
+- [MongoDB](./mongodb.md) — schemes: `mongodb://`, `mongodb+srv://`
 - [File (CSV / JSON / JSONL)](./file.md) — schemes: `file://`
 - [Directory spool](./dir-spool.md) — schemes: `spool://`, `dir-spool://`, `dirspool://`
 - [Object Storage (local / cloud)](./object-store.md) — schemes: `local-store://`, `s3://`, `s3a://`, `gs://`, `gcs://`, `az://`, `azure://`, `abfs://`, `abfss://`
 - [NATS](./nats.md) — schemes: `nats://`
-- [Redis Streams](./redis.md) — schemes: `redis://`, `rediss://`, `redis_streams://`
+- [Redis Streams](./redis.md) — schemes: `redis://`, `rediss://`, `redis+unix://`, `valkey://`, `valkeys://`, `valkey+unix://`, `redis_streams://`
 - [gRPC](./grpc.md) — schemes: `grpc://`, `grpcs://`
 - [AWS SQS / SNS](./aws.md) — schemes: `aws://`, `aws-sqs://`
 - [ZeroMQ](./zeromq.md) — schemes: `zeromq://`, `zmq://`

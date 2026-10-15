@@ -10,8 +10,9 @@ Consumers use a consumer group by default for durable, acked delivery;
 redis://[user:pass@]host[:port]?stream=<key>
 ```
 
-`redis://` (plain) and `rediss://` (TLS) are both accepted; `redis_streams://`
-is an explicit alias. If `stream` is omitted it defaults to the route name.
+`redis://` (plain), `rediss://` (TLS) and `redis+unix:///path/to.sock` (Unix socket) are
+accepted; `redis_streams://` is an explicit alias. On the command line `valkey://`,
+`valkeys://` and `valkey+unix://` work too. If `stream` is omitted it defaults to the route name.
 
 ## TLS
 

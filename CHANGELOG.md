@@ -28,6 +28,8 @@ All notable changes to `mq-bridge`. Newest first.
 - **`openai_chat` and `openai_embeddings` take `auth`** (`oauth2` or `aws_sigv4`) as `http_bulk`
   does, e.g. for Amazon Bedrock.
 - `StubHttpServer::start_with_headers` in `plugin::test_support` adds response headers.
+- **CLI URIs take `mongodb+srv://`, `redis+unix://`, `valkey://`, `valkeys://` and
+  `valkey+unix://`** directly, without the `url=` escape.
 
 ### Changed
 

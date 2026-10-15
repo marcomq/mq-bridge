@@ -19,7 +19,7 @@ mongodb://[user:password@]host[:port]/?database=<db>&collection=<name>
 | Copy a collection once, without a replica set | `mongodb://localhost:27017/?database=shop&collection=orders&consume=snapshot` |
 | User and password | `mongodb://app:secret@db.example.com:27017/?database=shop&collection=orders&authSource=admin` |
 | Replica set, several hosts | `mongodb://_/?url=mongodb://db1:27017,db2:27017,db3:27017/?replicaSet=rs0&database=shop&collection=orders` |
-| MongoDB Atlas (`mongodb+srv`) | `mongodb://_/?url=mongodb%2Bsrv://app:secret@cluster0.ab12c.mongodb.net&database=shop&collection=orders` |
+| MongoDB Atlas (`mongodb+srv`) | `mongodb+srv://app:secret@cluster0.ab12c.mongodb.net/?database=shop&collection=orders` |
 
 Rules that the table follows:
 
@@ -27,9 +27,8 @@ Rules that the table follows:
   does not start.
 - **Driver options stay on the connection string.** A parameter that is not a field of this
   connector, such as `replicaSet`, `authSource` or `tls=true`, is passed to the MongoDB driver.
-- **A host list or `mongodb+srv://` goes in `url=`**, with `_` as a placeholder host, because
-  neither is a URL the command line can parse. Write the `+` as `%2B`. In a config file the
-  connection string is used as it is.
+- **A host list goes in `url=`**, with `_` as a placeholder host, because it is not a URL the
+  command line can parse. In a config file the connection string is used as it is.
 
 ## Config (YAML / library)
 
