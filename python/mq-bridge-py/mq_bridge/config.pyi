@@ -318,6 +318,8 @@ class HttpBulkCursor(TypedDict, total=False):
     """Where an `http_bulk` input takes its next read position from. Set at most one of"""
     end_when_missing: bool
     item: Optional[str]
+    link: bool
+    next_url: Optional[str]
     response: Optional[str]
     start: Any
 
@@ -336,6 +338,7 @@ class HttpBulkDelete(TypedDict, total=False):
 class HttpBulkItems(TypedDict, total=False):
     """A JSON response holding an array with one entry per document, in request order."""
     error: Required[str]
+    index: Optional[str]
     path: str
 
 
@@ -414,6 +417,7 @@ class HttpBulkUpsert(TypedDict, total=False):
     document: Optional[str]
     envelope: Optional[str]
     format: HttpBulkFormat
+    max_documents: Optional[int]
     method: Optional[str]
     path: Required[str]
     result: HttpBulkResult
@@ -681,6 +685,7 @@ class ObjectStoreConfig(TypedDict, total=False):
 class OpenAiChatConfig(TypedDict, total=False):
     """The `openai_chat` endpoint: one chat completion per message, or per `messages_per_request`."""
     api_key: Optional[str]
+    auth: Any
     concurrency: Optional[int]
     json: bool
     max_request_bytes: Optional[int]
@@ -697,6 +702,7 @@ class OpenAiChatConfig(TypedDict, total=False):
 class OpenAiEmbeddingsConfig(TypedDict, total=False):
     """The `openai_embeddings` endpoint: one embeddings request per batch."""
     api_key: Optional[str]
+    auth: Any
     dimensions: Optional[int]
     input: Required[str]
     max_request_bytes: Optional[int]

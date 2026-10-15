@@ -3,8 +3,6 @@
 
 use mq_bridge::endpoints::ibm_mq::{IbmMqConsumer, IbmMqPublisher};
 use mq_bridge::models::{Endpoint, EndpointType, IbmMqConfig, Route};
-#[cfg(test)]
-use mq_bridge::test_utils::run_chaos_pipeline_test;
 /// This test requires a running IBM MQ instance.
 /// You can use the provided docker-compose file:
 /// `docker-compose -f tests/integration/docker-compose/ibm_mq.yml up -d`
@@ -194,7 +192,8 @@ routes:
       memory:
         topic: "chaos_out"
 "#;
-            run_chaos_pipeline_test("ibm_mq", config_yaml, controller, "mq").await;
+            mq_bridge::test_utils::run_chaos_pipeline_test("ibm_mq", config_yaml, controller, "mq")
+                .await;
         },
     )
     .await;
