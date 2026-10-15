@@ -416,9 +416,9 @@ mod kafka {
         }
     }
 
-    /// Redpanda Connect #2299: partitions move while the first member has records
-    /// prefetched. Whatever it commits must not pass a record nobody delivered, so a
-    /// final drain of the group finds every row the two members missed.
+    /// Partitions move while the first member has records prefetched. Whatever it commits
+    /// must not pass a record nobody delivered, so a final drain of the group finds every
+    /// row the two members missed.
     #[test]
     #[ignore = "requires docker compose"]
     fn kafka_rebalance_between_two_processes_loses_nothing() {
@@ -732,8 +732,8 @@ mod postgres {
             .collect()
     }
 
-    /// Redpanda Connect #4584: a crash mid-snapshot must not lose rows. Rows inserted
-    /// during the snapshot arrive through it or through the slot; duplicates are allowed.
+    /// A crash mid-snapshot must not lose rows. Rows inserted during the snapshot arrive
+    /// through it or through the slot; duplicates are allowed.
     #[test]
     #[ignore = "requires docker compose"]
     fn postgres_cdc_capture_all_killed_mid_snapshot_resumes_without_loss() {
@@ -833,8 +833,8 @@ mod postgres {
         );
     }
 
-    /// Debezium's idle-table WAL growth: while only an unpublished table is written, the
-    /// slot must still confirm the server's position, so the server can drop old WAL.
+    /// While only an unpublished table is written, the slot must still confirm the
+    /// server's position, so the server can drop old WAL.
     #[test]
     #[ignore = "requires docker compose"]
     fn postgres_cdc_slot_advances_while_published_tables_are_idle() {
@@ -916,8 +916,7 @@ mod postgres {
         );
     }
 
-    /// Kafka Connect's `timestamp.delay.interval.ms` case: id=1 commits after id=2 was
-    /// read. A cursor that moved past 2 must not skip 1 for good.
+    /// id=1 commits after id=2 was read. A cursor that moved past 2 must not skip 1 for good.
     #[test]
     #[ignore = "requires docker compose"]
     fn postgres_cursor_keeps_a_row_whose_transaction_commits_late() {

@@ -2601,6 +2601,75 @@ mod tests {
         assert!(first.is_none());
     }
 
+    /// A consumer must keep reading after the broker refuses a commit, and the next commit
+    /// must cover the refused one.
+    #[tokio::test]
+    async fn test_a_refused_commit_is_covered_by_the_next_one() {
+        use rdkafka::bindings as rdsys;
+        use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
+
+        let producer: FutureProducer = ClientConfig::new()
+            .set("test.mock.num.brokers", "1")
+            .create()
+            .unwrap();
+        let cluster = producer.client().mock_cluster().unwrap();
+        // The mock holds a new group for 3 s before its first assignment.
+        unsafe {
+            let handle = rdsys::rd_kafka_handle_mock_cluster(producer.client().native_ptr());
+            rdsys::rd_kafka_mock_group_initial_rebalance_delay_ms(handle, 0);
+        }
+        cluster.create_topic("commits", 1, 1).unwrap();
+        let config = KafkaConfig {
+            url: cluster.bootstrap_servers(),
+            topic: Some("commits".to_string()),
+            group_id: Some("commits".to_string()),
+            ..Default::default()
+        };
+        for payload in ["m0", "m1"] {
+            producer
+                .send(
+                    FutureRecord::<(), _>::to("commits").payload(payload),
+                    Duration::from_secs(5),
+                )
+                .await
+                .unwrap();
+        }
+
+        let mut consumer = KafkaConsumer::new(&config).await.unwrap();
+        cluster.request_errors(
+            RDKafkaApiKey::OffsetCommit,
+            &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_GROUP_AUTHORIZATION_FAILED],
+        );
+        for expected in ["m0", "m1"] {
+            let batch = tokio::time::timeout(Duration::from_secs(30), consumer.receive_batch(1))
+                .await
+                .expect("the consumer stopped reading")
+                .unwrap();
+            assert_eq!(batch.messages[0].get_payload_str(), expected);
+            (batch.commit)(vec![MessageDisposition::Ack]).await.unwrap();
+        }
+
+        let handle = consumer.consumer.clone();
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let handle = handle.clone();
+            let committed = tokio::task::spawn_blocking(move || {
+                handle.committed(Duration::from_secs(5)).unwrap()
+            })
+            .await
+            .unwrap();
+            let offset = committed.find_partition("commits", 0).unwrap().offset();
+            if offset == Offset::Offset(2) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the commit after the refused one never landed: {offset:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
     #[test]
     fn test_group_behind_compares_the_commit_with_the_target() {
         assert!(group_behind(10, Offset::Offset(9)));
