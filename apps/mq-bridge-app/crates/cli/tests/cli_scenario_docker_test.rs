@@ -464,10 +464,12 @@ mod kafka {
             a_status.is_some_and(|status| status.success()),
             "member A after SIGTERM: {a_status:?}"
         );
-        let b_status = exit_within(&mut b, Duration::from_secs(180));
-        if b_status.is_none() {
+        let Some(b_status) = exit_within(&mut b, Duration::from_secs(180)) else {
             let _ = b.kill();
-        }
+            let _ = b.wait();
+            panic!("member B did not finish its drain within 180s");
+        };
+        assert!(b_status.success(), "member B drain exit: {b_status}");
 
         let out_c = dir.path().join("c.jsonl");
         copy_ok(
@@ -486,7 +488,7 @@ mod kafka {
         union.extend(rows_c.iter().cloned());
         assert_all_arrived(&seeded, &union, "kafka rebalance");
         eprintln!(
-            "kafka rebalance: A {} rows, B {} rows (exit {b_status:?}), final drain {} rows, \
+            "kafka rebalance: A {} rows, B {} rows (exit {b_status}), final drain {} rows, \
              {} duplicates",
             rows_a.len(),
             rows_b.len(),

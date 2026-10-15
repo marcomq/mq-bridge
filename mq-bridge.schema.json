@@ -5241,7 +5241,7 @@
           "type": "string"
         },
         "index": {
-          "description": "JSON pointer, inside an entry, to its document's position in the request; the array may then list only failures.",
+          "description": "JSON pointer, inside an entry, to its document's position; the array may then list only failures, or be absent.",
           "type": [
             "string",
             "null"
