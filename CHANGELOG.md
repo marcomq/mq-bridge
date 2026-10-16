@@ -2,7 +2,7 @@
 
 All notable changes to `mq-bridge`. Newest first.
 
-## Unreleased
+## 1.0.1 (Unreleased)
 
 ### Added
 
@@ -39,8 +39,6 @@ All notable changes to `mq-bridge`. Newest first.
   batches and instances too. `ema(path, alpha)` is unchanged.
 - **With `time` or a half-life field, `last` keeps the value of the newest message**; a late
   message used to overwrite it.
-
-## 1.0.1
 
 ### Fixed
 
