@@ -2,23 +2,23 @@
 
 # URL Parameter Reference
 
-Auto-generated from the same JSON Schemas `mqb copy` uses to parse `--from`/`--to` query parameters (see `crates/cli/src/main.rs::endpoint_from_uri`). For workflow examples, see the [connector pages](../connectors/).
+Auto-generated from the same JSON Schemas `mqb copy` uses to parse `--from`/`--to` query parameters (see `crates/core/src/endpoint_uri.rs::endpoint_from_uri`). For workflow examples, see the [connector pages](../connectors/).
 
-- [PostgreSQL / MySQL / MariaDB / SQLite](./postgres.md) — schemes: `postgres://`, `postgresql://`, `mysql://`, `mariadb://`, `sqlite://`
-- [PostgreSQL CDC (logical replication)](./postgres-cdc.md) — schemes: `postgres-cdc://`, `pgcdc://`
-- [ClickHouse](./clickhouse.md) — schemes: `clickhouse://`, `clickhouses://`
 - [Kafka](./kafka.md) — schemes: `kafka://`
-- [MQTT](./mqtt.md) — schemes: `mqtt://`, `mqtts://`
-- [RabbitMQ (AMQP)](./rabbitmq.md) — schemes: `amqp://`, `amqps://`, `rabbitmq://`, `rabbitmqs://`
-- [HTTP](./http.md) — schemes: `http://`, `https://`
-- [WebSocket](./websocket.md) — schemes: `ws://`, `wss://`
-- [MongoDB](./mongodb.md) — schemes: `mongodb://`, `mongodb+srv://`
-- [File (CSV / JSON / JSONL)](./file.md) — schemes: `file://`
-- [Directory spool](./dir-spool.md) — schemes: `spool://`, `dir-spool://`, `dirspool://`
-- [Object Storage (local / cloud)](./object-store.md) — schemes: `local-store://`, `s3://`, `s3a://`, `gs://`, `gcs://`, `az://`, `azure://`, `abfs://`, `abfss://`
 - [NATS](./nats.md) — schemes: `nats://`
-- [Redis Streams](./redis.md) — schemes: `redis://`, `rediss://`, `redis+unix://`, `valkey://`, `valkeys://`, `valkey+unix://`, `redis_streams://`
-- [gRPC](./grpc.md) — schemes: `grpc://`, `grpcs://`
+- [RabbitMQ (AMQP)](./rabbitmq.md) — schemes: `amqp://`, `amqps://`, `rabbitmq://`, `rabbitmqs://`
+- [MQTT](./mqtt.md) — schemes: `mqtt://`, `mqtts://`
+- [Redis Streams](./redis.md) — schemes: `redis://`, `rediss://`, `redis+unix://`, `valkey://`, `valkeys://`, `valkey+unix://`
+- [IBM MQ](./ibmmq.md) — schemes: `ibmmq://`, `ibm-mq://`
 - [AWS SQS / SNS](./aws.md) — schemes: `aws://`, `aws-sqs://`
 - [ZeroMQ](./zeromq.md) — schemes: `zeromq://`, `zmq://`
-- [IBM MQ](./ibmmq.md) — schemes: `ibmmq://`, `ibm-mq://`
+- [PostgreSQL / MySQL / MariaDB / SQLite](./postgres.md) — schemes: `postgres://`, `postgresql://`, `mysql://`, `mariadb://`, `sqlite://`
+- [PostgreSQL CDC (logical replication)](./postgres-cdc.md) — schemes: `postgres-cdc://`, `pgcdc://`
+- [MongoDB](./mongodb.md) — schemes: `mongodb://`, `mongodb+srv://`
+- [ClickHouse](./clickhouse.md) — schemes: `clickhouse://`, `clickhouses://`
+- [File (CSV / JSON / JSONL)](./file.md) — schemes: `file://`
+- [Directory spool](./dir-spool.md) — schemes: `spool://`, `dir-spool://`, `dirspool://`
+- [Object Storage (local / cloud)](./object-store.md) — schemes: `s3://`, `s3a://`, `gs://`, `gcs://`, `az://`, `azure://`, `abfs://`, `abfss://`, `local-store://`
+- [HTTP](./http.md) — schemes: `http://`, `https://`
+- [WebSocket](./websocket.md) — schemes: `ws://`, `wss://`
+- [gRPC](./grpc.md) — schemes: `grpc://`, `grpcs://`

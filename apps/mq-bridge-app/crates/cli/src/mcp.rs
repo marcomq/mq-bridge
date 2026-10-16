@@ -217,6 +217,14 @@ struct GenerateCliCommandArgs {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct DescribeArgs {
+    /// A scheme (`kafka`), alias, endpoint type (`sqlx`) or middleware (`retry`).
+    /// Omit it for the whole catalog.
+    #[serde(default)]
+    name: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct RouteNameArg {
     /// The route name.
     name: String,
@@ -803,6 +811,35 @@ impl BridgeMcp {
     }
 
     #[tool(
+        description = "Describe the endpoints and middlewares this build supports, the same data as \
+            `mqb list --json` / `mqb describe <name> --json`: each endpoint's `endpoint` type (the \
+            JSON key `publish`/`start_route` take), URI form, example and typed `params` (also its \
+            config fields), and each middleware's params. Pass `name` to narrow it to one entry.",
+        annotations(read_only_hint = true)
+    )]
+    async fn describe(
+        &self,
+        Parameters(args): Parameters<DescribeArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let catalog = mq_bridge_app::endpoint_catalog::catalog()
+            .map_err(|error| internal(error.to_string()))?;
+        let catalog = match args.name.as_deref().map(str::trim) {
+            Some(name) if !name.is_empty() => {
+                let found = mq_bridge_app::endpoint_catalog::matching(catalog, name);
+                if found.endpoints.is_empty() && found.middlewares.is_empty() {
+                    return Err(invalid(format!(
+                        "no endpoint or middleware named '{name}'; omit `name` to list all"
+                    )));
+                }
+                found
+            }
+            _ => catalog,
+        };
+        let json = serde_json::to_value(catalog).map_err(|error| internal(error.to_string()))?;
+        Ok(ok_json(json))
+    }
+
+    #[tool(
         description = "Create and run a route that moves messages from its `input` (source) \
             endpoint to its `output` (sink) endpoint, each keyed by connector type. Supports \
             route options like `concurrency`, `batch_size`, and `exit_on_empty` (drain the source \
@@ -1352,7 +1389,8 @@ const INSTRUCTIONS: &str = "mq-bridge: a universal, protocol-agnostic message an
      however long the job runs. `bridge_status` shows what every mq-bridge process on \
      this machine is running, not only this server. Either endpoint may carry a `middlewares` array (retry, \
      dlq, deduplication, limiter, transform, compression, encryption, ...) to add delivery \
-     behaviour without changing the route. Apache Pulsar is available too, but is not one \
+     behaviour without changing the route. `describe` lists each endpoint type and \
+     middleware with its typed params. Apache Pulsar is available too, but is not one \
      of the endpoint variants in the tool schema: address it as {\"custom\": {\"name\": \
      \"pulsar\", \"config\": {\"url\": \"pulsar://host:6650\", \"topic\": \"...\", \
      \"subscription\": \"...\", \"initial_position\": \"earliest\"}}}. A source needs \
@@ -1717,6 +1755,33 @@ mod tests {
                 .expect("server_info"),
         );
         assert!(on["agent_bus"]["listening_as"].is_null(), "{on}");
+    }
+
+    #[tokio::test]
+    async fn describe_returns_the_catalog_or_one_entry() {
+        let server = BridgeMcp::new();
+        let all = json_of(
+            server
+                .describe(Parameters(DescribeArgs { name: None }))
+                .await
+                .expect("describe"),
+        );
+        assert!(all["endpoints"].as_array().unwrap().len() > 30, "{all}");
+        let kafka = json_of(
+            server
+                .describe(Parameters(DescribeArgs {
+                    name: Some("kafka".into()),
+                }))
+                .await
+                .expect("describe kafka"),
+        );
+        assert_eq!(kafka["endpoints"][0]["endpoint"], "kafka", "{kafka}");
+        let missing = server
+            .describe(Parameters(DescribeArgs {
+                name: Some("nosuch".into()),
+            }))
+            .await;
+        assert!(missing.is_err());
     }
 
     fn json_of(result: CallToolResult) -> serde_json::Value {

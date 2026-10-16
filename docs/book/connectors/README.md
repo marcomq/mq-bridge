@@ -16,7 +16,7 @@ key, and the part before the query string becomes `url` (or `path`):
 | `nats://host:4222` | `nats` | `url: "nats://host:4222"` |
 | `amqp://`, `rabbitmq://` | `amqp` | `url: "amqp://host:5672/%2f"` |
 | `mqtt://`, `mqtts://` | `mqtt` | `url: "mqtt://host:1883"` |
-| `redis://`, `rediss://`, `redis+unix://`, `valkey(s)://` | `redis_streams` | `url: "redis://host:6379"` |
+| `redis://`, `rediss://`, `redis+unix://`, `valkey(s)://`, `valkey+unix://` | `redis_streams` | `url: "redis://host:6379"` |
 | `postgres://`, `mysql://`, `sqlite://` | `sqlx` | the connection string as `url` |
 | `postgres-cdc://`, `pgcdc://` | `postgres_cdc` | `url: "postgres://…"` |
 | `mongodb://`, `mongodb+srv://` | `mongodb` | `url: "mongodb://host:27017"` |

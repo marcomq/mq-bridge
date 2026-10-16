@@ -68,6 +68,16 @@ impl Drop for Headless {
     }
 }
 
+/// Kills and reaps the child when dropped, including on a failed assertion.
+struct Reap(Child);
+
+impl Drop for Reap {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
 fn signal(child: &Child, name: &str) {
     let status = Command::new("kill")
         .arg(format!("-{name}"))
@@ -977,23 +987,25 @@ mod postgres {
         // The drain waits for the open transaction, so it can only end after the COMMIT.
         let first = dir.path().join("first.jsonl");
         let first_log = dir.path().join("first.log");
-        let mut first_run = cli()
-            .args([
-                "copy",
-                "--from",
-                &source,
-                "--to",
-                &raw_uri(&first),
-                "--drain",
-            ])
-            .arg("--resume")
-            .stdout(Stdio::null())
-            .stderr(std::fs::File::create(&first_log).expect("create log"))
-            .spawn()
-            .expect("start first copy");
+        let mut first_run = Reap(
+            cli()
+                .args([
+                    "copy",
+                    "--from",
+                    &source,
+                    "--to",
+                    &raw_uri(&first),
+                    "--drain",
+                ])
+                .arg("--resume")
+                .stdout(Stdio::null())
+                .stderr(std::fs::File::create(&first_log).expect("create log"))
+                .spawn()
+                .expect("start first copy"),
+        );
         std::thread::sleep(Duration::from_secs(3));
         assert!(
-            first_run.try_wait().expect("poll copy").is_none(),
+            first_run.0.try_wait().expect("poll copy").is_none(),
             "the first copy ended while id=1 was still open\n{}",
             tail(&first_log)
         );
@@ -1006,9 +1018,10 @@ mod postgres {
         writeln!(stdin, "COMMIT;").unwrap();
         drop(stdin);
         assert!(slow.wait().expect("slow transaction").success());
-        let status = exit_within(&mut first_run, Duration::from_secs(60));
+        let status = exit_within(&mut first_run.0, Duration::from_secs(60));
         if status.is_none() {
-            let _ = first_run.kill();
+            let _ = first_run.0.kill();
+            let _ = first_run.0.wait();
         }
         let status = status.unwrap_or_else(|| {
             panic!(

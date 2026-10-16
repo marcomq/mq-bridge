@@ -1,180 +1,98 @@
 //! Generates `docs/book/reference/<connector>.md` from the JSON Schemas of the
-//! endpoint config structs used by `mqb copy --from/--to` (see
-//! `endpoint_from_uri` in `src/main.rs`). The JSON Schema is the single
-//! source of truth for parameter name/type/default/required/description;
-//! this tool only renders it as a table. Examples in `docs/book/connectors/`
-//! are hand-written and not touched by this generator.
+//! endpoint config structs used by `mqb copy --from/--to`. Schemes, schemas and
+//! driver-option handling come from `mq_bridge_app::endpoint_catalog`, the
+//! table the URI parser dispatches on; this tool only renders them as tables.
+//! Examples in `docs/book/connectors/` are hand-written and not touched by this
+//! generator.
 //!
 //! Run with `cargo run -p mq-bridge-app --example gen_url_docs`.
 
-use mq_bridge_app::mq_bridge::models::{
-    AmqpConfig, AwsConfig, ClickHouseConfig, DirSpoolConfig, FileConfig, GrpcConfig, HttpConfig,
-    IbmMqConfig, KafkaConfig, MongoDbConfig, MqttConfig, NatsConfig, ObjectStoreConfig,
-    PostgresCdcConfig, RedisStreamsConfig, SqlxConfig, WebSocketConfig, ZeroMqConfig,
-};
+use mq_bridge_app::endpoint_catalog;
 use schemars::Schema;
 use serde_json::Value;
 use std::collections::{BTreeSet, HashSet};
 use std::path::Path;
 
+/// Endpoint type → (page slug, page title). Every endpoint type with a
+/// schema-typed URI needs a page; the generator fails on a missing one.
+const PAGES: &[(&str, &str, &str)] = &[
+    ("sqlx", "postgres", "PostgreSQL / MySQL / MariaDB / SQLite"),
+    (
+        "postgres_cdc",
+        "postgres-cdc",
+        "PostgreSQL CDC (logical replication)",
+    ),
+    ("clickhouse", "clickhouse", "ClickHouse"),
+    ("kafka", "kafka", "Kafka"),
+    ("mqtt", "mqtt", "MQTT"),
+    ("amqp", "rabbitmq", "RabbitMQ (AMQP)"),
+    ("http", "http", "HTTP"),
+    ("websocket", "websocket", "WebSocket"),
+    ("mongodb", "mongodb", "MongoDB"),
+    ("file", "file", "File (CSV / JSON / JSONL)"),
+    ("dir_spool", "dir-spool", "Directory spool"),
+    (
+        "object_store",
+        "object-store",
+        "Object Storage (local / cloud)",
+    ),
+    ("nats", "nats", "NATS"),
+    ("redis_streams", "redis", "Redis Streams"),
+    ("grpc", "grpc", "gRPC"),
+    ("aws", "aws", "AWS SQS / SNS"),
+    ("zeromq", "zeromq", "ZeroMQ"),
+    ("ibmmq", "ibmmq", "IBM MQ"),
+];
+
 struct Connector {
+    endpoint: String,
     /// File stem under `docs/book/reference/` and `docs/book/connectors/`.
     slug: &'static str,
     /// Human-readable name for the page heading.
     title: &'static str,
     /// URI schemes `mqb copy` recognises for this connector.
-    schemes: &'static [&'static str],
+    schemes: Vec<String>,
+    /// Whether an unrecognised `?key=value` rides along on the connection URL.
+    driver_options: bool,
     schema: Schema,
 }
 
-impl Connector {
-    /// Whether this connector's connection string is a URL that can carry an
-    /// unrecognised `?key=value` along as a driver option. Mirrors `driver_options`
-    /// in `crates/cli/src/main.rs` (keyed there by endpoint tag) — keep both in step.
-    fn driver_options(&self) -> bool {
-        matches!(
-            self.slug,
-            "postgres"
-                | "postgres-cdc"
-                | "mongodb"
-                | "redis"
-                | "rabbitmq"
-                | "http"
-                | "clickhouse"
-                | "websocket"
-        )
+/// One page per endpoint type, with the schemes of every catalog entry for it.
+fn connectors() -> Vec<Connector> {
+    let catalog = endpoint_catalog::catalog().expect("endpoint catalog");
+    let mut connectors: Vec<Connector> = Vec::new();
+    for e in catalog.endpoints {
+        let Some(schema) = endpoint_catalog::config_schema(&e.endpoint) else {
+            continue;
+        };
+        let schemes = std::iter::once(e.scheme).chain(e.aliases);
+        if let Some(c) = connectors.iter_mut().find(|c| c.endpoint == e.endpoint) {
+            c.schemes.extend(schemes);
+            continue;
+        }
+        let &(_, slug, title) = PAGES
+            .iter()
+            .find(|(endpoint, _, _)| *endpoint == e.endpoint)
+            .unwrap_or_else(|| {
+                panic!(
+                    "endpoint type '{}' has no reference page: add it to PAGES",
+                    e.endpoint
+                )
+            });
+        connectors.push(Connector {
+            slug,
+            title,
+            schemes: schemes.collect(),
+            driver_options: e.unknown_params == Some("driver_option"),
+            schema,
+            endpoint: e.endpoint,
+        });
     }
+    connectors
 }
 
 fn main() -> std::io::Result<()> {
-    let connectors = vec![
-        Connector {
-            slug: "postgres",
-            title: "PostgreSQL / MySQL / MariaDB / SQLite",
-            schemes: &["postgres", "postgresql", "mysql", "mariadb", "sqlite"],
-            schema: schemars::schema_for!(SqlxConfig),
-        },
-        Connector {
-            slug: "postgres-cdc",
-            title: "PostgreSQL CDC (logical replication)",
-            schemes: &["postgres-cdc", "pgcdc"],
-            schema: schemars::schema_for!(PostgresCdcConfig),
-        },
-        Connector {
-            slug: "clickhouse",
-            title: "ClickHouse",
-            schemes: &["clickhouse", "clickhouses"],
-            schema: schemars::schema_for!(ClickHouseConfig),
-        },
-        Connector {
-            slug: "kafka",
-            title: "Kafka",
-            schemes: &["kafka"],
-            schema: schemars::schema_for!(KafkaConfig),
-        },
-        Connector {
-            slug: "mqtt",
-            title: "MQTT",
-            schemes: &["mqtt", "mqtts"],
-            schema: schemars::schema_for!(MqttConfig),
-        },
-        Connector {
-            slug: "rabbitmq",
-            title: "RabbitMQ (AMQP)",
-            schemes: &["amqp", "amqps", "rabbitmq", "rabbitmqs"],
-            schema: schemars::schema_for!(AmqpConfig),
-        },
-        Connector {
-            slug: "http",
-            title: "HTTP",
-            schemes: &["http", "https"],
-            schema: schemars::schema_for!(HttpConfig),
-        },
-        Connector {
-            slug: "websocket",
-            title: "WebSocket",
-            schemes: &["ws", "wss"],
-            schema: schemars::schema_for!(WebSocketConfig),
-        },
-        Connector {
-            slug: "mongodb",
-            title: "MongoDB",
-            schemes: &["mongodb", "mongodb+srv"],
-            schema: schemars::schema_for!(MongoDbConfig),
-        },
-        Connector {
-            slug: "file",
-            title: "File (CSV / JSON / JSONL)",
-            schemes: &["file"],
-            schema: schemars::schema_for!(FileConfig),
-        },
-        Connector {
-            slug: "dir-spool",
-            title: "Directory spool",
-            schemes: &["spool", "dir-spool", "dirspool"],
-            schema: schemars::schema_for!(DirSpoolConfig),
-        },
-        Connector {
-            slug: "object-store",
-            title: "Object Storage (local / cloud)",
-            schemes: &[
-                "local-store",
-                "s3",
-                "s3a",
-                "gs",
-                "gcs",
-                "az",
-                "azure",
-                "abfs",
-                "abfss",
-            ],
-            schema: schemars::schema_for!(ObjectStoreConfig),
-        },
-        Connector {
-            slug: "nats",
-            title: "NATS",
-            schemes: &["nats"],
-            schema: schemars::schema_for!(NatsConfig),
-        },
-        Connector {
-            slug: "redis",
-            title: "Redis Streams",
-            schemes: &[
-                "redis",
-                "rediss",
-                "redis+unix",
-                "valkey",
-                "valkeys",
-                "valkey+unix",
-                "redis_streams",
-            ],
-            schema: schemars::schema_for!(RedisStreamsConfig),
-        },
-        Connector {
-            slug: "grpc",
-            title: "gRPC",
-            schemes: &["grpc", "grpcs"],
-            schema: schemars::schema_for!(GrpcConfig),
-        },
-        Connector {
-            slug: "aws",
-            title: "AWS SQS / SNS",
-            schemes: &["aws", "aws-sqs"],
-            schema: schemars::schema_for!(AwsConfig),
-        },
-        Connector {
-            slug: "zeromq",
-            title: "ZeroMQ",
-            schemes: &["zeromq", "zmq"],
-            schema: schemars::schema_for!(ZeroMqConfig),
-        },
-        Connector {
-            slug: "ibmmq",
-            title: "IBM MQ",
-            schemes: &["ibmmq", "ibm-mq"],
-            schema: schemars::schema_for!(IbmMqConfig),
-        },
-    ];
+    let connectors = connectors();
 
     let out_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../docs/book/reference");
     std::fs::create_dir_all(&out_dir)?;
@@ -183,7 +101,7 @@ fn main() -> std::io::Result<()> {
         "<!-- GENERATED by `cargo run -p mq-bridge-app --example gen_url_docs`. Do not edit by hand. -->\n\n\
          # URL Parameter Reference\n\n\
          Auto-generated from the same JSON Schemas `mqb copy` uses to parse \
-         `--from`/`--to` query parameters (see `crates/cli/src/main.rs::endpoint_from_uri`). \
+         `--from`/`--to` query parameters (see `crates/core/src/endpoint_uri.rs::endpoint_from_uri`). \
          For workflow examples, see the [connector pages](../connectors/).\n\n",
     );
 
@@ -269,7 +187,7 @@ fn render_connector(c: &Connector) -> String {
         .collect::<Vec<_>>()
         .join(", ");
 
-    let driver_note = if c.driver_options() {
+    let driver_note = if c.driver_options {
         " Any other `?key=value` pair is passed through unchanged as a driver \
          option on the connection URL."
             .to_string()
