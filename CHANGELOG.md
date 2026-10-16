@@ -2,10 +2,13 @@
 
 All notable changes to `mq-bridge`. Newest first.
 
-## 1.0.1 (Unreleased)
+## 1.0.1
 
 ### Added
 
+- **`mqb list` and `mqb describe <name>`** show the endpoints and middlewares this build
+  supports: URI form, an example and the typed parameters, as text or with `--json`. The MCP
+  server offers the same data as the `describe` tool.
 - **`aggregate` `fields` take `decayed_count(half_life)` and `decayed_sum(path, half_life)`.**
   Counts and totals that fade instead of dropping out of a window: at a steady rate they
   settle at about the last 1.44 half-lives. A short and a long half-life side by side show
