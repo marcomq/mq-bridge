@@ -19,7 +19,7 @@ mongodb://[user:password@]host[:port]/?database=<db>&collection=<name>
 | Copy a collection once, without a replica set | `mongodb://localhost:27017/?database=shop&collection=orders&consume=snapshot` |
 | User and password | `mongodb://app:secret@db.example.com:27017/?database=shop&collection=orders&authSource=admin` |
 | Replica set, several hosts | `mongodb://_/?url=mongodb://db1:27017,db2:27017,db3:27017/?replicaSet=rs0&database=shop&collection=orders` |
-| MongoDB Atlas (`mongodb+srv`) | `mongodb+srv://app:secret@cluster0.ab12c.mongodb.net/?database=shop&collection=orders` |
+| MongoDB Atlas (`mongodb+srv`) | `mongodb+srv://<user>:<password>@<cluster>.mongodb.net/?database=shop&collection=orders` |
 
 Rules that the table follows:
 
