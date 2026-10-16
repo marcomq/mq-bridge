@@ -233,6 +233,12 @@ fn routes(b: &Broker, q: &str, input: &Path, output: &Path, rate: Option<u32>) -
     let limiter = rate
         .map(|rate| format!("\n        - limiter: {{ messages_per_second: {rate} }}"))
         .unwrap_or_default();
+    // Both legs: a slow consumer join must not let the read side catch up in one burst.
+    let read_limiter = rate
+        .map(|rate| {
+            format!("\n      middlewares:\n        - limiter: {{ messages_per_second: {rate} }}")
+        })
+        .unwrap_or_default();
     format!(
         r#"  to_backend:
     concurrency: {c}
@@ -249,7 +255,7 @@ fn routes(b: &Broker, q: &str, input: &Path, output: &Path, rate: Option<u32>) -
     batch_size: {n}
     input:
       {source}
-    output:
+    output:{read_limiter}
       file: {{ path: '{output}', format: raw }}
 "#,
         input = input.display(),
