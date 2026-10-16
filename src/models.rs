@@ -3210,6 +3210,9 @@ pub struct HttpBulkUpsert {
     /// Without `result`: send a request refused with 400, 409, 413 or 422 again in halves, so only the bad document fails.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub split_on_reject: bool,
+    /// Most documents in one request; a larger batch is split. Unset = `max_request_bytes` alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_documents: Option<usize>,
 }
 
 /// The `http_bulk` request that answers a batch of lookups, one answer per message in order.
@@ -3389,6 +3392,12 @@ pub struct HttpBulkCursor {
     /// With `response`: a response without the field ends the read, instead of stopping the route.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub end_when_missing: bool,
+    /// JSON pointer to the URL of the next page, e.g. `/links/next`. Missing or `null` ends the read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_url: Option<String>,
+    /// The next page is the `Link` header's `rel="next"` URL. Without one the read ends.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub link: bool,
 }
 
 /// The `http_bulk` request that removes documents by id.
@@ -3410,7 +3419,7 @@ pub struct HttpBulkDelete {
     /// The body around the id array, e.g. `{"points": {ids}}`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub envelope: Option<String>,
-    /// One body line per id instead of an array, e.g. `{"delete":{"_id":{id}}}`.
+    /// Template per id, e.g. `{"delete":{"_id":{id}}}`: a body line, an array entry or a `{ids}` entry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub line: Option<String>,
     /// How the target reports the outcome. Unset = the HTTP status alone decides.
@@ -3444,6 +3453,23 @@ pub struct HttpBulkItems {
     pub path: String,
     /// JSON pointer to an entry's error text, e.g. `/index/error/reason`. An entry that has it failed.
     pub error: String,
+    /// JSON pointer, inside an entry, to its document's position; the array may then list only failures, or be absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index: Option<String>,
+    /// An entry whose value at `path` is not `equals` failed, even without an error text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub success: Option<HttpBulkItemSuccess>,
+}
+
+/// The value an `items` entry carries when its document was written, e.g. SES's `/Status: SUCCESS`.
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct HttpBulkItemSuccess {
+    /// JSON pointer, inside an entry, to its status, e.g. `/Status`.
+    pub path: String,
+    /// The status of a written document, e.g. `SUCCESS` or `true`.
+    pub equals: serde_json::Value,
 }
 
 /// A response with one JSON line per document, in request order.
@@ -3718,6 +3744,8 @@ pub struct OpenAiEmbeddingsConfig {
     pub request_timeout_ms: Option<u64>,
     /// TLS options as on `http_bulk` (`ca_file`, `cert_file`, `key_file`, `required`); JSON in a URI.
     pub tls: Option<serde_json::Value>,
+    /// `oauth2` or `aws_sigv4` credentials, as on `http_bulk`; JSON in a URI.
+    pub auth: Option<serde_json::Value>,
 }
 
 /// The `openai_chat` endpoint: one chat completion per message, or per `messages_per_request`.
@@ -3753,6 +3781,8 @@ pub struct OpenAiChatConfig {
     pub request_timeout_ms: Option<u64>,
     /// TLS options as on `http_bulk` (`ca_file`, `cert_file`, `key_file`, `required`); JSON in a URI.
     pub tls: Option<serde_json::Value>,
+    /// `oauth2` or `aws_sigv4` credentials, as on `http_bulk`; JSON in a URI.
+    pub auth: Option<serde_json::Value>,
 }
 
 // --- Common Configuration ---

@@ -158,7 +158,8 @@ API is a few lines of configuration away, but has not been tried.
 ## Recipes
 
 In the recipes `operation` reads the operation a Postgres change stream sets,
-which tells an upsert from a delete.
+which tells an upsert from a delete. For sending mail in bulk (SendGrid, Amazon
+SES) see [SMS & email notifications](../cookbook/notifications.md).
 
 ### Meilisearch
 
@@ -217,9 +218,10 @@ output:
 
 ### CouchDB
 
-Inserts only. CouchDB updates and deletes a document by its current `_rev`,
-which a change message does not carry, so a document whose `_id` exists is
-reported as a conflict and fails alone.
+Inserts only, unless the messages carry the document's current `_rev`: CouchDB
+updates and deletes a document by it, so without it a document whose `_id`
+exists is reported as a conflict and fails alone. Where a delete message holds
+`_id` and `_rev`, the `line` of `delete` sends them:
 
 ```yaml
 output:
@@ -227,10 +229,19 @@ output:
     url: http://localhost:5984
     headers:
       Authorization: Basic <base64 of user:password>
+    operation: "${payload:op}"
     upsert:
       path: /books/_bulk_docs
       format: json_array
       envelope: '{"docs": {documents}}'
+      result:
+        items:
+          error: /reason
+    delete:
+      path: /books/_bulk_docs
+      id_field: _id
+      envelope: '{"docs": {ids}}'
+      line: '{"_id": {id}, "_rev": "${payload:_rev}", "_deleted": true}'
       result:
         items:
           error: /reason
@@ -248,6 +259,8 @@ position after a page comes from is the only thing that differs between APIs:
 | unset | the number of documents read so far | `offset=` paging |
 | `item: <pointer>` | a field of the last document | `id > last` paging |
 | `response: <pointer>` | a value in the response | change feeds, scroll tokens |
+| `next_url: <pointer>` | a URL in the response | `"next": "https://…"` links |
+| `link: true` | the `Link` header's `rel="next"` URL | GitHub-style paging |
 
 A `response` cursor ends the read when the value is `null` or an empty string. Some APIs
 leave the field out on the last page instead (Google's `nextPageToken`): set
@@ -257,6 +270,28 @@ would otherwise read one page and report success.
 With `cursor_id` and `checkpoint_store` in `read` the position is saved after every
 acknowledged batch and a restart continues there. Without them every start
 reads from the beginning.
+
+A next-page URL may be relative; it is resolved against the page that named it. One on
+another scheme, host or port stops the read, so `headers` and `auth` are never sent
+elsewhere. The first request uses `read.path`, which may hold `{limit}`; the saved
+position is the next URL, so a restart asks for that page. The end is saved as well, so a
+restart after the last page reads nothing; `mqb checkpoint` resets it.
+
+### Next-page links: GitHub
+
+```yaml
+input:
+  http_bulk:
+    url: https://api.github.com
+    headers:
+      Authorization: "Bearer ${GITHUB_TOKEN}"
+    read:
+      path: /repos/OWNER/REPO/issues?state=all&per_page={limit}
+      cursor: { link: true }
+```
+
+An API that puts the link into the body, such as `{"data": [...], "links": {"next": "..."}}`,
+takes `items: /data` and `cursor: { next_url: /links/next }`.
 
 ### Change feed: CouchDB
 
@@ -473,6 +508,7 @@ Elasticsearch or Qdrant.
 | `document` | none | Template around each document; `{document}` marks where the payload goes, e.g. `{"doc":{document},"doc_as_upsert":true}`. Values taken from the message are JSON-escaped. |
 | `result` | HTTP status | See below |
 | `split_on_reject` | `false` | Without `result`: a request the target refuses with 400, 409, 413 or 422 is sent again in halves until the refused documents stand alone |
+| `max_documents` | none | Most documents in one request, for an API that limits the count rather than the size |
 
 `query`:
 
@@ -517,6 +553,8 @@ Elasticsearch or Qdrant.
 | `cursor.response` | none | JSON pointer to the next position in the response; `null` or an empty string there ends the read |
 | `cursor.end_when_missing` | `false` | With `cursor.response`: a response without that field ends the read too. Without it such a response stops the route |
 | `cursor.item` | none | JSON pointer to the position in the last document of a page |
+| `cursor.next_url` | none | JSON pointer to the URL of the next page, e.g. `/links/next`; missing, `null` or empty ends the read |
+| `cursor.link` | `false` | The next page is the `rel="next"` URL of the `Link` header; a page without one ends the read |
 | `cursor.start` | `0` for a count, else `null` | Position before the first read |
 | `cursor_id` | none | Names the saved read position |
 | `checkpoint_store` | none | Where the position is saved: `file://`, `postgres://`, `mongodb://` or `s3://` |
@@ -524,18 +562,20 @@ Elasticsearch or Qdrant.
 | `max_polling_interval_ms` | none | The wait doubles up to this while pages stay empty |
 | `stream` | none | `sse` or `ndjson`: read one open response instead of pages; see [An open stream](#an-open-stream-sse-and-ndjson) |
 
-`{cursor}` must occur in the path or the body, except with `stream`.
+`{cursor}` must occur in the path or the body, except with `stream`, `cursor.next_url` or
+`cursor.link`, which refuse it. Set at most one of `cursor.response`, `cursor.item`,
+`cursor.next_url` and `cursor.link`.
 
 `delete`:
 
 | Field | Default | Meaning |
 | --- | --- | --- |
-| `path` | required | With `{ids}` the ids go there, comma-separated and percent-encoded; without it they are sent as a JSON array body. An id containing a comma cannot be sent in the URL form. |
+| `path` | required | With `{ids}` the ids go there, comma-separated and percent-encoded; without it they are sent as a JSON array body. An id containing a comma cannot be sent in the URL form without a `line` that quotes it. |
 | `method` | `POST` | HTTP method |
 | `id_field` | `id` | Top-level payload field holding the id (a string or a number) |
 | `max_ids` | 1000 | Most ids in one request |
 | `envelope` | none | The body around the id array; `{ids}` marks where the array goes |
-| `line` | none | One body line per id instead of an array; `{id}` is replaced by the id as JSON (`7` or `"a"`) |
+| `line` | none | Template per id; `{id}` is replaced by the id as JSON (`7` or `"a"`), and values such as `${payload:_rev}` are JSON-escaped. Alone it gives one body line per id; with `envelope` each line is one array entry, and one that is no JSON fails only its message; with `{ids}` each line, percent-encoded, is one list entry |
 | `result` | HTTP status | See below |
 
 `result` takes at most one of:
@@ -543,7 +583,7 @@ Elasticsearch or Qdrant.
 | Field | Meaning |
 | --- | --- |
 | `lines` | The response has one JSON line per document, in order. `success` is a JSON pointer to a boolean; `error` points to the reason. |
-| `items` | The response is one JSON document with an array entry per document, in order. `path` is a JSON pointer to the array (empty when the response is the array); `error` points to an entry's error text, and an entry that has it failed. |
+| `items` | The response is one JSON document with an array entry per document, in order. `path` is a JSON pointer to the array (empty when the response is the array); `error` points to an entry's error text, and an entry that has it failed. With `index`, a JSON pointer inside an entry to its document's position in the request (from 0), the array may list only the failures, e.g. BigQuery's `insertErrors`, and is left out or `null` when none failed; a position outside the request fails it. With `success: { path, equals }`, an entry whose value at `path` is not `equals` failed too, e.g. SES's `/Status` other than `SUCCESS` without an `Error`. |
 | `job` | The response names a job. `id` points to it, `poll` is the path asked with GET (`{id}` is replaced), `status` points to its state. `succeeded` and `failed` list the final states; any other state is polled again. `error` points to the reason. `timeout_ms` (default `300000`) is how long the job may run. |
 
 Without `result`, a 2xx status means every document was written.

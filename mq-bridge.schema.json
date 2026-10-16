@@ -5135,6 +5135,15 @@
         "split_on_reject": {
           "description": "Without `result`: send a request refused with 400, 409, 413 or 422 again in halves, so only the bad document fails.",
           "type": "boolean"
+        },
+        "max_documents": {
+          "description": "Most documents in one request; a larger batch is split. Unset = `max_request_bytes` alone.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
         }
       },
       "additionalProperties": false,
@@ -5230,11 +5239,47 @@
         "error": {
           "description": "JSON pointer to an entry's error text, e.g. `/index/error/reason`. An entry that has it failed.",
           "type": "string"
+        },
+        "index": {
+          "description": "JSON pointer, inside an entry, to its document's position; the array may then list only failures, or be absent.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "success": {
+          "description": "An entry whose value at `path` is not `equals` failed, even without an error text.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HttpBulkItemSuccess"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false,
       "required": [
         "error"
+      ]
+    },
+    "HttpBulkItemSuccess": {
+      "description": "The value an `items` entry carries when its document was written, e.g. SES's `/Status: SUCCESS`.",
+      "type": "object",
+      "properties": {
+        "path": {
+          "description": "JSON pointer, inside an entry, to its status, e.g. `/Status`.",
+          "type": "string"
+        },
+        "equals": {
+          "description": "The status of a written document, e.g. `SUCCESS` or `true`."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "equals"
       ]
     },
     "HttpBulkJob": {
@@ -5519,6 +5564,17 @@
         "end_when_missing": {
           "description": "With `response`: a response without the field ends the read, instead of stopping the route.",
           "type": "boolean"
+        },
+        "next_url": {
+          "description": "JSON pointer to the URL of the next page, e.g. `/links/next`. Missing or `null` ends the read.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "link": {
+          "description": "The next page is the `Link` header's `rel=\"next\"` URL. Without one the read ends.",
+          "type": "boolean"
         }
       },
       "additionalProperties": false
@@ -5573,7 +5629,7 @@
           ]
         },
         "line": {
-          "description": "One body line per id instead of an array, e.g. `{\"delete\":{\"_id\":{id}}}`.",
+          "description": "Template per id, e.g. `{\"delete\":{\"_id\":{id}}}`: a body line, an array entry or a `{ids}` entry.",
           "type": [
             "string",
             "null"
@@ -6029,6 +6085,9 @@
         },
         "tls": {
           "description": "TLS options as on `http_bulk` (`ca_file`, `cert_file`, `key_file`, `required`); JSON in a URI."
+        },
+        "auth": {
+          "description": "`oauth2` or `aws_sigv4` credentials, as on `http_bulk`; JSON in a URI."
         }
       },
       "additionalProperties": false,
@@ -6095,6 +6154,9 @@
         },
         "tls": {
           "description": "TLS options as on `http_bulk` (`ca_file`, `cert_file`, `key_file`, `required`); JSON in a URI."
+        },
+        "auth": {
+          "description": "`oauth2` or `aws_sigv4` credentials, as on `http_bulk`; JSON in a URI."
         }
       },
       "additionalProperties": false,

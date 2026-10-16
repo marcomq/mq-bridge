@@ -2,6 +2,82 @@
 
 All notable changes to `mq-bridge`. Newest first.
 
+## 1.0.1
+
+### Added
+
+- **`mqb list` and `mqb describe <name>`** show the endpoints and middlewares this build
+  supports: URI form, an example and the typed parameters, as text or with `--json`. The MCP
+  server offers the same data as the `describe` tool.
+- **`aggregate` `fields` take `decayed_count(half_life)` and `decayed_sum(path, half_life)`.**
+  Counts and totals that fade instead of dropping out of a window: at a steady rate they
+  settle at about the last 1.44 half-lives. A short and a long half-life side by side show
+  whether a key's activity rises above its own usual level.
+- **`mqb.aggregate.overwrite: true` metadata folds a message as the newest one**, even if it is
+  older: `last` takes its value and the state's clock moves to its time. It repairs a state
+  that a wrong `time` pushed into the future.
+- **`http_bulk` `delete.line` works in every shape.** It is a template per id
+  (`${payload:_rev}` works) and becomes an array entry with `envelope` or a list entry with
+  `{ids}` in the path, e.g. a quoted PostgREST `in.(…)` list or CouchDB `_deleted` documents.
+  A line that is no JSON fails only its message.
+- **`http_bulk` `upsert.max_documents`** caps the documents per request.
+- **`http_bulk` `result.items.index`** matches entries by the position they name, so a response
+  may list only the failures (BigQuery `insertErrors`).
+- **`http_bulk` `result.items.success`** fails an entry whose status is not the given value,
+  even without an error text (SES `Status` other than `SUCCESS`).
+- **`http_bulk` reads follow next-page URLs**: `read.cursor.next_url` (a URL in the body) or
+  `read.cursor.link` (the `Link` header's `rel="next"`). The next URL is checkpointed; one on
+  another host stops the read, so credentials stay with the configured host.
+- **`openai_chat` and `openai_embeddings` take `auth`** (`oauth2` or `aws_sigv4`) as `http_bulk`
+  does, e.g. for Amazon Bedrock.
+- `StubHttpServer::start_with_headers` in `plugin::test_support` adds response headers.
+- **CLI URIs take `mongodb+srv://`, `redis+unix://`, `valkey://`, `valkeys://` and
+  `valkey+unix://`** directly, without the `url=` escape.
+
+### Changed
+
+- **A late message in `aggregate` `fields` now counts with the weight it would have had by
+  then**, 0.5 per half-life it is late, instead of fully. `ema`, `ema_stddev` and
+  `ema_variance` with a half-life now give the same result in any arrival order, across
+  batches and instances too. `ema(path, alpha)` is unchanged.
+- **With `time` or a half-life field, `last` keeps the value of the newest message**; a late
+  message used to overwrite it.
+
+### Fixed
+
+- **A PostgreSQL `cursor_column` source no longer skips a row whose transaction commits
+  after a later row was read.** A `serial` id taken by a long transaction used to be passed
+  by the cursor and never read. Each page now stops before the first row written by a
+  transaction that is not older than every open one; a view, which has no `xmin`, keeps the
+  old behaviour and logs a warning. While a write transaction stays open on the server, newer
+  rows wait for it.
+- **A Kafka drain restarted right after a crash no longer fails** with "was not assigned a
+  partition". The dead member holds the group for `session.timeout.ms` (45 s), longer than the
+  30 s the drain waited; the wait now outlasts the configured session timeout by 15 s.
+  `MQ_BRIDGE_DRAIN_JOIN_TIMEOUT_MS` still overrides it.
+- **`postgres_cdc` no longer pins WAL while its published tables are quiet.** Writes to other
+  tables advanced the confirmed position in memory, but it reached the server only with the
+  next batch, so the slot stayed put and the server kept every WAL segment since. The position
+  is now reported as soon as the stream is idle.
+- **A NATS JetStream drain started right after a crash no longer ends early.** What the crashed
+  run had pulled stays unacked until the consumer's `ack_wait` (30 s) runs out, so a drain
+  started sooner saw nothing, reported success and left those messages for the next run. An
+  idle drain now waits, at most `ack_wait`, while the consumer still has undelivered messages
+  or unacked ones this process does not hold.
+- **A Kafka drain no longer ends while another member's partitions still lag.** A member that
+  finished its own partitions could report success just before the rebalance gave it those of
+  a member that had left, and the rows stayed for the next run. Before ending, a drain now
+  compares the group's committed offsets on the other partitions with their targets and waits
+  while any lag, at most the join wait (`session.timeout.ms` + 15 s); past that, a live member
+  owns them and the drain ends as before.
+
+### Performance
+
+- **The `http` output spends 1.5 to 2.4 µs less per request.** It keeps its own connection
+  pool instead of hyper's legacy client: idle HTTP/1 connections are reused most recently used
+  first, and an HTTP/2 connection negotiated by ALPN is shared by all requests.
+  `pool_idle_timeout_ms` (default 90 s) and `tcp_keepalive_ms` apply as before.
+
 ## 1.0.0
 
 The first stable release. It follows a production-readiness review of the core engine, the

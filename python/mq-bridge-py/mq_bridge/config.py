@@ -27,6 +27,7 @@ HttpBulkAwsSigV4 = dict
 HttpBulkConfig = dict
 HttpBulkCursor = dict
 HttpBulkDelete = dict
+HttpBulkItemSuccess = dict
 HttpBulkItems = dict
 HttpBulkJob = dict
 HttpBulkLines = dict
@@ -165,6 +166,7 @@ __all__ = [
     "HttpBulkCursor",
     "HttpBulkDelete",
     "HttpBulkFormat",
+    "HttpBulkItemSuccess",
     "HttpBulkItems",
     "HttpBulkJob",
     "HttpBulkLines",

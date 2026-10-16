@@ -323,8 +323,14 @@ pub struct NatsConsumer {
     /// idle read time out into an empty batch; otherwise it blocks indefinitely
     /// (event-driven, no added latency) as a streaming source should.
     exit_on_empty: bool,
+    /// Messages received and not yet committed, so a drain can tell its own unacked
+    /// messages from those a crashed run left behind.
+    held: Arc<AtomicUsize>,
 }
 use std::any::Any;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 impl NatsConsumer {
     pub async fn new(config: &NatsConfig) -> anyhow::Result<Self> {
@@ -381,6 +387,7 @@ impl NatsConsumer {
             subject: subject.to_string(),
             source_metadata,
             exit_on_empty: false,
+            held: Arc::default(),
         })
     }
 }
@@ -405,6 +412,7 @@ impl MessageConsumer for NatsConsumer {
                 &self.client,
                 self.exit_on_empty,
                 self.source_metadata,
+                &self.held,
             )
             .await
     }
@@ -610,6 +618,7 @@ impl NatsCore {
         client: &async_nats::Client,
         exit_on_empty: bool,
         source_metadata: bool,
+        held: &Arc<AtomicUsize>,
     ) -> Result<ReceivedBatch, ConsumerError> {
         if max_messages == 0 {
             return Ok(ReceivedBatch {
@@ -623,15 +632,18 @@ impl NatsCore {
         // forever. Otherwise (streaming, the default) block indefinitely — event-driven,
         // no added latency. `.next()` is cancel-safe, so the timeout loses no message.
         match self {
-            NatsCore::JetStream { stream, .. } => {
+            NatsCore::JetStream { stream, consumer } => {
                 let mut canonical_messages = Vec::with_capacity(max_messages);
                 let mut jetstream_messages = Vec::with_capacity(max_messages);
 
                 tracing::trace!("Waiting for next NATS JetStream message");
-                let Some(message_stream) =
-                    crate::traits::drain_gated(exit_on_empty, stream.next()).await
-                else {
-                    return Ok(ReceivedBatch::empty()); // Idle: let the drain fire.
+                let mut drain_deadline = None;
+                let message_stream = loop {
+                    match crate::traits::drain_gated(exit_on_empty, stream.next()).await {
+                        Some(next) => break next,
+                        None if drain_must_wait(consumer, held, &mut drain_deadline).await => {}
+                        None => return Ok(ReceivedBatch::empty()), // Idle: let the drain fire.
+                    }
                 };
                 tracing::trace!("Received NATS JetStream message");
 
@@ -674,6 +686,9 @@ impl NatsCore {
 
                 trace!(count = canonical_messages.len(), subject = %subject, message_ids = ?LazyMessageIds(&canonical_messages), "Received batch of NATS JetStream messages");
                 let client = client.clone();
+                let count = jetstream_messages.len();
+                held.fetch_add(count, Ordering::AcqRel);
+                let held = Arc::clone(held);
                 let commit_closure: BatchCommitFunc = Box::new(move |dispositions| {
                     Box::pin(async move {
                         // Handle replies if responses are provided
@@ -690,8 +705,9 @@ impl NatsCore {
                         // Acknowledge messages concurrently.
                         // A concurrency limit of 100 is chosen to balance parallelism
                         // with not overwhelming the NATS server or spawning too many tasks.
-                        handle_jetstream_acks(jetstream_messages, dispositions).await?;
-                        Ok(())
+                        let acked = handle_jetstream_acks(jetstream_messages, dispositions).await;
+                        held.fetch_sub(count, Ordering::AcqRel);
+                        acked
                     }) as BoxFuture<'static, anyhow::Result<()>>
                 });
 
@@ -950,6 +966,46 @@ async fn handle_jetstream_replies(
             tracing::error!(error = %error, "Failed to flush NATS JetStream replies");
         }
     }
+}
+
+/// An idle drain is only empty once the consumer has nothing undelivered and no unacked
+/// messages besides ours: what a crashed run pulled comes back only after `ack_wait`,
+/// so a drain started sooner waits for it, at most that long.
+async fn drain_must_wait(
+    consumer: &jetstream::consumer::Consumer<pull::Config>,
+    held: &AtomicUsize,
+    deadline: &mut Option<Instant>,
+) -> bool {
+    let info = match consumer.get_info().await {
+        Ok(info) => info,
+        Err(e) => {
+            warn!(error = %e, "NATS drain could not read consumer info; treating idle as empty");
+            return false;
+        }
+    };
+    if info.num_pending == 0 && info.num_ack_pending <= held.load(Ordering::Acquire) {
+        return false;
+    }
+    let ack_wait = match info.config.ack_wait {
+        wait if wait.is_zero() => Duration::from_secs(30),
+        wait => wait,
+    };
+    let deadline =
+        *deadline.get_or_insert_with(|| Instant::now() + ack_wait + Duration::from_secs(2));
+    if Instant::now() < deadline {
+        trace!(
+            num_pending = info.num_pending,
+            num_ack_pending = info.num_ack_pending,
+            "NATS drain idle, but the consumer still has messages; waiting"
+        );
+        return true;
+    }
+    warn!(
+        num_pending = info.num_pending,
+        num_ack_pending = info.num_ack_pending,
+        "NATS drain ending with messages still pending after ack_wait"
+    );
+    false
 }
 
 async fn handle_jetstream_acks(

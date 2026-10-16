@@ -211,12 +211,12 @@ mod tests {
     fn the_recipes_in_the_book_are_valid_configurations() {
         let book = concat!(env!("CARGO_MANIFEST_DIR"), "/docs/book/connectors/");
         for (name, recipes) in [
-            ("http-bulk.md", 14),
+            ("http-bulk.md", 15),
             ("typesense.md", 2),
             ("elasticsearch.md", 2),
             ("postgrest.md", 2),
             ("qdrant.md", 2),
-            ("openai.md", 6),
+            ("openai.md", 7),
             ("../cookbook/llm.md", 4),
         ] {
             // The book is not part of the published crate.

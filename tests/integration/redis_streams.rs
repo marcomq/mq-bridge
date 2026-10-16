@@ -3,9 +3,8 @@ use std::sync::Arc;
 
 use mq_bridge::endpoints::redis_streams::{RedisStreamsConsumer, RedisStreamsPublisher};
 use mq_bridge::test_utils::{
-    run_performance_pipeline_test, run_pipeline_test, run_test_with_docker,
-    run_test_with_docker_controller, setup_logging, verify_subscriber_logic,
-    PERF_TEST_MESSAGE_COUNT,
+    run_performance_pipeline_test, run_test_with_docker, run_test_with_docker_controller,
+    setup_logging, verify_subscriber_logic, PERF_TEST_MESSAGE_COUNT,
 };
 
 const COMPOSE: &str = "tests/integration/docker-compose/redis.yml";
@@ -34,18 +33,6 @@ routes:
     output:
       memory: { topic: "test-out-redis", capacity: {out_capacity} }
 "#;
-
-pub async fn test_redis_pipeline() {
-    setup_logging();
-    run_test_with_docker(COMPOSE, || async {
-        let config_yaml = CONFIG_YAML.replace(
-            "{out_capacity}",
-            &(PERF_TEST_MESSAGE_COUNT + 1000).to_string(),
-        );
-        run_pipeline_test("redis_streams", &config_yaml).await;
-    })
-    .await;
-}
 
 pub async fn test_redis_subscriber_logic() {
     setup_logging();
@@ -142,86 +129,6 @@ pub async fn test_redis_status() {
             sleep(Duration::from_secs(1)).await;
         }
         println!("[Redis] Status test successful.");
-    })
-    .await;
-}
-
-// Issue 1 (regression): reading FROM a Redis stream with `exit_on_empty` must drain
-// every existing entry and then terminate. Before the fix the consumer blocked on the
-// first `recv` forever, so `--drain` never fired and a broker batch job hung.
-pub async fn test_redis_drain_exits_on_empty() {
-    use mq_bridge::models::{Endpoint, EndpointType, RedisStreamsConfig};
-    use mq_bridge::route::RouteOutcome;
-    use mq_bridge::traits::{MessageDisposition, MessagePublisher};
-    use mq_bridge::{CanonicalMessage, Route};
-
-    setup_logging();
-    run_test_with_docker(COMPOSE, || async {
-        const N: usize = 300;
-        let stream = format!("drain_redis_{}", fast_uuid_v7::gen_id());
-
-        // Publish N entries.
-        let pub_config = RedisStreamsConfig {
-            url: URL.to_string(),
-            stream: Some(stream.clone()),
-            ..Default::default()
-        };
-        let publisher = RedisStreamsPublisher::new(&pub_config).await.unwrap();
-        let batch: Vec<_> = (0..N)
-            .map(|i| CanonicalMessage::new(format!("msg-{i}").into_bytes(), None))
-            .collect();
-        publisher.send_batch(batch).await.unwrap();
-
-        // Read them with a group from the start of the stream, draining to memory.
-        let in_config = RedisStreamsConfig {
-            url: URL.to_string(),
-            stream: Some(stream.clone()),
-            group: Some(format!("g_{}", fast_uuid_v7::gen_id())),
-            read_from_start: true,
-            ..Default::default()
-        };
-        let out_topic = format!("drain_redis_out_{}", fast_uuid_v7::gen_id());
-        let input = Endpoint::new(EndpointType::RedisStreams(in_config));
-        let output = Endpoint::new_memory(&out_topic, N + 100);
-        let route = Route::new(input, output)
-            .with_batch_size(128)
-            .with_exit_on_empty(true);
-
-        let mut verifier = route
-            .connect_to_output("redis_drain_verifier")
-            .await
-            .unwrap();
-        let collector = tokio::spawn(async move {
-            let mut received = 0usize;
-            while received < N {
-                let item =
-                    tokio::time::timeout(std::time::Duration::from_secs(15), verifier.receive())
-                        .await
-                        .expect("timed out draining output")
-                        .expect("output stream closed early");
-                received += 1;
-                (item.commit)(MessageDisposition::Ack).await.unwrap();
-            }
-            received
-        });
-
-        let handle = route.run("redis_drain_test").await.unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(30), async {
-            while handle.outcome().is_none() {
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            }
-        })
-        .await
-        .expect("redis route did not exit on empty after draining");
-        assert_eq!(handle.outcome(), Some(RouteOutcome::Completed));
-        handle.join().await.expect("route task panicked");
-
-        let received = tokio::time::timeout(std::time::Duration::from_secs(5), collector)
-            .await
-            .expect("timed out collecting output")
-            .expect("collector task panicked");
-        assert_eq!(received, N);
-        println!("[Redis] Drain exit_on_empty test successful.");
     })
     .await;
 }

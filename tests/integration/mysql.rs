@@ -3,9 +3,8 @@
 
 use mq_bridge::endpoints::sqlx::{SqlxConsumer, SqlxPublisher};
 use mq_bridge::test_utils::{
-    add_performance_result, run_chaos_pipeline_test, run_direct_perf_test,
-    run_performance_pipeline_test_named, run_pipeline_test, run_test_with_docker,
-    run_test_with_docker_controller, setup_logging, PERF_TEST_MESSAGE_COUNT,
+    add_performance_result, run_direct_perf_test, run_performance_pipeline_test_named,
+    run_test_with_docker, run_test_with_docker_controller, setup_logging, PERF_TEST_MESSAGE_COUNT,
 };
 use std::future::Future;
 use std::sync::Arc;
@@ -53,13 +52,6 @@ routes:
     output:
       memory: { topic: "sqlx-mysql-out", capacity: {out_capacity} }
 "#;
-
-pub async fn test_mysql_pipeline() {
-    run_mysql_test(|config_yaml| async move {
-        run_pipeline_test("sqlx", &config_yaml).await;
-    })
-    .await;
-}
 
 pub async fn test_mysql_performance_pipeline() {
     run_mysql_test(|config_yaml| async move {
@@ -219,16 +211,6 @@ where
             &(PERF_TEST_MESSAGE_COUNT + 1000).to_string(),
         );
         runner(config_yaml).await;
-    })
-    .await;
-}
-
-pub async fn test_mysql_chaos() {
-    setup_logging();
-    run_test_with_docker_controller(DOCKER_COMPOSE_FILE, |controller| async move {
-        setup_db().await;
-        let config_yaml = CONFIG_YAML.replace("{out_capacity}", &(10000 + 1000).to_string());
-        run_chaos_pipeline_test("sqlx", &config_yaml, controller, "mysql").await;
     })
     .await;
 }

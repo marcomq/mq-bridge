@@ -541,6 +541,7 @@ impl KafkaConsumer {
         // the records. `position()` alone can advance while a fetched record is still waiting
         // in librdkafka or the prefetch task, which used to make a drain silently lose its tail.
         client_config.set("enable.partition.eof", "true");
+        let session_timeout = session_timeout(&client_config);
 
         let consumer: StreamConsumer = client_config.create_with_context(QuietEofContext)?;
         // librdkafka connects in the background and retries forever; probe once so an
@@ -600,7 +601,10 @@ impl KafkaConsumer {
             exit_on_empty: false,
             prefetcher: None,
             source_metadata,
-            drain_state: DrainState::default(),
+            drain_state: DrainState {
+                session_timeout,
+                ..DrainState::default()
+            },
             nacked: NackLatch::default(),
         })
     }
@@ -1356,17 +1360,31 @@ fn has_assignment(consumer: &StreamConsumer) -> bool {
 /// different question: that one is "is the source idle", this one is "has it started".
 ///
 /// A fresh consumer group needs a join/rebalance before any record can arrive, and that
-/// routinely outlasts the idle timeout. Defaults to 30s — only ever paid by a consumer
-/// that never gets an assignment. Override via `MQ_BRIDGE_DRAIN_JOIN_TIMEOUT_MS`.
-fn drain_join_timeout() -> Duration {
-    static V: std::sync::OnceLock<Duration> = std::sync::OnceLock::new();
-    *V.get_or_init(|| {
+/// routinely outlasts the idle timeout. A member that crashed holds the group until its
+/// session times out, so the wait is at least 30s and outlasts `session_timeout` by
+/// [`JOIN_AFTER_SESSION_MARGIN`]. Override via `MQ_BRIDGE_DRAIN_JOIN_TIMEOUT_MS`.
+fn drain_join_timeout(session_timeout: Duration) -> Duration {
+    static V: std::sync::OnceLock<Option<Duration>> = std::sync::OnceLock::new();
+    let configured = *V.get_or_init(|| {
         std::env::var("MQ_BRIDGE_DRAIN_JOIN_TIMEOUT_MS")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
             .map(Duration::from_millis)
-            .unwrap_or(Duration::from_secs(30))
-    })
+    });
+    configured
+        .unwrap_or_else(|| Duration::from_secs(30).max(session_timeout + JOIN_AFTER_SESSION_MARGIN))
+}
+
+/// Time for the rebalance that follows a dead member's eviction.
+const JOIN_AFTER_SESSION_MARGIN: Duration = Duration::from_secs(15);
+
+/// librdkafka's `session.timeout.ms`, with its default when not set.
+fn session_timeout(config: &ClientConfig) -> Duration {
+    let ms = config
+        .get("session.timeout.ms")
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(45_000);
+    Duration::from_millis(ms)
 }
 
 /// What an idle wait means in drain mode. An idle timeout on its own says nothing: the
@@ -1379,6 +1397,10 @@ enum DrainReadiness {
     /// Assigned, but some partition has not reached the offset the drain is aiming for:
     /// a fetch is still in flight. Not a drain.
     Starting,
+    /// This member's partitions are done, but partitions it does not hold still have rows
+    /// the group has not committed. A peer that left hands them over in a rebalance this
+    /// member may not have heard of yet; a live peer is still copying them.
+    PeersBehind,
     /// Assigned and there is nothing left to read.
     Drained,
 }
@@ -1406,6 +1428,10 @@ struct DrainState {
     pending_terminal: Option<PrefetchError>,
     /// When the next watermark lookup may block again — see [`drain_target`].
     watermark_retry_at: Option<std::time::Instant>,
+    /// The group's `session.timeout.ms`; sizes the join wait, see [`drain_join_timeout`].
+    session_timeout: Duration,
+    /// Every partition of the topic, looked up once — see [`peers_behind`].
+    partitions: Option<Vec<i32>>,
 }
 
 /// How long a failed watermark lookup suppresses further broker calls. `fetch_watermarks`
@@ -1461,6 +1487,7 @@ fn drain_target(
 fn drain_readiness(
     consumer: &StreamConsumer,
     state: &mut DrainState,
+    topic: &str,
     eof_positions: &std::sync::Mutex<PartitionOffsets>,
 ) -> DrainReadiness {
     if !has_assignment(consumer) {
@@ -1487,7 +1514,86 @@ fn drain_readiness(
         }
         return DrainReadiness::Starting;
     }
+    if peers_behind(consumer, state, topic, &positions) {
+        return DrainReadiness::PeersBehind;
+    }
     DrainReadiness::Drained
+}
+
+/// Whether a partition this member does not hold has rows the group has not committed.
+/// A failed lookup counts as yes; `await_first_within` bounds how long that is waited out.
+fn peers_behind(
+    consumer: &StreamConsumer,
+    state: &mut DrainState,
+    topic: &str,
+    owned: &TopicPartitionList,
+) -> bool {
+    let Some(partitions) = topic_partitions(consumer, state, topic) else {
+        return true;
+    };
+    let mut unowned = TopicPartitionList::new();
+    for partition in partitions {
+        if owned.find_partition(topic, partition).is_none() {
+            unowned.add_partition(topic, partition);
+        }
+    }
+    if unowned.count() == 0 {
+        return false;
+    }
+    let Ok(committed) = consumer.committed_offsets(unowned, BROKER_PROBE_TIMEOUT) else {
+        return true;
+    };
+    committed.elements().iter().any(|elem| {
+        let key = (topic.to_string(), elem.partition());
+        drain_target(consumer, state, &key).is_none_or(|high| group_behind(high, elem.offset()))
+    })
+}
+
+/// A committed offset is the next one to read, so the group is done at `high`.
+fn group_behind(high: i64, committed: Offset) -> bool {
+    match committed {
+        Offset::Offset(offset) => offset < high,
+        _ => high > 0,
+    }
+}
+
+/// The topic's partitions, read from the broker once; failures back off like
+/// [`drain_target`].
+fn topic_partitions(
+    consumer: &StreamConsumer,
+    state: &mut DrainState,
+    topic: &str,
+) -> Option<Vec<i32>> {
+    if let Some(partitions) = &state.partitions {
+        return Some(partitions.clone());
+    }
+    if state
+        .watermark_retry_at
+        .is_some_and(|at| std::time::Instant::now() < at)
+    {
+        return None;
+    }
+    let lookup = consumer
+        .fetch_metadata(None, BROKER_PROBE_TIMEOUT)
+        .map(|metadata| {
+            metadata
+                .topics()
+                .iter()
+                .filter(|t| t.name() == topic)
+                .flat_map(|t| t.partitions().iter().map(|p| p.id()))
+                .collect::<Vec<_>>()
+        });
+    match lookup {
+        Ok(partitions) => {
+            state.partitions = Some(partitions.clone());
+            Some(partitions)
+        }
+        Err(e) => {
+            debug!(topic = %topic, error = %e, "Kafka partition lookup failed; backing off");
+            state.watermark_retry_at = Some(std::time::Instant::now() + WATERMARK_RETRY_BACKOFF);
+            None
+        }
+    }
 }
 
 /// A librdkafka position is deliberately not accepted here: it advances when a record is
@@ -1503,6 +1609,7 @@ fn drain_offset_reached(high: i64, delivered: Option<i64>, eof: Option<i64>) -> 
 ///
 /// Split from the Kafka specifics so the waiting rule can be tested without a broker:
 /// `readiness` is the only thing that knows what a consumer is doing.
+#[cfg(test)]
 async fn await_first(
     rx: &async_channel::Receiver<Result<Prefetched, PrefetchError>>,
     exit_on_empty: bool,
@@ -1514,7 +1621,7 @@ async fn await_first(
         rx,
         exit_on_empty,
         topic,
-        drain_join_timeout(),
+        drain_join_timeout(Duration::ZERO),
         readiness,
         topic_has_partitions,
     )
@@ -1561,6 +1668,11 @@ async fn await_first_within(
             return None;
         }
         if std::time::Instant::now() >= start_deadline {
+            // No rebalance handed the lagging partitions over, so a live peer owns them.
+            if state == DrainReadiness::PeersBehind {
+                debug!(topic = %topic, timeout = ?join_timeout, "Kafka drain done; peers still hold lagging partitions");
+                return None;
+            }
             // Assigned and short of its target: there is data this drain has not copied.
             if state == DrainReadiness::Starting {
                 return Some(Err(PrefetchError::Connection(format!(
@@ -1573,7 +1685,8 @@ async fn await_first_within(
             if topic_has_partitions() {
                 return Some(Err(PrefetchError::Connection(format!(
                     "Kafka drain of '{topic}' was not assigned a partition within \
-                     {join_timeout:?} although the topic has partitions"
+                     {join_timeout:?} although the topic has partitions; a crashed member \
+                     may still hold the group (raise MQ_BRIDGE_DRAIN_JOIN_TIMEOUT_MS)"
                 ))));
             }
             tracing::warn!(
@@ -1651,11 +1764,12 @@ async fn receive_batch_internal(
     }
 
     // Block for the first record, then take whatever else the prefetcher already has.
-    let first = await_first(
+    let first = await_first_within(
         &prefetcher.rx,
         exit_on_empty,
         topic,
-        || drain_readiness(consumer, drain_state, &prefetcher.eof_positions),
+        drain_join_timeout(drain_state.session_timeout),
+        || drain_readiness(consumer, drain_state, topic, &prefetcher.eof_positions),
         || topic_has_partitions(consumer, topic),
     )
     .await;
@@ -2199,6 +2313,26 @@ mod tests {
         assert!(matches!(first, Some(Ok(record)) if record.offset == 11));
     }
 
+    #[test]
+    fn test_drain_join_wait_outlasts_a_crashed_members_session() {
+        assert_eq!(
+            session_timeout(&ClientConfig::new()),
+            Duration::from_secs(45)
+        );
+        let mut config = ClientConfig::new();
+        config.set("session.timeout.ms", "6000");
+        assert_eq!(session_timeout(&config), Duration::from_secs(6));
+
+        assert_eq!(
+            drain_join_timeout(Duration::from_secs(45)),
+            Duration::from_secs(60)
+        );
+        assert_eq!(
+            drain_join_timeout(Duration::from_secs(6)),
+            Duration::from_secs(30)
+        );
+    }
+
     #[tokio::test]
     async fn test_await_first_ignores_readiness_when_a_record_is_waiting() {
         let (tx, rx) = prefetch_channel(1);
@@ -2428,6 +2562,120 @@ mod tests {
             wait(true).await,
             Some(Err(PrefetchError::Connection(_)))
         ));
+    }
+
+    /// A member done with its own partitions must not end while a peer's still lag: the
+    /// peer may have left, and the rebalance handing them over not have reached it yet.
+    #[tokio::test]
+    async fn test_a_drain_waits_for_peers_then_ends_cleanly() {
+        let (tx, rx) = prefetch_channel(1);
+        let mut polls = 0;
+
+        let first = await_first(
+            &rx,
+            true,
+            "t",
+            || {
+                polls += 1;
+                if polls == 2 {
+                    tx.try_send(Ok(prefetched("t", 1, 7))).unwrap();
+                }
+                DrainReadiness::PeersBehind
+            },
+            || true,
+        )
+        .await;
+        assert!(matches!(first, Some(Ok(p)) if p.offset == 7));
+
+        // No rebalance came within the join wait: a live peer owns them, not an error.
+        let (_tx, rx) = prefetch_channel(1);
+        let first = await_first_within(
+            &rx,
+            true,
+            "t",
+            Duration::ZERO,
+            || DrainReadiness::PeersBehind,
+            || true,
+        )
+        .await;
+        assert!(first.is_none());
+    }
+
+    /// A consumer must keep reading after the broker refuses a commit, and the next commit
+    /// must cover the refused one.
+    #[tokio::test]
+    async fn test_a_refused_commit_is_covered_by_the_next_one() {
+        use rdkafka::bindings as rdsys;
+        use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
+
+        let producer: FutureProducer = ClientConfig::new()
+            .set("test.mock.num.brokers", "1")
+            .create()
+            .unwrap();
+        let cluster = producer.client().mock_cluster().unwrap();
+        // The mock holds a new group for 3 s before its first assignment.
+        unsafe {
+            let handle = rdsys::rd_kafka_handle_mock_cluster(producer.client().native_ptr());
+            rdsys::rd_kafka_mock_group_initial_rebalance_delay_ms(handle, 0);
+        }
+        cluster.create_topic("commits", 1, 1).unwrap();
+        let config = KafkaConfig {
+            url: cluster.bootstrap_servers(),
+            topic: Some("commits".to_string()),
+            group_id: Some("commits".to_string()),
+            ..Default::default()
+        };
+        for payload in ["m0", "m1"] {
+            producer
+                .send(
+                    FutureRecord::<(), _>::to("commits").payload(payload),
+                    Duration::from_secs(5),
+                )
+                .await
+                .unwrap();
+        }
+
+        let mut consumer = KafkaConsumer::new(&config).await.unwrap();
+        cluster.request_errors(
+            RDKafkaApiKey::OffsetCommit,
+            &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_GROUP_AUTHORIZATION_FAILED],
+        );
+        for expected in ["m0", "m1"] {
+            let batch = tokio::time::timeout(Duration::from_secs(30), consumer.receive_batch(1))
+                .await
+                .expect("the consumer stopped reading")
+                .unwrap();
+            assert_eq!(batch.messages[0].get_payload_str(), expected);
+            (batch.commit)(vec![MessageDisposition::Ack]).await.unwrap();
+        }
+
+        let handle = consumer.consumer.clone();
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let handle = handle.clone();
+            let committed = tokio::task::spawn_blocking(move || {
+                handle.committed(Duration::from_secs(5)).unwrap()
+            })
+            .await
+            .unwrap();
+            let offset = committed.find_partition("commits", 0).unwrap().offset();
+            if offset == Offset::Offset(2) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the commit after the refused one never landed: {offset:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    #[test]
+    fn test_group_behind_compares_the_commit_with_the_target() {
+        assert!(group_behind(10, Offset::Offset(9)));
+        assert!(!group_behind(10, Offset::Offset(10)));
+        assert!(group_behind(10, Offset::Invalid));
+        assert!(!group_behind(0, Offset::Invalid));
     }
 
     #[test]

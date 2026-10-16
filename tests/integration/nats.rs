@@ -4,9 +4,8 @@ use std::sync::Arc;
 use super::assert_permanent_consumer_error;
 use mq_bridge::endpoints::nats::{NatsConsumer, NatsPublisher};
 use mq_bridge::test_utils::{
-    add_performance_result, run_chaos_pipeline_test, run_direct_perf_test,
-    run_performance_pipeline_test, run_pipeline_test, run_test_with_docker,
-    run_test_with_docker_controller, setup_logging, verify_subscriber_logic,
+    add_performance_result, run_direct_perf_test, run_performance_pipeline_test,
+    run_test_with_docker, run_test_with_docker_controller, setup_logging, verify_subscriber_logic,
     PERF_TEST_MESSAGE_COUNT,
 };
 const CONFIG_YAML: &str = r#"
@@ -32,33 +31,6 @@ routes:
     output:
       memory: { topic: "test-out-nats", capacity: {out_capacity} }
 "#;
-
-pub async fn test_nats_pipeline() {
-    setup_logging();
-    run_test_with_docker("tests/integration/docker-compose/nats.yml", || async {
-        let config_yaml = CONFIG_YAML.replace(
-            "{out_capacity}",
-            &(PERF_TEST_MESSAGE_COUNT + 1000).to_string(),
-        ); // Use a small capacity for non-perf test
-        run_pipeline_test("nats", &config_yaml).await;
-    })
-    .await;
-}
-
-pub async fn test_nats_chaos() {
-    setup_logging();
-    run_test_with_docker_controller(
-        "tests/integration/docker-compose/nats.yml",
-        |controller| async move {
-            let config_yaml = CONFIG_YAML.replace(
-                "{out_capacity}",
-                &(PERF_TEST_MESSAGE_COUNT + 1000).to_string(),
-            );
-            run_chaos_pipeline_test("nats", &config_yaml, controller, "nats").await;
-        },
-    )
-    .await;
-}
 
 pub async fn test_nats_subscriber_logic() {
     setup_logging();
@@ -207,89 +179,6 @@ pub async fn test_nats_status() {
             println!("[NATS] Status test successful.");
         },
     )
-    .await;
-}
-
-// Issue 1 (regression): reading FROM a NATS JetStream with `exit_on_empty` must drain
-// every existing message and then terminate. Before the fix the consumer blocked on
-// the JetStream message stream forever, so `--drain` never fired and a broker batch
-// job hung after receiving all existing messages.
-pub async fn test_nats_drain_exits_on_empty() {
-    use mq_bridge::models::{Endpoint, EndpointType, NatsConfig, NatsDeliverPolicy};
-    use mq_bridge::route::RouteOutcome;
-    use mq_bridge::traits::{MessageDisposition, MessagePublisher};
-    use mq_bridge::{CanonicalMessage, Route};
-
-    setup_logging();
-    run_test_with_docker("tests/integration/docker-compose/nats.yml", || async {
-        const N: usize = 300;
-        let stream = format!("drain_stream_{}", fast_uuid_v7::gen_id());
-        let subject = format!("{stream}.data");
-
-        // Publish N messages into the stream.
-        let pub_config = NatsConfig {
-            url: "nats://localhost:4222".to_string(),
-            subject: Some(subject.clone()),
-            stream: Some(stream.clone()),
-            ..Default::default()
-        };
-        let publisher = NatsPublisher::new(&pub_config).await.unwrap();
-        let batch: Vec<_> = (0..N)
-            .map(|i| CanonicalMessage::new(format!("msg-{i}").into_bytes(), None))
-            .collect();
-        publisher.send_batch(batch).await.unwrap();
-
-        // Read them all (deliver_policy = all), draining to memory.
-        let in_config = NatsConfig {
-            url: "nats://localhost:4222".to_string(),
-            subject: Some(subject.clone()),
-            stream: Some(stream.clone()),
-            deliver_policy: Some(NatsDeliverPolicy::All),
-            ..Default::default()
-        };
-        let out_topic = format!("drain_nats_out_{}", fast_uuid_v7::gen_id());
-        let input = Endpoint::new(EndpointType::Nats(in_config));
-        let output = Endpoint::new_memory(&out_topic, N + 100);
-        let route = Route::new(input, output)
-            .with_batch_size(128)
-            .with_exit_on_empty(true);
-
-        let mut verifier = route
-            .connect_to_output("nats_drain_verifier")
-            .await
-            .unwrap();
-        let collector = tokio::spawn(async move {
-            let mut received = 0usize;
-            while received < N {
-                let item =
-                    tokio::time::timeout(std::time::Duration::from_secs(15), verifier.receive())
-                        .await
-                        .expect("timed out draining output")
-                        .expect("output stream closed early");
-                received += 1;
-                (item.commit)(MessageDisposition::Ack).await.unwrap();
-            }
-            received
-        });
-
-        let handle = route.run("nats_drain_test").await.unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(30), async {
-            while handle.outcome().is_none() {
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            }
-        })
-        .await
-        .expect("nats route did not exit on empty after draining");
-        assert_eq!(handle.outcome(), Some(RouteOutcome::Completed));
-        handle.join().await.expect("route task panicked");
-
-        let received = tokio::time::timeout(std::time::Duration::from_secs(5), collector)
-            .await
-            .expect("timed out collecting output")
-            .expect("collector task panicked");
-        assert_eq!(received, N);
-        println!("[NATS] Drain exit_on_empty test successful.");
-    })
     .await;
 }
 

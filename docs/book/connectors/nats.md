@@ -127,6 +127,8 @@ nats stream add orders --subjects 'orders.>' --storage file --replicas 3 --defau
 - **The durable consumer's name** is built from stream and subject, with `*` written `_any_`
   and `>` written `_all_`. Two routes with the same stream and subject therefore share one
   consumer and split the messages.
+- **A `--drain` right after a crash waits for redelivery.** What the crashed run held comes
+  back after `ack_wait` (default 30 s), so the drain ends only once those messages are copied.
 
 ## Writing
 

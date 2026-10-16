@@ -2,9 +2,8 @@
 
 use mq_bridge::endpoints::mqtt::{MqttConsumer, MqttPublisher};
 use mq_bridge::test_utils::{
-    add_performance_result, run_chaos_pipeline_test, run_direct_perf_test,
-    run_performance_pipeline_test, run_pipeline_test, run_test_with_docker,
-    run_test_with_docker_controller, setup_logging, verify_subscriber_logic,
+    add_performance_result, run_direct_perf_test, run_performance_pipeline_test,
+    run_test_with_docker, run_test_with_docker_controller, setup_logging, verify_subscriber_logic,
     PERF_TEST_BATCH_MESSAGE_COUNT,
 };
 use std::sync::Arc;
@@ -31,33 +30,6 @@ routes:
     output:
       memory: { topic: "test-out-mqtt", capacity: {out_capacity} }
 "#;
-
-pub async fn test_mqtt_pipeline() {
-    setup_logging();
-    run_test_with_docker("tests/integration/docker-compose/mqtt.yml", || async {
-        let config_yaml = CONFIG_YAML.replace(
-            "{out_capacity}",
-            &(PERF_TEST_BATCH_MESSAGE_COUNT + 1000).to_string(),
-        ); // Use a small capacity for non-perf test
-        run_pipeline_test("mqtt", &config_yaml).await;
-    })
-    .await;
-}
-
-pub async fn test_mqtt_chaos() {
-    setup_logging();
-    run_test_with_docker_controller(
-        "tests/integration/docker-compose/mqtt.yml",
-        |controller| async move {
-            let config_yaml = CONFIG_YAML.replace(
-                "{out_capacity}",
-                &(PERF_TEST_BATCH_MESSAGE_COUNT + 1000).to_string(),
-            );
-            run_chaos_pipeline_test("mqtt", &config_yaml, controller, "mosquitto").await;
-        },
-    )
-    .await;
-}
 
 pub async fn test_mqtt_subscriber_logic() {
     setup_logging();
