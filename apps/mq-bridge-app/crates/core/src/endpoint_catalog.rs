@@ -652,7 +652,10 @@ pub fn catalog() -> anyhow::Result<Catalog> {
     let mut endpoints: Vec<EndpointDoc> = schemes().into_iter().map(endpoint_doc).collect();
     for (name, schema) in mq_bridge::extensions::endpoint_config_schemas() {
         let scheme = name.replace('_', "-");
-        if endpoints.iter().any(|e| e.scheme == scheme) {
+        if endpoints
+            .iter()
+            .any(|e| e.scheme == scheme || e.aliases.contains(&scheme))
+        {
             continue;
         }
         endpoints.push(EndpointDoc {

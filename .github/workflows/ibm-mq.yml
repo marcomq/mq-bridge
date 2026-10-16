@@ -62,15 +62,23 @@ jobs:
             ${{ runner.os }}-cargo-ibmmq-
             ${{ runner.os }}-cargo-
       
+      # Only a cache miss reaches IBM's download host.
+      - name: Cache IBM MQ redist archive
+        uses: actions/cache@v6
+        with:
+          path: ~/ibm-mq-redist
+          key: ibm-mq-redist-${{ env.IBM_MQ_REDIST_SHA256 }}
+
       - name: Install IBM MQ Client Libraries
         id: mqclient
         run: |
-          archive_url="$IBM_MQ_REDIST_URL"
-          archive_name="$(basename "$archive_url")"
+          archive_name="$HOME/ibm-mq-redist/$(basename "$IBM_MQ_REDIST_URL")"
           # IBM's download host is occasionally unreachable from runners. Treat a
           # download failure as infrastructure flakiness and skip the rest of the
           # job (see `if:` guards below). Checksum/extract failures still fail.
-          if ! curl -fsSLO --retry 5 --retry-all-errors --retry-delay 5 --connect-timeout 30 "$archive_url"; then
+          # Download outside the cached dir so a failure never caches an empty one.
+          tmp="$RUNNER_TEMP/$(basename "$archive_name")"
+          if [ ! -f "$archive_name" ] && ! { curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 --connect-timeout 30 -o "$tmp" "$IBM_MQ_REDIST_URL" && mkdir -p "$(dirname "$archive_name")" && mv "$tmp" "$archive_name"; }; then
             echo "::warning::IBM MQ redist download failed (host unreachable); skipping IBM MQ build."
             echo "available=false" >> "$GITHUB_OUTPUT"
             exit 0
@@ -131,15 +139,23 @@ jobs:
             ${{ runner.os }}-cargo-ibmmq-
             ${{ runner.os }}-cargo-
       
+      # Only a cache miss reaches IBM's download host.
+      - name: Cache IBM MQ redist archive
+        uses: actions/cache@v6
+        with:
+          path: ~/ibm-mq-redist
+          key: ibm-mq-redist-${{ env.IBM_MQ_REDIST_SHA256 }}
+
       - name: Install IBM MQ Client Libraries
         id: mqclient
         run: |
-          archive_url="$IBM_MQ_REDIST_URL"
-          archive_name="$(basename "$archive_url")"
+          archive_name="$HOME/ibm-mq-redist/$(basename "$IBM_MQ_REDIST_URL")"
           # IBM's download host is occasionally unreachable from runners. Treat a
           # download failure as infrastructure flakiness and skip the rest of the
           # job (see `if:` guards below). Checksum/extract failures still fail.
-          if ! curl -fsSLO --retry 5 --retry-all-errors --retry-delay 5 --connect-timeout 30 "$archive_url"; then
+          # Download outside the cached dir so a failure never caches an empty one.
+          tmp="$RUNNER_TEMP/$(basename "$archive_name")"
+          if [ ! -f "$archive_name" ] && ! { curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 --connect-timeout 30 -o "$tmp" "$IBM_MQ_REDIST_URL" && mkdir -p "$(dirname "$archive_name")" && mv "$tmp" "$archive_name"; }; then
             echo "::warning::IBM MQ redist download failed (host unreachable); skipping IBM MQ integration tests."
             echo "available=false" >> "$GITHUB_OUTPUT"
             exit 0
@@ -223,20 +239,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-ibmmq-
       
-      - name: Install IBM MQ Client Libraries
-        run: |
-          archive_url="$IBM_MQ_REDIST_URL"
-          archive_name="$(basename "$archive_url")"
-          curl -fsSLO --retry 5 --retry-all-errors --retry-delay 5 --connect-timeout 30 "$archive_url"
-          echo "${IBM_MQ_REDIST_SHA256}  ${archive_name}" | sha256sum -c -
-          # The redist archive extracts a self-contained MQ install tree
-          # (bin/, lib64/, inc/, ...) with no top-level mqm/ dir, so unpack
-          # it directly into the installation path.
-          sudo mkdir -p /opt/mqm
-          sudo tar -xzf "$archive_name" -C /opt/mqm
-          echo "LD_LIBRARY_PATH=/opt/mqm/lib64:$LD_LIBRARY_PATH" >> $GITHUB_ENV
-          echo "MQ_INSTALLATION_PATH=/opt/mqm" >> $GITHUB_ENV
-      
+      # `ibm-mq` loads the client at runtime, so rustdoc needs no IBM MQ SDK.
       - name: Build documentation
         run: cargo doc --features ibm-mq --no-deps
 

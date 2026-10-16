@@ -268,9 +268,11 @@ jobs:
 
   # Armature clones an external repo and runs its test suite: no docker stacks, no
   # TLS certs, no keytool. It used to pay ~1.3m of setup for 1.7m of tests.
+  # Advisory: it builds armature's `develop` head unlocked, so their breakage shows here.
   integration-armature:
     name: Integration — Armature
     runs-on: ubuntu-latest
+    continue-on-error: true
     needs: integration-build
     steps:
       - uses: actions/checkout@v7
