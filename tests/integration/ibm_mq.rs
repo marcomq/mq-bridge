@@ -27,8 +27,8 @@ use mq_bridge::models::{Endpoint, EndpointType, IbmMqConfig, Route};
 /// `ALTER AUTHINFO(SYSTEM.DEFAULT.AUTHINFO.IDPWOS) AUTHTYPE(IDPWOS) ADOPTCTX(YES)`
 /// `REFRESH SECURITY(*)`
 use mq_bridge::test_utils::{
-    add_performance_result, generate_test_messages, run_chaos_pipeline_test, run_direct_perf_test,
-    run_test_with_docker, run_test_with_docker_controller, setup_logging, verify_subscriber_logic,
+    add_performance_result, generate_test_messages, run_direct_perf_test, run_test_with_docker,
+    run_test_with_docker_controller, setup_logging, verify_subscriber_logic,
 };
 use mq_bridge::traits::{MessageConsumer, MessagePublisher};
 use std::sync::Arc;
@@ -154,7 +154,12 @@ pub async fn test_ibm_mq_performance_pipeline() {
     .await;
 }
 
-pub async fn test_ibm_mq_chaos() {
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires docker compose and the IBM MQ client"]
+async fn test_ibm_mq_chaos() {
+    if !mq_bridge::test_utils::should_run("ibm-mq") || !client_available() {
+        return;
+    }
     setup_logging();
     run_test_with_docker_controller(
         "tests/integration/docker-compose/ibm_mq.yml",
@@ -187,7 +192,8 @@ routes:
       memory:
         topic: "chaos_out"
 "#;
-            run_chaos_pipeline_test("ibm_mq", config_yaml, controller, "mq").await;
+            mq_bridge::test_utils::run_chaos_pipeline_test("ibm_mq", config_yaml, controller, "mq")
+                .await;
         },
     )
     .await;

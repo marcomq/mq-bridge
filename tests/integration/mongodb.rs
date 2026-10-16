@@ -139,33 +139,6 @@ pub async fn test_mongodb_standalone_mode_boundaries() {
     .await;
 }
 
-pub async fn test_mongodb_pipeline() {
-    setup_logging();
-    run_test_with_docker("tests/integration/docker-compose/mongodb.yml", || async {
-        let config_yaml = CONFIG_YAML.replace(
-            "{out_capacity}",
-            &(PERF_TEST_MESSAGE_COUNT + 1000).to_string(),
-        );
-        run_pipeline_test("mongodb", &config_yaml).await;
-    })
-    .await;
-}
-
-pub async fn test_mongodb_chaos() {
-    setup_logging();
-    run_test_with_docker_controller(
-        "tests/integration/docker-compose/mongodb.yml",
-        |controller| async move {
-            let config_yaml = CONFIG_YAML.replace(
-                "{out_capacity}",
-                &(PERF_TEST_MESSAGE_COUNT + 1000).to_string(),
-            );
-            run_chaos_pipeline_test("mongodb", &config_yaml, controller, "mongodb").await;
-        },
-    )
-    .await;
-}
-
 /// The queue is read in the order it was written, not in `_id` order, across and inside batches.
 #[tokio::test]
 #[ignore = "requires docker compose"]

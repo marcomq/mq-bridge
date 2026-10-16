@@ -2,6 +2,8 @@ pub mod cli_command;
 pub mod config;
 pub mod copy_pipeline;
 pub mod encrypted_config;
+pub mod endpoint_catalog;
+pub mod endpoint_uri;
 #[cfg(feature = "otel")]
 pub mod otel_export;
 pub mod plugins;

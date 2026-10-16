@@ -1347,10 +1347,113 @@ fn ema_by_half_life_weights_by_elapsed_time() {
         // The same instant as an RFC 3339 time: nothing decays, 60 / 2.5.
         assert!((at(2) - 24.0).abs() < 1e-9);
         assert_eq!(late(2), None);
-        // Five seconds back: flagged, folded without decay, 90 / 3.5.
+        // Five seconds back: flagged, and it weighs 0.5^(5/10).
         assert_eq!(late(3).as_deref(), Some(into));
-        assert!((at(3) - 90.0 / 3.5).abs() < 1e-9);
+        let w = 0.5f64.sqrt();
+        assert!((at(3) - (60.0 + 30.0 * w) / (2.5 + w)).abs() < 1e-9);
     }
+}
+
+const TRENDS: &str = "{ key: '${payload:k}', into: s, time: ts, fields: { \
+    avg: 'ema(x, 10s)', spread: 'ema_stddev(x, 10s)', n: 'decayed_count(10s)', \
+    total: 'decayed_sum(x, 10s)', last: last(x), all: count } }";
+
+fn folded(agg: &Aggregate, payloads: Vec<Value>) -> Vec<Value> {
+    fold_messages(agg, payloads)
+        .into_iter()
+        .map(|m| serde_json::from_slice(&m.ok().unwrap().payload).unwrap())
+        .collect()
+}
+
+#[test]
+fn late_messages_give_the_same_state_as_in_order_ones() {
+    let at = |x: i64, ts: i64| json!({"k": "a", "x": x, "ts": ts});
+    let in_order = vec![at(4, 100), at(9, 103), at(1, 107), at(6, 115), at(3, 121)];
+    let shuffled = vec![at(6, 115), at(4, 100), at(3, 121), at(1, 107), at(9, 103)];
+    let a = folded(&aggregate(TRENDS), in_order).pop().unwrap()["s"].clone();
+    let b = folded(&aggregate(TRENDS), shuffled).pop().unwrap()["s"].clone();
+    for field in ["avg", "spread", "n", "total"] {
+        let (a, b) = (a[field].as_f64().unwrap(), b[field].as_f64().unwrap());
+        assert!((a - b).abs() < 1e-9, "{field}: {a} != {b}");
+    }
+    assert_eq!(a["last"], json!(3.0));
+    assert_eq!(b["last"], json!(3.0));
+    assert_eq!(b["all"], json!(5));
+}
+
+#[test]
+fn decayed_count_settles_at_rate_times_half_life_over_ln2() {
+    let agg = aggregate(
+        "{ key: '${payload:k}', into: s, time: ts, emit: previous, \
+           fields: { n: 'decayed_count(1m)', total: 'decayed_sum(x, 1m)' } }",
+    );
+    let mut docs = folded(
+        &agg,
+        (0..1200)
+            .map(|t| json!({"k": 1, "x": 2, "ts": t}))
+            .collect(),
+    );
+    // Before this message, faded to its time: the sum of q^i for i in 1..1200.
+    let q = 0.5f64.powf(1.0 / 60.0);
+    let expected = (q - q.powi(1200)) / (1.0 - q);
+    let last = docs.pop().unwrap()["s"].clone();
+    assert!((last["n"].as_f64().unwrap() - expected).abs() < 1e-6);
+    assert!((last["total"].as_f64().unwrap() - 2.0 * expected).abs() < 1e-6);
+    assert_eq!(docs[0]["s"], Value::Null);
+    // The value read a minute after the last message has halved.
+    let later = folded(&agg, vec![json!({"k": 1, "x": 2, "ts": 1259})]);
+    let n = later[0]["s"]["n"].as_f64().unwrap();
+    assert!((n - (expected + 1.0) / 2.0).abs() < 1e-6);
+}
+
+#[test]
+fn overwrite_metadata_folds_a_late_message_as_the_newest() {
+    let agg = aggregate("{ key: '${payload:k}', into: s, time: ts, fields: { v: last(x) } }");
+    let late = |overwrite: bool| {
+        let mut m = msg(json!({"k": 1, "x": 7, "ts": 50}));
+        if overwrite {
+            m.metadata.insert(OVERWRITE_KEY.into(), "true".into());
+        }
+        m
+    };
+    let out = agg.fold(vec![
+        msg(json!({"k": 1, "x": 1, "ts": 9e9})),
+        late(false),
+        late(true),
+        msg(json!({"k": 1, "x": 3, "ts": 60})),
+    ]);
+    let v = |i: usize| -> Value {
+        let doc: Value = serde_json::from_slice(&out[i].as_ref().ok().unwrap().payload).unwrap();
+        doc["s"]["v"].clone()
+    };
+    assert_eq!(v(1), json!(1.0));
+    assert!(out[1]
+        .as_ref()
+        .ok()
+        .unwrap()
+        .metadata
+        .contains_key(LATE_KEY));
+    assert_eq!(v(2), json!(7.0));
+    assert!(!out[2]
+        .as_ref()
+        .ok()
+        .unwrap()
+        .metadata
+        .contains_key(LATE_KEY));
+    // The clock was set back to 50, so 60 is in order again.
+    assert_eq!(v(3), json!(3.0));
+}
+
+#[test]
+fn decayed_fields_need_a_half_life() {
+    for spec in ["decayed_count(0.1)", "decayed_sum(x, 0.5)"] {
+        let yaml = format!("{{ key: '${{payload:k}}', into: s, fields: {{ a: '{spec}' }} }}");
+        assert!(error(&yaml).contains("half-life"), "{spec}");
+    }
+    assert!(
+        error("{ key: '${payload:k}', into: s, fields: { a: 'decayed_sum(x)' } }")
+            .contains("invalid field")
+    );
 }
 
 #[test]

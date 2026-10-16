@@ -3,13 +3,8 @@
 //  Licensed under MIT OR Apache-2.0, see LICENSE file for more details
 //  git clone https://github.com/marcomq/mq-bridge
 
+use super::pool::HttpPool;
 use super::*;
-
-/// Persistent, connection-pooling hyper client used by `HttpPublisher`.
-type HttpClient = hyper_util::client::legacy::Client<
-    hyper_rustls::HttpsConnector<hyper_util::client::legacy::connect::HttpConnector>,
-    http_body_util::Full<Bytes>,
->;
 
 /// Cap on how much of a failed response body is quoted in the error. Bodies may be up to
 /// [`MAX_HTTP_BODY_BYTES`]; an error string carried through retries and logs must not be.
@@ -33,84 +28,15 @@ fn error_body_excerpt(body: &[u8]) -> String {
     )
 }
 
-/// Builds a connection-pooling hyper client for the given TLS/connector settings.
-fn build_http_client(config: &HttpConfig) -> anyhow::Result<HttpClient> {
-    let tls_client_config = crate::support::tls::client_config(&config.tls)
-        .context("Failed to create rustls client config")?;
-
-    let mut http_connector = HttpConnector::new();
-    http_connector.enforce_http(false);
-    http_connector.set_nodelay(true);
-    if let Some(keepalive) = config.tcp_keepalive_ms {
-        http_connector.set_keepalive(Some(std::time::Duration::from_millis(keepalive)));
-    }
-
-    // Handles both http and https, and http1/http2.
-    let https_connector = HttpsConnectorBuilder::new()
-        .with_tls_config(tls_client_config)
-        .https_or_http()
-        .enable_http1()
-        .enable_http2()
-        .wrap_connector(http_connector);
-
-    let mut client_builder = hyper_util::client::legacy::Client::builder(TokioExecutor::new());
-    if let Some(timeout) = config.pool_idle_timeout_ms {
-        client_builder.pool_idle_timeout(std::time::Duration::from_millis(timeout));
-    }
-    Ok(client_builder.build(https_connector))
-}
-
-/// A set of independent pooled hyper clients that requests are round-robined across.
-///
-/// A single `legacy::Client` guards its connection pool with one mutex, so under high
-/// concurrency every in-flight request serialises on that lock — which caps publisher
-/// throughput and, unlike the server side (no shared lock), does not scale with cores.
-/// Sharding across several clients spreads that contention so send throughput scales.
-struct ShardedHttpClient {
-    clients: Vec<HttpClient>,
-    next: std::sync::atomic::AtomicUsize,
-}
-
-impl ShardedHttpClient {
-    /// Picks the next client, round-robin. Single-shard fast path avoids the atomic.
-    #[inline]
-    fn pick(&self) -> &HttpClient {
-        if self.clients.len() == 1 {
-            return &self.clients[0];
-        }
-        let idx = self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % self.clients.len();
-        &self.clients[idx]
-    }
-}
-
-/// Number of pooled clients to shard across — matches available parallelism (capped) so
-/// pool-lock contention scales with cores, like the server side does.
-fn http_client_shard_count() -> usize {
-    std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1)
-        .clamp(1, 16)
-}
-
-/// Builds a sharded set of connection-pooling hyper clients for these connector settings.
-fn build_sharded_http_client(config: &HttpConfig) -> anyhow::Result<ShardedHttpClient> {
-    let shards = http_client_shard_count();
-    let mut clients = Vec::with_capacity(shards);
-    for _ in 0..shards {
-        clients.push(build_http_client(config)?);
-    }
-    Ok(ShardedHttpClient {
-        clients,
-        next: std::sync::atomic::AtomicUsize::new(0),
-    })
-}
-
-/// Returns a shared sharded HTTP client for these client-level settings, building one on
-/// first use. The request URL is per-message, so one client serves all targets it reaches.
-async fn create_shared_http_client(
+/// Returns a shared connection pool for this origin and these client-level settings, building
+/// one on first use.
+async fn create_shared_http_pool(
     config: &HttpConfig,
-) -> anyhow::Result<std::sync::Arc<ShardedHttpClient>> {
+    origin: &hyper::Uri,
+) -> anyhow::Result<std::sync::Arc<HttpPool>> {
     let identity = crate::support::connection_registry::connection_identity((
+        origin.scheme_str(),
+        origin.authority().map(|authority| authority.as_str()),
         config.tls.required,
         &config.tls.ca_file,
         &config.tls.cert_file,
@@ -120,11 +46,12 @@ async fn create_shared_http_client(
         config.pool_idle_timeout_ms,
     ));
     let config_clone = config.clone();
+    let origin = origin.clone();
     crate::support::connection_registry::get_or_create(
         "http-client",
         identity,
         config.shared.unwrap_or(true),
-        move || async move { build_sharded_http_client(&config_clone) },
+        move || async move { HttpPool::new(&config_clone, &origin) },
     )
     .await
 }
@@ -132,15 +59,14 @@ async fn create_shared_http_client(
 /// A publisher that sends messages to an HTTP endpoint using hyper.
 ///
 /// Features:
-/// - Connection pooling for both HTTP and HTTPS via `hyper-rustls`.
+/// - Connection pooling for both HTTP and HTTPS on hyper's `client::conn` API.
 /// - Automatic negotiation of HTTP/1.1 or HTTP/2.
 /// - Configurable request timeout and batch concurrency
 /// - Comprehensive tracing for sent messages and response status
 /// - Proper error classification (Retryable vs NonRetryable)
 #[derive(Clone)]
 pub struct HttpPublisher {
-    /// Persistent HTTP client with connection pooling
-    client: std::sync::Arc<ShardedHttpClient>,
+    pool: std::sync::Arc<HttpPool>,
     url: String,
     base_uri: hyper::Uri,
     /// Default HTTP method to use if not overridden by message metadata
@@ -164,12 +90,7 @@ impl HttpPublisher {
         config: &HttpConfig,
         stream_response_sink: Option<std::sync::Arc<dyn MessagePublisher>>,
     ) -> anyhow::Result<Self> {
-        // Initialize TLS provider if TLS is configured for this endpoint.
         let batch_concurrency = config.batch_concurrency.unwrap_or(20).max(1);
-
-        // Share one pooled client across publishers with the same client-level settings.
-        let client = create_shared_http_client(config).await?;
-
         let url = config.tls.normalize_url(&config.url);
 
         let base_uri = url.parse::<hyper::Uri>().map_err(|e| {
@@ -199,6 +120,7 @@ impl HttpPublisher {
                 );
             }
         }
+        let pool = create_shared_http_pool(config, &base_uri).await?;
         // Only shown in logs, errors and status from here on.
         let url = crate::support::redact::url_password(&url).into_owned();
 
@@ -218,7 +140,7 @@ impl HttpPublisher {
         let compression_threshold_bytes = config.compression_threshold_bytes.unwrap_or(1024);
 
         Ok(Self {
-            client,
+            pool,
             url,
             base_uri,
             method,
@@ -344,11 +266,10 @@ impl HttpPublisher {
         // must together fit within request_timeout, so body collection gets only the time
         // left after the response headers arrive.
         let request_deadline = std::time::Instant::now() + self.request_timeout;
-        let future =
-            tokio::time::timeout(self.request_timeout, self.client.pick().request(request));
+        let future = tokio::time::timeout(self.request_timeout, self.pool.send(request));
 
-        let response: hyper::Response<Incoming> = match future.await {
-            Ok(Ok(resp)) => resp,
+        let (response, lease) = match future.await {
+            Ok(Ok(sent)) => sent,
             Ok(Err(e)) => {
                 let error = anyhow::anyhow!("Failed to send HTTP request to {}: {}", self.url, e);
                 return Err(PublisherError::Retryable(error));
@@ -418,7 +339,7 @@ impl HttpPublisher {
                 )
                 .await
                 {
-                    Ok(()) => {}
+                    Ok(()) => lease.release(),
                     Err(PublishResponseStreamError::Partial(error)) => {
                         tracing::warn!(
                             "HTTP response stream terminated after partial publish: {}",
@@ -442,7 +363,10 @@ impl HttpPublisher {
         )
         .await
         {
-            Ok(Ok(collected)) => collected.to_bytes(),
+            Ok(Ok(collected)) => {
+                lease.release();
+                collected.to_bytes()
+            }
             Ok(Err(e)) => {
                 return Err(PublisherError::Retryable(anyhow::anyhow!(
                     "Failed to read HTTP response body: {}",

@@ -156,7 +156,8 @@ what each one computes:
 ```
 
 Available are `count`, `sum`, `min`, `max`, `last`, `mean`, `stddev`, `variance`, and
-`ema(path, alpha)`, `ema_stddev(path, alpha)`, `ema_variance(path, alpha)`. `ema` is the
+`ema(path, alpha)`, `ema_stddev(path, alpha)`, `ema_variance(path, alpha)`, and the
+time-based `decayed_count(half_life)` and `decayed_sum(path, half_life)`. `ema` is the
 moving average from above: it has no start bias, so the first message reads its own value. The value may be a number or a numeric string, as a CSV source delivers it. `fields`
 is several times faster than an expression; use an expression where you need logic that the
 built-ins do not cover.
@@ -182,14 +183,41 @@ A reading counts half after five minutes, a quarter after ten. `time` names the 
 field with the message's time: epoch seconds or milliseconds, or an RFC 3339 text. Without
 `time` the clock of the process is used, and a replay then computes different values.
 
-A message that is older than the newest one its state has seen is **detected, not
-corrected**: it is folded as if it had arrived at that newest time and carries the metadata
-`mqb.aggregate.late`, which names the entries concerned. Filter or route on it where late
-data must not count:
+A message that is older than the newest one its state has seen **counts with the weight it
+would have had by then**: half per half-life it is late. The averages and decayed values
+therefore come out the same in any arrival order. `last` keeps the newest value. The message
+carries the metadata `mqb.aggregate.late`, which names the entries concerned. Filter or route
+on it where late data must not count at all:
 
 ```yaml
 - filter: 'meta["mqb.aggregate.late"] == null'
 ```
+
+A wrong `time` far in the future makes every later message late. Send one message with the
+metadata `mqb.aggregate.overwrite: true` to set the state's clock back to its time.
+
+### Rising or falling activity
+
+`decayed_count(half_life)` counts messages that fade: one counts half after a half-life. At
+a steady rate it settles at about the messages of the last 1.44 half-lives, without a
+window. `decayed_sum(path, half_life)` does the same for a value. A short and a long
+half-life side by side compare the recent activity of a key with its own usual level:
+
+```yaml
+- aggregate:
+    consistency: single_writer
+    key: "${payload:customer_id}"
+    into: orders
+    time: created_at
+    fields:
+      last_hour: decayed_count(1h)
+      last_week: decayed_count(7d)
+      amount_hour: decayed_sum(amount, 1h)
+      amount_week: decayed_sum(amount, 7d)
+```
+
+`last_hour` × 168 well above `last_week` means far more orders than this customer usually
+places.
 
 ## Messages with missing fields
 
@@ -375,7 +403,9 @@ If you need one of these, compute the aggregate in the database with a
   to keep them.
 - **Order matters for a moving average.** Messages of a batch are folded in order. With a
   route `concurrency` above 1 the order across batches is not guaranteed. With `time`, a
-  message older than its state is marked `mqb.aggregate.late`, not reordered.
+  message older than its state is weighted by its lateness and marked
+  `mqb.aggregate.late`, not reordered; `ema(path, alpha)` and expressions still depend on
+  the order.
 - **A message that cannot be folded fails alone** and changes no state: its payload is not a
   JSON object, its key has no value, a field is missing, or an expression fails. On an input
   it is logged and dropped, and the source is told it succeeded; on an output only that

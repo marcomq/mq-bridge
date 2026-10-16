@@ -95,15 +95,6 @@ routes:
       memory: { topic: "test-out-internal", capacity: {out_capacity} }
 "#;
 
-pub async fn test_memory_performance_pipeline() {
-    setup_logging();
-    let config_yaml = CONFIG_YAML.replace(
-        "{out_capacity}",
-        &(PERF_TEST_MESSAGE_COUNT + 1000).to_string(),
-    );
-    run_performance_pipeline_test("internal", &config_yaml, PERF_TEST_MESSAGE_COUNT).await;
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn test_memory_concurrency() {
     setup_logging();

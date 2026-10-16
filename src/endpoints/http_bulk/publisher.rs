@@ -145,12 +145,16 @@ pub(super) fn around(
 
 /// How the ids of a delete request are sent.
 enum DeleteBody {
+    /// Comma-separated in the path.
     Url,
     /// A JSON array between the two halves of the envelope.
     Array(String, String),
-    /// One line per id, the id between the two halves.
-    Lines(String, String),
+    /// One line per id.
+    Lines,
 }
+
+/// The `delete.line` template, split around `{id}`.
+type DeleteLine = (CompiledTemplate, CompiledTemplate);
 
 /// Documents that go out in one request, with the batch positions they came from.
 #[derive(Default)]
@@ -171,10 +175,11 @@ pub struct HttpBulkPublisher {
     action: Option<CompiledTemplate>,
     envelope: (String, String),
     compression: Compression,
-    delete: Option<(Request, HttpBulkDelete, DeleteBody)>,
+    delete: Option<(Request, HttpBulkDelete, DeleteBody, Option<DeleteLine>)>,
     operation: Option<CompiledTemplate>,
     delete_values: Vec<String>,
     max_request_bytes: usize,
+    max_documents: usize,
     split_on_reject: bool,
 }
 
@@ -224,6 +229,9 @@ impl HttpBulkPublisher {
             }
             None => None,
         };
+        if upsert.max_documents == Some(0) {
+            bail!("http_bulk upsert.max_documents must be at least 1");
+        }
         let reports = &upsert.result;
         if upsert.split_on_reject
             && (reports.lines.is_some() || reports.items.is_some() || reports.job.is_some())
@@ -243,22 +251,30 @@ impl HttpBulkPublisher {
                 )?;
                 let in_url = delete.path.contains(IDS);
                 let body = match (&delete.envelope, &delete.line) {
-                    (None, None) if in_url => DeleteBody::Url,
-                    (None, None) => DeleteBody::Array(String::new(), String::new()),
-                    _ if in_url => bail!(
-                        "http_bulk delete sends the ids in the path, so it takes no 'envelope' or 'line'"
+                    (Some(_), _) if in_url => bail!(
+                        "http_bulk delete sends the ids in the path, so it takes no 'envelope'"
                     ),
-                    (Some(envelope), None) => {
+                    _ if in_url => DeleteBody::Url,
+                    (Some(envelope), _) => {
                         let (before, after) = around(envelope, IDS, "delete.envelope")?;
                         DeleteBody::Array(before, after)
                     }
-                    (None, Some(line)) => {
-                        let (before, after) = around(line, LINE_ID, "delete.line")?;
-                        DeleteBody::Lines(before, after)
-                    }
-                    (Some(_), Some(_)) => bail!("http_bulk delete sets both 'envelope' and 'line'"),
+                    (None, Some(_)) => DeleteBody::Lines,
+                    (None, None) => DeleteBody::Array(String::new(), String::new()),
                 };
-                Some((request, delete.clone(), body))
+                let escape = (!in_url).then_some(JSON);
+                let line = match &delete.line {
+                    Some(line) => {
+                        let (before, after) = around(line, LINE_ID, "delete.line")?;
+                        let compile = |part: &str| {
+                            CompiledTemplate::compile(part, escape)
+                                .context("Invalid http_bulk delete.line template")
+                        };
+                        Some((compile(&before)?, compile(&after)?))
+                    }
+                    None => None,
+                };
+                Some((request, delete.clone(), body, line))
             }
             None => None,
         };
@@ -295,6 +311,7 @@ impl HttpBulkPublisher {
                 .context("Invalid http_bulk operation template")?,
             delete_values: config.delete_values.clone(),
             max_request_bytes: config.max_request_bytes,
+            max_documents: upsert.max_documents.unwrap_or(usize::MAX),
             split_on_reject: upsert.split_on_reject,
         })
     }
@@ -378,7 +395,8 @@ impl HttpBulkPublisher {
                 outcomes[index] = Some(PublisherError::NonRetryable(error));
                 continue;
             }
-            if mark > 0 && chunk.body.len() > self.max_request_bytes {
+            let full = chunk.indices.len() >= self.max_documents;
+            if mark > 0 && (full || chunk.body.len() > self.max_request_bytes) {
                 chunk.body.truncate(mark);
                 chunks.push(std::mem::take(&mut chunk));
                 // The same payload was accepted a moment ago.
@@ -458,56 +476,86 @@ impl HttpBulkPublisher {
         run: Range<usize>,
         outcomes: &mut [Option<PublisherError>],
     ) -> Result<(), (usize, Failure)> {
-        let Some((request, delete, shape)) = &self.delete else {
+        let Some((request, delete, shape, line)) = &self.delete else {
             let text = "http_bulk has no 'delete' request configured for a delete message";
             for index in run {
                 outcomes[index] = Some(PublisherError::NonRetryable(anyhow!(text)));
             }
             return Ok(());
         };
-        let mut ids: Vec<(usize, Value)> = Vec::new();
+        // Each id as it goes into the request: a URL list item, an array element or a line.
+        let mut ids: Vec<(usize, Vec<u8>)> = Vec::new();
         for index in run {
-            let id = serde_json::from_slice::<Value>(&messages[index].payload)
+            let message = &messages[index];
+            let id = serde_json::from_slice::<Value>(&message.payload)
                 .ok()
                 .and_then(|mut document| document.get_mut(&delete.id_field).map(Value::take))
                 .filter(|id| id.is_string() || id.is_number());
-            match id {
-                Some(id) => ids.push((index, id)),
-                None => {
-                    outcomes[index] = Some(PublisherError::NonRetryable(anyhow!(
-                        "the delete message has no string or number in '{}'",
-                        delete.id_field
-                    )));
+            let Some(id) = id else {
+                outcomes[index] = Some(PublisherError::NonRetryable(anyhow!(
+                    "the delete message has no string or number in '{}'",
+                    delete.id_field
+                )));
+                continue;
+            };
+            let piece = match line {
+                Some((before, after)) => {
+                    let mut piece = before.render(Some(message));
+                    piece.extend_from_slice(id.to_string().as_bytes());
+                    piece.extend_from_slice(&after.render(Some(message)));
+                    piece
                 }
-            }
+                None => id.to_string().into_bytes(),
+            };
+            let piece = match shape {
+                DeleteBody::Url if line.is_none() => id_in_url(&id).into_bytes(),
+                DeleteBody::Url => {
+                    let text = String::from_utf8_lossy(&piece);
+                    utf8_percent_encode(&text, NON_ALPHANUMERIC)
+                        .to_string()
+                        .into_bytes()
+                }
+                DeleteBody::Array(..) if line.is_some() => {
+                    // One broken element would make the whole array invalid.
+                    if let Err(e) = serde_json::from_slice::<serde::de::IgnoredAny>(&piece) {
+                        outcomes[index] = Some(PublisherError::NonRetryable(anyhow!(
+                            "delete.line is not valid JSON for this message: {e}"
+                        )));
+                        continue;
+                    }
+                    piece
+                }
+                _ => piece,
+            };
+            ids.push((index, piece));
         }
         for chunk in ids.chunks(delete.max_ids) {
             let indices: Vec<usize> = chunk.iter().map(|(index, _)| *index).collect();
             let mut url = format!("{}{}", self.connection.base, request.path);
+            let joined = |separator: &[u8]| {
+                let pieces: Vec<&[u8]> = chunk.iter().map(|(_, piece)| piece.as_slice()).collect();
+                pieces.join(separator)
+            };
             let body = match shape {
                 DeleteBody::Url => {
-                    let list: Vec<String> = chunk.iter().map(|(_, id)| id_in_url(id)).collect();
+                    let list = String::from_utf8_lossy(&joined(b",")).into_owned();
                     url = format!(
                         "{}{}",
                         self.connection.base,
-                        request.path.replace(IDS, &list.join(","))
+                        request.path.replace(IDS, &list)
                     );
                     None
                 }
                 DeleteBody::Array(before, after) => {
-                    let list: Vec<&Value> = chunk.iter().map(|(_, id)| id).collect();
-                    let body = format!(
-                        "{before}{}{after}",
-                        Value::from_iter(list.into_iter().cloned())
-                    );
-                    Some((HeaderValue::from_static(JSON), body.into_bytes()))
+                    let mut body = format!("{before}[").into_bytes();
+                    body.extend_from_slice(&joined(b","));
+                    body.extend_from_slice(format!("]{after}").as_bytes());
+                    Some((HeaderValue::from_static(JSON), body))
                 }
-                DeleteBody::Lines(before, after) => {
-                    let body: String = chunk
-                        .iter()
-                        .map(|(_, id)| format!("{before}{id}{after}\n"))
-                        .collect();
-                    Some((HeaderValue::from_static(NDJSON), body.into_bytes()))
+                DeleteBody::Lines => {
+                    let mut body = joined(b"\n");
+                    body.push(b'\n');
+                    Some((HeaderValue::from_static(NDJSON), body))
                 }
             };
             let sent = self.send(request, &url, body, chunk.len()).await;
@@ -771,26 +819,54 @@ fn rejected_items(
     label: &str,
 ) -> Result<Vec<(usize, String)>, Failure> {
     let answer: Option<Value> = serde_json::from_str(text).ok();
-    let entries = answer
-        .as_ref()
-        .and_then(|answer| answer.pointer(&items.path))
-        .and_then(Value::as_array);
-    let Some(entries) = entries.filter(|entries| entries.len() == documents) else {
+    let empty = Vec::new();
+    let entries = match answer.as_ref().map(|answer| answer.pointer(&items.path)) {
+        // A list of failures only is left out when nothing failed.
+        Some(None | Some(Value::Null)) if items.index.is_some() => Some(&empty),
+        found => found.flatten().and_then(Value::as_array),
+    };
+    let fits = |entries: &&Vec<Value>| match items.index {
+        Some(_) => entries.len() <= documents,
+        None => entries.len() == documents,
+    };
+    let Some(entries) = entries.filter(fits) else {
         return Err(Failure::permanent(format!(
             "{label} answered no array of {documents} entries at '{}': {}",
             items.path,
             quoted(text)
         )));
     };
-    let failed = |entry: &Value| match entry.pointer(&items.error) {
-        None | Some(Value::Null) => None,
-        Some(reason) => Some(scalar_text(reason).unwrap_or_else(|| reason.to_string())),
+    let failed = |entry: &Value| {
+        let status = items.success.as_ref().and_then(|success| {
+            let status = entry.pointer(&success.path).unwrap_or(&Value::Null);
+            (*status != success.equals).then_some(status)
+        });
+        match (entry.pointer(&items.error), status) {
+            (None | Some(Value::Null), None) => None,
+            (None | Some(Value::Null), Some(status)) => Some(format!("status {status}")),
+            (Some(reason), _) => Some(scalar_text(reason).unwrap_or_else(|| reason.to_string())),
+        }
     };
-    Ok(entries
-        .iter()
-        .enumerate()
-        .filter_map(|(position, entry)| Some((position, failed(entry)?)))
-        .collect())
+    let mut rejected = Vec::new();
+    for (position, entry) in entries.iter().enumerate() {
+        let Some(reason) = failed(entry) else {
+            continue;
+        };
+        let position = match &items.index {
+            None => position,
+            Some(pointer) => match entry.pointer(pointer).and_then(Value::as_u64) {
+                Some(index) if (index as usize) < documents => index as usize,
+                _ => {
+                    return Err(Failure::permanent(format!(
+                        "{label} answered an entry without a document index below {documents} at '{pointer}': {}",
+                        quoted(text)
+                    )))
+                }
+            },
+        };
+        rejected.push((position, reason));
+    }
+    Ok(rejected)
 }
 
 #[async_trait]
@@ -1510,6 +1586,150 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_delete_line_goes_into_an_array_and_a_url_list_and_reads_the_payload() {
+        let server = server(|_| (200, "{}".to_string())).await;
+        let deletes = |paths: &[&str]| -> Vec<CanonicalMessage> {
+            documents(paths)
+                .into_iter()
+                .map(|message| message.with_metadata_kv("op", "delete"))
+                .collect()
+        };
+        let in_array = publisher(
+            &server,
+            json!({
+                "operation": "${metadata:op}",
+                "upsert": {"path": "/db/_bulk_docs"},
+                "delete": {"path": "/db/_bulk_docs", "envelope": r#"{"docs": {ids}}"#,
+                    "line": r#"{"_id": {id}, "_rev": "${payload:_rev}", "_deleted": true}"#},
+            }),
+        );
+        let batch = deletes(&[r#"{"id":"a","_rev":"1-x"}"#, r#"{"id":"b","_rev":"2-\"y"}"#]);
+        assert!(failures(in_array.send_batch(batch).await.unwrap()).is_empty());
+        let in_url = publisher(
+            &server,
+            json!({
+                "operation": "${metadata:op}",
+                "upsert": {"path": "/t"},
+                "delete": {"method": "DELETE", "path": "/t?id=in.({ids})", "line": "{id}"},
+            }),
+        );
+        let batch = deletes(&[r#"{"id":"a,b"}"#, r#"{"id":7}"#]);
+        assert!(failures(in_url.send_batch(batch).await.unwrap()).is_empty());
+
+        let calls = calls(&server);
+        assert_eq!(
+            calls[0].2,
+            r#"{"docs": [{"_id": "a", "_rev": "1-x", "_deleted": true},{"_id": "b", "_rev": "2-\"y", "_deleted": true}]}"#
+        );
+        assert_eq!(calls[1].1, "/t?id=in.(%22a%2Cb%22,7)");
+    }
+
+    #[tokio::test]
+    async fn a_delete_line_that_is_no_json_fails_alone_in_an_array() {
+        let server = server(|_| (200, "{}".to_string())).await;
+        let publisher = publisher(
+            &server,
+            json!({
+                "operation": "${metadata:op}",
+                "upsert": {"path": "/d"},
+                "delete": {"path": "/d", "envelope": "{ids}", "line": "{\"id\": {id}, \"n\": ${payload:n}}"},
+            }),
+        );
+        let batch = documents(&[r#"{"id":1,"n":5}"#, r#"{"id":2}"#])
+            .into_iter()
+            .map(|message| message.with_metadata_kv("op", "delete"))
+            .collect();
+        let failed = failures(publisher.send_batch(batch).await.unwrap());
+        assert_eq!(failed.len(), 1, "{failed:?}");
+        assert!(failed[0].0.contains("\"id\":2"), "{failed:?}");
+        assert_eq!(calls(&server)[0].2, r#"[{"id": 1, "n": 5}]"#);
+    }
+
+    #[tokio::test]
+    async fn max_documents_caps_each_upsert_request() {
+        let server = server(|_| (200, "{}".to_string())).await;
+        let publisher = publisher(
+            &server,
+            json!({"upsert": {"path": "/d", "max_documents": 2}}),
+        );
+        let batch = documents(&[
+            r#"{"a":1}"#,
+            r#"{"a":2}"#,
+            r#"{"a":3}"#,
+            r#"{"a":4}"#,
+            r#"{"a":5}"#,
+        ]);
+        assert!(failures(publisher.send_batch(batch).await.unwrap()).is_empty());
+        let lines: Vec<usize> = calls(&server)
+            .iter()
+            .map(|(_, _, body)| body.lines().count())
+            .collect();
+        assert_eq!(lines, [2, 2, 1]);
+    }
+
+    #[tokio::test]
+    async fn result_items_with_an_index_may_list_only_the_failures() {
+        let answers = [
+            "{\"insertErrors\": [{\"index\": 1, \"errors\": [{\"message\": \"bad\"}]}]}",
+            "{\"insertErrors\": [{\"index\": 9, \"errors\": [{\"message\": \"bad\"}]}]}",
+            "{\"kind\": \"bigquery#tableDataInsertAllResponse\"}",
+        ];
+        let calls = std::sync::Arc::new(AtomicUsize::new(0));
+        let seen = calls.clone();
+        let server = server(move |_| {
+            (
+                200,
+                answers[seen.fetch_add(1, Ordering::SeqCst)].to_string(),
+            )
+        })
+        .await;
+        let publisher = publisher(
+            &server,
+            json!({"upsert": {"path": "/insertAll", "format": "json_array", "result": {"items":
+                {"path": "/insertErrors", "error": "/errors/0/message", "index": "/index"}}}}),
+        );
+        let failed = failures(
+            publisher
+                .send_batch(documents(&[r#"{"a":1}"#, r#"{"a":2}"#, r#"{"a":3}"#]))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(failed.len(), 1);
+        assert!(failed[0].2.contains("bad"), "{failed:?}");
+        let failed = failures(
+            publisher
+                .send_batch(documents(&[r#"{"a":1}"#]))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(failed.len(), 1);
+        assert!(failed[0].2.contains("index"), "{failed:?}");
+        let sent = publisher.send_batch(documents(&[r#"{"a":1}"#])).await;
+        assert!(failures(sent.unwrap()).is_empty());
+    }
+
+    #[tokio::test]
+    async fn result_items_with_a_success_value_fail_other_statuses_without_an_error() {
+        let answer = r#"{"Results": [{"Status": "SUCCESS"}, {"Status": "FAILED"}, {"Status": "SUCCESS", "Error": "late"}, {}]}"#;
+        let server = server(move |_| (200, answer.to_string())).await;
+        let publisher = publisher(
+            &server,
+            json!({"upsert": {"path": "/bulk", "format": "json_array", "result": {"items":
+                {"path": "/Results", "error": "/Error", "success": {"path": "/Status", "equals": "SUCCESS"}}}}}),
+        );
+        let batch = documents(&[r#"{"a":1}"#, r#"{"a":2}"#, r#"{"a":3}"#, r#"{"a":4}"#]);
+        let failed = failures(publisher.send_batch(batch).await.unwrap());
+        let reasons: Vec<&str> = failed.iter().map(|failure| failure.2.as_str()).collect();
+        assert_eq!(failed.len(), 3, "{failed:?}");
+        assert!(
+            reasons.iter().any(|r| r.contains("\"FAILED\"")),
+            "{failed:?}"
+        );
+        assert!(reasons.iter().any(|r| r.contains("late")), "{failed:?}");
+        assert!(reasons.iter().any(|r| r.contains("null")), "{failed:?}");
+    }
+
     #[test]
     fn a_config_that_cannot_work_is_refused_at_startup() {
         let refused = |config: Value| {
@@ -1561,16 +1781,16 @@ mod tests {
                 json!({"path": "/d", "format": "json_array", "envelope": "{}"}),
                 "exactly once",
             ),
+            (json!({"path": "/d", "max_documents": 0}), "max_documents"),
         ] {
             let error = refused(json!({"url": "http://h", "upsert": upsert}));
             assert!(error.contains(expected), "{error}");
         }
         for (delete, expected) in [
             (
-                json!({"path": "/d", "envelope": "{ids}", "line": "{id}"}),
-                "both",
+                json!({"path": "/d/{ids}", "envelope": "{ids}"}),
+                "in the path",
             ),
-            (json!({"path": "/d/{ids}", "line": "{id}"}), "in the path"),
             (json!({"path": "/d", "line": "x"}), "exactly once"),
         ] {
             let config = json!({"url": "http://h", "upsert": {"path": "/d"}, "delete": delete});

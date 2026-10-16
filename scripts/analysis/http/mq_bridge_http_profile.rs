@@ -820,11 +820,30 @@ async fn run_rust_client(args: ProfileArgs, url: String) -> anyhow::Result<()> {
     let duration = std::time::Duration::from_secs(args.duration_s);
     let stop_at = std::time::Instant::now() + duration;
     let header_count = args.header_count;
+    // MQB_RAW_CONN=spawn|inline: bypass the pooled legacy client with one hyper conn per task.
+    let raw_conn = std::env::var("MQB_RAW_CONN").ok();
+    // MQB_CLIENT=legacy-shared|reqwest|pool: one client shared by every task, like a publisher.
+    let shared = match std::env::var("MQB_CLIENT").ok() {
+        Some(mode) => Some(Arc::new(SharedClient::new(&mode, &uri)?)),
+        None => None,
+    };
 
     let mut tasks = Vec::with_capacity(args.clients);
     for _ in 0..args.clients {
         let uri = uri.clone();
         let expected = expected.clone();
+        if let Some(shared) = shared.clone() {
+            tasks.push(tokio::spawn(shared_client_task(
+                shared, uri, expected, stop_at,
+            )));
+            continue;
+        }
+        if let Some(raw_mode) = raw_conn.clone() {
+            tasks.push(tokio::spawn(raw_conn_client(
+                raw_mode, uri, expected, stop_at,
+            )));
+            continue;
+        }
         tasks.push(tokio::spawn(async move {
             let mut connector = HttpConnector::new();
             connector.set_nodelay(true);
@@ -874,4 +893,184 @@ async fn run_rust_client(args: ProfileArgs, url: String) -> anyhow::Result<()> {
         rate
     );
     Ok(())
+}
+
+#[cfg(feature = "http")]
+type RawSender = hyper::client::conn::http1::SendRequest<http_body_util::Full<Bytes>>;
+
+/// Minimal pool on the stable `conn::http1` API: idle senders in a `Mutex<Vec>`.
+#[cfg(feature = "http")]
+struct RawPool {
+    authority: String,
+    idle: std::sync::Mutex<Vec<RawSender>>,
+}
+
+#[cfg(feature = "http")]
+impl RawPool {
+    async fn checkout(&self) -> anyhow::Result<RawSender> {
+        loop {
+            let Some(sender) = self.idle.lock().expect("pool lock").pop() else {
+                break;
+            };
+            if !sender.is_closed() {
+                return Ok(sender);
+            }
+        }
+        let stream = tokio::net::TcpStream::connect(&self.authority).await?;
+        stream.set_nodelay(true)?;
+        let (sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(stream)).await?;
+        tokio::spawn(conn);
+        Ok(sender)
+    }
+
+    fn checkin(&self, sender: RawSender) {
+        if !sender.is_closed() {
+            self.idle.lock().expect("pool lock").push(sender);
+        }
+    }
+}
+
+#[cfg(feature = "http")]
+#[allow(clippy::large_enum_variant)]
+enum SharedClient {
+    Legacy(hyper_util::client::legacy::Client<HttpConnector, http_body_util::Full<Bytes>>),
+    #[cfg(feature = "http-bulk")]
+    Reqwest(reqwest::Client),
+    Pool(RawPool),
+}
+
+#[cfg(feature = "http")]
+impl SharedClient {
+    fn new(mode: &str, uri: &hyper::Uri) -> anyhow::Result<Self> {
+        Ok(match mode {
+            "legacy-shared" => {
+                let mut connector = HttpConnector::new();
+                connector.set_nodelay(true);
+                Self::Legacy(
+                    hyper_util::client::legacy::Client::builder(TokioExecutor::new())
+                        .build(connector),
+                )
+            }
+            #[cfg(feature = "http-bulk")]
+            "reqwest" => Self::Reqwest(reqwest::Client::builder().tcp_nodelay(true).build()?),
+            "pool" => Self::Pool(RawPool {
+                authority: format!(
+                    "{}:{}",
+                    uri.host().unwrap_or("127.0.0.1"),
+                    uri.port_u16().unwrap_or(80)
+                ),
+                idle: std::sync::Mutex::new(Vec::new()),
+            }),
+            other => anyhow::bail!("unknown MQB_CLIENT: {other}"),
+        })
+    }
+}
+
+#[cfg(feature = "http")]
+async fn shared_client_task(
+    shared: Arc<SharedClient>,
+    uri: hyper::Uri,
+    expected: Bytes,
+    stop_at: std::time::Instant,
+) -> anyhow::Result<usize> {
+    let mut count = 0usize;
+    while std::time::Instant::now() < stop_at {
+        let body = match shared.as_ref() {
+            SharedClient::Legacy(client) => {
+                let request = Request::builder()
+                    .method(hyper::Method::POST)
+                    .uri(uri.clone())
+                    .header("content-type", "application/json")
+                    .body(http_body_util::Full::new(Bytes::from_static(PAYLOAD)))?;
+                let response = client.request(request).await?;
+                anyhow::ensure!(response.status().is_success(), "HTTP {}", response.status());
+                response.into_body().collect().await?.to_bytes()
+            }
+            #[cfg(feature = "http-bulk")]
+            SharedClient::Reqwest(client) => {
+                let response = client
+                    .post(uri.to_string())
+                    .header("content-type", "application/json")
+                    .body(Bytes::from_static(PAYLOAD))
+                    .send()
+                    .await?;
+                anyhow::ensure!(response.status().is_success(), "HTTP {}", response.status());
+                response.bytes().await?
+            }
+            SharedClient::Pool(pool) => {
+                let mut sender = pool.checkout().await?;
+                let request = Request::builder()
+                    .method(hyper::Method::POST)
+                    .uri(uri.path())
+                    .header("host", pool.authority.as_str())
+                    .header("content-type", "application/json")
+                    .body(http_body_util::Full::new(Bytes::from_static(PAYLOAD)))?;
+                let response = sender.send_request(request).await?;
+                anyhow::ensure!(response.status().is_success(), "HTTP {}", response.status());
+                let body = response.into_body().collect().await?.to_bytes();
+                pool.checkin(sender);
+                body
+            }
+        };
+        anyhow::ensure!(body == expected, "unexpected body: {:?}", body);
+        count += 1;
+    }
+    Ok(count)
+}
+
+/// One `hyper::client::conn::http1` connection; `inline` polls it in this task, `spawn` in its own.
+#[cfg(feature = "http")]
+async fn raw_conn_client(
+    mode: String,
+    uri: hyper::Uri,
+    expected: Bytes,
+    stop_at: std::time::Instant,
+) -> anyhow::Result<usize> {
+    let host = uri.host().unwrap_or("127.0.0.1").to_string();
+    let authority = format!("{}:{}", host, uri.port_u16().unwrap_or(80));
+    let path = uri.path().to_string();
+    let stream = tokio::net::TcpStream::connect(&authority).await?;
+    stream.set_nodelay(true)?;
+    let (mut sender, conn) =
+        hyper::client::conn::http1::handshake::<_, http_body_util::Full<Bytes>>(TokioIo::new(
+            stream,
+        ))
+        .await?;
+    let mut conn: std::pin::Pin<Box<dyn std::future::Future<Output = hyper::Result<()>> + Send>> =
+        if mode == "spawn" {
+            tokio::spawn(conn);
+            Box::pin(futures::future::pending())
+        } else {
+            Box::pin(conn)
+        };
+    let mut count = 0usize;
+    while std::time::Instant::now() < stop_at {
+        let request = Request::builder()
+            .method(hyper::Method::POST)
+            .uri(path.as_str())
+            .header("host", authority.as_str())
+            .header("content-type", "application/json")
+            .body(http_body_util::Full::new(Bytes::from_static(PAYLOAD)))?;
+        let exchange = async {
+            let response = sender.send_request(request).await?;
+            if !response.status().is_success() {
+                anyhow::bail!("HTTP {}", response.status());
+            }
+            let body = response.into_body().collect().await?.to_bytes();
+            if body != expected {
+                anyhow::bail!("unexpected body: {:?}", body);
+            }
+            anyhow::Ok(())
+        };
+        tokio::select! {
+            biased;
+            result = exchange => result?,
+            result = &mut conn => {
+                result?;
+                anyhow::bail!("connection closed");
+            }
+        }
+        count += 1;
+    }
+    Ok(count)
 }

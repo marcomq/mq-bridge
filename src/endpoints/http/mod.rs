@@ -2331,6 +2331,7 @@ fn basic_auth_header_value(basic_auth: Option<&(String, String)>) -> Option<Stri
     })
 }
 
+mod pool;
 mod publisher;
 mod stream;
 pub use publisher::HttpPublisher;

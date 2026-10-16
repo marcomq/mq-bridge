@@ -3108,6 +3108,9 @@ pub struct SqlxCursorReader {
     /// Page queries, built once: only the bound cursor and limit vary between polls.
     sql_first: String,
     sql_next: String,
+    /// Unguarded `sql_first`/`sql_next` probes, set when the commit-order guard is on.
+    sql_unguarded: Option<(String, String)>,
+    hidden_rows_warned: bool,
     source_metadata: bool,
 }
 
@@ -3145,6 +3148,43 @@ impl Drop for Unsettled {
             position.epoch += 1;
         }
     }
+}
+
+/// `age()` of the oldest transaction still in flight, as the 32-bit xid row `xmin`s compare to.
+const PG_OLDEST_IN_FLIGHT_AGE: &str =
+    "age((pg_snapshot_xmin(pg_current_snapshot())::text::bigint % 4294967296)::text::xid)";
+
+/// Whether the table has an `xmin` to guard on; a view or a Postgres-compatible server may not.
+async fn pg_xmin_readable(pool: &AnyPool, table: &str) -> bool {
+    let probe =
+        format!("SELECT 1 FROM {table} WHERE age(xmin) <= {PG_OLDEST_IN_FLIGHT_AGE} LIMIT 0");
+    match sqlx::query(audited_sql(&probe)).fetch_all(pool).await {
+        Ok(_) => true,
+        Err(e) => {
+            warn!(table = %table, error = %e, "SQLx cursor reader cannot read xmin; rows of transactions that commit out of cursor order may be skipped");
+            false
+        }
+    }
+}
+
+/// Ends a page before the first row written by a transaction no older than the oldest one
+/// still open: that one may yet commit a lower cursor value, which `col > last` would skip.
+/// Only the page window is checked, so the cost stays one page.
+fn pg_in_flight_cut(
+    table: &str,
+    cursor_column: &str,
+    order_column: &str,
+    lower: Option<&str>,
+    limit: &str,
+) -> String {
+    let window_filter = lower
+        .map(|lower| format!(" WHERE {cursor_column} > {lower}"))
+        .unwrap_or_default();
+    format!(
+        "{cursor_column} < ALL (SELECT mqb_w.mqb_c FROM (SELECT {cursor_column} AS mqb_c, \
+         xmin AS mqb_x FROM {table}{window_filter} ORDER BY {order_column} ASC LIMIT {limit}) \
+         mqb_w WHERE age(mqb_w.mqb_x) <= {PG_OLDEST_IN_FLIGHT_AGE})"
+    )
 }
 
 /// Run one keyset page. `from` is the exclusive lower bound (`None` = start of table).
@@ -3273,22 +3313,46 @@ impl SqlxCursorReader {
                 ),
                 None => (lower_bound, cursor_column.clone()),
             };
+        let commit_order_guard =
+            driver_name == "PostgreSQL" && pg_xmin_readable(&pool, &config.table).await;
+        let guard = |lower: Option<&str>, limit: &str, joiner: &str| {
+            if commit_order_guard {
+                let cut =
+                    pg_in_flight_cut(&config.table, &cursor_column, &order_column, lower, limit);
+                format!(" {joiner} {cut}")
+            } else {
+                String::new()
+            }
+        };
+        let first_limit = positional_placeholder(&driver_name, 1);
         let sql_first = format!(
-            "SELECT {0} FROM {1} ORDER BY {2} ASC LIMIT {3}",
+            "SELECT {0} FROM {1}{2} ORDER BY {3} ASC LIMIT {4}",
             projection,
             config.table,
+            guard(None, &first_limit, "WHERE"),
             order_column,
-            positional_placeholder(&driver_name, 1),
+            first_limit,
         );
+        let next_limit = positional_placeholder(&driver_name, 2);
         let sql_next = format!(
-            "SELECT {0} FROM {1} WHERE {2} > {3} ORDER BY {5} ASC LIMIT {4}",
+            "SELECT {0} FROM {1} WHERE {2} > {3}{4} ORDER BY {5} ASC LIMIT {6}",
             projection,
             config.table,
             cursor_column,
             lower_bound,
-            positional_placeholder(&driver_name, 2),
+            guard(Some(&lower_bound), &next_limit, "AND"),
             order_column,
+            next_limit,
         );
+        let sql_unguarded = commit_order_guard.then(|| {
+            (
+                format!("SELECT 1 FROM {} LIMIT {first_limit}", config.table),
+                format!(
+                    "SELECT 1 FROM {} WHERE {cursor_column} > {lower_bound} LIMIT {next_limit}",
+                    config.table
+                ),
+            )
+        });
 
         Ok(Self {
             pool,
@@ -3297,6 +3361,8 @@ impl SqlxCursorReader {
             driver_name,
             sql_first,
             sql_next,
+            sql_unguarded,
+            hidden_rows_warned: false,
             backoff: PollBackoff::new(
                 Duration::from_millis(config.polling_interval_ms.unwrap_or(100)),
                 config.max_polling_interval_ms.map(Duration::from_millis),
@@ -3320,6 +3386,28 @@ impl SqlxCursorReader {
         } else {
             &self.sql_first
         }
+    }
+
+    /// Whether an empty guarded page hides committed rows behind a transaction still open.
+    async fn rows_hidden_by_open_transaction(
+        &mut self,
+        last: Option<&SqlCursor>,
+    ) -> Result<bool, ConsumerError> {
+        let Some((first, next)) = &self.sql_unguarded else {
+            return Ok(false);
+        };
+        let sql = if last.is_some() { next } else { first };
+        let rows = fetch_page(&self.pool, sql, last, 1)
+            .await
+            .map_err(classify_sql_consumer_error)?;
+        if rows.is_empty() {
+            return Ok(false);
+        }
+        if !self.hidden_rows_warned {
+            self.hidden_rows_warned = true;
+            warn!(table = %self.table, "SQLx cursor reader is waiting for an open transaction elsewhere on the server; committed rows after it are held back until it ends");
+        }
+        Ok(true)
     }
 
     /// Stamp the replay position an idempotent sink names its objects from. The cursor value
@@ -3406,6 +3494,11 @@ impl MessageConsumer for SqlxCursorReader {
                 // Drained: preserve polling cadence (backing off if configured), then surface an empty
                 // batch so the route can pause or terminate.
                 tokio::time::sleep(self.backoff.idle_delay()).await;
+                // Committed rows held back by the guard are not drained; keep polling for them.
+                if self.rows_hidden_by_open_transaction(last.as_ref()).await? {
+                    continue;
+                }
+                self.hidden_rows_warned = false;
                 return Ok(ReceivedBatch {
                     messages: Vec::new(),
                     commit: Box::new(|_| Box::pin(async { Ok(()) })),
@@ -3413,6 +3506,7 @@ impl MessageConsumer for SqlxCursorReader {
             }
             // Rows arrived: return to the base polling interval.
             self.backoff.reset();
+            self.hidden_rows_warned = false;
 
             // Resolve column positions and JSON keys once; every row in this batch shares the
             // same query/column order. Value *kinds* are still read per row (SQLite types

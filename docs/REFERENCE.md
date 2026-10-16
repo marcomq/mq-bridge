@@ -1359,6 +1359,8 @@ times faster, because no expression runs and the payload is not parsed into a tr
 | `ema(path, alpha)` | moving average weighting each new value with `alpha` (0 < alpha ≤ 1), without a start bias: the first message reads its own value |
 | `ema(path, half_life)` | the same, weighted by time: a value counts half after `half_life`, e.g. `ema(reading, 5m)`. Units: `ms`, `s`, `m`, `h`, `d` |
 | `ema_stddev(path, alpha)`, `ema_variance(path, alpha)` | the same over values weighted like `ema`, so old values fade; `null` for the first message. Both take a half-life in place of `alpha` too |
+| `decayed_count(half_life)` | messages, each counting half after `half_life`. At a steady rate of r per second it settles at r × half_life / ln 2, about the messages of the last 1.44 half-lives |
+| `decayed_sum(path, half_life)` | the same over the values at `path`: a recent total that fades instead of dropping out of a window |
 
 `path` is a dotted payload path such as `reading` or `device.reading`. Its value must be a
 number or a numeric string (what a CSV source delivers); a message without one cannot be
@@ -1385,13 +1387,44 @@ this process is used, which makes a replay compute different values.
       spread: ema_stddev(reading, 1h)
 ```
 
-**Late messages are detected, not corrected.** With `time` set, every `fields` state
-remembers the newest time it has seen. A message with an older time is folded as if it had
-arrived at that newest time (nothing decays for it), and it carries the metadata
-`mqb.aggregate.late` naming the entries concerned by their `into`, comma-separated. A
-[`filter`](#filter) or a `switch` can act on it as `meta["mqb.aggregate.late"]`. The first
-occurrence is logged as a warning. `time` adds one slot to each `fields` state; states stored
-before it was set are read and extended. Expression entries do not use `time`.
+**Trends.** The same value with a short and a long half-life side by side shows whether
+activity is rising or falling. Divided by its half-life, each is a rate: `orders_10m` / 10
+minutes above `orders_1d` / 1440 minutes means a key is busier than its own baseline.
+
+```yaml middleware
+- aggregate:
+    consistency: single_writer
+    key: "${payload:account_id}"
+    into: activity
+    time: created_at
+    fields:
+      orders_10m: decayed_count(10m)
+      orders_1d: decayed_count(1d)
+      amount_10m: decayed_sum(amount, 10m)
+      amount_1d: decayed_sum(amount, 1d)
+      typical_amount: ema(amount, 1d)
+      amount_spread: ema_stddev(amount, 1d)
+```
+
+With `emit: previous` the decayed values are read faded to the message's time, so they
+describe the activity before it.
+
+**Late messages fade by their lateness.** Every `fields` state with `time` or a half-life
+remembers the newest time it has seen. A message with an older time counts with the weight
+it would have had by then: 0.5 per half-life it is late. So `ema`, `ema_stddev`,
+`ema_variance`, `decayed_count` and `decayed_sum` end up the same whatever order the
+messages arrive in, across batches and instances too; the clock does not move back. `last`
+keeps the value of the newest message. `ema(path, alpha)` has no time and takes a late
+message in arrival order. A late message carries the metadata `mqb.aggregate.late` naming
+the entries concerned by their `into`, comma-separated. A [`filter`](#filter) or a `switch`
+can act on it as `meta["mqb.aggregate.late"]`. The first occurrence is logged as a warning.
+`time` adds one slot to each `fields` state; states stored before it was set are read and
+extended. Expression entries do not use `time`.
+
+**Correcting a state.** A message with the metadata `mqb.aggregate.overwrite: true` is
+folded as the newest one even if it is older: `last` takes its value, and the state's clock
+is set to its time. Use it to repair a state whose clock a wrong `time` pushed into the
+future, which would make every later message late.
 
 <a id="aggregate-on-error"></a>
 **A message that cannot be folded.** Its payload is not a JSON object, a `key` has no value,
@@ -1494,13 +1527,14 @@ and MongoDB are supported.
   first: on an input, list it *after* `aggregate` (see [Ordering](#ordering--read-this-before-combining-middleware)).
 - **Order matters for order-dependent states** such as a moving average. Within a batch
   messages are folded in order; with a route `concurrency` above 1 the order across batches
-  is not guaranteed. With `time`, a message older than its state is marked, not reordered.
+  is not guaranteed. With `time`, a message older than its state is weighted by its
+  lateness and marked, not reordered.
 - **A message that cannot be folded fails alone** and changes no state. By default an input
   drops it and still acks it, so an HTTP caller gets `202`; see
   [`on_error`](#aggregate-on-error) for `fail` and `skip`.
 - **No windows and no expiry by time.** There is no "last hour" and no time to live: a state
   covers every message of its key, and a row in the store is never removed. `ema` and
-  `ema_stddev` stand in for a sliding window, by message count or with a half-life by time. For fixed windows put the window into the key,
+  `ema_stddev`, `decayed_count` and `decayed_sum` stand in for a sliding window, by message count or with a half-life by time. For fixed windows put the window into the key,
   e.g. `key: "${payload:sensor_id}:${payload:hour}"`, and use a `store` with `shared`, which
   keeps no state in memory; the rows of past windows stay until you delete them.
 - **No exactly-once and no key ownership.** A stream processor commits state and input

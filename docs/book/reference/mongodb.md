@@ -2,7 +2,7 @@
 
 # MongoDB
 
-Schemes: `mongodb://`
+Schemes: `mongodb://`, `mongodb+srv://`
 
 Query parameters recognised as config fields for this connector. The object-typed `tls` is set with a JSON literal, e.g. `?tls={...}`. Any other `?key=value` pair is passed through unchanged as a driver option on the connection URL.
 

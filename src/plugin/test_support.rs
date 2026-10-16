@@ -157,6 +157,9 @@ impl StubRequest {
     }
 }
 
+/// Status, extra headers and body of a stub answer.
+pub type StubAnswer = (u16, Vec<(String, String)>, String);
+
 /// A local HTTP/1.1 server standing in for the service a sink talks to, so a
 /// unit test can script its answers — a slow job, a 503, a rejected document —
 /// without Docker. `respond` returns a status and a JSON body for each request;
@@ -184,6 +187,17 @@ pub struct StubHttpServer {
 impl StubHttpServer {
     pub async fn start(
         respond: impl Fn(&StubRequest) -> (u16, String) + Send + Sync + 'static,
+    ) -> std::io::Result<Self> {
+        Self::start_with_headers(move |request| {
+            let (status, body) = respond(request);
+            (status, Vec::new(), body)
+        })
+        .await
+    }
+
+    /// Like [`start`](Self::start), with extra response headers.
+    pub async fn start_with_headers(
+        respond: impl Fn(&StubRequest) -> StubAnswer + Send + Sync + 'static,
     ) -> std::io::Result<Self> {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let url = format!("http://{}", listener.local_addr()?);
@@ -228,7 +242,7 @@ impl Drop for StubHttpServer {
 async fn serve_stub(
     mut socket: tokio::net::TcpStream,
     seen: &std::sync::Mutex<Vec<StubRequest>>,
-    respond: &(dyn Fn(&StubRequest) -> (u16, String) + Send + Sync),
+    respond: &(dyn Fn(&StubRequest) -> StubAnswer + Send + Sync),
 ) -> std::io::Result<()> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -272,10 +286,14 @@ async fn serve_stub(
         headers,
         body,
     };
-    let (status, answer) = respond(&request);
+    let (status, extra, answer) = respond(&request);
     seen.lock().expect("stub requests poisoned").push(request);
+    let extra: String = extra
+        .iter()
+        .map(|(name, value)| format!("{name}: {value}\r\n"))
+        .collect();
     let response = format!(
-        "HTTP/1.1 {status} Stub\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
+        "HTTP/1.1 {status} Stub\r\nContent-Type: application/json\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n{answer}",
         answer.len()
     );
     socket.write_all(response.as_bytes()).await?;

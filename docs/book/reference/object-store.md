@@ -2,7 +2,7 @@
 
 # Object Storage (local / cloud)
 
-Schemes: `local-store://`, `s3://`, `s3a://`, `gs://`, `gcs://`, `az://`, `azure://`, `abfs://`, `abfss://`
+Schemes: `s3://`, `s3a://`, `gs://`, `gcs://`, `az://`, `azure://`, `abfs://`, `abfss://`, `local-store://`
 
 Query parameters recognised as config fields for this connector. The object-typed `csv` is set with a JSON literal, e.g. `?csv={...}`. Unrecognised parameters are not forwarded as driver options, so any other `?key=value` pair is rejected rather than silently ignored.
 

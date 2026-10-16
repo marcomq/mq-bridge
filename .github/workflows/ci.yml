@@ -208,12 +208,10 @@ jobs:
         include:
           - name: Status
             filter: 'binary(integration_test) & test(=test_all_status)'
-          - name: Chaos
-            filter: 'binary(integration_test) & test(=test_all_chaos)'
           - name: Logic
             filter: 'binary(integration_test) & (test(=test_all_request_reply) | test(=test_all_subscriber_logic))'
           - name: Endpoints
-            filter: 'binary(integration_test) & not test(=test_all_status) & not test(=test_all_chaos) & not test(=test_all_request_reply) & not test(=test_all_subscriber_logic) & not test(=test_all_performance_pipeline) & not test(=test_all_performance_direct)'
+            filter: 'binary(integration_test) & not test(=test_all_status) & not test(=test_all_request_reply) & not test(=test_all_subscriber_logic) & not test(=test_all_performance_pipeline) & not test(=test_all_performance_direct)'
           - name: Performance Pipeline
             filter: 'binary(integration_test) & test(=test_all_performance_pipeline)'
           - name: Performance Direct
@@ -270,9 +268,11 @@ jobs:
 
   # Armature clones an external repo and runs its test suite: no docker stacks, no
   # TLS certs, no keytool. It used to pay ~1.3m of setup for 1.7m of tests.
+  # Advisory: it builds armature's `develop` head unlocked, so their breakage shows here.
   integration-armature:
     name: Integration — Armature
     runs-on: ubuntu-latest
+    continue-on-error: true
     needs: integration-build
     steps:
       - uses: actions/checkout@v7

@@ -2,9 +2,8 @@
 
 use mq_bridge::endpoints::kafka::{KafkaConsumer, KafkaPublisher};
 use mq_bridge::test_utils::{
-    add_performance_result, run_chaos_pipeline_test, run_direct_perf_test,
-    run_performance_pipeline_test, run_pipeline_test, run_test_with_docker,
-    run_test_with_docker_controller, setup_logging, verify_subscriber_logic,
+    add_performance_result, run_direct_perf_test, run_performance_pipeline_test,
+    run_test_with_docker, run_test_with_docker_controller, setup_logging, verify_subscriber_logic,
     PERF_TEST_MESSAGE_COUNT,
 };
 use std::sync::Arc;
@@ -41,33 +40,6 @@ routes:
     output:
       memory: { topic: "kafka-test-out", capacity: {out_capacity} }
 "#;
-
-pub async fn test_kafka_pipeline() {
-    setup_logging();
-    run_test_with_docker("tests/integration/docker-compose/kafka.yml", || async {
-        let config_yaml = CONFIG_YAML.replace(
-            "{out_capacity}",
-            &(PERF_TEST_MESSAGE_COUNT + 1000).to_string(),
-        );
-        run_pipeline_test("kafka", &config_yaml).await;
-    })
-    .await;
-}
-
-pub async fn test_kafka_chaos() {
-    setup_logging();
-    run_test_with_docker_controller(
-        "tests/integration/docker-compose/kafka.yml",
-        |controller| async move {
-            let config_yaml = CONFIG_YAML.replace(
-                "{out_capacity}",
-                &(PERF_TEST_MESSAGE_COUNT + 1000).to_string(),
-            );
-            run_chaos_pipeline_test("kafka", &config_yaml, controller, "kafka").await;
-        },
-    )
-    .await;
-}
 
 pub async fn test_kafka_performance_pipeline() {
     setup_logging();

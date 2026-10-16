@@ -58,7 +58,8 @@ def main():
         file = OUT / page
         if not file.is_file() or page.name in SKIP:
             continue
-        text = file.read_text()
+        # mdBook renders README.md as index.html but leaves links to it as README.html.
+        text = re.sub(r'href="([^":]*)README\.html', r'href="\1index.html', file.read_text())
         head = f'<link rel="canonical" href="{url(page)}">'
         if page in descriptions:
             meta = f'<meta name="description" content="{html.escape(descriptions[page])}">'

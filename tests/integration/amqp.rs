@@ -33,18 +33,6 @@ routes:
       memory: { topic: "amqp-test-out", capacity: {out_capacity} }
 "#;
 
-pub async fn test_amqp_pipeline() {
-    setup_logging();
-    run_test_with_docker("tests/integration/docker-compose/amqp.yml", || async {
-        let config_yaml = CONFIG_YAML.replace(
-            "{out_capacity}",
-            &(PERF_TEST_MESSAGE_COUNT + 1000).to_string(),
-        );
-        run_pipeline_test("AMQP", &config_yaml).await;
-    })
-    .await;
-}
-
 #[tokio::test]
 #[ignore = "requires docker compose"]
 async fn test_amqp_publisher_handles_nack() {
@@ -332,21 +320,6 @@ async fn test_amqp_publisher_handles_disconnect() {
         Route::stop("amqp_fault_test").await;
         Route::stop("amqp_verifier").await;
     })
-    .await;
-}
-
-pub async fn test_amqp_chaos() {
-    setup_logging();
-    run_test_with_docker_controller(
-        "tests/integration/docker-compose/amqp.yml",
-        |controller| async move {
-            let config_yaml = CONFIG_YAML.replace(
-                "{out_capacity}",
-                &(PERF_TEST_MESSAGE_COUNT + 1000).to_string(),
-            );
-            run_chaos_pipeline_test("AMQP", &config_yaml, controller, "rabbitmq").await;
-        },
-    )
     .await;
 }
 

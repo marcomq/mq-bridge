@@ -171,6 +171,7 @@ On the command line it is one more parameter:
 | `max_request_bytes` | 10 MiB | With `messages_per_request`: a bundle over this size is cut earlier |
 | `request_timeout_ms` | see right | Timeout of one request; `0`: none. Unset: a request fails after 300 s without a response byte |
 | `tls` | none | TLS options as on [`http_bulk`](http-bulk.md). JSON text in a URI |
+| `auth` | none | `oauth2` or `aws_sigv4` credentials as on [`http_bulk`](http-bulk.md#authentication), in place of `api_key`. JSON text in a URI |
 
 ## `openai_embeddings`
 
@@ -204,6 +205,29 @@ on the [Qdrant](./qdrant.md) page. On the command line the scheme is
 | `max_request_bytes` | 10 MiB | A larger batch is split into several requests |
 | `request_timeout_ms` | see right | Timeout of one request; `0`: none. Unset: a request fails after 300 s without a response byte |
 | `tls` | none | TLS options as on [`http_bulk`](http-bulk.md). JSON text in a URI |
+| `auth` | none | `oauth2` or `aws_sigv4` credentials as on [`http_bulk`](http-bulk.md#authentication), in place of `api_key`. JSON text in a URI |
+
+## Amazon Bedrock
+
+Bedrock serves the chat completions API at
+`https://bedrock-runtime.<region>.amazonaws.com/openai/v1`. Use a Bedrock API key as
+`api_key`, or sign the requests with the AWS credentials of the environment (needs a build
+with the `aws` feature):
+
+```yaml
+output:
+  request:
+    to:
+      openai_chat:
+        url: https://bedrock-runtime.us-west-2.amazonaws.com/openai/v1
+        auth:
+          aws_sigv4: { region: us-west-2, service: bedrock }
+        model: openai.gpt-oss-20b-1:0
+        prompt: "Summarise: ${payload:text}"
+    forward_to: { file: { path: "summaries.jsonl", format: raw } }
+```
+
+This was checked for its configuration only, not run against Bedrock.
 
 ## From Rust
 

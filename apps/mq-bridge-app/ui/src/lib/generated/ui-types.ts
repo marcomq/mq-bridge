@@ -781,6 +781,7 @@ export interface HttpBulkUpsert {
   document?: string | null;
   result?: HttpBulkResult;
   split_on_reject?: boolean;
+  max_documents?: number | null;
 }
 
 export type HttpBulkFormat = "ndjson" | "json_array";
@@ -799,6 +800,13 @@ export interface HttpBulkLines {
 export interface HttpBulkItems {
   path?: string;
   error: string;
+  index?: string | null;
+  success?: HttpBulkItemSuccess | null;
+}
+
+export interface HttpBulkItemSuccess {
+  path: string;
+  equals: unknown;
 }
 
 export interface HttpBulkJob {
@@ -850,6 +858,8 @@ export interface HttpBulkCursor {
   item?: string | null;
   start?: unknown;
   end_when_missing?: boolean;
+  next_url?: string | null;
+  link?: boolean;
 }
 
 export type HttpBulkStream = "sse" | "ndjson";
@@ -933,6 +943,7 @@ export interface OpenAiChatConfig {
   max_request_bytes?: number | null;
   request_timeout_ms?: number | null;
   tls?: unknown;
+  auth?: unknown;
 }
 
 export interface OpenAiEmbeddingsConfig {
@@ -944,6 +955,7 @@ export interface OpenAiEmbeddingsConfig {
   max_request_bytes?: number | null;
   request_timeout_ms?: number | null;
   tls?: unknown;
+  auth?: unknown;
 }
 
 export interface QdrantConfig {

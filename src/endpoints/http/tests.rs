@@ -2863,3 +2863,85 @@ async fn a_response_stream_that_fails_half_way_is_not_sent_again() {
     let payloads: Vec<&[u8]> = taken.iter().map(|m| m.payload.as_ref()).collect();
     assert_eq!(payloads, [b"1".as_slice(), b"2", b""]);
 }
+
+/// Reads one request with a `Content-Length` body from `stream`.
+async fn read_raw_request(stream: &mut tokio::net::TcpStream) -> std::io::Result<()> {
+    let mut request = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+            let head = String::from_utf8_lossy(&request[..end]).to_ascii_lowercase();
+            let length = head
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length:"))
+                .map_or(0, |value| value.trim().parse().unwrap_or(0));
+            if request.len() >= end + 4 + length {
+                return Ok(());
+            }
+        }
+        let n = stream.read(&mut chunk).await?;
+        if n == 0 {
+            return Err(std::io::ErrorKind::UnexpectedEof.into());
+        }
+        request.extend_from_slice(&chunk[..n]);
+    }
+}
+
+/// Answers on keep-alive connections, closing each one after `per_connection` requests; returns
+/// the address and the number of connections accepted.
+async fn counting_http_server(per_connection: usize) -> (SocketAddr, Arc<AtomicU64>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let accepted = Arc::new(AtomicU64::new(0));
+    let counter = accepted.clone();
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            counter.fetch_add(1, Ordering::SeqCst);
+            tokio::spawn(async move {
+                for _ in 0..per_connection {
+                    if read_raw_request(&mut stream).await.is_err() {
+                        return;
+                    }
+                    let response = b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok";
+                    if stream.write_all(response).await.is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    (addr, accepted)
+}
+
+#[tokio::test]
+async fn http1_connections_are_reused() {
+    init_crypto();
+    let (addr, accepted) = counting_http_server(usize::MAX).await;
+    let config = HttpConfig {
+        url: format!("http://{addr}/"),
+        ..Default::default()
+    };
+    let publisher = HttpPublisher::new(&config).await.unwrap();
+    for _ in 0..3 {
+        let sent = publisher.send(CanonicalMessage::from_vec("request")).await;
+        assert!(sent.is_ok(), "{sent:?}");
+    }
+    assert_eq!(accepted.load(Ordering::SeqCst), 1);
+}
+
+/// The server closes without `Connection: close`, so the client learns of it only on reuse.
+#[tokio::test]
+async fn a_pooled_connection_the_server_closed_is_replaced() {
+    init_crypto();
+    let (addr, accepted) = counting_http_server(1).await;
+    let config = HttpConfig {
+        url: format!("http://{addr}/"),
+        ..Default::default()
+    };
+    let publisher = HttpPublisher::new(&config).await.unwrap();
+    for _ in 0..3 {
+        let sent = publisher.send(CanonicalMessage::from_vec("request")).await;
+        assert!(sent.is_ok(), "{sent:?}");
+    }
+    assert_eq!(accepted.load(Ordering::SeqCst), 3);
+}

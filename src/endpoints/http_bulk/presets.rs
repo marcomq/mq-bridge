@@ -495,6 +495,7 @@ fn openai_embeddings(_route: &str, value: &Value) -> anyhow::Result<Value> {
     let mut resolved = json!({
         "url": openai_url("openai-embeddings", config.url.as_deref())?,
         "headers": bearer(config.api_key),
+        "auth": nested("auth", config.auth)?,
         "request_timeout_ms": config.request_timeout_ms,
         "query": {
             "path": "/embeddings",
@@ -555,6 +556,7 @@ fn openai_chat(_route: &str, value: &Value) -> anyhow::Result<Value> {
     let mut resolved = json!({
         "url": openai_url("openai-chat", config.url.as_deref())?,
         "headers": bearer(config.api_key),
+        "auth": nested("auth", config.auth)?,
         "request_timeout_ms": config.request_timeout_ms,
         "query": query
     });
@@ -1112,6 +1114,41 @@ mod tests {
                 body.to_string()
             )]
         );
+    }
+
+    #[tokio::test]
+    async fn openai_chat_sends_the_oauth2_token_instead_of_an_api_key() {
+        let server = StubHttpServer::start(|request| match request.target.as_str() {
+            "/token" => (
+                200,
+                r#"{"access_token":"t1","expires_in":3600}"#.to_string(),
+            ),
+            _ => (
+                200,
+                r#"{"choices":[{"message":{"content":"ok"}}]}"#.to_string(),
+            ),
+        })
+        .await
+        .expect("stub server");
+        let auth = json!({"oauth2": {
+            "token_url": format!("{}/token", server.url()), "client_id": "c", "client_secret": "s"
+        }});
+        // A URI carries `auth` as JSON text.
+        let config = json!({
+            "url": server.url(), "model": "m", "prompt": "${payload:body}", "auth": auth.to_string()
+        });
+        let publisher = preset("openai_chat")
+            .create_publisher("route", &config)
+            .await
+            .unwrap();
+        publisher
+            .send_batch(vec![r#"{"body":"hi"}"#.into()])
+            .await
+            .unwrap();
+
+        let chat = server.requests().pop().unwrap();
+        assert_eq!(chat.target, "/v1/chat/completions");
+        assert_eq!(chat.header("authorization"), Some("Bearer t1"));
     }
 
     #[tokio::test]

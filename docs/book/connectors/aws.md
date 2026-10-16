@@ -45,6 +45,9 @@ mqb copy --drain \
   --to 'aws://?topic_arn=arn:aws:sns:us-east-1:1234:orders&region=us-east-1'
 ```
 
+Subscribers of the topic can be phone numbers and email addresses; see
+[SMS & email notifications](../cookbook/notifications.md).
+
 **LocalStack, continuous:**
 
 ```bash

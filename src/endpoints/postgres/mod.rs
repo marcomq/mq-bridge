@@ -276,7 +276,7 @@ impl PostgresCdcConsumer {
     }
 
     /// Push the current confirmed LSN to the server as the slot's applied position.
-    fn feedback(&mut self) {
+    fn feedback(&self) {
         let lsn = self.confirmed.load(Ordering::Acquire);
         self.client.update_applied_lsn(Lsn::from_u64(lsn));
     }
@@ -292,6 +292,8 @@ impl PostgresCdcConsumer {
             && self.confirmed.load(Ordering::Acquire) >= self.handed_out;
         if idle {
             self.confirmed.fetch_max(lsn, Ordering::AcqRel);
+            // An idle stream never returns from `receive_batch`, whose start is the other report.
+            self.feedback();
         }
     }
 
