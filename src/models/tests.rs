@@ -952,6 +952,30 @@ mod schema_tests {
     }
 
     #[test]
+    fn the_format_schemas_accept_every_serde_alias() {
+        fn check<T>()
+        where
+            T: schemars::JsonSchema + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug,
+        {
+            let schema = serde_json::to_value(schemars::schema_for!(T)).unwrap();
+            let aliases: Vec<_> = schema["oneOf"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|branch| branch.get("x-alias-of").is_some())
+                .collect();
+            assert_eq!(aliases.len(), 4, "{schema}");
+            for branch in aliases {
+                let alias: T = serde_json::from_value(branch["const"].clone()).unwrap();
+                let name: T = serde_json::from_value(branch["x-alias-of"].clone()).unwrap();
+                assert_eq!(alias, name, "{branch}");
+            }
+        }
+        check::<FileFormat>();
+        check::<MongoDbFormat>();
+    }
+
+    #[test]
     fn generate_json_schema() {
         let schema = schemars::schema_for!(Config);
         let schema_json = serde_json::to_string_pretty(&schema).unwrap();

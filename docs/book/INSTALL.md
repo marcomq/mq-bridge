@@ -9,7 +9,8 @@ install path for the form you need. To compile any of them yourself, see
 **Library in one line:** `cargo add mq-bridge` · `pip install mq-bridge` ·
 `npm install mq-bridge` — details in [Library](#library).
 
-- [CLI / server](#cli--server) — Homebrew, Conda, `cargo binstall`, `cargo install`, Docker
+- [CLI / server](#cli--server) — Homebrew, Conda, `cargo binstall`, `cargo install`, Docker,
+  and the [agent skill](#agent-skill)
 - [Desktop app (UI)](#desktop-app-ui) — Homebrew cask, or a prebuilt bundle
 - [Library](#library) — Rust, Python, Node.js
 
@@ -93,6 +94,17 @@ docker run --rm --name mq-bridge -p 9091:9091 -v "$(pwd)":/app \
 > on `amd64` only, since there is no redistributable IBM MQ client library for
 > arm64 yet. Start that image in emulation mode with `--platform=linux/amd64`, or
 > build `mq-bridge-app` yourself with `cargo build --release --features=ibm-mq`.
+
+### Agent skill
+
+If a coding agent drives `mqb` for you, give it the
+[mq-bridge skill](https://github.com/marcomq/mq-bridge/tree/main/apps/mq-bridge-app/agent-skills):
+how to look up params with `mqb describe`, write a `copy` or a config file, and avoid the
+common traps. It works with Claude Code, Codex, Cursor and other agents that read `SKILL.md`:
+
+```bash
+npx skills add marcomq/mq-bridge
+```
 
 ---
 

@@ -98,5 +98,6 @@ Problem-first guides, each with a runnable example in `examples/` that CI execut
 - [Architecture](https://marcomq.github.io/mq-bridge/engine/architecture.html)
 - [Performance tuning](https://marcomq.github.io/mq-bridge/operations/tuning.html)
 - [MCP server](https://marcomq.github.io/mq-bridge/MCP.html): drive routes from an AI agent
+- [Agent skill](https://github.com/marcomq/mq-bridge/blob/main/apps/mq-bridge-app/agent-skills/skills/mq-bridge/SKILL.md): how an agent drives the `mqb` CLI; install with `npx skills add marcomq/mq-bridge`
 - [Native plugins](https://marcomq.github.io/mq-bridge/extending/plugins.html): Pulsar, Meilisearch, Redpanda Connect
 - [Source repository](https://github.com/marcomq/mq-bridge)

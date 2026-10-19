@@ -1156,6 +1156,7 @@ pub struct SledConfig {
 /// Format for messages written to or read from a file.
 #[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schema", schemars(transform = format_alias_schema_transform))]
 #[serde(rename_all = "snake_case")]
 pub enum FileFormat {
     /// The full `CanonicalMessage` is serialized to JSON. Payload is either base64 or utf8 text. Also `envelope`.
@@ -2005,6 +2006,7 @@ pub struct AmqpConfig {
 /// Determines how messages are stored and retrieved from MongoDB collections.
 #[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schema", schemars(transform = format_alias_schema_transform))]
 #[serde(rename_all = "lowercase")]
 pub enum MongoDbFormat {
     #[default]

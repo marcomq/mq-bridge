@@ -1,0 +1,9 @@
+{
+  "name": "mq-bridge",
+  "description": "Use the mqb CLI to move data between brokers, databases, files, object storage and HTTP",
+  "author": { "name": "marcomq" },
+  "homepage": "https://marcomq.github.io/mq-bridge/",
+  "repository": "https://github.com/marcomq/mq-bridge",
+  "license": "MIT OR Apache-2.0",
+  "keywords": ["etl", "cdc", "kafka", "postgres", "message-bridge"]
+}

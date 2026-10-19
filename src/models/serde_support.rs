@@ -657,6 +657,45 @@ pub(crate) fn memory_config_schema_transform(schema: &mut schemars::Schema) {
     );
 }
 
+/// Schemars drops serde aliases, so editors would reject `format: envelope`. Each alias becomes
+/// its own `const` branch marked `x-alias-of`, which the UI drops to keep one dropdown entry.
+#[cfg(feature = "schema")]
+pub(crate) fn format_alias_schema_transform(schema: &mut schemars::Schema) {
+    const ALIASES: [(&str, &str); 4] = [
+        ("normal", "envelope"),
+        ("json", "envelope_json"),
+        ("text", "envelope_text"),
+        ("raw", "payload"),
+    ];
+    let Some(schema_obj) = schema.as_object_mut() else {
+        return;
+    };
+    if let Some(serde_json::Value::Array(values)) = schema_obj.remove("enum") {
+        schema_obj.remove("type");
+        let branches = values
+            .into_iter()
+            .map(|value| serde_json::json!({ "type": "string", "const": value }))
+            .collect();
+        schema_obj.insert("oneOf".to_string(), serde_json::Value::Array(branches));
+    }
+    let Some(one_of) = schema_obj
+        .get_mut("oneOf")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return;
+    };
+    for (name, alias) in ALIASES {
+        if one_of.iter().any(|branch| branch["const"] == name) {
+            one_of.push(serde_json::json!({
+                "description": format!("Same as `{name}`."),
+                "type": "string",
+                "const": alias,
+                "x-alias-of": name
+            }));
+        }
+    }
+}
+
 /// `null` is a unit variant, so schemars emits it as the bare string `"null"` — which can
 /// never validate inside `Endpoint`'s object schema. Flattened, it serialises as
 /// `{ "null": null }`; rewrite the branch to that object form.

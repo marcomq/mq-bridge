@@ -9,7 +9,7 @@ import { createDefaultEndpoint, createPublisherEndpointFromConsumerEndpoint, ens
 import { buildConsumerTree } from "./consumer-grouping";
 import { consumersPanelState } from "./stores";
 import { buildConsumerConfigDocument, buildConsumerPublisherDocument, extractImportedRequests, type ConfigJsonVariant } from "./import-export";
-import { forceRefOnlyEndpoints, hideUnusedDeprecatedProperties, nameMappingRuleBranches, resolveRootArrayItemSchema } from "./schema-utils";
+import { dropAliasBranches, forceRefOnlyEndpoints, hideUnusedDeprecatedProperties, nameMappingRuleBranches, resolveRootArrayItemSchema } from "./schema-utils";
 import { applyEndpointSchemaDefaults } from "./routes";
 import { getStoredJson, setStoredJson } from "./encrypted-json-storage";
 import { EMPTY_STORAGE_SECURITY } from "./storage-security";
@@ -539,6 +539,7 @@ function createConsumerFormSchema(consumer: ConsumerConfig): Record<string, unkn
   applyEndpointSchemaDefaults(itemSchema as any);
   forceRefOnlyEndpoints(itemSchema as any);
   nameMappingRuleBranches(itemSchema as any);
+  dropAliasBranches(itemSchema as any);
   hideUnusedDeprecatedProperties(itemSchema as any, consumer);
   return itemSchema;
 }

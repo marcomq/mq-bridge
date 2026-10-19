@@ -117,7 +117,9 @@ Every row works from the Rust crate, the Python and Node.js packages, and the ze
 
 The Connect plugin links only Redpanda Connect components free of Redpanda Community License code (bundled code is Apache-2.0 and MIT), so some upstream components, such as its Kafka, AWS and Snowflake ones, are not included; see [what is not included](https://marcomq.github.io/mq-bridge/connectors/connect.html#what-is-not-included).
 
-For AI agents: [`llms.txt`](llms.txt) is a curated index of the documentation.
+For AI agents: [`llms.txt`](llms.txt) is a curated index of the documentation, and
+`npx skills add marcomq/mq-bridge` installs a [skill](apps/mq-bridge-app/agent-skills) that
+teaches Claude Code, Codex and other agents to drive `mqb`.
 
 ## Benchmarks
 

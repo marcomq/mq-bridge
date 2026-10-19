@@ -2465,6 +2465,30 @@
           "description": "Parquet, one object per batch, JSON-object rows (object_store only; `parquet` feature).",
           "type": "string",
           "const": "parquet"
+        },
+        {
+          "description": "Same as `normal`.",
+          "type": "string",
+          "const": "envelope",
+          "x-alias-of": "normal"
+        },
+        {
+          "description": "Same as `json`.",
+          "type": "string",
+          "const": "envelope_json",
+          "x-alias-of": "json"
+        },
+        {
+          "description": "Same as `text`.",
+          "type": "string",
+          "const": "envelope_text",
+          "x-alias-of": "text"
+        },
+        {
+          "description": "Same as `raw`.",
+          "type": "string",
+          "const": "payload",
+          "x-alias-of": "raw"
         }
       ]
     },
@@ -3292,12 +3316,47 @@
     },
     "MongoDbFormat": {
       "description": "MongoDB message storage format.\n\nDetermines how messages are stored and retrieved from MongoDB collections.",
-      "type": "string",
-      "enum": [
-        "normal",
-        "json",
-        "text",
-        "raw"
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "normal"
+        },
+        {
+          "type": "string",
+          "const": "json"
+        },
+        {
+          "type": "string",
+          "const": "text"
+        },
+        {
+          "type": "string",
+          "const": "raw"
+        },
+        {
+          "description": "Same as `normal`.",
+          "type": "string",
+          "const": "envelope",
+          "x-alias-of": "normal"
+        },
+        {
+          "description": "Same as `json`.",
+          "type": "string",
+          "const": "envelope_json",
+          "x-alias-of": "json"
+        },
+        {
+          "description": "Same as `text`.",
+          "type": "string",
+          "const": "envelope_text",
+          "x-alias-of": "text"
+        },
+        {
+          "description": "Same as `raw`.",
+          "type": "string",
+          "const": "payload",
+          "x-alias-of": "raw"
+        }
       ]
     },
     "MqttConfig": {

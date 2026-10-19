@@ -14,6 +14,16 @@ All notable changes to `mq-bridge`. Newest first.
   refuses a pattern. A `kafka` output with a list or a
   pattern fails at startup instead of writing to a topic named after it. On the CLI the list
   is `?topic=a,b`.
+- **An agent skill for the CLI.** `apps/mq-bridge-app/agent-skills` teaches Claude Code,
+  Codex and other agents that read `SKILL.md` to use `mqb list`, `describe`, `copy` and
+  config files. Install it with `npx skills add marcomq/mq-bridge`.
+
+### Fixed
+
+- **The JSON schema accepts the descriptive format names.** `format: envelope`, `payload`,
+  `envelope_json` and `envelope_text` no longer show as invalid in an editor that validates
+  against `mq-bridge.schema.json`, and `mqb describe` lists them. The UI keeps showing one
+  entry per format.
 
 ## 1.0.1
 

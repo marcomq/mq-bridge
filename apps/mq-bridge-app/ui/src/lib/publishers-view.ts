@@ -10,7 +10,7 @@ import { createConsumerEndpointFromPublisherEndpoint, createDefaultEndpoint, ens
 import { publishersPanelState } from "./stores";
 import { buildPublisherConfigDocument, buildPublisherConfigRouteDocument, extractImportedRequests, type ConfigJsonVariant } from "./import-export";
 import { applyEndpointSchemaDefaults } from "./routes";
-import { forceRefOnlyEndpoints, hideUnusedDeprecatedProperties, nameMappingRuleBranches, resolveRootArrayItemSchema } from "./schema-utils";
+import { dropAliasBranches, forceRefOnlyEndpoints, hideUnusedDeprecatedProperties, nameMappingRuleBranches, resolveRootArrayItemSchema } from "./schema-utils";
 import { ensureWorkspaceCollections, sanitizePublisherHistory, type PublisherHistoryEntry, type PublisherHistoryStore } from "./workspace-config";
 import type { ConsumerConfig, PublisherConfig, PublisherResponseState, PublishersAppConfig, PublishersSchemaRoot } from "./panel-types";
 import type { PublishRequest } from "./generated/ui-types";
@@ -922,6 +922,7 @@ async function renderPublisherForm() {
   applyEndpointSchemaDefaults(schema as any);
   forceRefOnlyEndpoints(schema as any);
   nameMappingRuleBranches(schema as any);
+  dropAliasBranches(schema as any);
   hideUnusedDeprecatedProperties(schema as any, publisher);
   Object.entries(SCHEMA_CONFIG_ENDPOINT_TYPES).forEach(([defName, endpointType]) => {
     const endpointSchema = (schema as any).$defs?.[defName];
