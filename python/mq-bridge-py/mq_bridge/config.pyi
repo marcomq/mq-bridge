@@ -501,7 +501,7 @@ class KafkaConfig(TypedDict, total=False):
     shared: Optional[bool]
     source_metadata: bool
     tls: TlsConfig
-    topic: Optional[str]
+    topic: Optional[Union[str, List[str]]]
     url: Required[str]
     username: Optional[str]
 

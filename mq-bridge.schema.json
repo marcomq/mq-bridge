@@ -1933,11 +1933,16 @@
           "format": "password"
         },
         "topic": {
-          "description": "The Kafka topic to produce to or consume from.",
+          "description": "The topic to produce to or consume from. A source also takes a list (array or comma-separated) or a `^regex`.",
           "type": [
             "string",
+            "array",
             "null"
-          ]
+          ],
+          "items": {
+            "type": "string"
+          },
+          "default": null
         },
         "username": {
           "description": "Optional username for SASL authentication.",

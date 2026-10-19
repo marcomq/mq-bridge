@@ -543,6 +543,34 @@ where
     Ok(opt.unwrap_or(false))
 }
 
+/// One topic, a comma-separated list, or an array of names; an array is stored comma-joined.
+pub(crate) fn deserialize_topic_list<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(String),
+        Many(Vec<String>),
+    }
+    Ok(match Option::<OneOrMany>::deserialize(deserializer)? {
+        None => None,
+        Some(OneOrMany::One(topic)) => Some(topic),
+        Some(OneOrMany::Many(topics)) if topics.is_empty() => None,
+        Some(OneOrMany::Many(topics)) => Some(topics.join(",")),
+    })
+}
+
+/// A `type` list rather than `anyOf`, so form renderers keep a plain text field.
+#[cfg(feature = "schema")]
+pub(crate) fn topic_list_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": ["string", "array", "null"],
+        "items": { "type": "string" }
+    })
+}
+
 impl<'de> Deserialize<'de> for MemoryConfig {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where

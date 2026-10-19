@@ -2,6 +2,19 @@
 
 All notable changes to `mq-bridge`. Newest first.
 
+## Unreleased
+
+### Added
+
+- **A `kafka` source reads several topics.** `topic` takes a list (`[orders.eu, orders.us]`)
+  or a comma-separated string, and one consumer group shares the partitions of all of them;
+  `--drain` ends once every listed topic is read to its end. A name starting with `^` is a
+  librdkafka regex. It already reached librdkafka before, but a drain over it could not see
+  the partitions its peers held or a late group join, and could end early; a drain now
+  refuses a pattern. A `kafka` output with a list or a
+  pattern fails at startup instead of writing to a topic named after it. On the CLI the list
+  is `?topic=a,b`.
+
 ## 1.0.1
 
 ### Added

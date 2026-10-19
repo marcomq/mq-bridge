@@ -918,11 +918,38 @@ path: "/tmp/test"
         assert_eq!(clickhouse.compression, Compression::Gzip);
         assert_eq!(clickhouse.username.as_deref(), Some("default"));
     }
+
+    #[test]
+    fn a_kafka_topic_takes_one_name_or_a_list() {
+        let topic = |value: serde_json::Value| {
+            serde_json::from_value::<KafkaConfig>(
+                serde_json::json!({ "url": "b:9092", "topic": value }),
+            )
+            .unwrap()
+            .topic
+        };
+        assert_eq!(topic(serde_json::json!("a")).as_deref(), Some("a"));
+        assert_eq!(topic(serde_json::json!("a,b")).as_deref(), Some("a,b"));
+        assert_eq!(topic(serde_json::json!(["a", "b"])).as_deref(), Some("a,b"));
+        assert_eq!(topic(serde_json::json!([])), None);
+        assert_eq!(topic(serde_json::Value::Null), None);
+    }
 }
 
 #[cfg(feature = "schema")]
 mod schema_tests {
     use super::*;
+
+    #[test]
+    fn the_kafka_topic_schema_takes_a_string_or_a_list() {
+        let schema = serde_json::to_value(schemars::schema_for!(KafkaConfig)).unwrap();
+        let topic = &schema["properties"]["topic"];
+        assert_eq!(
+            topic["type"],
+            serde_json::json!(["string", "array", "null"])
+        );
+        assert!(topic["description"].is_string());
+    }
 
     #[test]
     fn generate_json_schema() {

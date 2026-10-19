@@ -54,6 +54,11 @@ pub struct KafkaPublisher {
 impl KafkaPublisher {
     pub async fn new(config: &KafkaConfig) -> anyhow::Result<Self> {
         let topic = config.topic.as_deref().unwrap_or("");
+        if topic.contains(',') || is_topic_pattern(topic) {
+            return Err(anyhow!(
+                "A Kafka output writes to one topic; '{topic}' is a list or pattern, which only a source accepts"
+            ));
+        }
         if config.delayed_ack {
             tracing::warn!("Kafka 'delayed_ack' is enabled. Messages are acknowledged before broker confirmation. This carries a risk of data loss in the event of a crash.");
         }
@@ -415,7 +420,9 @@ pub struct KafkaConsumer {
     // The consumer needs to be stored to keep the connection alive.
     consumer: Arc<ClosingStreamConsumer>,
     producer: Option<FutureProducer>,
+    /// The subscription as configured, for logs and status.
     topic: String,
+    topics: Vec<String>,
     /// Drain mode: only then does an idle fetch time out into an empty batch.
     exit_on_empty: bool,
     /// Started on first read, once the batch size is known — see [`Prefetcher`].
@@ -503,6 +510,7 @@ impl KafkaConsumer {
             source_metadata || config.source_metadata,
         );
         let topic = config.topic.as_deref().unwrap_or("");
+        let topics = topic_list(topic);
         let mut client_config = create_common_config(config);
 
         let is_subscriber = config.group_id.is_none();
@@ -554,8 +562,8 @@ impl KafkaConsumer {
         })
         .await?
         .map_err(|e| anyhow!("Kafka broker not reachable: {e}"))?;
-        if !topic.is_empty() {
-            consumer.subscribe(&[topic])?
+        if !topics.is_empty() {
+            consumer.subscribe(&topics.iter().map(String::as_str).collect::<Vec<_>>())?
         }
 
         // Wrap the consumer in an Arc to allow it to be shared.
@@ -598,6 +606,7 @@ impl KafkaConsumer {
             consumer,
             producer,
             topic: topic.to_string(),
+            topics,
             exit_on_empty: false,
             prefetcher: None,
             source_metadata,
@@ -699,11 +708,18 @@ impl MessageConsumer for KafkaConsumer {
 
     async fn receive_batch(&mut self, max_messages: usize) -> Result<ReceivedBatch, ConsumerError> {
         self.nacked.check()?;
+        if self.exit_on_empty && self.topics.iter().any(|t| is_topic_pattern(t)) {
+            return Err(ConsumerError::Permanent(anyhow!(
+                "A Kafka drain needs explicit topics; '{}' contains a pattern, whose topics it cannot know",
+                self.topic
+            )));
+        }
         let nacked = self.nacked.clone();
-        let (consumer, producer, topic, exit_on_empty) = (
+        let (consumer, producer, topic, topics, exit_on_empty) = (
             self.consumer.clone(),
             self.producer.clone(),
             self.topic.clone(),
+            self.topics.clone(),
             self.exit_on_empty,
         );
         // Taken out and put back because `prefetcher()` borrows self mutably too.
@@ -718,6 +734,7 @@ impl MessageConsumer for KafkaConsumer {
                 producer.as_ref(),
                 max_messages,
                 &topic,
+                &topics,
                 exit_on_empty,
                 &mut drain_state,
                 nacked,
@@ -729,13 +746,12 @@ impl MessageConsumer for KafkaConsumer {
 
     async fn status(&self) -> EndpointStatus {
         let consumer = self.consumer.clone();
-        let topic = self.topic.clone();
+        let topics = self.topics.clone();
 
         let (healthy, pending, error) = tokio::task::spawn_blocking(move || {
-            let meta_topic = if topic.is_empty() {
-                None
-            } else {
-                Some(topic.as_str())
+            let meta_topic = match topics.as_slice() {
+                [topic] if !is_topic_pattern(topic) => Some(topic.as_str()),
+                _ => None,
             };
             let (mut healthy, mut error) = match consumer
                 .client()
@@ -847,6 +863,22 @@ fn is_tombstone(message: &CanonicalMessage) -> bool {
         .metadata
         .get(KAFKA_TOMBSTONE_KEY)
         .is_some_and(|v| v == "true")
+}
+
+/// The topics of a subscription. Kafka topic names cannot contain a comma.
+fn topic_list(topic: &str) -> Vec<String> {
+    topic
+        .split(',')
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// librdkafka subscribes to every topic matching a name that starts with `^`, a character
+/// no topic name may contain.
+fn is_topic_pattern(topic: &str) -> bool {
+    topic.trim_start().starts_with('^')
 }
 
 /// Helper function to process a Kafka message and add it to the batch.
@@ -1430,8 +1462,8 @@ struct DrainState {
     watermark_retry_at: Option<std::time::Instant>,
     /// The group's `session.timeout.ms`; sizes the join wait, see [`drain_join_timeout`].
     session_timeout: Duration,
-    /// Every partition of the topic, looked up once — see [`peers_behind`].
-    partitions: Option<Vec<i32>>,
+    /// Every partition of the subscribed topics, looked up once — see [`peers_behind`].
+    partitions: Option<Vec<(String, i32)>>,
 }
 
 /// How long a failed watermark lookup suppresses further broker calls. `fetch_watermarks`
@@ -1487,7 +1519,7 @@ fn drain_target(
 fn drain_readiness(
     consumer: &StreamConsumer,
     state: &mut DrainState,
-    topic: &str,
+    topics: &[String],
     eof_positions: &std::sync::Mutex<PartitionOffsets>,
 ) -> DrainReadiness {
     if !has_assignment(consumer) {
@@ -1514,7 +1546,7 @@ fn drain_readiness(
         }
         return DrainReadiness::Starting;
     }
-    if peers_behind(consumer, state, topic, &positions) {
+    if peers_behind(consumer, state, topics, &positions) {
         return DrainReadiness::PeersBehind;
     }
     DrainReadiness::Drained
@@ -1525,16 +1557,16 @@ fn drain_readiness(
 fn peers_behind(
     consumer: &StreamConsumer,
     state: &mut DrainState,
-    topic: &str,
+    topics: &[String],
     owned: &TopicPartitionList,
 ) -> bool {
-    let Some(partitions) = topic_partitions(consumer, state, topic) else {
+    let Some(partitions) = topic_partitions(consumer, state, topics) else {
         return true;
     };
     let mut unowned = TopicPartitionList::new();
-    for partition in partitions {
-        if owned.find_partition(topic, partition).is_none() {
-            unowned.add_partition(topic, partition);
+    for (topic, partition) in &partitions {
+        if owned.find_partition(topic, *partition).is_none() {
+            unowned.add_partition(topic, *partition);
         }
     }
     if unowned.count() == 0 {
@@ -1544,7 +1576,7 @@ fn peers_behind(
         return true;
     };
     committed.elements().iter().any(|elem| {
-        let key = (topic.to_string(), elem.partition());
+        let key = (elem.topic().to_string(), elem.partition());
         drain_target(consumer, state, &key).is_none_or(|high| group_behind(high, elem.offset()))
     })
 }
@@ -1557,13 +1589,13 @@ fn group_behind(high: i64, committed: Offset) -> bool {
     }
 }
 
-/// The topic's partitions, read from the broker once; failures back off like
+/// The topics' partitions, read from the broker once; failures back off like
 /// [`drain_target`].
 fn topic_partitions(
     consumer: &StreamConsumer,
     state: &mut DrainState,
-    topic: &str,
-) -> Option<Vec<i32>> {
+    topics: &[String],
+) -> Option<Vec<(String, i32)>> {
     if let Some(partitions) = &state.partitions {
         return Some(partitions.clone());
     }
@@ -1579,8 +1611,12 @@ fn topic_partitions(
             metadata
                 .topics()
                 .iter()
-                .filter(|t| t.name() == topic)
-                .flat_map(|t| t.partitions().iter().map(|p| p.id()))
+                .filter(|t| topics.iter().any(|name| name == t.name()))
+                .flat_map(|t| {
+                    t.partitions()
+                        .iter()
+                        .map(|p| (t.name().to_string(), p.id()))
+                })
                 .collect::<Vec<_>>()
         });
     match lookup {
@@ -1589,7 +1625,7 @@ fn topic_partitions(
             Some(partitions)
         }
         Err(e) => {
-            debug!(topic = %topic, error = %e, "Kafka partition lookup failed; backing off");
+            debug!(topics = ?topics, error = %e, "Kafka partition lookup failed; backing off");
             state.watermark_retry_at = Some(std::time::Instant::now() + WATERMARK_RETRY_BACKOFF);
             None
         }
@@ -1628,16 +1664,17 @@ async fn await_first(
     .await
 }
 
-/// Whether the broker knows `topic` with at least one partition. A failed lookup counts as
-/// yes: "empty" has to be known, not assumed. Lists all topics, so nothing is auto-created.
-fn topic_has_partitions(consumer: &StreamConsumer, topic: &str) -> bool {
+/// Whether the broker knows one of `topics` with at least one partition. A failed lookup
+/// counts as yes: "empty" has to be known, not assumed. Lists all topics, so nothing is
+/// auto-created.
+fn topic_has_partitions(consumer: &StreamConsumer, topics: &[String]) -> bool {
     match consumer.fetch_metadata(None, BROKER_PROBE_TIMEOUT) {
         Ok(metadata) => metadata
             .topics()
             .iter()
-            .any(|t| t.name() == topic && !t.partitions().is_empty()),
+            .any(|t| topics.iter().any(|name| name == t.name()) && !t.partitions().is_empty()),
         Err(e) => {
-            debug!(topic = %topic, error = %e, "Kafka topic lookup failed");
+            debug!(topics = ?topics, error = %e, "Kafka topic lookup failed");
             true
         }
     }
@@ -1754,6 +1791,7 @@ async fn receive_batch_internal(
     producer: impl Into<Option<&FutureProducer>>,
     max_messages: usize,
     topic: &str,
+    topics: &[String],
     exit_on_empty: bool,
     drain_state: &mut DrainState,
     nacked: NackLatch,
@@ -1769,8 +1807,8 @@ async fn receive_batch_internal(
         exit_on_empty,
         topic,
         drain_join_timeout(drain_state.session_timeout),
-        || drain_readiness(consumer, drain_state, topic, &prefetcher.eof_positions),
-        || topic_has_partitions(consumer, topic),
+        || drain_readiness(consumer, drain_state, topics, &prefetcher.eof_positions),
+        || topic_has_partitions(consumer, topics),
     )
     .await;
     let Some(first) = first else {
@@ -2667,6 +2705,92 @@ mod tests {
                 "the commit after the refused one never landed: {offset:?}"
             );
             tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    /// One consumer drains every listed topic, and a drain refuses a pattern it cannot bound.
+    #[tokio::test]
+    async fn test_a_drain_reads_every_listed_topic() {
+        use rdkafka::bindings as rdsys;
+
+        let producer: FutureProducer = ClientConfig::new()
+            .set("test.mock.num.brokers", "1")
+            .create()
+            .unwrap();
+        let cluster = producer.client().mock_cluster().unwrap();
+        unsafe {
+            let handle = rdsys::rd_kafka_handle_mock_cluster(producer.client().native_ptr());
+            rdsys::rd_kafka_mock_group_initial_rebalance_delay_ms(handle, 0);
+        }
+        for (topic, payload) in [("orders.eu", "eu"), ("orders.us", "us")] {
+            cluster.create_topic(topic, 2, 1).unwrap();
+            producer
+                .send(
+                    FutureRecord::<(), _>::to(topic).payload(payload),
+                    Duration::from_secs(5),
+                )
+                .await
+                .unwrap();
+        }
+        let config = |topic: &str| KafkaConfig {
+            url: cluster.bootstrap_servers(),
+            topic: Some(topic.to_string()),
+            group_id: Some("multi".to_string()),
+            ..Default::default()
+        };
+
+        let mut consumer = KafkaConsumer::new(&config("orders.eu, orders.us"))
+            .await
+            .unwrap();
+        consumer.set_exit_on_empty(true);
+        let mut payloads = Vec::new();
+        loop {
+            let batch = tokio::time::timeout(Duration::from_secs(60), consumer.receive_batch(10))
+                .await
+                .expect("the drain never ended")
+                .unwrap();
+            if batch.messages.is_empty() {
+                break;
+            }
+            payloads.extend(
+                batch
+                    .messages
+                    .iter()
+                    .map(|m| m.get_payload_str().to_string()),
+            );
+            (batch.commit)(vec![MessageDisposition::Ack; batch.messages.len()])
+                .await
+                .unwrap();
+        }
+        payloads.sort();
+        assert_eq!(payloads, ["eu", "us"]);
+
+        let mut pattern = KafkaConsumer::new(&config("^orders\\..*")).await.unwrap();
+        pattern.set_exit_on_empty(true);
+        assert!(matches!(
+            pattern.receive_batch(10).await,
+            Err(ConsumerError::Permanent(_))
+        ));
+    }
+
+    #[test]
+    fn test_a_subscription_splits_on_commas_and_spots_patterns() {
+        assert_eq!(topic_list(" a, b,,c "), ["a", "b", "c"]);
+        assert!(topic_list("").is_empty());
+        assert!(is_topic_pattern("^orders\\..*"));
+        assert!(!is_topic_pattern("orders"));
+    }
+
+    #[tokio::test]
+    async fn test_a_publisher_rejects_a_topic_list_or_pattern() {
+        for topic in ["a,b", "^a.*"] {
+            let config = KafkaConfig {
+                url: "127.0.0.1:1".to_string(),
+                topic: Some(topic.to_string()),
+                create_topic: Some(false),
+                ..Default::default()
+            };
+            assert!(KafkaPublisher::new(&config).await.is_err(), "{topic}");
         }
     }
 

@@ -1053,6 +1053,10 @@ pub(crate) fn field_type(root: &serde_json::Value, sub: &serde_json::Value) -> F
     if has("number") {
         return FieldType::Number;
     }
+    // A string-or-list field (kafka's `topic`) also takes the list comma-separated.
+    if has("array") && has("string") && !has("object") {
+        return FieldType::StringLike;
+    }
     if has("object") || has("array") {
         return FieldType::Object;
     }
@@ -2214,6 +2218,10 @@ mod tests {
         let cfg = config("kafka://broker:9092?topic=orders", "kafka");
         assert_eq!(cfg["url"], "broker:9092");
         assert_eq!(cfg["topic"], "orders");
+        assert_eq!(
+            config("kafka://broker:9092?topic=a,b", "kafka")["topic"],
+            "a,b"
+        );
         assert_eq!(
             config("kafka://broker:9092/?topic=o", "kafka")["url"],
             "broker:9092"

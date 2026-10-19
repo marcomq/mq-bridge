@@ -1083,7 +1083,9 @@ pub struct KafkaConfig {
     #[serde(alias = "brokers")]
     #[cfg_attr(feature = "schema", schemars(extend("format"="password")))]
     pub url: String,
-    /// The Kafka topic to produce to or consume from.
+    /// The topic to produce to or consume from. A source also takes a list (array or comma-separated) or a `^regex`.
+    #[serde(default, deserialize_with = "deserialize_topic_list")]
+    #[cfg_attr(feature = "schema", schemars(schema_with = "topic_list_schema"))]
     pub topic: Option<String>,
     /// Optional username for SASL authentication.
     pub username: Option<String>,
