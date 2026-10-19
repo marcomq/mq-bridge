@@ -3,8 +3,8 @@
 # How to enrich events and keep per-key history (lookup + aggregate in Postgres)
 
 One mq-bridge route takes orders, adds the customer record from Postgres, and adds what is known
-about that customer so far: number of orders, total spend, the usual order amount and the spend of
-the last week. The history is kept in a Postgres table, so a restart continues where it stopped
+about that customer so far: number of orders, total spend, the usual order amount and a seven-day
+decayed spend. The history is kept in a Postgres table, so a restart continues where it stopped
 and several instances work on the same numbers. An order far above the customer's usual amount
 goes to a review table.
 

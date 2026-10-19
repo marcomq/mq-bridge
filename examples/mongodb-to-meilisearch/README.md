@@ -17,6 +17,7 @@ Needs Docker, `curl` and `jq`.
 
 ```bash
 docker compose up -d
+until [ -n "$(./search.sh headphones 2>/dev/null)" ]; do sleep 2; done  # wait for the first copy
 ./search.sh "hedphones"
 ```
 

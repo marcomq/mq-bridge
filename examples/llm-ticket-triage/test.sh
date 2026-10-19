@@ -15,8 +15,11 @@ post() {
   done
   echo "FAILED: could not post $1"; docker compose logs --tail 50 mq-bridge setup; exit 1
 }
-expect() { # expect <stream> <ids>
-  if [ "$(ids "$1")" = "$2" ]; then echo "ok: $1 holds $2"; return; fi
+expect() { # expect <stream> <ids>: each id is in the stream; ticket 6 may land there too
+  local got; got=",$(ids "$1"),"
+  local missing=""
+  for id in ${2//,/ }; do [[ $got == *",$id,"* ]] || missing=1; done
+  if [ -z "$missing" ]; then echo "ok: $1 holds $2"; return; fi
   echo "FAILED: $1"; echo "  expected: $2"; echo "  got:      $(ids "$1")"
   docker compose logs --tail 50 mq-bridge
   exit 1

@@ -1256,9 +1256,10 @@ needs another's result (e.g. a merchant id from the fetched user), chain a secon
 
 Keeps one state per key and updates it with every message: running sums, counters, moving
 averages. Input and output. The message is not consumed; it leaves with the state written
-into its payload. The states live in a database (`store`): each batch loads the states of
-its keys, computes, and writes them back before its messages go on. Nothing is kept in the
-process between batches, so a restart or a second instance continues from the stored values.
+into its payload. By default (`consistency: shared`) the states live in a database (`store`):
+each batch loads the states of its keys, computes, and writes them back before its messages
+go on. Nothing is kept in the process between batches, so a restart or a second instance
+continues from the stored values. `single_writer` keeps the states in memory instead.
 Compared with a writing [`lookup`](#lookup), the arithmetic runs here and the store is asked
 twice per batch, not per message.
 
@@ -1271,7 +1272,7 @@ twice per batch, not per message.
 | `output` | expression | the state itself; shapes what is written to the message |
 | `emit` | `updated` \| `previous` | `updated` |
 | `entries` | list of `{key, expression, fields, into, output, emit}` | `[]`; further aggregates |
-| `store` | URL | –; `postgres://…/db[/table]`, `sqlite://…`, `mongodb://host/db[/collection]`. Required unless `consistency: single_writer` |
+| `store` | URL | –; `postgres://…/db[/table]`, `sqlite://…`, `mongodb://host/db[/collection]`. Required unless `consistency: single_writer`; always required with `read_only` |
 | `consistency` | `shared` \| `single_writer` | `shared`: states are loaded and written per batch. `single_writer` keeps them in memory, written behind to the `store` if one is set |
 | `max_keys` | integer | `1000000`; states kept in memory per entry, `0` is unlimited |
 | `time` | dotted payload path | – (the clock); the message's event time, for `fields` entries |

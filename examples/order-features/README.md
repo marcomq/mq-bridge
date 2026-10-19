@@ -2,7 +2,7 @@
 
 Orders arrive on an HTTP endpoint. Each one is enriched with its customer from Postgres
 (`lookup`), gets the customer's history so far (`aggregate`: order count, total spend, a moving
-average of the amount, spend of the last week), and is written to Postgres. An order more than
+average of the amount, a seven-day decayed spend), and is written to Postgres. An order more than
 three times the customer's usual amount goes to a review table instead.
 
 The history is kept in Postgres, not in the bridge's memory: a restart continues where it

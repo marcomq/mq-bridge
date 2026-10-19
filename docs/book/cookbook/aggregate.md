@@ -5,10 +5,11 @@ and updates it with every message: counters, sums, moving averages. The message 
 the value written into its payload. Use it for values that depend on earlier messages, such
 as "how many orders did this customer place so far" or "what is this sensor's usual reading".
 
-The values live in a database you name with `store`. Every batch loads the values of its
-keys, computes, and writes them back before its messages go on. Nothing is kept in the
+By default the values live in a database you name with `store`. Every batch loads the values
+of its keys, computes, and writes them back before its messages go on. Nothing is kept in the
 process between batches, so a restart, or a second instance of the route, continues from the
-stored values.
+stored values. A route that runs as one instance can keep them in memory instead
+([`single_writer`](#faster-keep-the-states-in-memory)).
 
 ## Where it fits
 
@@ -87,7 +88,8 @@ store; a state that another instance changed in between is computed again. Two c
   steps. A crash between them, or a nack after the states were stored, delivers the batch
   again. See [What happens on a crash or a retry](#what-happens-on-a-crash-or-a-retry).
 
-The cost is two round trips per batch, so use a large `batch_size` (4096 to 8192). If the
+The cost is one load and one store per batch (each split into requests of 1000 keys), so use
+a large `batch_size` (4096 to 8192). If the
 route runs as one instance, [`single_writer`](#faster-keep-the-states-in-memory) is several
 times faster.
 

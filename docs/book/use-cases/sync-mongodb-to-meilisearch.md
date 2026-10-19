@@ -95,6 +95,7 @@ features and call `mq_bridge::deploy_file("routes.yaml")`; in Python,
 ```bash
 git clone https://github.com/marcomq/mq-bridge && cd mq-bridge/examples/mongodb-to-meilisearch
 docker compose up -d
+until [ -n "$(./search.sh headphones 2>/dev/null)" ]; do sleep 2; done  # wait for the first copy
 ./search.sh "hedphones"
 ```
 

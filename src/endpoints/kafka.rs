@@ -491,6 +491,7 @@ impl KafkaConsumer {
                 self.consumer.clone(),
                 prefetch_capacity(max_messages),
                 self.source_metadata,
+                subscribes_many_topics(&self.topics),
             )
         })
     }
@@ -865,14 +866,41 @@ fn is_tombstone(message: &CanonicalMessage) -> bool {
         .is_some_and(|v| v == "true")
 }
 
-/// The topics of a subscription. Kafka topic names cannot contain a comma.
+/// The topics of a subscription. Kafka topic names cannot contain a comma; a comma inside
+/// `{}`, `[]` or `()` belongs to a `^regex` entry and does not split it.
 fn topic_list(topic: &str) -> Vec<String> {
-    topic
-        .split(',')
+    let mut topics = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0;
+    for (i, c) in topic.char_indices() {
+        match c {
+            '{' | '[' | '(' => depth += 1,
+            '}' | ']' | ')' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                topics.push(&topic[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    topics.push(&topic[start..]);
+    topics
+        .into_iter()
         .map(str::trim)
         .filter(|t| !t.is_empty())
         .map(str::to_string)
         .collect()
+}
+
+/// More than one topic can reach this source, so partition+offset alone is not unique.
+fn subscribes_many_topics(topics: &[String]) -> bool {
+    topics.len() > 1 || topics.iter().any(|t| t.starts_with('^'))
+}
+
+fn topic_hash(topic: &str) -> u32 {
+    topic.bytes().fold(0x811c_9dc5, |hash: u32, b| {
+        (hash ^ b as u32).wrapping_mul(0x0100_0193)
+    })
 }
 
 /// librdkafka subscribes to every topic matching a name that starts with `^`, a character
@@ -1002,17 +1030,19 @@ fn spawn_prefetcher(
     consumer: Arc<ClosingStreamConsumer>,
     capacity: usize,
     source_metadata: bool,
+    topic_in_id: bool,
 ) -> Prefetcher {
     if source_metadata {
-        spawn_prefetcher_with_source_metadata(consumer, capacity)
+        spawn_prefetcher_with_source_metadata(consumer, capacity, topic_in_id)
     } else {
-        spawn_prefetcher_without_source_metadata(consumer, capacity)
+        spawn_prefetcher_without_source_metadata(consumer, capacity, topic_in_id)
     }
 }
 
 fn spawn_prefetcher_without_source_metadata(
     consumer: Arc<ClosingStreamConsumer>,
     capacity: usize,
+    topic_in_id: bool,
 ) -> Prefetcher {
     let (tx, rx) = async_channel::bounded(capacity);
     let budget = new_budget();
@@ -1029,7 +1059,7 @@ fn spawn_prefetcher_without_source_metadata(
             let mut chunk_eofs = Vec::new();
             for (result, eof_position) in chunk {
                 let item = match result {
-                    Ok(message) => match to_canonical(&message) {
+                    Ok(message) => match to_canonical_with_topic_id(&message, topic_in_id) {
                         Ok(canonical) => Ok(prefetched_record(&budget, canonical, &message).await),
                         Err(e) => Err(PrefetchError::Connection(e.to_string())),
                     },
@@ -1093,6 +1123,7 @@ async fn prefetched_record<M: Message>(
 fn spawn_prefetcher_with_source_metadata(
     consumer: Arc<ClosingStreamConsumer>,
     capacity: usize,
+    topic_in_id: bool,
 ) -> Prefetcher {
     let (tx, rx) = async_channel::bounded(capacity);
     let budget = new_budget();
@@ -1107,7 +1138,7 @@ fn spawn_prefetcher_with_source_metadata(
             let mut chunk_eofs = Vec::new();
             for (result, eof_position) in chunk {
                 let item = match result {
-                    Ok(message) => match to_canonical_with_source_metadata(&message) {
+                    Ok(message) => match to_canonical_with_source_metadata(&message, topic_in_id) {
                         Ok(canonical) => Ok(prefetched_record(&budget, canonical, &message).await),
                         Err(e) => Err(PrefetchError::Connection(e.to_string())),
                     },
@@ -1234,6 +1265,15 @@ pub const KAFKA_TOMBSTONE_KEY: &str = "mqb.kafka.tombstone";
 /// was never committed the route reconnected onto the same record forever, so a single
 /// tombstone wedged the consumer. It becomes an empty payload flagged in metadata instead.
 fn to_canonical<M: Message>(message: &M) -> anyhow::Result<CanonicalMessage> {
+    to_canonical_with_topic_id(message, false)
+}
+
+/// `topic_in_id` mixes a topic hash into the fallback id's top 32 bits; single-topic ids keep
+/// the old partition+offset value.
+fn to_canonical_with_topic_id<M: Message>(
+    message: &M,
+    topic_in_id: bool,
+) -> anyhow::Result<CanonicalMessage> {
     let tombstone = message.payload().is_none();
     let payload = message.payload().unwrap_or(&[]);
 
@@ -1292,7 +1332,12 @@ fn to_canonical<M: Message>(message: &M) -> anyhow::Result<CanonicalMessage> {
     // A u128 is used to hold both values, with the partition in the high 64 bits
     // and the offset in the low 64 bits.
     let message_id = message_id.unwrap_or_else(|| {
-        ((message.partition() as u32 as u128) << 64) | (message.offset() as u64 as u128)
+        let topic = if topic_in_id {
+            (topic_hash(message.topic()) as u128) << 96
+        } else {
+            0
+        };
+        topic | ((message.partition() as u32 as u128) << 64) | (message.offset() as u64 as u128)
     });
 
     let mut canonical_message = CanonicalMessage::new(payload.to_vec(), Some(message_id));
@@ -1325,8 +1370,11 @@ fn to_canonical<M: Message>(message: &M) -> anyhow::Result<CanonicalMessage> {
     Ok(canonical_message)
 }
 
-fn to_canonical_with_source_metadata<M: Message>(message: &M) -> anyhow::Result<CanonicalMessage> {
-    let mut canonical_message = to_canonical(message)?;
+fn to_canonical_with_source_metadata<M: Message>(
+    message: &M,
+    topic_in_id: bool,
+) -> anyhow::Result<CanonicalMessage> {
+    let mut canonical_message = to_canonical_with_topic_id(message, topic_in_id)?;
     canonical_message.metadata.insert(
         "mqb.src.kafka_topic".to_string(),
         message.topic().to_string(),
@@ -2777,8 +2825,36 @@ mod tests {
     fn test_a_subscription_splits_on_commas_and_spots_patterns() {
         assert_eq!(topic_list(" a, b,,c "), ["a", "b", "c"]);
         assert!(topic_list("").is_empty());
+        assert_eq!(
+            topic_list("^orders_[0-9]{1,2}$, audit"),
+            ["^orders_[0-9]{1,2}$", "audit"]
+        );
         assert!(is_topic_pattern("^orders\\..*"));
         assert!(!is_topic_pattern("orders"));
+    }
+
+    #[test]
+    fn test_a_multi_topic_fallback_id_tells_topics_apart() {
+        let other = |topic: &str| {
+            OwnedMessage::new(
+                Some(b"x".to_vec()),
+                None,
+                topic.to_string(),
+                rdkafka::Timestamp::now(),
+                3,
+                7,
+                None,
+            )
+        };
+        let id = |m: &OwnedMessage, many| to_canonical_with_topic_id(m, many).unwrap().message_id;
+        let single = (3u128 << 64) | 7;
+        assert_eq!(id(&other("a"), false), single);
+        assert_eq!(id(&other("b"), false), single);
+        assert_ne!(id(&other("a"), true), id(&other("b"), true));
+        assert_eq!(id(&other("a"), true) & u128::from(u64::MAX), 7);
+        assert!(subscribes_many_topics(&topic_list("a,b")));
+        assert!(subscribes_many_topics(&topic_list("^a.*")));
+        assert!(!subscribes_many_topics(&topic_list("a")));
     }
 
     #[tokio::test]
