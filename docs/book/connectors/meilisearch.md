@@ -20,6 +20,9 @@ On this page:
 - [Built in or plugin](#built-in-or-plugin)
 - [Options](#options) and [Limitations](#limitations)
 
+From MongoDB instead of Postgres: the use case
+[Search index sync: MongoDB → Meilisearch](../use-cases/sync-mongodb-to-meilisearch.md).
+
 ## Keep an index in sync with a Postgres table
 
 This is the pipeline a CDC-to-search tool such as Sequin runs: read the rows that already exist,

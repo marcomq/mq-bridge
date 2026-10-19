@@ -1,0 +1,24 @@
+products_to_search:
+  input:
+    mongodb:
+      url: "mongodb://mongo:27017/?replicaSet=rs0"
+      database: "shop"
+      collection: "products"
+      consume: capture_all          # copy existing documents, then follow the change stream
+      cursor_id: "products-to-meili" # a restart resumes from the saved position
+  output:
+    middlewares:
+      # A delete carries only `_id`, so it leaves as `{"id": ...}`; absent fields are left out.
+      - transform:
+          mapping:
+            id: "$._id.$oid"
+            name: "$.name"
+            description: "$.description"
+            price: "$.price"
+            tags: "$.tags"
+      - retry: { max_attempts: 5 }
+    meilisearch:
+      url: "http://meilisearch:7700"
+      index: "products"
+      primary_key: "id"
+      operation: "${metadata:mongodb.operation}"

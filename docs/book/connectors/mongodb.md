@@ -138,6 +138,9 @@ orders_cdc:
   `mqb_cursors_<collection>`; `checkpoint_store` puts it elsewhere, for a source you may not
   write to. See [Checkpoints](../cookbook/checkpoints.md).
 
+The use case [Search index sync: MongoDB → Meilisearch](../use-cases/sync-mongodb-to-meilisearch.md)
+follows a collection into a search index, deletes included, with a runnable example.
+
 Copy a collection of a standalone `mongod` into a file, once:
 
 ```bash

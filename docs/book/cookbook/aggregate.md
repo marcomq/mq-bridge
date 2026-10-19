@@ -1,11 +1,14 @@
 # Running aggregates
 
-The [`aggregate`](../engine/reference.md#aggregate) middleware keeps one state per key inside
-the process and updates it with every message: counters, sums, moving averages. The message
-goes on with the state written into its payload. Use it for values that depend on earlier
-messages, such as "how many readings did this sensor send so far" or "what is this sensor's
-usual reading". No database is asked, so it is much faster than a [`lookup`](lookup.md) that
-lets a database keep the counter.
+The [`aggregate`](../engine/reference.md#aggregate) middleware keeps a running value per key
+and updates it with every message: counters, sums, moving averages. The message goes on with
+the value written into its payload. Use it for values that depend on earlier messages, such
+as "how many orders did this customer place so far" or "what is this sensor's usual reading".
+
+The values live in a database you name with `store`. Every batch loads the values of its
+keys, computes, and writes them back before its messages go on. Nothing is kept in the
+process between batches, so a restart, or a second instance of the route, continues from the
+stored values.
 
 ## Where it fits
 
@@ -18,17 +21,15 @@ message, in the order the messages arrive.
 
 | You need | Use |
 |---|---|
-| a running value per key that a `filter`, a `switch` or the receiver decides on | `aggregate` |
-| the same, surviving restarts or shared by several instances | `aggregate` with a `store` |
+| a running value per key that a `filter`, a `switch` or the receiver decides on | `aggregate` with a `store` |
+| the same, faster, for a route that runs as one instance | `aggregate` with `consistency: single_writer` |
 | a counter that other applications update too | a writing [`lookup`](lookup.md) |
 | totals for reports only, in a database that aggregates on its own | write the raw rows and let the sink aggregate |
 | time windows, event time and late data, joins between streams, exactly-once state | a stream processor, with mq-bridge in front of it or behind it |
 
-Letting the database keep the counter is the obvious alternative, and the slow one: it
-costs a read and a write per message and key. In our measurements a `lookup` that updated
-five keys per message reached about 17k msg/s on PostgreSQL and about 2k on MongoDB. With
-`single_writer`, `aggregate` writes a changed state once per flush instead of once per
-message and reaches 240k on the same PostgreSQL (see [Performance](#performance-and-tuning)).
+Letting the database compute the counter, with a writing `lookup`, costs a read and a write
+per message and key. `aggregate` computes in the process and asks the store twice per batch,
+however large the batch is.
 
 Windows, event time and joins are out of scope. They need the state and the input position
 committed together, which a bridge between arbitrary endpoints cannot promise; see
@@ -38,41 +39,81 @@ committed together, which a bridge between arbitrary endpoints cannot promise; s
 
 ```yaml
 sensor_stats:
+  batch_size: 4096
   input:
     kafka: { topic: "readings", url: "localhost:9092" }
     middlewares:
       - aggregate:
-          consistency: single_writer
+          store: "postgres://localhost/telemetry/sensor_states"
           key: "${payload:sensor_id}"
           into: sensor
-          expression: "{ total: (state.total ?? 0) + reading, count: (state.count ?? 0) + 1 }"
+          fields: { total: sum(reading), count: count }
   output:
     kafka: { topic: "readings.enriched", url: "localhost:9092" }
 ```
 
 `{"sensor_id": 7, "reading": 20}` leaves as
-`{"sensor_id": 7, "reading": 20, "sensor": {"total": 20, "count": 1}}`. The next message for
-sensor 7 continues from that state.
+`{"sensor_id": 7, "reading": 20, "sensor": {"count": 1, "total": 20.0}}`. The next message
+for sensor 7 continues from that state, in this process or after a restart.
 
-`consistency: single_writer` without a `store` says that the states may live in this process
-only: they are gone after a restart and one instance runs the route. Leaving out both is a
-startup error, so that states in memory are never the result of a forgotten `store`.
-
-A CSV sink writes that nested result as the columns `sensor.total` and `sensor.count`, not as
+A CSV sink writes that nested result as the columns `sensor.count` and `sensor.total`, not as
 JSON text in one cell; see [CSV](../connectors/file.md#csv).
 
-`expression` returns the new state. It reads payload fields by name, metadata as `meta.<key>`,
-and `state`, the value it returned for the previous message with the same key. For a new key
-`state` is `null`, so `state.total ?? 0` gives the starting value. The language is the one
-[`transform`](transform.md) and `filter` use.
+## Where the states live
 
+PostgreSQL, SQLite (`sqlite:///var/lib/mqb/agg.db?mode=rwc`) and MongoDB
+(`mongodb://localhost/telemetry`) work as a `store`. The table or collection is created on
+start. **Name it in the URL**, as above: without a name it is `mqb_aggregate_<route>`, after
+the name the route runs under. mq-bridge-app runs routes under an internal name
+(`ui_collector_route_<hex>`), so there the default is not the name in your YAML, and renaming
+a route would start from empty states.
+
+Per batch, under the default `consistency: shared`:
+
+1. The distinct keys of the batch are loaded with one query.
+2. The batch is computed in memory, message by message.
+3. The changed states are written back with one statement.
+4. Only then do the messages go on, and only then is the batch acked.
+
+That is why a restart changes nothing: a batch is acked only after its states are stored,
+so the route continues exactly where it stopped, and after weeks of stops and starts it
+holds what a route that never stopped would hold. Several instances can run against the same
+store; a state that another instance changed in between is computed again. Two caveats:
+
+- **Decaying values need `time`.** With `time` they fade by the times in the messages.
+  Without it the clock of the process is used, and a replay computes different values. See
+  [A moving average by time](#a-moving-average-by-time).
+- **A replayed message counts twice.** Storing the states and acking the batch are two
+  steps. A crash between them, or a nack after the states were stored, delivers the batch
+  again. See [What happens on a crash or a retry](#what-happens-on-a-crash-or-a-retry).
+
+The cost is two round trips per batch, so use a large `batch_size` (4096 to 8192). If the
+route runs as one instance, [`single_writer`](#faster-keep-the-states-in-memory) is several
+times faster.
+
+## Logic of your own: `expression`
+
+Where the built-in aggregates do not fit, `expression` returns the new state:
+
+```yaml
+- aggregate:
+    store: "postgres://localhost/telemetry/sensor_states"
+    key: "${payload:sensor_id}"
+    into: sensor
+    expression: "{ total: (state.total ?? 0) + reading, count: (state.count ?? 0) + 1 }"
+```
+
+It reads payload fields by name, metadata as `meta.<key>`, and `state`, the value it returned
+for the previous message with the same key. For a new key `state` is `null`, so
+`state.total ?? 0` gives the starting value. The language is the one
+[`transform`](transform.md) and `filter` use.
 
 The usual form `avg * 0.99 + reading * 0.01` starts at the first reading and needs hundreds
 of messages to forget it. Keep the weighted sum and the weight, and divide when writing:
 
 ```yaml
 - aggregate:
-    consistency: single_writer
+    store: "postgres://localhost/telemetry/sensor_states"
     key: "${payload:sensor_id}"
     into: sensor.avg_reading
     expression: "{ s: (state.s ?? 0) * 0.99 + reading, w: (state.w ?? 0) * 0.99 + 1 }"
@@ -90,7 +131,7 @@ a rule such as "this reading is five times the sensor's average" needs:
 
 ```yaml
 - aggregate:
-    consistency: single_writer
+    store: "postgres://localhost/telemetry/sensor_states"
     key: "${payload:sensor_id}"
     into: sensor.avg_before
     emit: previous
@@ -106,7 +147,7 @@ carry the average and the standard deviation from before its own update, and a `
 
 ```yaml
 - aggregate:
-    consistency: single_writer
+    store: "postgres://localhost/telemetry/sensor_states"
     key: "${payload:sensor_id}"
     into: before
     emit: previous
@@ -125,7 +166,7 @@ values (divided by n − 1) and `null` for the first message of a key, which has
 
 ```yaml
 - aggregate:
-    consistency: single_writer
+    store: "postgres://localhost/telemetry/sensor_states"
     entries:
       - key: "${payload:sensor_id}"
         into: stats.sensor
@@ -135,14 +176,14 @@ values (divided by n − 1) and `null` for the first message of a key, which has
         expression: "{ max: max([state.max ?? reading, reading]) }"
 ```
 
-## Built-in aggregates: the fast path
+## Built-in aggregates
 
 For counters, sums and averages you do not need an expression. `fields` names the results and
 what each one computes:
 
 ```yaml
 - aggregate:
-    consistency: single_writer
+    store: "postgres://localhost/telemetry/sensor_states"
     entries:
       - key: "${payload:sensor_id}"
         into: sensor
@@ -170,7 +211,7 @@ instead of `alpha` and the weight follows the time between two messages of a key
 
 ```yaml
 - aggregate:
-    consistency: single_writer
+    store: "postgres://localhost/telemetry/sensor_states"
     key: "${payload:sensor_id}"
     into: sensor
     time: measured_at
@@ -205,7 +246,7 @@ half-life side by side compare the recent activity of a key with its own usual l
 
 ```yaml
 - aggregate:
-    consistency: single_writer
+    store: "postgres://localhost/telemetry/sensor_states"
     key: "${payload:customer_id}"
     into: orders
     time: created_at
@@ -232,7 +273,7 @@ what happens then:
 
 ```yaml
 - aggregate:
-    consistency: single_writer
+    store: "postgres://localhost/telemetry/sensor_states"
     on_error: skip
     entries:
       - { key: "${payload:sensor_id}", into: sensor, fields: { avg: "ema(reading, 0.01)" } }
@@ -258,31 +299,38 @@ the stored state as it is; with `emit: updated` what it would become.
     fields: { n: count, avg: "ema(reading, 0.01)" }
 ```
 
-## Keep the states across restarts
+## Faster: keep the states in memory
 
-Without `store` the states are gone after a restart. Give the middleware a database and they
-are kept there:
+If exactly one instance runs the route, `consistency: single_writer` keeps the states in
+memory and writes the changed ones to the store behind the batches:
 
 ```yaml
 - aggregate:
-    store: "postgres://localhost/telemetry"
+    store: "postgres://localhost/telemetry/sensor_states"
+    consistency: single_writer
     key: "${payload:sensor_id}"
     into: sensor
     fields: { n: count, avg: "ema(reading, 0.01)" }
 ```
 
-PostgreSQL, SQLite (`sqlite:///var/lib/mqb/agg.db?mode=rwc`) and MongoDB
-(`mongodb://localhost/telemetry`) work. The table or collection is created on start and is
-named `mqb_aggregate_<route>` unless the URL names one.
+A key is loaded from the store the first time it is seen, and a key that changed a hundred
+times between two writes is written once. A batch is still acked only once its states are
+stored, so a restart continues from the same values as under `shared`. In our measurements
+it reached 240k msg/s on PostgreSQL where `shared` reached 17k (see
+[Performance](#performance-and-tuning)). Two instances of such a route are wrong: run one.
 
-By default (`consistency: shared`) several instances of the route can run against the same
-store: every batch loads its states, updates them and writes them back, and a state that
-another instance changed in between is computed again. That is safe and bound by the
-database, about two round trips per batch, so use a large `batch_size` (4096 to 8192).
+Without a `store`, `single_writer` keeps the states in this process only. They are gone
+after a restart and are not shared between instances. Leaving out both `store` and
+`consistency: single_writer` is a startup error, so that states in memory are never the
+result of a forgotten `store`.
 
-If exactly one instance runs the route, `consistency: single_writer` is several times faster:
-the states stay in memory and are written to the store continuously. A batch is still only
-acked once its states are stored, so no update is lost on a crash.
+```yaml
+- aggregate:
+    consistency: single_writer
+    key: "${payload:sensor_id}"
+    into: sensor
+    fields: { n: count, avg: "ema(reading, 0.01)" }
+```
 
 ## How it works internally
 
@@ -388,6 +436,8 @@ If you need one of these, compute the aggregate in the database with a
 
 ## What to know before relying on it
 
+- **A restart continues with the same values**, with a `store` and with `time` for decaying
+  values; see [Where the states live](#where-the-states-live).
 - **Without `store`, state lives in memory only.** A restart starts from empty states and
   two instances do not share them. That is why it has to be asked for with
   `consistency: single_writer`.
@@ -398,9 +448,11 @@ If you need one of these, compute the aggregate in the database with a
 - **A replayed message counts twice.** Where that matters, let
   [`deduplication`](deduplication.md) see the message first: on an input, list it *after*
   `aggregate`, because a message passes the last middleware of an input first.
-- **The table is named after the route.** Renaming a route, or a consumer that has no `id`,
-  starts with empty states. Name the table in the URL (`postgres://host/db/sensor_states`)
-  to keep them.
+- **Name the table.** The default is named after the route, which under mq-bridge-app is an
+  internal name, and renaming a route starts with empty states. Name the table in the URL
+  (`postgres://host/db/sensor_states`).
+- **On an output, list `retry` before `aggregate`.** The last middleware of an output runs
+  first, so the retry then repeats only the send, not the update of the states.
 - **Order matters for a moving average.** Messages of a batch are folded in order. With a
   route `concurrency` above 1 the order across batches is not guaranteed. With `time`, a
   message older than its state is weighted by its lateness and marked
@@ -482,3 +534,6 @@ A `fields` state takes roughly 100 to 300 bytes, so the default limit stays with
 hundred megabytes per entry; an expression state with a large object takes more. `max_keys:
 0` removes the limit. Rows in a store are never removed; delete them yourself if the key is
 unbounded.
+
+A complete pipeline with a Postgres store, a `lookup` and routing on the result, with a runnable
+example: [Enrich events and keep per-key history](../use-cases/enrich-and-aggregate-orders.md).

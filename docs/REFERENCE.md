@@ -1254,10 +1254,13 @@ needs another's result (e.g. a merchant id from the fetched user), chain a secon
 
 ### `aggregate`
 
-Keeps one state per key in this process and updates it with every message: running sums,
-counters, moving averages. Input and output. The message is not consumed; it leaves with
-the state written into its payload. Use it where a [`lookup`](#lookup) would ask a database
-to keep a counter: the arithmetic runs here, so no request is made per message.
+Keeps one state per key and updates it with every message: running sums, counters, moving
+averages. Input and output. The message is not consumed; it leaves with the state written
+into its payload. The states live in a database (`store`): each batch loads the states of
+its keys, computes, and writes them back before its messages go on. Nothing is kept in the
+process between batches, so a restart or a second instance continues from the stored values.
+Compared with a writing [`lookup`](#lookup), the arithmetic runs here and the store is asked
+twice per batch, not per message.
 
 | Field | Type | Default |
 |---|---|---|
@@ -1268,8 +1271,8 @@ to keep a counter: the arithmetic runs here, so no request is made per message.
 | `output` | expression | the state itself; shapes what is written to the message |
 | `emit` | `updated` \| `previous` | `updated` |
 | `entries` | list of `{key, expression, fields, into, output, emit}` | `[]`; further aggregates |
-| `store` | URL | –; `postgres://…/db[/table]`, `sqlite://…`, `mongodb://host/db[/collection]`. Without it `consistency: single_writer` is required |
-| `consistency` | `shared` \| `single_writer` | `shared`, which needs a `store`; `single_writer` without a `store` keeps the states in memory only |
+| `store` | URL | –; `postgres://…/db[/table]`, `sqlite://…`, `mongodb://host/db[/collection]`. Required unless `consistency: single_writer` |
+| `consistency` | `shared` \| `single_writer` | `shared`: states are loaded and written per batch. `single_writer` keeps them in memory, written behind to the `store` if one is set |
 | `max_keys` | integer | `1000000`; states kept in memory per entry, `0` is unlimited |
 | `time` | dotted payload path | – (the clock); the message's event time, for `fields` entries |
 | `on_error` | `drop` \| `fail` \| `skip` | `drop`; what happens to a message that cannot be folded |
@@ -1277,7 +1280,7 @@ to keep a counter: the arithmetic runs here, so no request is made per message.
 
 ```yaml middleware
 - aggregate:
-    consistency: single_writer
+    store: "postgres://localhost/telemetry/sensor_states"
     key: "${payload:sensor_id}"
     into: sensor
     expression: "{ total: (state.total ?? 0) + reading, count: (state.count ?? 0) + 1 }"
@@ -1285,12 +1288,18 @@ to keep a counter: the arithmetic runs here, so no request is made per message.
 
 `{"sensor_id": 7, "reading": 20}` leaves as
 `{"sensor_id": 7, "reading": 20, "sensor": {"total": 20, "count": 1}}`; the next message for sensor 7
-continues from that state.
+continues from that state, in this process or another one.
 
-**States in memory only are opt-in.** Without a `store` the states are lost on restart and
-not shared between instances, so that has to be asked for with `consistency: single_writer`,
-as above. An `aggregate` with neither a `store` nor `consistency: single_writer` is a startup
-error.
+**Name the table.** Without one in the URL it is `mqb_aggregate_<route>`, after the name
+the route runs under. mq-bridge-app runs a route under an internal name
+(`ui_collector_route_<hex>`), so there the default is not the YAML name; renaming a route
+also starts from empty states. PostgreSQL, SQLite and MongoDB are supported; the table or
+collection is created on start. How the store is used is under
+[Consistency](#aggregate-consistency).
+
+**States in memory only are opt-in.** `consistency: single_writer` without a `store` keeps
+the states in this process: they are lost on restart and not shared between instances. An
+`aggregate` with neither a `store` nor `consistency: single_writer` is a startup error.
 
 **Expressions** are the ones [`filter`](#filter) and [`transform`](#transform) use. They read
 payload fields by name and metadata as `meta.<key>`, plus `state`: the value `expression`
@@ -1310,7 +1319,7 @@ to forget it. Keep the weighted sum and the weight instead and divide when writi
 
 ```yaml middleware
 - aggregate:
-    consistency: single_writer
+    store: "postgres://localhost/telemetry/sensor_states"
     key: "${payload:sensor_id}"
     into: sensor.avg_reading
     expression: "{ s: (state.s ?? 0) * 0.99 + reading, w: (state.w ?? 0) * 0.99 + 1 }"
@@ -1324,7 +1333,7 @@ the usual form still reads 216.
 
 ```yaml middleware
 - aggregate:
-    consistency: single_writer
+    store: "postgres://localhost/telemetry/sensor_states"
     entries:
       - key: "${payload:sensor_id}"
         into: features.sensor
@@ -1340,7 +1349,7 @@ times faster, because no expression runs and the payload is not parsed into a tr
 
 ```yaml middleware
 - aggregate:
-    consistency: single_writer
+    store: "postgres://localhost/telemetry/sensor_states"
     key: "${payload:sensor_id}"
     into: sensor
     fields:
@@ -1377,7 +1386,7 @@ this process is used, which makes a replay compute different values.
 
 ```yaml middleware
 - aggregate:
-    consistency: single_writer
+    store: "postgres://localhost/telemetry/sensor_states"
     key: "${payload:sensor_id}"
     into: sensor
     time: measured_at
@@ -1393,7 +1402,7 @@ minutes above `orders_1d` / 1440 minutes means a key is busier than its own base
 
 ```yaml middleware
 - aggregate:
-    consistency: single_writer
+    store: "postgres://localhost/telemetry/sensor_states"
     key: "${payload:account_id}"
     into: activity
     time: created_at
@@ -1444,7 +1453,7 @@ the reason for each is logged at debug level.
 
 ```yaml middleware
 - aggregate:
-    consistency: single_writer
+    store: "postgres://localhost/telemetry/sensor_states"
     on_error: skip
     entries:
       - { key: "${payload:sensor_id}", into: sensor, fields: { avg: "ema(reading, 0.01)" } }
@@ -1468,13 +1477,15 @@ messages before it.
     fields: { n: count, avg: "ema(reading, 0.01)" }
 ```
 
-**Keeping the states in a store.** With `store` the states survive a restart. The table or
-collection defaults to `mqb_aggregate_<route>` and is created on start; PostgreSQL, SQLite
-and MongoDB are supported.
+<a id="aggregate-consistency"></a>
+**Consistency.** `shared`, the default, keeps no state in the process; `single_writer` keeps
+the states in memory and makes the store a write-behind copy, for a route that runs as one
+instance only.
 
 ```yaml middleware
 - aggregate:
-    store: "postgres://localhost/telemetry"
+    store: "postgres://localhost/telemetry/sensor_states"
+    consistency: single_writer
     key: "${payload:sensor_id}"
     into: sensor
     fields: { n: count, avg: "ema(reading, 0.01)" }
@@ -1514,6 +1525,10 @@ and MongoDB are supported.
 
 **What to expect.**
 
+- **A restart continues with the same values.** With a `store` a batch is acked only after
+  its states are written, so a route stopped and started again computes what one that ran
+  for weeks would have. That holds for decaying values when `time` is set: they fade by the
+  messages' times, not by the clock of the process. A replay is the exception, below.
 - **Without `store`, state lives in memory only.** It is lost on restart and it is not shared
   between instances, which is why it needs `consistency: single_writer`.
 - **Memory is bounded by `max_keys`.** An entry keeps at most that many states in memory,
@@ -1523,7 +1538,8 @@ and MongoDB are supported.
   memory and loaded again from the store when their key returns, so results do not change.
   `shared` keeps nothing in memory. A `fields` state takes roughly 100 to 300 bytes.
 - **A replayed message counts twice.** Delivery is at-least-once: a batch that is nacked or
-  retried after it was folded is folded again. Where that matters, let [`deduplication`](#deduplication) see the message
+  retried after it was folded is folded again. On an output, list `retry` before `aggregate`,
+  so that retrying the send does not fold again. Where that matters, let [`deduplication`](#deduplication) see the message
   first: on an input, list it *after* `aggregate` (see [Ordering](#ordering--read-this-before-combining-middleware)).
 - **Order matters for order-dependent states** such as a moving average. Within a batch
   messages are folded in order; with a route `concurrency` above 1 the order across batches
