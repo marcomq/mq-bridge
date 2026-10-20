@@ -17,7 +17,7 @@
 ![macOS](https://img.shields.io/badge/macOS-supported-green?logo=apple)
 [![Supply chain](https://img.shields.io/badge/supply%20chain-cargo--deny-blue)](deny.toml)
 [![Security](https://img.shields.io/badge/security-advisory%20analysis-brightgreen)](SECURITY.md)
-[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
 <p align="center">
 🖥️ <a href="apps/mq-bridge-app">mq-bridge-app</a> ·

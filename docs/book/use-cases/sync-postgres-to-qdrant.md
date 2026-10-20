@@ -277,7 +277,7 @@ Limits of this recipe:
   `mq-bridge-app` is about 100 MB with every connector) or a library inside a Rust, Python or
   Node.js service you already run.
 - **Postgres CDC is part of the open-source core.** mq-bridge is licensed
-  [MIT OR Apache-2.0](https://github.com/marcomq/mq-bridge/blob/main/LICENSE), CDC included.
+  [MIT OR Apache-2.0](https://github.com/marcomq/mq-bridge#license), CDC included.
   Redpanda Connect's `postgres_cdc` input states that it requires an enterprise license (linked
   above).
 - **Backfill and streaming are one setting.** `consume: capture_all` copies the existing rows and

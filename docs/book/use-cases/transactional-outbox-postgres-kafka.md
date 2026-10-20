@@ -184,7 +184,7 @@ topic; it runs in CI. The example's README shows the same steps by hand.
 - **The broker is a config line.** Replacing the `kafka` output with `nats`, `amqp`, `mqtt` or
   `aws` relays the same outbox to another broker, with the same retry and dead-letter middleware.
 - **Postgres CDC is part of the open-source core.** mq-bridge is licensed
-  [MIT OR Apache-2.0](https://github.com/marcomq/mq-bridge/blob/main/LICENSE), CDC included.
+  [MIT OR Apache-2.0](https://github.com/marcomq/mq-bridge#license), CDC included.
   Redpanda Connect's `postgres_cdc` input states that it requires an enterprise license (linked
   above).
 - **The consumers of the events can be tested without a broker**, with the same library; see
