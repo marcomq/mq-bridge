@@ -42,6 +42,15 @@ export function nameMappingRuleBranches(itemSchema: MutableSchema): void {
   }
 }
 
+// The schema lists serde aliases (`envelope` for `normal`) as extra branches so editors accept
+// them; the form shows only the canonical name.
+export function dropAliasBranches(itemSchema: MutableSchema): void {
+  for (const def of Object.values(itemSchema.$defs || {})) {
+    if (!Array.isArray(def?.oneOf)) continue;
+    def.oneOf = def.oneOf.filter((branch) => !(branch && typeof branch === "object" && "x-alias-of" in branch));
+  }
+}
+
 // Schemars has no `deprecated` keyword, so the backend marks a superseded field by opening its
 // doc comment with "Deprecated:". Such a field is dropped from the form unless the config still
 // carries it — a legacy value stays visible and clearable, a new config only sees the replacement.

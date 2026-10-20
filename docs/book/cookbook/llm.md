@@ -45,6 +45,9 @@ tickets_triage:
 paid for are kept. An answer that is not JSON fails its message for good and
 goes to the `dlq`.
 
+The use case [LLM triage](../use-cases/llm-ticket-triage.md) runs this with a
+local Ollama model, a webhook input and one Redis stream per team.
+
 ## Summarise, and keep only the answer
 
 As the `to` of a [`request`](../engine/reference.md#request) endpoint, the
@@ -138,7 +141,8 @@ docs_to_qdrant:
 ```
 
 To follow changes and deletes as well, read the table with `postgres_cdc`; the
-[Qdrant](../connectors/qdrant.md) page has that route.
+[Qdrant](../connectors/qdrant.md) page has that route, and the use case
+[RAG index sync](../use-cases/sync-postgres-to-qdrant.md) runs it end to end.
 
 ## From Rust
 

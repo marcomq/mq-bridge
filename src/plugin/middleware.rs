@@ -20,6 +20,7 @@ use super::message::{from_abi, AbiMessages};
 use super::LoadedPlugin;
 use crate::errors::{ConsumerError, PublisherError};
 use crate::middleware::deferred_commit::{run_all, DeferredCommits};
+use crate::middleware::lookup::lookup_through;
 use crate::support::plugin_abi::{
     MqbBuffer, MqbFilterHandle, MqbMessage, MqbMiddlewareHandle, MqbSlice, MqbStatus,
     MQB_END_OF_STREAM, MQB_ERR_CONNECTION, MQB_ERR_INVALID_CONFIG, MQB_ERR_PANIC,
@@ -410,6 +411,21 @@ impl MessagePublisher for PluginMiddlewarePublisher {
         self.inner.send_batch(filtered.kept).await
     }
 
+    /// `None` when the plugin fails the batch, so each request is sent, and fails, alone.
+    async fn lookup_each(
+        &self,
+        requests: &[CanonicalMessage],
+    ) -> Option<Vec<Result<Option<serde_json::Value>, PublisherError>>> {
+        let filtered = self.middleware.apply(requests.to_vec()).await.ok()?;
+        let mut kept = filtered.kept.into_iter();
+        let outcomes = filtered
+            .keep_flags
+            .iter()
+            .map(|keep| Ok(keep.then(|| kept.next()).flatten()))
+            .collect();
+        Some(lookup_through(self.inner.as_ref(), outcomes).await)
+    }
+
     async fn flush(&self) -> anyhow::Result<()> {
         self.inner.flush().await
     }
@@ -621,6 +637,97 @@ mod tests {
             send("busy").await,
             Err(PublisherError::Retryable(_))
         ));
+    }
+
+    /// Drops a request marked `drop`; fails the whole batch if one is marked `fail`.
+    struct LookupFilter;
+
+    #[async_trait]
+    impl BatchFilter for LookupFilter {
+        async fn on_send(
+            &self,
+            messages: Vec<CanonicalMessage>,
+        ) -> anyhow::Result<Vec<Option<CanonicalMessage>>> {
+            if messages.iter().any(|m| &m.payload[..] == b"fail") {
+                return Err(anyhow!("failed"));
+            }
+            Ok(messages
+                .into_iter()
+                .map(|message| (&message.payload[..] != b"drop").then_some(message))
+                .collect())
+        }
+    }
+
+    #[derive(Default)]
+    struct LookupFilterFactory;
+
+    #[async_trait]
+    impl MiddlewareFactory for LookupFilterFactory {
+        async fn create(
+            &self,
+            _: &str,
+            _: &serde_json::Value,
+        ) -> anyhow::Result<Box<dyn BatchFilter>> {
+            Ok(Box::new(LookupFilter))
+        }
+    }
+
+    static LOOKUP_TABLE: ExportedVTable = build_vtable::<NoEndpoint, LookupFilterFactory>(
+        "lookup-filter",
+        "0.0.0",
+        CAPABILITIES_MIDDLEWARE_ONLY,
+    );
+
+    /// Answers each lookup with its request's payload, all in one call.
+    struct Echo;
+
+    #[async_trait]
+    impl MessagePublisher for Echo {
+        async fn send_batch(&self, _: Vec<CanonicalMessage>) -> Result<SentBatch, PublisherError> {
+            panic!("a batched lookup must not fall back to send");
+        }
+
+        async fn lookup_each(
+            &self,
+            requests: &[CanonicalMessage],
+        ) -> Option<Vec<Result<Option<serde_json::Value>, PublisherError>>> {
+            let echo = |r: &CanonicalMessage| Ok(Some(String::from_utf8_lossy(&r.payload).into()));
+            Some(requests.iter().map(echo).collect())
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_lookup_reaches_the_wrapped_endpoint_as_one_batch() {
+        unsafe { crate::plugin::register_plugin_table(LOOKUP_TABLE.as_ptr()) }.unwrap();
+        let factory = get_middleware_factory("lookup-filter").unwrap();
+        let publisher = factory
+            .apply_publisher(Box::new(Echo), "r", &serde_json::json!({}))
+            .await
+            .unwrap();
+        let requests = |payloads: &[&str]| -> Vec<CanonicalMessage> {
+            payloads
+                .iter()
+                .map(|p| CanonicalMessage::new(p.as_bytes().to_vec(), None))
+                .collect()
+        };
+        let answers = publisher
+            .lookup_each(&requests(&["a", "drop", "b"]))
+            .await
+            .unwrap();
+        assert_eq!(answers[0].as_ref().unwrap(), &Some("a".into()));
+        assert!(answers[1].is_err(), "a dropped request has no answer");
+        assert_eq!(answers[2].as_ref().unwrap(), &Some("b".into()));
+        assert!(
+            publisher
+                .lookup_each(&requests(&["a", "fail"]))
+                .await
+                .is_none(),
+            "a failed batch must fall back to one request at a time"
+        );
     }
 
     /// A cumulative-ack source: one message per batch, recording the commit order.

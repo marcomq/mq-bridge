@@ -288,3 +288,7 @@ output:
       value: /content/0/text
       error: /error/message
 ```
+
+Use cases with a runnable example:
+[RAG index sync: Postgres CDC → embeddings → Qdrant](../use-cases/sync-postgres-to-qdrant.md) and
+[classify and route messages with an LLM](../use-cases/llm-ticket-triage.md).

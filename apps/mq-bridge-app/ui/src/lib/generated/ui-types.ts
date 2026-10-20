@@ -322,7 +322,7 @@ export interface AwsConfig {
 
 export interface KafkaConfig {
   url: string;
-  topic?: string | null;
+  topic?: string | string[] | null;
   username?: string | null;
   password?: string | null;
   tls?: TlsConfig;
@@ -386,7 +386,7 @@ export interface FileConfig {
 
 export type NameBy = "auto" | "source_position" | "write_time";
 
-export type FileFormat = "normal" | "json" | "text" | "raw" | "csv" | "parquet";
+export type FileFormat = "normal" | "json" | "text" | "raw" | "csv" | "parquet" | "envelope" | "envelope_json" | "envelope_text" | "payload";
 
 export interface CsvConfig {
   separator?: string | null;
@@ -515,7 +515,7 @@ export interface MongoDbConfig {
 
 export type MongoConsume = "delete" | "snapshot" | "capture_new" | "capture_all";
 
-export type MongoDbFormat = "normal" | "json" | "text" | "raw";
+export type MongoDbFormat = "normal" | "json" | "text" | "raw" | "envelope" | "envelope_json" | "envelope_text" | "payload";
 
 export interface MqttConfig {
   url: string;

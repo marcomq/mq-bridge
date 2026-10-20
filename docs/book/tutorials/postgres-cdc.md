@@ -66,3 +66,4 @@ orders_cdc:
 - [PostgreSQL CDC connector](../connectors/postgres.md#postgresql-cdc) — URL format and examples.
 - [`postgres-cdc` parameter reference](../reference/postgres-cdc.md) — every recognised field.
 - [File connector](../connectors/file.md) — formats and options for the sink.
+- [Keep a vector index in sync with Postgres](../use-cases/sync-postgres-to-qdrant.md) — the same CDC input feeding embeddings and Qdrant.

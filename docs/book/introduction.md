@@ -78,6 +78,9 @@ route code should still be able to receive a batch, process it, publish it, and 
   then [Embed the library](tutorials/embedding.md).
 - Moving data without code? Start with [Installation](INSTALL.md) and the
   [`copy` quick start](quick-start.md).
+- Starting from a problem? The [Use cases](use-cases/README.md) solve one each, such as
+  keeping a RAG index in sync with Postgres or routing tickets with an LLM, with a runnable
+  example.
 - Want the end-to-end walkthroughs? See the [Tutorials](tutorials/postgres-cdc.md).
 - Looking for a specific task? The [Cookbook](cookbook/upserts.md) has short recipes.
 - Need exact fields and defaults? The [Reference](reference/endpoints.md) is authoritative.

@@ -38,6 +38,9 @@ mqb mcp install
 # 3. restart the client fully — reopening a tab is not enough
 ```
 
+An agent that runs the `mqb` CLI instead of the MCP tools can learn it from the
+[agent skill](INSTALL.md#agent-skill): `npx skills add marcomq/mq-bridge`.
+
 Then ask the agent for the job in words:
 
 > *"Drain the `events` Redis stream into the `events` table in Postgres, creating

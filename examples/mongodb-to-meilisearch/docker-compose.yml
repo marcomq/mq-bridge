@@ -1,0 +1,38 @@
+services:
+  # Change streams need a replica set; one member is enough.
+  mongo:
+    image: mongo:8.2
+    command: ["--replSet", "rs0", "--bind_ip_all"]
+    ports: ["127.0.0.1:27017:27017"]
+    volumes: ["mongodata:/data/db"]
+
+  meilisearch:
+    image: getmeili/meilisearch:v1.53.0
+    environment: { MEILI_ENV: development, MEILI_NO_ANALYTICS: "true" }
+    ports: ["127.0.0.1:7700:7700"]
+    volumes: ["meili:/meili_data"]
+
+  # Initiates the replica set and inserts the sample products, then exits.
+  setup:
+    image: mongo:8.2
+    depends_on: [mongo]
+    volumes: ["./init.js:/init.js:ro"]
+    command:
+      - sh
+      - -c
+      - |
+        until mongosh --quiet --host mongo --eval 'db.adminCommand({ping: 1})' >/dev/null 2>&1; do sleep 1; done
+        mongosh --quiet --host mongo /init.js
+
+  mq-bridge:
+    image: ghcr.io/marcomq/mq-bridge-app:1.0.1
+    command: ["--config", "/config/routes.yaml"]
+    volumes: ["./routes.yaml:/config/routes.yaml:ro"]
+    depends_on:
+      meilisearch: { condition: service_started }
+      setup: { condition: service_completed_successfully }
+    restart: on-failure
+
+volumes:
+  mongodata:
+  meili:

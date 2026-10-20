@@ -1083,7 +1083,9 @@ pub struct KafkaConfig {
     #[serde(alias = "brokers")]
     #[cfg_attr(feature = "schema", schemars(extend("format"="password")))]
     pub url: String,
-    /// The Kafka topic to produce to or consume from.
+    /// The topic to produce to or consume from. A source also takes a list (array or comma-separated) or a `^regex`.
+    #[serde(default, deserialize_with = "deserialize_topic_list")]
+    #[cfg_attr(feature = "schema", schemars(schema_with = "topic_list_schema"))]
     pub topic: Option<String>,
     /// Optional username for SASL authentication.
     pub username: Option<String>,
@@ -1154,6 +1156,7 @@ pub struct SledConfig {
 /// Format for messages written to or read from a file.
 #[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schema", schemars(transform = format_alias_schema_transform))]
 #[serde(rename_all = "snake_case")]
 pub enum FileFormat {
     /// The full `CanonicalMessage` is serialized to JSON. Payload is either base64 or utf8 text. Also `envelope`.
@@ -2003,6 +2006,7 @@ pub struct AmqpConfig {
 /// Determines how messages are stored and retrieved from MongoDB collections.
 #[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schema", schemars(transform = format_alias_schema_transform))]
 #[serde(rename_all = "lowercase")]
 pub enum MongoDbFormat {
     #[default]
