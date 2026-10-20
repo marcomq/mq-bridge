@@ -125,43 +125,47 @@ impl Entry {
 
     /// Sends one request; `None` when `from` found nothing.
     async fn fetch(&self, request: CanonicalMessage) -> Result<Option<Value>, PublisherError> {
-        let response = match self.from.send(request).await? {
-            Sent::Response(response) => response,
-            Sent::Ack => {
-                return Err(PublisherError::NonRetryable(anyhow::anyhow!(
-                    "lookup: the `from` endpoint returned no response; it must be request-capable"
+        answer_of(self.from.send(request).await?)
+    }
+}
+
+/// What a lookup reads from one answer of `from`; `None` when it found nothing.
+pub(crate) fn answer_of(sent: Sent) -> Result<Option<Value>, PublisherError> {
+    let response = match sent {
+        Sent::Response(response) => response,
+        Sent::Ack => {
+            return Err(PublisherError::NonRetryable(anyhow::anyhow!(
+                "lookup: the `from` endpoint returned no response; it must be request-capable"
+            )))
+        }
+    };
+    if let Some(status) = response
+        .metadata
+        .get(HTTP_STATUS_CODE)
+        .and_then(|s| s.parse::<u16>().ok())
+    {
+        match status {
+            404 => return Ok(None),
+            // 401 and 403 are a credential problem, not a fault of the message.
+            401 | 403 | 408 | 429 | 500..=504 => {
+                return Err(PublisherError::Retryable(anyhow::anyhow!(
+                    "lookup: HTTP status {status}"
                 )))
             }
-        };
-        if let Some(status) = response
-            .metadata
-            .get(HTTP_STATUS_CODE)
-            .and_then(|s| s.parse::<u16>().ok())
-        {
-            match status {
-                404 => return Ok(None),
-                // 401 and 403 are a credential problem, not a fault of the message.
-                401 | 403 | 408 | 429 | 500..=504 => {
-                    return Err(PublisherError::Retryable(anyhow::anyhow!(
-                        "lookup: HTTP status {status}"
-                    )))
-                }
-                400.. => {
-                    return Err(PublisherError::NonRetryable(anyhow::anyhow!(
-                        "lookup: HTTP status {status}"
-                    )))
-                }
-                _ => {}
+            400.. => {
+                return Err(PublisherError::NonRetryable(anyhow::anyhow!(
+                    "lookup: HTTP status {status}"
+                )))
             }
+            _ => {}
         }
-        if response.payload.is_empty() {
-            return Ok(None);
-        }
-        let value = serde_json::from_slice(&response.payload).unwrap_or_else(|_| {
-            Value::String(String::from_utf8_lossy(&response.payload).into_owned())
-        });
-        Ok((!value.is_null()).then_some(value))
     }
+    if response.payload.is_empty() {
+        return Ok(None);
+    }
+    let value = serde_json::from_slice(&response.payload)
+        .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&response.payload).into_owned()));
+    Ok((!value.is_null()).then_some(value))
 }
 
 /// An `http` source hands its status to the lookup, which decides: 404 is "not found",
@@ -175,7 +179,7 @@ fn with_status(from: &crate::models::Endpoint) -> crate::models::Endpoint {
 }
 
 /// A copy of a batch-wide error for each message it fails.
-fn duplicate(e: &PublisherError) -> PublisherError {
+pub(crate) fn duplicate(e: &PublisherError) -> PublisherError {
     let copy = anyhow::anyhow!("{e:#}");
     match e {
         PublisherError::Retryable(_) => PublisherError::Retryable(copy),

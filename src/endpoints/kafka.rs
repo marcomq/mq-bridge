@@ -1264,6 +1264,7 @@ pub const KAFKA_TOMBSTONE_KEY: &str = "mqb.kafka.tombstone";
 /// it carries the delete. Rejecting it used to fail the whole batch, and since the offset
 /// was never committed the route reconnected onto the same record forever, so a single
 /// tombstone wedged the consumer. It becomes an empty payload flagged in metadata instead.
+#[cfg(test)]
 fn to_canonical<M: Message>(message: &M) -> anyhow::Result<CanonicalMessage> {
     to_canonical_with_topic_id(message, false)
 }

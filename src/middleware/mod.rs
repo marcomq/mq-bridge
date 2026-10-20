@@ -54,7 +54,7 @@ pub(crate) mod encryption;
 pub(crate) mod filter;
 mod id;
 mod limiter;
-mod lookup;
+pub(crate) mod lookup;
 #[cfg(feature = "metrics")]
 mod metrics;
 #[cfg(feature = "otel")]

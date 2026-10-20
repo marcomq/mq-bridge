@@ -20,6 +20,7 @@
 //! anything, so the broker can redeliver.
 
 use std::any::Any;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -823,6 +824,51 @@ impl MessagePublisher for PluginPublisher {
         })
         .await
         .map_err(|err| PublisherError::Retryable(join_error(err)))?
+    }
+
+    /// One plugin call for a whole `lookup` batch, each request answered or failed alone.
+    async fn lookup_each(
+        &self,
+        requests: &[CanonicalMessage],
+    ) -> Option<Vec<Result<Option<serde_json::Value>, PublisherError>>> {
+        use crate::middleware::lookup::{answer_of, duplicate};
+        use crate::outcomes::Sent;
+        // Only a 1.2 plugin answers with responses; an older one is asked one request at a time.
+        self.publisher.plugin.table().request_reply_hooks()?;
+        let ids: Vec<u128> = requests.iter().map(|r| r.message_id).collect();
+        if ids.iter().collect::<HashSet<_>>().len() != ids.len() {
+            return None;
+        }
+        Some(match self.send_batch(requests.to_vec()).await {
+            Err(e) => ids.iter().map(|_| Err(duplicate(&e))).collect(),
+            Ok(SentBatch::Ack) => ids.iter().map(|_| answer_of(Sent::Ack)).collect(),
+            Ok(SentBatch::Partial { responses, failed }) => {
+                let mut failed: HashMap<u128, PublisherError> = failed
+                    .into_iter()
+                    .map(|(message, e)| (message.message_id, e))
+                    .collect();
+                let responses = responses.unwrap_or_default();
+                let answered: Vec<u128> = ids
+                    .iter()
+                    .filter(|id| !failed.contains_key(id))
+                    .copied()
+                    .collect();
+                let known: HashSet<&u128> = answered.iter().collect();
+                // A response that does not carry its request's id is matched by position.
+                let by_position = responses.len() == answered.len()
+                    && !responses.iter().all(|r| known.contains(&r.message_id));
+                let mut responses: HashMap<u128, CanonicalMessage> = match by_position {
+                    true => answered.iter().copied().zip(responses).collect(),
+                    false => responses.into_iter().map(|r| (r.message_id, r)).collect(),
+                };
+                ids.iter()
+                    .map(|id| match failed.remove(id) {
+                        Some(e) => Err(e),
+                        None => answer_of(responses.remove(id).map_or(Sent::Ack, Sent::Response)),
+                    })
+                    .collect()
+            }
+        })
     }
 
     async fn flush(&self) -> anyhow::Result<()> {

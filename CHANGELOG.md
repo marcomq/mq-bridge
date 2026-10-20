@@ -17,6 +17,12 @@ All notable changes to `mq-bridge`. Newest first.
 - **An agent skill for the CLI.** `apps/mq-bridge-app/agent-skills` teaches Claude Code,
   Codex and other agents that read `SKILL.md` to use `mqb list`, `describe`, `copy` and
   config files. Install it with `npx skills add marcomq/mq-bridge`.
+- **A `lookup` through a plugin is one call per batch.** A plugin with ABI 1.2 or newer
+  answers the whole batch in one `send_batch`, and each request fails on its own. An older
+  plugin, or a batch with repeated message ids, is still asked one request at a time.
+- **`x-mqb-uri: filepath` for plugin schemas.** Like `path`, but the leading `/` stays, so
+  `x:///models/a.onnx` gives `/models/a.onnx`. A plugin that uses it needs this release:
+  1.0.1 refuses to load it.
 
 ### Fixed
 
