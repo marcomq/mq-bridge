@@ -478,7 +478,7 @@ So `install` remains the shortest path on a machine that already has the binary
 — it is not superseded by publishing to the registry.
 
 [`server.json`](https://github.com/marcomq/mq-bridge/blob/main/apps/mq-bridge-app/server.json)
-at the repository root is the registry entry. It publishes the server under
+in `apps/mq-bridge-app/` is the registry entry. It publishes the server under
 `io.github.marcomq/mq-bridge` and offers two package types, both of which
 run the same `mcp --transport=stdio` command:
 
