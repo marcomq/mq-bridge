@@ -78,3 +78,6 @@ logged and drops only its message.
   strings.
 - A per-message `lookup_query` returns the first row only; use `ORDER BY … LIMIT 1` for
   "the latest". A batched (`IN`) query takes no plain `LIMIT`.
+
+A `lookup` combined with per-key history from `aggregate`, as a runnable example:
+[Enrich events and keep per-key history](../use-cases/enrich-and-aggregate-orders.md).

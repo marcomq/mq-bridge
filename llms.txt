@@ -21,6 +21,17 @@ Key facts:
 - [Request / reply](https://marcomq.github.io/mq-bridge/tutorials/request-reply.html)
 - [Rust API on docs.rs](https://docs.rs/mq-bridge): feature flags and types
 
+## Use cases
+
+Problem-first guides, each with a runnable example in `examples/` that CI executes.
+
+- [RAG index sync: Postgres CDC → embeddings → Qdrant](https://marcomq.github.io/mq-bridge/use-cases/sync-postgres-to-qdrant.html): logical replication, an OpenAI-compatible embeddings API (Ollama), Qdrant upserts and deletes
+- [Search index sync: MongoDB → Meilisearch](https://marcomq.github.io/mq-bridge/use-cases/sync-mongodb-to-meilisearch.html): change stream with initial copy, ObjectId to document id, deletes
+- [LLM triage: classify and route messages](https://marcomq.github.io/mq-bridge/use-cases/llm-ticket-triage.html): webhook → `openai_chat` → `switch` to one Redis stream per team; unknown answers go to people
+- [Enrich events and keep per-key history](https://marcomq.github.io/mq-bridge/use-cases/enrich-and-aggregate-orders.html): `lookup` from Postgres, `aggregate` with a Postgres store (survives restarts, shared by instances), outliers to review
+- [Transactional outbox with Postgres and Kafka](https://marcomq.github.io/mq-bridge/use-cases/transactional-outbox-postgres-kafka.html)
+- [Test message handlers without a broker](https://marcomq.github.io/mq-bridge/use-cases/test-without-a-broker.html): in-memory endpoints in Rust and Python tests
+
 ## Connectors
 
 - [Overview and capabilities](https://marcomq.github.io/mq-bridge/reference/endpoints.html): every transport, subscriber mode, request-reply and nack support, plugin endpoints
@@ -87,5 +98,6 @@ Key facts:
 - [Architecture](https://marcomq.github.io/mq-bridge/engine/architecture.html)
 - [Performance tuning](https://marcomq.github.io/mq-bridge/operations/tuning.html)
 - [MCP server](https://marcomq.github.io/mq-bridge/MCP.html): drive routes from an AI agent
+- [Agent skill](https://github.com/marcomq/mq-bridge/blob/main/apps/mq-bridge-app/agent-skills/skills/mq-bridge/SKILL.md): how an agent drives the `mqb` CLI; install with `npx skills add marcomq/mq-bridge`
 - [Native plugins](https://marcomq.github.io/mq-bridge/extending/plugins.html): Pulsar, Meilisearch, Redpanda Connect
 - [Source repository](https://github.com/marcomq/mq-bridge)

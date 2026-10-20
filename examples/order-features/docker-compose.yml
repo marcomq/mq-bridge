@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment: { POSTGRES_USER: app, POSTGRES_PASSWORD: app, POSTGRES_DB: app }
+    volumes: ["./init.sql:/docker-entrypoint-initdb.d/init.sql:ro", "pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d app"]
+      interval: 2s
+      retries: 30
+
+  mq-bridge:
+    image: ghcr.io/marcomq/mq-bridge-app:1.0.1
+    command: ["--config", "/config/routes.yaml"]
+    volumes: ["./routes.yaml:/config/routes.yaml:ro"]
+    ports: ["127.0.0.1:8080:8080"]
+    depends_on:
+      postgres: { condition: service_healthy }
+    restart: on-failure
+
+volumes:
+  pgdata:

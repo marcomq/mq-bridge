@@ -1,0 +1,33 @@
+tickets_triage:
+  input:
+    http: { url: "0.0.0.0:8080", path: "/tickets", method: "POST" }
+  output:
+    middlewares:
+      # Output middlewares run bottom-up: retry, then the model call.
+      - lookup:
+          from:
+            openai_chat:
+              url: "http://ollama:11434"
+              model: "qwen2.5:3b"
+              json: true
+              system: >-
+                You route customer support tickets to a team. Answer with a JSON
+                object {"team": string}. team is exactly one of:
+                "billing" for payments, charges, refunds and invoices;
+                "technical" for bugs, crashes, errors and outages;
+                "account" for login, password, email and profile changes;
+                "other" for everything else.
+              prompt: "Subject: ${payload:subject}\n\n${payload:body}"
+              options: { temperature: 0 }
+          into: triage
+      - retry: { max_attempts: 5 }
+    # Only known teams get a queue; any other answer goes to people.
+    switch:
+      when:
+        - if: 'triage.team == "billing"'
+          to: { redis_streams: { url: "redis://redis:6379", stream: "tickets.billing" } }
+        - if: 'triage.team == "technical"'
+          to: { redis_streams: { url: "redis://redis:6379", stream: "tickets.technical" } }
+        - if: 'triage.team == "account"'
+          to: { redis_streams: { url: "redis://redis:6379", stream: "tickets.account" } }
+      default: { redis_streams: { url: "redis://redis:6379", stream: "tickets.triage" } }

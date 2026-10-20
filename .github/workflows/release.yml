@@ -622,7 +622,7 @@ jobs:
             *) cp "$OUT/libmq_bridge.so" staging/lib/ ;;
           esac
           cp include/*.h staging/include/
-          cp LICENSE LICENSE-MIT LICENSE-APACHE staging/
+          cp LICENSE-MIT LICENSE-APACHE staging/
           cp c/mq-bridge-c/README.md staging/README.md
           cp c/mq-bridge-c/THIRD_PARTY_LICENSES.txt staging/
           if [ "$RUNNER_OS" == "Windows" ]; then

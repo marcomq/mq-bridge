@@ -1241,6 +1241,21 @@ impl MessagePublisher for FilterPublisher {
         self.inner.send_batch(kept).await
     }
 
+    async fn lookup_each(
+        &self,
+        requests: &[CanonicalMessage],
+    ) -> Option<Vec<Result<Option<serde_json::Value>, PublisherError>>> {
+        let outcomes = requests
+            .iter()
+            .map(|request| {
+                keep_or_fail(self.filter.matches(request), self.on_error)
+                    .map(|kept| kept.then(|| request.clone()))
+                    .map_err(PublisherError::NonRetryable)
+            })
+            .collect();
+        Some(crate::middleware::lookup::lookup_through(self.inner.as_ref(), outcomes).await)
+    }
+
     fn requires_ordered_publish(&self) -> bool {
         self.inner.requires_ordered_publish()
     }

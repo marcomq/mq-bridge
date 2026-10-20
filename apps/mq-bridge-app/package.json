@@ -1,5 +1,6 @@
 {
   "name": "mq-bridge-app",
+  "license": "MIT OR Apache-2.0",
   "dependencies": {
     "@awesome.me/webawesome": "^3.14.0",
     "@codemirror/commands": "^6.11.1",

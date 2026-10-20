@@ -2,6 +2,39 @@
 
 All notable changes to `mq-bridge`. Newest first.
 
+## 1.0.2
+
+### Added
+
+- **A `kafka` source reads several topics.** `topic` takes a list (`[orders.eu, orders.us]`)
+  or a comma-separated string, and one consumer group shares the partitions of all of them;
+  `--drain` ends once every listed topic is read to its end. A name starting with `^` is a
+  librdkafka regex. It already reached librdkafka before, but a drain over it could not see
+  the partitions its peers held or a late group join, and could end early; a drain now
+  refuses a pattern. A `kafka` output with a list or a
+  pattern fails at startup instead of writing to a topic named after it. On the CLI the list
+  is `?topic=a,b`. Over several topics, a record without an mq-bridge id gets a fallback id
+  that includes its topic, so the same partition and offset in two topics stay apart.
+- **An agent skill for the CLI.** `apps/mq-bridge-app/agent-skills` teaches Claude Code,
+  Codex and other agents that read `SKILL.md` to use `mqb list`, `describe`, `copy` and
+  config files. Install it with `npx skills add marcomq/mq-bridge`.
+- **A `lookup` through a plugin is one call per batch.** A plugin with ABI 1.2 or newer
+  answers the whole batch in one `send_batch`, and each request fails on its own. An older
+  plugin, or a batch with repeated message ids, is still asked one request at a time.
+- **`transform`, `filter` and plugin middlewares on a lookup's `from` keep it batched.**
+  They used to turn a batching `from` into one request per message. A request the middleware
+  drops fails as before; a plugin that fails the batch falls back to one request at a time.
+- **`x-mqb-uri: filepath` for plugin schemas.** Like `path`, but the leading `/` stays, so
+  `x:///models/a.onnx` gives `/models/a.onnx`. A plugin that uses it needs this release:
+  1.0.1 refuses to load it.
+
+### Fixed
+
+- **The JSON schema accepts the descriptive format names.** `format: envelope`, `payload`,
+  `envelope_json` and `envelope_text` no longer show as invalid in an editor that validates
+  against `mq-bridge.schema.json`, and `mqb describe` lists them. The UI keeps showing one
+  entry per format.
+
 ## 1.0.1
 
 ### Added

@@ -255,7 +255,8 @@ async fn test_redis_streams_contract() {
     check(Contract {
         name: "redis_streams",
         compose: compose("redis"),
-        input: json!({ "redis_streams": { "url": "redis://localhost:6379", "stream": "contract", "group": "contract" } }),
+        // The 60 s default would make each redelivery step wait a minute.
+        input: json!({ "redis_streams": { "url": "redis://localhost:6379", "stream": "contract", "group": "contract", "redelivery_timeout_ms": 1000 } }),
         output: json!({ "redis_streams": { "url": "redis://localhost:6379", "stream": "contract" } }),
         stable_id: true,
         hop_keeps_id: true,

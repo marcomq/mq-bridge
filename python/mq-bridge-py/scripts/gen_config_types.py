@@ -69,10 +69,10 @@ def type_expr(schema: dict) -> str:
             return f"Optional[{rendered}]" if nullable else rendered
 
     jtype = schema.get("type")
-    if isinstance(jtype, list):  # e.g. ["integer", "null"]
+    if isinstance(jtype, list):  # e.g. ["integer", "null"] or ["string", "array", "null"]
         nullable = "null" in jtype
-        concrete = [t for t in jtype if t != "null"]
-        base = _scalar({**schema, "type": concrete[0]}) if concrete else "Any"
+        inner = [_scalar({**schema, "type": t}) for t in jtype if t != "null"] or ["Any"]
+        base = inner[0] if len(inner) == 1 else "Union[" + ", ".join(inner) + "]"
         return f"Optional[{base}]" if nullable else base
 
     return _scalar(schema)

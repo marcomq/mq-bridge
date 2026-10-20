@@ -442,6 +442,28 @@ async fn publish_responses_and_failures_survive_the_abi() {
     }
 }
 
+/// A `lookup` through a loaded plugin is one call per batch, not one per message.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_lookup_batch_is_answered_by_one_plugin_call() {
+    let config = json!({ "queue": "lookups", "respond": true, "fail_send_at": [1] });
+    let loaded = publisher(&*plugin_factory(), config).await;
+    let answers = loaded
+        .lookup_each(&messages(&["a", "b", "c"]))
+        .await
+        .expect("a 1.2 plugin answers a lookup batch");
+    let answers: Vec<_> = answers.into_iter().map(|a| a.map_err(|_| ())).collect();
+    assert_eq!(
+        answers,
+        [Ok(Some(json!("re:a"))), Err(()), Ok(Some(json!("re:c")))]
+    );
+    let silent = publisher(&*plugin_factory(), json!({ "queue": "lookups-silent" })).await;
+    let answers = silent.lookup_each(&messages(&["a"])).await.unwrap();
+    assert!(
+        answers[0].is_err(),
+        "a plugin that sends no response answers nothing"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_reply_disposition_reaches_the_plugin() {
     let factory = plugin_factory();

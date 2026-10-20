@@ -21,9 +21,14 @@
 //! | `origin` | scheme, userinfo, host and port | `rp://user@host:9092` |
 //! | `url` | everything before `?` | `rp://user@host:9092/orders` |
 //! | `path` | the path, without its leading `/` | `orders` |
+//! | `filepath` | the path as written, percent-decoded, for a local file | `/orders` |
 //! | `query` | the query parameter of the same name (the default) | `g` |
 //!
-//! Each position but `query` may be claimed by at most one property. Anything
+//! A `filepath` keeps an absolute path absolute: `x:///models/a.onnx` gives
+//! `/models/a.onnx`, `x:models/a.onnx` the relative `models/a.onnx`.
+//!
+//! Each position but `query` may be claimed by at most one property, and `path`
+//! and `filepath` count as one. Anything
 //! unannotated is a query parameter, which is also what a plugin that describes
 //! nothing gets.
 //!
@@ -95,6 +100,8 @@ pub enum UriPosition {
     Url,
     /// The path, with its leading `/` removed.
     Path,
+    /// The path as written, so an absolute file path keeps its leading `/`.
+    Filepath,
     /// A query parameter of the same name. The default, so never written out.
     Query,
 }
@@ -106,10 +113,11 @@ impl UriPosition {
             "origin" => Ok(Self::Origin),
             "url" => Ok(Self::Url),
             "path" => Ok(Self::Path),
+            "filepath" => Ok(Self::Filepath),
             "query" => Ok(Self::Query),
             other => bail!(
                 "`{URI_ANNOTATION}: {other}` is not a URI position; \
-                 expected subscheme, origin, url, path or query"
+                 expected subscheme, origin, url, path, filepath or query"
             ),
         }
     }
@@ -196,6 +204,8 @@ pub struct UriSchema {
     origin: Option<String>,
     url: Option<String>,
     path: Option<String>,
+    /// Whether `path` is a [`UriPosition::Filepath`], keeping its leading `/`.
+    keep_root: bool,
     types: HashMap<String, FieldType>,
     /// Element type of each field that is a list, keyed the same way.
     items: HashMap<String, FieldType>,
@@ -236,6 +246,10 @@ impl UriSchema {
                 Some(UriPosition::Origin) => &mut mapping.origin,
                 Some(UriPosition::Url) => &mut mapping.url,
                 Some(UriPosition::Path) => &mut mapping.path,
+                Some(UriPosition::Filepath) => {
+                    mapping.keep_root = mapping.path.is_none();
+                    &mut mapping.path
+                }
                 Some(UriPosition::Query) | None => continue,
             };
             slot.get_or_insert_with(|| field.clone());
@@ -288,9 +302,12 @@ impl UriSchema {
                 config.insert(field.clone(), Value::String(url));
             }
             if let Some(field) = &self.path {
-                let path = parsed.path().trim_start_matches('/');
+                let path = match self.keep_root {
+                    true => percent_encoding::percent_decode_str(parsed.path()).decode_utf8_lossy(),
+                    false => parsed.path().trim_start_matches('/').into(),
+                };
                 if !path.is_empty() {
-                    config.insert(field.clone(), self.coerce(field, path)?);
+                    config.insert(field.clone(), self.coerce(field, &path)?);
                 }
             }
         } else {
@@ -530,9 +547,11 @@ pub fn validate(schema: &Value) -> anyhow::Result<()> {
             .as_str()
             .ok_or_else(|| anyhow!("`{URI_ANNOTATION}` on `{field}` must be a string"))?;
         let position = UriPosition::parse(text).with_context(|| format!("property `{field}`"))?;
-        if position == UriPosition::Query {
-            continue;
-        }
+        let position = match position {
+            UriPosition::Query => continue,
+            UriPosition::Filepath => UriPosition::Path,
+            other => other,
+        };
         if let Some(first) = claimed.insert(position, field) {
             bail!("`{first}` and `{field}` both claim the {text} of a URI; only one may");
         }
@@ -909,6 +928,28 @@ mod tests {
             .expect_err("one path cannot fill two fields");
 
         assert!(format!("{error:#}").contains("path"), "{error:#}");
+    }
+
+    #[test]
+    fn a_filepath_keeps_an_absolute_path_absolute() {
+        let schema = json!({
+            "type": "object",
+            "properties": { "model": { "type": "string", "x-mqb-uri": "filepath" } },
+        });
+        validate(&schema).unwrap();
+        let mapping = UriSchema::from_schema(&schema);
+        let model = |uri: &str| mapping.config_from_uri(uri).unwrap()["model"].clone();
+
+        assert_eq!(model("onnx:///models/a.onnx?x=1"), json!("/models/a.onnx"));
+        assert_eq!(model("onnx:models/a.onnx"), json!("models/a.onnx"));
+        assert_eq!(
+            model("onnx:///my%20models/a.onnx"),
+            json!("/my models/a.onnx")
+        );
+        assert_eq!(
+            model("onnx:///my models/ä.onnx"),
+            json!("/my models/ä.onnx")
+        );
     }
 
     #[test]

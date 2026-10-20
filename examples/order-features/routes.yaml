@@ -1,0 +1,34 @@
+orders_features:
+  input:
+    http: { url: "0.0.0.0:8080", path: "/orders", method: "POST" }
+  output:
+    # Output middlewares run bottom-up: lookup, then aggregate, then retry around the write.
+    middlewares:
+      - retry: { max_attempts: 5 }
+      # Per-customer history, kept in Postgres: it survives restarts and is shared by instances.
+      - aggregate:
+          store: "postgres://app:app@postgres:5432/app/customer_stats"
+          key: "${payload:customer_id}"
+          into: history
+          emit: previous          # the history before this order; null for a first order
+          time: created_at
+          fields:
+            orders: count
+            spend: sum(amount)
+            typical_amount: ema(amount, 30d)
+            spend_7d: decayed_sum(amount, 7d)
+      # One query per batch; an unknown customer gets null.
+      - lookup:
+          from:
+            sqlx:
+              url: "postgres://app:app@postgres:5432/app"
+              table: customers
+              lookup_query: "SELECT id, name, tier FROM customers WHERE id IN (${payload:customer_id}::bigint)"
+          into: customer
+    switch:
+      when:
+        - if: "history != null and amount > 3 * history.typical_amount"
+          to:
+            sqlx: { url: "postgres://app:app@postgres:5432/app", table: orders_review, columns: auto, key: id }
+      default:
+        sqlx: { url: "postgres://app:app@postgres:5432/app", table: orders_enriched, columns: auto, key: id }

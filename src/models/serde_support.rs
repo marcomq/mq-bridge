@@ -543,6 +543,34 @@ where
     Ok(opt.unwrap_or(false))
 }
 
+/// One topic, a comma-separated list, or an array of names; an array is stored comma-joined.
+pub(crate) fn deserialize_topic_list<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(String),
+        Many(Vec<String>),
+    }
+    Ok(match Option::<OneOrMany>::deserialize(deserializer)? {
+        None => None,
+        Some(OneOrMany::One(topic)) => Some(topic),
+        Some(OneOrMany::Many(topics)) if topics.is_empty() => None,
+        Some(OneOrMany::Many(topics)) => Some(topics.join(",")),
+    })
+}
+
+/// A `type` list rather than `anyOf`, so form renderers keep a plain text field.
+#[cfg(feature = "schema")]
+pub(crate) fn topic_list_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": ["string", "array", "null"],
+        "items": { "type": "string" }
+    })
+}
+
 impl<'de> Deserialize<'de> for MemoryConfig {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -627,6 +655,45 @@ pub(crate) fn memory_config_schema_transform(schema: &mut schemars::Schema) {
             { "required": ["url"] }
         ]),
     );
+}
+
+/// Schemars drops serde aliases, so editors would reject `format: envelope`. Each alias becomes
+/// its own `const` branch marked `x-alias-of`, which the UI drops to keep one dropdown entry.
+#[cfg(feature = "schema")]
+pub(crate) fn format_alias_schema_transform(schema: &mut schemars::Schema) {
+    const ALIASES: [(&str, &str); 4] = [
+        ("normal", "envelope"),
+        ("json", "envelope_json"),
+        ("text", "envelope_text"),
+        ("raw", "payload"),
+    ];
+    let Some(schema_obj) = schema.as_object_mut() else {
+        return;
+    };
+    if let Some(serde_json::Value::Array(values)) = schema_obj.remove("enum") {
+        schema_obj.remove("type");
+        let branches = values
+            .into_iter()
+            .map(|value| serde_json::json!({ "type": "string", "const": value }))
+            .collect();
+        schema_obj.insert("oneOf".to_string(), serde_json::Value::Array(branches));
+    }
+    let Some(one_of) = schema_obj
+        .get_mut("oneOf")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return;
+    };
+    for (name, alias) in ALIASES {
+        if one_of.iter().any(|branch| branch["const"] == name) {
+            one_of.push(serde_json::json!({
+                "description": format!("Same as `{name}`."),
+                "type": "string",
+                "const": alias,
+                "x-alias-of": name
+            }));
+        }
+    }
 }
 
 /// `null` is a unit variant, so schemars emits it as the bare string `"null"` — which can

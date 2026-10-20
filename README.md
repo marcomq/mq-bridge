@@ -17,7 +17,7 @@
 ![macOS](https://img.shields.io/badge/macOS-supported-green?logo=apple)
 [![Supply chain](https://img.shields.io/badge/supply%20chain-cargo--deny-blue)](deny.toml)
 [![Security](https://img.shields.io/badge/security-advisory%20analysis-brightgreen)](SECURITY.md)
-[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
 <p align="center">
 🖥️ <a href="apps/mq-bridge-app">mq-bridge-app</a> ·
@@ -40,6 +40,9 @@ It is a **library you embed in your own service**, not a daemon or platform you 
 | Problem | Guide with a runnable example |
 | :--- | :--- |
 | A RAG or semantic-search index drifts from its Postgres source | [Keep a vector index in sync with Postgres: CDC → embeddings → Qdrant](https://marcomq.github.io/mq-bridge/use-cases/sync-postgres-to-qdrant.html) |
+| Search results show what MongoDB no longer has | [Keep a search index in sync with MongoDB: change stream → Meilisearch](https://marcomq.github.io/mq-bridge/use-cases/sync-mongodb-to-meilisearch.html) |
+| Free-text messages need routing by what they say | [Classify and route messages with an LLM](https://marcomq.github.io/mq-bridge/use-cases/llm-ticket-triage.html) |
+| Events need a database record and per-key history to act on | [Enrich events and keep per-key history in Postgres](https://marcomq.github.io/mq-bridge/use-cases/enrich-and-aggregate-orders.html) |
 | A service must update its database and publish an event atomically | [Transactional outbox with Postgres and Kafka](https://marcomq.github.io/mq-bridge/use-cases/transactional-outbox-postgres-kafka.html) |
 | Tests for Kafka, NATS or RabbitMQ consumers need a running broker | [Test message handlers without a broker](https://marcomq.github.io/mq-bridge/use-cases/test-without-a-broker.html) |
 
@@ -114,7 +117,9 @@ Every row works from the Rust crate, the Python and Node.js packages, and the ze
 
 The Connect plugin links only Redpanda Connect components free of Redpanda Community License code (bundled code is Apache-2.0 and MIT), so some upstream components, such as its Kafka, AWS and Snowflake ones, are not included; see [what is not included](https://marcomq.github.io/mq-bridge/connectors/connect.html#what-is-not-included).
 
-For AI agents: [`llms.txt`](llms.txt) is a curated index of the documentation.
+For AI agents: [`llms.txt`](llms.txt) is a curated index of the documentation, and
+`npx skills add marcomq/mq-bridge` installs a [skill](apps/mq-bridge-app/agent-skills) that
+teaches Claude Code, Codex and other agents to drive `mqb`.
 
 ## Benchmarks
 

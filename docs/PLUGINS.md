@@ -500,9 +500,14 @@ for annotations, so a validator ignores it and the document stays a plain schema
 | `origin` | scheme, userinfo, host and port | `rp://user@host:9092` |
 | `url` | everything before `?` | `rp://user@host:9092/orders` |
 | `path` | the path, without its leading `/` | `orders` |
+| `filepath` | the path as written, for a local file | `/orders` |
 | `query` | the query parameter of the same name (the default) | `g` |
 
-Each position but `query` may be claimed by at most one field.
+Each position but `query` may be claimed by at most one field, and `path` and
+`filepath` count as one. `filepath` keeps an absolute path absolute:
+`x:///models/a.onnx` gives `/models/a.onnx`, `x:models/a.onnx` the relative
+`models/a.onnx`. It needs mq-bridge 1.0.2 or newer; an older host refuses to load
+a plugin that uses it.
 Everything unannotated is a query parameter, read as its declared `type` —
 `integer`, `number`, `boolean`, `array` (comma-separated, with `items` honoured)
 or string. A value that is not what the field declares is refused by name,

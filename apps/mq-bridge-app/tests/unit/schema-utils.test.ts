@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { forceRefOnlyEndpoints, hideUnusedDeprecatedProperties, nameMappingRuleBranches } from "../../ui/src/lib/schema-utils";
+import { dropAliasBranches, forceRefOnlyEndpoints, hideUnusedDeprecatedProperties, nameMappingRuleBranches } from "../../ui/src/lib/schema-utils";
 
 describe("schema-utils", () => {
   test("forces nested endpoint schemas to ref-only configs", () => {
@@ -185,5 +185,20 @@ describe("schema-utils", () => {
     const emptySchema: any = {};
     expect(() => hideUnusedDeprecatedProperties(emptySchema, null)).not.toThrow();
     expect(emptySchema).toEqual({});
+  });
+
+  test("drops alias branches so a format dropdown lists each value once", () => {
+    const schema: any = {
+      $defs: {
+        FileFormat: {
+          oneOf: [
+            { type: "string", const: "normal" },
+            { type: "string", const: "envelope", "x-alias-of": "normal" },
+          ],
+        },
+      },
+    };
+    dropAliasBranches(schema);
+    expect(schema.$defs.FileFormat.oneOf).toEqual([{ type: "string", const: "normal" }]);
   });
 });

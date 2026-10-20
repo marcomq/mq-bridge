@@ -22,9 +22,12 @@
 
 # Use cases
 - [Overview](use-cases/README.md)
-  - [Keep a vector index in sync with Postgres](use-cases/sync-postgres-to-qdrant.md)
-  - [Transactional outbox with Postgres and Kafka](use-cases/transactional-outbox-postgres-kafka.md)
-  - [Test message handlers without a broker](use-cases/test-without-a-broker.md)
+- [RAG index sync: Postgres CDC → embeddings → Qdrant](use-cases/sync-postgres-to-qdrant.md)
+- [Search index sync: MongoDB → Meilisearch](use-cases/sync-mongodb-to-meilisearch.md)
+- [LLM triage: classify and route messages](use-cases/llm-ticket-triage.md)
+- [Enrich events and keep per-key history](use-cases/enrich-and-aggregate-orders.md)
+- [Transactional outbox with Postgres and Kafka](use-cases/transactional-outbox-postgres-kafka.md)
+- [Test message handlers without a broker](use-cases/test-without-a-broker.md)
 
 # Tutorials
 - [Postgres CDC → JSONL](tutorials/postgres-cdc.md)

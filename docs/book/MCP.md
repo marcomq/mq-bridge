@@ -19,7 +19,7 @@ YAML to write first and no per-connector tool to install. `list_routes`,
 engine moves the bytes. Moving a 116.3 MiB dataset costs three tool calls and
 ~385 tokens — the same ~385 tokens whether the job is 1,000 rows or 1,000,000.
 
-| | Registry name | `io.github.marcomq/mq-bridge-app` |
+| | Registry name | `io.github.marcomq/mq-bridge` |
 | --- | --- | --- |
 | **Transports** | `stdio`, streamable HTTP | |
 | **Tools** | 9 (11 with `--agent-bus`) | [see below](#tools) |
@@ -37,6 +37,9 @@ mqb mcp install
 
 # 3. restart the client fully — reopening a tab is not enough
 ```
+
+An agent that runs the `mqb` CLI instead of the MCP tools can learn it from the
+[agent skill](INSTALL.md#agent-skill): `npx skills add marcomq/mq-bridge`.
 
 Then ask the agent for the job in words:
 
@@ -475,8 +478,8 @@ So `install` remains the shortest path on a machine that already has the binary
 — it is not superseded by publishing to the registry.
 
 [`server.json`](https://github.com/marcomq/mq-bridge/blob/main/apps/mq-bridge-app/server.json)
-at the repository root is the registry entry. It publishes the server under
-`io.github.marcomq/mq-bridge-app` and offers two package types, both of which
+in `apps/mq-bridge-app/` is the registry entry. It publishes the server under
+`io.github.marcomq/mq-bridge` and offers two package types, both of which
 run the same `mcp --transport=stdio` command:
 
 | `registryType` | Identifier | Requires |

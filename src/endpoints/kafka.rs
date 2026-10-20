@@ -13,7 +13,7 @@ use rdkafka::message::OwnedHeaders;
 use rdkafka::producer::{FutureProducer, FutureRecord, Producer};
 use rdkafka::Offset;
 use rdkafka::{
-    consumer::{CommitMode, Consumer, ConsumerContext},
+    consumer::{BaseConsumer, CommitMode, Consumer, ConsumerContext, Rebalance},
     error::{KafkaError, RDKafkaErrorCode},
     message::Headers,
     ClientConfig, ClientContext, Message, TopicPartitionList,
@@ -54,6 +54,11 @@ pub struct KafkaPublisher {
 impl KafkaPublisher {
     pub async fn new(config: &KafkaConfig) -> anyhow::Result<Self> {
         let topic = config.topic.as_deref().unwrap_or("");
+        if topic.contains(',') || is_topic_pattern(topic) {
+            return Err(anyhow!(
+                "A Kafka output writes to one topic; '{topic}' is a list or pattern, which only a source accepts"
+            ));
+        }
         if config.delayed_ack {
             tracing::warn!("Kafka 'delayed_ack' is enabled. Messages are acknowledged before broker confirmation. This carries a risk of data loss in the event of a crash.");
         }
@@ -372,7 +377,19 @@ fn delivery_error(what: &str, error: KafkaError) -> PublisherError {
 const BROKER_PROBE_TIMEOUT: Duration = Duration::from_secs(4);
 
 /// Keeps the end-of-partition event this consumer asks for out of the error log.
-struct QuietEofContext;
+#[derive(Default)]
+struct QuietEofContext {
+    subscriber_starts: Option<Arc<SubscriberStarts>>,
+}
+
+/// Where a `latest` subscriber starts each partition: the high watermark read before the
+/// assignment is applied, so it is never past the offset librdkafka resolves.
+#[derive(Default)]
+struct SubscriberStarts {
+    /// Only a drain needs them; others skip the blocking lookups.
+    drain: std::sync::atomic::AtomicBool,
+    offsets: std::sync::Mutex<PartitionOffsets>,
+}
 
 impl ClientContext for QuietEofContext {
     fn error(&self, error: KafkaError, reason: &str) {
@@ -384,7 +401,42 @@ impl ClientContext for QuietEofContext {
     }
 }
 
-impl ConsumerContext for QuietEofContext {}
+impl ConsumerContext for QuietEofContext {
+    fn pre_rebalance(&self, base_consumer: &BaseConsumer<Self>, rebalance: &Rebalance<'_>) {
+        let Some(starts) = &self.subscriber_starts else {
+            return;
+        };
+        if !starts.drain.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
+        match rebalance {
+            Rebalance::Assign(tpl) => {
+                for elem in tpl.elements() {
+                    let lookup = base_consumer.fetch_watermarks(
+                        elem.topic(),
+                        elem.partition(),
+                        Duration::from_secs(1),
+                    );
+                    // A failed lookup records nothing, so the partition reads as not drained.
+                    if let Ok((_low, high)) = lookup {
+                        starts
+                            .offsets
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .insert((elem.topic().to_string(), elem.partition()), high);
+                    }
+                }
+            }
+            Rebalance::Revoke(tpl) => {
+                let mut offsets = starts.offsets.lock().unwrap_or_else(|e| e.into_inner());
+                for elem in tpl.elements() {
+                    offsets.remove(&(elem.topic().to_string(), elem.partition()));
+                }
+            }
+            Rebalance::Error(_) => {}
+        }
+    }
+}
 
 type StreamConsumer = rdkafka::consumer::StreamConsumer<QuietEofContext>;
 
@@ -415,7 +467,9 @@ pub struct KafkaConsumer {
     // The consumer needs to be stored to keep the connection alive.
     consumer: Arc<ClosingStreamConsumer>,
     producer: Option<FutureProducer>,
+    /// The subscription as configured, for logs and status.
     topic: String,
+    topics: Vec<String>,
     /// Drain mode: only then does an idle fetch time out into an empty batch.
     exit_on_empty: bool,
     /// Started on first read, once the batch size is known — see [`Prefetcher`].
@@ -484,6 +538,7 @@ impl KafkaConsumer {
                 self.consumer.clone(),
                 prefetch_capacity(max_messages),
                 self.source_metadata,
+                subscribes_many_topics(&self.topics),
             )
         })
     }
@@ -503,6 +558,7 @@ impl KafkaConsumer {
             source_metadata || config.source_metadata,
         );
         let topic = config.topic.as_deref().unwrap_or("");
+        let topics = topic_list(topic);
         let mut client_config = create_common_config(config);
 
         let is_subscriber = config.group_id.is_none();
@@ -542,8 +598,11 @@ impl KafkaConsumer {
         // in librdkafka or the prefetch task, which used to make a drain silently lose its tail.
         client_config.set("enable.partition.eof", "true");
         let session_timeout = session_timeout(&client_config);
+        let subscriber_starts = is_subscriber.then(Arc::<SubscriberStarts>::default);
 
-        let consumer: StreamConsumer = client_config.create_with_context(QuietEofContext)?;
+        let consumer: StreamConsumer = client_config.create_with_context(QuietEofContext {
+            subscriber_starts: subscriber_starts.clone(),
+        })?;
         // librdkafka connects in the background and retries forever; probe once so an
         // unreachable broker fails the start instead of looking like an empty topic.
         let consumer = tokio::task::spawn_blocking(move || {
@@ -554,8 +613,8 @@ impl KafkaConsumer {
         })
         .await?
         .map_err(|e| anyhow!("Kafka broker not reachable: {e}"))?;
-        if !topic.is_empty() {
-            consumer.subscribe(&[topic])?
+        if !topics.is_empty() {
+            consumer.subscribe(&topics.iter().map(String::as_str).collect::<Vec<_>>())?
         }
 
         // Wrap the consumer in an Arc to allow it to be shared.
@@ -598,11 +657,13 @@ impl KafkaConsumer {
             consumer,
             producer,
             topic: topic.to_string(),
+            topics,
             exit_on_empty: false,
             prefetcher: None,
             source_metadata,
             drain_state: DrainState {
                 session_timeout,
+                subscriber_starts,
                 ..DrainState::default()
             },
             nacked: NackLatch::default(),
@@ -695,15 +756,27 @@ impl MessageConsumer for KafkaConsumer {
 
     fn set_exit_on_empty(&mut self, exit_on_empty: bool) {
         self.exit_on_empty = exit_on_empty;
+        if let Some(starts) = &self.drain_state.subscriber_starts {
+            starts
+                .drain
+                .store(exit_on_empty, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 
     async fn receive_batch(&mut self, max_messages: usize) -> Result<ReceivedBatch, ConsumerError> {
         self.nacked.check()?;
+        if self.exit_on_empty && self.topics.iter().any(|t| is_topic_pattern(t)) {
+            return Err(ConsumerError::Permanent(anyhow!(
+                "A Kafka drain needs explicit topics; '{}' contains a pattern, whose topics it cannot know",
+                self.topic
+            )));
+        }
         let nacked = self.nacked.clone();
-        let (consumer, producer, topic, exit_on_empty) = (
+        let (consumer, producer, topic, topics, exit_on_empty) = (
             self.consumer.clone(),
             self.producer.clone(),
             self.topic.clone(),
+            self.topics.clone(),
             self.exit_on_empty,
         );
         // Taken out and put back because `prefetcher()` borrows self mutably too.
@@ -718,6 +791,7 @@ impl MessageConsumer for KafkaConsumer {
                 producer.as_ref(),
                 max_messages,
                 &topic,
+                &topics,
                 exit_on_empty,
                 &mut drain_state,
                 nacked,
@@ -729,13 +803,12 @@ impl MessageConsumer for KafkaConsumer {
 
     async fn status(&self) -> EndpointStatus {
         let consumer = self.consumer.clone();
-        let topic = self.topic.clone();
+        let topics = self.topics.clone();
 
         let (healthy, pending, error) = tokio::task::spawn_blocking(move || {
-            let meta_topic = if topic.is_empty() {
-                None
-            } else {
-                Some(topic.as_str())
+            let meta_topic = match topics.as_slice() {
+                [topic] if !is_topic_pattern(topic) => Some(topic.as_str()),
+                _ => None,
             };
             let (mut healthy, mut error) = match consumer
                 .client()
@@ -847,6 +920,43 @@ fn is_tombstone(message: &CanonicalMessage) -> bool {
         .metadata
         .get(KAFKA_TOMBSTONE_KEY)
         .is_some_and(|v| v == "true")
+}
+
+/// The topics of a subscription. Kafka topic names cannot contain a comma; a comma inside
+/// `{}`, `[]` or `()` belongs to a `^regex` entry and does not split it.
+fn topic_list(topic: &str) -> Vec<String> {
+    let mut topics = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0;
+    for (i, c) in topic.char_indices() {
+        match c {
+            '{' | '[' | '(' => depth += 1,
+            '}' | ']' | ')' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                topics.push(&topic[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    topics.push(&topic[start..]);
+    topics
+        .into_iter()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// More than one topic can reach this source, so partition+offset alone is not unique.
+fn subscribes_many_topics(topics: &[String]) -> bool {
+    topics.len() > 1 || topics.iter().any(|t| t.starts_with('^'))
+}
+
+/// librdkafka subscribes to every topic matching a name that starts with `^`, a character
+/// no topic name may contain.
+fn is_topic_pattern(topic: &str) -> bool {
+    topic.trim_start().starts_with('^')
 }
 
 /// Helper function to process a Kafka message and add it to the batch.
@@ -970,17 +1080,19 @@ fn spawn_prefetcher(
     consumer: Arc<ClosingStreamConsumer>,
     capacity: usize,
     source_metadata: bool,
+    topic_in_id: bool,
 ) -> Prefetcher {
     if source_metadata {
-        spawn_prefetcher_with_source_metadata(consumer, capacity)
+        spawn_prefetcher_with_source_metadata(consumer, capacity, topic_in_id)
     } else {
-        spawn_prefetcher_without_source_metadata(consumer, capacity)
+        spawn_prefetcher_without_source_metadata(consumer, capacity, topic_in_id)
     }
 }
 
 fn spawn_prefetcher_without_source_metadata(
     consumer: Arc<ClosingStreamConsumer>,
     capacity: usize,
+    topic_in_id: bool,
 ) -> Prefetcher {
     let (tx, rx) = async_channel::bounded(capacity);
     let budget = new_budget();
@@ -997,7 +1109,7 @@ fn spawn_prefetcher_without_source_metadata(
             let mut chunk_eofs = Vec::new();
             for (result, eof_position) in chunk {
                 let item = match result {
-                    Ok(message) => match to_canonical(&message) {
+                    Ok(message) => match to_canonical_with_topic_id(&message, topic_in_id) {
                         Ok(canonical) => Ok(prefetched_record(&budget, canonical, &message).await),
                         Err(e) => Err(PrefetchError::Connection(e.to_string())),
                     },
@@ -1061,6 +1173,7 @@ async fn prefetched_record<M: Message>(
 fn spawn_prefetcher_with_source_metadata(
     consumer: Arc<ClosingStreamConsumer>,
     capacity: usize,
+    topic_in_id: bool,
 ) -> Prefetcher {
     let (tx, rx) = async_channel::bounded(capacity);
     let budget = new_budget();
@@ -1075,7 +1188,7 @@ fn spawn_prefetcher_with_source_metadata(
             let mut chunk_eofs = Vec::new();
             for (result, eof_position) in chunk {
                 let item = match result {
-                    Ok(message) => match to_canonical_with_source_metadata(&message) {
+                    Ok(message) => match to_canonical_with_source_metadata(&message, topic_in_id) {
                         Ok(canonical) => Ok(prefetched_record(&budget, canonical, &message).await),
                         Err(e) => Err(PrefetchError::Connection(e.to_string())),
                     },
@@ -1128,15 +1241,20 @@ fn record_partition_eof(
     eof_positions: &std::sync::Mutex<PartitionOffsets>,
 ) {
     let mut observed = eof_positions.lock().unwrap_or_else(|e| e.into_inner());
-    for elem in positions.elements() {
-        if elem.partition() != partition {
-            continue;
-        }
+    let candidates: Vec<_> = positions
+        .elements()
+        .into_iter()
+        .filter(|elem| elem.partition() == partition)
+        .collect();
+    // The EOF names no topic, so with several topics on this partition number only a
+    // consumed position, true for whichever topic it is, can be recorded.
+    let topic_known = candidates.len() == 1;
+    for elem in candidates {
         let key = (elem.topic().to_string(), partition);
         if let Offset::Offset(offset) = elem.offset() {
             let entry = observed.entry(key).or_insert(offset);
             *entry = (*entry).max(offset);
-        } else {
+        } else if topic_known {
             // librdkafka has no position until a record is consumed: the partition was
             // already at its end when the consumer was assigned.
             observed.entry(key).or_insert(EOF_BEFORE_ANY_RECORD);
@@ -1201,7 +1319,17 @@ pub const KAFKA_TOMBSTONE_KEY: &str = "mqb.kafka.tombstone";
 /// it carries the delete. Rejecting it used to fail the whole batch, and since the offset
 /// was never committed the route reconnected onto the same record forever, so a single
 /// tombstone wedged the consumer. It becomes an empty payload flagged in metadata instead.
+#[cfg(test)]
 fn to_canonical<M: Message>(message: &M) -> anyhow::Result<CanonicalMessage> {
+    to_canonical_with_topic_id(message, false)
+}
+
+/// `topic_in_id` makes the fallback id a 128-bit hash of topic, partition and offset;
+/// single-topic ids keep the old partition+offset value.
+fn to_canonical_with_topic_id<M: Message>(
+    message: &M,
+    topic_in_id: bool,
+) -> anyhow::Result<CanonicalMessage> {
     let tombstone = message.payload().is_none();
     let payload = message.payload().unwrap_or(&[]);
 
@@ -1260,6 +1388,17 @@ fn to_canonical<M: Message>(message: &M) -> anyhow::Result<CanonicalMessage> {
     // A u128 is used to hold both values, with the partition in the high 64 bits
     // and the offset in the low 64 bits.
     let message_id = message_id.unwrap_or_else(|| {
+        if topic_in_id {
+            return crate::canonical_message::hashed_id(
+                crate::canonical_message::string_id_hash(),
+                &[
+                    message.topic().as_bytes(),
+                    b"\0",
+                    &message.partition().to_be_bytes(),
+                    &message.offset().to_be_bytes(),
+                ],
+            );
+        }
         ((message.partition() as u32 as u128) << 64) | (message.offset() as u64 as u128)
     });
 
@@ -1293,8 +1432,11 @@ fn to_canonical<M: Message>(message: &M) -> anyhow::Result<CanonicalMessage> {
     Ok(canonical_message)
 }
 
-fn to_canonical_with_source_metadata<M: Message>(message: &M) -> anyhow::Result<CanonicalMessage> {
-    let mut canonical_message = to_canonical(message)?;
+fn to_canonical_with_source_metadata<M: Message>(
+    message: &M,
+    topic_in_id: bool,
+) -> anyhow::Result<CanonicalMessage> {
+    let mut canonical_message = to_canonical_with_topic_id(message, topic_in_id)?;
     canonical_message.metadata.insert(
         "mqb.src.kafka_topic".to_string(),
         message.topic().to_string(),
@@ -1430,8 +1572,10 @@ struct DrainState {
     watermark_retry_at: Option<std::time::Instant>,
     /// The group's `session.timeout.ms`; sizes the join wait, see [`drain_join_timeout`].
     session_timeout: Duration,
-    /// Every partition of the topic, looked up once — see [`peers_behind`].
-    partitions: Option<Vec<i32>>,
+    /// Every partition of the subscribed topics, looked up once — see [`peers_behind`].
+    partitions: Option<Vec<(String, i32)>>,
+    /// Subscriber mode only — see [`SubscriberStarts`].
+    subscriber_starts: Option<Arc<SubscriberStarts>>,
 }
 
 /// How long a failed watermark lookup suppresses further broker calls. `fetch_watermarks`
@@ -1487,7 +1631,7 @@ fn drain_target(
 fn drain_readiness(
     consumer: &StreamConsumer,
     state: &mut DrainState,
-    topic: &str,
+    topics: &[String],
     eof_positions: &std::sync::Mutex<PartitionOffsets>,
 ) -> DrainReadiness {
     if !has_assignment(consumer) {
@@ -1500,21 +1644,33 @@ fn drain_readiness(
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clone();
-    for elem in positions.elements() {
+    let elements = positions.elements();
+    let mut untouched = TopicPartitionList::new();
+    for elem in &elements {
         let key = (elem.topic().to_string(), elem.partition());
         let Some(high) = drain_target(consumer, state, &key) else {
             return DrainReadiness::Starting;
         };
-        if drain_offset_reached(
-            high,
-            state.delivered.get(&key).copied(),
-            eof_positions.get(&key).copied(),
-        ) {
+        let delivered = state.delivered.get(&key).copied();
+        let eof = eof_positions.get(&key).copied();
+        if drain_offset_reached(high, delivered, eof) {
             continue;
         }
+        // Such a partition gets no EOF marker, see `record_partition_eof`.
+        let shares_partition = elements
+            .iter()
+            .filter(|other| other.partition() == key.1)
+            .count()
+            > 1;
+        if delivered.is_some() || eof.is_some() || !shares_partition {
+            return DrainReadiness::Starting;
+        }
+        untouched.add_partition(&key.0, key.1);
+    }
+    if untouched.count() > 0 && !committed_at_target(consumer, state, untouched) {
         return DrainReadiness::Starting;
     }
-    if peers_behind(consumer, state, topic, &positions) {
+    if peers_behind(consumer, state, topics, &positions) {
         return DrainReadiness::PeersBehind;
     }
     DrainReadiness::Drained
@@ -1525,16 +1681,16 @@ fn drain_readiness(
 fn peers_behind(
     consumer: &StreamConsumer,
     state: &mut DrainState,
-    topic: &str,
+    topics: &[String],
     owned: &TopicPartitionList,
 ) -> bool {
-    let Some(partitions) = topic_partitions(consumer, state, topic) else {
+    let Some(partitions) = topic_partitions(consumer, state, topics) else {
         return true;
     };
     let mut unowned = TopicPartitionList::new();
-    for partition in partitions {
-        if owned.find_partition(topic, partition).is_none() {
-            unowned.add_partition(topic, partition);
+    for (topic, partition) in &partitions {
+        if owned.find_partition(topic, *partition).is_none() {
+            unowned.add_partition(topic, *partition);
         }
     }
     if unowned.count() == 0 {
@@ -1544,9 +1700,67 @@ fn peers_behind(
         return true;
     };
     committed.elements().iter().any(|elem| {
-        let key = (topic.to_string(), elem.partition());
+        let key = (elem.topic().to_string(), elem.partition());
         drain_target(consumer, state, &key).is_none_or(|high| group_behind(high, elem.offset()))
     })
+}
+
+/// Whether the group resumes every partition in `pending` at or past its target, so a
+/// partition nothing was read from is drained.
+fn committed_at_target(
+    consumer: &StreamConsumer,
+    state: &mut DrainState,
+    pending: TopicPartitionList,
+) -> bool {
+    let Ok(committed) = consumer.committed_offsets(pending, BROKER_PROBE_TIMEOUT) else {
+        return false;
+    };
+    committed.elements().iter().all(|elem| {
+        let key = (elem.topic().to_string(), elem.partition());
+        let Some(high) = drain_target(consumer, state, &key) else {
+            return false;
+        };
+        match elem.offset() {
+            Offset::Invalid => uncommitted_drained(high, subscriber_start(state, &key), || {
+                low_watermark(consumer, state, &key)
+            }),
+            committed => !group_behind(high, committed),
+        }
+    })
+}
+
+/// A partition the group never committed is drained only if nothing below `high` can still
+/// be read: a subscriber started at or past it, or retention already deleted it.
+fn uncommitted_drained(high: i64, start: Option<i64>, low: impl FnOnce() -> Option<i64>) -> bool {
+    high == 0 || start.is_some_and(|start| start >= high) || low().is_some_and(|low| low >= high)
+}
+
+fn subscriber_start(state: &DrainState, key: &(String, i32)) -> Option<i64> {
+    let starts = state.subscriber_starts.as_ref()?;
+    let offsets = starts.offsets.lock().unwrap_or_else(|e| e.into_inner());
+    offsets.get(key).copied()
+}
+
+/// The partition's current low watermark; failures back off like [`drain_target`].
+fn low_watermark(
+    consumer: &StreamConsumer,
+    state: &mut DrainState,
+    key: &(String, i32),
+) -> Option<i64> {
+    if state
+        .watermark_retry_at
+        .is_some_and(|at| std::time::Instant::now() < at)
+    {
+        return None;
+    }
+    match consumer.fetch_watermarks(&key.0, key.1, Duration::from_secs(1)) {
+        Ok((low, _high)) => Some(low),
+        Err(e) => {
+            debug!(topic = %key.0, partition = key.1, error = %e, "Kafka watermark lookup failed; backing off");
+            state.watermark_retry_at = Some(std::time::Instant::now() + WATERMARK_RETRY_BACKOFF);
+            None
+        }
+    }
 }
 
 /// A committed offset is the next one to read, so the group is done at `high`.
@@ -1557,13 +1771,13 @@ fn group_behind(high: i64, committed: Offset) -> bool {
     }
 }
 
-/// The topic's partitions, read from the broker once; failures back off like
+/// The topics' partitions, read from the broker once; failures back off like
 /// [`drain_target`].
 fn topic_partitions(
     consumer: &StreamConsumer,
     state: &mut DrainState,
-    topic: &str,
-) -> Option<Vec<i32>> {
+    topics: &[String],
+) -> Option<Vec<(String, i32)>> {
     if let Some(partitions) = &state.partitions {
         return Some(partitions.clone());
     }
@@ -1579,8 +1793,12 @@ fn topic_partitions(
             metadata
                 .topics()
                 .iter()
-                .filter(|t| t.name() == topic)
-                .flat_map(|t| t.partitions().iter().map(|p| p.id()))
+                .filter(|t| topics.iter().any(|name| name == t.name()))
+                .flat_map(|t| {
+                    t.partitions()
+                        .iter()
+                        .map(|p| (t.name().to_string(), p.id()))
+                })
                 .collect::<Vec<_>>()
         });
     match lookup {
@@ -1589,7 +1807,7 @@ fn topic_partitions(
             Some(partitions)
         }
         Err(e) => {
-            debug!(topic = %topic, error = %e, "Kafka partition lookup failed; backing off");
+            debug!(topics = ?topics, error = %e, "Kafka partition lookup failed; backing off");
             state.watermark_retry_at = Some(std::time::Instant::now() + WATERMARK_RETRY_BACKOFF);
             None
         }
@@ -1628,16 +1846,17 @@ async fn await_first(
     .await
 }
 
-/// Whether the broker knows `topic` with at least one partition. A failed lookup counts as
-/// yes: "empty" has to be known, not assumed. Lists all topics, so nothing is auto-created.
-fn topic_has_partitions(consumer: &StreamConsumer, topic: &str) -> bool {
+/// Whether the broker knows one of `topics` with at least one partition. A failed lookup
+/// counts as yes: "empty" has to be known, not assumed. Lists all topics, so nothing is
+/// auto-created.
+fn topic_has_partitions(consumer: &StreamConsumer, topics: &[String]) -> bool {
     match consumer.fetch_metadata(None, BROKER_PROBE_TIMEOUT) {
         Ok(metadata) => metadata
             .topics()
             .iter()
-            .any(|t| t.name() == topic && !t.partitions().is_empty()),
+            .any(|t| topics.iter().any(|name| name == t.name()) && !t.partitions().is_empty()),
         Err(e) => {
-            debug!(topic = %topic, error = %e, "Kafka topic lookup failed");
+            debug!(topics = ?topics, error = %e, "Kafka topic lookup failed");
             true
         }
     }
@@ -1754,6 +1973,7 @@ async fn receive_batch_internal(
     producer: impl Into<Option<&FutureProducer>>,
     max_messages: usize,
     topic: &str,
+    topics: &[String],
     exit_on_empty: bool,
     drain_state: &mut DrainState,
     nacked: NackLatch,
@@ -1769,8 +1989,8 @@ async fn receive_batch_internal(
         exit_on_empty,
         topic,
         drain_join_timeout(drain_state.session_timeout),
-        || drain_readiness(consumer, drain_state, topic, &prefetcher.eof_positions),
-        || topic_has_partitions(consumer, topic),
+        || drain_readiness(consumer, drain_state, topics, &prefetcher.eof_positions),
+        || topic_has_partitions(consumer, topics),
     )
     .await;
     let Some(first) = first else {
@@ -2314,6 +2534,27 @@ mod tests {
     }
 
     #[test]
+    fn test_a_shared_partition_eof_marks_no_unconsumed_topic_drained() {
+        let mut positions = TopicPartitionList::new();
+        positions.add_partition("a", 0);
+        positions
+            .add_partition_offset("b", 0, Offset::Offset(5))
+            .unwrap();
+        positions.add_partition("c", 1);
+        let observed = std::sync::Mutex::new(PartitionOffsets::new());
+        record_partition_eof(&positions, 0, &observed);
+        record_partition_eof(&positions, 1, &observed);
+        let observed = observed.into_inner().unwrap();
+
+        assert_eq!(observed.get(&("a".to_string(), 0)), None);
+        assert_eq!(observed.get(&("b".to_string(), 0)), Some(&5));
+        assert_eq!(
+            observed.get(&("c".to_string(), 1)),
+            Some(&EOF_BEFORE_ANY_RECORD)
+        );
+    }
+
+    #[test]
     fn test_drain_join_wait_outlasts_a_crashed_members_session() {
         assert_eq!(
             session_timeout(&ClientConfig::new()),
@@ -2670,12 +2911,135 @@ mod tests {
         }
     }
 
+    /// One consumer drains every listed topic, and a drain refuses a pattern it cannot bound.
+    #[tokio::test]
+    async fn test_a_drain_reads_every_listed_topic() {
+        use rdkafka::bindings as rdsys;
+
+        let producer: FutureProducer = ClientConfig::new()
+            .set("test.mock.num.brokers", "1")
+            .create()
+            .unwrap();
+        let cluster = producer.client().mock_cluster().unwrap();
+        unsafe {
+            let handle = rdsys::rd_kafka_handle_mock_cluster(producer.client().native_ptr());
+            rdsys::rd_kafka_mock_group_initial_rebalance_delay_ms(handle, 0);
+        }
+        for (topic, payload) in [("orders.eu", "eu"), ("orders.us", "us")] {
+            cluster.create_topic(topic, 2, 1).unwrap();
+            producer
+                .send(
+                    FutureRecord::<(), _>::to(topic).payload(payload),
+                    Duration::from_secs(5),
+                )
+                .await
+                .unwrap();
+        }
+        let config = |topic: &str| KafkaConfig {
+            url: cluster.bootstrap_servers(),
+            topic: Some(topic.to_string()),
+            group_id: Some("multi".to_string()),
+            ..Default::default()
+        };
+
+        let mut consumer = KafkaConsumer::new(&config("orders.eu, orders.us"))
+            .await
+            .unwrap();
+        consumer.set_exit_on_empty(true);
+        let mut payloads = Vec::new();
+        loop {
+            let batch = tokio::time::timeout(Duration::from_secs(60), consumer.receive_batch(10))
+                .await
+                .expect("the drain never ended")
+                .unwrap();
+            if batch.messages.is_empty() {
+                break;
+            }
+            payloads.extend(
+                batch
+                    .messages
+                    .iter()
+                    .map(|m| m.get_payload_str().to_string()),
+            );
+            (batch.commit)(vec![MessageDisposition::Ack; batch.messages.len()])
+                .await
+                .unwrap();
+        }
+        payloads.sort();
+        assert_eq!(payloads, ["eu", "us"]);
+
+        let mut pattern = KafkaConsumer::new(&config("^orders\\..*")).await.unwrap();
+        pattern.set_exit_on_empty(true);
+        assert!(matches!(
+            pattern.receive_batch(10).await,
+            Err(ConsumerError::Permanent(_))
+        ));
+    }
+
+    #[test]
+    fn test_a_subscription_splits_on_commas_and_spots_patterns() {
+        assert_eq!(topic_list(" a, b,,c "), ["a", "b", "c"]);
+        assert!(topic_list("").is_empty());
+        assert_eq!(
+            topic_list("^orders_[0-9]{1,2}$, audit"),
+            ["^orders_[0-9]{1,2}$", "audit"]
+        );
+        assert!(is_topic_pattern("^orders\\..*"));
+        assert!(!is_topic_pattern("orders"));
+    }
+
+    #[test]
+    fn test_a_multi_topic_fallback_id_tells_topics_apart() {
+        let other = |topic: &str| {
+            OwnedMessage::new(
+                Some(b"x".to_vec()),
+                None,
+                topic.to_string(),
+                rdkafka::Timestamp::now(),
+                3,
+                7,
+                None,
+            )
+        };
+        let id = |m: &OwnedMessage, many| to_canonical_with_topic_id(m, many).unwrap().message_id;
+        let single = (3u128 << 64) | 7;
+        assert_eq!(id(&other("a"), false), single);
+        assert_eq!(id(&other("b"), false), single);
+        assert_ne!(id(&other("a"), true), id(&other("b"), true));
+        assert_eq!(id(&other("a"), true), id(&other("a"), true));
+        assert!(subscribes_many_topics(&topic_list("a,b")));
+        assert!(subscribes_many_topics(&topic_list("^a.*")));
+        assert!(!subscribes_many_topics(&topic_list("a")));
+    }
+
+    #[tokio::test]
+    async fn test_a_publisher_rejects_a_topic_list_or_pattern() {
+        for topic in ["a,b", "^a.*"] {
+            let config = KafkaConfig {
+                url: "127.0.0.1:1".to_string(),
+                topic: Some(topic.to_string()),
+                create_topic: Some(false),
+                ..Default::default()
+            };
+            assert!(KafkaPublisher::new(&config).await.is_err(), "{topic}");
+        }
+    }
+
     #[test]
     fn test_group_behind_compares_the_commit_with_the_target() {
         assert!(group_behind(10, Offset::Offset(9)));
         assert!(!group_behind(10, Offset::Offset(10)));
         assert!(group_behind(10, Offset::Invalid));
         assert!(!group_behind(0, Offset::Invalid));
+    }
+
+    #[test]
+    fn test_uncommitted_partition_drained_only_when_nothing_below_target_is_readable() {
+        assert!(uncommitted_drained(0, None, || None));
+        assert!(uncommitted_drained(10, Some(10), || None));
+        assert!(uncommitted_drained(10, None, || Some(10)));
+        assert!(!uncommitted_drained(10, Some(9), || Some(9)));
+        assert!(!uncommitted_drained(10, None, || None));
     }
 
     #[test]

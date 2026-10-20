@@ -14,6 +14,7 @@ kafka://broker[:port]?topic=<topic>[&group_id=<group>]
 | Write to a topic | `kafka://localhost:9092?topic=orders` |
 | Read with a consumer group (resumes after a restart) | `kafka://localhost:9092?topic=orders&group_id=orders-sync` |
 | Read only what arrives from now on | `kafka://localhost:9092?topic=orders` |
+| Read several topics with one group | `kafka://localhost:9092?topic=orders.eu,orders.us&group_id=orders-sync` |
 | Several bootstrap brokers | `kafka://_/?url=broker1:9092,broker2:9092&topic=orders` |
 | Write to a topic that must already exist | `kafka://localhost:9092?topic=orders&create_topic=false` |
 | Key records by a metadata field | `kafka://localhost:9092?topic=orders&partition_key=customer_id` |
@@ -93,6 +94,12 @@ Whether a restart continues where it stopped depends on `group_id`:
 | After a restart | continues after the last acknowledged batch | starts at "now" again |
 | Several instances | share the partitions between them | each gets every record |
 
+- **A source reads several topics** given as a list, `topic: [orders.eu, orders.us]`, or
+  comma-separated, `topic: "orders.eu,orders.us"`. One consumer group shares the partitions
+  of all of them. A name starting with `^` is a librdkafka regex (`topic: "^orders\\..*"`) and
+  also picks up matching topics created later; `--drain` does not take one, since it has to
+  know every topic it ends on. Set `source_metadata: true` to tell the topics apart
+  (`mqb.src.kafka_topic`). An output writes to one topic.
 - **Offsets are committed after the output accepted the batch**, never before. A crash in
   between delivers that batch again (at least once). Make the output idempotent or add
   [deduplication](../cookbook/deduplication.md) where a duplicate matters.

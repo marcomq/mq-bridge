@@ -8,12 +8,18 @@ on:
       - "examples/postgres-cdc-to-qdrant/**"
       - "examples/transactional-outbox/**"
       - "examples/test-without-a-broker/**"
+      - "examples/mongodb-to-meilisearch/**"
+      - "examples/llm-ticket-triage/**"
+      - "examples/order-features/**"
       - ".github/workflows/examples.yml"
   pull_request:
     paths:
       - "examples/postgres-cdc-to-qdrant/**"
       - "examples/transactional-outbox/**"
       - "examples/test-without-a-broker/**"
+      - "examples/mongodb-to-meilisearch/**"
+      - "examples/llm-ticket-triage/**"
+      - "examples/order-features/**"
       - ".github/workflows/examples.yml"
   workflow_dispatch:
 
@@ -32,7 +38,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        example: [postgres-cdc-to-qdrant, transactional-outbox]
+        example:
+          - postgres-cdc-to-qdrant
+          - transactional-outbox
+          - mongodb-to-meilisearch
+          - llm-ticket-triage
+          - order-features
     steps:
       - uses: actions/checkout@v7
         with:
