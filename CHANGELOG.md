@@ -2,7 +2,7 @@
 
 All notable changes to `mq-bridge`. Newest first.
 
-## Unreleased
+## 1.0.2
 
 ### Added
 
@@ -13,7 +13,8 @@ All notable changes to `mq-bridge`. Newest first.
   the partitions its peers held or a late group join, and could end early; a drain now
   refuses a pattern. A `kafka` output with a list or a
   pattern fails at startup instead of writing to a topic named after it. On the CLI the list
-  is `?topic=a,b`.
+  is `?topic=a,b`. Over several topics, a record without an mq-bridge id gets a fallback id
+  that includes its topic, so the same partition and offset in two topics stay apart.
 - **An agent skill for the CLI.** `apps/mq-bridge-app/agent-skills` teaches Claude Code,
   Codex and other agents that read `SKILL.md` to use `mqb list`, `describe`, `copy` and
   config files. Install it with `npx skills add marcomq/mq-bridge`.
