@@ -79,7 +79,7 @@ The same binary is an MCP server, so an agent can move data without the rows pas
 mqb mcp install          # register with Claude Code / Claude Desktop / Cursor
 ```
 
-- MCP Registry name: `mcp-name: io.github.marcomq/mq-bridge-app`
+- MCP Registry name: `mcp-name: io.github.marcomq/mq-bridge`
 
 → Tools, transports, and the token-cost measurement: **[MCP server](https://marcomq.github.io/mq-bridge/MCP.html)**.
 

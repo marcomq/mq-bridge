@@ -169,7 +169,7 @@ RUN touch input.log error.log && mkdir /app_placeholder && \
 FROM gcr.io/distroless/cc-debian12:nonroot AS final
 
 # Ownership marker for the MCP Registry: must match `name` in server.json.
-LABEL io.modelcontextprotocol.server.name="io.github.marcomq/mq-bridge-app"
+LABEL io.modelcontextprotocol.server.name="io.github.marcomq/mq-bridge"
 
 COPY --from=builder /usr/src/mq-bridge/mq-bridge-app /usr/local/bin/mq-bridge-app
 COPY --from=builder /usr/src/mq-bridge/mqb /usr/local/bin/mqb
