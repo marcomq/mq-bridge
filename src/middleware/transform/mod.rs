@@ -214,6 +214,22 @@ impl MessagePublisher for TransformPublisher {
         Ok(SentBatch::Partial { responses, failed })
     }
 
+    async fn lookup_each(
+        &self,
+        requests: &[CanonicalMessage],
+    ) -> Option<Vec<Result<Option<serde_json::Value>, PublisherError>>> {
+        let outcomes = if self.compiled.is_noop() {
+            requests.iter().cloned().map(|r| Ok(Some(r))).collect()
+        } else {
+            self.apply_to_batch(requests.to_vec())
+                .await
+                .into_iter()
+                .map(|outcome| outcome.map(Some).map_err(|rejected| rejected.1.into()))
+                .collect()
+        };
+        Some(crate::middleware::lookup::lookup_through(self.inner.as_ref(), outcomes).await)
+    }
+
     async fn flush(&self) -> anyhow::Result<()> {
         self.inner.flush().await
     }

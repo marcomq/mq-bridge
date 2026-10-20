@@ -89,44 +89,84 @@ impl Entry {
         request
     }
 
-    /// Answers every message, in order: one batched lookup when `from` supports it, else one
-    /// request per message, `concurrency` at a time. `None` = not found.
+    /// Answers every message, in order. `None` = not found.
     async fn fetch_many(
         &self,
         msgs: &[&CanonicalMessage],
         concurrency: usize,
     ) -> Vec<Result<Option<Value>, PublisherError>> {
         let requests: Vec<CanonicalMessage> = msgs.iter().map(|m| self.request(m)).collect();
-        let n = requests.len();
-        let short = |answered: usize| {
-            let error = || anyhow::anyhow!("lookup: `from` answered {answered} of {n} requests");
-            (0..n)
-                .map(|_| Err(PublisherError::NonRetryable(error())))
-                .collect()
-        };
-        match self.from.lookup_each(&requests).await {
-            Some(found) if found.len() == n => return found,
-            Some(found) => return short(found.len()),
-            None => {}
-        }
-        match self.from.lookup_batch(&requests).await {
-            Some(Ok(found)) if found.len() == n => found.into_iter().map(Ok).collect(),
-            Some(Ok(found)) => short(found.len()),
-            Some(Err(e)) => (0..n).map(|_| Err(duplicate(&e))).collect(),
-            None => {
-                futures::stream::iter(requests)
-                    .map(|r| self.fetch(r))
-                    .buffered(concurrency)
-                    .collect()
-                    .await
-            }
-        }
+        CONCURRENCY
+            .scope(concurrency, answer_all(self.from.as_ref(), requests))
+            .await
     }
+}
 
-    /// Sends one request; `None` when `from` found nothing.
-    async fn fetch(&self, request: CanonicalMessage) -> Result<Option<Value>, PublisherError> {
-        answer_of(self.from.send(request).await?)
+tokio::task_local! {
+    /// The asking lookup's `concurrency`, for a middleware on `from` that answers it.
+    static CONCURRENCY: usize;
+}
+
+/// Answers every request, in order: one batched lookup when `from` supports it, else one
+/// request per message, the lookup's `concurrency` at a time. `None` = not found.
+async fn answer_all(
+    from: &dyn MessagePublisher,
+    requests: Vec<CanonicalMessage>,
+) -> Vec<Result<Option<Value>, PublisherError>> {
+    let n = requests.len();
+    if n == 0 {
+        return Vec::new();
     }
+    let short = |answered: usize| {
+        let error = || anyhow::anyhow!("lookup: `from` answered {answered} of {n} requests");
+        (0..n)
+            .map(|_| Err(PublisherError::NonRetryable(error())))
+            .collect()
+    };
+    match from.lookup_each(&requests).await {
+        Some(found) if found.len() == n => return found,
+        Some(found) => return short(found.len()),
+        None => {}
+    }
+    match from.lookup_batch(&requests).await {
+        Some(Ok(found)) if found.len() == n => found.into_iter().map(Ok).collect(),
+        Some(Ok(found)) => short(found.len()),
+        Some(Err(e)) => (0..n).map(|_| Err(duplicate(&e))).collect(),
+        None => {
+            let concurrency = CONCURRENCY.try_with(|c| *c).unwrap_or(1);
+            futures::stream::iter(requests)
+                .map(|r| async move { answer_of(from.send(r).await?) })
+                .buffered(concurrency)
+                .collect()
+                .await
+        }
+    }
+}
+
+/// Answers a lookup for a middleware on `from`, given what it made of each request:
+/// rewritten, `None` when it dropped it, or its error. The rest go to `inner` together.
+pub(crate) async fn lookup_through(
+    inner: &dyn MessagePublisher,
+    outcomes: Vec<Result<Option<CanonicalMessage>, PublisherError>>,
+) -> Vec<Result<Option<Value>, PublisherError>> {
+    let mut forwarded = Vec::with_capacity(outcomes.len());
+    let slots: Vec<_> = outcomes
+        .into_iter()
+        .map(|outcome| match outcome {
+            Ok(Some(request)) => {
+                forwarded.push(request);
+                None
+            }
+            // As when `send` drops it: the lookup gets no response.
+            Ok(None) => Some(answer_of(Sent::Ack)),
+            Err(e) => Some(Err(e)),
+        })
+        .collect();
+    let mut answers = answer_all(inner, forwarded).await.into_iter();
+    slots
+        .into_iter()
+        .map(|slot| slot.unwrap_or_else(|| answers.next().expect("one answer per request")))
+        .collect()
 }
 
 /// What a lookup reads from one answer of `from`; `None` when it found nothing.
@@ -840,6 +880,37 @@ entries:
         let batch = (1..=3).map(|id| msg(json!({"id": id}))).collect();
         let out = lookup.enrich_batch(batch).await;
         assert_eq!(payload(out[0].as_ref().unwrap())["user"], json!({"id": 1}));
+        let (_, refused) = out[1].as_ref().unwrap_err();
+        assert!(format!("{refused:#}").contains("refused"), "{refused:#}");
+        assert_eq!(payload(out[2].as_ref().unwrap())["user"], json!({"id": 3}));
+    }
+
+    #[cfg(feature = "filter")]
+    #[tokio::test]
+    async fn middlewares_on_from_keep_the_lookup_batched() {
+        use crate::middleware::filter::FilterPublisher;
+        use crate::middleware::transform::TransformPublisher;
+        let mapping = serde_yaml_ng::from_str(r#"{ mapping: { id: "$.user_id" } }"#).unwrap();
+        let filtered = FilterPublisher::new(Box::new(Each), "id > 1").unwrap();
+        let from = TransformPublisher::new(Box::new(filtered), &mapping).unwrap();
+        let entry = Entry {
+            from: Arc::new(from),
+            metadata: Vec::new(),
+            payload: None,
+            into: vec!["user".into()],
+            found_key: "lookup.user.found".into(),
+        };
+        let lookup = Lookup {
+            entries: vec![entry],
+            concurrency: 16,
+        };
+        let batch = (1..=3).map(|id| msg(json!({"user_id": id}))).collect();
+        let out = lookup.enrich_batch(batch).await;
+        let (_, dropped) = out[0].as_ref().unwrap_err();
+        assert!(
+            format!("{dropped:#}").contains("no response"),
+            "{dropped:#}"
+        );
         let (_, refused) = out[1].as_ref().unwrap_err();
         assert!(format!("{refused:#}").contains("refused"), "{refused:#}");
         assert_eq!(payload(out[2].as_ref().unwrap())["user"], json!({"id": 3}));

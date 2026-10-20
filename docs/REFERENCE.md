@@ -1104,8 +1104,8 @@ query answers the whole batch instead of one query per message:
   ClickHouse's `LIMIT 1 BY id` is fine). An error fails every message of the batch.
 - MongoDB: `find: '{"_id": {"$in": ["${payload:customer_id}"]}}'` matches documents by the
   field that holds `$in` (dotted paths work).
-- Only the endpoint itself batches: `middlewares` on `from` (e.g. `retry`) fall back to one
-  request per message.
+- `transform`, `filter` and plugin middlewares on `from` keep the batch; any other (e.g.
+  `retry`) falls back to one request per message. List `retry` after `lookup` instead.
 
 ```yaml middleware
 - lookup:
@@ -1186,7 +1186,7 @@ each message seeing its predecessors' writes.
 - Order matters for a query that builds on the stored value. A batch is applied in order, but
   at route `concurrency` above 1 batches run in parallel unless the sink keeps order (`file`
   does), and the per-message fallback (MySQL, a pooler, a query the function cannot wrap,
-  `middlewares` on `from`) sends `concurrency` messages at once. Set `concurrency: 1` on the
+  a `retry` on `from`) sends `concurrency` messages at once. Set `concurrency: 1` on the
   `lookup` and the route, or write the query so order does not matter, as below.
 - SQLite math functions (`exp`, `ln`, `pow`) are built into `mqb` and the Python and Node
   packages. A Rust project depending on `mq-bridge` builds its own SQLite and needs

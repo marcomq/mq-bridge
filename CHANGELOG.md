@@ -21,6 +21,9 @@ All notable changes to `mq-bridge`. Newest first.
 - **A `lookup` through a plugin is one call per batch.** A plugin with ABI 1.2 or newer
   answers the whole batch in one `send_batch`, and each request fails on its own. An older
   plugin, or a batch with repeated message ids, is still asked one request at a time.
+- **`transform`, `filter` and plugin middlewares on a lookup's `from` keep it batched.**
+  They used to turn a batching `from` into one request per message. A request the middleware
+  drops fails as before; a plugin that fails the batch falls back to one request at a time.
 - **`x-mqb-uri: filepath` for plugin schemas.** Like `path`, but the leading `/` stays, so
   `x:///models/a.onnx` gives `/models/a.onnx`. A plugin that uses it needs this release:
   1.0.1 refuses to load it.
