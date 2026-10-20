@@ -60,7 +60,7 @@ exit = "warn"
 collapsible_if = "allow"
 
 [workspace.package]
-version = "1.0.2"
+version = "1.0.3"
 
 [workspace.dependencies]
 anyhow = "1.0"
