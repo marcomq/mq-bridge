@@ -897,12 +897,6 @@ fn subscribes_many_topics(topics: &[String]) -> bool {
     topics.len() > 1 || topics.iter().any(|t| t.starts_with('^'))
 }
 
-fn topic_hash(topic: &str) -> u32 {
-    topic.bytes().fold(0x811c_9dc5, |hash: u32, b| {
-        (hash ^ b as u32).wrapping_mul(0x0100_0193)
-    })
-}
-
 /// librdkafka subscribes to every topic matching a name that starts with `^`, a character
 /// no topic name may contain.
 fn is_topic_pattern(topic: &str) -> bool {
@@ -1191,15 +1185,20 @@ fn record_partition_eof(
     eof_positions: &std::sync::Mutex<PartitionOffsets>,
 ) {
     let mut observed = eof_positions.lock().unwrap_or_else(|e| e.into_inner());
-    for elem in positions.elements() {
-        if elem.partition() != partition {
-            continue;
-        }
+    let candidates: Vec<_> = positions
+        .elements()
+        .into_iter()
+        .filter(|elem| elem.partition() == partition)
+        .collect();
+    // The EOF names no topic, so with several topics on this partition number only a
+    // consumed position, true for whichever topic it is, can be recorded.
+    let topic_known = candidates.len() == 1;
+    for elem in candidates {
         let key = (elem.topic().to_string(), partition);
         if let Offset::Offset(offset) = elem.offset() {
             let entry = observed.entry(key).or_insert(offset);
             *entry = (*entry).max(offset);
-        } else {
+        } else if topic_known {
             // librdkafka has no position until a record is consumed: the partition was
             // already at its end when the consumer was assigned.
             observed.entry(key).or_insert(EOF_BEFORE_ANY_RECORD);
@@ -1269,8 +1268,8 @@ fn to_canonical<M: Message>(message: &M) -> anyhow::Result<CanonicalMessage> {
     to_canonical_with_topic_id(message, false)
 }
 
-/// `topic_in_id` mixes a topic hash into the fallback id's top 32 bits; single-topic ids keep
-/// the old partition+offset value.
+/// `topic_in_id` makes the fallback id a 128-bit hash of topic, partition and offset;
+/// single-topic ids keep the old partition+offset value.
 fn to_canonical_with_topic_id<M: Message>(
     message: &M,
     topic_in_id: bool,
@@ -1333,12 +1332,18 @@ fn to_canonical_with_topic_id<M: Message>(
     // A u128 is used to hold both values, with the partition in the high 64 bits
     // and the offset in the low 64 bits.
     let message_id = message_id.unwrap_or_else(|| {
-        let topic = if topic_in_id {
-            (topic_hash(message.topic()) as u128) << 96
-        } else {
-            0
-        };
-        topic | ((message.partition() as u32 as u128) << 64) | (message.offset() as u64 as u128)
+        if topic_in_id {
+            return crate::canonical_message::hashed_id(
+                crate::canonical_message::string_id_hash(),
+                &[
+                    message.topic().as_bytes(),
+                    b"\0",
+                    &message.partition().to_be_bytes(),
+                    &message.offset().to_be_bytes(),
+                ],
+            );
+        }
+        ((message.partition() as u32 as u128) << 64) | (message.offset() as u64 as u128)
     });
 
     let mut canonical_message = CanonicalMessage::new(payload.to_vec(), Some(message_id));
@@ -1581,18 +1586,30 @@ fn drain_readiness(
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clone();
-    for elem in positions.elements() {
+    let elements = positions.elements();
+    let mut untouched = TopicPartitionList::new();
+    for elem in &elements {
         let key = (elem.topic().to_string(), elem.partition());
         let Some(high) = drain_target(consumer, state, &key) else {
             return DrainReadiness::Starting;
         };
-        if drain_offset_reached(
-            high,
-            state.delivered.get(&key).copied(),
-            eof_positions.get(&key).copied(),
-        ) {
+        let delivered = state.delivered.get(&key).copied();
+        let eof = eof_positions.get(&key).copied();
+        if drain_offset_reached(high, delivered, eof) {
             continue;
         }
+        // Such a partition gets no EOF marker, see `record_partition_eof`.
+        let shares_partition = elements
+            .iter()
+            .filter(|other| other.partition() == key.1)
+            .count()
+            > 1;
+        if delivered.is_some() || eof.is_some() || !shares_partition {
+            return DrainReadiness::Starting;
+        }
+        untouched.add_partition(&key.0, key.1);
+    }
+    if untouched.count() > 0 && !committed_at_target(consumer, state, untouched) {
         return DrainReadiness::Starting;
     }
     if peers_behind(consumer, state, topics, &positions) {
@@ -1627,6 +1644,22 @@ fn peers_behind(
     committed.elements().iter().any(|elem| {
         let key = (elem.topic().to_string(), elem.partition());
         drain_target(consumer, state, &key).is_none_or(|high| group_behind(high, elem.offset()))
+    })
+}
+
+/// Whether the group resumes every partition in `pending` at or past its target, so a
+/// partition nothing was read from is drained.
+fn committed_at_target(
+    consumer: &StreamConsumer,
+    state: &mut DrainState,
+    pending: TopicPartitionList,
+) -> bool {
+    let Ok(committed) = consumer.committed_offsets(pending, BROKER_PROBE_TIMEOUT) else {
+        return false;
+    };
+    committed.elements().iter().all(|elem| {
+        let key = (elem.topic().to_string(), elem.partition());
+        drain_target(consumer, state, &key).is_some_and(|high| !group_behind(high, elem.offset()))
     })
 }
 
@@ -2401,6 +2434,27 @@ mod tests {
     }
 
     #[test]
+    fn test_a_shared_partition_eof_marks_no_unconsumed_topic_drained() {
+        let mut positions = TopicPartitionList::new();
+        positions.add_partition("a", 0);
+        positions
+            .add_partition_offset("b", 0, Offset::Offset(5))
+            .unwrap();
+        positions.add_partition("c", 1);
+        let observed = std::sync::Mutex::new(PartitionOffsets::new());
+        record_partition_eof(&positions, 0, &observed);
+        record_partition_eof(&positions, 1, &observed);
+        let observed = observed.into_inner().unwrap();
+
+        assert_eq!(observed.get(&("a".to_string(), 0)), None);
+        assert_eq!(observed.get(&("b".to_string(), 0)), Some(&5));
+        assert_eq!(
+            observed.get(&("c".to_string(), 1)),
+            Some(&EOF_BEFORE_ANY_RECORD)
+        );
+    }
+
+    #[test]
     fn test_drain_join_wait_outlasts_a_crashed_members_session() {
         assert_eq!(
             session_timeout(&ClientConfig::new()),
@@ -2852,7 +2906,7 @@ mod tests {
         assert_eq!(id(&other("a"), false), single);
         assert_eq!(id(&other("b"), false), single);
         assert_ne!(id(&other("a"), true), id(&other("b"), true));
-        assert_eq!(id(&other("a"), true) & u128::from(u64::MAX), 7);
+        assert_eq!(id(&other("a"), true), id(&other("a"), true));
         assert!(subscribes_many_topics(&topic_list("a,b")));
         assert!(subscribes_many_topics(&topic_list("^a.*")));
         assert!(!subscribes_many_topics(&topic_list("a")));

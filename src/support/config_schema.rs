@@ -21,7 +21,7 @@
 //! | `origin` | scheme, userinfo, host and port | `rp://user@host:9092` |
 //! | `url` | everything before `?` | `rp://user@host:9092/orders` |
 //! | `path` | the path, without its leading `/` | `orders` |
-//! | `filepath` | the path as written, for a local file | `/orders` |
+//! | `filepath` | the path as written, percent-decoded, for a local file | `/orders` |
 //! | `query` | the query parameter of the same name (the default) | `g` |
 //!
 //! A `filepath` keeps an absolute path absolute: `x:///models/a.onnx` gives
@@ -303,11 +303,11 @@ impl UriSchema {
             }
             if let Some(field) = &self.path {
                 let path = match self.keep_root {
-                    true => parsed.path(),
-                    false => parsed.path().trim_start_matches('/'),
+                    true => percent_encoding::percent_decode_str(parsed.path()).decode_utf8_lossy(),
+                    false => parsed.path().trim_start_matches('/').into(),
                 };
                 if !path.is_empty() {
-                    config.insert(field.clone(), self.coerce(field, path)?);
+                    config.insert(field.clone(), self.coerce(field, &path)?);
                 }
             }
         } else {
@@ -942,6 +942,14 @@ mod tests {
 
         assert_eq!(model("onnx:///models/a.onnx?x=1"), json!("/models/a.onnx"));
         assert_eq!(model("onnx:models/a.onnx"), json!("models/a.onnx"));
+        assert_eq!(
+            model("onnx:///my%20models/a.onnx"),
+            json!("/my models/a.onnx")
+        );
+        assert_eq!(
+            model("onnx:///my models/ä.onnx"),
+            json!("/my models/ä.onnx")
+        );
     }
 
     #[test]
