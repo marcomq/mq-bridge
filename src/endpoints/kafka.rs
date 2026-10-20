@@ -13,7 +13,7 @@ use rdkafka::message::OwnedHeaders;
 use rdkafka::producer::{FutureProducer, FutureRecord, Producer};
 use rdkafka::Offset;
 use rdkafka::{
-    consumer::{CommitMode, Consumer, ConsumerContext},
+    consumer::{BaseConsumer, CommitMode, Consumer, ConsumerContext, Rebalance},
     error::{KafkaError, RDKafkaErrorCode},
     message::Headers,
     ClientConfig, ClientContext, Message, TopicPartitionList,
@@ -377,7 +377,19 @@ fn delivery_error(what: &str, error: KafkaError) -> PublisherError {
 const BROKER_PROBE_TIMEOUT: Duration = Duration::from_secs(4);
 
 /// Keeps the end-of-partition event this consumer asks for out of the error log.
-struct QuietEofContext;
+#[derive(Default)]
+struct QuietEofContext {
+    subscriber_starts: Option<Arc<SubscriberStarts>>,
+}
+
+/// Where a `latest` subscriber starts each partition: the high watermark read before the
+/// assignment is applied, so it is never past the offset librdkafka resolves.
+#[derive(Default)]
+struct SubscriberStarts {
+    /// Only a drain needs them; others skip the blocking lookups.
+    drain: std::sync::atomic::AtomicBool,
+    offsets: std::sync::Mutex<PartitionOffsets>,
+}
 
 impl ClientContext for QuietEofContext {
     fn error(&self, error: KafkaError, reason: &str) {
@@ -389,7 +401,42 @@ impl ClientContext for QuietEofContext {
     }
 }
 
-impl ConsumerContext for QuietEofContext {}
+impl ConsumerContext for QuietEofContext {
+    fn pre_rebalance(&self, base_consumer: &BaseConsumer<Self>, rebalance: &Rebalance<'_>) {
+        let Some(starts) = &self.subscriber_starts else {
+            return;
+        };
+        if !starts.drain.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
+        match rebalance {
+            Rebalance::Assign(tpl) => {
+                for elem in tpl.elements() {
+                    let lookup = base_consumer.fetch_watermarks(
+                        elem.topic(),
+                        elem.partition(),
+                        Duration::from_secs(1),
+                    );
+                    // A failed lookup records nothing, so the partition reads as not drained.
+                    if let Ok((_low, high)) = lookup {
+                        starts
+                            .offsets
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .insert((elem.topic().to_string(), elem.partition()), high);
+                    }
+                }
+            }
+            Rebalance::Revoke(tpl) => {
+                let mut offsets = starts.offsets.lock().unwrap_or_else(|e| e.into_inner());
+                for elem in tpl.elements() {
+                    offsets.remove(&(elem.topic().to_string(), elem.partition()));
+                }
+            }
+            Rebalance::Error(_) => {}
+        }
+    }
+}
 
 type StreamConsumer = rdkafka::consumer::StreamConsumer<QuietEofContext>;
 
@@ -551,8 +598,11 @@ impl KafkaConsumer {
         // in librdkafka or the prefetch task, which used to make a drain silently lose its tail.
         client_config.set("enable.partition.eof", "true");
         let session_timeout = session_timeout(&client_config);
+        let subscriber_starts = is_subscriber.then(Arc::<SubscriberStarts>::default);
 
-        let consumer: StreamConsumer = client_config.create_with_context(QuietEofContext)?;
+        let consumer: StreamConsumer = client_config.create_with_context(QuietEofContext {
+            subscriber_starts: subscriber_starts.clone(),
+        })?;
         // librdkafka connects in the background and retries forever; probe once so an
         // unreachable broker fails the start instead of looking like an empty topic.
         let consumer = tokio::task::spawn_blocking(move || {
@@ -613,6 +663,7 @@ impl KafkaConsumer {
             source_metadata,
             drain_state: DrainState {
                 session_timeout,
+                subscriber_starts,
                 ..DrainState::default()
             },
             nacked: NackLatch::default(),
@@ -705,6 +756,11 @@ impl MessageConsumer for KafkaConsumer {
 
     fn set_exit_on_empty(&mut self, exit_on_empty: bool) {
         self.exit_on_empty = exit_on_empty;
+        if let Some(starts) = &self.drain_state.subscriber_starts {
+            starts
+                .drain
+                .store(exit_on_empty, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 
     async fn receive_batch(&mut self, max_messages: usize) -> Result<ReceivedBatch, ConsumerError> {
@@ -1518,6 +1574,8 @@ struct DrainState {
     session_timeout: Duration,
     /// Every partition of the subscribed topics, looked up once — see [`peers_behind`].
     partitions: Option<Vec<(String, i32)>>,
+    /// Subscriber mode only — see [`SubscriberStarts`].
+    subscriber_starts: Option<Arc<SubscriberStarts>>,
 }
 
 /// How long a failed watermark lookup suppresses further broker calls. `fetch_watermarks`
@@ -1659,8 +1717,50 @@ fn committed_at_target(
     };
     committed.elements().iter().all(|elem| {
         let key = (elem.topic().to_string(), elem.partition());
-        drain_target(consumer, state, &key).is_some_and(|high| !group_behind(high, elem.offset()))
+        let Some(high) = drain_target(consumer, state, &key) else {
+            return false;
+        };
+        match elem.offset() {
+            Offset::Invalid => uncommitted_drained(high, subscriber_start(state, &key), || {
+                low_watermark(consumer, state, &key)
+            }),
+            committed => !group_behind(high, committed),
+        }
     })
+}
+
+/// A partition the group never committed is drained only if nothing below `high` can still
+/// be read: a subscriber started at or past it, or retention already deleted it.
+fn uncommitted_drained(high: i64, start: Option<i64>, low: impl FnOnce() -> Option<i64>) -> bool {
+    high == 0 || start.is_some_and(|start| start >= high) || low().is_some_and(|low| low >= high)
+}
+
+fn subscriber_start(state: &DrainState, key: &(String, i32)) -> Option<i64> {
+    let starts = state.subscriber_starts.as_ref()?;
+    let offsets = starts.offsets.lock().unwrap_or_else(|e| e.into_inner());
+    offsets.get(key).copied()
+}
+
+/// The partition's current low watermark; failures back off like [`drain_target`].
+fn low_watermark(
+    consumer: &StreamConsumer,
+    state: &mut DrainState,
+    key: &(String, i32),
+) -> Option<i64> {
+    if state
+        .watermark_retry_at
+        .is_some_and(|at| std::time::Instant::now() < at)
+    {
+        return None;
+    }
+    match consumer.fetch_watermarks(&key.0, key.1, Duration::from_secs(1)) {
+        Ok((low, _high)) => Some(low),
+        Err(e) => {
+            debug!(topic = %key.0, partition = key.1, error = %e, "Kafka watermark lookup failed; backing off");
+            state.watermark_retry_at = Some(std::time::Instant::now() + WATERMARK_RETRY_BACKOFF);
+            None
+        }
+    }
 }
 
 /// A committed offset is the next one to read, so the group is done at `high`.
@@ -2931,6 +3031,15 @@ mod tests {
         assert!(!group_behind(10, Offset::Offset(10)));
         assert!(group_behind(10, Offset::Invalid));
         assert!(!group_behind(0, Offset::Invalid));
+    }
+
+    #[test]
+    fn test_uncommitted_partition_drained_only_when_nothing_below_target_is_readable() {
+        assert!(uncommitted_drained(0, None, || None));
+        assert!(uncommitted_drained(10, Some(10), || None));
+        assert!(uncommitted_drained(10, None, || Some(10)));
+        assert!(!uncommitted_drained(10, Some(9), || Some(9)));
+        assert!(!uncommitted_drained(10, None, || None));
     }
 
     #[test]
