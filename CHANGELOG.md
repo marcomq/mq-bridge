@@ -2,6 +2,18 @@
 
 All notable changes to `mq-bridge`. Newest first.
 
+## 1.0.3
+
+### Changed
+
+- **The MCP server is registered as `io.github.marcomq/mq-bridge`** instead of
+  `io.github.marcomq/mq-bridge-app`. The Docker image label and the `mcp-name` line follow;
+  the package names `mq-bridge-app` (crates.io) and `ghcr.io/marcomq/mq-bridge-app` stay.
+  The registry entry now names the repository by id and points to `apps/mq-bridge-app`.
+- **The root `LICENSE` pointer is gone**, so GitHub detects the license from `LICENSE-MIT` and
+  `LICENSE-APACHE`. The licensing is unchanged: MIT OR Apache-2.0. The C library archive
+  ships the two license texts without the pointer.
+
 ## 1.0.2
 
 ### Added
