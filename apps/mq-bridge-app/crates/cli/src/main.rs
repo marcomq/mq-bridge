@@ -671,6 +671,15 @@ async fn main() -> anyhow::Result<()> {
         if !config.consumers.iter().any(|consumer| consumer.enabled) {
             anyhow::bail!("--drain: the configuration defines no enabled routes");
         }
+        if let Some(consumer) = config.consumers.iter().find(|consumer| {
+            consumer.enabled
+                && matches!(
+                    consumer.endpoint.endpoint_type,
+                    mq_bridge::models::EndpointType::Null
+                )
+        }) {
+            anyhow::bail!("--drain: enabled route '{}' has no source", consumer.name);
+        }
         for consumer in &mut config.consumers {
             consumer.options.exit_on_empty = true;
         }

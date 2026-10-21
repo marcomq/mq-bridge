@@ -646,13 +646,28 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn the_registry_dir_does_not_need_tmpdir_on_macos() {
-        let from_os = darwin_user_temp_dir().expect("macOS reports a user temp dir");
-        if let Some(tmpdir) = std::env::var_os("TMPDIR") {
-            assert_eq!(
-                fs::canonicalize(&from_os).unwrap(),
-                fs::canonicalize(tmpdir).unwrap()
-            );
-        }
+        const CHILD: &str = "MQB_STATUS_REGISTRY_NO_TMPDIR_CHILD";
+        let expected = if std::env::var_os(CHILD).is_some() {
+            assert!(std::env::var_os("TMPDIR").is_none());
+            darwin_user_temp_dir().expect("macOS reports a user temp dir")
+        } else if let Some(tmpdir) = std::env::var_os("TMPDIR") {
+            // The confstr fallback runs in a child process without TMPDIR.
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "status_registry::tests::the_registry_dir_does_not_need_tmpdir_on_macos",
+                ])
+                .env(CHILD, "1")
+                .env_remove("TMPDIR")
+                .status()
+                .unwrap();
+            assert!(status.success(), "the TMPDIR-less child failed");
+            PathBuf::from(tmpdir)
+        } else {
+            darwin_user_temp_dir().expect("macOS reports a user temp dir")
+        };
+        let registry = LocalStatusRegistry::new().unwrap();
+        assert!(registry.directory().starts_with(&expected));
     }
 
     #[test]

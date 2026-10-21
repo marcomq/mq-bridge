@@ -100,6 +100,13 @@ fn endpoint_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
     })
 }
 
+/// [`endpoint_schema`] for an `Option<Endpoint>` field, which also accepts `null`.
+fn optional_endpoint_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    let mut schema = endpoint_schema(generator);
+    schema.insert("type".into(), serde_json::json!(["object", "null"]));
+    schema
+}
+
 /// Lean stand-in for the full `Route` schema; see [`endpoint_schema`].
 fn route_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
     let mut endpoint = endpoint_schema(generator).to_value();
@@ -212,7 +219,7 @@ struct AgentListenArgs {
     /// connector, e.g. `{"nats": {"url": "...", "stream": "AGENTS", "subject":
     /// "agents.me"}}`, to receive from agents that are not on this machine.
     #[serde(default)]
-    #[schemars(schema_with = "endpoint_schema")]
+    #[schemars(schema_with = "optional_endpoint_schema")]
     input: Option<Endpoint>,
     /// How many messages to hold for `route_messages`. Defaults to 200.
     #[serde(default)]
@@ -230,7 +237,7 @@ struct AgentSendArgs {
     /// Optional sink endpoint replacing the recipient's local inbox directory,
     /// for an agent reachable over a broker rather than this filesystem.
     #[serde(default)]
-    #[schemars(schema_with = "endpoint_schema")]
+    #[schemars(schema_with = "optional_endpoint_schema")]
     output: Option<Endpoint>,
 }
 

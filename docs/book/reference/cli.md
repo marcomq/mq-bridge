@@ -23,7 +23,7 @@ empty and offers to serve the UI so you can build one interactively.
 mqb --config config.yml
 mqb --config config.yml --init-config dev/config/file-to-http.yml
 mqb --ui                           # start empty, define config.yml in the UI
-mqb --config config.yml --drain    # batch job: run every route until its source is empty
+mqb --config config.yml --drain    # batch job: run every enabled route until its source is empty
 ```
 
 | Option | Meaning |
@@ -270,8 +270,9 @@ unchanged (e.g. `postgres://…/db?table=src&sslmode=disable`).
 
 ### Middlewares in the URI
 
-Append `|`-separated middlewares to either URI to wrap that endpoint. They apply in the order
-written, and each takes its own config struct's fields as query params:
+Append `|`-separated middlewares to either URI to wrap that endpoint. They form that endpoint's
+`middlewares:` list in the order written, so a message passes them from the last to the first (see
+the reverse-order note below). Each takes its own config struct's fields as query params:
 
 ```bash
 mqb copy \

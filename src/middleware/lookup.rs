@@ -45,6 +45,11 @@ impl Entry {
             anyhow::bail!("lookup: `into` is empty; use `$` to replace the whole payload");
         }
         let into: Vec<String> = if path.is_empty() {
+            if into.trim() != "$" {
+                anyhow::bail!(
+                    "lookup: invalid `into` path '{into}'; use `$` to replace the whole payload"
+                );
+            }
             Vec::new()
         } else {
             path.split('.').map(str::to_string).collect()
@@ -795,6 +800,22 @@ entries:
             .err()
             .unwrap();
         assert!(err.to_string().contains("only lookup"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn only_a_lone_dollar_means_the_root() {
+        for into in ["$$", ".", "$."] {
+            let config: LookupMiddleware = serde_yaml_ng::from_str(&format!(
+                "{{ from: {{ static: {{ body: \"{{}}\", raw: true }} }}, into: \"{into}\" }}"
+            ))
+            .unwrap();
+            let sink = MemoryPublisher::new_local("lookup_bad_root", 16);
+            let err = LookupPublisher::new(Box::new(sink), &config, "lookup_test")
+                .await
+                .err()
+                .unwrap();
+            assert!(err.to_string().contains("invalid `into`"), "{into}: {err}");
+        }
     }
 
     fn memory_source(topic: &str) -> crate::endpoints::memory::MemoryConsumer {

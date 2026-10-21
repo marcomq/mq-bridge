@@ -19,16 +19,13 @@ shared `mq-bridge` dependency is maintained in the [engine repository's
 SECURITY.md](https://github.com/marcomq/mq-bridge/blob/main/SECURITY.md), rather
 than duplicated here.
 
-One important app-specific consequence is definite: `mq-bridge/full` enables
-the AWS transport in released builds. The AWS SDK's legacy `rustls 0.21`
-connector therefore brings `rustls-webpki 0.101.7` into released binaries, and
-RUSTSEC-2026-0098 and RUSTSEC-2026-0099 are reachable during ordinary AWS
-certificate validation. Exploitation requires a name-constrained CA in the
-trust store to issue a certificate outside its constraints (including an
-out-of-scope wildcard for -0099). The issue remains tracked pending the AWS
-SDK migration off that connector; it is not claimed to be absent from the
-binary. The CRL findings and the rumqttc path are explained in the linked
-analysis and suppressed with their app-specific reasoning in `deny.toml`.
+`mq-bridge/full` enables the AWS transport in released builds. The AWS SDK now
+validates certificates on `rustls 0.23` → `rustls-webpki 0.103.16`; the former
+legacy `rustls 0.21` → `rustls-webpki 0.101.7` path, which was reachable for
+RUSTSEC-2026-0098 and RUSTSEC-2026-0099, is no longer in `Cargo.lock`. The only
+affected `rustls-webpki` left is 0.102.8 via rumqttc, which uses it for an
+error type only; that path is explained in the linked analysis and suppressed
+with its reasoning in `deny.toml`.
 
 `cargo audit` also reports transitive unmaintained crates that
 `unmaintained = "workspace"` intentionally does not gate in cargo-deny. The

@@ -1327,7 +1327,7 @@ each message seeing its predecessors' writes.
   packages. A Rust project depending on `mq-bridge` builds its own SQLite and needs
   `LIBSQLITE3_FLAGS=SQLITE_ENABLE_MATH_FUNCTIONS` set (e.g. in `.cargo/config.toml` `[env]`).
 
-A time-decayed sum per key (e.g. recent orders per customer) that gives the same result in any order: a
+A time-decayed sum per key (e.g. recent order amount per customer) that gives the same result in any order: a
 late event is added with its own decay instead of being dropped, so parallel routes and
 instances can share the table.
 
@@ -1339,7 +1339,7 @@ instances can share the table.
         table: "velocity"
         lookup_query: >-
           INSERT INTO velocity (k, v, ts)
-          VALUES (${payload:card}, ${payload:amount}::float8, ${payload:ts}::bigint)
+          VALUES (${payload:customer}, ${payload:amount}::float8, ${payload:ts}::bigint)
           ON CONFLICT (k) DO UPDATE SET
             v = CASE WHEN excluded.ts > velocity.ts
                 THEN velocity.v * exp((velocity.ts - excluded.ts) / 60000.0) + excluded.v
