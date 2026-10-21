@@ -209,8 +209,8 @@ Two gotchas worth knowing before wiring up a `nats` endpoint:
 > Every available middleware, with its fields, defaults, supported side (input/output) and a
 > working example, is listed in **[REFERENCE.md](REFERENCE.md#middleware)**. Note in
 > particular the [ordering rule](REFERENCE.md#ordering--read-this-before-combining-middleware):
-> on an **output**, the *last* middleware in the list is the outermost layer, so `dlq` goes
-> last.
+> a message passes the list **from the bottom up**, on an input and an output alike. On an
+> **output** the *last* middleware is therefore the outermost layer, so `dlq` goes last.
 
 Middleware is defined as a list under an endpoint. `retry` and `dlq` belong on the output;
 on an input the route fails at start.

@@ -932,7 +932,7 @@
           ]
         },
         "into": {
-          "description": "Dotted payload path the response is written to, e.g. `customer.profile`.",
+          "description": "Dotted payload path the response is written to, e.g. `customer.profile`; `$` replaces the payload.",
           "type": [
             "string",
             "null"
@@ -979,7 +979,7 @@
           ]
         },
         "into": {
-          "description": "Dotted payload path the response is written to, e.g. `customer.profile`.",
+          "description": "Dotted payload path the response is written to, e.g. `customer.profile`; `$` replaces the payload.",
           "type": "string"
         }
       },

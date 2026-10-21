@@ -288,8 +288,8 @@ mqb copy \
   use `format=normal`. `format=json`/`text` render the payload as a JSON value and it does not
   survive the round trip (it comes back as a JSON array, and the reader reports a bogus
   "unsupported encryption envelope version 91").
-- Middlewares apply in list order on **both** ends, so a route that reads back what another wrote
-  must list them in the **reverse** order. Writing with `|compression?algorithm=zstd|encryption?key=…`
+- A message passes the middleware list from the **last** entry to the first on **both** ends,
+  so a route that reads back what another wrote must list them in the **reverse** order. Writing with `|compression?algorithm=zstd|encryption?key=…`
   reads back with `|encryption?key=…|compression?algorithm=zstd`.
 - A middleware with no params needs no `?` — `|metrics`.
 - `dlq`'s `endpoint` is itself a URL-encoded endpoint URI:

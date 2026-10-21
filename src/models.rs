@@ -581,7 +581,7 @@ pub struct LookupMiddleware {
     /// Request payload template. Defaults to the message's own payload and metadata.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payload: Option<String>,
-    /// Dotted payload path the response is written to, e.g. `customer.profile`.
+    /// Dotted payload path the response is written to, e.g. `customer.profile`; `$` replaces the payload.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub into: Option<String>,
     /// Further lookups, run in parallel with `from`.
@@ -605,7 +605,7 @@ pub struct LookupEntry {
     /// Request payload template. Defaults to the message's own payload and metadata.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payload: Option<String>,
-    /// Dotted payload path the response is written to, e.g. `customer.profile`.
+    /// Dotted payload path the response is written to, e.g. `customer.profile`; `$` replaces the payload.
     pub into: String,
 }
 

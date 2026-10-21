@@ -24,7 +24,7 @@ A sealed payload is binary, so a `file`/`object_store` sink that stores it must 
 `format=normal` — `format=json`/`text` render the payload as a JSON value and it cannot be read
 back (the reader reports "unsupported encryption envelope version 91"). Stacking it with
 `compression` works, but the reading route must list the two middlewares in the **reverse**
-order, since middlewares apply in list order on both ends.
+order, since a message passes the list from the bottom up on both ends.
 
 From the `copy` CLI it is an inline middleware; keep the key in `${env:VAR}` so it never reaches
 the process list or shell history (`{`/`}` percent-encode to `%7B`/`%7D`):

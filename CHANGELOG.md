@@ -4,7 +4,20 @@ All notable changes to `mq-bridge`. Newest first.
 
 ## Unreleased
 
+### Added
+
+- **`lookup` can replace the payload with `into: $`.** The response becomes the new payload
+  while the message keeps its id and metadata, on an input or an output; the incoming payload
+  need not be JSON. It must be the only lookup of its middleware. A missing or empty `into`
+  is still refused.
+
 ### Changed
+
+- **Middleware ordering is documented as one rule:** a message passes a `middlewares:` list
+  from the bottom up, on the input and the output alike. REFERENCE.md explains it with a
+  diagram, a table and the common mistakes; behaviour is unchanged.
+- **ARCHITECTURE.md explains when to use an endpoint, a middleware or a structural endpoint**,
+  and how `lookup` and `request` relate.
 
 - **The MCP tool list is about 17 KB instead of about 495 KB.** `publish`, `start_route`,
   `generate_cli_command`, `agent_listen` and `agent_send` no longer inline every

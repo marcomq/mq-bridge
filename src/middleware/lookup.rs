@@ -40,13 +40,15 @@ impl Entry {
         into: &str,
         route_name: &str,
     ) -> anyhow::Result<Self> {
-        let into: Vec<String> = into
-            .trim()
-            .trim_start_matches('$')
-            .trim_start_matches('.')
-            .split('.')
-            .map(str::to_string)
-            .collect();
+        let path = into.trim().trim_start_matches('$').trim_start_matches('.');
+        if into.trim().is_empty() {
+            anyhow::bail!("lookup: `into` is empty; use `$` to replace the whole payload");
+        }
+        let into: Vec<String> = if path.is_empty() {
+            Vec::new()
+        } else {
+            path.split('.').map(str::to_string).collect()
+        };
         if into.iter().any(String::is_empty) {
             anyhow::bail!("lookup: invalid `into` path '{}'", into.join("."));
         }
@@ -59,7 +61,11 @@ impl Entry {
             .transpose()?;
         // Box::pin breaks the recursive async type, as in the dlq middleware.
         let from = Box::pin(create_publisher_from_route(route_name, &with_status(from))).await?;
-        let found_key = format!("lookup.{}.found", into.join("."));
+        let found_key = if into.is_empty() {
+            FOUND.to_string()
+        } else {
+            format!("lookup.{}.found", into.join("."))
+        };
         Ok(Self {
             from,
             metadata,
@@ -67,6 +73,11 @@ impl Entry {
             into,
             found_key,
         })
+    }
+
+    /// `into: $`: the response becomes the whole payload.
+    fn replaces(&self) -> bool {
+        self.into.is_empty()
     }
 
     /// The request `from` answers for this message.
@@ -260,6 +271,12 @@ impl Lookup {
             ))
             .into());
         }
+        if entries.len() > 1 && entries.iter().any(Entry::replaces) {
+            return Err(InvalidConfig(anyhow::anyhow!(
+                "lookup: `into: $` replaces the whole payload, so it must be the only lookup; use a second `lookup` middleware for the others"
+            ))
+            .into());
+        }
         Ok(Self {
             entries,
             concurrency: config.concurrency.max(1),
@@ -281,9 +298,13 @@ impl Lookup {
         &self,
         messages: Vec<CanonicalMessage>,
     ) -> Vec<Result<CanonicalMessage, (CanonicalMessage, PublisherError)>> {
+        let replaces = self.entries.iter().any(Entry::replaces);
         let docs: Vec<Result<Value, PublisherError>> = messages
             .iter()
             .map(|m| {
+                if replaces {
+                    return Ok(Value::Null);
+                }
                 serde_json::from_slice(&m.payload).map_err(|e| {
                     PublisherError::NonRetryable(anyhow::anyhow!(
                         "lookup: payload is not JSON: {e}"
@@ -356,9 +377,13 @@ impl Lookup {
     }
 }
 
-/// Writes `value` at the dotted `path`, creating objects along the way.
+/// Writes `value` at the dotted `path`, creating objects along the way; an empty path
+/// replaces `root`.
 fn insert_at(root: &mut Value, path: &[String], value: Value) -> anyhow::Result<()> {
-    let (last, parents) = path.split_last().expect("path is non-empty");
+    let Some((last, parents)) = path.split_last() else {
+        *root = value;
+        return Ok(());
+    };
     let mut cur = root;
     for key in parents {
         let Value::Object(map) = cur else {
@@ -716,6 +741,60 @@ entries:
             .err()
             .unwrap();
         assert!(err.to_string().contains("together"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn into_root_replaces_the_payload_and_keeps_the_message() {
+        let (publisher, channel) = lookup(
+            "lookup_replace",
+            r#"
+from: { static: { body: '{"for":"${metadata:tenant}"}', raw: true } }
+into: $
+"#,
+        )
+        .await;
+        let mut incoming = CanonicalMessage::new(b"not json".to_vec(), None);
+        incoming.metadata.insert("tenant".into(), "acme".into());
+        let id = incoming.message_id;
+        publisher.send(incoming).await.unwrap();
+        let sent = channel.drain_messages();
+        assert_eq!(payload(&sent[0]), json!({"for": "acme"}));
+        assert_eq!(sent[0].message_id, id);
+        let meta = |k: &str| sent[0].metadata.get(k).map(String::as_str);
+        assert_eq!(meta("tenant"), Some("acme"));
+        assert_eq!(meta(FOUND), Some("true"));
+
+        let (publisher, channel) = lookup(
+            "lookup_replace_none",
+            "from: { static: { body: \"\", raw: true } }\ninto: $",
+        )
+        .await;
+        publisher.send(msg(json!({"id": 1}))).await.unwrap();
+        let sent = channel.drain_messages();
+        assert_eq!(payload(&sent[0]), Value::Null);
+        assert_eq!(
+            sent[0].metadata.get(FOUND).map(String::as_str),
+            Some("false")
+        );
+    }
+
+    #[tokio::test]
+    async fn into_root_must_be_the_only_lookup() {
+        let config: LookupMiddleware = serde_yaml_ng::from_str(
+            r#"
+from: { static: { body: "{}", raw: true } }
+into: $
+entries:
+  - { from: { static: { body: "{}", raw: true } }, into: user }
+"#,
+        )
+        .unwrap();
+        let sink = MemoryPublisher::new_local("lookup_replace_mixed", 16);
+        let err = LookupPublisher::new(Box::new(sink), &config, "lookup_test")
+            .await
+            .err()
+            .unwrap();
+        assert!(err.to_string().contains("only lookup"), "{err}");
     }
 
     fn memory_source(topic: &str) -> crate::endpoints::memory::MemoryConsumer {

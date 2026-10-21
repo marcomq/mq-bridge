@@ -32,17 +32,71 @@ my_route:
 
 ### Ordering — read this before combining middleware
 
-**Output (publisher) middlewares wrap in list order, so the *last* entry is the outermost
-layer and sees the failures of the ones before it.** Put `dlq` last.
+**One rule covers both sides: a message passes a `middlewares:` list from the bottom up.**
+The *last* entry handles the message first, the *first* entry handles it last. That holds
+on an input and on an output alike.
 
-**Input (consumer) middlewares are applied in reverse, so the *first* entry is outermost.**
-An incoming message passes the *last* entry first and the first entry last: list
-`[aggregate, deduplication]` to drop duplicates before they are counted.
+What differs between the two sides is where the list is attached. The message travels in
+opposite directions, so the transport sits at the bottom of an input list and at the top of
+an output list:
 
-**Consequence: a route that reads back what another route wrote needs the *reversed* list.**
-Writing with `[compression, encryption]` produces `compress(encrypt(payload))`; a reader
-given that same list would try to decrypt first and fail. The reading route must say
-`[encryption, compression]`. The lists mirror — they are not copied.
+```text
+        INPUT endpoint                         OUTPUT endpoint
+
+   route / handler        ▲             transport (kafka, file, …)  ▲
+   - first entry          │             - first entry               │
+   - second entry         │  message    - second entry              │  message
+   - last entry           │  moves up   - last entry                │  moves up
+   transport (kafka, …)   │             route / handler             │
+```
+
+The same picture as a table, plus the term used in code and error messages (the *outermost*
+layer is the one the route calls directly):
+
+| | Input list | Output list |
+|---|---|---|
+| Handles the message **first** | last entry, right after the transport | last entry, right after the route / handler |
+| Handles the message **last** | first entry, then the route / handler | first entry, then the transport |
+| Outermost layer | first entry | last entry |
+| Sees the result of | the entries **below** it and the transport | — |
+| Sees the failures of | — | the entries **above** it and the transport |
+
+**Reading a list.** Start at the bottom and say what each entry does to the message, in
+that order. On an output, a failure then travels back *down* the same list: every entry
+below the one that failed sees it, the ones above do not.
+
+```yaml
+# Output. Read bottom-up: dlq hands on, retry hands on, transform validates, transport sends.
+# A rejection by transform (or a failed send) travels back down: retry gives up, dlq captures.
+middlewares:
+  - transform: { schema_file: "user.json" }
+  - retry: { max_attempts: 3 }
+  - dlq: { endpoint: { file: { path: "rejected.jsonl" } } }
+```
+
+What follows from the rule:
+
+- **Output: list a middleware *after* the ones whose failures it should handle.** `retry`
+  goes after what it retries, `dlq` goes last. Swapped (`[dlq, retry]`), `retry` sits
+  outside `dlq`: a retryable failure passes `dlq` untouched, `retry` exhausts its attempts,
+  and the exhausted failure never comes back through `dlq`. It goes to the route instead,
+  which nacks it.
+- **Output: a batching middleware goes last.** `buffer` must handle the message before
+  `pack` so that `pack` gets a full batch: `[compression, pack, buffer]` (see [`pack`](#pack)).
+- **Input: list a middleware *before* the ones whose result it should see.**
+  `[aggregate, deduplication]` drops duplicates first and counts only what is left. The
+  reverse would count every duplicate.
+- **A route that reads back what another route wrote needs the *reversed* list.** Writing
+  with `[compression, encryption]` encrypts first and compresses last, producing
+  `compress(encrypt(payload))`. To undo that, the reader must decompress first and decrypt
+  last, so `compression` has to be at the bottom of the input list: `[encryption,
+  compression]`. Copying the writer's list would try to decrypt first and fail on the first
+  message. The lists mirror — they are not copied. See
+  [compress-then-encrypt over the wire](#compress-then-encrypt-over-the-wire) for the full
+  stack.
+- **Endpoints nested inside a middleware or structural endpoint have their own list**
+  (`dlq.endpoint`, `lookup.from`, `request.to`, a `fanout` leg, …). The same rule applies to
+  it, independent of the outer list.
 
 **A route handler sits outside every output middleware**, so it runs **once** per message
 and the middlewares act on what it returned. In particular `retry` re-attempts only the
@@ -56,14 +110,6 @@ a handler error propagates to the route and is reported there.
 > `middleware::transform::tests::test_rejected_message_reaches_the_dlq_through_the_config_wiring`,
 > and `reference_docs_test::publisher_middleware_wraps_last_entry_outermost`, and is
 > documented on `apply_middlewares_to_publisher` in `src/middleware/mod.rs`.
-
-```yaml
-# Correct: transform rejects -> retry gives up -> dlq captures.
-middlewares:
-  - transform: { schema_file: "user.json" }
-  - retry: { max_attempts: 3 }
-  - dlq: { endpoint: { file: { path: "rejected.jsonl" } } }
-```
 
 ### What exists
 
@@ -1035,7 +1081,7 @@ whether they were found. On an input, the handler already sees the enriched mess
 | Field | Type | Default |
 |---|---|---|
 | `from` | endpoint | must answer with a response; required unless `entries` is set |
-| `into` | dotted payload path | required with `from` |
+| `into` | dotted payload path, or `$` for the whole payload | required with `from` |
 | `metadata` | map string→template | `{}` |
 | `payload` | template | the message's own payload and metadata |
 | `entries` | list of `{from, into, metadata, payload}` | `[]`; further lookups |
@@ -1139,13 +1185,57 @@ the others keep their answers.
 - HTTP 408, 429 and 5xx fail the message as retryable, other statuses as non-retryable.
   Without `pass_through_status: true` the `http` endpoint already fails on any non-2xx
   response, so a missing record is an error rather than `null`.
-- The payload must be a JSON object along `into`.
+- The payload must be a JSON object along `into`. With `into: $` it may be anything (see
+  [Replacing the payload](#replacing-the-payload-into-)).
 - On an output, a failed lookup fails only its message; the rest of the batch is published.
   List `retry` / `dlq` after `lookup` to catch its failures.
 - On an input, a retryable error (e.g. the database is down) nacks the whole received batch,
   so the source redelivers it, and reconnects the route. A non-retryable error (non-JSON
   payload, HTTP 4xx, a query error) is logged and acks and drops only its message; the rest
   of the batch goes on. A misconfigured `from` therefore drops every message.
+
+#### Replacing the payload (`into: $`)
+
+`into: $` makes the response the new payload instead of writing it under a path. The
+message keeps its `message_id` and metadata, so its identity, correlation and commit
+position are unchanged; only the payload is swapped. It works on an input and an output,
+and the route goes on to its own output as usual.
+
+```yaml middleware
+- lookup:
+    from:
+      http:
+        url: "http://scoring:8080"
+        pass_through_status: true
+    metadata:
+      http_path: "/score"
+      http_method: POST
+    into: $
+```
+
+- The response is written as with any other path: JSON is kept as JSON, a non-JSON
+  response becomes a JSON **string** (quoted), and an empty response or HTTP 404 becomes
+  `null`. `lookup.found` says which it was.
+- The incoming payload need not be JSON. It is sent as the request unless `payload` sets one,
+  and replaced afterwards.
+- Only `lookup.found` is set; there is no `lookup.<into>.found` for the root.
+- `into: $` must be the only lookup of the middleware. A second entry would write into a
+  payload that is replaced anyway, so combining them is a startup error. To enrich the
+  replaced payload further, add a second `lookup` middleware listed **above** it. That is
+  the same on an input and an output, since both lists run bottom-up (see
+  [Ordering](#ordering--read-this-before-combining-middleware)).
+- The response's own metadata is not carried over. When the response should go on
+  **verbatim** — its bytes, a non-JSON body, its metadata — and to another endpoint than the
+  route's output, use the [`request`](#request) endpoint instead:
+
+| Need | Use |
+|---|---|
+| Add the answer to the message, keep going to the route's output | `lookup` with `into: <path>` |
+| Replace the message with the answer (JSON), keep going; input or output | `lookup` with `into: $` |
+| Send the answer as-is (bytes and metadata) to a different endpoint; output only | [`request`](#request) `{ to, forward_to }` |
+
+`into` must still be set; a `lookup` without it is refused at startup, so a forgotten
+`into` cannot silently throw the payload away. An empty `into: ""` is refused as well.
 
 **Writing lookups.** A per-message `lookup_query` that writes, such as a running counter or
 moving average, batches on PostgreSQL and SQLite: the batch runs in order in one transaction,
