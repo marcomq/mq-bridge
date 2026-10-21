@@ -675,6 +675,10 @@ fn batched_aggregate_query_keeps_keys_apart() {
             r#"[{"$match": {"c": {"$in": [${payload:c}]}}}, {"$setWindowFields": {"output": {}}}]"#,
             "$setWindowFields",
         ),
+        (
+            r#"[{"$lookup": {"from": "o", "pipeline": [{"$match": {"c": {"$in": [${payload:c}]}}}], "as": "o"}}]"#,
+            "top-level `$match`",
+        ),
     ] {
         let err = check(spanning).expect_err(spanning).to_string();
         assert!(err.contains(named), "{err}");

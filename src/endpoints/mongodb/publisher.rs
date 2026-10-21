@@ -1054,6 +1054,20 @@ pub(super) fn check_batch_pipeline(list: &ListQuery) -> anyhow::Result<()> {
     let Ok(stages) = pipeline_stages(sample.as_bytes()) else {
         return Ok(());
     };
+    // Results are matched to messages by the outer documents, so the keys must filter those.
+    let top_level = stages.iter().any(|stage| {
+        stage
+            .get_document("$match")
+            .ok()
+            .and_then(|m| m.get_document(&list.key).ok())
+            .is_some_and(|cond| cond.contains_key("$in"))
+    });
+    if !top_level {
+        anyhow::bail!(
+            "MongoDB `aggregate_query`: with `$in`, the key list must be the condition of `{}` in a top-level `$match` stage; compare the key directly to run once per message",
+            list.key
+        );
+    }
     let mut key = format!("${}", list.key);
     for stage in &stages {
         let Some((name, spec)) = stage.iter().next() else {
