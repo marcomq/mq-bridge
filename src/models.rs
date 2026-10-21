@@ -637,7 +637,7 @@ pub struct AggregateMiddleware {
     /// Expression returning the new state; reads payload fields, `meta.<key>` and `state`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expression: Option<String>,
-    /// Built-in aggregates instead of `expression`, e.g. `n: count`, `avg: ema(reading, 0.1)`.
+    /// Built-in aggregates instead of `expression`, e.g. `n: count`, `avg: ema(reading, 0.1)`, `avg: ema(reading, 5m)` (half-life), `recent: decayed_count(1h)`, `decayed_sum(amount, 1h)`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fields: Option<std::collections::BTreeMap<String, String>>,
     /// Expression over `state` shaping what is written to the message. Defaults to the state.
@@ -673,7 +673,7 @@ pub struct AggregateEntry {
     /// Expression returning the new state; reads payload fields, `meta.<key>` and `state`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expression: Option<String>,
-    /// Built-in aggregates instead of `expression`, e.g. `n: count`, `avg: ema(reading, 0.1)`.
+    /// Built-in aggregates instead of `expression`, e.g. `n: count`, `avg: ema(reading, 0.1)`, `avg: ema(reading, 5m)` (half-life), `recent: decayed_count(1h)`, `decayed_sum(amount, 1h)`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fields: Option<std::collections::BTreeMap<String, String>>,
     /// Expression over `state` shaping what is written to the message. Defaults to the state.

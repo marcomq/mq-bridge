@@ -1029,7 +1029,7 @@
           ]
         },
         "fields": {
-          "description": "Built-in aggregates instead of `expression`, e.g. `n: count`, `avg: ema(reading, 0.1)`.",
+          "description": "Built-in aggregates instead of `expression`, e.g. `n: count`, `avg: ema(reading, 0.1)`, `avg: ema(reading, 5m)` (half-life), `recent: decayed_count(1h)`, `decayed_sum(amount, 1h)`.",
           "type": [
             "object",
             "null"
@@ -1129,7 +1129,7 @@
           ]
         },
         "fields": {
-          "description": "Built-in aggregates instead of `expression`, e.g. `n: count`, `avg: ema(reading, 0.1)`.",
+          "description": "Built-in aggregates instead of `expression`, e.g. `n: count`, `avg: ema(reading, 0.1)`, `avg: ema(reading, 5m)` (half-life), `recent: decayed_count(1h)`, `decayed_sum(amount, 1h)`.",
           "type": [
             "object",
             "null"

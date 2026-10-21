@@ -1282,7 +1282,7 @@ each message seeing its predecessors' writes.
   packages. A Rust project depending on `mq-bridge` builds its own SQLite and needs
   `LIBSQLITE3_FLAGS=SQLITE_ENABLE_MATH_FUNCTIONS` set (e.g. in `.cargo/config.toml` `[env]`).
 
-A time-decayed sum per key (e.g. card velocity) that gives the same result in any order: a
+A time-decayed sum per key (e.g. recent orders per customer) that gives the same result in any order: a
 late event is added with its own decay instead of being dropped, so parallel routes and
 instances can share the table.
 
@@ -1357,7 +1357,7 @@ twice per batch, not per message.
 |---|---|---|
 | `key` | template | selects the state, e.g. `${payload:sensor_id}`; required unless `entries` is set |
 | `expression` | expression | returns the new state; `key` needs this or `fields` |
-| `fields` | map of name to built-in aggregate | – ; the fast alternative to `expression` |
+| `fields` | map of name to built-in aggregate | – ; the fast alternative to `expression`: `count`, `sum`, `ema` by alpha or half-life, `decayed_count`, `decayed_sum` and more, see **Built-in aggregates** below |
 | `into` | dotted payload path | where the result is written; required with `key` |
 | `output` | expression | the state itself; shapes what is written to the message |
 | `emit` | `updated` \| `previous` | `updated` |
