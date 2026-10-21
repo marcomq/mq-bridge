@@ -9,7 +9,11 @@ All notable changes to `mq-bridge`. Newest first.
 - **MongoDB `aggregate_query` for `lookup`.** An Extended-JSON aggregation pipeline template
   (`$group`, `$lookup`, `$setWindowFields`, …) that answers with its first result, the
   MongoDB counterpart of a SQL `lookup_query`. With the token in a `$match` `$in`, one
-  aggregation answers the whole batch; results match by the `$in` field or by `_id`.
+  aggregation answers the whole batch; results match by the `$in` field or by `_id`. In that
+  form, stages that would mix keys (`$limit`, `$count`, a `$group` on another field, …) are
+  refused at startup. The `$in` expression (`{"$in": [value, array]}`) no longer counts as a
+  key list, in `find` too; a `find` whose `$in` lists the token with other values now runs
+  per message instead of failing at startup.
 - **`lookup` can replace the payload with `into: $`.** The response becomes the new payload
   while the message keeps its id and metadata, on an input or an output; the incoming payload
   need not be JSON. It must be the only lookup of its middleware. A missing or empty `into`
@@ -43,6 +47,13 @@ All notable changes to `mq-bridge`. Newest first.
 - **Clearer MCP tool descriptions.** `stop_route`, `publish`, `describe`, `list_routes`
   and `route_status` say when to use them and when to use another tool. `stop_route`
   and `publish` carry safety hints for clients.
+- **An `object_store` source decodes a Parquet object as it is consumed.** Rows are turned
+  into JSON messages one batch at a time instead of all at once, so memory stays near the
+  file's size rather than a multiple of it as JSON, and the fetched object is no longer
+  copied. The cursor still moves on only after every row of the object is acked. The
+  `max_object_bytes`-derived bound on decoded output now applies per chunk, not to the whole
+  object. If a later part of a Parquet file fails to decode, `on_decode_error: skip` delivers
+  the rows read so far and skips the rest; `fail` stops the route.
 
 ### Fixed
 
