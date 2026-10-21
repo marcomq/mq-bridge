@@ -23,6 +23,9 @@ pub struct MongoDbPublisher {
     find: Option<CompiledTemplate>,
     /// Set when `find` holds `"field": {"$in": [${…}]}`: one query answers a whole batch.
     find_list: Option<(ListQuery, CompiledTemplate)>,
+    aggregate_query: Option<CompiledTemplate>,
+    /// Set when `aggregate_query` holds `"field": {"$in": [${…}]}`: one aggregation answers a batch.
+    aggregate_list: Option<(ListQuery, CompiledTemplate)>,
     /// Opt-in write: upsert this update on the `find` match and answer with the result.
     update: Option<CompiledTemplate>,
     /// Set by `update_batch_field`: a key's messages share one `update` call.
@@ -74,16 +77,19 @@ impl MongoDbPublisher {
                     .context("invalid MongoDB `find` template")
             })
             .transpose()?;
-        let find_list = match config.find.as_deref().map(lookup_batch::parse_mongodb) {
-            Some(parsed) => parsed?.map(|list| {
-                let element = format!("{}{}{}", list.prefix, list.token, list.suffix);
-                CompiledTemplate::compile(&element, Some("application/json"))
-                    .context("invalid MongoDB `find` template")
-                    .map(|element| (list, element))
-            }),
-            None => None,
+        let find_list = list_query(config.find.as_deref(), "find")?;
+        let aggregate_query = config
+            .aggregate_query
+            .as_deref()
+            .map(|t| {
+                CompiledTemplate::compile(t, Some("application/json"))
+                    .context("invalid MongoDB `aggregate_query` template")
+            })
+            .transpose()?;
+        let aggregate_list = list_query(config.aggregate_query.as_deref(), "aggregate_query")?;
+        if aggregate_query.is_some() && (find.is_some() || config.update.is_some()) {
+            anyhow::bail!("MongoDB `aggregate_query` cannot be combined with `find` or `update`");
         }
-        .transpose()?;
         let update = config
             .update
             .as_deref()
@@ -112,9 +118,11 @@ impl MongoDbPublisher {
         let shared_client = create_shared_client(config).await?;
         let client = (*shared_client).clone();
         let db = client.database(&config.database);
-        if find.is_some() {
+        if find.is_some() || aggregate_query.is_some() {
             if update.is_some() {
                 info!(database = %config.database, collection = %collection_name, "MongoDB find publisher connected; `update` writes on every lookup");
+            } else if aggregate_query.is_some() {
+                info!(database = %config.database, collection = %collection_name, "MongoDB aggregate_query publisher connected");
             } else {
                 info!(database = %config.database, collection = %collection_name, "MongoDB find publisher connected");
             }
@@ -132,6 +140,8 @@ impl MongoDbPublisher {
                 report_outcome: false,
                 find,
                 find_list,
+                aggregate_query,
+                aggregate_list,
                 update,
                 update_batch_field,
             });
@@ -213,6 +223,8 @@ impl MongoDbPublisher {
             report_outcome: config.report_outcome,
             find: None,
             find_list: None,
+            aggregate_query: None,
+            aggregate_list: None,
             update: None,
             update_batch_field: None,
         })
@@ -468,23 +480,7 @@ impl MongoDbPublisher {
         element: &CompiledTemplate,
         messages: &[CanonicalMessage],
     ) -> Result<Vec<Option<serde_json::Value>>, PublisherError> {
-        // A token without a value renders no key: that message is simply not found.
-        let elements: Vec<Option<String>> = messages
-            .iter()
-            .map(|m| {
-                element
-                    .render_resolved(Some(m))
-                    .and_then(|b| String::from_utf8(b).ok())
-            })
-            .collect();
-        let keys: Vec<Option<String>> = elements
-            .iter()
-            .map(|e| {
-                e.as_deref()
-                    .and_then(|e| serde_json::from_str::<serde_json::Value>(e).ok())
-                    .and_then(|v| lookup_batch::key_of(&v))
-            })
-            .collect();
+        let (elements, keys) = list_keys(element, messages);
         let mut records = Vec::new();
         for chunk in lookup_batch::distinct(&keys).chunks(lookup_batch::MAX_KEYS_PER_QUERY) {
             let listed: Vec<&str> = chunk
@@ -522,6 +518,98 @@ impl MongoDbPublisher {
             }
         }
         lookup_batch::answer(&keys, records, &list.key).map_err(PublisherError::NonRetryable)
+    }
+
+    /// Runs the rendered `aggregate_query` and answers with its first result, or an empty payload.
+    async fn aggregate_one(
+        &self,
+        template: &CompiledTemplate,
+        message: &CanonicalMessage,
+    ) -> Result<Sent, PublisherError> {
+        let found = match &self.aggregate_list {
+            Some((list, element)) => self
+                .aggregate_many(list, element, std::slice::from_ref(message))
+                .await?
+                .pop()
+                .flatten(),
+            None => {
+                let stages = pipeline_stages(&template.render(Some(message)))?;
+                let mut cursor = self
+                    .collection
+                    .aggregate(stages)
+                    .batch_size(1)
+                    .await
+                    .map_err(query_error)?;
+                match cursor.next().await {
+                    Some(doc) => {
+                        Some(Bson::Document(doc.map_err(query_error)?).into_relaxed_extjson())
+                    }
+                    None => None,
+                }
+            }
+        };
+        let payload = match &found {
+            Some(doc) => {
+                serde_json::to_vec(doc).map_err(|e| PublisherError::NonRetryable(e.into()))?
+            }
+            None => Vec::new(),
+        };
+        let mut response = CanonicalMessage::new(payload, Some(message.message_id));
+        response
+            .metadata
+            .insert(FOUND_KEY.to_string(), found.is_some().to_string());
+        Ok(Sent::Response(response))
+    }
+
+    /// Answers every message with one aggregation per chunk of distinct keys. A result is
+    /// matched by the `$in` field, or by `_id` when it has none (the key of a `$group`).
+    async fn aggregate_many(
+        &self,
+        list: &ListQuery,
+        element: &CompiledTemplate,
+        messages: &[CanonicalMessage],
+    ) -> Result<Vec<Option<serde_json::Value>>, PublisherError> {
+        let (elements, keys) = list_keys(element, messages);
+        let mut by_key: HashMap<String, serde_json::Value> = HashMap::new();
+        for chunk in lookup_batch::distinct(&keys).chunks(lookup_batch::MAX_KEYS_PER_QUERY) {
+            let listed: Vec<&str> = chunk
+                .iter()
+                .filter_map(|&i| elements[i].as_deref())
+                .collect();
+            let rendered = format!("{}{}{}", list.before, listed.join(", "), list.after);
+            let mut cursor = self
+                .collection
+                .aggregate(pipeline_stages(rendered.as_bytes())?)
+                .await
+                .map_err(query_error)?;
+            let wanted: std::collections::HashSet<&str> =
+                chunk.iter().filter_map(|&i| keys[i].as_deref()).collect();
+            let mut matched = 0;
+            while let Some(doc) = cursor.next().await {
+                let record = Bson::Document(doc.map_err(query_error)?).into_relaxed_extjson();
+                let key = lookup_batch::field(&record, &list.key)
+                    .or_else(|| record.get("_id"))
+                    .ok_or_else(|| {
+                        PublisherError::NonRetryable(anyhow!(
+                            "lookup: an `aggregate_query` result has neither `{}` nor `_id`; keep one, it is how results are matched to messages",
+                            list.key
+                        ))
+                    })?;
+                if let Some(k) = lookup_batch::key_of(key) {
+                    if wanted.contains(k.as_str()) && !by_key.contains_key(&k) {
+                        by_key.insert(k, record);
+                        matched += 1;
+                    }
+                }
+                if matched == wanted.len() {
+                    break;
+                }
+            }
+        }
+        Ok(keys
+            .iter()
+            .map(|k| k.as_ref().and_then(|k| by_key.get(k).cloned()))
+            .collect())
     }
 
     async fn recover_correlation_id_from_duplicate(
@@ -876,9 +964,92 @@ fn find_filter(rendered: &[u8]) -> Result<Document, PublisherError> {
         .map_err(|e| PublisherError::NonRetryable(e.context("invalid MongoDB `find` filter")))
 }
 
+/// Each message's rendered `$in` element and its key; a token without a value renders neither,
+/// so that message is simply not found.
+fn list_keys(
+    element: &CompiledTemplate,
+    messages: &[CanonicalMessage],
+) -> (Vec<Option<String>>, Vec<Option<String>>) {
+    let elements: Vec<Option<String>> = messages
+        .iter()
+        .map(|m| {
+            element
+                .render_resolved(Some(m))
+                .and_then(|b| String::from_utf8(b).ok())
+        })
+        .collect();
+    let keys: Vec<Option<String>> = elements
+        .iter()
+        .map(|e| {
+            e.as_deref()
+                .and_then(|e| serde_json::from_str::<serde_json::Value>(e).ok())
+                .and_then(|v| lookup_batch::key_of(&v))
+        })
+        .collect();
+    (elements, keys)
+}
+
+/// The batched form of a `find` / `aggregate_query` template, when its token sits inside `$in`.
+fn list_query(
+    template: Option<&str>,
+    option: &str,
+) -> anyhow::Result<Option<(ListQuery, CompiledTemplate)>> {
+    let Some(list) = template
+        .map(lookup_batch::parse_mongodb)
+        .transpose()?
+        .flatten()
+    else {
+        return Ok(None);
+    };
+    let element = format!("{}{}{}", list.prefix, list.token, list.suffix);
+    let element = CompiledTemplate::compile(&element, Some("application/json"))
+        .with_context(|| format!("invalid MongoDB `{option}` template"))?;
+    Ok(Some((list, element)))
+}
+
+/// Parses a rendered `aggregate_query` into its stages.
+pub(super) fn pipeline_stages(rendered: &[u8]) -> Result<Vec<Document>, PublisherError> {
+    serde_json::from_slice::<serde_json::Value>(rendered)
+        .map_err(anyhow::Error::from)
+        .and_then(|v| Ok(Bson::try_from(v)?))
+        .and_then(|b| match b {
+            Bson::Array(stages) => stages
+                .into_iter()
+                .map(|stage| match stage {
+                    Bson::Document(d) => Ok(d),
+                    other => Err(anyhow!("pipeline stage is a {:?}", other.element_type())),
+                })
+                .collect(),
+            other => Err(anyhow!(
+                "pipeline is a {:?}, not an array of stages",
+                other.element_type()
+            )),
+        })
+        .map_err(|e| PublisherError::NonRetryable(e.context("invalid MongoDB `aggregate_query`")))
+}
+
+/// Server codes of a failover, shutdown or timeout: the same aggregation can succeed later.
+const TRANSIENT_COMMAND_CODES: &[i32] = &[
+    6, 7, 50, 89, 91, 189, 262, 9001, 10107, 11600, 11602, 13435, 13436,
+];
+
+/// A server-rejected aggregation (a bad stage, or data it cannot compute) fails the same way
+/// on retry; a network, failover or timeout error does not.
+fn query_error(e: mongodb::error::Error) -> PublisherError {
+    match &*e.kind {
+        ErrorKind::Command(c) if !TRANSIENT_COMMAND_CODES.contains(&c.code) => {
+            PublisherError::NonRetryable(anyhow!(e).context("MongoDB `aggregate_query` rejected"))
+        }
+        _ => PublisherError::Retryable(e.into()),
+    }
+}
+
 #[async_trait]
 impl MessagePublisher for MongoDbPublisher {
     async fn send(&self, mut message: CanonicalMessage) -> Result<Sent, PublisherError> {
+        if let Some(template) = &self.aggregate_query {
+            return self.aggregate_one(template, &message).await;
+        }
         if let Some(template) = &self.find {
             return self.find_one(template, &message).await;
         }
@@ -1007,7 +1178,11 @@ impl MessagePublisher for MongoDbPublisher {
             return Ok(SentBatch::Ack);
         }
 
-        if self.request_reply || self.report_outcome || self.find.is_some() {
+        if self.request_reply
+            || self.report_outcome
+            || self.find.is_some()
+            || self.aggregate_query.is_some()
+        {
             // report_outcome needs a per-message Response, so fan out through single send.
             return crate::traits::send_batch_helper(self, messages, |p, m| Box::pin(p.send(m)))
                 .await;
@@ -1124,6 +1299,9 @@ impl MessagePublisher for MongoDbPublisher {
     ) -> Option<Result<Vec<Option<serde_json::Value>>, PublisherError>> {
         if let (Some(find), Some(update)) = (&self.find, &self.update) {
             return Some(self.update_many(find, update, requests).await);
+        }
+        if let Some((list, element)) = &self.aggregate_list {
+            return Some(self.aggregate_many(list, element, requests).await);
         }
         let (list, element) = self.find_list.as_ref()?;
         Some(self.find_many(list, element, requests).await)

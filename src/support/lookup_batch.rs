@@ -221,7 +221,7 @@ pub(crate) fn parse_mongodb(filter: &str) -> anyhow::Result<Option<ListQuery>> {
         return Ok(None);
     };
     if found.len() > 1 {
-        bail!("a `find` filter with `$in: [${{…}}]` must contain no other token");
+        bail!("a `find` or `aggregate_query` with `$in: [${{…}}]` must contain no other token");
     }
     let element = &filter[open + 1..close];
     if has_top_level_comma(element) {
@@ -365,6 +365,10 @@ mod tests {
         );
         assert_eq!(parse_mongodb(r#"{"_id": "${payload:id}"}"#).unwrap(), None);
         assert!(parse_mongodb(r#"{"$in": [${payload:id}]}"#).is_err());
+
+        let pipeline =
+            r#"[{"$match": {"k": {"$in": ["${payload:k}"]}}}, {"$group": {"_id": "$k"}}]"#;
+        assert_eq!(parse_mongodb(pipeline).unwrap().unwrap().key, "k");
     }
 
     #[test]

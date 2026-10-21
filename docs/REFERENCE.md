@@ -1109,7 +1109,7 @@ whether they were found. On an input, the handler already sees the enriched mess
   429 and 500 to 504 are retryable, any other 4xx fails the message. `pass_through_status`
   need not be set; set it on the endpoint when the `http` source sits behind a `ref`.
 - `from` must answer: `http`, `static`, `nats` / `memory` with `request_reply: true`,
-  `mongodb` with `find`, `sqlx` or `clickhouse` with `lookup_query`, `http_bulk` with `query`, or `grpc` to an
+  `mongodb` with `find` or `aggregate_query`, `sqlx` or `clickhouse` with `lookup_query`, `http_bulk` with `query`, or `grpc` to an
   mq-bridge `grpc` input whose route replies. An endpoint that only acknowledges fails the
   message as non-retryable.
 - `mongodb.find` is an Extended-JSON filter template and answers with the first matching
@@ -1163,6 +1163,41 @@ query answers the whole batch instead of one query per message:
         find: '{"_id": "${payload:customer_id}"}'
     into: customer
 ```
+**MongoDB aggregations.** `mongodb.aggregate_query` is an Extended-JSON aggregation pipeline
+template, the MongoDB counterpart of a SQL `lookup_query` with `GROUP BY`, joins and
+windows. It answers with the first result document and sets `mongodb.found`. Here, the
+share of a customer's orders over the last 90 days that came back:
+
+```yaml middleware
+- lookup:
+    from:
+      mongodb:
+        url: "mongodb://localhost:27017"
+        database: "shop"
+        collection: "orders"
+        aggregate_query: >-
+          [{"$match": {"customer": {"$in": ["${payload:customer_id}"]},
+                       "$expr": {"$gte": ["$ts", {"$dateSubtract": {"startDate": "$$NOW", "unit": "day", "amount": 90}}]}}},
+           {"$group": {"_id": "$customer", "orders": {"$sum": 1},
+                       "returned": {"$sum": {"$cond": [{"$eq": ["$status", "returned"]}, 1, 0]}},
+                       "returned_value": {"$sum": {"$cond": [{"$eq": ["$status", "returned"]}, "$total", 0]}}}},
+           {"$set": {"rate": {"$divide": ["$returned", "$orders"]}}}]
+    into: customer_returns
+```
+
+- Every stage works, including `$lookup` to join a second collection, `$facet`,
+  `$setWindowFields` and `$$NOW`. `$out` and `$merge` write and answer nothing; do not use
+  them in a lookup.
+- Put the token in `$in` inside `$match`, as above, and one aggregation answers the whole
+  batch, with the same rules as a batched `find` (no other token, at most 1000 keys per
+  call). Results are matched to messages by the `$in` field, or by `_id` when the result has
+  no such field, which is the case after a `$group` on it. A key with no result gets `null`.
+- Without `$in`, tokens may sit anywhere (`"${payload:customer_id}"` quoted for a string,
+  unquoted for a number) and the pipeline runs once per message.
+- `aggregate_query` cannot be combined with `find`. A pipeline the server rejects (a bad stage, or
+  data a stage cannot compute) fails as non-retryable, while network, failover and timeout
+  errors are retryable.
+
 An `http_bulk` endpoint with `query` batches too: one HTTP request answers every message
 of the batch, matched by position. An entry that reports an error fails only its message;
 the others keep their answers.

@@ -634,6 +634,107 @@ async fn mongo_find_answers_with_the_first_match() {
 }
 
 #[test]
+fn pipeline_must_be_an_array_of_stages() {
+    let stages = publisher::pipeline_stages(br#"[{"$match": {"k": 1}}, {"$count": "n"}]"#).unwrap();
+    assert_eq!(stages.len(), 2);
+    assert!(publisher::pipeline_stages(br#"{"$match": {}}"#).is_err());
+    assert!(publisher::pipeline_stages(b"[1]").is_err());
+    assert!(publisher::pipeline_stages(b"[").is_err());
+}
+
+/// Needs `tests/integration/docker-compose/mongodb.yml` running.
+#[tokio::test]
+#[ignore = "requires a MongoDB on localhost:27017"]
+async fn mongo_aggregate_query_answers_per_message_and_per_batch() {
+    let collection = format!("aggregate_{}", fast_uuid_v7::gen_id());
+    let config = |aggregate_query: Option<&str>| MongoDbConfig {
+        url: "mongodb://localhost:27017".to_string(),
+        database: "mq_bridge_test".to_string(),
+        collection: Some(collection.clone()),
+        format: MongoDbFormat::Raw,
+        aggregate_query: aggregate_query.map(str::to_string),
+        shared: Some(false),
+        ..Default::default()
+    };
+    let writer = MongoDbPublisher::new(&config(None)).await.unwrap();
+    for (customer, status) in [
+        ("a", "kept"),
+        ("a", "returned"),
+        ("a", "kept"),
+        ("b", "kept"),
+    ] {
+        writer
+            .send(CanonicalMessage::new(
+                format!(r#"{{"customer":"{customer}","status":"{status}"}}"#).into_bytes(),
+                None,
+            ))
+            .await
+            .unwrap();
+    }
+    let rate = |key: &str| {
+        format!(
+            r#"[{{"$match": {{"customer": {key}}}}},
+               {{"$group": {{"_id": "$customer", "orders": {{"$sum": 1}},
+                 "returned": {{"$sum": {{"$cond": [{{"$eq": ["$status", "returned"]}}, 1, 0]}}}}}}}},
+               {{"$set": {{"rate": {{"$divide": ["$returned", "$orders"]}}}}}}]"#
+        )
+    };
+    let ask =
+        |c: &str| CanonicalMessage::new(format!(r#"{{"customer":"{c}"}}"#).into_bytes(), None);
+
+    let single = MongoDbPublisher::new(&config(Some(&rate(r#""${payload:customer}""#))))
+        .await
+        .unwrap();
+    let Sent::Response(hit) = single.send(ask("a")).await.unwrap() else {
+        panic!("aggregate_query must answer with a response");
+    };
+    let doc: serde_json::Value = serde_json::from_slice(&hit.payload).unwrap();
+    assert_eq!(
+        (doc["orders"].as_f64(), doc["returned"].as_f64()),
+        (Some(3.0), Some(1.0))
+    );
+    let Sent::Response(miss) = single.send(ask("nobody")).await.unwrap() else {
+        panic!("aggregate_query must answer with a response");
+    };
+    assert!(miss.payload.is_empty());
+    assert_eq!(
+        miss.metadata.get("mongodb.found").map(String::as_str),
+        Some("false")
+    );
+
+    // Batched: `$group` drops `customer`, so results match by `_id`.
+    let batched =
+        MongoDbPublisher::new(&config(Some(&rate(r#"{"$in": ["${payload:customer}"]}"#))))
+            .await
+            .unwrap();
+    let answers = batched
+        .lookup_batch(&[ask("b"), ask("nobody"), ask("a")])
+        .await
+        .expect("an `$in` aggregate_query answers in batch")
+        .unwrap();
+    assert_eq!(answers[0].as_ref().unwrap()["orders"].as_f64(), Some(1.0));
+    assert_eq!(answers[1], None);
+    assert_eq!(answers[2].as_ref().unwrap()["returned"].as_f64(), Some(1.0));
+}
+
+#[tokio::test]
+async fn aggregate_query_refuses_find_or_update_before_connecting() {
+    for (find, update) in [(Some("{}"), None), (None, Some("{}"))] {
+        let config = MongoDbConfig {
+            url: "mongodb://localhost:1".to_string(),
+            database: "unused".to_string(),
+            collection: Some("unused".to_string()),
+            aggregate_query: Some("[]".to_string()),
+            find: find.map(str::to_string),
+            update: update.map(str::to_string),
+            ..Default::default()
+        };
+        let err = MongoDbPublisher::new(&config).await.err().unwrap();
+        assert!(err.to_string().contains("aggregate_query"), "{err}");
+    }
+}
+
+#[test]
 fn update_accepts_a_document_or_a_pipeline() {
     use mongodb::options::UpdateModifications;
     assert!(matches!(

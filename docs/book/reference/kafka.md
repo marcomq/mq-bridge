@@ -19,7 +19,7 @@ Query parameters recognised as config fields for this connector. The object-type
 | `shared` | boolean | no | `true` | (Publisher only) Share one producer per connection (default: true); false gives a dedicated producer. |
 | `source_metadata` | boolean | no | `false` | (Consumer only) Include authoritative `mqb.src.kafka_*` source positions. Defaults to false. |
 | `tls` | object | no | [see below](#tls) | TLS configuration. |
-| `topic` | string | no | — | The Kafka topic to produce to or consume from. |
+| `topic` | string \| array | no | `null` | The topic to produce to or consume from. A source also takes a list (array or comma-separated) or a `^regex`. |
 | `url` | string | yes | — | Comma-separated list of Kafka broker URLs. If it contains userinfo, it will be treated as a secret. |
 | `username` | string | no | — | Optional username for SASL authentication. |
 

@@ -13,7 +13,7 @@ Query parameters recognised as config fields for this connector. The object-type
 | `delete` | boolean | no | `false` | Remove acknowledged lines from the file. Only safe if no other process writes to it. |
 | `delimiter` | string | no | — | Optional delimiter for messages. Defaults to newline ("\n"). Can be a string or a hex sequence (e.g. "0x00"). Currently only single-byte delimiters are supported. |
 | `encryption` | object | no | `null` | At-rest AEAD encryption applied after compression. Requires the `encryption` feature. Publishers: always. Consumers: must match, and only the default `consume` mode reads it. |
-| `format` | `normal` \| `json` \| `text` \| `raw` \| `csv` \| `parquet` | no | `normal` | The format for writing messages to the file (Publisher) or interpreting them (Consumer). Defaults to `normal`. |
+| `format` | `normal` \| `json` \| `text` \| `raw` \| `csv` \| `parquet` \| `envelope` \| `envelope_json` \| `envelope_text` \| `payload` | no | `normal` | The format for writing messages to the file (Publisher) or interpreting them (Consumer). Defaults to `normal`. |
 | `fsync` | `off` \| `batch` \| `periodic` | no | — | (Sink only) When appended data is fsynced: `off` (default), `batch` (before each ack) or `periodic`. |
 | `fsync_interval_ms` | integer | no | — | (Sink only) Interval for `fsync: periodic` in milliseconds. Defaults to 1000. |
 | `group_id` | string | no | — | The consumer group ID that is used for offset tracking. Should be unique. |

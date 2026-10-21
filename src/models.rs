@@ -564,7 +564,7 @@ pub struct OtelMiddleware {}
 
 /// Lookup (enrich) middleware configuration.
 ///
-/// Asks a request-capable endpoint (HTTP, NATS/Memory `request_reply`, MongoDB `find`,
+/// Asks a request-capable endpoint (HTTP, NATS/Memory `request_reply`, MongoDB `find`/`aggregate_query`,
 /// SQLx/ClickHouse `lookup_query`) about each message and writes the response into the
 /// payload. A query keyed with `IN (…)` / `$in` answers a whole batch at once; other
 /// endpoints get one request per message. Several `entries` run in parallel.
@@ -2128,6 +2128,9 @@ pub struct MongoDbConfig {
     /// Answers with the first match. `{"_id": {"$in": ["${payload:id}"]}}` answers a batch at once.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub find: Option<String>,
+    /// (Publisher only) Extended-JSON aggregation pipeline template for `lookup`; answers with the first result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aggregate_query: Option<String>,
     /// Internal: Extended-JSON update (document or pipeline) upserted on the `find` match;
     /// the lookup then answers with the updated document. Opt-in write for keyed counters.
     #[serde(default, skip_serializing_if = "Option::is_none")]

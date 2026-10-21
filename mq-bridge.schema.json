@@ -902,7 +902,7 @@
       "additionalProperties": false
     },
     "LookupMiddleware": {
-      "description": "Lookup (enrich) middleware configuration.\n\nAsks a request-capable endpoint (HTTP, NATS/Memory `request_reply`, MongoDB `find`,\nSQLx/ClickHouse `lookup_query`) about each message and writes the response into the\npayload. A query keyed with `IN (…)` / `$in` answers a whole batch at once; other\nendpoints get one request per message. Several `entries` run in parallel.",
+      "description": "Lookup (enrich) middleware configuration.\n\nAsks a request-capable endpoint (HTTP, NATS/Memory `request_reply`, MongoDB `find`/`aggregate_query`,\nSQLx/ClickHouse `lookup_query`) about each message and writes the response into the\npayload. A query keyed with `IN (…)` / `$in` answers a whole batch at once; other\nendpoints get one request per message. Several `entries` run in parallel.",
       "type": "object",
       "properties": {
         "from": {
@@ -3255,6 +3255,13 @@
         },
         "find": {
           "description": "(Publisher only) Extended-JSON filter template for `lookup`, e.g. `{\"_id\": \"${payload:id}\"}`.\nAnswers with the first match. `{\"_id\": {\"$in\": [\"${payload:id}\"]}}` answers a batch at once.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "aggregate_query": {
+          "description": "(Publisher only) Extended-JSON aggregation pipeline template for `lookup`; answers with the first result.",
           "type": [
             "string",
             "null"

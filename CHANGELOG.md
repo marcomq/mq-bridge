@@ -6,6 +6,10 @@ All notable changes to `mq-bridge`. Newest first.
 
 ### Added
 
+- **MongoDB `aggregate_query` for `lookup`.** An Extended-JSON aggregation pipeline template
+  (`$group`, `$lookup`, `$setWindowFields`, …) that answers with its first result, the
+  MongoDB counterpart of a SQL `lookup_query`. With the token in a `$match` `$in`, one
+  aggregation answers the whole batch; results match by the `$in` field or by `_id`.
 - **`lookup` can replace the payload with `into: $`.** The response becomes the new payload
   while the message keeps its id and metadata, on an input or an output; the incoming payload
   need not be JSON. It must be the only lookup of its middleware. A missing or empty `into`

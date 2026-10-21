@@ -508,6 +508,7 @@ export interface MongoDbConfig {
   id_field?: string | null;
   report_outcome?: boolean;
   find?: string | null;
+  aggregate_query?: string | null;
   cursor_id?: string | null;
   meta_collection?: string | null;
   shared?: boolean | null;

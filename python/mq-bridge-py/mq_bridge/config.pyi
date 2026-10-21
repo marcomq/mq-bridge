@@ -602,6 +602,7 @@ class Middleware(TypedDict, total=False):
 
 class MongoDbConfig(TypedDict, total=False):
     """General MongoDB connection configuration."""
+    aggregate_query: Optional[str]
     capped_size_bytes: Optional[int]
     change_stream: bool
     checkpoint_store: Optional[str]
