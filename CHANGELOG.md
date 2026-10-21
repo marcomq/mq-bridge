@@ -2,6 +2,25 @@
 
 All notable changes to `mq-bridge`. Newest first.
 
+## Unreleased
+
+### Changed
+
+- **The MCP tool list is about 17 KB instead of about 495 KB.** `publish`, `start_route`,
+  `generate_cli_command`, `agent_listen` and `agent_send` no longer inline every
+  connector's config schema in their endpoint arguments; those are typed as an object
+  keyed by connector type, and `describe` returns a connector's fields on demand. Configs
+  are validated as before. A client loading the tools pays about 4k tokens, not about 120k.
+- **Clearer MCP tool descriptions.** `stop_route`, `publish`, `describe`, `list_routes`
+  and `route_status` say when to use them and when to use another tool. `stop_route`
+  and `publish` carry safety hints for clients.
+
+### Fixed
+
+- **`bridge_status` works on macOS when `$TMPDIR` is not set**, as with MCP clients that
+  start servers with a reduced environment. It failed with "no private per-user runtime
+  directory is available"; the per-user temp directory is now asked from the OS.
+
 ## 1.0.3
 
 ### Changed
