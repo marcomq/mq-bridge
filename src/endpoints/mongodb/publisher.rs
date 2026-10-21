@@ -87,6 +87,9 @@ impl MongoDbPublisher {
             })
             .transpose()?;
         let aggregate_list = list_query(config.aggregate_query.as_deref(), "aggregate_query")?;
+        if let Some((list, _)) = &aggregate_list {
+            check_batch_pipeline(list)?;
+        }
         if aggregate_query.is_some() && (find.is_some() || config.update.is_some()) {
             anyhow::bail!("MongoDB `aggregate_query` cannot be combined with `find` or `update`");
         }
@@ -1028,14 +1031,66 @@ pub(super) fn pipeline_stages(rendered: &[u8]) -> Result<Vec<Document>, Publishe
         .map_err(|e| PublisherError::NonRetryable(e.context("invalid MongoDB `aggregate_query`")))
 }
 
-/// Server codes of a failover, shutdown or timeout: the same aggregation can succeed later.
+/// Stages that act on all documents together: in batch form they mix or cap different keys.
+const CROSS_KEY_STAGES: &[&str] = &[
+    "$limit",
+    "$skip",
+    "$sample",
+    "$count",
+    "$facet",
+    "$bucket",
+    "$bucketAuto",
+    "$sortByCount",
+];
+
+/// A batched `aggregate_query` runs once for many keys, so its stages must keep them apart:
+/// none of [`CROSS_KEY_STAGES`], and `$group` / `$setWindowFields` by the `$in` field.
+pub(super) fn check_batch_pipeline(list: &ListQuery) -> anyhow::Result<()> {
+    // `0` stands in for the key; a pipeline that does not parse then fails per batch instead.
+    let sample = format!(
+        "{}{}0{}{}",
+        list.before, list.prefix, list.suffix, list.after
+    );
+    let Ok(stages) = pipeline_stages(sample.as_bytes()) else {
+        return Ok(());
+    };
+    let mut key = format!("${}", list.key);
+    for stage in &stages {
+        let Some((name, spec)) = stage.iter().next() else {
+            continue;
+        };
+        if CROSS_KEY_STAGES.contains(&name.as_str()) {
+            anyhow::bail!(
+                "MongoDB `aggregate_query`: `{name}` would act on the whole batch, not per key. With `$in` the pipeline runs for many keys at once; drop `{name}`, or match the key directly (`\"{}\": \"${{payload:…}}\"`) to run once per message",
+                list.key
+            );
+        }
+        let by = match name.as_str() {
+            "$group" => "_id",
+            "$setWindowFields" => "partitionBy",
+            _ => continue,
+        };
+        if spec.as_document().and_then(|d| d.get_str(by).ok()) != Some(key.as_str()) {
+            anyhow::bail!(
+                "MongoDB `aggregate_query`: with `$in`, `{name}` must use `{by}: \"{key}\"`, the key results are matched by"
+            );
+        }
+        if name == "$group" {
+            key = "$_id".to_string();
+        }
+    }
+    Ok(())
+}
+
+/// Server codes of a failover, shutdown, timeout or lost cursor: the same aggregation can
+/// succeed later.
 const TRANSIENT_COMMAND_CODES: &[i32] = &[
-    6, 7, 50, 89, 91, 189, 262, 9001, 10107, 11600, 11602, 13435, 13436,
+    6, 7, 43, 50, 89, 91, 189, 262, 9001, 10107, 11600, 11601, 11602, 13435, 13436,
 ];
 
 /// A server-rejected aggregation (a bad stage, or data it cannot compute) fails the same way
 /// on retry; a network, failover or timeout error does not.
-fn query_error(e: mongodb::error::Error) -> PublisherError {
+pub(super) fn query_error(e: mongodb::error::Error) -> PublisherError {
     match &*e.kind {
         ErrorKind::Command(c) if !TRANSIENT_COMMAND_CODES.contains(&c.code) => {
             PublisherError::NonRetryable(anyhow!(e).context("MongoDB `aggregate_query` rejected"))

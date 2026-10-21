@@ -1185,15 +1185,25 @@ share of a customer's orders over the last 90 days that came back:
     into: customer_returns
 ```
 
-- Every stage works, including `$lookup` to join a second collection, `$facet`,
+- Per message, every stage works, including `$lookup` to join a second collection, `$facet`,
   `$setWindowFields` and `$$NOW`. `$out` and `$merge` write and answer nothing; do not use
   them in a lookup.
 - Put the token in `$in` inside `$match`, as above, and one aggregation answers the whole
   batch, with the same rules as a batched `find` (no other token, at most 1000 keys per
   call). Results are matched to messages by the `$in` field, or by `_id` when the result has
-  no such field, which is the case after a `$group` on it. A key with no result gets `null`.
-- Without `$in`, tokens may sit anywhere (`"${payload:customer_id}"` quoted for a string,
-  unquoted for a number) and the pipeline runs once per message.
+  no such field, which is the case after a `$group` on it. A key with no result gets `null`;
+  if a key has several results, the first wins, so `$sort` first to pick e.g. the latest.
+- **A batched pipeline sees the documents of all keys at once.** Every stage must keep the
+  keys apart, or keys get mixed or capped. These are refused at startup in batch form:
+  `$limit`, `$skip`, `$sample`, `$count`, `$facet`, `$bucket`, `$bucketAuto` and
+  `$sortByCount`, as well as a `$group` or `$setWindowFields` that is not keyed by the `$in`
+  field (`"_id": "$customer"`, then `"partitionBy": "$_id"` after the `$group`). Nested
+  pipelines (inside `$lookup`) are not checked. When a stage must see one key alone,
+  compare the key directly (`"customer": "${payload:customer_id}"`) and the pipeline runs
+  once per message.
+- Without `$in` in that form, tokens may sit anywhere (`"${payload:customer_id}"` quoted for
+  a string, unquoted for a number) and the pipeline runs once per message. The `$in`
+  expression, `{"$in": ["${payload:tag}", "$tags"]}`, tests one value and is not a key list.
 - `aggregate_query` cannot be combined with `find`. A pipeline the server rejects (a bad stage, or
   data a stage cannot compute) fails as non-retryable, while network, failover and timeout
   errors are retryable.

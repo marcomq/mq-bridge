@@ -642,6 +642,64 @@ fn pipeline_must_be_an_array_of_stages() {
     assert!(publisher::pipeline_stages(b"[").is_err());
 }
 
+#[test]
+fn batched_aggregate_query_keeps_keys_apart() {
+    let check = |pipeline: &str| {
+        let list = crate::support::lookup_batch::parse_mongodb(pipeline)
+            .unwrap()
+            .expect("an `$in` pipeline is batched");
+        publisher::check_batch_pipeline(&list)
+    };
+    let by_key = r#"[{"$match": {"c.id": {"$in": ["${payload:c}"]}}}, {"$sort": {"ts": -1}},
+        {"$group": {"_id": "$c.id", "n": {"$sum": 1}}},
+        {"$setWindowFields": {"partitionBy": "$_id", "output": {}}}]"#;
+    check(by_key).unwrap();
+    for (spanning, named) in [
+        (
+            r#"[{"$match": {"c": {"$in": [${payload:c}]}}}, {"$limit": 5}]"#,
+            "$limit",
+        ),
+        (
+            r#"[{"$match": {"c": {"$in": [${payload:c}]}}}, {"$count": "n"}]"#,
+            "$count",
+        ),
+        (
+            r#"[{"$match": {"c": {"$in": [${payload:c}]}}}, {"$group": {"_id": null}}]"#,
+            "$group",
+        ),
+        (
+            r#"[{"$match": {"c": {"$in": [${payload:c}]}}}, {"$group": {"_id": "$day"}}]"#,
+            "$group",
+        ),
+        (
+            r#"[{"$match": {"c": {"$in": [${payload:c}]}}}, {"$setWindowFields": {"output": {}}}]"#,
+            "$setWindowFields",
+        ),
+    ] {
+        let err = check(spanning).expect_err(spanning).to_string();
+        assert!(err.contains(named), "{err}");
+    }
+}
+
+#[test]
+fn rejected_aggregation_is_final_but_a_lost_cursor_is_retried() {
+    let command = |code: i32| {
+        let error: mongodb::error::CommandError =
+            mongodb::bson::from_document(mongodb::bson::doc! { "code": code }).unwrap();
+        mongodb::error::Error::from(mongodb::error::ErrorKind::Command(error))
+    };
+    assert!(matches!(
+        publisher::query_error(command(16554)),
+        PublisherError::NonRetryable(_)
+    ));
+    for transient in [43, 11601, 13435] {
+        assert!(matches!(
+            publisher::query_error(command(transient)),
+            PublisherError::Retryable(_)
+        ));
+    }
+}
+
 /// Needs `tests/integration/docker-compose/mongodb.yml` running.
 #[tokio::test]
 #[ignore = "requires a MongoDB on localhost:27017"]
