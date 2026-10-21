@@ -10,6 +10,9 @@ All notable changes to `mq-bridge`. Newest first.
   while the message keeps its id and metadata, on an input or an output; the incoming payload
   need not be JSON. It must be the only lookup of its middleware. A missing or empty `into`
   is still refused.
+- **`mqb --config config.yml --drain` runs a config file as a batch job.** Every enabled
+  route gets `exit_on_empty`, and the process exits once all have drained, non-zero if one
+  failed or did not start — as `copy --drain` does. The file is not changed; implies `--no-ui`.
 
 ### Changed
 
@@ -18,6 +21,15 @@ All notable changes to `mq-bridge`. Newest first.
   diagram, a table and the common mistakes; behaviour is unchanged.
 - **ARCHITECTURE.md explains when to use an endpoint, a middleware or a structural endpoint**,
   and how `lookup` and `request` relate.
+- **`transform` with a `schema` is up to 6x faster on large payloads.** The pass that copies
+  untouched fields verbatim now also walks into nested objects and arrays, and handles
+  `required` and `default` itself instead of parsing the whole payload. A ~180 KB document
+  with root `required` goes from 84 to 507 MiB/s; one with a typed 2,000-item array from 73 to
+  122 MiB/s. As at the top level, values the schema never names are copied unparsed, so a
+  number like `1e400` there is passed through rather than rejected, and duplicate keys,
+  whitespace and large integers there are left as they are. A message that breaks the schema in
+  several places now always reports the first violation in schema order; before, the
+  shortcut could name a different field.
 
 - **The MCP tool list is about 17 KB instead of about 495 KB.** `publish`, `start_route`,
   `generate_cli_command`, `agent_listen` and `agent_send` no longer inline every

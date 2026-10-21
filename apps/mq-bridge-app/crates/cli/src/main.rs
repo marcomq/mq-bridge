@@ -152,6 +152,13 @@ struct Args {
     #[arg(long)]
     no_metrics: bool,
 
+    /// Run every enabled route with `exit_on_empty` and exit once all have drained.
+    ///
+    /// The config-file counterpart of `copy --drain`; the file is not changed.
+    /// Implies `--no-ui`, and exits non-zero if any route fails or does not start.
+    #[arg(long, conflicts_with = "ui")]
+    drain: bool,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -660,6 +667,14 @@ async fn main() -> anyhow::Result<()> {
     init_logging(&config, args.color);
     load_cli_plugins(&args.plugins)?;
     mq_bridge_app::plugins::load_trusted_plugins(&config.plugins, &config.env_vars)?;
+    if args.drain {
+        if !config.consumers.iter().any(|consumer| consumer.enabled) {
+            anyhow::bail!("--drain: the configuration defines no enabled routes");
+        }
+        for consumer in &mut config.consumers {
+            consumer.options.exit_on_empty = true;
+        }
+    }
     println!(
         r#"
       ┌────── mq-bridge-app ──────┐
@@ -687,7 +702,7 @@ async fn main() -> anyhow::Result<()> {
     // The prompt is offered only when there is nothing to run, which is the
     // "start empty and build a config in the UI" case. A config that defines
     // routes or consumers is a deployment: it must never stop at a question.
-    if args.no_ui {
+    if args.no_ui || args.drain {
         config.ui_addr = String::new();
     } else if config.ui_addr.is_empty() {
         // The container image sets this to every interface; a host stays on loopback.

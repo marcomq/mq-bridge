@@ -23,6 +23,7 @@ empty and offers to serve the UI so you can build one interactively.
 mqb --config config.yml
 mqb --config config.yml --init-config dev/config/file-to-http.yml
 mqb --ui                           # start empty, define config.yml in the UI
+mqb --config config.yml --drain    # batch job: run every route until its source is empty
 ```
 
 | Option | Meaning |
@@ -35,6 +36,7 @@ mqb --ui                           # start empty, define config.yml in the UI
 | `--no-ui` | Never serve the browser UI, and don't ask. |
 | `--metrics-addr <addr>` | Serve the Prometheus endpoint on `addr` (default `127.0.0.1:9090`), overriding `metrics_addr` from the config. |
 | `--no-metrics` | Don't serve the Prometheus endpoint on its own port. |
+| `--drain` | Run every enabled route with `exit_on_empty` and exit once all have drained — the config-file form of `copy --drain`. The file is not changed. Implies `--no-ui`; exits non-zero if a route fails or does not start. |
 | `--schema <path>` | Write the JSON Schema for `AppConfig` (use `-` for stdout) and exit. |
 | `--plugin <path>` | Load a native endpoint/middleware library before starting. Repeatable, valid on every subcommand, and combines with `plugins:` in the config — see [Native plugins](../extending/plugins.md). |
 

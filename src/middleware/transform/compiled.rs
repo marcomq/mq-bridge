@@ -12,6 +12,7 @@ use crate::middleware::raw_json::RawPairs;
 use crate::models::{MappingRule, TransformErrorPolicy, TransformMiddleware};
 use crate::CanonicalMessage;
 use bytes::Bytes;
+use serde_json::value::RawValue;
 use serde_json::{Map, Value};
 #[cfg(feature = "zen")]
 use zen_expression::compiler::{FetchFastTarget, Opcode};
@@ -80,28 +81,14 @@ pub(super) fn map_sorts_keys() -> bool {
     probe.keys().next().is_some_and(|first| first == "a")
 }
 
-/// Whether the root schema is a plain object carrying no obligation of its own, which is
-/// what lets a field-by-field rewrite stand in for parsing the whole payload. Root-level
-/// `required` and defaults need to know which fields are *absent*, which copying spans
-/// never learns, so they rule the shortcut out.
-pub(super) fn fast_eligible(
-    rules: &[CompiledRule],
-    schema: Option<&CompiledSchema>,
-    opts: Opts,
-) -> bool {
+/// Whether a span walk may stand in for parsing the whole payload: a schema-only config
+/// whose root is an object or array schema. A root that is not walkable at runtime (a
+/// scalar, an escaped key) still falls back per message.
+pub(super) fn fast_eligible(rules: &[CompiledRule], schema: Option<&CompiledSchema>) -> bool {
     if !rules.is_empty() {
         return false;
     }
-    let Some(schema) = schema else {
-        return false;
-    };
-    matches!(schema.ty, None | Some(Ty::Object))
-        && schema.enum_values.is_none()
-        && schema.content.is_none()
-        && schema.items.is_none()
-        && schema.default.is_none()
-        && schema.required.is_empty()
-        && !(opts.apply_defaults && schema.properties.iter().any(|(_, s)| s.default.is_some()))
+    schema.is_some_and(CompiledSchema::is_walkable)
 }
 
 /// The mapping-only subset `project_fast` can serve: no schema, and every rule lifts one
@@ -130,6 +117,90 @@ pub(super) fn compile_projection(
             })
         })
         .collect()
+}
+
+/// Key lookups over one object's members without allocating for the common narrow case:
+/// sorted members are binary-searched, narrow unsorted ones scanned, wide ones copied sorted.
+enum Keys<'p> {
+    Sorted(&'p [(&'p str, &'p RawValue)]),
+    Narrow(&'p [(&'p str, &'p RawValue)]),
+    Wide(Vec<&'p str>),
+}
+
+impl<'p> Keys<'p> {
+    const NARROW: usize = 16;
+
+    fn new(pairs: &'p [(&'p str, &'p RawValue)], sorted: bool) -> Self {
+        if sorted {
+            Keys::Sorted(pairs)
+        } else if pairs.len() <= Self::NARROW {
+            Keys::Narrow(pairs)
+        } else {
+            let mut keys: Vec<&str> = pairs.iter().map(|(key, _)| *key).collect();
+            keys.sort_unstable();
+            Keys::Wide(keys)
+        }
+    }
+
+    fn has_duplicates(&self) -> bool {
+        match self {
+            Keys::Sorted(pairs) => pairs.windows(2).any(|w| w[0].0 == w[1].0),
+            Keys::Narrow(pairs) => pairs
+                .iter()
+                .enumerate()
+                .any(|(i, (key, _))| pairs[..i].iter().any(|(seen, _)| seen == key)),
+            Keys::Wide(keys) => keys.windows(2).any(|w| w[0] == w[1]),
+        }
+    }
+
+    fn contains(&self, name: &str) -> bool {
+        match self {
+            Keys::Sorted(pairs) => pairs.binary_search_by(|(key, _)| (*key).cmp(name)).is_ok(),
+            Keys::Narrow(pairs) => pairs.iter().any(|(key, _)| *key == name),
+            Keys::Wide(keys) => keys.binary_search(&name).is_ok(),
+        }
+    }
+}
+
+fn write_value<T: serde::Serialize + ?Sized>(
+    value: &T,
+    crumbs: &[Crumb<'_>],
+    out: &mut Vec<u8>,
+) -> Result<(), TransformError> {
+    serde_json::to_writer(out, value).map_err(|e| {
+        TransformError::new(
+            render_path(crumbs),
+            ErrorKind::Parse,
+            format!("transformed value could not be serialized: {e}"),
+        )
+    })
+}
+
+/// Embedded JSON with nothing to check afterwards: unescapes the string and emits the
+/// document it carried, without ever building it.
+fn write_decoded_content(
+    raw: &str,
+    crumbs: &[Crumb<'_>],
+    out: &mut Vec<u8>,
+) -> Result<(), TransformError> {
+    // serde_json does the unescaping, so `😀` and friends are handled exactly as the
+    // normal path handles them.
+    let text: std::borrow::Cow<'_, str> = serde_json::from_str(raw).map_err(|e| {
+        TransformError::new(
+            render_path(crumbs),
+            ErrorKind::Parse,
+            format!("field is not valid JSON: {e}"),
+        )
+    })?;
+    let document = serde_json::from_str::<&RawValue>(&text).map_err(|e| {
+        TransformError::new(
+            render_path(crumbs),
+            ErrorKind::Content,
+            format!("contentMediaType is JSON but the string does not parse: {e}"),
+        )
+    })?;
+    out.extend_from_slice(document.get().as_bytes());
+    Ok(())
 }
 
 impl Compiled {
@@ -216,7 +287,7 @@ impl Compiled {
         let fast_map = compile_projection(&rules, schema.as_ref());
         Ok(Self {
             fast_eligible: config.expression.is_none()
-                && (fast_eligible(&rules, schema.as_ref(), opts) || fast_map.is_some()),
+                && (fast_eligible(&rules, schema.as_ref()) || fast_map.is_some()),
             #[cfg(feature = "zen")]
             expression_only: expression.is_some() && rules.is_empty() && schema.is_none(),
             take_inputs: paths_are_disjoint(&rules),
@@ -275,125 +346,246 @@ impl Compiled {
         Ok(out)
     }
 
-    /// Rewrites the payload field by field, copying the verbatim JSON span of every field
-    /// the schema would not change and parsing only the ones that need work. Those go
-    /// through the same `apply` as the normal path, so nesting, `items`, `enum` and
-    /// `contentSchema` all behave identically — this decides *whether* a field is worth
-    /// parsing, never *how* it is transformed.
+    /// Rewrites the payload span by span, copying the verbatim JSON of everything the
+    /// schema would not change and parsing only the values that need work. Those go
+    /// through the same `apply` as the normal path, so `enum`, `contentSchema` and
+    /// coercion behave identically — this decides *whether* a value is worth parsing,
+    /// never *how* it is transformed. Objects and arrays recurse, so a small schema over
+    /// a large document parses only the values it names.
     ///
     /// `None` means the payload's shape rules the shortcut out and the caller should fall
-    /// back; `Some(Err(_))` is a real transform failure and must not be retried slowly.
+    /// back; on `Some(Err(_))` the caller reruns the normal path, whose error is the one
+    /// reported.
     pub(super) fn transform_fast(
         &self,
         schema: &CompiledSchema,
         payload: &[u8],
     ) -> Option<Result<Vec<u8>, TransformError>> {
-        // Not an object, or a key we cannot borrow because it carried escapes.
-        let RawPairs(mut pairs) = serde_json::from_slice::<RawPairs>(payload).ok()?;
+        let text = std::str::from_utf8(payload).ok()?;
+        let text = text.trim_start_matches([' ', '\t', '\n', '\r']);
+        let mut out = Vec::with_capacity(payload.len() + payload.len() / 2);
+        let result = self.walk(schema, text, &mut Vec::new(), &mut out)?;
+        Some(result.map(|()| out))
+    }
 
-        // The output has to carry its keys the way the normal path's `Map` would order
-        // them. Insertion order needs no work: it is the order they were just read in.
-        if self.sort_keys {
-            pairs.sort_by(|a, b| a.0.cmp(b.0));
+    /// Writes `raw`, the verbatim JSON span of the member at `crumb`, to `out` as `apply`
+    /// would leave it. `crumb` joins `crumbs` only past the shortcuts, which cannot fail.
+    fn rewrite<'a>(
+        &self,
+        schema: &'a CompiledSchema,
+        raw: &'a str,
+        crumb: Crumb<'a>,
+        crumbs: &mut Vec<Crumb<'a>>,
+        out: &mut Vec<u8>,
+    ) -> Result<(), TransformError> {
+        // `coerce_empty_as_null` turns this value into a null, which every shortcut would
+        // otherwise wave through as an ordinary string.
+        let empty_string = self.opts.coerce_empty_as_null && raw == "\"\"";
+        if !empty_string {
+            if schema.is_passthrough(raw) {
+                out.extend_from_slice(raw.as_bytes());
+                return Ok(());
+            }
+            if schema.coerce_scalar_raw(raw, self.opts, out) {
+                return Ok(());
+            }
         }
+        crumbs.push(crumb);
+        let result = self.rewrite_parsed(schema, raw, empty_string, crumbs, out);
+        crumbs.pop();
+        result
+    }
 
-        // A `Value` parse collapses duplicate keys (last wins) where copying spans would
-        // emit both, so those rare payloads go the normal way. Quadratic, but objects are
-        // narrow and this runs once per message.
-        if pairs
-            .iter()
-            .enumerate()
-            .any(|(i, (key, _))| pairs[..i].iter().any(|(seen, _)| seen == key))
-        {
+    fn rewrite_parsed<'a>(
+        &self,
+        schema: &'a CompiledSchema,
+        raw: &'a str,
+        empty_string: bool,
+        crumbs: &mut Vec<Crumb<'a>>,
+        out: &mut Vec<u8>,
+    ) -> Result<(), TransformError> {
+        if !empty_string {
+            if schema.is_plain_content_decode(raw) {
+                return write_decoded_content(raw, crumbs, out);
+            }
+            if let Some(result) = self.walk(schema, raw, crumbs, out) {
+                return result;
+            }
+        }
+        let mut value: Value = serde_json::from_str(raw).map_err(|e| {
+            TransformError::new(
+                render_path(crumbs),
+                ErrorKind::Parse,
+                format!("field is not valid JSON: {e}"),
+            )
+        })?;
+        schema.apply(&mut value, crumbs, self.opts)?;
+        write_value(&value, crumbs, out)
+    }
+
+    /// Recurses into an object or array span. `None`, before anything is written, when the
+    /// span is not one that can be handled member by member.
+    fn walk<'a>(
+        &self,
+        schema: &'a CompiledSchema,
+        raw: &'a str,
+        crumbs: &mut Vec<Crumb<'a>>,
+        out: &mut Vec<u8>,
+    ) -> Option<Result<(), TransformError>> {
+        if !schema.is_walkable() {
             return None;
         }
+        match (raw.as_bytes().first(), schema.ty) {
+            (Some(b'{'), None | Some(Ty::Object)) => self.walk_object(schema, raw, crumbs, out),
+            (Some(b'['), None | Some(Ty::Array)) => self.walk_array(schema, raw, crumbs, out),
+            _ => None,
+        }
+    }
 
-        let mut out = Vec::with_capacity(payload.len() + payload.len() / 2);
-        out.push(b'{');
-        for (i, (key, raw)) in pairs.iter().enumerate() {
+    fn walk_array<'a>(
+        &self,
+        schema: &'a CompiledSchema,
+        raw: &'a str,
+        crumbs: &mut Vec<Crumb<'a>>,
+        out: &mut Vec<u8>,
+    ) -> Option<Result<(), TransformError>> {
+        // Below the root the span was already checked by its parent's parse.
+        if schema.items.is_none() && !crumbs.is_empty() {
+            out.extend_from_slice(raw.as_bytes());
+            return Some(Ok(()));
+        }
+        let items: Vec<&'a RawValue> = serde_json::from_str(raw).ok()?;
+        let Some(item_schema) = schema.items.as_deref() else {
+            out.extend_from_slice(raw.as_bytes());
+            return Some(Ok(()));
+        };
+        out.push(b'[');
+        for (i, item) in items.iter().enumerate() {
             if i > 0 {
                 out.push(b',');
             }
+            if let Err(e) = self.rewrite(item_schema, item.get(), Crumb::Index(i), crumbs, out) {
+                return Some(Err(e));
+            }
+        }
+        out.push(b']');
+        Some(Ok(()))
+    }
+
+    /// Mirrors `apply` on an object: defaults for absent properties, then `required`, then
+    /// each property. Absence is read off the spans' keys.
+    fn walk_object<'a>(
+        &self,
+        schema: &'a CompiledSchema,
+        raw: &'a str,
+        crumbs: &mut Vec<Crumb<'a>>,
+        out: &mut Vec<u8>,
+    ) -> Option<Result<(), TransformError>> {
+        // Not an object, or a key we cannot borrow because it carried escapes.
+        let RawPairs(mut pairs) = serde_json::from_str::<RawPairs<'a>>(raw).ok()?;
+
+        // Keys go out the way the normal path's `Map` would order them. Insertion order
+        // needs no work: it is the order they were just read in.
+        if self.sort_keys {
+            pairs.sort_by(|a, b| a.0.cmp(b.0));
+        }
+        let keys = Keys::new(&pairs, self.sort_keys);
+        // A `Value` parse collapses duplicate keys (last wins) where copying spans would
+        // emit both, so those rare objects are parsed instead.
+        if keys.has_duplicates() {
+            return None;
+        }
+        let present = |name: &str| keys.contains(name);
+
+        let defaults: Vec<(&'a str, &'a CompiledSchema, &'a Value)> = if self.opts.apply_defaults {
+            schema
+                .properties
+                .iter()
+                .filter_map(|(name, sub)| Some((name.as_str(), sub, sub.default.as_ref()?)))
+                .filter(|(name, _, _)| !present(name))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        for name in &schema.required {
+            if !present(name) && !defaults.iter().any(|(filled, _, _)| filled == name) {
+                crumbs.push(Crumb::Key(name));
+                let path = render_path(crumbs);
+                crumbs.pop();
+                return Some(Err(TransformError::new(
+                    path,
+                    ErrorKind::MissingRequired,
+                    "required field is missing and no default is defined",
+                )));
+            }
+        }
+
+        let mut first = true;
+        let mut separate = |out: &mut Vec<u8>| {
+            out.push(if first { b'{' } else { b',' });
+            first = false;
+        };
+        // Sorted keys interleave the defaults; insertion order appends them, as `Map` does.
+        let mut defaults = defaults.into_iter().peekable();
+        for (key, raw) in &pairs {
+            while let Some((name, sub, default)) =
+                defaults.next_if(|(name, _, _)| self.sort_keys && name < key)
+            {
+                separate(out);
+                if let Err(e) = self.write_default(name, sub, default, crumbs, out) {
+                    return Some(Err(e));
+                }
+            }
+            separate(out);
             out.push(b'"');
             out.extend_from_slice(key.as_bytes());
             out.extend_from_slice(b"\":");
-
             let sub = schema
                 .properties
                 .binary_search_by(|(name, _)| name.as_str().cmp(key))
                 .ok()
                 .map(|idx| &schema.properties[idx].1);
-
-            // `coerce_empty_as_null` turns this field into a null, which both shortcuts
-            // below would otherwise wave through as an ordinary string.
-            let empty_string = self.opts.coerce_empty_as_null && raw.get() == "\"\"";
-
             match sub {
-                // Embedded JSON with nothing to check afterwards: unescape the string and
-                // emit the document it carried, without ever building it.
-                Some(sub) if !empty_string && sub.is_plain_content_decode(raw.get()) => {
-                    // serde_json does the unescaping, so `😀` and friends are
-                    // handled exactly as the normal path handles them.
-                    let text: std::borrow::Cow<'_, str> = match serde_json::from_str(raw.get()) {
-                        Ok(text) => text,
-                        Err(e) => {
-                            return Some(Err(TransformError::new(
-                                render_path(&[Crumb::Key(key)]),
-                                ErrorKind::Parse,
-                                format!("field is not valid JSON: {e}"),
-                            )))
-                        }
-                    };
-                    match serde_json::from_str::<&serde_json::value::RawValue>(&text) {
-                        Ok(document) => out.extend_from_slice(document.get().as_bytes()),
-                        Err(e) => {
-                            return Some(Err(TransformError::new(
-                                render_path(&[Crumb::Key(key)]),
-                                ErrorKind::Content,
-                                format!(
-                                    "contentMediaType is JSON but the string does not parse: {e}"
-                                ),
-                            )))
-                        }
-                    }
-                }
-                // The schema has something to say about this field and the raw bytes do
-                // not already satisfy it: parse just this field and transform it.
-                Some(sub) if empty_string || !sub.is_passthrough(raw.get()) => {
-                    // A text-typed column becomes its typed token straight from the span.
-                    // `false` means the field is not a shape that serves, or the rewrite
-                    // failed and the general path has to raise the error.
-                    if !empty_string && sub.coerce_scalar_raw(raw.get(), self.opts, &mut out) {
-                        continue;
-                    }
-                    let mut value: Value = match serde_json::from_str(raw.get()) {
-                        Ok(value) => value,
-                        Err(e) => {
-                            return Some(Err(TransformError::new(
-                                render_path(&[Crumb::Key(key)]),
-                                ErrorKind::Parse,
-                                format!("field is not valid JSON: {e}"),
-                            )))
-                        }
-                    };
-                    let mut crumbs = vec![Crumb::Key(key)];
-                    if let Err(e) = sub.apply(&mut value, &mut crumbs, self.opts) {
+                Some(sub) => {
+                    if let Err(e) = self.rewrite(sub, raw.get(), Crumb::Key(key), crumbs, out) {
                         return Some(Err(e));
                     }
-                    if let Err(e) = serde_json::to_writer(&mut out, &value) {
-                        return Some(Err(TransformError::new(
-                            render_path(&[Crumb::Key(key)]),
-                            ErrorKind::Parse,
-                            format!("transformed value could not be serialized: {e}"),
-                        )));
-                    }
                 }
-                // Unmentioned by the schema, or already satisfying it.
-                _ => out.extend_from_slice(raw.get().as_bytes()),
+                None => out.extend_from_slice(raw.get().as_bytes()),
             }
         }
+        for (name, sub, default) in defaults {
+            separate(out);
+            if let Err(e) = self.write_default(name, sub, default, crumbs, out) {
+                return Some(Err(e));
+            }
+        }
+        if first {
+            out.push(b'{');
+        }
         out.push(b'}');
-        Some(Ok(out))
+        Some(Ok(()))
+    }
+
+    /// Writes `"name":` followed by `default` with the property's schema applied to it,
+    /// as `apply` does to a default it has just filled in.
+    fn write_default<'a>(
+        &self,
+        name: &'a str,
+        sub: &'a CompiledSchema,
+        default: &Value,
+        crumbs: &mut Vec<Crumb<'a>>,
+        out: &mut Vec<u8>,
+    ) -> Result<(), TransformError> {
+        crumbs.push(Crumb::Key(name));
+        let mut value = default.clone();
+        let result = sub.apply(&mut value, crumbs, self.opts).and_then(|()| {
+            write_value(name, crumbs, out)?;
+            out.push(b':');
+            write_value(&value, crumbs, out)
+        });
+        crumbs.pop();
+        result
     }
 
     /// Assembles a projection from the input's top-level spans: each picked field's
@@ -534,7 +726,11 @@ impl Compiled {
     pub(super) fn transform(&self, message: &mut CanonicalMessage) -> Result<(), TransformError> {
         if self.fast_eligible {
             let fast = match (&self.schema, &self.fast_map) {
-                (Some(schema), _) => self.transform_fast(schema, &message.payload),
+                // With several bad fields only `apply` knows which one it reports first.
+                (Some(schema), _) => self
+                    .transform_fast(schema, &message.payload)
+                    .and_then(Result::ok)
+                    .map(Ok),
                 (None, Some(fast_map)) => self.project_fast(fast_map, &message.payload),
                 (None, None) => None,
             };

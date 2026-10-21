@@ -115,7 +115,8 @@ orders_sync:
 ### Translating a `copy` command into a config file
 
 Most of a `copy` command maps field for field: URI query parameters become endpoint config keys,
-`--drain` becomes `exit_on_empty: true`, and `--filter` becomes a `filter` middleware on the
+`--drain` becomes `exit_on_empty: true` (or pass `--drain` to the config run to apply it to every
+route), and `--filter` becomes a `filter` middleware on the
 input. `mqb to-cli` goes the other way — it prints a command for a loaded config — but there is no
 converter in this direction, so three differences are worth knowing.
 
