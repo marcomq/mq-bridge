@@ -1152,10 +1152,10 @@ impl ObjectStoreConsumer {
             }
         };
         drop(buffer);
+        // Lock first: a cancel at this await must not drop the stream with its rows uncounted.
+        let mut progress = self.progress.lock().await;
         let unread = rows.unread();
         self.rows = None;
-
-        let mut progress = self.progress.lock().await;
         let Some(p) = progress.as_mut() else {
             return Ok(());
         };
@@ -2938,6 +2938,56 @@ mod tests {
             consumer.last_key.lock().await.as_deref(),
             Some("data/a.parquet")
         );
+    }
+
+    #[cfg(feature = "parquet")]
+    #[tokio::test]
+    async fn parquet_object_failing_part_way_follows_on_decode_error() {
+        let pad = "x".repeat(20_000);
+        let rows: Vec<_> = (0..128)
+            .map(|i| serde_json::json!({"id": i, "pad": if i < 64 { "" } else { pad.as_str() }}))
+            .collect();
+        let body = crate::support::parquet::encode_rows(&rows, Compression::Zstd).unwrap();
+        // The second chunk decodes past the per-chunk bound, the first does not.
+        let max_object_bytes = body.len() as u64;
+        assert!(max_object_bytes * 20 < 64 * 20_000);
+        for policy in [DecodeErrorPolicy::Skip, DecodeErrorPolicy::Fail] {
+            let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+            store
+                .put(
+                    &ObjPath::from("data/a.parquet"),
+                    PutPayload::from(body.clone()),
+                )
+                .await
+                .unwrap();
+            let mut consumer = ObjectStoreConsumer::from_store(
+                store,
+                ObjPath::from("data"),
+                FileFormat::Parquet,
+                None,
+                None,
+            );
+            consumer.max_object_bytes = Some(max_object_bytes);
+            consumer.on_decode_error = policy;
+
+            let first = consumer.receive_batch(64).await.unwrap();
+            assert_eq!(first.messages.len(), 64);
+            (first.commit)(vec![MessageDisposition::Ack; 64])
+                .await
+                .unwrap();
+            let next = consumer.receive_batch(64).await;
+            let last_key = consumer.last_key.lock().await.clone();
+            match policy {
+                DecodeErrorPolicy::Skip => {
+                    assert!(next.unwrap().messages.is_empty());
+                    assert_eq!(last_key.as_deref(), Some("data/a.parquet"));
+                }
+                DecodeErrorPolicy::Fail => {
+                    assert!(matches!(next, Err(ConsumerError::Permanent(_))));
+                    assert_eq!(last_key, None);
+                }
+            }
+        }
     }
 
     #[cfg(feature = "parquet")]
