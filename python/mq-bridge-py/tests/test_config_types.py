@@ -31,9 +31,10 @@ def test_generated_config_types_are_up_to_date() -> None:
     pyi, py = generator.generate()
 
     regen = (
-        "stale generated config types. Rebuild the extension and regenerate:\n"
-        "    cd python/mq-bridge-py && uv run maturin develop "
-        "&& uv run --no-sync python scripts/gen_config_types.py"
+        "stale generated config types. Regenerate:\n"
+        "    cargo test --features schema --lib schema_tests::generate_json_schema\n"
+        "    cd python/mq-bridge-py && uv run --no-sync python "
+        "scripts/gen_config_types.py --schema ../../mq-bridge.schema.json"
     )
     assert pyi == (PACKAGE_DIR / "mq_bridge" / "config.pyi").read_text(), (
         f"config.pyi is {regen}"

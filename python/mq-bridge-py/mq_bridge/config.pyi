@@ -284,6 +284,7 @@ class GrpcConfig(TypedDict, total=False):
 class HttpBulkAuth(TypedDict, total=False):
     """How `http_bulk` requests are authenticated beyond `headers`. Set at most one field."""
     aws_sigv4: Optional[HttpBulkAwsSigV4]
+    login: Optional[HttpBulkLogin]
     oauth2: Optional[HttpBulkOAuth2]
 
 
@@ -316,6 +317,7 @@ class HttpBulkConfig(TypedDict, total=False):
 
 class HttpBulkCursor(TypedDict, total=False):
     """Where an `http_bulk` input takes its next read position from. Set at most one of"""
+    add: Optional[int]
     end_when_missing: bool
     item: Optional[str]
     link: bool
@@ -366,6 +368,15 @@ class HttpBulkLines(TypedDict, total=False):
     success: Required[str]
 
 
+class HttpBulkLogin(TypedDict, total=False):
+    """A login request for `http_bulk` whose JSON answer holds a bearer token."""
+    body: Required[str]
+    expires_at: Optional[str]
+    expires_in: Optional[str]
+    token: Required[str]
+    url: Required[str]
+
+
 class HttpBulkOAuth2(TypedDict, total=False):
     """OAuth2 client credentials grant for `http_bulk`."""
     client_id: Required[str]
@@ -406,6 +417,8 @@ class HttpBulkRead(TypedDict, total=False):
     max_polling_interval_ms: Optional[int]
     method: Optional[str]
     path: Required[str]
+    payload: Optional[str]
+    payload_encoding: Optional[HttpBulkPayloadEncoding]
     polling_interval_ms: Optional[int]
     stream: Optional[HttpBulkStream]
 
@@ -998,6 +1011,7 @@ FileFormat = Literal["normal", "json", "text", "raw", "csv", "parquet", "envelop
 FileFsync = Literal["off", "batch", "periodic"]
 FilterMiddleware = Union[str, Dict[str, Any]]
 HttpBulkFormat = Literal["ndjson", "json_array"]
+HttpBulkPayloadEncoding = Literal["base64"]
 HttpBulkStream = Literal["sse", "ndjson"]
 HttpServerProtocol = Literal["auto", "http1_only", "http2_only"]
 IdHash = Literal["fnv1a", "sha256"]

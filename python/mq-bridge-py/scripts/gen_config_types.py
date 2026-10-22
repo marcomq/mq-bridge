@@ -13,11 +13,15 @@ Outputs (generated — do not edit by hand):
   - mq_bridge/config.py    runtime-safe aliases (no typing_extensions dep)
 
 Run with:  uv run python scripts/gen_config_types.py   (needs the extension built)
+Or, without building the extension, from the engine's schema file:
+  cargo test --features schema --lib schema_tests::generate_json_schema
+  uv run --no-sync python scripts/gen_config_types.py --schema ../../mq-bridge.schema.json
 A test (test_config_types.py) asserts the checked-in output is up to date.
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import keyword
 from pathlib import Path
@@ -28,8 +32,11 @@ PYI_PATH = PKG_DIR / "mq_bridge" / "config.pyi"
 PY_PATH = PKG_DIR / "mq_bridge" / "config.py"
 
 
-def load_schema() -> dict:
-    """Generate the schema ad hoc from the compiled extension."""
+def load_schema(schema_path: Path | None = None) -> dict:
+    """Read the schema from a file, or generate it ad hoc from the compiled extension."""
+    if schema_path is not None:
+        return json.loads(schema_path.read_text())
+
     from mq_bridge import config_schema
 
     return config_schema()
@@ -167,8 +174,8 @@ def render_typeddict(name: str, fields: dict, required: set, defn: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
-def generate() -> tuple[str, str]:
-    schema = load_schema()
+def generate(schema_path: Path | None = None) -> tuple[str, str]:
+    schema = load_schema(schema_path)
     defs = schema["$defs"]
 
     typeddicts: list[str] = []
@@ -257,7 +264,13 @@ def generate() -> tuple[str, str]:
 
 
 def main() -> None:
-    pyi, py = generate()
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument(
+        "--schema",
+        type=Path,
+        help="read the schema from this JSON file instead of the compiled extension",
+    )
+    pyi, py = generate(parser.parse_args().schema)
     PYI_PATH.write_text(pyi)
     PY_PATH.write_text(py)
     print(f"wrote {PYI_PATH.relative_to(PKG_DIR)}")

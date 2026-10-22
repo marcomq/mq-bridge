@@ -2,6 +2,8 @@
 
 // Keep committed package metadata in sync with the root Cargo workspace version.
 // Pass a version to bump it, or --check to verify that no copy has drifted.
+// Pick the bump from the changelog: a new config field, option, function, ABI version or
+// a changed result for the same config is minor (1.0.3 -> 1.1.0); only fixes are a patch.
 
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve, relative } from "node:path";
@@ -10,11 +12,14 @@ import { fileURLToPath } from "node:url";
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const args = process.argv.slice(2);
 const checkOnly = args.includes("--check");
+const allowPatch = args.includes("--allow-patch");
 const positional = args.filter((arg) => !arg.startsWith("--"));
-const unknownFlags = args.filter((arg) => arg.startsWith("--") && arg !== "--check");
+const unknownFlags = args.filter(
+  (arg) => arg.startsWith("--") && arg !== "--check" && arg !== "--allow-patch",
+);
 
 if (unknownFlags.length > 0 || positional.length > 1 || (checkOnly && positional.length > 0)) {
-  console.error("Usage: node scripts/sync-version.mjs [VERSION | --check]");
+  console.error("Usage: node scripts/sync-version.mjs [VERSION [--allow-patch] | --check]");
   process.exit(2);
 }
 
@@ -57,6 +62,16 @@ if (!currentVersion) {
 const version = positional[0] ?? currentVersion;
 if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(version)) {
   throw new Error(`Invalid semantic version: ${version}`);
+}
+
+const [major, minor] = version.split(".");
+const [currentMajor, currentMinor] = currentVersion.split(".");
+if (version !== currentVersion && major === currentMajor && minor === currentMinor && !allowPatch) {
+  const latestSection = readFileSync(resolve(repoRoot, "CHANGELOG.md"), "utf8").split(/^## /m)[1] ?? "";
+  if (/^### Added\s*$/m.test(latestSection)) {
+    console.error(`CHANGELOG.md has "### Added" for ${version}: bump the minor version, or pass --allow-patch.`);
+    process.exit(1);
+  }
 }
 
 replaceOnce(

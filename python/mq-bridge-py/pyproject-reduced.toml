@@ -63,4 +63,6 @@ markers = [
 bindings = "pyo3"
 features = ["pyo3/extension-module", "basic", "schema"]
 module-name = "mq_bridge._mq_bridge"
+# Editable installs (uv sync / uv run) build a debug extension, not a release one.
+editable-profile = "dev"
 python-source = "."

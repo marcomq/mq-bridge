@@ -3292,6 +3292,29 @@ pub struct HttpBulkAuth {
     /// AWS Signature Version 4 on every request. Needs the `aws` feature.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub aws_sigv4: Option<HttpBulkAwsSigV4>,
+    /// A JSON login request: its bearer token is cached and fetched again when it expires.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub login: Option<HttpBulkLogin>,
+}
+
+/// A login request for `http_bulk` whose JSON answer holds a bearer token.
+#[derive(Deserialize, Serialize, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct HttpBulkLogin {
+    /// Login endpoint, e.g. `https://api.example.com/users/login`. Sent as `POST`.
+    pub url: String,
+    /// JSON body with the credentials, e.g. `{"username":"u","password":"p"}`.
+    #[cfg_attr(feature = "schema", schemars(extend("format"="password")))]
+    pub body: String,
+    /// JSON pointer to the token in the answer, e.g. `/access_token/token`.
+    pub token: String,
+    /// JSON pointer to when the token expires, in Unix seconds. Excludes `expires_in`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+    /// JSON pointer to the token's lifetime in seconds. Unset with `expires_at` = fetched again on a 401.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_in: Option<String>,
 }
 
 /// OAuth2 client credentials grant for `http_bulk`.
@@ -3368,6 +3391,21 @@ pub struct HttpBulkRead {
     /// Read one open response as `sse` events or `ndjson` lines instead of pages.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream: Option<HttpBulkStream>,
+    /// JSON pointer to the message payload inside each document, e.g. `/payload`. Unset = the whole document.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload: Option<String>,
+    /// How the string at `payload` is encoded. Unset = taken as it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload_encoding: Option<HttpBulkPayloadEncoding>,
+}
+
+/// How an `http_bulk` input decodes the string at `read.payload`.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum HttpBulkPayloadEncoding {
+    /// Standard base64 with padding.
+    Base64,
 }
 
 /// How an `http_bulk` input that reads one open response is cut into messages.
@@ -3393,6 +3431,9 @@ pub struct HttpBulkCursor {
     /// JSON pointer to the position in the last document of a page, e.g. `/id`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub item: Option<String>,
+    /// With `item`: added to the whole-number position, e.g. `1` when the API wants the next offset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub add: Option<i64>,
     /// Position before the first read. Defaults to `0` for a count, otherwise to `null`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start: Option<serde_json::Value>,

@@ -2,10 +2,19 @@
 
 All notable changes to `mq-bridge`. Newest first.
 
-## Unreleased
+## 1.1.0
 
 ### Added
 
+- **`${message:payload}` and `| base64` in templates.** The token is the whole payload;
+  `| base64` encodes any token as standard base64, the payload as its raw bytes.
+- **`http_bulk` sends payloads that are not JSON.** An `upsert.document` without
+  `{document}` is the whole document, e.g. `{"data":"${message:payload | base64}"}`.
+- **`http_bulk` `auth.login`.** A JSON login request whose answer holds a bearer token, with
+  an optional `expires_at` or `expires_in`; renewed before expiry and after a 401.
+- **`http_bulk` reads wrapped and encoded records.** `read.payload` points to the payload in
+  each document, `read.payload_encoding: base64` decodes it, and `read.cursor.add` adds to a
+  numeric `cursor.item`, for APIs that take the next offset.
 - **MongoDB `aggregate_query` for `lookup`.** An Extended-JSON aggregation pipeline template
   (`$group`, `$lookup`, `$setWindowFields`, …) that answers with its first result, the
   MongoDB counterpart of a SQL `lookup_query`. With the token in a `$match` `$in`, one

@@ -31,6 +31,7 @@ HttpBulkItemSuccess = dict
 HttpBulkItems = dict
 HttpBulkJob = dict
 HttpBulkLines = dict
+HttpBulkLogin = dict
 HttpBulkOAuth2 = dict
 HttpBulkQuery = dict
 HttpBulkRead = dict
@@ -93,6 +94,7 @@ FileFormat = str
 FileFsync = str
 FilterMiddleware = str
 HttpBulkFormat = str
+HttpBulkPayloadEncoding = str
 HttpBulkStream = str
 HttpServerProtocol = str
 IdHash = str
@@ -170,7 +172,9 @@ __all__ = [
     "HttpBulkItems",
     "HttpBulkJob",
     "HttpBulkLines",
+    "HttpBulkLogin",
     "HttpBulkOAuth2",
+    "HttpBulkPayloadEncoding",
     "HttpBulkQuery",
     "HttpBulkRead",
     "HttpBulkResult",

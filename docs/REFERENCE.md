@@ -2211,6 +2211,7 @@ Tokens use the `${namespace:selector}` form:
 | `${payload:a.b.c}` | a field of the incoming JSON payload (dotted path; array indices allowed) |
 | `${metadata:key}` | a metadata value |
 | `${message:id}` | the message id (UUID string) |
+| `${message:payload}` | the whole payload as text (invalid UTF-8 replaced; use `\| base64` for binary) |
 | `${gen:uuid}` | a fresh UUID v7 |
 | `${gen:now}` / `${gen:timestamp}` | current time (RFC3339 UTC / Unix epoch ms) |
 | `${gen:counter}` | a per-endpoint counter, starting at 0 |
@@ -2221,7 +2222,8 @@ Tokens use the `${namespace:selector}` form:
 (e.g. an error reply that echoes the request); on an **input** (load-test source) only
 `gen`/`env` produce values. When the body's `content-type` metadata is a JSON type,
 interpolated request values are **JSON-escaped by default** so external data cannot break the
-structure — append `| raw` to a token to splice it verbatim. To emit a literal, un-interpolated
+structure — append `| raw` to a token to splice it verbatim, or `| base64` to emit it as
+standard base64 (`${message:payload | base64}` encodes the payload bytes as they are). To emit a literal, un-interpolated
 `${…}`, write `$${…}` (a bare `$$` is left as-is); any `${…}` with an unknown namespace is also
 left untouched.
 

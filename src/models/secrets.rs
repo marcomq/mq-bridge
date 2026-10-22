@@ -791,6 +791,12 @@ impl SecretExtractor for HttpBulkConfig {
                 std::mem::take(&mut oauth2.client_secret),
             );
         }
+        if let Some(login) = self.auth.as_mut().and_then(|auth| auth.login.as_mut()) {
+            secrets.insert(
+                format!("{prefix}__AUTH__LOGIN__BODY"),
+                std::mem::take(&mut login.body),
+            );
+        }
         if let Some(aws) = self.auth.as_mut().and_then(|auth| auth.aws_sigv4.as_mut()) {
             for (name, value) in [
                 ("SECRET_KEY", &mut aws.secret_key),
@@ -980,6 +986,18 @@ impl fmt::Debug for HttpBulkOAuth2 {
             .field("client_id", &self.client_id)
             .field("client_secret", &REDACTED)
             .field("scope", &self.scope)
+            .finish()
+    }
+}
+
+impl fmt::Debug for HttpBulkLogin {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HttpBulkLogin")
+            .field("url", &crate::support::redact::url_password(&self.url))
+            .field("body", &REDACTED)
+            .field("token", &self.token)
+            .field("expires_at", &self.expires_at)
+            .field("expires_in", &self.expires_in)
             .finish()
     }
 }
