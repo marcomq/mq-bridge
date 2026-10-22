@@ -1029,7 +1029,7 @@
           ]
         },
         "fields": {
-          "description": "Built-in aggregates instead of `expression`, e.g. `n: count`, `avg: ema(reading, 0.1)`, `avg: ema(reading, 5m)` (half-life), `recent: decayed_count(1h)`, `decayed_sum(amount, 1h)`.",
+          "description": "Built-in aggregates instead of `expression`, `name: fn`: `count`, `decayed_count(half-life)`, `sum|min|max|last|mean|stddev|variance(path)`, `ema|ema_stddev|ema_variance(path, alpha or half-life)`, `decayed_sum(path, half-life)`.",
           "type": [
             "object",
             "null"
@@ -1129,7 +1129,7 @@
           ]
         },
         "fields": {
-          "description": "Built-in aggregates instead of `expression`, e.g. `n: count`, `avg: ema(reading, 0.1)`, `avg: ema(reading, 5m)` (half-life), `recent: decayed_count(1h)`, `decayed_sum(amount, 1h)`.",
+          "description": "Built-in aggregates instead of `expression`, `name: fn`: `count`, `decayed_count(half-life)`, `sum|min|max|last|mean|stddev|variance(path)`, `ema|ema_stddev|ema_variance(path, alpha or half-life)`, `decayed_sum(path, half-life)`.",
           "type": [
             "object",
             "null"
