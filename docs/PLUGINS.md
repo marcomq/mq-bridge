@@ -49,12 +49,13 @@ in-process:
 
 ```yaml
 input:
-  custom:
-    name: pulsar
-    config:
-      url: "pulsar://localhost:6650"
-      topic: "persistent://public/default/orders"
+  pulsar:
+    url: "pulsar://localhost:6650"
+    topic: "persistent://public/default/orders"
 ```
+
+The long form `custom: { name: pulsar, config: {...} }` is the same endpoint, for configs
+validated against `mq-bridge.schema.json`.
 
 Load once, before starting routes that use it. Loading the same file twice is a
 no-op, and the **plugin loader** rejects a second library claiming a name that is
@@ -412,9 +413,7 @@ Routes name it like any custom middleware; loading the library registers it:
 input:
   kafka: { topic: orders }
   middlewares:
-    - custom:
-        name: redact
-        config: { fields: ["ssn"] }
+    - redact: { fields: ["ssn"] }
 ```
 
 Return `None` to drop a message. The host acknowledges dropped messages on the
@@ -949,9 +948,7 @@ plugins:
 routes:
   orders:
     input:
-      custom:
-        name: pulsar
-        config: { url: "pulsar://localhost:6650" }
+      pulsar: { url: "pulsar://localhost:6650" }
 ```
 
 or per run:

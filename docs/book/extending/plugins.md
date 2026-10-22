@@ -35,15 +35,15 @@ plugins:
 routes:
   orders:
     input:
-      custom:
-        name: acme
-        config: { url: "acme://localhost:9000" }
+      acme: { url: "acme://localhost:9000" }
     output:
       file:
         path: "orders.jsonl"
 ```
 
-The `name` is the one the plugin exports, not the file name. A plugin providing a
+The key is the name the plugin exports, not the file name. The long form
+`custom: { name: acme, config: {...} }` is the same endpoint, for configs validated against
+`mq-bridge.schema.json`. A plugin providing a
 middleware registers that under the same name, usable in any `middlewares:` chain.
 
 Plugins are loaded only from trusted startup configuration. The UI and `POST /config` may

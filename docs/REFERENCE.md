@@ -1767,6 +1767,12 @@ Delegates to a factory you registered programmatically.
     config: { lookup_url: "http://enrich.internal" }
 ```
 
+The registered name also works as a bare middleware key, as with endpoints:
+
+```yaml middleware
+- my_enricher: { lookup_url: "http://enrich.internal" }
+```
+
 Implement `CustomMiddlewareFactory` (`apply_consumer` and/or `apply_publisher`, each
 defaulting to pass-through) and register it before starting routes. It can also be written
 in Python (`register_middleware`, hooks `on_receive` / `on_send`) or JavaScript
@@ -2296,10 +2302,16 @@ output:
 ```
 
 Implement `CustomEndpointFactory` and register it before starting routes. Once registered,
-the name also works as a bare endpoint key — `input: { my_sink: {...} }` — since any
-unrecognised key is looked up in the custom-endpoint registry. Use the explicit `custom:`
-form above if you validate configs against `mq-bridge.schema.json`, which cannot know your
-key. Endpoints can also be written in Python (`register_endpoint`) or JavaScript
+the name also works as a bare endpoint key, since any unrecognised key is looked up in the
+custom-endpoint registry:
+
+```yaml endpoint
+output:
+  my_sink: { target: "internal://thing" }
+```
+
+Use the explicit `custom:` form if you validate configs against `mq-bridge.schema.json`,
+which cannot know your key. Endpoints can also be written in Python (`register_endpoint`) or JavaScript
 (`registerEndpoint`). See **[EXTENDING.md](EXTENDING.md)** for the full guide.
 
 ---

@@ -381,8 +381,8 @@ all three languages.
   work with no core change. Endpoints for transports we do not want in this repository's
   dependency tree live in their own crates.
 - **Custom Middleware:** Implement the `CustomMiddlewareFactory` trait and register it with
-  `extensions::register_middleware_factory`; use it as `custom: { name, config }` in an
-  endpoint's `middlewares` list.
+  `extensions::register_middleware_factory`; use it as `- <name>: {...}` (or
+  `custom: { name, config }`) in an endpoint's `middlewares` list.
 - **From Python / Node:** `register_endpoint` / `register_middleware` (Python) and
   `registerEndpoint` / `registerMiddleware` (Node) take a host-language object instead of a
   Rust type, for endpoints that only have a Python/JS SDK.

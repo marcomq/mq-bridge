@@ -45,18 +45,18 @@ input:
       topic: "orders"
 ```
 
-Middleware is always the explicit form, in any endpoint's `middlewares` list:
+Middleware takes the same two forms, in any endpoint's `middlewares` list:
 
 ```yaml
 output:
   file: { path: "out.jsonl" }
   middlewares:
-    - custom:
-        name: "redact"
-        config: { fields: ["ssn"] }
+    - redact: { fields: ["ssn"] }
+    # explicit form of the same entry:
+    # - custom: { name: "redact", config: { fields: ["ssn"] } }
 ```
 
-Whatever sits under the endpoint key (or under `config:`) is handed to your
+Whatever sits under the endpoint or middleware key (or under `config:`) is handed to your
 factory verbatim as JSON. mq-bridge does not interpret it.
 
 ---

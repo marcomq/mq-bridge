@@ -30,7 +30,7 @@ This is the recommended way to keep secrets out of source — see the
 ## Custom endpoints and plugins
 
 When the app stores secrets outside the config file (the `balanced` config security mode), it
-also takes them out of a `custom` endpoint's or middleware's `config`, such as a
+also takes them out of a plugin or custom endpoint's or middleware's config, such as a
 [Connect](../connectors/connect.md) component:
 
 - a string field whose name contains `password`, `passphrase`, `secret` or `credentials`, or

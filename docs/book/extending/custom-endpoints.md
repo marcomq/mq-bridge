@@ -6,6 +6,16 @@ programmatically before starting routes.
 
 ## Config
 
+Name the registered factory as the endpoint key; everything under it is its config:
+
+```yaml
+output:
+  my_sink: { target: "internal://thing" }
+```
+
+The explicit form is the same endpoint. Use it if you validate configs against
+`mq-bridge.schema.json`, which does not know your key:
+
 ```yaml
 output:
   custom:
@@ -18,7 +28,7 @@ output:
 | `name` | string | yes — matches the registered factory |
 | `config` | any JSON | yes — passed through to your factory |
 
-The `custom` endpoint works as a route `input` or `output`.
+Either form works as a route `input` or `output`.
 
 ## Implementing it
 
