@@ -653,9 +653,11 @@ pub(crate) mod object_store_backend {
                 v.into_string().ok()?,
             ))
         });
-        object_store::parse_url_opts(&parsed, env).with_context(|| {
-            format!(
-                "Failed to build object store for '{}'",
+        object_store::parse_url_opts(&parsed, env).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to build object store for '{}': {e}. Supported schemes: file:// (local \
+                 directory; the CLI spells it local-store://), s3://, s3a://, gs://, az://, \
+                 azure://, abfs://, abfss://, http(s)://",
                 crate::support::redact::url_password(url)
             )
         })

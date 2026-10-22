@@ -8,6 +8,42 @@
 #[allow(unused_imports)]
 use super::*;
 
+mod endpoint_spelling_tests {
+    use super::*;
+
+    #[test]
+    fn database_names_are_aliases_for_sqlx() {
+        for key in ["sqlite", "postgres", "postgresql", "mysql", "mariadb"] {
+            let json = format!(r#"{{"{key}": {{"url": "sqlite::memory:", "table": "t"}}}}"#);
+            let endpoint: Endpoint = serde_json::from_str(&json).expect(key);
+            assert!(
+                matches!(endpoint.endpoint_type, EndpointType::Sqlx(_)),
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn object_store_accepts_the_cli_local_store_scheme() {
+        let endpoint: Endpoint =
+            serde_json::from_str(r#"{"object_store": {"url": "local-store:///tmp/lake/"}}"#)
+                .expect("parse");
+        let EndpointType::ObjectStore(config) = endpoint.endpoint_type else {
+            panic!("not object_store");
+        };
+        assert_eq!(config.url, "file:///tmp/lake/");
+    }
+
+    #[test]
+    fn file_parquet_is_rejected_when_parsed() {
+        let err = serde_json::from_str::<Endpoint>(
+            r#"{"file": {"path": "/tmp/n.parquet", "format": "parquet"}}"#,
+        )
+        .expect_err("should fail");
+        assert!(err.to_string().contains("object_store"), "{err}");
+    }
+}
+
 mod null_endpoint_tests {
     use super::*;
 

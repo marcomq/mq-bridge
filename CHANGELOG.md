@@ -66,6 +66,13 @@ All notable changes to `mq-bridge`. Newest first.
 
 ### Fixed
 
+- **Config files take the names the CLI shows.** `sqlite`, `postgres`, `postgresql`, `mysql`
+  and `mariadb` are aliases for `sqlx`; before, they were read as plugin names and failed
+  with "Custom endpoint factory 'sqlite' not found". An `object_store` `url` may use the
+  CLI's `local-store://`, stored as `file://`.
+- **Clearer `object_store` and `file` errors.** A URL that cannot be opened now says why and
+  lists the supported schemes. `file` with `format: parquet` is rejected when the config is
+  read, not when the route starts, and the error points to `object_store`.
 - **`bridge_status` works on macOS when `$TMPDIR` is not set**, as with MCP clients that
   start servers with a reduced environment. It failed with "no private per-user runtime
   directory is available"; the per-user temp directory is now asked from the OS.

@@ -334,6 +334,13 @@ pub enum EndpointType {
     #[serde(rename = "redis_streams", alias = "redis")]
     RedisStreams(RedisStreamsConfig),
     Grpc(GrpcConfig),
+    #[serde(
+        alias = "sqlite",
+        alias = "postgres",
+        alias = "postgresql",
+        alias = "mysql",
+        alias = "mariadb"
+    )]
     Sqlx(SqlxConfig),
     #[serde(rename = "clickhouse", alias = "click_house")]
     ClickHouse(ClickHouseConfig),
@@ -1770,7 +1777,8 @@ pub struct ObjectStoreConfig {
     /// `gs://bucket/prefix`, or `az://container/prefix`. Credentials are resolved
     /// from the environment by the `object_store` crate (same mechanism as the checkpoint
     /// backend); Azure takes the account from `AZURE_STORAGE_ACCOUNT_NAME`, R2 uses `s3://`
-    /// plus a custom `AWS_ENDPOINT_URL`.
+    /// plus a custom `AWS_ENDPOINT_URL`. The CLI's `local-store://` is accepted as `file://`.
+    #[serde(deserialize_with = "deserialize_object_store_url")]
     pub url: String,
     /// (Sink only) `auto`, `write_time` (uuidv7 name) or `source_position` (name carries the source range).
     #[serde(default)]

@@ -2746,7 +2746,7 @@
       "type": "object",
       "properties": {
         "url": {
-          "description": "Object-store URL, e.g. `file:///var/lib/mqb/incoming`, `s3://bucket/prefix`,\n`gs://bucket/prefix`, or `az://container/prefix`. Credentials are resolved\nfrom the environment by the `object_store` crate (same mechanism as the checkpoint\nbackend); Azure takes the account from `AZURE_STORAGE_ACCOUNT_NAME`, R2 uses `s3://`\nplus a custom `AWS_ENDPOINT_URL`.",
+          "description": "Object-store URL, e.g. `file:///var/lib/mqb/incoming`, `s3://bucket/prefix`,\n`gs://bucket/prefix`, or `az://container/prefix`. Credentials are resolved\nfrom the environment by the `object_store` crate (same mechanism as the checkpoint\nbackend); Azure takes the account from `AZURE_STORAGE_ACCOUNT_NAME`, R2 uses `s3://`\nplus a custom `AWS_ENDPOINT_URL`. The CLI's `local-store://` is accepted as `file://`.",
           "type": "string"
         },
         "name_by": {

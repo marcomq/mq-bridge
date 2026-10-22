@@ -230,7 +230,8 @@ load_orders:
       table: orders
 ```
 
-The CLI uses `local-store://` to distinguish this endpoint from the single-file connector:
+The CLI uses `local-store://` to distinguish this endpoint from the single-file connector.
+A config file accepts it too and stores it as `file://`:
 
 ```bash
 mqb copy \
