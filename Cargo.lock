@@ -4267,11 +4267,13 @@ dependencies = [
 
 [[package]]
 name = "omq-proto"
-version = "0.29.0"
+version = "0.33.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fee65dbcab40baa822e4dc109e0a3cfddc0fe0747b26a3429dbebe34152889bf"
+checksum = "337547271c06b86531c7a110515f13997cdfc2c4356a3e36d93840ab7dee9d86"
 dependencies = [
  "bytes",
+ "concurrent-queue",
+ "loom",
  "patricia_tree",
  "rand 0.10.3",
  "smallvec",
@@ -4280,19 +4282,52 @@ dependencies = [
 ]
 
 [[package]]
-name = "omq-tokio"
-version = "0.25.0"
+name = "omq-proto"
+version = "0.34.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2cb96032396e37484530a7f36cf95e169bc32b676d01d1438b2501bf3ba570d1"
+checksum = "6d2ac66d70d8926efe5818f2f1b9dcbd191e0cc4c53df41677e622ca7faeb760"
+dependencies = [
+ "bytes",
+ "concurrent-queue",
+ "loom",
+ "patricia_tree",
+ "rand 0.10.3",
+ "smallvec",
+ "socket2",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "omq-shm"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ad2195121b4f240c4f0c4ba6884a266d3e876baea211238b5f9b32b36b2a9b32"
 dependencies = [
  "arc-swap",
  "bytes",
  "concurrent-queue",
+ "omq-proto 0.34.0",
+ "rand 0.10.3",
+ "rustix",
+]
+
+[[package]]
+name = "omq-tokio"
+version = "0.29.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "87363a8459c436ed113b7abcdbbd786f28615a758aee95f6daf20bb99e6f8dbe"
+dependencies = [
+ "arc-swap",
+ "bytes",
+ "concurrent-queue",
+ "crossbeam-utils",
  "fanring",
  "futures",
  "libc",
- "omq-proto",
+ "omq-proto 0.33.0",
+ "omq-shm",
  "parking_lot 0.12.5",
+ "pin-project-lite",
  "rand 0.10.3",
  "rustc-hash",
  "smallvec",
@@ -6460,9 +6495,9 @@ dependencies = [
 
 [[package]]
 name = "smallvec"
-version = "1.16.2"
+version = "1.16.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f9395f0f0eee849a9b707b2f06bb92a6a422090e2123bb2ef8e87a0e61892a8e"
+checksum = "5b3dc8af474f516a851ff4bd12db780f948b9250ad37211e4eec0bccea54e01b"
 dependencies = [
  "serde",
 ]
