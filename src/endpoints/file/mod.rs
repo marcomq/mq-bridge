@@ -1393,15 +1393,27 @@ impl FilePublisher {
     }
 
     /// Applies the `fsync` setting to a batch that was just written and flushed.
-    async fn sync_written(&self, file: &File) -> std::io::Result<()> {
+    /// `was_empty` also syncs the directory, so a newly created file's entry survives power loss.
+    async fn sync_written(&self, file: &File, was_empty: bool) -> std::io::Result<()> {
         match &self.fsync {
-            FsyncPolicy::Off => Ok(()),
-            FsyncPolicy::Batch => file.sync_data().await,
-            FsyncPolicy::Periodic(dirty) => {
-                dirty.store(true, Ordering::Release);
-                Ok(())
+            FsyncPolicy::Off => return Ok(()),
+            FsyncPolicy::Batch => file.sync_data().await?,
+            FsyncPolicy::Periodic(dirty) => dirty.store(true, Ordering::Release),
+        }
+        if was_empty {
+            if let Some(parent) = Path::new(&self.path).parent() {
+                let parent = if parent.as_os_str().is_empty() {
+                    Path::new(".")
+                } else {
+                    parent
+                };
+                // Best effort: Windows cannot open a directory handle this way.
+                if let Ok(directory) = File::open(parent).await {
+                    let _ = directory.sync_all().await;
+                }
             }
         }
+        Ok(())
     }
 
     /// Unlike the `object_store` sink, an encode failure here fails the whole batch rather than
@@ -1651,7 +1663,7 @@ impl FilePublisher {
                         anyhow::Error::new(e).context("Failed to flush file"),
                     ));
                 }
-                if let Err(e) = self.sync_written(&file).await {
+                if let Err(e) = self.sync_written(&file, pre_len == 0).await {
                     if let Err(te) = file.set_len(pre_len).await {
                         tracing::error!(
                             "Failed to truncate file back to {} after member sync error: {}",
@@ -1877,7 +1889,10 @@ impl MessagePublisher for FilePublisher {
                 anyhow::Error::new(e).context("Failed to flush file writer"),
             ));
         }
-        if let Err(e) = self.sync_written(writer.get_ref()).await {
+        if let Err(e) = self
+            .sync_written(writer.get_ref(), pre_len == Some(0))
+            .await
+        {
             roll_back_partial_batch(
                 &writer,
                 pre_len,
@@ -1899,6 +1914,11 @@ impl MessagePublisher for FilePublisher {
             }
         }
         Ok(())
+    }
+
+    /// Syncs the last `periodic` window when the route stops; the background task ends unsynced.
+    fn on_disconnect_hook(&self) -> Option<crate::traits::BoxFuture<'_, anyhow::Result<()>>> {
+        matches!(self.fsync, FsyncPolicy::Periodic(_)).then(|| self.flush())
     }
 
     /// A file is an ordered log by construction: appending batches in the order they

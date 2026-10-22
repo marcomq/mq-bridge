@@ -636,7 +636,14 @@ existing regular file fails there with "Failed to create part-file sink director
 system and does not call `fsync`, so a power loss can lose batches that were already
 acknowledged. `fsync: batch` syncs the file before each batch is acknowledged; this costs one
 disk sync per batch. `fsync: periodic` syncs in the background every `fsync_interval_ms`
-(default 1000) and bounds the loss to that interval at almost no cost in throughput.
+(default 1000) and bounds the loss to that interval at almost no cost in throughput; a final
+sync runs when the route stops. With either setting, a batch that starts a new file also
+syncs its directory, so the file itself survives a power loss. `object_store` with a
+`file://` URL always syncs each object and its directory before the write counts as done.
+
+SQLite commits with `synchronous=FULL`, the SQLite default. On macOS that is a plain
+`fsync()`, which does not flush the drive's write cache, so a power loss can still undo
+the most recent commits there. On Linux a commit is durable.
 
 **`delete: true` needs a single writer.** Acknowledged records are removed by rewriting the
 file and renaming the copy into place. Lines that another process appends during that

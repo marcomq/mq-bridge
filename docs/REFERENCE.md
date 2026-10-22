@@ -624,6 +624,12 @@ batches grow with the load:
 
 Only one batch is in flight at a time, with any `max_delay_ms`.
 
+On an output, `buffer` only merges sends from callers that wait at the same time. A route
+waits for each batch to be acknowledged before it reads the next one, so with
+`concurrency: 1` there is never a second caller: every batch smaller than `max_messages`
+waits the full `max_delay_ms` and leaves alone. To get larger sink batches from one worker,
+raise the route's `batch_size` instead.
+
 With route `concurrency` greater than 1, buffering preserves order inside each batch but
 does not guarantee source order across concurrent destination writes. Use `concurrency: 1`
 when destination order matters; route validation emits a warning for this combination.

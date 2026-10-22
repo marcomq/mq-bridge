@@ -66,6 +66,14 @@ All notable changes to `mq-bridge`. Newest first.
 
 ### Fixed
 
+- **`file` `fsync` and `fsync_interval_ms` work in config files.** The URI form and
+  `mqb describe` knew them, but a config file failed with "unknown field `fsync` in file
+  endpoint".
+- **Local `object_store` writes survive a power loss.** With a `file://` URL each object and
+  its directory are now synced before the write counts as done, as a remote PUT is.
+- **`file` sink durability gaps.** With `fsync: batch` or `periodic`, a batch that starts a
+  new file also syncs the directory, so the file is not lost on power loss. `periodic` runs
+  a final sync when the route stops instead of leaving the last interval unsynced.
 - **Config files take the names the CLI shows.** `sqlite`, `postgres`, `postgresql`, `mysql`
   and `mariadb` are aliases for `sqlx`; before, they were read as plugin names and failed
   with "Custom endpoint factory 'sqlite' not found". An `object_store` `url` may use the

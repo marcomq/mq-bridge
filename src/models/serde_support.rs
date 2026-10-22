@@ -210,6 +210,8 @@ const FILE_CONFIG_KEYS: &[&str] = &[
     "encryption",
     "csv",
     "source_metadata",
+    "fsync",
+    "fsync_interval_ms",
 ];
 
 fn reject_unknown_file_keys(
@@ -908,6 +910,8 @@ mod tests {
                 delimiter: Some("\n".to_string()),
                 mode: Some(mode),
                 source_metadata: true,
+                fsync: crate::models::FileFsync::Batch,
+                fsync_interval_ms: Some(250),
                 ..Default::default()
             };
             let file = serde_json::to_value(&config).unwrap();
