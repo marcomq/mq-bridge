@@ -4267,22 +4267,6 @@ dependencies = [
 
 [[package]]
 name = "omq-proto"
-version = "0.33.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "337547271c06b86531c7a110515f13997cdfc2c4356a3e36d93840ab7dee9d86"
-dependencies = [
- "bytes",
- "concurrent-queue",
- "loom",
- "patricia_tree",
- "rand 0.10.3",
- "smallvec",
- "socket2",
- "thiserror 2.0.21",
-]
-
-[[package]]
-name = "omq-proto"
 version = "0.34.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6d2ac66d70d8926efe5818f2f1b9dcbd191e0cc4c53df41677e622ca7faeb760"
@@ -4306,16 +4290,16 @@ dependencies = [
  "arc-swap",
  "bytes",
  "concurrent-queue",
- "omq-proto 0.34.0",
+ "omq-proto",
  "rand 0.10.3",
  "rustix",
 ]
 
 [[package]]
 name = "omq-tokio"
-version = "0.29.0"
+version = "0.30.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "87363a8459c436ed113b7abcdbbd786f28615a758aee95f6daf20bb99e6f8dbe"
+checksum = "111608079364f26e53546017d44788be6664b0aafc6064e2b57ad4daf5398e96"
 dependencies = [
  "arc-swap",
  "bytes",
@@ -4324,7 +4308,8 @@ dependencies = [
  "fanring",
  "futures",
  "libc",
- "omq-proto 0.33.0",
+ "nix 0.31.3",
+ "omq-proto",
  "omq-shm",
  "parking_lot 0.12.5",
  "pin-project-lite",
