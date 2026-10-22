@@ -1046,21 +1046,32 @@ const CROSS_KEY_STAGES: &[&str] = &[
 /// A batched `aggregate_query` runs once for many keys, so its stages must keep them apart:
 /// none of [`CROSS_KEY_STAGES`], and `$group` / `$setWindowFields` by the `$in` field.
 pub(super) fn check_batch_pipeline(list: &ListQuery) -> anyhow::Result<()> {
-    // `0` stands in for the key; a pipeline that does not parse then fails per batch instead.
-    let sample = format!(
-        "{}{}0{}{}",
-        list.before, list.prefix, list.suffix, list.after
-    );
-    let Ok(stages) = pipeline_stages(sample.as_bytes()) else {
+    // Two sample keys: only the list the token fills differs between the renders.
+    // A pipeline that does not parse fails per batch instead.
+    let render = |key: &str| {
+        let sample = format!(
+            "{}{}{key}{}{}",
+            list.before, list.prefix, list.suffix, list.after
+        );
+        pipeline_stages(sample.as_bytes())
+    };
+    let (Ok(stages), Ok(other)) = (render("0"), render("1")) else {
         return Ok(());
     };
-    // Results are matched to messages by the outer documents, so the keys must filter those.
-    let top_level = stages.iter().any(|stage| {
+    let key_list = |stage: &Document| {
         stage
             .get_document("$match")
+            .ok()?
+            .get_document(&list.key)
+            .ok()?
+            .get_array("$in")
             .ok()
-            .and_then(|m| m.get_document(&list.key).ok())
-            .is_some_and(|cond| cond.contains_key("$in"))
+            .cloned()
+    };
+    // Results are matched to messages by the outer documents, so the keys must filter those.
+    let top_level = stages.iter().zip(&other).any(|(a, b)| {
+        let keys = key_list(a);
+        keys.is_some() && keys != key_list(b)
     });
     if !top_level {
         anyhow::bail!(
