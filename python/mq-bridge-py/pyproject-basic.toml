@@ -1,5 +1,5 @@
 [build-system]
-requires = ["maturin>=1.7,<2.0"]
+requires = ["maturin>=1.10,<2.0"]
 build-backend = "maturin"
 
 [project]
@@ -45,7 +45,7 @@ Issues = "https://github.com/marcomq/mq-bridge/issues"
 
 [dependency-groups]
 dev = [
-  "maturin>=1.7,<2.0",
+  "maturin>=1.10,<2.0",
   "pytest>=8.3",
 ]
 bench = [

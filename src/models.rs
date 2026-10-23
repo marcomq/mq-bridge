@@ -1496,7 +1496,7 @@ pub enum FileFsync {
     Off,
     /// Before a batch is acknowledged.
     Batch,
-    /// In the background every `fsync_interval_ms`; at most that window is at risk.
+    /// Every `fsync_interval_ms`; the source is committed only after the sync.
     Periodic,
 }
 

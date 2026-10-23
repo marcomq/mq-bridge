@@ -357,14 +357,6 @@ impl CookieJarPublisher {
 
 #[async_trait]
 impl MessagePublisher for CookieJarPublisher {
-    fn on_connect_hook(&self) -> Option<BoxFuture<'_, anyhow::Result<()>>> {
-        self.inner.on_connect_hook()
-    }
-
-    fn on_disconnect_hook(&self) -> Option<BoxFuture<'_, anyhow::Result<()>>> {
-        self.inner.on_disconnect_hook()
-    }
-
     async fn send(&self, mut message: CanonicalMessage) -> Result<Sent, PublisherError> {
         self.prepare_message(&mut message);
         match self.inner.send(message).await? {
@@ -400,9 +392,7 @@ impl MessagePublisher for CookieJarPublisher {
         }
     }
 
-    fn requires_ordered_publish(&self) -> bool {
-        self.inner.requires_ordered_publish()
-    }
+    crate::traits::forward_publisher_meta!(inner);
 
     fn as_any(&self) -> &dyn Any {
         self

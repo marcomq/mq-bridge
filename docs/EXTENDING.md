@@ -57,7 +57,8 @@ output:
 ```
 
 Whatever sits under the endpoint or middleware key (or under `config:`) is handed to your
-factory verbatim as JSON. mq-bridge does not interpret it.
+factory as JSON, without reshaping. The app's config loader may resolve `${ENV}` references
+in it first; mq-bridge does not interpret it otherwise.
 
 ---
 
@@ -221,6 +222,15 @@ point is to keep one in-flight request from gating the next.
 `on_connect_hook` runs once after the endpoint is created and before the route
 reports itself ready — use it to warm a pool or create tables.
 `on_disconnect_hook` runs during shutdown. Both are optional.
+
+### Deferring commits to a flush
+
+A sink that buffers writes, or syncs them in the background, acks before the data is
+durable. Return `Some(interval)` from `deferred_commit_interval` and the route holds the
+source's commits until your `flush` succeeds. It calls `flush` at least every `interval`,
+sooner when many batches wait or the source runs dry, and when the route stops. A failed
+`flush` commits nothing: the route reconnects and the source redelivers. A wrapping
+middleware forwards the value of the publisher it wraps.
 
 ### Using it
 

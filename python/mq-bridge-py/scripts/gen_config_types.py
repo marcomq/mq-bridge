@@ -35,7 +35,7 @@ PY_PATH = PKG_DIR / "mq_bridge" / "config.py"
 def load_schema(schema_path: Path | None = None) -> dict:
     """Read the schema from a file, or generate it ad hoc from the compiled extension."""
     if schema_path is not None:
-        return json.loads(schema_path.read_text())
+        return json.loads(schema_path.read_text(encoding="utf-8"))
 
     from mq_bridge import config_schema
 

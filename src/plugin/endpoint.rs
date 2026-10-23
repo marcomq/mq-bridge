@@ -944,6 +944,15 @@ impl MessagePublisher for PluginPublisher {
         }
     }
 
+    /// Asks the plugin whether its acks wait for a flush. A plugin before ABI 1.4,
+    /// or one answering 0, keeps the trait default: commits run at once.
+    fn deferred_commit_interval(&self) -> Option<std::time::Duration> {
+        let publisher = &self.publisher;
+        let hook = publisher.plugin.table().deferred_commit_hook()?;
+        let ms = unsafe { hook(publisher.handle) };
+        (ms > 0).then(|| std::time::Duration::from_millis(ms))
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }

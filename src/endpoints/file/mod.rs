@@ -1077,8 +1077,30 @@ pub struct FilePublisher {
 enum FsyncPolicy {
     Off,
     Batch,
-    /// Set after a write, cleared by the background sync.
-    Periodic(Arc<AtomicBool>),
+    Periodic(Arc<PeriodicSync>),
+}
+
+/// Unsynced-write state shared by a `periodic` sink and its background sync.
+struct PeriodicSync {
+    /// Set after a write, cleared by the sync that covers it.
+    dirty: AtomicBool,
+    /// Held across a sync, so `flush` waits for one already running.
+    syncing: tokio::sync::Mutex<()>,
+    /// The deferred-commit interval; `None` for part files, which sync on their own.
+    interval: Option<Duration>,
+}
+
+impl PeriodicSync {
+    async fn sync(&self, path: &str) -> std::io::Result<()> {
+        let _syncing = self.syncing.lock().await;
+        if self.dirty.swap(false, Ordering::AcqRel) {
+            if let Err(e) = sync_path(path).await {
+                self.dirty.store(true, Ordering::Release);
+                return Err(e);
+            }
+        }
+        Ok(())
+    }
 }
 
 async fn sync_path(path: &str) -> std::io::Result<()> {
@@ -1087,16 +1109,13 @@ async fn sync_path(path: &str) -> std::io::Result<()> {
 }
 
 /// Syncs `path` every `interval` while it has unsynced writes; ends with the last publisher.
-fn spawn_periodic_sync(path: String, interval: Duration, dirty: Weak<AtomicBool>) {
+fn spawn_periodic_sync(path: String, interval: Duration, state: Weak<PeriodicSync>) {
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(interval).await;
-            let Some(dirty) = dirty.upgrade() else { break };
-            if dirty.swap(false, Ordering::AcqRel) {
-                if let Err(e) = sync_path(&path).await {
-                    warn!(path = %path, error = %e, "Periodic fsync of file sink failed");
-                    dirty.store(true, Ordering::Release);
-                }
+            let Some(state) = state.upgrade() else { break };
+            if let Err(e) = state.sync(&path).await {
+                warn!(path = %path, error = %e, "Periodic fsync of file sink failed");
             }
         }
     });
@@ -1361,11 +1380,15 @@ impl FilePublisher {
                     ))
                     .into());
                 }
-                let dirty = Arc::new(AtomicBool::new(false));
+                let state = Arc::new(PeriodicSync {
+                    dirty: AtomicBool::new(false),
+                    syncing: tokio::sync::Mutex::new(()),
+                    interval: (!by_source_position).then_some(interval),
+                });
                 if !by_source_position {
-                    spawn_periodic_sync(path_str.to_string(), interval, Arc::downgrade(&dirty));
+                    spawn_periodic_sync(path_str.to_string(), interval, Arc::downgrade(&state));
                 }
-                FsyncPolicy::Periodic(dirty)
+                FsyncPolicy::Periodic(state)
             }
         };
         info!(path = %path_str, format = ?format, "File sink opened for appending");
@@ -1398,7 +1421,7 @@ impl FilePublisher {
         match &self.fsync {
             FsyncPolicy::Off => return Ok(()),
             FsyncPolicy::Batch => file.sync_data().await?,
-            FsyncPolicy::Periodic(dirty) => dirty.store(true, Ordering::Release),
+            FsyncPolicy::Periodic(state) => state.dirty.store(true, Ordering::Release),
         }
         if was_empty {
             if let Some(parent) = Path::new(&self.path).parent() {
@@ -1908,12 +1931,18 @@ impl MessagePublisher for FilePublisher {
     }
 
     async fn flush(&self) -> anyhow::Result<()> {
-        if let FsyncPolicy::Periodic(dirty) = &self.fsync {
-            if dirty.swap(false, Ordering::AcqRel) {
-                sync_path(&self.path).await?;
-            }
+        if let FsyncPolicy::Periodic(state) = &self.fsync {
+            state.sync(&self.path).await?;
         }
         Ok(())
+    }
+
+    /// `periodic` acks before the sync, so the route holds commits until `flush` ran.
+    fn deferred_commit_interval(&self) -> Option<Duration> {
+        match &self.fsync {
+            FsyncPolicy::Periodic(state) => state.interval,
+            _ => None,
+        }
     }
 
     /// Syncs the last `periodic` window when the route stops; the background task ends unsynced.

@@ -2580,10 +2580,14 @@ async fn test_file_sink_fsync_modes() {
         .unwrap();
         let sink = FilePublisher::new(&config).await.unwrap();
         sink.send_batch(vec![msg!("one")]).await.unwrap();
-        if let super::FsyncPolicy::Periodic(dirty) = &sink.fsync {
-            assert!(dirty.load(std::sync::atomic::Ordering::Acquire));
+        if let super::FsyncPolicy::Periodic(state) = &sink.fsync {
+            assert_eq!(
+                sink.deferred_commit_interval(),
+                Some(std::time::Duration::from_millis(20))
+            );
+            assert!(state.dirty.load(std::sync::atomic::Ordering::Acquire));
             tokio::time::timeout(std::time::Duration::from_secs(5), async {
-                while dirty.load(std::sync::atomic::Ordering::Acquire) {
+                while state.dirty.load(std::sync::atomic::Ordering::Acquire) {
                     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
                 }
             })
@@ -2591,7 +2595,7 @@ async fn test_file_sink_fsync_modes() {
             .expect("periodic sync never ran");
             sink.send_batch(vec![msg!("two")]).await.unwrap();
             sink.flush().await.unwrap();
-            assert!(!dirty.load(std::sync::atomic::Ordering::Acquire));
+            assert!(!state.dirty.load(std::sync::atomic::Ordering::Acquire));
         }
         assert!(tokio::fs::read_to_string(&path)
             .await

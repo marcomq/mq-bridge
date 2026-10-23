@@ -20,10 +20,13 @@ The key is the registered factory's name; everything under it is its config. The
 form is the same middleware, for configs validated against `mq-bridge.schema.json`:
 
 ```yaml
-middlewares:
-  - custom:
-      name: "my_enricher"
-      config: { lookup_url: "http://enrich.internal" }
+output:
+  mongodb:
+    url: "mongodb://localhost:27017"
+  middlewares:
+    - custom:
+        name: "my_enricher"
+        config: { lookup_url: "http://enrich.internal" }
 ```
 
 | Field | Type | Required |

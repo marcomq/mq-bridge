@@ -315,6 +315,18 @@ impl MessagePublisher for SwitchPublisher {
         self.destinations().any(|p| p.requires_ordered_publish())
     }
 
+    /// The shortest interval of any branch: one flush covers every branch.
+    fn deferred_commit_interval(&self) -> Option<std::time::Duration> {
+        self.destinations()
+            .filter_map(|p| p.deferred_commit_interval())
+            .min()
+    }
+
+    async fn flush(&self) -> anyhow::Result<()> {
+        futures::future::try_join_all(self.destinations().map(|p| p.flush())).await?;
+        Ok(())
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }

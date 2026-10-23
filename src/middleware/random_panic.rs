@@ -173,14 +173,6 @@ impl RandomPanicPublisher {
 
 #[async_trait]
 impl MessagePublisher for RandomPanicPublisher {
-    fn on_connect_hook(&self) -> Option<BoxFuture<'_, anyhow::Result<()>>> {
-        self.inner.on_connect_hook()
-    }
-
-    fn on_disconnect_hook(&self) -> Option<BoxFuture<'_, anyhow::Result<()>>> {
-        self.inner.on_disconnect_hook()
-    }
-
     async fn send(&self, message: CanonicalMessage) -> Result<Sent, PublisherError> {
         if self.should_trigger_fault() {
             self.inject_fault()
@@ -208,9 +200,7 @@ impl MessagePublisher for RandomPanicPublisher {
         }
     }
 
-    fn requires_ordered_publish(&self) -> bool {
-        self.inner.requires_ordered_publish()
-    }
+    crate::traits::forward_publisher_meta!(inner);
 
     fn as_any(&self) -> &dyn Any {
         self

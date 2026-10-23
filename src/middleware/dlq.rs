@@ -339,6 +339,22 @@ impl MessagePublisher for DlqPublisher {
         self.inner.requires_ordered_publish()
     }
 
+    /// Dead-lettered messages are committed too, so a buffering DLQ defers commits as well.
+    fn deferred_commit_interval(&self) -> Option<std::time::Duration> {
+        [
+            self.inner.deferred_commit_interval(),
+            self.dlq_publisher.deferred_commit_interval(),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
+    }
+
+    async fn flush(&self) -> anyhow::Result<()> {
+        self.inner.flush().await?;
+        self.dlq_publisher.flush().await
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }

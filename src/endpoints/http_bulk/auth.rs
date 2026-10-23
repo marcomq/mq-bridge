@@ -157,7 +157,8 @@ fn check_url(raw: &str, field: &str, tls_required: bool) -> anyhow::Result<()> {
             bail!("http_bulk tls.required needs an https {field}");
         }
         if !super::is_loopback(&url) {
-            warn!(url = %raw, "http_bulk sends credentials unencrypted to {field}; use https");
+            let shown = crate::support::redact::url_password(raw);
+            warn!(url = %shown, "http_bulk sends credentials unencrypted to {field}; use https");
         }
     }
     Ok(())

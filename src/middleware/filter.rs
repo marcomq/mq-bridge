@@ -1188,21 +1188,6 @@ impl FilterPublisher {
 
 #[async_trait]
 impl MessagePublisher for FilterPublisher {
-    /// Delegated, so wrapping a sink in a filter does not swallow its lifecycle. The
-    /// route only ever runs the hooks of the *outermost* publisher, and the structural
-    /// endpoints rely on theirs to reach their nested destinations.
-    fn on_connect_hook(&self) -> Option<BoxFuture<'_, anyhow::Result<()>>> {
-        self.inner.on_connect_hook()
-    }
-
-    fn on_disconnect_hook(&self) -> Option<BoxFuture<'_, anyhow::Result<()>>> {
-        self.inner.on_disconnect_hook()
-    }
-
-    async fn flush(&self) -> anyhow::Result<()> {
-        self.inner.flush().await
-    }
-
     async fn send(&self, message: CanonicalMessage) -> Result<Sent, PublisherError> {
         if keep_or_fail(self.filter.matches(&message), self.on_error)
             .map_err(PublisherError::NonRetryable)?
@@ -1256,13 +1241,7 @@ impl MessagePublisher for FilterPublisher {
         Some(crate::middleware::lookup::lookup_through(self.inner.as_ref(), outcomes).await)
     }
 
-    fn requires_ordered_publish(&self) -> bool {
-        self.inner.requires_ordered_publish()
-    }
-
-    async fn status(&self) -> EndpointStatus {
-        self.inner.status().await
-    }
+    crate::traits::forward_publisher_meta!(inner);
 
     fn as_any(&self) -> &dyn std::any::Any {
         self

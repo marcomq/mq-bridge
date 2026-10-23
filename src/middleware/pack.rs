@@ -96,14 +96,6 @@ impl PackPublisher {
 
 #[async_trait]
 impl MessagePublisher for PackPublisher {
-    fn on_connect_hook(&self) -> Option<BoxFuture<'_, anyhow::Result<()>>> {
-        self.inner.on_connect_hook()
-    }
-
-    fn on_disconnect_hook(&self) -> Option<BoxFuture<'_, anyhow::Result<()>>> {
-        self.inner.on_disconnect_hook()
-    }
-
     async fn send_batch(
         &self,
         messages: Vec<CanonicalMessage>,
@@ -166,17 +158,7 @@ impl MessagePublisher for PackPublisher {
         }
     }
 
-    async fn flush(&self) -> anyhow::Result<()> {
-        self.inner.flush().await
-    }
-
-    fn requires_ordered_publish(&self) -> bool {
-        self.inner.requires_ordered_publish()
-    }
-
-    async fn status(&self) -> EndpointStatus {
-        self.inner.status().await
-    }
+    crate::traits::forward_publisher_meta!(inner);
 
     fn as_any(&self) -> &dyn Any {
         self

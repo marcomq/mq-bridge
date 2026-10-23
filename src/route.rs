@@ -29,6 +29,9 @@ use tokio::{
 };
 use tracing::{debug, error, info, trace, warn};
 
+mod flush_gate;
+use flush_gate::FlushGate;
+
 // Re-export extensions for backward compatibility and internal usage
 pub use crate::extensions::{
     get_endpoint_factory, get_middleware_factory, register_endpoint_factory,
@@ -651,6 +654,15 @@ fn report_join_result<T>(res: std::result::Result<T, tokio::task::JoinError>, wh
     }
 }
 
+fn report_commit_failure(err_tx: &Sender<anyhow::Error>, err: anyhow::Error) {
+    if err.is::<flush_gate::Unflushed>() {
+        debug!("Commit skipped: {}", err);
+        return;
+    }
+    error!("Commit failed: {}", err);
+    report_route_error(err_tx, err, "Could not send commit error to main task");
+}
+
 fn report_route_error(err_tx: &Sender<anyhow::Error>, err: anyhow::Error, context: &str) {
     match err_tx.try_send(err) {
         Ok(_) => trace!("Reported error to main task"),
@@ -892,8 +904,7 @@ async fn send_batch_and_commit(
             commit_tasks.spawn(async move {
                 let _permit = permit;
                 if let Err(e) = commit(dispositions).await {
-                    error!("Commit failed: {}", e);
-                    report_route_error(&err_tx, e, "Could not send commit error to main task");
+                    report_commit_failure(&err_tx, e);
                 }
             });
             Ok(())
@@ -990,8 +1001,7 @@ async fn send_batch_and_commit(
             commit_tasks.spawn(async move {
                 let _permit = permit;
                 if let Err(e) = commit(dispositions).await {
-                    error!("Commit failed: {}", e);
-                    report_route_error(&err_tx, e, "Could not send commit error to main task");
+                    report_commit_failure(&err_tx, e);
                 }
             });
             Ok(())
@@ -1970,6 +1980,7 @@ impl Route {
         let read_semaphore = commit_router.read_semaphore();
         let mut read_permit = None;
         let mut seq_counter = 0u64;
+        let flush_gate = commit_router.flush_gate(&publisher, &err_tx);
 
         if let Some(tx) = ready_tx {
             let _ = tx.send(()).await;
@@ -2002,6 +2013,9 @@ impl Route {
                                     info!("Consumer for route '{}' drained (empty batch, exit_on_empty). Shutting down.", route_display_name(name));
                                     break Ok(false); // Graceful drain-then-exit
                                 }
+                                if let Some(gate) = &flush_gate {
+                                    gate.nudge();
+                                }
                                 pause_after_empty_batch(self.options.empty_batch_delay_ms).await;
                                 continue; // No messages, loop to select! again
                             }
@@ -2031,7 +2045,10 @@ impl Route {
                     let seq = seq_counter;
                     seq_counter += 1;
                     let batch_len = received_batch.messages.len();
-                    let commit = commit_router.wrap(received_batch.commit, seq, read_permit.take());
+                    let mut commit = commit_router.wrap(received_batch.commit, seq, read_permit.take());
+                    if let Some(gate) = &flush_gate {
+                        commit = gate.hold(commit);
+                    }
                     if let Err(err) = send_batch_and_commit(
                         &publisher,
                         received_batch.messages,
@@ -2064,6 +2081,14 @@ impl Route {
             }
         };
 
+        // A clean end flushes and commits what is held; a failed one commits nothing more.
+        if let Some(gate) = &flush_gate {
+            if run_result.is_ok() {
+                gate.close();
+            } else {
+                gate.abandon();
+            }
+        }
         // Drain errors while waiting for tasks to finish to prevent deadlocks and lost errors
         loop {
             select! {
@@ -2085,6 +2110,9 @@ impl Route {
             }
         }
         drop(err_rx);
+        if let Some(gate) = flush_gate {
+            gate.shutdown().await;
+        }
         commit_router.shutdown().await;
         run_consumer_disconnect_hook(name, consumer.as_ref()).await;
         run_publisher_disconnect_hook(name, &publisher, disconnect_outcome(&run_result)).await;
@@ -2196,6 +2224,7 @@ impl Route {
         let commit_semaphore = commit_router.dispatch_semaphore();
         let read_semaphore = commit_router.read_semaphore();
         let mut read_permit = None;
+        let flush_gate = commit_router.flush_gate(&publisher, &err_tx);
 
         // --- Worker Pool ---
         let mut join_set = JoinSet::new();
@@ -2318,6 +2347,9 @@ impl Route {
                                     drained = true;
                                     break; // Graceful drain-then-exit
                                 }
+                                if let Some(gate) = &flush_gate {
+                                    gate.nudge();
+                                }
                                 pause_after_empty_batch(self.options.empty_batch_delay_ms).await;
                                 continue; // No messages, loop to select! again
                             }
@@ -2356,7 +2388,10 @@ impl Route {
                     // is closed while producing batches.
                     let seq = seq_counter;
                     let batch_len = messages.len();
-                    let wrapped_commit = commit_router.wrap(commit, seq, read_permit.take());
+                    let mut wrapped_commit = commit_router.wrap(commit, seq, read_permit.take());
+                    if let Some(gate) = &flush_gate {
+                        wrapped_commit = gate.hold(wrapped_commit);
+                    }
                     let ticket = ordered_publish.then(|| {
                         let (release, next_prev) = tokio::sync::oneshot::channel();
                         let ticket = OrderTicket {
@@ -2395,6 +2430,14 @@ impl Route {
         // This applies on both normal shutdown AND error paths, ensuring in-flight commits
         // are not aborted mid-sequence.
         drop(work_tx);
+        // A clean end flushes and commits what is held; a failed one commits nothing more.
+        if let Some(gate) = &flush_gate {
+            if loop_error.is_some() || worker_panicked {
+                gate.abandon();
+            } else {
+                gate.close();
+            }
+        }
         // A panicked worker never commits its batch. Ordered commits behind that gap would
         // wait on it forever, so they are failed at once and stay uncommitted for redelivery.
         if worker_panicked {
@@ -2405,6 +2448,9 @@ impl Route {
             if matches!(&res, Err(e) if e.is_panic()) {
                 worker_panicked = true;
                 commit_router.abandon();
+                if let Some(gate) = &flush_gate {
+                    gate.abandon();
+                }
             }
             report_join_result(res, "Worker task");
         }
@@ -2415,6 +2461,9 @@ impl Route {
             let _ = commit(vec![MessageDisposition::Nack; messages.len()]).await;
         }
 
+        if let Some(gate) = flush_gate {
+            gate.shutdown().await;
+        }
         // Close sequencer (if any) now that all in-flight commits have drained.
         commit_router.shutdown().await;
         run_consumer_disconnect_hook(name, consumer.as_ref()).await;
@@ -2681,9 +2730,11 @@ enum CommitRouter {
         handle: JoinHandle<()>,
         /// Batches read but not yet committed. See [`CommitRouter::read_semaphore`].
         in_flight: Arc<tokio::sync::Semaphore>,
+        capacity: usize,
     },
     Unordered {
         semaphore: Arc<tokio::sync::Semaphore>,
+        capacity: usize,
     },
 }
 
@@ -2698,12 +2749,37 @@ impl CommitRouter {
                 seq_tx,
                 handle,
                 in_flight: Arc::new(tokio::sync::Semaphore::new(in_flight)),
+                capacity: in_flight,
             }
         } else {
             CommitRouter::Unordered {
                 semaphore: Arc::new(tokio::sync::Semaphore::new(commit_concurrency_limit)),
+                capacity: commit_concurrency_limit,
             }
         }
+    }
+
+    /// Starts a [`FlushGate`] when the publisher defers its commits to a flush. It flushes
+    /// once half the commit slots are held, well before the reader would block on them.
+    fn flush_gate(
+        &self,
+        publisher: &Arc<dyn MessagePublisher>,
+        err_tx: &Sender<anyhow::Error>,
+    ) -> Option<FlushGate> {
+        let interval = publisher.deferred_commit_interval()?;
+        let (capacity, sequencer) = match self {
+            CommitRouter::Ordered {
+                seq_tx, capacity, ..
+            } => (*capacity, Some(seq_tx.clone())),
+            CommitRouter::Unordered { capacity, .. } => (*capacity, None),
+        };
+        Some(FlushGate::spawn(
+            Arc::clone(publisher),
+            interval,
+            capacity / 2,
+            sequencer,
+            err_tx.clone(),
+        ))
     }
 
     /// Wraps a batch commit for its dispatch mode. `seq` and `permit` are only used by
@@ -2733,7 +2809,7 @@ impl CommitRouter {
     fn dispatch_semaphore(&self) -> Option<Arc<tokio::sync::Semaphore>> {
         match self {
             CommitRouter::Ordered { .. } => None,
-            CommitRouter::Unordered { semaphore } => Some(Arc::clone(semaphore)),
+            CommitRouter::Unordered { semaphore, .. } => Some(Arc::clone(semaphore)),
         }
     }
 

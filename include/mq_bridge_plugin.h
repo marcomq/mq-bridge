@@ -46,7 +46,9 @@
 //   services for logs, metrics and crash handlers (`MqbHostVTable`).
 // * **1.3** appended `MqbPluginVTable::publisher_disconnect`, which tells a
 //   publisher how the route pass ended.
-#define MQB_PLUGIN_ABI_MINOR 3
+// * **1.4** appended `MqbPluginVTable::publisher_deferred_commit_interval_ms`,
+//   with which a publisher defers source commits to its next flush.
+#define MQB_PLUGIN_ABI_MINOR 4
 
 // The route pass drained its input to the end.
 #define MQB_DISCONNECT_COMPLETED 0
@@ -341,6 +343,9 @@ typedef MqbStatus (*MqbPublisherDisconnect)(MqbPublisherHandle publisher,
                                             uint32_t outcome,
                                             struct MqbBuffer *err);
 
+// Signature of `MqbPluginVTable::publisher_deferred_commit_interval_ms`.
+typedef uint64_t (*MqbPublisherDeferredCommitInterval)(MqbPublisherHandle publisher);
+
 // The function table a plugin exports through `MQB_PLUGIN_ENTRY_SYMBOL`.
 //
 // Every fallible function takes an `err` out-parameter. On a non-`MQB_OK`
@@ -563,6 +568,9 @@ typedef struct MqbPluginVTable {
   // pass ended (`MQB_DISCONNECT_*`; an unknown value means stopped). Called
   // at most once, before `publisher_close`, which then only releases.
   MqbPublisherDisconnect publisher_disconnect;
+  // Milliseconds after which the route flushes this publisher and only then commits
+  // the source; `0` commits at once. Read once, after `publisher_create`.
+  MqbPublisherDeferredCommitInterval publisher_deferred_commit_interval_ms;
 } MqbPluginVTable;
 
 // Signature of the exported discovery symbol.

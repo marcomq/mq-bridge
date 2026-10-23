@@ -161,6 +161,11 @@ static inline MqbStatus mqb_stub_send_async(MqbPublisherHandle publisher,
                                             MqbCompletion completion) {
     return MQB_ERR_UNSUPPORTED;
 }
+/* Commits run as soon as a send returns. */
+static inline uint64_t mqb_stub_no_deferred_commit(MqbPublisherHandle publisher) {
+    (void)publisher;
+    return 0;
+}
 /* Leaves the teardown to publisher_close, which the host calls afterwards. */
 static inline MqbStatus mqb_stub_disconnect(MqbPublisherHandle publisher, uint32_t outcome,
                                             MqbBuffer *err) {
@@ -221,7 +226,8 @@ static inline MqbStatus mqb_stub_middleware_apply(MqbMiddlewareHandle middleware
     .responses_free = mqb_stub_free, .publisher_status = mqb_stub_status,                   \
     .publisher_send_batch_async = mqb_stub_send_async,                                      \
     .publisher_flush_async = mqb_stub_flush_async,                                          \
-    .publisher_disconnect = mqb_stub_disconnect
+    .publisher_disconnect = mqb_stub_disconnect,                                            \
+    .publisher_deferred_commit_interval_ms = mqb_stub_no_deferred_commit
 
 /* The optional publisher entries: the host then calls publisher_send_batch and
  * publisher_flush on a blocking thread. Set create, the two, close and free. */
@@ -232,7 +238,8 @@ static inline MqbStatus mqb_stub_middleware_apply(MqbMiddlewareHandle middleware
     .responses_free = mqb_stub_free, .publisher_status = mqb_stub_status,                   \
     .publisher_send_batch_async = mqb_stub_send_async,                                      \
     .publisher_flush_async = mqb_stub_flush_async,                                          \
-    .publisher_disconnect = mqb_stub_disconnect
+    .publisher_disconnect = mqb_stub_disconnect,                                            \
+    .publisher_deferred_commit_interval_ms = mqb_stub_no_deferred_commit
 
 #define MQB_NO_MIDDLEWARE                                                                   \
     .middleware_create = mqb_stub_middleware_create,                                        \

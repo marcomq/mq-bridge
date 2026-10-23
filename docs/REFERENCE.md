@@ -58,7 +58,7 @@ layer is the one the route calls directly):
 | Handles the message **first** | last entry, right after the transport | last entry, right after the route / handler |
 | Handles the message **last** | first entry, then the route / handler | first entry, then the transport |
 | Outermost layer | first entry | last entry |
-| Sees the result of | the entries **below** it and the transport | — |
+| Sees the result of | the entries **below** it and the transport | the route / handler result, or the result from the entries **below** it |
 | Sees the failures of | — | the entries **above** it and the transport |
 
 **Reading a list.** Start at the bottom and say what each entry does to the message, in

@@ -635,9 +635,10 @@ existing regular file fails there with "Failed to create part-file sink director
 **Durability of the `file` sink.** By default the sink flushes each batch to the operating
 system and does not call `fsync`, so a power loss can lose batches that were already
 acknowledged. `fsync: batch` syncs the file before each batch is acknowledged; this costs one
-disk sync per batch. `fsync: periodic` syncs in the background every `fsync_interval_ms`
-(default 1000) and bounds the loss to that interval at almost no cost in throughput; a final
-sync runs when the route stops. With either setting, a batch that starts a new file also
+disk sync per batch. `fsync: periodic` syncs every `fsync_interval_ms` (default 1000) at
+almost no cost in throughput, and the route commits the source only after the sync that
+covers a batch, so a power loss loses nothing the source counts as delivered: it redelivers
+those batches instead. A final sync runs when the route stops. With either setting, a batch that starts a new file also
 syncs its directory, so the file itself survives a power loss. `object_store` with a
 `file://` URL always syncs each object and its directory before the write counts as done.
 

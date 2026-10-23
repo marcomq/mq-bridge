@@ -2580,7 +2580,7 @@
           "const": "batch"
         },
         {
-          "description": "In the background every `fsync_interval_ms`; at most that window is at risk.",
+          "description": "Every `fsync_interval_ms`; the source is committed only after the sync.",
           "type": "string",
           "const": "periodic"
         }

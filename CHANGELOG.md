@@ -6,6 +6,15 @@ All notable changes to `mq-bridge`. Newest first.
 
 ### Added
 
+- **Deferred commits.** A publisher whose acks only become durable with its next `flush`
+  returns `Some(interval)` from `MessagePublisher::deferred_commit_interval`. The route then
+  commits the source only after a successful flush, which it runs at least every
+  `interval`; a failed flush commits nothing and the source redelivers. Wrapping middleware
+  forwards the value. Plugins declare it through `publisher_deferred_commit_interval_ms`
+  (plugin ABI 1.4); an older plugin commits at once, as before.
+- **`file` `fsync: periodic` no longer loses acknowledged batches on power loss.** The source
+  is committed only after the sync that covers a batch, instead of right after the write.
+
 - **`${message:payload}` and `| base64` in templates.** The token is the whole payload;
   `| base64` encodes any token as standard base64, the payload as its raw bytes.
 - **`http_bulk` sends payloads that are not JSON.** An `upsert.document` without
@@ -66,6 +75,13 @@ All notable changes to `mq-bridge`. Newest first.
 
 ### Fixed
 
+- **`flush()` reaches the sink through every middleware and structural endpoint.**
+  `retry`, `compression`, `encryption`, `limiter`, `delay`, `metrics`, `cookie_jar`,
+  `random_panic`, `dlq`, `fanout`, `switch` and `request` returned `Ok` without
+  flushing what they wrap, so a `Publisher::flush()` from the API or a binding did nothing.
+- **An output's status shows the sink behind its middleware.** `retry`, `compression`,
+  `encryption`, `limiter`, `delay`, `metrics`, `cookie_jar`, `transform`, `random_panic`
+  and `buffer` reported themselves healthy, even with a broken sink behind them.
 - **`file` `fsync` and `fsync_interval_ms` work in config files.** The URI form and
   `mqb describe` knew them, but a config file failed with "unknown field `fsync` in file
   endpoint".
