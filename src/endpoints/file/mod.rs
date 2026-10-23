@@ -1369,6 +1369,9 @@ impl FilePublisher {
         } else {
             CoveredRanges::default()
         };
+        if config.fsync == FileFsync::Off && !by_source_position {
+            info!(path = %config.path, "File sink does not fsync; an OS crash or power loss can lose acknowledged batches. Set `fsync: periodic` to prevent that");
+        }
         let fsync = match config.fsync {
             FileFsync::Off => FsyncPolicy::Off,
             FileFsync::Batch => FsyncPolicy::Batch,
