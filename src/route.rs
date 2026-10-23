@@ -1222,7 +1222,17 @@ fn sync_file_sinks_behind_saved_position(
         if depth > 16 {
             return Vec::new();
         }
-        match &mut endpoint.endpoint_type {
+        let mut paths: Vec<String> = endpoint
+            .middlewares
+            .iter_mut()
+            .flat_map(|middleware| match middleware {
+                Middleware::Dlq(config) => {
+                    visit(&mut config.endpoint, source_has_position, depth + 1)
+                }
+                _ => Vec::new(),
+            })
+            .collect();
+        paths.extend(match &mut endpoint.endpoint_type {
             EndpointType::File(config) => {
                 // A pipe or terminal cannot be synced; part files always sync.
                 let not_a_file = std::fs::metadata(&config.path).is_ok_and(|m| !m.is_file());
@@ -1230,10 +1240,11 @@ fn sync_file_sinks_behind_saved_position(
                     || not_a_file
                     || config.resolved_name_by(source_has_position) == NameBy::SourcePosition
                 {
-                    return Vec::new();
+                    Vec::new()
+                } else {
+                    config.fsync = crate::models::FileFsync::Periodic;
+                    vec![config.path.clone()]
                 }
-                config.fsync = crate::models::FileFsync::Periodic;
-                vec![config.path.clone()]
             }
             EndpointType::Fanout(outputs) => outputs
                 .iter_mut()
@@ -1252,7 +1263,6 @@ fn sync_file_sinks_behind_saved_position(
                 }
                 paths
             }
-            EndpointType::Reader(output) => visit(output, source_has_position, depth + 1),
             EndpointType::Request(config) => {
                 let mut paths = visit(&mut config.to, source_has_position, depth + 1);
                 paths.extend(visit(
@@ -1276,7 +1286,8 @@ fn sync_file_sinks_behind_saved_position(
                 _ => Vec::new(),
             },
             _ => Vec::new(),
-        }
+        });
+        paths
     }
 
     if !input_saves_position(input, no_resume, 0) {
@@ -3734,6 +3745,21 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+        let with_dlq = endpoint(serde_json::json!({"memory": {"topic": "synced_main"},
+            "middlewares": [{"dlq": {"endpoint": {"file": {"path": "/tmp/mqb-synced-dlq.jsonl"}}}}]
+        }));
+        match sync(&cursor, &with_dlq, false).map(|o| o.middlewares) {
+            Some(middlewares) => match &middlewares[0] {
+                Middleware::Dlq(config) => {
+                    assert_eq!(
+                        fsync_of(&config.endpoint),
+                        crate::models::FileFsync::Periodic
+                    )
+                }
+                other => panic!("{other:?}"),
+            },
+            None => panic!("the dlq file was not upgraded"),
+        }
 
         assert!(
             sync(&cursor, &file("batch"), false).is_none(),
@@ -3741,10 +3767,10 @@ mod tests {
         );
         #[cfg(unix)]
         {
-            let stdout = endpoint(serde_json::json!({"file": {"path": "/dev/stdout"}}));
+            let device = endpoint(serde_json::json!({"file": {"path": "/dev/null"}}));
             assert!(
-                sync(&cursor, &stdout, false).is_none(),
-                "stdout cannot be synced"
+                sync(&cursor, &device, false).is_none(),
+                "a device cannot be synced"
             );
         }
         assert!(

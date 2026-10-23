@@ -665,7 +665,7 @@ covers a batch, so a power loss loses nothing the source counts as delivered: it
 those batches instead. A final sync runs when the route stops. When the input saves its read
 position to a checkpoint or replication slot, `fsync: off` is run as `periodic`, so the saved
 position never gets ahead of the data on disk; a path that is not a regular file, such as
-`/dev/stdout`, is left unsynced. With either setting, a batch that starts a new file also
+`/dev/stdout`, is left unsynced. With `batch` or `periodic`, a batch that starts a new file also
 syncs its directory, so the file itself survives a power loss. `object_store` with a
 `file://` URL always syncs each object and its directory before the write counts as done.
 
