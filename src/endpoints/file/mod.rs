@@ -1208,9 +1208,51 @@ async fn write_finalized_file(path: &Path, body: &[u8]) -> Result<(), PublisherE
     fs::rename(&staging, path)
         .await
         .context("Failed to finalize idempotent file output")?;
-    // Best effort: Windows cannot open a directory handle this way.
-    if let Ok(directory) = File::open(directory).await {
-        let _ = directory.sync_all().await;
+    Ok(())
+}
+
+/// fsyncs `dir` so a new entry in it survives power loss. Windows cannot open a directory
+/// handle this way, and some network or FUSE mounts cannot sync one; both are skipped.
+async fn sync_directory(dir: &Path) -> std::io::Result<()> {
+    let dir = if dir.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        dir
+    };
+    let handle = match File::open(dir).await {
+        Ok(handle) => handle,
+        Err(_) if cfg!(not(unix)) => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    match handle.sync_all().await {
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::InvalidInput | std::io::ErrorKind::Unsupported
+            ) =>
+        {
+            Ok(())
+        }
+        result => result,
+    }
+}
+
+/// `create_dir_all` that also syncs each directory it created into its parent.
+async fn create_dir_all_durable(dir: &Path) -> std::io::Result<()> {
+    let mut created = Vec::new();
+    let mut next = Some(dir);
+    while let Some(d) = next.filter(|d| !d.as_os_str().is_empty()) {
+        if fs::try_exists(d).await? {
+            break;
+        }
+        created.push(d);
+        next = d.parent();
+    }
+    fs::create_dir_all(dir).await?;
+    for d in created {
+        if let Some(parent) = d.parent() {
+            sync_directory(parent).await?;
+        }
     }
     Ok(())
 }
@@ -1319,12 +1361,12 @@ impl FilePublisher {
                 ))
                 .into());
             }
-            tokio::fs::create_dir_all(path).await.with_context(|| {
+            create_dir_all_durable(path).await.with_context(|| {
                 format!("Failed to create part-file sink directory: {path_str}")
             })?;
         }
         if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent).await.with_context(|| {
+            create_dir_all_durable(parent).await.with_context(|| {
                 format!("Failed to create parent directory for file: {:?}", parent)
             })?;
         }
@@ -1428,15 +1470,7 @@ impl FilePublisher {
         }
         if was_empty {
             if let Some(parent) = Path::new(&self.path).parent() {
-                let parent = if parent.as_os_str().is_empty() {
-                    Path::new(".")
-                } else {
-                    parent
-                };
-                // Opening is best effort: Windows cannot open a directory handle this way.
-                if let Ok(directory) = File::open(parent).await {
-                    directory.sync_all().await?;
-                }
+                sync_directory(parent).await?;
             }
         }
         Ok(())
@@ -1476,6 +1510,10 @@ impl FilePublisher {
                 let body = self.encode_member(body)?;
                 write_finalized_file(&final_path, &body).await?;
             }
+            // Also when the file already exists: a retry after a failed sync lands here.
+            sync_directory(Path::new(&self.path))
+                .await
+                .context("Failed to sync part-file sink directory")?;
             covered
                 .insert(run.source, run.start, run.end)
                 .map_err(PublisherError::NonRetryable)?;
@@ -1916,7 +1954,7 @@ impl MessagePublisher for FilePublisher {
             ));
         }
         if let Err(e) = self
-            .sync_written(writer.get_ref(), pre_len == Some(0))
+            .sync_written(writer.get_ref(), pre_len.is_none_or(|len| len == 0))
             .await
         {
             roll_back_partial_batch(
