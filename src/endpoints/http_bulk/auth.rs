@@ -3,18 +3,18 @@
 //  Licensed under MIT OR Apache-2.0, see LICENSE file for more details
 //  git clone https://github.com/marcomq/mq-bridge
 
-//! Credentials `http_bulk` fetches or computes per request: an OAuth2 client
-//! credentials token, or an AWS SigV4 signature.
+//! Credentials `http_bulk` fetches or computes per request: a bearer token from an
+//! OAuth2 client credentials grant or a JSON login, or an AWS SigV4 signature.
 
 use super::quoted;
-use crate::models::{HttpBulkAuth, HttpBulkOAuth2};
+use crate::models::{HttpBulkAuth, HttpBulkLogin, HttpBulkOAuth2};
 use crate::support::http_status;
 use anyhow::{bail, Context};
 use reqwest::header::{HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use reqwest::StatusCode;
 use serde_json::Value;
 use std::fmt;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 use tokio::time::Instant;
 use tracing::warn;
@@ -53,23 +53,33 @@ impl fmt::Display for SendError {
 
 pub(super) enum Auth {
     None,
-    OAuth2(OAuth2),
+    Bearer(Box<TokenSource>),
     #[cfg(feature = "aws")]
     SigV4(Box<sigv4::SigV4>),
 }
 
 impl Auth {
     pub(super) fn new(config: Option<&HttpBulkAuth>, tls_required: bool) -> anyhow::Result<Self> {
-        match config.map(|auth| (&auth.oauth2, &auth.aws_sigv4)) {
-            None | Some((None, None)) => Ok(Self::None),
-            Some((Some(oauth2), None)) => Ok(Self::OAuth2(OAuth2::new(oauth2, tls_required)?)),
+        let Some(auth) = config else {
+            return Ok(Self::None);
+        };
+        match (&auth.oauth2, &auth.aws_sigv4, &auth.login) {
+            (None, None, None) => Ok(Self::None),
+            (Some(oauth2), None, None) => Ok(Self::Bearer(Box::new(TokenSource::oauth2(
+                oauth2,
+                tls_required,
+            )?))),
+            (None, None, Some(login)) => Ok(Self::Bearer(Box::new(TokenSource::login(
+                login,
+                tls_required,
+            )?))),
             #[cfg(feature = "aws")]
-            Some((None, Some(aws))) => Ok(Self::SigV4(Box::new(sigv4::SigV4::new(aws)?))),
+            (None, Some(aws), None) => Ok(Self::SigV4(Box::new(sigv4::SigV4::new(aws)?))),
             #[cfg(not(feature = "aws"))]
-            Some((None, Some(_))) => {
+            (None, Some(_), None) => {
                 bail!("http_bulk auth.aws_sigv4 needs a build with the 'aws' feature")
             }
-            Some((Some(_), Some(_))) => bail!("http_bulk auth sets both 'oauth2' and 'aws_sigv4'"),
+            _ => bail!("http_bulk auth sets more than one of 'oauth2', 'aws_sigv4' and 'login'"),
         }
     }
 
@@ -82,9 +92,9 @@ impl Auth {
     ) -> Result<reqwest::Response, SendError> {
         match self {
             Self::None => request.send().await.map_err(SendError::transport),
-            Self::OAuth2(oauth2) => {
+            Self::Bearer(source) => {
                 let again = request.try_clone();
-                let token = oauth2.token(http).await?;
+                let token = source.token(http).await?;
                 let response = request
                     .header(AUTHORIZATION, token.clone())
                     .send()
@@ -92,8 +102,8 @@ impl Auth {
                     .map_err(SendError::transport)?;
                 match again {
                     Some(again) if response.status() == StatusCode::UNAUTHORIZED => {
-                        oauth2.forget(&token).await;
-                        let token = oauth2.token(http).await?;
+                        source.forget(&token).await;
+                        let token = source.token(http).await?;
                         let again = again.header(AUTHORIZATION, token);
                         again.send().await.map_err(SendError::transport)
                     }
@@ -115,30 +125,48 @@ struct Token {
     refresh_at: Option<Instant>,
 }
 
-pub(super) struct OAuth2 {
-    token_url: String,
-    form: String,
+/// Where the token response tells how long the token lives.
+enum Expiry {
+    /// Seconds from now.
+    In(String),
+    /// Unix seconds.
+    At(String),
+}
+
+/// A request that hands out a bearer token: OAuth2 client credentials or a JSON login.
+pub(super) struct TokenSource {
+    /// Names the request in errors, e.g. `OAuth2 token`.
+    label: &'static str,
+    url: String,
+    content_type: &'static str,
+    body: String,
+    /// JSON pointer to the token in the response.
+    pointer: String,
+    expiry: Option<Expiry>,
     token: Mutex<Option<Token>>,
 }
 
-impl OAuth2 {
-    fn new(config: &HttpBulkOAuth2, tls_required: bool) -> anyhow::Result<Self> {
-        let url = url::Url::parse(&config.token_url)
-            .context("http_bulk auth.oauth2.token_url is not a URL")?;
-        if !matches!(url.scheme(), "http" | "https") {
-            bail!("http_bulk auth.oauth2.token_url must be an http(s) URL");
+/// Checks a token or login URL; `field` names it in errors.
+fn check_url(raw: &str, field: &str, tls_required: bool) -> anyhow::Result<()> {
+    let url = url::Url::parse(raw).with_context(|| format!("http_bulk {field} is not a URL"))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        bail!("http_bulk {field} must be an http(s) URL");
+    }
+    if url.scheme() == "http" {
+        if tls_required {
+            bail!("http_bulk tls.required needs an https {field}");
         }
-        if url.scheme() == "http" {
-            if tls_required {
-                bail!("http_bulk tls.required needs an https auth.oauth2.token_url");
-            }
-            if !super::is_loopback(&url) {
-                warn!(
-                    token_url = %config.token_url,
-                    "http_bulk sends the OAuth2 client secret unencrypted; use an https token_url"
-                );
-            }
+        if !super::is_loopback(&url) {
+            let shown = crate::support::redact::url_password(raw);
+            warn!(url = %shown, "http_bulk sends credentials unencrypted to {field}; use https");
         }
+    }
+    Ok(())
+}
+
+impl TokenSource {
+    fn oauth2(config: &HttpBulkOAuth2, tls_required: bool) -> anyhow::Result<Self> {
+        check_url(&config.token_url, "auth.oauth2.token_url", tls_required)?;
         let mut form = url::form_urlencoded::Serializer::new(String::new());
         form.append_pair("grant_type", "client_credentials")
             .append_pair("client_id", &config.client_id)
@@ -147,8 +175,43 @@ impl OAuth2 {
             form.append_pair("scope", scope);
         }
         Ok(Self {
-            token_url: config.token_url.clone(),
-            form: form.finish(),
+            label: "OAuth2 token",
+            url: config.token_url.clone(),
+            content_type: "application/x-www-form-urlencoded",
+            body: form.finish(),
+            pointer: "/access_token".to_string(),
+            expiry: Some(Expiry::In("/expires_in".to_string())),
+            token: Mutex::new(None),
+        })
+    }
+
+    fn login(config: &HttpBulkLogin, tls_required: bool) -> anyhow::Result<Self> {
+        check_url(&config.url, "auth.login.url", tls_required)?;
+        serde_json::from_str::<serde::de::IgnoredAny>(&config.body)
+            .context("http_bulk auth.login.body is not JSON")?;
+        let pointers = [
+            Some(&config.token),
+            config.expires_at.as_ref(),
+            config.expires_in.as_ref(),
+        ];
+        if pointers.into_iter().flatten().any(|p| !p.starts_with('/')) {
+            bail!("http_bulk auth.login token, expires_at and expires_in are JSON pointers starting with '/'");
+        }
+        let expiry = match (&config.expires_at, &config.expires_in) {
+            (Some(_), Some(_)) => {
+                bail!("http_bulk auth.login sets both 'expires_at' and 'expires_in'")
+            }
+            (Some(at), None) => Some(Expiry::At(at.clone())),
+            (None, Some(lifetime)) => Some(Expiry::In(lifetime.clone())),
+            (None, None) => None,
+        };
+        Ok(Self {
+            label: "login",
+            url: config.url.clone(),
+            content_type: "application/json",
+            body: config.body.clone(),
+            pointer: config.token.clone(),
+            expiry,
             token: Mutex::new(None),
         })
     }
@@ -177,14 +240,15 @@ impl OAuth2 {
     }
 
     async fn fetch(&self, http: &reqwest::Client) -> Result<Token, SendError> {
+        let label = self.label;
         let failed = |error: reqwest::Error| SendError {
             retryable: true,
-            text: format!("the OAuth2 token request failed: {error}"),
+            text: format!("the {label} request failed: {error}"),
         };
         let response = http
-            .post(&self.token_url)
-            .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
-            .body(self.form.clone())
+            .post(&self.url)
+            .header(CONTENT_TYPE, self.content_type)
+            .body(self.body.clone())
             .send()
             .await
             .map_err(failed)?;
@@ -193,26 +257,42 @@ impl OAuth2 {
         if !status.is_success() {
             return Err(SendError {
                 retryable: http_status::is_retryable(status.as_u16()),
-                text: format!(
-                    "the OAuth2 token request answered {status}: {}",
-                    quoted(&text)
-                ),
+                text: format!("the {label} request answered {status}: {}", quoted(&text)),
             });
         }
         let answer: Value = serde_json::from_str(&text).unwrap_or_default();
-        let Some(token) = answer.get("access_token").and_then(Value::as_str) else {
-            return Err(SendError::permanent(
-                "the OAuth2 token response has no 'access_token'".to_string(),
-            ));
+        let Some(token) = answer.pointer(&self.pointer).and_then(Value::as_str) else {
+            return Err(SendError::permanent(format!(
+                "the {label} response has no token at '{}'",
+                self.pointer
+            )));
         };
         let mut header = HeaderValue::from_str(&format!("Bearer {token}")).map_err(|_| {
-            SendError::permanent("the OAuth2 access token is not a valid header value".to_string())
+            SendError::permanent(format!("the {label} token is not a valid header value"))
         })?;
         header.set_sensitive(true);
-        let lifetime = match answer.get("expires_in") {
-            Some(Value::Number(seconds)) => seconds.as_u64(),
-            Some(Value::String(seconds)) => seconds.parse().ok(),
+        let seconds = |pointer: &str| match answer.pointer(pointer) {
+            Some(Value::Number(seconds)) => seconds
+                .as_u64()
+                .or_else(|| seconds.as_f64().filter(|s| *s >= 0.0).map(|s| s as u64)),
+            Some(Value::String(seconds)) => seconds.parse().ok().or_else(|| {
+                seconds
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|s| *s >= 0.0)
+                    .map(|s| s as u64)
+            }),
             _ => None,
+        };
+        let lifetime = match &self.expiry {
+            Some(Expiry::In(pointer)) => seconds(pointer),
+            Some(Expiry::At(pointer)) => seconds(pointer).map(|at| {
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default();
+                at.saturating_sub(now.as_secs())
+            }),
+            None => None,
         };
         let refresh_at = lifetime.map(Duration::from_secs).map(|lifetime| {
             Instant::now() + lifetime.saturating_sub(REFRESH_MARGIN).max(lifetime / 2)
@@ -541,7 +621,99 @@ mod tests {
         });
         let config: HttpBulkConfig = serde_json::from_value(config).unwrap();
         let error = HttpBulkPublisher::new(&config).map(|_| ()).unwrap_err();
-        assert!(error.to_string().contains("both"), "{error}");
+        assert!(error.to_string().contains("more than one"), "{error}");
+    }
+
+    /// A login answering like Iggy: the token and its absolute expiry, nested.
+    fn login_issuer(lifetime: u64) -> impl Fn(&StubRequest) -> (u16, String) + Send + Sync {
+        let issued = Arc::new(AtomicUsize::new(0));
+        move |request| {
+            if request.target != "/users/login" {
+                return (200, "{}".to_string());
+            }
+            let number = issued.fetch_add(1, Ordering::SeqCst) + 1;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            let answer = json!({"user_id": 1, "access_token": {
+                "token": format!("token-{number}"), "expiry": now + lifetime
+            }});
+            (200, answer.to_string())
+        }
+    }
+
+    fn login(server: &StubHttpServer) -> Value {
+        json!({"login": {
+            "url": format!("{}/users/login", server.url()),
+            "body": r#"{"username":"bridge","password":"pw"}"#,
+            "token": "/access_token/token",
+            "expires_at": "/access_token/expiry"
+        }})
+    }
+
+    #[tokio::test]
+    async fn a_login_token_is_read_by_pointer_and_replaced_at_its_expiry() {
+        for (lifetime, logins) in [(3600, 1), (0, 2)] {
+            let server = server(login_issuer(lifetime)).await;
+            let publisher = publisher(&server, login(&server));
+            for id in 1..=2 {
+                let document = format!(r#"{{"id":{id}}}"#);
+                publisher
+                    .send_batch(vec![document.as_str().into()])
+                    .await
+                    .unwrap();
+            }
+
+            let requests = server.requests();
+            assert_eq!(requests[0].header("content-type"), Some("application/json"));
+            assert_eq!(
+                requests[0].body,
+                br#"{"username":"bridge","password":"pw"}"#
+            );
+            let sent = targets(&server);
+            let count = sent.iter().filter(|(t, _)| t == "/users/login").count();
+            assert_eq!(count, logins, "lifetime {lifetime}: {sent:?}");
+            assert_eq!(sent[1].1, "Bearer token-1");
+        }
+    }
+
+    #[test]
+    fn a_bad_login_configuration_is_refused() {
+        let login = |extra: Value| {
+            let mut login = json!({"url": "http://localhost:1/login", "body": "{}", "token": "/t"});
+            login
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            login
+        };
+        for (auth, reason) in [
+            (
+                json!({"login": login(json!({"body": "user=a"}))}),
+                "not JSON",
+            ),
+            (
+                json!({"login": login(json!({"token": "t"}))}),
+                "JSON pointers",
+            ),
+            (
+                json!({"login": login(json!({"expires_at": "/a", "expires_in": "/b"}))}),
+                "both",
+            ),
+            (
+                json!({"login": login(json!({})), "oauth2": {
+                    "token_url": "http://localhost:1/t", "client_id": "a", "client_secret": "b"
+                }}),
+                "more than one",
+            ),
+        ] {
+            let config =
+                json!({"url": "http://localhost:1", "upsert": {"path": "/d"}, "auth": auth});
+            let config: HttpBulkConfig = serde_json::from_value(config).unwrap();
+            let error = HttpBulkPublisher::new(&config).map(|_| ()).unwrap_err();
+            assert!(format!("{error:#}").contains(reason), "{error:#}");
+        }
     }
 
     #[cfg(feature = "aws")]

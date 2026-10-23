@@ -11,12 +11,10 @@ Use one as a route `output`:
 
 ```yaml
 output:
-  custom:
-    name: connect
-    config:
-      connector: mqtt          # the component name below
-      urls: ["tcp://localhost:1883"]
-      topic: "orders"
+  connect:
+    connector: mqtt          # the component name below
+    urls: ["tcp://localhost:1883"]
+    topic: "orders"
 ```
 
 | Category | Components |

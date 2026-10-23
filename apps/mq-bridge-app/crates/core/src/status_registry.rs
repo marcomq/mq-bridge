@@ -259,6 +259,28 @@ fn private_dir_builder() -> fs::DirBuilder {
     builder
 }
 
+/// The per-user private temp dir `$TMPDIR` normally points at. MCP clients often
+/// launch servers with a scrubbed environment that lacks `$TMPDIR`.
+#[cfg(target_os = "macos")]
+fn darwin_user_temp_dir() -> Option<PathBuf> {
+    let mut buf = vec![0 as libc::c_char; libc::PATH_MAX as usize];
+    // SAFETY: `buf` is writable for `buf.len()` bytes; confstr NUL-terminates
+    // within that length and returns the needed size (0 on failure).
+    let needed =
+        unsafe { libc::confstr(libc::_CS_DARWIN_USER_TEMP_DIR, buf.as_mut_ptr(), buf.len()) };
+    if needed == 0 || needed > buf.len() {
+        return None;
+    }
+    // SAFETY: confstr succeeded, so `buf` holds a NUL-terminated string.
+    let path = unsafe { std::ffi::CStr::from_ptr(buf.as_ptr()) };
+    path.to_str().ok().map(PathBuf::from)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn darwin_user_temp_dir() -> Option<PathBuf> {
+    None
+}
+
 pub trait StatusRegistry: Send + Sync {
     fn publish(&self, status: &InstanceStatus) -> Result<()>;
     fn remove(&self, instance_id: &str) -> Result<()>;
@@ -275,7 +297,9 @@ impl LocalStatusRegistry {
         let base = if cfg!(windows) {
             std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
         } else if cfg!(target_os = "macos") {
-            std::env::var_os("TMPDIR").map(PathBuf::from)
+            std::env::var_os("TMPDIR")
+                .map(PathBuf::from)
+                .or_else(darwin_user_temp_dir)
         } else {
             std::env::var_os("XDG_RUNTIME_DIR")
                 .or_else(|| std::env::var_os("TMPDIR"))
@@ -618,6 +642,33 @@ pub fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_registry_dir_does_not_need_tmpdir_on_macos() {
+        const CHILD: &str = "MQB_STATUS_REGISTRY_NO_TMPDIR_CHILD";
+        let expected = if std::env::var_os(CHILD).is_some() {
+            assert!(std::env::var_os("TMPDIR").is_none());
+            darwin_user_temp_dir().expect("macOS reports a user temp dir")
+        } else if let Some(tmpdir) = std::env::var_os("TMPDIR") {
+            // The confstr fallback runs in a child process without TMPDIR.
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "status_registry::tests::the_registry_dir_does_not_need_tmpdir_on_macos",
+                ])
+                .env(CHILD, "1")
+                .env_remove("TMPDIR")
+                .status()
+                .unwrap();
+            assert!(status.success(), "the TMPDIR-less child failed");
+            PathBuf::from(tmpdir)
+        } else {
+            darwin_user_temp_dir().expect("macOS reports a user temp dir")
+        };
+        let registry = LocalStatusRegistry::new().unwrap();
+        assert!(registry.directory().starts_with(&expected));
+    }
 
     #[test]
     fn stale_and_malformed_records_are_ignored() {

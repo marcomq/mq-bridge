@@ -699,6 +699,14 @@ struct ObjProgress {
     remaining: usize,
 }
 
+/// A fetched object's first records, its record count, and the Parquet rows still to decode.
+struct DecodedObject {
+    records: Vec<CanonicalMessage>,
+    total: usize,
+    #[cfg(feature = "parquet")]
+    rows: Option<crate::support::parquet::RowStream>,
+}
+
 /// Reads objects under a prefix in key order, resuming from a durable cursor.
 pub struct ObjectStoreConsumer {
     store: Arc<dyn ObjectStore>,
@@ -720,6 +728,9 @@ pub struct ObjectStoreConsumer {
     buffer: Arc<Mutex<Vec<CanonicalMessage>>>,
     /// Set while an object is in flight (buffered or awaiting commits); cleared when fully acked.
     progress: Arc<Mutex<Option<ObjProgress>>>,
+    /// Rows of the current Parquet object not decoded yet.
+    #[cfg(feature = "parquet")]
+    rows: Option<crate::support::parquet::RowStream>,
     idle_delay: Duration,
     /// Reject objects larger than this many bytes rather than buffering them whole; `None` = no limit.
     max_object_bytes: Option<u64>,
@@ -911,6 +922,8 @@ impl ObjectStoreConsumer {
             last_key: Arc::new(Mutex::new(last_key)),
             buffer: Arc::new(Mutex::new(Vec::new())),
             progress: Arc::new(Mutex::new(None)),
+            #[cfg(feature = "parquet")]
+            rows: None,
             idle_delay: Duration::from_millis(config.polling_interval_ms.unwrap_or(1000)),
             max_object_bytes: config.max_object_bytes,
             decode_failures: 0,
@@ -952,6 +965,8 @@ impl ObjectStoreConsumer {
             last_key: Arc::new(Mutex::new(last_key)),
             buffer: Arc::new(Mutex::new(Vec::new())),
             progress: Arc::new(Mutex::new(None)),
+            #[cfg(feature = "parquet")]
+            rows: None,
             idle_delay: Duration::from_millis(10),
             max_object_bytes: None,
             decode_failures: 0,
@@ -973,7 +988,7 @@ impl ObjectStoreConsumer {
     async fn next_object(
         &mut self,
         last: Option<&str>,
-    ) -> anyhow::Result<Option<(String, Vec<u8>)>> {
+    ) -> anyhow::Result<Option<(String, bytes::Bytes)>> {
         // An exact key may be written after the consumer starts; decide on first sight.
         if self.single_object.is_none() {
             let listed = self.store.list(Some(&self.base)).next().await.transpose()?;
@@ -1042,13 +1057,7 @@ impl ObjectStoreConsumer {
                     ))));
                 }
             }
-            let data = self
-                .store
-                .get(&meta.location)
-                .await?
-                .bytes()
-                .await?
-                .to_vec();
+            let data = self.store.get(&meta.location).await?.bytes().await?;
             // Decode (decrypt/decompress) is deferred to `receive_batch` so a poison
             // object is bounded-retried then quarantined rather than blocking forever.
             return Ok(Some((key, data)));
@@ -1069,44 +1078,111 @@ impl ObjectStoreConsumer {
     }
 
     /// Decodes a fetched object into its messages: decrypt, decompress, then split and parse.
-    fn decode_records(&self, key: &str, data: Vec<u8>) -> anyhow::Result<Vec<CanonicalMessage>> {
+    /// A Parquet object yields its first chunk here; the rest is decoded as it is consumed.
+    fn decode_records(&self, key: &str, data: bytes::Bytes) -> anyhow::Result<DecodedObject> {
         let data = self.decode_object(key, data)?;
         #[cfg(feature = "parquet")]
         if self.format == FileFormat::Parquet {
-            return crate::support::parquet::decode_rows(data, self.decompressed_limit())
-                .with_context(|| format!("decode parquet object '{key}'"));
+            let decode = || -> anyhow::Result<DecodedObject> {
+                let mut rest =
+                    crate::support::parquet::RowStream::open(data, self.decompressed_limit())?;
+                let records = rest.next_chunk().transpose()?.unwrap_or_default();
+                Ok(DecodedObject {
+                    records,
+                    total: rest.rows(),
+                    rows: Some(rest),
+                })
+            };
+            return decode().with_context(|| format!("decode parquet object '{key}'"));
         }
-        Ok(split_and_parse(
-            &data,
-            &self.delimiter,
-            &self.format,
-            &self.csv,
-        ))
+        let records = split_and_parse(&data, &self.delimiter, &self.format, &self.csv);
+        Ok(DecodedObject {
+            total: records.len(),
+            records,
+            #[cfg(feature = "parquet")]
+            rows: None,
+        })
     }
 
     /// Decrypt-then-decompress a fetched object whole (the write path compressed first).
     #[allow(unused_variables)]
-    fn decode_object(&self, key: &str, data: Vec<u8>) -> anyhow::Result<Vec<u8>> {
+    fn decode_object(&self, key: &str, data: bytes::Bytes) -> anyhow::Result<bytes::Bytes> {
         #[cfg(feature = "encryption")]
         let data = if let Some(crypto) = &self.crypto {
-            crypto
-                .open(&data, b"")
-                .with_context(|| format!("decrypt object '{key}'"))?
+            bytes::Bytes::from(
+                crypto
+                    .open(&data, b"")
+                    .with_context(|| format!("decrypt object '{key}'"))?,
+            )
         } else {
             data
         };
         #[cfg(feature = "compression")]
         let data = if self.compression != Compression::None && self.format != FileFormat::Parquet {
-            crate::support::compression::decompress_all(
-                self.compression,
-                &data,
-                self.decompressed_limit(),
+            bytes::Bytes::from(
+                crate::support::compression::decompress_all(
+                    self.compression,
+                    &data,
+                    self.decompressed_limit(),
+                )
+                .with_context(|| format!("decompress object '{key}'"))?,
             )
-            .with_context(|| format!("decompress object '{key}'"))?
         } else {
             data
         };
         Ok(data)
+    }
+
+    /// Tops the buffer up to `max_messages` from the open Parquet object. Once it is
+    /// exhausted, its unread rows no longer hold the cursor back.
+    #[cfg(feature = "parquet")]
+    async fn fill_from_rows(&mut self, max_messages: usize) -> Result<(), ConsumerError> {
+        let Some(rows) = self.rows.as_mut() else {
+            return Ok(());
+        };
+        let mut buffer = self.buffer.lock().await;
+        let failure = loop {
+            if buffer.len() >= max_messages {
+                return Ok(());
+            }
+            match rows.next_chunk() {
+                Some(Ok(chunk)) => buffer.extend(chunk),
+                Some(Err(e)) => break Some(e),
+                None => break None,
+            }
+        };
+        drop(buffer);
+        // Lock first: a cancel at this await must not drop the stream with its rows uncounted.
+        let mut progress = self.progress.lock().await;
+        let unread = rows.unread();
+        self.rows = None;
+        let Some(p) = progress.as_mut() else {
+            return Ok(());
+        };
+        if let Some(e) = failure {
+            if self.on_decode_error == DecodeErrorPolicy::Fail {
+                return Err(ConsumerError::Permanent(anyhow!(
+                    "parquet object '{}' cannot be decoded (on_decode_error: fail): {e:#}",
+                    p.key
+                )));
+            }
+            warn!(
+                key = %p.key,
+                error = %e,
+                skipped_rows = unread,
+                "parquet object failed to decode part way; skipping its remaining rows"
+            );
+        }
+        p.remaining = p.remaining.saturating_sub(unread);
+        if p.remaining == 0 {
+            let key = p.key.clone();
+            *progress = None;
+            drop(progress);
+            self.save_cursor(&key)
+                .await
+                .map_err(ConsumerError::Connection)?;
+        }
+        Ok(())
     }
 
     /// Persists the resume cursor durably, then advances the in-memory cursor. The durable
@@ -1134,6 +1210,8 @@ impl MessageConsumer for ObjectStoreConsumer {
         // in-flight commits). This keeps objects from interleaving so the cursor advances
         // strictly in key order.
         loop {
+            #[cfg(feature = "parquet")]
+            self.fill_from_rows(max_messages).await?;
             let buffer_empty = self.buffer.lock().await.is_empty();
             let in_flight = self.progress.lock().await.is_some();
             if buffer_empty && !in_flight {
@@ -1162,12 +1240,12 @@ impl MessageConsumer for ObjectStoreConsumer {
                     Some((key, raw)) => {
                         // Decode here so a poison object is bounded-retried then
                         // quarantined (cursor advanced past it) rather than looping forever.
-                        let records = match self.decode_records(&key, raw) {
-                            Ok(records) => {
+                        let decoded = match self.decode_records(&key, raw) {
+                            Ok(decoded) => {
                                 self.decode_failing_key = None;
                                 self.decode_failures = 0;
                                 self.decoded_any = true;
-                                records
+                                decoded
                             }
                             Err(e) => {
                                 if self.decode_failing_key.as_deref() == Some(key.as_str()) {
@@ -1221,7 +1299,7 @@ impl MessageConsumer for ObjectStoreConsumer {
                                 return Ok(empty_batch());
                             }
                         };
-                        if records.is_empty() {
+                        if decoded.total == 0 {
                             // No data records (e.g. a lone CSV header): advance past it so we
                             // don't re-list it forever, and go on with the next object.
                             self.save_cursor(&key)
@@ -1229,9 +1307,16 @@ impl MessageConsumer for ObjectStoreConsumer {
                                 .map_err(ConsumerError::Connection)?;
                             continue;
                         }
-                        let n = records.len();
-                        *self.buffer.lock().await = records;
-                        *self.progress.lock().await = Some(ObjProgress { key, remaining: n });
+                        *self.buffer.lock().await = decoded.records;
+                        *self.progress.lock().await = Some(ObjProgress {
+                            key,
+                            remaining: decoded.total,
+                        });
+                        #[cfg(feature = "parquet")]
+                        {
+                            self.rows = decoded.rows;
+                        }
+                        continue;
                     }
                 }
             } else if buffer_empty {
@@ -2814,6 +2899,94 @@ mod tests {
             (batch.commit)(vec![MessageDisposition::Ack; 3])
                 .await
                 .unwrap();
+        }
+    }
+
+    #[cfg(feature = "parquet")]
+    #[tokio::test]
+    async fn parquet_object_is_decoded_as_it_is_consumed() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let rows: Vec<_> = (0..200).map(|i| serde_json::json!({"id": i})).collect();
+        let body = crate::support::parquet::encode_rows(&rows, Compression::None).unwrap();
+        store
+            .put(&ObjPath::from("data/a.parquet"), PutPayload::from(body))
+            .await
+            .unwrap();
+        let mut consumer = ObjectStoreConsumer::from_store(
+            store,
+            ObjPath::from("data"),
+            FileFormat::Parquet,
+            None,
+            None,
+        );
+        let mut ids = Vec::new();
+        while ids.len() < rows.len() {
+            let batch = consumer.receive_batch(50).await.unwrap();
+            assert!(!batch.messages.is_empty() && batch.messages.len() <= 50);
+            assert!(consumer.buffer.lock().await.len() < 64, "decoded ahead");
+            assert_eq!(*consumer.last_key.lock().await, None, "cursor moved early");
+            for message in &batch.messages {
+                let row: serde_json::Value = serde_json::from_slice(&message.payload).unwrap();
+                ids.push(row["id"].as_i64().unwrap());
+            }
+            (batch.commit)(vec![MessageDisposition::Ack; batch.messages.len()])
+                .await
+                .unwrap();
+        }
+        assert_eq!(ids, (0..200).collect::<Vec<_>>());
+        assert_eq!(
+            consumer.last_key.lock().await.as_deref(),
+            Some("data/a.parquet")
+        );
+    }
+
+    #[cfg(feature = "parquet")]
+    #[tokio::test]
+    async fn parquet_object_failing_part_way_follows_on_decode_error() {
+        let pad = "x".repeat(20_000);
+        let rows: Vec<_> = (0..128)
+            .map(|i| serde_json::json!({"id": i, "pad": if i < 64 { "" } else { pad.as_str() }}))
+            .collect();
+        let body = crate::support::parquet::encode_rows(&rows, Compression::Zstd).unwrap();
+        // The second chunk decodes past the per-chunk bound, the first does not.
+        let max_object_bytes = body.len() as u64;
+        assert!(max_object_bytes * 20 < 64 * 20_000);
+        for policy in [DecodeErrorPolicy::Skip, DecodeErrorPolicy::Fail] {
+            let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+            store
+                .put(
+                    &ObjPath::from("data/a.parquet"),
+                    PutPayload::from(body.clone()),
+                )
+                .await
+                .unwrap();
+            let mut consumer = ObjectStoreConsumer::from_store(
+                store,
+                ObjPath::from("data"),
+                FileFormat::Parquet,
+                None,
+                None,
+            );
+            consumer.max_object_bytes = Some(max_object_bytes);
+            consumer.on_decode_error = policy;
+
+            let first = consumer.receive_batch(64).await.unwrap();
+            assert_eq!(first.messages.len(), 64);
+            (first.commit)(vec![MessageDisposition::Ack; 64])
+                .await
+                .unwrap();
+            let next = consumer.receive_batch(64).await;
+            let last_key = consumer.last_key.lock().await.clone();
+            match policy {
+                DecodeErrorPolicy::Skip => {
+                    assert!(next.unwrap().messages.is_empty());
+                    assert_eq!(last_key.as_deref(), Some("data/a.parquet"));
+                }
+                DecodeErrorPolicy::Fail => {
+                    assert!(matches!(next, Err(ConsumerError::Permanent(_))));
+                    assert_eq!(last_key, None);
+                }
+            }
         }
     }
 

@@ -22,7 +22,7 @@ engine moves the bytes. Moving a 116.3 MiB dataset costs three tool calls and
 | | Registry name | `io.github.marcomq/mq-bridge` |
 | --- | --- | --- |
 | **Transports** | `stdio`, streamable HTTP | |
-| **Tools** | 9 (11 with `--agent-bus`) | [see below](#tools) |
+| **Tools** | 11 (13 with `--agent-bus`) | [see below](#tools) |
 | **Connectors** | 15+ | [see below](#endpoints) |
 | **Install** | `mqb mcp install` | Docker / cargo / Homebrew / binaries — [Installation](INSTALL.md) |
 
@@ -73,11 +73,12 @@ transport owns stdout for the protocol itself.
 | `publish` | `publisher`, `message` \| `messages`, `name` | Send one message or a batch to any endpoint. Independent of routes. |
 | `start_route` | `route` (`input`/`output`), `name`, `batch_size`, `concurrency`, `capture_last` | Run a route moving messages from source to sink. Returns the route name. |
 | `generate_cli_command` | `route` (`input`/`output`), `name`, `batch_size`, `concurrency` | Render the same route as a copyable headless `mqb` command, with credentials replaced by environment variable placeholders. Starts nothing. |
+| `describe` | `name` (optional) | The connector types and middlewares this build supports, with their config fields. The same data as `mqb list --json` / `mqb describe <name> --json`. |
 | `list_routes` | — | Every route started by this server, with live connection health and rates. |
 | `route_status` | `name` (optional) | Health, totals and rates for one route, or all of them. |
 | `wait_route` | `name`, `timeout_ms` | Block until a route finishes, then report how it ended. One call instead of a polling loop. |
 | `route_messages` | `name` | The most recent messages captured on a route. Requires `capture_last`; reads drain the buffer. |
-| `stop_route` | `name` | Stop a route; returns total messages and the rate it achieved. |
+| `stop_route` | `name` | Stop a route; returns total messages and the rate it achieved. Returns without waiting for the route to exit, and discards captured messages not yet read. |
 | `bridge_status` | — | Every mq-bridge process of this user on this machine (CLI copies, web UI, desktop app, other MCP servers) with the state, rates and totals of its routes. Read-only; the same records as `mqb status --json`. |
 | `server_info` | — | Crate version, git hash, build profile and build time, plus the agent bus when it is on. |
 | `agent_listen` | `name`, `input`, `capture_last` | **`--agent-bus` only.** Open this server's agent inbox so other agents can reach it. Off until called. |
@@ -85,6 +86,12 @@ transport owns stdout for the protocol itself.
 
 Call `server_info` before quoting any throughput number: a debug binary reports
 much slower rates, and the figure would be meaningless.
+
+The tool list a client loads is about 17 KB. The endpoint arguments (`publisher`,
+`route.input`, `route.output`) are typed only as an object keyed by connector
+type, not with every connector's config fields: those would add about 170 KB per
+tool. The model asks `describe` for the fields of the connector it is about to
+use, and the server still validates the full config on every call.
 
 ### Agent messaging
 

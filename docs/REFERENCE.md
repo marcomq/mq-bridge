@@ -32,17 +32,71 @@ my_route:
 
 ### Ordering — read this before combining middleware
 
-**Output (publisher) middlewares wrap in list order, so the *last* entry is the outermost
-layer and sees the failures of the ones before it.** Put `dlq` last.
+**One rule covers both sides: a message passes a `middlewares:` list from the bottom up.**
+The *last* entry handles the message first, the *first* entry handles it last. That holds
+on an input and on an output alike.
 
-**Input (consumer) middlewares are applied in reverse, so the *first* entry is outermost.**
-An incoming message passes the *last* entry first and the first entry last: list
-`[aggregate, deduplication]` to drop duplicates before they are counted.
+What differs between the two sides is where the list is attached. The message travels in
+opposite directions, so the transport sits at the bottom of an input list and at the top of
+an output list:
 
-**Consequence: a route that reads back what another route wrote needs the *reversed* list.**
-Writing with `[compression, encryption]` produces `compress(encrypt(payload))`; a reader
-given that same list would try to decrypt first and fail. The reading route must say
-`[encryption, compression]`. The lists mirror — they are not copied.
+```text
+        INPUT endpoint                         OUTPUT endpoint
+
+   route / handler        ▲             transport (kafka, file, …)  ▲
+   - first entry          │             - first entry               │
+   - second entry         │  message    - second entry              │  message
+   - last entry           │  moves up   - last entry                │  moves up
+   transport (kafka, …)   │             route / handler             │
+```
+
+The same picture as a table, plus the term used in code and error messages (the *outermost*
+layer is the one the route calls directly):
+
+| | Input list | Output list |
+|---|---|---|
+| Handles the message **first** | last entry, right after the transport | last entry, right after the route / handler |
+| Handles the message **last** | first entry, then the route / handler | first entry, then the transport |
+| Outermost layer | first entry | last entry |
+| Sees the result of | the entries **below** it and the transport | the route / handler result, or the result from the entries **below** it |
+| Sees the failures of | — | the entries **above** it and the transport |
+
+**Reading a list.** Start at the bottom and say what each entry does to the message, in
+that order. On an output, a failure then travels back *down* the same list: every entry
+below the one that failed sees it, the ones above do not.
+
+```yaml
+# Output. Read bottom-up: dlq hands on, retry hands on, transform validates, transport sends.
+# A rejection by transform (or a failed send) travels back down: retry gives up, dlq captures.
+middlewares:
+  - transform: { schema_file: "user.json" }
+  - retry: { max_attempts: 3 }
+  - dlq: { endpoint: { file: { path: "rejected.jsonl" } } }
+```
+
+What follows from the rule:
+
+- **Output: list a middleware *after* the ones whose failures it should handle.** `retry`
+  goes after what it retries, `dlq` goes last. Swapped (`[dlq, retry]`), `retry` sits
+  outside `dlq`: a retryable failure passes `dlq` untouched, `retry` exhausts its attempts,
+  and the exhausted failure never comes back through `dlq`. It goes to the route instead,
+  which nacks it.
+- **Output: a batching middleware goes last.** `buffer` must handle the message before
+  `pack` so that `pack` gets a full batch: `[compression, pack, buffer]` (see [`pack`](#pack)).
+- **Input: list a middleware *before* the ones whose result it should see.**
+  `[aggregate, deduplication]` drops duplicates first and counts only what is left. The
+  reverse would count every duplicate.
+- **A route that reads back what another route wrote needs the *reversed* list.** Writing
+  with `[compression, encryption]` encrypts first and compresses last, producing
+  `compress(encrypt(payload))`. To undo that, the reader must decompress first and decrypt
+  last, so `compression` has to be at the bottom of the input list: `[encryption,
+  compression]`. Copying the writer's list would try to decrypt first and fail on the first
+  message. The lists mirror — they are not copied. See
+  [compress-then-encrypt over the wire](#compress-then-encrypt-over-the-wire) for the full
+  stack.
+- **Endpoints nested inside a middleware or structural endpoint have their own list**
+  (`dlq.endpoint`, `lookup.from`, `request.to`, a `fanout` leg, …). The same rule applies to
+  it, independent of the outer list.
 
 **A route handler sits outside every output middleware**, so it runs **once** per message
 and the middlewares act on what it returned. In particular `retry` re-attempts only the
@@ -56,14 +110,6 @@ a handler error propagates to the route and is reported there.
 > `middleware::transform::tests::test_rejected_message_reaches_the_dlq_through_the_config_wiring`,
 > and `reference_docs_test::publisher_middleware_wraps_last_entry_outermost`, and is
 > documented on `apply_middlewares_to_publisher` in `src/middleware/mod.rs`.
-
-```yaml
-# Correct: transform rejects -> retry gives up -> dlq captures.
-middlewares:
-  - transform: { schema_file: "user.json" }
-  - retry: { max_attempts: 3 }
-  - dlq: { endpoint: { file: { path: "rejected.jsonl" } } }
-```
 
 ### What exists
 
@@ -578,6 +624,12 @@ batches grow with the load:
 
 Only one batch is in flight at a time, with any `max_delay_ms`.
 
+On an output, `buffer` only merges sends from callers that wait at the same time. A route
+waits for each batch to be acknowledged before it reads the next one, so with
+`concurrency: 1` there is never a second caller: every batch smaller than `max_messages`
+waits the full `max_delay_ms` and leaves alone. To get larger sink batches from one worker,
+raise the route's `batch_size` instead.
+
 With route `concurrency` greater than 1, buffering preserves order inside each batch but
 does not guarantee source order across concurrent destination writes. Use `concurrency: 1`
 when destination order matters; route validation emits a warning for this combination.
@@ -1035,7 +1087,7 @@ whether they were found. On an input, the handler already sees the enriched mess
 | Field | Type | Default |
 |---|---|---|
 | `from` | endpoint | must answer with a response; required unless `entries` is set |
-| `into` | dotted payload path | required with `from` |
+| `into` | dotted payload path, or `$` for the whole payload | required with `from` |
 | `metadata` | map string→template | `{}` |
 | `payload` | template | the message's own payload and metadata |
 | `entries` | list of `{from, into, metadata, payload}` | `[]`; further lookups |
@@ -1063,7 +1115,7 @@ whether they were found. On an input, the handler already sees the enriched mess
   429 and 500 to 504 are retryable, any other 4xx fails the message. `pass_through_status`
   need not be set; set it on the endpoint when the `http` source sits behind a `ref`.
 - `from` must answer: `http`, `static`, `nats` / `memory` with `request_reply: true`,
-  `mongodb` with `find`, `sqlx` or `clickhouse` with `lookup_query`, `http_bulk` with `query`, or `grpc` to an
+  `mongodb` with `find` or `aggregate_query`, `sqlx` or `clickhouse` with `lookup_query`, `http_bulk` with `query`, or `grpc` to an
   mq-bridge `grpc` input whose route replies. An endpoint that only acknowledges fails the
   message as non-retryable.
 - `mongodb.find` is an Extended-JSON filter template and answers with the first matching
@@ -1117,6 +1169,51 @@ query answers the whole batch instead of one query per message:
         find: '{"_id": "${payload:customer_id}"}'
     into: customer
 ```
+**MongoDB aggregations.** `mongodb.aggregate_query` is an Extended-JSON aggregation pipeline
+template, the MongoDB counterpart of a SQL `lookup_query` with `GROUP BY`, joins and
+windows. It answers with the first result document and sets `mongodb.found`. Here, the
+share of a customer's orders over the last 90 days that came back:
+
+```yaml middleware
+- lookup:
+    from:
+      mongodb:
+        url: "mongodb://localhost:27017"
+        database: "shop"
+        collection: "orders"
+        aggregate_query: >-
+          [{"$match": {"customer": {"$in": ["${payload:customer_id}"]},
+                       "$expr": {"$gte": ["$ts", {"$dateSubtract": {"startDate": "$$NOW", "unit": "day", "amount": 90}}]}}},
+           {"$group": {"_id": "$customer", "orders": {"$sum": 1},
+                       "returned": {"$sum": {"$cond": [{"$eq": ["$status", "returned"]}, 1, 0]}},
+                       "returned_value": {"$sum": {"$cond": [{"$eq": ["$status", "returned"]}, "$total", 0]}}}},
+           {"$set": {"rate": {"$divide": ["$returned", "$orders"]}}}]
+    into: customer_returns
+```
+
+- Per message, every stage works, including `$lookup` to join a second collection, `$facet`,
+  `$setWindowFields` and `$$NOW`. `$out` and `$merge` write and answer nothing; do not use
+  them in a lookup.
+- Put the token in `$in` inside `$match`, as above, and one aggregation answers the whole
+  batch, with the same rules as a batched `find` (no other token, at most 1000 keys per
+  call). Results are matched to messages by the `$in` field, or by `_id` when the result has
+  no such field, which is the case after a `$group` on it. A key with no result gets `null`;
+  if a key has several results, the first wins, so `$sort` first to pick e.g. the latest.
+- **A batched pipeline sees the documents of all keys at once.** Every stage must keep the
+  keys apart, or keys get mixed or capped. These are refused at startup in batch form:
+  `$limit`, `$skip`, `$sample`, `$count`, `$facet`, `$bucket`, `$bucketAuto` and
+  `$sortByCount`, as well as a `$group` or `$setWindowFields` that is not keyed by the `$in`
+  field (`"_id": "$customer"`, then `"partitionBy": "$_id"` after the `$group`). Nested
+  pipelines (inside `$lookup`) are not checked. When a stage must see one key alone,
+  compare the key directly (`"customer": "${payload:customer_id}"`) and the pipeline runs
+  once per message.
+- Without `$in` in that form, tokens may sit anywhere (`"${payload:customer_id}"` quoted for
+  a string, unquoted for a number) and the pipeline runs once per message. The `$in`
+  expression, `{"$in": ["${payload:tag}", "$tags"]}`, tests one value and is not a key list.
+- `aggregate_query` cannot be combined with `find`. A pipeline the server rejects (a bad stage, or
+  data a stage cannot compute) fails as non-retryable, while network, failover and timeout
+  errors are retryable.
+
 An `http_bulk` endpoint with `query` batches too: one HTTP request answers every message
 of the batch, matched by position. An entry that reports an error fails only its message;
 the others keep their answers.
@@ -1139,13 +1236,57 @@ the others keep their answers.
 - HTTP 408, 429 and 5xx fail the message as retryable, other statuses as non-retryable.
   Without `pass_through_status: true` the `http` endpoint already fails on any non-2xx
   response, so a missing record is an error rather than `null`.
-- The payload must be a JSON object along `into`.
+- The payload must be a JSON object along `into`. With `into: $` it may be anything (see
+  [Replacing the payload](#replacing-the-payload-into-)).
 - On an output, a failed lookup fails only its message; the rest of the batch is published.
   List `retry` / `dlq` after `lookup` to catch its failures.
 - On an input, a retryable error (e.g. the database is down) nacks the whole received batch,
   so the source redelivers it, and reconnects the route. A non-retryable error (non-JSON
   payload, HTTP 4xx, a query error) is logged and acks and drops only its message; the rest
   of the batch goes on. A misconfigured `from` therefore drops every message.
+
+#### Replacing the payload (`into: $`)
+
+`into: $` makes the response the new payload instead of writing it under a path. The
+message keeps its `message_id` and metadata, so its identity, correlation and commit
+position are unchanged; only the payload is swapped. It works on an input and an output,
+and the route goes on to its own output as usual.
+
+```yaml middleware
+- lookup:
+    from:
+      http:
+        url: "http://scoring:8080"
+        pass_through_status: true
+    metadata:
+      http_path: "/score"
+      http_method: POST
+    into: $
+```
+
+- The response is written as with any other path: JSON is kept as JSON, a non-JSON
+  response becomes a JSON **string** (quoted), and an empty response or HTTP 404 becomes
+  `null`. `lookup.found` says which it was.
+- The incoming payload need not be JSON. It is sent as the request unless `payload` sets one,
+  and replaced afterwards.
+- Only `lookup.found` is set; there is no `lookup.<into>.found` for the root.
+- `into: $` must be the only lookup of the middleware. A second entry would write into a
+  payload that is replaced anyway, so combining them is a startup error. To enrich the
+  replaced payload further, add a second `lookup` middleware listed **above** it. That is
+  the same on an input and an output, since both lists run bottom-up (see
+  [Ordering](#ordering--read-this-before-combining-middleware)).
+- The response's own metadata is not carried over. When the response should go on
+  **verbatim** — its bytes, a non-JSON body, its metadata — and to another endpoint than the
+  route's output, use the [`request`](#request) endpoint instead:
+
+| Need | Use |
+|---|---|
+| Add the answer to the message, keep going to the route's output | `lookup` with `into: <path>` |
+| Replace the message with the answer (JSON), keep going; input or output | `lookup` with `into: $` |
+| Send the answer as-is (bytes and metadata) to a different endpoint; output only | [`request`](#request) `{ to, forward_to }` |
+
+`into` must still be set; a `lookup` without it is refused at startup, so a forgotten
+`into` cannot silently throw the payload away. An empty `into: ""` is refused as well.
 
 **Writing lookups.** A per-message `lookup_query` that writes, such as a running counter or
 moving average, batches on PostgreSQL and SQLite: the batch runs in order in one transaction,
@@ -1192,7 +1333,7 @@ each message seeing its predecessors' writes.
   packages. A Rust project depending on `mq-bridge` builds its own SQLite and needs
   `LIBSQLITE3_FLAGS=SQLITE_ENABLE_MATH_FUNCTIONS` set (e.g. in `.cargo/config.toml` `[env]`).
 
-A time-decayed sum per key (e.g. card velocity) that gives the same result in any order: a
+A time-decayed sum per key (e.g. recent order amount per customer) that gives the same result in any order: a
 late event is added with its own decay instead of being dropped, so parallel routes and
 instances can share the table.
 
@@ -1204,7 +1345,7 @@ instances can share the table.
         table: "velocity"
         lookup_query: >-
           INSERT INTO velocity (k, v, ts)
-          VALUES (${payload:card}, ${payload:amount}::float8, ${payload:ts}::bigint)
+          VALUES (${payload:customer}, ${payload:amount}::float8, ${payload:ts}::bigint)
           ON CONFLICT (k) DO UPDATE SET
             v = CASE WHEN excluded.ts > velocity.ts
                 THEN velocity.v * exp((velocity.ts - excluded.ts) / 60000.0) + excluded.v
@@ -1267,7 +1408,7 @@ twice per batch, not per message.
 |---|---|---|
 | `key` | template | selects the state, e.g. `${payload:sensor_id}`; required unless `entries` is set |
 | `expression` | expression | returns the new state; `key` needs this or `fields` |
-| `fields` | map of name to built-in aggregate | – ; the fast alternative to `expression` |
+| `fields` | map of name to built-in aggregate | – ; the fast alternative to `expression`: `count`, `sum`, `ema` by alpha or half-life, `decayed_count`, `decayed_sum` and more, see **Built-in aggregates** below |
 | `into` | dotted payload path | where the result is written; required with `key` |
 | `output` | expression | the state itself; shapes what is written to the message |
 | `emit` | `updated` \| `previous` | `updated` |
@@ -1630,6 +1771,12 @@ Delegates to a factory you registered programmatically.
 - custom:
     name: "my_enricher"
     config: { lookup_url: "http://enrich.internal" }
+```
+
+The registered name also works as a bare middleware key, as with endpoints:
+
+```yaml middleware
+- my_enricher: { lookup_url: "http://enrich.internal" }
 ```
 
 Implement `CustomMiddlewareFactory` (`apply_consumer` and/or `apply_publisher`, each
@@ -2076,6 +2223,7 @@ Tokens use the `${namespace:selector}` form:
 | `${payload:a.b.c}` | a field of the incoming JSON payload (dotted path; array indices allowed) |
 | `${metadata:key}` | a metadata value |
 | `${message:id}` | the message id (UUID string) |
+| `${message:payload}` | the whole payload as text (invalid UTF-8 replaced; use `\| base64` for binary) |
 | `${gen:uuid}` | a fresh UUID v7 |
 | `${gen:now}` / `${gen:timestamp}` | current time (RFC3339 UTC / Unix epoch ms) |
 | `${gen:counter}` | a per-endpoint counter, starting at 0 |
@@ -2086,7 +2234,8 @@ Tokens use the `${namespace:selector}` form:
 (e.g. an error reply that echoes the request); on an **input** (load-test source) only
 `gen`/`env` produce values. When the body's `content-type` metadata is a JSON type,
 interpolated request values are **JSON-escaped by default** so external data cannot break the
-structure — append `| raw` to a token to splice it verbatim. To emit a literal, un-interpolated
+structure — append `| raw` to a token to splice it verbatim, or `| base64` to emit it as
+standard base64 (`${message:payload | base64}` encodes the payload bytes as they are). To emit a literal, un-interpolated
 `${…}`, write `$${…}` (a bare `$$` is left as-is); any `${…}` with an unknown namespace is also
 left untouched.
 
@@ -2159,10 +2308,16 @@ output:
 ```
 
 Implement `CustomEndpointFactory` and register it before starting routes. Once registered,
-the name also works as a bare endpoint key — `input: { my_sink: {...} }` — since any
-unrecognised key is looked up in the custom-endpoint registry. Use the explicit `custom:`
-form above if you validate configs against `mq-bridge.schema.json`, which cannot know your
-key. Endpoints can also be written in Python (`register_endpoint`) or JavaScript
+the name also works as a bare endpoint key, since any unrecognised key is looked up in the
+custom-endpoint registry:
+
+```yaml endpoint
+output:
+  my_sink: { target: "internal://thing" }
+```
+
+Use the explicit `custom:` form if you validate configs against `mq-bridge.schema.json`,
+which cannot know your key. Endpoints can also be written in Python (`register_endpoint`) or JavaScript
 (`registerEndpoint`). See **[EXTENDING.md](EXTENDING.md)** for the full guide.
 
 ---

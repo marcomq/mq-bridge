@@ -77,7 +77,10 @@ pub const MQB_PLUGIN_ABI_MAJOR: u32 = 1;
 ///   services for logs, metrics and crash handlers ([`MqbHostVTable`]).
 /// * **1.3** appended [`MqbPluginVTable::publisher_disconnect`], which tells a
 ///   publisher how the route pass ended.
-pub const MQB_PLUGIN_ABI_MINOR: u32 = 3;
+/// * **1.4** appended [`MqbPluginVTable::publisher_deferred_commit_interval_ms`],
+///   with which a publisher defers source commits to its next flush, and added the
+///   [`MQB_DELIVERY_REQUIRES_FULL_REPLAY`] and [`MQB_DELIVERY_REPLAYS_FROM_START`] flags.
+pub const MQB_PLUGIN_ABI_MINOR: u32 = 4;
 
 /// The route pass drained its input to the end.
 pub const MQB_DISCONNECT_COMPLETED: u32 = 0;
@@ -175,6 +178,12 @@ pub const MQB_MESSAGE_KEPT: u8 = 1;
 pub const MQB_DELIVERY_IDEMPOTENT_SINK: u8 = 1 << 0;
 /// [`MqbPluginVTable::factory_delivery`] flag: a consumer built from the config acknowledges.
 pub const MQB_DELIVERY_ACKNOWLEDGES: u8 = 1 << 1;
+/// [`MqbPluginVTable::factory_delivery`] flag (ABI 1.4): a publisher built from the config
+/// replaces its target with each run's data, so its input must read everything every run.
+pub const MQB_DELIVERY_REQUIRES_FULL_REPLAY: u8 = 1 << 2;
+/// [`MqbPluginVTable::factory_delivery`] flag (ABI 1.4): a consumer built from the config
+/// reads the full data set from the start on every run.
+pub const MQB_DELIVERY_REPLAYS_FROM_START: u8 = 1 << 3;
 
 /// A borrowed, non-owning view of bytes. Lifetime is defined by whichever side
 /// produced it; see the crate-level ownership rules.
@@ -686,7 +695,16 @@ pub struct MqbPluginVTable {
     /// pass ended (`MQB_DISCONNECT_*`; an unknown value means stopped). Called
     /// at most once, before `publisher_close`, which then only releases.
     pub publisher_disconnect: MqbPublisherDisconnect,
+
+    // --- Added in ABI 1.4. Read through `deferred_commit_hook`.
+    /// Milliseconds after which the route flushes this publisher and only then commits
+    /// the source; `0` commits at once. Read once, after `publisher_create`.
+    pub publisher_deferred_commit_interval_ms: MqbPublisherDeferredCommitInterval,
 }
+
+/// Signature of [`MqbPluginVTable::publisher_deferred_commit_interval_ms`].
+pub type MqbPublisherDeferredCommitInterval =
+    unsafe extern "C" fn(publisher: MqbPublisherHandle) -> u64;
 
 /// Signature of [`MqbPluginVTable::publisher_disconnect`].
 pub type MqbPublisherDisconnect = unsafe extern "C" fn(
@@ -917,6 +935,15 @@ impl MqbPluginVTable {
         }
         Some(self.publisher_disconnect)
     }
+
+    /// The 1.4 deferred-commit entry, or `None` for an older plugin, whose
+    /// commits then run as soon as a send returns.
+    pub fn deferred_commit_hook(&self) -> Option<MqbPublisherDeferredCommitInterval> {
+        if self.struct_size < MQB_VTABLE_SIZE_V1_4 {
+            return None;
+        }
+        Some(self.publisher_deferred_commit_interval_ms)
+    }
 }
 
 /// Size of the **1.0** field set: 7 header words (`struct_size`, the packed
@@ -955,6 +982,11 @@ pub const MQB_VTABLE_SIZE_V1_2: usize = MQB_VTABLE_SIZE_V1_1 + 11 * core::mem::s
 /// [`MqbPluginVTable::publisher_disconnect`]. A feature gate like
 /// [`MQB_VTABLE_SIZE_V1_1`].
 pub const MQB_VTABLE_SIZE_V1_3: usize = MQB_VTABLE_SIZE_V1_2 + core::mem::size_of::<usize>();
+
+/// Size of the **1.4** field set: 1.3 plus
+/// [`MqbPluginVTable::publisher_deferred_commit_interval_ms`]. A feature gate like
+/// [`MQB_VTABLE_SIZE_V1_1`].
+pub const MQB_VTABLE_SIZE_V1_4: usize = MQB_VTABLE_SIZE_V1_3 + core::mem::size_of::<usize>();
 
 /// Why a plugin was rejected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1075,7 +1107,31 @@ mod tests {
             MQB_VTABLE_SIZE_V1_3,
             MQB_VTABLE_SIZE_V1_2 + size_of::<usize>()
         );
-        assert_eq!(size_of::<MqbPluginVTable>(), MQB_VTABLE_SIZE_V1_3);
+    }
+
+    #[test]
+    fn the_1_4_table_size_matches_the_declared_table() {
+        assert_eq!(
+            MQB_VTABLE_SIZE_V1_4,
+            MQB_VTABLE_SIZE_V1_3 + size_of::<usize>()
+        );
+        assert_eq!(size_of::<MqbPluginVTable>(), MQB_VTABLE_SIZE_V1_4);
+    }
+
+    #[test]
+    fn a_1_3_table_loads_but_offers_no_deferred_commit_hook() {
+        let mut table = stub_table();
+        table.struct_size = MQB_VTABLE_SIZE_V1_3;
+        assert!(check_compatibility(&table).is_ok());
+        assert!(table.disconnect_hook().is_some());
+        assert!(table.deferred_commit_hook().is_none());
+
+        table.struct_size = MQB_VTABLE_SIZE_V1_4;
+        let hook = table.deferred_commit_hook().expect("1.4 table");
+        assert_eq!(
+            unsafe { hook(MqbPublisherHandle(core::ptr::null_mut())) },
+            250
+        );
     }
 
     #[test]
@@ -1282,6 +1338,9 @@ mod tests {
             MQB_OK
         }
         unsafe extern "C" fn publisher_free(_: MqbPublisherHandle) {}
+        unsafe extern "C" fn publisher_deferred_commit_interval_ms(_: MqbPublisherHandle) -> u64 {
+            250
+        }
         unsafe extern "C" fn middleware_create(
             _: MqbFactoryHandle,
             _: MqbSlice,
@@ -1454,6 +1513,7 @@ mod tests {
             plugin_init,
             factory_delivery,
             publisher_disconnect,
+            publisher_deferred_commit_interval_ms,
         }
     }
 }

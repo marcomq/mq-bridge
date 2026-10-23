@@ -1077,8 +1077,30 @@ pub struct FilePublisher {
 enum FsyncPolicy {
     Off,
     Batch,
-    /// Set after a write, cleared by the background sync.
-    Periodic(Arc<AtomicBool>),
+    Periodic(Arc<PeriodicSync>),
+}
+
+/// Unsynced-write state shared by a `periodic` sink and its background sync.
+struct PeriodicSync {
+    /// Set after a write, cleared by the sync that covers it.
+    dirty: AtomicBool,
+    /// Held across a sync, so `flush` waits for one already running.
+    syncing: tokio::sync::Mutex<()>,
+    /// The deferred-commit interval; `None` for part files, which sync on their own.
+    interval: Option<Duration>,
+}
+
+impl PeriodicSync {
+    async fn sync(&self, path: &str) -> std::io::Result<()> {
+        let _syncing = self.syncing.lock().await;
+        if self.dirty.swap(false, Ordering::AcqRel) {
+            if let Err(e) = sync_path(path).await {
+                self.dirty.store(true, Ordering::Release);
+                return Err(e);
+            }
+        }
+        Ok(())
+    }
 }
 
 async fn sync_path(path: &str) -> std::io::Result<()> {
@@ -1087,16 +1109,13 @@ async fn sync_path(path: &str) -> std::io::Result<()> {
 }
 
 /// Syncs `path` every `interval` while it has unsynced writes; ends with the last publisher.
-fn spawn_periodic_sync(path: String, interval: Duration, dirty: Weak<AtomicBool>) {
+fn spawn_periodic_sync(path: String, interval: Duration, state: Weak<PeriodicSync>) {
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(interval).await;
-            let Some(dirty) = dirty.upgrade() else { break };
-            if dirty.swap(false, Ordering::AcqRel) {
-                if let Err(e) = sync_path(&path).await {
-                    warn!(path = %path, error = %e, "Periodic fsync of file sink failed");
-                    dirty.store(true, Ordering::Release);
-                }
+            let Some(state) = state.upgrade() else { break };
+            if let Err(e) = state.sync(&path).await {
+                warn!(path = %path, error = %e, "Periodic fsync of file sink failed");
             }
         }
     });
@@ -1189,9 +1208,51 @@ async fn write_finalized_file(path: &Path, body: &[u8]) -> Result<(), PublisherE
     fs::rename(&staging, path)
         .await
         .context("Failed to finalize idempotent file output")?;
-    // Best effort: Windows cannot open a directory handle this way.
-    if let Ok(directory) = File::open(directory).await {
-        let _ = directory.sync_all().await;
+    Ok(())
+}
+
+/// fsyncs `dir` so a new entry in it survives power loss. Windows cannot open a directory
+/// handle this way, and some network or FUSE mounts cannot sync one; both are skipped.
+async fn sync_directory(dir: &Path) -> std::io::Result<()> {
+    let dir = if dir.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        dir
+    };
+    let handle = match File::open(dir).await {
+        Ok(handle) => handle,
+        Err(_) if cfg!(not(unix)) => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    match handle.sync_all().await {
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::InvalidInput | std::io::ErrorKind::Unsupported
+            ) =>
+        {
+            Ok(())
+        }
+        result => result,
+    }
+}
+
+/// `create_dir_all` that also syncs each directory it created into its parent.
+async fn create_dir_all_durable(dir: &Path) -> std::io::Result<()> {
+    let mut created = Vec::new();
+    let mut next = Some(dir);
+    while let Some(d) = next.filter(|d| !d.as_os_str().is_empty()) {
+        if fs::try_exists(d).await? {
+            break;
+        }
+        created.push(d);
+        next = d.parent();
+    }
+    fs::create_dir_all(dir).await?;
+    for d in created {
+        if let Some(parent) = d.parent() {
+            sync_directory(parent).await?;
+        }
     }
     Ok(())
 }
@@ -1300,12 +1361,12 @@ impl FilePublisher {
                 ))
                 .into());
             }
-            tokio::fs::create_dir_all(path).await.with_context(|| {
+            create_dir_all_durable(path).await.with_context(|| {
                 format!("Failed to create part-file sink directory: {path_str}")
             })?;
         }
         if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent).await.with_context(|| {
+            create_dir_all_durable(parent).await.with_context(|| {
                 format!("Failed to create parent directory for file: {:?}", parent)
             })?;
         }
@@ -1350,6 +1411,9 @@ impl FilePublisher {
         } else {
             CoveredRanges::default()
         };
+        if config.fsync == FileFsync::Off && !by_source_position {
+            info!(path = %config.path, "File sink does not fsync; an OS crash or power loss can lose acknowledged batches. Set `fsync: periodic` to prevent that");
+        }
         let fsync = match config.fsync {
             FileFsync::Off => FsyncPolicy::Off,
             FileFsync::Batch => FsyncPolicy::Batch,
@@ -1361,11 +1425,15 @@ impl FilePublisher {
                     ))
                     .into());
                 }
-                let dirty = Arc::new(AtomicBool::new(false));
+                let state = Arc::new(PeriodicSync {
+                    dirty: AtomicBool::new(false),
+                    syncing: tokio::sync::Mutex::new(()),
+                    interval: (!by_source_position).then_some(interval),
+                });
                 if !by_source_position {
-                    spawn_periodic_sync(path_str.to_string(), interval, Arc::downgrade(&dirty));
+                    spawn_periodic_sync(path_str.to_string(), interval, Arc::downgrade(&state));
                 }
-                FsyncPolicy::Periodic(dirty)
+                FsyncPolicy::Periodic(state)
             }
         };
         info!(path = %path_str, format = ?format, "File sink opened for appending");
@@ -1393,15 +1461,19 @@ impl FilePublisher {
     }
 
     /// Applies the `fsync` setting to a batch that was just written and flushed.
-    async fn sync_written(&self, file: &File) -> std::io::Result<()> {
+    /// `was_empty` also syncs the directory, so a newly created file's entry survives power loss.
+    async fn sync_written(&self, file: &File, was_empty: bool) -> std::io::Result<()> {
         match &self.fsync {
-            FsyncPolicy::Off => Ok(()),
-            FsyncPolicy::Batch => file.sync_data().await,
-            FsyncPolicy::Periodic(dirty) => {
-                dirty.store(true, Ordering::Release);
-                Ok(())
+            FsyncPolicy::Off => return Ok(()),
+            FsyncPolicy::Batch => file.sync_data().await?,
+            FsyncPolicy::Periodic(state) => state.dirty.store(true, Ordering::Release),
+        }
+        if was_empty {
+            if let Some(parent) = Path::new(&self.path).parent() {
+                sync_directory(parent).await?;
             }
         }
+        Ok(())
     }
 
     /// Unlike the `object_store` sink, an encode failure here fails the whole batch rather than
@@ -1438,6 +1510,10 @@ impl FilePublisher {
                 let body = self.encode_member(body)?;
                 write_finalized_file(&final_path, &body).await?;
             }
+            // Also when the file already exists: a retry after a failed sync lands here.
+            sync_directory(Path::new(&self.path))
+                .await
+                .context("Failed to sync part-file sink directory")?;
             covered
                 .insert(run.source, run.start, run.end)
                 .map_err(PublisherError::NonRetryable)?;
@@ -1651,7 +1727,7 @@ impl FilePublisher {
                         anyhow::Error::new(e).context("Failed to flush file"),
                     ));
                 }
-                if let Err(e) = self.sync_written(&file).await {
+                if let Err(e) = self.sync_written(&file, pre_len == 0).await {
                     if let Err(te) = file.set_len(pre_len).await {
                         tracing::error!(
                             "Failed to truncate file back to {} after member sync error: {}",
@@ -1877,7 +1953,10 @@ impl MessagePublisher for FilePublisher {
                 anyhow::Error::new(e).context("Failed to flush file writer"),
             ));
         }
-        if let Err(e) = self.sync_written(writer.get_ref()).await {
+        if let Err(e) = self
+            .sync_written(writer.get_ref(), pre_len.is_none_or(|len| len == 0))
+            .await
+        {
             roll_back_partial_batch(
                 &writer,
                 pre_len,
@@ -1893,12 +1972,23 @@ impl MessagePublisher for FilePublisher {
     }
 
     async fn flush(&self) -> anyhow::Result<()> {
-        if let FsyncPolicy::Periodic(dirty) = &self.fsync {
-            if dirty.swap(false, Ordering::AcqRel) {
-                sync_path(&self.path).await?;
-            }
+        if let FsyncPolicy::Periodic(state) = &self.fsync {
+            state.sync(&self.path).await?;
         }
         Ok(())
+    }
+
+    /// `periodic` acks before the sync, so the route holds commits until `flush` ran.
+    fn deferred_commit_interval(&self) -> Option<Duration> {
+        match &self.fsync {
+            FsyncPolicy::Periodic(state) => state.interval,
+            _ => None,
+        }
+    }
+
+    /// Syncs the last `periodic` window when the route stops; the background task ends unsynced.
+    fn on_disconnect_hook(&self) -> Option<crate::traits::BoxFuture<'_, anyhow::Result<()>>> {
+        matches!(self.fsync, FsyncPolicy::Periodic(_)).then(|| self.flush())
     }
 
     /// A file is an ordered log by construction: appending batches in the order they

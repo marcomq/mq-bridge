@@ -2,6 +2,114 @@
 
 All notable changes to `mq-bridge`. Newest first.
 
+## 1.1.0
+
+### Added
+
+- **Sinks that replace their target are checked at route start.** A custom sink declares
+  `requires_full_replay`, and the route then only starts behind an input that reads the full
+  data set each run (a custom source declares `replays_from_start`). Plugins answer through two
+  new ABI 1.4 `factory_delivery` bits. See docs/DELIVERY.md.
+- **Deferred commits.** A publisher whose acks only become durable with its next `flush`
+  returns `Some(interval)` from `MessagePublisher::deferred_commit_interval`. The route then
+  commits the source only after a successful flush, which it runs at least every
+  `interval`; a failed flush commits nothing and the source redelivers. Wrapping middleware
+  forwards the value. Plugins declare it through `publisher_deferred_commit_interval_ms`
+  (plugin ABI 1.4); an older plugin commits at once, as before.
+- **`file` `fsync: periodic` no longer loses acknowledged batches on power loss.** The source
+  is committed only after the sync that covers a batch, instead of right after the write.
+
+- **`${message:payload}` and `| base64` in templates.** The token is the whole payload;
+  `| base64` encodes any token as standard base64, the payload as its raw bytes.
+- **`http_bulk` sends payloads that are not JSON.** An `upsert.document` without
+  `{document}` is the whole document, e.g. `{"data":"${message:payload | base64}"}`.
+- **`http_bulk` `auth.login`.** A JSON login request whose answer holds a bearer token, with
+  an optional `expires_at` or `expires_in`; renewed before expiry and after a 401.
+- **`http_bulk` reads wrapped and encoded records.** `read.payload` points to the payload in
+  each document, `read.payload_encoding: base64` decodes it, and `read.cursor.add` adds to a
+  numeric `cursor.item`, for APIs that take the next offset.
+- **MongoDB `aggregate_query` for `lookup`.** An Extended-JSON aggregation pipeline template
+  (`$group`, `$lookup`, `$setWindowFields`, …) that answers with its first result, the
+  MongoDB counterpart of a SQL `lookup_query`. With the token in a `$match` `$in`, one
+  aggregation answers the whole batch; results match by the `$in` field or by `_id`. In that
+  form, stages that would mix keys (`$limit`, `$count`, a `$group` on another field, …) are
+  refused at startup. The `$in` expression (`{"$in": [value, array]}`) no longer counts as a
+  key list, in `find` too; a `find` whose `$in` lists the token with other values now runs
+  per message instead of failing at startup.
+- **`lookup` can replace the payload with `into: $`.** The response becomes the new payload
+  while the message keeps its id and metadata, on an input or an output; the incoming payload
+  need not be JSON. It must be the only lookup of its middleware. A missing or empty `into`
+  is still refused.
+- **`mqb --config config.yml --drain` runs a config file as a batch job.** Every enabled
+  route gets `exit_on_empty`, and the process exits once all have drained, non-zero if one
+  failed or did not start — as `copy --drain` does. The file is not changed; implies `--no-ui`.
+
+### Changed
+
+- **A `file` sink behind a saved read position syncs.** When the input saves its position to a
+  checkpoint or replication slot, an appending `file` sink with `fsync: off` runs with
+  `fsync: periodic`, so a power loss can no longer leave the saved position ahead of the
+  written data and make a resume skip rows. Paths that are not regular files, such as
+  `/dev/stdout`, are left as they are. Other `fsync: off` sinks log the risk at info.
+- **Middleware ordering is documented as one rule:** a message passes a `middlewares:` list
+  from the bottom up, on the input and the output alike. REFERENCE.md explains it with a
+  diagram, a table and the common mistakes; behaviour is unchanged.
+- **ARCHITECTURE.md explains when to use an endpoint, a middleware or a structural endpoint**,
+  and how `lookup` and `request` relate.
+- **`transform` with a `schema` is up to 6x faster on large payloads.** The pass that copies
+  untouched fields verbatim now also walks into nested objects and arrays, and handles
+  `required` and `default` itself instead of parsing the whole payload. A ~180 KB document
+  with root `required` goes from 84 to 507 MiB/s; one with a typed 2,000-item array from 73 to
+  122 MiB/s. As at the top level, values the schema never names are copied unparsed, so a
+  number like `1e400` there is passed through rather than rejected, and duplicate keys,
+  whitespace and large integers there are left as they are. A message that breaks the schema in
+  several places now always reports the first violation in schema order; before, the
+  shortcut could name a different field.
+
+- **The MCP tool list is about 17 KB instead of about 495 KB.** `publish`, `start_route`,
+  `generate_cli_command`, `agent_listen` and `agent_send` no longer inline every
+  connector's config schema in their endpoint arguments; those are typed as an object
+  keyed by connector type, and `describe` returns a connector's fields on demand. Configs
+  are validated as before. A client loading the tools pays about 4k tokens, not about 120k.
+- **Clearer MCP tool descriptions.** `stop_route`, `publish`, `describe`, `list_routes`
+  and `route_status` say when to use them and when to use another tool. `stop_route`
+  and `publish` carry safety hints for clients.
+- **An `object_store` source decodes a Parquet object as it is consumed.** Rows are turned
+  into JSON messages one batch at a time instead of all at once, so memory stays near the
+  file's size rather than a multiple of it as JSON, and the fetched object is no longer
+  copied. The cursor still moves on only after every row of the object is acked. The
+  `max_object_bytes`-derived bound on decoded output now applies per chunk, not to the whole
+  object. If a later part of a Parquet file fails to decode, `on_decode_error: skip` delivers
+  the rows read so far and skips the rest; `fail` stops the route.
+
+### Fixed
+
+- **`flush()` reaches the sink through every middleware and structural endpoint.**
+  `retry`, `compression`, `encryption`, `limiter`, `delay`, `metrics`, `cookie_jar`,
+  `random_panic`, `dlq`, `fanout`, `switch` and `request` returned `Ok` without
+  flushing what they wrap, so a `Publisher::flush()` from the API or a binding did nothing.
+- **An output's status shows the sink behind its middleware.** `retry`, `compression`,
+  `encryption`, `limiter`, `delay`, `metrics`, `cookie_jar`, `transform`, `random_panic`
+  and `buffer` reported themselves healthy, even with a broken sink behind them.
+- **`file` `fsync` and `fsync_interval_ms` work in config files.** The URI form and
+  `mqb describe` knew them, but a config file failed with "unknown field `fsync` in file
+  endpoint".
+- **Local `object_store` writes survive a power loss.** With a `file://` URL each object and
+  its directory are now synced before the write counts as done, as a remote PUT is.
+- **`file` sink durability gaps.** With `fsync: batch` or `periodic`, a batch that starts a
+  new file also syncs the directory, so the file is not lost on power loss. `periodic` runs
+  a final sync when the route stops instead of leaving the last interval unsynced.
+- **Config files take the names the CLI shows.** `sqlite`, `postgres`, `postgresql`, `mysql`
+  and `mariadb` are aliases for `sqlx`; before, they were read as plugin names and failed
+  with "Custom endpoint factory 'sqlite' not found". An `object_store` `url` may use the
+  CLI's `local-store://`, stored as `file://`.
+- **Clearer `object_store` and `file` errors.** A URL that cannot be opened now says why and
+  lists the supported schemes. `file` with `format: parquet` is rejected when the config is
+  read, not when the route starts, and the error points to `object_store`.
+- **`bridge_status` works on macOS when `$TMPDIR` is not set**, as with MCP clients that
+  start servers with a reduced environment. It failed with "no private per-user runtime
+  directory is available"; the per-user temp directory is now asked from the OS.
+
 ## 1.0.3
 
 ### Changed

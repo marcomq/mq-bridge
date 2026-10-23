@@ -25,18 +25,69 @@ or shape routing rather than talking to a broker: `ref`, `fanout`, `switch`, `re
 documented in [REFERENCE.md](REFERENCE.md#structural-endpoints).
 
 ### 3. Middleware
-Middleware wraps consumers and publishers to add cross-cutting features. There is no
-`Middleware` trait: a middleware *is* a decorator implementing `MessageConsumer` and/or
-`MessagePublisher`, which is why `CustomMiddlewareFactory` is defined as `apply_consumer` /
+Middleware sits between an endpoint and the route: it is attached to one endpoint and changes
+how messages reach it or leave it. There is no `Middleware` trait: a middleware *is* a
+decorator implementing `MessageConsumer` and/or `MessagePublisher` around the endpoint's own
+consumer or publisher, which is why `CustomMiddlewareFactory` is defined as `apply_consumer` /
 `apply_publisher`. Available middleware includes:
 - Retries (exponential backoff) and dead-letter queues (DLQ)
 - JSON transformation (`transform`): mapping, type coercion, schema validation
+- Enrichment from other endpoints (`lookup`) and running state per key (`aggregate`)
 - Deduplication (sled-based), weak joins, buffering, rate limiting
 - Metrics, delays, fault injection
 - Custom user middleware
 
 The complete list, with fields, defaults and the layer-ordering rules, is in
-[REFERENCE.md](REFERENCE.md#middleware).
+[REFERENCE.md](REFERENCE.md#middleware). The ordering rule in one line: **a message passes a
+`middlewares:` list from the bottom up**, on the input and on the output alike.
+
+### Endpoint, middleware or structural endpoint?
+
+The three overlap at first sight: a request/reply endpoint also takes a message and returns
+one, and some middleware calls other endpoints. The split is about **where the message goes
+next**:
+
+| | What it does | Where the message goes next |
+|---|---|---|
+| **Endpoint** | A message starts or ends here (broker, database, file, HTTP, …) | Out of the route, or into it |
+| **Middleware** | Changes how messages reach or leave the one endpoint it is attached to | Always on to that endpoint (or, on an input, to the route) |
+| **Structural endpoint** | Decides *which* endpoints get the message, or produces it | Wherever it routes it: `fanout`, `switch`, `request`, `sequence`, … |
+
+So a middleware may *use* other endpoints on the side — `dlq` sends failures to its
+`endpoint`, `lookup` asks its `from` — but it never redirects the main flow. As soon as the
+message itself should go somewhere else, that is a structural endpoint. This keeps a route
+readable as "input → output", with the middleware lists in between.
+
+Middleware comes in three kinds:
+
+- **Shaping the message:** `transform`, `lookup`, `aggregate`, `id`, `cookie_jar`,
+  `compression`, `encryption`, `pack` / `unpack`. Each turns one message into another.
+  Conceptually that is a request/reply call placed inline: `lookup` literally is one, it asks
+  an endpoint and writes the answer into the message (or, with `into: $`, makes the answer
+  the message).
+- **Controlling the call:** `retry`, `dlq`, `timeout`, `limiter`, `delay`, `buffer`,
+  `filter`, `deduplication`, `weak_join`. These decide *whether, when, how often or
+  together with which others* a message moves on. They need the endpoint they wrap and
+  cannot be expressed as an endpoint of their own.
+- **Observing:** `metrics`, `otel`, and `random_panic` for tests. The message passes
+  unchanged.
+
+The overlap between a shaping middleware and a request/reply endpoint is deliberate, and
+the choice between them is about the next hop:
+
+| Need | Use |
+|---|---|
+| Add an endpoint's answer to the message, keep going to the route's output | `lookup` with `into: <path>` |
+| Replace the message with the answer (JSON), keep going; input or output | `lookup` with `into: $` |
+| Send the answer as-is (bytes and metadata) to a different endpoint; output only | `request { to, forward_to }` |
+
+Two more differences matter in practice:
+
+- **Acknowledgement.** Input middleware sits between receiving and committing: `id`,
+  `deduplication` and `filter` decide what is acked and when. An endpoint's response never
+  touches the source's commit.
+- **Lifecycle.** Middleware lives in the route's process and shares its start and shutdown.
+  An endpoint owns a connection to another system, with its own reconnects.
 
 ### 4. Handler
 Handlers are user-defined async functions that process messages. There are two main handler types:
@@ -330,8 +381,8 @@ all three languages.
   work with no core change. Endpoints for transports we do not want in this repository's
   dependency tree live in their own crates.
 - **Custom Middleware:** Implement the `CustomMiddlewareFactory` trait and register it with
-  `extensions::register_middleware_factory`; use it as `custom: { name, config }` in an
-  endpoint's `middlewares` list.
+  `extensions::register_middleware_factory`; use it as `- <name>: {...}` (or
+  `custom: { name, config }`) in an endpoint's `middlewares` list.
 - **From Python / Node:** `register_endpoint` / `register_middleware` (Python) and
   `registerEndpoint` / `registerMiddleware` (Node) take a host-language object instead of a
   Rust type, for endpoints that only have a Python/JS SDK.

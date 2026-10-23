@@ -43,27 +43,26 @@ Name the component with `connector`; every other field is that component's own c
 ```yaml
 mqtt_to_elasticsearch:
   input:
-    custom:
-      name: connect
-      config:
-        connector: mqtt
-        urls: ["tcp://localhost:1883"]
-        topics: ["orders"]
+    connect:
+      connector: mqtt
+      urls: ["tcp://localhost:1883"]
+      topics: ["orders"]
   output:
     middlewares:
       - retry: { max_attempts: 3 }
-    custom:
-      name: connect
-      config:
-        connector: elasticsearch_v8
-        urls: ["http://localhost:9200"]
-        index: "orders"
-        action: "index"
-        id: '${! json("id") }'
+    connect:
+      connector: elasticsearch_v8
+      urls: ["http://localhost:9200"]
+      index: "orders"
+      action: "index"
+      id: '${! json("id") }'
 ```
 
+The long form `custom: { name: connect, config: {...} }` is the same endpoint. Use it if you
+validate configs against `mq-bridge.schema.json`, which does not know the `connect` key.
+
 A component often names the same thing differently per direction. Put such fields in an `input`
-or `output` block inside `config`; the block matching the endpoint is merged in and the other is
+or `output` block inside the `connect` block; the block matching the endpoint is merged in and the other is
 dropped, so one configuration can describe both ends.
 
 ### From a URL
@@ -86,16 +85,14 @@ This form also takes a `pipeline` of processors and resource sections:
 
 ```yaml
 output:
-  custom:
-    name: connect
-    config:
-      yaml: |
-        pipeline:
-          processors:
-            - mapping: 'root = this.without("internal")'
-        output:
-          file:
-            path: /tmp/orders.jsonl
+  connect:
+    yaml: |
+      pipeline:
+        processors:
+          - mapping: 'root = this.without("internal")'
+      output:
+        file:
+          path: /tmp/orders.jsonl
 ```
 
 ## Processors as middleware

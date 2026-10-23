@@ -23,6 +23,7 @@ empty and offers to serve the UI so you can build one interactively.
 mqb --config config.yml
 mqb --config config.yml --init-config dev/config/file-to-http.yml
 mqb --ui                           # start empty, define config.yml in the UI
+mqb --config config.yml --drain    # batch job: run every enabled route until its source is empty
 ```
 
 | Option | Meaning |
@@ -35,6 +36,7 @@ mqb --ui                           # start empty, define config.yml in the UI
 | `--no-ui` | Never serve the browser UI, and don't ask. |
 | `--metrics-addr <addr>` | Serve the Prometheus endpoint on `addr` (default `127.0.0.1:9090`), overriding `metrics_addr` from the config. |
 | `--no-metrics` | Don't serve the Prometheus endpoint on its own port. |
+| `--drain` | Run every enabled route with `exit_on_empty` and exit once all have drained — the config-file form of `copy --drain`. The file is not changed. Implies `--no-ui`; exits non-zero if a route fails or does not start. |
 | `--schema <path>` | Write the JSON Schema for `AppConfig` (use `-` for stdout) and exit. |
 | `--plugin <path>` | Load a native endpoint/middleware library before starting. Repeatable, valid on every subcommand, and combines with `plugins:` in the config — see [Native plugins](../extending/plugins.md). |
 
@@ -268,8 +270,9 @@ unchanged (e.g. `postgres://…/db?table=src&sslmode=disable`).
 
 ### Middlewares in the URI
 
-Append `|`-separated middlewares to either URI to wrap that endpoint. They apply in the order
-written, and each takes its own config struct's fields as query params:
+Append `|`-separated middlewares to either URI to wrap that endpoint. They form that endpoint's
+`middlewares:` list in the order written, so a message passes them from the last to the first (see
+the reverse-order note below). Each takes its own config struct's fields as query params:
 
 ```bash
 mqb copy \
@@ -288,8 +291,8 @@ mqb copy \
   use `format=normal`. `format=json`/`text` render the payload as a JSON value and it does not
   survive the round trip (it comes back as a JSON array, and the reader reports a bogus
   "unsupported encryption envelope version 91").
-- Middlewares apply in list order on **both** ends, so a route that reads back what another wrote
-  must list them in the **reverse** order. Writing with `|compression?algorithm=zstd|encryption?key=…`
+- A message passes the middleware list from the **last** entry to the first on **both** ends,
+  so a route that reads back what another wrote must list them in the **reverse** order. Writing with `|compression?algorithm=zstd|encryption?key=…`
   reads back with `|encryption?key=…|compression?algorithm=zstd`.
 - A middleware with no params needs no `?` — `|metrics`.
 - `dlq`'s `endpoint` is itself a URL-encoded endpoint URI:

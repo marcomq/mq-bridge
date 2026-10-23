@@ -9,13 +9,11 @@ Pulsar dependency. `mqb` has it built in; the library and the bindings load it a
 ```yaml
 pulsar_to_file:
   input:
-    custom:
-      name: pulsar
-      config:
-        url: "pulsar://localhost:6650"
-        topic: "persistent://public/default/orders"
-        subscription: "order-workers"
-        initial_position: earliest
+    pulsar:
+      url: "pulsar://localhost:6650"
+      topic: "persistent://public/default/orders"
+      subscription: "order-workers"
+      initial_position: earliest
   output:
     file: { path: "orders.jsonl" }
 ```

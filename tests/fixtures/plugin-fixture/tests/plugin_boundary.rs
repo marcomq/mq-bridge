@@ -624,24 +624,29 @@ fn the_configuration_schema_is_the_same_linked_and_loaded() {
     assert_eq!(loaded["properties"]["queue"]["x-mqb-uri"], json!("path"));
 }
 
-/// ABI 1.2 asks the plugin per config, so a guarantee can depend on a field.
+/// ABI 1.2 asks the plugin per config, so a guarantee can depend on a field; 1.4 adds two bits.
 #[test]
 fn delivery_guarantees_follow_the_config_across_the_boundary() {
     let loaded = plugin_factory();
     for config in [
         json!({ "queue": "delivery" }),
         json!({ "queue": "delivery", "idempotent": true, "acknowledges": false }),
+        json!({ "queue": "delivery", "full_replay": true, "replays_from_start": true }),
     ] {
         let answers = |factory: &dyn CustomEndpointFactory| {
             (
                 factory.idempotent_sink(&config),
                 factory.acknowledges(&config),
+                factory.requires_full_replay(&config),
+                factory.replays_from_start(&config),
             )
         };
         assert_eq!(answers(&*loaded), answers(&FixtureFactory), "{config}");
     }
     assert!(loaded.idempotent_sink(&json!({ "idempotent": true })));
     assert!(!loaded.acknowledges(&json!({ "acknowledges": false })));
+    assert!(loaded.requires_full_replay(&json!({ "full_replay": true })));
+    assert!(loaded.replays_from_start(&json!({ "replays_from_start": true })));
 }
 
 /// The fixture's config has no `url` field and denies unknown ones, so only the

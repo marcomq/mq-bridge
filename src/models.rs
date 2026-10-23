@@ -334,6 +334,13 @@ pub enum EndpointType {
     #[serde(rename = "redis_streams", alias = "redis")]
     RedisStreams(RedisStreamsConfig),
     Grpc(GrpcConfig),
+    #[serde(
+        alias = "sqlite",
+        alias = "postgres",
+        alias = "postgresql",
+        alias = "mysql",
+        alias = "mariadb"
+    )]
     Sqlx(SqlxConfig),
     #[serde(rename = "clickhouse", alias = "click_house")]
     ClickHouse(ClickHouseConfig),
@@ -564,7 +571,7 @@ pub struct OtelMiddleware {}
 
 /// Lookup (enrich) middleware configuration.
 ///
-/// Asks a request-capable endpoint (HTTP, NATS/Memory `request_reply`, MongoDB `find`,
+/// Asks a request-capable endpoint (HTTP, NATS/Memory `request_reply`, MongoDB `find`/`aggregate_query`,
 /// SQLx/ClickHouse `lookup_query`) about each message and writes the response into the
 /// payload. A query keyed with `IN (…)` / `$in` answers a whole batch at once; other
 /// endpoints get one request per message. Several `entries` run in parallel.
@@ -581,7 +588,7 @@ pub struct LookupMiddleware {
     /// Request payload template. Defaults to the message's own payload and metadata.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payload: Option<String>,
-    /// Dotted payload path the response is written to, e.g. `customer.profile`.
+    /// Dotted payload path the response is written to, e.g. `customer.profile`; `$` replaces the payload.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub into: Option<String>,
     /// Further lookups, run in parallel with `from`.
@@ -605,7 +612,7 @@ pub struct LookupEntry {
     /// Request payload template. Defaults to the message's own payload and metadata.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payload: Option<String>,
-    /// Dotted payload path the response is written to, e.g. `customer.profile`.
+    /// Dotted payload path the response is written to, e.g. `customer.profile`; `$` replaces the payload.
     pub into: String,
 }
 
@@ -637,7 +644,7 @@ pub struct AggregateMiddleware {
     /// Expression returning the new state; reads payload fields, `meta.<key>` and `state`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expression: Option<String>,
-    /// Built-in aggregates instead of `expression`, e.g. `n: count`, `avg: ema(reading, 0.1)`.
+    /// Built-in aggregates instead of `expression`, `name: fn`: `count`, `decayed_count(half-life)`, `sum|min|max|last|mean|stddev|variance(path)`, `ema|ema_stddev|ema_variance(path, alpha or half-life)`, `decayed_sum(path, half-life)`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fields: Option<std::collections::BTreeMap<String, String>>,
     /// Expression over `state` shaping what is written to the message. Defaults to the state.
@@ -673,7 +680,7 @@ pub struct AggregateEntry {
     /// Expression returning the new state; reads payload fields, `meta.<key>` and `state`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expression: Option<String>,
-    /// Built-in aggregates instead of `expression`, e.g. `n: count`, `avg: ema(reading, 0.1)`.
+    /// Built-in aggregates instead of `expression`, `name: fn`: `count`, `decayed_count(half-life)`, `sum|min|max|last|mean|stddev|variance(path)`, `ema|ema_stddev|ema_variance(path, alpha or half-life)`, `decayed_sum(path, half-life)`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fields: Option<std::collections::BTreeMap<String, String>>,
     /// Expression over `state` shaping what is written to the message. Defaults to the state.
@@ -1489,7 +1496,7 @@ pub enum FileFsync {
     Off,
     /// Before a batch is acknowledged.
     Batch,
-    /// In the background every `fsync_interval_ms`; at most that window is at risk.
+    /// Every `fsync_interval_ms`; the source is committed only after the sync.
     Periodic,
 }
 
@@ -1770,7 +1777,8 @@ pub struct ObjectStoreConfig {
     /// `gs://bucket/prefix`, or `az://container/prefix`. Credentials are resolved
     /// from the environment by the `object_store` crate (same mechanism as the checkpoint
     /// backend); Azure takes the account from `AZURE_STORAGE_ACCOUNT_NAME`, R2 uses `s3://`
-    /// plus a custom `AWS_ENDPOINT_URL`.
+    /// plus a custom `AWS_ENDPOINT_URL`. The CLI's `local-store://` is accepted as `file://`.
+    #[serde(deserialize_with = "deserialize_object_store_url")]
     pub url: String,
     /// (Sink only) `auto`, `write_time` (uuidv7 name) or `source_position` (name carries the source range).
     #[serde(default)]
@@ -2128,6 +2136,9 @@ pub struct MongoDbConfig {
     /// Answers with the first match. `{"_id": {"$in": ["${payload:id}"]}}` answers a batch at once.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub find: Option<String>,
+    /// (Publisher only) Extended-JSON aggregation pipeline template for `lookup`; answers with the first result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aggregate_query: Option<String>,
     /// Internal: Extended-JSON update (document or pipeline) upserted on the `find` match;
     /// the lookup then answers with the updated document. Opt-in write for keyed counters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3289,6 +3300,29 @@ pub struct HttpBulkAuth {
     /// AWS Signature Version 4 on every request. Needs the `aws` feature.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub aws_sigv4: Option<HttpBulkAwsSigV4>,
+    /// A JSON login request: its bearer token is cached and fetched again when it expires.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub login: Option<HttpBulkLogin>,
+}
+
+/// A login request for `http_bulk` whose JSON answer holds a bearer token.
+#[derive(Deserialize, Serialize, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct HttpBulkLogin {
+    /// Login endpoint, e.g. `https://api.example.com/users/login`. Sent as `POST`.
+    pub url: String,
+    /// JSON body with the credentials, e.g. `{"username":"u","password":"p"}`.
+    #[cfg_attr(feature = "schema", schemars(extend("format"="password")))]
+    pub body: String,
+    /// JSON pointer to the token in the answer, e.g. `/access_token/token`.
+    pub token: String,
+    /// JSON pointer to when the token expires, in Unix seconds. Excludes `expires_in`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+    /// JSON pointer to the token's lifetime in seconds. Unset with `expires_at` = fetched again on a 401.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_in: Option<String>,
 }
 
 /// OAuth2 client credentials grant for `http_bulk`.
@@ -3365,6 +3399,21 @@ pub struct HttpBulkRead {
     /// Read one open response as `sse` events or `ndjson` lines instead of pages.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream: Option<HttpBulkStream>,
+    /// JSON pointer to the message payload inside each document, e.g. `/payload`. Unset = the whole document.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload: Option<String>,
+    /// How the string at `payload` is encoded. Unset = taken as it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload_encoding: Option<HttpBulkPayloadEncoding>,
+}
+
+/// How an `http_bulk` input decodes the string at `read.payload`.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum HttpBulkPayloadEncoding {
+    /// Standard base64 with padding.
+    Base64,
 }
 
 /// How an `http_bulk` input that reads one open response is cut into messages.
@@ -3390,6 +3439,9 @@ pub struct HttpBulkCursor {
     /// JSON pointer to the position in the last document of a page, e.g. `/id`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub item: Option<String>,
+    /// With `item`: added to the whole-number position, e.g. `1` when the API wants the next offset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub add: Option<i64>,
     /// Position before the first read. Defaults to `0` for a count, otherwise to `null`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start: Option<serde_json::Value>,

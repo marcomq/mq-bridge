@@ -18,6 +18,7 @@
 //! | `${payload:a.b.c}` | nested field of the incoming JSON payload (dotted path; array indices allowed) |
 //! | `${metadata:key}` | a metadata string value |
 //! | `${message:id}` | the message id (canonical UUID string) |
+//! | `${message:payload}` | the whole payload as it is, JSON or not |
 //! | `${gen:uuid}` | a fresh UUID v7 |
 //! | `${gen:now}` | current time, RFC3339 UTC |
 //! | `${gen:timestamp}` | current time, Unix epoch milliseconds |
@@ -36,10 +37,11 @@
 //! `content-type`. When it is a JSON type, resolved `payload`/`metadata`/`message`
 //! values are JSON-string-escaped so external data can never break the surrounding
 //! structure. Append `| raw` to a token (`${payload:x | raw}`) to splice it
-//! verbatim instead. `gen`/`env` values are framework/operator-generated and are
-//! always inserted verbatim.
+//! verbatim instead, or `| base64` to insert its standard base64 encoding.
+//! `gen`/`env` values are framework/operator-generated and are never escaped.
 
 use anyhow::{anyhow, bail, Context};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::de::{self, DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde::Deserialize;
 use serde_json::Value;
@@ -85,15 +87,26 @@ enum Source {
     Metadata(String),
     /// The message id.
     MessageId,
+    /// The raw payload bytes.
+    MessagePayload,
     /// A per-render generated value.
     Gen(Gen),
+}
+
+/// The optional `| filter` of a token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Filter {
+    None,
+    /// Bypass the template's escape mode and splice verbatim.
+    Raw,
+    /// Standard base64 of the value's bytes.
+    Base64,
 }
 
 #[derive(Debug, Clone)]
 struct Token {
     source: Source,
-    /// `| raw`: bypass the template's escape mode and splice verbatim.
-    raw: bool,
+    filter: Filter,
 }
 
 #[derive(Debug)]
@@ -223,12 +236,31 @@ impl CompiledTemplate {
         }
     }
 
+    /// Whether any token reads the message: its payload, metadata or id.
+    pub fn reads_message(&self) -> bool {
+        self.segments.iter().any(|segment| {
+            matches!(
+                segment,
+                Segment::Token(Token {
+                    source: Source::Payload(_)
+                        | Source::Metadata(_)
+                        | Source::MessageId
+                        | Source::MessagePayload,
+                    ..
+                })
+            )
+        })
+    }
+
     /// Whether every token is derived from data that remains stable across message replays.
     pub fn has_only_replay_stable_tokens(&self) -> bool {
         self.segments.iter().all(|segment| match segment {
             Segment::Literal(_) => true,
             Segment::Token(token) => {
-                matches!(token.source, Source::Payload(_) | Source::Metadata(_))
+                matches!(
+                    token.source,
+                    Source::Payload(_) | Source::Metadata(_) | Source::MessagePayload
+                )
             }
         })
     }
@@ -257,15 +289,26 @@ impl CompiledTemplate {
             match seg {
                 Segment::Literal(b) => out.extend_from_slice(b),
                 Segment::Token(tok) => {
+                    if let (Filter::Base64, Source::MessagePayload, Some(msg)) =
+                        (tok.filter, &tok.source, msg)
+                    {
+                        out.extend_from_slice(BASE64.encode(&msg.payload).as_bytes());
+                        continue;
+                    }
                     let value = match self.resolve(tok, msg, &mut payload) {
                         Some(value) => value,
                         None if strict => return None,
                         None => String::new(),
                     };
-                    if tok.raw || self.escape == EscapeMode::None {
-                        out.extend_from_slice(value.as_bytes());
-                    } else {
-                        json_escape_into(&value, &mut out);
+                    match tok.filter {
+                        Filter::Base64 => {
+                            out.extend_from_slice(BASE64.encode(value.as_bytes()).as_bytes())
+                        }
+                        Filter::Raw => out.extend_from_slice(value.as_bytes()),
+                        Filter::None if self.escape == EscapeMode::None => {
+                            out.extend_from_slice(value.as_bytes())
+                        }
+                        Filter::None => json_escape_into(&value, &mut out),
                     }
                 }
             }
@@ -311,6 +354,7 @@ impl CompiledTemplate {
             },
             Source::Metadata(key) => msg.and_then(|m| m.metadata.get(key)).cloned(),
             Source::MessageId => msg.map(|m| format_message_id(m.message_id)),
+            Source::MessagePayload => msg.map(|m| String::from_utf8_lossy(&m.payload).into_owned()),
             Source::Gen(generator) => Some(match generator {
                 Gen::Uuid => format_message_id(fast_uuid_v7::gen_id()),
                 Gen::Now => rfc3339_utc_now(),
@@ -354,34 +398,39 @@ fn parse_token(inner: &str) -> anyhow::Result<Parsed> {
         "metadata" => Source::Metadata(selector.to_string()),
         "message" => match selector {
             "id" => Source::MessageId,
-            other => bail!("unknown message field '${{message:{other}}}' (only 'id' is supported)"),
+            "payload" => Source::MessagePayload,
+            other => bail!(
+                "unknown message field '${{message:{other}}}' (only 'id' and 'payload' are supported)"
+            ),
         },
         "gen" => Source::Gen(parse_gen(selector)?),
         "env" => {
             let value = std::env::var(selector).with_context(|| {
                 format!("environment variable '{selector}' for '${{{inner}}}' is not set")
             })?;
-            validate_filter(filter, inner)?;
-            return Ok(Parsed::Literal(value));
+            return Ok(Parsed::Literal(match validate_filter(filter, inner)? {
+                Filter::Base64 => BASE64.encode(value.as_bytes()),
+                Filter::None | Filter::Raw => value,
+            }));
         }
         // Unknown namespace: leave the text untouched for backward compatibility,
         // regardless of any filter.
         _ => return Ok(Parsed::Verbatim),
     };
 
-    let raw = validate_filter(filter, inner)?;
-    Ok(Parsed::Token(Token { source, raw }))
+    let filter = validate_filter(filter, inner)?;
+    Ok(Parsed::Token(Token { source, filter }))
 }
 
-/// Validate the optional `| filter` for a recognized namespace. Only `raw` is
-/// supported today; returns whether it was set.
-fn validate_filter(filter: Option<&str>, inner: &str) -> anyhow::Result<bool> {
+/// Validate the optional `| filter` for a recognized namespace.
+fn validate_filter(filter: Option<&str>, inner: &str) -> anyhow::Result<Filter> {
     match filter {
-        None => Ok(false),
-        Some("raw") => Ok(true),
-        Some(other) => {
-            bail!("unknown token filter '{other}' in '${{{inner}}}' (only 'raw' is supported)")
-        }
+        None => Ok(Filter::None),
+        Some("raw") => Ok(Filter::Raw),
+        Some("base64") => Ok(Filter::Base64),
+        Some(other) => bail!(
+            "unknown token filter '{other}' in '${{{inner}}}' (only 'raw' and 'base64' are supported)"
+        ),
     }
 }
 
@@ -813,6 +862,34 @@ mod tests {
             Some(&msg),
         );
         assert_eq!(out, r#"{"x":{"k":1}}"#);
+    }
+
+    #[test]
+    fn base64_filter_encodes_the_raw_payload_and_fields() {
+        let binary = CanonicalMessage::new(vec![0xff, 0x00, b'"', 0x80], None);
+        let template = CompiledTemplate::compile(
+            r#"{"p":"${message:payload | base64}"}"#,
+            Some("application/json"),
+        )
+        .unwrap();
+        assert_eq!(template.render(Some(&binary)), br#"{"p":"/wAigA=="}"#);
+        assert!(template.has_only_replay_stable_tokens());
+
+        let msg = msg_with(r#"{"name":"a\"b"}"#, &[("k", "v")]);
+        let out = render_str(
+            r#"${payload:name | base64} ${metadata:k | base64} ${message:payload}"#,
+            Some("application/json"),
+            Some(&msg),
+        );
+        assert_eq!(out, r#"YSJi dg== {\"name\":\"a\\\"b\"}"#);
+    }
+
+    #[test]
+    fn base64_filter_encodes_an_env_value_once() {
+        let path = std::env::var("PATH").unwrap();
+        let out = render_str("Basic ${env:PATH | base64}", None, None);
+        assert_eq!(out, format!("Basic {}", BASE64.encode(path)));
+        assert!(CompiledTemplate::compile("${message:payload | hex}", None).is_err());
     }
 
     #[test]

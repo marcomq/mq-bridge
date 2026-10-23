@@ -1352,9 +1352,8 @@ mod fast_path_equivalence {
             assert_byte_identical(schema, payload);
         }
 
-        // A sub-schema default takes the whole root off the fast path, because filling one
-        // needs to know which fields are absent — which copying spans never learns.
-        assert_same(
+        // A default only matters for a null or absent field, which takes the general path.
+        assert_same_via_fast(
             json!({
                 "type": "object",
                 "properties": { "v": { "type": "integer", "default": 5 } }
@@ -1485,36 +1484,6 @@ mod fast_path_equivalence {
         assert_same_via_fast(schema, r#"{"outer":{"inner":"bad"},"list":["1","2"]}"#);
     }
 
-    /// A documented, deliberate difference. The normal path looks for violations in
-    /// schema order; the fast path finds them in the order the payload lists its fields,
-    /// which is not the same when keys are not sorted. A message violating the schema in
-    /// more than one place is rejected either way — only the field named in the error
-    /// differs. Making these agree would mean transforming in schema order and emitting in
-    /// payload order, i.e. buffering every field, which costs more than the diagnostic is
-    /// worth. Asserted so it cannot change unnoticed.
-    #[test]
-    fn known_difference_which_violation_is_reported_when_several() {
-        let schema = json!({"type":"object","properties":{
-        "outer":{"type":"object","properties":{"inner":{"type":"integer"}}},
-        "list":{"type":"array","items":{"type":"integer"}}}});
-        let out = both(schema, r#"{"outer":{"inner":"bad"},"list":["1","x"]}"#);
-        // Sorted keys visit `list` first; insertion order reaches `outer` first. Either
-        // way the message is rejected — only the field named in the error differs.
-        let sorted = Err("coercion:$.list[1]".to_string());
-        let insertion = Err("coercion:$.outer.inner".to_string());
-        // The normal path walks the schema's (sorted) properties, so it always names `list`.
-        assert_eq!(out.slow, sorted);
-        // The fast path follows the payload order this build's `Map` would use; the other
-        // ordering is what a build with the opposite `preserve_order` setting produces.
-        let (build_order, other_order) = if map_sorts_keys() {
-            (&sorted, &insertion)
-        } else {
-            (&insertion, &sorted)
-        };
-        assert_eq!(&out.fast, build_order);
-        assert_eq!(&out.fast_other_order, other_order);
-    }
-
     #[test]
     fn enums_agree() {
         let schema = json!({"type":"object","properties":{
@@ -1549,19 +1518,124 @@ mod fast_path_equivalence {
         );
     }
 
+    /// Absence is read off the spans' keys, so `required` and defaults are served by the
+    /// walk at every level, including a default that itself needs coercing.
+    /// With several bad fields the normal path reports the first in schema order; the walk
+    /// meets them in payload order, so the error must still come from the normal path.
+    #[test]
+    fn first_of_several_errors_agrees() {
+        let int = json!({"type": "integer"});
+        assert_same_via_fast(
+            json!({"properties": {"a": {"type": "integer", "default": "oops"}, "b": int}}),
+            r#"{"b":"x"}"#,
+        );
+        assert_same_via_fast(
+            json!({"properties": {"a": int, "b": int}}),
+            r#"{"b":"x","a":"y"}"#,
+        );
+        assert_same_via_fast(
+            json!({"properties": {"a": int, "o": {"required": ["k"]}}}),
+            r#"{"o":{},"a":"bad"}"#,
+        );
+        assert_same_via_fast(
+            json!({"type":"object","properties":{
+            "outer":{"type":"object","properties":{"inner":{"type":"integer"}}},
+            "list":{"type":"array","items":{"type":"integer"}}}}),
+            r#"{"outer":{"inner":"bad"},"list":["1","x"]}"#,
+        );
+    }
+
+    #[test]
+    fn required_and_defaults_agree() {
+        let schema = json!({"type":"object","required":["a","z"],"properties":{
+        "a":{"type":"string"},
+        "m":{"type":"integer","default":"7"},
+        "z":{"type":"string","default":"filled"},
+        "o":{"type":"object","required":["k"],"properties":{
+            "k":{"type":"integer"},
+            "d":{"type":"boolean","default":true}}}}});
+        for payload in [
+            r#"{"a":"x"}"#,
+            r#"{"a":"x","z":"given","m":"3"}"#,
+            r#"{"b":1,"a":"x","o":{"k":"1"}}"#,
+            r#"{"z":null,"a":"x"}"#,
+            r#"{"z":"x"}"#,
+            r#"{"a":"x","o":{}}"#,
+            r#"{"a":"x","o":{"d":"0"}}"#,
+            r#"{"a":"x","o":{"k":"bad"}}"#,
+            r#"{}"#,
+        ] {
+            assert_same_via_fast(schema.clone(), payload);
+        }
+        let unfilled = TransformMiddleware {
+            schema: Some(schema),
+            apply_defaults: false,
+            ..Default::default()
+        };
+        assert_same_with(unfilled.clone(), r#"{"a":"x","z":"y"}"#);
+        assert_same_with(unfilled, r#"{"a":"x"}"#);
+
+        // A default that fails its own schema is reported at its field.
+        let bad_default = json!({"type":"object","properties":{
+        "n":{"type":"integer","default":"oops"}}});
+        assert_same_via_fast(bad_default, r#"{"x":1}"#);
+    }
+
+    /// Wide objects take a different key-lookup route than narrow ones.
+    #[test]
+    fn wide_objects_agree() {
+        let schema = json!({"type":"object","required":["k3"],"properties":{
+        "k7":{"type":"integer"},"missing":{"type":"string","default":"d"}}});
+        let wide: Vec<String> = (0..40).map(|i| format!(r#""k{i}":"{i}""#)).collect();
+        assert_same_via_fast(schema.clone(), &format!("{{{}}}", wide.join(",")));
+        let duplicated = format!("{{{},\"k5\":\"again\"}}", wide.join(","));
+        assert_same_via_fast(schema.clone(), &duplicated);
+        assert_same_via_fast(schema, &format!("{{{}}}", wide[4..].join(",")));
+    }
+
+    /// Arrays are walked element by element, at the root and nested, with failures
+    /// naming the element.
+    #[test]
+    fn arrays_agree() {
+        let rows = json!({"type":"array","items":{"type":"object","required":["id"],
+            "properties":{"id":{"type":"integer"},"tags":{"type":"array","items":{"type":"string"}}}}});
+        for payload in [
+            r#"[]"#,
+            r#"[{"id":"1"},{"id":2,"tags":[1,"a"]},{"id":"3","x":null}]"#,
+            r#"[{"id":"1"},{"id":"no"}]"#,
+            r#"[{"id":"1"},{"tags":[]}]"#,
+            r#"[{"id":"1"},null]"#,
+            r#" [{"id":"1"}] "#,
+        ] {
+            assert_same_via_fast(rows.clone(), payload);
+        }
+        let nested = json!({"type":"object","properties":{"rows":rows}});
+        assert_same_via_fast(nested.clone(), r#"{"rows":[{"id":"1"},{"id":"2"}],"n":1}"#);
+        assert_same_via_fast(nested, r#"{"rows":[{"id":"1"},{"id":"x"}]}"#);
+    }
+
+    /// Nested objects that the walk cannot take member by member fall back for that
+    /// field alone, and still agree.
+    #[test]
+    fn nested_fallbacks_agree() {
+        let schema = json!({"type":"object","properties":{
+        "o":{"type":"object","properties":{"s":{"type":"string"},"i":{"type":"integer"}}},
+        "e":{"type":"object","enum":[{"a":1}]}}});
+        for payload in [
+            r#"{"o":{"i":"1","i":"2"}}"#,
+            r#"{"o":{"a\"b":1,"i":"3"}}"#,
+            r#"{"o":[1]}"#,
+            r#"{"o":null}"#,
+            r#"{"e":{"a":1}}"#,
+            r#"{"e":{"a":2}}"#,
+        ] {
+            assert_same_via_fast(schema.clone(), payload);
+        }
+        assert_byte_identical(schema, r#"{"o":{"z":1,"i":"5","a":{"b":[1]}},"x":2}"#);
+    }
+
     #[test]
     fn shapes_that_must_fall_back_still_agree() {
-        // Root-level `required` and defaults need to know what is absent.
-        let required = json!({"type":"object","required":["a"],
-                          "properties":{"a":{"type":"string"}}});
-        assert_same(required.clone(), r#"{"a":"x"}"#);
-        assert_same(required, r#"{"b":"x"}"#);
-
-        let defaulted = json!({"type":"object","properties":{
-        "a":{"type":"string","default":"filled"}}});
-        assert_same(defaulted.clone(), r#"{"b":1}"#);
-        assert_same(defaulted, r#"{"a":null}"#);
-
         // A non-object payload has no fields to walk.
         assert_same(scalars(), r#"[1,2,3]"#);
         assert_same(scalars(), r#""bare string""#);

@@ -204,6 +204,19 @@ pub(crate) fn parse_sql(sql: &str) -> anyhow::Result<Option<ListQuery>> {
     }))
 }
 
+/// The field of `"field": {"$in": [`, given the text up to that `[`.
+fn in_field(before: &str) -> Option<String> {
+    before
+        .trim_end()
+        .strip_suffix(':')
+        .and_then(|b| b.trim_end().strip_suffix("\"$in\""))
+        .and_then(|b| b.trim_end().strip_suffix('{'))
+        .and_then(|b| b.trim_end().strip_suffix(':'))
+        .and_then(|b| b.trim_end().strip_suffix('"'))
+        .and_then(|b| b.rfind('"').map(|i| b[i + 1..].to_string()))
+        .filter(|f| !f.is_empty())
+}
+
 /// Parses a MongoDB `find` template. `Ok(None)` when it runs per message; `Ok(Some(_))` when
 /// the only token sits inside `"field": {"$in": [ … ]}`.
 pub(crate) fn parse_mongodb(filter: &str) -> anyhow::Result<Option<ListQuery>> {
@@ -214,29 +227,24 @@ pub(crate) fn parse_mongodb(filter: &str) -> anyhow::Result<Option<ListQuery>> {
             .strip_suffix(':')
             .is_some_and(|b| b.trim_end().ends_with("\"$in\""))
     };
+    // The expression `{"$in": [value, array]}` (two elements, or under an operator such as
+    // `$expr`) tests one value; it is not a key list and runs per message.
+    let key_list = |(open, close): (usize, usize)| {
+        !has_top_level_comma(&filter[open + 1..close])
+            && !in_field(&filter[..open]).is_some_and(|f| f.starts_with('$'))
+    };
     let list = found.iter().find_map(|&(start, end)| {
-        enclosing_list(filter, start, b'[', b']', is_in).map(|l| (start, end, l))
+        enclosing_list(filter, start, b'[', b']', is_in)
+            .filter(|&l| key_list(l))
+            .map(|l| (start, end, l))
     });
     let Some((start, end, (open, close))) = list else {
         return Ok(None);
     };
     if found.len() > 1 {
-        bail!("a `find` filter with `$in: [${{…}}]` must contain no other token");
+        bail!("a `find` or `aggregate_query` with `$in: [${{…}}]` must contain no other token");
     }
-    let element = &filter[open + 1..close];
-    if has_top_level_comma(element) {
-        bail!("`$in: […]` must hold just the one element with the token");
-    }
-    // `"field": {"$in": [` — the field name is the quoted string before `: {`.
-    let field = filter[..open]
-        .trim_end()
-        .strip_suffix(':')
-        .and_then(|b| b.trim_end().strip_suffix("\"$in\""))
-        .and_then(|b| b.trim_end().strip_suffix('{'))
-        .and_then(|b| b.trim_end().strip_suffix(':'))
-        .and_then(|b| b.trim_end().strip_suffix('"'))
-        .and_then(|b| b.rfind('"').map(|i| b[i + 1..].to_string()))
-        .filter(|f| !f.is_empty())
+    let field = in_field(&filter[..open])
         .ok_or_else(|| anyhow!("`$in: [${{…}}]` must be the whole condition of one field, e.g. {{\"_id\": {{\"$in\": [${{payload:id}}]}}}}"))?;
     Ok(Some(ListQuery {
         key: field,
@@ -365,6 +373,19 @@ mod tests {
         );
         assert_eq!(parse_mongodb(r#"{"_id": "${payload:id}"}"#).unwrap(), None);
         assert!(parse_mongodb(r#"{"$in": [${payload:id}]}"#).is_err());
+
+        let pipeline =
+            r#"[{"$match": {"k": {"$in": ["${payload:k}"]}}}, {"$group": {"_id": "$k"}}]"#;
+        assert_eq!(parse_mongodb(pipeline).unwrap().unwrap().key, "k");
+
+        // The `$in` expression tests one value and runs per message, tokens anywhere.
+        for per_message in [
+            r#"[{"$set": {"hit": {"$cond": [{"$in": ["${payload:tag}", "$tags"]}, 1, 0]}}}]"#,
+            r#"{"$expr": {"$in": ["${payload:tag}", "$tags"]}, "k": "${payload:k}"}"#,
+            r#"{"$expr": {"$in": ["${payload:tag}"]}}"#,
+        ] {
+            assert_eq!(parse_mongodb(per_message).unwrap(), None, "{per_message}");
+        }
     }
 
     #[test]

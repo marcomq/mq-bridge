@@ -35,12 +35,11 @@ the tool output and the real exposure:
 
 | Advisory | Crate / path | Feature | Status |
 | --- | --- | --- | --- |
-| [RUSTSEC-2026-0104](https://rustsec.org/advisories/RUSTSEC-2026-0104) | `rustls-webpki` via `rumqttc`, `aws-sdk-*` | `mqtt`, `aws` | **Not affected** — CRL code path never invoked |
+| [RUSTSEC-2026-0104](https://rustsec.org/advisories/RUSTSEC-2026-0104) | `rustls-webpki 0.102.8` via `rumqttc` | `mqtt` | **Not affected** — CRL code path never invoked |
 | [RUSTSEC-2026-0049](https://rustsec.org/advisories/RUSTSEC-2026-0049) | `rustls-webpki 0.102.8` via `rumqttc` | `mqtt` | **Not affected** — CRL code path never invoked |
-| [RUSTSEC-2026-0098](https://rustsec.org/advisories/RUSTSEC-2026-0098) | `rustls-webpki 0.102.8` via `rumqttc` | `mqtt` | **Not affected** — validation runs on patched `0.103.13` |
-| [RUSTSEC-2026-0099](https://rustsec.org/advisories/RUSTSEC-2026-0099) | `rustls-webpki 0.102.8` via `rumqttc` | `mqtt` | **Not affected** — validation runs on patched `0.103.13` |
-| [RUSTSEC-2026-0098](https://rustsec.org/advisories/RUSTSEC-2026-0098) | `rustls-webpki 0.101.7` via `aws-sdk-*` | `aws` | **Reachable**, narrow preconditions — see below |
-| [RUSTSEC-2026-0099](https://rustsec.org/advisories/RUSTSEC-2026-0099) | `rustls-webpki 0.101.7` via `aws-sdk-*` | `aws` | **Reachable**, narrow preconditions — see below |
+| [RUSTSEC-2026-0098](https://rustsec.org/advisories/RUSTSEC-2026-0098) | `rustls-webpki 0.102.8` via `rumqttc` | `mqtt` | **Not affected** — validation runs on patched `0.103.16` |
+| [RUSTSEC-2026-0099](https://rustsec.org/advisories/RUSTSEC-2026-0099) | `rustls-webpki 0.102.8` via `rumqttc` | `mqtt` | **Not affected** — validation runs on patched `0.103.16` |
+| [RUSTSEC-2026-0382](https://rustsec.org/advisories/RUSTSEC-2026-0382) | `rustls-webpki 0.102.8` via `rumqttc` | `mqtt` | **Not affected** — validation runs on patched `0.103.16` |
 | [RUSTSEC-2025-0057](https://rustsec.org/advisories/RUSTSEC-2025-0057) | `fxhash` via `sled 0.34` | `sled`, `dedup` | Unmaintained only, no vulnerability |
 | [RUSTSEC-2024-0384](https://rustsec.org/advisories/RUSTSEC-2024-0384) | `instant` via `sled 0.34` → `parking_lot 0.11` | `sled`, `dedup` | Unmaintained only, no vulnerability |
 | [RUSTSEC-2025-0134](https://rustsec.org/advisories/RUSTSEC-2025-0134) | `rustls-pemfile` (direct + `rumqttc`) | `amqp`, `nats`, `mqtt`, `http` | Unmaintained only, no vulnerability |
@@ -51,34 +50,19 @@ broadest — it is pulled in by `amqp`, `nats`, `mqtt`, and `http` alike.
 
 ### Detail: the `rustls-webpki` advisories
 
-These reach the dependency tree by two independent paths.
+The only affected version left in the tree arrives via
+`rumqttc 0.25` → `rustls-webpki 0.102.8` (feature `mqtt`). No `rumqttc` release
+moves off 0.102 yet. `rumqttc` declares this dependency but uses exactly one
+item from it: the `webpki::Error` variant in its own error enum (`src/tls.rs:42`
+is the only reference to `webpki` in the crate). All certificate validation on
+the MQTT path runs through `tokio-rustls 0.26` → `rustls 0.23` →
+`rustls-webpki 0.103.16`, which is patched for all five advisories.
+**Not affected.**
 
-**Path A — `rumqttc 0.25` → `rustls-webpki 0.102.8` (feature `mqtt`).**
-`rumqttc` declares this dependency but uses exactly one item from it: the
-`webpki::Error` variant in its own error enum (`src/tls.rs:42` is the only
-reference to `webpki` in the crate). All certificate validation on the MQTT path
-runs through `tokio-rustls 0.26` → `rustls 0.23` → `rustls-webpki 0.103.13`,
-which is patched for all four advisories. **Not affected.**
-
-**Path B — `aws-config` / `aws-sdk-sqs` / `aws-sdk-sns` →
-`aws-smithy-http-client` → legacy `rustls 0.21` → `rustls-webpki 0.101.7`
-(feature `aws`).** `aws-smithy-http-client` still selects its
-`legacy-rustls-ring` connector, so this is live code on the SQS/SNS path. It
-splits two ways:
-
-- **RUSTSEC-2026-0104 and RUSTSEC-2026-0049 (CRL handling): not affected.** This
-  code executes only when the application supplies a certificate revocation list
-  to a client-certificate verifier. The AWS SDK is an outbound HTTPS client and
-  never configures one. mq-bridge's only `WebPkiClientVerifier` — used for the
-  optional mTLS HTTP server in `src/endpoints/http/mod.rs` — runs on
-  `rustls 0.23` / `rustls-webpki 0.103.13` and is never given a CRL.
-- **RUSTSEC-2026-0098 and RUSTSEC-2026-0099 (name constraints): reachable.**
-  These fire during ordinary server-certificate chain validation, which the SQS
-  and SNS clients perform on every call. Exploitation requires a
-  name-constrained CA present in the trust store that issues certificates
-  outside its constraints — narrow, and not something mq-bridge can trigger or
-  mitigate itself. The fix depends on the AWS SDK migrating off its legacy
-  `rustls 0.21` connector. We do not claim to be unaffected here.
+Every other TLS path, including the AWS SDK (feature `aws`), now validates on
+`rustls 0.23` → `rustls-webpki 0.103.16`. The former legacy `rustls 0.21` →
+`rustls-webpki 0.101.7` path, which was reachable for RUSTSEC-2026-0098 and
+RUSTSEC-2026-0099, is no longer in the dependency tree.
 
 ### Detail: the unmaintained crates
 

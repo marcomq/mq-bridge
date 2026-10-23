@@ -230,7 +230,8 @@ load_orders:
       table: orders
 ```
 
-The CLI uses `local-store://` to distinguish this endpoint from the single-file connector:
+The CLI uses `local-store://` to distinguish this endpoint from the single-file connector.
+A config file accepts it too and stores it as `file://`:
 
 ```bash
 mqb copy \
@@ -310,8 +311,8 @@ from file extensions. Use separate prefixes and routes for mixed formats.
 - `parquet` reads every row of a Parquet file as one JSON object, with the file's column types
   kept (numbers stay numbers). It reads what the `object_store` sink writes and files from
   other tools, on S3, GCS, Azure and local directories alike, and needs the `parquet` build
-  feature, which `mqb` includes. A Parquet file is decoded whole in memory, so
-  `max_object_bytes` matters more here than for the line formats.
+  feature, which `mqb` includes. The file is fetched whole, but its rows are decoded batch
+  by batch as the route consumes them, so memory stays near the file's size.
 - `normal` and `json` read mq-bridge message wrappers, one per line, and preserve metadata.
 - For ordinary third-party JSONL, use `raw`: each line becomes one message payload without
   validating or transforming its JSON.

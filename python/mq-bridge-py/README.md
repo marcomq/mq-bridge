@@ -96,14 +96,17 @@ to a file and point your `# yaml-language-server: $schema=` line at it.
 
 `mq_bridge/config.pyi` and `mq_bridge/config.py` are **generated — do not edit by
 hand**. Regenerate them whenever the Rust config models change (e.g. adding a
-field or a new endpoint). Because the generator reads the schema from the
-compiled extension, you must rebuild first:
+field or a new endpoint). The fastest way skips the extension build and reads
+the schema the engine writes to `mq-bridge.schema.json`:
 
 ```bash
 # from python/mq-bridge-py/
-uv run maturin develop                              # rebuild the extension
-uv run --no-sync python scripts/gen_config_types.py # regenerate config.pyi / config.py
+cargo test --features schema --lib schema_tests::generate_json_schema
+uv run --no-sync python scripts/gen_config_types.py --schema ../../mq-bridge.schema.json
 ```
+
+Without `--schema`, the generator reads the schema from the compiled extension,
+so rebuild it first with `uv run --no-sync maturin develop`.
 
 Then commit the updated `config.pyi`/`config.py`. `tests/test_config_types.py`
 asserts the checked-in output matches the schema, so CI (the "Python package

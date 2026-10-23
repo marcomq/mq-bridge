@@ -537,6 +537,17 @@ pub trait MessagePublisher: Send + Sync + 'static {
         false
     }
 
+    /// `Some(interval)` when this publisher's acks only become durable with its next
+    /// [`flush`](Self::flush): it buffers or syncs in the background.
+    ///
+    /// The route then holds the source's commits, calls `flush()` at least every
+    /// `interval` and releases the commits of every batch sent before a successful
+    /// flush. A failed flush commits nothing; the route reconnects and the source
+    /// redelivers. Defaults to `None`: commits run as soon as `send_batch` returns.
+    fn deferred_commit_interval(&self) -> Option<std::time::Duration> {
+        None
+    }
+
     fn as_any(&self) -> &dyn Any;
 }
 
@@ -585,6 +596,10 @@ impl<T: MessagePublisher + ?Sized> MessagePublisher for Arc<T> {
 
     fn requires_ordered_publish(&self) -> bool {
         (**self).requires_ordered_publish()
+    }
+
+    fn deferred_commit_interval(&self) -> Option<std::time::Duration> {
+        (**self).deferred_commit_interval()
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -639,10 +654,73 @@ impl<T: MessagePublisher + ?Sized> MessagePublisher for Box<T> {
         (**self).requires_ordered_publish()
     }
 
+    fn deferred_commit_interval(&self) -> Option<std::time::Duration> {
+        (**self).deferred_commit_interval()
+    }
+
     fn as_any(&self) -> &dyn Any {
         (**self).as_any()
     }
 }
+
+/// Forwards the pass-through [`MessagePublisher`] methods of a wrapper to the publisher in
+/// `$field`: `requires_ordered_publish`, `deferred_commit_interval`, `flush`, `status` and
+/// both lifecycle hooks. Call it inside an `#[async_trait]` impl; `flags;` forwards only
+/// the first two, for a wrapper with its own flush and hooks.
+macro_rules! forward_publisher_meta {
+    (flags; $($field:ident).+) => {
+        fn requires_ordered_publish(&self) -> bool {
+            self.$($field).+.requires_ordered_publish()
+        }
+
+        fn deferred_commit_interval(&self) -> Option<std::time::Duration> {
+            self.$($field).+.deferred_commit_interval()
+        }
+    };
+    ($($field:ident).+) => {
+        fn requires_ordered_publish(&self) -> bool {
+            self.$($field).+.requires_ordered_publish()
+        }
+
+        fn deferred_commit_interval(&self) -> Option<std::time::Duration> {
+            self.$($field).+.deferred_commit_interval()
+        }
+
+        // The signature `#[async_trait]` gives `async fn flush`; it does not expand macros.
+        fn flush<'life0, 'async_trait>(
+            &'life0 self,
+        ) -> ::core::pin::Pin<
+            Box<dyn ::core::future::Future<Output = anyhow::Result<()>> + Send + 'async_trait>,
+        >
+        where
+            'life0: 'async_trait,
+            Self: 'async_trait,
+        {
+            self.$($field).+.flush()
+        }
+
+        fn status<'life0, 'async_trait>(
+            &'life0 self,
+        ) -> ::core::pin::Pin<
+            Box<dyn ::core::future::Future<Output = $crate::traits::EndpointStatus> + Send + 'async_trait>,
+        >
+        where
+            'life0: 'async_trait,
+            Self: 'async_trait,
+        {
+            self.$($field).+.status()
+        }
+
+        fn on_connect_hook(&self) -> Option<$crate::traits::BoxFuture<'_, anyhow::Result<()>>> {
+            self.$($field).+.on_connect_hook()
+        }
+
+        fn on_disconnect_hook(&self) -> Option<$crate::traits::BoxFuture<'_, anyhow::Result<()>>> {
+            self.$($field).+.on_disconnect_hook()
+        }
+    };
+}
+pub(crate) use forward_publisher_meta;
 
 /// Factory for creating custom endpoints (consumers and publishers).
 #[async_trait]
@@ -693,6 +771,19 @@ pub trait CustomEndpointFactory: Send + Sync + std::fmt::Debug {
     /// `x-mqb-acknowledges` boolean in [`Self::config_schema`], else `true`.
     fn acknowledges(&self, _config: &serde_json::Value) -> bool {
         schema_flag(self.config_schema(), "x-mqb-acknowledges").unwrap_or(true)
+    }
+
+    /// Whether a publisher built from `config` replaces its target with the data of each run,
+    /// as a staged table swapped in at the end does. A route into it then fails to start
+    /// unless its input reads the full data set on every run. Defaults to `false`.
+    fn requires_full_replay(&self, _config: &serde_json::Value) -> bool {
+        false
+    }
+
+    /// Whether a consumer built from `config` reads the full data set from the start on every
+    /// run: it saves no position and consumes nothing. Defaults to `false`.
+    fn replays_from_start(&self, _config: &serde_json::Value) -> bool {
+        false
     }
 }
 

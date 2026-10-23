@@ -129,6 +129,14 @@ impl Request {
     }
 }
 
+fn json_object(payload: &[u8]) -> anyhow::Result<&[u8]> {
+    let payload = payload.trim_ascii();
+    if payload.first() != Some(&b'{') {
+        bail!("the payload is not a JSON object");
+    }
+    Ok(payload)
+}
+
 /// The text before and after a placeholder, which must occur exactly once.
 pub(super) fn around(
     template: &str,
@@ -163,13 +171,20 @@ struct Chunk {
     indices: Vec<usize>,
 }
 
+/// How `upsert.document` turns a message into the document that is sent.
+enum Document {
+    /// The templates before and after the payload.
+    Around(CompiledTemplate, CompiledTemplate),
+    /// A template without `{document}` renders the whole document.
+    Whole(CompiledTemplate),
+}
+
 pub struct HttpBulkPublisher {
     connection: Connection,
     /// Unset on an endpoint that only answers lookups.
     upsert: Option<Request>,
     query: Option<Query>,
-    /// The templates before and after each document.
-    document: Option<(CompiledTemplate, CompiledTemplate)>,
+    document: Option<Document>,
     format: HttpBulkFormat,
     content_type: HeaderValue,
     action: Option<CompiledTemplate>,
@@ -217,15 +232,25 @@ impl HttpBulkPublisher {
         };
         let document = match &upsert.document {
             Some(document) => {
-                let (before, after) = around(document, DOCUMENT, "upsert.document")?;
-                if ndjson && !before.trim_start().starts_with('{') {
-                    bail!("http_bulk upsert.document must be a JSON object for format 'ndjson'");
-                }
                 let compile = |part: &str| {
                     CompiledTemplate::compile(part, Some(JSON))
                         .context("Invalid http_bulk upsert.document template")
                 };
-                Some((compile(&before)?, compile(&after)?))
+                let (before, document) = if document.contains(DOCUMENT) {
+                    let (before, after) = around(document, DOCUMENT, "upsert.document")?;
+                    let parts = Document::Around(compile(&before)?, compile(&after)?);
+                    (before, parts)
+                } else {
+                    let whole = compile(document)?;
+                    if !whole.reads_message() {
+                        bail!("http_bulk upsert.document needs {DOCUMENT} or a token from the message, e.g. ${{message:payload}}");
+                    }
+                    (document.clone(), Document::Whole(whole))
+                };
+                if ndjson && !before.trim_start().starts_with('{') {
+                    bail!("http_bulk upsert.document must be a JSON object for format 'ndjson'");
+                }
+                Some(document)
             }
             None => None,
         };
@@ -330,20 +355,21 @@ impl HttpBulkPublisher {
         body: &mut Vec<u8>,
         message: &CanonicalMessage,
     ) -> anyhow::Result<()> {
-        let payload = message.payload.trim_ascii();
-        if payload.first() != Some(&b'{') {
-            bail!("the payload is not a JSON object");
-        }
         let wrapped;
         let payload = match &self.document {
-            Some((before, after)) => {
+            Some(Document::Whole(template)) => {
+                wrapped = template.render(Some(message));
+                wrapped.as_slice()
+            }
+            Some(Document::Around(before, after)) => {
+                let payload = json_object(&message.payload)?;
                 let mut text = before.render(Some(message));
                 text.extend_from_slice(payload);
                 text.extend_from_slice(&after.render(Some(message)));
                 wrapped = text;
                 wrapped.as_slice()
             }
-            None => payload,
+            None => json_object(&message.payload)?,
         };
         match self.format {
             HttpBulkFormat::Ndjson => {
@@ -1824,8 +1850,10 @@ mod tests {
         );
 
         for (document, reason) in [
-            ("{\"doc\":1}", "{document}"),
+            ("{\"a\":{document},\"b\":{document}}", "{document}"),
+            ("{\"doc\":{doc}}", "{document} or a token"),
             ("[{document}]", "JSON object"),
+            ("\"${message:payload | base64}\"", "JSON object"),
         ] {
             let config = json!({
                 "url": "http://localhost:1",
@@ -1835,5 +1863,30 @@ mod tests {
             let error = HttpBulkPublisher::new(&config).map(|_| ()).unwrap_err();
             assert!(error.to_string().contains(reason), "{error}");
         }
+    }
+
+    #[tokio::test]
+    async fn a_document_without_placeholder_renders_any_payload() {
+        let server = server(|_| (200, String::new())).await;
+        let publisher = publisher(
+            &server,
+            json!({"upsert": {
+                "path": "/messages",
+                "format": "json_array",
+                "envelope": "{\"messages\":{documents}}",
+                "document": "{\"id\":0,\"payload\":\"${message:payload | base64}\"}"
+            }}),
+        );
+        let binary = CanonicalMessage::new(vec![0xff, 0x00], None);
+        let sent = publisher
+            .send_batch(vec![binary, CanonicalMessage::from("not json")])
+            .await
+            .unwrap();
+
+        assert!(failures(sent).is_empty());
+        assert_eq!(
+            calls(&server)[0].2,
+            r#"{"messages":[{"id":0,"payload":"/wA="},{"id":0,"payload":"bm90IGpzb24="}]}"#
+        );
     }
 }

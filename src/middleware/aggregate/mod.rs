@@ -1884,14 +1884,6 @@ impl AggregatePublisher {
 
 #[async_trait]
 impl MessagePublisher for AggregatePublisher {
-    fn on_connect_hook(&self) -> Option<BoxFuture<'_, anyhow::Result<()>>> {
-        self.inner.on_connect_hook()
-    }
-
-    fn on_disconnect_hook(&self) -> Option<BoxFuture<'_, anyhow::Result<()>>> {
-        self.inner.on_disconnect_hook()
-    }
-
     async fn send(&self, message: CanonicalMessage) -> Result<Sent, PublisherError> {
         let (mut folded, flush) = self.fold(vec![message]).await?;
         let message = folded
@@ -1946,17 +1938,7 @@ impl MessagePublisher for AggregatePublisher {
         }
     }
 
-    async fn flush(&self) -> anyhow::Result<()> {
-        self.inner.flush().await
-    }
-
-    async fn status(&self) -> EndpointStatus {
-        self.inner.status().await
-    }
-
-    fn requires_ordered_publish(&self) -> bool {
-        self.inner.requires_ordered_publish()
-    }
+    crate::traits::forward_publisher_meta!(inner);
 
     fn as_any(&self) -> &dyn Any {
         self

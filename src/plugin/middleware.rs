@@ -376,14 +376,6 @@ struct PluginMiddlewarePublisher {
 
 #[async_trait]
 impl MessagePublisher for PluginMiddlewarePublisher {
-    fn on_connect_hook(&self) -> Option<BoxFuture<'_, anyhow::Result<()>>> {
-        self.inner.on_connect_hook()
-    }
-
-    fn on_disconnect_hook(&self) -> Option<BoxFuture<'_, anyhow::Result<()>>> {
-        self.inner.on_disconnect_hook()
-    }
-
     async fn send_batch(
         &self,
         messages: Vec<CanonicalMessage>,
@@ -426,17 +418,7 @@ impl MessagePublisher for PluginMiddlewarePublisher {
         Some(lookup_through(self.inner.as_ref(), outcomes).await)
     }
 
-    async fn flush(&self) -> anyhow::Result<()> {
-        self.inner.flush().await
-    }
-
-    async fn status(&self) -> EndpointStatus {
-        self.inner.status().await
-    }
-
-    fn requires_ordered_publish(&self) -> bool {
-        self.inner.requires_ordered_publish()
-    }
+    crate::traits::forward_publisher_meta!(inner);
 
     fn as_any(&self) -> &dyn Any {
         self

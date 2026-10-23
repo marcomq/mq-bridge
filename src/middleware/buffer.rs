@@ -364,9 +364,11 @@ impl MessagePublisher for BufferPublisher {
         self.core.inner.flush().await
     }
 
-    fn requires_ordered_publish(&self) -> bool {
-        self.core.inner.requires_ordered_publish()
+    async fn status(&self) -> crate::traits::EndpointStatus {
+        self.core.inner.status().await
     }
+
+    crate::traits::forward_publisher_meta!(flags; core.inner);
 
     fn as_any(&self) -> &dyn Any {
         self

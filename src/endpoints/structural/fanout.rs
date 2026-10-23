@@ -203,6 +203,19 @@ impl MessagePublisher for FanoutPublisher {
         self.publishers.iter().any(|p| p.requires_ordered_publish())
     }
 
+    /// The shortest interval of any leg: one flush covers every leg.
+    fn deferred_commit_interval(&self) -> Option<std::time::Duration> {
+        self.publishers
+            .iter()
+            .filter_map(|p| p.deferred_commit_interval())
+            .min()
+    }
+
+    async fn flush(&self) -> anyhow::Result<()> {
+        futures::future::try_join_all(self.publishers.iter().map(|p| p.flush())).await?;
+        Ok(())
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }

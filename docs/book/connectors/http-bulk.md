@@ -101,6 +101,27 @@ output:
       format: json_array
 ```
 
+A login that answers with a token in JSON. The body is sent as it is; `token` and
+`expires_at` (Unix seconds) or `expires_in` (seconds from now) are JSON pointers into the
+answer. Without either the token is kept until a request is answered 401, and so is one
+whose expiry is in milliseconds. The body is not JSON-escaped: a password with a `"` or
+`\` in it must be escaped in the environment variable:
+
+```yaml
+output:
+  http_bulk:
+    url: https://api.example.com
+    auth:
+      login:
+        url: https://api.example.com/users/login
+        body: '{"username":"bridge","password":"${API_PASSWORD}"}'
+        token: /access_token/token
+        expires_at: /access_token/expiry
+    upsert:
+      path: /v1/items
+      format: json_array
+```
+
 Amazon OpenSearch Service, with requests signed by the AWS credentials of the environment
 (`service: aoss` for OpenSearch Serverless):
 
@@ -117,7 +138,7 @@ output:
         items: { path: /items, error: /index/error/reason }
 ```
 
-The OAuth2 and SigV4 examples were checked for their configuration only, not run against
+The OAuth2, login and SigV4 examples were checked for their configuration only, not run against
 those services.
 
 ## On the command line
@@ -261,6 +282,15 @@ position after a page comes from is the only thing that differs between APIs:
 | `response: <pointer>` | a value in the response | change feeds, scroll tokens |
 | `next_url: <pointer>` | a URL in the response | `"next": "https://…"` links |
 | `link: true` | the `Link` header's `rel="next"` URL | GitHub-style paging |
+
+An API that takes the next offset rather than the last one read gets `cursor.add: 1`,
+which adds to the whole number at `cursor.item`. An API that wraps each record in an
+envelope, say `{"offset": 7, "payload": "aGVsbG8="}`, gets `read.payload: /payload` and
+`read.payload_encoding: base64`: the message is then the decoded bytes, not the document.
+The position is still taken from the whole document. A checkpoint saved before `add` was
+set holds the last offset read, so the first page after the change repeats that record. A
+document whose `payload` is missing or does not decode stops the read at its page: the
+route fails there until the API stops returning it.
 
 A `response` cursor ends the read when the value is `null` or an empty string. Some APIs
 leave the field out on the last page instead (Google's `nextPageToken`): set
@@ -482,7 +512,7 @@ Elasticsearch or Qdrant.
 | --- | --- | --- |
 | `url` | required | Base URL of the target |
 | `headers` | none | Sent with every request; stored as secrets |
-| `auth` | none | `oauth2` or `aws_sigv4` credentials for every request; see below |
+| `auth` | none | `oauth2`, `login` or `aws_sigv4` credentials for every request; see below |
 | `upsert` | an output needs it or `query` | The request that writes documents |
 | `query` | none | The request that answers lookups; excludes `upsert`, `delete` and `operation` |
 | `read` | required for an input | The request that reads a page of documents, or opens a stream |
@@ -493,7 +523,7 @@ Elasticsearch or Qdrant.
 | `compression` | `none` | `gzip`, `zstd` or `lz4` for request bodies, named in `Content-Encoding` |
 | `request_timeout_ms` | see right | Timeout of one request; `0`: none. Unset: a request fails after 300 s without a response byte. With `read.stream` it is the longest silence on the open response, and unset means none |
 | `connect_timeout_ms` | 10000 | Connection timeout |
-| `tls` | none | `ca_file` and `accept_invalid_certs` for `https://`; `required: true` refuses a `url` or OAuth2 `token_url` that is not `https://` |
+| `tls` | none | `ca_file` and `accept_invalid_certs` for `https://`; `required: true` refuses a `url`, OAuth2 `token_url` or `login.url` that is not `https://` |
 
 `upsert`:
 
@@ -505,7 +535,7 @@ Elasticsearch or Qdrant.
 | `content_type` | by format | `application/x-ndjson` or `application/json` |
 | `action` | none | `ndjson` only: a line sent before each document, e.g. `{"index":{"_id":"${payload:id}"}}`. Values taken from the message are JSON-escaped. |
 | `envelope` | none | `json_array` only: the body around the array; `{documents}` marks where the array goes |
-| `document` | none | Template around each document; `{document}` marks where the payload goes, e.g. `{"doc":{document},"doc_as_upsert":true}`. Values taken from the message are JSON-escaped. |
+| `document` | none | Template around each document; `{document}` marks where the payload goes, e.g. `{"doc":{document},"doc_as_upsert":true}`. Without `{document}` the template is the whole document and the payload need not be JSON, e.g. `{"data":"${message:payload \| base64}"}`. Values taken from the message are JSON-escaped. |
 | `result` | HTTP status | See below |
 | `split_on_reject` | `false` | Without `result`: a request the target refuses with 400, 409, 413 or 422 is sent again in halves until the refused documents stand alone |
 | `max_documents` | none | Most documents in one request, for an API that limits the count rather than the size |
@@ -540,6 +570,7 @@ Elasticsearch or Qdrant.
 | Field | Meaning |
 | --- | --- |
 | `oauth2` | Client credentials grant: `token_url`, `client_id`, `client_secret` and an optional `scope`. The token is sent as `Authorization: Bearer`. Use an `https://` `token_url`: the secret is sent to it. With `tls.required` anything else is refused; without it, plain HTTP to another host logs a warning. |
+| `login` | `url` and `body`, a JSON login request sent with POST; `token`, a JSON pointer to the token in the answer; `expires_at` (Unix seconds) or `expires_in` (seconds), optional JSON pointers to its expiry. The token is sent as `Authorization: Bearer`. `body` is stored as a secret; `url` is checked like the OAuth2 `token_url`. |
 | `aws_sigv4` | Signs each request: `region` and `service` (`es`, `aoss`, …). `access_key`, `secret_key` and `session_token` are optional; without them the AWS default credential chain is used. Needs a build with the `aws` feature, which `full` includes. |
 
 `read`:
@@ -553,6 +584,7 @@ Elasticsearch or Qdrant.
 | `cursor.response` | none | JSON pointer to the next position in the response; `null` or an empty string there ends the read |
 | `cursor.end_when_missing` | `false` | With `cursor.response`: a response without that field ends the read too. Without it such a response stops the route |
 | `cursor.item` | none | JSON pointer to the position in the last document of a page |
+| `cursor.add` | none | With `cursor.item`: added to that whole number, e.g. `1` for an API that takes the next offset |
 | `cursor.next_url` | none | JSON pointer to the URL of the next page, e.g. `/links/next`; missing, `null` or empty ends the read |
 | `cursor.link` | `false` | The next page is the `rel="next"` URL of the `Link` header; a page without one ends the read |
 | `cursor.start` | `0` for a count, else `null` | Position before the first read |
@@ -561,6 +593,8 @@ Elasticsearch or Qdrant.
 | `polling_interval_ms` | 1000 | Wait after an empty page |
 | `max_polling_interval_ms` | none | The wait doubles up to this while pages stay empty |
 | `stream` | none | `sse` or `ndjson`: read one open response instead of pages; see [An open stream](#an-open-stream-sse-and-ndjson) |
+| `payload` | the document | JSON pointer to the message payload in each document; a string is taken as text, anything else as JSON. Not with `stream` |
+| `payload_encoding` | none | `base64`: decode the string at `payload` |
 
 `{cursor}` must occur in the path or the body, except with `stream`, `cursor.next_url` or
 `cursor.link`, which refuse it. Set at most one of `cursor.response`, `cursor.item`,
@@ -623,14 +657,14 @@ Without `result`, a 2xx status means every document was written.
   way. The job may still finish later, so retry only where sending a document
   twice is safe, as it is for an upsert by id.
 - **Truncate is not applied.** A truncate message fails for good.
-- **A token is fetched once and shared.** With `auth.oauth2` the token is
+- **A token is fetched once and shared.** With `auth.oauth2` or `auth.login` the token is
   cached and replaced a minute before it expires (at half its lifetime if that
   is shorter); concurrent batches wait for one token request. A request
   answered 401 gets a new token and is sent once more; a second 401 fails as any
   other status. The client id and secret go in the form body of the token
   request. A failing token endpoint fails the batch by its status.
 - **Credentials cover every request**: upserts, deletes, queries, reads and job
-  polls. `client_secret`, `secret_key` and `session_token` are stored as
+  polls. `client_secret`, `login.body`, `secret_key` and `session_token` are stored as
   secrets. A SigV4 signature covers the body as sent, after compression.
 
 As a lookup (`query`):

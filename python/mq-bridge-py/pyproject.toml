@@ -1,5 +1,5 @@
 [build-system]
-requires = ["maturin>=1.7,<2.0"]
+requires = ["maturin>=1.10,<2.0"]
 build-backend = "maturin"
 
 [project]
@@ -49,7 +49,7 @@ Issues = "https://github.com/marcomq/mq-bridge/issues"
 
 [dependency-groups]
 dev = [
-  "maturin>=1.7,<2.0",
+  "maturin>=1.10,<2.0",
   "pytest>=8.3",
 ]
 bench = [
@@ -70,4 +70,6 @@ markers = [
 bindings = "pyo3"
 features = ["pyo3/extension-module", "full", "schema"]
 module-name = "mq_bridge._mq_bridge"
+# Editable installs (uv sync / uv run) build a debug extension, not a release one.
+editable-profile = "dev"
 python-source = "."

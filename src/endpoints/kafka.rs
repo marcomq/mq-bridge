@@ -1874,7 +1874,10 @@ async fn await_first_within(
     loop {
         // A drain that is already complete shouldn't spend a whole idle timeout finding
         // that out. Nothing can still be in flight: every partition is at its target.
-        if exit_on_empty && rx.is_empty() && readiness() == DrainReadiness::Drained {
+        // The channel is checked again after `readiness()`: an EOF is published only once the
+        // records ahead of it are in the channel, so they may have landed in between.
+        if exit_on_empty && rx.is_empty() && readiness() == DrainReadiness::Drained && rx.is_empty()
+        {
             return None;
         }
         if let Some(item) = crate::traits::drain_gated(exit_on_empty, rx.recv()).await {
@@ -1884,7 +1887,10 @@ async fn await_first_within(
         }
         let state = readiness();
         if state == DrainReadiness::Drained {
-            return None;
+            if rx.is_empty() {
+                return None;
+            }
+            continue;
         }
         if std::time::Instant::now() >= start_deadline {
             // No rebalance handed the lagging partitions over, so a live peer owns them.
@@ -2531,6 +2537,36 @@ mod tests {
 
         let first = await_first(&rx, true, "t", || DrainReadiness::Drained, || true).await;
         assert!(matches!(first, Some(Ok(record)) if record.offset == 11));
+    }
+
+    #[tokio::test]
+    async fn test_a_record_landing_while_readiness_reports_drained_is_not_dropped() {
+        for calls_before_landing in [0, 1] {
+            let (tx, rx) = prefetch_channel(1);
+            let mut calls = 0;
+            let first = await_first(
+                &rx,
+                true,
+                "t",
+                || {
+                    if calls == calls_before_landing {
+                        tx.try_send(Ok(prefetched("t", 0, 7))).unwrap();
+                    }
+                    calls += 1;
+                    if calls > calls_before_landing {
+                        DrainReadiness::Drained
+                    } else {
+                        DrainReadiness::Starting
+                    }
+                },
+                || true,
+            )
+            .await;
+            assert!(
+                matches!(first, Some(Ok(record)) if record.offset == 7),
+                "record landing at readiness call {calls_before_landing} was dropped"
+            );
+        }
     }
 
     #[test]

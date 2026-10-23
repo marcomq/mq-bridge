@@ -133,7 +133,7 @@ ends when its source is empty if the route has `exit_on_empty`, so there is no c
 | `kafka` | no | no |  |
 | `meilisearch` | no | with `operation` |  |
 | `memory` | with `request_reply: true` | no |  |
-| `mongodb` | depends | no | Replies with `request_reply`, `report_outcome` or `find`. |
+| `mongodb` | depends | no | Replies with `request_reply`, `report_outcome`, `find` or `aggregate_query`. |
 | `mqtt` | no | no |  |
 | `nats` | with `request_reply: true` | no |  |
 | `null` | no | no |  |

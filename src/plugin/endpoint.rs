@@ -27,7 +27,8 @@ use std::sync::Arc;
 use crate::support::plugin_abi::{
     MqbAsyncHooks, MqbBatchHandle, MqbBuffer, MqbConsumerHandle, MqbMessage, MqbPublisherHandle,
     MqbResponsesHandle, MqbSlice, MqbStatus, MqbStatusHooks, MQB_DELIVERY_ACKNOWLEDGES,
-    MQB_DELIVERY_IDEMPOTENT_SINK, MQB_DISCONNECT_COMPLETED, MQB_DISCONNECT_FAILED,
+    MQB_DELIVERY_IDEMPOTENT_SINK, MQB_DELIVERY_REPLAYS_FROM_START,
+    MQB_DELIVERY_REQUIRES_FULL_REPLAY, MQB_DISCONNECT_COMPLETED, MQB_DISCONNECT_FAILED,
     MQB_DISCONNECT_STOPPED, MQB_DISPOSITION_ACK, MQB_DISPOSITION_NACK, MQB_DISPOSITION_REPLY,
     MQB_END_OF_STREAM, MQB_ERR_CONNECTION, MQB_ERR_INVALID_CONFIG, MQB_ERR_PANIC,
     MQB_ERR_PERMANENT, MQB_ERR_RETRYABLE, MQB_ERR_UNSUPPORTED, MQB_OK, MQB_OUTCOME_OK,
@@ -120,6 +121,16 @@ impl CustomEndpointFactory for PluginEndpointFactory {
             Some(flags) => flags & MQB_DELIVERY_ACKNOWLEDGES != 0,
             None => schema_flag(self.config_schema(), "x-mqb-acknowledges").unwrap_or(true),
         }
+    }
+
+    fn requires_full_replay(&self, config: &serde_json::Value) -> bool {
+        self.delivery_flags(config)
+            .is_some_and(|flags| flags & MQB_DELIVERY_REQUIRES_FULL_REPLAY != 0)
+    }
+
+    fn replays_from_start(&self, config: &serde_json::Value) -> bool {
+        self.delivery_flags(config)
+            .is_some_and(|flags| flags & MQB_DELIVERY_REPLAYS_FROM_START != 0)
     }
 
     async fn create_consumer(
@@ -942,6 +953,15 @@ impl MessagePublisher for PluginPublisher {
             Some(hook) => unsafe { hook(publisher.handle) != 0 },
             None => false,
         }
+    }
+
+    /// Asks the plugin whether its acks wait for a flush. A plugin before ABI 1.4,
+    /// or one answering 0, keeps the trait default: commits run at once.
+    fn deferred_commit_interval(&self) -> Option<std::time::Duration> {
+        let publisher = &self.publisher;
+        let hook = publisher.plugin.table().deferred_commit_hook()?;
+        let ms = unsafe { hook(publisher.handle) };
+        (ms > 0).then(|| std::time::Duration::from_millis(ms))
     }
 
     fn as_any(&self) -> &dyn Any {

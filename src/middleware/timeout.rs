@@ -1,5 +1,5 @@
 use crate::models::TimeoutMiddleware;
-use crate::traits::{BoxFuture, EndpointStatus, MessagePublisher, PublisherError, Sent, SentBatch};
+use crate::traits::{MessagePublisher, PublisherError, Sent, SentBatch};
 use crate::CanonicalMessage;
 use async_trait::async_trait;
 use std::any::Any;
@@ -40,14 +40,6 @@ impl TimeoutPublisher {
 
 #[async_trait]
 impl MessagePublisher for TimeoutPublisher {
-    fn on_connect_hook(&self) -> Option<BoxFuture<'_, anyhow::Result<()>>> {
-        self.inner.on_connect_hook()
-    }
-
-    fn on_disconnect_hook(&self) -> Option<BoxFuture<'_, anyhow::Result<()>>> {
-        self.inner.on_disconnect_hook()
-    }
-
     async fn send(&self, message: CanonicalMessage) -> Result<Sent, PublisherError> {
         self.bounded(self.inner.send(message)).await
     }
@@ -59,17 +51,7 @@ impl MessagePublisher for TimeoutPublisher {
         self.bounded(self.inner.send_batch(messages)).await
     }
 
-    async fn flush(&self) -> anyhow::Result<()> {
-        self.inner.flush().await
-    }
-
-    async fn status(&self) -> EndpointStatus {
-        self.inner.status().await
-    }
-
-    fn requires_ordered_publish(&self) -> bool {
-        self.inner.requires_ordered_publish()
-    }
+    crate::traits::forward_publisher_meta!(inner);
 
     fn as_any(&self) -> &dyn Any {
         self

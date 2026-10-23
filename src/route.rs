@@ -29,6 +29,9 @@ use tokio::{
 };
 use tracing::{debug, error, info, trace, warn};
 
+mod flush_gate;
+use flush_gate::FlushGate;
+
 // Re-export extensions for backward compatibility and internal usage
 pub use crate::extensions::{
     get_endpoint_factory, get_middleware_factory, register_endpoint_factory,
@@ -576,6 +579,37 @@ fn endpoint_tree_has_buffer(endpoint: &Endpoint, visited_refs: &mut HashSet<Stri
     }
 }
 
+/// The name of the first sink in this output that replaces its target with each run's data.
+fn endpoint_tree_full_replay_sink(
+    endpoint: &Endpoint,
+    visited_refs: &mut HashSet<String>,
+) -> Option<String> {
+    match &endpoint.endpoint_type {
+        EndpointType::Custom { name, config } => crate::extensions::get_endpoint_factory(name)
+            .filter(|factory| factory.requires_full_replay(config))
+            .map(|_| name.clone()),
+        EndpointType::Ref(name) => {
+            if !visited_refs.insert(name.clone()) {
+                return None;
+            }
+            get_endpoint(name)
+                .and_then(|referenced| endpoint_tree_full_replay_sink(&referenced, visited_refs))
+        }
+        EndpointType::Fanout(endpoints) => endpoints
+            .iter()
+            .find_map(|endpoint| endpoint_tree_full_replay_sink(endpoint, visited_refs)),
+        EndpointType::Switch(config) => config
+            .cases
+            .values()
+            .chain(config.when.iter().map(|case| &case.to))
+            .chain(config.default.iter().map(Box::as_ref))
+            .find_map(|endpoint| endpoint_tree_full_replay_sink(endpoint, visited_refs)),
+        EndpointType::Request(config) => endpoint_tree_full_replay_sink(&config.to, visited_refs)
+            .or_else(|| endpoint_tree_full_replay_sink(&config.forward_to, visited_refs)),
+        _ => None,
+    }
+}
+
 /// How many messages a runner may process before it must cooperatively yield.
 ///
 /// The route loops drive `async-channel` recv/send, which complete synchronously
@@ -649,6 +683,15 @@ fn report_join_result<T>(res: std::result::Result<T, tokio::task::JoinError>, wh
             error!("{} panicked: {}", what, e);
         }
     }
+}
+
+fn report_commit_failure(err_tx: &Sender<anyhow::Error>, err: anyhow::Error) {
+    if err.is::<flush_gate::Unflushed>() {
+        debug!("Commit skipped: {}", err);
+        return;
+    }
+    error!("Commit failed: {}", err);
+    report_route_error(err_tx, err, "Could not send commit error to main task");
 }
 
 fn report_route_error(err_tx: &Sender<anyhow::Error>, err: anyhow::Error, context: &str) {
@@ -892,8 +935,7 @@ async fn send_batch_and_commit(
             commit_tasks.spawn(async move {
                 let _permit = permit;
                 if let Err(e) = commit(dispositions).await {
-                    error!("Commit failed: {}", e);
-                    report_route_error(&err_tx, e, "Could not send commit error to main task");
+                    report_commit_failure(&err_tx, e);
                 }
             });
             Ok(())
@@ -990,8 +1032,7 @@ async fn send_batch_and_commit(
             commit_tasks.spawn(async move {
                 let _permit = permit;
                 if let Err(e) = commit(dispositions).await {
-                    error!("Commit failed: {}", e);
-                    report_route_error(&err_tx, e, "Could not send commit error to main task");
+                    report_commit_failure(&err_tx, e);
                 }
             });
             Ok(())
@@ -1066,6 +1107,223 @@ pub(crate) fn source_is_at_most_once(endpoint_type: &EndpointType) -> bool {
             .is_some_and(|factory| !factory.acknowledges(config)),
         _ => false,
     }
+}
+
+/// Whether `no_resume` reaches this input. A compiled-out endpoint is served by a registered
+/// factory, and the search presets build their reader without it, so both still resume.
+#[allow(clippy::match_like_matches_macro)] // Every `cfg!` is `true` in a full build.
+fn input_applies_no_resume(endpoint_type: &EndpointType) -> bool {
+    match endpoint_type {
+        EndpointType::ObjectStore(_) => cfg!(feature = "object-store"),
+        EndpointType::HttpBulk(_) => cfg!(feature = "http-bulk"),
+        EndpointType::ClickHouse(_) => cfg!(feature = "clickhouse"),
+        EndpointType::Sqlx(_) => cfg!(feature = "sqlx"),
+        EndpointType::MongoDb(_) => cfg!(feature = "mongodb"),
+        EndpointType::Ref(_) => true,
+        _ => false,
+    }
+}
+
+/// Whether every run of this input reads the full data set from the start. `false` unless the
+/// configuration shows it: no saved position, nothing consumed, no dedup across runs.
+/// `no_resume` ignores saved checkpoints where the consumer applies it.
+fn source_replays_from_start(endpoint: &Endpoint, no_resume: bool, depth: usize) -> bool {
+    const MAX_DEPTH: usize = 16;
+    let no_resume = no_resume && input_applies_no_resume(&endpoint.endpoint_type);
+    // A checkpoint opens only with both a cursor id and a store.
+    let unsaved = |cursor_id: &Option<String>, store: &Option<String>| {
+        no_resume || cursor_id.is_none() || store.is_none()
+    };
+    if depth > MAX_DEPTH
+        || endpoint
+            .middlewares
+            .iter()
+            .any(|middleware| matches!(middleware, Middleware::Deduplication(_)))
+    {
+        return false;
+    }
+    match &endpoint.endpoint_type {
+        EndpointType::File(config) => matches!(
+            config.mode,
+            None | Some(crate::models::FileConsumerMode::Consume { delete: false })
+        ),
+        EndpointType::Static(_) => true,
+        EndpointType::ObjectStore(config) => unsaved(&config.cursor_id, &config.checkpoint_store),
+        EndpointType::HttpBulk(config) => config.read.as_ref().is_some_and(|read| {
+            read.stream.is_none()
+                && read.cursor.start.is_none()
+                && unsaved(&read.cursor_id, &read.checkpoint_store)
+        }),
+        EndpointType::Meilisearch(config) => unsaved(&config.cursor_id, &config.checkpoint_store),
+        EndpointType::Qdrant(config) => unsaved(&config.cursor_id, &config.checkpoint_store),
+        // Without `cursor_id` the cursor is only kept across reconnects of one run.
+        EndpointType::Sqlx(config) => {
+            config.cursor_column.is_some()
+                && (no_resume || config.cursor_id.is_none())
+                && config.publication.is_none()
+                && !config.delete_after_read
+        }
+        EndpointType::ClickHouse(config) => {
+            config.cursor_column.is_some() && unsaved(&config.cursor_id, &config.checkpoint_store)
+        }
+        EndpointType::MongoDb(config) => {
+            config.resolved_consume() == crate::models::MongoConsume::Snapshot
+        }
+        EndpointType::Sequence(config) => {
+            config.cursor_id.is_none()
+                && config
+                    .endpoints
+                    .iter()
+                    .all(|endpoint| source_replays_from_start(endpoint, false, depth + 1))
+        }
+        EndpointType::Ref(name) => get_endpoint(name)
+            .is_some_and(|referenced| source_replays_from_start(&referenced, no_resume, depth + 1)),
+        EndpointType::Custom { name, config } => crate::extensions::get_endpoint_factory(name)
+            .is_some_and(|factory| factory.replays_from_start(config)),
+        _ => false,
+    }
+}
+
+/// Whether this input durably saves how far it has read: a checkpoint or a replication slot.
+/// `sequence` children ignore `no_resume`, so they are checked without it.
+fn input_saves_position(endpoint: &Endpoint, no_resume: bool, depth: usize) -> bool {
+    const MAX_DEPTH: usize = 16;
+    let no_resume = no_resume && input_applies_no_resume(&endpoint.endpoint_type);
+    let saved = |cursor_id: &Option<String>, store: &Option<String>| {
+        !no_resume && cursor_id.is_some() && store.is_some()
+    };
+    match &endpoint.endpoint_type {
+        _ if depth > MAX_DEPTH => false,
+        EndpointType::PostgresCdc(config) => !config.temporary_slot,
+        EndpointType::Sqlx(config) => {
+            config.publication.is_some()
+                || (!no_resume && config.cursor_id.is_some() && config.cursor_column.is_some())
+        }
+        EndpointType::MongoDb(config) => {
+            !no_resume
+                && config.cursor_id.is_some()
+                && matches!(
+                    config.resolved_consume(),
+                    crate::models::MongoConsume::CaptureNew
+                        | crate::models::MongoConsume::CaptureAll
+                )
+        }
+        EndpointType::ClickHouse(config) => saved(&config.cursor_id, &config.checkpoint_store),
+        EndpointType::ObjectStore(config) => saved(&config.cursor_id, &config.checkpoint_store),
+        EndpointType::HttpBulk(config) => config
+            .read
+            .as_ref()
+            .is_some_and(|read| saved(&read.cursor_id, &read.checkpoint_store)),
+        EndpointType::Meilisearch(config) => saved(&config.cursor_id, &config.checkpoint_store),
+        EndpointType::Qdrant(config) => saved(&config.cursor_id, &config.checkpoint_store),
+        EndpointType::Sequence(config) => {
+            (config.cursor_id.is_some() && config.checkpoint_store.is_some())
+                || config
+                    .endpoints
+                    .iter()
+                    .any(|endpoint| input_saves_position(endpoint, false, depth + 1))
+        }
+        EndpointType::Ref(name) => get_endpoint(name)
+            .is_some_and(|referenced| input_saves_position(&referenced, no_resume, depth + 1)),
+        _ => false,
+    }
+}
+
+/// Moves appending `file` sinks with `fsync: off` to `periodic` when the input saves its
+/// position, so a saved position never covers data a power loss can still undo.
+fn sync_file_sinks_behind_saved_position(
+    route_name: &str,
+    input: &Endpoint,
+    output: &Endpoint,
+    source_has_position: bool,
+    no_resume: bool,
+) -> Option<Endpoint> {
+    fn visit(endpoint: &mut Endpoint, source_has_position: bool, depth: usize) -> Vec<String> {
+        if depth > 16 {
+            return Vec::new();
+        }
+        let mut paths: Vec<String> = endpoint
+            .middlewares
+            .iter_mut()
+            .flat_map(|middleware| match middleware {
+                Middleware::Dlq(config) => {
+                    visit(&mut config.endpoint, source_has_position, depth + 1)
+                }
+                _ => Vec::new(),
+            })
+            .collect();
+        paths.extend(match &mut endpoint.endpoint_type {
+            EndpointType::File(config) => {
+                // A pipe or terminal cannot be synced; part files always sync.
+                let not_a_file = std::fs::metadata(&config.path).is_ok_and(|m| !m.is_file());
+                if config.fsync != crate::models::FileFsync::Off
+                    || not_a_file
+                    || config.resolved_name_by(source_has_position) == NameBy::SourcePosition
+                {
+                    Vec::new()
+                } else {
+                    config.fsync = crate::models::FileFsync::Periodic;
+                    vec![config.path.clone()]
+                }
+            }
+            EndpointType::Fanout(outputs) => outputs
+                .iter_mut()
+                .flat_map(|output| visit(output, source_has_position, depth + 1))
+                .collect(),
+            EndpointType::Switch(config) => {
+                let mut paths = Vec::new();
+                for output in config.cases.values_mut() {
+                    paths.extend(visit(output, source_has_position, depth + 1));
+                }
+                for case in &mut config.when {
+                    paths.extend(visit(&mut case.to, source_has_position, depth + 1));
+                }
+                if let Some(output) = config.default.as_deref_mut() {
+                    paths.extend(visit(output, source_has_position, depth + 1));
+                }
+                paths
+            }
+            EndpointType::Request(config) => {
+                let mut paths = visit(&mut config.to, source_has_position, depth + 1);
+                paths.extend(visit(
+                    &mut config.forward_to,
+                    source_has_position,
+                    depth + 1,
+                ));
+                paths
+            }
+            EndpointType::Ref(name) => match get_endpoint(name) {
+                // Merged as publisher creation does: the ref's middlewares wrap the target's.
+                Some(mut resolved) if endpoint.handler.is_none() || resolved.handler.is_none() => {
+                    let paths = visit(&mut resolved, source_has_position, depth + 1);
+                    if !paths.is_empty() {
+                        resolved.middlewares.append(&mut endpoint.middlewares);
+                        resolved.handler = resolved.handler.take().or(endpoint.handler.take());
+                        *endpoint = resolved;
+                    }
+                    paths
+                }
+                _ => Vec::new(),
+            },
+            _ => Vec::new(),
+        });
+        paths
+    }
+
+    if !input_saves_position(input, no_resume, 0) {
+        return None;
+    }
+    let mut output = output.clone();
+    let paths = visit(&mut output, source_has_position, 0);
+    if paths.is_empty() {
+        return None;
+    }
+    info!(
+        route = route_name,
+        paths = ?paths,
+        "The input saves its read position, so file sinks with `fsync: off` use `fsync: periodic`; a power loss would otherwise leave the saved position ahead of the written data"
+    );
+    Some(output)
 }
 
 /// The `mqb.src.*` family a positioned input stamps; see [`supports_source_metadata`].
@@ -1414,6 +1672,15 @@ impl Route {
         name: &str,
         allowed_endpoints: Option<&[&str]>,
     ) -> anyhow::Result<Vec<String>> {
+        self.check_with_resume(name, allowed_endpoints, false)
+    }
+
+    fn check_with_resume(
+        &self,
+        name: &str,
+        allowed_endpoints: Option<&[&str]>,
+        no_resume: bool,
+    ) -> anyhow::Result<Vec<String>> {
         self.options.validate()?;
         if !self.options.allow_fault_injection {
             check_fault_middleware_allowed(
@@ -1478,6 +1745,22 @@ impl Route {
                 ));
             }
         }
+        if let Some(sink) = endpoint_tree_full_replay_sink(&self.output, &mut HashSet::new()) {
+            if !source_replays_from_start(&self.input, no_resume, 0) {
+                let input = match self.resolved_input().as_deref().map(|i| &i.endpoint_type) {
+                    Some(EndpointType::Custom { name, .. }) => name.clone(),
+                    Some(endpoint_type) => endpoint_type.name().to_string(),
+                    None => self.input.endpoint_type.name().to_string(),
+                };
+                return Err(anyhow::anyhow!(
+                    "Route '{name}': the '{sink}' output replaces its target with the data of \
+                     each run, but the '{input}' input does not read the full data set on every \
+                     run: it resumes from a saved position, consumes what it reads, or \
+                     deduplicates across runs. Use an input that reads everything each time, \
+                     see docs/DELIVERY.md."
+                ));
+            }
+        }
         Ok(warnings)
     }
 
@@ -1529,7 +1812,7 @@ impl Route {
         let shown = Arc::new(route_display_name(name_str));
         // The checks take the key; only their text shows the display name.
         let warnings = self
-            .check(name_str, None)
+            .check_with_resume(name_str, None, no_resume)
             .map_err(|e| show_route_error(e, name_str, &shown))?;
         for warning in warnings {
             let warning = show_route_name(warning, name_str, &shown);
@@ -1927,6 +2210,20 @@ impl Route {
                 }
                 None => &self.output,
             };
+        let synced_output;
+        let output = match sync_file_sinks_behind_saved_position(
+            name,
+            &self.input,
+            output,
+            source_has_position,
+            no_resume,
+        ) {
+            Some(endpoint) => {
+                synced_output = endpoint;
+                &synced_output
+            }
+            None => output,
+        };
         let source_metadata_required =
             output_requires_source_metadata(name, output, source_has_position)?;
         check_source_position_available(name, &self.input, source_metadata_required)?;
@@ -1970,6 +2267,7 @@ impl Route {
         let read_semaphore = commit_router.read_semaphore();
         let mut read_permit = None;
         let mut seq_counter = 0u64;
+        let flush_gate = commit_router.flush_gate(&publisher, &err_tx);
 
         if let Some(tx) = ready_tx {
             let _ = tx.send(()).await;
@@ -1994,6 +2292,7 @@ impl Route {
                     self.options.batch_size,
                     read_semaphore.as_ref(),
                     &mut read_permit,
+                    flush_gate.as_ref(),
                 ) => {
                     let received_batch = match res {
                         Ok(batch) => {
@@ -2001,6 +2300,9 @@ impl Route {
                                 if self.options.exit_on_empty {
                                     info!("Consumer for route '{}' drained (empty batch, exit_on_empty). Shutting down.", route_display_name(name));
                                     break Ok(false); // Graceful drain-then-exit
+                                }
+                                if let Some(gate) = &flush_gate {
+                                    gate.nudge();
                                 }
                                 pause_after_empty_batch(self.options.empty_batch_delay_ms).await;
                                 continue; // No messages, loop to select! again
@@ -2031,7 +2333,10 @@ impl Route {
                     let seq = seq_counter;
                     seq_counter += 1;
                     let batch_len = received_batch.messages.len();
-                    let commit = commit_router.wrap(received_batch.commit, seq, read_permit.take());
+                    let mut commit = commit_router.wrap(received_batch.commit, seq, read_permit.take());
+                    if let Some(gate) = &flush_gate {
+                        commit = gate.hold(commit);
+                    }
                     if let Err(err) = send_batch_and_commit(
                         &publisher,
                         received_batch.messages,
@@ -2064,6 +2369,14 @@ impl Route {
             }
         };
 
+        // A clean end flushes and commits what is held; a failed one commits nothing more.
+        if let Some(gate) = &flush_gate {
+            if run_result.is_ok() {
+                gate.close();
+            } else {
+                gate.abandon();
+            }
+        }
         // Drain errors while waiting for tasks to finish to prevent deadlocks and lost errors
         loop {
             select! {
@@ -2085,6 +2398,9 @@ impl Route {
             }
         }
         drop(err_rx);
+        if let Some(gate) = flush_gate {
+            gate.shutdown().await;
+        }
         commit_router.shutdown().await;
         run_consumer_disconnect_hook(name, consumer.as_ref()).await;
         run_publisher_disconnect_hook(name, &publisher, disconnect_outcome(&run_result)).await;
@@ -2112,6 +2428,20 @@ impl Route {
                 }
                 None => &self.output,
             };
+        let synced_output;
+        let output = match sync_file_sinks_behind_saved_position(
+            name,
+            &self.input,
+            output,
+            source_has_position,
+            no_resume,
+        ) {
+            Some(endpoint) => {
+                synced_output = endpoint;
+                &synced_output
+            }
+            None => output,
+        };
         let source_metadata_required =
             output_requires_source_metadata(name, output, source_has_position)?;
         check_source_position_available(name, &self.input, source_metadata_required)?;
@@ -2196,6 +2526,7 @@ impl Route {
         let commit_semaphore = commit_router.dispatch_semaphore();
         let read_semaphore = commit_router.read_semaphore();
         let mut read_permit = None;
+        let flush_gate = commit_router.flush_gate(&publisher, &err_tx);
 
         // --- Worker Pool ---
         let mut join_set = JoinSet::new();
@@ -2309,6 +2640,7 @@ impl Route {
                     self.options.batch_size,
                     read_semaphore.as_ref(),
                     &mut read_permit,
+                    flush_gate.as_ref(),
                 ) => {
                     let (messages, commit) = match res {
                         Ok(batch) => {
@@ -2317,6 +2649,9 @@ impl Route {
                                     info!("Consumer for route '{}' drained (empty batch, exit_on_empty). Shutting down.", route_display_name(name));
                                     drained = true;
                                     break; // Graceful drain-then-exit
+                                }
+                                if let Some(gate) = &flush_gate {
+                                    gate.nudge();
                                 }
                                 pause_after_empty_batch(self.options.empty_batch_delay_ms).await;
                                 continue; // No messages, loop to select! again
@@ -2356,7 +2691,10 @@ impl Route {
                     // is closed while producing batches.
                     let seq = seq_counter;
                     let batch_len = messages.len();
-                    let wrapped_commit = commit_router.wrap(commit, seq, read_permit.take());
+                    let mut wrapped_commit = commit_router.wrap(commit, seq, read_permit.take());
+                    if let Some(gate) = &flush_gate {
+                        wrapped_commit = gate.hold(wrapped_commit);
+                    }
                     let ticket = ordered_publish.then(|| {
                         let (release, next_prev) = tokio::sync::oneshot::channel();
                         let ticket = OrderTicket {
@@ -2395,6 +2733,14 @@ impl Route {
         // This applies on both normal shutdown AND error paths, ensuring in-flight commits
         // are not aborted mid-sequence.
         drop(work_tx);
+        // A clean end flushes and commits what is held; a failed one commits nothing more.
+        if let Some(gate) = &flush_gate {
+            if loop_error.is_some() || worker_panicked {
+                gate.abandon();
+            } else {
+                gate.close();
+            }
+        }
         // A panicked worker never commits its batch. Ordered commits behind that gap would
         // wait on it forever, so they are failed at once and stay uncommitted for redelivery.
         if worker_panicked {
@@ -2405,6 +2751,9 @@ impl Route {
             if matches!(&res, Err(e) if e.is_panic()) {
                 worker_panicked = true;
                 commit_router.abandon();
+                if let Some(gate) = &flush_gate {
+                    gate.abandon();
+                }
             }
             report_join_result(res, "Worker task");
         }
@@ -2415,6 +2764,9 @@ impl Route {
             let _ = commit(vec![MessageDisposition::Nack; messages.len()]).await;
         }
 
+        if let Some(gate) = flush_gate {
+            gate.shutdown().await;
+        }
         // Close sequencer (if any) now that all in-flight commits have drained.
         commit_router.shutdown().await;
         run_consumer_disconnect_hook(name, consumer.as_ref()).await;
@@ -2681,9 +3033,11 @@ enum CommitRouter {
         handle: JoinHandle<()>,
         /// Batches read but not yet committed. See [`CommitRouter::read_semaphore`].
         in_flight: Arc<tokio::sync::Semaphore>,
+        capacity: usize,
     },
     Unordered {
         semaphore: Arc<tokio::sync::Semaphore>,
+        capacity: usize,
     },
 }
 
@@ -2698,12 +3052,41 @@ impl CommitRouter {
                 seq_tx,
                 handle,
                 in_flight: Arc::new(tokio::sync::Semaphore::new(in_flight)),
+                capacity: in_flight,
             }
         } else {
             CommitRouter::Unordered {
                 semaphore: Arc::new(tokio::sync::Semaphore::new(commit_concurrency_limit)),
+                capacity: commit_concurrency_limit,
             }
         }
+    }
+
+    /// Starts a [`FlushGate`] when the publisher defers its commits to a flush. It flushes
+    /// once half the commit slots are held, well before the reader would block on them.
+    fn flush_gate(
+        &self,
+        publisher: &Arc<dyn MessagePublisher>,
+        err_tx: &Sender<anyhow::Error>,
+    ) -> Option<FlushGate> {
+        let interval = publisher.deferred_commit_interval()?;
+        let (capacity, sequencer, read_permits) = match self {
+            CommitRouter::Ordered {
+                seq_tx,
+                capacity,
+                in_flight,
+                ..
+            } => (*capacity, Some(seq_tx.clone()), Some(Arc::clone(in_flight))),
+            CommitRouter::Unordered { capacity, .. } => (*capacity, None, None),
+        };
+        Some(FlushGate::spawn(
+            Arc::clone(publisher),
+            interval,
+            capacity / 2,
+            sequencer,
+            read_permits,
+            err_tx.clone(),
+        ))
     }
 
     /// Wraps a batch commit for its dispatch mode. `seq` and `permit` are only used by
@@ -2733,7 +3116,7 @@ impl CommitRouter {
     fn dispatch_semaphore(&self) -> Option<Arc<tokio::sync::Semaphore>> {
         match self {
             CommitRouter::Ordered { .. } => None,
-            CommitRouter::Unordered { semaphore } => Some(Arc::clone(semaphore)),
+            CommitRouter::Unordered { semaphore, .. } => Some(Arc::clone(semaphore)),
         }
     }
 
@@ -2786,9 +3169,19 @@ async fn receive_with_permit(
     batch_size: usize,
     semaphore: Option<&Arc<tokio::sync::Semaphore>>,
     permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
+    flush_gate: Option<&FlushGate>,
 ) -> Result<crate::traits::ReceivedBatch, ConsumerError> {
     if permit.is_none() {
-        *permit = acquire_commit_permit(semaphore).await;
+        if let Some(sem) = semaphore {
+            *permit = Arc::clone(sem).try_acquire_owned().ok();
+            if permit.is_none() {
+                // Out of room: what is held at the gate may be what the reader waits on.
+                if let Some(gate) = flush_gate {
+                    gate.nudge();
+                }
+                *permit = acquire_commit_permit(semaphore).await;
+            }
+        }
     }
     consumer.receive_batch(batch_size).await
 }
@@ -3254,6 +3647,188 @@ mod tests {
         assert_eq!(lossy.delivery_guarantee(), DeliveryGuarantee::AtMostOnce);
         let unknown = Route::new(memory(), custom("dg_not_registered", serde_json::json!({})));
         assert_eq!(unknown.delivery_guarantee(), DeliveryGuarantee::AtLeastOnce);
+    }
+
+    /// A sink that replaces its target each run only starts behind an input that reads everything.
+    #[test]
+    fn a_full_replay_sink_needs_an_input_that_reads_everything() {
+        #[derive(Debug)]
+        struct Overwrite;
+        impl crate::traits::CustomEndpointFactory for Overwrite {
+            fn requires_full_replay(&self, config: &serde_json::Value) -> bool {
+                config.get("overwrite").is_some()
+            }
+        }
+        #[derive(Debug)]
+        struct FullSource;
+        impl crate::traits::CustomEndpointFactory for FullSource {
+            fn replays_from_start(&self, _config: &serde_json::Value) -> bool {
+                true
+            }
+        }
+        let _ = crate::extensions::register_endpoint_factory("fr_overwrite", Arc::new(Overwrite));
+        let _ = crate::extensions::register_endpoint_factory("fr_full", Arc::new(FullSource));
+        let custom = |name: &str, config| {
+            Endpoint::new(EndpointType::Custom {
+                name: name.to_string(),
+                config,
+            })
+        };
+        let overwrite = || custom("fr_overwrite", serde_json::json!({"overwrite": true}));
+        let file = |mode| {
+            Endpoint::new(EndpointType::File(crate::models::FileConfig {
+                path: "/tmp/mqb-full-replay-input.jsonl".to_string(),
+                mode,
+                ..Default::default()
+            }))
+        };
+        let check = |input: Endpoint, output: Endpoint| Route::new(input, output).check("fr", None);
+
+        check(file(None), overwrite()).expect("a plain file read covers everything");
+        check(custom("fr_full", serde_json::json!({})), overwrite()).expect("declared full");
+        check(
+            Endpoint::new_memory("fr_in", 1),
+            custom("fr_overwrite", serde_json::json!({})),
+        )
+        .expect("an appending sink takes any input");
+
+        let resumed = file(Some(crate::models::FileConsumerMode::GroupSubscribe {
+            group_id: "g".to_string(),
+            read_from_tail: false,
+        }));
+        for (input, output) in [
+            (resumed, overwrite()),
+            (Endpoint::new_memory("fr_in", 1), overwrite()),
+            (
+                Endpoint::new_memory("fr_in", 1),
+                Endpoint::new(EndpointType::Fanout(vec![
+                    Endpoint::new_memory("fr_leg", 1),
+                    overwrite(),
+                ])),
+            ),
+        ] {
+            let err = check(input, output).unwrap_err().to_string();
+            assert!(
+                err.contains("'fr_overwrite' output replaces its target"),
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_saved_or_configured_position_is_not_a_full_replay_unless_no_resume() {
+        let bulk = |read: serde_json::Value| -> Endpoint {
+            serde_json::from_value(serde_json::json!({
+                "http_bulk": {"url": "http://localhost:1", "read": read}
+            }))
+            .unwrap()
+        };
+        let plain = bulk(serde_json::json!({"path": "/docs"}));
+        let saved = bulk(serde_json::json!({
+            "path": "/docs", "cursor_id": "c", "checkpoint_store": "file:///tmp/mqb-c.json"
+        }));
+        let id_only = bulk(serde_json::json!({"path": "/docs", "cursor_id": "c"}));
+        let started =
+            bulk(serde_json::json!({"path": "/docs", "cursor": {"response": "/n", "start": 5}}));
+        assert!(source_replays_from_start(&plain, false, 0));
+        assert!(!source_replays_from_start(&saved, false, 0));
+        assert!(
+            source_replays_from_start(&id_only, false, 0),
+            "no store, no checkpoint"
+        );
+        assert_eq!(
+            source_replays_from_start(&saved, true, 0),
+            cfg!(feature = "http-bulk"),
+            "a plugin-served input ignores no_resume"
+        );
+        assert!(!source_replays_from_start(&started, true, 0));
+        let meili: Endpoint = serde_json::from_value(serde_json::json!({"meilisearch": {
+            "url": "meilisearch://localhost:7700", "index": "docs"
+        }}))
+        .unwrap();
+        assert!(source_replays_from_start(&meili, false, 0));
+        let sqlx: Endpoint = serde_json::from_value(serde_json::json!({"sqlx": {
+            "url": "sqlite::memory:", "table": "t", "cursor_column": "id", "cursor_id": "c"
+        }}))
+        .unwrap();
+        assert!(!source_replays_from_start(&sqlx, false, 0));
+        assert_eq!(
+            source_replays_from_start(&sqlx, true, 0),
+            cfg!(feature = "sqlx")
+        );
+    }
+
+    #[test]
+    fn a_file_sink_behind_a_saved_position_is_synced() {
+        let endpoint =
+            |value: serde_json::Value| -> Endpoint { serde_json::from_value(value).unwrap() };
+        let cursor = endpoint(serde_json::json!({"sqlx": {
+            "url": "sqlite::memory:", "table": "t", "cursor_column": "id", "cursor_id": "c"
+        }}));
+        let file = |fsync: &str| {
+            endpoint(
+                serde_json::json!({"file": {"path": "/tmp/mqb-synced-out.jsonl", "fsync": fsync}}),
+            )
+        };
+        let fsync_of = |output: &Endpoint| match &output.endpoint_type {
+            EndpointType::File(config) => config.fsync,
+            _ => panic!("not a file sink"),
+        };
+        let sync = |input: &Endpoint, output: &Endpoint, no_resume: bool| {
+            sync_file_sinks_behind_saved_position("synced", input, output, false, no_resume)
+        };
+
+        let synced = sync(&cursor, &file("off"), false).expect("upgraded");
+        assert_eq!(fsync_of(&synced), crate::models::FileFsync::Periodic);
+        let fanout = Endpoint::new(EndpointType::Fanout(vec![
+            Endpoint::new_memory("synced_leg", 1),
+            file("off"),
+        ]));
+        match sync(&cursor, &fanout, false).map(|o| o.endpoint_type) {
+            Some(EndpointType::Fanout(legs)) => {
+                assert_eq!(fsync_of(&legs[1]), crate::models::FileFsync::Periodic)
+            }
+            other => panic!("{other:?}"),
+        }
+        let with_dlq = endpoint(serde_json::json!({"memory": {"topic": "synced_main"},
+            "middlewares": [{"dlq": {"endpoint": {"file": {"path": "/tmp/mqb-synced-dlq.jsonl"}}}}]
+        }));
+        match sync(&cursor, &with_dlq, false).map(|o| o.middlewares) {
+            Some(middlewares) => match &middlewares[0] {
+                Middleware::Dlq(config) => {
+                    assert_eq!(
+                        fsync_of(&config.endpoint),
+                        crate::models::FileFsync::Periodic
+                    )
+                }
+                other => panic!("{other:?}"),
+            },
+            None => panic!("the dlq file was not upgraded"),
+        }
+
+        assert!(
+            sync(&cursor, &file("batch"), false).is_none(),
+            "an explicit sync stays"
+        );
+        #[cfg(unix)]
+        {
+            let device = endpoint(serde_json::json!({"file": {"path": "/dev/null"}}));
+            assert!(
+                sync(&cursor, &device, false).is_none(),
+                "a device cannot be synced"
+            );
+        }
+        assert_eq!(
+            sync(&cursor, &file("off"), true).is_none(),
+            cfg!(feature = "sqlx"),
+            "no_resume saves nothing where the input applies it"
+        );
+        assert!(sync(&Endpoint::new_memory("synced_in", 1), &file("off"), false).is_none());
+        let temporary = endpoint(serde_json::json!({"postgres_cdc": {
+            "url": "postgres://localhost/db", "publication": "p", "slot_name": "s",
+            "temporary_slot": true
+        }}));
+        assert!(!input_saves_position(&temporary, false, 0));
     }
 
     #[test]

@@ -27,8 +27,11 @@ See the full catalog in [Endpoints (connectors)](../reference/endpoints.md).
 
 **Middleware** intercepts and processes messages around an endpoint — retries, dead-letter
 queues, transformation, deduplication, rate limiting, encryption, metrics. It attaches as a
-`middlewares:` list on the input, output, or both. Ordering matters: on an output the *last*
-entry is the outermost layer, so `dlq` goes last. See [Middleware](../engine/reference.md).
+`middlewares:` list on the input, output, or both. Ordering matters: **a message passes the
+list from the bottom up**, on both sides, so on an output `dlq` goes last to catch what the
+entries above it failed. See [Middleware](../engine/reference.md) for the full ordering rules,
+and [Endpoint, middleware or structural endpoint?](../engine/architecture.md#endpoint-middleware-or-structural-endpoint)
+for when to reach for which.
 
 ## Handler
 

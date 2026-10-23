@@ -8,6 +8,7 @@ Query parameters recognised as config fields for this connector. The object-type
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
+| `aggregate_query` | string | no | — | (Publisher only) Extended-JSON aggregation pipeline template for `lookup`; answers with the first result. |
 | `capped_size_bytes` | integer | no | — | (Publisher only) If set, creates a capped collection with this size in bytes. |
 | `change_stream` | boolean | no | `false` | (Consumer only) **Deprecated** — use `consume: capture_new`. Kept for compatibility. |
 | `checkpoint_store` | string | no | — | (Consumer only) Where to persist the resume cursor in `capture_new`/`capture_all` mode. A URL selects the backend; a bare name (or `/name`) reuses the **source** database with that name: - absent → source database, collection `mqb_cursors_<source_collection>` (auto-unique) - `/my_cursors` → source database, collection `my_cursors` - `file:///var/lib/mqb/cursors.json` → local JSON file (read-only / write-restricted sources) - `mongodb://host/db/collection` → external MongoDB collection (collection optional) - `postgres://user@host/db/table` or `mysql://host/db/table` → external SQL table (table optional) - `s3://bucket/prefix` (also `gs://`, `az://`, `abfs://`) → cloud object store; creds via env  When no collection/table is named, it defaults to `mqb_cursors_<source_collection>`. May embed connection credentials, so it is treated as a secret. |
@@ -16,7 +17,7 @@ Query parameters recognised as config fields for this connector. The object-type
 | `cursor_id` | string | no | — | The ID used for the cursor in sequenced mode. If not provided, consumption starts from the current sequence (ephemeral). |
 | `database` | string | yes | — | The database name. |
 | `find` | string | no | — | (Publisher only) Extended-JSON filter template for `lookup`, e.g. `{"_id": "${payload:id}"}`. Answers with the first match. `{"_id": {"$in": ["${payload:id}"]}}` answers a batch at once. |
-| `format` | `normal` \| `json` \| `text` \| `raw` | no | `normal` | Format for storing messages. Defaults to Normal. |
+| `format` | `normal` \| `json` \| `text` \| `raw` \| `envelope` \| `envelope_json` \| `envelope_text` \| `payload` | no | `normal` | Format for storing messages. Defaults to Normal. |
 | `id_field` | string | no | — | (Publisher only) Top-level payload field whose value becomes the document `_id`, or a replay-stable `${...}` template such as `${metadata:mqb.id}`. Enables idempotent inserts through MongoDB's unique `_id` index. Sink collections only. |
 | `meta_collection` | string | no | — | **Deprecated** — unused since the publisher no longer writes `seq`. Kept for compatibility. |
 | `password` | string | no | — | Optional password. Takes precedence over any credentials embedded in the `url`. Use embedded URL credentials for simple one-off connections but prefer explicit username/password fields (or environment-sourced secrets) for clarity and secret management in production. |

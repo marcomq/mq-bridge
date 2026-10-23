@@ -184,6 +184,30 @@ one identity to every message missing the field, so it is dropped instead.
 | `nats` (JetStream) | `Nats-Msg-Id` from the message id; the server drops a repeat **within the stream's duplicate window** (2 minutes by default) — a replay after that lands again | `deduplicate: true` |
 | `amqp`, `mqtt`, `redis_streams`, `aws`, `ibm_mq`, `zeromq` | None — at-least-once | Deduplicate at the next consumer instead |
 
+## Sinks that replace their target
+
+Some custom sinks rewrite their whole target on every run instead of appending: a snapshot,
+an overwrite. Behind an input that resumes from a saved position, that run holds only the new
+rows, and the rest of the target is gone. Such a sink declares it
+(`requires_full_replay`), and the route refuses to start unless its input reads the full
+data set on every run:
+
+| Input | Reads everything each run when |
+|---|---|
+| `file` | default mode, or `consume` without `delete` |
+| `static` | always |
+| `object_store` | no `checkpoint_store` and no `cursor_id` |
+| `http_bulk` | a `read` without `stream`, `cursor_id` or `checkpoint_store` |
+| `sqlx`, `clickhouse` | a `cursor_column` without `cursor_id` or `checkpoint_store` (`sqlx`: no `publication`, no `delete_after_read`) |
+| `mongodb` | `consume: snapshot` |
+| `sequence` | no `cursor_id`, and every listed input qualifies |
+| `ref` | the referenced endpoint qualifies |
+| custom | the factory declares `replays_from_start` |
+
+Every other input fails the check, and so does any input carrying the `deduplication`
+middleware, which drops what an earlier run already sent. The sink is found anywhere in the
+output, including inside `fanout`, `switch`, `request` and `ref`.
+
 ## Picking a combination
 
 **Any source → a database sink.** The easy case. You do not need a replayable source position at
@@ -635,8 +659,19 @@ existing regular file fails there with "Failed to create part-file sink director
 **Durability of the `file` sink.** By default the sink flushes each batch to the operating
 system and does not call `fsync`, so a power loss can lose batches that were already
 acknowledged. `fsync: batch` syncs the file before each batch is acknowledged; this costs one
-disk sync per batch. `fsync: periodic` syncs in the background every `fsync_interval_ms`
-(default 1000) and bounds the loss to that interval at almost no cost in throughput.
+disk sync per batch. `fsync: periodic` syncs every `fsync_interval_ms` (default 1000) at
+almost no cost in throughput, and the route commits the source only after the sync that
+covers a batch, so a power loss loses nothing the source counts as delivered: it redelivers
+those batches instead. A final sync runs when the route stops. When the input saves its read
+position to a checkpoint or replication slot, `fsync: off` is run as `periodic`, so the saved
+position never gets ahead of the data on disk; a path that is not a regular file, such as
+`/dev/stdout`, is left unsynced. With `batch` or `periodic`, a batch that starts a new file also
+syncs its directory, so the file itself survives a power loss. `object_store` with a
+`file://` URL always syncs each object and its directory before the write counts as done.
+
+SQLite commits with `synchronous=FULL`, the SQLite default. On macOS that is a plain
+`fsync()`, which does not flush the drive's write cache, so a power loss can still undo
+the most recent commits there. On Linux a commit is durable.
 
 **`delete: true` needs a single writer.** Acknowledged records are removed by rewriting the
 file and renaming the copy into place. Lines that another process appends during that

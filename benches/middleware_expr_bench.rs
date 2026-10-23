@@ -108,5 +108,75 @@ fn bench_transform(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_filter, bench_transform);
+/// A ~200 KB document: a few scalars, a 2,000-entry line-item array and a nested object
+/// carrying a large blob. Every schema below is small; the payload is what is large.
+fn large_corpus() -> Vec<CanonicalMessage> {
+    let items: Vec<String> = (0..2_000)
+        .map(|i| {
+            format!(
+                r#"{{"sku":"A{i}","qty":"{}","price":"9.99","note":"line item"}}"#,
+                i % 7
+            )
+        })
+        .collect();
+    let blob = "x".repeat(64 * 1024);
+    (0..20)
+        .map(|i| {
+            let payload = format!(
+                r#"{{"id":"{i}","name":"order","items":[{}],"meta":{{"source":"web","blob":"{blob}"}}}}"#,
+                items.join(",")
+            );
+            CanonicalMessage::new(payload.into_bytes(), None)
+        })
+        .collect()
+}
+
+fn bench_transform_large(c: &mut Criterion) {
+    let messages = large_corpus();
+    let bytes: usize = messages.iter().map(|m| m.payload.len()).sum();
+    let schema = |value: serde_json::Value| TransformMiddleware {
+        schema: Some(value),
+        ..Default::default()
+    };
+    let id = serde_json::json!({ "id": { "type": "integer" } });
+    let cases = [
+        (
+            "top_level",
+            schema(serde_json::json!({ "type": "object", "properties": id })),
+        ),
+        (
+            "root_required",
+            schema(serde_json::json!({ "type": "object", "properties": id, "required": ["id"] })),
+        ),
+        (
+            "nested_object",
+            schema(serde_json::json!({ "type": "object", "properties": {
+                "meta": { "type": "object", "properties": { "source": { "type": "string" } } }
+            }})),
+        ),
+        (
+            "array_items",
+            schema(serde_json::json!({ "type": "object", "properties": {
+                "items": { "type": "array", "items": { "type": "object",
+                    "properties": { "qty": { "type": "integer" } } } }
+            }})),
+        ),
+    ];
+
+    let mut group = c.benchmark_group("transform_large");
+    group.throughput(Throughput::Bytes(bytes as u64));
+    for (name, config) in cases {
+        group.bench_with_input(BenchmarkId::from_parameter(name), &config, |b, config| {
+            b.iter(|| transform_messages(config, &messages).expect("transform applies"));
+        });
+    }
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_filter,
+    bench_transform,
+    bench_transform_large
+);
 criterion_main!(benches);

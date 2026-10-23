@@ -3,15 +3,15 @@
 //  Licensed under MIT OR Apache-2.0, see LICENSE file for more details
 //  git clone https://github.com/marcomq/mq-bridge
 
-use crate::traits::{BoxFuture, Handler, MessagePublisher};
 use crate::traits::{Handled, HandlerError};
+use crate::traits::{Handler, MessagePublisher};
 use crate::CanonicalMessage;
 use async_trait::async_trait;
 use std::any::Any;
 use std::future::Future;
 use std::sync::Arc;
 
-use crate::traits::{EndpointStatus, PublisherError, Sent, SentBatch};
+use crate::traits::{PublisherError, Sent, SentBatch};
 #[async_trait]
 impl<F, Fut> Handler for F
 where
@@ -41,14 +41,6 @@ impl CommandPublisher {
 
 #[async_trait]
 impl MessagePublisher for CommandPublisher {
-    fn on_connect_hook(&self) -> Option<BoxFuture<'_, anyhow::Result<()>>> {
-        self.inner.on_connect_hook()
-    }
-
-    fn on_disconnect_hook(&self) -> Option<BoxFuture<'_, anyhow::Result<()>>> {
-        self.inner.on_disconnect_hook()
-    }
-
     async fn send(&self, message: CanonicalMessage) -> Result<Sent, PublisherError> {
         let inbound_correlation_id = message.metadata.get("correlation_id").cloned();
         let original_id = message.message_id;
@@ -137,21 +129,7 @@ impl MessagePublisher for CommandPublisher {
         }
     }
 
-    async fn flush(&self) -> anyhow::Result<()> {
-        self.inner.flush().await
-    }
-
-    /// The handler has no transport of its own, so health is whatever it publishes to.
-    /// Without this the default `healthy: true` would mask a dead endpoint — this
-    /// publisher is the outermost one on a handler route, so it is what a route's
-    /// status reads.
-    async fn status(&self) -> EndpointStatus {
-        self.inner.status().await
-    }
-
-    fn requires_ordered_publish(&self) -> bool {
-        self.inner.requires_ordered_publish()
-    }
+    crate::traits::forward_publisher_meta!(inner);
 
     fn as_any(&self) -> &dyn Any {
         self

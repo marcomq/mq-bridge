@@ -902,7 +902,7 @@
       "additionalProperties": false
     },
     "LookupMiddleware": {
-      "description": "Lookup (enrich) middleware configuration.\n\nAsks a request-capable endpoint (HTTP, NATS/Memory `request_reply`, MongoDB `find`,\nSQLx/ClickHouse `lookup_query`) about each message and writes the response into the\npayload. A query keyed with `IN (…)` / `$in` answers a whole batch at once; other\nendpoints get one request per message. Several `entries` run in parallel.",
+      "description": "Lookup (enrich) middleware configuration.\n\nAsks a request-capable endpoint (HTTP, NATS/Memory `request_reply`, MongoDB `find`/`aggregate_query`,\nSQLx/ClickHouse `lookup_query`) about each message and writes the response into the\npayload. A query keyed with `IN (…)` / `$in` answers a whole batch at once; other\nendpoints get one request per message. Several `entries` run in parallel.",
       "type": "object",
       "properties": {
         "from": {
@@ -932,7 +932,7 @@
           ]
         },
         "into": {
-          "description": "Dotted payload path the response is written to, e.g. `customer.profile`.",
+          "description": "Dotted payload path the response is written to, e.g. `customer.profile`; `$` replaces the payload.",
           "type": [
             "string",
             "null"
@@ -979,7 +979,7 @@
           ]
         },
         "into": {
-          "description": "Dotted payload path the response is written to, e.g. `customer.profile`.",
+          "description": "Dotted payload path the response is written to, e.g. `customer.profile`; `$` replaces the payload.",
           "type": "string"
         }
       },
@@ -1029,7 +1029,7 @@
           ]
         },
         "fields": {
-          "description": "Built-in aggregates instead of `expression`, e.g. `n: count`, `avg: ema(reading, 0.1)`.",
+          "description": "Built-in aggregates instead of `expression`, `name: fn`: `count`, `decayed_count(half-life)`, `sum|min|max|last|mean|stddev|variance(path)`, `ema|ema_stddev|ema_variance(path, alpha or half-life)`, `decayed_sum(path, half-life)`.",
           "type": [
             "object",
             "null"
@@ -1129,7 +1129,7 @@
           ]
         },
         "fields": {
-          "description": "Built-in aggregates instead of `expression`, e.g. `n: count`, `avg: ema(reading, 0.1)`.",
+          "description": "Built-in aggregates instead of `expression`, `name: fn`: `count`, `decayed_count(half-life)`, `sum|min|max|last|mean|stddev|variance(path)`, `ema|ema_stddev|ema_variance(path, alpha or half-life)`, `decayed_sum(path, half-life)`.",
           "type": [
             "object",
             "null"
@@ -2353,14 +2353,14 @@
               "description": "**Queue Mode**: Standard point-to-point consumption. Reads from the start\nof the file. If `delete` is true, processed lines are physically removed\nfrom the file once they are successfully acknowledged. Removing rewrites the\nfile, so `delete` is only safe when nothing outside this process appends to it.",
               "type": "object",
               "properties": {
+                "mode": {
+                  "type": "string",
+                  "const": "consume"
+                },
                 "delete": {
                   "description": "Remove acknowledged lines from the file. Only safe if no other process writes to it.",
                   "type": "boolean",
                   "default": false
-                },
-                "mode": {
-                  "type": "string",
-                  "const": "consume"
                 }
               },
               "required": [
@@ -2371,14 +2371,14 @@
               "description": "**Broadcast Mode**: Pub-sub style consumption. Tails the file by starting\nat the current end. If `delete` is true, lines are removed only after\nall local application subscribers for this specific file have acknowledged them.",
               "type": "object",
               "properties": {
+                "mode": {
+                  "type": "string",
+                  "const": "subscribe"
+                },
                 "delete": {
                   "description": "Remove lines all local subscribers acknowledged. Only safe if no other process writes to it.",
                   "type": "boolean",
                   "default": false
-                },
-                "mode": {
-                  "type": "string",
-                  "const": "subscribe"
                 }
               },
               "required": [
@@ -2389,6 +2389,10 @@
               "description": "**Persistent Mode**: Consumption with external offset tracking.\nSaves the last read byte position to a `.offset` file identified by the `group_id`.\nThis allows the consumer to resume exactly where it left off after a restart\nwithout deleting data or requiring the bridge to stay running.",
               "type": "object",
               "properties": {
+                "mode": {
+                  "type": "string",
+                  "const": "group_subscribe"
+                },
                 "group_id": {
                   "description": "The consumer group ID that is used for offset tracking. Should be unique.",
                   "type": "string"
@@ -2397,10 +2401,6 @@
                   "description": "If true, starts reading from the end of the file if no offset is stored.\nIf false, starts reading from the beginning.",
                   "type": "boolean",
                   "default": false
-                },
-                "mode": {
-                  "type": "string",
-                  "const": "group_subscribe"
                 }
               },
               "required": [
@@ -2580,7 +2580,7 @@
           "const": "batch"
         },
         {
-          "description": "In the background every `fsync_interval_ms`; at most that window is at risk.",
+          "description": "Every `fsync_interval_ms`; the source is committed only after the sync.",
           "type": "string",
           "const": "periodic"
         }
@@ -2746,7 +2746,7 @@
       "type": "object",
       "properties": {
         "url": {
-          "description": "Object-store URL, e.g. `file:///var/lib/mqb/incoming`, `s3://bucket/prefix`,\n`gs://bucket/prefix`, or `az://container/prefix`. Credentials are resolved\nfrom the environment by the `object_store` crate (same mechanism as the checkpoint\nbackend); Azure takes the account from `AZURE_STORAGE_ACCOUNT_NAME`, R2 uses `s3://`\nplus a custom `AWS_ENDPOINT_URL`.",
+          "description": "Object-store URL, e.g. `file:///var/lib/mqb/incoming`, `s3://bucket/prefix`,\n`gs://bucket/prefix`, or `az://container/prefix`. Credentials are resolved\nfrom the environment by the `object_store` crate (same mechanism as the checkpoint\nbackend); Azure takes the account from `AZURE_STORAGE_ACCOUNT_NAME`, R2 uses `s3://`\nplus a custom `AWS_ENDPOINT_URL`. The CLI's `local-store://` is accepted as `file://`.",
           "type": "string"
         },
         "name_by": {
@@ -3255,6 +3255,13 @@
         },
         "find": {
           "description": "(Publisher only) Extended-JSON filter template for `lookup`, e.g. `{\"_id\": \"${payload:id}\"}`.\nAnswers with the first match. `{\"_id\": {\"$in\": [\"${payload:id}\"]}}` answers a batch at once.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "aggregate_query": {
+          "description": "(Publisher only) Extended-JSON aggregation pipeline template for `lookup`; answers with the first result.",
           "type": [
             "string",
             "null"
@@ -5065,6 +5072,17 @@
               "type": "null"
             }
           ]
+        },
+        "login": {
+          "description": "A JSON login request: its bearer token is cached and fetched again when it expires.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HttpBulkLogin"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false
@@ -5141,6 +5159,45 @@
       "required": [
         "region",
         "service"
+      ]
+    },
+    "HttpBulkLogin": {
+      "description": "A login request for `http_bulk` whose JSON answer holds a bearer token.",
+      "type": "object",
+      "properties": {
+        "url": {
+          "description": "Login endpoint, e.g. `https://api.example.com/users/login`. Sent as `POST`.",
+          "type": "string"
+        },
+        "body": {
+          "description": "JSON body with the credentials, e.g. `{\"username\":\"u\",\"password\":\"p\"}`.",
+          "type": "string",
+          "format": "password"
+        },
+        "token": {
+          "description": "JSON pointer to the token in the answer, e.g. `/access_token/token`.",
+          "type": "string"
+        },
+        "expires_at": {
+          "description": "JSON pointer to when the token expires, in Unix seconds. Excludes `expires_in`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "expires_in": {
+          "description": "JSON pointer to the token's lifetime in seconds. Unset with `expires_at` = fetched again on a 401.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "url",
+        "body",
+        "token"
       ]
     },
     "HttpBulkUpsert": {
@@ -5597,6 +5654,24 @@
               "type": "null"
             }
           ]
+        },
+        "payload": {
+          "description": "JSON pointer to the message payload inside each document, e.g. `/payload`. Unset = the whole document.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "payload_encoding": {
+          "description": "How the string at `payload` is encoded. Unset = taken as it is.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HttpBulkPayloadEncoding"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false,
@@ -5621,6 +5696,14 @@
             "string",
             "null"
           ]
+        },
+        "add": {
+          "description": "With `item`: added to the whole-number position, e.g. `1` when the API wants the next offset.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
         },
         "start": {
           "description": "Position before the first read. Defaults to `0` for a count, otherwise to `null`."
@@ -5655,6 +5738,16 @@
           "description": "One JSON document per line.",
           "type": "string",
           "const": "ndjson"
+        }
+      ]
+    },
+    "HttpBulkPayloadEncoding": {
+      "description": "How an `http_bulk` input decodes the string at `read.payload`.",
+      "oneOf": [
+        {
+          "description": "Standard base64 with padding.",
+          "type": "string",
+          "const": "base64"
         }
       ]
     },

@@ -399,11 +399,18 @@ fn exports_plugin_entry(path: &Path) -> anyhow::Result<bool> {
     let entry = &super::MQB_PLUGIN_ENTRY_SYMBOL[..super::MQB_PLUGIN_ENTRY_SYMBOL.len() - 1];
     let cache = ReadCache::new(std::fs::File::open(path)?);
     let file = object::File::parse(&cache).context("not a readable shared library")?;
-    Ok(file.exports()?.iter().any(|export| {
-        // Mach-O prefixes C symbols with an underscore.
+    for export in file.exports()? {
+        let export = export?;
         let name = export.name();
-        name == entry || name.strip_prefix(b"_") == Some(entry)
-    }))
+        let Some(name) = name.name() else {
+            continue;
+        };
+        // Mach-O prefixes C symbols with an underscore.
+        if name == entry || name.strip_prefix(b"_") == Some(entry) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Where an unresolved endpoint name was looked for, to append to that error.

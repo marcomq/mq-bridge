@@ -34,17 +34,14 @@ ignore = [
     # item from it: the `webpki::Error` variant in its error enum (tls.rs:42 is
     # the only reference in the crate). All certificate validation on the MQTT
     # path runs through tokio-rustls 0.26 -> rustls 0.23 -> rustls-webpki
-    # 0.103.13, which is patched for all four advisories below.
-    #
-    # --- rustls-webpki, via aws-sdk-* (feature: aws) ----------------------
-    # aws-smithy-http-client still selects its `legacy-rustls-ring` connector,
-    # which compiles rustls 0.21 -> rustls-webpki 0.101.7. That code is live on
-    # the SQS/SNS path. See per-advisory reasoning below.
+    # 0.103.16, which is patched for all five advisories below. Every other TLS
+    # path (aws included) also validates on 0.103.16.
 
-    { id = "RUSTSEC-2026-0104", reason = "Panic in CRL parsing. Unreachable: the CRL code path only executes when the application supplies a CRL to a client-certificate verifier. Both affected paths (rumqttc, aws-sdk) are outbound TLS clients that never configure one, and our only WebPkiClientVerifier (src/endpoints/http/mod.rs) runs on the patched rustls-webpki 0.103.13 and passes no CRLs." },
+    { id = "RUSTSEC-2026-0104", reason = "Panic in CRL parsing. Unreachable: 0.102.8 is only used for its Error type by rumqttc, and our only WebPkiClientVerifier (src/endpoints/http/mod.rs) runs on the patched rustls-webpki 0.103.16 and passes no CRLs." },
     { id = "RUSTSEC-2026-0049", reason = "CRL distribution-point matching. Unreachable for the same reason as RUSTSEC-2026-0104: no CRL is ever supplied on any path in this crate." },
-    { id = "RUSTSEC-2026-0098", reason = "Name constraints for URI names incorrectly accepted. Not affected via rumqttc (validation runs on patched 0.103.13). REACHABLE via the aws feature's legacy rustls 0.21 connector during ordinary server-certificate validation; exploitation requires a name-constrained CA in the trust store issuing outside its constraints. Tracked, blocked on the AWS SDK migrating off rustls 0.21." },
-    { id = "RUSTSEC-2026-0099", reason = "Name constraints accepted for wildcard-asserting certificates. Same disposition as RUSTSEC-2026-0098: not affected via rumqttc, reachable-but-narrow via the aws feature." },
+    { id = "RUSTSEC-2026-0098", reason = "Name constraints for URI names incorrectly accepted. Not affected: rumqttc uses 0.102.8 only for its Error type; validation runs on patched 0.103.16." },
+    { id = "RUSTSEC-2026-0099", reason = "Name constraints accepted for wildcard-asserting certificates. Same disposition as RUSTSEC-2026-0098." },
+    { id = "RUSTSEC-2026-0382", reason = "Distrusted emSign intermediates accepted. Not affected: rumqttc uses 0.102.8 only for its Error type; all chain validation runs on patched 0.103.16, and webpki-roots / webpki-root-certs are on the patched 1.0.10." },
     { id = "RUSTSEC-2026-0258", reason = "h2 0.3.27 is pulled in by the AWS SDK legacy hyper 0.14 client and has no patch release. This application uses it only in outbound AWS clients. Tracked pending the AWS SDK dropping hyper 0.14." },
 
     # --- Unmaintained, no known vulnerability -----------------------------

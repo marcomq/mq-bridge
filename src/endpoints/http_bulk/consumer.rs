@@ -13,7 +13,7 @@
 use super::{quoted, Connection, JSON};
 use crate::checkpoint::{self, CheckpointBackend, CheckpointStore, VersionedCheckpoint};
 use crate::endpoints::poll::PollBackoff;
-use crate::models::{HttpBulkConfig, HttpBulkRead, HttpBulkStream};
+use crate::models::{HttpBulkConfig, HttpBulkPayloadEncoding, HttpBulkRead, HttpBulkStream};
 use crate::support::http_status;
 use crate::support::sse::{find_sse_event_end, parse_sse_event, ParsedSseEvent};
 use crate::traits::{
@@ -22,6 +22,7 @@ use crate::traits::{
 use crate::CanonicalMessage;
 use anyhow::{anyhow, bail, Context};
 use async_trait::async_trait;
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use bytes::Bytes;
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use reqwest::header::{ACCEPT, CONTENT_TYPE, LINK};
@@ -53,8 +54,8 @@ enum CursorSource {
         pointer: String,
         end_when_missing: bool,
     },
-    /// A JSON pointer into the last document of the page.
-    Item(String),
+    /// A JSON pointer into the last document of the page, plus `add` for a whole number.
+    Item { pointer: String, add: Option<i64> },
     /// The id of a server-sent event, sent back as `Last-Event-ID`.
     EventId,
     /// The URL of the next page, at this JSON pointer or, with `None`, in the `Link` header.
@@ -90,6 +91,8 @@ pub struct HttpBulkConsumer {
     /// A draining route ends on the first empty page, so it does not wait for it.
     exit_on_empty: bool,
     stream: Option<HttpBulkStream>,
+    /// The pointer to the payload in each document and how it is decoded.
+    payload: Option<(String, Option<HttpBulkPayloadEncoding>)>,
     open: Option<Open>,
     /// How long a draining route waits for a silent stream.
     silence: Duration,
@@ -226,13 +229,31 @@ impl HttpBulkConsumer {
                 },
                 Value::Null,
             ),
-            (None, Some(pointer), _) => (CursorSource::Item(pointer.clone()), Value::Null),
+            (None, Some(pointer), _) => (
+                CursorSource::Item {
+                    pointer: pointer.clone(),
+                    add: cursor.add,
+                },
+                Value::Null,
+            ),
             (None, None, Some(HttpBulkStream::Sse)) => (CursorSource::EventId, Value::Null),
             (None, None, Some(HttpBulkStream::Ndjson)) => (CursorSource::Untracked, Value::Null),
             (None, None, None) => (CursorSource::Count, Value::from(0u64)),
         };
         if read.cursor.end_when_missing && !matches!(source, CursorSource::Response { .. }) {
             bail!("http_bulk read.cursor.end_when_missing needs read.cursor.response");
+        }
+        if cursor.add.is_some() && !matches!(source, CursorSource::Item { .. }) {
+            bail!("http_bulk read.cursor.add needs read.cursor.item");
+        }
+        if read.payload_encoding.is_some() && read.payload.is_none() {
+            bail!("http_bulk read.payload_encoding needs read.payload");
+        }
+        if read.payload.is_some() && read.stream.is_some() {
+            bail!("http_bulk read.payload does not apply to a stream");
+        }
+        if read.payload.as_ref().is_some_and(|p| !p.starts_with('/')) {
+            bail!("http_bulk read.payload must be a JSON pointer starting with '/'");
         }
         let start = read.cursor.start.clone().unwrap_or(start);
         if matches!(source, CursorSource::Count) && !start.is_u64() {
@@ -285,6 +306,7 @@ impl HttpBulkConsumer {
             })),
             exit_on_empty: false,
             stream: read.stream,
+            payload: read.payload.clone().map(|p| (p, read.payload_encoding)),
             open: None,
             silence: Duration::from_millis(read.polling_interval_ms.unwrap_or(1000)),
         })
@@ -395,14 +417,9 @@ impl HttpBulkConsumer {
                     .map(|n| Some(Position::At(Value::from(read + n))))
                     .collect())
             }
-            CursorSource::Item(pointer) => items
+            CursorSource::Item { pointer, add } => items
                 .iter()
-                .map(|item| match item.pointer(pointer) {
-                    Some(value) if !value.is_null() => Ok(Some(Position::At(value.clone()))),
-                    _ => Err(ConsumerError::Permanent(anyhow!(
-                        "http_bulk read.cursor.item '{pointer}' is missing in a document"
-                    ))),
-                })
+                .map(|item| item_position(pointer, *add, Some(item)).map(Some))
                 .collect(),
             CursorSource::Response {
                 pointer,
@@ -546,7 +563,10 @@ impl HttpBulkConsumer {
             let mut messages = Vec::with_capacity(items.len());
             for item in items {
                 positions.push(match &self.source {
-                    CursorSource::Item(pointer) => Some(item_position(pointer, &item.payload)?),
+                    CursorSource::Item { pointer, add } => {
+                        let document = serde_json::from_slice::<Value>(&item.payload).ok();
+                        Some(item_position(pointer, *add, document.as_ref())?)
+                    }
                     CursorSource::EventId => {
                         if let Some(id) = &item.event_id {
                             open.last_id = Some(Position::At(Value::from(id.as_str())));
@@ -719,16 +739,61 @@ fn status_error(label: &str, status: reqwest::StatusCode, text: &str) -> Consume
     }
 }
 
-/// The position of a streamed document, from the field `pointer` names.
-fn item_position(pointer: &str, payload: &[u8]) -> Result<Position, ConsumerError> {
-    let document = serde_json::from_slice::<Value>(payload).ok();
-    match document
-        .as_ref()
-        .and_then(|document| document.pointer(pointer))
-    {
-        Some(value) if !value.is_null() => Ok(Position::At(value.clone())),
-        _ => Err(ConsumerError::Permanent(anyhow!(
-            "http_bulk read.cursor.item '{pointer}' is missing in a document"
+/// The position after a document, from the field `pointer` names, plus `add`.
+fn item_position(
+    pointer: &str,
+    add: Option<i64>,
+    document: Option<&Value>,
+) -> Result<Position, ConsumerError> {
+    let value = match document.and_then(|document| document.pointer(pointer)) {
+        Some(value) if !value.is_null() => value,
+        _ => {
+            return Err(ConsumerError::Permanent(anyhow!(
+                "http_bulk read.cursor.item '{pointer}' is missing in a document"
+            )))
+        }
+    };
+    let Some(add) = add else {
+        return Ok(Position::At(value.clone()));
+    };
+    let sum = match value {
+        Value::Number(n) => n
+            .as_u64()
+            .and_then(|n| n.checked_add_signed(add))
+            .map(Value::from)
+            .or_else(|| n.as_i64().and_then(|n| n.checked_add(add)).map(Value::from)),
+        _ => None,
+    };
+    sum.map(Position::At).ok_or_else(|| {
+        ConsumerError::Permanent(anyhow!(
+            "http_bulk read.cursor.item '{pointer}' is {value}, not a whole number read.cursor.add can be added to"
+        ))
+    })
+}
+
+/// The message payload of a document: the field `pointer` names, decoded.
+fn item_payload(
+    pointer: &str,
+    encoding: Option<HttpBulkPayloadEncoding>,
+    item: &Value,
+) -> Result<Vec<u8>, ConsumerError> {
+    let value = item.pointer(pointer).ok_or_else(|| {
+        ConsumerError::Permanent(anyhow!(
+            "http_bulk read.payload '{pointer}' is missing in a document"
+        ))
+    })?;
+    match (encoding, value) {
+        (None, Value::String(text)) => Ok(text.clone().into_bytes()),
+        (None, other) => Ok(serde_json::to_vec(other).unwrap_or_default()),
+        (Some(HttpBulkPayloadEncoding::Base64), Value::String(text)) => {
+            BASE64.decode(text).map_err(|e| {
+                ConsumerError::Permanent(anyhow!(
+                    "http_bulk read.payload '{pointer}' is not valid base64: {e}"
+                ))
+            })
+        }
+        (Some(HttpBulkPayloadEncoding::Base64), _) => Err(ConsumerError::Permanent(anyhow!(
+            "http_bulk read.payload '{pointer}' is not a base64 string"
         ))),
     }
 }
@@ -839,6 +904,16 @@ impl MessageConsumer for HttpBulkConsumer {
                 }
                 return Ok(self.idle().await);
             }
+            let messages = items
+                .iter()
+                .map(|item| {
+                    let payload = match &self.payload {
+                        Some((pointer, encoding)) => item_payload(pointer, *encoding, item)?,
+                        None => serde_json::to_vec(item).unwrap_or_default(),
+                    };
+                    Ok(CanonicalMessage::new(payload, None))
+                })
+                .collect::<Result<Vec<_>, ConsumerError>>()?;
             // Advance optimistically; the commit rolls back to the last acked document.
             {
                 let mut progress = self.progress.lock().unwrap();
@@ -853,12 +928,6 @@ impl MessageConsumer for HttpBulkConsumer {
             }
             self.backoff.reset();
 
-            let messages: Vec<CanonicalMessage> = items
-                .iter()
-                .map(|item| {
-                    CanonicalMessage::new(serde_json::to_vec(item).unwrap_or_default(), None)
-                })
-                .collect();
             trace!(count = messages.len(), path = %self.path, "Read documents");
 
             let commit = self.commit(positions, before, rollbacks);
@@ -1000,6 +1069,69 @@ mod tests {
         assert!(read(&mut second, 0).await.is_empty());
         assert_eq!(targets(&server).last().unwrap(), "/rows?id=gt.c");
         let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn an_offset_after_the_item_and_a_decoded_payload_resume_without_repeats() {
+        let message = |offset: u64, payload: &str| json!({"header": {"offset": offset}, "payload": BASE64.encode(payload)});
+        let pages = json!({
+            "/m?value=0&count=2": {"messages": [message(0, "zero"), message(1, "\u{0}one")]},
+            "/m?value=2&count=2": {"messages": [message(2, "{\"two\":2}")]},
+            "/m?value=3&count=2": {"messages": [{"header": {"offset": 3}, "payload": "%%"}]},
+        });
+        let server = server(move |request| {
+            let page = pages.get(&request.target).cloned();
+            (200, page.unwrap_or(json!({"messages": []})).to_string())
+        })
+        .await;
+        let (path, url) = store();
+        let config = json!({
+            "read": {
+                "path": "/m?value={cursor}&count={limit}",
+                "items": "/messages",
+                "cursor": {"item": "/header/offset", "add": 1, "start": 0},
+                "payload": "/payload",
+                "payload_encoding": "base64",
+                "cursor_id": "copy",
+                "checkpoint_store": url,
+            },
+        });
+        let mut first = consumer(&server, config.clone()).await;
+        assert_eq!(read(&mut first, 2).await, ["zero", "\u{0}one"]);
+
+        let mut second = consumer(&server, config).await;
+        assert_eq!(read(&mut second, 1).await, ["{\"two\":2}"]);
+        let Err(error) = second.receive_batch(2).await else {
+            panic!("bad base64 was accepted");
+        };
+        assert!(error.to_string().contains("not valid base64"), "{error}");
+        // The undecodable page did not move the position past it.
+        assert!(second.receive_batch(2).await.is_err());
+        assert_eq!(targets(&server).last().unwrap(), "/m?value=3&count=2");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn a_misplaced_add_or_payload_is_refused() {
+        for (read, reason) in [
+            (json!({"cursor": {"add": 1}}), "needs read.cursor.item"),
+            (json!({"payload_encoding": "base64"}), "needs read.payload"),
+            (json!({"payload": "payload"}), "JSON pointer"),
+            (
+                json!({"payload": "/p", "stream": "ndjson", "path": "/s"}),
+                "does not apply to a stream",
+            ),
+        ] {
+            let mut config =
+                json!({"url": "http://localhost:1", "read": {"path": "/d?o={cursor}"}});
+            config["read"]
+                .as_object_mut()
+                .unwrap()
+                .extend(read.as_object().unwrap().clone());
+            let config: HttpBulkConfig = serde_json::from_value(config).unwrap();
+            let error = HttpBulkConsumer::new(&config, true).await.err().unwrap();
+            assert!(error.to_string().contains(reason), "{error}");
+        }
     }
 
     #[tokio::test]

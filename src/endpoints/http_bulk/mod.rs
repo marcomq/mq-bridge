@@ -211,7 +211,7 @@ mod tests {
     fn the_recipes_in_the_book_are_valid_configurations() {
         let book = concat!(env!("CARGO_MANIFEST_DIR"), "/docs/book/connectors/");
         for (name, recipes) in [
-            ("http-bulk.md", 15),
+            ("http-bulk.md", 16),
             ("typesense.md", 2),
             ("elasticsearch.md", 2),
             ("postgrest.md", 2),

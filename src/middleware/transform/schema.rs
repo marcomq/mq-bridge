@@ -282,6 +282,14 @@ impl CompiledSchema {
         Ok(())
     }
 
+    /// True when `apply` on an object or array does nothing a member-by-member walk could
+    /// not reproduce: `enum` compares the whole value, so it rules the walk out.
+    pub(super) fn is_walkable(&self) -> bool {
+        matches!(self.ty, None | Some(Ty::Object) | Some(Ty::Array))
+            && self.enum_values.is_none()
+            && self.content.is_none()
+    }
+
     /// True when `apply` would leave `raw` — one field's verbatim JSON span — byte for
     /// byte as it is, so the field can be copied straight to the output and never has to
     /// become a `Value`. Deliberately conservative: anything with an obligation attached

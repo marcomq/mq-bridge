@@ -21,6 +21,8 @@
 //!     respond: false           # answer each published message with `re:<payload>`
 //!     idempotent: false        # report the publisher as an idempotent sink
 //!     acknowledges: true       # report the consumer as acknowledging
+//!     full_replay: false       # report the publisher as replacing its target each run
+//!     replays_from_start: false # report the consumer as reading everything each run
 //! ```
 //!
 //! The same plugin also exports a middleware under the name `fixture`:
@@ -115,6 +117,11 @@ pub struct FixtureConfig {
     pub idempotent: bool,
     #[serde(default = "default_true")]
     pub acknowledges: bool,
+    /// Only reported through the delivery flags, like `idempotent`.
+    #[serde(default)]
+    pub full_replay: bool,
+    #[serde(default)]
+    pub replays_from_start: bool,
 }
 
 fn default_true() -> bool {
@@ -211,6 +218,8 @@ fn fixture_config_schema() -> serde_json::Value {
             "respond": { "type": "boolean", "default": false },
             "idempotent": { "type": "boolean", "default": false },
             "acknowledges": { "type": "boolean", "default": true },
+            "full_replay": { "type": "boolean", "default": false },
+            "replays_from_start": { "type": "boolean", "default": false },
         },
     })
 }
@@ -227,6 +236,14 @@ impl CustomEndpointFactory for FixtureFactory {
 
     fn acknowledges(&self, config: &serde_json::Value) -> bool {
         FixtureConfig::deserialize(config).map_or(true, |config| config.acknowledges)
+    }
+
+    fn requires_full_replay(&self, config: &serde_json::Value) -> bool {
+        FixtureConfig::deserialize(config).is_ok_and(|config| config.full_replay)
+    }
+
+    fn replays_from_start(&self, config: &serde_json::Value) -> bool {
+        FixtureConfig::deserialize(config).is_ok_and(|config| config.replays_from_start)
     }
 
     async fn create_consumer(

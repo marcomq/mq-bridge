@@ -1134,6 +1134,11 @@ License: MIT OR Apache-2.0
 Source: https://github.com/jonhoo/evmap.git
 Copyright/attribution: Copyright (c) 2017 Jon Gjengset
 
+fanring@0.3.9
+License: ISC
+Source: https://github.com/paddor/fanring.rs
+Copyright/attribution: Copyright (c) 2026 Patrik Wenger
+
 fast-uuid-v7@0.1.10
 License: MIT
 Source: https://github.com/marcomq/fast-uuid-v7
@@ -2314,6 +2319,11 @@ Source: https://github.com/rusticata/oid-registry.git
 Copyright/attribution: Copyright (c) 2017 Pierre Chifflier
 
 omq-proto@0.26.1
+License: ISC
+Source: https://github.com/paddor/omq.rs
+Copyright/attribution: Copyright (c) 2026 Patrik Wenger
+
+omq-shm@0.2.3
 License: ISC
 Source: https://github.com/paddor/omq.rs
 Copyright/attribution: Copyright (c) 2026 Patrik Wenger

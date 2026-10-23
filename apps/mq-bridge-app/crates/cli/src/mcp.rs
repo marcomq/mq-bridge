@@ -83,11 +83,49 @@ impl InputMessage {
     }
 }
 
+/// Lean stand-in for the full `Endpoint` schema, which inlines every
+/// connector's config (~170 KB per tool). `describe` serves those fields on demand.
+fn endpoint_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": "object",
+        "properties": {
+            "middlewares": {
+                "type": "array",
+                "items": { "type": "object" },
+                "description": "Optional middlewares, each keyed by name, e.g. {\"retry\": {\"max_attempts\": 3}}."
+            }
+        },
+        "additionalProperties": true,
+        "minProperties": 1
+    })
+}
+
+/// [`endpoint_schema`] for an `Option<Endpoint>` field, which also accepts `null`.
+fn optional_endpoint_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    let mut schema = endpoint_schema(generator);
+    schema.insert("type".into(), serde_json::json!(["object", "null"]));
+    schema
+}
+
+/// Lean stand-in for the full `Route` schema; see [`endpoint_schema`].
+fn route_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    let mut endpoint = endpoint_schema(generator).to_value();
+    endpoint["description"] = "Endpoint keyed by connector type.".into();
+    schemars::json_schema!({
+        "type": "object",
+        "properties": { "input": endpoint, "output": endpoint },
+        "required": ["input"],
+        "additionalProperties": true
+    })
+}
+
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct PublishArgs {
-    /// Target endpoint, keyed by connector type, e.g.
+    /// Target endpoint: one connector-type key with its config, e.g.
     /// `{"kafka": {"url": "localhost:9092", "topic": "orders"}}` or
-    /// `{"file": {"path": "/tmp/out.jsonl"}}`.
+    /// `{"file": {"path": "/tmp/out.jsonl"}}`, plus an optional `middlewares`
+    /// array. `describe` lists the connector types and their config fields.
+    #[schemars(schema_with = "endpoint_schema")]
     publisher: Endpoint,
     /// A single message to send.
     #[serde(default)]
@@ -147,12 +185,13 @@ struct StartRouteArgs {
     ///   "output": {"file": {"path": "/tmp/out.jsonl"}}}` — plus route options such
     /// as `exit_on_empty` (drain the source then exit), `concurrency` and
     /// `batch_size`. Use `{"null": null}` as the `output` to discard messages.
+    /// `describe` lists the connector types and their config fields.
     ///
     /// A `file`/`object_store` source must repeat the `compression`/`encryption`
     /// its data was written with — neither is auto-detected, and a mismatch ends
     /// the route as `completed` having moved few or no messages rather than
     /// failing, so check the moved-message count.
-    #[schemars(with = "Route")]
+    #[schemars(schema_with = "route_schema")]
     route: RouteArg,
     /// Route concurrency. Overrides `concurrency` inside `route` if both are given;
     /// if neither is given the app default (4) applies, not the library's 1. Higher
@@ -180,6 +219,7 @@ struct AgentListenArgs {
     /// connector, e.g. `{"nats": {"url": "...", "stream": "AGENTS", "subject":
     /// "agents.me"}}`, to receive from agents that are not on this machine.
     #[serde(default)]
+    #[schemars(schema_with = "optional_endpoint_schema")]
     input: Option<Endpoint>,
     /// How many messages to hold for `route_messages`. Defaults to 200.
     #[serde(default)]
@@ -197,6 +237,7 @@ struct AgentSendArgs {
     /// Optional sink endpoint replacing the recipient's local inbox directory,
     /// for an agent reachable over a broker rather than this filesystem.
     #[serde(default)]
+    #[schemars(schema_with = "optional_endpoint_schema")]
     output: Option<Endpoint>,
 }
 
@@ -206,7 +247,7 @@ struct GenerateCliCommandArgs {
     #[serde(default)]
     name: Option<String>,
     /// The same route JSON accepted by `start_route`.
-    #[schemars(with = "Route")]
+    #[schemars(schema_with = "route_schema")]
     route: RouteArg,
     /// Route concurrency. Overrides a value inside `route`.
     #[serde(default)]
@@ -226,7 +267,7 @@ struct DescribeArgs {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct RouteNameArg {
-    /// The route name.
+    /// The route name, as returned by `start_route` or listed by `list_routes`.
     name: String,
 }
 
@@ -691,7 +732,10 @@ impl BridgeMcp {
             {\"kafka\": {\"url\": \"...\", \"topic\": \"...\"}}); this is independent of routes. \
             Provide either `message` or `messages`; each message has a `payload` and optional \
             `metadata` headers (e.g. `kind` for the message type, `correlation_id`). Returns the \
-            send outcome (an acknowledgement, or the endpoint's reply for request/reply endpoints)."
+            send outcome (an acknowledgement, or the endpoint's reply for request/reply endpoints). \
+            Use it for ad-hoc sends; to move data from a source endpoint, use `start_route`. \
+            Messages are written to the external system and cannot be recalled.",
+        annotations(read_only_hint = false, open_world_hint = true)
     )]
     async fn publish(
         &self,
@@ -814,7 +858,8 @@ impl BridgeMcp {
         description = "Describe the endpoints and middlewares this build supports, the same data as \
             `mqb list --json` / `mqb describe <name> --json`: each endpoint's `endpoint` type (the \
             JSON key `publish`/`start_route` take), URI form, example and typed `params` (also its \
-            config fields), and each middleware's params. Pass `name` to narrow it to one entry.",
+            config fields), and each middleware's params. Pass `name` to narrow it to one entry. \
+            Call it before writing `publisher` or `route` JSON for a connector you have not used yet.",
         annotations(read_only_hint = true)
     )]
     async fn describe(
@@ -982,7 +1027,9 @@ impl BridgeMcp {
 
     #[tool(
         description = "List the routes started by this server, with their live connection health, \
-            total messages moved, current message rate, and achieved average rate.",
+            total messages moved, current message rate, and achieved average rate. For one \
+            route's full status use `route_status`; for routes of other mq-bridge processes \
+            use `bridge_status`.",
         annotations(read_only_hint = true)
     )]
     async fn list_routes(&self) -> Result<CallToolResult, McpError> {
@@ -1161,7 +1208,8 @@ impl BridgeMcp {
             health, whether it has finished, the total number of messages it has moved, its current \
             rate (`messages_per_second`), and the rate it achieved overall \
             (`average_messages_per_second` over `elapsed_s`). Quote the average for a finished job: \
-            the current rate decays to ~0 once a route stops moving data.",
+            the current rate decays to ~0 once a route stops moving data. To wait for a job to \
+            finish, call `wait_route` once instead of polling this.",
         annotations(read_only_hint = true)
     )]
     async fn route_status(
@@ -1289,8 +1337,14 @@ impl BridgeMcp {
     }
 
     #[tool(
-        description = "Stop a running route by `name`. Returns the total messages it moved plus the \
-            rate it achieved (`average_messages_per_second` over `elapsed_s`)."
+        description = "Stop a route started by this server, by `name`. Use it to end a continuous \
+            route or abandon a drain; a route started with `exit_on_empty` stops by itself, so \
+            wait for it with `wait_route` instead. Sends the shutdown signal and returns without \
+            waiting for the route to exit; the route is removed from `list_routes`, and messages \
+            captured for `route_messages` but not yet read are discarded (their count is \
+            returned). Returns the total messages it moved plus the rate it achieved \
+            (`average_messages_per_second` over `elapsed_s`).",
+        annotations(read_only_hint = false, destructive_hint = true)
     )]
     async fn stop_route(
         &self,
@@ -1681,6 +1735,15 @@ mod tests {
             .into_iter()
             .map(|t| t.name.to_string())
             .collect()
+    }
+
+    // Every client loads the whole tool list into context; inlining the connector
+    // config schemas once made it ~495 KB.
+    #[test]
+    fn the_tool_list_stays_small() {
+        let server = BridgeMcp::new().with_agent_bus(true);
+        let tools = serde_json::to_string(&server.tool_router.list_all()).unwrap();
+        assert!(tools.len() < 40_000, "tool list is {} bytes", tools.len());
     }
 
     // The agent bus is an opt-in: a client that never asked for it must not even

@@ -55,6 +55,11 @@ pub(crate) fn is_known_endpoint_name(name: &str) -> bool {
             | "request"
             | "null"
             | "sqlx"
+            | "sqlite"
+            | "postgres"
+            | "postgresql"
+            | "mysql"
+            | "mariadb"
             | "clickhouse"
             | "click_house"
             | "postgres_cdc"
@@ -205,6 +210,8 @@ const FILE_CONFIG_KEYS: &[&str] = &[
     "encryption",
     "csv",
     "source_metadata",
+    "fsync",
+    "fsync_interval_ms",
 ];
 
 fn reject_unknown_file_keys(
@@ -218,6 +225,11 @@ fn reject_unknown_file_keys(
             "unknown field `{key}` in file endpoint, expected one of {}",
             FILE_CONFIG_KEYS.join(", ")
         )),
+        None if file.get("format").and_then(|f| f.as_str()) == Some("parquet") => Err(
+            "file 'format: parquet' is not supported (a Parquet file can't be appended to); \
+             use object_store with a directory url, e.g. {object_store: {url: \"file:///dir/\", format: parquet}}"
+                .to_string(),
+        ),
         None => Ok(()),
     }
 }
@@ -541,6 +553,18 @@ where
 {
     let opt = Option::<bool>::deserialize(deserializer)?;
     Ok(opt.unwrap_or(false))
+}
+
+/// Accepts the CLI's `local-store://` spelling of a local directory and stores it as `file://`.
+pub(crate) fn deserialize_object_store_url<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let url = String::deserialize(deserializer)?;
+    Ok(match url.strip_prefix("local-store://") {
+        Some(rest) => format!("file://{rest}"),
+        None => url,
+    })
 }
 
 /// One topic, a comma-separated list, or an array of names; an array is stored comma-joined.
@@ -886,6 +910,8 @@ mod tests {
                 delimiter: Some("\n".to_string()),
                 mode: Some(mode),
                 source_metadata: true,
+                fsync: crate::models::FileFsync::Batch,
+                fsync_interval_ms: Some(250),
                 ..Default::default()
             };
             let file = serde_json::to_value(&config).unwrap();

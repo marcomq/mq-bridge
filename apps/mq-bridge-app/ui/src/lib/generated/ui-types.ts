@@ -508,6 +508,7 @@ export interface MongoDbConfig {
   id_field?: string | null;
   report_outcome?: boolean;
   find?: string | null;
+  aggregate_query?: string | null;
   cursor_id?: string | null;
   meta_collection?: string | null;
   shared?: boolean | null;
@@ -754,6 +755,7 @@ export interface HttpBulkConfig {
 export interface HttpBulkAuth {
   oauth2?: HttpBulkOAuth2 | null;
   aws_sigv4?: HttpBulkAwsSigV4 | null;
+  login?: HttpBulkLogin | null;
 }
 
 export interface HttpBulkOAuth2 {
@@ -769,6 +771,14 @@ export interface HttpBulkAwsSigV4 {
   access_key?: string | null;
   secret_key?: string | null;
   session_token?: string | null;
+}
+
+export interface HttpBulkLogin {
+  url: string;
+  body: string;
+  token: string;
+  expires_at?: string | null;
+  expires_in?: string | null;
 }
 
 export interface HttpBulkUpsert {
@@ -851,11 +861,14 @@ export interface HttpBulkRead {
   polling_interval_ms?: number | null;
   max_polling_interval_ms?: number | null;
   stream?: HttpBulkStream | null;
+  payload?: string | null;
+  payload_encoding?: HttpBulkPayloadEncoding | null;
 }
 
 export interface HttpBulkCursor {
   response?: string | null;
   item?: string | null;
+  add?: number | null;
   start?: unknown;
   end_when_missing?: boolean;
   next_url?: string | null;
@@ -863,6 +876,8 @@ export interface HttpBulkCursor {
 }
 
 export type HttpBulkStream = "sse" | "ndjson";
+
+export type HttpBulkPayloadEncoding = "base64";
 
 export interface HttpBulkDelete {
   path: string;
@@ -1020,7 +1035,7 @@ export interface ConsumerResponseConfig {
   payload?: string;
 }
 
-export type ConsumerOutputConfig = { mode: "none" } | { publisher: string; publisher_id?: string | null; mode: "publisher" } | { response?: ConsumerResponseConfig | null; mode: "response" };
+export type ConsumerOutputConfig = { mode: "none" } | { mode: "publisher"; publisher: string; publisher_id?: string | null } | { mode: "response"; response?: ConsumerResponseConfig | null };
 
 export interface ConsumerMessageCaptureConfig {
   enabled?: boolean;
