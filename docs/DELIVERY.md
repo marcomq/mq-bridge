@@ -662,7 +662,10 @@ acknowledged. `fsync: batch` syncs the file before each batch is acknowledged; t
 disk sync per batch. `fsync: periodic` syncs every `fsync_interval_ms` (default 1000) at
 almost no cost in throughput, and the route commits the source only after the sync that
 covers a batch, so a power loss loses nothing the source counts as delivered: it redelivers
-those batches instead. A final sync runs when the route stops. With either setting, a batch that starts a new file also
+those batches instead. A final sync runs when the route stops. When the input saves its read
+position to a checkpoint or replication slot, `fsync: off` is run as `periodic`, so the saved
+position never gets ahead of the data on disk; a path that is not a regular file, such as
+`/dev/stdout`, is left unsynced. With either setting, a batch that starts a new file also
 syncs its directory, so the file itself survives a power loss. `object_store` with a
 `file://` URL always syncs each object and its directory before the write counts as done.
 

@@ -46,6 +46,11 @@ All notable changes to `mq-bridge`. Newest first.
 
 ### Changed
 
+- **A `file` sink behind a saved read position syncs.** When the input saves its position to a
+  checkpoint or replication slot, an appending `file` sink with `fsync: off` runs with
+  `fsync: periodic`, so a power loss can no longer leave the saved position ahead of the
+  written data and make a resume skip rows. Paths that are not regular files, such as
+  `/dev/stdout`, are left as they are. Other `fsync: off` sinks log the risk at info.
 - **Middleware ordering is documented as one rule:** a message passes a `middlewares:` list
   from the bottom up, on the input and the output alike. REFERENCE.md explains it with a
   diagram, a table and the common mistakes; behaviour is unchanged.

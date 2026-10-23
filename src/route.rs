@@ -1155,7 +1155,7 @@ fn source_replays_from_start(endpoint: &Endpoint, no_resume: bool, depth: usize)
                 && config
                     .endpoints
                     .iter()
-                    .all(|endpoint| source_replays_from_start(endpoint, no_resume, depth + 1))
+                    .all(|endpoint| source_replays_from_start(endpoint, false, depth + 1))
         }
         EndpointType::Ref(name) => get_endpoint(name)
             .is_some_and(|referenced| source_replays_from_start(&referenced, no_resume, depth + 1)),
@@ -1163,6 +1163,136 @@ fn source_replays_from_start(endpoint: &Endpoint, no_resume: bool, depth: usize)
             .is_some_and(|factory| factory.replays_from_start(config)),
         _ => false,
     }
+}
+
+/// Whether this input durably saves how far it has read: a checkpoint or a replication slot.
+/// `sequence` children ignore `no_resume`, so they are checked without it.
+fn input_saves_position(endpoint: &Endpoint, no_resume: bool, depth: usize) -> bool {
+    const MAX_DEPTH: usize = 16;
+    let saved = |cursor_id: &Option<String>, store: &Option<String>| {
+        !no_resume && cursor_id.is_some() && store.is_some()
+    };
+    match &endpoint.endpoint_type {
+        _ if depth > MAX_DEPTH => false,
+        EndpointType::PostgresCdc(config) => !config.temporary_slot,
+        EndpointType::Sqlx(config) => {
+            config.publication.is_some()
+                || (!no_resume && config.cursor_id.is_some() && config.cursor_column.is_some())
+        }
+        EndpointType::MongoDb(config) => {
+            !no_resume
+                && config.cursor_id.is_some()
+                && matches!(
+                    config.resolved_consume(),
+                    crate::models::MongoConsume::CaptureNew
+                        | crate::models::MongoConsume::CaptureAll
+                )
+        }
+        EndpointType::ClickHouse(config) => saved(&config.cursor_id, &config.checkpoint_store),
+        EndpointType::ObjectStore(config) => saved(&config.cursor_id, &config.checkpoint_store),
+        EndpointType::HttpBulk(config) => config
+            .read
+            .as_ref()
+            .is_some_and(|read| saved(&read.cursor_id, &read.checkpoint_store)),
+        EndpointType::Meilisearch(config) => saved(&config.cursor_id, &config.checkpoint_store),
+        EndpointType::Qdrant(config) => saved(&config.cursor_id, &config.checkpoint_store),
+        EndpointType::Sequence(config) => {
+            (config.cursor_id.is_some() && config.checkpoint_store.is_some())
+                || config
+                    .endpoints
+                    .iter()
+                    .any(|endpoint| input_saves_position(endpoint, false, depth + 1))
+        }
+        EndpointType::Ref(name) => get_endpoint(name)
+            .is_some_and(|referenced| input_saves_position(&referenced, no_resume, depth + 1)),
+        _ => false,
+    }
+}
+
+/// Moves appending `file` sinks with `fsync: off` to `periodic` when the input saves its
+/// position, so a saved position never covers data a power loss can still undo.
+fn sync_file_sinks_behind_saved_position(
+    route_name: &str,
+    input: &Endpoint,
+    output: &Endpoint,
+    source_has_position: bool,
+    no_resume: bool,
+) -> Option<Endpoint> {
+    fn visit(endpoint: &mut Endpoint, source_has_position: bool, depth: usize) -> Vec<String> {
+        if depth > 16 {
+            return Vec::new();
+        }
+        match &mut endpoint.endpoint_type {
+            EndpointType::File(config) => {
+                // A pipe or terminal cannot be synced; part files always sync.
+                let not_a_file = std::fs::metadata(&config.path).is_ok_and(|m| !m.is_file());
+                if config.fsync != crate::models::FileFsync::Off
+                    || not_a_file
+                    || config.resolved_name_by(source_has_position) == NameBy::SourcePosition
+                {
+                    return Vec::new();
+                }
+                config.fsync = crate::models::FileFsync::Periodic;
+                vec![config.path.clone()]
+            }
+            EndpointType::Fanout(outputs) => outputs
+                .iter_mut()
+                .flat_map(|output| visit(output, source_has_position, depth + 1))
+                .collect(),
+            EndpointType::Switch(config) => {
+                let mut paths = Vec::new();
+                for output in config.cases.values_mut() {
+                    paths.extend(visit(output, source_has_position, depth + 1));
+                }
+                for case in &mut config.when {
+                    paths.extend(visit(&mut case.to, source_has_position, depth + 1));
+                }
+                if let Some(output) = config.default.as_deref_mut() {
+                    paths.extend(visit(output, source_has_position, depth + 1));
+                }
+                paths
+            }
+            EndpointType::Reader(output) => visit(output, source_has_position, depth + 1),
+            EndpointType::Request(config) => {
+                let mut paths = visit(&mut config.to, source_has_position, depth + 1);
+                paths.extend(visit(
+                    &mut config.forward_to,
+                    source_has_position,
+                    depth + 1,
+                ));
+                paths
+            }
+            EndpointType::Ref(name) => match get_endpoint(name) {
+                // Merged as publisher creation does: the ref's middlewares wrap the target's.
+                Some(mut resolved) if endpoint.handler.is_none() || resolved.handler.is_none() => {
+                    let paths = visit(&mut resolved, source_has_position, depth + 1);
+                    if !paths.is_empty() {
+                        resolved.middlewares.append(&mut endpoint.middlewares);
+                        resolved.handler = resolved.handler.take().or(endpoint.handler.take());
+                        *endpoint = resolved;
+                    }
+                    paths
+                }
+                _ => Vec::new(),
+            },
+            _ => Vec::new(),
+        }
+    }
+
+    if !input_saves_position(input, no_resume, 0) {
+        return None;
+    }
+    let mut output = output.clone();
+    let paths = visit(&mut output, source_has_position, 0);
+    if paths.is_empty() {
+        return None;
+    }
+    info!(
+        route = route_name,
+        paths = ?paths,
+        "The input saves its read position, so file sinks with `fsync: off` use `fsync: periodic`; a power loss would otherwise leave the saved position ahead of the written data"
+    );
+    Some(output)
 }
 
 /// The `mqb.src.*` family a positioned input stamps; see [`supports_source_metadata`].
@@ -2049,6 +2179,20 @@ impl Route {
                 }
                 None => &self.output,
             };
+        let synced_output;
+        let output = match sync_file_sinks_behind_saved_position(
+            name,
+            &self.input,
+            output,
+            source_has_position,
+            no_resume,
+        ) {
+            Some(endpoint) => {
+                synced_output = endpoint;
+                &synced_output
+            }
+            None => output,
+        };
         let source_metadata_required =
             output_requires_source_metadata(name, output, source_has_position)?;
         check_source_position_available(name, &self.input, source_metadata_required)?;
@@ -2253,6 +2397,20 @@ impl Route {
                 }
                 None => &self.output,
             };
+        let synced_output;
+        let output = match sync_file_sinks_behind_saved_position(
+            name,
+            &self.input,
+            output,
+            source_has_position,
+            no_resume,
+        ) {
+            Some(endpoint) => {
+                synced_output = endpoint;
+                &synced_output
+            }
+            None => output,
+        };
         let source_metadata_required =
             output_requires_source_metadata(name, output, source_has_position)?;
         check_source_position_available(name, &self.input, source_metadata_required)?;
@@ -3542,6 +3700,63 @@ mod tests {
         assert!(!source_replays_from_start(&saved, false, 0));
         assert!(source_replays_from_start(&saved, true, 0));
         assert!(!source_replays_from_start(&started, true, 0));
+    }
+
+    #[test]
+    fn a_file_sink_behind_a_saved_position_is_synced() {
+        let endpoint =
+            |value: serde_json::Value| -> Endpoint { serde_json::from_value(value).unwrap() };
+        let cursor = endpoint(serde_json::json!({"sqlx": {
+            "url": "sqlite::memory:", "table": "t", "cursor_column": "id", "cursor_id": "c"
+        }}));
+        let file = |fsync: &str| {
+            endpoint(
+                serde_json::json!({"file": {"path": "/tmp/mqb-synced-out.jsonl", "fsync": fsync}}),
+            )
+        };
+        let fsync_of = |output: &Endpoint| match &output.endpoint_type {
+            EndpointType::File(config) => config.fsync,
+            _ => panic!("not a file sink"),
+        };
+        let sync = |input: &Endpoint, output: &Endpoint, no_resume: bool| {
+            sync_file_sinks_behind_saved_position("synced", input, output, false, no_resume)
+        };
+
+        let synced = sync(&cursor, &file("off"), false).expect("upgraded");
+        assert_eq!(fsync_of(&synced), crate::models::FileFsync::Periodic);
+        let fanout = Endpoint::new(EndpointType::Fanout(vec![
+            Endpoint::new_memory("synced_leg", 1),
+            file("off"),
+        ]));
+        match sync(&cursor, &fanout, false).map(|o| o.endpoint_type) {
+            Some(EndpointType::Fanout(legs)) => {
+                assert_eq!(fsync_of(&legs[1]), crate::models::FileFsync::Periodic)
+            }
+            other => panic!("{other:?}"),
+        }
+
+        assert!(
+            sync(&cursor, &file("batch"), false).is_none(),
+            "an explicit sync stays"
+        );
+        #[cfg(unix)]
+        {
+            let stdout = endpoint(serde_json::json!({"file": {"path": "/dev/stdout"}}));
+            assert!(
+                sync(&cursor, &stdout, false).is_none(),
+                "stdout cannot be synced"
+            );
+        }
+        assert!(
+            sync(&cursor, &file("off"), true).is_none(),
+            "no_resume saves nothing"
+        );
+        assert!(sync(&Endpoint::new_memory("synced_in", 1), &file("off"), false).is_none());
+        let temporary = endpoint(serde_json::json!({"postgres_cdc": {
+            "url": "postgres://localhost/db", "publication": "p", "slot_name": "s",
+            "temporary_slot": true
+        }}));
+        assert!(!input_saves_position(&temporary, false, 0));
     }
 
     #[test]
