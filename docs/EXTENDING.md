@@ -232,6 +232,15 @@ sooner when many batches wait or the source runs dry, and when the route stops. 
 `flush` commits nothing: the route reconnects and the source redelivers. A wrapping
 middleware forwards the value of the publisher it wraps.
 
+### Sinks that replace their target
+
+A sink that rewrites its whole target on every run (a snapshot, an overwrite) loses data
+behind an input that resumes or consumes. Return `true` from
+`CustomEndpointFactory::requires_full_replay` for such a config, and the route refuses to
+start unless its input reads the full data set each run. A custom source that does
+declares it with `replays_from_start`. See
+[Sinks that replace their target](DELIVERY.md#sinks-that-replace-their-target).
+
 ### Using it
 
 ```rust

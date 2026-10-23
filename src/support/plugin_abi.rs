@@ -78,7 +78,8 @@ pub const MQB_PLUGIN_ABI_MAJOR: u32 = 1;
 /// * **1.3** appended [`MqbPluginVTable::publisher_disconnect`], which tells a
 ///   publisher how the route pass ended.
 /// * **1.4** appended [`MqbPluginVTable::publisher_deferred_commit_interval_ms`],
-///   with which a publisher defers source commits to its next flush.
+///   with which a publisher defers source commits to its next flush, and added the
+///   [`MQB_DELIVERY_REQUIRES_FULL_REPLAY`] and [`MQB_DELIVERY_REPLAYS_FROM_START`] flags.
 pub const MQB_PLUGIN_ABI_MINOR: u32 = 4;
 
 /// The route pass drained its input to the end.
@@ -177,6 +178,12 @@ pub const MQB_MESSAGE_KEPT: u8 = 1;
 pub const MQB_DELIVERY_IDEMPOTENT_SINK: u8 = 1 << 0;
 /// [`MqbPluginVTable::factory_delivery`] flag: a consumer built from the config acknowledges.
 pub const MQB_DELIVERY_ACKNOWLEDGES: u8 = 1 << 1;
+/// [`MqbPluginVTable::factory_delivery`] flag (ABI 1.4): a publisher built from the config
+/// replaces its target with each run's data, so its input must read everything every run.
+pub const MQB_DELIVERY_REQUIRES_FULL_REPLAY: u8 = 1 << 2;
+/// [`MqbPluginVTable::factory_delivery`] flag (ABI 1.4): a consumer built from the config
+/// reads the full data set from the start on every run.
+pub const MQB_DELIVERY_REPLAYS_FROM_START: u8 = 1 << 3;
 
 /// A borrowed, non-owning view of bytes. Lifetime is defined by whichever side
 /// produced it; see the crate-level ownership rules.

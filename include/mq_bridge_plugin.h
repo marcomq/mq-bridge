@@ -47,7 +47,8 @@
 // * **1.3** appended `MqbPluginVTable::publisher_disconnect`, which tells a
 //   publisher how the route pass ended.
 // * **1.4** appended `MqbPluginVTable::publisher_deferred_commit_interval_ms`,
-//   with which a publisher defers source commits to its next flush.
+//   with which a publisher defers source commits to its next flush, and added the
+//   `MQB_DELIVERY_REQUIRES_FULL_REPLAY` and `MQB_DELIVERY_REPLAYS_FROM_START` flags.
 #define MQB_PLUGIN_ABI_MINOR 4
 
 // The route pass drained its input to the end.
@@ -116,6 +117,14 @@
 
 // `MqbPluginVTable::factory_delivery` flag: a consumer built from the config acknowledges.
 #define MQB_DELIVERY_ACKNOWLEDGES (1 << 1)
+
+// `MqbPluginVTable::factory_delivery` flag (ABI 1.4): a publisher built from the config
+// replaces its target with each run's data, so its input must read everything every run.
+#define MQB_DELIVERY_REQUIRES_FULL_REPLAY (1 << 2)
+
+// `MqbPluginVTable::factory_delivery` flag (ABI 1.4): a consumer built from the config
+// reads the full data set from the start on every run.
+#define MQB_DELIVERY_REPLAYS_FROM_START (1 << 3)
 
 // `MQB_LOG_*`: severity of an event passed to `MqbHostVTable::log` (ABI 1.2).
 #define MQB_LOG_ERROR 1
@@ -618,6 +627,7 @@ typedef const struct MqbPluginVTable *(*MqbPluginListEntry)(size_t index);
 #define MQB_VTABLE_SIZE_V1_1 (MQB_VTABLE_SIZE_V1_0 + 3 * sizeof(size_t))
 #define MQB_VTABLE_SIZE_V1_2 (MQB_VTABLE_SIZE_V1_1 + 11 * sizeof(size_t))
 #define MQB_VTABLE_SIZE_V1_3 (MQB_VTABLE_SIZE_V1_2 + sizeof(size_t))
+#define MQB_VTABLE_SIZE_V1_4 (MQB_VTABLE_SIZE_V1_3 + sizeof(size_t))
 #define MQB_HOST_VTABLE_SIZE_V1_2 (5 * sizeof(size_t))
 
 #if defined(_WIN32)
@@ -643,7 +653,7 @@ MQB_PLUGIN_EXPORT const MqbPluginVTable *mq_bridge_plugin_v1(void);
 MQB_STATIC_ASSERT(sizeof(size_t) == 8, "the plugin ABI layout is defined for 64-bit targets");
 MQB_STATIC_ASSERT(sizeof(MqbMessage) == 16 + 4 * sizeof(size_t), "MqbMessage layout");
 MQB_STATIC_ASSERT(sizeof(MqbHostVTable) == MQB_HOST_VTABLE_SIZE_V1_2, "MqbHostVTable layout");
-MQB_STATIC_ASSERT(sizeof(MqbPluginVTable) == MQB_VTABLE_SIZE_V1_3,
+MQB_STATIC_ASSERT(sizeof(MqbPluginVTable) == MQB_VTABLE_SIZE_V1_4,
                   "MqbPluginVTable grew: add the new MQB_VTABLE_SIZE_* to include/cbindgen.toml");
 
 #endif /* MQ_BRIDGE_PLUGIN_H */

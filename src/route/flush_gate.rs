@@ -22,7 +22,7 @@ use crate::traits::{BatchCommitFunc, MessageDisposition, MessagePublisher};
 use async_channel::Sender;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, Semaphore};
 use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
@@ -73,6 +73,7 @@ impl FlushGate {
         interval: Duration,
         max_held: usize,
         sequencer: Option<Sender<(u64, SequencerItem)>>,
+        read_permits: Option<Arc<Semaphore>>,
         err_tx: Sender<anyhow::Error>,
     ) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
@@ -81,6 +82,7 @@ impl FlushGate {
             interval,
             max_held: max_held.max(1),
             sequencer,
+            read_permits,
             err_tx,
             held: Vec::new(),
             closing: false,
@@ -153,6 +155,8 @@ struct GateTask {
     interval: Duration,
     max_held: usize,
     sequencer: Option<Sender<(u64, SequencerItem)>>,
+    /// The reader's ordered-commit budget; when it is spent, held commits are what it waits on.
+    read_permits: Option<Arc<Semaphore>>,
     err_tx: Sender<anyhow::Error>,
     held: Vec<Go>,
     closing: bool,
@@ -173,7 +177,10 @@ impl GateTask {
                             continue;
                         }
                         self.held.push(go);
-                        urgent || self.closing || self.held.len() >= self.max_held
+                        urgent
+                            || self.closing
+                            || self.held.len() >= self.max_held
+                            || self.reader_starved()
                     }
                     Some(GateEvent::Nudge) => !self.held.is_empty(),
                     Some(GateEvent::Close) => {
@@ -219,14 +226,16 @@ impl GateTask {
             Err(e) => {
                 self.held = released;
                 warn!(error = %e, "Flushing the output failed; held commits are dropped for redelivery");
-                self.fail(format!(
+                let reason = format!(
                     "flushing the output failed, the batch stays uncommitted for redelivery: {e:#}"
-                ));
+                );
+                // Report first, so the route sees the flush error before the failed commits.
                 report_route_error(
                     &self.err_tx,
                     e.context("Flushing the output before committing failed"),
                     "Could not report the flush error to the main task",
                 );
+                self.fail(reason);
             }
         }
     }
@@ -240,6 +249,14 @@ impl GateTask {
             let _ = go.send(Err(reason.clone()));
         }
         self.failed.get_or_insert(reason);
+    }
+
+    /// Released commits can wait in the sequencer on an earlier one still held here, so the
+    /// held count alone may never reach `max_held` while the reader has no permit left.
+    fn reader_starved(&self) -> bool {
+        self.read_permits
+            .as_ref()
+            .is_some_and(|permits| permits.available_permits() == 0)
     }
 
     fn close_sequencer(&self) {
@@ -444,12 +461,12 @@ mod tests {
         for (concurrency, ordered) in [(1, true), (1, false), (4, true), (4, false)] {
             let (route, world) = route(200, ordered, true, Duration::from_secs(3600), concurrency);
             let run = route.run_until_err("flush_gate_drain", None, None);
+            let case = format!("concurrency {concurrency}, ordered {ordered}");
             let result = tokio::time::timeout(Duration::from_secs(20), run)
                 .await
-                .expect("the route wedged on held commits");
+                .unwrap_or_else(|_| panic!("the route wedged on held commits: {case}"));
             assert!(result.is_ok(), "{result:?}");
 
-            let case = format!("concurrency {concurrency}, ordered {ordered}");
             assert!(world.pending.lock().unwrap().is_empty(), "{case}");
             assert_eq!(world.early_commits.load(Ordering::SeqCst), 0, "{case}");
             assert!(world.flushes.load(Ordering::SeqCst) > 1, "{case}");

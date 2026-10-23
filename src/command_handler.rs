@@ -3,15 +3,15 @@
 //  Licensed under MIT OR Apache-2.0, see LICENSE file for more details
 //  git clone https://github.com/marcomq/mq-bridge
 
-use crate::traits::{BoxFuture, Handler, MessagePublisher};
 use crate::traits::{Handled, HandlerError};
+use crate::traits::{Handler, MessagePublisher};
 use crate::CanonicalMessage;
 use async_trait::async_trait;
 use std::any::Any;
 use std::future::Future;
 use std::sync::Arc;
 
-use crate::traits::{EndpointStatus, PublisherError, Sent, SentBatch};
+use crate::traits::{PublisherError, Sent, SentBatch};
 #[async_trait]
 impl<F, Fut> Handler for F
 where

@@ -579,6 +579,37 @@ fn endpoint_tree_has_buffer(endpoint: &Endpoint, visited_refs: &mut HashSet<Stri
     }
 }
 
+/// The name of the first sink in this output that replaces its target with each run's data.
+fn endpoint_tree_full_replay_sink(
+    endpoint: &Endpoint,
+    visited_refs: &mut HashSet<String>,
+) -> Option<String> {
+    match &endpoint.endpoint_type {
+        EndpointType::Custom { name, config } => crate::extensions::get_endpoint_factory(name)
+            .filter(|factory| factory.requires_full_replay(config))
+            .map(|_| name.clone()),
+        EndpointType::Ref(name) => {
+            if !visited_refs.insert(name.clone()) {
+                return None;
+            }
+            get_endpoint(name)
+                .and_then(|referenced| endpoint_tree_full_replay_sink(&referenced, visited_refs))
+        }
+        EndpointType::Fanout(endpoints) => endpoints
+            .iter()
+            .find_map(|endpoint| endpoint_tree_full_replay_sink(endpoint, visited_refs)),
+        EndpointType::Switch(config) => config
+            .cases
+            .values()
+            .chain(config.when.iter().map(|case| &case.to))
+            .chain(config.default.iter().map(Box::as_ref))
+            .find_map(|endpoint| endpoint_tree_full_replay_sink(endpoint, visited_refs)),
+        EndpointType::Request(config) => endpoint_tree_full_replay_sink(&config.to, visited_refs)
+            .or_else(|| endpoint_tree_full_replay_sink(&config.forward_to, visited_refs)),
+        _ => None,
+    }
+}
+
 /// How many messages a runner may process before it must cooperatively yield.
 ///
 /// The route loops drive `async-channel` recv/send, which complete synchronously
@@ -1078,6 +1109,60 @@ pub(crate) fn source_is_at_most_once(endpoint_type: &EndpointType) -> bool {
     }
 }
 
+/// Whether every run of this input reads the full data set from the start. `false` unless the
+/// configuration shows it: no saved position, nothing consumed, no dedup across runs.
+fn source_replays_from_start(endpoint: &Endpoint, depth: usize) -> bool {
+    const MAX_DEPTH: usize = 16;
+    if depth > MAX_DEPTH
+        || endpoint
+            .middlewares
+            .iter()
+            .any(|middleware| matches!(middleware, Middleware::Deduplication(_)))
+    {
+        return false;
+    }
+    match &endpoint.endpoint_type {
+        EndpointType::File(config) => matches!(
+            config.mode,
+            None | Some(crate::models::FileConsumerMode::Consume { delete: false })
+        ),
+        EndpointType::Static(_) => true,
+        EndpointType::ObjectStore(config) => {
+            config.checkpoint_store.is_none() && config.cursor_id.is_none()
+        }
+        EndpointType::HttpBulk(config) => config.read.as_ref().is_some_and(|read| {
+            read.stream.is_none() && read.cursor_id.is_none() && read.checkpoint_store.is_none()
+        }),
+        EndpointType::Sqlx(config) => {
+            config.cursor_column.is_some()
+                && config.cursor_id.is_none()
+                && config.checkpoint_store.is_none()
+                && config.publication.is_none()
+                && !config.delete_after_read
+        }
+        EndpointType::ClickHouse(config) => {
+            config.cursor_column.is_some()
+                && config.cursor_id.is_none()
+                && config.checkpoint_store.is_none()
+        }
+        EndpointType::MongoDb(config) => {
+            config.resolved_consume() == crate::models::MongoConsume::Snapshot
+        }
+        EndpointType::Sequence(config) => {
+            config.cursor_id.is_none()
+                && config
+                    .endpoints
+                    .iter()
+                    .all(|endpoint| source_replays_from_start(endpoint, depth + 1))
+        }
+        EndpointType::Ref(name) => get_endpoint(name)
+            .is_some_and(|referenced| source_replays_from_start(&referenced, depth + 1)),
+        EndpointType::Custom { name, config } => crate::extensions::get_endpoint_factory(name)
+            .is_some_and(|factory| factory.replays_from_start(config)),
+        _ => false,
+    }
+}
+
 /// The `mqb.src.*` family a positioned input stamps; see [`supports_source_metadata`].
 fn source_position_prefix(endpoint_type: &EndpointType) -> Option<&'static str> {
     match endpoint_type {
@@ -1484,6 +1569,22 @@ impl Route {
                     "Route '{name}' requires {required} delivery, but its configuration supports \
                      only {actual}. Make the sink write idempotent (Mongo `id_field`, SQL `ON \
                      CONFLICT … DO NOTHING`, file/object_store `name_by: source_position`), \
+                     see docs/DELIVERY.md."
+                ));
+            }
+        }
+        if let Some(sink) = endpoint_tree_full_replay_sink(&self.output, &mut HashSet::new()) {
+            if !source_replays_from_start(&self.input, 0) {
+                let input = match self.resolved_input().as_deref().map(|i| &i.endpoint_type) {
+                    Some(EndpointType::Custom { name, .. }) => name.clone(),
+                    Some(endpoint_type) => endpoint_type.name().to_string(),
+                    None => self.input.endpoint_type.name().to_string(),
+                };
+                return Err(anyhow::anyhow!(
+                    "Route '{name}': the '{sink}' output replaces its target with the data of \
+                     each run, but the '{input}' input does not read the full data set on every \
+                     run: it resumes from a saved position, consumes what it reads, or \
+                     deduplicates across runs. Use an input that reads everything each time, \
                      see docs/DELIVERY.md."
                 ));
             }
@@ -2005,6 +2106,7 @@ impl Route {
                     self.options.batch_size,
                     read_semaphore.as_ref(),
                     &mut read_permit,
+                    flush_gate.as_ref(),
                 ) => {
                     let received_batch = match res {
                         Ok(batch) => {
@@ -2338,6 +2440,7 @@ impl Route {
                     self.options.batch_size,
                     read_semaphore.as_ref(),
                     &mut read_permit,
+                    flush_gate.as_ref(),
                 ) => {
                     let (messages, commit) = match res {
                         Ok(batch) => {
@@ -2767,17 +2870,21 @@ impl CommitRouter {
         err_tx: &Sender<anyhow::Error>,
     ) -> Option<FlushGate> {
         let interval = publisher.deferred_commit_interval()?;
-        let (capacity, sequencer) = match self {
+        let (capacity, sequencer, read_permits) = match self {
             CommitRouter::Ordered {
-                seq_tx, capacity, ..
-            } => (*capacity, Some(seq_tx.clone())),
-            CommitRouter::Unordered { capacity, .. } => (*capacity, None),
+                seq_tx,
+                capacity,
+                in_flight,
+                ..
+            } => (*capacity, Some(seq_tx.clone()), Some(Arc::clone(in_flight))),
+            CommitRouter::Unordered { capacity, .. } => (*capacity, None, None),
         };
         Some(FlushGate::spawn(
             Arc::clone(publisher),
             interval,
             capacity / 2,
             sequencer,
+            read_permits,
             err_tx.clone(),
         ))
     }
@@ -2862,9 +2969,19 @@ async fn receive_with_permit(
     batch_size: usize,
     semaphore: Option<&Arc<tokio::sync::Semaphore>>,
     permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
+    flush_gate: Option<&FlushGate>,
 ) -> Result<crate::traits::ReceivedBatch, ConsumerError> {
     if permit.is_none() {
-        *permit = acquire_commit_permit(semaphore).await;
+        if let Some(sem) = semaphore {
+            *permit = Arc::clone(sem).try_acquire_owned().ok();
+            if permit.is_none() {
+                // Out of room: what is held at the gate may be what the reader waits on.
+                if let Some(gate) = flush_gate {
+                    gate.nudge();
+                }
+                *permit = acquire_commit_permit(semaphore).await;
+            }
+        }
     }
     consumer.receive_batch(batch_size).await
 }
@@ -3330,6 +3447,72 @@ mod tests {
         assert_eq!(lossy.delivery_guarantee(), DeliveryGuarantee::AtMostOnce);
         let unknown = Route::new(memory(), custom("dg_not_registered", serde_json::json!({})));
         assert_eq!(unknown.delivery_guarantee(), DeliveryGuarantee::AtLeastOnce);
+    }
+
+    /// A sink that replaces its target each run only starts behind an input that reads everything.
+    #[test]
+    fn a_full_replay_sink_needs_an_input_that_reads_everything() {
+        #[derive(Debug)]
+        struct Overwrite;
+        impl crate::traits::CustomEndpointFactory for Overwrite {
+            fn requires_full_replay(&self, config: &serde_json::Value) -> bool {
+                config.get("overwrite").is_some()
+            }
+        }
+        #[derive(Debug)]
+        struct FullSource;
+        impl crate::traits::CustomEndpointFactory for FullSource {
+            fn replays_from_start(&self, _config: &serde_json::Value) -> bool {
+                true
+            }
+        }
+        let _ = crate::extensions::register_endpoint_factory("fr_overwrite", Arc::new(Overwrite));
+        let _ = crate::extensions::register_endpoint_factory("fr_full", Arc::new(FullSource));
+        let custom = |name: &str, config| {
+            Endpoint::new(EndpointType::Custom {
+                name: name.to_string(),
+                config,
+            })
+        };
+        let overwrite = || custom("fr_overwrite", serde_json::json!({"overwrite": true}));
+        let file = |mode| {
+            Endpoint::new(EndpointType::File(crate::models::FileConfig {
+                path: "/tmp/mqb-full-replay-input.jsonl".to_string(),
+                mode,
+                ..Default::default()
+            }))
+        };
+        let check = |input: Endpoint, output: Endpoint| Route::new(input, output).check("fr", None);
+
+        check(file(None), overwrite()).expect("a plain file read covers everything");
+        check(custom("fr_full", serde_json::json!({})), overwrite()).expect("declared full");
+        check(
+            Endpoint::new_memory("fr_in", 1),
+            custom("fr_overwrite", serde_json::json!({})),
+        )
+        .expect("an appending sink takes any input");
+
+        let resumed = file(Some(crate::models::FileConsumerMode::GroupSubscribe {
+            group_id: "g".to_string(),
+            read_from_tail: false,
+        }));
+        for (input, output) in [
+            (resumed, overwrite()),
+            (Endpoint::new_memory("fr_in", 1), overwrite()),
+            (
+                Endpoint::new_memory("fr_in", 1),
+                Endpoint::new(EndpointType::Fanout(vec![
+                    Endpoint::new_memory("fr_leg", 1),
+                    overwrite(),
+                ])),
+            ),
+        ] {
+            let err = check(input, output).unwrap_err().to_string();
+            assert!(
+                err.contains("'fr_overwrite' output replaces its target"),
+                "{err}"
+            );
+        }
     }
 
     #[test]

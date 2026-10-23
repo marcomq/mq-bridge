@@ -772,6 +772,19 @@ pub trait CustomEndpointFactory: Send + Sync + std::fmt::Debug {
     fn acknowledges(&self, _config: &serde_json::Value) -> bool {
         schema_flag(self.config_schema(), "x-mqb-acknowledges").unwrap_or(true)
     }
+
+    /// Whether a publisher built from `config` replaces its target with the data of each run,
+    /// as a staged table swapped in at the end does. A route into it then fails to start
+    /// unless its input reads the full data set on every run. Defaults to `false`.
+    fn requires_full_replay(&self, _config: &serde_json::Value) -> bool {
+        false
+    }
+
+    /// Whether a consumer built from `config` reads the full data set from the start on every
+    /// run: it saves no position and consumes nothing. Defaults to `false`.
+    fn replays_from_start(&self, _config: &serde_json::Value) -> bool {
+        false
+    }
 }
 
 pub(crate) fn schema_flag(schema: Option<serde_json::Value>, key: &str) -> Option<bool> {

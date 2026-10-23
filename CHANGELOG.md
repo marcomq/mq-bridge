@@ -6,6 +6,10 @@ All notable changes to `mq-bridge`. Newest first.
 
 ### Added
 
+- **Sinks that replace their target are checked at route start.** A custom sink declares
+  `requires_full_replay`, and the route then only starts behind an input that reads the full
+  data set each run (a custom source declares `replays_from_start`). Plugins answer through two
+  new ABI 1.4 `factory_delivery` bits. See docs/DELIVERY.md.
 - **Deferred commits.** A publisher whose acks only become durable with its next `flush`
   returns `Some(interval)` from `MessagePublisher::deferred_commit_interval`. The route then
   commits the source only after a successful flush, which it runs at least every

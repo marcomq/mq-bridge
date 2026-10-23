@@ -253,9 +253,15 @@ impl MessagePublisher for RequestForwardPublisher {
         self.request.requires_ordered_publish() || self.forward.requires_ordered_publish()
     }
 
-    /// The forward target is what the response is written to, so its interval decides.
+    /// Either leg may ack before its data is durable, so the shorter interval decides.
     fn deferred_commit_interval(&self) -> Option<std::time::Duration> {
-        self.forward.deferred_commit_interval()
+        [
+            self.request.deferred_commit_interval(),
+            self.forward.deferred_commit_interval(),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 
     async fn flush(&self) -> anyhow::Result<()> {

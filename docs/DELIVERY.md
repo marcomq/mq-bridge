@@ -184,6 +184,30 @@ one identity to every message missing the field, so it is dropped instead.
 | `nats` (JetStream) | `Nats-Msg-Id` from the message id; the server drops a repeat **within the stream's duplicate window** (2 minutes by default) — a replay after that lands again | `deduplicate: true` |
 | `amqp`, `mqtt`, `redis_streams`, `aws`, `ibm_mq`, `zeromq` | None — at-least-once | Deduplicate at the next consumer instead |
 
+## Sinks that replace their target
+
+Some custom sinks rewrite their whole target on every run instead of appending: a snapshot,
+an overwrite. Behind an input that resumes from a saved position, that run holds only the new
+rows, and the rest of the target is gone. Such a sink declares it
+(`requires_full_replay`), and the route refuses to start unless its input reads the full
+data set on every run:
+
+| Input | Reads everything each run when |
+|---|---|
+| `file` | default mode, or `consume` without `delete` |
+| `static` | always |
+| `object_store` | no `checkpoint_store` and no `cursor_id` |
+| `http_bulk` | a `read` without `stream`, `cursor_id` or `checkpoint_store` |
+| `sqlx`, `clickhouse` | a `cursor_column` without `cursor_id` or `checkpoint_store` (`sqlx`: no `publication`, no `delete_after_read`) |
+| `mongodb` | `consume: snapshot` |
+| `sequence` | no `cursor_id`, and every listed input qualifies |
+| `ref` | the referenced endpoint qualifies |
+| custom | the factory declares `replays_from_start` |
+
+Every other input fails the check, and so does any input carrying the `deduplication`
+middleware, which drops what an earlier run already sent. The sink is found anywhere in the
+output, including inside `fanout`, `switch`, `request` and `ref`.
+
 ## Picking a combination
 
 **Any source → a database sink.** The easy case. You do not need a replayable source position at

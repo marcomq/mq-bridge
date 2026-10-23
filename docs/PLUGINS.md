@@ -604,6 +604,13 @@ receive the endpoint's `config`. Since ABI 1.2 the host asks a loaded plugin the
 same way (`factory_delivery`); a 1.0/1.1 plugin is judged by its schema alone. Claim idempotency
 only for a write keyed on something replay-stable: the route trusts it.
 
+Since ABI 1.4 two more bits answer `requires_full_replay` and `replays_from_start`:
+`MQB_DELIVERY_REQUIRES_FULL_REPLAY` for a sink that replaces its target on each run, and
+`MQB_DELIVERY_REPLAYS_FROM_START` for a source that reads everything every run. A route with
+such a sink only starts behind such an input; see
+[Sinks that replace their target](DELIVERY.md#sinks-that-replace-their-target). An older
+plugin sets neither bit.
+
 ### Asking for a batch size
 
 `mqb copy` sends 1,024 messages per batch unless `--batch-size` says otherwise. A
@@ -1001,7 +1008,7 @@ Minor versions so far:
 | 1.1 | `publisher_requires_ordered_publish`, so a plugin sink can ask the route to keep its sends in source order; `publisher_send_batch_outcomes`, so a partly failed batch reports which messages failed; and `factory_config_schema`, so a plugin describes its configuration as a JSON Schema for a host to render and to map a URI onto. |
 | 1.2 | `publisher_send_batch_responses` and `responses_free`, so publish responses reach the route; `batch_commit_replies` with `MQB_DISPOSITION_REPLY`, so a plugin consumer receives the reply to send; `consumer_status` / `publisher_status`, so `status()` reports the plugin's own state; and `*_async` twins of receive, commit, send and flush that finish through an `MqbCompletion` callback instead of blocking a host thread; `plugin_init` hands the plugin an `MqbHostVTable`, through which its logs and metrics reach the host and it registers a crash handler; the optional `mq_bridge_plugin_v1_at` symbol exports several tables from one library; `factory_delivery` answers `idempotent_sink` / `acknowledges` per config. |
 | 1.3 | `publisher_disconnect`, which hands a publisher the route's outcome (`MQB_DISCONNECT_COMPLETED`, `_STOPPED`, `_FAILED`) before it is closed, so `disconnect_outcome()` works inside a loaded plugin. |
-| 1.4 | `publisher_deferred_commit_interval_ms`, with which a publisher asks the route to commit the source only after its next successful flush. |
+| 1.4 | `publisher_deferred_commit_interval_ms`, with which a publisher asks the route to commit the source only after its next successful flush; `factory_delivery` bits `MQB_DELIVERY_REQUIRES_FULL_REPLAY` and `MQB_DELIVERY_REPLAYS_FROM_START`, checked at route start. |
 
 Publish the supported ABI range in your package metadata, and test each packaged
 plugin against the oldest and newest mq-bridge you claim to support.

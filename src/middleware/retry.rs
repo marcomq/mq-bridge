@@ -1,5 +1,5 @@
 use crate::models::RetryMiddleware;
-use crate::traits::{BoxFuture, MessagePublisher, PublisherError, Sent, SentBatch};
+use crate::traits::{MessagePublisher, PublisherError, Sent, SentBatch};
 use crate::CanonicalMessage;
 use anyhow::anyhow;
 use async_trait::async_trait;

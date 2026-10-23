@@ -70,12 +70,12 @@ use crate::support::plugin_abi::{
     MqbBatchHandle, MqbBuffer, MqbCompletion, MqbConsumerHandle, MqbFactoryHandle, MqbFilterHandle,
     MqbMessage, MqbMiddlewareHandle, MqbPluginVTable, MqbPublisherHandle, MqbResponsesHandle,
     MqbSlice, MqbStatus, MQB_CAP_CONSUMER, MQB_CAP_MIDDLEWARE, MQB_CAP_PUBLISHER,
-    MQB_DELIVERY_ACKNOWLEDGES, MQB_DELIVERY_IDEMPOTENT_SINK, MQB_DISCONNECT_COMPLETED,
-    MQB_DISCONNECT_FAILED, MQB_DISPOSITION_NACK, MQB_DISPOSITION_REPLY, MQB_END_OF_STREAM,
-    MQB_ERR_CONNECTION, MQB_ERR_INVALID_CONFIG, MQB_ERR_PANIC, MQB_ERR_PERMANENT,
-    MQB_ERR_RETRYABLE, MQB_MIDDLEWARE_RECEIVE, MQB_OK, MQB_OUTCOME_OK, MQB_OUTCOME_PERMANENT,
-    MQB_OUTCOME_RETRYABLE, MQB_PLUGIN_ABI_MAJOR, MQB_PLUGIN_ABI_MINOR, MQB_SCHEMA_ENDPOINT,
-    MQB_SCHEMA_MIDDLEWARE,
+    MQB_DELIVERY_ACKNOWLEDGES, MQB_DELIVERY_IDEMPOTENT_SINK, MQB_DELIVERY_REPLAYS_FROM_START,
+    MQB_DELIVERY_REQUIRES_FULL_REPLAY, MQB_DISCONNECT_COMPLETED, MQB_DISCONNECT_FAILED,
+    MQB_DISPOSITION_NACK, MQB_DISPOSITION_REPLY, MQB_END_OF_STREAM, MQB_ERR_CONNECTION,
+    MQB_ERR_INVALID_CONFIG, MQB_ERR_PANIC, MQB_ERR_PERMANENT, MQB_ERR_RETRYABLE,
+    MQB_MIDDLEWARE_RECEIVE, MQB_OK, MQB_OUTCOME_OK, MQB_OUTCOME_PERMANENT, MQB_OUTCOME_RETRYABLE,
+    MQB_PLUGIN_ABI_MAJOR, MQB_PLUGIN_ABI_MINOR, MQB_SCHEMA_ENDPOINT, MQB_SCHEMA_MIDDLEWARE,
 };
 use crate::traits::{
     BatchCommitFunc, CustomEndpointFactory, DisconnectOutcome, EndpointStatus, MessageConsumer,
@@ -583,6 +583,12 @@ unsafe extern "C" fn factory_delivery(
         if state.factory.acknowledges(&config) {
             flags |= MQB_DELIVERY_ACKNOWLEDGES;
         }
+        if state.factory.requires_full_replay(&config) {
+            flags |= MQB_DELIVERY_REQUIRES_FULL_REPLAY;
+        }
+        if state.factory.replays_from_start(&config) {
+            flags |= MQB_DELIVERY_REPLAYS_FROM_START;
+        }
         unsafe { *out_flags = flags };
         MQB_OK
     })
@@ -979,9 +985,8 @@ unsafe extern "C" fn publisher_create(
                 hook.await.map_err(|error| (MQB_ERR_CONNECTION, error))?;
             }
             let requires_ordered_publish = publisher.requires_ordered_publish();
-            let deferred_commit_interval_ms = publisher
-                .deferred_commit_interval()
-                .map_or(0, |interval| interval_ms(interval));
+            let deferred_commit_interval_ms =
+                publisher.deferred_commit_interval().map_or(0, interval_ms);
             Ok::<_, (MqbStatus, anyhow::Error)>((
                 publisher,
                 requires_ordered_publish,
