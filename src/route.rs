@@ -1109,11 +1109,30 @@ pub(crate) fn source_is_at_most_once(endpoint_type: &EndpointType) -> bool {
     }
 }
 
+/// Whether `no_resume` reaches this input. A compiled-out endpoint is served by a registered
+/// factory, and the search presets build their reader without it, so both still resume.
+fn input_applies_no_resume(endpoint_type: &EndpointType) -> bool {
+    match endpoint_type {
+        EndpointType::ObjectStore(_) => cfg!(feature = "object-store"),
+        EndpointType::HttpBulk(_) => cfg!(feature = "http-bulk"),
+        EndpointType::ClickHouse(_) => cfg!(feature = "clickhouse"),
+        EndpointType::Sqlx(_) => cfg!(feature = "sqlx"),
+        EndpointType::MongoDb(_) => cfg!(feature = "mongodb"),
+        EndpointType::Ref(_) => true,
+        _ => false,
+    }
+}
+
 /// Whether every run of this input reads the full data set from the start. `false` unless the
 /// configuration shows it: no saved position, nothing consumed, no dedup across runs.
-/// `no_resume` ignores saved checkpoints, as the consumers then do.
+/// `no_resume` ignores saved checkpoints where the consumer applies it.
 fn source_replays_from_start(endpoint: &Endpoint, no_resume: bool, depth: usize) -> bool {
     const MAX_DEPTH: usize = 16;
+    let no_resume = no_resume && input_applies_no_resume(&endpoint.endpoint_type);
+    // A checkpoint opens only with both a cursor id and a store.
+    let unsaved = |cursor_id: &Option<String>, store: &Option<String>| {
+        no_resume || cursor_id.is_none() || store.is_none()
+    };
     if depth > MAX_DEPTH
         || endpoint
             .middlewares
@@ -1128,24 +1147,23 @@ fn source_replays_from_start(endpoint: &Endpoint, no_resume: bool, depth: usize)
             None | Some(crate::models::FileConsumerMode::Consume { delete: false })
         ),
         EndpointType::Static(_) => true,
-        EndpointType::ObjectStore(config) => {
-            no_resume || (config.checkpoint_store.is_none() && config.cursor_id.is_none())
-        }
+        EndpointType::ObjectStore(config) => unsaved(&config.cursor_id, &config.checkpoint_store),
         EndpointType::HttpBulk(config) => config.read.as_ref().is_some_and(|read| {
             read.stream.is_none()
                 && read.cursor.start.is_none()
-                && (no_resume || (read.cursor_id.is_none() && read.checkpoint_store.is_none()))
+                && unsaved(&read.cursor_id, &read.checkpoint_store)
         }),
+        EndpointType::Meilisearch(config) => unsaved(&config.cursor_id, &config.checkpoint_store),
+        EndpointType::Qdrant(config) => unsaved(&config.cursor_id, &config.checkpoint_store),
+        // Without `cursor_id` the cursor is only kept across reconnects of one run.
         EndpointType::Sqlx(config) => {
             config.cursor_column.is_some()
-                && config.cursor_id.is_none()
-                && config.checkpoint_store.is_none()
+                && (no_resume || config.cursor_id.is_none())
                 && config.publication.is_none()
                 && !config.delete_after_read
         }
         EndpointType::ClickHouse(config) => {
-            config.cursor_column.is_some()
-                && (no_resume || (config.cursor_id.is_none() && config.checkpoint_store.is_none()))
+            config.cursor_column.is_some() && unsaved(&config.cursor_id, &config.checkpoint_store)
         }
         EndpointType::MongoDb(config) => {
             config.resolved_consume() == crate::models::MongoConsume::Snapshot
@@ -1169,6 +1187,7 @@ fn source_replays_from_start(endpoint: &Endpoint, no_resume: bool, depth: usize)
 /// `sequence` children ignore `no_resume`, so they are checked without it.
 fn input_saves_position(endpoint: &Endpoint, no_resume: bool, depth: usize) -> bool {
     const MAX_DEPTH: usize = 16;
+    let no_resume = no_resume && input_applies_no_resume(&endpoint.endpoint_type);
     let saved = |cursor_id: &Option<String>, store: &Option<String>| {
         !no_resume && cursor_id.is_some() && store.is_some()
     };
@@ -3704,13 +3723,38 @@ mod tests {
             .unwrap()
         };
         let plain = bulk(serde_json::json!({"path": "/docs"}));
-        let saved = bulk(serde_json::json!({"path": "/docs", "cursor_id": "c"}));
+        let saved = bulk(serde_json::json!({
+            "path": "/docs", "cursor_id": "c", "checkpoint_store": "file:///tmp/mqb-c.json"
+        }));
+        let id_only = bulk(serde_json::json!({"path": "/docs", "cursor_id": "c"}));
         let started =
             bulk(serde_json::json!({"path": "/docs", "cursor": {"response": "/n", "start": 5}}));
         assert!(source_replays_from_start(&plain, false, 0));
         assert!(!source_replays_from_start(&saved, false, 0));
-        assert!(source_replays_from_start(&saved, true, 0));
+        assert!(
+            source_replays_from_start(&id_only, false, 0),
+            "no store, no checkpoint"
+        );
+        assert_eq!(
+            source_replays_from_start(&saved, true, 0),
+            cfg!(feature = "http-bulk"),
+            "a plugin-served input ignores no_resume"
+        );
         assert!(!source_replays_from_start(&started, true, 0));
+        let meili: Endpoint = serde_json::from_value(serde_json::json!({"meilisearch": {
+            "url": "meilisearch://localhost:7700", "index": "docs"
+        }}))
+        .unwrap();
+        assert!(source_replays_from_start(&meili, false, 0));
+        let sqlx: Endpoint = serde_json::from_value(serde_json::json!({"sqlx": {
+            "url": "sqlite::memory:", "table": "t", "cursor_column": "id", "cursor_id": "c"
+        }}))
+        .unwrap();
+        assert!(!source_replays_from_start(&sqlx, false, 0));
+        assert_eq!(
+            source_replays_from_start(&sqlx, true, 0),
+            cfg!(feature = "sqlx")
+        );
     }
 
     #[test]
@@ -3773,9 +3817,10 @@ mod tests {
                 "a device cannot be synced"
             );
         }
-        assert!(
+        assert_eq!(
             sync(&cursor, &file("off"), true).is_none(),
-            "no_resume saves nothing"
+            cfg!(feature = "sqlx"),
+            "no_resume saves nothing where the input applies it"
         );
         assert!(sync(&Endpoint::new_memory("synced_in", 1), &file("off"), false).is_none());
         let temporary = endpoint(serde_json::json!({"postgres_cdc": {
