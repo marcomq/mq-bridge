@@ -1433,9 +1433,9 @@ impl FilePublisher {
                 } else {
                     parent
                 };
-                // Best effort: Windows cannot open a directory handle this way.
+                // Opening is best effort: Windows cannot open a directory handle this way.
                 if let Ok(directory) = File::open(parent).await {
-                    let _ = directory.sync_all().await;
+                    directory.sync_all().await?;
                 }
             }
         }

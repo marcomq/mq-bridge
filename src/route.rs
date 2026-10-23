@@ -1111,6 +1111,7 @@ pub(crate) fn source_is_at_most_once(endpoint_type: &EndpointType) -> bool {
 
 /// Whether `no_resume` reaches this input. A compiled-out endpoint is served by a registered
 /// factory, and the search presets build their reader without it, so both still resume.
+#[allow(clippy::match_like_matches_macro)] // Every `cfg!` is `true` in a full build.
 fn input_applies_no_resume(endpoint_type: &EndpointType) -> bool {
     match endpoint_type {
         EndpointType::ObjectStore(_) => cfg!(feature = "object-store"),
