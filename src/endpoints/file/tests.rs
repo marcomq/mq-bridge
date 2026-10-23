@@ -4419,14 +4419,15 @@ async fn test_file_queue_holds_back_a_record_still_being_written() {
         let mut source = FileConsumer::new(&config).await.unwrap();
         let batch = source.receive_batch(8).await.unwrap();
         assert_eq!(batch.messages.len(), 1, "{mode:?}");
-        (batch.commit)(vec![crate::traits::MessageDisposition::Ack])
-            .await
-            .unwrap();
+        // Append before the ack: its file rewrite is slow on Windows and would outlast the hold.
         std::fs::OpenOptions::new()
             .append(true)
             .open(&path)
             .unwrap()
             .write_all(b"2}\n{\"c\":3}")
+            .unwrap();
+        (batch.commit)(vec![crate::traits::MessageDisposition::Ack])
+            .await
             .unwrap();
 
         let mut rest = Vec::new();

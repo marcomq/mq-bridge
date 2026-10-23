@@ -1111,7 +1111,8 @@ pub(crate) fn source_is_at_most_once(endpoint_type: &EndpointType) -> bool {
 
 /// Whether every run of this input reads the full data set from the start. `false` unless the
 /// configuration shows it: no saved position, nothing consumed, no dedup across runs.
-fn source_replays_from_start(endpoint: &Endpoint, depth: usize) -> bool {
+/// `no_resume` ignores saved checkpoints, as the consumers then do.
+fn source_replays_from_start(endpoint: &Endpoint, no_resume: bool, depth: usize) -> bool {
     const MAX_DEPTH: usize = 16;
     if depth > MAX_DEPTH
         || endpoint
@@ -1128,10 +1129,12 @@ fn source_replays_from_start(endpoint: &Endpoint, depth: usize) -> bool {
         ),
         EndpointType::Static(_) => true,
         EndpointType::ObjectStore(config) => {
-            config.checkpoint_store.is_none() && config.cursor_id.is_none()
+            no_resume || (config.checkpoint_store.is_none() && config.cursor_id.is_none())
         }
         EndpointType::HttpBulk(config) => config.read.as_ref().is_some_and(|read| {
-            read.stream.is_none() && read.cursor_id.is_none() && read.checkpoint_store.is_none()
+            read.stream.is_none()
+                && read.cursor.start.is_none()
+                && (no_resume || (read.cursor_id.is_none() && read.checkpoint_store.is_none()))
         }),
         EndpointType::Sqlx(config) => {
             config.cursor_column.is_some()
@@ -1142,8 +1145,7 @@ fn source_replays_from_start(endpoint: &Endpoint, depth: usize) -> bool {
         }
         EndpointType::ClickHouse(config) => {
             config.cursor_column.is_some()
-                && config.cursor_id.is_none()
-                && config.checkpoint_store.is_none()
+                && (no_resume || (config.cursor_id.is_none() && config.checkpoint_store.is_none()))
         }
         EndpointType::MongoDb(config) => {
             config.resolved_consume() == crate::models::MongoConsume::Snapshot
@@ -1153,10 +1155,10 @@ fn source_replays_from_start(endpoint: &Endpoint, depth: usize) -> bool {
                 && config
                     .endpoints
                     .iter()
-                    .all(|endpoint| source_replays_from_start(endpoint, depth + 1))
+                    .all(|endpoint| source_replays_from_start(endpoint, no_resume, depth + 1))
         }
         EndpointType::Ref(name) => get_endpoint(name)
-            .is_some_and(|referenced| source_replays_from_start(&referenced, depth + 1)),
+            .is_some_and(|referenced| source_replays_from_start(&referenced, no_resume, depth + 1)),
         EndpointType::Custom { name, config } => crate::extensions::get_endpoint_factory(name)
             .is_some_and(|factory| factory.replays_from_start(config)),
         _ => false,
@@ -1509,6 +1511,15 @@ impl Route {
         name: &str,
         allowed_endpoints: Option<&[&str]>,
     ) -> anyhow::Result<Vec<String>> {
+        self.check_with_resume(name, allowed_endpoints, false)
+    }
+
+    fn check_with_resume(
+        &self,
+        name: &str,
+        allowed_endpoints: Option<&[&str]>,
+        no_resume: bool,
+    ) -> anyhow::Result<Vec<String>> {
         self.options.validate()?;
         if !self.options.allow_fault_injection {
             check_fault_middleware_allowed(
@@ -1574,7 +1585,7 @@ impl Route {
             }
         }
         if let Some(sink) = endpoint_tree_full_replay_sink(&self.output, &mut HashSet::new()) {
-            if !source_replays_from_start(&self.input, 0) {
+            if !source_replays_from_start(&self.input, no_resume, 0) {
                 let input = match self.resolved_input().as_deref().map(|i| &i.endpoint_type) {
                     Some(EndpointType::Custom { name, .. }) => name.clone(),
                     Some(endpoint_type) => endpoint_type.name().to_string(),
@@ -1640,7 +1651,7 @@ impl Route {
         let shown = Arc::new(route_display_name(name_str));
         // The checks take the key; only their text shows the display name.
         let warnings = self
-            .check(name_str, None)
+            .check_with_resume(name_str, None, no_resume)
             .map_err(|e| show_route_error(e, name_str, &shown))?;
         for warning in warnings {
             let warning = show_route_name(warning, name_str, &shown);
@@ -3513,6 +3524,24 @@ mod tests {
                 "{err}"
             );
         }
+    }
+
+    #[test]
+    fn a_saved_or_configured_position_is_not_a_full_replay_unless_no_resume() {
+        let bulk = |read: serde_json::Value| -> Endpoint {
+            serde_json::from_value(serde_json::json!({
+                "http_bulk": {"url": "http://localhost:1", "read": read}
+            }))
+            .unwrap()
+        };
+        let plain = bulk(serde_json::json!({"path": "/docs"}));
+        let saved = bulk(serde_json::json!({"path": "/docs", "cursor_id": "c"}));
+        let started =
+            bulk(serde_json::json!({"path": "/docs", "cursor": {"response": "/n", "start": 5}}));
+        assert!(source_replays_from_start(&plain, false, 0));
+        assert!(!source_replays_from_start(&saved, false, 0));
+        assert!(source_replays_from_start(&saved, true, 0));
+        assert!(!source_replays_from_start(&started, true, 0));
     }
 
     #[test]
