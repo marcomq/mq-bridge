@@ -105,6 +105,7 @@ MongoDbFormat = str
 MqttProtocol = str
 NameBy = str
 NatsDeliverPolicy = str
+ObjectStoreFsync = str
 PackFormat = str
 PostgresConsume = str
 SpoolClaim = str
@@ -204,6 +205,7 @@ __all__ = [
     "NatsConfig",
     "NatsDeliverPolicy",
     "ObjectStoreConfig",
+    "ObjectStoreFsync",
     "OpenAiChatConfig",
     "OpenAiEmbeddingsConfig",
     "OtelMiddleware",

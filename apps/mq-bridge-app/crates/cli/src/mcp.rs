@@ -866,6 +866,9 @@ impl BridgeMcp {
         &self,
         Parameters(args): Parameters<DescribeArgs>,
     ) -> Result<CallToolResult, McpError> {
+        tokio::task::spawn_blocking(mq_bridge_app::plugins::discover_installed_plugins)
+            .await
+            .map_err(|error| internal(error.to_string()))?;
         let catalog = mq_bridge_app::endpoint_catalog::catalog()
             .map_err(|error| internal(error.to_string()))?;
         let catalog = match args.name.as_deref().map(str::trim) {
@@ -1625,9 +1628,6 @@ pub async fn run(
     agent_bus: bool,
     workspace_path: String,
 ) -> anyhow::Result<()> {
-    // Off the request path, so the first route using a large plugin doesn't
-    // spend its startup timeout loading the library.
-    tokio::task::spawn_blocking(mq_bridge_app::mq_bridge::plugin::discover_all_endpoint_plugins);
     let server = BridgeMcp::new().with_agent_bus(agent_bus);
     // Held for the lifetime of the transport; dropping it removes the lease,
     // including on the `bail!` below.

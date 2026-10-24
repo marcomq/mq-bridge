@@ -2,6 +2,58 @@
 
 All notable changes to `mq-bridge`. Newest first.
 
+## 1.2.0
+
+### Added
+
+- **`fsync` and `fsync_interval_ms` on the local `object_store` sink.** `periodic` (the default)
+  syncs staged objects in groups every `fsync_interval_ms` (default 1000); objects become
+  visible and the source is committed after that sync, so a shorter interval trades
+  throughput for latency. `batch` syncs each object before its ack (the 1.1.0 behaviour),
+  `off` never syncs (the 1.0.3 behaviour). Remote stores ignore both.
+
+### Changed
+
+- **Plugins load only when a route names them.** A route loads the plugins it names before its
+  startup checks, using the library named for the endpoint first and a full scan only if that
+  misses. The app no longer loads every installed plugin at start; only `--schema`, the UI
+  schema, `list`, `describe` and unknown URI schemes scan.
+- **`concurrency: 1` reads the next batch while the current one is sent.** Sends stay one at a
+  time in source order. On a clean stop the batch read ahead is sent; after an error it is
+  returned to the source.
+
+### Fixed
+
+- **Local `object_store` sink slowed down by per-object fsync (1.1.0).** 1.1.0 synced every
+  object and its directory on a `file://` / `local-store://` sink, one by one. The sink now
+  writes objects under a hidden staging name and syncs them in groups about once a second
+  (`fsync: periodic`, the new default), committing the source only after that sync, so
+  durability is unchanged. Write-time names behind an input that reads everything from the
+  start on each run skip syncing. See docs/DELIVERY.md.
+- **`file` part files (`name_by: source_position`) are synced in groups.** Each part used to
+  cost two syncs of its own. Parts now wait under a hidden `.stage-<id>` name and are synced
+  together every `fsync_interval_ms` (default 1000) before the source is committed;
+  `fsync: batch` keeps the per-part sync.
+- **Secrets in a `switch`'s `when` cases were left in the config.** They are now extracted
+  like those in `cases` and `default`, as `…__SWITCH__WHEN__<n>__TO__…`, and checked for
+  key collisions like them.
+- **Kafka `delayed_ack` failed fast inputs with `QueueFull`.** A send that found the local
+  producer queue full failed the batch, and the retries wrote duplicates. It now waits for
+  room, as an awaited send does, and fails as retryable if the queue stays full for 330 s.
+- **A `sled` queue stalled after about a thousand writes.** While the consumer was busy, its
+  change watcher stopped draining sled's event buffer; once that filled, every write to the
+  tree blocked, including the consumer's own (`delete_after_read` drains hung) and in-process
+  publishers.
+- **`file` `subscribe` with `delete: true` lost and corrupted lines.** Acked lines were removed
+  in the background, so a drain exited with many of them still in the file; they are now
+  removed before the commit returns. Past 100,000 buffered lines the store dropped unread
+  lines and deleted them from the file; it now keeps them and reads at most 10,000 lines
+  ahead. Lines appended while others were unacked were partly skipped or read from mid-line.
+- **A plugin scan no longer reopens libraries it already loaded.** A library whose file name
+  differs from its endpoint names was parsed, hashed and logged again on every scan. A
+  library named for an endpoint that is already registered is now loaded anyway, so its
+  other names (such as `connect_mapping`) register; the taken name is skipped.
+
 ## 1.1.0
 
 ### Added

@@ -2334,7 +2334,7 @@
           "$ref": "#/$defs/FileFsync"
         },
         "fsync_interval_ms": {
-          "description": "(Sink only) Interval for `fsync: periodic` in milliseconds. Defaults to 1000.",
+          "description": "(Sink only) Interval for `fsync: periodic` and grouped part-file syncs, in milliseconds. Defaults to 1000.",
           "type": [
             "integer",
             "null"
@@ -2850,6 +2850,26 @@
             }
           ],
           "default": null
+        },
+        "fsync": {
+          "description": "(Sink only, local store) `periodic` (default) syncs objects in groups about every second, `batch` each object, `off` never.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ObjectStoreFsync"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "fsync_interval_ms": {
+          "description": "(Sink only, local store) How often `fsync: periodic` syncs and publishes staged objects, in milliseconds. Defaults to 1000.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
         }
       },
       "additionalProperties": false,
@@ -2884,6 +2904,26 @@
           "description": "`year=YYYY/month=MM/day=DD/`, read as partition columns by Spark, DuckDB, DataFusion, Athena.",
           "type": "string",
           "const": "hive"
+        }
+      ]
+    },
+    "ObjectStoreFsync": {
+      "description": "When the local object-store sink forces a written object to disk.",
+      "oneOf": [
+        {
+          "description": "Never; the OS flushes. An acknowledged object can be lost or left empty on power loss.",
+          "type": "string",
+          "const": "off"
+        },
+        {
+          "description": "Each object before its batch is acknowledged.",
+          "type": "string",
+          "const": "batch"
+        },
+        {
+          "description": "Objects are staged, then synced and moved into place together about every second;\nthe source is committed after that.",
+          "type": "string",
+          "const": "periodic"
         }
       ]
     },

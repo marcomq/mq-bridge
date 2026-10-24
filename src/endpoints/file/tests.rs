@@ -442,6 +442,7 @@ async fn idempotent_file_sink_replays_only_uncovered_kafka_offsets_after_restart
         .send_batch(vec![kafka_message(0), kafka_message(1), kafka_message(2)])
         .await
         .unwrap();
+    restarted.flush().await.unwrap();
 
     let mut names = std::fs::read_dir(&output)
         .unwrap()
@@ -575,6 +576,7 @@ async fn file_source_metadata_numbers_records_and_feeds_an_idempotent_sink() {
     };
     let publisher = FilePublisher::new(&sink).await.unwrap();
     publisher.send_batch(batch.messages).await.unwrap();
+    publisher.flush().await.unwrap();
 
     let names = std::fs::read_dir(&output)
         .unwrap()
@@ -728,6 +730,7 @@ async fn idempotent_file_sink_replays_postgres_cdc_changes_in_one_commit() {
         ])
         .await
         .unwrap();
+    publisher.flush().await.unwrap();
 
     let mut names = std::fs::read_dir(&output)
         .unwrap()
@@ -981,6 +984,71 @@ async fn test_file_consumer_consume_explicit_delete() {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
     assert_eq!(content, "");
+}
+
+#[tokio::test]
+async fn subscribe_delete_removes_acked_lines_before_the_commit_returns() {
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("subscribe_delete_sync.log");
+    tokio::fs::write(&file_path, b"a\nb\nc\n").await.unwrap();
+    let mut consumer = FileConsumer::new(&FileConfig {
+        path: file_path.to_str().unwrap().to_string(),
+        mode: Some(FileConsumerMode::Subscribe { delete: true }),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+
+    let mut commits = Vec::new();
+    let mut received = 0;
+    while received < 3 {
+        let batch = consumer.receive_batch(10).await.unwrap();
+        received += batch.messages.len();
+        commits.push((batch.commit, batch.messages.len()));
+    }
+    for (commit, len) in commits {
+        commit(vec![crate::traits::MessageDisposition::Ack; len])
+            .await
+            .unwrap();
+    }
+    // A blocking read, so a deletion still queued on the runtime cannot run first.
+    assert_eq!(std::fs::read_to_string(&file_path).unwrap(), "");
+}
+
+#[tokio::test]
+async fn subscribe_delete_reads_lines_appended_while_others_are_unacked() {
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("subscribe_delete_append.log");
+    tokio::fs::write(&file_path, b"a\nb\n").await.unwrap();
+    let mut consumer = FileConsumer::new(&FileConfig {
+        path: file_path.to_str().unwrap().to_string(),
+        mode: Some(FileConsumerMode::Subscribe { delete: true }),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+
+    let mut payloads = Vec::new();
+    while payloads.len() < 2 {
+        let batch = consumer.receive_batch(10).await.unwrap();
+        payloads.extend(batch.messages.into_iter().map(|m| m.payload));
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&file_path)
+        .unwrap();
+    std::io::Write::write_all(&mut file, b"c\nd\n").unwrap();
+    while payloads.len() < 4 {
+        let batch = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            consumer.receive_batch(10),
+        )
+        .await
+        .expect("appended lines arrive")
+        .unwrap();
+        payloads.extend(batch.messages.into_iter().map(|m| m.payload));
+    }
+    assert_eq!(payloads, ["a", "b", "c", "d"].map(bytes::Bytes::from));
 }
 
 #[tokio::test]
@@ -2585,7 +2653,6 @@ async fn test_file_sink_fsync_modes() {
                 sink.deferred_commit_interval(),
                 Some(std::time::Duration::from_millis(20))
             );
-            assert!(state.dirty.load(std::sync::atomic::Ordering::Acquire));
             tokio::time::timeout(std::time::Duration::from_secs(5), async {
                 while state.dirty.load(std::sync::atomic::Ordering::Acquire) {
                     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
@@ -2602,6 +2669,21 @@ async fn test_file_sink_fsync_modes() {
             .unwrap()
             .starts_with("one\n"));
     }
+
+    let slow: FileConfig = serde_json::from_value(json!({
+        "path": dir.path().join("slow.jsonl").to_str().unwrap(),
+        "fsync": "periodic",
+        "fsync_interval_ms": 60_000,
+    }))
+    .unwrap();
+    let sink = FilePublisher::new(&slow).await.unwrap();
+    sink.send_batch(vec![msg!("one")]).await.unwrap();
+    let super::FsyncPolicy::Periodic(state) = &sink.fsync else {
+        panic!("expected periodic fsync");
+    };
+    assert!(state.dirty.load(std::sync::atomic::Ordering::Acquire));
+    sink.flush().await.unwrap();
+    assert!(!state.dirty.load(std::sync::atomic::Ordering::Acquire));
 
     let zero: FileConfig = serde_json::from_value(json!({
         "path": dir.path().join("zero.jsonl").to_str().unwrap(),
@@ -4567,5 +4649,51 @@ async fn a_byte_order_mark_is_dropped_from_the_first_line_only() {
             .map(|m| String::from_utf8_lossy(&m.payload).into_owned())
             .collect::<Vec<_>>();
         assert_eq!(lines, ["{\"id\":1}", "{\"id\":2}"], "{mode:?}");
+    }
+}
+
+/// Parts are synced as a group on flush, holding the commit; `fsync: batch` syncs each part.
+#[tokio::test]
+async fn part_files_appear_after_the_grouped_sync() {
+    let dir = tempdir().unwrap();
+    for (fsync, grouped) in [
+        (crate::models::FileFsync::Off, true),
+        (crate::models::FileFsync::Batch, false),
+    ] {
+        let output = dir.path().join(format!("{fsync:?}"));
+        let config = FileConfig {
+            path: output.to_string_lossy().into_owned(),
+            name_by: NameBy::SourcePosition,
+            fsync,
+            ..Default::default()
+        };
+        let publisher = FilePublisher::new(&config).await.unwrap();
+        let mut message = msg!(json!({ "n": 1 }));
+        for (key, value) in [("topic", "t"), ("partition", "0"), ("offset", "7")] {
+            message
+                .metadata
+                .insert(format!("mqb.src.kafka_{key}"), value.into());
+        }
+        publisher.send_batch(vec![message]).await.unwrap();
+        let parts = || {
+            std::fs::read_dir(&output)
+                .unwrap()
+                .filter(|e| {
+                    !e.as_ref()
+                        .unwrap()
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with('.')
+                })
+                .count()
+        };
+        assert_eq!(parts(), usize::from(!grouped), "{fsync:?}");
+        assert_eq!(
+            publisher.deferred_commit_interval().is_some(),
+            grouped,
+            "{fsync:?}"
+        );
+        publisher.flush().await.unwrap();
+        assert_eq!(parts(), 1, "{fsync:?}");
     }
 }

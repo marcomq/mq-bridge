@@ -856,8 +856,6 @@ impl UiApp {
                 .into_iter()
                 .map(|plugin| plugin.path),
         );
-        // After the listed ones, so an explicit path wins; the UI schema lists these too.
-        mq_bridge::plugin::discover_all_endpoint_plugins();
         initial_config
             .plugins
             .extend(startup_plugins.iter().cloned());
@@ -972,6 +970,11 @@ impl UiApp {
         let result = match (method.as_str(), path) {
             ("GET", "/health") => Ok(Handled::Publish(msg!("OK"))),
             ("GET", "/schema.json") => {
+                if let Err(error) =
+                    tokio::task::spawn_blocking(crate::plugins::discover_installed_plugins).await
+                {
+                    tracing::warn!(%error, "plugin scan for the UI schema failed");
+                }
                 let schema = crate::config::app_config_schema();
                 self.ok_json(&schema, false)
             }
