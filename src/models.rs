@@ -1834,6 +1834,9 @@ pub struct ObjectStoreConfig {
     /// (Sink only, local store) `periodic` (default) syncs objects in groups about every second, `batch` each object, `off` never.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fsync: Option<ObjectStoreFsync>,
+    /// (Sink only, local store) How often `fsync: periodic` syncs and publishes staged objects, in milliseconds. Defaults to 1000.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fsync_interval_ms: Option<u64>,
 }
 
 /// When the local object-store sink forces a written object to disk.

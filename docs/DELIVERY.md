@@ -675,10 +675,12 @@ renamed into place and their directory synced, before the route commits the sour
 
 **Durability of the local `object_store` sink.** With a `file://` (or `local-store://`) URL
 the default, `fsync: periodic`, writes each object as `<name>#<n>` in the prefix directory,
-which listings and readers skip. About once a second, and on flush or shutdown, the sink syncs
-all of those files at once, renames them into place and syncs their directories. The route
-commits the source only after that, so a power loss loses no acknowledged object, and objects
-appear up to a second after they are sent. On start, the sink removes `#<n>` files a crashed
+which listings and readers skip. Every `fsync_interval_ms` (default 1000), and on flush or
+shutdown, the sink syncs all of those files at once, renames them into place and syncs their
+directories. The route commits the source only after that, so a power loss loses no
+acknowledged object, and objects appear up to one interval after they are sent. That delay
+is the price of the throughput: a sparse stream that needs each object visible at once is
+better served by a shorter interval or by `fsync: batch`. On start, the sink removes `#<n>` files a crashed
 run left for its own object names. One exception applies when `fsync` is unset: a sink naming
 objects by `write_time` behind an input that reads everything from the start on each run (such
 as a plain `file` source, `static`, an object-store or SQL cursor source without a saved

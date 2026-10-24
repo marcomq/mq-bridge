@@ -2334,7 +2334,7 @@
           "$ref": "#/$defs/FileFsync"
         },
         "fsync_interval_ms": {
-          "description": "(Sink only) Interval for `fsync: periodic` in milliseconds. Defaults to 1000.",
+          "description": "(Sink only) Interval for `fsync: periodic` and grouped part-file syncs, in milliseconds. Defaults to 1000.",
           "type": [
             "integer",
             "null"
@@ -2861,6 +2861,15 @@
               "type": "null"
             }
           ]
+        },
+        "fsync_interval_ms": {
+          "description": "(Sink only, local store) How often `fsync: periodic` syncs and publishes staged objects, in milliseconds. Defaults to 1000.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
         }
       },
       "additionalProperties": false,

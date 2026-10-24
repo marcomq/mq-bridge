@@ -447,6 +447,7 @@ export interface ObjectStoreConfig {
   compression?: Compression;
   encryption?: EncryptionConfig | null;
   fsync?: ObjectStoreFsync | null;
+  fsync_interval_ms?: number | null;
 }
 
 export type DecodeErrorPolicy = "skip" | "fail";

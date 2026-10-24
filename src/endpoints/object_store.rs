@@ -407,11 +407,10 @@ impl ObjectStorePublisher {
             if removed > 0 {
                 info!(dir = %root.display(), removed, "Removed objects a previous run staged but never finalized");
             }
-            Some(LocalStaging::new(
-                root,
-                StagedName::Suffixed,
-                FINALIZE_INTERVAL,
-            ))
+            let interval = config
+                .fsync_interval_ms
+                .map_or(FINALIZE_INTERVAL, |ms| Duration::from_millis(ms.max(1)));
+            Some(LocalStaging::new(root, StagedName::Suffixed, interval))
         } else {
             None
         };
@@ -863,11 +862,11 @@ impl Drop for Unsettled {
     }
 }
 
-/// Consecutive decode failures on one object before it is quarantined (skipped) so a
-/// single poison object cannot block the source forever.
 /// How often staged local objects are finalized when nothing else flushes them.
 const FINALIZE_INTERVAL: Duration = Duration::from_millis(1000);
 
+/// Consecutive decode failures on one object before it is quarantined (skipped) so a
+/// single poison object cannot block the source forever.
 const MAX_OBJECT_DECODE_FAILURES: u32 = 5;
 
 /// Opens a consumer's external checkpoint. The source URL is already part of the store key.
@@ -2589,6 +2588,22 @@ mod tests {
         // Cursor advanced past the object; a further read is idle (empty).
         let drained = consumer.receive_batch(10).await.unwrap();
         assert!(drained.messages.is_empty());
+    }
+
+    #[tokio::test]
+    async fn local_sink_uses_the_configured_fsync_interval() {
+        let dir = tempfile::tempdir().unwrap();
+        let publisher = ObjectStorePublisher::new(&ObjectStoreConfig {
+            url: format!("file://{}", dir.path().display()),
+            fsync_interval_ms: Some(25),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            publisher.deferred_commit_interval(),
+            Some(Duration::from_millis(25))
+        );
     }
 
     #[tokio::test]
