@@ -149,7 +149,8 @@ fn spawn_finalizer(staging: Weak<LocalStaging>, interval: Duration) {
 fn finalize_all(root: &Path, batch: &[Staged]) -> io::Result<()> {
     let mut moved = Vec::with_capacity(batch.len());
     for entry in batch {
-        match File::open(&entry.staged) {
+        // Windows syncs only a handle opened for writing.
+        match std::fs::OpenOptions::new().write(true).open(&entry.staged) {
             Ok(file) => {
                 push_to_device(&file)?;
                 moved.push(entry);
@@ -183,12 +184,19 @@ fn finalize_all(root: &Path, batch: &[Staged]) -> io::Result<()> {
     flush_device(root)
 }
 
-/// Removes `<name>#<digits>` files in `root` whose `name` is one of this sink's own.
+/// Staged files younger than this may belong to a concurrent writer sharing the directory.
+#[cfg_attr(not(feature = "object-store"), allow(dead_code))]
+pub(crate) const STAGING_REAP_AGE: Duration = Duration::from_secs(60);
+
+/// Removes `<name>#<digits>` files in `root` older than `min_age` whose `name` is one of this
+/// sink's own.
 #[cfg_attr(not(feature = "object-store"), allow(dead_code))]
 pub(crate) fn remove_suffixed_leftovers(
     root: &Path,
+    min_age: Duration,
     is_ours: impl Fn(&str) -> bool,
 ) -> io::Result<usize> {
+    let now = std::time::SystemTime::now();
     let entries = match std::fs::read_dir(root) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
@@ -201,9 +209,20 @@ pub(crate) fn remove_suffixed_leftovers(
         let Some((name, suffix)) = file_name.to_str().and_then(|n| n.rsplit_once('#')) else {
             continue;
         };
-        if !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit()) && is_ours(name) {
-            std::fs::remove_file(entry.path())?;
-            removed += 1;
+        if suffix.is_empty() || !suffix.bytes().all(|b| b.is_ascii_digit()) || !is_ours(name) {
+            continue;
+        }
+        let age = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok());
+        if age.is_some_and(|age| age >= min_age) {
+            match std::fs::remove_file(entry.path()) {
+                Ok(()) => removed += 1,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
         }
     }
     Ok(removed)
@@ -327,8 +346,14 @@ mod tests {
         for name in ["ours.jsonl#1", "ours.jsonl#x", "theirs.csv#1", "ours.jsonl"] {
             std::fs::write(dir.path().join(name), b"").unwrap();
         }
+        let fresh = remove_suffixed_leftovers(dir.path(), STAGING_REAP_AGE, |name| {
+            name.ends_with(".jsonl")
+        })
+        .unwrap();
+        assert_eq!(fresh, 0, "a concurrent writer's file is kept");
         let removed =
-            remove_suffixed_leftovers(dir.path(), |name| name.ends_with(".jsonl")).unwrap();
+            remove_suffixed_leftovers(dir.path(), Duration::ZERO, |name| name.ends_with(".jsonl"))
+                .unwrap();
         assert_eq!(removed, 1);
         assert_eq!(
             names(dir.path()),

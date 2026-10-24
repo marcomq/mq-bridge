@@ -35,10 +35,11 @@ All notable changes to `mq-bridge`. Newest first.
   together every `fsync_interval_ms` (default 1000) before the source is committed;
   `fsync: batch` keeps the per-part sync.
 - **Secrets in a `switch`'s `when` cases were left in the config.** They are now extracted
-  like those in `cases` and `default`, as `…__SWITCH__WHEN__<n>__TO__…`.
+  like those in `cases` and `default`, as `…__SWITCH__WHEN__<n>__TO__…`, and checked for
+  key collisions like them.
 - **Kafka `delayed_ack` failed fast inputs with `QueueFull`.** A send that found the local
   producer queue full failed the batch, and the retries wrote duplicates. It now waits for
-  room, as an awaited send does.
+  room, as an awaited send does, and fails as retryable if the queue stays full for 330 s.
 - **A `sled` queue stalled after about a thousand writes.** While the consumer was busy, its
   change watcher stopped draining sled's event buffer; once that filled, every write to the
   tree blocked, including the consumer's own (`delete_after_read` drains hung) and in-process
@@ -49,7 +50,9 @@ All notable changes to `mq-bridge`. Newest first.
   lines and deleted them from the file; it now keeps them and reads at most 10,000 lines
   ahead. Lines appended while others were unacked were partly skipped or read from mid-line.
 - **A plugin scan no longer reopens libraries it already loaded.** A library whose file name
-  differs from its endpoint names was parsed, hashed and logged again on every scan.
+  differs from its endpoint names was parsed, hashed and logged again on every scan. A
+  library named for an endpoint that is already registered is now loaded anyway, so its
+  other names (such as `connect_mapping`) register; the taken name is skipped.
 
 ## 1.1.0
 

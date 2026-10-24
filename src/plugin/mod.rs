@@ -258,7 +258,16 @@ pub fn load_endpoint_plugin(path: impl AsRef<Path>) -> anyhow::Result<PluginInfo
 ///
 /// All or nothing: if one of them cannot be registered, none is.
 pub fn load_endpoint_plugins(path: impl AsRef<Path>) -> anyhow::Result<Vec<PluginInfo>> {
-    let path = path.as_ref();
+    load_plugins(path.as_ref(), false)
+}
+
+/// Like [`load_endpoint_plugins`], but a name another factory already holds is skipped
+/// instead of failing the library, so its other names still register.
+pub(crate) fn load_discovered_plugins(path: &Path) -> anyhow::Result<Vec<PluginInfo>> {
+    load_plugins(path, true)
+}
+
+fn load_plugins(path: &Path, skip_taken: bool) -> anyhow::Result<Vec<PluginInfo>> {
     let resolved = std::fs::canonicalize(path)
         .with_context(|| format!("plugin library not found: {}", path.display()))?;
 
@@ -270,11 +279,12 @@ pub fn load_endpoint_plugins(path: impl AsRef<Path>) -> anyhow::Result<Vec<Plugi
     }
 
     // Returning an error drops `plugins`, which frees their factories.
-    let plugins: Vec<Arc<LoadedPlugin>> =
+    let mut plugins: Vec<Arc<LoadedPlugin>> =
         open_plugins(&resolved)?.into_iter().map(Arc::new).collect();
     let mut endpoints = std::collections::HashSet::new();
     let mut middlewares = std::collections::HashSet::new();
-    for plugin in &plugins {
+    let mut skipped = std::collections::HashSet::new();
+    for (index, plugin) in plugins.iter().enumerate() {
         let info = &plugin.info;
         let endpoint = info.supports_consumer || info.supports_publisher;
         if !(endpoint || info.supports_middleware) {
@@ -291,7 +301,10 @@ pub fn load_endpoint_plugins(path: impl AsRef<Path>) -> anyhow::Result<Vec<Plugi
             && (get_endpoint_factory(&info.name).is_some() || !endpoints.insert(&info.name));
         let taken_middleware = info.supports_middleware
             && (get_middleware_factory(&info.name).is_some() || !middlewares.insert(&info.name));
-        if taken || taken_middleware {
+        if (taken || taken_middleware) && skip_taken {
+            tracing::debug!(name = %info.name, path = %resolved.display(), "skipping plugin name already registered");
+            skipped.insert(index);
+        } else if taken || taken_middleware {
             return Err(anyhow!(
                 "`{}` from {} is already registered by another factory; \
                  unload it or rename the plugin's endpoint",
@@ -301,6 +314,17 @@ pub fn load_endpoint_plugins(path: impl AsRef<Path>) -> anyhow::Result<Vec<Plugi
         }
     }
 
+    if !skipped.is_empty() {
+        // Unloading is not safe once the library ran, even if none of its names register.
+        if let Some(library) = plugins.first().and_then(|p| p._library.clone()) {
+            std::mem::forget(library);
+        }
+        plugins = plugins
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, plugin)| (!skipped.contains(&index)).then_some(plugin))
+            .collect();
+    }
     for (index, plugin) in plugins.iter().enumerate() {
         if let Err(error) = register_plugin(plugin) {
             for registered in &plugins[..index] {

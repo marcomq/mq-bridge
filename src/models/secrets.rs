@@ -113,6 +113,7 @@ impl Endpoint {
                 check_secret_key_names("switch case", cfg.cases.keys().map(String::as_str))?;
                 cfg.cases
                     .values()
+                    .chain(cfg.when.iter().map(|case| &case.to))
                     .chain(cfg.default.as_deref())
                     .try_for_each(Endpoint::check_secret_keys)
             }

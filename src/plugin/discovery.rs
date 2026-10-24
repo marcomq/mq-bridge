@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context};
 
-use super::{load_endpoint_plugins, PluginInfo};
+use super::{load_discovered_plugins, PluginInfo};
 
 /// Set to `0`, `false`, `off` or `no` to resolve `custom` endpoints only from
 /// factories the host registered or a config listed by path.
@@ -248,7 +248,10 @@ fn discover_plugin_in(
         // The file name is a convention the library itself never sees, so a
         // mismatch is possible. It stays loaded, because unloading is not safe.
         let Some(info) = infos.iter().find(|info| info.name == name).cloned() else {
-            let first = &infos[0].name;
+            // Every name it exports was taken already.
+            let Some(first) = infos.first().map(|info| &info.name) else {
+                return Ok(None);
+            };
             return Err(anyhow!(
                 "{} is named for {kind_name} `{name}` but provides `{first}`; it stays loaded for \
                  the life of the process. Rename the file to {} or ask for `{first}`.",
@@ -284,8 +287,8 @@ pub fn discover_all_endpoint_plugins() -> Vec<PluginInfo> {
 
 /// [`discover_all_endpoint_plugins`] against an explicit list of directories.
 ///
-/// The first directory wins for a file name, and a file whose endpoint is already
-/// registered — compiled in, or loaded before — is left alone. A file that does not
+/// The first directory wins for a file name. A name already registered — compiled in, or
+/// loaded before — is skipped, but the library's other names still load. A file that does not
 /// export the plugin entry point, such as a plugin's own helper library, is never
 /// opened. One that fails `check_trusted` or fails to load is logged and skipped.
 pub fn discover_all_endpoint_plugins_in(dirs: &[PathBuf]) -> Vec<PluginInfo> {
@@ -308,7 +311,6 @@ pub fn discover_all_endpoint_plugins_in(dirs: &[PathBuf]) -> Vec<PluginInfo> {
             };
             if !seen.insert(stem.to_owned())
                 || !path.is_file()
-                || is_registered(stem)
                 || super::loaded_from(&path).is_some()
             {
                 continue;
@@ -340,7 +342,7 @@ fn load_discovered(path: &Path) -> anyhow::Result<Vec<PluginInfo>> {
     }
     check_trusted(path)?;
     let sha256 = sha256_hex(path).with_context(|| format!("failed to read {}", path.display()))?;
-    let infos = load_endpoint_plugins(path)?;
+    let infos = load_discovered_plugins(path)?;
     let names: Vec<&str> = infos.iter().map(|info| info.name.as_str()).collect();
     tracing::info!(path = %path.display(), %sha256, endpoints = ?names, "loaded discovered plugin library");
     Ok(infos)
@@ -408,14 +410,6 @@ fn check_trusted(path: &Path) -> anyhow::Result<()> {
 #[cfg(not(unix))]
 fn check_trusted(_path: &Path) -> anyhow::Result<()> {
     Ok(())
-}
-
-/// A file stem may spell a hyphenated endpoint name with an underscore.
-fn is_registered(stem: &str) -> bool {
-    use crate::extensions::{get_endpoint_factory, get_middleware_factory};
-    let registered =
-        |name: &str| get_endpoint_factory(name).is_some() || get_middleware_factory(name).is_some();
-    registered(stem) || registered(&stem.replace('_', "-"))
 }
 
 /// Reads the export table only, so a library that is not a plugin runs no code.

@@ -64,7 +64,9 @@ use tracing::{info, trace, warn};
 /// credentials from the environment. Shared with the object-store checkpoint backend so
 /// both resolve creds identically — see [`checkpoint::object_store_backend::build_store`].
 use crate::checkpoint::object_store_backend::{build_store, build_store_with_fsync};
-use crate::support::local_staging::{remove_suffixed_leftovers, LocalStaging, StagedName};
+use crate::support::local_staging::{
+    remove_suffixed_leftovers, LocalStaging, StagedName, STAGING_REAP_AGE,
+};
 
 /// True if two object-store URLs share a scheme+host and one's path segments are a prefix
 /// of the other's — i.e. a recursive `list` of one would surface objects of the other.
@@ -401,7 +403,9 @@ impl ObjectStorePublisher {
             let root = LocalFileSystem::new().path_to_filesystem(&base)?;
             let scan = root.clone();
             let removed = tokio::task::spawn_blocking(move || {
-                remove_suffixed_leftovers(&scan, |name| is_own_object_name(name, &extension))
+                remove_suffixed_leftovers(&scan, STAGING_REAP_AGE, |name| {
+                    is_own_object_name(name, &extension)
+                })
             })
             .await??;
             if removed > 0 {
