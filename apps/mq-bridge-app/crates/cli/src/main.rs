@@ -624,6 +624,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     if let Some(schema_path) = args.schema {
+        mq_bridge_app::plugins::discover_installed_plugins();
         let schema = mq_bridge_app::config::app_config_schema();
         let schema_json =
             serde_json::to_string_pretty(&schema).context("Failed to serialize schema")?;

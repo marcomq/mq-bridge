@@ -85,6 +85,7 @@ pub use discovery::{
     discover_endpoint_plugin_in, discover_middleware_plugin, discover_middleware_plugin_in,
     discovery_enabled, library_file_name, plugin_search_path, search_path_hint,
 };
+pub(crate) use discovery::{discover_endpoint_plugin_or_scan, discover_middleware_plugin_or_scan};
 pub use endpoint::PluginEndpointFactory;
 pub use host::PLUGIN_LOG_TARGET;
 pub use middleware::PluginMiddlewareFactory;
@@ -226,6 +227,14 @@ pub fn plugin_loading_disabled() -> bool {
 fn loaded_plugins() -> &'static Mutex<HashMap<PathBuf, Vec<Arc<LoadedPlugin>>>> {
     static LOADED: OnceLock<Mutex<HashMap<PathBuf, Vec<Arc<LoadedPlugin>>>>> = OnceLock::new();
     LOADED.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// The plugins already loaded from `path`, if any.
+pub(crate) fn loaded_from(path: &Path) -> Option<Vec<PluginInfo>> {
+    let resolved = std::fs::canonicalize(path).ok()?;
+    let loaded = loaded_plugins().lock().ok()?;
+    let plugins = loaded.get(&resolved)?;
+    Some(plugins.iter().map(|p| p.info.clone()).collect())
 }
 
 /// Loads a native endpoint plugin and registers the endpoint it provides.

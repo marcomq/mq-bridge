@@ -426,6 +426,10 @@ impl SecretExtractor for EndpointType {
                         secrets,
                     );
                 }
+                for (i, case) in cfg.when.iter_mut().enumerate() {
+                    case.to
+                        .extract_secrets(&format!("{prefix}__SWITCH__WHEN__{i}__TO"), secrets);
+                }
                 if let Some(default) = &mut cfg.default {
                     default.extract_secrets(&format!("{}__{}", prefix, "SWITCH__DEFAULT"), secrets);
                 }

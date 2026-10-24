@@ -403,7 +403,7 @@ url = []
 
 # Endpoint features
 # `file` endpoint (CSV/JSONL/raw files); `object-store` reuses its codecs.
-file = []
+file = ["dep:libc"]
 # `dir_spool` endpoint: crash-safe directory FIFO queue.
 dir-spool = ["dep:pidlock"]
 kafka = ["rdkafka", "rdkafka/libz-static"]

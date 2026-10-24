@@ -578,7 +578,8 @@ sink never lists — its names are unique per write, so there is nothing to reco
 `source_position` path a fresh prefix pays one empty listing per publisher. A listing that fails is
 logged rather than failing the batch, leaving same-name-only deduplication until it succeeds: a
 transient failure is retried on the next batch, a denied `ListObjects` is not retried. Local files
-stage to a temp name, `fsync`, then `rename` (atomic within a filesystem); object stores have no
+stage to a temp name, `fsync`, then `rename` (atomic within a filesystem), in groups unless
+`fsync: batch`; object stores have no
 atomic rename, so a single PUT under the final name *is* the commit.
 
 This needs a replayable source position. Today that means:
@@ -666,8 +667,26 @@ those batches instead. A final sync runs when the route stops. When the input sa
 position to a checkpoint or replication slot, `fsync: off` is run as `periodic`, so the saved
 position never gets ahead of the data on disk; a path that is not a regular file, such as
 `/dev/stdout`, is left unsynced. With `batch` or `periodic`, a batch that starts a new file also
-syncs its directory, so the file itself survives a power loss. `object_store` with a
-`file://` URL always syncs each object and its directory before the write counts as done.
+syncs its directory, so the file itself survives a power loss.
+Part files under `name_by: source_position` are always made durable: each is written as a
+hidden `.stage-<id>` file, and every `fsync_interval_ms` (default 1000) all of them are synced,
+renamed into place and their directory synced, before the route commits the source.
+`fsync: batch` instead syncs each part before its ack.
+
+**Durability of the local `object_store` sink.** With a `file://` (or `local-store://`) URL
+the default, `fsync: periodic`, writes each object as `<name>#<n>` in the prefix directory,
+which listings and readers skip. About once a second, and on flush or shutdown, the sink syncs
+all of those files at once, renames them into place and syncs their directories. The route
+commits the source only after that, so a power loss loses no acknowledged object, and objects
+appear up to a second after they are sent. On start, the sink removes `#<n>` files a crashed
+run left for its own object names. One exception applies when `fsync` is unset: a sink naming
+objects by `write_time` behind an input that reads everything from the start on each run (such
+as a plain `file` source, `static`, an object-store or SQL cursor source without a saved
+checkpoint) skips syncing, because a rerun rewrites whatever a power loss undid.
+`fsync: batch` writes and syncs each object and its directory before the ack; `fsync: off`
+never syncs, and with `source_position` names it is logged as a warning, since an empty part
+left by a power loss counts as written. Remote stores ignore the option: a PUT is durable once
+it returns.
 
 SQLite commits with `synchronous=FULL`, the SQLite default. On macOS that is a plain
 `fsync()`, which does not flush the drive's write cache, so a power loss can still undo

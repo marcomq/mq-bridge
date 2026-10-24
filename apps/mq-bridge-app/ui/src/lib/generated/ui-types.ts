@@ -446,11 +446,14 @@ export interface ObjectStoreConfig {
   extension?: string | null;
   compression?: Compression;
   encryption?: EncryptionConfig | null;
+  fsync?: ObjectStoreFsync | null;
 }
 
 export type DecodeErrorPolicy = "skip" | "fail";
 
 export type DatePartitionStyle = "nested" | "hive";
+
+export type ObjectStoreFsync = "off" | "batch" | "periodic";
 
 export type StaticConfig = string | Record<string, never>;
 

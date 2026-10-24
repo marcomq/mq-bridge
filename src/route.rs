@@ -579,6 +579,66 @@ fn endpoint_tree_has_buffer(endpoint: &Endpoint, visited_refs: &mut HashSet<Stri
     }
 }
 
+/// Loads the plugins this endpoint tree names, so route analysis sees their factories.
+#[cfg(feature = "plugin")]
+fn load_named_plugins(
+    endpoint: &Endpoint,
+    depth: usize,
+    visited_refs: &mut HashSet<String>,
+) -> anyhow::Result<()> {
+    const MAX_DEPTH: usize = 16;
+    if depth > MAX_DEPTH {
+        return Ok(());
+    }
+    let mut nested: Vec<&Endpoint> = Vec::new();
+    for middleware in &endpoint.middlewares {
+        match middleware {
+            Middleware::Custom { name, .. } => {
+                if crate::extensions::get_middleware_factory(name).is_none() {
+                    crate::plugin::discover_middleware_plugin_or_scan(name)?;
+                }
+            }
+            Middleware::Dlq(config) => nested.push(&config.endpoint),
+            Middleware::Lookup(config) => {
+                nested.extend(config.from.iter());
+                nested.extend(config.entries.iter().map(|entry| &entry.from));
+            }
+            _ => {}
+        }
+    }
+    match &endpoint.endpoint_type {
+        EndpointType::Custom { name, .. } => {
+            if crate::endpoints::named_endpoint_factory(name).is_none() {
+                crate::plugin::discover_endpoint_plugin_or_scan(name)?;
+            }
+        }
+        EndpointType::Ref(name) => {
+            if visited_refs.insert(name.clone()) {
+                if let Some(referenced) = get_endpoint(name) {
+                    load_named_plugins(&referenced, depth + 1, visited_refs)?;
+                }
+            }
+        }
+        EndpointType::Fanout(endpoints) => nested.extend(endpoints),
+        EndpointType::Sequence(config) => nested.extend(&config.endpoints),
+        EndpointType::Switch(config) => nested.extend(
+            config
+                .cases
+                .values()
+                .chain(config.when.iter().map(|case| &case.to))
+                .chain(config.default.as_deref()),
+        ),
+        EndpointType::Reader(inner) => nested.push(inner),
+        EndpointType::Request(config) => nested.extend([&*config.to, &*config.forward_to]),
+        EndpointType::Http(config) => nested.extend(config.stream_response_to.as_deref()),
+        _ => {}
+    }
+    for endpoint in nested {
+        load_named_plugins(endpoint, depth + 1, visited_refs)?;
+    }
+    Ok(())
+}
+
 /// The name of the first sink in this output that replaces its target with each run's data.
 fn endpoint_tree_full_replay_sink(
     endpoint: &Endpoint,
@@ -869,6 +929,88 @@ impl BatchScratch {
                 .map(|m| m.message_id),
         );
     }
+}
+
+/// What a sequential send needs, owned so it can run in its own task.
+struct SendContext {
+    publisher: Arc<dyn MessagePublisher>,
+    has_retry_middleware: bool,
+    has_dlq_middleware: bool,
+    transient_failure_policy: TransientPublishFailurePolicy,
+    err_tx: Sender<anyhow::Error>,
+    commit_semaphore: Option<Arc<tokio::sync::Semaphore>>,
+    drops: Option<Arc<RwLock<DropReport>>>,
+    sends: Option<Arc<PendingSends>>,
+}
+
+type SendTaskOutput = (anyhow::Result<()>, JoinSet<()>, BatchScratch);
+
+/// A finished send, taken from its task.
+type Reaped = Option<Result<SendTaskOutput, tokio::task::JoinError>>;
+
+/// Waits for the read, moving a send that finishes meanwhile into `reaped`, where it outlives
+/// this future. Many sources' reads are not cancel-safe (a queue may have locked rows
+/// already), so only a failed send cancels the read.
+async fn next_step(
+    receive: Option<
+        impl std::future::Future<Output = Result<crate::traits::ReceivedBatch, ConsumerError>>,
+    >,
+    sending: &mut Option<JoinHandle<SendTaskOutput>>,
+    reaped: &mut Reaped,
+) -> Option<Result<crate::traits::ReceivedBatch, ConsumerError>> {
+    let Some(receive) = receive else {
+        let joined = sending.as_mut().expect("guarded by is_some").await;
+        *sending = None;
+        *reaped = Some(joined);
+        return None;
+    };
+    tokio::pin!(receive);
+    loop {
+        select! {
+            received = &mut receive => return Some(received),
+            joined = async { sending.as_mut().expect("guarded by is_some").await },
+                if sending.is_some() =>
+            {
+                let failed = !matches!(joined, Ok((Ok(()), _, _)));
+                *sending = None;
+                *reaped = Some(joined);
+                if failed {
+                    return None;
+                }
+            }
+        }
+    }
+}
+
+/// Sends one batch in its own task and hands the commit tasks and scratch back.
+fn spawn_send(
+    context: &Arc<SendContext>,
+    messages: Vec<crate::CanonicalMessage>,
+    commit: BatchCommitFunc,
+    mut commit_tasks: JoinSet<()>,
+    mut scratch: BatchScratch,
+) -> JoinHandle<SendTaskOutput> {
+    let context = Arc::clone(context);
+    tokio::spawn(async move {
+        let result = send_batch_and_commit(
+            &context.publisher,
+            messages,
+            commit,
+            context.has_retry_middleware,
+            context.has_dlq_middleware,
+            context.transient_failure_policy,
+            &context.err_tx,
+            context.commit_semaphore.as_ref(),
+            &mut commit_tasks,
+            &mut scratch,
+            context.drops.as_ref(),
+            context.sends.as_deref().map(|sends| (sends, 0)),
+            // Sends never overlap, so no ticket is needed.
+            None,
+        )
+        .await;
+        (result, commit_tasks, scratch)
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1229,6 +1371,102 @@ fn input_saves_position(endpoint: &Endpoint, no_resume: bool, depth: usize) -> b
     }
 }
 
+/// Applies `rewrite` to every sink a publish can reach (fanout, switch, request, ref, dlq)
+/// and collects what it reports; a ref is inlined only when one of its sinks changed.
+fn rewrite_sinks(
+    endpoint: &mut Endpoint,
+    depth: usize,
+    rewrite: &mut dyn FnMut(&mut Endpoint) -> Option<String>,
+) -> Vec<String> {
+    if depth > 16 {
+        return Vec::new();
+    }
+    let mut changed: Vec<String> = Vec::new();
+    for middleware in endpoint.middlewares.iter_mut() {
+        if let Middleware::Dlq(config) = middleware {
+            changed.extend(rewrite_sinks(&mut config.endpoint, depth + 1, rewrite));
+        }
+    }
+    changed.extend(match &mut endpoint.endpoint_type {
+        EndpointType::Fanout(outputs) => outputs
+            .iter_mut()
+            .flat_map(|output| rewrite_sinks(output, depth + 1, rewrite))
+            .collect(),
+        EndpointType::Switch(config) => {
+            let mut changed = Vec::new();
+            for output in config.cases.values_mut() {
+                changed.extend(rewrite_sinks(output, depth + 1, rewrite));
+            }
+            for case in &mut config.when {
+                changed.extend(rewrite_sinks(&mut case.to, depth + 1, rewrite));
+            }
+            if let Some(output) = config.default.as_deref_mut() {
+                changed.extend(rewrite_sinks(output, depth + 1, rewrite));
+            }
+            changed
+        }
+        EndpointType::Request(config) => {
+            let mut changed = rewrite_sinks(&mut config.to, depth + 1, rewrite);
+            changed.extend(rewrite_sinks(&mut config.forward_to, depth + 1, rewrite));
+            changed
+        }
+        EndpointType::Ref(name) => match get_endpoint(name) {
+            // Merged as publisher creation does: the ref's middlewares wrap the target's.
+            Some(mut resolved) if endpoint.handler.is_none() || resolved.handler.is_none() => {
+                let changed = rewrite_sinks(&mut resolved, depth + 1, rewrite);
+                if !changed.is_empty() {
+                    resolved.middlewares.append(&mut endpoint.middlewares);
+                    resolved.handler = resolved.handler.take().or(endpoint.handler.take());
+                    *endpoint = resolved;
+                }
+                changed
+            }
+            _ => Vec::new(),
+        },
+        _ => rewrite(endpoint).into_iter().collect(),
+    });
+    changed
+}
+
+/// Turns fsync off for local object-store sinks that leave it unset, name by write time and
+/// sit behind an input that replays everything each run: a rerun rewrites what a crash lost.
+fn relax_object_store_fsync(
+    route_name: &str,
+    input: &Endpoint,
+    output: &Endpoint,
+    source_has_position: bool,
+    no_resume: bool,
+) -> Option<Endpoint> {
+    if !source_replays_from_start(input, no_resume, 0) {
+        return None;
+    }
+    let mut output = output.clone();
+    let urls = rewrite_sinks(
+        &mut output,
+        0,
+        &mut |endpoint| match &mut endpoint.endpoint_type {
+            EndpointType::ObjectStore(config)
+                if config.fsync.is_none()
+                    && config.url.starts_with("file:")
+                    && config.resolved_name_by(source_has_position) == NameBy::WriteTime =>
+            {
+                config.fsync = Some(crate::models::ObjectStoreFsync::Off);
+                Some(config.url.clone())
+            }
+            _ => None,
+        },
+    );
+    if urls.is_empty() {
+        return None;
+    }
+    info!(
+        route = route_name,
+        urls = ?urls,
+        "The input replays from the start each run, so write-time named object-store sinks skip fsync; set `fsync: batch` to sync anyway"
+    );
+    Some(output)
+}
+
 /// Moves appending `file` sinks with `fsync: off` to `periodic` when the input saves its
 /// position, so a saved position never covers data a power loss can still undo.
 fn sync_file_sinks_behind_saved_position(
@@ -1239,75 +1477,26 @@ fn sync_file_sinks_behind_saved_position(
     no_resume: bool,
 ) -> Option<Endpoint> {
     fn visit(endpoint: &mut Endpoint, source_has_position: bool, depth: usize) -> Vec<String> {
-        if depth > 16 {
-            return Vec::new();
-        }
-        let mut paths: Vec<String> = endpoint
-            .middlewares
-            .iter_mut()
-            .flat_map(|middleware| match middleware {
-                Middleware::Dlq(config) => {
-                    visit(&mut config.endpoint, source_has_position, depth + 1)
-                }
-                _ => Vec::new(),
-            })
-            .collect();
-        paths.extend(match &mut endpoint.endpoint_type {
-            EndpointType::File(config) => {
-                // A pipe or terminal cannot be synced; part files always sync.
-                let not_a_file = std::fs::metadata(&config.path).is_ok_and(|m| !m.is_file());
-                if config.fsync != crate::models::FileFsync::Off
-                    || not_a_file
-                    || config.resolved_name_by(source_has_position) == NameBy::SourcePosition
-                {
-                    Vec::new()
-                } else {
-                    config.fsync = crate::models::FileFsync::Periodic;
-                    vec![config.path.clone()]
-                }
-            }
-            EndpointType::Fanout(outputs) => outputs
-                .iter_mut()
-                .flat_map(|output| visit(output, source_has_position, depth + 1))
-                .collect(),
-            EndpointType::Switch(config) => {
-                let mut paths = Vec::new();
-                for output in config.cases.values_mut() {
-                    paths.extend(visit(output, source_has_position, depth + 1));
-                }
-                for case in &mut config.when {
-                    paths.extend(visit(&mut case.to, source_has_position, depth + 1));
-                }
-                if let Some(output) = config.default.as_deref_mut() {
-                    paths.extend(visit(output, source_has_position, depth + 1));
-                }
-                paths
-            }
-            EndpointType::Request(config) => {
-                let mut paths = visit(&mut config.to, source_has_position, depth + 1);
-                paths.extend(visit(
-                    &mut config.forward_to,
-                    source_has_position,
-                    depth + 1,
-                ));
-                paths
-            }
-            EndpointType::Ref(name) => match get_endpoint(name) {
-                // Merged as publisher creation does: the ref's middlewares wrap the target's.
-                Some(mut resolved) if endpoint.handler.is_none() || resolved.handler.is_none() => {
-                    let paths = visit(&mut resolved, source_has_position, depth + 1);
-                    if !paths.is_empty() {
-                        resolved.middlewares.append(&mut endpoint.middlewares);
-                        resolved.handler = resolved.handler.take().or(endpoint.handler.take());
-                        *endpoint = resolved;
+        rewrite_sinks(
+            endpoint,
+            depth,
+            &mut |endpoint| match &mut endpoint.endpoint_type {
+                EndpointType::File(config) => {
+                    // A pipe or terminal cannot be synced; part files always sync.
+                    let not_a_file = std::fs::metadata(&config.path).is_ok_and(|m| !m.is_file());
+                    if config.fsync != crate::models::FileFsync::Off
+                        || not_a_file
+                        || config.resolved_name_by(source_has_position) == NameBy::SourcePosition
+                    {
+                        None
+                    } else {
+                        config.fsync = crate::models::FileFsync::Periodic;
+                        Some(config.path.clone())
                     }
-                    paths
                 }
-                _ => Vec::new(),
+                _ => None,
             },
-            _ => Vec::new(),
-        });
-        paths
+        )
     }
 
     if !input_saves_position(input, no_resume, 0) {
@@ -1480,6 +1669,9 @@ impl Route {
     /// configuration alone, `AtMostOnce` only for inputs with no acknowledgement at all.
     /// Everything else is `AtLeastOnce`.
     pub fn delivery_guarantee(&self) -> DeliveryGuarantee {
+        if let Err(error) = self.load_named_plugins() {
+            tracing::warn!("failed to load a plugin this route names: {error:#}");
+        }
         let relaxed =
             relax_object_naming("", self.source_has_position(), &self.input, &self.output)
                 .ok()
@@ -1675,6 +1867,17 @@ impl Route {
         self.check_with_resume(name, allowed_endpoints, false)
     }
 
+    /// Loads the plugins the route names before anything asks the factory registry.
+    fn load_named_plugins(&self) -> anyhow::Result<()> {
+        #[cfg(feature = "plugin")]
+        {
+            let mut visited_refs = HashSet::new();
+            load_named_plugins(&self.input, 0, &mut visited_refs)?;
+            load_named_plugins(&self.output, 0, &mut visited_refs)?;
+        }
+        Ok(())
+    }
+
     fn check_with_resume(
         &self,
         name: &str,
@@ -1682,6 +1885,8 @@ impl Route {
         no_resume: bool,
     ) -> anyhow::Result<Vec<String>> {
         self.options.validate()?;
+        self.load_named_plugins()
+            .map_err(|error| anyhow::anyhow!("[route:{name}] {error:#}"))?;
         if !self.options.allow_fault_injection {
             check_fault_middleware_allowed(
                 &self.input,
@@ -2224,6 +2429,20 @@ impl Route {
             }
             None => output,
         };
+        let unsynced_output;
+        let output = match relax_object_store_fsync(
+            name,
+            &self.input,
+            output,
+            source_has_position,
+            no_resume,
+        ) {
+            Some(endpoint) => {
+                unsynced_output = endpoint;
+                &unsynced_output
+            }
+            None => output,
+        };
         let source_metadata_required =
             output_requires_source_metadata(name, output, source_has_position)?;
         check_source_position_available(name, &self.input, source_metadata_required)?;
@@ -2254,14 +2473,15 @@ impl Route {
             return Err(err);
         }
         let (err_tx, err_rx) = bounded(1);
-        let mut commit_tasks = JoinSet::new();
+        let commit_tasks = JoinSet::new();
 
         // Ordered consumers (cumulative-ack) commit through the serial sequencer;
         // individual-ack consumers commit concurrently under a semaphore.
         let commit_router = CommitRouter::new(
             consumer.commit_requires_order(),
             self.options.commit_concurrency_limit,
-            1,
+            // The batch being sent and the one read ahead.
+            2,
         );
         let commit_semaphore = commit_router.dispatch_semaphore();
         let read_semaphore = commit_router.read_semaphore();
@@ -2272,102 +2492,143 @@ impl Route {
         if let Some(tx) = ready_tx {
             let _ = tx.send(()).await;
         }
-        let mut batch_scratch = BatchScratch::with_capacity(self.options.batch_size);
-        // Check if retry middleware is present on output
-        let has_retry_middleware =
-            self.output_has_middleware(|m| matches!(m, Middleware::Retry(_)));
-        let has_dlq_middleware = self.output_has_middleware(|m| matches!(m, Middleware::Dlq(_)));
+        let send_context = Arc::new(SendContext {
+            publisher: Arc::clone(&publisher),
+            has_retry_middleware: self.output_has_middleware(|m| matches!(m, Middleware::Retry(_))),
+            has_dlq_middleware: self.output_has_middleware(|m| matches!(m, Middleware::Dlq(_))),
+            transient_failure_policy,
+            err_tx: err_tx.clone(),
+            commit_semaphore: commit_semaphore.clone(),
+            drops: drops.cloned(),
+            sends: sends.cloned(),
+        });
+        // One batch is sent in its own task while the next is read. Sends never overlap, so
+        // they stay in source order, and a started send is never cancelled.
+        let mut sending: Option<JoinHandle<SendTaskOutput>> = None;
+        let mut send_parts = Some((
+            commit_tasks,
+            BatchScratch::with_capacity(self.options.batch_size),
+        ));
+        let mut prefetched: Option<(Vec<crate::CanonicalMessage>, BatchCommitFunc)> = None;
+        // Set once reading stops; returned when the last send has finished.
+        let mut ending: Option<anyhow::Result<bool>> = None;
+        let mut idle = false;
         // Messages processed since the last cooperative yield (see YIELD_EVERY_MSGS).
         let mut since_yield = 0usize;
+        let mut reaped: Reaped = None;
         let mut run_result = loop {
-            select! {
-                Ok(err) = err_rx.recv() => break Err(err),
-
-                _ = shutdown_rx.recv() => {
-                    info!("Shutdown signal received in sequential runner for route '{}'.", route_display_name(name));
-                    break Ok(true); // Stopped by shutdown signal
+            if let Some(joined) = reaped.take() {
+                match joined {
+                    Ok((result, tasks, scratch)) => {
+                        send_parts = Some((tasks, scratch));
+                        if let Err(err) = result {
+                            if !matches!(ending, Some(Err(_))) {
+                                ending = Some(Err(err));
+                            }
+                        }
+                    }
+                    Err(join_error) => {
+                        // Its batch is never committed; ordered commits behind it must not wait.
+                        commit_router.abandon();
+                        ending = Some(Err(anyhow::anyhow!(
+                            "The send task failed; its batch was never committed: {join_error}"
+                        )));
+                    }
                 }
-                res = receive_with_permit(
-                    consumer.as_mut(),
-                    self.options.batch_size,
-                    read_semaphore.as_ref(),
-                    &mut read_permit,
-                    flush_gate.as_ref(),
-                ) => {
-                    let received_batch = match res {
-                        Ok(batch) => {
-                            if batch.messages.is_empty() {
-                                if self.options.exit_on_empty {
-                                    info!("Consumer for route '{}' drained (empty batch, exit_on_empty). Shutting down.", route_display_name(name));
-                                    break Ok(false); // Graceful drain-then-exit
-                                }
+                // Cooperatively yield, amortized over messages processed so a
+                // hot loop can't starve other tasks (see YIELD_EVERY_MSGS).
+                if since_yield >= YIELD_EVERY_MSGS {
+                    since_yield = 0;
+                    tokio::task::yield_now().await;
+                }
+            }
+            if sending.is_none() {
+                if let Some((messages, commit)) = prefetched.take() {
+                    if matches!(ending, Some(Err(_))) {
+                        // As in the concurrent runner: a batch read but not sent goes back.
+                        let _ = commit(vec![MessageDisposition::Nack; messages.len()]).await;
+                    } else if let Some((tasks, scratch)) = send_parts.take() {
+                        since_yield += messages.len();
+                        sending = Some(spawn_send(&send_context, messages, commit, tasks, scratch));
+                    }
+                }
+                if sending.is_none() {
+                    if let Some(result) = ending.take() {
+                        break result;
+                    }
+                }
+            }
+            let want_receive = prefetched.is_none() && !idle && ending.is_none();
+            select! {
+                Ok(err) = err_rx.recv(), if ending.is_none() => ending = Some(Err(err)),
+
+                _ = shutdown_rx.recv(), if ending.is_none() => {
+                    info!("Shutdown signal received in sequential runner for route '{}'.", route_display_name(name));
+                    ending = Some(Ok(true)); // Stopped by shutdown signal
+                }
+
+                _ = pause_after_empty_batch(self.options.empty_batch_delay_ms), if idle && ending.is_none() => {
+                    idle = false;
+                }
+
+                step = next_step(
+                    want_receive.then(|| receive_with_permit(
+                        consumer.as_mut(),
+                        self.options.batch_size,
+                        read_semaphore.as_ref(),
+                        &mut read_permit,
+                        flush_gate.as_ref(),
+                    )),
+                    &mut sending,
+                    &mut reaped,
+                ), if want_receive || sending.is_some() => {
+                    match step {
+                        Some(Ok(batch)) if batch.messages.is_empty() => {
+                            if self.options.exit_on_empty {
+                                info!("Consumer for route '{}' drained (empty batch, exit_on_empty). Shutting down.", route_display_name(name));
+                                ending = Some(Ok(false)); // Graceful drain-then-exit
+                            } else {
                                 if let Some(gate) = &flush_gate {
                                     gate.nudge();
                                 }
-                                pause_after_empty_batch(self.options.empty_batch_delay_ms).await;
-                                continue; // No messages, loop to select! again
+                                idle = true;
                             }
-                            batch
                         }
-                        Err(ConsumerError::EndOfStream) => {
+                        Some(Ok(batch)) => {
+                            debug!("Received a batch of {} messages sequentially", batch.messages.len());
+                            let mut commit = commit_router.wrap(batch.commit, seq_counter, read_permit.take());
+                            seq_counter += 1;
+                            if let Some(gate) = &flush_gate {
+                                commit = gate.hold(commit);
+                            }
+                            prefetched = Some((batch.messages, commit));
+                        }
+                        Some(Err(ConsumerError::EndOfStream)) => {
                             info!("Consumer for route '{}' reached end of stream. Shutting down.", route_display_name(name));
-                            break Ok(false); // Graceful exit
+                            ending = Some(Ok(false)); // Graceful exit
                         }
-                        Err(ConsumerError::Connection(e)) => {
+                        Some(Err(ConsumerError::Connection(e))) => {
                             // Propagate error to trigger reconnect by the outer loop
-                            break Err(e);
-                        },
-                        Err(ConsumerError::Gap { requested, base }) => {
-                            // Propagate gap error to trigger reconnect by the outer loop
-                            break Err(anyhow::anyhow!("Consumer gap: requested offset {requested} but earliest available is {base}"));
+                            ending = Some(Err(e));
                         }
-                        Err(ConsumerError::Permanent(e)) => {
+                        Some(Err(ConsumerError::Gap { requested, base })) => {
+                            // Propagate gap error to trigger reconnect by the outer loop
+                            ending = Some(Err(anyhow::anyhow!("Consumer gap: requested offset {requested} but earliest available is {base}")));
+                        }
+                        Some(Err(ConsumerError::Permanent(e))) => {
                             // Non-retryable: shut the route down instead of reconnecting
                             // and re-reading the same poison message forever.
-                            break Err(ConsumerError::Permanent(e).into());
+                            ending = Some(Err(ConsumerError::Permanent(e).into()));
                         }
-                    };
-                    debug!("Received a batch of {} messages sequentially", received_batch.messages.len());
-
-                    // Process the batch sequentially without spawning a new task
-                    let seq = seq_counter;
-                    seq_counter += 1;
-                    let batch_len = received_batch.messages.len();
-                    let mut commit = commit_router.wrap(received_batch.commit, seq, read_permit.take());
-                    if let Some(gate) = &flush_gate {
-                        commit = gate.hold(commit);
-                    }
-                    if let Err(err) = send_batch_and_commit(
-                        &publisher,
-                        received_batch.messages,
-                        commit,
-                        has_retry_middleware,
-                        has_dlq_middleware,
-                        transient_failure_policy,
-                        &err_tx,
-                        commit_semaphore.as_ref(),
-                        &mut commit_tasks,
-                        &mut batch_scratch,
-                        drops,
-                        sends.map(|sends| (sends.as_ref(), 0)),
-                        // The sequential runner sends one batch at a time already.
-                        None,
-                    )
-                    .await
-                    {
-                        break Err(err);
-                    }
-
-                    // Cooperatively yield, amortized over messages processed so a
-                    // hot loop can't starve other tasks (see YIELD_EVERY_MSGS).
-                    since_yield += batch_len;
-                    if since_yield >= YIELD_EVERY_MSGS {
-                        since_yield = 0;
-                        tokio::task::yield_now().await;
+                        // Only a send finished; it waits in `reaped`.
+                        None => {}
                     }
                 }
             }
         };
+        // A failed send task took its commit tasks with it.
+        let (mut commit_tasks, _) =
+            send_parts.unwrap_or_else(|| (JoinSet::new(), BatchScratch::with_capacity(0)));
 
         // A clean end flushes and commits what is held; a failed one commits nothing more.
         if let Some(gate) = &flush_gate {
@@ -2439,6 +2700,20 @@ impl Route {
             Some(endpoint) => {
                 synced_output = endpoint;
                 &synced_output
+            }
+            None => output,
+        };
+        let unsynced_output;
+        let output = match relax_object_store_fsync(
+            name,
+            &self.input,
+            output,
+            source_has_position,
+            no_resume,
+        ) {
+            Some(endpoint) => {
+                unsynced_output = endpoint;
+                &unsynced_output
             }
             None => output,
         };
@@ -3904,6 +4179,61 @@ mod tests {
     /// resolved against the route's input rather than read off the config.
     #[cfg(feature = "object-store")]
     #[test]
+    fn only_write_time_object_stores_behind_a_replaying_input_skip_fsync() {
+        let endpoint =
+            |value: serde_json::Value| -> Endpoint { serde_json::from_value(value).unwrap() };
+        let replaying = endpoint(serde_json::json!({"file": {"path": "/tmp/mqb-in.jsonl"}}));
+        let broker = Endpoint::new_memory("fsync_broker", 1);
+        let bucket = |extra: serde_json::Value| {
+            let mut config = serde_json::json!({"url": "file:///tmp/mqb-fsync/"});
+            config
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            endpoint(serde_json::json!({ "object_store": config }))
+        };
+        let fsync_of = |output: &Endpoint| match &output.endpoint_type {
+            EndpointType::ObjectStore(config) => config.fsync,
+            other => panic!("not an object-store sink: {other:?}"),
+        };
+        let relax = |input: &Endpoint, output: &Endpoint| {
+            relax_object_store_fsync("fsync", input, output, false, false)
+        };
+        let off = Some(crate::models::ObjectStoreFsync::Off);
+
+        let write_time = bucket(serde_json::json!({"name_by": "write_time"}));
+        assert_eq!(fsync_of(&relax(&replaying, &write_time).unwrap()), off);
+        assert_eq!(
+            fsync_of(&relax(&replaying, &bucket(serde_json::json!({}))).unwrap()),
+            off
+        );
+        assert!(
+            relax(&broker, &write_time).is_none(),
+            "a broker input keeps fsync"
+        );
+        let remote = endpoint(
+            serde_json::json!({"object_store": {"url": "s3://b/p/", "name_by": "write_time"}}),
+        );
+        assert!(
+            relax(&replaying, &remote).is_none(),
+            "only the local store syncs"
+        );
+        let source_position = bucket(serde_json::json!({"name_by": "source_position"}));
+        assert!(relax(&replaying, &source_position).is_none());
+        let batch = bucket(serde_json::json!({"name_by": "write_time", "fsync": "batch"}));
+        assert!(
+            relax(&replaying, &batch).is_none(),
+            "an explicit choice is kept"
+        );
+        let fanout = Endpoint::new(EndpointType::Fanout(vec![broker.clone(), write_time]));
+        match relax(&replaying, &fanout).map(|o| o.endpoint_type) {
+            Some(EndpointType::Fanout(legs)) => assert_eq!(fsync_of(&legs[1]), off),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[cfg(feature = "object-store")]
+    #[test]
     fn auto_named_object_store_reports_the_mechanism_its_input_earns() {
         fn route_from(input: Endpoint) -> Route {
             Route::new(
@@ -4384,7 +4714,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_stalled_ordered_commit_stops_the_sequential_runner_reading() {
-        assert_stalled_ordered_commit_stops_reads(1, 2).await;
+        assert_stalled_ordered_commit_stops_reads(1, 3).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -4432,6 +4762,15 @@ mod tests {
     /// behind it must fail instead of holding the route open.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_panicked_worker_fails_the_route_instead_of_blocking_ordered_commits() {
+        assert_panicked_send_fails_the_route(4).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_panicked_send_fails_the_sequential_route_instead_of_blocking_ordered_commits() {
+        assert_panicked_send_fails_the_route(1).await;
+    }
+
+    async fn assert_panicked_send_fails_the_route(concurrency: usize) {
         const TOTAL: usize = 20;
         let unique_id = fast_uuid_v7::gen_id().to_string();
         let ordered = format!("panic_ordered_{unique_id}");
@@ -4455,7 +4794,7 @@ mod tests {
             .add_middleware(custom(ordered));
         let output = Endpoint::new(EndpointType::Null).add_middleware(custom(panicking));
         let route = Route::new(input.clone(), output)
-            .with_concurrency(4)
+            .with_concurrency(concurrency)
             .with_batch_size(1);
         let input_channel = input.channel().unwrap();
         let messages = (0..TOTAL)
@@ -4471,6 +4810,281 @@ mod tests {
         .await
         .expect("a worker panic must not leave the route waiting on its commit");
         assert!(result.is_err(), "a panicked worker is not a completion");
+    }
+
+    /// Counts reads and records each committed payload with its disposition.
+    #[derive(Debug)]
+    struct ReadAheadProbe {
+        read: AtomicUsize,
+        committed: Mutex<Vec<(String, bool)>>,
+        sent: Mutex<Vec<String>>,
+        /// One permit per send; the send of payload `fail_on` returns a retryable error.
+        gate: tokio::sync::Semaphore,
+        fail_on: Option<&'static str>,
+    }
+
+    impl ReadAheadProbe {
+        fn new(fail_on: Option<&'static str>) -> Arc<Self> {
+            Arc::new(Self {
+                read: AtomicUsize::new(0),
+                committed: Mutex::default(),
+                sent: Mutex::default(),
+                gate: tokio::sync::Semaphore::new(0),
+                fail_on,
+            })
+        }
+    }
+
+    #[derive(Debug)]
+    struct ReadAheadProbeFactory(Arc<ReadAheadProbe>);
+
+    struct ProbedConsumer(Box<dyn MessageConsumer>, Arc<ReadAheadProbe>);
+    struct ProbedPublisher(Box<dyn MessagePublisher>, Arc<ReadAheadProbe>);
+
+    #[async_trait::async_trait]
+    impl CustomMiddlewareFactory for ReadAheadProbeFactory {
+        async fn apply_consumer(
+            &self,
+            consumer: Box<dyn MessageConsumer>,
+            _route_name: &str,
+            _config: &serde_json::Value,
+        ) -> anyhow::Result<Box<dyn MessageConsumer>> {
+            Ok(Box::new(ProbedConsumer(consumer, Arc::clone(&self.0))))
+        }
+
+        async fn apply_publisher(
+            &self,
+            publisher: Box<dyn MessagePublisher>,
+            _route_name: &str,
+            _config: &serde_json::Value,
+        ) -> anyhow::Result<Box<dyn MessagePublisher>> {
+            Ok(Box::new(ProbedPublisher(publisher, Arc::clone(&self.0))))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MessageConsumer for ProbedConsumer {
+        async fn receive_batch(
+            &mut self,
+            max_messages: usize,
+        ) -> Result<ReceivedBatch, ConsumerError> {
+            let mut batch = self.0.receive_batch(max_messages).await?;
+            if batch.messages.is_empty() {
+                return Ok(batch);
+            }
+            self.1.read.fetch_add(1, Ordering::SeqCst);
+            let payloads: Vec<String> = batch
+                .messages
+                .iter()
+                .map(|m| m.get_payload_str().to_string())
+                .collect();
+            let probe = Arc::clone(&self.1);
+            let inner = batch.commit;
+            batch.commit = Box::new(move |dispositions: Vec<MessageDisposition>| {
+                let mut committed = probe.committed.lock().unwrap();
+                for (payload, disposition) in payloads.into_iter().zip(&dispositions) {
+                    let acked = !matches!(disposition, MessageDisposition::Nack);
+                    committed.push((payload, acked));
+                }
+                inner(dispositions)
+            });
+            Ok(batch)
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MessagePublisher for ProbedPublisher {
+        async fn send_batch(
+            &self,
+            messages: Vec<crate::CanonicalMessage>,
+        ) -> Result<SentBatch, PublisherError> {
+            self.1.gate.acquire().await.unwrap().forget();
+            let payload = messages[0].get_payload_str().to_string();
+            if self.1.fail_on == Some(payload.as_str()) {
+                return Err(PublisherError::Retryable(anyhow::anyhow!("injected")));
+            }
+            self.1.sent.lock().unwrap().push(payload);
+            self.0.send_batch(messages).await
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    /// Runs a sequential route over `total` single-message batches with a probe on both ends.
+    fn probed_sequential_route(
+        probe: &Arc<ReadAheadProbe>,
+        total: usize,
+    ) -> (Route, tokio::task::JoinHandle<()>) {
+        let unique_id = fast_uuid_v7::gen_id().to_string();
+        let name = format!("read_ahead_probe_{unique_id}");
+        register_middleware_factory(&name, Arc::new(ReadAheadProbeFactory(Arc::clone(probe))))
+            .unwrap();
+        let custom = || Middleware::Custom {
+            name: name.clone(),
+            config: serde_json::Value::Null,
+        };
+        let input = Endpoint::new_memory(&format!("read_ahead_in_{unique_id}"), total)
+            .add_middleware(custom());
+        let output = Endpoint::new(EndpointType::Null).add_middleware(custom());
+        let route = Route::new(input.clone(), output)
+            .with_concurrency(1)
+            .with_batch_size(1);
+        let fill = tokio::spawn(async move {
+            let channel = input.channel().unwrap();
+            let messages = (0..total).map(|seq| CanonicalMessage::from(seq.to_string()));
+            channel.fill_messages(messages.collect()).await.unwrap();
+            channel.close();
+        });
+        (route, fill)
+    }
+
+    async fn wait_for_reads(probe: &ReadAheadProbe, reads: usize) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while probe.read.load(Ordering::SeqCst) < reads {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the runner should read ahead while a send is pending");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_sequential_runner_reads_one_batch_ahead_and_sends_in_order() {
+        const TOTAL: usize = 10;
+        let probe = ReadAheadProbe::new(None);
+        let (route, fill) = probed_sequential_route(&probe, TOTAL);
+        fill.await.unwrap();
+        let running =
+            tokio::spawn(async move { route.run_until_err("read_ahead", None, None).await });
+
+        wait_for_reads(&probe, 2).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            probe.read.load(Ordering::SeqCst),
+            2,
+            "one batch ahead, no more"
+        );
+
+        probe.gate.add_permits(TOTAL);
+        tokio::time::timeout(Duration::from_secs(5), running)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let expected: Vec<String> = (0..TOTAL).map(|seq| seq.to_string()).collect();
+        assert_eq!(*probe.sent.lock().unwrap(), expected);
+        let committed = probe.committed.lock().unwrap();
+        assert!(committed.iter().all(|(_, acked)| *acked), "{committed:?}");
+        assert_eq!(committed.len(), TOTAL);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_failed_send_returns_the_batch_read_ahead_unsent() {
+        let probe = ReadAheadProbe::new(Some("0"));
+        let (route, fill) = probed_sequential_route(&probe, 4);
+        fill.await.unwrap();
+        let running =
+            tokio::spawn(async move { route.run_until_err("read_ahead_fail", None, None).await });
+
+        wait_for_reads(&probe, 2).await;
+        probe.gate.add_permits(4);
+        let result = tokio::time::timeout(Duration::from_secs(5), running)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(result.is_err(), "a failed send ends the route");
+        assert!(probe.sent.lock().unwrap().is_empty());
+        assert_eq!(
+            *probe.committed.lock().unwrap(),
+            vec![("0".to_string(), false), ("1".to_string(), false)],
+        );
+    }
+
+    /// Counts reads that were dropped before they finished.
+    #[derive(Debug)]
+    struct CancelCountingFactory(Arc<AtomicUsize>);
+
+    struct CancelCountingConsumer(Box<dyn MessageConsumer>, Arc<AtomicUsize>);
+
+    struct UnfinishedRead<'a>(&'a AtomicUsize, bool);
+
+    impl Drop for UnfinishedRead<'_> {
+        fn drop(&mut self) {
+            if !self.1 {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl CustomMiddlewareFactory for CancelCountingFactory {
+        async fn apply_consumer(
+            &self,
+            consumer: Box<dyn MessageConsumer>,
+            _route_name: &str,
+            _config: &serde_json::Value,
+        ) -> anyhow::Result<Box<dyn MessageConsumer>> {
+            Ok(Box::new(CancelCountingConsumer(
+                consumer,
+                Arc::clone(&self.0),
+            )))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MessageConsumer for CancelCountingConsumer {
+        async fn receive_batch(
+            &mut self,
+            max_messages: usize,
+        ) -> Result<ReceivedBatch, ConsumerError> {
+            let mut guard = UnfinishedRead(&self.1, false);
+            // Slow enough that the previous batch's send finishes first.
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            let batch = self.0.receive_batch(max_messages).await;
+            guard.1 = true;
+            batch
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_finished_send_does_not_cancel_the_read_ahead() {
+        const TOTAL: usize = 20;
+        let cancelled = Arc::new(AtomicUsize::new(0));
+        let unique_id = fast_uuid_v7::gen_id().to_string();
+        let name = format!("cancel_counting_{unique_id}");
+        register_middleware_factory(&name, Arc::new(CancelCountingFactory(cancelled.clone())))
+            .unwrap();
+        let input = Endpoint::new_memory(&format!("cancel_counting_in_{unique_id}"), TOTAL)
+            .add_middleware(Middleware::Custom {
+                name,
+                config: serde_json::Value::Null,
+            });
+        let channel = input.channel().unwrap();
+        let messages = (0..TOTAL).map(|seq| CanonicalMessage::from(seq.to_string()));
+        channel.fill_messages(messages.collect()).await.unwrap();
+        channel.close();
+        let route = Route::new(input, Endpoint::new(EndpointType::Null))
+            .with_concurrency(1)
+            .with_batch_size(1);
+
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            route.run_until_err("cancel_counting", None, None),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(cancelled.load(Ordering::SeqCst), 0);
     }
 
     #[derive(Debug, Default)]

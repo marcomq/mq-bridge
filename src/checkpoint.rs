@@ -640,6 +640,14 @@ pub(crate) mod object_store_backend {
     /// normalization `AmazonS3Builder::from_env` does. Unrecognized keys are ignored. Bare
     /// `parse_url` reads no env at all, which would fall through to the EC2/GCE metadata service.
     pub(crate) fn build_store(url: &str) -> anyhow::Result<(Box<dyn ObjectStore>, ObjPath)> {
+        build_store_with_fsync(url, true)
+    }
+
+    /// [`build_store`], with `fsync` choosing whether the local store syncs each written object.
+    pub(crate) fn build_store_with_fsync(
+        url: &str,
+        fsync: bool,
+    ) -> anyhow::Result<(Box<dyn ObjectStore>, ObjPath)> {
         let parsed = url::Url::parse(url).with_context(|| {
             format!(
                 "Invalid object_store url '{}'",
@@ -666,7 +674,7 @@ pub(crate) mod object_store_backend {
             object_store::ObjectStoreScheme::parse(&parsed),
             Ok((object_store::ObjectStoreScheme::Local, _))
         ) {
-            let local = object_store::local::LocalFileSystem::new().with_fsync(true);
+            let local = object_store::local::LocalFileSystem::new().with_fsync(fsync);
             return Ok((Box::new(local), path));
         }
         Ok((store, path))

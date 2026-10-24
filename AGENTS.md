@@ -136,7 +136,7 @@ Both implement `MessageConsumer` trait. Subscribers often wrap consumers (e.g., 
 ### Route Execution
 
 Routes can run in two modes:
-- **Sequential** (`concurrency: 1`): Single-threaded processing
+- **Sequential** (`concurrency: 1`): One send at a time in source order; the next batch is read while it runs
 - **Concurrent** (`concurrency > 1`): Worker pool with configurable concurrency
 
 Routes handle graceful shutdown via `shutdown_rx` channel. The `select!` macro cancels `receive_batch()` futures when shutdown is received.

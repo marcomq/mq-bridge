@@ -1676,9 +1676,7 @@ fn custom_endpoint_factory(name: &str) -> Result<Arc<dyn CustomEndpointFactory>>
 
 #[cfg(feature = "plugin")]
 fn discover_custom_endpoint(name: &str) -> Result<Option<Arc<dyn CustomEndpointFactory>>> {
-    if crate::plugin::discover_endpoint_plugin(name)?.is_none() {
-        return Ok(None);
-    }
+    crate::plugin::discover_endpoint_plugin_or_scan(name)?;
     Ok(get_endpoint_factory(name))
 }
 
@@ -1698,7 +1696,7 @@ fn custom_endpoint_hint(_name: &str) -> String {
 }
 
 /// The factory for a name: a registered one, else a named `http_bulk` endpoint such as `qdrant`.
-fn named_endpoint_factory(name: &str) -> Option<Arc<dyn CustomEndpointFactory>> {
+pub(crate) fn named_endpoint_factory(name: &str) -> Option<Arc<dyn CustomEndpointFactory>> {
     let factory = get_endpoint_factory(name);
     #[cfg(feature = "http-bulk")]
     let factory = factory.or_else(|| http_bulk::builtin_preset(name));

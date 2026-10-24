@@ -1481,7 +1481,7 @@ pub struct FileConfig {
     /// (Sink only) When appended data is fsynced: `off` (default), `batch` (before each ack) or `periodic`.
     #[serde(default, skip_serializing_if = "FileFsync::is_off")]
     pub fsync: FileFsync,
-    /// (Sink only) Interval for `fsync: periodic` in milliseconds. Defaults to 1000.
+    /// (Sink only) Interval for `fsync: periodic` and grouped part-file syncs, in milliseconds. Defaults to 1000.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fsync_interval_ms: Option<u64>,
 }
@@ -1831,6 +1831,23 @@ pub struct ObjectStoreConfig {
     /// At-rest AEAD encryption applied after compression. Requires the `encryption` feature.
     #[serde(default)]
     pub encryption: Option<EncryptionConfig>,
+    /// (Sink only, local store) `periodic` (default) syncs objects in groups about every second, `batch` each object, `off` never.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fsync: Option<ObjectStoreFsync>,
+}
+
+/// When the local object-store sink forces a written object to disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum ObjectStoreFsync {
+    /// Never; the OS flushes. An acknowledged object can be lost or left empty on power loss.
+    Off,
+    /// Each object before its batch is acknowledged.
+    Batch,
+    /// Objects are staged, then synced and moved into place together about every second;
+    /// the source is committed after that.
+    Periodic,
 }
 
 // --- NATS Specific Configuration ---

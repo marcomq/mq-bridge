@@ -22,6 +22,8 @@ pub mod crypto;
 pub(crate) mod crypto_envelope;
 pub mod http_status;
 pub mod interpolation;
+#[cfg(feature = "file")]
+pub(crate) mod local_staging;
 #[cfg(any(feature = "sqlx", feature = "clickhouse", feature = "mongodb"))]
 pub(crate) mod lookup_batch;
 pub mod ndjson;

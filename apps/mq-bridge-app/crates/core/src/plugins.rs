@@ -45,6 +45,14 @@ use std::sync::OnceLock;
 
 use anyhow::Context;
 
+/// Loads every installed plugin, once, for the lists and schemas that show them all.
+pub fn discover_installed_plugins() {
+    static SCANNED: OnceLock<()> = OnceLock::new();
+    SCANNED.get_or_init(|| {
+        mq_bridge::plugin::discover_all_endpoint_plugins();
+    });
+}
+
 /// Registers endpoints that ship with mq-bridge-app but are maintained as
 /// separate crates. Cache the result because startup has several entry paths.
 pub fn register_builtin_endpoints() -> anyhow::Result<()> {

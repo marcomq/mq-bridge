@@ -33,6 +33,7 @@ use crate::endpoints::file::{
 };
 use crate::models::{
     Compression, DatePartitionStyle, DecodeErrorPolicy, FileFormat, NameBy, ObjectStoreConfig,
+    ObjectStoreFsync,
 };
 #[cfg(feature = "encryption")]
 use crate::support::crypto::Crypto;
@@ -48,6 +49,7 @@ use anyhow::{anyhow, Context};
 use async_trait::async_trait;
 use fast_uuid_v7::SequentialGenerator;
 use futures::{StreamExt, TryStreamExt};
+use object_store::local::LocalFileSystem;
 use object_store::{
     path::Path as ObjPath, Error as ObjectStoreError, ObjectStore, ObjectStoreExt, PutMode,
     PutOptions, PutPayload,
@@ -61,7 +63,8 @@ use tracing::{info, trace, warn};
 /// Builds an `object_store` backend and its base prefix `Path` from a URL, reading
 /// credentials from the environment. Shared with the object-store checkpoint backend so
 /// both resolve creds identically — see [`checkpoint::object_store_backend::build_store`].
-use crate::checkpoint::object_store_backend::build_store;
+use crate::checkpoint::object_store_backend::{build_store, build_store_with_fsync};
+use crate::support::local_staging::{remove_suffixed_leftovers, LocalStaging, StagedName};
 
 /// True if two object-store URLs share a scheme+host and one's path segments are a prefix
 /// of the other's — i.e. a recursive `list` of one would surface objects of the other.
@@ -110,6 +113,17 @@ fn extension_for(format: &FileFormat, compression: Compression, encrypted: bool)
 }
 
 /// Rejects `format`/`compression`/`encryption` settings whose Cargo feature is missing.
+/// Whether `name` is an object this sink writes: a source-range part or a uuid name.
+fn is_own_object_name(name: &str, extension: &str) -> bool {
+    parse_finalized_name(name, extension).is_some()
+        || name
+            .strip_suffix(extension)
+            .and_then(|stem| stem.strip_suffix('.'))
+            .is_some_and(|id| {
+                id.len() == 36 && id.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-')
+            })
+}
+
 fn validate_object_settings(_config: &ObjectStoreConfig) -> anyhow::Result<()> {
     #[cfg(not(feature = "parquet"))]
     if _config.format == FileFormat::Parquet {
@@ -341,6 +355,8 @@ pub struct ObjectStorePublisher {
     // Shared across clones on purpose: the ordering guarantee is per generator instance, so
     // two independent generators would hand out interleaved keys.
     keys: Arc<StdMutex<SequentialGenerator>>,
+    /// Set for a local store that syncs objects in groups; objects then go through it.
+    staging: Option<Arc<LocalStaging>>,
 }
 
 impl ObjectStorePublisher {
@@ -355,7 +371,17 @@ impl ObjectStorePublisher {
         name_by: NameBy,
     ) -> anyhow::Result<Self> {
         validate_object_settings(config)?;
-        let (store, base) = build_store(&config.url)?;
+        if config.fsync == Some(ObjectStoreFsync::Off) && name_by == NameBy::SourcePosition {
+            warn!(url = %config.url, "object_store 'fsync: off' with 'name_by: source_position': after a power loss an empty part can count as written and its range is not replayed");
+        }
+        let local = config.url.starts_with("file:");
+        let staged = local
+            && !matches!(
+                config.fsync,
+                Some(ObjectStoreFsync::Off | ObjectStoreFsync::Batch)
+            );
+        let (store, base) =
+            build_store_with_fsync(&config.url, config.fsync == Some(ObjectStoreFsync::Batch))?;
         let store: Arc<dyn ObjectStore> = Arc::from(store);
         let delimiter = parse_delimiter(config.delimiter.as_deref())?;
         let csv = CsvDialect::for_format(&config.format, &config.csv, &delimiter)?;
@@ -370,6 +396,25 @@ impl ObjectStorePublisher {
         if name_by == NameBy::SourcePosition && config.date_partition == Some(true) {
             warn!("object_store 'date_partition' does not apply to 'name_by: source_position'; part names carry the source range and are written flat under the prefix");
         }
+        let staging = if staged {
+            let extension = extension.clone();
+            let root = LocalFileSystem::new().path_to_filesystem(&base)?;
+            let scan = root.clone();
+            let removed = tokio::task::spawn_blocking(move || {
+                remove_suffixed_leftovers(&scan, |name| is_own_object_name(name, &extension))
+            })
+            .await??;
+            if removed > 0 {
+                info!(dir = %root.display(), removed, "Removed objects a previous run staged but never finalized");
+            }
+            Some(LocalStaging::new(
+                root,
+                StagedName::Suffixed,
+                FINALIZE_INTERVAL,
+            ))
+        } else {
+            None
+        };
         info!(url = %config.url, format = ?config.format, ?name_by, "Object-store sink opened");
         Ok(Self {
             store,
@@ -393,7 +438,48 @@ impl ObjectStorePublisher {
             covered_ranges: Arc::new(Mutex::new(CoveredRanges::default())),
             recovered: Arc::new(tokio::sync::OnceCell::new()),
             keys: Arc::new(StdMutex::new(SequentialGenerator::new())),
+            staging,
         })
+    }
+
+    /// Writes one object, staged when the local store syncs in groups.
+    async fn write_object(
+        &self,
+        key: &ObjPath,
+        body: Vec<u8>,
+        create_only: bool,
+    ) -> Result<(), PublisherError> {
+        if let Some(staging) = &self.staging {
+            let target = LocalFileSystem::new()
+                .path_to_filesystem(key)
+                .map_err(|e| PublisherError::NonRetryable(anyhow!(e)))?;
+            return staging.write(target, body).await.map_err(|e| {
+                PublisherError::Retryable(anyhow!(e).context(format!("staging object '{key}'")))
+            });
+        }
+        let options = PutOptions {
+            mode: if create_only {
+                PutMode::Create
+            } else {
+                PutMode::Overwrite
+            },
+            ..Default::default()
+        };
+        match self
+            .store
+            .put_opts(key, PutPayload::from(body), options)
+            .await
+        {
+            Ok(_) => Ok(()),
+            // Same name, same range, same bytes: the object is already the one this PUT would
+            // have written. Recovery ran before the first PUT, so reaching this arm means a
+            // repeat within the run rather than an unrecovered earlier one.
+            Err(ObjectStoreError::AlreadyExists { .. }) if create_only => Ok(()),
+            Err(error) => Err(classify_put_error(
+                error,
+                format!("object-store put '{key}'"),
+            )),
+        }
     }
 
     /// Object key for the next write: `<prefix>/[YYYY/MM/DD/]<uuidv7>.<ext>`.
@@ -591,30 +677,7 @@ impl ObjectStorePublisher {
             .map_err(PublisherError::NonRetryable)?;
         let body = self.encode_object_body(body)?;
         let key = self.base.clone().join(name.as_str());
-        match self
-            .store
-            .put_opts(
-                &key,
-                PutPayload::from(body),
-                PutOptions {
-                    mode: PutMode::Create,
-                    ..Default::default()
-                },
-            )
-            .await
-        {
-            Ok(_) => {}
-            // Same name, same range, same bytes: the object is already the one this PUT would
-            // have written. Recovery ran before the first PUT, so reaching this arm means a
-            // repeat within the run rather than an unrecovered earlier one.
-            Err(ObjectStoreError::AlreadyExists { .. }) => {}
-            Err(error) => {
-                return Err(classify_put_error(
-                    error,
-                    format!("object-store put by source position '{key}'"),
-                ));
-            }
-        }
+        self.write_object(&key, body, true).await?;
         self.covered_ranges
             .lock()
             .await
@@ -668,16 +731,26 @@ impl MessagePublisher for ObjectStorePublisher {
         }
         let body = self.encode_object_body(body)?;
         let key = self.next_key();
-        self.store
-            .put(&key, PutPayload::from(body))
-            .await
-            .map_err(|e| classify_put_error(e, format!("object-store put '{key}'")))?;
+        self.write_object(&key, body, false).await?;
         trace!(key = %key, "Wrote object to object store");
         Ok(SentBatch::from_failures(failed))
     }
 
     async fn flush(&self) -> anyhow::Result<()> {
+        if let Some(staging) = &self.staging {
+            staging.finalize().await?;
+        }
         Ok(())
+    }
+
+    /// Staged objects are durable only after `flush`, so the route holds commits until then.
+    fn deferred_commit_interval(&self) -> Option<Duration> {
+        self.staging.as_ref().map(|s| s.interval())
+    }
+
+    /// Finalizes what is still staged when the route stops.
+    fn on_disconnect_hook(&self) -> Option<crate::traits::BoxFuture<'_, anyhow::Result<()>>> {
+        self.staging.as_ref().map(|_| self.flush())
     }
 
     // Deliberately *not* declaring `requires_ordered_publish()`. Read order here is key order
@@ -792,6 +865,9 @@ impl Drop for Unsettled {
 
 /// Consecutive decode failures on one object before it is quarantined (skipped) so a
 /// single poison object cannot block the source forever.
+/// How often staged local objects are finalized when nothing else flushes them.
+const FINALIZE_INTERVAL: Duration = Duration::from_millis(1000);
+
 const MAX_OBJECT_DECODE_FAILURES: u32 = 5;
 
 /// Opens a consumer's external checkpoint. The source URL is already part of the store key.
@@ -1515,6 +1591,7 @@ mod tests {
             covered_ranges: Arc::new(Mutex::new(CoveredRanges::default())),
             recovered: Arc::new(tokio::sync::OnceCell::new()),
             keys: Arc::new(StdMutex::new(SequentialGenerator::new())),
+            staging: None,
         }
     }
 
@@ -2530,6 +2607,13 @@ mod tests {
             .send_batch(vec![json_msg(serde_json::json!({"source": "local"}))])
             .await
             .unwrap();
+        assert_eq!(
+            publisher.deferred_commit_interval(),
+            Some(FINALIZE_INTERVAL)
+        );
+        let mut early = ObjectStoreConsumer::new(&config).await.unwrap();
+        assert!(early.receive_batch(10).await.unwrap().messages.is_empty());
+        publisher.flush().await.unwrap();
 
         let mut consumer = ObjectStoreConsumer::new(&config).await.unwrap();
         let batch = consumer.receive_batch(10).await.unwrap();
@@ -2573,6 +2657,7 @@ mod tests {
             )])
             .await
             .unwrap();
+        publisher.flush().await.unwrap();
 
         let mut objects: Vec<String> = std::fs::read_dir(dir.path())
             .unwrap()
@@ -2871,6 +2956,7 @@ mod tests {
                 .send_batch(rows.iter().cloned().map(json_msg).collect())
                 .await
                 .unwrap();
+            publisher.flush().await.unwrap();
 
             let files: Vec<_> = std::fs::read_dir(dir.path())
                 .unwrap()

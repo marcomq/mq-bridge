@@ -6,9 +6,10 @@
 //! Finding an installed plugin from the endpoint name a route asked for.
 //!
 //! A `custom` endpoint whose name no factory is registered under is the trigger:
-//! the searched directories are consulted for `libmq_bridge_<name>` and nothing
-//! else, so a route never loads a library it did not name. A host that lists what
-//! is installed before any route asks calls [`discover_all_endpoint_plugins`].
+//! the searched directories are consulted for `libmq_bridge_<name>` first. Only a
+//! name no library file is named for falls back to scanning every installed library,
+//! since one library may provide several names. A host that lists what is installed
+//! before any route asks calls [`discover_all_endpoint_plugins`].
 //!
 //! Loading a library runs its code, so a discovered one must pass
 //! `check_trusted` first. A library loaded by explicit path is the caller's choice
@@ -191,6 +192,23 @@ pub fn discover_middleware_plugin_in(
     discover_plugin_in(dirs, name, PluginKind::Middleware)
 }
 
+/// [`discover_endpoint_plugin`], falling back to a scan of the whole search path:
+/// one library may provide several names, such as `connect_mapping`.
+pub(crate) fn discover_endpoint_plugin_or_scan(name: &str) -> anyhow::Result<()> {
+    if discover_endpoint_plugin(name)?.is_none() {
+        discover_all_endpoint_plugins();
+    }
+    Ok(())
+}
+
+/// The middleware counterpart of [`discover_endpoint_plugin_or_scan`].
+pub(crate) fn discover_middleware_plugin_or_scan(name: &str) -> anyhow::Result<()> {
+    if discover_middleware_plugin(name)?.is_none() {
+        discover_all_endpoint_plugins();
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy)]
 enum PluginKind {
     Endpoint,
@@ -288,7 +306,11 @@ pub fn discover_all_endpoint_plugins_in(dirs: &[PathBuf]) -> Vec<PluginInfo> {
             else {
                 continue;
             };
-            if !seen.insert(stem.to_owned()) || !path.is_file() || is_registered(stem) {
+            if !seen.insert(stem.to_owned())
+                || !path.is_file()
+                || is_registered(stem)
+                || super::loaded_from(&path).is_some()
+            {
                 continue;
             }
             match exports_plugin_entry(&path) {
@@ -313,6 +335,9 @@ pub fn discover_all_endpoint_plugins_in(dirs: &[PathBuf]) -> Vec<PluginInfo> {
 /// Loads a library found on the search path, after [`check_trusted`], and logs
 /// its path and SHA-256 so every library loaded without being named is on record.
 fn load_discovered(path: &Path) -> anyhow::Result<Vec<PluginInfo>> {
+    if let Some(infos) = super::loaded_from(path) {
+        return Ok(infos);
+    }
     check_trusted(path)?;
     let sha256 = sha256_hex(path).with_context(|| format!("failed to read {}", path.display()))?;
     let infos = load_endpoint_plugins(path)?;
