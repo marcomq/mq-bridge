@@ -695,6 +695,8 @@ class ObjectStoreConfig(TypedDict, total=False):
     encryption: Optional[EncryptionConfig]
     extension: Optional[str]
     format: FileFormat
+    fsync: Optional[ObjectStoreFsync]
+    fsync_interval_ms: Optional[int]
     idempotency: Optional[bool]
     max_object_bytes: Optional[int]
     name_by: NameBy
@@ -1022,6 +1024,7 @@ MongoDbFormat = Literal["normal", "json", "text", "raw", "envelope", "envelope_j
 MqttProtocol = Literal["v5", "v3"]
 NameBy = Literal["auto", "source_position", "write_time"]
 NatsDeliverPolicy = Literal["all", "last", "new", "last_per_subject"]
+ObjectStoreFsync = Literal["off", "batch", "periodic"]
 PackFormat = Literal["mqb", "benthos_binary"]
 PostgresConsume = Literal["capture_new", "capture_all", "snapshot"]
 SpoolClaim = Literal["exclusive", "warn", "off"]
