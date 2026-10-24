@@ -169,7 +169,7 @@ impl UiAppRuntimeHooks {
 pub struct UiApp {
     config: Arc<RwLock<AppConfig>>,
     trusted_plugin_paths: Arc<HashSet<PathBuf>>,
-    metrics_handle: PrometheusHandle,
+    metrics_handle: Option<PrometheusHandle>,
     config_file_path: Arc<String>,
     secret_store: Arc<dyn SecretStore>,
     ui_handles: Arc<RwLock<HashMap<String, RouteHandle>>>,
@@ -731,7 +731,7 @@ impl UiApp {
         let storage_security = storage_security_for_cli(&initial_config);
         Self::new_internal(
             initial_config,
-            metrics_handle,
+            Some(metrics_handle),
             config_file_path,
             Arc::new(EnvFileSecretStore::new(".env")),
             storage_security,
@@ -742,14 +742,14 @@ impl UiApp {
 
     pub fn new_with_startup_plugins(
         initial_config: AppConfig,
-        metrics_handle: PrometheusHandle,
+        metrics_handle: impl Into<Option<PrometheusHandle>>,
         config_file_path: String,
         startup_plugins: &[String],
     ) -> Result<Self> {
         let storage_security = storage_security_for_cli(&initial_config);
         Self::new_internal(
             initial_config,
-            metrics_handle,
+            metrics_handle.into(),
             config_file_path,
             Arc::new(EnvFileSecretStore::new(".env")),
             storage_security,
@@ -766,7 +766,7 @@ impl UiApp {
     ) -> Result<Self> {
         Self::new_internal(
             initial_config.clone(),
-            metrics_handle,
+            Some(metrics_handle),
             config_file_path,
             secret_store,
             storage_security_for_cli(&initial_config),
@@ -784,7 +784,7 @@ impl UiApp {
     ) -> Result<Self> {
         Self::new_internal(
             initial_config,
-            metrics_handle,
+            Some(metrics_handle),
             config_file_path,
             secret_store,
             storage_security,
@@ -804,7 +804,7 @@ impl UiApp {
     ) -> Result<Self> {
         Self::new_internal(
             initial_config,
-            metrics_handle,
+            Some(metrics_handle),
             config_file_path,
             secret_store,
             storage_security,
@@ -825,7 +825,7 @@ impl UiApp {
     ) -> Result<Self> {
         Self::new_internal(
             initial_config,
-            metrics_handle,
+            Some(metrics_handle),
             config_file_path,
             secret_store,
             storage_security,
@@ -836,7 +836,7 @@ impl UiApp {
 
     fn new_internal(
         mut initial_config: AppConfig,
-        metrics_handle: PrometheusHandle,
+        metrics_handle: Option<PrometheusHandle>,
         config_file_path: String,
         secret_store: Arc<dyn SecretStore>,
         storage_security: StorageSecurityInfoResponse,
@@ -1090,7 +1090,10 @@ impl UiApp {
     }
 
     pub fn render_metrics(&self) -> String {
-        self.metrics_handle.render()
+        self.metrics_handle
+            .as_ref()
+            .map(PrometheusHandle::render)
+            .unwrap_or_default()
     }
 
     pub async fn consumer_status(&self, consumer_key: &str) -> Option<ConsumerStatusResponse> {
