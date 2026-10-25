@@ -68,7 +68,9 @@ impl mq_bridge::traits::Handler for CountingObserver {
     }
 
     fn observe(&self, msgs: &[CanonicalMessage]) -> Option<mq_bridge::Passthrough> {
-        self.counter.fetch_add(msgs.len() as u64, Ordering::Relaxed);
+        let first_deliveries = msgs.iter().filter(|msg| !is_redelivery(msg)).count();
+        self.counter
+            .fetch_add(first_deliveries as u64, Ordering::Relaxed);
         if let Some(capture) = &self.capture {
             msgs.iter()
                 .for_each(|msg| capture.push(&self.source_key, msg.clone()));

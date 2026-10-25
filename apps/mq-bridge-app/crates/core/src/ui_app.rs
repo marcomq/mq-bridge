@@ -710,7 +710,12 @@ impl mq_bridge::traits::Handler for CollectorContext {
     }
 
     fn observe(&self, msgs: &[CanonicalMessage]) -> Option<Passthrough> {
-        self.counter.fetch_add(msgs.len() as u64, Ordering::Relaxed);
+        let first_deliveries = msgs
+            .iter()
+            .filter(|msg| !crate::route_metrics::is_redelivery(msg))
+            .count();
+        self.counter
+            .fetch_add(first_deliveries as u64, Ordering::Relaxed);
         if self.capture_enabled {
             msgs.iter().for_each(|msg| self.capture_one(msg));
         }
