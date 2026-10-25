@@ -37,24 +37,9 @@ mod status_cmd;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-/// App-level default batch size for headless routes (`copy`, MCP) when the caller
-/// does not specify one. The library's `RouteOptions::default()` is 512; this is the
-/// bulk-move value the app applies on top.
-pub(crate) const DEFAULT_BATCH_SIZE: usize = 1024;
-
-/// The batch size for a run that names none: what the sink's schema asks for
-/// (`x-mqb-default-batch-size`), else [`DEFAULT_BATCH_SIZE`].
-pub(crate) fn default_batch_size(output: &mq_bridge::models::Endpoint) -> usize {
-    let name = match &output.endpoint_type {
-        mq_bridge::models::EndpointType::Custom { name, .. } => name,
-        named => named.name(),
-    };
-    mq_bridge::extensions::endpoint_default_batch_size(name).unwrap_or(DEFAULT_BATCH_SIZE)
-}
-
-/// App-level default route concurrency for headless routes (`copy`, MCP) when the
-/// caller does not specify one. See [`DEFAULT_BATCH_SIZE`].
-pub(crate) const DEFAULT_CONCURRENCY: usize = 4;
+#[cfg(test)]
+pub(crate) use mq_bridge_app::config::DEFAULT_BATCH_SIZE;
+pub(crate) use mq_bridge_app::config::{DEFAULT_CONCURRENCY, default_batch_size};
 
 /// How often `copy --drain` checks whether the route task has ended. The engine
 /// exposes completion as a poll, not a notification; see [`run_copy`].

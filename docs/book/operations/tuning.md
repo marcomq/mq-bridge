@@ -14,11 +14,12 @@ the knob that stays opt-in.
 
 Two different starting points are worth knowing:
 
-- **Library / config-mode routes** default to `batch_size: 512`, `concurrency: 1` — the engine
-  primitive default. One batch is sent at a time, in source order, while the next is read.
-- **The `copy` CLI and the MCP server** default to `batch_size: 1024`, `concurrency: 4`
-  (`--batch-size` / `--concurrency` on `copy`), because they exist for bulk moves. The
-  benchmark numbers below use `copy`.
+- **Library routes** default to `batch_size: 512`, `concurrency: 1` — the engine primitive
+  default. One batch is sent at a time, in source order, while the next is read.
+- **Routes the app runs** — `copy`, the MCP server, config files and the UI — default to
+  `batch_size: 1024`, `concurrency: 4` (`--batch-size` / `--concurrency` on `copy`), unless
+  the sink asks for another batch size. Write `concurrency: 1` for a route whose sink must
+  see batches in source order. The benchmark numbers below use `copy`.
 
 When throughput matters, **`batch_size` is almost always the first knob to try.**
 

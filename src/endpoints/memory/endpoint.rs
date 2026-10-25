@@ -991,9 +991,6 @@ impl MessageConsumer for TransportQueueConsumer {
         };
 
         let commit = Box::new(move |dispositions: Vec<MessageDisposition>| {
-            let requeue = requeue.clone();
-            let topic = topic.clone();
-            let messages_for_retry = messages_for_retry.clone();
             Box::pin(async move {
                 if dispositions.len() != expected_count {
                     return Err(anyhow::anyhow!(

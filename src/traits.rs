@@ -4,7 +4,7 @@
 //  git clone https://github.com/marcomq/mq-bridge
 
 pub use crate::errors::{ConsumerError, HandlerError, PublisherError};
-pub use crate::outcomes::{Handled, Received, ReceivedBatch, Sent, SentBatch};
+pub use crate::outcomes::{Handled, Passthrough, Received, ReceivedBatch, Sent, SentBatch};
 use crate::CanonicalMessage;
 use anyhow::anyhow;
 use async_trait::async_trait;
@@ -133,6 +133,15 @@ pub trait Handler: Send + Sync + 'static {
         results
     }
 
+    /// Fast path for a handler that only observes messages and never changes them.
+    ///
+    /// `Some` forwards or acks the whole batch as is: `handle`/`handle_many` are not
+    /// called, messages are not cloned and no `correlation_id` is added. The default
+    /// `None` takes the normal per-message path.
+    fn observe(&self, _msgs: &[CanonicalMessage]) -> Option<Passthrough> {
+        None
+    }
+
     /// Tries to register a handler for a specific type.
     /// Returns `None` if this handler does not support registration (e.g. it's not a TypeHandler).
     fn register_handler(
@@ -152,6 +161,10 @@ impl<T: Handler + ?Sized> Handler for Arc<T> {
 
     async fn handle_many(&self, msgs: Vec<CanonicalMessage>) -> Vec<Result<Handled, HandlerError>> {
         (**self).handle_many(msgs).await
+    }
+
+    fn observe(&self, msgs: &[CanonicalMessage]) -> Option<Passthrough> {
+        (**self).observe(msgs)
     }
 
     fn register_handler(

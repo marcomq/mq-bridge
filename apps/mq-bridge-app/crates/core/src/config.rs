@@ -11,7 +11,7 @@ use anyhow::Result;
 use config::Config;
 use mq_bridge::{
     Route,
-    models::{Endpoint, EndpointType, Middleware, RouteOptions, SecretExtractor},
+    models::{Endpoint, EndpointType, Middleware, SecretExtractor},
 };
 use schemars::JsonSchema;
 use uuid::Uuid;
@@ -153,18 +153,40 @@ pub struct AppConfig {
     pub default_tab: String,
 }
 
-/// Generates the application schema with runtime defaults sourced from the
-/// actual mq-bridge model rather than schemars' fallback values.
+/// Route concurrency wherever the app runs a route that leaves it out: config
+/// files, the UI, `copy`, MCP. The library's `RouteOptions::default()` is 1.
+pub const DEFAULT_CONCURRENCY: usize = 4;
+
+/// Batch size wherever the app runs a route that leaves it out, unless the sink
+/// asks for another. The library's `RouteOptions::default()` is 512.
+pub const DEFAULT_BATCH_SIZE: usize = 1024;
+
+/// The batch size for a route that names none: what the sink's schema asks for
+/// (`x-mqb-default-batch-size`), else [`DEFAULT_BATCH_SIZE`].
+pub fn default_batch_size(output: &Endpoint) -> usize {
+    let name = match &output.endpoint_type {
+        EndpointType::Custom { name, .. } => name,
+        named => named.name(),
+    };
+    mq_bridge::extensions::endpoint_default_batch_size(name).unwrap_or(DEFAULT_BATCH_SIZE)
+}
+
+/// Generates the application schema with the app's route defaults rather than
+/// the library's.
 pub fn app_config_schema() -> serde_json::Value {
     let mut schema = serde_json::to_value(schemars::schema_for!(AppConfig))
         .expect("AppConfig schema should serialize");
-    let default = serde_json::Value::from(RouteOptions::default().batch_size);
     for definition in ["RouteConfig", "ConsumerConfig"] {
-        schema
-            .pointer_mut(&format!("/$defs/{definition}/properties/batch_size"))
-            .and_then(serde_json::Value::as_object_mut)
-            .unwrap_or_else(|| panic!("AppConfig schema should contain {definition}.batch_size"))
-            .insert("default".to_string(), default.clone());
+        for (field, default) in [
+            ("concurrency", DEFAULT_CONCURRENCY),
+            ("batch_size", DEFAULT_BATCH_SIZE),
+        ] {
+            schema
+                .pointer_mut(&format!("/$defs/{definition}/properties/{field}"))
+                .and_then(serde_json::Value::as_object_mut)
+                .unwrap_or_else(|| panic!("AppConfig schema should contain {definition}.{field}"))
+                .insert("default".to_string(), default.into());
+        }
     }
 
     for (name, declared) in registered_endpoint_schemas() {
@@ -923,16 +945,18 @@ fn load_config_internal(
 
     let raw = settings.clone().try_deserialize::<serde_json::Value>()?;
 
-    let mut config: AppConfig = match lift_bare_routes(raw) {
+    let lifted = lift_bare_routes(raw.clone());
+    let mut config: AppConfig = match &lifted {
         Some(lifted) => Config::builder()
             .add_source(config::File::from_str(
-                &serde_json::to_string(&lifted)?,
+                &serde_json::to_string(lifted)?,
                 config::FileFormat::Json,
             ))
             .build()?
             .try_deserialize()?,
         None => settings.try_deserialize()?,
     };
+    config.apply_app_route_defaults(lifted.as_ref().unwrap_or(&raw));
     // Without env overrides (desktop) route secrets need re-applying as well.
     let stored_secrets: HashMap<String, String> = env_vars
         .into_iter()
@@ -1119,6 +1143,46 @@ pub fn load_config_at_path(
 }
 
 impl AppConfig {
+    /// Sets the app's `concurrency` and `batch_size` on every route and consumer
+    /// whose source, `written`, leaves them out. Read off the deserialized
+    /// options, a left-out value would be indistinguishable from a written 1.
+    pub fn apply_app_route_defaults(&mut self, written: &serde_json::Value) {
+        let has = |entry: Option<&serde_json::Value>, key: &str| {
+            entry.and_then(|entry| entry.get(key)).is_some()
+        };
+        for (name, route) in &mut self.routes {
+            let entry = written.get("routes").and_then(|routes| routes.get(name));
+            if !has(entry, "concurrency") {
+                route.route.options.concurrency = DEFAULT_CONCURRENCY;
+            }
+            if !has(entry, "batch_size") {
+                route.route.options.batch_size = default_batch_size(&route.route.output);
+            }
+        }
+        for (index, consumer) in self.consumers.iter_mut().enumerate() {
+            let entry = written
+                .get("consumers")
+                .and_then(|consumers| consumers.get(index));
+            if !has(entry, "concurrency") {
+                consumer.options.concurrency = DEFAULT_CONCURRENCY;
+            }
+            if !has(entry, "batch_size") {
+                let sink = match &consumer.output {
+                    ConsumerOutputConfig::Publisher {
+                        publisher,
+                        publisher_id,
+                    } => self.publishers.iter().find(|candidate| {
+                        publisher_id.as_deref() == Some(candidate.id.as_str())
+                            || candidate.name == *publisher
+                    }),
+                    _ => None,
+                };
+                consumer.options.batch_size =
+                    sink.map_or(DEFAULT_BATCH_SIZE, |sink| default_batch_size(&sink.endpoint));
+            }
+        }
+    }
+
     pub fn ensure_entity_ids(&mut self) {
         assign_entity_ids(
             "publisher",
@@ -2010,18 +2074,48 @@ publishers:
     }
 
     #[test]
-    fn app_schema_uses_runtime_batch_size_default() {
+    fn app_schema_uses_the_app_route_defaults() {
         let schema = app_config_schema();
         for definition in ["RouteConfig", "ConsumerConfig"] {
-            let batch_size = schema
-                .pointer(&format!("/$defs/{definition}/properties/batch_size"))
-                .unwrap();
-            assert_eq!(
-                batch_size["default"],
-                mq_bridge::models::RouteOptions::default().batch_size
-            );
-            assert_eq!(batch_size["minimum"], 1);
+            let property = |field: &str| {
+                schema
+                    .pointer(&format!("/$defs/{definition}/properties/{field}"))
+                    .unwrap()
+                    .clone()
+            };
+            assert_eq!(property("batch_size")["default"], DEFAULT_BATCH_SIZE);
+            assert_eq!(property("batch_size")["minimum"], 1);
+            assert_eq!(property("concurrency")["default"], DEFAULT_CONCURRENCY);
         }
+    }
+
+    #[test]
+    fn a_config_file_gets_the_app_route_defaults_but_keeps_written_values() {
+        let path = std::env::temp_dir().join(format!("mqb-defaults-{}.yml", Uuid::new_v4()));
+        std::fs::write(
+            &path,
+            "routes:\n  bare:\n    input: { memory: { topic: a } }\n    output: { memory: { topic: b } }\n  \
+             pinned:\n    concurrency: 1\n    batch_size: 512\n    input: { memory: { topic: c } }\n    \
+             output: { memory: { topic: d } }\nconsumers:\n  - name: plain\n    endpoint: { memory: { topic: e } }\n",
+        )
+        .unwrap();
+        let (config, _) = load_config_at_path(path.to_string_lossy()).unwrap();
+        std::fs::remove_file(&path).ok();
+
+        let options = |name: &str| {
+            &config
+                .consumers
+                .iter()
+                .find(|consumer| consumer.name == name)
+                .unwrap()
+                .options
+        };
+        for name in ["bare", "plain"] {
+            assert_eq!(options(name).concurrency, DEFAULT_CONCURRENCY, "{name}");
+            assert_eq!(options(name).batch_size, DEFAULT_BATCH_SIZE, "{name}");
+        }
+        assert_eq!(options("pinned").concurrency, 1);
+        assert_eq!(options("pinned").batch_size, 512);
     }
 
     #[test]

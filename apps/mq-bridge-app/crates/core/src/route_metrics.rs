@@ -46,6 +46,37 @@ pub fn is_redelivery(msg: &CanonicalMessage) -> bool {
     msg.metadata.contains_key(RETRY_ATTEMPT_KEY)
 }
 
+/// Counts and optionally captures a route's messages, forwarding or acking
+/// each batch untouched via [`Handler::observe`](mq_bridge::traits::Handler::observe).
+pub struct CountingObserver {
+    pub counter: Arc<AtomicU64>,
+    pub capture: Option<MessageCapture>,
+    pub source_key: String,
+    pub passthrough: mq_bridge::Passthrough,
+}
+
+#[async_trait::async_trait]
+impl mq_bridge::traits::Handler for CountingObserver {
+    async fn handle(
+        &self,
+        msg: CanonicalMessage,
+    ) -> Result<mq_bridge::Handled, mq_bridge::HandlerError> {
+        Ok(match self.observe(std::slice::from_ref(&msg)) {
+            Some(mq_bridge::Passthrough::Forward) => mq_bridge::Handled::Publish(msg),
+            _ => mq_bridge::Handled::Ack,
+        })
+    }
+
+    fn observe(&self, msgs: &[CanonicalMessage]) -> Option<mq_bridge::Passthrough> {
+        self.counter.fetch_add(msgs.len() as u64, Ordering::Relaxed);
+        if let Some(capture) = &self.capture {
+            msgs.iter()
+                .for_each(|msg| capture.push(&self.source_key, msg.clone()));
+        }
+        Some(self.passthrough)
+    }
+}
+
 /// Metadata key naming the route/consumer a captured message came from.
 pub const CAPTURE_SOURCE_KEY: &str = "ui_source";
 /// Metadata key holding the capture timestamp, as epoch milliseconds.

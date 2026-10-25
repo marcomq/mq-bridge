@@ -445,7 +445,8 @@ impl ObjectStorePublisher {
         })
     }
 
-    /// Writes one object, staged when the local store syncs in groups.
+    /// Writes one object, staged when the local store syncs in groups. With `create_only` an
+    /// existing object is kept and the write counts as done.
     async fn write_object(
         &self,
         key: &ObjPath,
@@ -456,7 +457,12 @@ impl ObjectStorePublisher {
             let target = LocalFileSystem::new()
                 .path_to_filesystem(key)
                 .map_err(|e| PublisherError::NonRetryable(anyhow!(e)))?;
-            return staging.write(target, body).await.map_err(|e| {
+            let staged = if create_only {
+                staging.write_new(target, body).await
+            } else {
+                staging.write(target, body).await
+            };
+            return staged.map_err(|e| {
                 PublisherError::Retryable(anyhow!(e).context(format!("staging object '{key}'")))
             });
         }

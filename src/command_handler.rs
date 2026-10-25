@@ -3,15 +3,36 @@
 //  Licensed under MIT OR Apache-2.0, see LICENSE file for more details
 //  git clone https://github.com/marcomq/mq-bridge
 
-use crate::traits::{Handled, HandlerError};
+use crate::traits::{Handled, HandlerError, Passthrough};
 use crate::traits::{Handler, MessagePublisher};
 use crate::CanonicalMessage;
 use async_trait::async_trait;
 use std::any::Any;
+use std::collections::hash_map::Entry;
 use std::future::Future;
 use std::sync::Arc;
 
 use crate::traits::{PublisherError, Sent, SentBatch};
+
+const CORRELATION_ID_KEY: &str = "correlation_id";
+
+/// Keeps a correlation_id the response already has, else takes the inbound one, else
+/// the original message id as 32 lowercase hex digits.
+fn set_correlation_id<'a>(
+    response: &mut CanonicalMessage,
+    inbound: impl FnOnce() -> Option<&'a str>,
+    original_id: u128,
+) {
+    if let Entry::Vacant(slot) = response.metadata.entry(CORRELATION_ID_KEY.to_string()) {
+        slot.insert(match inbound() {
+            Some(id) => id.to_owned(),
+            None => fast_uuid_v7::format_uuid_hex(original_id)
+                .as_str()
+                .to_owned(),
+        });
+    }
+}
+
 #[async_trait]
 impl<F, Fut> Handler for F
 where
@@ -42,19 +63,23 @@ impl CommandPublisher {
 #[async_trait]
 impl MessagePublisher for CommandPublisher {
     async fn send(&self, message: CanonicalMessage) -> Result<Sent, PublisherError> {
-        let inbound_correlation_id = message.metadata.get("correlation_id").cloned();
+        match self.handler.observe(std::slice::from_ref(&message)) {
+            Some(Passthrough::Forward) => return self.inner.send(message).await,
+            Some(Passthrough::Ack) => return Ok(Sent::Ack),
+            None => {}
+        }
+        let inbound_correlation_id = message.metadata.get(CORRELATION_ID_KEY).cloned();
         let original_id = message.message_id;
         match self.handler.handle(message).await {
             Ok(Handled::Publish(mut response_msg)) => {
                 // For internal correlation, set the response message's ID to the original.
                 response_msg.message_id = original_id;
                 // For end-to-end tracing, propagate or create a correlation_id.
-                let fallback_correlation_id =
-                    inbound_correlation_id.unwrap_or_else(|| format!("{:032x}", original_id));
-                response_msg
-                    .metadata
-                    .entry("correlation_id".to_string())
-                    .or_insert(fallback_correlation_id);
+                set_correlation_id(
+                    &mut response_msg,
+                    || inbound_correlation_id.as_deref(),
+                    original_id,
+                );
                 self.inner.send(response_msg).await
             }
             Ok(Handled::Ack) => Ok(Sent::Ack),
@@ -66,6 +91,11 @@ impl MessagePublisher for CommandPublisher {
         &self,
         messages: Vec<CanonicalMessage>,
     ) -> Result<SentBatch, PublisherError> {
+        match self.handler.observe(&messages) {
+            Some(Passthrough::Forward) => return self.inner.send_batch(messages).await,
+            Some(Passthrough::Ack) => return Ok(SentBatch::Ack),
+            None => {}
+        }
         let handler_results = self.handler.handle_many(messages.clone()).await;
 
         if handler_results.len() != messages.len() {
@@ -88,14 +118,12 @@ impl MessagePublisher for CommandPublisher {
             match result {
                 Ok(Handled::Ack) => {}
                 Ok(Handled::Publish(mut response_msg)) => {
-                    let inbound_correlation_id = message.metadata.get("correlation_id").cloned();
                     response_msg.message_id = original_id;
-                    let fallback_correlation_id =
-                        inbound_correlation_id.unwrap_or_else(|| format!("{:032x}", original_id));
-                    response_msg
-                        .metadata
-                        .entry("correlation_id".to_string())
-                        .or_insert(fallback_correlation_id);
+                    set_correlation_id(
+                        &mut response_msg,
+                        || message.metadata.get(CORRELATION_ID_KEY).map(String::as_str),
+                        original_id,
+                    );
                     to_publish.push(response_msg);
                 }
                 Err(HandlerError::NonRetryable(err)) => {
@@ -143,6 +171,26 @@ mod tests {
     use super::*;
     use crate::endpoints::memory::MemoryPublisher;
 
+    #[test]
+    fn correlation_id_fallback_matches_lower_hex() {
+        for id in [
+            0u128,
+            1,
+            0xab,
+            u128::MAX,
+            0x01a16e51_2935_7512_a34d_b1c599c4a610,
+        ] {
+            let mut msg = CanonicalMessage::new(Vec::new(), None);
+            set_correlation_id(&mut msg, || None, id);
+            assert_eq!(msg.metadata[CORRELATION_ID_KEY], format!("{id:032x}"));
+        }
+        let mut msg = CanonicalMessage::new(Vec::new(), None);
+        set_correlation_id(&mut msg, || Some("inbound"), 7);
+        assert_eq!(msg.metadata[CORRELATION_ID_KEY], "inbound");
+        set_correlation_id(&mut msg, || None, 8);
+        assert_eq!(msg.metadata[CORRELATION_ID_KEY], "inbound");
+    }
+
     #[tokio::test]
     async fn test_command_handler_produces_response() {
         let memory_publisher = MemoryPublisher::new_local("test_command_out_resp", 10);
@@ -160,6 +208,46 @@ mod tests {
         let received = channel.drain_messages();
         assert_eq!(received.len(), 1);
         assert_eq!(received[0].payload, "response_to_command1".as_bytes());
+    }
+
+    struct Observer(Passthrough);
+
+    #[async_trait]
+    impl Handler for Observer {
+        async fn handle(&self, _msg: CanonicalMessage) -> Result<Handled, HandlerError> {
+            unreachable!("observe short-circuits handle")
+        }
+        fn observe(&self, _msgs: &[CanonicalMessage]) -> Option<Passthrough> {
+            Some(self.0)
+        }
+    }
+
+    #[tokio::test]
+    async fn observe_forwards_or_acks_without_handle() {
+        let forward_out = MemoryPublisher::new_local("test_command_observe_fwd", 10);
+        let forward_channel = forward_out.channel();
+        let forward = CommandPublisher::new(forward_out, Observer(Passthrough::Forward));
+        let sent = forward
+            .send_batch(vec!["a".into(), "b".into()])
+            .await
+            .unwrap();
+        assert!(matches!(sent, SentBatch::Ack));
+        forward.send("c".into()).await.unwrap();
+        let received = forward_channel.drain_messages();
+        assert_eq!(received.len(), 3);
+        assert!(received
+            .iter()
+            .all(|m| !m.metadata.contains_key(CORRELATION_ID_KEY)));
+
+        let ack_out = MemoryPublisher::new_local("test_command_observe_ack", 10);
+        let ack_channel = ack_out.channel();
+        let ack = CommandPublisher::new(ack_out, Observer(Passthrough::Ack));
+        assert!(matches!(
+            ack.send_batch(vec!["a".into()]).await.unwrap(),
+            SentBatch::Ack
+        ));
+        assert!(matches!(ack.send("b".into()).await.unwrap(), Sent::Ack));
+        assert!(ack_channel.drain_messages().is_empty());
     }
 
     #[tokio::test]

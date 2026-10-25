@@ -30,6 +30,8 @@ pub(crate) enum StagedName {
 struct Staged {
     staged: PathBuf,
     target: PathBuf,
+    /// An existing target is kept and this file dropped, instead of replaced.
+    create_only: bool,
 }
 
 pub(crate) struct LocalStaging {
@@ -62,6 +64,25 @@ impl LocalStaging {
 
     /// Writes `body` under a staging name; it appears at `target` after `finalize`.
     pub(crate) async fn write(self: &Arc<Self>, target: PathBuf, body: Vec<u8>) -> io::Result<()> {
+        self.stage(target, body, false).await
+    }
+
+    /// Like [`Self::write`], but a `target` that exists by then is left as it is.
+    #[cfg_attr(not(feature = "object-store"), allow(dead_code))]
+    pub(crate) async fn write_new(
+        self: &Arc<Self>,
+        target: PathBuf,
+        body: Vec<u8>,
+    ) -> io::Result<()> {
+        self.stage(target, body, true).await
+    }
+
+    async fn stage(
+        self: &Arc<Self>,
+        target: PathBuf,
+        body: Vec<u8>,
+        create_only: bool,
+    ) -> io::Result<()> {
         let (dir, staged_name) = match self.naming {
             StagedName::Suffixed => {
                 let name = target.file_name().ok_or_else(|| {
@@ -84,7 +105,11 @@ impl LocalStaging {
             this.pending
                 .lock()
                 .expect("staging list mutex poisoned")
-                .push(Staged { staged, target });
+                .push(Staged {
+                    staged,
+                    target,
+                    create_only,
+                });
             Ok(())
         })
         .await
@@ -165,7 +190,17 @@ fn finalize_all(root: &Path, batch: &[Staged]) -> io::Result<()> {
         if let Some(parent) = entry.target.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::rename(&entry.staged, &entry.target)?;
+        if entry.create_only {
+            match std::fs::hard_link(&entry.staged, &entry.target) {
+                Ok(()) => {}
+                // A duplicate: the target already holds what this write would have.
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error),
+            }
+            std::fs::remove_file(&entry.staged)?;
+        } else {
+            std::fs::rename(&entry.staged, &entry.target)?;
+        }
     }
     let mut dirs = BTreeSet::new();
     for entry in batch {
@@ -308,6 +343,28 @@ mod tests {
         assert_eq!(std::fs::read(key).unwrap(), b"x\n");
         assert_eq!(std::fs::read(twin).unwrap(), b"y\n");
         assert_eq!(names(dir.path()), ["2026", "2027"]);
+    }
+
+    #[tokio::test]
+    async fn a_create_only_write_keeps_an_existing_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let staging = LocalStaging::new(dir.path().to_path_buf(), StagedName::Suffixed, SECOND);
+        let kept = dir.path().join("kept.jsonl");
+        let fresh = dir.path().join("fresh.jsonl");
+        std::fs::write(&kept, b"first\n").unwrap();
+        staging
+            .write_new(kept.clone(), b"second\n".to_vec())
+            .await
+            .unwrap();
+        staging
+            .write_new(fresh.clone(), b"new\n".to_vec())
+            .await
+            .unwrap();
+
+        staging.finalize().await.unwrap();
+        assert_eq!(std::fs::read(&kept).unwrap(), b"first\n");
+        assert_eq!(std::fs::read(&fresh).unwrap(), b"new\n");
+        assert_eq!(names(dir.path()), ["fresh.jsonl", "kept.jsonl"]);
     }
 
     #[tokio::test]

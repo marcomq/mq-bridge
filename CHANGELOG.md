@@ -11,6 +11,10 @@ All notable changes to `mq-bridge`. Newest first.
   visible and the source is committed after that sync, so a shorter interval trades
   throughput for latency. `batch` syncs each object before its ack (the 1.1.0 behaviour),
   `off` never syncs (the 1.0.3 behaviour). Remote stores ignore both.
+- **`Handler::observe` for handlers that only watch messages.** Returning
+  `Some(Passthrough::Forward)` or `Some(Passthrough::Ack)` publishes or acks the batch
+  unchanged, without calling `handle`, cloning messages or adding a `correlation_id`. The
+  default returns `None` and keeps the existing behaviour. The app's collector routes use it.
 
 ### Changed
 
@@ -18,6 +22,10 @@ All notable changes to `mq-bridge`. Newest first.
   startup checks, using the library named for the endpoint first and a full scan only if that
   misses. The app no longer loads every installed plugin at start; only `--schema`, the UI
   schema, `list`, `describe` and unknown URI schemes scan.
+- **App routes from config files and the UI default to `concurrency: 4` and `batch_size: 1024`,**
+  like `copy` and MCP already did; a sink's own preferred batch size still wins. Before, they
+  got the library's `1` and `512`. A written value is kept, so a route that needs source order
+  sets `concurrency: 1`. The library defaults are unchanged.
 - **`concurrency: 1` reads the next batch while the current one is sent.** Sends stay one at a
   time in source order. On a clean stop the batch read ahead is sent; after an error it is
   returned to the source.

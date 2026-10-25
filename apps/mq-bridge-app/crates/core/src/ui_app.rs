@@ -3,9 +3,7 @@ use crate::config::{
     ConsumerOutputConfig, ConsumerResponseConfig, EnvFileSecretStore, PublisherClient, SecretStore,
 };
 use crate::encrypted_config::has_config_master_key;
-use crate::route_metrics::{
-    CAPTURE_SOURCE_KEY, CAPTURE_TIME_KEY, MessageCapture, RouteMetrics, is_redelivery,
-};
+use crate::route_metrics::{CAPTURE_SOURCE_KEY, CAPTURE_TIME_KEY, MessageCapture, RouteMetrics};
 use crate::status_registry::{
     InstanceKind, InstanceStatus, LocalStatusRegistry, StatusEntity, StatusLease, StatusRoute,
     StatusSnapshot, StatusSummary, endpoint_type_label, list_off_thread,
@@ -16,7 +14,8 @@ use metrics_exporter_prometheus::PrometheusHandle;
 use mq_bridge::models::{Endpoint, EndpointType, Route, StaticConfig};
 use mq_bridge::route::{RouteHandle, RouteOutcome};
 use mq_bridge::{
-    CanonicalMessage, Handled, HandlerError, Publisher, Sent, msg, unregister_publisher,
+    CanonicalMessage, Handled, HandlerError, Passthrough, Publisher, Sent, msg,
+    unregister_publisher,
 };
 use schemars::JsonSchema;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -660,6 +659,63 @@ struct CollectorContext {
     counter: Arc<AtomicU64>,
     output: ResolvedConsumerOutput,
     capture_enabled: bool,
+}
+
+impl CollectorContext {
+    fn capture_one(&self, msg: &CanonicalMessage) {
+        let mut enriched = msg.clone();
+
+        // The configured response, if any, is recorded alongside the
+        // request so the UI can show both halves of a request/reply.
+        if let ResolvedConsumerOutput::Response { response: Some(r) } = &self.output {
+            let meta = &mut enriched.metadata;
+            meta.insert("ui_response_payload".into(), r.payload.clone());
+            if let Ok(headers) = serde_json::to_string(&r.headers) {
+                meta.insert("ui_response_metadata".into(), headers);
+            }
+        }
+
+        // Tags the source/capture time and never blocks the bridge:
+        // a full buffer drops its oldest entry to keep "last N".
+        self.capture.push(&self.source_key, enriched);
+    }
+
+    fn passthrough(&self) -> Passthrough {
+        match &self.output {
+            ResolvedConsumerOutput::None => Passthrough::Ack,
+            // A `null` output with middlewares still runs them.
+            ResolvedConsumerOutput::Publisher { endpoint, .. }
+                if matches!(endpoint.endpoint_type, EndpointType::Null)
+                    && endpoint.middlewares.is_empty() =>
+            {
+                Passthrough::Ack
+            }
+            ResolvedConsumerOutput::Publisher { .. } => Passthrough::Forward,
+            // The `Static` output endpoint produces the response
+            // (payload + headers); we just trigger it.
+            ResolvedConsumerOutput::Response { response: Some(_) } => Passthrough::Forward,
+            ResolvedConsumerOutput::Response { response: None } => Passthrough::Ack,
+        }
+    }
+}
+
+// Only observes: `observe` lets the engine forward each batch untouched.
+#[async_trait::async_trait]
+impl mq_bridge::traits::Handler for CollectorContext {
+    async fn handle(&self, msg: CanonicalMessage) -> Result<Handled, HandlerError> {
+        match self.observe(std::slice::from_ref(&msg)) {
+            Some(Passthrough::Forward) => Ok(Handled::Publish(msg)),
+            _ => Ok(Handled::Ack),
+        }
+    }
+
+    fn observe(&self, msgs: &[CanonicalMessage]) -> Option<Passthrough> {
+        self.counter.fetch_add(msgs.len() as u64, Ordering::Relaxed);
+        if self.capture_enabled {
+            msgs.iter().for_each(|msg| self.capture_one(msg));
+        }
+        Some(self.passthrough())
+    }
 }
 
 fn resolve_consumer_output(
@@ -2010,7 +2066,12 @@ impl UiApp {
         msg: CanonicalMessage,
     ) -> Result<Handled, HandlerError> {
         let body = msg.payload;
-        let new_config: AppConfig = match serde_json::from_slice(&body) {
+        let parsed = serde_json::from_slice::<serde_json::Value>(&body).and_then(|written| {
+            let mut config: AppConfig = serde_json::from_value(written.clone())?;
+            config.apply_app_route_defaults(&written);
+            Ok(config)
+        });
+        let new_config: AppConfig = match parsed {
             Ok(cfg) => cfg,
             Err(e) => {
                 let mut msg_str = format!("Json deserialize error: {}", e);
@@ -2099,69 +2160,17 @@ impl UiApp {
                 },
             };
 
-            let context = Arc::new(CollectorContext {
+            let context = CollectorContext {
                 source_key: consumer_key.clone(),
                 capture,
                 counter: Arc::clone(&sequence_counter),
                 output: resolved_output,
                 capture_enabled,
-            });
+            };
 
             let route = Route::new(consumer.endpoint.clone(), output_for_route)
                 .with_options(consumer.options.clone())
-                .with_handler(move |msg: CanonicalMessage| {
-                    let ctx = Arc::clone(&context);
-                    async move {
-                        // A `retry` redelivery re-enters the handler, so counting
-                        // it would inflate the consumer's total by `max_attempts`.
-                        if !is_redelivery(&msg) {
-                            ctx.counter.fetch_add(1, Ordering::Relaxed);
-                        }
-
-                        if ctx.capture_enabled {
-                            let mut enriched = msg.clone();
-
-                            // The configured response, if any, is recorded alongside the
-                            // request so the UI can show both halves of a request/reply.
-                            if let ResolvedConsumerOutput::Response { response: Some(r) } =
-                                &ctx.output
-                            {
-                                let meta = &mut enriched.metadata;
-                                meta.insert("ui_response_payload".into(), r.payload.clone());
-                                if let Ok(headers) = serde_json::to_string(&r.headers) {
-                                    meta.insert("ui_response_metadata".into(), headers);
-                                }
-                            }
-
-                            // Tags the source/capture time and never blocks the bridge:
-                            // a full buffer drops its oldest entry to keep "last N".
-                            ctx.capture.push(&ctx.source_key, enriched);
-                        }
-
-                        match &ctx.output {
-                            ResolvedConsumerOutput::None => Ok(Handled::Ack),
-                            ResolvedConsumerOutput::Publisher { endpoint, .. } => {
-                                // A `null` output with middlewares still runs them.
-                                if matches!(endpoint.endpoint_type, EndpointType::Null)
-                                    && endpoint.middlewares.is_empty()
-                                {
-                                    Ok(Handled::Ack)
-                                } else {
-                                    Ok(Handled::Publish(msg))
-                                }
-                            }
-                            ResolvedConsumerOutput::Response { response } => {
-                                // The `Static` output endpoint produces the response
-                                // (payload + headers); we just trigger it.
-                                if response.is_some() {
-                                    Ok(Handled::Publish(msg))
-                                } else {
-                                    Ok(Handled::Ack)
-                                }
-                            }
-                        }
-                    }
-                });
+                .with_handler(context);
             let internal_route_name = collector_route_name(&consumer_key);
             let shown = collector_display_name(consumer);
             mq_bridge::set_route_display_name(&internal_route_name, &shown);
