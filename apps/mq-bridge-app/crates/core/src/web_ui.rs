@@ -45,7 +45,7 @@ pub async fn start_web_server(
     bind_addr: String,
     initial_config: AppConfig,
     startup_plugins: Vec<String>,
-    metrics_handle: metrics_exporter_prometheus::PrometheusHandle,
+    metrics_handle: impl Into<Option<metrics_exporter_prometheus::PrometheusHandle>>,
     config_file_path: String,
 ) -> Result<(), anyhow::Error> {
     let bind_addr = bind_addr.to_string();

@@ -29,6 +29,13 @@ impl EventPublisher {
 #[async_trait]
 impl MessagePublisher for EventPublisher {
     async fn send(&self, message: CanonicalMessage) -> Result<Sent, PublisherError> {
+        if self
+            .handler
+            .observe(std::slice::from_ref(&message))
+            .is_some()
+        {
+            return Ok(Sent::Ack);
+        }
         match self.handler.handle(message).await {
             Ok(_) => Ok(Sent::Ack), // Ignore result (Ack or Publish), just Ack.
             Err(e) => Err(e),       // Converts HandlerError to PublisherError
@@ -39,6 +46,9 @@ impl MessagePublisher for EventPublisher {
         &self,
         messages: Vec<CanonicalMessage>,
     ) -> Result<SentBatch, PublisherError> {
+        if self.handler.observe(&messages).is_some() {
+            return Ok(SentBatch::Ack);
+        }
         let results = self.handler.handle_many(messages.clone()).await;
         if results.len() != messages.len() {
             return Err(PublisherError::NonRetryable(anyhow::anyhow!(

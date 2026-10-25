@@ -7,6 +7,7 @@ use crate::event_store::{EventStore, EventStoreConsumer, RetentionPolicy};
 use crate::models::{Compression, FileConfig, FileConsumerMode, FileFormat, FileFsync, NameBy};
 #[cfg(feature = "encryption")]
 use crate::support::crypto::Crypto;
+use crate::support::local_staging::{LocalStaging, StagedName};
 use crate::support::source_ranges::{finalized_name, CoveredRanges};
 use crate::traits::{
     ConsumerError, MessageConsumer, MessagePublisher, PublisherError, ReceivedBatch, SentBatch,
@@ -1070,6 +1071,8 @@ pub struct FilePublisher {
     /// clones of this publisher so all writers to the same file agree on it.
     csv_header: Arc<Mutex<Option<Vec<String>>>>,
     fsync: FsyncPolicy,
+    /// Part files waiting for a grouped sync; `None` under `fsync: batch`, which syncs each part.
+    part_staging: Option<Arc<LocalStaging>>,
 }
 
 /// How the appending sink syncs; part files under `source_position` always sync.
@@ -1436,9 +1439,18 @@ impl FilePublisher {
                 FsyncPolicy::Periodic(state)
             }
         };
+        let part_staging = (by_source_position && config.fsync != FileFsync::Batch).then(|| {
+            let interval = config.fsync_interval_ms.unwrap_or(1000).max(1);
+            LocalStaging::new(
+                path.to_path_buf(),
+                StagedName::Hidden,
+                Duration::from_millis(interval),
+            )
+        });
         info!(path = %path_str, format = ?format, "File sink opened for appending");
         Ok(Self {
             fsync,
+            part_staging,
             path: path_str.to_string(),
             file_lock,
             delimiter,
@@ -1508,12 +1520,24 @@ impl FilePublisher {
                     body.extend_from_slice(&self.delimiter);
                 }
                 let body = self.encode_member(body)?;
-                write_finalized_file(&final_path, &body).await?;
+                if let Some(staging) = &self.part_staging {
+                    staging.write(final_path, body).await.map_err(|e| {
+                        PublisherError::Retryable(
+                            anyhow::Error::new(e).context("Failed to stage part-file sink output"),
+                        )
+                    })?;
+                } else {
+                    write_finalized_file(&final_path, &body).await?;
+                    sync_directory(Path::new(&self.path))
+                        .await
+                        .context("Failed to sync part-file sink directory")?;
+                }
+            } else {
+                // A retry after a failed directory sync lands here.
+                sync_directory(Path::new(&self.path))
+                    .await
+                    .context("Failed to sync part-file sink directory")?;
             }
-            // Also when the file already exists: a retry after a failed sync lands here.
-            sync_directory(Path::new(&self.path))
-                .await
-                .context("Failed to sync part-file sink directory")?;
             covered
                 .insert(run.source, run.start, run.end)
                 .map_err(PublisherError::NonRetryable)?;
@@ -1972,14 +1996,20 @@ impl MessagePublisher for FilePublisher {
     }
 
     async fn flush(&self) -> anyhow::Result<()> {
+        if let Some(staging) = &self.part_staging {
+            return Ok(staging.finalize().await?);
+        }
         if let FsyncPolicy::Periodic(state) = &self.fsync {
             state.sync(&self.path).await?;
         }
         Ok(())
     }
 
-    /// `periodic` acks before the sync, so the route holds commits until `flush` ran.
+    /// `periodic` and staged parts ack before the sync, so the route holds commits until `flush`.
     fn deferred_commit_interval(&self) -> Option<Duration> {
+        if let Some(staging) = &self.part_staging {
+            return Some(staging.interval());
+        }
         match &self.fsync {
             FsyncPolicy::Periodic(state) => state.interval,
             _ => None,
@@ -1988,7 +2018,8 @@ impl MessagePublisher for FilePublisher {
 
     /// Syncs the last `periodic` window when the route stops; the background task ends unsynced.
     fn on_disconnect_hook(&self) -> Option<crate::traits::BoxFuture<'_, anyhow::Result<()>>> {
-        matches!(self.fsync, FsyncPolicy::Periodic(_)).then(|| self.flush())
+        (self.part_staging.is_some() || matches!(self.fsync, FsyncPolicy::Periodic(_)))
+            .then(|| self.flush())
     }
 
     /// A file is an ordered log by construction: appending batches in the order they
@@ -2010,6 +2041,9 @@ struct FileFeedState {
     lines_in_memory: usize,
 }
 
+/// Most lines a subscribe + delete store holds that no subscriber has received yet.
+const MAX_UNREAD_LINES: u64 = 10_000;
+
 /// Creates an EventStore backed by a file.
 /// The EventStore acts as an in-memory buffer for the file content, allowing unified handling of Consume and Subscribe modes.
 async fn create_file_event_store(
@@ -2030,27 +2064,31 @@ async fn create_file_event_store(
     let delimiter_clone = delimiter.clone();
     let format_gc = format.clone();
 
+    // Never drop unacked lines: the drop callback deletes them from the file. The reader
+    // bounds memory instead (`MAX_UNREAD_LINES`).
     let retention = RetentionPolicy {
         gc_interval: std::time::Duration::ZERO,
+        max_count: None,
+        max_age: None,
         ..Default::default()
     };
     // Use immediate GC for file stores to ensure files are truncated promptly on ack.
 
     // 1. Create EventStore with on_drop callback
     let store = Arc::new(
-        EventStore::new(retention).with_drop_callback(move |events| {
-            // In EventStore mode (Subscribe + Delete), we always delete.
+        EventStore::new(retention).with_async_drop_callback(move |events| {
             let count = events.len();
-            if count == 0 {
-                return;
-            }
             let state = feed_state_clone.clone();
             let path = path_clone.clone();
             let file_op_lock = file_op_lock_clone.clone();
             let delimiter = delimiter_clone.clone();
             let format = format_gc.clone();
 
-            tokio::spawn(async move {
+            // Awaited by the ack, so acked lines are gone before the commit returns.
+            Box::pin(async move {
+                if count == 0 {
+                    return;
+                }
                 // Serialize file operations to prevent race conditions between multiple GCs
                 let _guard = file_op_lock.lock().await;
 
@@ -2072,7 +2110,7 @@ async fn create_file_event_store(
                     s.lines_in_memory = s.lines_in_memory.saturating_sub(count);
                     trace!("Removed {} lines from {}", count, path);
                 }
-            });
+            })
         }),
     );
 
@@ -2104,7 +2142,7 @@ async fn create_file_event_store(
 
             // Open file
             let file_res = OpenOptions::new().read(true).open(&path_clone).await;
-            let mut file = match file_res {
+            let file = match file_res {
                 Ok(f) => f,
                 Err(e) => {
                     tracing::error!("Failed to open file {}: {}", path_clone, e);
@@ -2148,18 +2186,15 @@ async fn create_file_event_store(
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 continue;
             }
-            file = reader.into_inner();
-
             // Release file op lock to allow publisher to write while we read
             drop(file_guard);
 
-            // Read new lines
-            let mut reader = BufReader::new(file);
+            // Keep the same reader: its buffer already holds the bytes after the skipped lines.
             let mut lines_read = 0;
             let mut batch = Vec::with_capacity(128);
             let mut pending_partial = false;
 
-            loop {
+            while store_clone.unread() < MAX_UNREAD_LINES {
                 let mut buffer = Vec::new();
                 match read_record(
                     &mut reader,

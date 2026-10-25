@@ -648,6 +648,7 @@ pub(crate) fn scheme_names() -> (Vec<&'static str>, Vec<&'static str>) {
 }
 
 /// Built-in schemes, then registered extension endpoints, then every middleware.
+/// Lists only loaded plugins; callers that show installed ones scan first.
 pub fn catalog() -> anyhow::Result<Catalog> {
     let mut endpoints: Vec<EndpointDoc> = schemes().into_iter().map(endpoint_doc).collect();
     for (name, schema) in mq_bridge::extensions::endpoint_config_schemas() {

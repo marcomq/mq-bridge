@@ -208,7 +208,7 @@ pub use canonical_message::{CanonicalMessage, MessageContext};
 pub use config_file::deploy_file;
 pub use errors::HandlerError;
 pub use models::Route;
-pub use outcomes::{Handled, Received, ReceivedBatch, Sent, SentBatch};
+pub use outcomes::{Handled, Passthrough, Received, ReceivedBatch, Sent, SentBatch};
 pub use publisher::Publisher;
 
 pub use endpoints::memory::get_or_create_channel;

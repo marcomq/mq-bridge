@@ -15,13 +15,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use mq_bridge_app::mq_bridge::{
-    CanonicalMessage, Handled, Publisher, Sent, SentBatch,
+    CanonicalMessage, Passthrough, Publisher, Sent, SentBatch,
     models::{Endpoint, EndpointType, Route},
     route::{RouteHandle, RouteOutcome},
 };
 use mq_bridge_app::route_metrics::{
-    CAPTURE_SOURCE_KEY, CAPTURE_TIME_KEY, MessageCapture, RouteMetrics, RouteTiming,
-    format_capture_time, is_redelivery,
+    CAPTURE_SOURCE_KEY, CAPTURE_TIME_KEY, CountingObserver, MessageCapture, RouteMetrics,
+    RouteTiming, format_capture_time,
 };
 use mq_bridge_app::status_registry::{
     InstanceKind, LocalStatusRegistry, StatusEntity, StatusLease, StatusRoute, StatusSnapshot,
@@ -866,6 +866,9 @@ impl BridgeMcp {
         &self,
         Parameters(args): Parameters<DescribeArgs>,
     ) -> Result<CallToolResult, McpError> {
+        tokio::task::spawn_blocking(mq_bridge_app::plugins::discover_installed_plugins)
+            .await
+            .map_err(|error| internal(error.to_string()))?;
         let catalog = mq_bridge_app::endpoint_catalog::catalog()
             .map_err(|error| internal(error.to_string()))?;
         let catalog = match args.name.as_deref().map(str::trim) {
@@ -946,9 +949,7 @@ impl BridgeMcp {
 
         // Wrap the route in the same counting/capturing handler the web UI puts on
         // its consumer routes, so `route_status` can report a live message rate.
-        // The handler forwards every message unchanged unless the sink is `null`,
-        // and counts each one once — a `retry` redelivery re-enters the handler
-        // but is not a new message.
+        // The handler forwards every message unchanged unless the sink is `null`.
         let publishes = !matches!(route.output.endpoint_type, EndpointType::Null)
             || !route.output.middlewares.is_empty();
         let input_label = endpoint_type_label(&route.input.endpoint_type);
@@ -958,23 +959,15 @@ impl BridgeMcp {
             .then(|| MessageCapture::with_capacity(&capture_topic(&name), capture_last));
         let source_key = name.clone();
 
-        let route = route.with_handler(move |msg: CanonicalMessage| {
-            let counter = Arc::clone(&counter);
-            let capture = capture.clone();
-            let source_key = source_key.clone();
-            async move {
-                if !is_redelivery(&msg) {
-                    counter.fetch_add(1, Ordering::Relaxed);
-                }
-                if let Some(capture) = capture {
-                    capture.push(&source_key, msg.clone());
-                }
-                Ok(if publishes {
-                    Handled::Publish(msg)
-                } else {
-                    Handled::Ack
-                })
-            }
+        let route = route.with_handler(CountingObserver {
+            counter,
+            capture,
+            source_key,
+            passthrough: if publishes {
+                Passthrough::Forward
+            } else {
+                Passthrough::Ack
+            },
         });
 
         let handle = match route.run(&name).await {
@@ -1625,9 +1618,6 @@ pub async fn run(
     agent_bus: bool,
     workspace_path: String,
 ) -> anyhow::Result<()> {
-    // Off the request path, so the first route using a large plugin doesn't
-    // spend its startup timeout loading the library.
-    tokio::task::spawn_blocking(mq_bridge_app::mq_bridge::plugin::discover_all_endpoint_plugins);
     let server = BridgeMcp::new().with_agent_bus(agent_bus);
     // Held for the lifetime of the transport; dropping it removes the lease,
     // including on the `bail!` below.

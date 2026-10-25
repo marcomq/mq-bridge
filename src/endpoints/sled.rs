@@ -217,8 +217,9 @@ impl SledConsumer {
             let mut subscriber = subscriber;
             loop {
                 match subscriber.next_timeout(Duration::from_millis(100)) {
+                    // Never block here: an undrained subscriber stalls every write to the tree.
                     Ok(_event) => {
-                        if tx.send_blocking(()).is_err() {
+                        if let Err(async_channel::TrySendError::Closed(_)) = tx.try_send(()) {
                             break;
                         }
                     }
@@ -576,6 +577,31 @@ mod tests {
 
         assert_eq!(next_payload(&mut consumer).await, b"two");
         assert_eq!(next_payload(&mut consumer).await, b"three");
+        close_db(&path).unwrap();
+    }
+
+    #[test]
+    fn writes_do_not_stall_while_the_consumer_is_busy() {
+        // More writes than sled buffers for an undrained watcher (1024 events).
+        const COUNT: u64 = 1200;
+        let dir = tempdir().unwrap();
+        let path = dir.path().to_str().unwrap().to_string();
+        let publisher = SledPublisher::new(&queue(&path)).unwrap();
+        let consumer = SledConsumer::new(&queue(&path)).unwrap();
+        let tree = publisher.tree.clone();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        // Its own thread: a stalled sled write blocks the thread, so the deadline sits outside.
+        std::thread::spawn(move || {
+            for i in 0..COUNT {
+                tree.insert(i.to_be_bytes(), "item").unwrap();
+            }
+            let _ = done_tx.send(());
+        });
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("writes finish while the consumer reads nothing");
+        assert_eq!(publisher.tree.len(), COUNT as usize);
+        drop(consumer);
         close_db(&path).unwrap();
     }
 

@@ -59,9 +59,9 @@ responses, MongoDB polling, WebSocket frames, and file rows are all different in
 route code should still be able to receive a batch, process it, publish it, and commit it.
 
 - **Fast by default.** Every endpoint is optimized around batch-shaped APIs, and the headless
-  surfaces ship tuned for throughput: the `copy` CLI and the MCP server default to
-  `batch_size: 1024` and `concurrency: 4`. The library/config primitive defaults to
-  `batch_size: 512`, `concurrency: 1`: batches fill opportunistically — a route takes whatever
+  surfaces ship tuned for throughput: every route the app runs — `copy`, MCP, config files and
+  the UI — defaults to `batch_size: 1024` and `concurrency: 4`. The library primitive defaults
+  to `batch_size: 512`, `concurrency: 1`: batches fill opportunistically — a route takes whatever
   is already queued rather than waiting — so throughput comes for free while parallelism stays
   a deliberate per-route choice.
 - **Reliability is built in, not bolted on.** Retries, dead-letter queues, deduplication, rate

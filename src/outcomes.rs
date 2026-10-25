@@ -12,6 +12,15 @@ pub enum Handled {
     Publish(CanonicalMessage),
 }
 
+/// What a pass-through [`Handler`](crate::traits::Handler) does with a batch it observed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Passthrough {
+    /// Publish the messages unchanged.
+    Forward,
+    /// Acknowledge the messages without publishing them.
+    Ack,
+}
+
 /// The outcome of a successful single message publishing operation.
 #[derive(Debug)]
 pub enum Sent {

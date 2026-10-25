@@ -144,9 +144,9 @@ credential-redacted source, destination, and filter. Re-running the same command
 correctly, and `mqb checkpoint show SOURCE TARGET` finds its position, but a config route has
 no way to name that id, so it starts a fresh checkpoint under whatever `cursor_id` you choose.
 
-**The defaults differ.** `copy` defaults to `concurrency: 4` and `batch_size: 1024`; a route
-defaults to `1` and `512`. Write both out explicitly, or the translated route runs at a quarter
-of the concurrency for no visible reason.
+**The defaults match.** `copy` and a config route run by the app both default to
+`concurrency: 4` and `batch_size: 1024`. Only a route built with the library directly starts at
+`1` and `512`.
 
 ### `--drain` and checkpoints
 

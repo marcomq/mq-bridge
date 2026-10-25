@@ -160,6 +160,7 @@ fn middleware_from_spec(spec: &str) -> anyhow::Result<mq_bridge::models::Middlew
     }
 
     let Some((name, declared)) = custom_middleware(name, &tag)? else {
+        crate::plugins::discover_installed_plugins();
         let mut known = middleware_tags(&root);
         known.extend(mq_bridge::extensions::middleware_config_schemas().into_keys());
         anyhow::bail!(
@@ -268,7 +269,9 @@ fn custom_middleware(
             return Ok(registered(candidate));
         }
     }
-    Ok(None)
+    // One library may provide several names, so its file need not be named for this one.
+    crate::plugins::discover_installed_plugins();
+    Ok(registered(name).or_else(|| registered(tag)))
 }
 
 /// Reads a middleware spec's query params into its config object, typed by
@@ -750,6 +753,13 @@ fn extension_endpoint_from_uri(
         .is_some()
     {
         return custom_endpoint_from_uri(plugin, uri);
+    }
+    // One library may provide several names, so its file need not be named for this one.
+    crate::plugins::discover_installed_plugins();
+    for name in [plugin_of(scheme).to_string(), scheme_factory(scheme)] {
+        if mq_bridge::extensions::get_endpoint_factory(&name).is_some() {
+            return custom_endpoint_from_uri(&name, uri);
+        }
     }
     let (schemes, structural) = endpoint_catalog::scheme_names();
     anyhow::bail!(
@@ -2312,6 +2322,8 @@ mod tests {
             "object_store",
         );
         assert_eq!(cfg["name_by"], "source_position");
+        let cfg = config("local-store:///var/lib/mqb/parts?fsync=off", "object_store");
+        assert_eq!(cfg["fsync"], "off");
     }
 
     /// `idempotency` is the deprecated spelling of `name_by`; v0.4.x URLs must keep working.

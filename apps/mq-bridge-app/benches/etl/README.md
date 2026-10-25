@@ -60,7 +60,7 @@ These rules hold for every table on this page unless a cell says otherwise.
 | Scenario | Batch | Conc. | Throughput | Peak RSS | Version |
 |---|---|---|---|---|---|
 | CSV → JSONL (strings passthrough, 1M rows ~116 MiB) | 1024 | 1 | **3,134,796 rows/s** | ~29 MiB | 0.4.20 |
-| CSV → JSONL, same job driven through an MCP tool call | 1024 | 1 | **2,466,515 rows/s** | — | 0.4.20 |
+| CSV → JSONL, same job driven through an MCP tool call | 1024 | 1 | **3,108,517 rows/s** | — | 1.2.0 |
 | CSV → JSONL with typing `transform` (id→int, embedded JSON) | 1024 | 1 | **1,626,016 rows/s** | ~71 MiB | 0.4.20 |
 | IPC forward (`static` → `memory`, Unix socket) | 1024 | 1 | **1,419,025 rows/s** | — | 0.4.20 (300 s window) |
 | Postgres → JSONL (1M rows, 7 mixed-type cols) | 1024 | 4 | **505,050 rows/s** | ~57 MiB | 0.4.20 |
@@ -114,7 +114,7 @@ Every scenario section below has the same four parts: **Measures**, **Run**,
 | [4](#4--local-ipc-throughput) | process → process over a Unix socket | sustained rows/s | `run_ipc_throughput.sh` | 1,419,025 rows/s |
 | [5](#5--postgres--jsonl-vs-sling-and-meltano) | Postgres → JSONL | rows/s, peak RSS vs. Sling, Meltano | `run_meltano_bench.sh` | 413,907 rows/s, 54.9 MiB |
 | [6](#6--csv--jsonl-vs-sling-and-meltano) | CSV → JSONL | rows/s, peak RSS vs. Sling, Meltano, DuckDB | `run_csv_to_jsonl.sh` | 3,134,796 rows/s, 28.7 MiB |
-| [7](#7--mcp-server-tool-call-latency-throughput-token-cost) | CSV → JSONL through an MCP tool call | latency, rows/s, agent tokens | `run_mcp_bench.sh` | 2,466,515 rows/s, ~86 ms fixed cost |
+| [7](#7--mcp-server-tool-call-latency-throughput-token-cost) | CSV → JSONL through an MCP tool call | latency, rows/s, agent tokens | `run_mcp_bench.sh` | 3,108,517 rows/s, on par with the `copy` CLI |
 | [8](#8--postgres--file-vs-the-tools-that-ship-with-postgres) | Postgres → file | rows/s vs. `psql \copy`, `pg_dump`; seven output formats | `run_pg_vendor.sh` | 495,540 rows/s to CSV |
 | [9](#9--kafka--file-vs-arroyo-and-sea-streamer) | Kafka → file | rows/s, peak RSS vs. Arroyo, Sea Streamer | `run_kafka_stream.sh` | 878,105 rows/s, 160 MiB |
 | [10](#10--redpanda-connect-and-the-connect-plugin) | CSV → JSONL and Kafka → JSONL | rows/s, peak RSS vs. Redpanda Connect; native endpoints vs. the Connect plugin | `run_csv_connect.sh`, `run_kafka_stream.sh connect` | ~19.5x (CSV, typed), ~11.7x (Kafka, projection) |
@@ -572,7 +572,7 @@ per row compared with the `copy` CLI.
 
 ```bash
 benches/etl/run_mcp_bench.sh          # -> results/mcp_bench.json (+ a row in results/csv_to_jsonl.csv)
-REPEATS=3 LATENCY_CALLS=1000 benches/etl/run_mcp_bench.sh
+REPEATS=5 LATENCY_CALLS=1000 benches/etl/run_mcp_bench.sh
 ```
 
 [`mcp_bench.py`](mcp_bench.py) is a genuine MCP client. It spawns
@@ -585,29 +585,31 @@ actually pays. Nothing reaches into the process.
 <!-- ANCHOR: mcp_results -->
 | Measurement | Result |
 | --- | --- |
-| Tool-call round-trip latency (200 calls) | **p50 0.054 ms** · p95 0.070 ms · p99 1.343 ms |
-| 1M-row CSV → JSONL via `start_route` (client wall-clock, 6 runs) | **2,466,515 rows/s** (median 0.405 s) |
+| Tool-call round-trip latency (200 calls) | **p50 0.036 ms** · p95 0.049 ms · p99 0.068 ms |
+| 1M-row CSV → JSONL via `start_route` (client wall-clock, 5 runs) | **3,108,517 rows/s** (median 0.322 s, ±0.004) |
 | Same job, server's own `average_messages_per_second` | no longer usable at this speed — see the note below |
-| `copy` CLI baseline, same dataset and session (§6 untyped) | 3,134,796 rows/s (5-run median 0.319 s, ±0.004) |
-| Fixed cost of going through the MCP interface | **~86 ms** |
-| Agent tool traffic to move the whole dataset | **1,541 bytes** (~385 tokens, 3 calls) |
+| `copy` CLI baseline, same dataset and session (§6 untyped) | 3,076,923 rows/s (5-run median 0.325 s, ±0.010) |
+| Cost of going through the MCP interface | **none measurable** |
+| Agent tool traffic to move the whole dataset | **1,539 bytes** (~385 tokens, 3 calls) |
 | The same 116.3 MiB through a model's context | ~30.5M tokens |
 <!-- ANCHOR_END: mcp_results -->
 
 **Notes.**
 
 - **The MCP interface costs one round-trip, not a per-row tax.** Client wall-clock is
-  0.405 s against the CLI's 0.319 s on the same dataset in the same session: a fixed
-  **~86 ms**, not a rate difference. Most of it is the client's own polling: it asks
+  0.322 s against the CLI's 0.325 s on the same dataset in the same session. The two
+  round trips that bracket the job cost ~0.04 ms each at p50. The client polls
   `route_status` every 50 ms (`POLL_INTERVAL_S` in `mcp_bench.py`), so completion is
-  seen 0–50 ms late, ~25 ms on average. The two round trips that bracket the job cost
-  ~0.05 ms each at p50. The comparison is in fact tilted *toward* MCP: the harness
-  spawns a fresh `mqb copy` process for every CLI run, while the MCP server is spawned
-  once and reused, so the CLI figure carries process startup the MCP path never pays.
-  Scale the dataset and the ~86 ms stays put.
+  seen 0–50 ms late; the harness spawns a fresh `mqb copy` process for every CLI run,
+  while the MCP server is spawned once and reused. The two roughly cancel out.
+- **Up to 0.4.20 the MCP path was ~86 ms slower** (0.405 s against 0.319 s). That was
+  not a fixed cost: `start_route` counts rows through a handler, and the handler paid
+  a per-message clone, future and `correlation_id`. Since 1.2.0 a handler that only
+  observes forwards each batch untouched, so the gap closed.
 - **Run the MCP scenario with enough repeats.** `mcp_bench.py` discards no warm-up.
-  Every run is timed, including the cold first one (2.08M rows/s here, against
-  2.44M–2.51M for the five after it), so a short series reads low. Use 6 or more.
+  Every run is timed, including the cold first one. On 0.4.20 that run read 2.08M
+  rows/s against 2.44M–2.51M for the ones after it; on 1.2.0 all five landed between
+  3.06M and 3.18M. Use 5 or more.
 - **Ignore the server's own `average_messages_per_second` here.** The route sampler
   ticks every 200 ms and the whole job finishes in about two ticks, so that field
   quantises: it reported anything from 2.6M to 4.2M rows/s across runs of nearly

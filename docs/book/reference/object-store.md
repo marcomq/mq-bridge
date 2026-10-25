@@ -18,12 +18,14 @@ Query parameters recognised as config fields for this connector. The object-type
 | `encryption` | object | no | `null` | At-rest AEAD encryption applied after compression. Requires the `encryption` feature. |
 | `extension` | string | no | — | (Sink only) Extension for written objects, without the dot. Defaults to a value derived from `format`, `compression` and `encryption` (e.g. `jsonl`, `csv`, `bin`, `jsonl.gz`, `jsonl.lz4`, `jsonl.gz.enc`); encrypted objects get a trailing `.enc` since they are ciphertext, not a directly decompressible `.gz`. |
 | `format` | `normal` \| `json` \| `text` \| `raw` \| `csv` \| `parquet` \| `envelope` \| `envelope_json` \| `envelope_text` \| `payload` | no | `normal` | Record encoding within an object, shared with the file endpoint. Defaults to `normal` (one JSON `CanonicalMessage` per line). Parquet needs the `parquet` feature. |
+| `fsync` | `off` \| `batch` \| `periodic` | no | — | (Sink only, local store) `periodic` (default) syncs objects in groups about every second, `batch` each object, `off` never. |
+| `fsync_interval_ms` | integer | no | — | (Sink only, local store) How often `fsync: periodic` syncs and publishes staged objects, in milliseconds. Defaults to 1000. |
 | `idempotency` | boolean | no | — | Deprecated: use `name_by`. true = `source_position`, false = `write_time`; ignored when `name_by` is set. |
 | `max_object_bytes` | integer | no | — | (Source only) Maximum size in bytes of a single object to fetch into memory. An object larger than this fails the read (surfaced as a consumer error) instead of being buffered whole. Unset means no limit (the whole object is materialized). |
 | `name_by` | `auto` \| `source_position` \| `write_time` | no | `auto` | (Sink only) `auto`, `write_time` (uuidv7 name) or `source_position` (name carries the source range). |
 | `on_decode_error` | `skip` \| `fail` | no | `skip` | (Source only) An object that cannot be decoded: `skip` it (default) or `fail` the route. `skip` also stops the route while no object has been decoded yet. |
 | `polling_interval_ms` | integer | no | — | (Source only) Idle poll interval in milliseconds when no new objects are found. Defaults to 1000. |
-| `url` | string | yes | — | Object-store URL, e.g. `file:///var/lib/mqb/incoming`, `s3://bucket/prefix`, `gs://bucket/prefix`, or `az://container/prefix`. Credentials are resolved from the environment by the `object_store` crate (same mechanism as the checkpoint backend); Azure takes the account from `AZURE_STORAGE_ACCOUNT_NAME`, R2 uses `s3://` plus a custom `AWS_ENDPOINT_URL`. |
+| `url` | string | yes | — | Object-store URL, e.g. `file:///var/lib/mqb/incoming`, `s3://bucket/prefix`, `gs://bucket/prefix`, or `az://container/prefix`. Credentials are resolved from the environment by the `object_store` crate (same mechanism as the checkpoint backend); Azure takes the account from `AZURE_STORAGE_ACCOUNT_NAME`, R2 uses `s3://` plus a custom `AWS_ENDPOINT_URL`. The CLI's `local-store://` is accepted as `file://`. |
 
 ## Struct-typed fields
 

@@ -23,6 +23,13 @@ use std::time::Duration;
 use tracing::{debug, error, info, trace};
 use uuid::Uuid;
 
+/// How long a `delayed_ack` send waits for room in a full local producer queue.
+const QUEUE_FULL_BACKOFF: Duration = Duration::from_millis(10);
+
+/// After this, a message that still finds the queue full fails as retryable. Longer than the
+/// default `message.timeout.ms` (300 s), so a broker outage only waits.
+const QUEUE_FULL_TIMEOUT: Duration = Duration::from_secs(330);
+
 /// Shared rdkafka producer. The flush on `Drop` runs only when the last holder is
 /// dropped, so publishers sharing this producer don't flush each other's buffers early.
 pub struct SharedKafkaProducer {
@@ -213,10 +220,25 @@ impl MessagePublisher for KafkaPublisher {
             // The `FutureProducer` will handle sending it in the background according to the
             // `linger.ms` and other batching settings. We don't await the delivery report
             // here to achieve high throughput. The `flush()` in `Drop` ensures all messages
-            // are sent before shutdown.
-            self.producer
-                .send_result(record)
-                .map_err(|(e, _)| delivery_error("Failed to enqueue Kafka message", e))?;
+            // are sent before shutdown. A full queue is backpressure: wait for room.
+            let deadline = tokio::time::Instant::now() + QUEUE_FULL_TIMEOUT;
+            loop {
+                match self.producer.send_result(record) {
+                    Ok(_) => break,
+                    Err((e @ KafkaError::MessageProduction(RDKafkaErrorCode::QueueFull), _))
+                        if tokio::time::Instant::now() >= deadline =>
+                    {
+                        return Err(delivery_error("Kafka producer queue stayed full", e));
+                    }
+                    Err((KafkaError::MessageProduction(RDKafkaErrorCode::QueueFull), back)) => {
+                        record = back;
+                        tokio::time::sleep(QUEUE_FULL_BACKOFF).await;
+                    }
+                    Err((e, _)) => {
+                        return Err(delivery_error("Failed to enqueue Kafka message", e));
+                    }
+                }
+            }
         }
         Ok(Sent::Ack)
     }

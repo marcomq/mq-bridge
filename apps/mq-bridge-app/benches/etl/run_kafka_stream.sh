@@ -52,6 +52,8 @@ SEA_STREAMER_LABEL="${SEA_STREAMER_LABEL:-sea-streamer-file}"
 RPC_BIN="${RPC_BIN:-$HERE/bin/redpanda-connect}"
 VECTOR_BIN="${VECTOR_BIN:-$HERE/bin/vector}"
 CONNECT_PLUGIN="${CONNECT_PLUGIN:-/opt/homebrew/lib/mq-bridge/libmq_bridge_connect.dylib}"
+# Every documented Kafka figure uses this; librdkafka's 1000 ms default roughly halves them.
+export MQB_CONSUMER_OPTIONS="${MQB_CONSUMER_OPTIONS:-[[\"fetch.queue.backoff.ms\",\"10\"]]}"
 export RESULTS_CSV ROWS REPEATS
 
 # --- Topic seeding -----------------------------------------------------------

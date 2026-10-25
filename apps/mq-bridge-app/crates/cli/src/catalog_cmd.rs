@@ -22,6 +22,7 @@ pub struct DescribeArgs {
 }
 
 pub fn list(args: ListArgs) -> anyhow::Result<()> {
+    mq_bridge_app::plugins::discover_installed_plugins();
     let catalog = catalog()?;
     if args.json {
         println!("{}", serde_json::to_string_pretty(&catalog)?);
@@ -32,6 +33,7 @@ pub fn list(args: ListArgs) -> anyhow::Result<()> {
 }
 
 pub fn describe(args: DescribeArgs) -> anyhow::Result<()> {
+    mq_bridge_app::plugins::discover_installed_plugins();
     let found = matching(catalog()?, &args.name);
     if found.endpoints.is_empty() && found.middlewares.is_empty() {
         anyhow::bail!(

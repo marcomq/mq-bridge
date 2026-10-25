@@ -1327,6 +1327,9 @@ r:
           metadata_key: kind
           cases:
             "a b": { kafka: { url: "h:9092", topic: t, password: p } }
+          when:
+            - if: "n > 1"
+              to: { nats: { url: "nats://h", subject: s, password: p } }
           default: { mqtt: { url: "mqtt://h", topic: t, password: p } }
       - reader: { sqlx: { url: "postgres://h/db", table: t, password: p } }
       - request:
@@ -1344,6 +1347,7 @@ r:
             "FANOUT__0__AWS__SESSION_TOKEN",
             "FANOUT__1__SWITCH__CASES__A_B__KAFKA__PASSWORD",
             "FANOUT__1__SWITCH__DEFAULT__MQTT__PASSWORD",
+            "FANOUT__1__SWITCH__WHEN__0__TO__NATS__PASSWORD",
             "FANOUT__2__READER__SQLX__PASSWORD",
             "FANOUT__3__REQUEST__TO__NATS__PASSWORD",
             "FANOUT__3__REQUEST__FORWARD_TO__AMQP__PASSWORD",

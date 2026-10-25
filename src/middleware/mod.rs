@@ -331,7 +331,8 @@ fn custom_middleware_factory(name: &str) -> Result<Arc<dyn CustomMiddlewareFacto
         return Ok(factory);
     }
     #[cfg(feature = "plugin")]
-    if crate::plugin::discover_middleware_plugin(name)?.is_some() {
+    {
+        crate::plugin::discover_middleware_plugin_or_scan(name)?;
         if let Some(factory) = get_middleware_factory(name) {
             return Ok(factory);
         }

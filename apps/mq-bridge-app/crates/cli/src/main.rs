@@ -37,24 +37,9 @@ mod status_cmd;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-/// App-level default batch size for headless routes (`copy`, MCP) when the caller
-/// does not specify one. The library's `RouteOptions::default()` is 512; this is the
-/// bulk-move value the app applies on top.
-pub(crate) const DEFAULT_BATCH_SIZE: usize = 1024;
-
-/// The batch size for a run that names none: what the sink's schema asks for
-/// (`x-mqb-default-batch-size`), else [`DEFAULT_BATCH_SIZE`].
-pub(crate) fn default_batch_size(output: &mq_bridge::models::Endpoint) -> usize {
-    let name = match &output.endpoint_type {
-        mq_bridge::models::EndpointType::Custom { name, .. } => name,
-        named => named.name(),
-    };
-    mq_bridge::extensions::endpoint_default_batch_size(name).unwrap_or(DEFAULT_BATCH_SIZE)
-}
-
-/// App-level default route concurrency for headless routes (`copy`, MCP) when the
-/// caller does not specify one. See [`DEFAULT_BATCH_SIZE`].
-pub(crate) const DEFAULT_CONCURRENCY: usize = 4;
+#[cfg(test)]
+pub(crate) use mq_bridge_app::config::DEFAULT_BATCH_SIZE;
+pub(crate) use mq_bridge_app::config::{DEFAULT_CONCURRENCY, default_batch_size};
 
 /// How often `copy --drain` checks whether the route task has ended. The engine
 /// exposes completion as a poll, not a notification; see [`run_copy`].
@@ -624,6 +609,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     if let Some(schema_path) = args.schema {
+        mq_bridge_app::plugins::discover_installed_plugins();
         let schema = mq_bridge_app::config::app_config_schema();
         let schema_json =
             serde_json::to_string_pretty(&schema).context("Failed to serialize schema")?;
@@ -726,6 +712,8 @@ async fn main() -> anyhow::Result<()> {
 
     let mut prom_addr = None;
     // --- 2. Initialize Prometheus Metrics Exporter ---
+    // Without a metrics port or UI nobody reads the recorder, and building one
+    // costs up to 200 ms of `quanta` clock calibration; the macros stay no-ops.
     let builder = metrics_exporter_prometheus::PrometheusBuilder::new();
     let (recorder, metrics_task) =
         if !config.metrics_addr.is_empty() && config.metrics_addr != config.ui_addr {
@@ -735,12 +723,16 @@ async fn main() -> anyhow::Result<()> {
             ))?;
             let (recorder, server_future) = builder.with_http_listener(addr).build()?;
             prom_addr = Some(addr);
-            (recorder, Some(tokio::spawn(server_future)))
+            (Some(recorder), Some(tokio::spawn(server_future)))
+        } else if !config.ui_addr.is_empty() {
+            (Some(builder.build_recorder()), None)
         } else {
-            (builder.build_recorder(), None)
+            (None, None)
         };
-    let prometheus_handle = recorder.handle();
-    metrics::set_global_recorder(recorder).context("Failed to install Prometheus recorder")?;
+    let prometheus_handle = recorder.as_ref().map(|recorder| recorder.handle());
+    if let Some(recorder) = recorder {
+        metrics::set_global_recorder(recorder).context("Failed to install Prometheus recorder")?;
+    }
     #[cfg(feature = "otel")]
     let otel_guard = mq_bridge_app::otel_export::init_from_env()
         .context("Failed to install OpenTelemetry OTLP exporter")?;
@@ -751,8 +743,7 @@ async fn main() -> anyhow::Result<()> {
     // `queue_message_processing_duration_seconds` samples recorded by mq-bridge
     // accumulate in an unbounded AtomicBucket and slowly leak memory. Drive
     // upkeep manually whenever we built the recorder without a listener.
-    if metrics_task.is_none() {
-        let upkeep_handle = prometheus_handle.clone();
+    if let (Some(upkeep_handle), None) = (prometheus_handle.clone(), &metrics_task) {
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
             loop {

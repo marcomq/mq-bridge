@@ -86,9 +86,15 @@ pub struct EventStore {
     retention_policy: RetentionPolicy,
     offset_update: watch::Sender<u64>,
     dropped_events: AtomicU64,
+    /// Highest offset handed to any subscriber.
+    delivered: AtomicU64,
     last_gc: RwLock<SystemTime>,
     on_drop: Option<Box<dyn Fn(Vec<StoredEvent>) + Send + Sync>>,
+    on_drop_async: Option<AsyncDropCallback>,
 }
+
+type AsyncDropCallback =
+    Box<dyn Fn(Vec<StoredEvent>) -> futures::future::BoxFuture<'static, ()> + Send + Sync>;
 
 impl std::fmt::Debug for EventStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -111,8 +117,10 @@ impl EventStore {
             retention_policy,
             offset_update,
             dropped_events: AtomicU64::new(0),
+            delivered: AtomicU64::new(0),
             last_gc: RwLock::new(SystemTime::now()),
             on_drop: None,
+            on_drop_async: None,
         }
     }
 
@@ -156,7 +164,9 @@ impl EventStore {
         drop(events);
 
         if remove_count > 0 {
-            if let Some(cb) = &self.on_drop {
+            if let Some(cb) = &self.on_drop_async {
+                tokio::spawn(cb(removed));
+            } else if let Some(cb) = &self.on_drop {
                 cb(removed);
             }
             warn!(
@@ -223,7 +233,9 @@ impl EventStore {
         drop(events);
 
         if remove_count > 0 {
-            if let Some(cb) = &self.on_drop {
+            if let Some(cb) = &self.on_drop_async {
+                tokio::spawn(cb(removed));
+            } else if let Some(cb) = &self.on_drop {
                 cb(removed);
             }
             warn!(
@@ -244,6 +256,19 @@ impl EventStore {
         callback: impl Fn(Vec<StoredEvent>) + Send + Sync + 'static,
     ) -> Self {
         self.on_drop = Some(Box::new(callback));
+        self
+    }
+
+    /// Like [`Self::with_drop_callback`], but an ack waits for the callback's work to finish,
+    /// so it is done once the commit returns. Retention drops still run it in the background.
+    pub(crate) fn with_async_drop_callback(
+        mut self,
+        callback: impl Fn(Vec<StoredEvent>) -> futures::future::BoxFuture<'static, ()>
+            + Send
+            + Sync
+            + 'static,
+    ) -> Self {
+        self.on_drop_async = Some(Box::new(callback));
         self
     }
 
@@ -409,53 +434,67 @@ impl EventStore {
             *active_acks.iter().min().unwrap()
         };
 
-        let mut events = self.events.write().unwrap();
-        let base = self.base_offset.load(Ordering::SeqCst);
-        let max_age = self.retention_policy.max_age;
-        let mut remove_count = 0;
+        let (remove_count, removed) = {
+            let mut events = self.events.write().unwrap();
+            let base = self.base_offset.load(Ordering::SeqCst);
+            let max_age = self.retention_policy.max_age;
+            let mut remove_count = 0;
 
-        for (i, event) in events.iter().enumerate() {
-            let mut remove = false;
-            let offset = base + i as u64;
+            for (i, event) in events.iter().enumerate() {
+                let mut remove = false;
+                let offset = base + i as u64;
 
-            // Condition 1: All active subscribers have acked this event
-            if !active_acks.is_empty() && offset <= min_ack {
-                remove = true;
-            }
+                // Condition 1: All active subscribers have acked this event
+                if !active_acks.is_empty() && offset <= min_ack {
+                    remove = true;
+                }
 
-            // Condition 2: Max age exceeded (Secondary GC)
-            if !remove {
-                if let Some(max_age) = max_age {
-                    let event_time = UNIX_EPOCH + Duration::from_millis(event.stored_at);
-                    if let Ok(age) = now.duration_since(event_time) {
-                        if age > max_age {
-                            remove = true;
+                // Condition 2: Max age exceeded (Secondary GC)
+                if !remove {
+                    if let Some(max_age) = max_age {
+                        let event_time = UNIX_EPOCH + Duration::from_millis(event.stored_at);
+                        if let Ok(age) = now.duration_since(event_time) {
+                            if age > max_age {
+                                remove = true;
+                            }
                         }
                     }
                 }
+
+                if remove {
+                    remove_count += 1;
+                } else {
+                    break;
+                }
             }
 
-            if remove {
-                remove_count += 1;
-            } else {
-                break;
+            let mut removed = Vec::new();
+            if remove_count > 0 {
+                debug!("GC removing {} events", remove_count);
+                removed = events.drain(0..remove_count).collect();
+                self.base_offset
+                    .fetch_add(remove_count as u64, Ordering::SeqCst);
             }
-        }
-
-        let mut removed = Vec::new();
-        if remove_count > 0 {
-            debug!("GC removing {} events", remove_count);
-            removed = events.drain(0..remove_count).collect();
-            self.base_offset
-                .fetch_add(remove_count as u64, Ordering::SeqCst);
-        }
-        drop(events);
+            (remove_count, removed)
+        };
 
         if remove_count > 0 {
-            if let Some(cb) = &self.on_drop {
+            if let Some(cb) = &self.on_drop_async {
+                cb(removed).await;
+            } else if let Some(cb) = &self.on_drop {
                 cb(removed);
             }
         }
+    }
+
+    /// Stored events no subscriber has received yet.
+    pub(crate) fn unread(&self) -> u64 {
+        let last = self.next_offset.load(Ordering::SeqCst).saturating_sub(1);
+        let seen = self
+            .delivered
+            .load(Ordering::SeqCst)
+            .max(self.base_offset.load(Ordering::SeqCst).saturating_sub(1));
+        last.saturating_sub(seen)
     }
 
     pub fn consumer(self: &Arc<Self>, subscriber_id: String) -> EventStoreConsumer {
@@ -530,6 +569,7 @@ impl MessageConsumer for EventStoreConsumer {
         let mut new_offset = last_offset_val;
         if let Some(last) = stored_events.last() {
             new_offset = last.offset;
+            self.store.delivered.fetch_max(new_offset, Ordering::SeqCst);
         }
 
         // Advance offset immediately to support async commit pipelines (like Route)

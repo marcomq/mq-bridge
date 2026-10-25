@@ -60,7 +60,7 @@ exit = "warn"
 collapsible_if = "allow"
 
 [workspace.package]
-version = "1.1.0"
+version = "1.2.0"
 
 [workspace.dependencies]
 anyhow = "1.0"
@@ -403,7 +403,7 @@ url = []
 
 # Endpoint features
 # `file` endpoint (CSV/JSONL/raw files); `object-store` reuses its codecs.
-file = []
+file = ["dep:libc"]
 # `dir_spool` endpoint: crash-safe directory FIFO queue.
 dir-spool = ["dep:pidlock"]
 kafka = ["rdkafka", "rdkafka/libz-static"]
