@@ -119,7 +119,7 @@ Use Postman/Bruno when your main job is crafting and sharing API requests; use `
 
 ## Performance
 
-A CSV → JSONL conversion hit **3,134,796 rows/s** (mq-bridge 0.4.20) — ~1.5x DuckDB's all-core copy of the same file, on fewer cores and ~18x less memory. The same job **through an MCP tool call** ran at **2,466,515 rows/s** against that session's 3,134,796 rows/s CLI baseline: the MCP interface costs a *fixed* ~86 ms (route start, plus up to one 50 ms completion poll), not a per-row tax. It costs an agent a *flat* ~385 tokens regardless of row count, because the rows never enter the model's context.
+A CSV → JSONL conversion hit **3,134,796 rows/s** (mq-bridge 0.4.20) — ~1.5x DuckDB's all-core copy of the same file, on fewer cores and ~18x less memory. The same job **through an MCP tool call** ran at **3,108,517 rows/s** (mq-bridge 1.2.0), level with that session's 3,076,923 rows/s CLI baseline: the MCP interface costs one round-trip, not a per-row tax. It costs an agent a *flat* ~385 tokens regardless of row count, because the rows never enter the model's context.
 
 On a Kafka → file relay using mq-bridge-app's default file format and no transform,
 the same engine was **~78% faster than Sea Streamer** comparing both on the mimalloc
