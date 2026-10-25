@@ -572,7 +572,7 @@ per row compared with the `copy` CLI.
 
 ```bash
 benches/etl/run_mcp_bench.sh          # -> results/mcp_bench.json (+ a row in results/csv_to_jsonl.csv)
-REPEATS=3 LATENCY_CALLS=1000 benches/etl/run_mcp_bench.sh
+REPEATS=5 LATENCY_CALLS=1000 benches/etl/run_mcp_bench.sh
 ```
 
 [`mcp_bench.py`](mcp_bench.py) is a genuine MCP client. It spawns
