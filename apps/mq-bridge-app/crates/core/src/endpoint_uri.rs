@@ -389,8 +389,9 @@ fn extension_schemes() -> String {
 ///
 /// The factory owns its config shape, so the mapping comes from the JSON Schema
 /// it declares: which field takes the address, which takes the path, and what
-/// type each query param is read as. A factory that declares nothing keeps the
-/// mapping that predates schemas — `url` is the URI up to the query and every
+/// type each query param is read as. A factory that declares no schema keeps the
+/// mapping that predates schemas: `url` is the URI up to the query, as for a schema
+/// that positions nothing but declares `url` itself. Without a schema every
 /// query param is a string, since guessing a type there would silently turn an
 /// id like `0123` into a number.
 fn custom_endpoint_from_uri(name: &str, uri: &str) -> anyhow::Result<mq_bridge::models::Endpoint> {
