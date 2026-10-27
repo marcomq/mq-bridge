@@ -11,6 +11,7 @@ on:
       - "examples/mongodb-to-meilisearch/**"
       - "examples/llm-ticket-triage/**"
       - "examples/order-features/**"
+      - "examples/postgres-cdc-to-warehouse/**"
       - ".github/workflows/examples.yml"
   pull_request:
     paths:
@@ -20,6 +21,7 @@ on:
       - "examples/mongodb-to-meilisearch/**"
       - "examples/llm-ticket-triage/**"
       - "examples/order-features/**"
+      - "examples/postgres-cdc-to-warehouse/**"
       - ".github/workflows/examples.yml"
   workflow_dispatch:
 
@@ -44,6 +46,7 @@ jobs:
           - mongodb-to-meilisearch
           - llm-ticket-triage
           - order-features
+          - postgres-cdc-to-warehouse
     steps:
       - uses: actions/checkout@v7
         with:

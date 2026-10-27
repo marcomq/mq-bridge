@@ -523,7 +523,7 @@ Elasticsearch or Qdrant.
 | `compression` | `none` | `gzip`, `zstd` or `lz4` for request bodies, named in `Content-Encoding` |
 | `request_timeout_ms` | see right | Timeout of one request; `0`: none. Unset: a request fails after 300 s without a response byte. With `read.stream` it is the longest silence on the open response, and unset means none |
 | `connect_timeout_ms` | 10000 | Connection timeout |
-| `tls` | none | `ca_file` and `accept_invalid_certs` for `https://`; `required: true` refuses a `url`, OAuth2 `token_url` or `login.url` that is not `https://` |
+| `tls` | none | `ca_file` and `accept_invalid_certs` for `https://`; `cert_file` and `key_file` (PEM, unencrypted key) send a client certificate, and `key_file` requires `cert_file`; `required: true` refuses a `url`, OAuth2 `token_url` or `login.url` that is not `https://` |
 
 `upsert`:
 

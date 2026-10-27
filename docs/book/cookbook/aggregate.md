@@ -1,7 +1,7 @@
 # Running aggregates
 
 The [`aggregate`](../engine/reference.md#aggregate) middleware keeps a running value per key
-and updates it with every message: counters, sums, moving averages. The message goes on with
+and updates it with every message, such as a counter or a sum. The message goes on with
 the value written into its payload. Use it for values that depend on earlier messages, such
 as "how many orders did this customer place so far" or "what is this sensor's usual reading".
 
@@ -538,4 +538,4 @@ hundred megabytes per entry; an expression state with a large object takes more.
 unbounded.
 
 A complete pipeline with a Postgres store, a `lookup` and routing on the result, with a runnable
-example: [Enrich events and keep per-key history](../use-cases/enrich-and-aggregate-orders.md).
+example: [Enrich events and add per-key totals](../use-cases/enrich-and-aggregate-orders.md).

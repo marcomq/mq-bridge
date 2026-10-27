@@ -28,9 +28,9 @@
 //! `/models/a.onnx`, `x:models/a.onnx` the relative `models/a.onnx`.
 //!
 //! Each position but `query` may be claimed by at most one property, and `path`
-//! and `filepath` count as one. Anything
-//! unannotated is a query parameter, which is also what a plugin that describes
-//! nothing gets.
+//! and `filepath` count as one. Anything unannotated is a query parameter. A
+//! schema that claims no position outside the query gets the URI up to the
+//! query as `url` only if it declares no property or a `url` property.
 //!
 //! # Compound schemes
 //!
@@ -265,6 +265,31 @@ impl UriSchema {
             || self.path.is_some()
     }
 
+    /// The URI shape this mapping reads, each positioned field shown as `<field>`.
+    pub fn uri_template(&self, scheme: &str) -> String {
+        let scheme = match &self.subscheme {
+            Some(field) => format!("{scheme}+<{field}>"),
+            None => scheme.to_string(),
+        };
+        let address = match (&self.url, &self.origin, &self.path) {
+            (Some(url), _, Some(path)) => format!("//<{url}>/<{path}>"),
+            (Some(url), ..) => format!("//<{url}>"),
+            (None, Some(origin), Some(path)) => format!("//<{origin}>/<{path}>"),
+            (None, Some(origin), None) => format!("//<{origin}>"),
+            (None, None, Some(path)) if self.keep_root => format!("<{path}>"),
+            (None, None, Some(path)) => format!("///<{path}>"),
+            (None, None, None) if self.takes_legacy_url() => "//<url>".to_string(),
+            (None, None, None) => "//".to_string(),
+        };
+        format!("{scheme}:{address}?<param>=<value>")
+    }
+
+    /// Whether the URI up to the query becomes `url`, the mapping that predates
+    /// schemas: only when nothing is positioned and `url` is not foreign to the schema.
+    fn takes_legacy_url(&self) -> bool {
+        !self.positions_a_field() && (self.types.is_empty() || self.types.contains_key("url"))
+    }
+
     /// Turns a URI into a configuration object.
     ///
     /// Query parameters are applied last, so `?url=...` still overrides whatever
@@ -310,8 +335,7 @@ impl UriSchema {
                     config.insert(field.clone(), self.coerce(field, &path)?);
                 }
             }
-        } else {
-            // No schema, or one that positions nothing: the address is the URI.
+        } else if self.takes_legacy_url() {
             config.insert("url".into(), Value::String(before_query.to_string()));
         }
 
@@ -904,6 +928,65 @@ mod tests {
 
         assert_eq!(config["connector"], json!("mqtt"));
         assert!(!config.contains_key("url"), "{config:?}");
+    }
+
+    #[test]
+    fn the_uri_template_shows_only_the_positions_the_schema_claims() {
+        let template = |schema: Value| UriSchema::from_schema(&schema).uri_template("rp");
+        assert_eq!(
+            template(connect_schema()),
+            "rp://<url>/<topic>?<param>=<value>"
+        );
+        let subscheme_only = json!({
+            "type": "object",
+            "properties": { "connector": { "type": "string", "x-mqb-uri": "subscheme" } },
+        });
+        assert_eq!(
+            template(subscheme_only),
+            "rp+<connector>://?<param>=<value>"
+        );
+        assert_eq!(
+            UriSchema::default().uri_template("rp"),
+            "rp://<url>?<param>=<value>"
+        );
+    }
+
+    #[test]
+    fn a_url_and_a_path_both_show_in_the_template_and_both_map() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "url": { "type": "string", "x-mqb-uri": "url" },
+                "table": { "type": "string", "x-mqb-uri": "path" },
+            },
+        });
+        validate(&schema).expect("url and path are distinct positions");
+        let mapping = UriSchema::from_schema(&schema);
+
+        assert_eq!(
+            mapping.uri_template("rp"),
+            "rp://<url>/<table>?<param>=<value>"
+        );
+        let config = mapping
+            .config_from_uri("rp://host:9000/books?x=1")
+            .expect("map the uri");
+        assert_eq!(config["url"], json!("rp://host:9000/books"));
+        assert_eq!(config["table"], json!("books"));
+    }
+
+    #[test]
+    fn a_schema_without_a_url_property_never_gets_the_legacy_url() {
+        let schema = json!({
+            "type": "object",
+            "properties": { "config": { "type": "string" } },
+        });
+
+        let config = UriSchema::from_schema(&schema)
+            .config_from_uri("rp://host?config=x")
+            .expect("map the uri");
+
+        assert!(!config.contains_key("url"), "{config:?}");
+        assert_eq!(config["config"], json!("x"));
     }
 
     #[test]

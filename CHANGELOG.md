@@ -2,6 +2,8 @@
 
 All notable changes to `mq-bridge`. Newest first.
 
+## Unreleased
+
 ## 1.2.0
 
 ### Added

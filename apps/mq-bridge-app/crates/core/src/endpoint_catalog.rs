@@ -660,7 +660,7 @@ pub fn catalog() -> anyhow::Result<Catalog> {
             continue;
         }
         endpoints.push(EndpointDoc {
-            uri: format!("{scheme}://<address>?<param>=<value>"),
+            uri: mq_bridge::plugin::endpoint_uri_schema(&name).uri_template(&scheme),
             summary: summary(&schema),
             params: params(&schema, &schema, &[]),
             scheme,

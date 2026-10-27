@@ -1,35 +1,34 @@
-<!-- description: Enrich each event with a database record (lookup) and keep per-key history in Postgres (aggregate with a store): order count, spend and a moving average per customer, then route outliers to review. Survives restarts, shared by several instances. Runnable docker-compose example. -->
+<!-- description: Enrich each event with a database record (lookup) and add per-key totals kept in Postgres (aggregate with a store): order count, spend and the usual amount per customer, then route unusually large orders to review. Survives restarts, shared by several instances. Runnable docker-compose example. -->
 
-# How to enrich events and keep per-key history (lookup + aggregate in Postgres)
+# How to enrich events and add per-key totals (lookup + aggregate in Postgres)
 
 One mq-bridge route takes orders, adds the customer record from Postgres, and adds what is known
-about that customer so far: number of orders, total spend, the usual order amount and a seven-day
-decayed spend. The history is kept in a Postgres table, so a restart continues where it stopped
-and several instances work on the same numbers. An order far above the customer's usual amount
-goes to a review table.
+about that customer so far: number of orders, total spend and the usual order amount. The totals
+are kept in a Postgres table, so a restart continues where it stopped and several instances
+work on the same numbers. An order far above the customer's usual amount goes to a review table.
 
 Runnable example: [`examples/order-features`](https://github.com/marcomq/mq-bridge/tree/main/examples/order-features).
 
 ## The problem: every event needs context it does not carry
 
-An order event says who ordered and how much. Whatever acts on it, a fraud score, a loyalty rule,
+An order event says who ordered and how much. Whatever acts on it, a discount, a loyalty rule,
 a dashboard, needs more: the customer's tier from the CRM, and how this order compares to the
 customer's earlier ones. The usual ways to get there each have a cost:
 
-- **Querying the history per event** (`SELECT count(*), avg(amount) FROM orders WHERE customer_id
+- **Querying past orders per event** (`SELECT count(*), avg(amount) FROM orders WHERE customer_id
   = …`) gets slower as the table grows and runs once for every event.
 - **A counter in the application's memory** is lost on restart and splits into separate counts
   as soon as a second instance runs.
 - **A stream processor** (Flink, Kafka Streams) keeps state properly, but is a cluster and a
   programming model of its own for what may be four numbers per customer.
 
-## The solution: a lookup for the record, an aggregate for the history
+## The solution: a lookup for the record, an aggregate for the totals
 
 ```mermaid
 flowchart LR
   A[Shop] -- "POST /orders" --> B[mq-bridge route]
   B -- "1. customer by id<br/>(one query per batch)" --> C[(customers)]
-  B <-- "2. history per customer<br/>(load, fold, write back)" --> S[(customer_stats)]
+  B <-- "2. totals per customer<br/>(load, fold, write back)" --> S[(customer_stats)]
   B -- "usual order" --> E[(orders_enriched)]
   B -- "far above usual" --> R[(orders_review)]
 ```
@@ -122,7 +121,7 @@ docker compose exec postgres psql -U app -d app -c 'SELECT id, amount, customer,
 ```
 
 The stack is Postgres 16 and mq-bridge-app 1.0.1. `./test.sh` posts five orders with a restart
-of the bridge in between and checks that the history continues, that the outlier is in
+of the bridge in between and checks that the totals continue, that the outlier is in
 `orders_review`, and that an unknown customer is stored without customer data; it runs in CI.
 
 ## Failure semantics
@@ -131,7 +130,7 @@ of the bridge in between and checks that the history continues, that the outlier
 | :--- | :--- |
 | **mq-bridge restarts** | The states are in `customer_stats`; the next order of a customer continues from there. Nothing is kept only in memory. |
 | **Several instances** | With `consistency: shared` they can run side by side. A write that lost the race to another instance is refused, and the batch is folded again from the reloaded states. |
-| **Duplicates** | Delivery is at-least-once, and an order delivered twice is counted twice: the state write and the acknowledgement are two steps. The row in `orders_enriched` is overwritten by its `id`, the history is not. To count each order once, let a [`deduplication`](../cookbook/deduplication.md) keyed on the order id see it first, on the input. |
+| **Duplicates** | Delivery is at-least-once, and an order delivered twice is counted twice: the state write and the acknowledgement are two steps. The row in `orders_enriched` is overwritten by its `id`, the totals are not. To count each order once, let a [`deduplication`](../cookbook/deduplication.md) keyed on the order id see it first, on the input. |
 | **Postgres unavailable** | The lookup or the state write fails as retryable and the caller gets an error. The `lookup` and `aggregate` run before the `retry`, so a failed lookup counts nothing and the caller can send again; `retry` repeats only the table write. |
 | **A failed table write** | When the write still fails after `retry`, the order has already been counted; sent again, it is counted twice. |
 | **Order of events** | Within a batch orders are folded in order. With route `concurrency` above 1 batches can overtake each other; with `time` set, the averages and decayed sums do not depend on that, `count` and `sum` never did. |
@@ -152,7 +151,7 @@ Limits of this recipe:
 
 ## When not to use mq-bridge for this
 
-- **The history is a query you already have.** If the orders are in Postgres and a view or a
+- **The totals are a query you already have.** If the orders are in Postgres and a view or a
   materialized view answers fast enough, there is nothing to maintain.
 - **You need exactly-once counts or exact windows.** A stream processor commits state and input
   position together; here a redelivered event counts twice.
@@ -164,7 +163,7 @@ Limits of this recipe:
 | | mq-bridge | A stream processor (Flink, Kafka Streams) | A streaming database (Materialize, RisingWave) |
 | :--- | :--- | :--- | :--- |
 | Lookup of a record by key | `lookup` against Postgres, MySQL, SQLite, MongoDB, ClickHouse or HTTP | a lookup join or your own code | a join with a table |
-| Per-key state | `aggregate`: built-in sums, counts, moving averages and decayed sums, or an expression | any state, in code | any SQL aggregate |
+| Per-key state | `aggregate`: built-in counts, sums and averages, or an expression | any state, in code | any SQL aggregate |
 | Where state lives | Postgres, SQLite or MongoDB, or memory | the processor's state backend | the database |
 | Delivery | at-least-once; a replay counts twice | exactly-once available | exactly-once |
 | Windows | none; decayed sums or a window in the key | tumbling, sliding, session | SQL windows |
