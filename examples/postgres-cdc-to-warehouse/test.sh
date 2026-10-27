@@ -5,9 +5,9 @@ cd "$(dirname "$0")"
 
 src() { docker compose exec -T postgres psql -U app -d app -qc "$1"; }
 dw() { docker compose exec -T warehouse psql -U dw -d dw -qAtc "$1"; }
-# The change log as the warehouse reads it: one row per (_lsn, id), in arrival order.
-log() { dw "SELECT string_agg(id || ':' || _op || ':' || coalesce(amount_eur::text, '-'), ' ' ORDER BY first, id)
-  FROM (SELECT id, _op, amount_eur, min(_synced_at) AS first FROM orders_changes GROUP BY _lsn, id, _op, amount_eur) c"; }
+# The change log as the warehouse reads it: one row per (id, _lsn, _ord), in arrival order.
+log() { dw "SELECT string_agg(id || ':' || _op || ':' || coalesce(amount_eur::text, '-'), ' ' ORDER BY first, id, _ord)
+  FROM (SELECT id, _op, amount_eur, _ord, min(_synced_at) AS first FROM orders_changes GROUP BY _lsn, _ord, id, _op, amount_eur) c"; }
 count() { dw "SELECT count(*) FROM orders_changes WHERE $1"; }
 dlq() { docker compose cp mq-bridge:/app/dlq.jsonl - 2>/dev/null | tar xO 2>/dev/null || true; }
 wait_for() { # wait_for <description> <expected change log>
@@ -43,6 +43,11 @@ wait_for "a change made while the bridge was down arrives after a restart" "$CHA
 [ "$(count "_op = 'snapshot'")" = 3 ] || { echo "FAILED: the copy ran again"; exit 1; }
 [ "$(count "customer = 'edsger'")" = 1 ] || { echo "FAILED: the offline row arrived more than once"; exit 1; }
 echo "ok: the copy is not repeated and the offline row arrives once"
+
+src "BEGIN; UPDATE orders SET status = 'shipped' WHERE customer = 'barbara';
+  UPDATE orders SET status = 'done' WHERE customer = 'barbara'; COMMIT"
+CHANGES="$CHANGES 4:update:42 4:update:42"
+wait_for "two changes to one row in one transaction are both kept" "$CHANGES"
 
 src "INSERT INTO orders (customer, amount_cents) VALUES ('kim', 250000)"
 src "INSERT INTO orders (customer, amount_cents) VALUES ('ken', 1500)"
