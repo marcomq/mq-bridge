@@ -1,0 +1,34 @@
+orders_to_warehouse:
+  # Native mq-bridge: Postgres logical replication, existing rows first.
+  input:
+    postgres_cdc:
+      url: "postgres://app:app@postgres:5432/app"
+      publication: "orders_pub"
+      slot_name: "orders_to_warehouse"
+      consume: capture_all                             # copy existing rows, then follow changes
+      checkpoint_store: "file:///app/checkpoint.json"  # a restart does not repeat the copy
+    middlewares:
+      # Redpanda Connect plugin: a Bloblang mapping, run in process.
+      - connect_mapping: |
+          root = this.without("amount_cents")
+          root.amount_eur = if this.amount_cents != null { this.amount_cents / 100 }
+          root._op = metadata("postgres.operation").or("snapshot")
+          root._lsn = metadata("postgres.lsn")
+          root._synced_at = now()
+  # faucet plugin: a faucet sink. Its postgres connector stands in for Snowflake here.
+  output:
+    middlewares:
+      - retry: { max_attempts: 5, initial_interval_ms: 200 }
+      - dlq:                                           # after retry: gets what retry gave up on
+          endpoint:
+            file: { path: "/app/dlq.jsonl", format: json }
+    custom:
+      name: faucet
+      config:
+        connector: postgres
+        flush: batch
+        config:
+          connection_url: "postgres://dw:dw@warehouse:5432/dw"
+          table_name: orders_changes
+          create_table: false
+          column_mapping: auto_map

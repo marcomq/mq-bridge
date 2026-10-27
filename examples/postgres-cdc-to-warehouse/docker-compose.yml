@@ -1,0 +1,34 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    command: ["postgres", "-c", "wal_level=logical"]
+    environment: { POSTGRES_USER: app, POSTGRES_PASSWORD: app, POSTGRES_DB: app }
+    volumes: ["./init.sql:/docker-entrypoint-initdb.d/init.sql:ro", "pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d app"]
+      interval: 2s
+      retries: 30
+
+  # Stands in for Snowflake: an append-only table written by faucet's postgres sink.
+  warehouse:
+    image: postgres:16-alpine
+    environment: { POSTGRES_USER: dw, POSTGRES_PASSWORD: dw, POSTGRES_DB: dw }
+    volumes: ["./warehouse.sql:/docker-entrypoint-initdb.d/warehouse.sql:ro", "dwdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dw -d dw"]
+      interval: 2s
+      retries: 30
+
+  mq-bridge:
+    build: .
+    command: ["--config", "/config/routes.yaml"]
+    volumes: ["./routes.yaml:/config/routes.yaml:ro", "state:/app"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      warehouse: { condition: service_healthy }
+    restart: on-failure
+
+volumes:
+  pgdata:
+  dwdata:
+  state:

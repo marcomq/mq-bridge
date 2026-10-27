@@ -5,7 +5,7 @@
 <p align="center"><em>crossing streams · library</em></p>
 
 <p align="center">
-<strong>One Rust engine to move data reliably between brokers, databases, files and HTTP — embedded in your Rust, Python or Node.js service.</strong>
+<strong>One fast Rust engine to move and reshape data between brokers, databases, files and HTTP. Try it in the CLI, ship it in your Rust, Python or Node.js service.</strong>
 </p>
 
 [![Crates.io](https://img.shields.io/crates/v/mq-bridge.svg)](https://crates.io/crates/mq-bridge)
@@ -31,9 +31,11 @@
 
 `mq-bridge` is an asynchronous Rust library that moves messages and data between systems: Kafka, NATS, RabbitMQ, MQTT, MongoDB, PostgreSQL/MySQL/SQLite, Postgres CDC, ClickHouse, Redis Streams, HTTP, WebSocket, gRPC, ZeroMQ, AWS SQS/SNS, IBM MQ, cloud object storage, files, and in-memory channels. Every endpoint sits behind the same batch-shaped `receive_batch` / `send_batch` traits, so any source can feed any sink.
 
-A **route** connects one input to one output. In between, it can transform, filter, fan out, retry, rate-limit, deduplicate, or answer a request, all by configuration. Where configuration isn't enough, you add a handler in Rust, Python or Node.js. Batching, ack/nack, commit ordering and broker I/O stay in the Tokio-based core, so your code works with plain `CanonicalMessage`s and doesn't handle Kafka offsets or AMQP nacks.
+A **route** connects one input to one output and shapes the data on the way: transform, filter, switch, fan out, enrich, retry, rate-limit, deduplicate, or answer a request, all by configuration. The engine is fast: a typing `transform` runs at ~1.6M rows/s, [~19.5x Redpanda Connect](#benchmarks) on the same job. Structural endpoints such as `switch`, `fanout` and `sequence` nest freely inside a route, and wrong delivery combinations fail when the route starts, not in production. Where configuration isn't enough, you add a handler in Rust, Python or Node.js. Batching, ack/nack, commit ordering and broker I/O stay in the Tokio-based core, so your code works with plain `CanonicalMessage`s and doesn't handle Kafka offsets or AMQP nacks.
 
-It is a **library you embed in your own service**, not a daemon or platform you operate. If you'd rather not write code, [`mq-bridge-app`](apps/mq-bridge-app) runs the same engine and config as a CLI, server, desktop app, and MCP server.
+**Try it in the CLI, ship it in your service:** [`mq-bridge-app`](apps/mq-bridge-app) runs a route from the command line (`mqb`), as a server, desktop app or MCP server; the same config runs as a library inside your Rust, Python or Node.js service when you need lower latency or want the pipeline in your production code. No daemon or platform to operate.
+
+**Bridge between ecosystems:** two plugins add over 100 more inputs and outputs: Redpanda Connect's components and faucet's connectors. They load only when a route uses them and run in the same process, so one route can read with one framework, process with a second and write with a third, under one ack chain and with mq-bridge's retry, DLQ and deduplication around all of it. See [Combine ecosystems in one route](#combine-ecosystems-in-one-route).
 
 ## Use cases
 
@@ -41,8 +43,9 @@ It is a **library you embed in your own service**, not a daemon or platform you 
 | :--- | :--- |
 | A RAG or semantic-search index drifts from its Postgres source | [Keep a vector index in sync with Postgres: CDC → embeddings → Qdrant](https://marcomq.github.io/mq-bridge/use-cases/sync-postgres-to-qdrant.html) |
 | Search results show what MongoDB no longer has | [Keep a search index in sync with MongoDB: change stream → Meilisearch](https://marcomq.github.io/mq-bridge/use-cases/sync-mongodb-to-meilisearch.html) |
+| The warehouse is a day behind and misses every change in between | [Stream Postgres changes into a warehouse: CDC → Bloblang → Snowflake](https://marcomq.github.io/mq-bridge/use-cases/cdc-to-warehouse.html) |
 | Free-text messages need routing by what they say | [Classify and route messages with an LLM](https://marcomq.github.io/mq-bridge/use-cases/llm-ticket-triage.html) |
-| Events need a database record and per-key history to act on | [Enrich events and keep per-key history in Postgres](https://marcomq.github.io/mq-bridge/use-cases/enrich-and-aggregate-orders.html) |
+| Events need a database record and per-key totals to act on | [Enrich events and add per-key totals in Postgres](https://marcomq.github.io/mq-bridge/use-cases/enrich-and-aggregate-orders.html) |
 | A service must update its database and publish an event atomically | [Transactional outbox with Postgres and Kafka](https://marcomq.github.io/mq-bridge/use-cases/transactional-outbox-postgres-kafka.html) |
 | Tests for Kafka, NATS or RabbitMQ consumers need a running broker | [Test message handlers without a broker](https://marcomq.github.io/mq-bridge/use-cases/test-without-a-broker.html) |
 
@@ -113,9 +116,29 @@ Every row works from the Rust crate, the Python and Node.js packages, and the ze
 | **Reliability**: retries, dead-letter queue, deduplication, rate limiting | `retry`, `dlq`, `deduplication`, `limiter` middleware · `dedup` for deduplication | [Middleware reference](docs/REFERENCE.md) · [Delivery guarantees](docs/DELIVERY.md) |
 | **Broker-free tests**: run a route or handler against in-memory channels, no Docker | `memory` endpoint · built in | [Embed the library](https://marcomq.github.io/mq-bridge/tutorials/embedding.html) |
 | **ETL without code** | [`mq-bridge-app`](apps/mq-bridge-app): `mqb copy <from> <to>`, YAML routes, desktop UI, MCP server | [Quick start: `mqb copy`](https://marcomq.github.io/mq-bridge/quick-start.html) |
-| **More systems through plugins**: Apache Pulsar, Meilisearch, and Redpanda Connect's inputs, outputs and processors | native plugins · `plugin` | [Plugin endpoints](https://marcomq.github.io/mq-bridge/reference/endpoints.html#plugin-endpoints) · [Connect plugin](https://marcomq.github.io/mq-bridge/connectors/connect.html): [inputs](https://marcomq.github.io/mq-bridge/connectors/connect-inputs.html), [outputs](https://marcomq.github.io/mq-bridge/connectors/connect-outputs.html), [processors](https://marcomq.github.io/mq-bridge/connectors/connect-processors.html) |
+| **More systems through plugins**: Apache Pulsar, Meilisearch, Redpanda Connect's inputs, outputs and processors, and faucet's sources and sinks (MySQL / SQL Server / Oracle CDC, Snowflake, BigQuery, Iceberg, Delta, GraphQL APIs, …) | native plugins · `plugin` | [Plugin endpoints](https://marcomq.github.io/mq-bridge/reference/endpoints.html#plugin-endpoints) · [Connect plugin](https://marcomq.github.io/mq-bridge/connectors/connect.html): [inputs](https://marcomq.github.io/mq-bridge/connectors/connect-inputs.html), [outputs](https://marcomq.github.io/mq-bridge/connectors/connect-outputs.html), [processors](https://marcomq.github.io/mq-bridge/connectors/connect-processors.html) · [faucet plugin](https://github.com/marcomq/mq-bridge-faucet) |
 
-The Connect plugin links only Redpanda Connect components free of Redpanda Community License code (bundled code is Apache-2.0 and MIT), so some upstream components, such as its Kafka, AWS and Snowflake ones, are not included; see [what is not included](https://marcomq.github.io/mq-bridge/connectors/connect.html#what-is-not-included).
+The Connect plugin links only Redpanda Connect components free of Redpanda Community License code (bundled code is Apache-2.0 and MIT), so some upstream components, such as its Kafka, AWS and Snowflake ones, are not included; see [what is not included](https://marcomq.github.io/mq-bridge/connectors/connect.html#what-is-not-included). Native endpoints and the faucet plugin cover most of that gap.
+
+## Combine ecosystems in one route
+
+No single framework has every connector and processor. mq-bridge combines three in one route:
+
+| Parts from | What they bring | Count |
+| :--- | :--- | :--- |
+| **mq-bridge, native** | Kafka, NATS, RabbitMQ, MQTT, IBM MQ, Postgres and MongoDB CDC, SQL, object storage, paged HTTP APIs (`http_bulk`), HTTP / gRPC / WebSocket servers, …; `transform`, `switch`, `fanout`, `aggregate`, `lookup`, retry, DLQ, dedup | 20+ transports |
+| **[Connect plugin](https://marcomq.github.io/mq-bridge/connectors/connect.html)** | Redpanda Connect's components; Bloblang processors as middleware on any endpoint | 56 inputs, 68 outputs, 86 processors |
+| **[faucet plugin](https://github.com/marcomq/mq-bridge-faucet)** | [faucet](https://github.com/PawanSikawat/faucet-stream)'s connectors: MySQL / SQL Server / Oracle CDC, Snowflake, BigQuery, Iceberg, Delta, GraphQL, Singer taps; exactly-once into supporting sinks | 41 sources, 34 sinks |
+
+Plugins load only when a route names them and run in-process. Acks, commits, `retry`, `dlq` and `deduplication` work across all parts, and plugin endpoints nest inside `switch`, `fanout` and `sequence`. Where a system has both, prefer the native endpoint.
+
+| Scenario | Native | Connect | faucet |
+| :--- | :--- | :--- | :--- |
+| Postgres into Snowflake, backfill then changes, exactly once | `postgres_cdc`, `retry`, `dlq` | `connect_mapping` | `snowflake` sink |
+| MySQL, SQL Server or Oracle changes into Kafka | `kafka` output, `transform` | `connect_mapping` | `mysql-cdc`, `mssql-cdc`, `oracle-cdc` |
+| Sensor data: live statistics, alerts to a time-series DB, all to the lake | `mqtt`, `aggregate`, `switch`, `fanout` | `questdb` output | `iceberg` or `delta` sink |
+
+Install the Connect plugin with `brew`, `conda`, `pip` or `npm` ([install](https://marcomq.github.io/mq-bridge/connectors/connect.html#install)), the faucet plugin with `pip install mq-bridge-faucet` or `npm install mq-bridge-faucet` ([README](https://github.com/marcomq/mq-bridge-faucet#using-it)).
 
 For AI agents: [`llms.txt`](llms.txt) is a curated index of the documentation, and
 `npx skills add marcomq/mq-bridge` installs a [skill](apps/mq-bridge-app/agent-skills) that
@@ -129,10 +152,12 @@ Like-for-like ETL comparisons, measured through the zero-code [`mq-bridge-app`](
 | :--- | :--- | :--- |
 | CSV → JSONL, 1M mixed-type rows (~116 MiB) | **3,134,796 rows/s**, ~29 MiB RAM | Meltano (`tap-csv` → `target-jsonl`): 9,771 rows/s, ~444 MiB RAM — mq-bridge **~321x faster**<br>DuckDB, all cores: 2,109,704 rows/s — mq-bridge **~1.5x faster**, ~18x less memory |
 | Kafka → file, 1M rows, no transform | **878,105 rows/s**, ~160 MiB RAM | Sea Streamer, mimalloc build: 492,465 rows/s, ~894 MiB RAM — mq-bridge **~1.8x faster** (also ~1.8x vs. its default-allocator build) |
+| CSV → JSONL, 1M rows, typing `transform` | **1,594,896 rows/s** | Redpanda Connect 4.112.0, Bloblang `mapping`: 81,893 rows/s — mq-bridge **~19.5x faster**, outputs asserted identical |
+| Kafka → JSONL, 1M rows, projection | **766,280 rows/s** | Redpanda Connect 4.112.0: 65,741 rows/s — mq-bridge **~11.7x faster**, under half the memory, identical sink bytes |
 
 The CSV row reuses an existing, independently published 1M-row CSV → JSONL workload, on a byte-identical fixture: 7 mixed-type columns, seed 42, 121,981,421 bytes, SHA-256 `a84894e0…0c45b221` ([full definition](apps/mq-bridge-app/benches/etl/README.md#workload-definition)). Whole-process wall-clock, no transformation, Meltano run on the same machine and file.
 
-All figures: mq-bridge 0.4.20. DuckDB is a throughput ceiling for the conversion itself, not an ETL tool.
+All figures: mq-bridge 0.4.20, except the Redpanda Connect rows, which were measured together with their native mq-bridge figures in one later session ([scenario 10](apps/mq-bridge-app/benches/etl/README.md#10--redpanda-connect-and-the-connect-plugin)). DuckDB is a throughput ceiling for the conversion itself, not an ETL tool.
 
 
 **External benchmark:** both the Rust library ([`mq-bridge`](https://www.http-arena.com/#sort=rps:-1&q=rust)) and the Python binding ([`mq-bridge-py`](https://www.http-arena.com/#sort=rps:-1&q=python)) are entries on the third-party [http-arena.com](https://www.http-arena.com/) leaderboard, which compares HTTP frameworks by requests per second (live, so rankings shift over time). It measures mq-bridge's HTTP (and WebSocket) serving path, which is one endpoint among many, not broker or ETL throughput; those are covered under [Benchmarks](#benchmarks). See [the Python analysis notes](python/mq-bridge-py/README.md#analysis) for the local comparison harness.
@@ -144,6 +169,8 @@ What you get from one engine, whichever language you call it from:
 
 *   **20+ native transports, 100+ more via plugin, one API**: every connector listed above, plus `dir_spool` (a crash-safe directory FIFO queue), behind the same `receive_batch` / `send_batch` shape.
 *   **Redpanda Connect reach**: the [Connect plugin](https://github.com/marcomq/mq-bridge-connect) adds Redpanda Connect's production-proven components — **56 inputs and 68 outputs as endpoints, plus 86 processors**, most of which also run as middleware on any endpoint — while mq-bridge keeps routing, batching, retries, DLQ and deduplication.
+*   **faucet reach**: the [faucet plugin](https://github.com/marcomq/mq-bridge-faucet) adds faucet's **41 sources and 34 sinks** as one `faucet` endpoint: MySQL / SQL Server / Oracle CDC, Snowflake, BigQuery, Iceberg, Delta, GraphQL APIs and Singer taps, with commit-token exactly-once into sinks that support it.
+*   **The best of three frameworks in one route**: native endpoints, Connect and faucet parts mix freely in one route and one process; see [Combine ecosystems in one route](#combine-ecosystems-in-one-route).
 *   **Change Data Capture**: stream row-level changes from **Postgres** (logical replication / `pgoutput`) and **MongoDB** (change streams) as flat rows with an operation marker.
 *   **Restart-safe delivery**: batch-aware ack/nack with commit sequencing for cumulative-ack brokers; the integration suite shows **no data loss during in-flight broker restarts**, including a Postgres CDC restart-safety test.
 *   **Reliability middleware, not a framework**: retries, dead-letter queues, deduplication, rate limiting, and cookie/session persistence wrap any endpoint.

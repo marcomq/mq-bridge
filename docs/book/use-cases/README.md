@@ -1,4 +1,4 @@
-<!-- description: Problem-first guides for mq-bridge: keep a vector or search index in sync with Postgres or MongoDB, classify and route messages with an LLM, enrich events and keep per-key history, implement the transactional outbox, test message handlers without a broker. Each has a runnable example. -->
+<!-- description: Problem-first guides for mq-bridge: keep a vector or search index in sync with Postgres or MongoDB, stream Postgres changes into a warehouse, classify and route messages with an LLM, enrich events and add per-key totals, implement the transactional outbox, test message handlers without a broker. Each has a runnable example. -->
 
 # Use cases
 
@@ -25,6 +25,14 @@ follows its change stream into a Meilisearch index, deletes included; the same i
 Typesense or Elasticsearch.
 Example: [`mongodb-to-meilisearch`](https://github.com/marcomq/mq-bridge/tree/main/examples/mongodb-to-meilisearch).
 
+## Load a warehouse
+
+**[Warehouse sync: Postgres CDC → Bloblang → Snowflake](cdc-to-warehouse.md).** A nightly
+export leaves the warehouse a day behind and loses every change in between. One route copies a
+Postgres table and appends each insert, update and delete to a warehouse table, reshaped by a
+Bloblang mapping and written by a faucet sink, with rejected rows kept in a DLQ.
+Example: [`postgres-cdc-to-warehouse`](https://github.com/marcomq/mq-bridge/tree/main/examples/postgres-cdc-to-warehouse).
+
 ## Add intelligence and context to a stream
 
 **[LLM triage: classify and route messages](llm-ticket-triage.md).** Free-text messages
@@ -32,9 +40,9 @@ Example: [`mongodb-to-meilisearch`](https://github.com/marcomq/mq-bridge/tree/ma
 routes on the answer, with any answer outside the known categories sent to people.
 Example: [`llm-ticket-triage`](https://github.com/marcomq/mq-bridge/tree/main/examples/llm-ticket-triage).
 
-**[Enrich events and keep per-key history](enrich-and-aggregate-orders.md).** An event needs
-a database record and the history of its key to be acted on. A `lookup` adds the record, an
-`aggregate` with a Postgres store adds counts, sums and moving averages per key that survive
+**[Enrich events and add per-key totals](enrich-and-aggregate-orders.md).** An event needs
+a database record and what is known about its key so far. A `lookup` adds the record, an
+`aggregate` with a Postgres store adds counts and sums per key that survive
 restarts and are shared by instances, and outliers go to a review table.
 Example: [`order-features`](https://github.com/marcomq/mq-bridge/tree/main/examples/order-features).
 

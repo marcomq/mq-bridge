@@ -2,7 +2,7 @@
 
 The [`lookup`](../engine/reference.md#lookup) middleware asks another endpoint for each message
 and writes the answer into the payload. Use it to join an event with master data, or to add
-features such as a previous value or a moving average (for counters and averages that need
+features such as a previous value (for counters and sums that need
 no database, see [running aggregates](aggregate.md)). The endpoint asked must answer:
 `http`, `static`, `mongodb` with `find`, `sqlx` or `clickhouse` with `lookup_query`, `nats` /
 `memory` with `request_reply: true`, or `grpc` to an mq-bridge `grpc` input whose route replies.
@@ -79,5 +79,5 @@ logged and drops only its message.
 - A per-message `lookup_query` returns the first row only; use `ORDER BY … LIMIT 1` for
   "the latest". A batched (`IN`) query takes no plain `LIMIT`.
 
-A `lookup` combined with per-key history from `aggregate`, as a runnable example:
-[Enrich events and keep per-key history](../use-cases/enrich-and-aggregate-orders.md).
+A `lookup` combined with per-key totals from `aggregate`, as a runnable example:
+[Enrich events and add per-key totals](../use-cases/enrich-and-aggregate-orders.md).

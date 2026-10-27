@@ -27,8 +27,9 @@ Problem-first guides, each with a runnable example in `examples/` that CI execut
 
 - [RAG index sync: Postgres CDC → embeddings → Qdrant](https://marcomq.github.io/mq-bridge/use-cases/sync-postgres-to-qdrant.html): logical replication, an OpenAI-compatible embeddings API (Ollama), Qdrant upserts and deletes
 - [Search index sync: MongoDB → Meilisearch](https://marcomq.github.io/mq-bridge/use-cases/sync-mongodb-to-meilisearch.html): change stream with initial copy, ObjectId to document id, deletes
+- [Warehouse sync: Postgres CDC → Bloblang → Snowflake](https://marcomq.github.io/mq-bridge/use-cases/cdc-to-warehouse.html): `postgres_cdc` with initial copy, a `connect_mapping` (Connect plugin), a faucet sink appending a change log, rejected rows to a `dlq`
 - [LLM triage: classify and route messages](https://marcomq.github.io/mq-bridge/use-cases/llm-ticket-triage.html): webhook → `openai_chat` → `switch` to one Redis stream per team; unknown answers go to people
-- [Enrich events and keep per-key history](https://marcomq.github.io/mq-bridge/use-cases/enrich-and-aggregate-orders.html): `lookup` from Postgres, `aggregate` with a Postgres store (survives restarts, shared by instances), outliers to review
+- [Enrich events and add per-key totals](https://marcomq.github.io/mq-bridge/use-cases/enrich-and-aggregate-orders.html): `lookup` from Postgres, `aggregate` with a Postgres store (survives restarts, shared by instances), outliers to review
 - [Transactional outbox with Postgres and Kafka](https://marcomq.github.io/mq-bridge/use-cases/transactional-outbox-postgres-kafka.html)
 - [Test message handlers without a broker](https://marcomq.github.io/mq-bridge/use-cases/test-without-a-broker.html): in-memory endpoints in Rust and Python tests
 
@@ -69,7 +70,7 @@ Problem-first guides, each with a runnable example in `examples/` that CI execut
 - [Content-based routing](https://marcomq.github.io/mq-bridge/cookbook/switch.html)
 - [Enrichment and lookups](https://marcomq.github.io/mq-bridge/cookbook/lookup.html)
 - [LLM calls in a pipeline](https://marcomq.github.io/mq-bridge/cookbook/llm.html): classify, summarise or embed messages with an OpenAI-compatible API
-- [Running aggregates](https://marcomq.github.io/mq-bridge/cookbook/aggregate.html): per-key sums, counters, moving averages
+- [Running aggregates](https://marcomq.github.io/mq-bridge/cookbook/aggregate.html): per-key counters and sums
 - [Fan-out](https://marcomq.github.io/mq-bridge/cookbook/fanout.html)
 - [Weak join / correlation](https://marcomq.github.io/mq-bridge/cookbook/weak-join.html)
 - [Secrets and interpolation](https://marcomq.github.io/mq-bridge/cookbook/secrets.html)
