@@ -272,6 +272,7 @@ impl UriSchema {
             None => scheme.to_string(),
         };
         let address = match (&self.url, &self.origin, &self.path) {
+            (Some(url), _, Some(path)) => format!("//<{url}>/<{path}>"),
             (Some(url), ..) => format!("//<{url}>"),
             (None, Some(origin), Some(path)) => format!("//<{origin}>/<{path}>"),
             (None, Some(origin), None) => format!("//<{origin}>"),
@@ -940,11 +941,37 @@ mod tests {
             "type": "object",
             "properties": { "connector": { "type": "string", "x-mqb-uri": "subscheme" } },
         });
-        assert_eq!(template(subscheme_only), "rp+<connector>://?<param>=<value>");
+        assert_eq!(
+            template(subscheme_only),
+            "rp+<connector>://?<param>=<value>"
+        );
         assert_eq!(
             UriSchema::default().uri_template("rp"),
             "rp://<url>?<param>=<value>"
         );
+    }
+
+    #[test]
+    fn a_url_and_a_path_both_show_in_the_template_and_both_map() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "url": { "type": "string", "x-mqb-uri": "url" },
+                "table": { "type": "string", "x-mqb-uri": "path" },
+            },
+        });
+        validate(&schema).expect("url and path are distinct positions");
+        let mapping = UriSchema::from_schema(&schema);
+
+        assert_eq!(
+            mapping.uri_template("rp"),
+            "rp://<url>/<table>?<param>=<value>"
+        );
+        let config = mapping
+            .config_from_uri("rp://host:9000/books?x=1")
+            .expect("map the uri");
+        assert_eq!(config["url"], json!("rp://host:9000/books"));
+        assert_eq!(config["table"], json!("books"));
     }
 
     #[test]
