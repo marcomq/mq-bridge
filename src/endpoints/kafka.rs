@@ -7,10 +7,10 @@ use crate::traits::{
 use crate::CanonicalMessage;
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt};
 use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
 use rdkafka::message::OwnedHeaders;
-use rdkafka::producer::{FutureProducer, FutureRecord, Producer};
+use rdkafka::producer::{DeliveryFuture, FutureProducer, FutureRecord, Producer};
 use rdkafka::Offset;
 use rdkafka::{
     consumer::{BaseConsumer, CommitMode, Consumer, ConsumerContext, Rebalance},
@@ -18,7 +18,8 @@ use rdkafka::{
     message::Headers,
     ClientConfig, ClientContext, Message, TopicPartitionList,
 };
-use std::sync::Arc;
+use std::future::Future;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tracing::{debug, error, info, trace};
 use uuid::Uuid;
@@ -29,6 +30,84 @@ const QUEUE_FULL_BACKOFF: Duration = Duration::from_millis(10);
 /// After this, a message that still finds the queue full fails as retryable. Longer than the
 /// default `message.timeout.ms` (300 s), so a broker outage only waits.
 const QUEUE_FULL_TIMEOUT: Duration = Duration::from_secs(330);
+
+/// How often a route confirms `delayed_ack` sends and commits their source.
+const DELAYED_ACK_COMMIT_INTERVAL: Duration = Duration::from_millis(100);
+
+/// A flush that waits longer fails; its batches are redelivered, not lost.
+const DELAYED_ACK_FLUSH_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Pending reports are pruned once this many pile up between flushes.
+const DELIVERY_PRUNE_FLOOR: usize = 4096;
+
+type Confirmation = futures::future::Map<
+    DeliveryFuture,
+    fn(<DeliveryFuture as Future>::Output) -> Result<(), String>,
+>;
+
+fn delivery_outcome(result: <DeliveryFuture as Future>::Output) -> Result<(), String> {
+    match result {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err((e, _))) => Err(e.to_string()),
+        Err(_) => Err("delivery report cancelled".to_string()),
+    }
+}
+
+/// Delivery reports of `delayed_ack` sends that no flush has checked yet.
+struct PendingDeliveries<F> {
+    futures: Vec<F>,
+    failure: Option<String>,
+    prune_at: usize,
+}
+
+impl<F: Future<Output = Result<(), String>> + Unpin> PendingDeliveries<F> {
+    fn new() -> Self {
+        Self {
+            futures: Vec::new(),
+            failure: None,
+            prune_at: DELIVERY_PRUNE_FLOOR,
+        }
+    }
+
+    /// Drops settled reports now and then, keeping the first failure for the next flush,
+    /// so a publisher that is never flushed stays bounded.
+    fn push(&mut self, delivery: F) {
+        self.futures.push(delivery);
+        if self.futures.len() < self.prune_at {
+            return;
+        }
+        let failure = &mut self.failure;
+        self.futures.retain_mut(|f| match f.now_or_never() {
+            None => true,
+            Some(Ok(())) => false,
+            Some(Err(e)) => {
+                failure.get_or_insert(e);
+                false
+            }
+        });
+        self.prune_at = (self.futures.len() * 2).max(DELIVERY_PRUNE_FLOOR);
+    }
+
+    fn take(&mut self) -> (Vec<F>, Option<String>) {
+        self.prune_at = DELIVERY_PRUNE_FLOOR;
+        (std::mem::take(&mut self.futures), self.failure.take())
+    }
+}
+
+/// Waits for every report taken from [`PendingDeliveries`]; any failure fails the flush.
+async fn confirm_deliveries<F: Future<Output = Result<(), String>> + Unpin>(
+    (futures, failure): (Vec<F>, Option<String>),
+    timeout: Duration,
+) -> anyhow::Result<()> {
+    if let Some(e) = failure {
+        return Err(anyhow!("Kafka delivery failed: {e}"));
+    }
+    match tokio::time::timeout(timeout, futures::future::try_join_all(futures)).await {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(e)) => Err(anyhow!("Kafka delivery failed: {e}")),
+        Err(_) => Err(anyhow!("Kafka deliveries not confirmed within {timeout:?}")),
+    }
+}
 
 /// Shared rdkafka producer. The flush on `Drop` runs only when the last holder is
 /// dropped, so publishers sharing this producer don't flush each other's buffers early.
@@ -54,6 +133,8 @@ pub struct KafkaPublisher {
     producer: Arc<SharedKafkaProducer>,
     topic: String,
     delayed_ack: bool,
+    /// `Some` with `delayed_ack`: the reports a route's flush waits for before committing.
+    pending: Option<Mutex<PendingDeliveries<Confirmation>>>,
     // Metadata field whose value is used as the record key; falls back to message_id.
     partition_key: Option<String>,
 }
@@ -67,7 +148,7 @@ impl KafkaPublisher {
             ));
         }
         if config.delayed_ack {
-            tracing::warn!("Kafka 'delayed_ack' is enabled. Messages are acknowledged before broker confirmation. This carries a risk of data loss in the event of a crash.");
+            tracing::info!("Kafka 'delayed_ack' is enabled: sends return before broker confirmation; a route commits its source only once they are confirmed.");
         }
 
         let mut client_config = create_common_config(config);
@@ -179,6 +260,9 @@ impl KafkaPublisher {
             producer,
             topic: topic.to_string(),
             delayed_ack: config.delayed_ack,
+            pending: config
+                .delayed_ack
+                .then(|| Mutex::new(PendingDeliveries::new())),
             partition_key: config.partition_key.clone(),
         })
     }
@@ -216,15 +300,19 @@ impl MessagePublisher for KafkaPublisher {
                 .await
                 .map_err(|(e, _)| delivery_error("Kafka message delivery failed", e))?;
         } else {
-            // "Fire and forget" send. This enqueues the message in the producer's buffer.
-            // The `FutureProducer` will handle sending it in the background according to the
-            // `linger.ms` and other batching settings. We don't await the delivery report
-            // here to achieve high throughput. The `flush()` in `Drop` ensures all messages
-            // are sent before shutdown. A full queue is backpressure: wait for room.
+            // Enqueue only; `flush` awaits the delivery report. A full queue is backpressure.
             let deadline = tokio::time::Instant::now() + QUEUE_FULL_TIMEOUT;
             loop {
                 match self.producer.send_result(record) {
-                    Ok(_) => break,
+                    Ok(delivery) => {
+                        if let Some(pending) = &self.pending {
+                            pending
+                                .lock()
+                                .expect("Kafka pending deliveries lock poisoned")
+                                .push(delivery.map(delivery_outcome as fn(_) -> _));
+                        }
+                        break;
+                    }
                     Err((e @ KafkaError::MessageProduction(RDKafkaErrorCode::QueueFull), _))
                         if tokio::time::Instant::now() >= deadline =>
                     {
@@ -320,6 +408,13 @@ impl MessagePublisher for KafkaPublisher {
     }
 
     async fn flush(&self) -> anyhow::Result<()> {
+        if let Some(pending) = &self.pending {
+            let taken = pending
+                .lock()
+                .expect("Kafka pending deliveries lock poisoned")
+                .take();
+            return confirm_deliveries(taken, DELAYED_ACK_FLUSH_TIMEOUT).await;
+        }
         self.producer
             .flush(Duration::from_secs(10))
             .map_err(|e| anyhow!("Kafka flush error: {}", e))
@@ -354,6 +449,11 @@ impl MessagePublisher for KafkaPublisher {
             pending: Some(pending),
             ..Default::default()
         }
+    }
+
+    /// `delayed_ack` sends are confirmed in `flush`, so the route holds commits until then.
+    fn deferred_commit_interval(&self) -> Option<Duration> {
+        self.pending.as_ref().map(|_| DELAYED_ACK_COMMIT_INTERVAL)
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -2713,6 +2813,7 @@ mod tests {
             producer: Arc::new(SharedKafkaProducer { producer }),
             topic: "t".to_string(),
             delayed_ack: false,
+            pending: None,
             partition_key: None,
         }
     }
@@ -3118,5 +3219,46 @@ mod tests {
             record_key(None, &msg),
             msg.message_id.to_be_bytes().to_vec()
         );
+    }
+
+    #[tokio::test]
+    async fn a_failure_pruned_between_flushes_still_fails_the_next_flush() {
+        let mut pending = PendingDeliveries::new();
+        pending.push(futures::future::ready(Err("broker rejected".to_string())));
+        for _ in 1..DELIVERY_PRUNE_FLOOR {
+            pending.push(futures::future::ready(Ok(())));
+        }
+        let taken = pending.take();
+        assert!(taken.0.is_empty(), "settled reports are pruned");
+        let err = confirm_deliveries(taken, Duration::from_secs(1))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("broker rejected"));
+        assert!(confirm_deliveries(pending.take(), Duration::from_secs(1))
+            .await
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn an_unconfirmed_delivery_fails_the_flush() {
+        let mut pending = PendingDeliveries::new();
+        pending.push(futures::future::pending::<Result<(), String>>());
+        assert!(
+            confirm_deliveries(pending.take(), Duration::from_millis(10))
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn delayed_ack_defers_commits_until_deliveries_are_confirmed() {
+        let mut publisher = offline_publisher();
+        publisher.delayed_ack = true;
+        publisher.pending = Some(Mutex::new(PendingDeliveries::new()));
+        assert!(publisher.deferred_commit_interval().is_some());
+
+        publisher.send(CanonicalMessage::from("x")).await.unwrap();
+        let err = publisher.flush().await.unwrap_err();
+        assert!(err.to_string().contains("Kafka delivery failed"), "{err}");
     }
 }

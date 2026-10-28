@@ -496,15 +496,19 @@ dedup to survive a re-read.
   afterwards (MongoDB's sweep can lag by up to a minute). The collection defaults to
   `mqb_dedup_<route>`. Point it at the same
   deployment your sink already uses to avoid running extra infrastructure.
-- `postgres|mysql|mariadb|sqlite://…[/table]` — a shared SQL table (`dedup_key` PK,
+- `postgres|mysql|mariadb://…[/table]` or `sqlite://…` — a shared SQL table (`dedup_key` PK,
   `expire_at`), so multiple instances deduplicate against one another. Requires the `sqlx`
   feature. SQL has no native TTL, so expired rows are swept periodically; the table defaults
-  to `mqb_dedup_<route>`.
+  to `mqb_dedup_<route>`. A SQLite URL is a file path with no table slot, so it always uses
+  the default.
 
 `sled_path` is the legacy spelling of a local sled store and is equivalent to `store: "sled://<path>"`.
 
 A shared store's default collection/table is named after the route, so replicas of one route
-must run under the same route name. A copy whose key is still in flight elsewhere waits for that
+must run under the same route name. mq-bridge-app runs a route under an internal name
+(`ui_collector_route_<hex>`), so there the default is not the YAML name; name the collection or
+table in the URL to choose it. SQLite URLs have no table slot, so a SQLite store keeps that
+per-run default. A copy whose key is still in flight elsewhere waits for that
 delivery instead of being dropped; a failed delivery releases its key at once. A delivery in
 flight keeps its key however long the sink takes; only the key of a holder that died is freed,
 after five seconds. The ordering and its crash windows are in [DELIVERY.md](DELIVERY.md#the-deduplication-middleware).

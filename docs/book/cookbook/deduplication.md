@@ -29,7 +29,9 @@ process-local or **shared across every instance of the route**:
 | `mongodb://host/db[/collection]` | shared between instances | `mongodb` |
 | `postgres` / `mysql` / `mariadb` / `sqlite` `://…[/table]` | shared between instances | `sqlx` |
 
-The collection/table defaults to `mqb_dedup_<route>`. Under `mqb copy`, whose route name
+The collection/table defaults to `mqb_dedup_<route>`. Config mode runs a route under an
+internal name (`ui_collector_route_<hex>`), so there the default is not the name in your YAML;
+name the collection or table in the URL to choose it. Under `mqb copy`, whose route name
 is new on every run, it defaults to `mqb_dedup_copy_<id>`: the id is derived from source,
 destination and `--filter` without credentials, so the same command finds its keys again.
 A `sqlite://` URL has no place for a table name and keeps the per-run default. Point a shared store at the deployment

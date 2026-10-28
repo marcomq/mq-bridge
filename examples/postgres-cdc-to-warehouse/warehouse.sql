@@ -6,6 +6,7 @@ CREATE TABLE orders_changes (
   status text,
   _op text NOT NULL,
   _lsn text,
+  _ord text,
   _synced_at timestamptz NOT NULL,
   CONSTRAINT plausible_amount CHECK (amount_eur IS NULL OR amount_eur < 1000)
 );

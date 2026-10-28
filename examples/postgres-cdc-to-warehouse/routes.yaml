@@ -7,6 +7,7 @@ orders_to_warehouse:
       slot_name: "orders_to_warehouse"
       consume: capture_all                             # copy existing rows, then follow changes
       checkpoint_store: "file:///app/checkpoint.json"  # a restart does not repeat the copy
+      source_metadata: true                            # a change's position in its transaction
     middlewares:
       # Redpanda Connect plugin: a Bloblang mapping, run in process.
       - connect_mapping: |
@@ -14,6 +15,7 @@ orders_to_warehouse:
           root.amount_eur = if this.amount_cents != null { this.amount_cents / 100 }
           root._op = metadata("postgres.operation").or("snapshot")
           root._lsn = metadata("postgres.lsn")
+          root._ord = metadata("mqb.src.postgres_ordinal")
           root._synced_at = now()
   # faucet plugin: a faucet sink. Its postgres connector stands in for Snowflake here.
   output:

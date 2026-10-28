@@ -50,12 +50,14 @@ orders_to_warehouse:
       slot_name: "orders_to_warehouse"
       consume: capture_all                             # copy existing rows, then follow changes
       checkpoint_store: "file:///app/checkpoint.json"  # a restart does not repeat the copy
+      source_metadata: true                            # a change's position in its transaction
     middlewares:
       - connect_mapping: |
           root = this.without("amount_cents")
           root.amount_eur = if this.amount_cents != null { this.amount_cents / 100 }
           root._op = metadata("postgres.operation").or("snapshot")
           root._lsn = metadata("postgres.lsn")
+          root._ord = metadata("mqb.src.postgres_ordinal")
           root._synced_at = now()
   output:
     middlewares:
@@ -84,7 +86,7 @@ How it fits together:
   `snapshot`. `checkpoint_store` remembers that the copy finished.
 - [`connect_mapping`](../connectors/connect.md#processors-as-middleware) runs a Bloblang mapping
   in the same process: it converts cents to euros, drops the source column and adds the
-  operation, the LSN and a load timestamp. A `transform` would cover the renames; Bloblang is
+  operation, the LSN, the change's position in its transaction and a load timestamp. A `transform` would cover the renames; Bloblang is
   there for logic such as the conditional, and for mappings a team already has.
 - The faucet sink appends each row to `orders_changes`. `column_mapping: auto_map` writes each
   field to the column of the same name. `flush: batch` writes before every acknowledgement, so
@@ -138,8 +140,19 @@ docker compose exec warehouse psql -U dw -d dw -c "SELECT * FROM orders_changes"
 
 The stack is two Postgres 16 instances (source and warehouse) and an image with mq-bridge-app
 1.2.0 and the two plugins from their release archives. `./test.sh` checks the copy, an update,
-a delete and an insert in commit order, a change made while the bridge was stopped, and a row
+a delete and an insert in commit order, two updates of one row in one transaction, a change made while the bridge was stopped, and a row
 the warehouse rejects through a `CHECK` constraint; it runs in CI.
+
+Postgres runs `warehouse.sql` only on an empty volume. A `dwdata` volume from a run before the
+`_ord` column existed keeps the old table; add the column before starting the route:
+
+```bash
+docker compose up -d warehouse
+docker compose exec warehouse psql -U dw -d dw -c "ALTER TABLE orders_changes ADD COLUMN IF NOT EXISTS _ord text"
+docker compose up -d --build
+```
+
+Or discard the demo data with `docker compose down -v`.
 
 The example's README explains the two details of plugins in a container: the libraries must be
 owned by root, and faucet needs a glibc from 2.39 on, newer than in the official image.
@@ -149,7 +162,7 @@ owned by root, and faucet needs a glibc from 2.39 on, newer than in the official
 | Event | What happens |
 | :--- | :--- |
 | **mq-bridge restarts** | The replication slot keeps the position, so changes made while the bridge was down arrive after the restart. The copy is not repeated. |
-| **Duplicates** | Delivery is [at-least-once](../engine/delivery.md): after a crash or a failed write, changes since the last confirmed position arrive again. A repeated row has the same `id` and `_lsn`, so a view that keeps one row per `(id, _lsn)` removes it. `_lsn` is the commit position, shared by every change of a transaction: to keep two changes to one `id` in one transaction apart, set `source_metadata: true` on the input, map `metadata("mqb.src.postgres_ordinal")` (the change's stable position in its transaction) into a column such as `_ord`, and keep one row per `(id, _lsn, _ord)`. The copy has no LSN; a crash during the copy repeats it. |
+| **Duplicates** | Delivery is [at-least-once](../engine/delivery.md): after a crash or a failed write, changes since the last confirmed position arrive again. A repeated row has the same `id`, `_lsn` and `_ord`. `_lsn` is the commit position, shared by every change of a transaction, so two changes to one `id` in one transaction differ only in `_ord`, their position in it: keep one row per `(id, _lsn, _ord)`. The copy has no LSN; a crash during the copy repeats it. |
 | **Deletes** | A delete arrives as a row with `_op = delete` and only the key columns set. Set `REPLICA IDENTITY FULL` on the source table to get the whole old row. |
 | **Warehouse unavailable** | `retry` repeats the write; after `max_attempts` the change goes to the DLQ, so a longer outage fills the DLQ instead of stopping the route. Raise `max_attempts` or leave the `dlq` out to make the route wait instead. |
 | **A row the warehouse refuses** | When faucet reports the record as the cause, as for a constraint or type error, the write is not retried; the row goes to the DLQ file and the route continues. |
@@ -162,7 +175,7 @@ warehouse and skips what is already there after a restart; the Snowflake and Pos
 support it. It also needs `source_metadata: true` on the input and a `state_key`. It does
 not combine with a DLQ: the position commits past a rejected row, so a crash before the DLQ
 saw it would lose the row. Choose one, exactly-once writes, or a DLQ for rejected rows and
-deduplication by `(id, _lsn)` in the warehouse, as the example does.
+deduplication by `(id, _lsn, _ord)` in the warehouse, as the example does.
 
 Limits of this recipe:
 

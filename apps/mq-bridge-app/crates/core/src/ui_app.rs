@@ -2179,6 +2179,10 @@ impl UiApp {
             let internal_route_name = collector_route_name(&consumer_key);
             let shown = collector_display_name(consumer);
             mq_bridge::set_route_display_name(&internal_route_name, &shown);
+            tracing::info!(
+                "Route '{}' runs as '{internal_route_name}'; defaults named after the route use this name",
+                consumer.name
+            );
             // A config error names the engine route before the engine can show `shown`.
             let handle = route.run(&internal_route_name).await.map_err(|e| {
                 anyhow::anyhow!(format!("{e:#}").replace(&internal_route_name, &shown))

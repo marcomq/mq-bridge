@@ -1,7 +1,7 @@
 <p align="center">
   <img src="apps/mq-bridge-app/crates/desktop/icons/icon.png" alt="mq-bridge" width="128" height="128">
 </p>
-<h1 align="center">mq-bridge</h1>
+<h1 align="center">mqb · mq-bridge</h1>
 <p align="center"><em>crossing streams · library</em></p>
 
 <p align="center">

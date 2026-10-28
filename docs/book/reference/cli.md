@@ -84,7 +84,12 @@ behalf — see [Ports in containers](../operations/deploying.md#ports-in-contain
 
 Metrics are always collected, and always available at `/metrics` on the web UI
 when it runs. Separately, config mode serves a standalone Prometheus endpoint on
-**`127.0.0.1:9090`** by default.
+the `metrics_addr` of the config. Without one, it is served on **`127.0.0.1:9090`**
+only when no config file is on disk (`--config-str`, environment variables, or an
+empty start) or the config defines no routes; a config file with routes opens no
+metrics port. If that implicit `127.0.0.1:9090` is already in use, for example by a
+second instance, a warning is logged and the bridge runs without it. An address
+that is configured or passed with `--metrics-addr` must be free, or the start fails.
 
 It defaults to loopback rather than `0.0.0.0` because, while the endpoint is
 read-only, it still describes the routes and endpoint types in use — a bare run
@@ -97,6 +102,29 @@ mqb --config config.yml --no-metrics                  # no separate port at all
 ```
 
 `metrics_addr` in the config does the same thing; the flag overrides it.
+
+### When `--no-ui` and `--no-metrics` are needed
+
+A config file with routes needs neither flag: it opens no port unless it sets
+`ui_addr` or `metrics_addr`. A config saved from the web UI may contain both, because
+the UI saves its settings with the routes. Clear them in the file, or pass the flags
+to override them for one run. The command printed by `to-cli` keeps both flags
+because it embeds the whole config, these settings included.
+
+### Route names in config mode
+
+Config mode runs each route under an internal name: `ui_collector_route_` followed by
+the hex-encoded route id. A route without an `id`, such as one from a config file, gets
+an id derived from its name, so the internal name is stable across restarts but not
+readable. The log at startup prints it:
+`Route 'orders_cdc' runs as 'ui_collector_route_3965…3832'`. Other log lines and errors
+show the configured name.
+Every default that the endpoint and middleware pages describe as the route name
+uses the internal name instead: the deduplication store (`mqb_dedup_<route>`), the
+aggregate store (`mqb_aggregate_<route>`), a Redis stream, IBM MQ queue or
+Meilisearch index with no name, the Pulsar subscription and the MQTT client id. Set
+these explicitly when you want a name you choose. `mqb copy` and the MCP
+`start_route` tool are not affected; they run a route under its own name.
 
 ## `copy` — ad-hoc one-route job
 

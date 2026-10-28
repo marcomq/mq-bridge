@@ -1,4 +1,4 @@
-# mq-bridge
+# mqb · mq-bridge
 
 > mq-bridge is an asynchronous Rust library, with Python and Node.js bindings, that moves messages and data between brokers (Kafka, NATS, RabbitMQ/AMQP, MQTT, Redis Streams, AWS SQS/SNS, IBM MQ, ZeroMQ), databases (PostgreSQL, MySQL, SQLite, MongoDB, ClickHouse, with change data capture for Postgres and MongoDB), object storage (S3, GCS, Azure Blob as Parquet or JSONL), files (CSV, JSONL), and HTTP, gRPC and WebSocket. A route connects one input to one output and adds retries, dead-letter queues, deduplication, schema validation and routing by configuration.
 

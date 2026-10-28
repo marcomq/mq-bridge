@@ -681,12 +681,21 @@ async fn main() -> anyhow::Result<()> {
     // UI + metrics are reachable with sane defaults.
     let has_persisted_config = std::path::Path::new(&config_file_path).exists();
     let unconfigured = !has_persisted_config || config.consumers.is_empty();
+    let mut implicit_metrics_addr = false;
     if let Some(addr) = args.metrics_addr {
         config.metrics_addr = addr;
     } else if args.no_metrics {
         config.metrics_addr = String::new();
     } else if unconfigured && config.metrics_addr.is_empty() {
         config.metrics_addr = DEFAULT_METRICS_ADDR.to_string();
+        implicit_metrics_addr = true;
+    }
+    // Nobody asked for this port, so a second instance must not fail on it.
+    if implicit_metrics_addr && std::net::TcpListener::bind(DEFAULT_METRICS_ADDR).is_err() {
+        warn!(
+            "{DEFAULT_METRICS_ADDR} is in use, so the Prometheus endpoint is not served; pass --metrics-addr to serve it elsewhere"
+        );
+        config.metrics_addr = String::new();
     }
     // The UI is a control surface, so its port is the one address never opened
     // implicitly: a `ui_addr` in the config counts as consent, an accidental
