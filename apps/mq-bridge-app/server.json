@@ -1,7 +1,7 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.marcomq/mq-bridge",
-  "title": "mq-bridge",
+  "title": "mqb · mq-bridge",
   "description": "Move data between 15+ databases, queues and files at high throughput, without it entering context",
   "version": "1.2.0",
   "websiteUrl": "https://marcomq.github.io/mq-bridge/MCP.html",

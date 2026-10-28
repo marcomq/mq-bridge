@@ -1,4 +1,4 @@
-# mq-bridge-app
+# mqb · mq-bridge-app
 
 ![Linux](https://img.shields.io/badge/Linux-supported-green?logo=linux)
 ![Windows](https://img.shields.io/badge/Windows-supported-green?logo=windows)

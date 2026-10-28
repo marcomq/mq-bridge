@@ -1,5 +1,5 @@
 [book]
-title    = "mq-bridge"
+title    = "mqb · mq-bridge"
 authors  = ["mq-bridge contributors"]
 language = "en"
 src      = "."

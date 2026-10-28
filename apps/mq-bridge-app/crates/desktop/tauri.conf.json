@@ -14,7 +14,7 @@
         "minHeight": 600,
         "minWidth": 800,
         "resizable": true,
-        "title": "mq-bridge",
+        "title": "mqb · mq-bridge",
         "width": 1280
       }
     ],

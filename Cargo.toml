@@ -256,7 +256,7 @@ zeromq = { version = "0.6", optional = true }
 # benchmarks and adds CURVE/PLAIN security, but requires MSRV 1.93 / edition
 # 2024 — so it is kept behind its own opt-in feature and out of `full`/`portable`
 # to preserve the crate's 1.85 MSRV on the default build.
-omq-tokio = { version = "0.30", optional = true }
+omq-tokio = { version = "0.32", optional = true }
 
 # Redis Streams. Pure-Rust client (no C bindings). TLS via rustls (ring), so
 # `rediss://` URLs work; webpki-roots ships the CA bundle so there's no system
@@ -278,7 +278,7 @@ percent-encoding = "2.3"
 # Postgres CDC (logical replication / pgoutput). pgwire-replication is a
 # narrowly-scoped wire-protocol client (COPY-both, LSN/standby, TLS/SCRAM) that
 # deliberately avoids tokio-postgres; byteorder backs the pgoutput byte decoder.
-pgwire-replication = { version = "0.4", optional = true, default-features = false, features = ["tls-rustls", "scram", "md5"] }
+pgwire-replication = { version = "0.5", optional = true, default-features = false, features = ["tls-rustls", "scram", "md5"] }
 byteorder = { version = "1.5", optional = true }
 
 # dir_spool PRODUCER/CONSUMER locks: a pid file whose owner is checked for liveness, so a
