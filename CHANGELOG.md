@@ -4,6 +4,36 @@ All notable changes to `mq-bridge`. Newest first.
 
 ## Unreleased
 
+### Changed
+
+- **Config mode logs each route's internal name at start**, as
+  `Route 'orders_cdc' runs as 'ui_collector_route_<hex>'`. Defaults named after the route
+  (the dedup and aggregate stores, the MQTT client id, ...) use that internal name; the CLI
+  reference now lists them.
+
+### Fixed
+
+- **Kafka `delayed_ack: true` could lose messages.** Sends were acked before the broker
+  confirmed them, and a failed delivery was dropped silently. A route now holds the source's
+  commits until the publisher's flush has seen every delivery report (about every 100 ms); a
+  failed or unconfirmed delivery fails the flush and the source redelivers. Sends still
+  return without waiting for the broker.
+- **MongoDB `consume: delete` drain could end before a crashed run's documents came back.**
+  Documents a killed process had claimed stay locked for their 60 s lease, and a drain
+  started in that window read the collection as empty and exited, leaving them behind. A
+  draining consumer now waits for those claims to lapse, at most the lease plus 2 s.
+- **A second `mqb` instance failed to start on the implicit metrics port.** When nothing set
+  `metrics_addr` and `127.0.0.1:9090` was taken, the start failed. The bridge now logs a
+  warning and runs without the Prometheus endpoint; an address set in the config or with
+  `--metrics-addr` must still be free.
+- **A plugin URI set `url` on endpoints that have no `url` field.** When a plugin's schema
+  positioned no field, the URI up to the query was always written to `url`. That now happens
+  only if the schema declares no properties or declares `url` itself.
+- **`mqb list` and `mqb describe` showed a generic URI for plugin endpoints.** They printed
+  `<scheme>://<address>?<param>=<value>` whatever the plugin's schema mapped. They now show
+  the shape it reads, such as `rp://<url>/<topic>?<param>=<value>`, using the new
+  `UriSchema::uri_template`.
+
 ## 1.2.0
 
 ### Added

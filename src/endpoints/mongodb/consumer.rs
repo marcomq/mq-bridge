@@ -5,6 +5,9 @@
 
 use super::*;
 
+/// How long a claim locks a document before another consumer may take it.
+const LEASE_SECS: i64 = 60;
+
 /// A consumer that receives messages from a MongoDB collection, treating it like a queue (locking).
 pub struct MongoDbConsumer {
     collection: Collection<Document>,
@@ -13,6 +16,8 @@ pub struct MongoDbConsumer {
     polling_interval: Duration,
     collection_name: String,
     receive_query: Option<Document>,
+    exit_on_empty: bool,
+    drain_deadline: Option<Instant>,
 }
 
 impl MongoDbConsumer {
@@ -74,6 +79,8 @@ impl MongoDbConsumer {
             polling_interval: Duration::from_millis(config.polling_interval_ms.unwrap_or(100)),
             collection_name: collection_name.to_string(),
             receive_query,
+            exit_on_empty: false,
+            drain_deadline: None,
         })
     }
 }
@@ -122,7 +129,7 @@ impl MessageConsumer for MongoDbConsumer {
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .context("System time is before UNIX EPOCH")?
                 .as_secs() as i64;
-            let lock_duration_secs = 60;
+            let lock_duration_secs = LEASE_SECS;
             let locked_until = now + lock_duration_secs;
             // Concurrent consumers can write the same `locked_until` second, so only
             // this token distinguishes the documents this poll actually won.
@@ -139,6 +146,7 @@ impl MessageConsumer for MongoDbConsumer {
                 .await?;
 
             if !claimed_docs.is_empty() {
+                self.drain_deadline = None;
                 let (messages, commit) =
                     self.process_claimed_documents(claimed_docs, claim_token)?;
                 return Ok(ReceivedBatch { messages, commit });
@@ -165,6 +173,9 @@ impl MessageConsumer for MongoDbConsumer {
                 tokio::time::sleep(self.polling_interval).await;
             }
 
+            if self.exit_on_empty && self.drain_must_wait(&extra_filter).await {
+                continue;
+            }
             return Ok(ReceivedBatch {
                 messages: Vec::new(),
                 commit: Box::new(|_| Box::pin(async { Ok(()) })),
@@ -213,12 +224,58 @@ impl MessageConsumer for MongoDbConsumer {
         }
     }
 
+    fn set_exit_on_empty(&mut self, exit_on_empty: bool) {
+        self.exit_on_empty = exit_on_empty;
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
 }
 
 impl MongoDbConsumer {
+    /// An idle drain is only empty once no claim still holds a document: what a crashed
+    /// run claimed comes back when its lease lapses, so a drain started sooner waits for it.
+    async fn drain_must_wait(&mut self, extra_filter: &Document) -> bool {
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let claimed = doc! {
+            "locked_until": { "$gte": now },
+            "seq_counter": { "$exists": false },
+            "last_seq": { "$exists": false }
+        };
+        let filter = if extra_filter.is_empty() {
+            claimed
+        } else {
+            doc! { "$and": [claimed, extra_filter.clone()] }
+        };
+        match self
+            .collection
+            .find_one(filter)
+            .projection(doc! { "_id": 1 })
+            .await
+        {
+            // A lease that lapsed while we waited is claimable now: one more poll first.
+            Ok(None) => return self.drain_deadline.take().is_some(),
+            Ok(Some(_)) => {}
+            Err(e) => {
+                warn!(error = %e, "MongoDB drain could not check for claimed documents; treating idle as empty");
+                return false;
+            }
+        }
+        let deadline = *self
+            .drain_deadline
+            .get_or_insert_with(|| Instant::now() + Duration::from_secs(LEASE_SECS as u64 + 2));
+        if Instant::now() < deadline {
+            trace!(collection = %self.collection_name, "MongoDB drain idle, but documents are still claimed; waiting");
+            return true;
+        }
+        warn!(collection = %self.collection_name, "MongoDB drain ending with documents still claimed after the lease");
+        false
+    }
+
     /// Creates a BSON document filter to find available (unlocked) messages.
     fn available_message_filter(now: i64) -> Document {
         doc! {
@@ -298,7 +355,7 @@ impl MongoDbConsumer {
         let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)?
             .as_secs() as i64;
-        let lock_duration_secs = 60;
+        let lock_duration_secs = LEASE_SECS;
         let locked_until = now + lock_duration_secs;
         let claim_token = fast_uuid_v7::gen_id_string();
 
@@ -496,7 +553,7 @@ async fn extend_claim(
     let result = collection
         .update_one(
             doc! { "_id": id, "claim_token": claim_token },
-            doc! { "$set": { "locked_until": now + 60 } },
+            doc! { "$set": { "locked_until": now + LEASE_SECS } },
         )
         .await
         .context("Failed to extend MongoDB message claim before replying")?;

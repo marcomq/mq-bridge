@@ -143,6 +143,17 @@ The stack is two Postgres 16 instances (source and warehouse) and an image with 
 a delete and an insert in commit order, two updates of one row in one transaction, a change made while the bridge was stopped, and a row
 the warehouse rejects through a `CHECK` constraint; it runs in CI.
 
+Postgres runs `warehouse.sql` only on an empty volume. A `dwdata` volume from a run before the
+`_ord` column existed keeps the old table; add the column before starting the route:
+
+```bash
+docker compose up -d warehouse
+docker compose exec warehouse psql -U dw -d dw -c "ALTER TABLE orders_changes ADD COLUMN IF NOT EXISTS _ord text"
+docker compose up -d --build
+```
+
+Or discard the demo data with `docker compose down -v`.
+
 The example's README explains the two details of plugins in a container: the libraries must be
 owned by root, and faucet needs a glibc from 2.39 on, newer than in the official image.
 

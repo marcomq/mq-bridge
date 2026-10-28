@@ -504,7 +504,9 @@ dedup to survive a re-read.
 `sled_path` is the legacy spelling of a local sled store and is equivalent to `store: "sled://<path>"`.
 
 A shared store's default collection/table is named after the route, so replicas of one route
-must run under the same route name. A copy whose key is still in flight elsewhere waits for that
+must run under the same route name. mq-bridge-app runs a route under an internal name
+(`ui_collector_route_<hex>`), so there the default is not the YAML name; name the collection or
+table in the URL to choose it. A copy whose key is still in flight elsewhere waits for that
 delivery instead of being dropped; a failed delivery releases its key at once. A delivery in
 flight keeps its key however long the sink takes; only the key of a holder that died is freed,
 after five seconds. The ordering and its crash windows are in [DELIVERY.md](DELIVERY.md#the-deduplication-middleware).

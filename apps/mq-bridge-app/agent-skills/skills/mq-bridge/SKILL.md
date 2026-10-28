@@ -79,7 +79,8 @@ routes:
   environment; keep credentials there, never inline.
 - Schema for validation and editor completion: `mqb --schema mqb.schema.json` (`-` prints it).
   Add `# yaml-language-server: $schema=./mqb.schema.json` as the first line of the YAML.
-- Run with `mqb --config routes.yml --no-ui`. `mqb --config routes.yml to-cli` prints the
+- Run with `mqb --config routes.yml`; a config with routes opens no UI or metrics port
+  unless it sets `ui_addr` or `metrics_addr`. `mqb --config routes.yml to-cli` prints the
   config as one self-contained command with credentials replaced by env placeholders.
 - `mqb status` shows what every mq-bridge process on this machine is running.
 
@@ -92,7 +93,11 @@ routes:
   copied: use `--wait`.
 - Broker sources may start at the newest message. Check `mqb describe <scheme>` for an
   offset or initial-position param before expecting a topic's backlog.
-- Never put the web UI on the network: pass `--no-ui` in scripts; `--ui` binds loopback only.
+- Never put the web UI on the network: pass `--no-ui` in scripts whose config may set
+  `ui_addr` (a config saved from the UI does); `--ui` binds loopback only.
+- Config mode runs a route as `ui_collector_route_<hex>`, so defaults named after the route
+  (`mqb_dedup_<route>`, `mqb_aggregate_<route>`, MQTT client id, ...) use that name: set
+  them explicitly.
 
 ## Further reading
 

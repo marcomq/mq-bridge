@@ -188,6 +188,64 @@ fn assert_lost_at_most(seeded: &[String], got: &[String], case: &str, allowed: u
     );
 }
 
+/// Seeds `sink`, `kill -9`s a drain of `source` a quarter in, then drains again right
+/// away: what the killed run held must come back, so the two outputs hold every row.
+fn killed_mid_run_resumes(case: &str, sink: &str, source: &str) {
+    let dir = TestDir::new();
+    let seeded = numbered_rows(50_000);
+    copy_ok(
+        &format!("{case}: seed"),
+        &raw_uri(seed_rows(&dir, "input.jsonl", &seeded)),
+        sink,
+        &["--batch-size", "1024"],
+    );
+
+    let first = dir.path().join("first.jsonl");
+    // A slow sink keeps claimed batches in flight, so the kill always strands some.
+    let slow_first = format!("{}|delay?delay_ms=20", raw_uri(&first));
+    let mut child = Reap(
+        cli()
+            .args(["copy", "--from", source, "--to", &slow_first, "--drain"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("start copy"),
+    );
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while complete_rows(&first).len() < seeded.len() / 4 {
+        assert!(
+            Instant::now() < deadline,
+            "{case}: first run never got a quarter in"
+        );
+        assert!(
+            child.0.try_wait().expect("poll copy").is_none(),
+            "{case}: the first run finished before it could be killed"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    signal(&child.0, "KILL");
+    let _ = child.0.wait();
+    let first_rows = complete_rows(&first);
+    assert!(
+        first_rows.len() < seeded.len(),
+        "{case}: the first run copied everything before the kill; nothing to resume"
+    );
+
+    let second = dir.path().join("second.jsonl");
+    copy_ok(&format!("{case}: resume"), source, &raw_uri(&second), &[]);
+    let second_rows = complete_rows(&second);
+
+    let mut union = first_rows.clone();
+    union.extend(second_rows.iter().cloned());
+    assert_all_arrived(&seeded, &union, case);
+    eprintln!(
+        "{case}: first {} rows, second {} rows, {} duplicates",
+        first_rows.len(),
+        second_rows.len(),
+        union.len() - distinct(&union).len()
+    );
+}
+
 // ------------------------------------------------------------------- scenarios
 
 /// A backend's legs, copied from the engine's `CONFIG_YAML` for it, so the
@@ -355,71 +413,18 @@ mod kafka {
     });
 
     /// `kill -9` mid-copy, then the same group again: what the first run did not
-    /// commit is read again, so the two outputs together hold every row.
+    /// commit is read again. The killed member still holds the group for
+    /// `session.timeout.ms`; the drain must wait it out rather than fail.
     #[test]
     #[ignore = "requires docker compose"]
     fn kafka_copy_killed_mid_run_resumes_without_loss() {
         backend!("kafka");
-        let dir = TestDir::new();
         let topic = unique("cli_scn_kafka_kill");
         let sink = format!("kafka://{BROKER}?topic={topic}");
-        let source = format!("{sink}&group_id=g_{topic}");
-        let seeded = numbered_rows(100_000);
-        copy_ok(
-            "kafka kill: seed",
-            &raw_uri(seed_rows(&dir, "input.jsonl", &seeded)),
+        killed_mid_run_resumes(
+            "kafka kill -9 resume",
             &sink,
-            &["--batch-size", "1024"],
-        );
-
-        let first = dir.path().join("first.jsonl");
-        let mut child = cli()
-            .args([
-                "copy",
-                "--from",
-                &source,
-                "--to",
-                &raw_uri(&first),
-                "--drain",
-            ])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("start copy");
-        let deadline = Instant::now() + Duration::from_secs(120);
-        while complete_rows(&first).len() < seeded.len() / 4 {
-            assert!(
-                Instant::now() < deadline,
-                "first run never got a quarter in"
-            );
-            assert!(
-                child.try_wait().expect("poll copy").is_none(),
-                "the first run finished before it could be killed"
-            );
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        signal(&child, "KILL");
-        let _ = child.wait();
-        let first_rows = complete_rows(&first);
-        assert!(
-            first_rows.len() < seeded.len(),
-            "the first run copied everything before the kill; nothing to resume"
-        );
-
-        // The killed member still holds the group for `session.timeout.ms`; the
-        // drain must wait it out rather than fail.
-        let second = dir.path().join("second.jsonl");
-        copy_ok("kafka kill: resume", &source, &raw_uri(&second), &[]);
-        let second_rows = complete_rows(&second);
-
-        let mut union = first_rows.clone();
-        union.extend(second_rows.iter().cloned());
-        assert_all_arrived(&seeded, &union, "kafka kill -9 resume");
-        eprintln!(
-            "kafka kill: first {} rows, second {} rows, {} duplicates",
-            first_rows.len(),
-            second_rows.len(),
-            union.len() - distinct(&union).len()
+            &format!("{sink}&group_id=g_{topic}"),
         );
     }
 
@@ -540,64 +545,14 @@ mod nats {
         ..BASE
     });
 
-    /// `kill -9` mid-copy, then the same durable consumer again: what the first run
-    /// did not ack is redelivered, so the two outputs together hold every row.
+    /// `kill -9` mid-copy, then the same durable consumer again: the drain must wait
+    /// out `ack_wait` for what the killed run held instead of exiting early.
     #[test]
     #[ignore = "requires docker compose"]
     fn nats_copy_killed_mid_run_resumes_without_loss() {
         backend!("nats");
-        let dir = TestDir::new();
         let uri = endpoint();
-        let seeded = numbered_rows(100_000);
-        copy_ok(
-            "nats kill: seed",
-            &raw_uri(seed_rows(&dir, "input.jsonl", &seeded)),
-            &uri,
-            &["--batch-size", "1024"],
-        );
-
-        let first = dir.path().join("first.jsonl");
-        let mut child = cli()
-            .args(["copy", "--from", &uri, "--to", &raw_uri(&first), "--drain"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("start copy");
-        let deadline = Instant::now() + Duration::from_secs(120);
-        while complete_rows(&first).len() < seeded.len() / 4 {
-            assert!(
-                Instant::now() < deadline,
-                "first run never got a quarter in"
-            );
-            assert!(
-                child.try_wait().expect("poll copy").is_none(),
-                "the first run finished before it could be killed"
-            );
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        signal(&child, "KILL");
-        let _ = child.wait();
-        let first_rows = complete_rows(&first);
-        assert!(
-            first_rows.len() < seeded.len(),
-            "the first run copied everything before the kill; nothing to resume"
-        );
-
-        // Started right away: the drain must wait out `ack_wait` for what the killed
-        // run held instead of exiting early (U13 in upstream-issue-triage.md).
-        let second = dir.path().join("second.jsonl");
-        copy_ok("nats kill: resume", &uri, &raw_uri(&second), &[]);
-        let second_rows = complete_rows(&second);
-
-        let mut union = first_rows.clone();
-        union.extend(second_rows.iter().cloned());
-        assert_all_arrived(&seeded, &union, "nats kill -9 resume");
-        eprintln!(
-            "nats kill: first {} rows, second {} rows, {} duplicates",
-            first_rows.len(),
-            second_rows.len(),
-            union.len() - distinct(&union).len()
-        );
+        killed_mid_run_resumes("nats kill -9 resume", &uri, &uri);
     }
 }
 
@@ -618,6 +573,20 @@ mod amqp {
         source: |q| format!(r#"amqp: {{ url: "{URL}", queue: "{q}", prefetch_count: 1000 }}"#),
         ..BASE
     });
+
+    /// The broker requeues what a dead connection left unacked.
+    #[test]
+    #[ignore = "requires docker compose"]
+    fn amqp_copy_killed_mid_run_resumes_without_loss() {
+        backend!("amqp");
+        let queue = unique("cli_scn_amqp_kill");
+        let uri = format!("amqp://guest:guest@localhost:5672?queue={queue}");
+        killed_mid_run_resumes(
+            "amqp kill -9 resume",
+            &uri,
+            &format!("{uri}&prefetch_count=1000"),
+        );
+    }
 }
 
 #[cfg(any(feature = "full", feature = "mqtt"))]
@@ -654,6 +623,23 @@ mod mongodb {
         source: |q| format!("mongodb: {{ {DB}, collection: {q}, consume: delete }}"),
         ..BASE
     });
+
+    /// Documents the killed run claimed stay locked for their lease; the drain must
+    /// wait it out instead of reading the collection as empty.
+    #[test]
+    #[ignore = "requires docker compose"]
+    fn mongodb_copy_killed_mid_run_resumes_without_loss() {
+        backend!("mongodb");
+        let sink = format!(
+            "mongodb://localhost:27017?database=mq_bridge_test&collection={}",
+            unique("cli_scn_mongo_kill")
+        );
+        killed_mid_run_resumes(
+            "mongodb kill -9 resume",
+            &sink,
+            &format!("{sink}&consume=delete"),
+        );
+    }
 }
 
 /// The engine's sqlx queue legs: rows are inserted, then read and deleted.

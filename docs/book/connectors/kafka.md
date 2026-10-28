@@ -126,7 +126,8 @@ Whether a restart continues where it stopped depends on `group_id`:
   `mq_bridge.message_id`.
 - **Sent means acknowledged by all in-sync replicas.** The producer is idempotent (`acks=all`),
   compresses with lz4 and waits 1 ms to fill a batch. `delayed_ack: true` stops waiting for the
-  broker: faster, and a crash can lose what was not yet confirmed.
+  broker on each send: a route instead confirms the sends about every 100 ms and only then
+  commits the source, so a failed delivery is redelivered, not lost.
 - **`producer_options` override all of that.** With `acks` set to `0` or `1`, idempotence is
   switched off too, as librdkafka requires.
 
