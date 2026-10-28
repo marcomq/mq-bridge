@@ -31,8 +31,7 @@ All notable changes to `mq-bridge`. Newest first.
   only if the schema declares no properties or declares `url` itself.
 - **`mqb list` and `mqb describe` showed a generic URI for plugin endpoints.** They printed
   `<scheme>://<address>?<param>=<value>` whatever the plugin's schema mapped. They now show
-  the shape it reads, such as `rp://<url>/<topic>?<param>=<value>`, using the new
-  `UriSchema::uri_template`.
+  the shape it reads, such as `rp://<url>/<topic>?<param>=<value>`.
 
 ## 1.2.0
 

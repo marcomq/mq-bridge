@@ -266,6 +266,7 @@ impl UriSchema {
     }
 
     /// The URI shape this mapping reads, each positioned field shown as `<field>`.
+    #[doc(hidden)]
     pub fn uri_template(&self, scheme: &str) -> String {
         let scheme = match &self.subscheme {
             Some(field) => format!("{scheme}+<{field}>"),
