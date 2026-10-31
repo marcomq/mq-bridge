@@ -176,6 +176,7 @@
 #![warn(rustdoc::broken_intra_doc_links)]
 #![warn(rustdoc::missing_crate_level_docs)]
 
+pub mod blocking_handler;
 pub mod canonical_message;
 // Not feature-gated: the trait, the file backend and the URL parser need no
 // optional dependency, and each external backend already reports its own

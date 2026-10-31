@@ -4,7 +4,18 @@ All notable changes to `mq-bridge`. Newest first.
 
 ## Unreleased
 
+### Added
+
+- **`ThreadedHandler` runs a blocking handler with `&mut` state on its own thread.**
+  Implement `BlockingHandler` (or pass a closure); no `Mutex`, no `spawn_blocking`. The
+  `HandlerContext` can `emit` any number of messages per input and reports
+  `is_cancelled()` once a `CancelHandle` cancels the message's `correlation_id`; queued
+  messages with a cancelled id are acked without running. See `mq_bridge::blocking_handler`.
+
 ### Performance
+
+- **Smaller binaries.** `Endpoint::clone` was inlined into every codegen unit; a lean
+  build (`default-features = false`) shrinks by ~450 KB (5.7 → 5.3 MB stripped).
 
 - **sqlx and ClickHouse parse only the payload fields they read.** Sinks and lookups used to
   parse every payload in full, even when every value came from metadata; now they skip the

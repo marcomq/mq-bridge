@@ -864,7 +864,12 @@ mod tests {
             }
         }
         // A malformed value that is picked still fails, as do broken documents.
-        for payload in [&br#"{"a":"\ud83d"}"#[..], br#"{"a":"\u00"}"#, br#"{not json"#, b""] {
+        for payload in [
+            &br#"{"a":"\ud83d"}"#[..],
+            br#"{"a":"\u00"}"#,
+            br#"{not json"#,
+            b"",
+        ] {
             assert_eq!(pick_fields(payload, |key| key == "a"), None);
         }
         let invalid_utf8: &[u8] = &[b'{', b'"', b'a', b'"', b':', b'"', 0xff, b'"', b'}'];
