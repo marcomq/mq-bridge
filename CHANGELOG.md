@@ -2,6 +2,16 @@
 
 All notable changes to `mq-bridge`. Newest first.
 
+## Unreleased
+
+### Performance
+
+- **sqlx and ClickHouse parse only the payload fields they read.** Sinks and lookups used to
+  parse every payload in full, even when every value came from metadata; now they skip the
+  parse in that case and otherwise build only the fields their tokens name. http_bulk does the
+  same for delete ids and stream cursors (`read.cursor.item`). Malformed text in a field that
+  is not read no longer turns the row's payload values into NULL.
+
 ## 1.2.1
 
 ### Changed
