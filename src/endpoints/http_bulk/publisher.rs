@@ -13,7 +13,7 @@ use crate::models::{
 };
 use crate::support::change_op::ChangeOp;
 use crate::support::compression_pool::{gzip_default, lz4_pooled, zstd_pooled};
-use crate::support::interpolation::CompiledTemplate;
+use crate::support::interpolation::{pick_fields, CompiledTemplate};
 use crate::support::poll_job::{poll_until, PollSchedule};
 use crate::support::{http_status, ndjson};
 use crate::traits::{MessagePublisher, PublisherError, SentBatch};
@@ -513,8 +513,7 @@ impl HttpBulkPublisher {
         let mut ids: Vec<(usize, Vec<u8>)> = Vec::new();
         for index in run {
             let message = &messages[index];
-            let id = serde_json::from_slice::<Value>(&message.payload)
-                .ok()
+            let id = pick_fields(&message.payload, |key| key == delete.id_field)
                 .and_then(|mut document| document.get_mut(&delete.id_field).map(Value::take))
                 .filter(|id| id.is_string() || id.is_number());
             let Some(id) = id else {
