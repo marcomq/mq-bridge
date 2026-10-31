@@ -1,0 +1,31 @@
+services:
+  pg:
+    image: postgres:17.6
+    environment:
+      POSTGRES_USER: bench
+      POSTGRES_PASSWORD: bench
+      POSTGRES_DB: bench
+    command: ["postgres", "-c", "shared_buffers=256MB", "-c", "max_connections=200"]
+    ports: ["127.0.0.1:55432:5432"]
+    volumes: ["./seed.sql:/docker-entrypoint-initdb.d/seed.sql:ro"]
+    healthcheck:
+      # Over TCP: the init server that runs seed.sql listens on the socket only.
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "bench"]
+      interval: 1s
+      retries: 120
+
+  # Shares pg's network namespace; `tc netem` on its eth0 delays every reply pg sends.
+  netem:
+    image: alpine:3.22
+    network_mode: "service:pg"
+    cap_add: [NET_ADMIN]
+    command: ["sh", "-c", "apk add --no-cache iproute2 >/dev/null && sleep infinity"]
+    depends_on: [pg]
+
+  # pgbench client that reaches pg through the published port, like the bridge on the Mac does.
+  pgclient:
+    image: postgres:17.6
+    profiles: [pgbench]
+    entrypoint: ["sleep", "infinity"]
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    depends_on: [pg]
