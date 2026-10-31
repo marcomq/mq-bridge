@@ -123,7 +123,40 @@ impl BufferCore {
                 )))
             });
         distribute_batch_results(batch.entries, send_result);
+        self.finish_flush().await;
+    }
 
+    /// Claims an idle buffer, so a send can go out at once in the caller's own task.
+    async fn claim_idle(&self) -> bool {
+        let mut state = self.state.lock().await;
+        if state.flush_in_progress || !state.pending.is_empty() {
+            return false;
+        }
+        state.flush_in_progress = true;
+        true
+    }
+
+    /// Sends one message without a task hop; sends arriving meanwhile queue as the next batch.
+    async fn send_direct(
+        self: Arc<Self>,
+        message: CanonicalMessage,
+    ) -> Result<Sent, PublisherError> {
+        let mut guard = FlushGuard(Some(Arc::clone(&self)));
+        let message_id = message.message_id;
+        let send_result = AssertUnwindSafe(self.inner.send_batch(vec![message]))
+            .catch_unwind()
+            .await
+            .unwrap_or_else(|_| {
+                Err(PublisherError::Connection(anyhow!(
+                    "Buffered send panicked"
+                )))
+            });
+        Arc::clone(&self).finish_flush().await;
+        guard.0 = None;
+        single_send_result(message_id, send_result)
+    }
+
+    async fn finish_flush(self: Arc<Self>) {
         let (waiters, next_timer, should_flush_again) = {
             let mut state = self.state.lock().await;
             state.flush_in_progress = false;
@@ -153,6 +186,34 @@ impl BufferCore {
         }
         if should_flush_again {
             self.try_start_flush();
+        }
+    }
+}
+
+/// Ends a claimed flush even when the sending caller is cancelled, e.g. by a request timeout.
+struct FlushGuard(Option<Arc<BufferCore>>);
+
+impl Drop for FlushGuard {
+    fn drop(&mut self) {
+        if let Some(core) = self.0.take() {
+            tokio::spawn(core.finish_flush());
+        }
+    }
+}
+
+fn single_send_result(
+    message_id: u128,
+    send_result: Result<SentBatch, PublisherError>,
+) -> Result<Sent, PublisherError> {
+    match send_result? {
+        SentBatch::Ack => Ok(Sent::Ack),
+        SentBatch::Partial { responses, failed } => {
+            if let Some((_, error)) = failed.into_iter().next() {
+                return Err(error);
+            }
+            Ok(responses
+                .and_then(|r| r.into_iter().find(|m| m.message_id == message_id))
+                .map_or(Sent::Ack, Sent::Response))
         }
     }
 }
@@ -300,6 +361,9 @@ impl MessagePublisher for BufferPublisher {
     }
 
     async fn send(&self, message: CanonicalMessage) -> Result<Sent, PublisherError> {
+        if self.core.max_delay.is_zero() && self.core.claim_idle().await {
+            return Arc::clone(&self.core).send_direct(message).await;
+        }
         let mut receivers = self.enqueue_messages(vec![message]).await;
         await_send_result(receivers.pop().expect("single message receiver missing")).await
     }
@@ -613,6 +677,44 @@ mod tests {
         fn as_any(&self) -> &dyn Any {
             self
         }
+    }
+
+    #[tokio::test]
+    async fn test_zero_delay_buffer_recovers_from_a_cancelled_direct_send() {
+        let batches = Arc::new(StdMutex::new(Vec::new()));
+        let release = Arc::new(Notify::new());
+        let publisher = Arc::new(
+            BufferPublisher::new(
+                Box::new(BlockingPublisher {
+                    batches: batches.clone(),
+                    release: release.clone(),
+                }),
+                &BufferMiddleware::new(8, 0),
+            )
+            .unwrap(),
+        );
+
+        let cancelled = timeout(
+            Duration::from_millis(20),
+            publisher.send(CanonicalMessage::from("one")),
+        )
+        .await;
+        assert!(cancelled.is_err());
+
+        let second = {
+            let publisher = Arc::clone(&publisher);
+            tokio::spawn(async move { publisher.send(CanonicalMessage::from("two")).await })
+        };
+        let started = Instant::now();
+        while batches.lock().unwrap().len() < 2 {
+            assert!(
+                started.elapsed() < Duration::from_secs(1),
+                "buffer stayed claimed"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        release.notify_waiters();
+        assert!(matches!(second.await.unwrap().unwrap(), Sent::Ack));
     }
 
     #[tokio::test]

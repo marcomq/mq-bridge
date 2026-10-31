@@ -42,7 +42,7 @@ use anyhow::anyhow;
 use async_trait::async_trait;
 use std::collections::{HashSet, VecDeque};
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use tokio::sync::oneshot;
 
@@ -122,6 +122,7 @@ pub struct HandlerContext {
     correlation_id: Option<String>,
     cancel: Arc<CancelState>,
     seen_generation: AtomicU64,
+    cancelled: AtomicBool,
     emitter: Option<Arc<dyn MessagePublisher>>,
     runtime: tokio::runtime::Handle,
 }
@@ -135,6 +136,9 @@ impl HandlerContext {
     /// `true` once this message's `correlation_id` was cancelled. One atomic load
     /// while nothing new was cancelled, so it is cheap to poll per token.
     pub fn is_cancelled(&self) -> bool {
+        if self.cancelled.load(Ordering::Relaxed) {
+            return true;
+        }
         let Some(id) = self.correlation_id.as_deref() else {
             return false;
         };
@@ -142,7 +146,9 @@ impl HandlerContext {
         if self.seen_generation.swap(now, Ordering::Relaxed) == now {
             return false;
         }
-        self.cancel.contains(id)
+        let cancelled = self.cancel.contains(id);
+        self.cancelled.store(cancelled, Ordering::Relaxed);
+        cancelled
     }
 
     /// Sends `msg` to the emit publisher right away and waits for it to be accepted.
@@ -201,6 +207,8 @@ impl ThreadedHandler {
             .name("mqb-handler".into())
             .spawn(move || {
                 for job in rx {
+                    // Read before the check, so a cancel racing with it bumps the generation.
+                    let generation = state.generation.load(Ordering::Acquire);
                     let correlation_id = job.msg.metadata.get(CORRELATION_ID_KEY).cloned();
                     if correlation_id
                         .as_deref()
@@ -211,7 +219,8 @@ impl ThreadedHandler {
                     }
                     let ctx = HandlerContext {
                         correlation_id,
-                        seen_generation: AtomicU64::new(state.generation.load(Ordering::Acquire)),
+                        seen_generation: AtomicU64::new(generation),
+                        cancelled: AtomicBool::new(false),
                         cancel: state.clone(),
                         emitter: emitter.clone(),
                         runtime: job.runtime,
@@ -297,6 +306,7 @@ mod tests {
                 while !ctx.is_cancelled() {
                     std::thread::yield_now();
                 }
+                assert!(ctx.is_cancelled(), "cancellation must stay visible");
                 return Ok(Handled::Ack);
             }
             Ok(Handled::Publish(msg))

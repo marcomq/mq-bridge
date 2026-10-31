@@ -1427,6 +1427,59 @@ async fn test_http_route_inline_response_can_be_disabled() {
 }
 
 #[tokio::test]
+async fn test_http_route_batches_for_a_handler_that_prefers_batches() {
+    use crate::{Handled, HandlerError};
+    struct Batching(Arc<std::sync::atomic::AtomicUsize>);
+    #[async_trait::async_trait]
+    impl crate::traits::Handler for Batching {
+        async fn handle(&self, _msg: CanonicalMessage) -> Result<Handled, HandlerError> {
+            unreachable!("requests should arrive through handle_many")
+        }
+        async fn handle_many(
+            &self,
+            msgs: Vec<CanonicalMessage>,
+        ) -> Vec<Result<Handled, HandlerError>> {
+            self.0
+                .fetch_max(msgs.len(), std::sync::atomic::Ordering::Relaxed);
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            msgs.into_iter().map(|m| Ok(Handled::Publish(m))).collect()
+        }
+        fn prefers_batches(&self) -> bool {
+            true
+        }
+    }
+
+    init_crypto();
+    let addr = format!("127.0.0.1:{}", get_free_port());
+    let largest = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let input = Endpoint::new(EndpointType::Http(HttpConfig::new(addr.clone())));
+    let route = crate::Route::new(input, Endpoint::new_response())
+        .with_concurrency(1)
+        .with_handler(Batching(largest.clone()));
+    let handle = route.run("test_http_route_prefers_batches").await.unwrap();
+
+    let client = hyper_util::client::legacy::Client::builder(TokioExecutor::new())
+        .build(HttpConnector::new());
+    let requests = (0..16).map(|i| {
+        let request = Request::builder()
+            .method(hyper::Method::POST)
+            .uri(format!("http://{addr}/"))
+            .body(http_body_util::Full::<Bytes>::new(Bytes::from(
+                i.to_string(),
+            )))
+            .unwrap();
+        client.request(request)
+    });
+    for response in futures::future::join_all(requests).await {
+        assert_eq!(response.unwrap().status(), StatusCode::OK);
+    }
+    assert!(largest.load(std::sync::atomic::Ordering::Relaxed) > 1);
+
+    handle.stop().await;
+    let _ = handle.join().await;
+}
+
+#[tokio::test]
 async fn test_http_to_static_raw_sets_content_type_handler_free() {
     // The handler-free fast path: `http -> static` replies inline with a raw
     // (unquoted) body and a configured content-type header. This is the
