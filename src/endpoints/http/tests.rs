@@ -1959,12 +1959,23 @@ fn test_http_client(
 /// Sends one request carrying `headers` to a bare consumer and returns the metadata the
 /// handler ends up seeing.
 async fn handler_metadata_for_request_headers(headers: &[(&str, &str)]) -> HashMap<String, String> {
+    handler_message_for_request(HttpConfig::default(), headers, Bytes::from_static(b"body"))
+        .await
+        .metadata
+}
+
+/// Sends one request to a consumer built from `base` and returns the message the handler sees.
+async fn handler_message_for_request(
+    base: HttpConfig,
+    headers: &[(&str, &str)],
+    body: Bytes,
+) -> CanonicalMessage {
     init_crypto();
     let port = get_free_port();
     let addr = format!("127.0.0.1:{port}");
     let config = HttpConfig {
         url: addr.clone(),
-        ..Default::default()
+        ..base
     };
     let mut consumer = HttpConsumer::new(&config).await.unwrap();
 
@@ -1988,16 +1999,14 @@ async fn handler_metadata_for_request_headers(headers: &[(&str, &str)]) -> HashM
     let response = test_http_client()
         .request(
             request
-                .body(http_body_util::Full::<Bytes>::new(Bytes::from_static(
-                    b"body",
-                )))
+                .body(http_body_util::Full::<Bytes>::new(body))
                 .unwrap(),
         )
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::ACCEPTED);
 
-    receive_task.await.unwrap().metadata
+    receive_task.await.unwrap()
 }
 
 #[test]
@@ -2062,6 +2071,66 @@ async fn test_sensitive_request_headers_reach_handler_verbatim() {
             );
         }
     }
+}
+
+#[tokio::test]
+async fn test_forward_headers_keeps_only_listed_headers() {
+    let config = HttpConfig::default()
+        .with_forward_headers(vec!["X-Trace-Id".into(), "authorization".into()]);
+    let metadata = handler_message_for_request(
+        config,
+        &[
+            ("x-trace-id", "trace-42"),
+            ("x-other", "dropped"),
+            ("authorization", "Basic dXNlcjpwYXNzd29yZA=="),
+            ("cookie", "session=abc123"),
+        ],
+        Bytes::from_static(b"body"),
+    )
+    .await
+    .metadata;
+
+    assert_eq!(
+        metadata.get("x-trace-id").map(String::as_str),
+        Some("trace-42")
+    );
+    assert_eq!(
+        metadata
+            .get("mqb.src.http_authorization")
+            .map(String::as_str),
+        Some("Basic dXNlcjpwYXNzd29yZA==")
+    );
+    assert!(!metadata.contains_key("x-other"));
+    assert!(!metadata.contains_key("mqb.src.http_cookie"));
+    assert!(!metadata.contains_key("content-length"));
+    assert_eq!(metadata.get(HTTP_METHOD).map(String::as_str), Some("POST"));
+    assert_eq!(metadata.get(HTTP_PATH).map(String::as_str), Some("/"));
+}
+
+#[tokio::test]
+async fn test_forward_headers_still_decompresses_an_unlisted_content_encoding() {
+    use std::io::Write;
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    encoder.write_all(b"hello").unwrap();
+    let gzipped = Bytes::from(encoder.finish().unwrap());
+
+    let config = HttpConfig::default().with_forward_headers(vec!["x-trace-id".into()]);
+    let message =
+        handler_message_for_request(config, &[("content-encoding", "gzip")], gzipped).await;
+
+    assert_eq!(message.payload.as_ref(), b"hello");
+    assert!(!message.metadata.contains_key("content-encoding"));
+}
+
+#[tokio::test]
+async fn test_forward_headers_rejects_an_invalid_name() {
+    let config = HttpConfig::new(format!("127.0.0.1:{}", get_free_port()))
+        .with_forward_headers(vec!["bad header".into()]);
+    let error = HttpConsumer::new(&config)
+        .await
+        .err()
+        .expect("invalid name accepted");
+    assert!(error.to_string().contains("forward_headers"), "{error}");
 }
 
 #[tokio::test]

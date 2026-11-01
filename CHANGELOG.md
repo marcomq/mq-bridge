@@ -2,7 +2,7 @@
 
 All notable changes to `mq-bridge`. Newest first.
 
-## Unreleased
+## 1.4.0
 
 ### Added
 
@@ -14,6 +14,18 @@ All notable changes to `mq-bridge`. Newest first.
   batch runs form the next batch. An exception or a result list of the wrong length fails
   every message in the batch. In `scripts/twelve-dollar` a create took 46 instead of 102 µs
   of CPU with one SQLite transaction per batch.
+- **`forward_headers` on an `http` input limits which request headers become metadata.**
+  Names match case-insensitively; method, path, query and version are always set, and a
+  listed credential header still goes to `mqb.src.http_<name>`. Unset keeps every header.
+  Each header left out saves two allocations per request (43 → 35 with only `host` kept).
+  Builder: `HttpConfig::with_forward_headers`.
+
+### Performance
+
+- **An `http` input that runs through the route pipeline allocates less per request.** The
+  reply goes back over the request's channel directly instead of through a boxed closure: 78
+  instead of 81 allocations and ~2% less CPU per request. An `http` → `response` route takes
+  the inline path and is unchanged.
 
 ## 1.3.0
 

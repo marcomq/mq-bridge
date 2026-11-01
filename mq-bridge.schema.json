@@ -3715,6 +3715,16 @@
           "format": "uint64",
           "minimum": 0
         },
+        "forward_headers": {
+          "description": "(Consumer only) Only these request headers (case-insensitive) become metadata. Unset = all headers.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
         "basic_auth": {
           "description": "HTTP Basic Authentication credentials (username, password). For consumers: validates incoming requests. For publishers: adds Authorization header.",
           "type": [

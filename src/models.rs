@@ -2622,6 +2622,9 @@ pub struct HttpConfig {
     /// (Consumer only) Largest request body in bytes, also after decompression; a larger one gets 413. Defaults to 256 MiB.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_body_bytes: Option<u64>,
+    /// (Consumer only) Only these request headers (case-insensitive) become metadata. Unset = all headers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forward_headers: Option<Vec<String>>,
     /// HTTP Basic Authentication credentials (username, password). For consumers: validates incoming requests. For publishers: adds Authorization header.
     #[cfg_attr(feature = "schema", schemars(extend("format"="password")))]
     #[serde(

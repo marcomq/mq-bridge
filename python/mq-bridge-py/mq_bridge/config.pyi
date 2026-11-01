@@ -454,6 +454,7 @@ class HttpConfig(TypedDict, total=False):
     concurrency_limit: Optional[int]
     custom_headers: Dict[str, str]
     fire_and_forget: bool
+    forward_headers: Optional[List[str]]
     header_read_timeout_ms: Optional[int]
     inline_response_fast_path: Optional[bool]
     internal_buffer_size: Optional[int]

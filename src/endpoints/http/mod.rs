@@ -204,6 +204,7 @@ struct HttpConsumerState {
     concurrency_limit: ConcurrencyLimiter,
     max_body_bytes: u64,
     method: Option<hyper::Method>,
+    forward_headers: Option<Vec<hyper::header::HeaderName>>,
 }
 
 /// Immutable snapshot of the registered HTTP routes.
@@ -852,6 +853,20 @@ fn setup_http_state_and_channel(
         );
     }
 
+    let forward_headers = config
+        .forward_headers
+        .as_ref()
+        .map(|names| {
+            names
+                .iter()
+                .map(|name| {
+                    hyper::header::HeaderName::from_bytes(name.as_bytes())
+                        .map_err(|e| anyhow::anyhow!("Invalid forward_headers name '{name}': {e}"))
+                })
+                .collect::<anyhow::Result<Vec<_>>>()
+        })
+        .transpose()?;
+
     let inline_echo = inline_publisher.as_ref().is_some_and(|publisher| {
         publisher
             .as_any()
@@ -874,6 +889,7 @@ fn setup_http_state_and_channel(
         concurrency_limit: ConcurrencyLimiter::new(config.concurrency_limit.unwrap_or(100)),
         max_body_bytes: config.max_body_bytes.unwrap_or(MAX_HTTP_BODY_BYTES),
         method,
+        forward_headers,
     };
     Ok((request_rx, state, buffer_size))
 }
@@ -1655,6 +1671,11 @@ async fn handle_request_internal(
         if let Ok(v_str) = value.to_str() {
             if key.as_str().eq_ignore_ascii_case("content-encoding") {
                 content_encoding = Some(v_str.to_string());
+            }
+            if let Some(allowed) = &state.forward_headers {
+                if !allowed.contains(key) {
+                    continue;
+                }
             }
             let k_str = key.as_str();
             // `mqb.src.*` is reserved for framework provenance, so a request header may never
