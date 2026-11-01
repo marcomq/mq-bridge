@@ -541,6 +541,10 @@ pub(crate) fn pick_path(bytes: &[u8], segments: &[String]) -> Option<Value> {
 /// Equivalent to keeping those keys of `serde_json::from_slice(bytes)` (`None` when the
 /// document is malformed or not an object), without allocating the rest of the document.
 /// Like `pick_path`, bad escapes or UTF-8 inside a skipped string go unnoticed.
+#[cfg_attr(
+    not(any(feature = "sqlx", feature = "clickhouse", feature = "http-bulk")),
+    allow(dead_code)
+)]
 pub(crate) fn pick_fields(bytes: &[u8], wanted: impl Fn(&str) -> bool) -> Option<Value> {
     let mut de = serde_json::Deserializer::from_slice(bytes);
     let picked = PickFields(&wanted).deserialize(&mut de).ok()?;
@@ -548,6 +552,10 @@ pub(crate) fn pick_fields(bytes: &[u8], wanted: impl Fn(&str) -> bool) -> Option
     Some(Value::Object(picked))
 }
 
+#[cfg_attr(
+    not(any(feature = "sqlx", feature = "clickhouse", feature = "http-bulk")),
+    allow(dead_code)
+)]
 struct PickFields<'f, F>(&'f F);
 
 impl<'de, F: Fn(&str) -> bool> DeserializeSeed<'de> for PickFields<'_, F> {
@@ -583,6 +591,10 @@ impl<'de, F: Fn(&str) -> bool> Visitor<'de> for PickFields<'_, F> {
 }
 
 /// An object key, kept only when `wanted` accepts it.
+#[cfg_attr(
+    not(any(feature = "sqlx", feature = "clickhouse", feature = "http-bulk")),
+    allow(dead_code)
+)]
 struct WantedKey<'f, F>(&'f F);
 
 impl<'de, F: Fn(&str) -> bool> DeserializeSeed<'de> for WantedKey<'_, F> {
