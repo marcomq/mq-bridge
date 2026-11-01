@@ -1,0 +1,86 @@
+log_level: warn
+routes:
+  feed_api:
+    concurrency: __CONCURRENCY__
+    batch_size: 512
+    input:
+      http:
+        url: "127.0.0.1:__PORT__"
+    output:
+      switch:
+        when:
+          - if: 'meta.http_method == "GET" and meta.http_path == "/feed"'
+            to:
+              static: { body: "${payload:j | raw}", raw: true, metadata: { content-type: application/json } }
+              middlewares:
+                - lookup:
+                    from:
+                      sqlx:
+                        url: "sqlite://__SQLITE_PATH__"
+                        table: posts
+                        max_connections: __POOL__
+                        lookup_query: >-
+                          SELECT json_object('posts', json_group_array(json(x))) AS j FROM (
+                          SELECT json_object('id',p.id,'body',p.body,'created_at',p.created_at,'author',u.username,
+                          'like_count',(SELECT count(*) FROM likes l WHERE l.post_id=p.id)) AS x
+                          FROM posts p JOIN users u ON u.id=p.user_id ORDER BY p.created_at DESC, p.id DESC LIMIT 20)
+                    into: $
+          - if: 'meta.http_method == "GET" and startsWith(meta.http_path, "/posts/")'
+            to:
+              switch:
+                metadata_key: lookup.found
+                cases:
+                  "true": { static: { body: "${payload:j | raw}", raw: true, metadata: { content-type: application/json } } }
+                default: { static: { body: '{"error":"post not found"}', raw: true, metadata: { content-type: application/json, http_status_code: "404" } } }
+              middlewares:
+                - lookup:
+                    from:
+                      sqlx:
+                        url: "sqlite://__SQLITE_PATH__"
+                        table: posts
+                        max_connections: __POOL__
+                        lookup_query: >-
+                          SELECT json_object('post', json_object('id',p.id,'body',p.body,'created_at',p.created_at,'author',u.username,
+                          'like_count',(SELECT count(*) FROM likes l WHERE l.post_id=p.id))) AS j
+                          FROM posts p JOIN users u ON u.id=p.user_id
+                          WHERE p.id = CAST(substr(${metadata:path}, 8) AS INTEGER)
+                    metadata: { path: "${metadata:http_path}" }
+                    into: $
+          - if: 'meta.http_method == "POST" and meta.http_path == "/posts"'
+            to:
+              static: { body: "${payload:j | raw}", raw: true, metadata: { content-type: application/json, http_status_code: "201" } }
+              middlewares:
+                - lookup:
+                    from:
+                      sqlx:
+                        url: "sqlite://__SQLITE_PATH__"
+                        table: posts
+                        max_connections: __POOL__
+                        lookup_query: >-
+                          INSERT INTO posts (user_id, body) VALUES (${metadata:uid}, trim(${payload:body}))
+                          RETURNING json_object('post', json_object('id',id,'body',body,'created_at',created_at,
+                          'author',${metadata:uname},'like_count',0)) AS j
+                    metadata: { uid: "${metadata:x-user-id}", uname: "${metadata:x-username}" }
+                    into: $
+          - if: 'meta.http_method == "POST" and startsWith(meta.http_path, "/posts/") and endsWith(meta.http_path, "/like")'
+            to:
+              switch:
+                metadata_key: lookup.found
+                cases:
+                  "true": { static: { body: "${payload:j | raw}", raw: true, metadata: { content-type: application/json, http_status_code: "201" } } }
+                default: { static: { body: '{"liked":true,"already_liked":true}', raw: true, metadata: { content-type: application/json } } }
+              middlewares:
+                - lookup:
+                    from:
+                      sqlx:
+                        url: "sqlite://__SQLITE_PATH__"
+                        table: likes
+                        max_connections: __POOL__
+                        lookup_query: >-
+                          INSERT INTO likes (user_id, post_id)
+                          SELECT ${metadata:uid}, id FROM posts WHERE id = CAST(substr(${metadata:path}, 8, length(${metadata:path}) - 12) AS INTEGER)
+                          ON CONFLICT DO NOTHING
+                          RETURNING json_object('liked',json('true'),'already_liked',json('false'),'post_id',post_id) AS j
+                    metadata: { uid: "${metadata:x-user-id}", path: "${metadata:http_path}" }
+                    into: $
+        default: { static: { body: '{"error":"not found"}', raw: true, metadata: { content-type: application/json, http_status_code: "404" } } }

@@ -15,7 +15,7 @@ All notable changes to `mq-bridge`. Newest first.
   answers requests inline, so `handle_many` only ever got one message. A handler returning
   `true` now gets the requests that arrive while a batch is in flight as its next batch,
   still on the inline path; a `websocket` input in `auto` mode runs routed for it. One
-  SQLite transaction per batch halved CPU per request in `benches/twelve-dollar`.
+  SQLite transaction per batch halved CPU per request in `scripts/twelve-dollar`.
 - **`UriSchema::uri_template` is now documented.** It returns the URI shape a plugin's schema
   reads, such as `rp://<url>/<topic>?<param>=<value>`; it shipped hidden in 1.2.1.
 
@@ -24,6 +24,11 @@ All notable changes to `mq-bridge`. Newest first.
 - **Smaller binaries.** `Endpoint::clone` was inlined into every codegen unit; a lean
   build (`default-features = false`) shrinks by ~450 KB (5.7 → 5.3 MB stripped).
   `futures` no longer pulls in `futures-executor`, which was unused.
+
+- **`lookup` with `into: $` passes the answer on unparsed.** A valid JSON answer becomes the
+  payload as `from` sent it, after a check that allocates nothing; it used to be parsed and
+  written again. The JSON is the same, but whitespace and escapes now stay as `from` wrote
+  them. A 4 KB SQLite feed reply costs ~6 µs less (80 → 74 µs per request).
 
 - **sqlx and ClickHouse parse only the payload fields they read.** Sinks and lookups used to
   parse every payload in full, even when every value came from metadata; now they skip the
