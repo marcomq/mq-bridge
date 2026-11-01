@@ -1,0 +1,23 @@
+[package]
+name = "twelve-dollar-server"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Own workspace: built on its own, with only the features it needs.
+[workspace]
+
+[dependencies]
+mq-bridge = { path = "../../..", default-features = false, features = ["http", "sqlx"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
+async-trait = "0.1"
+serde_json = "1"
+hmac = "=0.12.1"
+sha2 = "=0.10.9"
+base64 = "=0.22.1"
+mimalloc = { version = "0.1", default-features = false }
+
+[profile.release]
+lto = "thin"
+debug = "line-tables-only"
+strip = "none"

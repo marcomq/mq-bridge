@@ -1540,6 +1540,14 @@ pub(crate) async fn try_run_fast_path_route(
     None
 }
 
+#[cfg(any(feature = "http", feature = "websocket"))]
+fn handler_prefers_batches(output: &Endpoint) -> bool {
+    output
+        .handler
+        .as_ref()
+        .is_some_and(|handler| handler.prefers_batches())
+}
+
 #[cfg(feature = "websocket")]
 enum WebSocketDirectRouteSupport {
     Supported,
@@ -1565,6 +1573,11 @@ fn websocket_direct_route_support(route: &crate::models::Route) -> WebSocketDire
     }
     if !route.input.middlewares.is_empty() || !route.output.middlewares.is_empty() {
         return WebSocketDirectRouteSupport::Unsupported("middleware requires routed mode");
+    }
+    if cfg.execution_mode == crate::models::WebSocketExecutionMode::Auto
+        && handler_prefers_batches(&route.output)
+    {
+        return WebSocketDirectRouteSupport::Unsupported("handler prefers batches");
     }
 
     WebSocketDirectRouteSupport::Supported
@@ -1599,6 +1612,16 @@ async fn run_http_inline_response_fast_path(
     http_config: crate::models::HttpConfig,
 ) -> anyhow::Result<bool> {
     let publisher = create_publisher_from_route(name, &route.output).await?;
+    // A batching handler gets the requests that arrive while a batch is in flight as its next batch.
+    let publisher: Arc<dyn MessagePublisher> = if handler_prefers_batches(&route.output) {
+        let config = crate::models::BufferMiddleware::new(route.options.batch_size, 0);
+        Arc::new(crate::middleware::buffer::BufferPublisher::new(
+            Box::new(publisher),
+            &config,
+        )?)
+    } else {
+        publisher
+    };
     let consumer =
         http::HttpConsumer::new_with_inline_publisher(&http_config, Some(publisher.clone()))
             .await?;

@@ -480,6 +480,66 @@ async fn test_http_consumer_publisher_integration() {
 }
 
 #[tokio::test]
+async fn test_http_input_buffer_collects_requests_without_losing_any() {
+    init_crypto();
+    let addr = format!("127.0.0.1:{}", get_free_port());
+    let consumer = HttpConsumer::new(&HttpConfig {
+        url: addr.clone(),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let mut consumer = crate::middleware::buffer::BufferConsumer::new(
+        Box::new(consumer),
+        &crate::models::BufferMiddleware {
+            max_messages: 8,
+            max_delay_ms: 200,
+        },
+    )
+    .expect("buffer accepts an http input");
+    let publisher = Arc::new(
+        HttpPublisher::new(&HttpConfig {
+            url: format!("http://{addr}"),
+            ..Default::default()
+        })
+        .await
+        .unwrap(),
+    );
+    let send = |body: &'static str, after_ms: u64| {
+        let publisher = publisher.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(after_ms)).await;
+            publisher.send(CanonicalMessage::from(body)).await
+        })
+    };
+    let reply = |batch: ReceivedBatch| async move {
+        let replies = (0..batch.messages.len())
+            .map(|_| MessageDisposition::Reply(CanonicalMessage::from("ok")))
+            .collect();
+        (batch.commit)(replies).await.unwrap();
+        batch.messages
+    };
+
+    let mut sends = vec![send("a", 0), send("b", 20), send("c", 40)];
+    let first = reply(consumer.receive_batch(64).await.unwrap()).await;
+    // The window closed on an in-flight read; cancelling it must not lose "d".
+    sends.push(send("d", 0));
+    let second = reply(consumer.receive_batch(64).await.unwrap()).await;
+
+    let payloads = |msgs: Vec<CanonicalMessage>| -> Vec<Vec<u8>> {
+        msgs.into_iter().map(|m| m.payload.to_vec()).collect()
+    };
+    assert_eq!(payloads(first), [b"a", b"b", b"c"]);
+    assert_eq!(payloads(second), [b"d"]);
+    for send in sends {
+        match send.await.unwrap().unwrap() {
+            Sent::Response(msg) => assert_eq!(&msg.payload[..], b"ok"),
+            Sent::Ack => panic!("expected a reply"),
+        }
+    }
+}
+
+#[tokio::test]
 async fn test_http_receive_streamable_sse_items_share_correlation_id() {
     init_crypto();
 
@@ -1421,6 +1481,59 @@ async fn test_http_route_inline_response_can_be_disabled() {
     assert_eq!(response.headers().get("x-request-id").unwrap(), "req-123");
     let body = response.into_body().collect().await.unwrap().to_bytes();
     assert_eq!(body, Bytes::from_static(br#"{"value":1}"#));
+
+    handle.stop().await;
+    let _ = handle.join().await;
+}
+
+#[tokio::test]
+async fn test_http_route_batches_for_a_handler_that_prefers_batches() {
+    use crate::{Handled, HandlerError};
+    struct Batching(Arc<std::sync::atomic::AtomicUsize>);
+    #[async_trait::async_trait]
+    impl crate::traits::Handler for Batching {
+        async fn handle(&self, _msg: CanonicalMessage) -> Result<Handled, HandlerError> {
+            unreachable!("requests should arrive through handle_many")
+        }
+        async fn handle_many(
+            &self,
+            msgs: Vec<CanonicalMessage>,
+        ) -> Vec<Result<Handled, HandlerError>> {
+            self.0
+                .fetch_max(msgs.len(), std::sync::atomic::Ordering::Relaxed);
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            msgs.into_iter().map(|m| Ok(Handled::Publish(m))).collect()
+        }
+        fn prefers_batches(&self) -> bool {
+            true
+        }
+    }
+
+    init_crypto();
+    let addr = format!("127.0.0.1:{}", get_free_port());
+    let largest = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let input = Endpoint::new(EndpointType::Http(HttpConfig::new(addr.clone())));
+    let route = crate::Route::new(input, Endpoint::new_response())
+        .with_concurrency(1)
+        .with_handler(Batching(largest.clone()));
+    let handle = route.run("test_http_route_prefers_batches").await.unwrap();
+
+    let client = hyper_util::client::legacy::Client::builder(TokioExecutor::new())
+        .build(HttpConnector::new());
+    let requests = (0..16).map(|i| {
+        let request = Request::builder()
+            .method(hyper::Method::POST)
+            .uri(format!("http://{addr}/"))
+            .body(http_body_util::Full::<Bytes>::new(Bytes::from(
+                i.to_string(),
+            )))
+            .unwrap();
+        client.request(request)
+    });
+    for response in futures::future::join_all(requests).await {
+        assert_eq!(response.unwrap().status(), StatusCode::OK);
+    }
+    assert!(largest.load(std::sync::atomic::Ordering::Relaxed) > 1);
 
     handle.stop().await;
     let _ = handle.join().await;

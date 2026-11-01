@@ -528,12 +528,93 @@ fn path_segments(path: &str) -> Vec<String> {
 /// Equivalent to `walk(&serde_json::from_slice(bytes)?, path)` — the picked subtree is built
 /// as a normal `Value`, so rendering is byte-identical — but the rest of the document is
 /// discarded as it is scanned instead of being allocated.
-fn pick_path(bytes: &[u8], segments: &[String]) -> Option<Value> {
+pub(crate) fn pick_path(bytes: &[u8], segments: &[String]) -> Option<Value> {
     let mut de = serde_json::Deserializer::from_slice(bytes);
     let picked = Pick(segments).deserialize(&mut de).ok().flatten();
     // Keep `from_slice`'s strictness: trailing garbage is still a parse failure.
     de.end().ok()?;
     picked
+}
+
+/// Deserialize only the top-level fields `wanted` accepts, as an object.
+///
+/// Equivalent to keeping those keys of `serde_json::from_slice(bytes)` (`None` when the
+/// document is malformed or not an object), without allocating the rest of the document.
+/// Like `pick_path`, bad escapes or UTF-8 inside a skipped string go unnoticed.
+#[cfg_attr(
+    not(any(feature = "sqlx", feature = "clickhouse", feature = "http-bulk")),
+    allow(dead_code)
+)]
+pub(crate) fn pick_fields(bytes: &[u8], wanted: impl Fn(&str) -> bool) -> Option<Value> {
+    let mut de = serde_json::Deserializer::from_slice(bytes);
+    let picked = PickFields(&wanted).deserialize(&mut de).ok()?;
+    de.end().ok()?;
+    Some(Value::Object(picked))
+}
+
+#[cfg_attr(
+    not(any(feature = "sqlx", feature = "clickhouse", feature = "http-bulk")),
+    allow(dead_code)
+)]
+struct PickFields<'f, F>(&'f F);
+
+impl<'de, F: Fn(&str) -> bool> DeserializeSeed<'de> for PickFields<'_, F> {
+    type Value = serde_json::Map<String, Value>;
+
+    fn deserialize<D: de::Deserializer<'de>>(self, de: D) -> Result<Self::Value, D::Error> {
+        de.deserialize_map(self)
+    }
+}
+
+impl<'de, F: Fn(&str) -> bool> Visitor<'de> for PickFields<'_, F> {
+    type Value = serde_json::Map<String, Value>;
+
+    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str("a JSON object")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        let mut picked = serde_json::Map::new();
+        while let Some(key) = map.next_key_seed(WantedKey(self.0))? {
+            match key {
+                // Last occurrence wins, matching how `Value` folds duplicate keys.
+                Some(key) => {
+                    picked.insert(key, map.next_value()?);
+                }
+                None => {
+                    map.next_value::<IgnoredAny>()?;
+                }
+            }
+        }
+        Ok(picked)
+    }
+}
+
+/// An object key, kept only when `wanted` accepts it.
+#[cfg_attr(
+    not(any(feature = "sqlx", feature = "clickhouse", feature = "http-bulk")),
+    allow(dead_code)
+)]
+struct WantedKey<'f, F>(&'f F);
+
+impl<'de, F: Fn(&str) -> bool> DeserializeSeed<'de> for WantedKey<'_, F> {
+    type Value = Option<String>;
+
+    fn deserialize<D: de::Deserializer<'de>>(self, de: D) -> Result<Self::Value, D::Error> {
+        de.deserialize_str(self)
+    }
+}
+
+impl<'de, F: Fn(&str) -> bool> Visitor<'de> for WantedKey<'_, F> {
+    type Value = Option<String>;
+
+    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str("an object key")
+    }
+
+    fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
+        Ok((self.0)(v).then(|| v.to_owned()))
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -674,40 +755,42 @@ mod tests {
         m
     }
 
+    /// Valid, odd and broken payloads the pick helpers must read exactly like a full parse.
+    const PAYLOADS: [&[u8]; 22] = [
+        br#"{"id":42,"name":"bob","amount":1.50,"created_at":"2026-01-01T00:00:00Z"}"#,
+        br#"{"a":{"b":{"c":"deep"}},"z":1}"#,
+        br#"{"a":{"b":["x","y","z"]}}"#,
+        br#"{"dup":1,"dup":2}"#,
+        "{\"esc\\\"key\":\"v\",\"s\":\"line\\nbreak é\"}".as_bytes(),
+        br#"{"n":null,"t":true,"obj":{"k":[1,2]},"arr":[{"q":9}]}"#,
+        br#"{"big":123456789012345678,"neg":-0.0,"exp":1e3}"#,
+        "{\"unicode\":\"héllo ☃\"}".as_bytes(),
+        // A key spelled with \u escapes: must still match the plain path "id".
+        br#"{"\u0069\u0064":7}"#,
+        // Keys where one is a prefix of another.
+        br#"{"id":1,"identity":2,"i":3}"#,
+        // Surrogate pair, escaped solidus, tab and a control char, all as \u escapes.
+        br#"{"emoji":"\ud83d\ude00","sl":"a\/b","tab":"a\tb","ctl":"a\u0001b"}"#,
+        br#"{"empty":{},"earr":[],"nested":{"a":{"a":{"a":1}}}}"#,
+        br#"[10,20,30]"#,
+        br#"42"#,
+        br#""bare""#,
+        br#"{"a":1} trailing"#,
+        br#"{not json"#,
+        b"",
+        // Invalid UTF-8: JSON must be UTF-8, so both paths must reject these identically.
+        &[b'{', b'"', b'a', b'"', b':', b'"', 0xff, 0xfe, b'"', b'}'],
+        &[0xff, 0xfe, 0xfd],
+        // Lone surrogate and a truncated escape.
+        br#"{"a":"\ud83d"}"#,
+        br#"{"a":"\u00"}"#,
+    ];
+
     /// The whole safety argument for `pick_path`: it must agree with parsing the document and
     /// walking it. A disagreement would silently change rendered dedup keys, and an existing
     /// on-disk dedup store would stop matching after an upgrade.
     #[test]
     fn pick_path_matches_a_full_parse_and_walk() {
-        let payloads: [&[u8]; 22] = [
-            br#"{"id":42,"name":"bob","amount":1.50,"created_at":"2026-01-01T00:00:00Z"}"#,
-            br#"{"a":{"b":{"c":"deep"}},"z":1}"#,
-            br#"{"a":{"b":["x","y","z"]}}"#,
-            br#"{"dup":1,"dup":2}"#,
-            "{\"esc\\\"key\":\"v\",\"s\":\"line\\nbreak é\"}".as_bytes(),
-            br#"{"n":null,"t":true,"obj":{"k":[1,2]},"arr":[{"q":9}]}"#,
-            br#"{"big":123456789012345678,"neg":-0.0,"exp":1e3}"#,
-            "{\"unicode\":\"héllo ☃\"}".as_bytes(),
-            // A key spelled with \u escapes: must still match the plain path "id".
-            br#"{"\u0069\u0064":7}"#,
-            // Keys where one is a prefix of another.
-            br#"{"id":1,"identity":2,"i":3}"#,
-            // Surrogate pair, escaped solidus, tab and a control char, all as \u escapes.
-            br#"{"emoji":"\ud83d\ude00","sl":"a\/b","tab":"a\tb","ctl":"a\u0001b"}"#,
-            br#"{"empty":{},"earr":[],"nested":{"a":{"a":{"a":1}}}}"#,
-            br#"[10,20,30]"#,
-            br#"42"#,
-            br#""bare""#,
-            br#"{"a":1} trailing"#,
-            br#"{not json"#,
-            b"",
-            // Invalid UTF-8: JSON must be UTF-8, so both paths must reject these identically.
-            &[b'{', b'"', b'a', b'"', b':', b'"', 0xff, 0xfe, b'"', b'}'],
-            &[0xff, 0xfe, 0xfd],
-            // Lone surrogate and a truncated escape.
-            br#"{"a":"\ud83d"}"#,
-            br#"{"a":"\u00"}"#,
-        ];
         let paths = [
             "id",
             "name",
@@ -746,7 +829,7 @@ mod tests {
             "",
         ];
 
-        for payload in payloads {
+        for payload in PAYLOADS {
             for path in paths {
                 let expected = serde_json::from_slice::<Value>(payload)
                     .ok()
@@ -760,6 +843,49 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// `pick_fields` must keep exactly the wanted top-level keys of a full parse.
+    #[test]
+    fn pick_fields_matches_a_full_parse() {
+        let wanted: [&[&str]; 4] = [
+            &["id"],
+            &["dup", "esc\"key", "missing"],
+            &["a", "n", "obj"],
+            &[],
+        ];
+        for payload in PAYLOADS {
+            for names in wanted {
+                let expected = match serde_json::from_slice::<Value>(payload) {
+                    Ok(Value::Object(doc)) => Some(Value::Object(
+                        doc.into_iter()
+                            .filter(|(key, _)| names.contains(&key.as_str()))
+                            .collect(),
+                    )),
+                    Ok(_) => None,
+                    // Malformed text in a skipped string is not detected (see `pick_fields`).
+                    Err(_) => continue,
+                };
+                let actual = pick_fields(payload, |key| names.contains(&key));
+                assert_eq!(
+                    actual,
+                    expected,
+                    "pick_fields disagreed for payload {} and fields {names:?}",
+                    String::from_utf8_lossy(payload)
+                );
+            }
+        }
+        // A malformed value that is picked still fails, as do broken documents.
+        for payload in [
+            &br#"{"a":"\ud83d"}"#[..],
+            br#"{"a":"\u00"}"#,
+            br#"{not json"#,
+            b"",
+        ] {
+            assert_eq!(pick_fields(payload, |key| key == "a"), None);
+        }
+        let invalid_utf8: &[u8] = &[b'{', b'"', b'a', b'"', b':', b'"', 0xff, b'"', b'}'];
+        assert_eq!(pick_fields(invalid_utf8, |key| key == "a"), None);
     }
 
     /// A second payload token disables the single-field path; both spellings must render alike.

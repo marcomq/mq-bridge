@@ -15,8 +15,9 @@ use crate::traits::{
 };
 use crate::CanonicalMessage;
 use async_trait::async_trait;
+use bytes::Bytes;
 use futures::StreamExt;
-use serde_json::{Map, Value};
+use serde_json::{value::RawValue, Map, Value};
 use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -113,7 +114,25 @@ impl Entry {
     ) -> Vec<Result<Option<Value>, PublisherError>> {
         let requests: Vec<CanonicalMessage> = msgs.iter().map(|m| self.request(m)).collect();
         CONCURRENCY
-            .scope(concurrency, answer_all(self.from.as_ref(), requests))
+            .scope(
+                concurrency,
+                answer_all(self.from.as_ref(), requests, answer_of, |v| v),
+            )
+            .await
+    }
+
+    /// As `fetch_many`, but each answer as the JSON bytes that replace the payload.
+    async fn fetch_json(
+        &self,
+        msgs: &[&CanonicalMessage],
+        concurrency: usize,
+    ) -> Vec<Result<Option<Bytes>, PublisherError>> {
+        let requests: Vec<CanonicalMessage> = msgs.iter().map(|m| self.request(m)).collect();
+        CONCURRENCY
+            .scope(
+                concurrency,
+                answer_all(self.from.as_ref(), requests, json_of, json_bytes),
+            )
             .await
     }
 }
@@ -125,10 +144,12 @@ tokio::task_local! {
 
 /// Answers every request, in order: one batched lookup when `from` supports it, else one
 /// request per message, the lookup's `concurrency` at a time. `None` = not found.
-async fn answer_all(
+async fn answer_all<T>(
     from: &dyn MessagePublisher,
     requests: Vec<CanonicalMessage>,
-) -> Vec<Result<Option<Value>, PublisherError>> {
+    read: fn(Sent) -> Result<Option<T>, PublisherError>,
+    from_value: fn(Value) -> T,
+) -> Vec<Result<Option<T>, PublisherError>> {
     let n = requests.len();
     if n == 0 {
         return Vec::new();
@@ -140,18 +161,25 @@ async fn answer_all(
             .collect()
     };
     match from.lookup_each(&requests).await {
-        Some(found) if found.len() == n => return found,
+        Some(found) if found.len() == n => {
+            return found
+                .into_iter()
+                .map(|r| r.map(|o| o.map(from_value)))
+                .collect()
+        }
         Some(found) => return short(found.len()),
         None => {}
     }
     match from.lookup_batch(&requests).await {
-        Some(Ok(found)) if found.len() == n => found.into_iter().map(Ok).collect(),
+        Some(Ok(found)) if found.len() == n => {
+            found.into_iter().map(|o| Ok(o.map(from_value))).collect()
+        }
         Some(Ok(found)) => short(found.len()),
         Some(Err(e)) => (0..n).map(|_| Err(duplicate(&e))).collect(),
         None => {
             let concurrency = CONCURRENCY.try_with(|c| *c).unwrap_or(1);
             futures::stream::iter(requests)
-                .map(|r| async move { answer_of(from.send(r).await?) })
+                .map(|r| async move { read(from.send(r).await?) })
                 .buffered(concurrency)
                 .collect()
                 .await
@@ -178,7 +206,9 @@ pub(crate) async fn lookup_through(
             Err(e) => Some(Err(e)),
         })
         .collect();
-    let mut answers = answer_all(inner, forwarded).await.into_iter();
+    let mut answers = answer_all(inner, forwarded, answer_of, |v| v)
+        .await
+        .into_iter();
     slots
         .into_iter()
         .map(|slot| slot.unwrap_or_else(|| answers.next().expect("one answer per request")))
@@ -187,6 +217,36 @@ pub(crate) async fn lookup_through(
 
 /// What a lookup reads from one answer of `from`; `None` when it found nothing.
 pub(crate) fn answer_of(sent: Sent) -> Result<Option<Value>, PublisherError> {
+    let Some(payload) = answer_payload(sent)? else {
+        return Ok(None);
+    };
+    let value = serde_json::from_slice(&payload)
+        .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&payload).into_owned()));
+    Ok((!value.is_null()).then_some(value))
+}
+
+/// As `answer_of`, as JSON bytes: a valid JSON answer is passed on unparsed.
+fn json_of(sent: Sent) -> Result<Option<Bytes>, PublisherError> {
+    let Some(payload) = answer_payload(sent)? else {
+        return Ok(None);
+    };
+    match serde_json::from_slice::<&RawValue>(&payload) {
+        Ok(raw) if raw.get() == "null" => Ok(None),
+        Ok(_) => Ok(Some(payload)),
+        Err(_) => Ok(Some(json_bytes(Value::String(
+            String::from_utf8_lossy(&payload).into_owned(),
+        )))),
+    }
+}
+
+fn json_bytes(value: Value) -> Bytes {
+    serde_json::to_vec(&value)
+        .expect("a JSON value serializes")
+        .into()
+}
+
+/// The payload of one answer of `from`; `None` when it found nothing.
+fn answer_payload(sent: Sent) -> Result<Option<Bytes>, PublisherError> {
     let response = match sent {
         Sent::Response(response) => response,
         Sent::Ack => {
@@ -219,9 +279,7 @@ pub(crate) fn answer_of(sent: Sent) -> Result<Option<Value>, PublisherError> {
     if response.payload.is_empty() {
         return Ok(None);
     }
-    let value = serde_json::from_slice(&response.payload)
-        .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&response.payload).into_owned()));
-    Ok((!value.is_null()).then_some(value))
+    Ok(Some(response.payload))
 }
 
 /// An `http` source hands its status to the lookup, which decides: 404 is "not found",
@@ -303,13 +361,16 @@ impl Lookup {
         &self,
         messages: Vec<CanonicalMessage>,
     ) -> Vec<Result<CanonicalMessage, (CanonicalMessage, PublisherError)>> {
-        let replaces = self.entries.iter().any(Entry::replaces);
+        if let [entry] = self.entries.as_slice() {
+            if entry.replaces() {
+                let targets: Vec<&CanonicalMessage> = messages.iter().collect();
+                let answers = entry.fetch_json(&targets, self.concurrency).await;
+                return messages.into_iter().zip(answers).map(replace).collect();
+            }
+        }
         let docs: Vec<Result<Value, PublisherError>> = messages
             .iter()
             .map(|m| {
-                if replaces {
-                    return Ok(Value::Null);
-                }
                 serde_json::from_slice(&m.payload).map_err(|e| {
                     PublisherError::NonRetryable(anyhow::anyhow!(
                         "lookup: payload is not JSON: {e}"
@@ -380,6 +441,20 @@ impl Lookup {
             Err(e) => Err((msg, PublisherError::NonRetryable(e.into()))),
         }
     }
+}
+
+/// `into: $`: the answer becomes the payload as is, or `null` when nothing was found.
+fn replace(
+    (mut msg, answer): (CanonicalMessage, Result<Option<Bytes>, PublisherError>),
+) -> Result<CanonicalMessage, (CanonicalMessage, PublisherError)> {
+    let found = match answer {
+        Ok(found) => found,
+        Err(e) => return Err((msg, e)),
+    };
+    msg.metadata
+        .insert(FOUND.to_string(), found.is_some().to_string());
+    msg.payload = found.unwrap_or_else(|| Bytes::from_static(b"null"));
+    Ok(msg)
 }
 
 /// Writes `value` at the dotted `path`, creating objects along the way; an empty path
@@ -763,6 +838,21 @@ into: $
             sent[0].metadata.get(FOUND).map(String::as_str),
             Some("false")
         );
+
+        for (body, expected, found) in [
+            ("plain text", json!("plain text"), "true"),
+            (" null ", Value::Null, "false"),
+        ] {
+            let (publisher, channel) = lookup(
+                "lookup_replace_raw",
+                &format!("from: {{ static: {{ body: \"{body}\", raw: true }} }}\ninto: $"),
+            )
+            .await;
+            publisher.send(msg(json!({"id": 1}))).await.unwrap();
+            let sent = channel.drain_messages();
+            assert_eq!(payload(&sent[0]), expected, "{body}");
+            assert_eq!(sent[0].metadata.get(FOUND).map(String::as_str), Some(found));
+        }
     }
 
     #[tokio::test]

@@ -8,7 +8,7 @@ use anyhow::anyhow;
 use async_trait::async_trait;
 use futures::FutureExt;
 use std::any::Any;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use tokio::sync::{oneshot, Mutex};
@@ -80,33 +80,24 @@ impl BufferCore {
     }
 
     async fn maybe_flush(self: Arc<Self>) {
-        let batch = {
+        let (batch, waiters) = {
             let mut state = self.state.lock().await;
             if state.flush_in_progress || state.pending.is_empty() {
-                None
+                return;
+            }
+            let batch = take_batch(&mut state.pending, self.max_messages);
+            if batch.entries.is_empty() {
+                (None, std::mem::take(&mut state.flush_waiters))
             } else {
                 state.flush_in_progress = true;
                 state.timer_generation = state.timer_generation.wrapping_add(1);
-
-                let count = state.pending.len().min(self.max_messages);
-                let mut entries = Vec::with_capacity(count);
-                let mut messages = Vec::with_capacity(count);
-
-                for _ in 0..count {
-                    if let Some(entry) = state.pending.pop_front() {
-                        let message_id = entry.message.message_id;
-                        messages.push(entry.message);
-                        entries.push(InFlightEntry {
-                            message_id,
-                            result_tx: entry.result_tx,
-                        });
-                    }
-                }
-
-                Some(PendingBatch { entries, messages })
+                (Some(batch), Vec::new())
             }
         };
 
+        for waiter in waiters {
+            let _ = waiter.send(());
+        }
         if let Some(batch) = batch {
             self.process_batch(batch).await;
         }
@@ -155,6 +146,36 @@ impl BufferCore {
             self.try_start_flush();
         }
     }
+}
+
+/// Drops sends whose caller gave up, and ends the batch at a repeated message id,
+/// since results are matched back to callers by id.
+fn take_batch(pending: &mut VecDeque<PendingEntry>, max_messages: usize) -> PendingBatch {
+    let count = pending.len().min(max_messages);
+    let mut entries = Vec::with_capacity(count);
+    let mut messages = Vec::with_capacity(count);
+    let mut ids = HashSet::with_capacity(count);
+
+    while entries.len() < max_messages {
+        let Some(front) = pending.front() else {
+            break;
+        };
+        if front.result_tx.is_closed() {
+            pending.pop_front();
+            continue;
+        }
+        if !ids.insert(front.message.message_id) {
+            break;
+        }
+        let entry = pending.pop_front().expect("front entry checked above");
+        entries.push(InFlightEntry {
+            message_id: entry.message.message_id,
+            result_tx: entry.result_tx,
+        });
+        messages.push(entry.message);
+    }
+
+    PendingBatch { entries, messages }
 }
 
 fn distribute_batch_results(
@@ -378,8 +399,8 @@ impl MessagePublisher for BufferPublisher {
 /// Linger for `receive_batch`: coalesces trickling reads into real batches, up to
 /// `max_messages` or `max_delay`. Needs `batch_size` >= the desired buffer.
 ///
-/// For cancel-safe consumers only (mpsc-backed: WebSocket, memory, channels): the linger
-/// may cancel an in-flight inner `receive_batch`.
+/// For cancel-safe consumers only (mpsc-backed: HTTP, WebSocket, memory, channels): the
+/// linger may cancel an in-flight inner `receive_batch`.
 pub struct BufferConsumer {
     inner: Box<dyn MessageConsumer>,
     max_messages: usize,
@@ -400,6 +421,10 @@ pub struct BufferConsumer {
 /// match — place Buffer directly above the source endpoint.
 fn inner_is_cancel_safe(inner: &dyn MessageConsumer) -> bool {
     let any = inner.as_any();
+    #[cfg(feature = "http")]
+    if any.is::<crate::endpoints::http::HttpConsumer>() {
+        return true;
+    }
     #[cfg(feature = "websocket")]
     if any.is::<crate::endpoints::websocket::WebSocketConsumer>() {
         return true;
@@ -417,7 +442,7 @@ impl BufferConsumer {
     pub fn new(inner: Box<dyn MessageConsumer>, config: &BufferMiddleware) -> anyhow::Result<Self> {
         if !inner_is_cancel_safe(inner.as_ref()) {
             return Err(anyhow!(
-                "Buffer middleware requires a cancel-safe input consumer (memory or WebSocket) \
+                "Buffer middleware requires a cancel-safe input consumer (memory, HTTP, WebSocket or gRPC server) \
                  placed directly above the source endpoint; its linger may cancel an in-flight \
                  inner receive_batch, which would corrupt delivery on other transports"
             ));
@@ -821,6 +846,42 @@ mod tests {
 
         assert_eq!(batches.lock().unwrap().len(), 1);
         assert_eq!(batches.lock().unwrap()[0].len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_buffer_skips_cancelled_sends_and_splits_repeated_ids() {
+        let batches = Arc::new(StdMutex::new(Vec::new()));
+        let publisher = BufferPublisher::new(
+            Box::new(RecordingPublisher {
+                batches: batches.clone(),
+            }),
+            &BufferMiddleware {
+                max_messages: 16,
+                max_delay_ms: 1_000,
+            },
+        )
+        .unwrap();
+
+        let cancelled = publisher
+            .enqueue_messages(vec![CanonicalMessage::from("gone")])
+            .await;
+        drop(cancelled);
+        let first = CanonicalMessage::from("a");
+        let mut repeat = CanonicalMessage::from("b");
+        repeat.message_id = first.message_id;
+        let receivers = publisher.enqueue_messages(vec![first, repeat]).await;
+
+        publisher.flush().await.unwrap();
+        for receiver in receivers {
+            assert!(matches!(await_send_result(receiver).await, Ok(Sent::Ack)));
+        }
+        let bodies: Vec<Vec<String>> = batches
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|batch| batch.iter().map(|m| m.get_payload_str().into()).collect())
+            .collect();
+        assert_eq!(bodies, vec![vec!["a".to_string()], vec!["b".to_string()]]);
     }
 
     /// Yields one message per call (ids ascending), recording each commit's disposition.

@@ -6,6 +6,7 @@
 use super::poll::PollBackoff;
 use crate::canonical_message::tracing_support::LazyMessageIds;
 use crate::models::SqlxConfig;
+use crate::support::interpolation::pick_fields;
 use crate::support::lookup_batch::{self, ListQuery};
 use crate::traits::{
     BoxFuture, ConsumerError, EndpointStatus, MessageConsumer, MessageDisposition,
@@ -253,8 +254,22 @@ fn parse_template_with(
     Ok((out, sources))
 }
 
+/// The payload fields `sources` read, parsed alone; `None` when none reads the payload.
+fn payload_fields(msg: &CanonicalMessage, sources: &[ColumnSource]) -> Option<serde_json::Value> {
+    let reads = |key: &str| {
+        (sources.iter()).any(|s| matches!(s, ColumnSource::Payload(field) if field == key))
+    };
+    if !sources
+        .iter()
+        .any(|s| matches!(s, ColumnSource::Payload(_)))
+    {
+        return None;
+    }
+    pick_fields(&msg.payload, reads)
+}
+
 /// Resolve a `ColumnSource` for one message into a typed `BindValue`. `payload_json`
-/// is the payload parsed once as JSON (`None` if not valid JSON). No fallback: a
+/// holds at least the payload fields the source reads (`None` if not valid JSON). No fallback: a
 /// `Payload` source never consults metadata and vice versa; an unresolvable source
 /// yields `Null`.
 fn resolve_source(
@@ -330,13 +345,13 @@ fn reject_embedded_nul(source: &ColumnSource, value: &BindValue) -> Result<(), P
     )))
 }
 
-/// Parse the payload as JSON once, then resolve+bind every column source for one row.
+/// Parse the payload fields once, then resolve+bind every column source for one row.
 fn bind_message_sources<'q>(
     mut query: AnyQuery<'q>,
     msg: &CanonicalMessage,
     sources: &[ColumnSource],
 ) -> Result<AnyQuery<'q>, PublisherError> {
-    let payload_json: Option<serde_json::Value> = serde_json::from_slice(&msg.payload).ok();
+    let payload_json = payload_fields(msg, sources);
     for source in sources {
         let value = resolve_source(msg, source, &payload_json);
         reject_embedded_nul(source, &value)?;
@@ -664,7 +679,7 @@ fn pg_batch_args(
     let mut types: Vec<Option<&'static str>> = vec![None; sources.len()];
     let mut rows = Vec::with_capacity(messages.len());
     for message in messages {
-        let payload = serde_json::from_slice(&message.payload).ok();
+        let payload = payload_fields(message, sources);
         let mut row = Vec::with_capacity(sources.len());
         for (source, ty) in sources.iter().zip(types.iter_mut()) {
             let (value, kind) = match resolve_source(message, source, &payload) {
@@ -1619,7 +1634,7 @@ impl SqlxPublisher {
     ) -> Result<Vec<Option<serde_json::Value>>, PublisherError> {
         let values: Vec<BindValue> = messages
             .iter()
-            .map(|m| resolve_source(m, source, &serde_json::from_slice(&m.payload).ok()))
+            .map(|m| resolve_source(m, source, &payload_fields(m, std::slice::from_ref(source))))
             .collect();
         // A key with an embedded NUL cannot match a text column: not found, not an error.
         let keys: Vec<Option<String>> = values
@@ -1924,7 +1939,7 @@ impl SqlxPublisher {
 
         let mut buf = String::new();
         for msg in messages {
-            let payload_json: Option<serde_json::Value> = serde_json::from_slice(&msg.payload).ok();
+            let payload_json = payload_fields(msg, &sink.sources);
             for (i, source) in sink.sources.iter().enumerate() {
                 if i > 0 {
                     buf.push('\t');

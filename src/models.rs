@@ -225,7 +225,7 @@ impl std::fmt::Display for DeliveryGuarantee {
 }
 
 /// Represents a connection point for messages, which can be a source (input) or a sink (output).
-#[derive(Serialize, Clone, Default)]
+#[derive(Serialize, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "schema", schemars(transform = endpoint_schema_transform))]
 #[serde(deny_unknown_fields)]
@@ -242,6 +242,18 @@ pub struct Endpoint {
     #[cfg_attr(feature = "schema", schemars(skip))]
     /// Internal handler for processing messages (not serialized).
     pub handler: Option<Arc<dyn Handler>>,
+}
+
+// Not derived: a derived clone is `#[inline]` and was copied into every codegen unit.
+impl Clone for Endpoint {
+    #[inline(never)]
+    fn clone(&self) -> Self {
+        Self {
+            middlewares: self.middlewares.clone(),
+            endpoint_type: self.endpoint_type.clone(),
+            handler: self.handler.clone(),
+        }
+    }
 }
 
 /// Configuration for the `static` endpoint.

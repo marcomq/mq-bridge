@@ -19,6 +19,7 @@
 use super::poll::PollBackoff;
 use crate::checkpoint::{self, CheckpointBackend, CheckpointStore, VersionedCheckpoint};
 use crate::models::{ClickHouseConfig, Compression};
+use crate::support::interpolation::pick_fields;
 use crate::support::lookup_batch::{self, ListQuery};
 use crate::traits::{
     BoxFuture, ConsumerError, EndpointStatus, MessageConsumer, MessageDisposition,
@@ -51,24 +52,39 @@ fn resolve_token(
     payload_json: &Option<serde_json::Value>,
 ) -> serde_json::Value {
     use serde_json::Value;
-    if let Some(inner) = token.strip_prefix("${").and_then(|t| t.strip_suffix('}')) {
-        if let Some((prefix, name)) = inner.split_once(':') {
-            return match prefix.trim() {
-                "payload" => payload_json
-                    .as_ref()
-                    .and_then(|v| v.get(name.trim()))
-                    .cloned()
-                    .unwrap_or(Value::Null),
-                "metadata" => msg
-                    .metadata
-                    .get(name.trim())
-                    .map(|s| Value::String(s.clone()))
-                    .unwrap_or(Value::Null),
-                _ => Value::String(token.to_string()),
-            };
-        }
+    match token_parts(token) {
+        Some(("payload", name)) => payload_json
+            .as_ref()
+            .and_then(|v| v.get(name))
+            .cloned()
+            .unwrap_or(Value::Null),
+        Some(("metadata", name)) => msg
+            .metadata
+            .get(name)
+            .map(|s| Value::String(s.clone()))
+            .unwrap_or(Value::Null),
+        _ => Value::String(token.to_string()),
     }
-    Value::String(token.to_string())
+}
+
+/// `${prefix:name}` as its trimmed `(prefix, name)`.
+fn token_parts(token: &str) -> Option<(&str, &str)> {
+    let inner = token.strip_prefix("${")?.strip_suffix('}')?;
+    let (prefix, name) = inner.split_once(':')?;
+    Some((prefix.trim(), name.trim()))
+}
+
+/// The payload fields `tokens` read, parsed alone; `None` when none reads the payload.
+fn payload_fields<'t>(
+    msg: &CanonicalMessage,
+    tokens: impl Iterator<Item = &'t String> + Clone,
+) -> Option<serde_json::Value> {
+    let fields = tokens.filter_map(|t| match token_parts(t) {
+        Some(("payload", name)) => Some(name),
+        _ => None,
+    });
+    fields.clone().next()?;
+    pick_fields(&msg.payload, |key| fields.clone().any(|name| name == key))
 }
 
 /// Build the JSON object (one JSONEachRow row) for a single message.
@@ -78,7 +94,10 @@ fn build_row(
     msg: &CanonicalMessage,
     columns: &Option<std::collections::BTreeMap<String, String>>,
 ) -> anyhow::Result<serde_json::Value> {
-    let payload_json: Option<serde_json::Value> = serde_json::from_slice(&msg.payload).ok();
+    let payload_json = match columns {
+        Some(map) => payload_fields(msg, map.values()),
+        None => serde_json::from_slice(&msg.payload).ok(),
+    };
     match columns {
         Some(map) => {
             let mut obj = serde_json::Map::with_capacity(map.len());
@@ -135,7 +154,7 @@ impl LookupQuery {
 
     /// The SQL with `{pN:Type}` slots, and the matching `param_pN` values, for one message.
     fn render(&self, msg: &CanonicalMessage) -> (String, Vec<(String, String)>) {
-        let payload_json: Option<serde_json::Value> = serde_json::from_slice(&msg.payload).ok();
+        let payload_json = payload_fields(msg, self.tokens.iter());
         let mut sql = self.parts[0].clone();
         let mut params = Vec::with_capacity(self.tokens.len());
         for (i, (token, part)) in self.tokens.iter().zip(&self.parts[1..]).enumerate() {
@@ -557,7 +576,13 @@ impl ClickHousePublisher {
     ) -> Result<Vec<Option<serde_json::Value>>, PublisherError> {
         let values: Vec<serde_json::Value> = messages
             .iter()
-            .map(|m| resolve_token(&list.token, m, &serde_json::from_slice(&m.payload).ok()))
+            .map(|m| {
+                resolve_token(
+                    &list.token,
+                    m,
+                    &payload_fields(m, std::iter::once(&list.token)),
+                )
+            })
             .collect();
         let keys: Vec<Option<String>> = values.iter().map(lookup_batch::key_of).collect();
         let mut records = Vec::new();

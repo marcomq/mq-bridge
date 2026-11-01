@@ -15,6 +15,7 @@ use crate::checkpoint::{self, CheckpointBackend, CheckpointStore, VersionedCheck
 use crate::endpoints::poll::PollBackoff;
 use crate::models::{HttpBulkConfig, HttpBulkPayloadEncoding, HttpBulkRead, HttpBulkStream};
 use crate::support::http_status;
+use crate::support::interpolation::pick_path;
 use crate::support::sse::{find_sse_event_end, parse_sse_event, ParsedSseEvent};
 use crate::traits::{
     BatchCommitFunc, BoxFuture, ConsumerError, MessageConsumer, MessageDisposition, ReceivedBatch,
@@ -55,7 +56,12 @@ enum CursorSource {
         end_when_missing: bool,
     },
     /// A JSON pointer into the last document of the page, plus `add` for a whole number.
-    Item { pointer: String, add: Option<i64> },
+    Item {
+        pointer: String,
+        add: Option<i64>,
+        /// `pointer` for `pick_path`, when that reads the same value as `Value::pointer`.
+        segments: Option<Vec<String>>,
+    },
     /// The id of a server-sent event, sent back as `Last-Event-ID`.
     EventId,
     /// The URL of the next page, at this JSON pointer or, with `None`, in the `Link` header.
@@ -233,6 +239,7 @@ impl HttpBulkConsumer {
                 CursorSource::Item {
                     pointer: pointer.clone(),
                     add: cursor.add,
+                    segments: pointer_segments(pointer),
                 },
                 Value::Null,
             ),
@@ -417,9 +424,9 @@ impl HttpBulkConsumer {
                     .map(|n| Some(Position::At(Value::from(read + n))))
                     .collect())
             }
-            CursorSource::Item { pointer, add } => items
+            CursorSource::Item { pointer, add, .. } => items
                 .iter()
-                .map(|item| item_position(pointer, *add, Some(item)).map(Some))
+                .map(|item| item_position(pointer, *add, item.pointer(pointer)).map(Some))
                 .collect(),
             CursorSource::Response {
                 pointer,
@@ -563,9 +570,18 @@ impl HttpBulkConsumer {
             let mut messages = Vec::with_capacity(items.len());
             for item in items {
                 positions.push(match &self.source {
-                    CursorSource::Item { pointer, add } => {
-                        let document = serde_json::from_slice::<Value>(&item.payload).ok();
-                        Some(item_position(pointer, *add, document.as_ref())?)
+                    CursorSource::Item {
+                        pointer,
+                        add,
+                        segments,
+                    } => {
+                        let value = match segments {
+                            Some(segments) => pick_path(&item.payload, segments),
+                            None => serde_json::from_slice::<Value>(&item.payload)
+                                .ok()
+                                .and_then(|document| document.pointer(pointer).cloned()),
+                        };
+                        Some(item_position(pointer, *add, value.as_ref())?)
                     }
                     CursorSource::EventId => {
                         if let Some(id) = &item.event_id {
@@ -743,9 +759,9 @@ fn status_error(label: &str, status: reqwest::StatusCode, text: &str) -> Consume
 fn item_position(
     pointer: &str,
     add: Option<i64>,
-    document: Option<&Value>,
+    value: Option<&Value>,
 ) -> Result<Position, ConsumerError> {
-    let value = match document.and_then(|document| document.pointer(pointer)) {
+    let value = match value {
         Some(value) if !value.is_null() => value,
         _ => {
             return Err(ConsumerError::Permanent(anyhow!(
@@ -769,6 +785,19 @@ fn item_position(
             "http_bulk read.cursor.item '{pointer}' is {value}, not a whole number read.cursor.add can be added to"
         ))
     })
+}
+
+/// `pointer` as `pick_path` segments; `None` for an index `Value::pointer` rejects (`01`, `+1`).
+fn pointer_segments(pointer: &str) -> Option<Vec<String>> {
+    if pointer.is_empty() {
+        return Some(Vec::new());
+    }
+    (pointer.strip_prefix('/')?.split('/'))
+        .map(|token| {
+            let odd_index = token.starts_with('+') || (token.len() > 1 && token.starts_with('0'));
+            (!odd_index).then(|| token.replace("~1", "/").replace("~0", "~"))
+        })
+        .collect()
 }
 
 /// The message payload of a document: the field `pointer` names, decoded.
@@ -949,6 +978,35 @@ mod tests {
     use super::*;
     use crate::plugin::test_support::{payload_texts, StubHttpServer, StubRequest};
     use serde_json::json;
+
+    /// Picking a pointer's segments must read what `Value::pointer` reads on the parsed item.
+    #[test]
+    fn pointer_segments_pick_what_value_pointer_reads() {
+        let docs = [
+            r#"{"a":{"b":[10,{"c":"x"}]},"a/b":1,"m~n":2,"":3,"01":4,"+1":5}"#,
+            r#"[7,[8,9]]"#,
+            r#"{"seq":{"id":42}} trailing"#,
+            r#""bare""#,
+        ];
+        let pointers = [
+            "", "/", "/a", "/a/b", "/a/b/0", "/a/b/1/c", "/a/b/2", "/a~1b", "/m~0n", "/01", "/+1",
+            "/1/0", "/1/01", "/0/+0", "/missing", "a", "/seq/id",
+        ];
+        for doc in docs {
+            for pointer in pointers {
+                let expected = serde_json::from_slice::<Value>(doc.as_bytes())
+                    .ok()
+                    .and_then(|d| d.pointer(pointer).cloned());
+                let actual = match pointer_segments(pointer) {
+                    Some(segments) => pick_path(doc.as_bytes(), &segments),
+                    None => serde_json::from_slice::<Value>(doc.as_bytes())
+                        .ok()
+                        .and_then(|d| d.pointer(pointer).cloned()),
+                };
+                assert_eq!(actual, expected, "doc {doc} pointer {pointer:?}");
+            }
+        }
+    }
 
     async fn server(
         respond: impl Fn(&StubRequest) -> (u16, String) + Send + Sync + 'static,

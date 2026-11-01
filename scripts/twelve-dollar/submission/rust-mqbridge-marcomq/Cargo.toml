@@ -1,0 +1,21 @@
+[package]
+name = "twelve-dollar-mq-bridge"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Standalone, not part of any surrounding workspace.
+[workspace]
+
+[dependencies]
+mq-bridge = { version = "=1.3.0", default-features = false, features = ["http", "sqlx"] }
+tokio = { version = "=1.54.1", features = ["rt-multi-thread", "macros", "signal"] }
+async-trait = "=0.1.92"
+serde_json = "=1.0.154"
+hmac = "=0.12.1"
+sha2 = "=0.10.9"
+base64 = "=0.22.1"
+mimalloc = { version = "=0.1.52", default-features = false }
+
+[profile.release]
+lto = "thin"

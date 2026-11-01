@@ -2,6 +2,42 @@
 
 All notable changes to `mq-bridge`. Newest first.
 
+## 1.3.0
+
+### Added
+
+- **`ThreadedHandler` runs a blocking handler with `&mut` state on its own thread.**
+  Implement `BlockingHandler` (or pass a closure); no `Mutex`, no `spawn_blocking`. The
+  `HandlerContext` can `emit` any number of messages per input and reports
+  `is_cancelled()` once a `CancelHandle` cancels the message's `correlation_id`; queued
+  messages with a cancelled id are acked without running. See `mq_bridge::blocking_handler`.
+- **`Handler::prefers_batches` lets an HTTP handler batch.** An `http` → `response` route
+  answers requests inline, so `handle_many` only ever got one message. A handler returning
+  `true` now gets the requests that arrive while a batch is in flight as its next batch,
+  still on the inline path; a `websocket` input in `auto` mode runs routed for it. One
+  SQLite transaction per batch halved CPU per request in `scripts/twelve-dollar`.
+- **`buffer` works on an `http` input.** Its read can be cancelled safely, so a `buffer`
+  with `max_delay_ms` above 0 now collects requests there instead of refusing to start.
+- **`UriSchema::uri_template` is now documented.** It returns the URI shape a plugin's schema
+  reads, such as `rp://<url>/<topic>?<param>=<value>`; it shipped hidden in 1.2.1.
+
+### Performance
+
+- **Smaller binaries.** `Endpoint::clone` was inlined into every codegen unit; a lean
+  build (`default-features = false`) shrinks by ~450 KB (5.7 → 5.3 MB stripped).
+  `futures` no longer pulls in `futures-executor`, which was unused.
+
+- **`lookup` with `into: $` passes the answer on unparsed.** A valid JSON answer becomes the
+  payload as `from` sent it, after a check that allocates nothing; it used to be parsed and
+  written again. The JSON is the same, but whitespace and escapes now stay as `from` wrote
+  them. A 4 KB SQLite feed reply costs ~6 µs less (80 → 74 µs per request).
+
+- **sqlx and ClickHouse parse only the payload fields they read.** Sinks and lookups used to
+  parse every payload in full, even when every value came from metadata; now they skip the
+  parse in that case and otherwise build only the fields their tokens name. http_bulk does the
+  same for delete ids and stream cursors (`read.cursor.item`). Malformed text in a field that
+  is not read no longer turns the row's payload values into NULL.
+
 ## 1.2.1
 
 ### Changed

@@ -22,7 +22,7 @@
 2. **Endpoint**: A source (consumer) or sink (publisher) for messages - supports Kafka, NATS, AMQP, MQTT, MongoDB, ZeroMQ, HTTP, Files, and in-memory channels
 3. **Top-Level API**: A set of functions in the `mq_bridge` root for managing routes and publishers (e.g., `get_route`, `stop_route`, `get_publisher`).
 4. **Middleware**: Components that intercept and process messages (retries, DLQ, deduplication, metrics)
-5. **Handler**: Programmatic components for business logic (CommandHandler for 1-to-1 transformations, EventHandler for terminal consumption)
+5. **Handler**: Programmatic components for business logic (CommandHandler for 1-to-1 transformations, EventHandler for terminal consumption, ThreadedHandler for blocking `&mut` handlers such as local inference: emit many per input, cancel by correlation id)
 6. **CanonicalMessage**: The unified message format used throughout the system
 7. **Request-Reply**: Native support for synchronous request-reply pattern on NATS, MongoDB, and Memory endpoints
 
@@ -114,6 +114,7 @@ src/
 │   └── plugin_abi.rs    # C ABI shared by host and native plugins
 ├── command_handler.rs    # Command handler wrapper
 ├── event_handler.rs      # Event handler wrapper
+├── blocking_handler.rs   # ThreadedHandler: blocking `&mut` handler on its own thread, emit, cancel by correlation id
 ├── event_store.rs        # In-memory event store
 ├── type_handler.rs       # Typed message handlers
 ├── publisher.rs          # Standalone publisher API

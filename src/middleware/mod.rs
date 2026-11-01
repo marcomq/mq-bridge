@@ -38,7 +38,7 @@ pub(crate) fn note_rejected_input_message() {
 
 #[cfg(feature = "aggregate")]
 pub(crate) mod aggregate;
-mod buffer;
+pub(crate) mod buffer;
 #[cfg(feature = "compression")]
 pub(crate) mod compression;
 mod cookie_jar;

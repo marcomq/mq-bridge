@@ -133,6 +133,16 @@ pub trait Handler: Send + Sync + 'static {
         results
     }
 
+    /// Returns true when `handle_many` does work per batch that is cheaper than per message,
+    /// such as one database transaction for every message it gets.
+    ///
+    /// An `http` input with a `response` output answers requests inline. With `true`, requests
+    /// that arrive while a batch is in flight reach `handle_many` together as the next batch.
+    /// A `websocket` input in `auto` mode then runs routed instead of direct.
+    fn prefers_batches(&self) -> bool {
+        false
+    }
+
     /// Fast path for a handler that only observes messages and never changes them.
     ///
     /// `Some` forwards or acks the whole batch as is: `handle`/`handle_many` are not
@@ -161,6 +171,10 @@ impl<T: Handler + ?Sized> Handler for Arc<T> {
 
     async fn handle_many(&self, msgs: Vec<CanonicalMessage>) -> Vec<Result<Handled, HandlerError>> {
         (**self).handle_many(msgs).await
+    }
+
+    fn prefers_batches(&self) -> bool {
+        (**self).prefers_batches()
     }
 
     fn observe(&self, msgs: &[CanonicalMessage]) -> Option<Passthrough> {
