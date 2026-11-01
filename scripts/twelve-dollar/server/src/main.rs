@@ -73,35 +73,27 @@ struct Api {
 }
 
 impl Api {
-    fn parse(&self, msg: &CanonicalMessage) -> Request {
-        let path = msg.http_path();
-        match (msg.http_method(), path) {
+    /// `Err` carries the `Request::Fail` to answer with.
+    fn parse(&self, msg: &CanonicalMessage) -> Result<Request, Request> {
+        let id = |s: &str| post_id(s).ok_or(Request::Fail(400, "invalid post id"));
+        Ok(match (msg.http_method(), msg.http_path()) {
             ("GET", "/health") => Request::Health,
             ("GET", "/feed") => Request::Feed,
             ("GET", p) if p.starts_with("/posts/") && !p[7..].contains('/') => {
-                match post_id(&p[7..]) {
-                    Some(id) => Request::Post(id),
-                    None => Request::Fail(400, "invalid post id"),
-                }
+                Request::Post(id(&p[7..])?)
             }
-            ("POST", "/posts") => match self.user(msg) {
-                Err(e) => e,
-                Ok((user, name)) => match new_body(&msg.payload) {
-                    Ok(body) => Request::Create { user, name, body },
-                    Err(e) => e,
-                },
-            },
+            ("POST", "/posts") => {
+                let (user, name) = self.user(msg)?;
+                let body = new_body(&msg.payload)?;
+                Request::Create { user, name, body }
+            }
             ("POST", p) if p.starts_with("/posts/") && p.ends_with("/like") && p.len() > 12 => {
-                match self.user(msg) {
-                    Err(e) => e,
-                    Ok((user, _)) => match post_id(&p[7..p.len() - 5]) {
-                        Some(post) => Request::Like { user, post },
-                        None => Request::Fail(400, "invalid post id"),
-                    },
-                }
+                let (user, _) = self.user(msg)?;
+                let post = id(&p[7..p.len() - 5])?;
+                Request::Like { user, post }
             }
-            _ => Request::Fail(404, "not found"),
-        }
+            _ => return Err(Request::Fail(404, "not found")),
+        })
     }
 
     /// Verifies the HS256 bearer token on every request and returns (user id, username).
@@ -111,49 +103,29 @@ impl Api {
             .get("mqb.src.http_authorization")
             .and_then(|v| v.strip_prefix("Bearer "))
             .ok_or(Request::Fail(401, "missing bearer token"))?;
-        let invalid = Request::Fail(401, "invalid or expired token");
-        let mut parts = token.splitn(3, '.');
-        let (Some(header), Some(payload), Some(signature)) =
-            (parts.next(), parts.next(), parts.next())
-        else {
-            return Err(invalid);
-        };
-        let header: serde_json::Value = URL_SAFE_NO_PAD
-            .decode(header)
-            .ok()
-            .and_then(|h| serde_json::from_slice(&h).ok())
+        let claims = self
+            .claims(token)
             .ok_or(Request::Fail(401, "invalid or expired token"))?;
-        if header.get("alg").and_then(|a| a.as_str()) != Some("HS256") {
-            return Err(invalid);
-        }
-        let Ok(signature) = URL_SAFE_NO_PAD.decode(signature) else {
-            return Err(invalid);
-        };
-        let mut mac = self.mac.clone();
-        mac.update(&token.as_bytes()[..token.len() - signature_len(token)]);
-        if mac.verify_slice(&signature).is_err() {
-            return Err(invalid);
-        }
-        let Some(claims) = URL_SAFE_NO_PAD
-            .decode(payload)
-            .ok()
-            .and_then(|p| serde_json::from_slice::<serde_json::Value>(&p).ok())
-        else {
-            return Err(invalid);
-        };
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0.0, |d| d.as_secs_f64());
-        match claims.get("exp").and_then(|e| e.as_f64()) {
-            Some(exp) if exp > now => {}
-            _ => return Err(invalid),
-        }
-        let user = claims.get("sub").and_then(|s| s.as_str()).and_then(post_id);
-        let name = claims.get("username").and_then(|n| n.as_str());
-        match (user, name) {
+        let user = claims["sub"].as_str().and_then(post_id);
+        match (user, claims["username"].as_str()) {
             (Some(user), Some(name)) => Ok((user, name.to_owned())),
             _ => Err(Request::Fail(401, "invalid token payload")),
         }
+    }
+
+    /// The claims of a correctly signed, unexpired HS256 token.
+    fn claims(&self, token: &str) -> Option<serde_json::Value> {
+        let (signed, signature) = token.rsplit_once('.')?;
+        let (header, payload) = signed.split_once('.')?;
+        if decode_json(header)?["alg"] != "HS256" {
+            return None;
+        }
+        let mut mac = self.mac.clone();
+        mac.update(signed.as_bytes());
+        mac.verify_slice(&URL_SAFE_NO_PAD.decode(signature).ok()?).ok()?;
+        let claims = decode_json(payload)?;
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs_f64();
+        (claims["exp"].as_f64()? > now).then_some(claims)
     }
 
     async fn run(
@@ -253,8 +225,8 @@ impl Api {
     }
 }
 
-fn signature_len(token: &str) -> usize {
-    token.rsplit_once('.').map_or(0, |(_, s)| s.len() + 1)
+fn decode_json(part: &str) -> Option<serde_json::Value> {
+    serde_json::from_slice(&URL_SAFE_NO_PAD.decode(part).ok()?).ok()
 }
 
 /// A positive integer without sign, fraction or leading garbage.
@@ -294,7 +266,10 @@ impl Handler for Api {
     }
 
     async fn handle_many(&self, msgs: Vec<CanonicalMessage>) -> Vec<Result<Handled, HandlerError>> {
-        let requests = msgs.iter().map(|m| self.parse(m)).collect();
+        let requests = msgs
+            .iter()
+            .map(|m| self.parse(m).unwrap_or_else(|fail| fail))
+            .collect();
         self.batch(requests)
             .await
             .into_iter()
@@ -311,24 +286,8 @@ fn env(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_owned())
 }
 
-fn main() -> anyhow::Result<()> {
-    let workers: usize = env("WORKERS", "1").parse().expect("WORKERS");
-    tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(workers)
-        .enable_all()
-        .build()
-        .expect("runtime")
-        .block_on(serve())
-}
-
-async fn serve() -> anyhow::Result<()> {
-    // ROUTE_YAML runs route.yaml (config only) in this binary, for profiling the engine path.
-    if let Ok(path) = std::env::var("ROUTE_YAML") {
-        let handle = Route::from_file(path, "feed_api")?.run("feed_api").await?;
-        tokio::signal::ctrl_c().await?;
-        handle.stop().await;
-        return Ok(());
-    }
+#[tokio::main(flavor = "multi_thread", worker_threads = 1)]
+async fn main() -> anyhow::Result<()> {
     let options = SqliteConnectOptions::new()
         .filename(env("SQLITE_PATH", "feed.db"))
         .journal_mode(SqliteJournalMode::Wal)
@@ -351,9 +310,8 @@ async fn serve() -> anyhow::Result<()> {
         http = http.with_inline_response_fast_path(inline == "1");
     }
     let input = Endpoint::new(EndpointType::Http(http));
-    let batch: usize = env("BATCH_SIZE", "512").parse().expect("BATCH_SIZE");
     let route = Route::new(input, Endpoint::new_response())
-        .with_batch_size(batch)
+        .with_batch_size(512)
         .with_handler(api);
     let handle = route.run("feed_api").await?;
     tokio::signal::ctrl_c().await?;

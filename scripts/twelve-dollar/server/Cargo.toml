@@ -8,7 +8,7 @@ publish = false
 [workspace]
 
 [dependencies]
-mq-bridge = { path = "../../..", default-features = false, features = ["http", "sqlx", "yaml", "filter"] }
+mq-bridge = { path = "../../..", default-features = false, features = ["http", "sqlx"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
 async-trait = "0.1"
 serde_json = "1"

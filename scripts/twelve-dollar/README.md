@@ -133,8 +133,8 @@ The k6 load test was not run.
 
 ## Submission (`submission/rust-mqbridge-marcomq/`)
 
-The prototype without the bench switches (`INLINE`, `NOBATCH`, `ROUTE_YAML`, `WORKERS`,
-`BATCH_SIZE`), plus `install.sh` / `build.sh` / `start.sh` and a README, laid out as the
+The prototype without the bench switches (`INLINE`, `NOBATCH`) and with tokio's default
+worker count, plus `install.sh` / `build.sh` / `start.sh` and a README, laid out as the
 challenge expects. `/health` answers 503 `degraded` when SQLite fails, as the spec asks.
 It needs mq-bridge 1.3.0 from crates.io (for `prefers_batches`), so before opening the PR:
 
