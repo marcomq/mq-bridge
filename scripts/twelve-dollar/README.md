@@ -31,10 +31,12 @@ caffeinate -dims python3 decompose.py
 Needs `mq-bridge-app` (`MQB_APP` overrides the binary) and `oha`. Every variant starts from a
 fresh copy of the seed database. Announce the run and check the machine is idle first.
 
-**Measure:** the bridge process's CPU time (user + sys, `ps cputime`) over a 6 s closed load
+**Measure:** the bridge process's CPU time (user + sys; `ps cputime`, `/proc/<pid>/stat` on Linux) over a 6 s closed load
 of 64 connections, divided by the requests answered. This is the leaderboard's µs/req column
 and does not depend on core count. `mix` weights the endpoints like one k6 user loop: feed +
-post + 0.15 like + 0.02 create.
+post + 0.15 like + 0.02 create. A variant with an endpoint under 99 % 2xx gets no `mix`.
+`post` reads the seed feed's 20 posts, as the load test does; the results below predate that
+and used random ids from 10,000–99,999.
 
 ## Results (2026-10-31, Apple M1, mq-bridge-app 1.2.0)
 
@@ -44,7 +46,7 @@ post + 0.15 like + 0.02 create.
 |---|---|---|---|---|---|
 | `rc1_pool1` (route concurrency 1, 1 connection) | 91 | 53 | 50 | 46 | **70** |
 | `rc1_pool4` | 181 | 73 | 52 | 47 | 121 |
-| `rc4_pool4` | 183 | 87 | 63 | ¹ | 129 |
+| `rc4_pool4` | 183 | 87 | 63 | ¹ | n/a |
 
 ¹ 85 % of creates failed: concurrent writers on 4 connections got `database is locked`, the
 route went into its 5 s reconnect, and every request in that window failed.

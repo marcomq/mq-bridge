@@ -13,7 +13,7 @@ import sys
 import time
 from pathlib import Path
 
-from run import HERE, SEED, WORK, cpu_seconds, oha
+from run import FEED_IDS, HERE, MIN_OK, SEED, WORK, cpu_seconds, oha
 
 BIN = os.environ.get("SERVER_BIN", str(HERE / "../../target/release/twelve-dollar-server"))
 PORT = 13002
@@ -22,7 +22,7 @@ TOKEN = json.loads((WORK / "challenge/seed/tokens.json").read_text())[6]["token"
 AUTH = ["-H", f"authorization: Bearer {TOKEN}"]
 ENDPOINTS = {
     "feed": (["--rand-regex-url", f"{BASE}/feed"], 1.0),
-    "post": (["--rand-regex-url", f"{BASE}/posts/[1-9][0-9]{{4}}"], 1.0),
+    "post": (["--rand-regex-url", f"{BASE}/posts/{FEED_IDS}"], 1.0),
     "like": (["--rand-regex-url", f"{BASE}/posts/[1-9][0-9]{{4}}/like", "-m", "POST", *AUTH], 0.15),
     "create": (["--rand-regex-url", f"{BASE}/posts", "-m", "POST", *AUTH, "-H", "content-type: application/json",
                 "-d", '{"body":"bob says hi at 2026-10-31T12:00:00.000Z (VU 1, iter 1)"}'], 0.02),
@@ -56,7 +56,7 @@ def main():
     args = ap.parse_args()
     proc = start({})
     try:
-        us = {}
+        us, failed = {}, []
         for name, (oha_args, _) in ENDPOINTS.items():
             if args.only and name not in args.only:
                 continue
@@ -68,10 +68,14 @@ def main():
             done = sum(codes.values())
             ok = sum(n for code, n in codes.items() if code.startswith("2"))
             us[name] = spent / done * 1e6
+            if ok / done < MIN_OK:
+                failed.append(name)
             p99 = result["latencyPercentiles"]["p99"] * 1000
             print(f"{name:7} {us[name]:7.1f} µs/req  {result['summary']['requestsPerSec']:8.0f} req/s  "
                   f"p99 {p99:6.1f} ms  2xx {ok / done:.1%}", flush=True)
-        if len(us) == len(ENDPOINTS):
+        if failed:
+            print(f"mix     n/a, failed: {', '.join(failed)}", flush=True)
+        elif len(us) == len(ENDPOINTS):
             mix = sum(us[n] * w for n, (_, w) in ENDPOINTS.items()) / sum(w for _, w in ENDPOINTS.values())
             print(f"mix     {mix:7.1f} µs/req  -> ~{1e6 / mix:,.0f} req/s on one core", flush=True)
     finally:

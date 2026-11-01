@@ -37,8 +37,8 @@ RATES = [1000, 2500, 5000, 10000, 20000, 40000]
 OPEN_CONNECTIONS = 256
 
 
-def sh(*cmd, check=True, capture=True):
-    return subprocess.run(cmd, check=check, capture_output=capture, text=True, cwd=HERE)
+def sh(*cmd, check=True, capture=True, timeout=600):
+    return subprocess.run(cmd, check=check, capture_output=capture, text=True, cwd=HERE, timeout=timeout)
 
 
 def route_yaml(variant):
@@ -109,8 +109,9 @@ def oha(duration, connections, rate=None):
 
 
 def check_once():
-    out = subprocess.run(["curl", "-s", "-X", "POST", "-d", '{"event":"view"}',
-                          f"http://127.0.0.1:{PORT}/u/000042"], capture_output=True, text=True).stdout
+    out = subprocess.run(["curl", "-s", "-m", "10", "-X", "POST", "-d", '{"event":"view"}',
+                          f"http://127.0.0.1:{PORT}/u/000042"], capture_output=True, text=True,
+                         timeout=15).stdout
     if '"user_42"' not in out:
         raise RuntimeError(f"unexpected response: {out!r}")
 

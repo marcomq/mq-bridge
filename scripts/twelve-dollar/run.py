@@ -10,6 +10,7 @@ import json
 import os
 import shutil
 import socket
+import sqlite3
 import subprocess
 import sys
 import time
@@ -22,11 +23,22 @@ RESULTS = HERE / os.environ.get("RESULTS", "results/current")
 APP = os.environ.get("MQB_APP", "mq-bridge-app")
 PORT = 13000
 BASE = f"http://127.0.0.1:{PORT}"
+MIN_OK = 0.99
 
+
+def feed_ids_regex(db=SEED):
+    """The seed feed's 20 posts as a regex alternation; the load test reads and likes those."""
+    with sqlite3.connect(f"file:{db}?mode=ro", uri=True) as con:
+        ids = [row[0] for row in con.execute("SELECT id FROM posts ORDER BY created_at DESC, id DESC LIMIT 20")]
+    return "(" + "|".join(map(str, ids)) + ")"
+
+
+FEED_IDS = feed_ids_regex()
 ENDPOINTS = {
     # name: (oha args, weight per user loop)
     "feed": (["--rand-regex-url", f"{BASE}/feed"], 1.0),
-    "post": (["--rand-regex-url", f"{BASE}/posts/[1-9][0-9]{{4}}"], 1.0),
+    "post": (["--rand-regex-url", f"{BASE}/posts/{FEED_IDS}"], 1.0),
+    # oha sends one user per run, so feed ids would turn nearly every like into a repeat.
     "like": (["--rand-regex-url", f"{BASE}/posts/[1-9][0-9]{{4}}/like", "-m", "POST",
               "-H", "x-user-id: 7"], 0.15),
     "create": (["--rand-regex-url", f"{BASE}/posts", "-m", "POST", "-H", "x-user-id: 7",
@@ -42,6 +54,11 @@ VARIANTS = {
 
 
 def cpu_seconds(pid):
+    stat = Path(f"/proc/{pid}/stat")
+    if stat.exists():
+        # Linux ps rounds cputime to whole seconds; /proc has clock ticks (utime, stime).
+        fields = stat.read_text().rsplit(")", 1)[1].split()
+        return (int(fields[11]) + int(fields[12])) / os.sysconf("SC_CLK_TCK")
     out = subprocess.run(["ps", "-o", "cputime=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
     parts = [float(p) for p in out.replace("-", ":").split(":")]
     seconds = 0.0
@@ -93,7 +110,7 @@ def main():
     for variant in args.only or list(VARIANTS):
         proc = start(variant)
         try:
-            us = {}
+            us, failed = {}, []
             for name, (oha_args, weight) in ENDPOINTS.items():
                 oha(oha_args, args.warmup, args.connections)
                 before = cpu_seconds(proc.pid)
@@ -103,11 +120,17 @@ def main():
                 done = sum(result["statusCodeDistribution"].values())
                 ok = sum(n for code, n in result["statusCodeDistribution"].items() if code.startswith("2"))
                 us[name] = spent / done * 1e6
+                if ok / done < MIN_OK:
+                    failed.append(name)
                 p99 = result["latencyPercentiles"]["p99"] * 1000
                 rows.append((variant, name, us[name], summary["requestsPerSec"], p99, ok / done))
                 (RESULTS / f"{variant}__{name}.json").write_text(json.dumps(result))
                 print(f"{variant:10} {name:7} {us[name]:7.1f} µs/req  {summary['requestsPerSec']:8.0f} req/s  "
                       f"p99 {p99:6.1f} ms  2xx {ok / done:.1%}", flush=True)
+            if failed:
+                print(f"{variant:10} mix     n/a, failed: {', '.join(failed)}", flush=True)
+                rows.append((variant, "mix", None, None, None, None))
+                continue
             weights = {n: w for n, (_, w) in ENDPOINTS.items()}
             mix = sum(us[n] * w for n, w in weights.items()) / sum(weights.values())
             print(f"{variant:10} mix     {mix:7.1f} µs/req  -> ~{1e6 / mix:,.0f} req/s on one core", flush=True)

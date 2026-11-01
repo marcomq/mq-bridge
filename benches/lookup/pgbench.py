@@ -48,9 +48,9 @@ def script(name):
     return sets + f"{SELECT} IN ({', '.join(KEY.format(i=i) for i in range(n))});\n"
 
 
-def compose(*args, **kw):
+def compose(*args, timeout=600, **kw):
     return subprocess.run(["docker", "compose", *args], cwd=HERE, check=True,
-                          capture_output=True, text=True, **kw)
+                          capture_output=True, text=True, timeout=timeout, **kw)
 
 
 def pgbench(location, name, clients, duration):
@@ -59,7 +59,7 @@ def pgbench(location, name, clients, duration):
     out = compose("exec", "-T", "-e", "PGPASSWORD=bench", service,
                   "pgbench", "-n", "-h", host, "-p", port, "-U", "bench", "-M", protocol,
                   "-c", str(clients), "-j", str(min(clients, 4)), "-T", str(duration),
-                  "-f", f"/tmp/{name}.sql", "bench").stdout
+                  "-f", f"/tmp/{name}.sql", "bench", timeout=duration + 60).stdout
     if m := re.search(r"failed transactions: (\d+)", out):
         if int(m.group(1)):
             raise RuntimeError(f"{location} {name} c{clients}: {m.group(1)} failed transactions")

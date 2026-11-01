@@ -14,19 +14,21 @@ Three measurements against the same Postgres table (1M rows, text primary key):
 ## Run
 
 ```sh
+export RESULTS=results/$(date +%Y%m%d-%H%M%S)   # a fresh directory per run; CSVs append
 docker compose up -d --wait
-mkdir -p results/current && { date; uptime; mq-bridge-app --version; oha --version; docker --version;
-  sysctl -n machdep.cpu.brand_string hw.ncpu hw.memsize; } > results/current/meta.txt
+mkdir -p "$RESULTS" && { date; uptime; mq-bridge-app --version; oha --version; docker --version;
+  sysctl -n machdep.cpu.brand_string hw.ncpu hw.memsize; } > "$RESULTS/meta.txt"
 caffeinate -dims python3 pgbench.py              # ~30 min; --duration 2 --reps 1 for a smoke run
 caffeinate -dims python3 run_file.py             # 1M-row input, ≤15 s per cell × 8 variants × 5 reps
 caffeinate -dims python3 run.py                  # ~40 min; --reps 1 --duration 2s --warmup 1s for a smoke run
 python3 summarize.py                             # $RESULTS/summary.md
-docker compose --profile pgbench down
+docker compose --profile pgbench down --volumes
 ```
 
 Needs `mq-bridge-app`, `oha` (`brew install oha`) and Docker. pgbench runs inside containers
 from the `postgres:17.6` image, nothing is installed on the host. Results go to
-`results/current/` (git-ignored); `RESULTS=results/<name>` keeps a run apart.
+`$RESULTS` (default `results/current/`, git-ignored). The pgbench and file CSVs append, so
+reusing a directory mixes runs.
 
 ## Protocol
 

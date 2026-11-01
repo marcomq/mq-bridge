@@ -613,6 +613,10 @@ Accumulates single sends and forwards them as one batch. Input and output.
 Flushes when either bound is hit. Useful in front of an endpoint whose per-call overhead
 dominates. Adds up to `max_delay_ms` of latency.
 
+On an input, `buffer` works on `memory`, `http`, `websocket` and `grpc` in server mode, and
+must be the last entry in the input's `middlewares`. It only collects with `max_delay_ms` above 0: the input
+already hands over everything that is waiting, up to the route's `batch_size`.
+
 On an output, each caller of a single send gets its own result back: its response, its
 error, or the acknowledgement. A response is matched to its request by message id. Placed
 after a [`lookup`](#lookup) or an [`aggregate`](#aggregate), `buffer` therefore lets

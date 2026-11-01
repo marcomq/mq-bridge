@@ -480,6 +480,66 @@ async fn test_http_consumer_publisher_integration() {
 }
 
 #[tokio::test]
+async fn test_http_input_buffer_collects_requests_without_losing_any() {
+    init_crypto();
+    let addr = format!("127.0.0.1:{}", get_free_port());
+    let consumer = HttpConsumer::new(&HttpConfig {
+        url: addr.clone(),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let mut consumer = crate::middleware::buffer::BufferConsumer::new(
+        Box::new(consumer),
+        &crate::models::BufferMiddleware {
+            max_messages: 8,
+            max_delay_ms: 200,
+        },
+    )
+    .expect("buffer accepts an http input");
+    let publisher = Arc::new(
+        HttpPublisher::new(&HttpConfig {
+            url: format!("http://{addr}"),
+            ..Default::default()
+        })
+        .await
+        .unwrap(),
+    );
+    let send = |body: &'static str, after_ms: u64| {
+        let publisher = publisher.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(after_ms)).await;
+            publisher.send(CanonicalMessage::from(body)).await
+        })
+    };
+    let reply = |batch: ReceivedBatch| async move {
+        let replies = (0..batch.messages.len())
+            .map(|_| MessageDisposition::Reply(CanonicalMessage::from("ok")))
+            .collect();
+        (batch.commit)(replies).await.unwrap();
+        batch.messages
+    };
+
+    let mut sends = vec![send("a", 0), send("b", 20), send("c", 40)];
+    let first = reply(consumer.receive_batch(64).await.unwrap()).await;
+    // The window closed on an in-flight read; cancelling it must not lose "d".
+    sends.push(send("d", 0));
+    let second = reply(consumer.receive_batch(64).await.unwrap()).await;
+
+    let payloads = |msgs: Vec<CanonicalMessage>| -> Vec<Vec<u8>> {
+        msgs.into_iter().map(|m| m.payload.to_vec()).collect()
+    };
+    assert_eq!(payloads(first), [b"a", b"b", b"c"]);
+    assert_eq!(payloads(second), [b"d"]);
+    for send in sends {
+        match send.await.unwrap().unwrap() {
+            Sent::Response(msg) => assert_eq!(&msg.payload[..], b"ok"),
+            Sent::Ack => panic!("expected a reply"),
+        }
+    }
+}
+
+#[tokio::test]
 async fn test_http_receive_streamable_sse_items_share_correlation_id() {
     init_crypto();
 

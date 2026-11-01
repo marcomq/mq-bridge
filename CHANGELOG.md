@@ -16,6 +16,8 @@ All notable changes to `mq-bridge`. Newest first.
   `true` now gets the requests that arrive while a batch is in flight as its next batch,
   still on the inline path; a `websocket` input in `auto` mode runs routed for it. One
   SQLite transaction per batch halved CPU per request in `scripts/twelve-dollar`.
+- **`buffer` works on an `http` input.** Its read can be cancelled safely, so a `buffer`
+  with `max_delay_ms` above 0 now collects requests there instead of refusing to start.
 - **`UriSchema::uri_template` is now documented.** It returns the URI shape a plugin's schema
   reads, such as `rp://<url>/<topic>?<param>=<value>`; it shipped hidden in 1.2.1.
 
