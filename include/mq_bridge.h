@@ -63,6 +63,18 @@ typedef MqbStatus (*mqb_handler_fn)(const struct mqb_message_t *message,
                                     struct mqb_message_t **out,
                                     void *user_data);
 
+// Handles `count` messages in one call, for work that is cheaper per batch. The
+// `messages` array and its messages are valid for the call only. `out` holds
+// `count` null entries: leave `out[i]` null to acknowledge message `i`, or set it
+// to a new message to publish instead (the library frees it). The status applies
+// to the whole batch, with the meanings of `mqb_handler_fn`.
+//
+// Called from the library's worker threads, possibly several at once.
+typedef MqbStatus (*mqb_batch_handler_fn)(const struct mqb_message_t *const *messages,
+                                          size_t count,
+                                          struct mqb_message_t **out,
+                                          void *user_data);
+
 #ifdef __cplusplus
 extern "C" {
 #endif // __cplusplus
@@ -224,6 +236,13 @@ struct mqb_route_t *mqb_route_from_str(const char *config, const char *name);
 MqbStatus mqb_route_set_handler(const struct mqb_route_t *route,
                                 mqb_handler_fn handler,
                                 void *user_data);
+
+// Runs messages through `handler` a batch at a time before the output. On an
+// `http` input with a `response` output, requests that arrive while a batch runs
+// form the next batch. Set before `mqb_route_start`.
+MqbStatus mqb_route_set_batch_handler(const struct mqb_route_t *route,
+                                      mqb_batch_handler_fn handler,
+                                      void *user_data);
 
 // Runs messages whose `kind` metadata equals `kind` through `handler`. May be
 // called once per kind. Set before `mqb_route_start`.

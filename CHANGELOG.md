@@ -2,6 +2,19 @@
 
 All notable changes to `mq-bridge`. Newest first.
 
+## Unreleased
+
+### Added
+
+- **Python: `Route.with_batch_handler` gets the whole batch.** `handler(messages)` returns one
+  result per message, in order, so a batch can share one database transaction. Node has it as
+  `Route.withBatchHandler`, C as `mqb_route_set_batch_handler`, where the handler fills an
+  `out` array and returns one status for the batch. It sets
+  `prefers_batches`, so on an `http` → `response` route the requests that arrive while a
+  batch runs form the next batch. An exception or a result list of the wrong length fails
+  every message in the batch. In `scripts/twelve-dollar` a create took 46 instead of 102 µs
+  of CPU with one SQLite transaction per batch.
+
 ## 1.3.0
 
 ### Added

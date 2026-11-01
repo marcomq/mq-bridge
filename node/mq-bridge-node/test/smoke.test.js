@@ -248,6 +248,41 @@ test("Route.withHandler serves an HTTP response", async () => {
   }
 });
 
+test("Route.withBatchHandler serves an HTTP response", async () => {
+  const port = await freePort();
+  const routeName = `node_with_batch_handler_${port}`;
+  const route = Route.fromStr(
+    httpRouteConfig(routeName, port, "/with-batch-handler"),
+    routeName,
+  );
+
+  route.withBatchHandler(async (messages) =>
+    messages.map((message) =>
+      Message.fromJson(
+        { handledBy: "withBatchHandler", value: message.json().value },
+        { "content-type": "application/json" },
+      ),
+    ),
+  );
+
+  try {
+    route.start();
+    const response = await postWithRetry(
+      `http://127.0.0.1:${port}/with-batch-handler`,
+      { value: 12 },
+    );
+    const text = await response.text();
+    assert.equal(response.status, 200, text);
+    assert.deepEqual(JSON.parse(text), {
+      handledBy: "withBatchHandler",
+      value: 12,
+    });
+  } finally {
+    route.stop();
+    route.join();
+  }
+});
+
 test("Route.addHandler dispatches by kind with middleware config", async () => {
   const port = await freePort();
   const routeName = `node_add_handler_${port}`;

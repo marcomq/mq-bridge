@@ -247,6 +247,66 @@ impl Handler for JsJsonHandler {
     }
 }
 
+type JsBatchCallback = ThreadsafeFunction<
+    Vec<NativeMessage>,
+    Promise<Vec<Option<NativeMessage>>>,
+    Vec<NativeMessage>,
+    Status,
+    true,
+    true,
+>;
+
+struct JsBatchHandler {
+    label: String,
+    callback: JsBatchCallback,
+}
+
+#[async_trait]
+impl Handler for JsBatchHandler {
+    async fn handle(&self, msg: CanonicalMessage) -> std::result::Result<Handled, HandlerError> {
+        self.handle_many(vec![msg]).await.pop().unwrap_or_else(|| {
+            Err(HandlerError::NonRetryable(anyhow::anyhow!(
+                "empty batch result"
+            )))
+        })
+    }
+
+    /// One JS call per batch; an error or a result list of the wrong length fails
+    /// every message in the batch.
+    async fn handle_many(
+        &self,
+        msgs: Vec<CanonicalMessage>,
+    ) -> Vec<std::result::Result<Handled, HandlerError>> {
+        let expected = msgs.len();
+        if expected == 0 {
+            return Vec::new();
+        }
+        let batch = msgs.iter().map(NativeMessage::from_canonical).collect();
+        let outcome = match self.callback.call_async(Ok(batch)).await {
+            Ok(promise) => promise.await,
+            Err(err) => Err(err),
+        };
+        let failure = match outcome {
+            Ok(results) if results.len() == expected => {
+                return results.into_iter().map(message_result_to_handled).collect();
+            }
+            Ok(results) => format!(
+                "Node batch handler '{}' returned {} results for {expected} messages",
+                self.label,
+                results.len()
+            ),
+            Err(err) => handler_error(&self.label, err).to_string(),
+        };
+        (0..expected)
+            .map(|_| Err(HandlerError::NonRetryable(anyhow::anyhow!(failure.clone()))))
+            .collect()
+    }
+
+    fn prefers_batches(&self) -> bool {
+        true
+    }
+}
+
 fn message_result_to_handled(
     result: Option<NativeMessage>,
 ) -> std::result::Result<Handled, HandlerError> {
@@ -1065,6 +1125,33 @@ impl Route {
         self.ensure_not_running()?;
         let mut route = self.lock_route()?;
         let updated = route.clone().with_handler(JsMessageHandler {
+            label: self.name.clone(),
+            callback,
+        });
+        *route = updated;
+        Ok(())
+    }
+
+    /// Attach a handler that gets a whole batch and returns one result per
+    /// message, in order. Use it for work that is cheaper per batch, such as one
+    /// database transaction for all messages.
+    // Spelled out, not `JsBatchCallback`: napi generates the TS signature from it.
+    #[allow(clippy::type_complexity)]
+    #[napi]
+    pub fn with_batch_handler(
+        &self,
+        callback: ThreadsafeFunction<
+            Vec<NativeMessage>,
+            Promise<Vec<Option<NativeMessage>>>,
+            Vec<NativeMessage>,
+            Status,
+            true,
+            true,
+        >,
+    ) -> Result<()> {
+        self.ensure_not_running()?;
+        let mut route = self.lock_route()?;
+        let updated = route.clone().with_handler(JsBatchHandler {
             label: self.name.clone(),
             callback,
         });

@@ -62,6 +62,7 @@ static void test_bad_config(void) {
         NULL);
     CHECK(route != NULL);
     CHECK(mqb_route_set_handler(route, NULL, NULL) != MQB_OK);
+    CHECK(mqb_route_set_batch_handler(route, NULL, NULL) != MQB_OK);
     CHECK(mqb_route_add_handler(route, "kind", NULL, NULL) != MQB_OK);
     mqb_route_free(route);
 
@@ -183,6 +184,55 @@ static void test_route_with_handler(void) {
 
     CHECK(mqb_route_stop(route) == MQB_OK);
     CHECK(mqb_route_join(route) == MQB_OK);
+    mqb_consumer_free(consumer);
+    mqb_publisher_free(publisher);
+    mqb_route_free(route);
+}
+
+/* Upper-cases every message of the batch; `user_data` counts the messages. */
+static MqbStatus upper_case_batch(const mqb_message_t *const *messages, size_t count,
+                                  mqb_message_t **out, void *user_data) {
+    for (size_t i = 0; i < count; i++) {
+        MqbStatus status = upper_case(messages[i], &out[i], user_data);
+        if (status != MQB_OK) {
+            return status;
+        }
+    }
+    return MQB_OK;
+}
+
+static void test_route_with_batch_handler(void) {
+    atomic_int calls = 0;
+    mqb_route_t *route = mqb_route_from_str(
+        "input: { memory: { topic: smoke_batch_in } }\n"
+        "output: { memory: { topic: smoke_batch_out } }\n",
+        NULL);
+    CHECK(route != NULL);
+    CHECK(mqb_route_set_batch_handler(route, upper_case_batch, &calls) == MQB_OK);
+    CHECK(mqb_route_start(route) == MQB_OK);
+
+    mqb_publisher_t *publisher =
+        mqb_publisher_from_str("memory: { topic: smoke_batch_in }", NULL);
+    mqb_consumer_t *consumer = mqb_consumer_from_str("memory: { topic: smoke_batch_out }", NULL);
+    CHECK(publisher != NULL && consumer != NULL);
+    send_text(publisher, "one");
+    send_text(publisher, "two");
+
+    const char *expected[] = {"ONE", "TWO"};
+    size_t received = 0;
+    while (received < 2) {
+        mqb_batch_t *batch = NULL;
+        CHECK(mqb_consumer_poll(consumer, 2, 5000, &batch) == MQB_OK);
+        CHECK(batch != NULL && mqb_batch_count(batch) > 0);
+        for (size_t i = 0; i < mqb_batch_count(batch); i++) {
+            CHECK(received < 2);
+            CHECK(slice_is(mqb_message_payload(mqb_batch_at(batch, i)), expected[received++]));
+        }
+        mqb_batch_free(batch);
+    }
+    CHECK(atomic_load(&calls) == 2);
+    CHECK(mqb_consumer_commit(consumer) == MQB_OK);
+
     mqb_consumer_free(consumer);
     mqb_publisher_free(publisher);
     mqb_route_free(route);
@@ -359,6 +409,7 @@ int main(int argc, char **argv) {
     test_message();
     test_publish_and_poll();
     test_route_with_handler();
+    test_route_with_batch_handler();
     test_request_reply();
     test_in_process_plugin();
     test_csv_to_json(argc > 1 ? argv[1] : "/tmp");

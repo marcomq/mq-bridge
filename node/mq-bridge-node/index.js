@@ -195,6 +195,16 @@ class Route {
     });
   }
 
+  withBatchHandler(handler) {
+    this._native.withBatchHandler(async (error, messages) => {
+      if (error) {
+        throw error;
+      }
+      const results = await handler(messages.map((message) => Message._fromNative(message)));
+      return Array.from(results, (result) => Message._toNativeResult(result));
+    });
+  }
+
   addHandler(kind, handler) {
     this._native.addHandler(kind, async (error, data) => {
       if (error) {

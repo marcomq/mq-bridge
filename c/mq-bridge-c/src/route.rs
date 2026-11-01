@@ -57,13 +57,96 @@ impl Handler for CHandler {
             let reply = (!out.is_null()).then(|| unsafe { Box::from_raw(out) });
             (status, reply)
         });
-        let failed = || anyhow!("C handler '{}' returned status {status}", self.label);
         match status {
             MQB_OK => Ok(reply.map_or(Handled::Ack, |reply| Handled::Publish(reply.inner))),
-            MQB_ERR_RETRYABLE => Err(HandlerError::Retryable(failed())),
-            MQB_ERR_CONNECTION => Err(HandlerError::Connection(failed())),
-            _ => Err(HandlerError::NonRetryable(failed())),
+            _ => Err(status_error(&self.label, status)),
         }
+    }
+}
+
+fn status_error(label: &str, status: MqbStatus) -> HandlerError {
+    let failed = anyhow!("C handler '{label}' returned status {status}");
+    match status {
+        MQB_ERR_RETRYABLE => HandlerError::Retryable(failed),
+        MQB_ERR_CONNECTION => HandlerError::Connection(failed),
+        _ => HandlerError::NonRetryable(failed),
+    }
+}
+
+/// Handles `count` messages in one call, for work that is cheaper per batch. The
+/// `messages` array and its messages are valid for the call only. `out` holds
+/// `count` null entries: leave `out[i]` null to acknowledge message `i`, or set it
+/// to a new message to publish instead (the library frees it). The status applies
+/// to the whole batch, with the meanings of `mqb_handler_fn`.
+///
+/// Called from the library's worker threads, possibly several at once.
+pub type mqb_batch_handler_fn = Option<
+    unsafe extern "C" fn(
+        messages: *const *const mqb_message_t,
+        count: usize,
+        out: *mut *mut mqb_message_t,
+        user_data: *mut c_void,
+    ) -> MqbStatus,
+>;
+
+struct CBatchHandler {
+    label: String,
+    callback: unsafe extern "C" fn(
+        *const *const mqb_message_t,
+        usize,
+        *mut *mut mqb_message_t,
+        *mut c_void,
+    ) -> MqbStatus,
+    user_data: usize,
+}
+
+#[async_trait]
+impl Handler for CBatchHandler {
+    async fn handle(&self, msg: CanonicalMessage) -> Result<Handled, HandlerError> {
+        self.handle_many(vec![msg])
+            .await
+            .pop()
+            .unwrap_or_else(|| Err(HandlerError::NonRetryable(anyhow!("empty batch result"))))
+    }
+
+    async fn handle_many(&self, msgs: Vec<CanonicalMessage>) -> Vec<Result<Handled, HandlerError>> {
+        let count = msgs.len();
+        if count == 0 {
+            return Vec::new();
+        }
+        let inputs: Vec<mqb_message_t> = msgs.into_iter().map(mqb_message_t::wrap).collect();
+        // C code may block; keep the runtime's other tasks moving meanwhile.
+        let (status, replies) = tokio::task::block_in_place(|| {
+            let pointers: Vec<*const mqb_message_t> =
+                inputs.iter().map(|input| input as *const _).collect();
+            let mut out = vec![std::ptr::null_mut::<mqb_message_t>(); count];
+            let status = unsafe {
+                (self.callback)(
+                    pointers.as_ptr(),
+                    count,
+                    out.as_mut_ptr(),
+                    self.user_data as *mut c_void,
+                )
+            };
+            let replies: Vec<Option<Box<mqb_message_t>>> = out
+                .into_iter()
+                .map(|reply| (!reply.is_null()).then(|| unsafe { Box::from_raw(reply) }))
+                .collect();
+            (status, replies)
+        });
+        if status != MQB_OK {
+            return (0..count)
+                .map(|_| Err(status_error(&self.label, status)))
+                .collect();
+        }
+        replies
+            .into_iter()
+            .map(|reply| Ok(reply.map_or(Handled::Ack, |reply| Handled::Publish(reply.inner))))
+            .collect()
+    }
+
+    fn prefers_batches(&self) -> bool {
+        true
     }
 }
 
@@ -282,6 +365,28 @@ pub unsafe extern "C" fn mqb_route_set_handler(
     guard(|| {
         let route = unsafe { handle(route) }?;
         let handler = route.handler(route.name.clone(), handler, user_data)?;
+        let mut inner = route.lock_route()?;
+        *inner = inner.clone().with_handler(handler);
+        Ok(())
+    })
+}
+
+/// Runs messages through `handler` a batch at a time before the output. On an
+/// `http` input with a `response` output, requests that arrive while a batch runs
+/// form the next batch. Set before `mqb_route_start`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mqb_route_set_batch_handler(
+    route: *const mqb_route_t,
+    handler: mqb_batch_handler_fn,
+    user_data: *mut c_void,
+) -> MqbStatus {
+    guard(|| {
+        let route = unsafe { handle(route) }?;
+        let handler = CBatchHandler {
+            label: route.name.clone(),
+            callback: handler.ok_or_else(|| anyhow!("handler is null"))?,
+            user_data: user_data as usize,
+        };
         let mut inner = route.lock_route()?;
         *inner = inner.clone().with_handler(handler);
         Ok(())

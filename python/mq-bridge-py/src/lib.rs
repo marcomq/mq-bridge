@@ -71,6 +71,8 @@ struct RouteRunState {
 enum PythonHandlerMode {
     Message,
     Json,
+    /// One call per batch with a list of `Message`s, returning one result per message.
+    Batch,
 }
 
 #[derive(Clone)]
@@ -109,6 +111,10 @@ impl PythonHandler {
 
     fn json(label: impl Into<String>, callable: Py<PyAny>) -> Self {
         Self::new(label, PythonHandlerMode::Json, callable)
+    }
+
+    fn batch(label: impl Into<String>, callable: Py<PyAny>) -> Self {
+        Self::new(label, PythonHandlerMode::Batch, callable)
     }
 
     fn new(label: impl Into<String>, mode: PythonHandlerMode, callable: Py<PyAny>) -> Self {
@@ -287,6 +293,10 @@ impl Handler for PythonHandler {
 
     async fn handle_many(&self, msgs: Vec<CanonicalMessage>) -> Vec<Result<Handled, HandlerError>> {
         self.invoke_batch(msgs).await
+    }
+
+    fn prefers_batches(&self) -> bool {
+        matches!(self.mode, PythonHandlerMode::Batch)
     }
 }
 
@@ -1193,6 +1203,29 @@ impl Route {
         let updated = route
             .clone()
             .with_handler(PythonHandler::message(slf.name.clone(), handler));
+        *route = updated;
+        drop(route);
+        Ok(slf)
+    }
+
+    /// Attach a handler that gets a whole batch: `handler(messages: list[Message])` returns a
+    /// list with one result per message, in order. Use it for work that is cheaper per batch,
+    /// such as one database transaction for all messages. On an `http` -> `response` route,
+    /// requests that arrive while a batch runs reach the handler together as the next batch.
+    fn with_batch_handler<'py>(
+        slf: PyRefMut<'py, Self>,
+        py: Python<'py>,
+        handler: Py<PyAny>,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        if !handler.bind(py).is_callable() {
+            return Err(PyTypeError::new_err("handler must be callable"));
+        }
+        slf.ensure_not_running()?;
+
+        let mut route = slf.lock_route()?;
+        let updated = route
+            .clone()
+            .with_handler(PythonHandler::batch(slf.name.clone(), handler));
         *route = updated;
         drop(route);
         Ok(slf)
@@ -2325,6 +2358,14 @@ fn invoke_python_handler_many(
     messages: Vec<CanonicalMessage>,
 ) -> Vec<Result<Handled, HandlerError>> {
     let processed = messages.len() as u64;
+    if matches!(mode, PythonHandlerMode::Batch) {
+        return Python::attach(|py| {
+            ensure_gc_configured(py);
+            let results = invoke_python_batch_handler(py, callable, label, messages);
+            gc_tick(py, processed);
+            results
+        });
+    }
     Python::attach(|py| {
         ensure_gc_configured(py);
         let results: Vec<Result<Handled, HandlerError>> = messages
@@ -2332,7 +2373,7 @@ fn invoke_python_handler_many(
             .map(|message| {
                 let message_id = message.message_id;
                 let arg = match mode {
-                    PythonHandlerMode::Message => {
+                    PythonHandlerMode::Message | PythonHandlerMode::Batch => {
                         Py::new(py, Message::from_canonical(&message)).map(|msg| msg.into_any())
                     }
                     PythonHandlerMode::Json => json_bytes_to_python(py, message.payload.as_ref()),
@@ -2363,6 +2404,62 @@ fn invoke_python_handler_many(
         gc_tick(py, processed);
         results
     })
+}
+
+/// Calls a batch handler once with every message and maps its list back, one result per
+/// message. An exception or a list of the wrong length fails every message in the batch.
+fn invoke_python_batch_handler(
+    py: Python<'_>,
+    callable: &Py<PyAny>,
+    label: &str,
+    messages: Vec<CanonicalMessage>,
+) -> Vec<Result<Handled, HandlerError>> {
+    let Some(first_id) = messages.first().map(|m| m.message_id) else {
+        return Vec::new();
+    };
+    let expected = messages.len();
+    let outcome = (|| -> PyResult<Vec<Bound<'_, PyAny>>> {
+        let batch = PyList::empty(py);
+        for message in &messages {
+            batch.append(Py::new(py, Message::from_canonical(message))?)?;
+        }
+        let returned = callable.bind(py).call1((batch,))?;
+        let results = returned.try_iter()?.collect::<PyResult<Vec<_>>>()?;
+        if results.len() != expected {
+            return Err(PyValueError::new_err(format!(
+                "batch handler returned {} results for {expected} messages",
+                results.len()
+            )));
+        }
+        Ok(results)
+    })();
+    match outcome {
+        Ok(results) => messages
+            .into_iter()
+            .zip(results)
+            .map(|(message, result)| {
+                let message_id = message.message_id;
+                python_result_to_handled(&result, message_id, message.metadata).map_err(|err| {
+                    python_error_to_handler_error(py_err_context(label, message_id), err)
+                })
+            })
+            .collect(),
+        Err(err) => {
+            let failure = python_error_to_handler_error(py_err_context(label, first_id), err);
+            let retryable = matches!(failure, HandlerError::Retryable(_));
+            let text = failure.to_string();
+            (0..expected)
+                .map(|_| {
+                    let error = anyhow!(text.clone());
+                    Err(if retryable {
+                        HandlerError::Retryable(error)
+                    } else {
+                        HandlerError::NonRetryable(error)
+                    })
+                })
+                .collect()
+        }
+    }
 }
 
 struct PyErrorContext<'a> {
@@ -3455,6 +3552,81 @@ routes:
             }
             Handled::Ack => panic!("expected publish"),
         }
+    }
+
+    fn batch_handler(code: &std::ffi::CStr) -> PythonHandler {
+        let callable = Python::attach(|py| {
+            let module = PyModule::from_code(
+                py,
+                code,
+                pyo3::ffi::c_str!("batch_handler.py"),
+                pyo3::ffi::c_str!("batch_handler"),
+            )
+            .unwrap();
+            module.getattr("handle").unwrap().unbind()
+        });
+        PythonHandler::with_executor_mode(
+            "batch:test",
+            PythonHandlerMode::Batch,
+            callable,
+            PythonHandlerExecutorMode::Direct,
+        )
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_batch_handler_gets_whole_batch() {
+        let handler = batch_handler(pyo3::ffi::c_str!(
+            "def handle(msgs):\n    n = len(msgs)\n    return [{'n': n, 'v': m.json()['v']} for m in msgs]\n"
+        ));
+        assert!(handler.prefers_batches());
+        let msgs = (1..=3)
+            .map(|v| CanonicalMessage::from_json(json!({ "v": v })).unwrap())
+            .collect();
+        let results = handler.handle_many(msgs).await;
+        let parsed: Vec<JsonValue> = results
+            .into_iter()
+            .map(|r| match r.unwrap() {
+                Handled::Publish(m) => m.parse().unwrap(),
+                Handled::Ack => panic!("expected publish"),
+            })
+            .collect();
+        assert_eq!(
+            parsed,
+            vec![
+                json!({ "n": 3, "v": 1 }),
+                json!({ "n": 3, "v": 2 }),
+                json!({ "n": 3, "v": 3 })
+            ]
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_batch_handler_wrong_length_fails_every_message() {
+        let handler = batch_handler(pyo3::ffi::c_str!("def handle(msgs):\n    return [None]\n"));
+        let msgs = (0..2)
+            .map(|v| CanonicalMessage::from_json(json!({ "v": v })).unwrap())
+            .collect();
+        let results = handler.handle_many(msgs).await;
+        assert_eq!(results.len(), 2);
+        assert!(results
+            .iter()
+            .all(|r| matches!(r, Err(HandlerError::NonRetryable(_)))));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_message_handler_does_not_prefer_batches() {
+        let callable = Python::attach(|py| {
+            py.eval(pyo3::ffi::c_str!("lambda m: m"), None, None)
+                .unwrap()
+                .unbind()
+        });
+        let handler = PythonHandler::with_executor_mode(
+            "message:test",
+            PythonHandlerMode::Message,
+            callable,
+            PythonHandlerExecutorMode::Direct,
+        );
+        assert!(!handler.prefers_batches());
     }
 
     #[test]

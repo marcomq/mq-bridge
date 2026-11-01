@@ -10,6 +10,9 @@ export type Metadata = Record<string, string>;
 export type HandlerResult = Message | null | undefined;
 export type MessageHandler = (message: Message) => HandlerResult | Promise<HandlerResult>;
 export type JsonHandler = (data: JsonValue) => HandlerResult | Promise<HandlerResult>;
+export type BatchHandler = (
+  messages: Message[],
+) => Iterable<HandlerResult> | Promise<Iterable<HandlerResult>>;
 
 export class Message {
   constructor(payload: Buffer | Uint8Array, metadata?: Metadata | null, id?: string | null);
@@ -116,6 +119,14 @@ export class Route {
   /** @deprecated Use {@link Route.fromStr} instead. */
   static fromYamlStr(text: string, name?: string | null): Route;
   withHandler(handler: MessageHandler): void;
+  /**
+   * Attach a handler that gets a whole batch and returns one result per message,
+   * in order. Use it for work that is cheaper per batch, such as one database
+   * transaction for all messages. On an `http` -> `response` route, requests that
+   * arrive while a batch runs form the next batch. A thrown error, or a result
+   * list of the wrong length, fails every message in the batch.
+   */
+  withBatchHandler(handler: BatchHandler): void;
   addHandler(kind: string, handler: JsonHandler): void;
   start(): void;
   stop(): void;

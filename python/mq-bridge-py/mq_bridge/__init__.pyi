@@ -162,6 +162,17 @@ class Route:
 
     def with_handler(self, handler: Callable[[Message], HandlerResult]) -> "Route": ...
 
+    def with_batch_handler(
+        self, handler: Callable[[List[Message]], Iterable[HandlerResult]]
+    ) -> "Route":
+        """Attach a handler that gets a whole batch and returns one result per
+        message, in order. Use it for work that is cheaper per batch, such as one
+        database transaction for all messages. On an ``http`` -> ``response``
+        route, requests that arrive while a batch runs form the next batch. An
+        exception, or a result list of the wrong length, fails every message in
+        the batch."""
+        ...
+
     def add_handler(
         self,
         kind: str,
