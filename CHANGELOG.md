@@ -58,6 +58,9 @@ All notable changes to `mq-bridge`. Newest first.
   Android unless the app initialised it through JNI, and refused `tls.ca_file` there.
   On Android they now use the bundled roots, or `tls.ca_file`. Affected since 0.3.4
   (`clickhouse`) and 0.4.18 (`http_bulk`); other platforms are unchanged.
+- **`config_schema::flatten` keeps a recursive definition as a `$ref`.** It inlined one again
+  on every path into the cycle, so an endpoint schema with an `Endpoint` field (`openai_chat`
+  `stream_to`) grew the app's `/schema.json` to 5.6 MB and the UI took seconds to start.
 - **A `stream_to` reader gets a last token when a streaming request panics.** It is sent
   with `mqb.stream.status: error` (if `stream_to` still accepts sends) and the message fails
   for good; before, the reader waited forever.

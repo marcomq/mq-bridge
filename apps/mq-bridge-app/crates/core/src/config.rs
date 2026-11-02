@@ -2313,9 +2313,7 @@ publishers:
         // Its own `Config` collides with the root name it was just given, so it
         // gets a key of its own rather than aliasing it.
         let nested = schema
-            .pointer(&format!(
-                "/$defs/{target}/properties/nested/properties/child/$ref"
-            ))
+            .pointer(&format!("/$defs/{target}/properties/nested/$ref"))
             .and_then(serde_json::Value::as_str)
             .unwrap()
             .to_string();
