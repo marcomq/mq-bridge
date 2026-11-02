@@ -3780,6 +3780,7 @@ dependencies = [
  "rumqttc",
  "rust_decimal",
  "rustls",
+ "rustls-native-certs",
  "rustls-pemfile",
  "schemars",
  "serde",

@@ -21,10 +21,11 @@ use crate::traits::{
 use crate::CanonicalMessage;
 use anyhow::{anyhow, bail, Context};
 use async_trait::async_trait;
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt};
 use reqwest::header::{HeaderValue, ACCEPT, CONTENT_TYPE};
 use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
+use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
@@ -38,6 +39,8 @@ const EARLY_CANCEL_TTL: Duration = Duration::from_secs(30);
 /// Most such cancels kept; the oldest is dropped first.
 const EARLY_CANCELS: usize = 1024;
 const EVENT_STREAM: &str = "text/event-stream";
+/// Longest event the stream may hold unterminated.
+const MAX_EVENT_BYTES: usize = 1024 * 1024;
 
 pub(crate) struct StreamQueryPublisher {
     connection: Connection,
@@ -200,9 +203,32 @@ impl StreamQueryPublisher {
             .get("correlation_id")
             .cloned()
             .unwrap_or_else(|| format!("{:032x}", message.message_id));
-        let entry = self.running.as_ref().map(|r| r.enter(&correlation_id));
-        let cancelled = entry.as_ref().map(|e| e.token.clone()).unwrap_or_default();
         let mut tokens = Tokens::new(correlation_id);
+        let attempt = AssertUnwindSafe(self.attempt(message, &mut tokens))
+            .catch_unwind()
+            .await;
+        if let Ok(result) = attempt {
+            return result;
+        }
+        // A reader waiting for the last token must not wait forever.
+        let reason = format!("{} panicked", self.label);
+        let end = End::Failed(reason.clone());
+        tokens
+            .send(&*self.stream_to, &reason, Some((&end, None)))
+            .await;
+        Err(PublisherError::NonRetryable(anyhow!(reason)))
+    }
+
+    async fn attempt(
+        &self,
+        message: &CanonicalMessage,
+        tokens: &mut Tokens,
+    ) -> Result<CanonicalMessage, PublisherError> {
+        let entry = self
+            .running
+            .as_ref()
+            .map(|r| r.enter(&tokens.correlation_id));
+        let cancelled = entry.as_ref().map(|e| e.token.clone()).unwrap_or_default();
         let label = &self.label;
         let started = match self.start(message, &cancelled).await {
             Ok(started) => started,
@@ -221,14 +247,8 @@ impl StreamQueryPublisher {
         let end = match started {
             None => End::Cancelled,
             Some(response) => {
-                self.read(
-                    response,
-                    &cancelled,
-                    &mut tokens,
-                    &mut text,
-                    &mut stop_reason,
-                )
-                .await
+                self.read(response, &cancelled, tokens, &mut text, &mut stop_reason)
+                    .await
             }
         };
         drop(entry);
@@ -368,6 +388,9 @@ impl StreamQueryPublisher {
                     }
                 }
             }
+            if buffer.len() > MAX_EVENT_BYTES {
+                return End::Failed(format!("an event is longer than {MAX_EVENT_BYTES} bytes"));
+            }
         }
     }
 }
@@ -396,7 +419,7 @@ struct Tokens {
     correlation_id: String,
     attempt: String,
     index: usize,
-    /// Cleared on the first failed send; later tokens are not sent.
+    /// Cleared after the last token or the first failed send; later tokens are not sent.
     healthy: bool,
 }
 
@@ -431,6 +454,7 @@ impl Tokens {
             }
         }
         self.index += 1;
+        self.healthy = end.is_none();
         if let Err(error) = sink.send(message).await {
             self.healthy = false;
             warn!(
@@ -744,6 +768,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_unterminated_event_fails_once_it_outgrows_the_limit() {
+        let chunks = vec![b"data: ".to_vec(), vec![b'x'; super::MAX_EVENT_BYTES + 1]];
+        let (url, _server) = serve(SSE.into(), chunks, true).await;
+        let (publisher, _tokens) = publisher(&url, json!({})).await;
+        let error = publisher
+            .send(CanonicalMessage::from("hi"))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("longer than"), "{error}");
+    }
+
+    #[tokio::test]
     async fn a_refused_request_quotes_the_server_in_its_last_token() {
         let body = r#"{"error":{"message":"bad key"}}"#;
         let head = format!(
@@ -867,6 +903,22 @@ mod tests {
         let request = CanonicalMessage::from(messages.to_string().as_str());
         answer(publisher.send(request).await);
         assert_eq!(server.await.unwrap()["messages"], messages);
+    }
+
+    #[tokio::test]
+    async fn a_payload_that_is_not_one_array_is_refused_before_the_request() {
+        let extra = json!({"prompt": null, "messages_from_payload": true});
+        let (publisher, _tokens) = publisher("http://127.0.0.1:9", extra).await;
+        for payload in [
+            r#"[{"role":"user","content":"hi"}],"model":"x""#,
+            r#"{"a":1}"#,
+        ] {
+            let error = publisher
+                .send(CanonicalMessage::from(payload))
+                .await
+                .unwrap_err();
+            assert!(matches!(error, PublisherError::NonRetryable(_)), "{error}");
+        }
     }
 
     #[tokio::test]
@@ -1027,6 +1079,53 @@ mod tests {
         assert!(error.to_string().contains("bad model"), "{error}");
         let tokens = tokens.drain_messages();
         assert_eq!(meta(tokens.last().unwrap(), "mqb.stream.status"), "error");
+    }
+
+    /// Panics on every token but the last, which it keeps.
+    struct PanicsBeforeTheEnd(std::sync::Mutex<Vec<CanonicalMessage>>);
+
+    #[async_trait::async_trait]
+    impl MessagePublisher for PanicsBeforeTheEnd {
+        async fn send_batch(
+            &self,
+            messages: Vec<CanonicalMessage>,
+        ) -> Result<crate::traits::SentBatch, PublisherError> {
+            for message in messages {
+                assert_eq!(meta(&message, "mqb.stream.end"), "true", "a token panics");
+                self.0.lock().unwrap().push(message);
+            }
+            Ok(crate::traits::SentBatch::Ack)
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    #[tokio::test]
+    async fn a_panic_still_ends_the_tokens_with_an_error() {
+        let (url, _server) = serve(SSE.into(), vec![delta("a"), finished()], false).await;
+        let config = json!({
+            "url": url,
+            "query": {
+                "path": "/x", "format": "json_array", "request": "{}", "per_message": true,
+                "value": "/choices/0/delta/content", "stream_to": {"memory": {"topic": topic()}}
+            }
+        });
+        let config: crate::models::HttpBulkConfig = serde_json::from_value(config).unwrap();
+        let mut publisher = super::StreamQueryPublisher::new("route", &config)
+            .await
+            .unwrap();
+        let sink = std::sync::Arc::new(PanicsBeforeTheEnd(Default::default()));
+        publisher.stream_to = sink.clone();
+        let error = publisher
+            .send(CanonicalMessage::from("hi"))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, PublisherError::NonRetryable(_)), "{error}");
+        let tokens = sink.0.lock().unwrap();
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(meta(&tokens[0], "mqb.stream.status"), "error");
     }
 
     #[tokio::test]

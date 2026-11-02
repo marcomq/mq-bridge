@@ -197,14 +197,14 @@ the message's response, as without streaming:
 ```yaml
 chat:
   concurrency: 8
-  input: { nats: { url: "nats://localhost:4222", subject: "chat.requests" } }
+  input: { nats: { url: "nats://localhost:4222", subject: "chat.requests", stream: "chat_requests" } }
   output:
     openai_chat:
       url: "http://localhost:11434"
       model: llama3.2
       messages_from_payload: true
-      stream_to: { nats: { url: "nats://localhost:4222", subject: "chat.tokens" } }
-      cancel_from: { nats: { url: "nats://localhost:4222", subject: "chat.cancel" } }
+      stream_to: { nats: { url: "nats://localhost:4222", subject: "chat.tokens", stream: "chat_tokens", no_jetstream: true } }
+      cancel_from: { nats: { url: "nats://localhost:4222", subject: "chat.cancel", stream: "chat_cancel", no_jetstream: true } }
 ```
 
 Each token message carries the delta text as payload and this metadata:
@@ -226,8 +226,8 @@ response carries `correlation_id`, `mqb.stream.attempt`, `mqb.stream.status` and
   committed after the whole answer, so a crash or a retry starts a new attempt:
   its tokens come again from index 0 under a new `mqb.stream.attempt`. A reader that
   sees a new attempt for a `correlation_id` drops what it collected before.
-  What happens to tokens already sent is up to `stream_to`; a memory channel
-  loses them on a restart, a broker keeps them.
+  What happens to tokens already sent is up to `stream_to`; a memory channel or
+  core NATS loses them on a restart, a durable broker such as JetStream or Kafka keeps them.
 - **Every attempt ends with a last token message**, also one that fails
   before the stream starts. A stream that breaks off ends with `error` and
   fails its message as retryable. An error status before the stream fails like
@@ -344,6 +344,9 @@ let llm: Endpoint = OpenAiChatConfig {
 - **Batch size is the request size.** OpenAI takes at most 2048 texts per
   embeddings request; keep the route's `batch_size` at or below your
   provider's limit.
+- **It works on Android.** HTTPS there checks the server against the Mozilla
+  roots built into mq-bridge; no JNI setup is needed. Behind a proxy with its
+  own CA, set `tls.ca_file`.
 - **Nothing is cached.** A replayed message is sent, and billed, again. Use
   [`deduplication`](../cookbook/deduplication.md) before the lookup if that
   matters.

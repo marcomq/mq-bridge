@@ -1,5 +1,5 @@
 use crate::canonical_message::tracing_support::LazyMessageIds;
-use crate::models::KafkaConfig;
+use crate::models::{CaRoots, KafkaConfig};
 use crate::traits::{
     BatchCommitFunc, BoxFuture, ConsumerError, EndpointStatus, MessageConsumer, MessageDisposition,
     MessagePublisher, PublisherError, Received, ReceivedBatch, Sent, SentBatch,
@@ -151,7 +151,7 @@ impl KafkaPublisher {
             tracing::info!("Kafka 'delayed_ack' is enabled: sends return before broker confirmation; a route commits its source only once they are confirmed.");
         }
 
-        let mut client_config = create_common_config(config);
+        let mut client_config = create_common_config(config)?;
         client_config
             // --- Performance Tuning ---
             // An awaited batch waits out the linger before it is sent: 1 ms keeps it in one
@@ -681,7 +681,7 @@ impl KafkaConsumer {
         );
         let topic = config.topic.as_deref().unwrap_or("");
         let topics = topic_list(topic);
-        let mut client_config = create_common_config(config);
+        let mut client_config = create_common_config(config)?;
 
         let is_subscriber = config.group_id.is_none();
 
@@ -744,7 +744,7 @@ impl KafkaConsumer {
 
         // Create a producer for sending replies, but only for consumers, not subscribers.
         let producer = if !is_subscriber {
-            let mut producer_config = create_common_config(config);
+            let mut producer_config = create_common_config(config)?;
             // Apply similar defaults as KafkaPublisher for reliability
             producer_config
                 // Replies are awaited one at a time and each waits out the linger: keep it short.
@@ -1574,7 +1574,7 @@ fn to_canonical_with_source_metadata<M: Message>(
     Ok(canonical_message)
 }
 
-fn create_common_config(config: &KafkaConfig) -> ClientConfig {
+fn create_common_config(config: &KafkaConfig) -> anyhow::Result<ClientConfig> {
     let mut client_config = ClientConfig::new();
     client_config.set("bootstrap.servers", &config.url);
 
@@ -1582,7 +1582,8 @@ fn create_common_config(config: &KafkaConfig) -> ClientConfig {
     let sasl = config.username.is_some() && config.password.is_some();
     if config.tls.required || sasl {
         client_config.set("security.protocol", "ssl");
-        if let Some(ca_file) = &config.tls.ca_file {
+        let ca_file = crate::support::tls_check::ca_file_path("kafka", &config.tls, CaRoots::Os)?;
+        if let Some(ca_file) = ca_file {
             client_config.set("ssl.ca.location", ca_file);
         } else {
             // A vendored OpenSSL has no CA directory of its own; search the system's.
@@ -1610,7 +1611,7 @@ fn create_common_config(config: &KafkaConfig) -> ClientConfig {
         client_config.set("sasl.password", password);
         client_config.set("security.protocol", "sasl_ssl");
     }
-    client_config
+    Ok(client_config)
 }
 
 /// Whether the group has told this consumer which partitions it owns. Empty until the
@@ -2898,7 +2899,7 @@ mod tests {
         let mut config = sasl_config();
         config.tls.ca_file = Some("/ca.pem".to_string());
 
-        let client = create_common_config(&config);
+        let client = create_common_config(&config).unwrap();
 
         assert_eq!(client.get("security.protocol"), Some("sasl_ssl"));
         assert_eq!(client.get("ssl.ca.location"), Some("/ca.pem"));
@@ -2906,7 +2907,7 @@ mod tests {
 
     #[test]
     fn test_tls_without_a_ca_file_searches_the_system_ca_store() {
-        let client = create_common_config(&sasl_config());
+        let client = create_common_config(&sasl_config()).unwrap();
 
         assert_eq!(client.get("ssl.ca.location"), Some("probe"));
     }
@@ -2918,7 +2919,7 @@ mod tests {
         config.tls.key_file = Some("/client.key".to_string());
         config.tls.cert_password = Some("pw".to_string());
 
-        let client = create_common_config(&config);
+        let client = create_common_config(&config).unwrap();
 
         assert_eq!(client.get("ssl.key.password"), Some("pw"));
     }

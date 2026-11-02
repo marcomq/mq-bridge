@@ -32,6 +32,8 @@ pub(crate) mod local_staging;
 ))]
 pub(crate) mod lookup_batch;
 pub mod ndjson;
+#[cfg(feature = "rustls-native-certs")]
+pub(crate) mod os_roots;
 pub(crate) mod pack;
 pub(crate) mod parallel;
 #[cfg(feature = "parquet")]
@@ -45,7 +47,25 @@ pub mod source_ranges;
 #[cfg(any(feature = "http", feature = "http-bulk"))]
 pub(crate) mod sse;
 pub mod stream_batch;
-#[cfg(any(feature = "http", feature = "websocket", feature = "nats"))]
+#[cfg(any(
+    feature = "http",
+    feature = "websocket",
+    feature = "nats",
+    feature = "mqtt",
+    feature = "http-bulk",
+    feature = "clickhouse"
+))]
+// An mqtt-only build uses just the root store.
+#[cfg_attr(
+    not(any(
+        feature = "http",
+        feature = "websocket",
+        feature = "nats",
+        feature = "http-bulk",
+        feature = "clickhouse"
+    )),
+    allow(dead_code)
+)]
 pub(crate) mod tls;
 #[cfg(any(
     feature = "amqp",

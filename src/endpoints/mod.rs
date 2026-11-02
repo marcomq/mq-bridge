@@ -246,6 +246,17 @@ fn policy_name(endpoint_type: &EndpointType) -> Option<&str> {
     }
 }
 
+/// The `stream_to` and `cancel_from` endpoints of a streaming `http_bulk` or `openai_chat`.
+pub(crate) fn streaming_endpoints(endpoint_type: &EndpointType) -> [Option<&Endpoint>; 2] {
+    match endpoint_type {
+        EndpointType::HttpBulk(cfg) => cfg.query.as_ref().map_or([None, None], |query| {
+            [query.stream_to.as_deref(), query.cancel_from.as_deref()]
+        }),
+        EndpointType::OpenAiChat(cfg) => [cfg.stream_to.as_deref(), cfg.cancel_from.as_deref()],
+        _ => [None, None],
+    }
+}
+
 /// Applies a type policy to the endpoints a `dlq` or `lookup` middleware sends to.
 fn check_middleware_endpoints(
     route_name: &str,
@@ -2135,6 +2146,23 @@ fn check_publisher_recursive(
         ));
     }
     check_middleware_endpoints(route_name, endpoint, depth, allowed_types)?;
+    let [stream_to, cancel_from] = streaming_endpoints(&endpoint.endpoint_type);
+    if let Some(target) = stream_to {
+        warnings.extend(check_publisher_recursive(
+            route_name,
+            target,
+            depth + 1,
+            allowed_types,
+        )?);
+    }
+    if let Some(source) = cancel_from {
+        warnings.extend(check_consumer_recursive(
+            route_name,
+            source,
+            depth + 1,
+            allowed_types,
+        )?);
+    }
     match &endpoint.endpoint_type {
         EndpointType::Ref(name) => {
             let referenced = crate::route::get_endpoint(name).ok_or_else(|| {
@@ -4141,6 +4169,20 @@ mod tests {
                 assert!(check_publisher("test", &endpoint, Some(&["memory"])).is_err());
                 assert!(check_publisher("test", &endpoint, Some(&["pulsar"])).is_ok());
                 assert!(check_publisher("test", &endpoint, None).is_ok());
+            }
+        }
+
+        #[test]
+        fn the_policy_reaches_the_stream_to_and_cancel_from_endpoints() {
+            let pulsar = serde_json::json!({"custom": {"name": "pulsar", "config": null}});
+            for field in ["stream_to", "cancel_from"] {
+                let endpoint: Endpoint = serde_json::from_value(serde_json::json!({
+                    "openai_chat": {"model": "m", "prompt": "p", field: pulsar}
+                }))
+                .unwrap();
+                let check = |allowed: &[&str]| check_publisher("test", &endpoint, Some(allowed));
+                assert!(check(&["openai_chat"]).is_err(), "{field}");
+                assert!(check(&["openai_chat", "pulsar"]).is_ok(), "{field}");
             }
         }
 

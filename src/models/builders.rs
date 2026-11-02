@@ -978,6 +978,17 @@ impl TlsConfig {
         self.is_mtls_client_configured()
     }
 
+    /// Where the trusted CA certificates come from: `ca_file` is a path, `$.os` or `$.bundled`.
+    #[allow(dead_code)]
+    pub(crate) fn ca_roots(&self) -> CaRoots<'_> {
+        match self.ca_file.as_deref() {
+            None => CaRoots::Default,
+            Some("$.os") => CaRoots::Os,
+            Some("$.bundled") => CaRoots::Bundled,
+            Some(path) => CaRoots::File(path),
+        }
+    }
+
     /// Checks if the TLS configuration is sufficient to make a TLS client connection.
     pub fn is_tls_client_configured(&self) -> bool {
         self.required

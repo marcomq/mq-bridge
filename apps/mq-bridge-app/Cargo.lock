@@ -4724,6 +4724,7 @@ dependencies = [
  "rumqttc",
  "rust_decimal",
  "rustls",
+ "rustls-native-certs",
  "rustls-pemfile",
  "schemars 1.2.3",
  "serde",

@@ -387,6 +387,7 @@ class HttpBulkOAuth2(TypedDict, total=False):
 
 class HttpBulkQuery(TypedDict, total=False):
     """The `http_bulk` request that answers a batch of lookups, one answer per message in order."""
+    cancel_from: Optional[Endpoint]
     concurrency: Optional[int]
     content_type: Optional[str]
     envelope: Optional[str]
@@ -404,6 +405,8 @@ class HttpBulkQuery(TypedDict, total=False):
     responses_text: Optional[str]
     split_on_reject: bool
     stop_reason: Optional[str]
+    stream_done: Optional[str]
+    stream_to: Optional[Endpoint]
     value: Optional[str]
 
 
@@ -710,14 +713,17 @@ class OpenAiChatConfig(TypedDict, total=False):
     """The `openai_chat` endpoint: one chat completion per message, or per `messages_per_request`."""
     api_key: Optional[str]
     auth: Any
+    cancel_from: Optional[Endpoint]
     concurrency: Optional[int]
     json: bool
     max_request_bytes: Optional[int]
+    messages_from_payload: bool
     messages_per_request: Optional[int]
     model: Required[str]
     options: Any
-    prompt: Required[str]
+    prompt: str
     request_timeout_ms: Optional[int]
+    stream_to: Optional[Endpoint]
     system: Optional[str]
     tls: Any
     url: Optional[str]

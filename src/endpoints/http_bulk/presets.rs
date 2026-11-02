@@ -579,7 +579,7 @@ fn openai_chat(_route: &str, value: &Value) -> anyhow::Result<Value> {
             // Serializing escapes the literal text; the template escapes what a message puts in.
             let request = Value::Object(body).to_string().replacen(
                 MESSAGES,
-                r#""messages":${message:payload | raw}"#,
+                r#""messages":${message:payload | json_array}"#,
                 1,
             );
             let mut query = json!({

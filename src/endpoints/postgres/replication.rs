@@ -9,7 +9,7 @@
 //! Pinned upstream commit and per-file changes: `./VENDORED.md`.
 
 use crate::endpoints::postgres::state::{format_lsn, parse_lsn};
-use crate::models::PostgresCdcConfig;
+use crate::models::{CaRoots, PostgresCdcConfig};
 use anyhow::{anyhow, Context};
 use percent_encoding::percent_decode_str;
 use pgwire_replication::{Lsn, ReplicationClient, ReplicationConfig, TlsConfig as PgTlsConfig};
@@ -94,11 +94,10 @@ fn parse_url(url: &str) -> anyhow::Result<PgCoords> {
 /// URL's `sslmode`, so the stream is never weaker than the control connection.
 /// `prefer` and `allow` stay plain text, as they cannot enforce anything.
 fn map_tls(tls: &crate::models::TlsConfig, coords: &PgCoords) -> anyhow::Result<PgTlsConfig> {
-    let root = || {
-        tls.ca_file
-            .clone()
-            .or_else(|| coords.sslrootcert.clone())
-            .map(PathBuf::from)
+    let ca_file = crate::support::tls_check::ca_file_path("postgres_cdc", tls, CaRoots::Bundled)?;
+    let root = || match tls.ca_roots() {
+        CaRoots::Default => coords.sslrootcert.clone().map(PathBuf::from),
+        _ => ca_file.map(PathBuf::from),
     };
     let config = if tls.required {
         crate::support::tls_check::warn_unverified("postgres_cdc", tls.accept_invalid_certs);
@@ -130,6 +129,10 @@ fn map_tls(tls: &crate::models::TlsConfig, coords: &PgCoords) -> anyhow::Result<
 /// same TLS enforcement as the replication stream so the slot lifecycle can't
 /// silently fall back to an unverified `sslmode=prefer` connection.
 async fn control_conn(url: &str, tls: &crate::models::TlsConfig) -> anyhow::Result<PgConnection> {
+    let url = match tls.ca_roots() {
+        CaRoots::Bundled => without_root_cert(url),
+        _ => url.to_owned(),
+    };
     let mut opts: PgConnectOptions = url
         .parse()
         .context("postgres-cdc: invalid connection URL")?;
@@ -139,7 +142,9 @@ async fn control_conn(url: &str, tls: &crate::models::TlsConfig) -> anyhow::Resu
         } else {
             sqlx::postgres::PgSslMode::VerifyFull
         });
-        if let Some(ca_file) = &tls.ca_file {
+        let ca_file =
+            crate::support::tls_check::ca_file_path("postgres_cdc", tls, CaRoots::Bundled)?;
+        if let Some(ca_file) = ca_file {
             opts = opts.ssl_root_cert(ca_file);
         }
     }
@@ -149,6 +154,24 @@ async fn control_conn(url: &str, tls: &crate::models::TlsConfig) -> anyhow::Resu
     opts.connect()
         .await
         .map_err(|e| anyhow!("postgres-cdc: control-plane connect failed: {e}"))
+}
+
+/// `url` without `sslrootcert`, so `tls.ca_file: "$.bundled"` wins as in [`map_tls`].
+fn without_root_cert(url: &str) -> String {
+    let Ok(mut parsed) = url::Url::parse(url) else {
+        return url.to_owned();
+    };
+    let kept: Vec<(String, String)> = parsed
+        .query_pairs()
+        .filter(|(key, _)| key != "sslrootcert")
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    if kept.is_empty() {
+        parsed.set_query(None);
+    } else {
+        parsed.query_pairs_mut().clear().extend_pairs(kept);
+    }
+    parsed.into()
 }
 
 /// Ensure the logical replication slot exists, creating it with the `pgoutput`

@@ -565,8 +565,13 @@ pub async fn build_external_store(
             #[cfg(not(any(feature = "sqlite", feature = "sqlx")))]
             {
                 let _ = (table, source_name, cursor_id);
+                let features = if url.starts_with("sqlite:") {
+                    "'sqlite' or 'sqlx' feature"
+                } else {
+                    "'sqlx' feature"
+                };
                 Err(anyhow!(
-                    "checkpoint_store '{}' requires the 'sqlite' or 'sqlx' feature to be enabled",
+                    "checkpoint_store '{}' requires the {features} to be enabled",
                     crate::support::redact::url_password(&url)
                 ))
             }

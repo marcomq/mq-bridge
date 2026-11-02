@@ -6,7 +6,7 @@
 //! rustls configs built from a [`TlsConfig`], shared by the endpoints that listen
 //! or connect over TLS themselves.
 
-use crate::models::TlsConfig;
+use crate::models::{CaRoots, TlsConfig};
 use anyhow::Context;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use std::fs::File;
@@ -35,6 +35,11 @@ pub(crate) fn server_config(tls_config: &TlsConfig) -> anyhow::Result<rustls::Se
             .with_safe_default_protocol_versions()?;
 
     let config = if let Some(ca_file) = &tls_config.ca_file {
+        if !matches!(tls_config.ca_roots(), CaRoots::File(_)) {
+            anyhow::bail!(
+                "tls.ca_file \"{ca_file}\" is only for clients; a server needs a CA file"
+            );
+        }
         // mTLS: verify client certificates using the provided CA
         let mut client_auth_roots = rustls::RootCertStore::empty();
         let mut pem = BufReader::new(File::open(ca_file).with_context(|| {
@@ -66,27 +71,99 @@ pub(crate) fn server_config(tls_config: &TlsConfig) -> anyhow::Result<rustls::Se
 }
 
 /// A client config from `tls`: its CA or the public roots, and a client certificate if given.
+#[cfg(any(feature = "http", feature = "websocket", feature = "nats"))]
 pub(crate) fn client_config(tls_config: &TlsConfig) -> anyhow::Result<rustls::ClientConfig> {
-    if tls_config.cert_file.is_some() != tls_config.key_file.is_some() {
-        anyhow::bail!("a TLS client certificate needs both cert_file and key_file");
+    check_client_pair(tls_config)?;
+    if tls_config.accept_invalid_certs {
+        warn!("TLS client is configured to accept invalid certificates. This is insecure and must not be used in production.");
     }
-    let mut root_cert_store = rustls::RootCertStore::empty();
+    client_config_with(tls_config, crate::endpoints::get_crypto_provider()?)
+}
 
-    if let Some(ca_file) = &tls_config.ca_file {
-        let mut pem = BufReader::new(
-            File::open(ca_file).with_context(|| format!("Failed to open CA file: {}", ca_file))?,
+/// TLS for a reqwest client. Where reqwest's OS verifier works, it stays as before,
+/// `ca_file` adding to the OS roots; elsewhere this builds the rustls config itself.
+#[cfg(any(feature = "http-bulk", feature = "clickhouse"))]
+pub(crate) fn reqwest_tls(
+    builder: reqwest::ClientBuilder,
+    tls_config: &TlsConfig,
+    endpoint: &str,
+) -> anyhow::Result<reqwest::ClientBuilder> {
+    if tls_config.cert_password.is_some() {
+        anyhow::bail!("{endpoint} tls.cert_password is not supported; use an unencrypted key");
+    }
+    if tls_config.cert_file.is_none() && tls_config.key_file.is_some() {
+        anyhow::bail!("{endpoint} tls.key_file needs tls.cert_file");
+    }
+    if uses_os_verifier(tls_config.ca_roots(), cfg!(target_os = "android")) {
+        return os_verifier_tls(builder, tls_config, endpoint);
+    }
+    let mut tls_config = tls_config.clone();
+    if tls_config.key_file.is_none() {
+        tls_config.key_file = tls_config.cert_file.clone();
+    }
+    // Same fallback as reqwest when the application installed no provider.
+    let provider = rustls::crypto::CryptoProvider::get_default()
+        .cloned()
+        .unwrap_or_else(|| Arc::new(rustls::crypto::aws_lc_rs::default_provider()));
+    let mut config = client_config_with(&tls_config, provider)?;
+    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    Ok(builder.tls_backend_preconfigured(config))
+}
+
+/// reqwest's OS verifier panics on Android unless the app initialised it through JNI.
+#[cfg(any(feature = "http-bulk", feature = "clickhouse"))]
+fn uses_os_verifier(roots: CaRoots<'_>, android: bool) -> bool {
+    !android && !matches!(roots, CaRoots::Bundled)
+}
+
+#[cfg(any(feature = "http-bulk", feature = "clickhouse"))]
+fn os_verifier_tls(
+    mut builder: reqwest::ClientBuilder,
+    tls_config: &TlsConfig,
+    endpoint: &str,
+) -> anyhow::Result<reqwest::ClientBuilder> {
+    if tls_config.accept_invalid_certs {
+        builder = builder.danger_accept_invalid_certs(true);
+    }
+    if let CaRoots::File(ca) = tls_config.ca_roots() {
+        let pem = std::fs::read(ca)
+            .with_context(|| format!("Failed to read {endpoint} CA file '{ca}'"))?;
+        builder = builder.add_root_certificate(
+            reqwest::Certificate::from_pem(&pem)
+                .with_context(|| format!("Invalid {endpoint} CA certificate '{ca}'"))?,
         );
-        for cert in rustls_pemfile::certs(&mut pem) {
-            root_cert_store.add(cert?)?;
-        }
-    } else {
-        root_cert_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     }
+    if let Some(cert) = &tls_config.cert_file {
+        let mut pem = std::fs::read(cert)
+            .with_context(|| format!("Failed to read {endpoint} cert file '{cert}'"))?;
+        if let Some(key) = &tls_config.key_file {
+            pem.push(b'\n');
+            pem.extend(
+                std::fs::read(key)
+                    .with_context(|| format!("Failed to read {endpoint} key file '{key}'"))?,
+            );
+        }
+        builder = builder.identity(
+            reqwest::Identity::from_pem(&pem)
+                .with_context(|| format!("Invalid {endpoint} client certificate '{cert}'"))?,
+        );
+    }
+    Ok(builder)
+}
 
-    let config_builder =
-        rustls::ClientConfig::builder_with_provider(crate::endpoints::get_crypto_provider()?)
-            .with_safe_default_protocol_versions()?
-            .with_root_certificates(root_cert_store);
+/// [`client_config`] with an explicit crypto provider.
+pub(crate) fn client_config_with(
+    tls_config: &TlsConfig,
+    provider: Arc<rustls::crypto::CryptoProvider>,
+) -> anyhow::Result<rustls::ClientConfig> {
+    check_client_pair(tls_config)?;
+    let root_cert_store = root_store(tls_config)?;
+    let schemes = provider
+        .signature_verification_algorithms
+        .supported_schemes();
+    let config_builder = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()?
+        .with_root_certificates(root_cert_store);
 
     let mut config =
         if let (Some(cert_file), Some(key_file)) = (&tls_config.cert_file, &tls_config.key_file) {
@@ -103,10 +180,6 @@ pub(crate) fn client_config(tls_config: &TlsConfig) -> anyhow::Result<rustls::Cl
         // INSECURE: disables server certificate and hostname verification, so the
         // connection is open to man-in-the-middle attacks. Honoured only because the
         // caller explicitly opted in via `accept_invalid_certs`; never for production.
-        warn!("TLS client is configured to accept invalid certificates. This is insecure and must not be used in production.");
-        let schemes = crate::endpoints::get_crypto_provider()?
-            .signature_verification_algorithms
-            .supported_schemes();
         config
             .dangerous()
             .set_certificate_verifier(Arc::new(NoopClientCertVerifier {
@@ -115,6 +188,43 @@ pub(crate) fn client_config(tls_config: &TlsConfig) -> anyhow::Result<rustls::Cl
     }
 
     Ok(config)
+}
+
+fn check_client_pair(tls_config: &TlsConfig) -> anyhow::Result<()> {
+    if tls_config.cert_file.is_some() != tls_config.key_file.is_some() {
+        anyhow::bail!("a TLS client certificate needs both cert_file and key_file");
+    }
+    Ok(())
+}
+
+/// The roots `tls.ca_file` names: a CA file, `$.os` or `$.bundled`; unset, the bundled roots.
+pub(crate) fn root_store(tls_config: &TlsConfig) -> anyhow::Result<rustls::RootCertStore> {
+    let mut store = rustls::RootCertStore::empty();
+    match tls_config.ca_roots() {
+        CaRoots::Default | CaRoots::Bundled => {
+            store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        }
+        CaRoots::Os => {
+            let roots = crate::support::os_roots::os_roots()?;
+            let (added, ignored) = store.add_parsable_certificates(roots.iter().cloned());
+            if ignored > 0 {
+                warn!(
+                    added,
+                    ignored, "Ignored unparsable certificates in the OS CA store"
+                );
+            }
+        }
+        CaRoots::File(ca_file) => {
+            let mut pem = BufReader::new(
+                File::open(ca_file)
+                    .with_context(|| format!("Failed to open CA file: {}", ca_file))?,
+            );
+            for cert in rustls_pemfile::certs(&mut pem) {
+                store.add(cert?)?;
+            }
+        }
+    }
+    Ok(store)
 }
 
 /// A rustls server-certificate verifier that performs no validation. Used only when
@@ -180,6 +290,7 @@ mod tests {
     use super::*;
 
     /// With one of the pair missing no certificate was sent, and only the server said so.
+    #[cfg(any(feature = "http", feature = "websocket", feature = "nats"))]
     #[test]
     fn half_a_client_certificate_is_refused() {
         for (cert_file, key_file) in [(Some("c.pem"), None), (None, Some("k.pem"))] {
@@ -192,5 +303,36 @@ mod tests {
             let error = client_config(&tls).unwrap_err().to_string();
             assert!(error.contains("cert_file and key_file"), "{error}");
         }
+    }
+
+    #[test]
+    fn ca_file_keywords_pick_the_roots() {
+        let bundled = webpki_roots::TLS_SERVER_ROOTS.len();
+        for ca_file in [None, Some("$.bundled")] {
+            let tls = TlsConfig {
+                ca_file: ca_file.map(str::to_owned),
+                ..Default::default()
+            };
+            assert_eq!(root_store(&tls).unwrap().len(), bundled);
+        }
+        #[cfg(not(target_os = "android"))]
+        match crate::support::os_roots::os_roots() {
+            Ok(_) => assert!(!root_store(&TlsConfig::new().with_ca_file("$.os"))
+                .unwrap()
+                .is_empty()),
+            Err(e) => eprintln!("skipping $.os: {e}"),
+        }
+        let missing = root_store(&TlsConfig::new().with_ca_file("$nope")).unwrap_err();
+        assert!(missing.to_string().contains("$nope"), "{missing}");
+    }
+
+    #[cfg(any(feature = "http-bulk", feature = "clickhouse"))]
+    #[test]
+    fn reqwest_keeps_the_os_verifier_except_on_android_or_for_bundled_roots() {
+        for roots in [CaRoots::Default, CaRoots::Os, CaRoots::File("ca.pem")] {
+            assert!(uses_os_verifier(roots, false));
+            assert!(!uses_os_verifier(roots, true));
+        }
+        assert!(!uses_os_verifier(CaRoots::Bundled, false));
     }
 }

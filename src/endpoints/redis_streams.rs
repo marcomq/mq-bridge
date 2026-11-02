@@ -14,7 +14,7 @@
 //! so messages stay readable by any other Redis client.
 
 use crate::canonical_message::tracing_support::LazyMessageIds;
-use crate::models::RedisStreamsConfig;
+use crate::models::{CaRoots, RedisStreamsConfig};
 use crate::traits::{
     BoxFuture, ConsumerError, EndpointStatus, MessageConsumer, MessageDisposition,
     MessagePublisher, PublisherError, ReceivedBatch, SentBatch,
@@ -99,13 +99,14 @@ fn open_client(config: &RedisStreamsConfig) -> anyhow::Result<redis::Client> {
             "redis_streams ignores tls.accept_invalid_certs: the server certificate is always checked"
         );
     }
-    let read = |field: &str, path: &String| {
+    let read = |field: &str, path: &str| {
         std::fs::read(path)
             .map_err(|e| anyhow!("Failed to read redis_streams tls.{field} '{path}': {e}"))
     };
-    let root_cert = match &tls.ca_file {
-        Some(path) => Some(read("ca_file", path)?),
-        None => None,
+    let root_cert = match tls.ca_roots() {
+        CaRoots::Default | CaRoots::Bundled => None,
+        CaRoots::Os => Some(crate::support::os_roots::os_roots_pem()?.into_bytes()),
+        CaRoots::File(path) => Some(read("ca_file", path)?),
     };
     let client_tls = match (&tls.cert_file, &tls.key_file) {
         (Some(cert), Some(key)) => {

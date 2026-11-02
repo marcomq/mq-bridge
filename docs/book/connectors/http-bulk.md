@@ -529,8 +529,8 @@ output:
       value: /delta/text
       stop_reason: /delta/stop_reason
       error: /error/message
-      stream_to: { nats: { url: "nats://localhost:4222", subject: "chat.tokens" } }
-      cancel_from: { nats: { url: "nats://localhost:4222", subject: "chat.cancel" } }
+      stream_to: { nats: { url: "nats://localhost:4222", subject: "chat.tokens", stream: "chat_tokens", no_jetstream: true } }
+      cancel_from: { nats: { url: "nats://localhost:4222", subject: "chat.cancel", stream: "chat_cancel", no_jetstream: true } }
 ```
 
 - **Per event:** `value` points to the text, `error` to an error text, and
@@ -693,6 +693,10 @@ Without `result`, a 2xx status means every document was written.
   before choosing either.
 - **Redirects are not followed**, so credentials in `headers` stay with the
   configured host.
+- **Server certificates are checked against the OS CA store.** `tls.ca_file`
+  adds a private CA to it; `"$.bundled"` uses only the Mozilla roots built into
+  mq-bridge. On Android the bundled roots are the default and a CA file
+  replaces them; see [TLS](../engine/configuration.md#tls--security-hardening).
 - **Retries follow the status.** 408, 429 and 5xx (except 501 and 505) and
   connection errors are retryable; other statuses are not. Add the `retry`
   middleware to retry them and `dlq` to keep what failed for good.

@@ -6,6 +6,12 @@ All notable changes to `mq-bridge`. Newest first.
 
 ### Added
 
+- **`tls.ca_file: "$.os"` and `"$.bundled"` pick the trusted CAs.** `$.os` is the
+  operating system's CA store, `$.bundled` the Mozilla roots built into mq-bridge. Without
+  `ca_file` every endpoint keeps its default. Where a driver cannot take a value (`$.os` on
+  `mongodb`, `sqlx`, `postgres_cdc` and on Android; `$.bundled` on `kafka` and `amqp`) the
+  endpoint fails to start and says so. The table per endpoint is in
+  [CONFIGURATION.md](docs/CONFIGURATION.md#tls--security-hardening).
 - **Feature `sqlite`: the `sqlx` endpoint with only the SQLite driver.** `sqlx` still
   brings PostgreSQL, MySQL/MariaDB and SQLite. Without the PostgreSQL driver, `bulk_copy`
   is unavailable.
@@ -30,8 +36,10 @@ All notable changes to `mq-bridge`. Newest first.
   far; a cancel that arrives before its request starts is kept for 30 s. Every attempt
   ends with a last token message, also one that fails before the stream starts.
   `messages_from_payload: true` sends the payload as the `messages` array, e.g. a
-  whole conversation. Code that builds `OpenAiChatConfig` without `..Default::default()`
-  needs the three new fields.
+  whole conversation; a payload that is not exactly one JSON array is refused, so it
+  cannot add fields such as `model` to the request. The new template filter
+  `| json_array` does that check. Code that builds `OpenAiChatConfig` without
+  `..Default::default()` needs the three new fields.
 - **`http_bulk` `query` streams with `stream_to`.** With `per_message: true` each answer is
   read as server-sent events; `value`, `error` and `stop_reason` apply to each event, and
   `stream_done` names the data that ends the stream (e.g. `[DONE]`). Token metadata and
@@ -41,6 +49,17 @@ All notable changes to `mq-bridge`. Newest first.
   keepalives and events that are not JSON are skipped. `HttpBulkPublisher::new` refuses
   `query.stream_to`; build it through the endpoint factory. Code that builds
   `HttpBulkQuery` without `..Default::default()` needs the three new fields.
+
+### Fixed
+
+- **`http_bulk` (incl. `openai_chat`) and `clickhouse` could not connect over HTTPS on
+  Android.** They checked certificates with the OS verifier of reqwest, which panics on
+  Android unless the app initialised it through JNI, and refused `tls.ca_file` there.
+  On Android they now use the bundled roots, or `tls.ca_file`. Affected since 0.3.4
+  (`clickhouse`) and 0.4.18 (`http_bulk`); other platforms are unchanged.
+- **A `stream_to` reader always gets a last token.** If a streaming request panics, the
+  last token is sent with `mqb.stream.status: error` and the message fails for good;
+  before, the reader waited forever.
 
 ### Performance
 

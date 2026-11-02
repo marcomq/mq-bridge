@@ -2071,7 +2071,7 @@
       ]
     },
     "TlsConfig": {
-      "description": "TLS configuration for secure connections.\n\nConfigures Transport Layer Security (TLS/SSL) for encrypted communication.\nSupports both client certificate (mutual TLS) and server certificate validation.\n\n# Examples\n\n```\nuse mq_bridge::models::TlsConfig;\n\nlet tls = TlsConfig {\n    required: true,\n    ca_file: Some(\"/path/to/ca.pem\".to_string()),\n    cert_file: Some(\"/path/to/cert.pem\".to_string()),\n    key_file: Some(\"/path/to/key.pem\".to_string()),\n    ..Default::default()\n};\n```",
+      "description": "TLS configuration for secure connections.\n\nConfigures Transport Layer Security (TLS/SSL) for encrypted communication.\nSupports both client certificate (mutual TLS) and server certificate validation.\n\n`ca_file` also takes `\"$.os\"` (the operating system's CA store) or `\"$.bundled\"` (the\nMozilla roots built into mq-bridge). Which endpoint supports which, and what it trusts\nwithout `ca_file`, is in the TLS section of the configuration guide.\n\n# Examples\n\n```\nuse mq_bridge::models::TlsConfig;\n\nlet tls = TlsConfig {\n    required: true,\n    ca_file: Some(\"/path/to/ca.pem\".to_string()),\n    cert_file: Some(\"/path/to/cert.pem\".to_string()),\n    key_file: Some(\"/path/to/key.pem\".to_string()),\n    ..Default::default()\n};\n```",
       "type": "object",
       "properties": {
         "required": {
@@ -2080,7 +2080,7 @@
           "default": false
         },
         "ca_file": {
-          "description": "Path to the CA certificate file.",
+          "description": "Path to the CA certificate file, or `$.os` (OS CA store) or `$.bundled` (built-in public roots).",
           "type": [
             "string",
             "null"

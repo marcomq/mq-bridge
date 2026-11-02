@@ -198,7 +198,9 @@ chat:
 ```
 
 A message on `chat.cancel` with the same `correlation_id` stops the answer.
-The metadata of the tokens and what a retry does to them are on the
+`memory` topics reach only a front end in the same process, e.g. through the
+Python or Node binding; a separate one uses a broker, as in the
+[NATS example](../connectors/openai.md#streaming-the-answer). The metadata of the tokens and what a retry does to them are on the
 [connector page](../connectors/openai.md#streaming-the-answer). For the raw
 server-sent events of any other API, use the [`http`](../reference/http.md)
 output with `stream_response_to`.

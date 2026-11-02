@@ -509,6 +509,12 @@ fn check_fault_middleware_allowed(
         ));
     }
 
+    for nested in crate::endpoints::streaming_endpoints(&endpoint.endpoint_type)
+        .into_iter()
+        .flatten()
+    {
+        check_fault_middleware_allowed(nested, route_name, role, depth + 1, visited)?;
+    }
     match &endpoint.endpoint_type {
         EndpointType::Ref(name) => {
             if !visited.insert(name.clone()) {

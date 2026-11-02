@@ -38,6 +38,8 @@
 //! values are JSON-string-escaped so external data can never break the surrounding
 //! structure. Append `| raw` to a token (`${payload:x | raw}`) to splice it
 //! verbatim instead, or `| base64` to insert its standard base64 encoding.
+//! `| json_array` splices verbatim only a value that is exactly one JSON array,
+//! and nothing otherwise, so a JSON body fails its validity check.
 //! `gen`/`env` values are framework/operator-generated and are never escaped.
 
 use anyhow::{anyhow, bail, Context};
@@ -101,6 +103,13 @@ enum Filter {
     Raw,
     /// Standard base64 of the value's bytes.
     Base64,
+    /// Verbatim, but only if the value is exactly one JSON array; otherwise nothing.
+    JsonArray,
+}
+
+/// One JSON array and nothing after it, checked without building it.
+fn is_json_array(value: &str) -> bool {
+    value.trim_start().starts_with('[') && serde_json::from_str::<IgnoredAny>(value).is_ok()
 }
 
 #[derive(Debug, Clone)]
@@ -305,6 +314,11 @@ impl CompiledTemplate {
                             out.extend_from_slice(BASE64.encode(value.as_bytes()).as_bytes())
                         }
                         Filter::Raw => out.extend_from_slice(value.as_bytes()),
+                        Filter::JsonArray if is_json_array(&value) => {
+                            out.extend_from_slice(value.as_bytes())
+                        }
+                        Filter::JsonArray if strict => return None,
+                        Filter::JsonArray => {}
                         Filter::None if self.escape == EscapeMode::None => {
                             out.extend_from_slice(value.as_bytes())
                         }
@@ -410,7 +424,10 @@ fn parse_token(inner: &str) -> anyhow::Result<Parsed> {
             })?;
             return Ok(Parsed::Literal(match validate_filter(filter, inner)? {
                 Filter::Base64 => BASE64.encode(value.as_bytes()),
-                Filter::None | Filter::Raw => value,
+                Filter::JsonArray if !is_json_array(&value) => {
+                    bail!("environment variable '{selector}' is not a JSON array")
+                }
+                Filter::None | Filter::Raw | Filter::JsonArray => value,
             }));
         }
         // Unknown namespace: leave the text untouched for backward compatibility,
@@ -428,8 +445,9 @@ fn validate_filter(filter: Option<&str>, inner: &str) -> anyhow::Result<Filter> 
         None => Ok(Filter::None),
         Some("raw") => Ok(Filter::Raw),
         Some("base64") => Ok(Filter::Base64),
+        Some("json_array") => Ok(Filter::JsonArray),
         Some(other) => bail!(
-            "unknown token filter '{other}' in '${{{inner}}}' (only 'raw' and 'base64' are supported)"
+            "unknown token filter '{other}' in '${{{inner}}}' (only 'raw', 'base64' and 'json_array' are supported)"
         ),
     }
 }

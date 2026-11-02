@@ -3918,6 +3918,10 @@ pub struct OpenAiChatConfig {
 /// Configures Transport Layer Security (TLS/SSL) for encrypted communication.
 /// Supports both client certificate (mutual TLS) and server certificate validation.
 ///
+/// `ca_file` also takes `"$.os"` (the operating system's CA store) or `"$.bundled"` (the
+/// Mozilla roots built into mq-bridge). Which endpoint supports which, and what it trusts
+/// without `ca_file`, is in the TLS section of the configuration guide.
+///
 /// # Examples
 ///
 /// ```
@@ -3938,7 +3942,7 @@ pub struct TlsConfig {
     /// If true, enable TLS/SSL.
     #[serde(default, deserialize_with = "deserialize_null_as_false")]
     pub required: bool,
-    /// Path to the CA certificate file.
+    /// Path to the CA certificate file, or `$.os` (OS CA store) or `$.bundled` (built-in public roots).
     pub ca_file: Option<String>,
     /// Path to the client certificate file (PEM).
     pub cert_file: Option<String>,
@@ -3950,4 +3954,17 @@ pub struct TlsConfig {
     /// If true, disable server certificate verification (insecure).
     #[serde(default)]
     pub accept_invalid_certs: bool,
+}
+
+/// Where a client's trusted CA certificates come from; see [`TlsConfig::ca_roots`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) enum CaRoots<'a> {
+    /// No `ca_file`: the endpoint's own default.
+    Default,
+    /// `$.os`: the operating system's CA store.
+    Os,
+    /// `$.bundled`: the Mozilla roots built into mq-bridge.
+    Bundled,
+    File(&'a str),
 }

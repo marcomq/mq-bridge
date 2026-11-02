@@ -5,7 +5,7 @@
 
 use super::poll::PollBackoff;
 use crate::canonical_message::tracing_support::LazyMessageIds;
-use crate::models::SqlxConfig;
+use crate::models::{CaRoots, SqlxConfig};
 use crate::support::interpolation::pick_fields;
 use crate::support::lookup_batch::{self, ListQuery};
 use crate::traits::{
@@ -385,6 +385,8 @@ fn build_sqlx_url_with_tls(config: &SqlxConfig) -> anyhow::Result<String> {
     }
 
     if config.tls.required {
+        let ca_file =
+            crate::support::tls_check::ca_file_path("sqlx", &config.tls, CaRoots::Bundled)?;
         let scheme = url.scheme().to_string();
         match scheme.as_str() {
             "postgres" | "postgresql" => {
@@ -395,11 +397,11 @@ fn build_sqlx_url_with_tls(config: &SqlxConfig) -> anyhow::Result<String> {
                 } else {
                     // Validation enabled: verify the chain and hostname. `sslrootcert`
                     // (appended below) supplies a custom CA when configured; without one
-                    // the system trust store is used.
+                    // the driver's bundled public roots are used.
                     query_pairs.append_pair("sslmode", "verify-full");
                 }
 
-                if let Some(ca) = &config.tls.ca_file {
+                if let Some(ca) = ca_file {
                     query_pairs.append_pair("sslrootcert", ca);
                 }
                 if let Some(cert) = &config.tls.cert_file {
@@ -430,10 +432,10 @@ fn build_sqlx_url_with_tls(config: &SqlxConfig) -> anyhow::Result<String> {
                     // Explicitly opted out of validation: encrypt but do not verify.
                     query_pairs.append_pair("ssl-mode", "REQUIRED");
                 } else {
-                    // Chain and host name, against `ssl-ca` or the system trust store.
+                    // Chain and host name, against `ssl-ca` or the driver's bundled public roots.
                     query_pairs.append_pair("ssl-mode", "VERIFY_IDENTITY");
                 }
-                if let Some(ca) = &config.tls.ca_file {
+                if let Some(ca) = ca_file {
                     query_pairs.append_pair("ssl-ca", ca);
                 }
                 if let Some(cert) = &config.tls.cert_file {

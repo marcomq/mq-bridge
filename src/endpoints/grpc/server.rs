@@ -977,6 +977,11 @@ async fn get_or_create_shared_grpc_server(
 
         let mut tls_config = ServerTlsConfig::new().identity(identity);
         if let Some(ca_path) = &config.tls.ca_file {
+            if !matches!(config.tls.ca_roots(), crate::models::CaRoots::File(_)) {
+                anyhow::bail!(
+                    "tls.ca_file \"{ca_path}\" is only for clients; a server needs a CA file"
+                );
+            }
             let ca_pem = tokio::fs::read(ca_path).await?;
             let ca_cert = Certificate::from_pem(ca_pem);
             tls_config = tls_config.client_ca_root(ca_cert);

@@ -13,7 +13,7 @@ mod server;
 pub use consumer::GrpcConsumer;
 pub use publisher::{create_grpc_publisher, GrpcPublisher};
 
-use crate::models::GrpcConfig;
+use crate::models::{CaRoots, GrpcConfig};
 use crate::CanonicalMessage;
 use anyhow::Result;
 use bytes::{Buf, BufMut};
@@ -207,12 +207,18 @@ pub(super) async fn make_endpoint(
     let mut endpoint = tonic::transport::Endpoint::from_shared(url.to_string())?;
 
     if https {
-        let mut tls_config = ClientTlsConfig::new().with_enabled_roots();
-        if let Some(ca_path) = &config.tls.ca_file {
-            let ca_pem = tokio::fs::read(ca_path).await?;
-            let ca_cert = Certificate::from_pem(ca_pem);
-            tls_config = tls_config.ca_certificate(ca_cert);
-        }
+        let mut tls_config = match config.tls.ca_roots() {
+            CaRoots::Os => ClientTlsConfig::new().ca_certificate(Certificate::from_pem(
+                crate::support::os_roots::os_roots_pem()?,
+            )),
+            CaRoots::Default | CaRoots::Bundled => ClientTlsConfig::new().with_enabled_roots(),
+            CaRoots::File(ca_path) => {
+                let ca_pem = tokio::fs::read(ca_path).await?;
+                ClientTlsConfig::new()
+                    .with_enabled_roots()
+                    .ca_certificate(Certificate::from_pem(ca_pem))
+            }
+        };
         if let (Some(cert_path), Some(key_path)) = (&config.tls.cert_file, &config.tls.key_file) {
             let cert_pem = tokio::fs::read(cert_path).await?;
             let key_pem = tokio::fs::read(key_path).await?;

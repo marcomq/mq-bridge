@@ -100,40 +100,7 @@ impl Connection {
             None => builder.read_timeout(DEFAULT_READ_TIMEOUT),
         };
         crate::support::tls_check::warn_unverified("http_bulk", config.tls.accept_invalid_certs);
-        if config.tls.accept_invalid_certs {
-            builder = builder.danger_accept_invalid_certs(true);
-        }
-        if let Some(ca) = &config.tls.ca_file {
-            let pem = std::fs::read(ca)
-                .with_context(|| format!("Failed to read http_bulk CA file '{ca}'"))?;
-            builder = builder.add_root_certificate(
-                reqwest::Certificate::from_pem(&pem)
-                    .with_context(|| format!("Invalid http_bulk CA certificate '{ca}'"))?,
-            );
-        }
-        if config.tls.cert_password.is_some() {
-            bail!("http_bulk tls.cert_password is not supported; use an unencrypted key");
-        }
-        match (&config.tls.cert_file, &config.tls.key_file) {
-            (Some(cert), key) => {
-                let mut pem = std::fs::read(cert)
-                    .with_context(|| format!("Failed to read http_bulk cert file '{cert}'"))?;
-                if let Some(key) = key {
-                    pem.push(b'\n');
-                    pem.extend(
-                        std::fs::read(key).with_context(|| {
-                            format!("Failed to read http_bulk key file '{key}'")
-                        })?,
-                    );
-                }
-                builder =
-                    builder.identity(reqwest::Identity::from_pem(&pem).with_context(|| {
-                        format!("Invalid http_bulk client certificate '{cert}'")
-                    })?);
-            }
-            (None, Some(_)) => bail!("http_bulk tls.key_file needs tls.cert_file"),
-            (None, None) => {}
-        }
+        builder = crate::support::tls::reqwest_tls(builder, &config.tls, "http_bulk")?;
         let auth = auth::Auth::new(config.auth.as_ref(), config.tls.required)?;
         if sends_credentials_in_clear(&url, &headers, &auth) {
             warn!(
@@ -299,5 +266,50 @@ mod tests {
             }
             assert_eq!(found, recipes, "{name}");
         }
+    }
+
+    #[tokio::test]
+    async fn bundled_roots_reject_a_private_ca_that_ca_file_trusts() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let generated = rcgen::generate_simple_self_signed(vec!["127.0.0.1".into()]).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let ca = dir.path().join("ca.pem");
+        std::fs::write(&ca, generated.cert.pem()).unwrap();
+        let key =
+            rustls::pki_types::PrivateKeyDer::Pkcs8(generated.signing_key.serialize_der().into());
+        let server = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![generated.cert.der().clone()], key)
+            .unwrap();
+        let acceptor = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(server));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("https://{}/", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            while let Ok((socket, _)) = listener.accept().await {
+                let Ok(mut tls) = acceptor.accept(socket).await else {
+                    continue;
+                };
+                let mut buffer = [0u8; 4096];
+                let _ = tls.read(&mut buffer).await;
+                let answer = "HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok";
+                let _ = tls.write_all(answer.as_bytes()).await;
+                let _ = tls.shutdown().await;
+            }
+        });
+        let get = |tls: crate::models::TlsConfig| {
+            let url = url.clone();
+            async move {
+                let mut config: HttpBulkConfig =
+                    serde_json::from_value(serde_json::json!({ "url": url }))?;
+                config.tls = tls;
+                let connection = Connection::new(&config)?;
+                anyhow::Ok(connection.http.get(url).send().await?.text().await?)
+            }
+        };
+        let bundled = crate::models::TlsConfig::new().with_ca_file("$.bundled");
+        assert!(get(bundled).await.is_err());
+        let trusted = crate::models::TlsConfig::new().with_ca_file(ca.to_string_lossy());
+        assert_eq!(get(trusted).await.unwrap(), "ok");
     }
 }

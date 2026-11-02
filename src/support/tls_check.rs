@@ -5,6 +5,7 @@
 
 //! Warnings for a connection whose settings leave it exposed.
 
+use crate::models::CaRoots;
 use tracing::warn;
 
 fn parsed(url: &str) -> Option<url::Url> {
@@ -78,6 +79,28 @@ pub(crate) fn warn_listener_cert_unused(endpoint: &str, tls: &crate::models::Tls
     }
 }
 
+/// `tls.ca_file` as a path for a driver that takes only paths and trusts `own_roots`
+/// by itself: that keyword means no path, the other one is refused.
+pub(crate) fn ca_file_path<'a>(
+    endpoint: &str,
+    tls: &'a crate::models::TlsConfig,
+    own_roots: CaRoots<'static>,
+) -> anyhow::Result<Option<&'a str>> {
+    match tls.ca_roots() {
+        CaRoots::Default => Ok(None),
+        CaRoots::File(path) => Ok(Some(path)),
+        roots if roots == own_roots => Ok(None),
+        CaRoots::Os => anyhow::bail!(
+            "{endpoint} cannot use tls.ca_file \"$.os\": its driver takes only a CA file path; \
+             name the OS bundle file instead, e.g. /etc/ssl/certs/ca-certificates.crt"
+        ),
+        CaRoots::Bundled => anyhow::bail!(
+            "{endpoint} cannot use tls.ca_file \"$.bundled\": its driver trusts the OS CA store; \
+             leave ca_file unset or name a CA file"
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -118,5 +141,27 @@ mod tests {
             false
         ));
         assert!(!exposes_credentials("127.0.0.1:4222", true, false));
+    }
+
+    #[test]
+    fn a_path_only_driver_maps_its_own_roots_and_refuses_the_other() {
+        use crate::models::TlsConfig;
+        let with = |ca: &str| TlsConfig::new().with_ca_file(ca);
+        let path = with("/ca.pem");
+        assert_eq!(
+            ca_file_path("x", &path, CaRoots::Os).unwrap(),
+            Some("/ca.pem")
+        );
+        assert_eq!(
+            ca_file_path("x", &TlsConfig::new(), CaRoots::Os).unwrap(),
+            None
+        );
+        assert_eq!(ca_file_path("x", &with("$.os"), CaRoots::Os).unwrap(), None);
+        assert_eq!(
+            ca_file_path("x", &with("$.bundled"), CaRoots::Bundled).unwrap(),
+            None
+        );
+        assert!(ca_file_path("x", &with("$.bundled"), CaRoots::Os).is_err());
+        assert!(ca_file_path("x", &with("$.os"), CaRoots::Bundled).is_err());
     }
 }
