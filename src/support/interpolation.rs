@@ -38,8 +38,8 @@
 //! values are JSON-string-escaped so external data can never break the surrounding
 //! structure. Append `| raw` to a token (`${payload:x | raw}`) to splice it
 //! verbatim instead, or `| base64` to insert its standard base64 encoding.
-//! `| json_array` splices verbatim only a value that is exactly one JSON array,
-//! and nothing otherwise, so a JSON body fails its validity check.
+//! `| json_array` splices verbatim only a value that is exactly one JSON array;
+//! any other value fails the whole render (`render` then yields an empty body).
 //! `gen`/`env` values are framework/operator-generated and are never escaped.
 
 use anyhow::{anyhow, bail, Context};
@@ -103,8 +103,14 @@ enum Filter {
     Raw,
     /// Standard base64 of the value's bytes.
     Base64,
-    /// Verbatim, but only if the value is exactly one JSON array; otherwise nothing.
+    /// Verbatim, but only if the value is exactly one JSON array; otherwise the render fails.
     JsonArray,
+}
+
+/// Why a render produced no output.
+enum Unrendered {
+    Missing,
+    NotJsonArray,
 }
 
 /// One JSON array and nothing after it, checked without building it.
@@ -276,8 +282,15 @@ impl CompiledTemplate {
 
     /// Render the template against an optional message. On the source side (no
     /// input message) `payload`/`metadata`/`message` tokens resolve to empty.
+    /// A `| json_array` token whose value is not exactly one JSON array renders nothing at all.
     pub fn render(&self, msg: Option<&CanonicalMessage>) -> Vec<u8> {
         self.render_inner(msg, false).unwrap_or_default()
+    }
+
+    /// Like [`Self::render`], but an error when a `| json_array` value is not one JSON array.
+    pub fn render_checked(&self, msg: Option<&CanonicalMessage>) -> Result<Vec<u8>, String> {
+        self.render_inner(msg, false)
+            .map_err(|_| "a '| json_array' value is not exactly one JSON array".to_string())
     }
 
     /// Render, but `None` as soon as a token has no value for this message.
@@ -287,10 +300,14 @@ impl CompiledTemplate {
     /// still yields `"x-"` when `b` is absent — a non-empty value that every such message
     /// shares. Only a whole-template check catches that.
     pub fn render_resolved(&self, msg: Option<&CanonicalMessage>) -> Option<Vec<u8>> {
-        self.render_inner(msg, true)
+        self.render_inner(msg, true).ok()
     }
 
-    fn render_inner(&self, msg: Option<&CanonicalMessage>, strict: bool) -> Option<Vec<u8>> {
+    fn render_inner(
+        &self,
+        msg: Option<&CanonicalMessage>,
+        strict: bool,
+    ) -> Result<Vec<u8>, Unrendered> {
         let mut payload = self.parse_payload(msg);
 
         let mut out = Vec::with_capacity(self.literal_len + 16);
@@ -304,9 +321,18 @@ impl CompiledTemplate {
                         out.extend_from_slice(BASE64.encode(&msg.payload).as_bytes());
                         continue;
                     }
+                    if let (Filter::JsonArray, Source::MessagePayload, Some(msg)) =
+                        (tok.filter, &tok.source, msg)
+                    {
+                        if !std::str::from_utf8(&msg.payload).is_ok_and(is_json_array) {
+                            return Err(Unrendered::NotJsonArray);
+                        }
+                        out.extend_from_slice(&msg.payload);
+                        continue;
+                    }
                     let value = match self.resolve(tok, msg, &mut payload) {
                         Some(value) => value,
-                        None if strict => return None,
+                        None if strict => return Err(Unrendered::Missing),
                         None => String::new(),
                     };
                     match tok.filter {
@@ -317,8 +343,7 @@ impl CompiledTemplate {
                         Filter::JsonArray if is_json_array(&value) => {
                             out.extend_from_slice(value.as_bytes())
                         }
-                        Filter::JsonArray if strict => return None,
-                        Filter::JsonArray => {}
+                        Filter::JsonArray => return Err(Unrendered::NotJsonArray),
                         Filter::None if self.escape == EscapeMode::None => {
                             out.extend_from_slice(value.as_bytes())
                         }
@@ -327,7 +352,7 @@ impl CompiledTemplate {
                 }
             }
         }
-        Some(out)
+        Ok(out)
     }
 
     /// Parse as little of the payload as the template actually asks for.
@@ -1021,6 +1046,23 @@ mod tests {
             Some(&msg),
         );
         assert_eq!(out, r#"{"x":{"k":1}}"#);
+    }
+
+    #[test]
+    fn a_value_that_is_not_one_json_array_fails_the_render() {
+        let template =
+            CompiledTemplate::compile(r#"{"items":[${payload:items | json_array}]}"#, None)
+                .unwrap();
+        let ok = msg_with(r#"{"items":[1,2]}"#, &[]);
+        assert_eq!(
+            template.render_checked(Some(&ok)).unwrap(),
+            br#"{"items":[[1,2]]}"#
+        );
+        for payload in [r#"{"items":{"a":1}}"#, r#"{}"#] {
+            let bad = msg_with(payload, &[]);
+            assert!(template.render_checked(Some(&bad)).is_err(), "{payload}");
+            assert!(template.render(Some(&bad)).is_empty(), "{payload}");
+        }
     }
 
     #[test]

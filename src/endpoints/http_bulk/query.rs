@@ -152,10 +152,10 @@ impl Query {
         message: &CanonicalMessage,
         number: usize,
     ) -> Result<Vec<u8>, String> {
-        let mut rendered = self.request.render(Some(message)).to_vec();
+        let mut rendered = self.request.render_checked(Some(message))?;
         if let Some(rest) = &self.numbered {
             rendered.extend_from_slice(number.to_string().as_bytes());
-            rendered.extend_from_slice(&rest.render(Some(message)));
+            rendered.extend_from_slice(&rest.render_checked(Some(message))?);
         }
         let part = rendered.trim_ascii();
         if part.is_empty() {

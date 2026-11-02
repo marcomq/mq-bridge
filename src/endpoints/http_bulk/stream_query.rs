@@ -910,11 +910,12 @@ mod tests {
         let extra = json!({"prompt": null, "messages_from_payload": true});
         let (publisher, _tokens) = publisher("http://127.0.0.1:9", extra).await;
         for payload in [
-            r#"[{"role":"user","content":"hi"}],"model":"x""#,
-            r#"{"a":1}"#,
+            &br#"[{"role":"user","content":"hi"}],"model":"x""#[..],
+            br#"{"a":1}"#,
+            b"[\"\xff\"]",
         ] {
             let error = publisher
-                .send(CanonicalMessage::from(payload))
+                .send(CanonicalMessage::new(payload.to_vec(), None))
                 .await
                 .unwrap_err();
             assert!(matches!(error, PublisherError::NonRetryable(_)), "{error}");

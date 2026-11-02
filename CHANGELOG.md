@@ -34,7 +34,8 @@ All notable changes to `mq-bridge`. Newest first.
   still the response, so the input is committed after it and a retry starts a new attempt.
   `cancel_from` stops a running request by `correlation_id` and answers with the text so
   far; a cancel that arrives before its request starts is kept for 30 s. Every attempt
-  ends with a last token message, also one that fails before the stream starts.
+  ends with a last token message, also one that fails before the stream starts, unless a
+  send to `stream_to` failed: then that attempt sends no further tokens.
   `messages_from_payload: true` sends the payload as the `messages` array, e.g. a
   whole conversation; a payload that is not exactly one JSON array is refused, so it
   cannot add fields such as `model` to the request. The new template filter
@@ -57,9 +58,9 @@ All notable changes to `mq-bridge`. Newest first.
   Android unless the app initialised it through JNI, and refused `tls.ca_file` there.
   On Android they now use the bundled roots, or `tls.ca_file`. Affected since 0.3.4
   (`clickhouse`) and 0.4.18 (`http_bulk`); other platforms are unchanged.
-- **A `stream_to` reader always gets a last token.** If a streaming request panics, the
-  last token is sent with `mqb.stream.status: error` and the message fails for good;
-  before, the reader waited forever.
+- **A `stream_to` reader gets a last token when a streaming request panics.** It is sent
+  with `mqb.stream.status: error` (if `stream_to` still accepts sends) and the message fails
+  for good; before, the reader waited forever.
 
 ### Performance
 
