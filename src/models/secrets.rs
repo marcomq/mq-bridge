@@ -780,10 +780,23 @@ impl SecretExtractor for ElasticsearchConfig {
 
 named_endpoint_secrets! {
     MeilisearchConfig { api_key, checkpoint_store }
-    OpenAiChatConfig { api_key }
     OpenAiEmbeddingsConfig { api_key }
     QdrantConfig { api_key, checkpoint_store }
     TypesenseConfig { api_key }
+}
+
+impl SecretExtractor for OpenAiChatConfig {
+    fn extract_secrets(&mut self, prefix: &str, secrets: &mut HashMap<String, String>) {
+        if let Some(value) = self.api_key.take() {
+            secrets.insert(format!("{prefix}__API_KEY"), value);
+        }
+        if let Some(endpoint) = &mut self.stream_to {
+            endpoint.extract_secrets(&format!("{prefix}__STREAM_TO"), secrets);
+        }
+        if let Some(endpoint) = &mut self.cancel_from {
+            endpoint.extract_secrets(&format!("{prefix}__CANCEL_FROM"), secrets);
+        }
+    }
 }
 
 impl SecretExtractor for HttpBulkConfig {
@@ -819,6 +832,14 @@ impl SecretExtractor for HttpBulkConfig {
                 "READ__CHECKPOINT_STORE",
                 secrets,
             );
+        }
+        if let Some(query) = self.query.as_mut() {
+            if let Some(endpoint) = &mut query.stream_to {
+                endpoint.extract_secrets(&format!("{prefix}__QUERY__STREAM_TO"), secrets);
+            }
+            if let Some(endpoint) = &mut query.cancel_from {
+                endpoint.extract_secrets(&format!("{prefix}__QUERY__CANCEL_FROM"), secrets);
+            }
         }
         self.tls
             .extract_secrets(&format!("{}__{}", prefix, "TLS"), secrets);

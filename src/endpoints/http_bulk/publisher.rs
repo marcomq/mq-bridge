@@ -202,6 +202,9 @@ impl HttpBulkPublisher {
     pub fn new(config: &HttpBulkConfig) -> anyhow::Result<Self> {
         let connection = Connection::new(config)?;
         let query = config.query.as_ref().map(Query::new).transpose()?;
+        if config.query.as_ref().is_some_and(|q| q.stream_to.is_some()) {
+            bail!("http_bulk query.stream_to is built by the endpoint factory, not HttpBulkPublisher::new");
+        }
         if query.is_some()
             && (config.upsert.is_some() || config.delete.is_some() || config.operation.is_some())
         {

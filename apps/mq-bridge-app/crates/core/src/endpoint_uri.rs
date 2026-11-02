@@ -1194,6 +1194,15 @@ mod tests {
             panic!("not an http_bulk endpoint");
         };
         assert_eq!(config.read.unwrap().path, "/d?o={cursor}");
+
+        let streamed = endpoint_from_uri(
+            r#"http-bulk:?config={"url":"http://h","query":{"path":"/m","request":"{}","per_message":true,"value":"/delta/text","stream_to":{"memory":{"topic":"t"}}}}"#,
+        );
+        let EndpointType::HttpBulk(config) = streamed.unwrap().endpoint_type else {
+            panic!("not an http_bulk endpoint");
+        };
+        let stream_to = config.query.unwrap().stream_to.unwrap();
+        assert!(matches!(stream_to.endpoint_type, EndpointType::Memory(_)));
     }
 
     #[test]
@@ -2094,6 +2103,13 @@ mod tests {
                 serde_json::json!(20),
             ),
             (
+                "openai://localhost:11434?model=m&messages_from_payload=true",
+                "openai_chat",
+                "openai://localhost:11434",
+                "messages_from_payload",
+                serde_json::json!(true),
+            ),
+            (
                 "openai-embeddings+https://llm.example.com/v1?model=m&input=x&dimensions=8",
                 "openai_embeddings",
                 "https://llm.example.com/v1",
@@ -2107,6 +2123,9 @@ mod tests {
             assert_eq!(config["url"], url);
             assert_eq!(config[field], value, "{uri}");
         }
+        let uri = r#"openai://h?model=m&prompt=Hi&stream_to={"memory":{"topic":"t"}}"#;
+        let endpoint = endpoint_from_uri(uri).unwrap();
+        assert_eq!(named(&endpoint).1["stream_to"]["memory"]["topic"], "t");
         let error = endpoint_from_uri("typesense://h/books?request_timeout_ms=soon").unwrap_err();
         assert!(
             format!("{error:#}").contains("request_timeout_ms"),

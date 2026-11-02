@@ -16,6 +16,7 @@ mod consumer;
 mod presets;
 mod publisher;
 mod query;
+mod stream_query;
 pub use crate::models::{
     ElasticsearchConfig, ElasticsearchMode, MeilisearchConfig, OpenAiChatConfig,
     OpenAiEmbeddingsConfig, QdrantConfig, TypesenseConfig,
@@ -28,6 +29,7 @@ pub use presets::{
     register_preset_with, schema as preset_schema, segment as preset_segment,
 };
 pub use publisher::HttpBulkPublisher;
+pub(crate) use stream_query::StreamQueryPublisher;
 
 use crate::models::HttpBulkConfig;
 use anyhow::{bail, Context};
@@ -51,6 +53,16 @@ struct Connection {
 
 impl Connection {
     fn new(config: &HttpBulkConfig) -> anyhow::Result<Self> {
+        let streams = config.read.as_ref().and_then(|read| read.stream).is_some();
+        Self::build(config, streams)
+    }
+
+    /// For responses read as a stream: `request_timeout_ms` bounds each silence.
+    fn streaming(config: &HttpBulkConfig) -> anyhow::Result<Self> {
+        Self::build(config, true)
+    }
+
+    fn build(config: &HttpBulkConfig, streams: bool) -> anyhow::Result<Self> {
         let url = url::Url::parse(&config.url).context("Invalid http_bulk URL")?;
         if !url.has_host() || !matches!(url.scheme(), "http" | "https") {
             bail!("http_bulk URL must be an absolute http(s) URL, e.g. 'http://localhost:7700'");
@@ -78,7 +90,6 @@ impl Connection {
             .connect_timeout(Duration::from_millis(
                 config.connect_timeout_ms.unwrap_or(10_000),
             ));
-        let streams = config.read.as_ref().and_then(|read| read.stream).is_some();
         builder = match config.request_timeout_ms {
             Some(0) => builder,
             // An open stream has no total duration: the timeout bounds each silence.
@@ -207,17 +218,31 @@ mod tests {
         preset_names().find_map(|name| Some((name, endpoint.get(name)?)))
     }
 
+    /// Builds the publisher; a streamed query is only validated, its `stream_to` may not exist here.
+    fn valid(config: &HttpBulkConfig) -> anyhow::Result<()> {
+        match config
+            .query
+            .as_ref()
+            .filter(|query| query.stream_to.is_some())
+        {
+            Some(query) => query::Query::new(query)
+                .and(Connection::streaming(config))
+                .map(|_| ()),
+            None => HttpBulkPublisher::new(config).map(|_| ()),
+        }
+    }
+
     #[test]
     fn the_recipes_in_the_book_are_valid_configurations() {
         let book = concat!(env!("CARGO_MANIFEST_DIR"), "/docs/book/connectors/");
         for (name, recipes) in [
-            ("http-bulk.md", 16),
+            ("http-bulk.md", 17),
             ("typesense.md", 2),
             ("elasticsearch.md", 2),
             ("postgrest.md", 2),
             ("qdrant.md", 2),
-            ("openai.md", 7),
-            ("../cookbook/llm.md", 4),
+            ("openai.md", 8),
+            ("../cookbook/llm.md", 5),
         ] {
             // The book is not part of the published crate.
             let Ok(page) = std::fs::read_to_string(format!("{book}{name}")) else {
@@ -259,8 +284,7 @@ mod tests {
                 for (preset, config) in asked.filter_map(named) {
                     let config = presets::resolve(preset, config)
                         .unwrap_or_else(|error| panic!("{name}: {error:#}"));
-                    HttpBulkPublisher::new(&config)
-                        .unwrap_or_else(|error| panic!("{name}: {error}"));
+                    valid(&config).unwrap_or_else(|error| panic!("{name}: {error}"));
                 }
                 let config = match (named(output), output.get("http_bulk")) {
                     (Some((preset, config)), _) => presets::resolve(preset, config),
@@ -271,7 +295,7 @@ mod tests {
                 };
                 let config: HttpBulkConfig =
                     config.unwrap_or_else(|error| panic!("{name}: {error:#}"));
-                HttpBulkPublisher::new(&config).unwrap_or_else(|error| panic!("{name}: {error}"));
+                valid(&config).unwrap_or_else(|error| panic!("{name}: {error}"));
             }
             assert_eq!(found, recipes, "{name}");
         }

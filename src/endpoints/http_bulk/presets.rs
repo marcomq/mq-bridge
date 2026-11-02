@@ -6,6 +6,7 @@
 //! Named endpoints that are an `http_bulk` configuration: a few fields and a
 //! URI of their own, and the generic publisher underneath.
 
+use super::stream_query::StreamQueryPublisher;
 use super::{HttpBulkConsumer, HttpBulkPublisher};
 use crate::errors::InvalidConfig;
 use crate::models::{
@@ -164,8 +165,17 @@ impl CustomEndpointFactory for Preset {
         route_name: &str,
         config: &Value,
     ) -> anyhow::Result<Box<dyn MessagePublisher>> {
-        let config = self.config(route_name, config)?;
-        Ok(Box::new(HttpBulkPublisher::new(&config)?))
+        let resolved = self.config(route_name, config)?;
+        if resolved
+            .query
+            .as_ref()
+            .is_some_and(|q| q.stream_to.is_some())
+        {
+            return Ok(Box::new(
+                StreamQueryPublisher::new(route_name, &resolved).await?,
+            ));
+        }
+        Ok(Box::new(HttpBulkPublisher::new(&resolved)?))
     }
 
     fn config_schema(&self) -> Option<Value> {
@@ -514,7 +524,25 @@ fn openai_embeddings(_route: &str, value: &Value) -> anyhow::Result<Value> {
 }
 
 fn openai_chat(_route: &str, value: &Value) -> anyhow::Result<Value> {
+    const MESSAGES: &str = r#""messages":"{messages}""#;
     let config: OpenAiChatConfig = serde_json::from_value(value.clone())?;
+    let streams = config.stream_to.is_some();
+    if config.cancel_from.is_some() && !streams {
+        bail!("'cancel_from' needs 'stream_to'");
+    }
+    if streams && config.messages_per_request.is_some() {
+        bail!("'stream_to' excludes 'messages_per_request'");
+    }
+    if config.messages_from_payload {
+        if !config.prompt.is_empty() || config.system.is_some() {
+            bail!("'messages_from_payload' excludes 'prompt' and 'system'");
+        }
+        if config.messages_per_request.is_some() {
+            bail!("'messages_from_payload' excludes 'messages_per_request'");
+        }
+    } else if config.prompt.is_empty() {
+        bail!("'prompt' is required unless 'messages_from_payload' is set");
+    }
     let mut body = match nested("options", config.options)? {
         Some(Value::Object(options)) => options,
         None => serde_json::Map::new(),
@@ -530,6 +558,9 @@ fn openai_chat(_route: &str, value: &Value) -> anyhow::Result<Value> {
         body.insert("response_format".into(), json!({"type": "json_object"}));
     }
     body.insert("model".into(), json!(config.model));
+    if streams {
+        body.insert("stream".into(), json!(true));
+    }
     let system = config.system.as_deref();
     let query = match config.messages_per_request {
         Some(0) => bail!("'messages_per_request' must be at least 1"),
@@ -540,17 +571,36 @@ fn openai_chat(_route: &str, value: &Value) -> anyhow::Result<Value> {
                 messages.push(json!({"role": "system", "content": system}));
             }
             messages.push(json!({"role": "user", "content": config.prompt}));
-            body.insert("messages".into(), json!(messages));
-            json!({
+            let messages = match config.messages_from_payload {
+                true => json!("{messages}"),
+                false => json!(messages),
+            };
+            body.insert("messages".into(), messages);
+            // Serializing escapes the literal text; the template escapes what a message puts in.
+            let request = Value::Object(body).to_string().replacen(
+                MESSAGES,
+                r#""messages":${message:payload | raw}"#,
+                1,
+            );
+            let mut query = json!({
                 "path": "/chat/completions",
                 "format": "json_array",
-                // Serializing escapes the literal text; the template escapes what a message puts in.
-                "request": Value::Object(body).to_string(),
+                "request": request,
                 "per_message": true,
                 "value": "/choices/0/message/content",
                 "error": "/error/message",
                 "parse_value": config.json
-            })
+            });
+            if streams {
+                query["value"] = json!("/choices/0/delta/content");
+                query["stop_reason"] = json!("/choices/0/finish_reason");
+                query["stream_done"] = json!("[DONE]");
+                query["stream_to"] = json!(config.stream_to);
+                if config.cancel_from.is_some() {
+                    query["cancel_from"] = json!(config.cancel_from);
+                }
+            }
+            query
         }
     };
     let mut resolved = json!({

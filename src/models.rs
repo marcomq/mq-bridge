@@ -3322,6 +3322,23 @@ pub struct HttpBulkQuery {
     /// A refused request (400, 409, 413, 422) or unmatched answers: ask again in halves.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub split_on_reject: bool,
+    /// `per_message` only: reads the answer as server-sent events and sends each `value` to this endpoint.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_nested_endpoint",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub stream_to: Option<Box<Endpoint>>,
+    /// With `stream_to`: a message here with a request's `correlation_id` stops it.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_nested_endpoint",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub cancel_from: Option<Box<Endpoint>>,
+    /// With `stream_to`: the event data that ends the stream, e.g. `[DONE]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_done: Option<String>,
 }
 
 /// How `http_bulk` requests are authenticated beyond `headers`. Set at most one field.
@@ -3856,7 +3873,11 @@ pub struct OpenAiChatConfig {
     /// Template of the system message.
     pub system: Option<String>,
     /// Template of the user message, e.g. `Summarise: ${payload:body}`.
+    #[serde(default)]
     pub prompt: String,
+    /// The payload is the `messages` array itself, e.g. a whole conversation.
+    #[serde(default)]
+    pub messages_from_payload: bool,
     /// Ask for a JSON object and parse the answer.
     #[serde(default)]
     pub json: bool,
@@ -3874,6 +3895,20 @@ pub struct OpenAiChatConfig {
     pub tls: Option<serde_json::Value>,
     /// `oauth2` or `aws_sigv4` credentials, as on `http_bulk`; JSON in a URI.
     pub auth: Option<serde_json::Value>,
+    /// Streams the answer: each text delta goes to this endpoint as it arrives.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_nested_endpoint",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub stream_to: Option<Box<Endpoint>>,
+    /// With `stream_to`: a message here with a request's `correlation_id` stops it.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_nested_endpoint",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub cancel_from: Option<Box<Endpoint>>,
 }
 
 // --- Common Configuration ---

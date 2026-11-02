@@ -81,6 +81,16 @@ impl Query {
                  'index' and 'split_on_reject'"
             );
         }
+        if config.stream_to.is_some() {
+            if !config.per_message || config.value.is_none() {
+                bail!("http_bulk query.stream_to needs 'per_message' and 'value'");
+            }
+            if config.found.is_some() {
+                bail!("http_bulk query.stream_to excludes 'found'");
+            }
+        } else if config.cancel_from.is_some() || config.stream_done.is_some() {
+            bail!("http_bulk query.cancel_from and query.stream_done need 'stream_to'");
+        }
         let concurrency = match config.concurrency {
             Some(0) => bail!("http_bulk query.concurrency must be at least 1"),
             Some(concurrency) => concurrency,
@@ -137,7 +147,11 @@ impl Query {
 
     /// One message's part of the body: lines for `ndjson`, one JSON value otherwise.
     /// `number` is its place in the request, from 1.
-    fn part(&self, message: &CanonicalMessage, number: usize) -> Result<Vec<u8>, String> {
+    pub(super) fn part(
+        &self,
+        message: &CanonicalMessage,
+        number: usize,
+    ) -> Result<Vec<u8>, String> {
         let mut rendered = self.request.render(Some(message)).to_vec();
         if let Some(rest) = &self.numbered {
             rendered.extend_from_slice(number.to_string().as_bytes());
@@ -428,18 +442,31 @@ impl Query {
         self.answer(&answer)
     }
 
-    fn label(&self) -> String {
+    pub(super) fn label(&self) -> String {
         format!("{} {}", self.method, self.path)
+    }
+
+    pub(super) fn concurrency(&self) -> usize {
+        self.concurrency
+    }
+
+    /// The request that sends `body`, with the configured method and content type.
+    pub(super) fn request(
+        &self,
+        connection: &Connection,
+        body: Vec<u8>,
+    ) -> reqwest::RequestBuilder {
+        let url = format!("{}{}", connection.base, self.path);
+        connection
+            .request(self.method.clone(), &url)
+            .header(CONTENT_TYPE, self.content_type.clone())
+            .body(body)
     }
 
     /// Sends one body and returns the text of a 2xx response.
     async fn post(&self, connection: &Connection, body: Vec<u8>) -> Result<String, Failure> {
         let label = self.label();
-        let url = format!("{}{}", connection.base, self.path);
-        let request = connection
-            .request(self.method.clone(), &url)
-            .header(CONTENT_TYPE, self.content_type.clone())
-            .body(body);
+        let request = self.request(connection, body);
         let response = connection.send(request).await.map_err(|e| Failure {
             retryable: e.retryable,
             status: None,

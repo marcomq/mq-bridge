@@ -506,6 +506,49 @@ Two more shapes, as the `query` section alone:
 These three shapes were run against a stub server only, not against
 Elasticsearch or Qdrant.
 
+### Streaming an answer
+
+With `per_message: true` and `stream_to`, each request is read as server-sent
+events. The text at `value` in each event goes to `stream_to` the moment it
+arrives; the whole text is still the message's response, so the input is
+committed after it. This is how [`openai_chat`](./openai.md#streaming-the-answer)
+streams, and Anthropic's `/v1/messages` is a recipe:
+
+```yaml
+output:
+  http_bulk:
+    url: https://api.anthropic.com
+    headers:
+      x-api-key: <api key>
+      anthropic-version: "2023-06-01"
+    query:
+      path: /v1/messages
+      format: json_array
+      per_message: true
+      request: '{"model":"claude-haiku-4-5","max_tokens":1024,"stream":true,"messages":[{"role":"user","content":"${payload:text}"}]}'
+      value: /delta/text
+      stop_reason: /delta/stop_reason
+      error: /error/message
+      stream_to: { nats: { url: "nats://localhost:4222", subject: "chat.tokens" } }
+      cancel_from: { nats: { url: "nats://localhost:4222", subject: "chat.cancel" } }
+```
+
+- **Per event:** `value` points to the text, `error` to an error text, and
+  `stop_reason` to why the answer ended. Events with neither text nor stop
+  reason, such as `ping`, keepalives and data that is not JSON, are skipped.
+- **The end.** The stream is complete at the data `stream_done` names, such as
+  OpenAI's `[DONE]`, or when it closes after a stop reason. Without
+  `stream_done` and `stop_reason`, closing is the end. Any other close fails
+  the message as retryable.
+- **Errors.** A response that is not `text/event-stream`, or an error event
+  before the first text, fails the message for good. An error event later
+  fails it as retryable.
+- Token metadata, retries, cancelling and a failing `stream_to` work as
+  described for [`openai_chat`](./openai.md#streaming-the-answer).
+  `request_timeout_ms` bounds each silence of the stream; unset, it is 300 s.
+- Under [`lookup`](../cookbook/lookup.md) the tokens still go to `stream_to`
+  and the lookup gets the whole answer.
+
 ## Fields
 
 | Field | Default | Meaning |
@@ -562,6 +605,9 @@ Elasticsearch or Qdrant.
 | `index` | none | JSON pointer, inside an entry, to the `{index}` of its message. Entries are then matched by that number instead of by position; a number that is missing, repeated or unknown makes the response unusable |
 | `stop_reason` | none | JSON pointer to why the response ended, e.g. `/choices/0/finish_reason`; named in the error when the answers cannot be matched |
 | `split_on_reject` | `false` | A request refused with 400, 409, 413 or 422, or a response whose answers cannot be matched: ask again in halves until the messages at fault stand alone, so only they fail. Without it the batch fails for good |
+| `stream_to` | none | Reads each answer as server-sent events and sends each `value` to this endpoint, see [Streaming an answer](#streaming-an-answer). Needs `per_message` and `value`, excludes `found`. JSON text in a URI |
+| `cancel_from` | none | With `stream_to`: a message here stops the request with its `correlation_id`. JSON text in a URI |
+| `stream_done` | none | With `stream_to`: the event data that ends the stream, e.g. `[DONE]` |
 
 `max_messages`, `responses_text`, `index` and `split_on_reject` exclude `per_message`.
 

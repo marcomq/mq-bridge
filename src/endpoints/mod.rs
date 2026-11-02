@@ -2787,6 +2787,12 @@ async fn create_base_publisher(
         }
         #[cfg(feature = "http-bulk")]
         EndpointType::HttpBulk(cfg) => {
+            if cfg.query.as_ref().is_some_and(|q| q.stream_to.is_some()) {
+                return Ok(
+                    Box::new(http_bulk::StreamQueryPublisher::new(route_name, cfg).await?)
+                        as Box<dyn MessagePublisher>,
+                );
+            }
             Ok(Box::new(http_bulk::HttpBulkPublisher::new(cfg)?) as Box<dyn MessagePublisher>)
         }
         #[cfg(feature = "http")]

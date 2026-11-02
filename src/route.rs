@@ -631,6 +631,20 @@ fn load_named_plugins(
         EndpointType::Reader(inner) => nested.push(inner),
         EndpointType::Request(config) => nested.extend([&*config.to, &*config.forward_to]),
         EndpointType::Http(config) => nested.extend(config.stream_response_to.as_deref()),
+        EndpointType::HttpBulk(config) => nested.extend(config.query.iter().flat_map(|query| {
+            query
+                .stream_to
+                .as_deref()
+                .into_iter()
+                .chain(query.cancel_from.as_deref())
+        })),
+        EndpointType::OpenAiChat(config) => nested.extend(
+            config
+                .stream_to
+                .as_deref()
+                .into_iter()
+                .chain(config.cancel_from.as_deref()),
+        ),
         _ => {}
     }
     for endpoint in nested {

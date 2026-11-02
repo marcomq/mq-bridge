@@ -555,6 +555,25 @@ where
     Ok(opt.unwrap_or(false))
 }
 
+/// A nested endpoint, or the JSON text of one as a URI query spells it.
+pub(crate) fn deserialize_nested_endpoint<'de, D>(
+    deserializer: D,
+) -> Result<Option<Box<Endpoint>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = match Option::<serde_json::Value>::deserialize(deserializer)? {
+        None => return Ok(None),
+        Some(serde_json::Value::String(text)) if text.trim_start().starts_with('{') => {
+            serde_json::from_str(&text).map_err(serde::de::Error::custom)?
+        }
+        Some(value) => value,
+    };
+    serde_json::from_value(value)
+        .map(Some)
+        .map_err(serde::de::Error::custom)
+}
+
 /// Accepts the CLI's `local-store://` spelling of a local directory and stores it as `file://`.
 pub(crate) fn deserialize_object_store_url<'de, D>(deserializer: D) -> Result<String, D::Error>
 where

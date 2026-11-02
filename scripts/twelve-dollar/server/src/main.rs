@@ -122,9 +122,13 @@ impl Api {
         }
         let mut mac = self.mac.clone();
         mac.update(signed.as_bytes());
-        mac.verify_slice(&URL_SAFE_NO_PAD.decode(signature).ok()?).ok()?;
+        mac.verify_slice(&URL_SAFE_NO_PAD.decode(signature).ok()?)
+            .ok()?;
         let claims = decode_json(payload)?;
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs_f64();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()?
+            .as_secs_f64();
         (claims["exp"].as_f64()? > now).then_some(claims)
     }
 

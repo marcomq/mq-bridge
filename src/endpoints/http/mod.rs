@@ -1391,7 +1391,9 @@ impl MessageConsumer for HttpConsumer {
         // limit. This is cheaper than `recv().await` plus a `try_recv()` loop (one
         // channel operation instead of N) and coalesces bursts more tightly — the
         // single per-route receiver is otherwise a per-message wake-up point.
-        let mut batch: Vec<HttpSourceMessage> = Vec::with_capacity(max_messages);
+        // Sized to what is queued, not `max_messages`: a full-size buffer per batch costs ~80 KB.
+        let queued = self.request_rx.len().clamp(1, max_messages);
+        let mut batch: Vec<HttpSourceMessage> = Vec::with_capacity(queued);
         let received = self.request_rx.recv_many(&mut batch, max_messages);
         // Drain mode: a brief idle timeout yields an empty batch so --drain can fire.
         let Some(count) = crate::traits::drain_gated(self.exit_on_empty, received).await else {

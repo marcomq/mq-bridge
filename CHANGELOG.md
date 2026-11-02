@@ -19,6 +19,25 @@ All notable changes to `mq-bridge`. Newest first.
   listed credential header still goes to `mqb.src.http_<name>`. Unset keeps every header.
   Each header left out saves two allocations per request (43 → 35 with only `host` kept).
   Builder: `HttpConfig::with_forward_headers`.
+- **`openai_chat` streams with `stream_to`.** Each text delta goes to that endpoint as it
+  arrives, with `correlation_id`, `mqb.stream.attempt`, `mqb.stream.index` and `mqb.stream.end` metadata; the
+  last one carries `mqb.stream.status` (`complete`, `cancelled`, `error`). The whole answer is
+  still the response, so the input is committed after it and a retry starts a new attempt.
+  `cancel_from` stops a running request by `correlation_id` and answers with the text so
+  far; a cancel that arrives before its request starts is kept for 30 s. Every attempt
+  ends with a last token message, also one that fails before the stream starts.
+  `messages_from_payload: true` sends the payload as the `messages` array, e.g. a
+  whole conversation. Code that builds `OpenAiChatConfig` without `..Default::default()`
+  needs the three new fields.
+- **`http_bulk` `query` streams with `stream_to`.** With `per_message: true` each answer is
+  read as server-sent events; `value`, `error` and `stop_reason` apply to each event, and
+  `stream_done` names the data that ends the stream (e.g. `[DONE]`). Token metadata and
+  `cancel_from` work as for `openai_chat`, which is now this query with the fields filled
+  in, so Anthropic's `/v1/messages` streams as a recipe. A response that is not
+  `text/event-stream`, or an error event before the first text, fails for good;
+  keepalives and events that are not JSON are skipped. `HttpBulkPublisher::new` refuses
+  `query.stream_to`; build it through the endpoint factory. Code that builds
+  `HttpBulkQuery` without `..Default::default()` needs the three new fields.
 
 ### Performance
 
@@ -26,6 +45,10 @@ All notable changes to `mq-bridge`. Newest first.
   reply goes back over the request's channel directly instead of through a boxed closure: 78
   instead of 81 allocations and ~2% less CPU per request. An `http` → `response` route takes
   the inline path and is unchanged.
+- **The routed `http` input sizes each batch to the requests waiting, not to `batch_size`.**
+  It used to reserve room for a full batch on every receive (~80 KB at `batch_size` 512, even
+  for one request). CPU per request is unchanged with mimalloc and with the macOS system
+  allocator.
 
 ## 1.3.0
 

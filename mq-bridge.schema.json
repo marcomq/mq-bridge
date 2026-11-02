@@ -5621,6 +5621,35 @@
         "split_on_reject": {
           "description": "A refused request (400, 409, 413, 422) or unmatched answers: ask again in halves.",
           "type": "boolean"
+        },
+        "stream_to": {
+          "description": "`per_message` only: reads the answer as server-sent events and sends each `value` to this endpoint.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Endpoint"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cancel_from": {
+          "description": "With `stream_to`: a message here with a request's `correlation_id` stops it.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Endpoint"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "stream_done": {
+          "description": "With `stream_to`: the event data that ends the stream, e.g. `[DONE]`.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "additionalProperties": false,
@@ -6244,7 +6273,13 @@
         },
         "prompt": {
           "description": "Template of the user message, e.g. `Summarise: ${payload:body}`.",
-          "type": "string"
+          "type": "string",
+          "default": ""
+        },
+        "messages_from_payload": {
+          "description": "The payload is the `messages` array itself, e.g. a whole conversation.",
+          "type": "boolean",
+          "default": false
         },
         "json": {
           "description": "Ask for a JSON object and parse the answer.",
@@ -6295,12 +6330,33 @@
         },
         "auth": {
           "description": "`oauth2` or `aws_sigv4` credentials, as on `http_bulk`; JSON in a URI."
+        },
+        "stream_to": {
+          "description": "Streams the answer: each text delta goes to this endpoint as it arrives.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Endpoint"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cancel_from": {
+          "description": "With `stream_to`: a message here with a request's `correlation_id` stops it.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Endpoint"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false,
       "required": [
-        "model",
-        "prompt"
+        "model"
       ]
     },
     "OpenAiEmbeddingsConfig": {

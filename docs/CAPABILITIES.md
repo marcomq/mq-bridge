@@ -128,7 +128,7 @@ ends when its source is empty if the route has `exit_on_empty`, so there is no c
 | `file` | no | yes |  |
 | `grpc` | depends | no | The dynamic client returns the RPC's reply. |
 | `http` | yes | no | The reply is the HTTP response, with the status in `http_status_code`. |
-| `http_bulk` | depends | with `operation` | Replies with `query` set. |
+| `http_bulk` | depends | with `operation` | Replies with `query` set; with `query.stream_to` each token is sent there first. |
 | `ibmmq` | no | no |  |
 | `kafka` | no | no |  |
 | `meilisearch` | no | with `operation` |  |
@@ -138,7 +138,7 @@ ends when its source is empty if the route has `exit_on_empty`, so there is no c
 | `nats` | with `request_reply: true` | no |  |
 | `null` | no | no |  |
 | `object_store` | no | no |  |
-| `openai_chat` | yes | no | The reply is the model's answer. |
+| `openai_chat` | yes | no | The reply is the model's answer; with `stream_to` each token is sent there first. |
 | `openai_embeddings` | yes | no | The reply is the vector. |
 | `qdrant` | no | with `operation` |  |
 | `reader` | yes | no | The reply is the message read from the wrapped input. |
