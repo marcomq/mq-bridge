@@ -24,7 +24,12 @@ pub mod http_status;
 pub mod interpolation;
 #[cfg(feature = "file")]
 pub(crate) mod local_staging;
-#[cfg(any(feature = "sqlx", feature = "clickhouse", feature = "mongodb"))]
+#[cfg(any(
+    feature = "sqlite",
+    feature = "sqlx",
+    feature = "clickhouse",
+    feature = "mongodb"
+))]
 pub(crate) mod lookup_batch;
 pub mod ndjson;
 pub(crate) mod pack;
@@ -48,6 +53,7 @@ pub(crate) mod tls;
     feature = "nats",
     feature = "mongodb",
     feature = "redis-streams",
+    feature = "sqlite",
     feature = "sqlx",
     feature = "clickhouse",
     feature = "http-bulk",

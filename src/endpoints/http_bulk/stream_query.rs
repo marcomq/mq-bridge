@@ -709,7 +709,10 @@ mod tests {
         for (index, token) in tokens.iter().enumerate() {
             assert_eq!(meta(token, "mqb.stream.index"), index.to_string());
             assert_eq!(meta(token, "correlation_id"), "c1");
-            assert_eq!(meta(token, "mqb.stream.attempt"), meta(&response, "mqb.stream.attempt"));
+            assert_eq!(
+                meta(token, "mqb.stream.attempt"),
+                meta(&response, "mqb.stream.attempt")
+            );
             assert_eq!(meta(token, "mqb.stream.end"), (index == 2).to_string());
         }
         assert_eq!(meta(&tokens[2], "mqb.stream.status"), "complete");
@@ -806,7 +809,10 @@ mod tests {
         assert_eq!(response.get_payload_str(), "\"par\"");
         assert_eq!(meta(&response, "mqb.stream.status"), "cancelled");
         let tokens = tokens.drain_messages();
-        assert_eq!(meta(tokens.last().unwrap(), "mqb.stream.status"), "cancelled");
+        assert_eq!(
+            meta(tokens.last().unwrap(), "mqb.stream.status"),
+            "cancelled"
+        );
     }
 
     #[tokio::test]
@@ -827,7 +833,10 @@ mod tests {
         let sent = tokio::time::timeout(Duration::from_secs(3), publisher.send(request)).await;
         let response = answer(sent.expect("cancelled in time"));
         assert_eq!(meta(&response, "mqb.stream.status"), "cancelled");
-        assert_eq!(meta(&tokens.drain_messages()[0], "mqb.stream.status"), "cancelled");
+        assert_eq!(
+            meta(&tokens.drain_messages()[0], "mqb.stream.status"),
+            "cancelled"
+        );
 
         // The cancel was used up: the next request with that id runs.
         let request = CanonicalMessage::from("hi").with_metadata_kv("correlation_id", "early");

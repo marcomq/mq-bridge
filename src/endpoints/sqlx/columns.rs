@@ -1,9 +1,9 @@
 //! `columns: auto`: write each top-level JSON field into the table column of the same name.
 
 use super::{
-    audited_sql, bind_key, bind_value, classify_sql_error, copy_in, open_copy_pool,
-    positional_placeholder, push_copy_value, quote_ident_for, BindValue, MYSQL_COLUMN_TYPES_SQL,
-    SQLITE_COLUMN_TYPES_SQL,
+    audited_sql, bind_key, bind_value, classify_sql_error, copy_rows, open_copy_pool,
+    positional_placeholder, push_copy_value, quote_ident_for, BindValue, CopyPool,
+    MYSQL_COLUMN_TYPES_SQL, SQLITE_COLUMN_TYPES_SQL,
 };
 use crate::errors::InvalidConfig;
 use crate::models::SqlxConfig;
@@ -11,7 +11,6 @@ use crate::outcomes::SentBatch;
 use crate::traits::PublisherError;
 use crate::CanonicalMessage;
 use anyhow::anyhow;
-use sqlx::postgres::{PgPool, PgPoolCopyExt};
 use sqlx::{AnyPool, Row};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -54,7 +53,7 @@ pub(super) struct AutoColumns {
     key: Vec<usize>,
     /// Takes the fields without a column of their own, as one JSON object.
     extra: Option<usize>,
-    copy_pool: Option<PgPool>,
+    copy_pool: Option<CopyPool>,
     warned_unknown: AtomicBool,
 }
 
@@ -591,23 +590,7 @@ impl AutoColumns {
                 }
                 copies.push((stmt, buf));
             }
-            match copies.as_slice() {
-                [] => {}
-                [(stmt, buf)] => {
-                    let copier = copy_pool.copy_in_raw(stmt).await;
-                    copy_in(copier.map_err(classify_sql_error)?, buf.as_bytes()).await?;
-                }
-                // Records of several shapes: one transaction, so a retry cannot write some twice.
-                _ => {
-                    let mut tx = copy_pool.begin().await.map_err(retryable)?;
-                    for (stmt, buf) in &copies {
-                        let copier = tx.copy_in_raw(stmt).await;
-                        copy_in(copier.map_err(classify_sql_error)?, buf.as_bytes()).await?;
-                    }
-                    tx.commit().await.map_err(retryable)?;
-                }
-            }
-            return Ok(());
+            return copy_rows(copy_pool, &copies).await;
         }
 
         // One statement is atomic by itself; several need a transaction.

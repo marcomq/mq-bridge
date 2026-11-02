@@ -1273,7 +1273,7 @@ fn input_applies_no_resume(endpoint_type: &EndpointType) -> bool {
         EndpointType::ObjectStore(_) => cfg!(feature = "object-store"),
         EndpointType::HttpBulk(_) => cfg!(feature = "http-bulk"),
         EndpointType::ClickHouse(_) => cfg!(feature = "clickhouse"),
-        EndpointType::Sqlx(_) => cfg!(feature = "sqlx"),
+        EndpointType::Sqlx(_) => cfg!(any(feature = "sqlite", feature = "sqlx")),
         EndpointType::MongoDb(_) => cfg!(feature = "mongodb"),
         EndpointType::Ref(_) => true,
         _ => false,
@@ -4043,7 +4043,7 @@ mod tests {
         assert!(!source_replays_from_start(&sqlx, false, 0));
         assert_eq!(
             source_replays_from_start(&sqlx, true, 0),
-            cfg!(feature = "sqlx")
+            cfg!(any(feature = "sqlite", feature = "sqlx"))
         );
     }
 
@@ -4109,7 +4109,7 @@ mod tests {
         }
         assert_eq!(
             sync(&cursor, &file("off"), true).is_none(),
-            cfg!(feature = "sqlx"),
+            cfg!(any(feature = "sqlite", feature = "sqlx")),
             "no_resume saves nothing where the input applies it"
         );
         assert!(sync(&Endpoint::new_memory("synced_in", 1), &file("off"), false).is_none());
@@ -7900,7 +7900,7 @@ mod tests {
 
     // Creates a temporary SQLite file with a `messages` table, mirroring the
     // setup used by the sqlx endpoint tests.
-    #[cfg(feature = "sqlx")]
+    #[cfg(any(feature = "sqlite", feature = "sqlx"))]
     async fn setup_drain_db() -> (tempfile::TempDir, String) {
         use sqlx::Connection;
         sqlx::any::install_default_drivers();
@@ -7932,7 +7932,7 @@ mod tests {
 
     // A sqlx -> memory route with exit_on_empty drains the source table and then
     // completes on its own; all rows must arrive at the output.
-    #[cfg(feature = "sqlx")]
+    #[cfg(any(feature = "sqlite", feature = "sqlx"))]
     #[tokio::test]
     async fn test_route_exit_on_empty_drains_and_stops() {
         use crate::endpoints::sqlx::SqlxPublisher;
@@ -8005,7 +8005,7 @@ mod tests {
 
     // Regression: without exit_on_empty, a drained route keeps polling and does
     // not terminate on an empty batch.
-    #[cfg(feature = "sqlx")]
+    #[cfg(any(feature = "sqlite", feature = "sqlx"))]
     #[tokio::test]
     async fn test_route_without_exit_on_empty_keeps_running() {
         use crate::models::SqlxConfig;
@@ -8053,7 +8053,7 @@ mod tests {
     // A plain SQLite table with an `id`/`payload` schema but NO `locked_until` lease
     // column — used to exercise both queue-mode failure (Issue 3) and cursor-mode
     // full-table reads (Issue 2).
-    #[cfg(feature = "sqlx")]
+    #[cfg(any(feature = "sqlite", feature = "sqlx"))]
     async fn setup_plain_db(rows: usize) -> (tempfile::TempDir, String) {
         use sqlx::Connection;
         sqlx::any::install_default_drivers();
@@ -8089,7 +8089,7 @@ mod tests {
     // `cursor_column`) on a table lacking the `locked_until` lease column hits an
     // unrecoverable "no such column" error. It must fail fast (RouteOutcome::Failed)
     // instead of reconnecting every reconnect_interval_ms forever.
-    #[cfg(feature = "sqlx")]
+    #[cfg(any(feature = "sqlite", feature = "sqlx"))]
     #[tokio::test]
     async fn test_route_sqlite_missing_locked_until_fails_fast() {
         use crate::models::SqlxConfig;
@@ -8130,7 +8130,7 @@ mod tests {
     // Issue 2: SQLite gets a full-table read via `cursor_column`, exactly like
     // Postgres (the ETL path) — read mode is config-driven, not driver-specific. A
     // cursor-mode drain of the plain table reads every row and exits Completed.
-    #[cfg(feature = "sqlx")]
+    #[cfg(any(feature = "sqlite", feature = "sqlx"))]
     #[tokio::test]
     async fn test_route_sqlite_cursor_column_drains_full_table() {
         use crate::models::SqlxConfig;
@@ -8189,7 +8189,7 @@ mod tests {
 
     // exit_on_empty must stop the route in concurrent mode too, not just sequential:
     // the drain reports empty so the reconnect loop stops instead of looping forever.
-    #[cfg(feature = "sqlx")]
+    #[cfg(any(feature = "sqlite", feature = "sqlx"))]
     #[tokio::test]
     async fn test_route_exit_on_empty_drains_and_stops_concurrent() {
         use crate::endpoints::sqlx::SqlxPublisher;

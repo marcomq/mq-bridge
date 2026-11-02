@@ -6,6 +6,9 @@ All notable changes to `mq-bridge`. Newest first.
 
 ### Added
 
+- **Feature `sqlite`: the `sqlx` endpoint with only the SQLite driver.** `sqlx` still
+  brings PostgreSQL, MySQL/MariaDB and SQLite. Without the PostgreSQL driver, `bulk_copy`
+  is unavailable.
 - **Python: `Route.with_batch_handler` gets the whole batch.** `handler(messages)` returns one
   result per message, in order, so a batch can share one database transaction. Node has it as
   `Route.withBatchHandler`, C as `mqb_route_set_batch_handler`, where the handler fills an

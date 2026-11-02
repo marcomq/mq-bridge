@@ -542,7 +542,12 @@ pub(crate) fn pick_path(bytes: &[u8], segments: &[String]) -> Option<Value> {
 /// document is malformed or not an object), without allocating the rest of the document.
 /// Like `pick_path`, bad escapes or UTF-8 inside a skipped string go unnoticed.
 #[cfg_attr(
-    not(any(feature = "sqlx", feature = "clickhouse", feature = "http-bulk")),
+    not(any(
+        feature = "sqlite",
+        feature = "sqlx",
+        feature = "clickhouse",
+        feature = "http-bulk"
+    )),
     allow(dead_code)
 )]
 pub(crate) fn pick_fields(bytes: &[u8], wanted: impl Fn(&str) -> bool) -> Option<Value> {
@@ -553,7 +558,12 @@ pub(crate) fn pick_fields(bytes: &[u8], wanted: impl Fn(&str) -> bool) -> Option
 }
 
 #[cfg_attr(
-    not(any(feature = "sqlx", feature = "clickhouse", feature = "http-bulk")),
+    not(any(
+        feature = "sqlite",
+        feature = "sqlx",
+        feature = "clickhouse",
+        feature = "http-bulk"
+    )),
     allow(dead_code)
 )]
 struct PickFields<'f, F>(&'f F);
@@ -592,7 +602,12 @@ impl<'de, F: Fn(&str) -> bool> Visitor<'de> for PickFields<'_, F> {
 
 /// An object key, kept only when `wanted` accepts it.
 #[cfg_attr(
-    not(any(feature = "sqlx", feature = "clickhouse", feature = "http-bulk")),
+    not(any(
+        feature = "sqlite",
+        feature = "sqlx",
+        feature = "clickhouse",
+        feature = "http-bulk"
+    )),
     allow(dead_code)
 )]
 struct WantedKey<'f, F>(&'f F);

@@ -242,7 +242,7 @@ aws-sdk-sns = { version = "1.107", optional = true, default-features = false, fe
 aws-sigv4 = { version = "1.4", optional = true }
 
 # SQLx
-sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "mysql", "any", "sqlite-bundled"], optional = true }
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls", "any"], optional = true }
 
 # ClickHouse — talks the ClickHouse HTTP interface directly (JSONEachRow in/out).
 # reqwest is used rather than the typed `clickhouse` crate because that crate is
@@ -437,7 +437,9 @@ zeromq-omq = ["dep:omq-tokio"]
 redis-streams = ["dep:redis"]
 # Note: The grpc feature requires protobuf-src which can significantly increase build times.
 grpc = ["tonic", "tonic-reflection", "prost", "prost-types", "prost-reflect", "tokio-stream", "tonic-prost", "tonic-prost-build", "rustls", "vendored-protoc"]
-sqlx = ["dep:sqlx"]
+# SQL endpoint with only the SQLite driver; `sqlx` adds PostgreSQL and MySQL/MariaDB.
+sqlite = ["dep:sqlx", "sqlx/sqlite-bundled"]
+sqlx = ["sqlite", "sqlx/postgres", "sqlx/mysql"]
 clickhouse = ["dep:reqwest", "dep:flate2", "dep:lz4_flex", "dep:zstd"]
 # Generic bulk document sink over HTTP (search engines and similar APIs).
 http-bulk = ["dep:reqwest", "dep:flate2", "dep:lz4_flex", "dep:zstd"]

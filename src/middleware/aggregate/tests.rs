@@ -533,7 +533,7 @@ fn a_stored_state_keeps_every_digit() {
 }
 
 /// Two instances on one store count every message once, and a third starts from their state.
-#[cfg(any(feature = "sqlx", feature = "mongodb"))]
+#[cfg(any(feature = "sqlite", feature = "sqlx", feature = "mongodb"))]
 async fn check_shared_store(url: &str) {
     let config: AggregateMiddleware = serde_yaml_ng::from_str(&format!(
         "{{ store: '{url}', key: '${{payload:card}}', into: stats, expression: '{SUM}' }}"
@@ -549,7 +549,7 @@ async fn check_shared_store(url: &str) {
     assert_eq!(out[0]["stats"], json!({"sum": 61, "n": 61}));
 }
 
-#[cfg(feature = "sqlx")]
+#[cfg(any(feature = "sqlite", feature = "sqlx"))]
 #[tokio::test]
 async fn a_sqlite_store_is_shared_and_survives_a_restart() {
     let dir = tempfile::tempdir().unwrap();
@@ -566,7 +566,7 @@ async fn a_sqlite_store_is_shared_and_survives_a_restart() {
 // Live: MQB_AGG_STORE_URL=postgres://postgres:pw@localhost:55432/t/agg_test (or a
 // mongodb://localhost:57017/t/agg_test URL) cargo test --features aggregate,sqlx,mongodb,yaml \
 //   --lib live_store -- --ignored --nocapture. The table or collection must be empty.
-#[cfg(any(feature = "sqlx", feature = "mongodb"))]
+#[cfg(any(feature = "sqlite", feature = "sqlx", feature = "mongodb"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "needs a database"]
 async fn a_live_store_is_shared_and_survives_a_restart() {
@@ -578,7 +578,7 @@ async fn a_live_store_is_shared_and_survives_a_restart() {
 }
 
 /// Throughput through a store: five keys with three moving averages each, like the fold bench.
-#[cfg(any(feature = "sqlx", feature = "mongodb"))]
+#[cfg(any(feature = "sqlite", feature = "sqlx", feature = "mongodb"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "bench, needs a database"]
 async fn a_live_store_bench() {

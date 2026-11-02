@@ -254,7 +254,7 @@ pub use {prost, tonic};
 pub use mqi;
 #[cfg(feature = "postgres-cdc")]
 pub use pgwire_replication;
-#[cfg(feature = "sqlx")]
+#[cfg(any(feature = "sqlite", feature = "sqlx"))]
 pub use sqlx;
 
 pub mod consumer {
