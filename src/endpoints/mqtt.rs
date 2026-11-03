@@ -1240,16 +1240,7 @@ fn sanitize_for_client_id(input: &str) -> String {
 }
 
 async fn build_tls_config(config: &MqttConfig) -> anyhow::Result<rustls::ClientConfig> {
-    let mut root_cert_store = rustls::RootCertStore::empty();
-    if let Some(ca_file) = &config.tls.ca_file {
-        let mut ca_buf = std::io::BufReader::new(std::fs::File::open(ca_file)?);
-        let certs = rustls_pemfile::certs(&mut ca_buf).collect::<Result<Vec<_>, _>>()?;
-        for cert in certs {
-            root_cert_store.add(cert)?;
-        }
-    } else {
-        root_cert_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    }
+    let root_cert_store = crate::support::tls::root_store(&config.tls)?;
 
     let client_config_builder =
         rustls::ClientConfig::builder_with_provider(crate::endpoints::get_crypto_provider()?)

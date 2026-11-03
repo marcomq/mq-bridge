@@ -16,6 +16,7 @@ mod consumer;
 mod presets;
 mod publisher;
 mod query;
+mod stream_query;
 pub use crate::models::{
     ElasticsearchConfig, ElasticsearchMode, MeilisearchConfig, OpenAiChatConfig,
     OpenAiEmbeddingsConfig, QdrantConfig, TypesenseConfig,
@@ -28,6 +29,7 @@ pub use presets::{
     register_preset_with, schema as preset_schema, segment as preset_segment,
 };
 pub use publisher::HttpBulkPublisher;
+pub(crate) use stream_query::StreamQueryPublisher;
 
 use crate::models::HttpBulkConfig;
 use anyhow::{bail, Context};
@@ -51,6 +53,16 @@ struct Connection {
 
 impl Connection {
     fn new(config: &HttpBulkConfig) -> anyhow::Result<Self> {
+        let streams = config.read.as_ref().and_then(|read| read.stream).is_some();
+        Self::build(config, streams)
+    }
+
+    /// For responses read as a stream: `request_timeout_ms` bounds each silence.
+    fn streaming(config: &HttpBulkConfig) -> anyhow::Result<Self> {
+        Self::build(config, true)
+    }
+
+    fn build(config: &HttpBulkConfig, streams: bool) -> anyhow::Result<Self> {
         let url = url::Url::parse(&config.url).context("Invalid http_bulk URL")?;
         if !url.has_host() || !matches!(url.scheme(), "http" | "https") {
             bail!("http_bulk URL must be an absolute http(s) URL, e.g. 'http://localhost:7700'");
@@ -78,7 +90,6 @@ impl Connection {
             .connect_timeout(Duration::from_millis(
                 config.connect_timeout_ms.unwrap_or(10_000),
             ));
-        let streams = config.read.as_ref().and_then(|read| read.stream).is_some();
         builder = match config.request_timeout_ms {
             Some(0) => builder,
             // An open stream has no total duration: the timeout bounds each silence.
@@ -89,40 +100,7 @@ impl Connection {
             None => builder.read_timeout(DEFAULT_READ_TIMEOUT),
         };
         crate::support::tls_check::warn_unverified("http_bulk", config.tls.accept_invalid_certs);
-        if config.tls.accept_invalid_certs {
-            builder = builder.danger_accept_invalid_certs(true);
-        }
-        if let Some(ca) = &config.tls.ca_file {
-            let pem = std::fs::read(ca)
-                .with_context(|| format!("Failed to read http_bulk CA file '{ca}'"))?;
-            builder = builder.add_root_certificate(
-                reqwest::Certificate::from_pem(&pem)
-                    .with_context(|| format!("Invalid http_bulk CA certificate '{ca}'"))?,
-            );
-        }
-        if config.tls.cert_password.is_some() {
-            bail!("http_bulk tls.cert_password is not supported; use an unencrypted key");
-        }
-        match (&config.tls.cert_file, &config.tls.key_file) {
-            (Some(cert), key) => {
-                let mut pem = std::fs::read(cert)
-                    .with_context(|| format!("Failed to read http_bulk cert file '{cert}'"))?;
-                if let Some(key) = key {
-                    pem.push(b'\n');
-                    pem.extend(
-                        std::fs::read(key).with_context(|| {
-                            format!("Failed to read http_bulk key file '{key}'")
-                        })?,
-                    );
-                }
-                builder =
-                    builder.identity(reqwest::Identity::from_pem(&pem).with_context(|| {
-                        format!("Invalid http_bulk client certificate '{cert}'")
-                    })?);
-            }
-            (None, Some(_)) => bail!("http_bulk tls.key_file needs tls.cert_file"),
-            (None, None) => {}
-        }
+        builder = crate::support::tls::reqwest_tls(builder, &config.tls, "http_bulk")?;
         let auth = auth::Auth::new(config.auth.as_ref(), config.tls.required)?;
         if sends_credentials_in_clear(&url, &headers, &auth) {
             warn!(
@@ -207,17 +185,31 @@ mod tests {
         preset_names().find_map(|name| Some((name, endpoint.get(name)?)))
     }
 
+    /// Builds the publisher; a streamed query is only validated, its `stream_to` may not exist here.
+    fn valid(config: &HttpBulkConfig) -> anyhow::Result<()> {
+        match config
+            .query
+            .as_ref()
+            .filter(|query| query.stream_to.is_some())
+        {
+            Some(query) => query::Query::new(query)
+                .and(Connection::streaming(config))
+                .map(|_| ()),
+            None => HttpBulkPublisher::new(config).map(|_| ()),
+        }
+    }
+
     #[test]
     fn the_recipes_in_the_book_are_valid_configurations() {
         let book = concat!(env!("CARGO_MANIFEST_DIR"), "/docs/book/connectors/");
         for (name, recipes) in [
-            ("http-bulk.md", 16),
+            ("http-bulk.md", 17),
             ("typesense.md", 2),
             ("elasticsearch.md", 2),
             ("postgrest.md", 2),
             ("qdrant.md", 2),
-            ("openai.md", 7),
-            ("../cookbook/llm.md", 4),
+            ("openai.md", 8),
+            ("../cookbook/llm.md", 5),
         ] {
             // The book is not part of the published crate.
             let Ok(page) = std::fs::read_to_string(format!("{book}{name}")) else {
@@ -259,8 +251,7 @@ mod tests {
                 for (preset, config) in asked.filter_map(named) {
                     let config = presets::resolve(preset, config)
                         .unwrap_or_else(|error| panic!("{name}: {error:#}"));
-                    HttpBulkPublisher::new(&config)
-                        .unwrap_or_else(|error| panic!("{name}: {error}"));
+                    valid(&config).unwrap_or_else(|error| panic!("{name}: {error}"));
                 }
                 let config = match (named(output), output.get("http_bulk")) {
                     (Some((preset, config)), _) => presets::resolve(preset, config),
@@ -271,9 +262,54 @@ mod tests {
                 };
                 let config: HttpBulkConfig =
                     config.unwrap_or_else(|error| panic!("{name}: {error:#}"));
-                HttpBulkPublisher::new(&config).unwrap_or_else(|error| panic!("{name}: {error}"));
+                valid(&config).unwrap_or_else(|error| panic!("{name}: {error}"));
             }
             assert_eq!(found, recipes, "{name}");
         }
+    }
+
+    #[tokio::test]
+    async fn bundled_roots_reject_a_private_ca_that_ca_file_trusts() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let generated = rcgen::generate_simple_self_signed(vec!["127.0.0.1".into()]).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let ca = dir.path().join("ca.pem");
+        std::fs::write(&ca, generated.cert.pem()).unwrap();
+        let key =
+            rustls::pki_types::PrivateKeyDer::Pkcs8(generated.signing_key.serialize_der().into());
+        let server = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![generated.cert.der().clone()], key)
+            .unwrap();
+        let acceptor = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(server));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("https://{}/", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            while let Ok((socket, _)) = listener.accept().await {
+                let Ok(mut tls) = acceptor.accept(socket).await else {
+                    continue;
+                };
+                let mut buffer = [0u8; 4096];
+                let _ = tls.read(&mut buffer).await;
+                let answer = "HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok";
+                let _ = tls.write_all(answer.as_bytes()).await;
+                let _ = tls.shutdown().await;
+            }
+        });
+        let get = |tls: crate::models::TlsConfig| {
+            let url = url.clone();
+            async move {
+                let mut config: HttpBulkConfig =
+                    serde_json::from_value(serde_json::json!({ "url": url }))?;
+                config.tls = tls;
+                let connection = Connection::new(&config)?;
+                anyhow::Ok(connection.http.get(url).send().await?.text().await?)
+            }
+        };
+        let bundled = crate::models::TlsConfig::new().with_ca_file("$.bundled");
+        assert!(get(bundled).await.is_err());
+        let trusted = crate::models::TlsConfig::new().with_ca_file(ca.to_string_lossy());
+        assert_eq!(get(trusted).await.unwrap(), "ok");
     }
 }

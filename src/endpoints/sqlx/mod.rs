@@ -5,7 +5,7 @@
 
 use super::poll::PollBackoff;
 use crate::canonical_message::tracing_support::LazyMessageIds;
-use crate::models::SqlxConfig;
+use crate::models::{CaRoots, SqlxConfig};
 use crate::support::interpolation::pick_fields;
 use crate::support::lookup_batch::{self, ListQuery};
 use crate::traits::{
@@ -16,6 +16,7 @@ use crate::CanonicalMessage;
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;
 use sqlx::any::AnyPoolOptions;
+#[cfg(feature = "sqlx")]
 use sqlx::postgres::{PgPool, PgPoolCopyExt, PgPoolOptions};
 use sqlx::{AnyPool, AssertSqlSafe, Column, Row};
 use std::sync::{Arc, Mutex};
@@ -384,6 +385,8 @@ fn build_sqlx_url_with_tls(config: &SqlxConfig) -> anyhow::Result<String> {
     }
 
     if config.tls.required {
+        let ca_file =
+            crate::support::tls_check::ca_file_path("sqlx", &config.tls, CaRoots::Bundled)?;
         let scheme = url.scheme().to_string();
         match scheme.as_str() {
             "postgres" | "postgresql" => {
@@ -394,11 +397,11 @@ fn build_sqlx_url_with_tls(config: &SqlxConfig) -> anyhow::Result<String> {
                 } else {
                     // Validation enabled: verify the chain and hostname. `sslrootcert`
                     // (appended below) supplies a custom CA when configured; without one
-                    // the system trust store is used.
+                    // the driver's bundled public roots are used.
                     query_pairs.append_pair("sslmode", "verify-full");
                 }
 
-                if let Some(ca) = &config.tls.ca_file {
+                if let Some(ca) = ca_file {
                     query_pairs.append_pair("sslrootcert", ca);
                 }
                 if let Some(cert) = &config.tls.cert_file {
@@ -429,10 +432,10 @@ fn build_sqlx_url_with_tls(config: &SqlxConfig) -> anyhow::Result<String> {
                     // Explicitly opted out of validation: encrypt but do not verify.
                     query_pairs.append_pair("ssl-mode", "REQUIRED");
                 } else {
-                    // Chain and host name, against `ssl-ca` or the system trust store.
+                    // Chain and host name, against `ssl-ca` or the driver's bundled public roots.
                     query_pairs.append_pair("ssl-mode", "VERIFY_IDENTITY");
                 }
-                if let Some(ca) = &config.tls.ca_file {
+                if let Some(ca) = ca_file {
                     query_pairs.append_pair("ssl-ca", ca);
                 }
                 if let Some(cert) = &config.tls.cert_file {
@@ -803,14 +806,29 @@ fn lookup_error(e: sqlx::Error) -> PublisherError {
 /// Bulk-load sink using PostgreSQL `COPY FROM STDIN`. `columns[i]` receives the value
 /// resolved from `sources[i]` — positional, mirroring the token-based INSERT.
 struct PgCopySink {
-    pool: PgPool,
+    pool: CopyPool,
     table: String,
     columns: Vec<String>,
     sources: Vec<ColumnSource>,
 }
 
+#[cfg(feature = "sqlx")]
+type CopyPool = PgPool;
+/// Without the PostgreSQL driver (`sqlite` only) there is no COPY pool.
+#[cfg(not(feature = "sqlx"))]
+enum CopyPool {}
+
 /// Dedicated native Postgres pool: COPY needs the typed pg protocol, not the `Any` layer.
-async fn open_copy_pool(config: &SqlxConfig) -> anyhow::Result<PgPool> {
+#[cfg(not(feature = "sqlx"))]
+async fn open_copy_pool(_config: &SqlxConfig) -> anyhow::Result<CopyPool> {
+    Err(anyhow!(
+        "bulk_copy needs PostgreSQL support (feature `sqlx`)"
+    ))
+}
+
+/// Dedicated native Postgres pool: COPY needs the typed pg protocol, not the `Any` layer.
+#[cfg(feature = "sqlx")]
+async fn open_copy_pool(config: &SqlxConfig) -> anyhow::Result<CopyPool> {
     let url = build_sqlx_url_with_tls(config)?;
     PgPoolOptions::new()
         .max_connections(config.max_connections.unwrap_or(5))
@@ -832,7 +850,34 @@ fn push_copy_value(buf: &mut String, value: BindValue) {
     }
 }
 
+/// Runs each `(COPY statement, rows)`; several run in one transaction, so a retry cannot write some twice.
+#[cfg(feature = "sqlx")]
+async fn copy_rows(pool: &CopyPool, copies: &[(String, String)]) -> Result<(), PublisherError> {
+    let retryable = |e: sqlx::Error| PublisherError::Retryable(anyhow!(e));
+    match copies {
+        [] => Ok(()),
+        [(stmt, buf)] => {
+            let copier = pool.copy_in_raw(stmt).await;
+            copy_in(copier.map_err(classify_sql_error)?, buf.as_bytes()).await
+        }
+        _ => {
+            let mut tx = pool.begin().await.map_err(retryable)?;
+            for (stmt, buf) in copies {
+                let copier = tx.copy_in_raw(stmt).await;
+                copy_in(copier.map_err(classify_sql_error)?, buf.as_bytes()).await?;
+            }
+            tx.commit().await.map_err(retryable)
+        }
+    }
+}
+
+#[cfg(not(feature = "sqlx"))]
+async fn copy_rows(pool: &CopyPool, _copies: &[(String, String)]) -> Result<(), PublisherError> {
+    match *pool {}
+}
+
 /// Sends `buf` as the data of a started `COPY … FROM STDIN` and ends it.
+#[cfg(feature = "sqlx")]
 async fn copy_in<C>(
     mut copier: sqlx::postgres::PgCopyIn<C>,
     buf: &[u8],
@@ -1951,8 +1996,7 @@ impl SqlxPublisher {
             buf.push('\n');
         }
 
-        let copier = sink.pool.copy_in_raw(&stmt).await;
-        copy_in(copier.map_err(classify_sql_error)?, buf.as_bytes()).await?;
+        copy_rows(&sink.pool, &[(stmt, buf)]).await?;
 
         trace!(count = messages.len(), table = %sink.table, "Bulk-copied batch to PostgreSQL");
         Ok(())

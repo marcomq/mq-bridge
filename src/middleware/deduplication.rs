@@ -136,7 +136,7 @@ pub(crate) enum DedupBackend {
         collection: Option<String>,
     },
     /// Shared SQL table (`postgres|mysql|mariadb|sqlite://…[/table]`).
-    #[cfg(feature = "sqlx")]
+    #[cfg(any(feature = "sqlite", feature = "sqlx"))]
     Sqlx { url: String, table: Option<String> },
 }
 
@@ -197,7 +197,7 @@ pub(crate) fn parse_dedup_store(spec: &str) -> anyhow::Result<DedupBackend> {
 
 /// Parse a non-sled `store:` scheme by delegating to the checkpoint URL parser, then accepting
 /// only the backends deduplication supports in this build.
-#[cfg(any(feature = "mongodb", feature = "sqlx"))]
+#[cfg(any(feature = "mongodb", feature = "sqlite", feature = "sqlx"))]
 fn parse_networked_dedup_store(spec: &str) -> anyhow::Result<DedupBackend> {
     match crate::checkpoint::parse_checkpoint_store(spec)? {
         #[cfg(feature = "mongodb")]
@@ -210,7 +210,7 @@ fn parse_networked_dedup_store(spec: &str) -> anyhow::Result<DedupBackend> {
             database,
             collection,
         }),
-        #[cfg(feature = "sqlx")]
+        #[cfg(any(feature = "sqlite", feature = "sqlx"))]
         crate::checkpoint::CheckpointBackend::Sqlx { url, table } => {
             Ok(DedupBackend::Sqlx { url, table })
         }
@@ -220,10 +220,10 @@ fn parse_networked_dedup_store(spec: &str) -> anyhow::Result<DedupBackend> {
     }
 }
 
-#[cfg(not(any(feature = "mongodb", feature = "sqlx")))]
+#[cfg(not(any(feature = "mongodb", feature = "sqlite", feature = "sqlx")))]
 fn parse_networked_dedup_store(spec: &str) -> anyhow::Result<DedupBackend> {
     Err(anyhow!(
-        "deduplication store '{spec}' requires a networked backend feature (mongodb or sqlx); this build supports only local sled paths"
+        "deduplication store '{spec}' requires a networked backend feature (mongodb, sqlite or sqlx); this build supports only local sled paths"
     ))
 }
 
@@ -256,7 +256,7 @@ async fn build_store(
             )
             .await
         }
-        #[cfg(feature = "sqlx")]
+        #[cfg(any(feature = "sqlite", feature = "sqlx"))]
         DedupBackend::Sqlx { url, table } => {
             crate::endpoints::sqlx::build_sql_dedup_store(
                 &url,

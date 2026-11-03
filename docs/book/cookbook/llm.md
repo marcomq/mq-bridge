@@ -180,9 +180,30 @@ It needs the `http-bulk` feature and no registration.
 
 ## Stream tokens
 
-These endpoints wait for the whole answer. For a token stream, call the API
-with the [`http`](../reference/http.md) output and `stream_response_to`, which
-publishes each server-sent event as its own message.
+`openai_chat` with `stream_to` sends each text delta to another endpoint as
+it arrives, and still answers with the whole text. A chat front end sends the
+conversation as the payload and reads the tokens by `correlation_id`:
+
+```yaml
+chat:
+  concurrency: 8
+  input: { memory: { topic: "chat.requests" } }
+  output:
+    openai_chat:
+      url: "http://localhost:11434"
+      model: llama3.2
+      messages_from_payload: true
+      stream_to: { memory: { topic: "chat.tokens" } }
+      cancel_from: { memory: { topic: "chat.cancel" } }
+```
+
+A message on `chat.cancel` with the same `correlation_id` stops the answer.
+`memory` topics reach only a front end in the same process, e.g. through the
+Python or Node binding; a separate one uses a broker, as in the
+[NATS example](../connectors/openai.md#streaming-the-answer). The metadata of the tokens and what a retry does to them are on the
+[connector page](../connectors/openai.md#streaming-the-answer). For the raw
+server-sent events of any other API, use the [`http`](../reference/http.md)
+output with `stream_response_to`.
 
 ## Other providers
 

@@ -565,6 +565,7 @@ export interface HttpConfig {
   concurrency_limit?: number | null;
   header_read_timeout_ms?: number | null;
   max_body_bytes?: number | null;
+  forward_headers?: string[] | null;
   basic_auth?: unknown[] | null;
   custom_headers?: Record<string, string>;
   shared?: boolean | null;
@@ -852,6 +853,9 @@ export interface HttpBulkQuery {
   index?: string | null;
   stop_reason?: string | null;
   split_on_reject?: boolean;
+  stream_to?: Endpoint | null;
+  cancel_from?: Endpoint | null;
+  stream_done?: string | null;
 }
 
 export interface HttpBulkRead {
@@ -954,7 +958,8 @@ export interface OpenAiChatConfig {
   api_key?: string | null;
   model: string;
   system?: string | null;
-  prompt: string;
+  prompt?: string;
+  messages_from_payload?: boolean;
   json?: boolean;
   options?: unknown;
   concurrency?: number | null;
@@ -963,6 +968,8 @@ export interface OpenAiChatConfig {
   request_timeout_ms?: number | null;
   tls?: unknown;
   auth?: unknown;
+  stream_to?: Endpoint | null;
+  cancel_from?: Endpoint | null;
 }
 
 export interface OpenAiEmbeddingsConfig {

@@ -42,7 +42,13 @@ use tokio_rustls::TlsAcceptor;
 use tracing::{debug, info, trace, warn};
 use uuid::Uuid;
 
-type HttpSourceMessage = (CanonicalMessage, CommitFunc);
+type HttpSourceMessage = (CanonicalMessage, HttpReply);
+
+/// How a routed request gets its disposition back.
+enum HttpReply {
+    Oneshot(tokio::sync::oneshot::Sender<MessageDisposition>),
+    Commit(CommitFunc),
+}
 
 #[derive(Clone, Default)]
 struct HttpConnInfo {
@@ -155,6 +161,7 @@ pub struct HttpConsumer {
     bound_addr: Option<SocketAddr>,
     /// Drain mode: only then does an idle recv time out into an empty batch.
     exit_on_empty: bool,
+    fire_and_forget: bool,
 }
 
 impl HttpConsumer {
@@ -197,6 +204,7 @@ struct HttpConsumerState {
     concurrency_limit: ConcurrencyLimiter,
     max_body_bytes: u64,
     method: Option<hyper::Method>,
+    forward_headers: Option<Vec<hyper::header::HeaderName>>,
 }
 
 /// Immutable snapshot of the registered HTTP routes.
@@ -763,6 +771,7 @@ impl HttpConsumer {
             config.workers.unwrap()
         };
         let route_id = HTTP_ROUTE_ID.fetch_add(1, Ordering::Relaxed);
+        let fire_and_forget = state.fire_and_forget;
         let server_key = HttpServerKey {
             listen_addr: addr.to_string(),
             tls: tls_config.clone(),
@@ -785,6 +794,7 @@ impl HttpConsumer {
             url: build_consumer_target_url(config, shared_server.bound_addr),
             bound_addr: shared_server.bound_addr,
             exit_on_empty: false,
+            fire_and_forget,
         })
     }
 }
@@ -843,6 +853,20 @@ fn setup_http_state_and_channel(
         );
     }
 
+    let forward_headers = config
+        .forward_headers
+        .as_ref()
+        .map(|names| {
+            names
+                .iter()
+                .map(|name| {
+                    hyper::header::HeaderName::from_bytes(name.as_bytes())
+                        .map_err(|e| anyhow::anyhow!("Invalid forward_headers name '{name}': {e}"))
+                })
+                .collect::<anyhow::Result<Vec<_>>>()
+        })
+        .transpose()?;
+
     let inline_echo = inline_publisher.as_ref().is_some_and(|publisher| {
         publisher
             .as_any()
@@ -865,6 +889,7 @@ fn setup_http_state_and_channel(
         concurrency_limit: ConcurrencyLimiter::new(config.concurrency_limit.unwrap_or(100)),
         max_body_bytes: config.max_body_bytes.unwrap_or(MAX_HTTP_BODY_BYTES),
         method,
+        forward_headers,
     };
     Ok((request_rx, state, buffer_size))
 }
@@ -1366,7 +1391,9 @@ impl MessageConsumer for HttpConsumer {
         // limit. This is cheaper than `recv().await` plus a `try_recv()` loop (one
         // channel operation instead of N) and coalesces bursts more tightly — the
         // single per-route receiver is otherwise a per-message wake-up point.
-        let mut batch: Vec<HttpSourceMessage> = Vec::with_capacity(max_messages);
+        // Sized to what is queued, not `max_messages`: a full-size buffer per batch costs ~80 KB.
+        let queued = self.request_rx.len().clamp(1, max_messages);
+        let mut batch: Vec<HttpSourceMessage> = Vec::with_capacity(queued);
         let received = self.request_rx.recv_many(&mut batch, max_messages);
         // Drain mode: a brief idle timeout yields an empty batch so --drain can fire.
         let Some(count) = crate::traits::drain_gated(self.exit_on_empty, received).await else {
@@ -1376,9 +1403,9 @@ impl MessageConsumer for HttpConsumer {
             return Err(anyhow!("HTTP source channel closed").into());
         }
 
-        let (messages, commits): (Vec<_>, Vec<_>) = batch.into_iter().unzip();
+        let (messages, replies): (Vec<_>, Vec<_>) = batch.into_iter().unzip();
+        let fire_and_forget = self.fire_and_forget;
 
-        // Create a batch commit that handles all collected messages
         let batch_commit: crate::traits::BatchCommitFunc =
             Box::new(move |dispositions: Vec<MessageDisposition>| {
                 Box::pin(async move {
@@ -1386,12 +1413,25 @@ impl MessageConsumer for HttpConsumer {
                         count = dispositions.len(),
                         "Committing batch of HTTP messages"
                     );
-                    // Commit each message with its corresponding disposition
-                    let mut results = Vec::with_capacity(commits.len());
-                    for (commit, disposition) in commits.into_iter().zip(dispositions) {
-                        results.push(commit(disposition).await);
+                    let mut result = Ok(());
+                    for (reply, disposition) in replies.into_iter().zip(dispositions) {
+                        match reply {
+                            HttpReply::Oneshot(tx) => {
+                                if tx.send(disposition).is_err() && !fire_and_forget {
+                                    trace!(
+                                        "HTTP handler was no longer waiting for commit disposition"
+                                    );
+                                }
+                            }
+                            HttpReply::Commit(commit) => {
+                                let committed = commit(disposition).await;
+                                if result.is_ok() {
+                                    result = committed;
+                                }
+                            }
+                        }
                     }
-                    results.into_iter().collect::<anyhow::Result<()>>()
+                    result
                 }) as crate::traits::BoxFuture<'static, anyhow::Result<()>>
             });
 
@@ -1634,6 +1674,11 @@ async fn handle_request_internal(
             if key.as_str().eq_ignore_ascii_case("content-encoding") {
                 content_encoding = Some(v_str.to_string());
             }
+            if let Some(allowed) = &state.forward_headers {
+                if !allowed.contains(key) {
+                    continue;
+                }
+            }
             let k_str = key.as_str();
             // `mqb.src.*` is reserved for framework provenance, so a request header may never
             // supply one: without this a client could forge its own `mqb.src.http_authorization`.
@@ -1799,22 +1844,14 @@ async fn handle_request_internal(
         );
     }
 
-    let fire_and_forget = state.fire_and_forget;
     let (ack_tx, ack_rx) = tokio::sync::oneshot::channel::<MessageDisposition>();
-    let commit = Box::new(move |disposition: MessageDisposition| {
-        Box::pin(async move {
-            if ack_tx.send(disposition).is_err() && !fire_and_forget {
-                trace!("HTTP handler was no longer waiting for commit disposition");
-            }
-            Ok(())
-        }) as BoxFuture<'static, anyhow::Result<()>>
-    });
+    let reply = HttpReply::Oneshot(ack_tx);
 
     // Use a timeout for the internal channel send to prevent connection task hang
     // if the bridge pipeline is overloaded. 503 Service Unavailable is returned
     // to allow the client to retry later without holding onto server resources.
     let send_timeout = std::time::Duration::from_millis(2000).min(state.request_timeout / 2);
-    match tokio::time::timeout(send_timeout, state.tx.send((message, commit))).await {
+    match tokio::time::timeout(send_timeout, state.tx.send((message, reply))).await {
         Ok(Ok(_)) => {}
         Ok(Err(e)) => {
             tracing::error!("Failed to send request to bridge (channel closed): {}", e);

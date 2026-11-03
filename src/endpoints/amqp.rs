@@ -1,5 +1,5 @@
 use crate::canonical_message::tracing_support::LazyMessageIds;
-use crate::models::AmqpConfig;
+use crate::models::{AmqpConfig, CaRoots};
 use crate::traits::{
     BatchCommitFunc, BoxFuture, ConsumerError, EndpointStatus, MessageConsumer, MessageDisposition,
     MessagePublisher, PublisherError, ReceivedBatch, Sent, SentBatch,
@@ -720,7 +720,8 @@ async fn create_amqp_connection(config: &AmqpConfig) -> anyhow::Result<Connectio
 
 async fn build_tls_config(config: &AmqpConfig) -> anyhow::Result<OwnedTLSConfig> {
     // lapin takes the CA certificates as PEM text, not as a path.
-    let ca_pem = match &config.tls.ca_file {
+    let ca_file = crate::support::tls_check::ca_file_path("amqp", &config.tls, CaRoots::Os)?;
+    let ca_pem = match ca_file {
         Some(path) => Some(
             tokio::fs::read_to_string(path)
                 .await

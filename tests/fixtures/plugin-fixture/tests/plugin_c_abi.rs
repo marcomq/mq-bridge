@@ -1,4 +1,4 @@
-//! Plugins written in C against `include/mq_bridge_plugin.h` load and run.
+//! Plugins written in C against `bindings/c/include/mq_bridge_plugin.h` load and run.
 //!
 //! Builds `examples/c-plugin` with the system C compiler (`$CC`, default `cc`),
 //! so the headers, the examples and the host are checked together.
@@ -56,7 +56,7 @@ fn build_c_plugin(name: &str, sources: &[&str]) -> PathBuf {
         "-shared"
     })
     .arg("-I")
-    .arg(root.join("include"))
+    .arg(root.join("bindings/c/include"))
     .args(sources.iter().map(|source| example.join(source)))
     .arg("-o")
     .arg(&library);
@@ -138,13 +138,13 @@ fn the_headers_compile_as_cpp() {
         "-x",
         "c++",
     ])
-    .arg(repo_root().join("include/mq_bridge_plugin.h"));
+    .arg(repo_root().join("bindings/c/include/mq_bridge_plugin.h"));
     run(cxx);
 }
 
 #[test]
 fn the_header_names_the_symbols_the_host_loads() {
-    let header = std::fs::read_to_string(repo_root().join("include/mq_bridge_plugin.h"))
+    let header = std::fs::read_to_string(repo_root().join("bindings/c/include/mq_bridge_plugin.h"))
         .expect("read the header");
     for (name, value) in [
         ("MQB_PLUGIN_ENTRY_SYMBOL", MQB_PLUGIN_ENTRY_SYMBOL),

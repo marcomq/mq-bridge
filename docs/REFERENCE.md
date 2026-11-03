@@ -2243,7 +2243,12 @@ Tokens use the `${namespace:selector}` form:
 `gen`/`env` produce values. When the body's `content-type` metadata is a JSON type,
 interpolated request values are **JSON-escaped by default** so external data cannot break the
 structure — append `| raw` to a token to splice it verbatim, or `| base64` to emit it as
-standard base64 (`${message:payload | base64}` encodes the payload bytes as they are). To emit a literal, un-interpolated
+standard base64 (`${message:payload | base64}` encodes the payload bytes as they are).
+`| json_array` splices a value verbatim only if it is exactly one JSON array (for
+`${message:payload}`, also valid UTF-8), so a payload cannot add fields to a JSON body. Any
+other value fails the whole body: an `http_bulk` query (and `openai_chat`) refuses the message
+as non-retryable, other endpoints get an empty body, and `${env:VAR | json_array}` with a
+non-array value is a startup error. To emit a literal, un-interpolated
 `${…}`, write `$${…}` (a bare `$$` is left as-is); any `${…}` with an unknown namespace is also
 left untouched.
 

@@ -244,12 +244,37 @@ Most endpoints accept a `tls` block. The available fields are:
 ```yaml
 tls:
   required: true                   # enable TLS
-  ca_file: "./certs/ca.pem"        # CA to verify the server
+  ca_file: "./certs/ca.pem"        # CA to verify the server, or "$.os" / "$.bundled"
   cert_file: "./certs/client.pem"  # client cert (mTLS)
   key_file: "./certs/client.key"   # client private key (mTLS)
   cert_password: "secret"          # password for an encrypted key (where supported)
   accept_invalid_certs: false      # NEVER set true in production
 ```
+
+**Which CAs a client trusts.** `ca_file` names a PEM file, or one of two reserved values:
+
+- `"$.os"`: the operating system's CA store, including private CAs installed there.
+- `"$.bundled"`: the Mozilla root list built into mq-bridge, the same on every machine.
+
+Without `ca_file` each endpoint keeps the default of its driver:
+
+| Endpoint | Without `ca_file` | A CA file | `$.os` | `$.bundled` |
+|---|---|---|---|---|
+| `http`, `websocket`, `nats`, `mqtt`, `redis_streams` | bundled | replaces the default | yes | yes (the default) |
+| `grpc` | bundled | is added to the default | yes | yes (the default) |
+| `http_bulk`, `clickhouse` | OS store; bundled on Android | is added to the OS store; replaces it on Android | yes (the default); not on Android | yes |
+| `kafka`, `amqp` | OS store | replaces (`kafka`) or is added to (`amqp`) the default | yes (the default) | no: the driver takes only PEM files or paths |
+| `mongodb`, `sqlx`, `postgres_cdc` | bundled | replaces the default | no: the driver takes only a path; name the OS bundle instead, e.g. `/etc/ssl/certs/ca-certificates.crt` | yes (the default) |
+
+A value that is not supported fails when the endpoint starts. On Android, `$.os` always
+fails: the CA store there is only reachable through Java. A listener (`http`, `websocket`,
+`grpc` server) uses `ca_file` to check client certificates and needs a file. `ibm_mq` has
+no `tls` block (it uses `key_repository` and `cipher_spec`), and `aws` and `object_store`
+use the TLS of their SDK.
+
+Where the value passes through a shell, a `.env` file or docker-compose, quote it so the `$`
+survives, e.g. `'$.os'`: unquoted, a `.env` file turns `$.os` into `.os`. In YAML and JSON
+files it needs nothing.
 
 Which endpoint has a `tls` block, and how each one authenticates, is in the last table of
 [CAPABILITIES.md](CAPABILITIES.md#encryption-and-authentication).

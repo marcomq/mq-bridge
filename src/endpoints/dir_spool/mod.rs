@@ -1275,7 +1275,7 @@ impl DirSpoolConsumer {
             Ok(entries) => entries,
             // A shard the consumer emptied and pruned, or one a producer has not created
             // yet: not an error, just nothing to read.
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Err(error) if is_gone(&error, !prefix.is_empty()) => {
                 return Ok((Vec::new(), Vec::new()))
             }
             Err(error) => {
@@ -1571,6 +1571,13 @@ async fn prune_shard_dirs(dir: &Path, base: &str) {
     }
 }
 
+/// Whether listing failed because the directory is gone. Windows reports a shard that is
+/// still being removed (delete pending) as access denied rather than not found.
+fn is_gone(error: &std::io::Error, is_shard: bool) -> bool {
+    error.kind() == std::io::ErrorKind::NotFound
+        || (cfg!(windows) && is_shard && error.kind() == std::io::ErrorKind::PermissionDenied)
+}
+
 /// Deletes `path`, treating an already-absent file as success. Returns whether it is gone.
 async fn remove_file(path: &Path) -> bool {
     match fs::remove_file(path).await {
@@ -1743,7 +1750,7 @@ async fn highest_sequence(
     while let Some((path, prefix, depth_left)) = pending.pop() {
         let mut entries = match fs::read_dir(&path).await {
             Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) if is_gone(&error, !prefix.is_empty()) => continue,
             Err(error) => {
                 return Err(anyhow::Error::new(error).context(format!(
                     "Failed to list dir_spool directory: {}",

@@ -13,7 +13,10 @@ use std::sync::Arc;
 pub(crate) const MAX_KEY_LEN: usize = 512;
 
 /// One state to write, guarded by the version it was computed from.
-#[cfg_attr(not(any(feature = "sqlx", feature = "mongodb")), allow(dead_code))]
+#[cfg_attr(
+    not(any(feature = "sqlite", feature = "sqlx", feature = "mongodb")),
+    allow(dead_code)
+)]
 pub(crate) struct StateWrite {
     pub(crate) key: String,
     /// JSON text of the new state.
@@ -44,7 +47,7 @@ pub(crate) async fn build_store(
         crate::checkpoint::sanitize_ident(route_name)
     );
     match crate::checkpoint::parse_checkpoint_store(spec)? {
-        #[cfg(feature = "sqlx")]
+        #[cfg(any(feature = "sqlite", feature = "sqlx"))]
         crate::checkpoint::CheckpointBackend::Sqlx { url, table } => {
             crate::endpoints::sqlx::build_sql_state_store(&url, table.unwrap_or(name)).await
         }

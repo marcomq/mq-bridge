@@ -77,7 +77,7 @@
 //! A schema is read and mapped, never enforced, unless
 //! [`VALIDATE_VAR`] says otherwise — see [`validation_enabled`].
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{anyhow, bail, Context};
 use serde_json::{Map, Value};
@@ -591,12 +591,19 @@ const MAX_REF_DEPTH: usize = 16;
 ///
 /// That is the shape `#[derive(JsonSchema)]` gives an enum field, so a plugin can
 /// derive its schema without hand-writing one per enum. A schema that is already
-/// flat comes back unchanged. Only the definitions a cycle still points at are kept.
+/// flat comes back unchanged. A recursive definition, such as an `Endpoint` field,
+/// stays a `$ref`: inlining it repeats the whole cycle at every place it is reached.
+/// The definitions those references need are kept as declared.
 pub fn flatten(schema: &Value) -> Value {
-    let mut flat = flatten_node(schema, schema, &mut Vec::new());
+    let cyclic = cyclic_definitions(schema);
+    let mut body = schema.clone();
+    if let Some(object) = body.as_object_mut() {
+        object.remove("$defs");
+        object.remove("definitions");
+    }
+    let mut flat = flatten_node(&body, schema, &mut Vec::new(), &cyclic);
     for key in ["$defs", "definitions"] {
-        let Some(Value::Object(definitions)) = flat.as_object_mut().and_then(|o| o.remove(key))
-        else {
+        let Some(Value::Object(definitions)) = schema.get(key) else {
             continue;
         };
         let prefix = format!("#/{key}/");
@@ -626,12 +633,7 @@ fn references(node: &Value, prefix: &str, names: &mut Vec<String>) {
             for (key, value) in object {
                 match value.as_str().filter(|_| key == "$ref") {
                     // A pointer into a definition still needs the whole definition.
-                    Some(reference) => names.extend(
-                        reference
-                            .strip_prefix(prefix)
-                            .and_then(|rest| rest.split('/').next())
-                            .map(|name| name.replace("~1", "/").replace("~0", "~")),
-                    ),
+                    Some(reference) => names.extend(definition_name(reference, prefix)),
                     None => references(value, prefix, names),
                 }
             }
@@ -641,12 +643,74 @@ fn references(node: &Value, prefix: &str, names: &mut Vec<String>) {
     }
 }
 
+/// The name of the definition `reference` points into under `prefix`, unescaped.
+fn definition_name(reference: &str, prefix: &str) -> Option<String> {
+    reference
+        .strip_prefix(prefix)
+        .and_then(|rest| rest.split('/').next())
+        .map(|name| name.replace("~1", "/").replace("~0", "~"))
+}
+
+/// The definitions that can reach themselves, as `#/$defs/Name` or `#/definitions/Name`.
+fn cyclic_definitions(schema: &Value) -> HashSet<String> {
+    let mut edges: HashMap<String, Vec<String>> = HashMap::new();
+    for key in ["$defs", "definitions"] {
+        let Some(Value::Object(definitions)) = schema.get(key) else {
+            continue;
+        };
+        let prefix = format!("#/{key}/");
+        for (name, definition) in definitions {
+            let mut targets = Vec::new();
+            references(definition, &prefix, &mut targets);
+            let targets = targets
+                .into_iter()
+                .map(|t| format!("{prefix}{t}"))
+                .collect();
+            edges.insert(format!("{prefix}{name}"), targets);
+        }
+    }
+    edges
+        .keys()
+        .filter(|start| {
+            let mut seen = HashSet::new();
+            let mut pending = edges[*start].clone();
+            while let Some(next) = pending.pop() {
+                if &next == *start {
+                    return true;
+                }
+                if seen.insert(next.clone()) {
+                    pending.extend(edges.get(&next).into_iter().flatten().cloned());
+                }
+            }
+            false
+        })
+        .cloned()
+        .collect()
+}
+
+fn is_cyclic(reference: &str, cyclic: &HashSet<String>) -> bool {
+    ["#/$defs/", "#/definitions/"].iter().any(|prefix| {
+        definition_name(reference, prefix)
+            .is_some_and(|name| cyclic.contains(&format!("{prefix}{name}")))
+    })
+}
+
 /// `path` holds the references being expanded; one already on it is a cycle and stays a `$ref`.
-fn flatten_node<'a>(node: &'a Value, root: &'a Value, path: &mut Vec<&'a str>) -> Value {
+fn flatten_node<'a>(
+    node: &'a Value,
+    root: &'a Value,
+    path: &mut Vec<&'a str>,
+    cyclic: &HashSet<String>,
+) -> Value {
     let object = match node {
         Value::Object(object) => object,
         Value::Array(items) => {
-            return Value::Array(items.iter().map(|i| flatten_node(i, root, path)).collect())
+            return Value::Array(
+                items
+                    .iter()
+                    .map(|i| flatten_node(i, root, path, cyclic))
+                    .collect(),
+            )
         }
         other => return other.clone(),
     };
@@ -654,11 +718,13 @@ fn flatten_node<'a>(node: &'a Value, root: &'a Value, path: &mut Vec<&'a str>) -
     let target = object
         .get("$ref")
         .and_then(Value::as_str)
-        .filter(|reference| path.len() < MAX_REF_DEPTH && !path.contains(reference))
+        .filter(|reference| {
+            path.len() < MAX_REF_DEPTH && !path.contains(reference) && !is_cyclic(reference, cyclic)
+        })
         .and_then(|reference| Some((reference, local_definition(root, reference)?)));
     if let Some((reference, definition)) = target {
         path.push(reference);
-        if let Value::Object(resolved) = flatten_node(definition, root, path) {
+        if let Value::Object(resolved) = flatten_node(definition, root, path, cyclic) {
             out = resolved;
         }
         path.pop();
@@ -668,7 +734,7 @@ fn flatten_node<'a>(node: &'a Value, root: &'a Value, path: &mut Vec<&'a str>) -
             continue;
         }
         // A sibling of `$ref`, such as the field's own description, wins.
-        out.insert(key.clone(), flatten_node(value, root, path));
+        out.insert(key.clone(), flatten_node(value, root, path, cyclic));
     }
     for key in ["oneOf", "anyOf"] {
         let Some(constants) = out.get(key).and_then(constants_of) else {
@@ -1213,7 +1279,7 @@ mod tests {
         assert_eq!(flat["properties"]["other"]["$ref"], "#/$defs/Missing");
         assert_eq!(
             flat["properties"]["node"],
-            json!({ "properties": { "next": { "$ref": "#/$defs/Node" } } })
+            json!({ "$ref": "#/$defs/Node" })
         );
         // The reference left behind still resolves.
         assert!(flat.pointer("/$defs/Node/properties/next").is_some());

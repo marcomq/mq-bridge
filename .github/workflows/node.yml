@@ -5,7 +5,7 @@ on:
     branches: [main, dev]
     paths:
       - ".github/workflows/node.yml"
-      - "node/mq-bridge-node/**"
+      - "bindings/node/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - "src/**"
@@ -13,7 +13,7 @@ on:
     branches: [main, dev]
     paths:
       - ".github/workflows/node.yml"
-      - "node/mq-bridge-node/**"
+      - "bindings/node/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - "src/**"
@@ -45,10 +45,10 @@ jobs:
         with:
           node-version: "20"
           cache: npm
-          cache-dependency-path: node/mq-bridge-node/package-lock.json
+          cache-dependency-path: bindings/node/package-lock.json
 
       - name: Verify lock is in sync
-        working-directory: node/mq-bridge-node
+        working-directory: bindings/node
         run: npm ci --ignore-scripts
 
   test:
@@ -70,7 +70,7 @@ jobs:
         with:
           node-version: "20"
           cache: npm
-          cache-dependency-path: node/mq-bridge-node/package-lock.json
+          cache-dependency-path: bindings/node/package-lock.json
 
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
@@ -80,19 +80,19 @@ jobs:
           cache-workspace-crates: true
 
       - name: Install Node dependencies
-        working-directory: node/mq-bridge-node
+        working-directory: bindings/node
         run: npm ci
 
       - name: Check Rust binding
         run: cargo check -p mq-bridge-node --no-default-features --features "http middleware schema"
 
       - name: Build native addon
-        working-directory: node/mq-bridge-node
+        working-directory: bindings/node
         run: npm run build:ci
 
       # A leaked ThreadsafeFunction keeps the event loop alive and the suite
       # never exits; cap it here rather than burning the whole job budget.
       - name: Run Node tests
-        working-directory: node/mq-bridge-node
+        working-directory: bindings/node
         timeout-minutes: 5
         run: npm test

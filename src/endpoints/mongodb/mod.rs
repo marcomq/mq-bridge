@@ -1,5 +1,5 @@
 use crate::canonical_message::tracing_support::LazyMessageIds;
-use crate::models::{MongoDbConfig, MongoDbFormat};
+use crate::models::{CaRoots, MongoDbConfig, MongoDbFormat};
 use crate::support::interpolation::CompiledTemplate;
 use crate::traits::{
     BatchCommitFunc, BoxFuture, ConsumerError, EndpointStatus, MessageConsumer, MessageDisposition,
@@ -467,7 +467,9 @@ async fn create_client(config: &MongoDbConfig) -> anyhow::Result<Client> {
 
     if config.tls.required {
         let mut tls_options = mongodb::options::TlsOptions::builder().build();
-        if let Some(ca_file) = &config.tls.ca_file {
+        let ca_file =
+            crate::support::tls_check::ca_file_path("mongodb", &config.tls, CaRoots::Bundled)?;
+        if let Some(ca_file) = ca_file {
             tls_options.ca_file_path = Some(std::path::PathBuf::from(ca_file));
         }
         if let Some(cert_file) = &config.tls.cert_file {

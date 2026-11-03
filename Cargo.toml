@@ -30,10 +30,10 @@ workspace = true
 
 [workspace]
 members = [
-    "bindings-common",
-    "python/mq-bridge-py",
-    "node/mq-bridge-node",
-    "c/mq-bridge-c",
+    "bindings/common",
+    "bindings/python",
+    "bindings/node",
+    "bindings/c",
     "plugins/full",
     "tests/fixtures/plugin-fixture",
     "tests/fixtures/plugin-fixture-bad-abi",
@@ -60,7 +60,7 @@ exit = "warn"
 collapsible_if = "allow"
 
 [workspace.package]
-version = "1.3.0"
+version = "1.4.0"
 
 [workspace.dependencies]
 anyhow = "1.0"
@@ -139,6 +139,8 @@ rustls = { version = "0.23", optional = true, default-features = false, features
 tokio-rustls = { version = "0.26", optional = true, default-features = false, features = ["tls12", "logging"] }
 rustls-pemfile = { version = "2.2", optional = true }
 webpki-roots = { version = "1", optional = true }
+# The OS CA store for `tls.ca_file: "$.os"`.
+rustls-native-certs = { version = "0.8", optional = true }
 
 # Metrics
 metrics = { version = "0.24", optional = true }
@@ -242,7 +244,7 @@ aws-sdk-sns = { version = "1.107", optional = true, default-features = false, fe
 aws-sigv4 = { version = "1.4", optional = true }
 
 # SQLx
-sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "mysql", "any", "sqlite-bundled"], optional = true }
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls", "any"], optional = true }
 
 # ClickHouse — talks the ClickHouse HTTP interface directly (JSONEachRow in/out).
 # reqwest is used rather than the typed `clickhouse` crate because that crate is
@@ -411,11 +413,11 @@ kafka = ["rdkafka", "rdkafka/libz-static"]
 # OpenSSL from source: needs perl and make, and adds minutes to a clean build.
 kafka-ssl = ["kafka", "rdkafka/ssl-vendored"]
 amqp = ["lapin", "rustls", "rustls-pemfile"]
-nats = ["async-nats", "rustls", "rustls-pemfile", "webpki-roots"]
+nats = ["async-nats", "rustls", "rustls-pemfile", "webpki-roots", "rustls-native-certs"]
 mongodb = ["dep:mongodb"]
-mqtt = ["rumqttc", "rustls", "tokio-rustls", "rustls-pemfile", "webpki-roots"]
-http = ["dep:arc-swap", "hyper", "hyper-util", "hyper-rustls", "dep:tower-service", "http-body-util", "dep:http-body", "rustls", "tokio-rustls", "rustls-pemfile", "webpki-roots", "h2", "dep:flate2", "dep:lz4_flex", "dep:zstd"]
-websocket = ["dep:tokio-websockets", "dep:http-crate", "tokio-websockets/rustls-bring-your-own-connector", "rustls", "tokio-rustls", "rustls-pemfile", "webpki-roots"]
+mqtt = ["rumqttc", "rustls", "tokio-rustls", "rustls-pemfile", "webpki-roots", "rustls-native-certs"]
+http = ["dep:arc-swap", "hyper", "hyper-util", "hyper-rustls", "dep:tower-service", "http-body-util", "dep:http-body", "rustls", "tokio-rustls", "rustls-pemfile", "webpki-roots", "rustls-native-certs", "h2", "dep:flate2", "dep:lz4_flex", "dep:zstd"]
+websocket = ["dep:tokio-websockets", "dep:http-crate", "tokio-websockets/rustls-bring-your-own-connector", "rustls", "tokio-rustls", "rustls-pemfile", "webpki-roots", "rustls-native-certs"]
 aws = ["aws-config", "aws-sdk-sqs", "aws-sdk-sns", "aws-sigv4"]
 # Runtime-loaded IBM MQ client via dlopen: builds with no SDK present; the IBM
 # redistributable client is only needed at runtime, and only if an ibm-mq
@@ -434,13 +436,15 @@ zeromq = ["dep:zeromq"]
 # In `full` but not `portable`.
 # The default `backend: try_omq` uses it when present and falls back to zmq.
 zeromq-omq = ["dep:omq-tokio"]
-redis-streams = ["dep:redis"]
+redis-streams = ["dep:redis", "rustls", "rustls-native-certs"]
 # Note: The grpc feature requires protobuf-src which can significantly increase build times.
-grpc = ["tonic", "tonic-reflection", "prost", "prost-types", "prost-reflect", "tokio-stream", "tonic-prost", "tonic-prost-build", "rustls", "vendored-protoc"]
-sqlx = ["dep:sqlx"]
-clickhouse = ["dep:reqwest", "dep:flate2", "dep:lz4_flex", "dep:zstd"]
+grpc = ["tonic", "tonic-reflection", "prost", "prost-types", "prost-reflect", "tokio-stream", "tonic-prost", "tonic-prost-build", "rustls", "rustls-native-certs", "vendored-protoc"]
+# SQL endpoint with only the SQLite driver; `sqlx` adds PostgreSQL and MySQL/MariaDB.
+sqlite = ["dep:sqlx", "sqlx/sqlite-bundled"]
+sqlx = ["sqlite", "sqlx/postgres", "sqlx/mysql"]
+clickhouse = ["dep:reqwest", "dep:flate2", "dep:lz4_flex", "dep:zstd", "rustls", "rustls-pemfile", "webpki-roots", "rustls-native-certs"]
 # Generic bulk document sink over HTTP (search engines and similar APIs).
-http-bulk = ["dep:reqwest", "dep:flate2", "dep:lz4_flex", "dep:zstd"]
+http-bulk = ["dep:reqwest", "dep:flate2", "dep:lz4_flex", "dep:zstd", "rustls", "rustls-pemfile", "webpki-roots", "rustls-native-certs"]
 # Cloud object-store checkpoint backend (S3/GCS/Azure/R2). Talks cloud REST via reqwest.
 object-store = ["dep:object_store", "file"]
 # `format: parquet` on object_store. Column codecs reuse the `compression` crates.

@@ -1,0 +1,24 @@
+[package]
+name = "mq-bridge-bindings-common"
+version.workspace = true
+edition = "2024"
+publish = false
+description = "Shared config-loading and message helpers for the mq-bridge Python and Node bindings"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/marcomq/mq-bridge"
+
+[lib]
+doctest = false
+
+[dependencies]
+anyhow.workspace = true
+fast-uuid-v7.workspace = true
+mq-bridge = { path = "../..", default-features = false }
+serde = { workspace = true, features = ["derive"] }
+serde_yaml_ng.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "env-filter"] }
+
+[lints]
+workspace = true

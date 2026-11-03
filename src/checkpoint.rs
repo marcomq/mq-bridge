@@ -160,7 +160,7 @@ pub async fn open_endpoint_checkpoint(
     use crate::models::EndpointType;
     let _ = route_name;
     match endpoint_type {
-        #[cfg(feature = "sqlx")]
+        #[cfg(any(feature = "sqlite", feature = "sqlx"))]
         EndpointType::Sqlx(cfg) if cfg.publication.is_none() && cfg.cursor_column.is_some() => {
             crate::endpoints::sqlx::cursor_checkpoint(cfg).await
         }
@@ -552,7 +552,7 @@ pub async fn build_external_store(
             checkpoint_key(source_name, cursor_id),
         ))),
         CheckpointBackend::Sqlx { url, table } => {
-            #[cfg(feature = "sqlx")]
+            #[cfg(any(feature = "sqlite", feature = "sqlx"))]
             {
                 crate::endpoints::sqlx::build_sql_checkpoint_store(
                     &url,
@@ -562,11 +562,16 @@ pub async fn build_external_store(
                 )
                 .await
             }
-            #[cfg(not(feature = "sqlx"))]
+            #[cfg(not(any(feature = "sqlite", feature = "sqlx")))]
             {
                 let _ = (table, source_name, cursor_id);
+                let features = if url.starts_with("sqlite:") {
+                    "'sqlite' or 'sqlx' feature"
+                } else {
+                    "'sqlx' feature"
+                };
                 Err(anyhow!(
-                    "checkpoint_store '{}' requires the 'sqlx' feature to be enabled",
+                    "checkpoint_store '{}' requires the {features} to be enabled",
                     crate::support::redact::url_password(&url)
                 ))
             }

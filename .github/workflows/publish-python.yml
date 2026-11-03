@@ -170,7 +170,7 @@ jobs:
 
       - name: Select package metadata
         if: matrix.pyproject != 'pyproject.toml'
-        working-directory: python/mq-bridge-py
+        working-directory: bindings/python
         shell: bash
         run: cp "${{ matrix.pyproject }}" pyproject.toml
 
@@ -191,7 +191,7 @@ jobs:
           CARGO_NET_RETRY: "5"
           CARGO_NET_GIT_FETCH_WITH_CLI: "true"
         with:
-          working-directory: python/mq-bridge-py
+          working-directory: bindings/python
           command: build
           target: ${{ matrix.target }}
           args: ${{ matrix.args }}
@@ -214,7 +214,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: wheels-${{ matrix.package }}-${{ matrix.os }}-${{ matrix.target }}-${{ matrix.manylinux || 'auto' }}
-          path: python/mq-bridge-py/dist
+          path: bindings/python/dist
 
   build-sdists:
     name: Build ${{ matrix.package }} sdist
@@ -234,7 +234,7 @@ jobs:
 
       - name: Select package metadata
         if: matrix.pyproject != 'pyproject.toml'
-        working-directory: python/mq-bridge-py
+        working-directory: bindings/python
         run: cp "${{ matrix.pyproject }}" pyproject.toml
 
       - name: Set up Python
@@ -248,7 +248,7 @@ jobs:
       - name: Build sdist
         uses: PyO3/maturin-action@v1
         with:
-          working-directory: python/mq-bridge-py
+          working-directory: bindings/python
           command: sdist
           args: --out dist
 
@@ -256,7 +256,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: sdist-${{ matrix.package }}
-          path: python/mq-bridge-py/dist
+          path: bindings/python/dist
 
   publish:
     name: Publish to ${{ inputs.target == 'pypi' && 'PyPI' || 'TestPyPI' }}

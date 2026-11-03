@@ -2,6 +2,90 @@
 
 All notable changes to `mq-bridge`. Newest first.
 
+## 1.4.0
+
+### Added
+
+- **`tls.ca_file: "$.os"` and `"$.bundled"` pick the trusted CAs.** `$.os` is the
+  operating system's CA store, `$.bundled` the Mozilla roots built into mq-bridge. Without
+  `ca_file` every endpoint keeps its default. Where a driver cannot take a value (`$.os` on
+  `mongodb`, `sqlx`, `postgres_cdc` and on Android; `$.bundled` on `kafka` and `amqp`) the
+  endpoint fails to start and says so. The table per endpoint is in
+  [CONFIGURATION.md](docs/CONFIGURATION.md#tls--security-hardening).
+- **Feature `sqlite`: the `sqlx` endpoint with only the SQLite driver.** `sqlx` still
+  brings PostgreSQL, MySQL/MariaDB and SQLite. Without the PostgreSQL driver, `bulk_copy`
+  is unavailable.
+- **Python: `Route.with_batch_handler` gets the whole batch.** `handler(messages)` returns one
+  result per message, in order, so a batch can share one database transaction. Node has it as
+  `Route.withBatchHandler`, C as `mqb_route_set_batch_handler`, where the handler fills an
+  `out` array and returns one status for the batch. It sets
+  `prefers_batches`, so on an `http` → `response` route the requests that arrive while a
+  batch runs form the next batch. An exception or a result list of the wrong length fails
+  every message in the batch. In `scripts/twelve-dollar` a create took 46 instead of 102 µs
+  of CPU with one SQLite transaction per batch.
+- **`forward_headers` on an `http` input limits which request headers become metadata.**
+  Names match case-insensitively; method, path, query and version are always set, and a
+  listed credential header still goes to `mqb.src.http_<name>`. Unset keeps every header.
+  Each header left out saves two allocations per request (43 → 35 with only `host` kept).
+  Builder: `HttpConfig::with_forward_headers`.
+- **`openai_chat` streams with `stream_to`.** Each text delta goes to that endpoint as it
+  arrives, with `correlation_id`, `mqb.stream.attempt`, `mqb.stream.index` and `mqb.stream.end` metadata; the
+  last one carries `mqb.stream.status` (`complete`, `cancelled`, `error`). The whole answer is
+  still the response, so the input is committed after it and a retry starts a new attempt.
+  `cancel_from` stops a running request by `correlation_id` and answers with the text so
+  far; a cancel that arrives before its request starts is kept for 30 s. Every attempt
+  ends with a last token message, also one that fails before the stream starts, unless a
+  send to `stream_to` failed: then that attempt sends no further tokens.
+  `messages_from_payload: true` sends the payload as the `messages` array, e.g. a
+  whole conversation; a payload that is not exactly one JSON array is refused, so it
+  cannot add fields such as `model` to the request. The new template filter
+  `| json_array` does that check. Code that builds `OpenAiChatConfig` without
+  `..Default::default()` needs the three new fields.
+- **`http_bulk` `query` streams with `stream_to`.** With `per_message: true` each answer is
+  read as server-sent events; `value`, `error` and `stop_reason` apply to each event, and
+  `stream_done` names the data that ends the stream (e.g. `[DONE]`). Token metadata and
+  `cancel_from` work as for `openai_chat`, which is now this query with the fields filled
+  in, so Anthropic's `/v1/messages` streams as a recipe. A response that is not
+  `text/event-stream`, or an error event before the first text, fails for good;
+  keepalives and events that are not JSON are skipped. `HttpBulkPublisher::new` refuses
+  `query.stream_to`; build it through the endpoint factory. Code that builds
+  `HttpBulkQuery` without `..Default::default()` needs the three new fields.
+- **`unregister_endpoint(name)` removes an endpoint added with `register_endpoint`,** so
+  `ref: "name"` stops resolving.
+- **App: every publisher is a named endpoint.** `ref: "<publisher name>"` resolves to it;
+  a renamed or deleted publisher stops resolving on save.
+- **C library archive for Linux arm64.** `mq-bridge-c-aarch64-unknown-linux-gnu` is built
+  on a native arm64 runner with the same glibc floor (2.35) as the x86_64 archive.
+
+### Fixed
+
+- **`http_bulk` (incl. `openai_chat`) and `clickhouse` could not connect over HTTPS on
+  Android.** They checked certificates with the OS verifier of reqwest, which panics on
+  Android unless the app initialised it through JNI, and refused `tls.ca_file` there.
+  On Android they now use the bundled roots, or `tls.ca_file`. Affected since 0.3.4
+  (`clickhouse`) and 0.4.18 (`http_bulk`); other platforms are unchanged.
+- **`config_schema::flatten` keeps a recursive definition as a `$ref`.** It inlined one again
+  on every path into the cycle, so an endpoint schema with an `Endpoint` field (`openai_chat`
+  `stream_to`) grew the app's `/schema.json` to 5.6 MB and the UI took seconds to start.
+- **A `stream_to` reader gets a last token when a streaming request panics.** It is sent
+  with `mqb.stream.status: error` (if `stream_to` still accepts sends) and the message fails
+  for good; before, the reader waited forever.
+- **App: the publisher and consumer forms load in a fraction of the time.** An endpoint
+  nested in another one (fanout, switch, request, lookup, dlq, ...) is a `ref` field in the
+  form; before, each was expanded into a full endpoint form, which took seconds. Inline nested
+  endpoints still work in the YAML/JSON editor.
+
+### Performance
+
+- **An `http` input that runs through the route pipeline allocates less per request.** The
+  reply goes back over the request's channel directly instead of through a boxed closure: 78
+  instead of 81 allocations and ~2% less CPU per request. An `http` → `response` route takes
+  the inline path and is unchanged.
+- **The routed `http` input sizes each batch to the requests waiting, not to `batch_size`.**
+  It used to reserve room for a full batch on every receive (~80 KB at `batch_size` 512, even
+  for one request). CPU per request is unchanged with mimalloc and with the macOS system
+  allocator.
+
 ## 1.3.0
 
 ### Added

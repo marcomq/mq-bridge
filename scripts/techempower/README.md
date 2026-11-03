@@ -162,7 +162,7 @@ DATABASE_URL="postgres://benchmarkdbuser:benchmarkdbpass@127.0.0.1:5433/hello_wo
 docker compose -f scripts/techempower/postgres.yml down -v
 
 # Python: requires the wheel installed in the active venv
-#   (cd python/mq-bridge-py && uv run maturin develop --release \
+#   (cd bindings/python && uv run maturin develop --release \
 #       --no-default-features -F http -F pyo3/extension-module)
 scripts/techempower/verify.sh python
 ```
@@ -171,7 +171,7 @@ For a head-to-head throughput comparison against FastAPI/Sanic/etc., the
 existing wrk harness still applies:
 
 ```bash
-cd python/mq-bridge-py && uv run python analysis/bench_http_native.py
+cd bindings/python && uv run python analysis/bench_http_native.py
 ```
 
 ## Historical note (upstream is archived)

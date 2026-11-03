@@ -189,11 +189,13 @@ pub fn app_config_schema() -> serde_json::Value {
         }
     }
 
+    let known = schema["$defs"].as_object().cloned().unwrap_or_default();
     for (name, declared) in registered_endpoint_schemas() {
         let prefix = pascal_case(&name);
         let definition = format!("{prefix}Config");
         add_variant_definition(
             &mut schema,
+            &known,
             "Endpoint",
             &name,
             &prefix,
@@ -205,7 +207,15 @@ pub fn app_config_schema() -> serde_json::Value {
     for (name, declared) in mq_bridge::extensions::middleware_config_schemas() {
         let declared = declared.unwrap_or_else(|| serde_json::json!({ "type": "object" }));
         let prefix = format!("{}Middleware", pascal_case(&name));
-        add_variant_definition(&mut schema, "Middleware", &name, &prefix, &prefix, declared);
+        add_variant_definition(
+            &mut schema,
+            &known,
+            "Middleware",
+            &name,
+            &prefix,
+            &prefix,
+            declared,
+        );
     }
     schema
 }
@@ -238,6 +248,7 @@ fn registered_endpoint_schemas() -> std::collections::BTreeMap<String, serde_jso
 /// lists it as a variant of `union`, which is what makes the UI offer it.
 fn add_variant_definition(
     schema: &mut serde_json::Value,
+    known: &serde_json::Map<String, serde_json::Value>,
     union: &str,
     name: &str,
     prefix: &str,
@@ -246,7 +257,7 @@ fn add_variant_definition(
 ) {
     // Claimed before lifting, so a nested definition cannot take the same key.
     let definition = reserve_definition(schema, definition);
-    schema["$defs"][&definition] = lift_definitions(schema, prefix, declared);
+    schema["$defs"][&definition] = lift_definitions(schema, known, prefix, declared);
     schema["$defs"][union]["oneOf"]
         .as_array_mut()
         .unwrap_or_else(|| panic!("AppConfig schema should contain {union} variants"))
@@ -278,9 +289,11 @@ fn reserve_definition(schema: &mut serde_json::Value, wanted: &str) -> String {
 ///
 /// A derived schema carries definitions for its nested types, and two endpoints
 /// may well both have a `Tls` or an `Auth`. Prefixing is what keeps one from
-/// silently redefining the other's.
+/// silently redefining the other's. A definition the app schema already has
+/// verbatim, e.g. `Endpoint` under `stream_to`, is shared rather than copied.
 fn lift_definitions(
     schema: &mut serde_json::Value,
+    known: &serde_json::Map<String, serde_json::Value>,
     prefix: &str,
     mut declared: serde_json::Value,
 ) -> serde_json::Value {
@@ -297,6 +310,10 @@ fn lift_definitions(
         return declared;
     };
 
+    let own: serde_json::Map<_, _> = own
+        .into_iter()
+        .filter(|(key, definition)| known.get(key) != Some(definition))
+        .collect();
     let renames: std::collections::BTreeMap<String, String> = own
         .keys()
         .map(|key| {
@@ -1177,8 +1194,9 @@ impl AppConfig {
                     }),
                     _ => None,
                 };
-                consumer.options.batch_size =
-                    sink.map_or(DEFAULT_BATCH_SIZE, |sink| default_batch_size(&sink.endpoint));
+                consumer.options.batch_size = sink.map_or(DEFAULT_BATCH_SIZE, |sink| {
+                    default_batch_size(&sink.endpoint)
+                });
             }
         }
     }
@@ -2295,9 +2313,7 @@ publishers:
         // Its own `Config` collides with the root name it was just given, so it
         // gets a key of its own rather than aliasing it.
         let nested = schema
-            .pointer(&format!(
-                "/$defs/{target}/properties/nested/properties/child/$ref"
-            ))
+            .pointer(&format!("/$defs/{target}/properties/nested/$ref"))
             .and_then(serde_json::Value::as_str)
             .unwrap()
             .to_string();

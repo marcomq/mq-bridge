@@ -261,6 +261,7 @@ impl EventStore {
 
     /// Like [`Self::with_drop_callback`], but an ack waits for the callback's work to finish,
     /// so it is done once the commit returns. Retention drops still run it in the background.
+    #[cfg_attr(not(feature = "file"), allow(dead_code))]
     pub(crate) fn with_async_drop_callback(
         mut self,
         callback: impl Fn(Vec<StoredEvent>) -> futures::future::BoxFuture<'static, ()>
@@ -488,6 +489,7 @@ impl EventStore {
     }
 
     /// Stored events no subscriber has received yet.
+    #[cfg_attr(not(feature = "file"), allow(dead_code))]
     pub(crate) fn unread(&self) -> u64 {
         let last = self.next_offset.load(Ordering::SeqCst).saturating_sub(1);
         let seen = self

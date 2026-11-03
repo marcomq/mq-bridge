@@ -13,6 +13,6 @@ docs/book/book
 **/*.so
 **/*.node
 **/*.whl
-python/mq-bridge-py/dist
+bindings/python/dist
 apps/mq-bridge-app/test-results
 apps/mq-bridge-app/playwright-report

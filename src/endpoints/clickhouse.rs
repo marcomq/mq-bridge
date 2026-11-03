@@ -279,42 +279,7 @@ impl ChClient {
             builder = builder.timeout(Duration::from_millis(ms));
         }
         crate::support::tls_check::warn_unverified("clickhouse", config.tls.accept_invalid_certs);
-        if config.tls.accept_invalid_certs {
-            builder = builder.danger_accept_invalid_certs(true);
-        }
-        if let Some(ca) = &config.tls.ca_file {
-            let pem = std::fs::read(ca)
-                .with_context(|| format!("Failed to read ClickHouse CA file '{}'", ca))?;
-            builder = builder.add_root_certificate(
-                reqwest::Certificate::from_pem(&pem)
-                    .with_context(|| format!("Invalid ClickHouse CA certificate '{}'", ca))?,
-            );
-        }
-        if config.tls.cert_password.is_some() {
-            return Err(anyhow!(
-                "ClickHouse tls.cert_password is not supported; use an unencrypted key"
-            ));
-        }
-        match (&config.tls.cert_file, &config.tls.key_file) {
-            (Some(cert), key) => {
-                let mut pem = std::fs::read(cert)
-                    .with_context(|| format!("Failed to read ClickHouse cert file '{cert}'"))?;
-                if let Some(key) = key {
-                    pem.push(b'\n');
-                    pem.extend(
-                        std::fs::read(key).with_context(|| {
-                            format!("Failed to read ClickHouse key file '{key}'")
-                        })?,
-                    );
-                }
-                builder =
-                    builder.identity(reqwest::Identity::from_pem(&pem).with_context(|| {
-                        format!("Invalid ClickHouse client certificate '{cert}'")
-                    })?);
-            }
-            (None, Some(_)) => return Err(anyhow!("ClickHouse tls.key_file needs tls.cert_file")),
-            (None, None) => {}
-        }
+        builder = crate::support::tls::reqwest_tls(builder, &config.tls, "ClickHouse")?;
         let http = builder
             .build()
             .context("Failed to build ClickHouse HTTP client")?;

@@ -2622,6 +2622,9 @@ pub struct HttpConfig {
     /// (Consumer only) Largest request body in bytes, also after decompression; a larger one gets 413. Defaults to 256 MiB.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_body_bytes: Option<u64>,
+    /// (Consumer only) Only these request headers (case-insensitive) become metadata. Unset = all headers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forward_headers: Option<Vec<String>>,
     /// HTTP Basic Authentication credentials (username, password). For consumers: validates incoming requests. For publishers: adds Authorization header.
     #[cfg_attr(feature = "schema", schemars(extend("format"="password")))]
     #[serde(
@@ -3319,6 +3322,23 @@ pub struct HttpBulkQuery {
     /// A refused request (400, 409, 413, 422) or unmatched answers: ask again in halves.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub split_on_reject: bool,
+    /// `per_message` only: reads the answer as server-sent events and sends each `value` to this endpoint.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_nested_endpoint",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub stream_to: Option<Box<Endpoint>>,
+    /// With `stream_to`: a message here with a request's `correlation_id` stops it.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_nested_endpoint",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub cancel_from: Option<Box<Endpoint>>,
+    /// With `stream_to`: the event data that ends the stream, e.g. `[DONE]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_done: Option<String>,
 }
 
 /// How `http_bulk` requests are authenticated beyond `headers`. Set at most one field.
@@ -3853,7 +3873,11 @@ pub struct OpenAiChatConfig {
     /// Template of the system message.
     pub system: Option<String>,
     /// Template of the user message, e.g. `Summarise: ${payload:body}`.
+    #[serde(default)]
     pub prompt: String,
+    /// The payload is the `messages` array itself, e.g. a whole conversation.
+    #[serde(default)]
+    pub messages_from_payload: bool,
     /// Ask for a JSON object and parse the answer.
     #[serde(default)]
     pub json: bool,
@@ -3871,6 +3895,20 @@ pub struct OpenAiChatConfig {
     pub tls: Option<serde_json::Value>,
     /// `oauth2` or `aws_sigv4` credentials, as on `http_bulk`; JSON in a URI.
     pub auth: Option<serde_json::Value>,
+    /// Streams the answer: each text delta goes to this endpoint as it arrives.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_nested_endpoint",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub stream_to: Option<Box<Endpoint>>,
+    /// With `stream_to`: a message here with a request's `correlation_id` stops it.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_nested_endpoint",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub cancel_from: Option<Box<Endpoint>>,
 }
 
 // --- Common Configuration ---
@@ -3879,6 +3917,10 @@ pub struct OpenAiChatConfig {
 ///
 /// Configures Transport Layer Security (TLS/SSL) for encrypted communication.
 /// Supports both client certificate (mutual TLS) and server certificate validation.
+///
+/// `ca_file` also takes `"$.os"` (the operating system's CA store) or `"$.bundled"` (the
+/// Mozilla roots built into mq-bridge). Which endpoint supports which, and what it trusts
+/// without `ca_file`, is in the TLS section of the configuration guide.
 ///
 /// # Examples
 ///
@@ -3900,7 +3942,7 @@ pub struct TlsConfig {
     /// If true, enable TLS/SSL.
     #[serde(default, deserialize_with = "deserialize_null_as_false")]
     pub required: bool,
-    /// Path to the CA certificate file.
+    /// Path to the CA certificate file, or `$.os` (OS CA store) or `$.bundled` (built-in public roots).
     pub ca_file: Option<String>,
     /// Path to the client certificate file (PEM).
     pub cert_file: Option<String>,
@@ -3912,4 +3954,17 @@ pub struct TlsConfig {
     /// If true, disable server certificate verification (insecure).
     #[serde(default)]
     pub accept_invalid_certs: bool,
+}
+
+/// Where a client's trusted CA certificates come from; see [`TlsConfig::ca_roots`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) enum CaRoots<'a> {
+    /// No `ca_file`: the endpoint's own default.
+    Default,
+    /// `$.os`: the operating system's CA store.
+    Os,
+    /// `$.bundled`: the Mozilla roots built into mq-bridge.
+    Bundled,
+    File(&'a str),
 }

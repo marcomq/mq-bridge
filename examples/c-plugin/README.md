@@ -1,7 +1,7 @@
 # C plugins
 
 Two mq-bridge plugins written in C against
-[`include/mq_bridge_plugin.h`](../../include/mq_bridge_plugin.h):
+[`bindings/c/include/mq_bridge_plugin.h`](../../bindings/c/include/mq_bridge_plugin.h):
 
 - **`minimal.c`** (`drop_heartbeats`, ~35 lines) is a middleware that drops
   messages whose payload is `ping` and passes everything else through unchanged.
@@ -19,7 +19,7 @@ Two mq-bridge plugins written in C against
   DE12345678000000012345EUR  ->  {"account":"DE12345678","amount_minor":12345,"currency":"EUR"}
   ```
 
-Both use [`mq_bridge_plugin_helpers.h`](../../include/mq_bridge_plugin_helpers.h)
+Both use [`mq_bridge_plugin_helpers.h`](../../bindings/c/include/mq_bridge_plugin_helpers.h)
 so their tables list only the entries they implement.
 
 ## Build
@@ -27,7 +27,7 @@ so their tables list only the entries they implement.
 ```sh
 cmake -B build && cmake --build build
 # or directly (macOS: -dynamiclib instead of -shared)
-cc -std=c11 -shared -fPIC -I ../../include minimal.c -o libdrop_heartbeats.so
+cc -std=c11 -shared -fPIC -I ../../bindings/c/include minimal.c -o libdrop_heartbeats.so
 ```
 
 ## Use

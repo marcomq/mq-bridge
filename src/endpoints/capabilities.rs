@@ -176,7 +176,7 @@ const CAPABILITIES: &[EndpointCapabilities] = &[
         replies: Depends,
         ordered_publish: With("operation"),
         input_note: "A paged read of a search index.",
-        output_note: "Replies with `query` set.",
+        output_note: "Replies with `query` set; with `query.stream_to` each token is sent there first.",
         security_note: "`auth` and custom headers.",
         ..row("http_bulk", TlsBlock)
     },
@@ -232,7 +232,7 @@ const CAPABILITIES: &[EndpointCapabilities] = &[
         acknowledges: Na,
         ordered_commit: Na,
         replies: Yes,
-        output_note: "The reply is the model's answer.",
+        output_note: "The reply is the model's answer; with `stream_to` each token is sent there first.",
         security_note: "API key.",
         ..row("openai_chat", TlsBlock)
     },

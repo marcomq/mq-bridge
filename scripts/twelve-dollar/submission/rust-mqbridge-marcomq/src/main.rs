@@ -51,8 +51,14 @@ enum Request {
         user: i64,
         post: i64,
     },
-    Fail(u16, &'static str),
+    Fail(Fail),
 }
+
+/// An error reply decided before touching the database: status and message.
+struct Fail(u16, &'static str);
+
+const INVALID_TOKEN: Fail = Fail(401, "invalid or expired token");
+const INVALID_ID: Fail = Fail(400, "invalid post id");
 
 impl Request {
     fn writes(&self) -> bool {
@@ -82,86 +88,68 @@ struct Api {
 }
 
 impl Api {
-    fn parse(&self, msg: &CanonicalMessage) -> Request {
-        let path = msg.http_path();
-        match (msg.http_method(), path) {
+    /// Routes a request; auth is checked before the post id (spec rule).
+    fn parse(&self, msg: &CanonicalMessage) -> Result<Request, Fail> {
+        Ok(match (msg.http_method(), msg.http_path()) {
             ("GET", "/health") => Request::Health,
             ("GET", "/feed") => Request::Feed,
             ("GET", p) if p.starts_with("/posts/") && !p[7..].contains('/') => {
-                match post_id(&p[7..]) {
-                    Some(id) => Request::Post(id),
-                    None => Request::Fail(400, "invalid post id"),
-                }
+                Request::Post(positive_id(&p[7..]).ok_or(INVALID_ID)?)
             }
-            ("POST", "/posts") => match self.user(msg) {
-                Err(e) => e,
-                Ok((user, name)) => match new_body(&msg.payload) {
-                    Ok(body) => Request::Create { user, name, body },
-                    Err(e) => e,
-                },
-            },
+            ("POST", "/posts") => {
+                let (user, name) = self.user(msg)?;
+                let body = new_body(&msg.payload)?;
+                Request::Create { user, name, body }
+            }
             ("POST", p) if p.starts_with("/posts/") && p.ends_with("/like") && p.len() > 12 => {
-                match self.user(msg) {
-                    Err(e) => e,
-                    Ok((user, _)) => match post_id(&p[7..p.len() - 5]) {
-                        Some(post) => Request::Like { user, post },
-                        None => Request::Fail(400, "invalid post id"),
-                    },
-                }
+                let (user, _) = self.user(msg)?;
+                let post = positive_id(&p[7..p.len() - 5]).ok_or(INVALID_ID)?;
+                Request::Like { user, post }
             }
-            _ => Request::Fail(404, "not found"),
-        }
+            _ => return Err(Fail(404, "not found")),
+        })
     }
 
     /// Verifies the HS256 bearer token on every request and returns (user id, username).
-    fn user(&self, msg: &CanonicalMessage) -> Result<(i64, String), Request> {
+    fn user(&self, msg: &CanonicalMessage) -> Result<(i64, String), Fail> {
         let token = msg
             .metadata
             .get("mqb.src.http_authorization")
             .and_then(|v| v.strip_prefix("Bearer "))
-            .ok_or(Request::Fail(401, "missing bearer token"))?;
-        let invalid = Request::Fail(401, "invalid or expired token");
+            .ok_or(Fail(401, "missing bearer token"))?;
         let mut parts = token.splitn(3, '.');
         let (Some(header), Some(payload), Some(signature)) =
             (parts.next(), parts.next(), parts.next())
         else {
-            return Err(invalid);
+            return Err(INVALID_TOKEN);
         };
-        let header: serde_json::Value = URL_SAFE_NO_PAD
-            .decode(header)
-            .ok()
-            .and_then(|h| serde_json::from_slice(&h).ok())
-            .ok_or(Request::Fail(401, "invalid or expired token"))?;
-        if header.get("alg").and_then(|a| a.as_str()) != Some("HS256") {
-            return Err(invalid);
-        }
-        let Ok(signature) = URL_SAFE_NO_PAD.decode(signature) else {
-            return Err(invalid);
-        };
+        let mut sig = [0u8; 32];
+        let n = URL_SAFE_NO_PAD
+            .decode_slice(signature, &mut sig)
+            .map_err(|_| INVALID_TOKEN)?;
         let mut mac = self.mac.clone();
-        mac.update(&token.as_bytes()[..token.len() - signature_len(token)]);
-        if mac.verify_slice(&signature).is_err() {
-            return Err(invalid);
+        mac.update(&token.as_bytes()[..header.len() + 1 + payload.len()]);
+        mac.verify_slice(&sig[..n]).map_err(|_| INVALID_TOKEN)?;
+        let header = decode_json(header).ok_or(INVALID_TOKEN)?;
+        if header.get("alg").and_then(|a| a.as_str()) != Some("HS256") {
+            return Err(INVALID_TOKEN);
         }
-        let Some(claims) = URL_SAFE_NO_PAD
-            .decode(payload)
-            .ok()
-            .and_then(|p| serde_json::from_slice::<serde_json::Value>(&p).ok())
-        else {
-            return Err(invalid);
-        };
+        let claims = decode_json(payload).ok_or(INVALID_TOKEN)?;
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0.0, |d| d.as_secs_f64());
-        match claims.get("exp").and_then(|e| e.as_f64()) {
-            Some(exp) if exp > now => {}
-            _ => return Err(invalid),
+        let exp = claims.get("exp").and_then(|e| e.as_f64());
+        if !exp.is_some_and(|exp| exp > now) {
+            return Err(INVALID_TOKEN);
         }
-        let user = claims.get("sub").and_then(|s| s.as_str()).and_then(post_id);
+        let user = claims
+            .get("sub")
+            .and_then(|s| s.as_str())
+            .and_then(positive_id);
         let name = claims.get("username").and_then(|n| n.as_str());
         match (user, name) {
             (Some(user), Some(name)) => Ok((user, name.to_owned())),
-            _ => Err(Request::Fail(401, "invalid token payload")),
+            _ => Err(Fail(401, "invalid token payload")),
         }
     }
 
@@ -226,7 +214,7 @@ impl Api {
                         .into_bytes(),
                 )
             }
-            Request::Fail(status, message) => error(status, message),
+            Request::Fail(Fail(status, message)) => error(status, message),
         })
     }
 
@@ -267,29 +255,29 @@ impl Api {
     }
 }
 
-fn signature_len(token: &str) -> usize {
-    token.rsplit_once('.').map_or(0, |(_, s)| s.len() + 1)
+fn decode_json(part: &str) -> Option<serde_json::Value> {
+    serde_json::from_slice(&URL_SAFE_NO_PAD.decode(part).ok()?).ok()
 }
 
 /// A positive integer without sign, fraction or leading garbage.
-fn post_id(s: &str) -> Option<i64> {
+fn positive_id(s: &str) -> Option<i64> {
     if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
     s.parse().ok().filter(|&id| id > 0)
 }
 
-fn new_body(payload: &[u8]) -> Result<String, Request> {
+fn new_body(payload: &[u8]) -> Result<String, Fail> {
     let value: serde_json::Value =
-        serde_json::from_slice(payload).map_err(|_| Request::Fail(400, "malformed JSON body"))?;
+        serde_json::from_slice(payload).map_err(|_| Fail(400, "malformed JSON body"))?;
     let body = value
         .get("body")
         .and_then(|b| b.as_str())
         .map(str::trim)
         .filter(|b| !b.is_empty())
-        .ok_or(Request::Fail(400, "body is required"))?;
+        .ok_or(Fail(400, "body is required"))?;
     if body.chars().count() > 500 {
-        return Err(Request::Fail(400, "body must be at most 500 characters"));
+        return Err(Fail(400, "body must be at most 500 characters"));
     }
     Ok(body.to_owned())
 }
@@ -308,7 +296,10 @@ impl Handler for Api {
     }
 
     async fn handle_many(&self, msgs: Vec<CanonicalMessage>) -> Vec<Result<Handled, HandlerError>> {
-        let requests = msgs.iter().map(|m| self.parse(m)).collect();
+        let requests = msgs
+            .iter()
+            .map(|m| self.parse(m).unwrap_or_else(Request::Fail))
+            .collect();
         self.batch(requests)
             .await
             .into_iter()
@@ -343,7 +334,8 @@ async fn main() -> anyhow::Result<()> {
         started: Instant::now(),
     };
     let addr = format!("{}:{}", env("HOST", "127.0.0.1"), env("PORT", "3000"));
-    let input = Endpoint::new(EndpointType::Http(HttpConfig::new(addr)));
+    let http = HttpConfig::new(addr).with_concurrency_limit(512);
+    let input = Endpoint::new(EndpointType::Http(http));
     let route = Route::new(input, Endpoint::new_response())
         .with_batch_size(512)
         .with_handler(api);
@@ -352,3 +344,6 @@ async fn main() -> anyhow::Result<()> {
     handle.stop().await;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

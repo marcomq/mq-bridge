@@ -978,6 +978,17 @@ impl TlsConfig {
         self.is_mtls_client_configured()
     }
 
+    /// Where the trusted CA certificates come from: `ca_file` is a path, `$.os` or `$.bundled`.
+    #[allow(dead_code)]
+    pub(crate) fn ca_roots(&self) -> CaRoots<'_> {
+        match self.ca_file.as_deref() {
+            None => CaRoots::Default,
+            Some("$.os") => CaRoots::Os,
+            Some("$.bundled") => CaRoots::Bundled,
+            Some(path) => CaRoots::File(path),
+        }
+    }
+
     /// Checks if the TLS configuration is sufficient to make a TLS client connection.
     pub fn is_tls_client_configured(&self) -> bool {
         self.required
@@ -1073,7 +1084,7 @@ with_value_setters!(GrpcConfig { with_tls => tls: TlsConfig, with_server_streami
 with_optional_setters!(GrpcConfig { with_timeout_ms => timeout_ms: u64, with_connect_timeout_ms => connect_timeout_ms: u64, with_request_timeout_ms => request_timeout_ms: u64, with_idle_stream_timeout_ms => idle_stream_timeout_ms: u64, with_overall_timeout_ms => overall_timeout_ms: u64, with_initial_stream_window_size => initial_stream_window_size: u32, with_initial_connection_window_size => initial_connection_window_size: u32, with_concurrency_limit_per_connection => concurrency_limit_per_connection: usize, with_http2_keepalive_interval_ms => http2_keepalive_interval_ms: u64, with_http2_keepalive_timeout_ms => http2_keepalive_timeout_ms: u64, with_max_decoding_message_size => max_decoding_message_size: usize, with_max_encoding_message_size => max_encoding_message_size: usize, with_descriptor_set_bytes => descriptor_set_bytes: Vec<u8>, with_request => request: serde_json::Value, with_shared => shared: bool });
 with_optional_string_setters!(GrpcConfig { with_consumer_id => consumer_id, with_descriptor_set_path => descriptor_set_path, with_service_name => service_name, with_method_name => method_name, with_bearer_token => bearer_token, with_api_key => api_key, with_api_key_name => api_key_name });
 with_value_setters!(HttpConfig { with_tls => tls: TlsConfig, with_fire_and_forget => fire_and_forget: bool, with_pass_through_status => pass_through_status: bool, with_compression => compression: Compression, with_custom_headers => custom_headers: HashMap<String, String> });
-with_optional_setters!(HttpConfig { with_request_timeout_ms => request_timeout_ms: u64, with_internal_buffer_size => internal_buffer_size: usize, with_batch_concurrency => batch_concurrency: usize, with_tcp_keepalive_ms => tcp_keepalive_ms: u64, with_pool_idle_timeout_ms => pool_idle_timeout_ms: u64, with_compression_enabled => compression_enabled: bool, with_compression_threshold_bytes => compression_threshold_bytes: usize, with_concurrency_limit => concurrency_limit: usize, with_basic_auth => basic_auth: (String, String), with_shared => shared: bool });
+with_optional_setters!(HttpConfig { with_request_timeout_ms => request_timeout_ms: u64, with_internal_buffer_size => internal_buffer_size: usize, with_batch_concurrency => batch_concurrency: usize, with_tcp_keepalive_ms => tcp_keepalive_ms: u64, with_pool_idle_timeout_ms => pool_idle_timeout_ms: u64, with_compression_enabled => compression_enabled: bool, with_compression_threshold_bytes => compression_threshold_bytes: usize, with_concurrency_limit => concurrency_limit: usize, with_forward_headers => forward_headers: Vec<String>, with_basic_auth => basic_auth: (String, String), with_shared => shared: bool });
 with_optional_string_setters!(HttpConfig { with_message_id_header => message_id_header });
 with_optional_string_setters!(WebSocketConfig { with_message_id_header => message_id_header });
 with_optional_setters!(WebSocketConfig { with_routed_queue_capacity => routed_queue_capacity: usize, with_basic_auth => basic_auth: (String, String), with_max_connections => max_connections: usize });

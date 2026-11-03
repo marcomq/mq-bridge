@@ -169,9 +169,90 @@ On the command line it is one more parameter:
 | `concurrency` | 8 | Requests in flight when a batch is sent to the endpoint as an output. Under a `lookup`, the lookup's own `concurrency` (default 16) decides, unless `messages_per_request` is set |
 | `messages_per_request` | none | Messages answered by one request, see [above](#several-messages-in-one-request). Unset: one request per message |
 | `max_request_bytes` | 10 MiB | With `messages_per_request`: a bundle over this size is cut earlier |
-| `request_timeout_ms` | see right | Timeout of one request; `0`: none. Unset: a request fails after 300 s without a response byte |
+| `request_timeout_ms` | see right | Timeout of one request; `0`: none. Unset: a request fails after 300 s without a response byte. With `stream_to` it bounds each silence of the stream, not the whole answer |
 | `tls` | none | TLS options as on [`http_bulk`](http-bulk.md). JSON text in a URI |
 | `auth` | none | `oauth2` or `aws_sigv4` credentials as on [`http_bulk`](http-bulk.md#authentication), in place of `api_key`. JSON text in a URI |
+| `messages_from_payload` | `false` | The payload is the `messages` array, e.g. a whole conversation. Excludes `prompt`, `system` and `messages_per_request` |
+| `stream_to` | none | Streams the answer, see [below](#streaming-the-answer): every text delta goes to this endpoint. Excludes `messages_per_request`. JSON text in a URI |
+| `cancel_from` | none | With `stream_to`: a message here stops the request with its `correlation_id`. JSON text in a URI |
+
+### A whole conversation as the payload
+
+With `messages_from_payload: true` the payload is sent as the request's
+`messages`, so the caller keeps the history and sends all of it:
+
+```json
+[{"role": "system", "content": "Answer briefly."}, {"role": "user", "content": "Hi"}]
+```
+
+The payload must be that JSON array; anything else is refused by the API and
+fails its message for good.
+
+### Streaming the answer
+
+With `stream_to` the endpoint asks for a streamed completion and sends every
+text delta to that endpoint the moment it arrives. The whole answer is still
+the message's response, as without streaming:
+
+```yaml
+chat:
+  concurrency: 8
+  input: { nats: { url: "nats://localhost:4222", subject: "chat.requests", stream: "chat_requests" } }
+  output:
+    openai_chat:
+      url: "http://localhost:11434"
+      model: llama3.2
+      messages_from_payload: true
+      stream_to: { nats: { url: "nats://localhost:4222", subject: "chat.tokens", stream: "chat_tokens", no_jetstream: true } }
+      cancel_from: { nats: { url: "nats://localhost:4222", subject: "chat.cancel", stream: "chat_cancel", no_jetstream: true } }
+```
+
+Each token message carries the delta text as payload and this metadata:
+
+| Key | Value |
+|---|---|
+| `correlation_id` | The request's `correlation_id`, else its message id as 32 hex digits |
+| `mqb.stream.attempt` | A new id for each attempt at the request |
+| `mqb.stream.index` | 0, 1, 2, … within one attempt |
+| `mqb.stream.end` | `true` on the last token message of an attempt, else `false` |
+| `mqb.stream.status` | Last message only: `complete`, `cancelled` or `error` |
+| `mqb.stream.stop_reason` | Last message only, when the API sent one, e.g. `stop` or `length` |
+
+The last message has an empty payload, or the error text with `error`. The
+response carries `correlation_id`, `mqb.stream.attempt`, `mqb.stream.status` and
+`mqb.stream.stop_reason` too.
+
+- **Token messages are for latency, the response is the result.** The input is
+  committed after the whole answer, so a crash or a retry starts a new attempt:
+  its tokens come again from index 0 under a new `mqb.stream.attempt`. A reader that
+  sees a new attempt for a `correlation_id` drops what it collected before.
+  What happens to tokens already sent is up to `stream_to`; a memory channel or
+  core NATS loses them on a restart, a durable broker such as JetStream or Kafka keeps them.
+- **Every attempt ends with a last token message**, also one that fails
+  before the stream starts. A stream that breaks off ends with `error` and
+  fails its message as retryable. An error status before the stream fails like
+  without streaming, 408, 429 and 5xx as retryable, others for good, and its
+  last token message holds the error with `mqb.stream.index` 0, so a reader can tell
+  that no text came.
+- **A failing `stream_to` does not fail the request.** It logs one warning,
+  sends no further tokens for that request and still delivers the answer.
+- **Cancel by `correlation_id`.** A message on `cancel_from` whose
+  `correlation_id`, or else whose payload, names a running request closes its
+  connection. The response then holds the answer so far with
+  `mqb.stream.status: cancelled`, and the input is committed. A cancel that arrives
+  before its request starts is kept for 30 s (at most 1024): the request then
+  ends at once as `cancelled`, without being sent. Each such cancel stops one
+  request.
+- **Requests run side by side up to `concurrency`** within a batch. The route
+  sends the next batch only when one finishes, so set the route's
+  `concurrency` above 1, or a new conversation waits for the previous answer.
+- **Do not put a collecting middleware such as `buffer` on `stream_to`.** It
+  holds the tokens back, which is what streaming is meant to avoid.
+- **`json: true` parses the complete answer.** The tokens are raw text; a
+  cancelled answer stays text.
+
+On the command line, `stream_to` and `cancel_from` are JSON text:
+`openai://localhost:11434?model=llama3.2&messages_from_payload=true&stream_to={"memory":{"topic":"tokens"}}`.
 
 ## `openai_embeddings`
 
@@ -263,11 +344,15 @@ let llm: Endpoint = OpenAiChatConfig {
 - **Batch size is the request size.** OpenAI takes at most 2048 texts per
   embeddings request; keep the route's `batch_size` at or below your
   provider's limit.
+- **It works on Android.** HTTPS there checks the server against the Mozilla
+  roots built into mq-bridge; no JNI setup is needed. Behind a proxy with its
+  own CA, set `tls.ca_file`.
 - **Nothing is cached.** A replayed message is sent, and billed, again. Use
   [`deduplication`](../cookbook/deduplication.md) before the lookup if that
   matters.
-- **No streaming here.** For a token stream, use the `http` output with
-  `stream_response_to`; see the [LLM cookbook](../cookbook/llm.md#stream-tokens).
+- **Streaming works for other APIs too.** `openai_chat` sets `stream_to`, see
+  [above](#streaming-the-answer); for another API, such as Anthropic's, use
+  [`http_bulk` with `stream_to`](./http-bulk.md#streaming-an-answer).
 
 Both endpoints are the generic [`http_bulk`](./http-bulk.md) `query` with the
 requests filled in. An API with another shape, such as Anthropic's

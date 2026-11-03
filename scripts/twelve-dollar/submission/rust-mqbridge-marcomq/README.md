@@ -18,8 +18,9 @@ handling and batching come from the library.
 - **Group commit.** The handler implements `handle_many` and `prefers_batches`. Requests that
   arrive while a batch is running reach the handler together as the next batch, and the whole
   batch runs in one transaction (`BEGIN IMMEDIATE` when it holds a write). Every response is
-  sent after `COMMIT`, so a 201 means the row is durable (rule 6). At most 100 requests are in
-  flight at a time, so a batch has at most 100 requests.
+  sent after `COMMIT`, so a 201 means the row is durable (rule 6). At most 512 requests are in
+  flight at a time (`concurrency_limit`, mq-bridge's default is 100), so a batch has at most
+  512 requests.
 - **One SQLite connection**, WAL, `synchronous=NORMAL`, `mmap_size` 1 GiB. With a single writer
   there is no `database is locked`, and batching makes up for the single connection.
 - **SQLite builds the JSON.** Each query returns the finished response body via `json_object`

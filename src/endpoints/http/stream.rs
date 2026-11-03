@@ -2,6 +2,7 @@
 // (stable since 1.80) is always available here; the crate-wide 1.75 MSRV doesn't apply.
 #![allow(clippy::incompatible_msrv)]
 
+use super::{HttpReply, HttpSourceMessage};
 use crate::support::sse::{find_sse_event_end, parse_sse_event, ParsedSseEvent};
 use crate::traits::{
     BoxFuture, CommitFunc, MessageDisposition, MessagePublisher, PublisherError, Sent,
@@ -19,7 +20,6 @@ use std::sync::Arc;
 use tracing::{debug, trace, warn};
 
 type BoxBody = http_body_util::combinators::BoxBody<Bytes, anyhow::Error>;
-type HttpSourceMessage = (CanonicalMessage, CommitFunc);
 type HttpStreamResponseTx = async_channel::Sender<Result<Frame<Bytes>, anyhow::Error>>;
 
 pub(super) enum PublishResponseStreamError {
@@ -496,11 +496,16 @@ async fn send_stream_item(
         return streamable_commit(disposition, response_tx, response_format, send_timeout).await;
     }
 
-    let commit = Box::new(move |disposition: MessageDisposition| {
+    let commit: CommitFunc = Box::new(move |disposition: MessageDisposition| {
         streamable_commit(disposition, response_tx, response_format, send_timeout)
     });
 
-    match tokio::time::timeout(send_timeout, dispatch.tx.send((message, commit))).await {
+    match tokio::time::timeout(
+        send_timeout,
+        dispatch.tx.send((message, HttpReply::Commit(commit))),
+    )
+    .await
+    {
         Ok(Ok(_)) => Ok(()),
         Ok(Err(error)) => Err(anyhow!("Internal pipeline closed: {}", error)),
         Err(_) => Err(anyhow!("Server overloaded")),

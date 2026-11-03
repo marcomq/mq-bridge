@@ -46,8 +46,8 @@ tests/**/*.pkcs12
 *.so
 *.pyd
 .pytest_cache/
-python/mq-bridge-py/.venv/
-python/mq-bridge-py/dist/
+bindings/python/.venv/
+bindings/python/dist/
 
 .vscode/
 .DS_Store

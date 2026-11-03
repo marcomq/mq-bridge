@@ -33,7 +33,12 @@ pub mod mqtt;
 pub mod nats;
 #[cfg(feature = "object-store")]
 pub mod object_store;
-#[cfg(any(feature = "sqlx", feature = "clickhouse", feature = "http-bulk"))]
+#[cfg(any(
+    feature = "sqlite",
+    feature = "sqlx",
+    feature = "clickhouse",
+    feature = "http-bulk"
+))]
 mod poll;
 #[cfg(feature = "postgres-cdc")]
 pub mod postgres;
@@ -41,7 +46,7 @@ pub mod postgres;
 pub mod redis_streams;
 #[cfg(feature = "sled")]
 pub mod sled;
-#[cfg(feature = "sqlx")]
+#[cfg(any(feature = "sqlite", feature = "sqlx"))]
 pub mod sqlx;
 /// Structural endpoints (`fanout`, `switch`, `request`, `response`, `reader`,
 /// `static`, `stream_buffer`, `null`) that route or terminate a flow instead of
@@ -238,6 +243,17 @@ fn policy_name(endpoint_type: &EndpointType) -> Option<&str> {
         EndpointType::Custom { name, .. } => Some(name),
         other if other.is_core() => None,
         other => Some(other.name()),
+    }
+}
+
+/// The `stream_to` and `cancel_from` endpoints of a streaming `http_bulk` or `openai_chat`.
+pub(crate) fn streaming_endpoints(endpoint_type: &EndpointType) -> [Option<&Endpoint>; 2] {
+    match endpoint_type {
+        EndpointType::HttpBulk(cfg) => cfg.query.as_ref().map_or([None, None], |query| {
+            [query.stream_to.as_deref(), query.cancel_from.as_deref()]
+        }),
+        EndpointType::OpenAiChat(cfg) => [cfg.stream_to.as_deref(), cfg.cancel_from.as_deref()],
+        _ => [None, None],
     }
 }
 
@@ -544,7 +560,7 @@ fn check_consumer_recursive(
             }
             Ok(warnings)
         }
-        #[cfg(feature = "sqlx")]
+        #[cfg(any(feature = "sqlite", feature = "sqlx"))]
         EndpointType::Sqlx(cfg) => {
             if cfg.insert_query.is_some() {
                 warnings.push(
@@ -730,7 +746,7 @@ pub(crate) async fn pin_resume_position(route_name: &str, endpoint: &Endpoint) -
         // is this moment, so changes made during the snapshot are still on the server.
         let cdc = match &resolved.endpoint_type {
             EndpointType::PostgresCdc(cfg) => Some(std::borrow::Cow::Borrowed(cfg)),
-            #[cfg(feature = "sqlx")]
+            #[cfg(any(feature = "sqlite", feature = "sqlx"))]
             EndpointType::Sqlx(cfg) if cfg.publication.is_some() => {
                 Some(std::borrow::Cow::Owned(sqlx_cfg_to_cdc(cfg)?))
             }
@@ -1843,7 +1859,7 @@ async fn create_base_consumer(
             }
             Ok(boxed(grpc::GrpcConsumer::new(&config).await?))
         }
-        #[cfg(feature = "sqlx")]
+        #[cfg(any(feature = "sqlite", feature = "sqlx"))]
         EndpointType::Sqlx(cfg) => {
             if cfg.publication.is_some() {
                 // A Postgres publication means CDC (logical replication), not polling —
@@ -2130,6 +2146,23 @@ fn check_publisher_recursive(
         ));
     }
     check_middleware_endpoints(route_name, endpoint, depth, allowed_types)?;
+    let [stream_to, cancel_from] = streaming_endpoints(&endpoint.endpoint_type);
+    if let Some(target) = stream_to {
+        warnings.extend(check_publisher_recursive(
+            route_name,
+            target,
+            depth + 1,
+            allowed_types,
+        )?);
+    }
+    if let Some(source) = cancel_from {
+        warnings.extend(check_consumer_recursive(
+            route_name,
+            source,
+            depth + 1,
+            allowed_types,
+        )?);
+    }
     match &endpoint.endpoint_type {
         EndpointType::Ref(name) => {
             let referenced = crate::route::get_endpoint(name).ok_or_else(|| {
@@ -2337,7 +2370,7 @@ fn check_publisher_recursive(
         }
         #[cfg(feature = "grpc")]
         EndpointType::Grpc(_) => Ok(warnings),
-        #[cfg(feature = "sqlx")]
+        #[cfg(any(feature = "sqlite", feature = "sqlx"))]
         EndpointType::Sqlx(cfg) => {
             if cfg.select_query.is_some() {
                 warnings.push(
@@ -2776,7 +2809,7 @@ async fn create_base_publisher(
         }
         #[cfg(feature = "grpc")]
         EndpointType::Grpc(cfg) => grpc::create_grpc_publisher(cfg).await,
-        #[cfg(feature = "sqlx")]
+        #[cfg(any(feature = "sqlite", feature = "sqlx"))]
         EndpointType::Sqlx(cfg) => {
             Ok(Box::new(sqlx::SqlxPublisher::new(cfg).await?) as Box<dyn MessagePublisher>)
         }
@@ -2787,6 +2820,12 @@ async fn create_base_publisher(
         }
         #[cfg(feature = "http-bulk")]
         EndpointType::HttpBulk(cfg) => {
+            if cfg.query.as_ref().is_some_and(|q| q.stream_to.is_some()) {
+                return Ok(
+                    Box::new(http_bulk::StreamQueryPublisher::new(route_name, cfg).await?)
+                        as Box<dyn MessagePublisher>,
+                );
+            }
             Ok(Box::new(http_bulk::HttpBulkPublisher::new(cfg)?) as Box<dyn MessagePublisher>)
         }
         #[cfg(feature = "http")]
@@ -3153,7 +3192,7 @@ mod tests {
 
     /// A polling cursor is a replay position, so an idempotent sink accepts it — where a
     /// plain `sqlx` queue read (no `cursor_column`) still has nothing to sequence by.
-    #[cfg(feature = "sqlx")]
+    #[cfg(any(feature = "sqlite", feature = "sqlx"))]
     #[test]
     fn sqlx_is_a_replay_source_only_in_cursor_or_cdc_mode() {
         let cursor = EndpointType::Sqlx(crate::models::SqlxConfig {
@@ -4130,6 +4169,20 @@ mod tests {
                 assert!(check_publisher("test", &endpoint, Some(&["memory"])).is_err());
                 assert!(check_publisher("test", &endpoint, Some(&["pulsar"])).is_ok());
                 assert!(check_publisher("test", &endpoint, None).is_ok());
+            }
+        }
+
+        #[test]
+        fn the_policy_reaches_the_stream_to_and_cancel_from_endpoints() {
+            let pulsar = serde_json::json!({"custom": {"name": "pulsar", "config": null}});
+            for field in ["stream_to", "cancel_from"] {
+                let endpoint: Endpoint = serde_json::from_value(serde_json::json!({
+                    "openai_chat": {"model": "m", "prompt": "p", field: pulsar}
+                }))
+                .unwrap();
+                let check = |allowed: &[&str]| check_publisher("test", &endpoint, Some(allowed));
+                assert!(check(&["openai_chat"]).is_err(), "{field}");
+                assert!(check(&["openai_chat", "pulsar"]).is_ok(), "{field}");
             }
         }
 

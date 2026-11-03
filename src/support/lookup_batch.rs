@@ -34,6 +34,7 @@ pub(crate) struct ListQuery {
 
 impl ListQuery {
     /// The query with the element repeated for `n` keys; `slot(i)` renders the i-th value.
+    #[cfg_attr(not(any(feature = "sqlite", feature = "clickhouse")), allow(dead_code))]
     pub fn expand(&self, n: usize, mut slot: impl FnMut(usize) -> String) -> String {
         let mut out = self.before.clone();
         for i in 0..n {
@@ -116,6 +117,7 @@ fn has_top_level_comma(element: &str) -> bool {
     })
 }
 
+#[cfg_attr(not(any(feature = "sqlite", feature = "clickhouse")), allow(dead_code))]
 fn ends_with_in_keyword(text: &str) -> bool {
     let t = text.trim_end();
     t.len() >= 2
@@ -127,6 +129,7 @@ fn ends_with_in_keyword(text: &str) -> bool {
 }
 
 /// The column named left of `IN`: `c.id` and `"Id"` give `id` and `Id`.
+#[cfg_attr(not(any(feature = "sqlite", feature = "clickhouse")), allow(dead_code))]
 fn column_before_in(text: &str) -> anyhow::Result<String> {
     let t = text.trim_end();
     let t = t[..t.len() - 2].trim_end();
@@ -146,6 +149,7 @@ fn column_before_in(text: &str) -> anyhow::Result<String> {
 }
 
 /// A plain `LIMIT n` would cap the whole batch, not each key; `LIMIT n BY …` is per key.
+#[cfg_attr(not(any(feature = "sqlite", feature = "clickhouse")), allow(dead_code))]
 fn has_plain_limit(sql: &str) -> bool {
     let words: Vec<&str> = sql.split_whitespace().collect();
     words.iter().enumerate().any(|(i, w)| {
@@ -160,6 +164,7 @@ fn has_plain_limit(sql: &str) -> bool {
 }
 
 /// True when `element` is a subquery (`SELECT …` / `WITH …`), not a value list.
+#[cfg_attr(not(any(feature = "sqlite", feature = "clickhouse")), allow(dead_code))]
 fn starts_subquery(element: &str) -> bool {
     let t = element.trim_start_matches(|c: char| c.is_whitespace() || c == '(');
     ["select", "with"].iter().any(|kw| {
@@ -171,6 +176,7 @@ fn starts_subquery(element: &str) -> bool {
 
 /// Parses a SQL lookup query. `Ok(None)` when it runs per message (the token is compared
 /// directly); `Ok(Some(_))` when the only token sits inside `column IN (…)`.
+#[cfg_attr(not(any(feature = "sqlite", feature = "clickhouse")), allow(dead_code))]
 pub(crate) fn parse_sql(sql: &str) -> anyhow::Result<Option<ListQuery>> {
     let found = tokens(sql)?;
     let list = found.iter().find_map(|&(start, end)| {
@@ -205,6 +211,7 @@ pub(crate) fn parse_sql(sql: &str) -> anyhow::Result<Option<ListQuery>> {
 }
 
 /// The field of `"field": {"$in": [`, given the text up to that `[`.
+#[cfg_attr(not(feature = "mongodb"), allow(dead_code))]
 fn in_field(before: &str) -> Option<String> {
     before
         .trim_end()
@@ -219,6 +226,7 @@ fn in_field(before: &str) -> Option<String> {
 
 /// Parses a MongoDB `find` template. `Ok(None)` when it runs per message; `Ok(Some(_))` when
 /// the only token sits inside `"field": {"$in": [ … ]}`.
+#[cfg_attr(not(feature = "mongodb"), allow(dead_code))]
 pub(crate) fn parse_mongodb(filter: &str) -> anyhow::Result<Option<ListQuery>> {
     let found = tokens(filter)?;
     let is_in = |before: &str| {

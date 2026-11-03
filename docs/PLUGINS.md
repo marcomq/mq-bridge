@@ -790,8 +790,8 @@ listens on a free local port, answers every request through the closure, and
 The ABI is plain C, so a plugin does not have to be Rust. The usual reason is an
 existing C library — a parser for a proprietary wire format, say — that should
 run as a middleware without being rewritten.
-[`include/mq_bridge_plugin.h`](../include/mq_bridge_plugin.h) declares the ABI;
-[`include/mq_bridge_plugin_helpers.h`](../include/mq_bridge_plugin_helpers.h)
+[`bindings/c/include/mq_bridge_plugin.h`](../bindings/c/include/mq_bridge_plugin.h) declares the ABI;
+[`bindings/c/include/mq_bridge_plugin_helpers.h`](../bindings/c/include/mq_bridge_plugin_helpers.h)
 fills in every entry a plugin does not implement. A complete middleware that
 drops heartbeat messages:
 
@@ -873,7 +873,7 @@ matches the host, and its `static_assert`s refuse to compile if the table layout
 ever does not.
 
 A C or C++ program that embeds mq-bridge through the
-[C library](../c/mq-bridge-c/README.md) does not need a separate plugin library:
+[C library](../bindings/c/README.md) does not need a separate plugin library:
 `mqb_register_plugin(&table)` registers the same table from the program itself.
 
 #### When it crashes

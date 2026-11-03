@@ -2071,7 +2071,7 @@
       ]
     },
     "TlsConfig": {
-      "description": "TLS configuration for secure connections.\n\nConfigures Transport Layer Security (TLS/SSL) for encrypted communication.\nSupports both client certificate (mutual TLS) and server certificate validation.\n\n# Examples\n\n```\nuse mq_bridge::models::TlsConfig;\n\nlet tls = TlsConfig {\n    required: true,\n    ca_file: Some(\"/path/to/ca.pem\".to_string()),\n    cert_file: Some(\"/path/to/cert.pem\".to_string()),\n    key_file: Some(\"/path/to/key.pem\".to_string()),\n    ..Default::default()\n};\n```",
+      "description": "TLS configuration for secure connections.\n\nConfigures Transport Layer Security (TLS/SSL) for encrypted communication.\nSupports both client certificate (mutual TLS) and server certificate validation.\n\n`ca_file` also takes `\"$.os\"` (the operating system's CA store) or `\"$.bundled\"` (the\nMozilla roots built into mq-bridge). Which endpoint supports which, and what it trusts\nwithout `ca_file`, is in the TLS section of the configuration guide.\n\n# Examples\n\n```\nuse mq_bridge::models::TlsConfig;\n\nlet tls = TlsConfig {\n    required: true,\n    ca_file: Some(\"/path/to/ca.pem\".to_string()),\n    cert_file: Some(\"/path/to/cert.pem\".to_string()),\n    key_file: Some(\"/path/to/key.pem\".to_string()),\n    ..Default::default()\n};\n```",
       "type": "object",
       "properties": {
         "required": {
@@ -2080,7 +2080,7 @@
           "default": false
         },
         "ca_file": {
-          "description": "Path to the CA certificate file.",
+          "description": "Path to the CA certificate file, or `$.os` (OS CA store) or `$.bundled` (built-in public roots).",
           "type": [
             "string",
             "null"
@@ -3714,6 +3714,16 @@
           ],
           "format": "uint64",
           "minimum": 0
+        },
+        "forward_headers": {
+          "description": "(Consumer only) Only these request headers (case-insensitive) become metadata. Unset = all headers.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
         },
         "basic_auth": {
           "description": "HTTP Basic Authentication credentials (username, password). For consumers: validates incoming requests. For publishers: adds Authorization header.",
@@ -5611,6 +5621,35 @@
         "split_on_reject": {
           "description": "A refused request (400, 409, 413, 422) or unmatched answers: ask again in halves.",
           "type": "boolean"
+        },
+        "stream_to": {
+          "description": "`per_message` only: reads the answer as server-sent events and sends each `value` to this endpoint.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Endpoint"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cancel_from": {
+          "description": "With `stream_to`: a message here with a request's `correlation_id` stops it.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Endpoint"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "stream_done": {
+          "description": "With `stream_to`: the event data that ends the stream, e.g. `[DONE]`.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "additionalProperties": false,
@@ -6234,7 +6273,13 @@
         },
         "prompt": {
           "description": "Template of the user message, e.g. `Summarise: ${payload:body}`.",
-          "type": "string"
+          "type": "string",
+          "default": ""
+        },
+        "messages_from_payload": {
+          "description": "The payload is the `messages` array itself, e.g. a whole conversation.",
+          "type": "boolean",
+          "default": false
         },
         "json": {
           "description": "Ask for a JSON object and parse the answer.",
@@ -6285,12 +6330,33 @@
         },
         "auth": {
           "description": "`oauth2` or `aws_sigv4` credentials, as on `http_bulk`; JSON in a URI."
+        },
+        "stream_to": {
+          "description": "Streams the answer: each text delta goes to this endpoint as it arrives.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Endpoint"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cancel_from": {
+          "description": "With `stream_to`: a message here with a request's `correlation_id` stops it.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Endpoint"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false,
       "required": [
-        "model",
-        "prompt"
+        "model"
       ]
     },
     "OpenAiEmbeddingsConfig": {

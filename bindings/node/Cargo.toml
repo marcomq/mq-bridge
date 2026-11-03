@@ -1,0 +1,77 @@
+[package]
+name = "mq-bridge-node"
+version.workspace = true
+edition = "2024"
+publish = false
+description = "Node.js bindings for mq-bridge, an async message-bridging library"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/marcomq/mq-bridge"
+
+[lib]
+name = "mq_bridge_node"
+crate-type = ["cdylib"]
+doctest = false
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+bytes = { workspace = true, features = ["serde"] }
+fast-uuid-v7.workspace = true
+mq-bridge = { path = "../.." }
+mq-bridge-bindings-common = { path = "../common" }
+napi = { version = "3", features = ["serde-json", "async"] }
+napi-derive = "3"
+schemars = { version = "1.2", optional = true }
+serde_json.workspace = true
+serde_yaml_ng.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time"] }
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "env-filter"] }
+
+# The addon is dlopen'd by Node, so mimalloc's thread-locals must use the dynamic
+# TLS model — the default initial-exec model draws from the fixed static TLS
+# surplus and fails to load on slim images ("cannot allocate memory in static TLS
+# block", napi-rs#1060). Not applicable on macOS/Windows.
+[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
+mimalloc = { version = "0.1", default-features = false, features = ["local_dynamic_tls"], optional = true }
+
+[target.'cfg(not(any(target_os = "linux", target_os = "freebsd")))'.dependencies]
+mimalloc = { version = "0.1", default-features = false, optional = true }
+
+[build-dependencies]
+napi-build = "2"
+
+[features]
+default = ["full"]
+middleware = ["mq-bridge/middleware"]
+full = ["mq-bridge/full", "plugin", "schema", "mimalloc"]
+# mimalloc as Rust-side global allocator. Only redirects allocations made by this
+# cdylib's Rust code; V8's allocator is untouched. Safe because no raw
+# Rust-allocated buffer crosses the addon boundary. Excluded from `basic`.
+mimalloc = ["dep:mimalloc"]
+basic = ["http", "nats", "mqtt", "websocket", "zeromq", "plugin", "rustls-ring", "schema"]
+dedup = ["mq-bridge/dedup"]
+metrics = ["mq-bridge/metrics"]
+# Load endpoints from native plugin libraries via `loadEndpointPlugin`.
+plugin = ["mq-bridge/plugin"]
+schema = ["dep:schemars", "mq-bridge/schema"]
+test-utils = ["mq-bridge/test-utils"]
+kafka = ["mq-bridge/kafka"]
+amqp = ["mq-bridge/amqp"]
+nats = ["mq-bridge/nats"]
+mongodb = ["mq-bridge/mongodb"]
+mqtt = ["mq-bridge/mqtt"]
+http = ["mq-bridge/http"]
+websocket = ["mq-bridge/websocket"]
+aws = ["mq-bridge/aws"]
+ibm-mq = ["mq-bridge/ibm-mq"]
+ibm-mq-static = ["mq-bridge/ibm-mq-static"]
+zeromq = ["mq-bridge/zeromq"]
+redis-streams = ["mq-bridge/redis-streams"]
+grpc = ["mq-bridge/grpc"]
+sqlx = ["mq-bridge/sqlx"]
+rustls-ring = ["mq-bridge/rustls-ring"]
+rustls-aws-lc = ["mq-bridge/rustls-aws-lc"]
+
+[lints]
+workspace = true

@@ -16,6 +16,7 @@ Query parameters recognised as config fields for this connector. The object-type
 | `concurrency_limit` | integer | no | — | (Consumer only) Maximum number of concurrent requests to handle. Defaults to 100. |
 | `custom_headers` | object | no | — | Custom headers as key-value pairs (e.g., {"X-API-Key": "token123"}). Added to outgoing HTTP headers for both consumers and publishers. |
 | `fire_and_forget` | boolean | no | `false` | (Consumer only) If true, respond immediately with 202 Accepted without waiting for downstream processing. Defaults to false. |
+| `forward_headers` | array of string | no | — | (Consumer only) Only these request headers (case-insensitive) become metadata. Unset = all headers. |
 | `header_read_timeout_ms` | integer | no | — | (Consumer only) Close an HTTP/1 connection whose request head takes longer than this. Unset or 0 = no limit. |
 | `inline_response_fast_path` | boolean | no | `true` | (Consumer only) If true, compatible `http -> response` routes may bypass the normal route consumer/worker/disposition pipeline and reply inline for lower latency. Defaults to true. Set to false to force the normal route path. |
 | `internal_buffer_size` | integer | no | — | (Consumer only) Internal buffer size for the channel. Defaults to 100. |

@@ -56,9 +56,9 @@ Install the library for your language:
 | Language | Package | Install |
 | :--- | :--- | :--- |
 | Rust | [`mq-bridge`](https://crates.io/crates/mq-bridge) | `cargo add mq-bridge --features kafka,nats,yaml` |
-| Python | [`mq-bridge`](python/mq-bridge-py/README.md) ([PyPI](https://pypi.org/project/mq-bridge/)) | `pip install mq-bridge` |
-| Node.js | [`mq-bridge`](node/mq-bridge-node/README.md) ([npm](https://www.npmjs.com/package/mq-bridge)) | `npm install mq-bridge` |
-| C / C++ | [`mq_bridge.h`](c/mq-bridge-c/README.md) | `cargo build --release -p mq-bridge-c` (build from source) |
+| Python | [`mq-bridge`](bindings/python/README.md) ([PyPI](https://pypi.org/project/mq-bridge/)) | `pip install mq-bridge` |
+| Node.js | [`mq-bridge`](bindings/node/README.md) ([npm](https://www.npmjs.com/package/mq-bridge)) | `npm install mq-bridge` |
+| C / C++ | [`mq_bridge.h`](bindings/c/README.md) | `cargo build --release -p mq-bridge-c` (build from source) |
 
 Describe a route — here Kafka → NATS with retries — in `routes.yaml`:
 
@@ -103,7 +103,7 @@ Every row works from the Rust crate, the Python and Node.js packages, and the ze
 | :--- | :--- | :--- |
 | **Message brokers**: Kafka, NATS (JetStream), RabbitMQ (AMQP), MQTT, Redis Streams, AWS SQS/SNS, IBM MQ, ZeroMQ | `kafka`, `nats`, `amqp`, `mqtt`, `redis_streams`, `aws`, `ibmmq`, `zeromq` endpoints · features `kafka`, `nats`, `amqp`, `mqtt`, `redis-streams`, `aws`, `ibm-mq`, `zeromq` | [Connectors](https://marcomq.github.io/mq-bridge/connectors/index.html) |
 | **Change Data Capture (CDC)**: stream Postgres or MongoDB changes to Kafka, files, a warehouse, … | `postgres_cdc` (logical replication, `pgoutput`) · `postgres-cdc`; `mongodb` with `consume: capture_all` / `capture_new` (change streams) · `mongodb` | [Postgres CDC tutorial](https://marcomq.github.io/mq-bridge/tutorials/postgres-cdc.html) · [MongoDB](https://marcomq.github.io/mq-bridge/connectors/mongodb.html) |
-| **SQL databases**: PostgreSQL, MySQL, MariaDB, SQLite as source (cursor polling) or sink (insert / upsert) | `sqlx` endpoint · `sqlx` | [PostgreSQL / MySQL / SQLite](https://marcomq.github.io/mq-bridge/connectors/postgres.html) · [Upserts](https://marcomq.github.io/mq-bridge/cookbook/upserts.html) |
+| **SQL databases**: PostgreSQL, MySQL, MariaDB, SQLite as source (cursor polling) or sink (insert / upsert) | `sqlx` endpoint · `sqlx` (`sqlite` for SQLite only) | [PostgreSQL / MySQL / SQLite](https://marcomq.github.io/mq-bridge/connectors/postgres.html) · [Upserts](https://marcomq.github.io/mq-bridge/cookbook/upserts.html) |
 | **MongoDB** as source or sink | `mongodb` endpoint · `mongodb` | [MongoDB](https://marcomq.github.io/mq-bridge/connectors/mongodb.html) |
 | **ClickHouse** bulk insert and resumable reads | `clickhouse` endpoint · `clickhouse` | [ClickHouse](https://marcomq.github.io/mq-bridge/connectors/clickhouse.html) |
 | **Search engines** and other bulk document APIs (Meilisearch, Typesense, Elasticsearch, Qdrant, PostgREST / Supabase) | `http_bulk` endpoint · `http-bulk` | [HTTP bulk](https://marcomq.github.io/mq-bridge/connectors/http-bulk.html) |
@@ -160,7 +160,7 @@ The CSV row reuses an existing, independently published 1M-row CSV → JSONL wor
 All figures: mq-bridge 0.4.20, except the Redpanda Connect rows, which were measured together with their native mq-bridge figures in one later session ([scenario 10](apps/mq-bridge-app/benches/etl/README.md#10--redpanda-connect-and-the-connect-plugin)). DuckDB is a throughput ceiling for the conversion itself, not an ETL tool.
 
 
-**External benchmark:** both the Rust library ([`mq-bridge`](https://www.http-arena.com/#sort=rps:-1&q=rust)) and the Python binding ([`mq-bridge-py`](https://www.http-arena.com/#sort=rps:-1&q=python)) are entries on the third-party [http-arena.com](https://www.http-arena.com/) leaderboard, which compares HTTP frameworks by requests per second (live, so rankings shift over time). It measures mq-bridge's HTTP (and WebSocket) serving path, which is one endpoint among many, not broker or ETL throughput; those are covered under [Benchmarks](#benchmarks). See [the Python analysis notes](python/mq-bridge-py/README.md#analysis) for the local comparison harness.
+**External benchmark:** both the Rust library ([`mq-bridge`](https://www.http-arena.com/#sort=rps:-1&q=rust)) and the Python binding ([`mq-bridge-py`](https://www.http-arena.com/#sort=rps:-1&q=python)) are entries on the third-party [http-arena.com](https://www.http-arena.com/) leaderboard, which compares HTTP frameworks by requests per second (live, so rankings shift over time). It measures mq-bridge's HTTP (and WebSocket) serving path, which is one endpoint among many, not broker or ETL throughput; those are covered under [Benchmarks](#benchmarks). See [the Python analysis notes](bindings/python/README.md#analysis) for the local comparison harness.
 
 
 ## Why mq-bridge
@@ -175,7 +175,7 @@ What you get from one engine, whichever language you call it from:
 *   **Restart-safe delivery**: batch-aware ack/nack with commit sequencing for cumulative-ack brokers; the integration suite shows **no data loss during in-flight broker restarts**, including a Postgres CDC restart-safety test.
 *   **Reliability middleware, not a framework**: retries, dead-letter queues, deduplication, rate limiting, and cookie/session persistence wrap any endpoint.
 *   **Polyglot on one engine**: the same Rust core ships as native **Python** and **Node.js** bindings; routing, batching, and broker I/O stay in Rust.
-*   **TLS everywhere, one config shape**: a single `TlsConfig` block (CA bundle, client cert/key for mTLS, insecure-skip) is reused across transports.
+*   **TLS everywhere, one config shape**: a single `TlsConfig` block (CA bundle, client cert/key for mTLS, insecure-skip) is reused across transports. `ca_file: "$.os"` trusts the OS CA store and `"$.bundled"` the built-in Mozilla roots; [what each endpoint supports](docs/CONFIGURATION.md#tls--security-hardening).
 *   **Self-hosted, no daemon**: generate config in the optional UI, paste it into your code, run it in-process. No hosted control plane, no separate scheduler.
 
 **Prefer not to write code?** [`mq-bridge-app`](apps/mq-bridge-app) runs the exact same engine as a **standalone, zero-code ETL service** configured entirely by **YAML or environment variables**. It ships a **Postman-style UI** to build, send, and inspect messages against a route, and can **import Postman collections and AsyncAPI documents** to scaffold routes and endpoints. Everything about the app — install, CLI, UI, cookbook, tuning — is in the [📖 book](https://marcomq.github.io/mq-bridge/).

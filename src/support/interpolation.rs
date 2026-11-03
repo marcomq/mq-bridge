@@ -38,6 +38,8 @@
 //! values are JSON-string-escaped so external data can never break the surrounding
 //! structure. Append `| raw` to a token (`${payload:x | raw}`) to splice it
 //! verbatim instead, or `| base64` to insert its standard base64 encoding.
+//! `| json_array` splices verbatim only a value that is exactly one JSON array;
+//! any other value fails the whole render (`render` then yields an empty body).
 //! `gen`/`env` values are framework/operator-generated and are never escaped.
 
 use anyhow::{anyhow, bail, Context};
@@ -101,6 +103,68 @@ enum Filter {
     Raw,
     /// Standard base64 of the value's bytes.
     Base64,
+    /// Verbatim, but only if the value is exactly one JSON array; otherwise the render fails.
+    JsonArray,
+}
+
+/// Why a render produced no output.
+enum Unrendered {
+    Missing,
+    NotJsonArray,
+}
+
+/// One JSON array and nothing after it, checked without building it.
+fn is_json_array(value: &str) -> bool {
+    value.trim_start().starts_with('[') && serde_json::from_str::<ValidJson>(value).is_ok()
+}
+
+/// Validates any JSON value, decoding every string so bad escapes fail. `IgnoredAny` skips
+/// string escapes unchecked, so a lone surrogate would pass it.
+struct ValidJson;
+
+impl<'de> Deserialize<'de> for ValidJson {
+    fn deserialize<D: de::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        de.deserialize_any(ValidJsonVisitor)
+    }
+}
+
+struct ValidJsonVisitor;
+
+impl<'de> Visitor<'de> for ValidJsonVisitor {
+    type Value = ValidJson;
+
+    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str("a JSON value")
+    }
+
+    fn visit_bool<E>(self, _: bool) -> Result<ValidJson, E> {
+        Ok(ValidJson)
+    }
+    fn visit_i64<E>(self, _: i64) -> Result<ValidJson, E> {
+        Ok(ValidJson)
+    }
+    fn visit_u64<E>(self, _: u64) -> Result<ValidJson, E> {
+        Ok(ValidJson)
+    }
+    fn visit_f64<E>(self, _: f64) -> Result<ValidJson, E> {
+        Ok(ValidJson)
+    }
+    fn visit_str<E>(self, _: &str) -> Result<ValidJson, E> {
+        Ok(ValidJson)
+    }
+    fn visit_unit<E>(self) -> Result<ValidJson, E> {
+        Ok(ValidJson)
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<ValidJson, A::Error> {
+        while seq.next_element::<ValidJson>()?.is_some() {}
+        Ok(ValidJson)
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<ValidJson, A::Error> {
+        while map.next_entry::<ValidJson, ValidJson>()?.is_some() {}
+        Ok(ValidJson)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -267,8 +331,15 @@ impl CompiledTemplate {
 
     /// Render the template against an optional message. On the source side (no
     /// input message) `payload`/`metadata`/`message` tokens resolve to empty.
+    /// A `| json_array` token whose value is not exactly one JSON array renders nothing at all.
     pub fn render(&self, msg: Option<&CanonicalMessage>) -> Vec<u8> {
         self.render_inner(msg, false).unwrap_or_default()
+    }
+
+    /// Like [`Self::render`], but an error when a `| json_array` value is not one JSON array.
+    pub fn render_checked(&self, msg: Option<&CanonicalMessage>) -> Result<Vec<u8>, String> {
+        self.render_inner(msg, false)
+            .map_err(|_| "a '| json_array' value is not exactly one JSON array".to_string())
     }
 
     /// Render, but `None` as soon as a token has no value for this message.
@@ -278,10 +349,14 @@ impl CompiledTemplate {
     /// still yields `"x-"` when `b` is absent — a non-empty value that every such message
     /// shares. Only a whole-template check catches that.
     pub fn render_resolved(&self, msg: Option<&CanonicalMessage>) -> Option<Vec<u8>> {
-        self.render_inner(msg, true)
+        self.render_inner(msg, true).ok()
     }
 
-    fn render_inner(&self, msg: Option<&CanonicalMessage>, strict: bool) -> Option<Vec<u8>> {
+    fn render_inner(
+        &self,
+        msg: Option<&CanonicalMessage>,
+        strict: bool,
+    ) -> Result<Vec<u8>, Unrendered> {
         let mut payload = self.parse_payload(msg);
 
         let mut out = Vec::with_capacity(self.literal_len + 16);
@@ -295,9 +370,18 @@ impl CompiledTemplate {
                         out.extend_from_slice(BASE64.encode(&msg.payload).as_bytes());
                         continue;
                     }
+                    if let (Filter::JsonArray, Source::MessagePayload, Some(msg)) =
+                        (tok.filter, &tok.source, msg)
+                    {
+                        if !std::str::from_utf8(&msg.payload).is_ok_and(is_json_array) {
+                            return Err(Unrendered::NotJsonArray);
+                        }
+                        out.extend_from_slice(&msg.payload);
+                        continue;
+                    }
                     let value = match self.resolve(tok, msg, &mut payload) {
                         Some(value) => value,
-                        None if strict => return None,
+                        None if strict => return Err(Unrendered::Missing),
                         None => String::new(),
                     };
                     match tok.filter {
@@ -305,6 +389,10 @@ impl CompiledTemplate {
                             out.extend_from_slice(BASE64.encode(value.as_bytes()).as_bytes())
                         }
                         Filter::Raw => out.extend_from_slice(value.as_bytes()),
+                        Filter::JsonArray if is_json_array(&value) => {
+                            out.extend_from_slice(value.as_bytes())
+                        }
+                        Filter::JsonArray => return Err(Unrendered::NotJsonArray),
                         Filter::None if self.escape == EscapeMode::None => {
                             out.extend_from_slice(value.as_bytes())
                         }
@@ -313,7 +401,7 @@ impl CompiledTemplate {
                 }
             }
         }
-        Some(out)
+        Ok(out)
     }
 
     /// Parse as little of the payload as the template actually asks for.
@@ -410,7 +498,10 @@ fn parse_token(inner: &str) -> anyhow::Result<Parsed> {
             })?;
             return Ok(Parsed::Literal(match validate_filter(filter, inner)? {
                 Filter::Base64 => BASE64.encode(value.as_bytes()),
-                Filter::None | Filter::Raw => value,
+                Filter::JsonArray if !is_json_array(&value) => {
+                    bail!("environment variable '{selector}' is not a JSON array")
+                }
+                Filter::None | Filter::Raw | Filter::JsonArray => value,
             }));
         }
         // Unknown namespace: leave the text untouched for backward compatibility,
@@ -428,8 +519,9 @@ fn validate_filter(filter: Option<&str>, inner: &str) -> anyhow::Result<Filter> 
         None => Ok(Filter::None),
         Some("raw") => Ok(Filter::Raw),
         Some("base64") => Ok(Filter::Base64),
+        Some("json_array") => Ok(Filter::JsonArray),
         Some(other) => bail!(
-            "unknown token filter '{other}' in '${{{inner}}}' (only 'raw' and 'base64' are supported)"
+            "unknown token filter '{other}' in '${{{inner}}}' (only 'raw', 'base64' and 'json_array' are supported)"
         ),
     }
 }
@@ -542,7 +634,12 @@ pub(crate) fn pick_path(bytes: &[u8], segments: &[String]) -> Option<Value> {
 /// document is malformed or not an object), without allocating the rest of the document.
 /// Like `pick_path`, bad escapes or UTF-8 inside a skipped string go unnoticed.
 #[cfg_attr(
-    not(any(feature = "sqlx", feature = "clickhouse", feature = "http-bulk")),
+    not(any(
+        feature = "sqlite",
+        feature = "sqlx",
+        feature = "clickhouse",
+        feature = "http-bulk"
+    )),
     allow(dead_code)
 )]
 pub(crate) fn pick_fields(bytes: &[u8], wanted: impl Fn(&str) -> bool) -> Option<Value> {
@@ -553,7 +650,12 @@ pub(crate) fn pick_fields(bytes: &[u8], wanted: impl Fn(&str) -> bool) -> Option
 }
 
 #[cfg_attr(
-    not(any(feature = "sqlx", feature = "clickhouse", feature = "http-bulk")),
+    not(any(
+        feature = "sqlite",
+        feature = "sqlx",
+        feature = "clickhouse",
+        feature = "http-bulk"
+    )),
     allow(dead_code)
 )]
 struct PickFields<'f, F>(&'f F);
@@ -592,7 +694,12 @@ impl<'de, F: Fn(&str) -> bool> Visitor<'de> for PickFields<'_, F> {
 
 /// An object key, kept only when `wanted` accepts it.
 #[cfg_attr(
-    not(any(feature = "sqlx", feature = "clickhouse", feature = "http-bulk")),
+    not(any(
+        feature = "sqlite",
+        feature = "sqlx",
+        feature = "clickhouse",
+        feature = "http-bulk"
+    )),
     allow(dead_code)
 )]
 struct WantedKey<'f, F>(&'f F);
@@ -988,6 +1095,33 @@ mod tests {
             Some(&msg),
         );
         assert_eq!(out, r#"{"x":{"k":1}}"#);
+    }
+
+    #[test]
+    fn a_value_that_is_not_one_json_array_fails_the_render() {
+        let template =
+            CompiledTemplate::compile(r#"{"items":[${payload:items | json_array}]}"#, None)
+                .unwrap();
+        let ok = msg_with(r#"{"items":[1,2]}"#, &[]);
+        assert_eq!(
+            template.render_checked(Some(&ok)).unwrap(),
+            br#"{"items":[[1,2]]}"#
+        );
+        for payload in [r#"{"items":{"a":1}}"#, r#"{}"#] {
+            let bad = msg_with(payload, &[]);
+            assert!(template.render_checked(Some(&bad)).is_err(), "{payload}");
+            assert!(template.render(Some(&bad)).is_empty(), "{payload}");
+        }
+        assert!(is_json_array(r#" [1,"a😀",{"ki":[null,true]}]"#));
+        for bad in [
+            r#"["\ud83d"]"#,
+            r#"[{"\udc00":1}]"#,
+            r#"["\u00"]"#,
+            "[1] x",
+            "{}",
+        ] {
+            assert!(!is_json_array(bad), "{bad}");
+        }
     }
 
     #[test]
