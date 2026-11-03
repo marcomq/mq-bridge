@@ -1,4 +1,4 @@
-//! The C API of mq-bridge. `include/mq_bridge.h` is generated from this crate.
+//! The C API of mq-bridge. `c/include/mq_bridge.h` is generated from this crate.
 //!
 //! Every call blocks the calling thread. A fallible call returns an `MqbStatus`
 //! (or a null handle) and leaves its text in [`mqb_last_error`].

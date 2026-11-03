@@ -1,4 +1,4 @@
-//! A C program written against `include/mq_bridge.h` builds, links and runs.
+//! A C program written against `c/include/mq_bridge.h` builds, links and runs.
 //!
 //! Compiles `examples/c-library` with the system C compiler (`$CC`, default `cc`),
 //! so the header, the examples and the library are checked together.
@@ -62,7 +62,7 @@ fn compile(library: &Path, source: &str) -> PathBuf {
     ])
     .args(std::env::var_os("MQB_C_ASAN").map(|_| "-fsanitize=address"))
     .arg("-I")
-    .arg(root.join("include"))
+    .arg(root.join("c/include"))
     .arg(root.join("examples/c-library").join(source))
     .arg("-L")
     .arg(library_dir)

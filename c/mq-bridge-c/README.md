@@ -5,7 +5,7 @@ any supported endpoint (Kafka, NATS, AMQP, MQTT, HTTP, files, databases, ...),
 configured with the same YAML or JSON as the CLI and the other bindings. C++,
 and any language that can call C, can use it too.
 
-- Header: [`include/mq_bridge.h`](../../include/mq_bridge.h) (generated, checked in)
+- Header: [`c/include/mq_bridge.h`](../include/mq_bridge.h) (generated, checked in)
 - Library: `libmq_bridge.so` / `.dylib` / `mq_bridge.dll`, and `libmq_bridge.a`
 - Examples: [`examples/c-library`](../../examples/c-library)
 
@@ -131,7 +131,7 @@ mqb_route_free(route);
 program, the same table a [plugin library](../../docs/PLUGINS.md#writing-one-in-c-or-c)
 exports. Its name then works as `custom: { name: ..., config: {} }` in a route,
 as an endpoint, a middleware or both, depending on its capability flags.
-[`mq_bridge_plugin_helpers.h`](../../include/mq_bridge_plugin_helpers.h) fills
+[`mq_bridge_plugin_helpers.h`](../include/mq_bridge_plugin_helpers.h) fills
 the entries you do not implement; [`smoke.c`](../../examples/c-library/smoke.c)
 has a complete one. `mqb_load_plugin(path)` loads a plugin library instead.
 

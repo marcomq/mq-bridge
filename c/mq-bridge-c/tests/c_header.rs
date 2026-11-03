@@ -1,4 +1,4 @@
-//! `include/mq_bridge.h` is generated from this crate's sources.
+//! `c/include/mq_bridge.h` is generated from this crate's sources.
 //!
 //! The header is checked in so C users need no Rust toolchain; this test keeps
 //! it from drifting. `MQB_BLESS=1` rewrites it instead of comparing.
@@ -30,7 +30,7 @@ fn generate() -> String {
 #[test]
 fn the_checked_in_header_matches_the_rust_api() {
     let generated = generate();
-    let path = crate_dir().join("../../include/mq_bridge.h");
+    let path = crate_dir().join("../include/mq_bridge.h");
     if std::env::var_os("MQB_BLESS").is_some() {
         std::fs::write(&path, generated).expect("write the header");
         return;
@@ -38,7 +38,7 @@ fn the_checked_in_header_matches_the_rust_api() {
     let checked_in = std::fs::read_to_string(&path).unwrap_or_default();
     assert!(
         checked_in == generated,
-        "include/mq_bridge.h is stale; regenerate it with \
+        "c/include/mq_bridge.h is stale; regenerate it with \
          `MQB_BLESS=1 cargo test -p mq-bridge-c --no-default-features --test c_header` \
          and review MQB_API_VERSION"
     );

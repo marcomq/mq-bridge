@@ -654,6 +654,6 @@ MQB_STATIC_ASSERT(sizeof(size_t) == 8, "the plugin ABI layout is defined for 64-
 MQB_STATIC_ASSERT(sizeof(MqbMessage) == 16 + 4 * sizeof(size_t), "MqbMessage layout");
 MQB_STATIC_ASSERT(sizeof(MqbHostVTable) == MQB_HOST_VTABLE_SIZE_V1_2, "MqbHostVTable layout");
 MQB_STATIC_ASSERT(sizeof(MqbPluginVTable) == MQB_VTABLE_SIZE_V1_4,
-                  "MqbPluginVTable grew: add the new MQB_VTABLE_SIZE_* to include/cbindgen.toml");
+                  "MqbPluginVTable grew: add the new MQB_VTABLE_SIZE_* to c/include/cbindgen.toml");
 
 #endif /* MQ_BRIDGE_PLUGIN_H */
