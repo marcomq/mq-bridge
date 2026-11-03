@@ -752,13 +752,13 @@ fn validate_consumers(
 ) -> std::result::Result<(), UpdateConfigError> {
     for consumer in consumers {
         // Its output is registered under that name, which would replace the publisher's.
-        if let EndpointType::Ref(name) = &consumer.endpoint.endpoint_type {
-            if publishers.iter().any(|p| p.name.trim() == name.trim()) {
-                return Err(UpdateConfigError::Validation(format!(
-                    "Consumer {}: input ref '{name}' is also a publisher name",
-                    consumer.name
-                )));
-            }
+        if let EndpointType::Ref(name) = &consumer.endpoint.endpoint_type
+            && publishers.iter().any(|p| p.name.trim() == name.trim())
+        {
+            return Err(UpdateConfigError::Validation(format!(
+                "Consumer {}: input ref '{name}' is also a publisher name",
+                consumer.name
+            )));
         }
         let resolved_output = resolve_consumer_output(consumer, publishers)?;
         let output_endpoint = match &resolved_output {
