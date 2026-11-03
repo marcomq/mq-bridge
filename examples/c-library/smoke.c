@@ -1,4 +1,4 @@
-/* End-to-end check of mq_bridge.h, run by c/mq-bridge-c/tests/c_api.rs.
+/* End-to-end check of mq_bridge.h, run by bindings/c/tests/c_api.rs.
  * Uses in-memory endpoints and files in the directory given as the first
  * argument (default /tmp), so it needs no broker. */
 #define _POSIX_C_SOURCE 200809L

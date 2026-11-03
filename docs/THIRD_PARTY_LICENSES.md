@@ -10,12 +10,12 @@ The distributed files are:
 - `apps/mq-bridge-app/crates/core/THIRD_PARTY_LICENSES.txt` for the CLI, its
   embedded web UI, the Tauri application, release archives, Docker, Homebrew,
   and Conda packages.
-- `node/mq-bridge-node/THIRD_PARTY_LICENSES.txt` for the platform-specific npm
+- `bindings/node/THIRD_PARTY_LICENSES.txt` for the platform-specific npm
   packages containing the native addon. The JavaScript-only root npm package
   does not ship this file.
-- `python/mq-bridge-py/THIRD_PARTY_LICENSES.txt` for Python wheels containing
+- `bindings/python/THIRD_PARTY_LICENSES.txt` for Python wheels containing
   the native extension.
-- `c/mq-bridge-c/THIRD_PARTY_LICENSES.txt` for the C library release archives.
+- `bindings/c/THIRD_PARTY_LICENSES.txt` for the C library release archives.
 
 ## Current generation policy
 

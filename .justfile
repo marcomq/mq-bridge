@@ -376,7 +376,7 @@ check-native-deps:
 #     This one bites even when $CONDA_PREFIX is a perfectly good env, so
 #     pointing $PYO3_PYTHON somewhere valid does not rescue it.
 #
-# uv owns the interpreter for this project (python/mq-bridge-py/.venv), so
+# uv owns the interpreter for this project (bindings/python/.venv), so
 # $CONDA_PREFIX has no say here and dropping it is the fix for both.
 
 [doc('Sync the dev environment and build the extension into it')]
@@ -384,7 +384,7 @@ check-native-deps:
 py-dev: _require-python
     #!/usr/bin/env bash
     set -euo pipefail
-    cd python/mq-bridge-py
+    cd bindings/python
     unset CONDA_PREFIX
     uv sync --group dev --no-install-project
     uv run maturin develop
@@ -394,7 +394,7 @@ py-dev: _require-python
 py-test:
     #!/usr/bin/env bash
     set -euo pipefail
-    cd python/mq-bridge-py
+    cd bindings/python
     unset CONDA_PREFIX
     uv run pytest -q
 
@@ -409,7 +409,7 @@ py-test-lean: _require-python
     unset CONDA_PREFIX
     cargo test -p mq-bridge-py --no-default-features --features http,rustls-ring test_config_schema_is_always_available
     cargo test -p mq-bridge-py --no-default-features --features http,rustls-ring test_module_init_installs_rustls_provider
-    cd python/mq-bridge-py
+    cd bindings/python
     uv run maturin develop --no-default-features -F http -F rustls-ring -F pyo3/extension-module
     uv run pytest -q tests/test_public_api.py tests/test_config_types.py
 

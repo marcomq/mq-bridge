@@ -18,7 +18,7 @@ async-trait.workspace = true
 bytes = { workspace = true, features = ["serde"] }
 fast-uuid-v7.workspace = true
 mq-bridge = { path = "../..", features = ["schema"] }
-mq-bridge-bindings-common = { path = "../../bindings-common" }
+mq-bridge-bindings-common = { path = "../common" }
 pyo3 = { version = "0.29.0", features = ["abi3-py38"] }
 rustls = { version = "0.23", optional = true, default-features = false, features = ["std", "tls12", "logging"] }
 schemars = "1.2"

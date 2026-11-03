@@ -1,4 +1,4 @@
-//! `c/include/mq_bridge_plugin.h` is generated from `src/support/plugin_abi.rs`.
+//! `bindings/c/include/mq_bridge_plugin.h` is generated from `src/support/plugin_abi.rs`.
 //!
 //! The header is checked in so C authors need no Rust toolchain; this test keeps
 //! it from drifting. `MQB_BLESS=1` rewrites it instead of comparing.
@@ -11,8 +11,8 @@ fn repo_root() -> PathBuf {
 
 fn generate() -> String {
     let root = repo_root();
-    let config = cbindgen::Config::from_file(root.join("c/include/cbindgen.toml"))
-        .expect("read c/include/cbindgen.toml");
+    let config = cbindgen::Config::from_file(root.join("bindings/c/include/cbindgen.toml"))
+        .expect("read bindings/c/include/cbindgen.toml");
     let mut out = Vec::new();
     cbindgen::Builder::new()
         .with_config(config)
@@ -49,7 +49,7 @@ fn strip_doc_links(header: &str) -> String {
 #[test]
 fn the_checked_in_header_matches_the_rust_abi() {
     let generated = generate();
-    let path = repo_root().join("c/include/mq_bridge_plugin.h");
+    let path = repo_root().join("bindings/c/include/mq_bridge_plugin.h");
     if std::env::var_os("MQB_BLESS").is_some() {
         std::fs::write(&path, generated).expect("write the header");
         return;
@@ -57,7 +57,7 @@ fn the_checked_in_header_matches_the_rust_abi() {
     let checked_in = std::fs::read_to_string(&path).unwrap_or_default();
     assert!(
         checked_in == generated,
-        "c/include/mq_bridge_plugin.h is stale; regenerate it with \
+        "bindings/c/include/mq_bridge_plugin.h is stale; regenerate it with \
          `MQB_BLESS=1 cargo test -p mq-bridge-plugin-fixture --test plugin_c_header`"
     );
 }

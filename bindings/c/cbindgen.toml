@@ -6,7 +6,7 @@ usize_is_size_t = true
 no_includes = true
 sys_includes = ["stdbool.h", "stddef.h", "stdint.h"]
 includes = ["mq_bridge_plugin.h"]
-autogen_warning = "/* Generated from c/mq-bridge-c/src by cbindgen. Do not edit.\n * Regenerate: MQB_BLESS=1 cargo test -p mq-bridge-c --no-default-features --test c_header */"
+autogen_warning = "/* Generated from bindings/c/src by cbindgen. Do not edit.\n * Regenerate: MQB_BLESS=1 cargo test -p mq-bridge-c --no-default-features --test c_header */"
 
 header = """
 /*

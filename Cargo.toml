@@ -30,10 +30,10 @@ workspace = true
 
 [workspace]
 members = [
-    "bindings-common",
-    "python/mq-bridge-py",
-    "node/mq-bridge-node",
-    "c/mq-bridge-c",
+    "bindings/common",
+    "bindings/python",
+    "bindings/node",
+    "bindings/c",
     "plugins/full",
     "tests/fixtures/plugin-fixture",
     "tests/fixtures/plugin-fixture-bad-abi",

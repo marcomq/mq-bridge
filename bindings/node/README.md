@@ -234,7 +234,7 @@ mq-bridge Node route plus raw Node `http`, uWebSockets.js, Fastify, and Express
 (all peers run only when installed) — and drives each with `wrk`:
 
 ```bash
-cd node/mq-bridge-node
+cd bindings/node
 npm run build                 # release addon (the bench is meaningless on a debug build)
 npm i -D fastify express      # optional Node HTTP peers
 npm i -D uNetworking/uWebSockets.js#v20.51.0   # the http-arena Node leader (native, from GitHub)

@@ -20,7 +20,7 @@ test = false
 anyhow.workspace = true
 async-trait.workspace = true
 mqb = { package = "mq-bridge", path = "../..", features = ["plugin"] }
-mq-bridge-bindings-common = { path = "../../bindings-common" }
+mq-bridge-bindings-common = { path = "../common" }
 schemars = { version = "1.2", optional = true }
 serde_json.workspace = true
 serde_yaml_ng.workspace = true

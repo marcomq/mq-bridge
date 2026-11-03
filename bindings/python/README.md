@@ -100,7 +100,7 @@ field or a new endpoint). The fastest way skips the extension build and reads
 the schema the engine writes to `mq-bridge.schema.json`:
 
 ```bash
-# from python/mq-bridge-py/
+# from bindings/python/
 cargo test --features schema --lib schema_tests::generate_json_schema
 uv run --no-sync python scripts/gen_config_types.py --schema ../../mq-bridge.schema.json
 ```
@@ -342,7 +342,7 @@ These knobs are read from the environment at startup:
 `uv` is a good fit here for the Python-side developer workflow, while `maturin` stays the build backend:
 
 ```bash
-cd python/mq-bridge-py
+cd bindings/python
 uv sync --group dev --no-install-project
 uv run maturin develop
 uv run pytest -q
@@ -352,7 +352,7 @@ Performance smoke tests are skipped by default because they start routes and mea
 local throughput:
 
 ```bash
-cd python/mq-bridge-py
+cd bindings/python
 MQ_BRIDGE_RUN_PERF_TESTS=1 uv run pytest -q -m performance
 ```
 
@@ -361,21 +361,21 @@ MQ_BRIDGE_RUN_PERF_TESTS=1 uv run pytest -q -m performance
 Raw message handler:
 
 ```bash
-cd python/mq-bridge-py
+cd bindings/python
 uv run python examples/raw_route.py
 ```
 
 Kind-based JSON handler:
 
 ```bash
-cd python/mq-bridge-py
+cd bindings/python
 uv run python examples/json_route.py
 ```
 
 Memory benchmark:
 
 ```bash
-cd python/mq-bridge-py
+cd bindings/python
 uv run maturin develop --release
 uv run python examples/bench_memory.py --messages 100000
 ```
@@ -388,7 +388,7 @@ and direct executor modes, plus FastAPI, Starlette, Sanic, aiohttp, and
 FastStream when installed) and drives each with `wrk`:
 
 ```bash
-cd python/mq-bridge-py
+cd bindings/python
 uv run maturin develop --release
 uv sync --group bench   # optional Python HTTP peers
 uv run python analysis/bench_http_native.py --connections 1,8,32 --duration 8

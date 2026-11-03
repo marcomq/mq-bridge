@@ -5,14 +5,14 @@ any supported endpoint (Kafka, NATS, AMQP, MQTT, HTTP, files, databases, ...),
 configured with the same YAML or JSON as the CLI and the other bindings. C++,
 and any language that can call C, can use it too.
 
-- Header: [`c/include/mq_bridge.h`](../include/mq_bridge.h) (generated, checked in)
+- Header: [`bindings/c/include/mq_bridge.h`](include/mq_bridge.h) (generated, checked in)
 - Library: `libmq_bridge.so` / `.dylib` / `mq_bridge.dll`, and `libmq_bridge.a`
 - Examples: [`examples/c-library`](../../examples/c-library)
 
 ## Install
 
 Each [GitHub release](https://github.com/marcomq/mq-bridge/releases) has a
-`mq-bridge-c-<target>` archive for Linux x86_64 (glibc 2.35+), macOS arm64 and
+`mq-bridge-c-<target>` archive for Linux x86_64 and arm64 (glibc 2.35+), macOS arm64 and
 Windows x86_64. It holds the shared library with every endpoint in `lib/` and its
 matching header in `include/`; there is no static library in it.
 
@@ -33,7 +33,7 @@ cargo build --release -p mq-bridge-c \
 
 The libraries land in `target/release/`. In-memory endpoints, the structural
 endpoints and middleware need no feature; the endpoint features are the ones of
-the [Node.js binding](../../node/mq-bridge-node/Cargo.toml).
+the [Node.js binding](../node/Cargo.toml).
 
 ```sh
 cc -std=c11 -I include app.c -L target/release -lmq_bridge -o app
@@ -131,7 +131,7 @@ mqb_route_free(route);
 program, the same table a [plugin library](../../docs/PLUGINS.md#writing-one-in-c-or-c)
 exports. Its name then works as `custom: { name: ..., config: {} }` in a route,
 as an endpoint, a middleware or both, depending on its capability flags.
-[`mq_bridge_plugin_helpers.h`](../include/mq_bridge_plugin_helpers.h) fills
+[`mq_bridge_plugin_helpers.h`](include/mq_bridge_plugin_helpers.h) fills
 the entries you do not implement; [`smoke.c`](../../examples/c-library/smoke.c)
 has a complete one. `mqb_load_plugin(path)` loads a plugin library instead.
 

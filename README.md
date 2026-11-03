@@ -56,9 +56,9 @@ Install the library for your language:
 | Language | Package | Install |
 | :--- | :--- | :--- |
 | Rust | [`mq-bridge`](https://crates.io/crates/mq-bridge) | `cargo add mq-bridge --features kafka,nats,yaml` |
-| Python | [`mq-bridge`](python/mq-bridge-py/README.md) ([PyPI](https://pypi.org/project/mq-bridge/)) | `pip install mq-bridge` |
-| Node.js | [`mq-bridge`](node/mq-bridge-node/README.md) ([npm](https://www.npmjs.com/package/mq-bridge)) | `npm install mq-bridge` |
-| C / C++ | [`mq_bridge.h`](c/mq-bridge-c/README.md) | `cargo build --release -p mq-bridge-c` (build from source) |
+| Python | [`mq-bridge`](bindings/python/README.md) ([PyPI](https://pypi.org/project/mq-bridge/)) | `pip install mq-bridge` |
+| Node.js | [`mq-bridge`](bindings/node/README.md) ([npm](https://www.npmjs.com/package/mq-bridge)) | `npm install mq-bridge` |
+| C / C++ | [`mq_bridge.h`](bindings/c/README.md) | `cargo build --release -p mq-bridge-c` (build from source) |
 
 Describe a route — here Kafka → NATS with retries — in `routes.yaml`:
 
@@ -160,7 +160,7 @@ The CSV row reuses an existing, independently published 1M-row CSV → JSONL wor
 All figures: mq-bridge 0.4.20, except the Redpanda Connect rows, which were measured together with their native mq-bridge figures in one later session ([scenario 10](apps/mq-bridge-app/benches/etl/README.md#10--redpanda-connect-and-the-connect-plugin)). DuckDB is a throughput ceiling for the conversion itself, not an ETL tool.
 
 
-**External benchmark:** both the Rust library ([`mq-bridge`](https://www.http-arena.com/#sort=rps:-1&q=rust)) and the Python binding ([`mq-bridge-py`](https://www.http-arena.com/#sort=rps:-1&q=python)) are entries on the third-party [http-arena.com](https://www.http-arena.com/) leaderboard, which compares HTTP frameworks by requests per second (live, so rankings shift over time). It measures mq-bridge's HTTP (and WebSocket) serving path, which is one endpoint among many, not broker or ETL throughput; those are covered under [Benchmarks](#benchmarks). See [the Python analysis notes](python/mq-bridge-py/README.md#analysis) for the local comparison harness.
+**External benchmark:** both the Rust library ([`mq-bridge`](https://www.http-arena.com/#sort=rps:-1&q=rust)) and the Python binding ([`mq-bridge-py`](https://www.http-arena.com/#sort=rps:-1&q=python)) are entries on the third-party [http-arena.com](https://www.http-arena.com/) leaderboard, which compares HTTP frameworks by requests per second (live, so rankings shift over time). It measures mq-bridge's HTTP (and WebSocket) serving path, which is one endpoint among many, not broker or ETL throughput; those are covered under [Benchmarks](#benchmarks). See [the Python analysis notes](bindings/python/README.md#analysis) for the local comparison harness.
 
 
 ## Why mq-bridge

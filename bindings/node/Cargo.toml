@@ -18,7 +18,7 @@ async-trait.workspace = true
 bytes = { workspace = true, features = ["serde"] }
 fast-uuid-v7.workspace = true
 mq-bridge = { path = "../.." }
-mq-bridge-bindings-common = { path = "../../bindings-common" }
+mq-bridge-bindings-common = { path = "../common" }
 napi = { version = "3", features = ["serde-json", "async"] }
 napi-derive = "3"
 schemars = { version = "1.2", optional = true }

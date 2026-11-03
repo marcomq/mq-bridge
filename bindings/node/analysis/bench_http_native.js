@@ -16,7 +16,7 @@
  *
  * Requires `wrk` on PATH (`brew install wrk`). The `fastify` / `express`
  * targets additionally require those packages to be importable (install with
- * `npm i -D fastify express` in node/mq-bridge-node). The `mqb` target needs
+ * `npm i -D fastify express` in bindings/node). The `mqb` target needs
  * the addon built with the `http` feature (`npm run build` or `npm run
  * build:ci`).
  */

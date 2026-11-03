@@ -18,7 +18,7 @@
 #ifndef MQ_BRIDGE_H
 #define MQ_BRIDGE_H
 
-/* Generated from c/mq-bridge-c/src by cbindgen. Do not edit.
+/* Generated from bindings/c/src by cbindgen. Do not edit.
  * Regenerate: MQB_BLESS=1 cargo test -p mq-bridge-c --no-default-features --test c_header */
 
 #include <stdbool.h>

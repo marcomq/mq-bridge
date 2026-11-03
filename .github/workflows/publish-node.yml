@@ -56,7 +56,7 @@ jobs:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
           cache: npm
-          cache-dependency-path: node/mq-bridge-node/package-lock.json
+          cache-dependency-path: bindings/node/package-lock.json
 
       # Trusted publishing (OIDC) requires npm >= 11.5.1.
       - name: Update npm
@@ -65,35 +65,35 @@ jobs:
       # Regenerate package.json/lock from the Cargo workspace version (source of
       # truth) BEFORE npm ci, so a drifted committed lock can't fail the publish.
       - name: Sync version from Cargo workspace
-        working-directory: node/mq-bridge-node
+        working-directory: bindings/node
         run: npm run sync-version
 
       - name: Install Node dependencies
-        working-directory: node/mq-bridge-node
+        working-directory: bindings/node
         run: npm ci
 
       - name: Download loader into package root
         uses: actions/download-artifact@v8
         with:
           name: loader
-          path: node/mq-bridge-node
+          path: bindings/node
 
       - name: Download platform addons
         uses: actions/download-artifact@v8
         with:
           pattern: bindings-*
-          path: node/mq-bridge-node/artifacts
+          path: bindings/node/artifacts
 
       - name: Create per-platform npm dirs
-        working-directory: node/mq-bridge-node
+        working-directory: bindings/node
         run: npx napi create-npm-dirs
 
       - name: Distribute addons into npm dirs
-        working-directory: node/mq-bridge-node
+        working-directory: bindings/node
         run: npx napi artifacts -d artifacts
 
       - name: List npm dirs
-        working-directory: node/mq-bridge-node
+        working-directory: bindings/node
         run: ls -R npm
 
       # The default per-platform README is ~88 bytes; paired with a 50-67MB
@@ -102,7 +102,7 @@ jobs:
       # README plus description/homepage/keywords so it doesn't read as a
       # placeholder. (Server-side heuristic; reduces but cannot guarantee a pass.)
       - name: Enrich platform package metadata
-        working-directory: node/mq-bridge-node
+        working-directory: bindings/node
         run: |
           set -e
           for dir in npm/*/; do
@@ -120,7 +120,7 @@ jobs:
           done
 
       - name: Publish platform packages and root
-        working-directory: node/mq-bridge-node
+        working-directory: bindings/node
         env:
           # No NODE_AUTH_TOKEN: publishing is OIDC-only (trusted publishing).
           NPM_CONFIG_PROVENANCE: "true"

@@ -30,8 +30,8 @@ const paths = {
   appLock: resolve(repoRoot, "apps/mq-bridge-app/Cargo.lock"),
   server: resolve(repoRoot, "apps/mq-bridge-app/server.json"),
   tauri: resolve(repoRoot, "apps/mq-bridge-app/crates/desktop/tauri.conf.json"),
-  nodePackage: resolve(repoRoot, "node/mq-bridge-node/package.json"),
-  nodeLock: resolve(repoRoot, "node/mq-bridge-node/package-lock.json"),
+  nodePackage: resolve(repoRoot, "bindings/node/package.json"),
+  nodeLock: resolve(repoRoot, "bindings/node/package-lock.json"),
 };
 
 const originals = new Map(
