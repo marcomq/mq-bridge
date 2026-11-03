@@ -50,6 +50,10 @@ All notable changes to `mq-bridge`. Newest first.
   keepalives and events that are not JSON are skipped. `HttpBulkPublisher::new` refuses
   `query.stream_to`; build it through the endpoint factory. Code that builds
   `HttpBulkQuery` without `..Default::default()` needs the three new fields.
+- **`unregister_endpoint(name)` removes an endpoint added with `register_endpoint`,** so
+  `ref: "name"` stops resolving.
+- **App: every publisher is a named endpoint.** `ref: "<publisher name>"` resolves to it;
+  a renamed or deleted publisher stops resolving on save.
 
 ### Fixed
 
@@ -64,6 +68,10 @@ All notable changes to `mq-bridge`. Newest first.
 - **A `stream_to` reader gets a last token when a streaming request panics.** It is sent
   with `mqb.stream.status: error` (if `stream_to` still accepts sends) and the message fails
   for good; before, the reader waited forever.
+- **App: the publisher and consumer forms load in a fraction of the time.** An endpoint
+  nested in another one (fanout, switch, request, lookup, dlq, ...) is a `ref` field in the
+  form; before, each was expanded into a full endpoint form, which took seconds. Inline nested
+  endpoints still work in the YAML/JSON editor.
 
 ### Performance
 

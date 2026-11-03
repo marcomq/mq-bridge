@@ -145,39 +145,19 @@ export function forceRefOnlyEndpoints(itemSchema: MutableSchema): void {
   }
   ensureStaticConfigDef(itemSchema);
 
-  const forceRef = (obj: MutableSchema | undefined) => {
-    if (!obj || typeof obj !== "object") return;
-    obj.$ref = "#/$defs/RefConfig";
-    delete obj.oneOf;
-    delete obj.anyOf;
-    delete obj.allOf;
-    delete obj.properties;
-    delete obj.enum;
-    delete obj.const;
-    delete obj.default;
-    obj.type = "object";
+  // Every endpoint nested in another one (fanout, switch, request, lookup, dlq, ...) is edited as
+  // a ref to a named publisher: a full nested form is unusable and its expansion dominates load time.
+  // The item's own top-level endpoint is in its root properties, not in $defs, and stays a form.
+  const forceNestedRefs = (node: unknown) => {
+    if (Array.isArray(node)) return node.forEach(forceNestedRefs);
+    if (!node || typeof node !== "object") return;
+    const schema = node as MutableSchema;
+    if (schema.$ref === "#/$defs/Endpoint") {
+      schema.$ref = "#/$defs/RefConfig";
+      schema.type = "object";
+      return;
+    }
+    Object.values(schema).forEach(forceNestedRefs);
   };
-
-  const dlq = itemSchema.$defs.DlqConfig;
-  if (dlq?.properties?.endpoint) {
-    forceRef(dlq.properties.endpoint);
-  }
-
-  const fanout = itemSchema.$defs.FanoutConfig || itemSchema.$defs.FanOutConfig;
-  if (fanout) {
-    const endpoints = fanout.items || fanout.properties?.endpoints?.items;
-    if (endpoints) {
-      forceRef(endpoints);
-    }
-  }
-
-  const sw = itemSchema.$defs.SwitchConfig;
-  if (sw?.properties) {
-    if (sw.properties.default) {
-      forceRef(sw.properties.default);
-    }
-    if (sw.properties.cases?.additionalProperties) {
-      forceRef(sw.properties.cases.additionalProperties);
-    }
-  }
+  Object.values(itemSchema.$defs).forEach(forceNestedRefs);
 }

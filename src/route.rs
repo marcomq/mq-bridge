@@ -438,6 +438,12 @@ pub fn get_endpoint(name: &str) -> Option<Endpoint> {
     reader.get(name).cloned()
 }
 
+/// Removes a named endpoint, so `ref: "name"` no longer resolves. Returns the removed endpoint.
+pub fn unregister_endpoint(name: &str) -> Option<Endpoint> {
+    let mut writer = recover_write_lock(ENDPOINT_REF_REGISTRY.get()?, "endpoint_ref_registry");
+    writer.remove(name)
+}
+
 static ROUTE_DISPLAY_NAMES: OnceLock<RwLock<HashMap<String, String>>> = OnceLock::new();
 
 /// Sets the name `route` is shown under in log lines, error text and DLQ metadata.

@@ -2,15 +2,17 @@ import { describe, expect, test } from "vitest";
 import { dropAliasBranches, forceRefOnlyEndpoints, hideUnusedDeprecatedProperties, nameMappingRuleBranches } from "../../ui/src/lib/schema-utils";
 
 describe("schema-utils", () => {
-  test("forces nested endpoint schemas to ref-only configs", () => {
+  test("turns every nested endpoint into a ref and keeps the item's own endpoint", () => {
+    const endpoint = { $ref: "#/$defs/Endpoint" };
     const schema: any = {
+      properties: { endpoint: { $ref: "#/$defs/Endpoint" } },
       $defs: {
-        DlqConfig: { properties: { endpoint: { oneOf: [{ type: "string" }] } } },
-        FanoutConfig: { items: { anyOf: [{ type: "string" }] } },
+        Endpoint: { oneOf: [{ properties: { fanout: { type: "array", items: { ...endpoint } } } }] },
+        DeadLetterQueueMiddleware: { properties: { endpoint: { ...endpoint } } },
         SwitchConfig: {
           properties: {
-            default: { properties: { http: {} } },
-            cases: { additionalProperties: { enum: ["http"] } },
+            default: { anyOf: [{ ...endpoint }, { type: "null" }] },
+            cases: { additionalProperties: { ...endpoint } },
           },
         },
       },
@@ -18,26 +20,12 @@ describe("schema-utils", () => {
 
     forceRefOnlyEndpoints(schema);
 
-    expect(schema.$defs.RefConfig.properties.ref.type).toBe("string");
-    expect(schema.$defs.DlqConfig.properties.endpoint).toMatchObject({
-      $ref: "#/$defs/RefConfig",
-      type: "object",
-    });
-    expect(schema.$defs.FanoutConfig.items).toMatchObject({
-      $ref: "#/$defs/RefConfig",
-      type: "object",
-    });
-    expect(schema.$defs.SwitchConfig.properties.default).toMatchObject({
-      $ref: "#/$defs/RefConfig",
-      type: "object",
-    });
-    expect(schema.$defs.SwitchConfig.properties.cases.additionalProperties).toMatchObject({
-      $ref: "#/$defs/RefConfig",
-      type: "object",
-    });
-    expect(schema.$defs.DlqConfig.properties.endpoint).not.toHaveProperty("oneOf");
-    expect(schema.$defs.FanoutConfig.items).not.toHaveProperty("anyOf");
-    expect(schema.$defs.SwitchConfig.properties.default).not.toHaveProperty("properties");
+    const ref = { $ref: "#/$defs/RefConfig", type: "object" };
+    expect(schema.properties.endpoint).toEqual({ $ref: "#/$defs/Endpoint" });
+    expect(schema.$defs.Endpoint.oneOf[0].properties.fanout.items).toEqual(ref);
+    expect(schema.$defs.DeadLetterQueueMiddleware.properties.endpoint).toEqual(ref);
+    expect(schema.$defs.SwitchConfig.properties.default.anyOf).toEqual([ref, { type: "null" }]);
+    expect(schema.$defs.SwitchConfig.properties.cases.additionalProperties).toEqual(ref);
   });
 
   test("is safe when defs are missing or incomplete and stays idempotent", () => {
@@ -63,8 +51,7 @@ describe("schema-utils", () => {
     const schema: any = {
       $defs: {
         Existing: { type: "string" },
-        DlqConfig: { properties: { endpoint: { oneOf: [{ type: "string" }], properties: { http: {} } } } },
-        SwitchConfig: { properties: { default: { anyOf: [{ type: "string" }] } } },
+        RequestForwardConfig: { properties: { to: { $ref: "#/$defs/Endpoint" } } },
       },
     };
 
@@ -75,11 +62,7 @@ describe("schema-utils", () => {
     expect(schema).toEqual(once);
     expect(schema.$defs.RefConfig.properties.ref.type).toBe("string");
     expect(schema.$defs.Existing).toEqual({ type: "string" });
-    expect(schema.$defs.DlqConfig.properties.endpoint).toEqual({
-      $ref: "#/$defs/RefConfig",
-      type: "object",
-    });
-    expect(schema.$defs.SwitchConfig.properties.default).toEqual({
+    expect(schema.$defs.RequestForwardConfig.properties.to).toEqual({
       $ref: "#/$defs/RefConfig",
       type: "object",
     });

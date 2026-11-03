@@ -14,8 +14,8 @@ use metrics_exporter_prometheus::PrometheusHandle;
 use mq_bridge::models::{Endpoint, EndpointType, Route, StaticConfig};
 use mq_bridge::route::{RouteHandle, RouteOutcome};
 use mq_bridge::{
-    CanonicalMessage, Handled, HandlerError, Passthrough, Publisher, Sent, msg,
-    unregister_publisher,
+    CanonicalMessage, Handled, HandlerError, Passthrough, Publisher, Sent, msg, register_endpoint,
+    unregister_endpoint, unregister_publisher,
 };
 use schemars::JsonSchema;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -723,6 +723,57 @@ impl mq_bridge::traits::Handler for CollectorContext {
     }
 }
 
+/// Makes every publisher reachable as `ref: "<name>"`; names gone since `previous` stop resolving.
+fn register_publisher_refs(previous: &[PublisherClient], current: &[PublisherClient]) {
+    let names = |publishers: &[PublisherClient]| -> HashSet<String> {
+        publishers
+            .iter()
+            .map(|publisher| publisher.name.trim().to_string())
+            .filter(|name| !name.is_empty())
+            .collect()
+    };
+    let current_names = names(current);
+    for stale in names(previous).difference(&current_names) {
+        unregister_endpoint(stale);
+    }
+    for publisher in current {
+        let name = publisher.name.trim();
+        if !name.is_empty() {
+            register_endpoint(name, publisher.endpoint.clone());
+        }
+    }
+}
+
+fn validate_consumers(
+    consumers: &[ConsumerConfig],
+    publishers: &[PublisherClient],
+) -> std::result::Result<(), UpdateConfigError> {
+    for consumer in consumers {
+        let resolved_output = resolve_consumer_output(consumer, publishers)?;
+        let output_endpoint = match &resolved_output {
+            ResolvedConsumerOutput::None => Endpoint::null(),
+            ResolvedConsumerOutput::Response { .. } => Endpoint::new_response(),
+            ResolvedConsumerOutput::Publisher { endpoint, .. } => (*endpoint).as_ref().clone(),
+        };
+        // With the consumer's options, so one that cannot run is refused here.
+        let temp_route = Route::new(consumer.endpoint.clone(), output_endpoint)
+            .with_options(consumer.options.clone());
+        let consumer_key = consumer_runtime_key(consumer);
+        temp_route.check(&consumer_key, None).map_err(|e| {
+            UpdateConfigError::Validation(format!(
+                "Consumer {}: validation failed: {}",
+                if consumer.name.is_empty() {
+                    consumer_key.as_str()
+                } else {
+                    consumer.name.as_str()
+                },
+                e
+            ))
+        })?;
+    }
+    Ok(())
+}
+
 fn resolve_consumer_output(
     consumer: &ConsumerConfig,
     publishers: &[PublisherClient],
@@ -920,6 +971,7 @@ impl UiApp {
         initial_config
             .plugins
             .extend(startup_plugins.iter().cloned());
+        register_publisher_refs(&[], &initial_config.publishers);
         let app = Self {
             config: Arc::new(RwLock::new(initial_config)),
             trusted_plugin_paths: Arc::new(trusted_plugin_paths),
@@ -1904,28 +1956,12 @@ impl UiApp {
             })
             .collect();
 
-        for consumer in &consumers {
-            let resolved_output = resolve_consumer_output(consumer, &new_config.publishers)?;
-            let output_endpoint = match &resolved_output {
-                ResolvedConsumerOutput::None => Endpoint::null(),
-                ResolvedConsumerOutput::Response { .. } => Endpoint::new_response(),
-                ResolvedConsumerOutput::Publisher { endpoint, .. } => (*endpoint).as_ref().clone(),
-            };
-            // With the consumer's options, so one that cannot run is refused here.
-            let temp_route = Route::new(consumer.endpoint.clone(), output_endpoint)
-                .with_options(consumer.options.clone());
-            let consumer_key = consumer_runtime_key(consumer);
-            temp_route.check(&consumer_key, None).map_err(|e| {
-                UpdateConfigError::Validation(format!(
-                    "Consumer {}: validation failed: {}",
-                    if consumer.name.is_empty() {
-                        consumer_key.as_str()
-                    } else {
-                        consumer.name.as_str()
-                    },
-                    e
-                ))
-            })?;
+        // Registered before validation, which resolves `ref`s to these names.
+        let previous_publishers = self.config.read().await.publishers.clone();
+        register_publisher_refs(&previous_publishers, &new_config.publishers);
+        if let Err(error) = validate_consumers(&consumers, &new_config.publishers) {
+            register_publisher_refs(&new_config.publishers, &previous_publishers);
+            return Err(error);
         }
 
         if let Some(prepare) = &self.storage_save_prepare {
@@ -2283,6 +2319,30 @@ mod tests {
     };
     use mq_bridge::models::MemoryConfig;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn publishers_resolve_by_name_until_removed() {
+        let publisher = |name: &str| PublisherClient {
+            id: String::new(),
+            name: name.to_string(),
+            endpoint: Endpoint::null(),
+            comment: String::new(),
+            payload: String::new(),
+            headers: Vec::new(),
+            sort_order: None,
+        };
+        let (kept, dropped) = (
+            format!("kept-{}", Uuid::new_v4()),
+            format!("dropped-{}", Uuid::new_v4()),
+        );
+        let before = [publisher(&kept), publisher(&dropped), publisher("  ")];
+        register_publisher_refs(&[], &before);
+        assert!(mq_bridge::route::get_endpoint(&dropped).is_some());
+
+        register_publisher_refs(&before, &[publisher(&format!(" {kept} "))]);
+        assert!(mq_bridge::route::get_endpoint(&kept).is_some());
+        assert!(mq_bridge::route::get_endpoint(&dropped).is_none());
+    }
 
     #[derive(Default)]
     struct NoopSecretStore;
