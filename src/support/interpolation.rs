@@ -115,7 +115,56 @@ enum Unrendered {
 
 /// One JSON array and nothing after it, checked without building it.
 fn is_json_array(value: &str) -> bool {
-    value.trim_start().starts_with('[') && serde_json::from_str::<IgnoredAny>(value).is_ok()
+    value.trim_start().starts_with('[') && serde_json::from_str::<ValidJson>(value).is_ok()
+}
+
+/// Validates any JSON value, decoding every string so bad escapes fail. `IgnoredAny` skips
+/// string escapes unchecked, so a lone surrogate would pass it.
+struct ValidJson;
+
+impl<'de> Deserialize<'de> for ValidJson {
+    fn deserialize<D: de::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        de.deserialize_any(ValidJsonVisitor)
+    }
+}
+
+struct ValidJsonVisitor;
+
+impl<'de> Visitor<'de> for ValidJsonVisitor {
+    type Value = ValidJson;
+
+    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str("a JSON value")
+    }
+
+    fn visit_bool<E>(self, _: bool) -> Result<ValidJson, E> {
+        Ok(ValidJson)
+    }
+    fn visit_i64<E>(self, _: i64) -> Result<ValidJson, E> {
+        Ok(ValidJson)
+    }
+    fn visit_u64<E>(self, _: u64) -> Result<ValidJson, E> {
+        Ok(ValidJson)
+    }
+    fn visit_f64<E>(self, _: f64) -> Result<ValidJson, E> {
+        Ok(ValidJson)
+    }
+    fn visit_str<E>(self, _: &str) -> Result<ValidJson, E> {
+        Ok(ValidJson)
+    }
+    fn visit_unit<E>(self) -> Result<ValidJson, E> {
+        Ok(ValidJson)
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<ValidJson, A::Error> {
+        while seq.next_element::<ValidJson>()?.is_some() {}
+        Ok(ValidJson)
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<ValidJson, A::Error> {
+        while map.next_entry::<ValidJson, ValidJson>()?.is_some() {}
+        Ok(ValidJson)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1062,6 +1111,16 @@ mod tests {
             let bad = msg_with(payload, &[]);
             assert!(template.render_checked(Some(&bad)).is_err(), "{payload}");
             assert!(template.render(Some(&bad)).is_empty(), "{payload}");
+        }
+        assert!(is_json_array(r#" [1,"a😀",{"ki":[null,true]}]"#));
+        for bad in [
+            r#"["\ud83d"]"#,
+            r#"[{"\udc00":1}]"#,
+            r#"["\u00"]"#,
+            "[1] x",
+            "{}",
+        ] {
+            assert!(!is_json_array(bad), "{bad}");
         }
     }
 
