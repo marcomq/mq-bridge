@@ -169,7 +169,7 @@ pub struct mqb_route_t {
 
 fn build(route: Route, name: Option<&str>) -> anyhow::Result<mqb_route_t> {
     Ok(mqb_route_t {
-        runtime: Arc::new(common::build_runtime()?),
+        runtime: Arc::new(crate::build_runtime()?),
         route: Mutex::new(route),
         name: name.map_or_else(common::default_route_name, str::to_string),
         run_state: Arc::new(Mutex::new(RunState::default())),

@@ -21,6 +21,7 @@ anyhow.workspace = true
 async-trait.workspace = true
 mqb = { package = "mq-bridge", path = "../..", features = ["plugin"] }
 mq-bridge-bindings-common = { path = "../common" }
+rustls = { version = "0.23", optional = true, default-features = false, features = ["std", "tls12", "logging"] }
 schemars = { version = "1.2", optional = true }
 serde_json.workspace = true
 serde_yaml_ng.workspace = true
@@ -34,7 +35,7 @@ cbindgen = { version = "0.29.4", default-features = false }
 [features]
 default = ["full"]
 middleware = ["mqb/middleware"]
-full = ["mqb/full", "schema"]
+full = ["mqb/full", "schema", "rustls-aws-lc"]
 basic = ["http", "nats", "mqtt", "websocket", "zeromq", "rustls-ring", "schema"]
 dedup = ["mqb/dedup"]
 metrics = ["mqb/metrics"]
@@ -53,8 +54,8 @@ zeromq = ["mqb/zeromq"]
 redis-streams = ["mqb/redis-streams"]
 grpc = ["mqb/grpc"]
 sqlx = ["mqb/sqlx"]
-rustls-ring = ["mqb/rustls-ring"]
-rustls-aws-lc = ["mqb/rustls-aws-lc"]
+rustls-ring = ["dep:rustls", "rustls/ring", "mqb/rustls-ring"]
+rustls-aws-lc = ["dep:rustls", "rustls/aws_lc_rs", "mqb/rustls-aws-lc"]
 
 [lints]
 workspace = true

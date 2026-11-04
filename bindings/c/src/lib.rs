@@ -104,6 +104,15 @@ pub(crate) unsafe fn optional_name<'a>(ptr: *const c_char) -> anyhow::Result<Opt
     Ok(common::normalize_name(Some(unsafe { text(ptr, "name") }?)))
 }
 
+/// The library is the application here, so it installs the rustls provider TLS endpoints need.
+pub(crate) fn build_runtime() -> anyhow::Result<tokio::runtime::Runtime> {
+    #[cfg(feature = "rustls-aws-lc")]
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    #[cfg(all(feature = "rustls-ring", not(feature = "rustls-aws-lc")))]
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    common::build_runtime()
+}
+
 pub(crate) fn parse_config(config: &str) -> anyhow::Result<serde_yaml_ng::Value> {
     serde_yaml_ng::from_str(config).context("failed to parse YAML config")
 }
