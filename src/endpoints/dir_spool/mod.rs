@@ -1271,13 +1271,11 @@ impl DirSpoolConsumer {
         capacity: usize,
         claimed: &StdMutex<HashSet<String>>,
     ) -> anyhow::Result<(Vec<String>, Vec<String>)> {
-        let mut entries = match fs::read_dir(path).await {
-            Ok(entries) => entries,
+        let mut entries = match read_dir_if_present(path, !prefix.is_empty()).await {
+            Ok(Some(entries)) => entries,
             // A shard the consumer emptied and pruned, or one a producer has not created
             // yet: not an error, just nothing to read.
-            Err(error) if is_gone(&error, !prefix.is_empty()) => {
-                return Ok((Vec::new(), Vec::new()))
-            }
+            Ok(None) => return Ok((Vec::new(), Vec::new())),
             Err(error) => {
                 return Err(anyhow::Error::new(error).context(format!(
                     "Failed to list dir_spool directory: {}",
@@ -1571,11 +1569,28 @@ async fn prune_shard_dirs(dir: &Path, base: &str) {
     }
 }
 
-/// Whether listing failed because the directory is gone. Windows reports a shard that is
-/// still being removed (delete pending) as access denied rather than not found.
-fn is_gone(error: &std::io::Error, is_shard: bool) -> bool {
-    error.kind() == std::io::ErrorKind::NotFound
-        || (cfg!(windows) && is_shard && error.kind() == std::io::ErrorKind::PermissionDenied)
+/// Opens a directory listing, or `None` when the directory is gone. Windows reports a shard
+/// still being removed (delete pending) as access denied, so that is retried until it
+/// resolves; access denied that persists is a real error.
+async fn read_dir_if_present(path: &Path, is_shard: bool) -> std::io::Result<Option<fs::ReadDir>> {
+    const DELETE_PENDING_RETRIES: u32 = 5;
+    let mut retries = 0;
+    loop {
+        match fs::read_dir(path).await {
+            Ok(entries) => return Ok(Some(entries)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error)
+                if cfg!(windows)
+                    && is_shard
+                    && error.kind() == std::io::ErrorKind::PermissionDenied
+                    && retries < DELETE_PENDING_RETRIES =>
+            {
+                retries += 1;
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 /// Deletes `path`, treating an already-absent file as success. Returns whether it is gone.
@@ -1748,9 +1763,9 @@ async fn highest_sequence(
     )];
     let mut best: Option<u64> = None;
     while let Some((path, prefix, depth_left)) = pending.pop() {
-        let mut entries = match fs::read_dir(&path).await {
-            Ok(entries) => entries,
-            Err(error) if is_gone(&error, !prefix.is_empty()) => continue,
+        let mut entries = match read_dir_if_present(&path, !prefix.is_empty()).await {
+            Ok(Some(entries)) => entries,
+            Ok(None) => continue,
             Err(error) => {
                 return Err(anyhow::Error::new(error).context(format!(
                     "Failed to list dir_spool directory: {}",

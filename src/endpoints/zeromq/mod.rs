@@ -3,8 +3,8 @@
 //!
 //! * [`zmq`] — the `zeromq` crate (zmq.rs), behind the `zeromq` feature.
 //! * [`omq`] — `omq-tokio` (omq.rs), behind the `zeromq-omq` feature (MSRV 1.93 /
-//!   edition 2024, so it is in `full` but not `portable`). Faster on the
-//!   per-message `raw`/`raw_framed` path.
+//!   edition 2024; in `full` and `portable`). Faster on the per-message
+//!   `raw`/`raw_framed` path.
 //!
 //! `backend: try_omq` (the default) picks omq when it is compiled in and falls
 //! back to zmq otherwise; naming a backend explicitly makes it a requirement.

@@ -431,8 +431,39 @@ pub fn register_endpoint(name: &str, endpoint: Endpoint) {
     }
 }
 
+type EndpointOverlay = HashMap<String, Option<Endpoint>>;
+
+thread_local! {
+    static ENDPOINT_REF_OVERLAY: std::cell::RefCell<Option<EndpointOverlay>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Runs `f` with `overrides` layered over the registered endpoints on the current thread only,
+/// so a configuration can be checked against the refs it would register without publishing
+/// them. `None` hides a registered name. Other threads keep seeing the registry unchanged.
+pub fn with_endpoint_overrides<R>(overrides: EndpointOverlay, f: impl FnOnce() -> R) -> R {
+    struct Restore(Option<EndpointOverlay>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let previous = self.0.take();
+            ENDPOINT_REF_OVERLAY.with(|overlay| *overlay.borrow_mut() = previous);
+        }
+    }
+    let _restore = Restore(ENDPOINT_REF_OVERLAY.with(|overlay| overlay.replace(Some(overrides))));
+    f()
+}
+
 /// Retrieves a registered endpoint by name.
 pub fn get_endpoint(name: &str) -> Option<Endpoint> {
+    let overridden = ENDPOINT_REF_OVERLAY.with(|overlay| {
+        overlay
+            .borrow()
+            .as_ref()
+            .and_then(|overlay| overlay.get(name).cloned())
+    });
+    if let Some(endpoint) = overridden {
+        return endpoint;
+    }
     let registry = ENDPOINT_REF_REGISTRY.get_or_init(|| RwLock::new(HashMap::new()));
     let reader = recover_read_lock(registry, "endpoint_ref_registry");
     reader.get(name).cloned()

@@ -105,7 +105,7 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "ti
 # The crate MSRV is 1.89 (uuid 1.27, in every build); these features need more:
 # - "aws" (aws-sdk-*) requires Rust 1.94.1, and so does "full".
 # - "sqlx" and "postgres-cdc" (sqlx 0.9) require Rust 1.94.
-# - "zeromq-omq" (omq 0.30) requires Rust 1.93.
+# - "zeromq-omq" (omq 0.33) requires Rust 1.93.
 async-trait.workspace = true
 serde_json.workspace = true
 thiserror = "2.0"
@@ -254,10 +254,9 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls", "h
 # ZeroMQ
 zeromq = { version = "0.7", optional = true }
 
-# Alternative pure-Rust ZeroMQ backend (PoC). Faster than libzmq per its
-# benchmarks and adds CURVE/PLAIN security, but requires MSRV 1.93 / edition
-# 2024 — so it is kept behind its own opt-in feature and out of `full`/`portable`
-# to preserve the crate's 1.85 MSRV on the default build.
+# Default ZeroMQ backend (`backend: try_omq`). Faster than libzmq per its
+# benchmarks and adds CURVE/PLAIN security. Pure Rust without default
+# features; needs MSRV 1.93 / edition 2024.
 omq-tokio = { version = "0.33", optional = true }
 
 # Redis Streams. Pure-Rust client (no C bindings). TLS via rustls (ring), so
@@ -351,7 +350,7 @@ vendored-protoc = ["dep:protoc-bin-vendored"]
 # kafka (librdkafka), sqlx (libsqlite3-sys), grpc (protoc), ibm-mq/ibm-mq-static
 # (IBM C client). postgres-cdc is excluded too: its wire protocol is pure Rust
 # but it pulls in sqlx (C).
-portable = ["file", "dir-spool", "metrics", "otel", "dedup", "yaml", "plugin", "mongodb", "amqp", "nats", "mqtt", "http", "aws", "zeromq", "redis-streams", "clickhouse", "http-bulk", "websocket", "object-store", "rustls-aws-lc"]
+portable = ["file", "dir-spool", "metrics", "otel", "dedup", "yaml", "plugin", "mongodb", "amqp", "nats", "mqtt", "http", "aws", "zeromq", "zeromq-omq", "redis-streams", "clickhouse", "http-bulk", "websocket", "object-store", "rustls-aws-lc"]
 
 # Functionality features
 # YAML config files for Route/Publisher::from_file and deploy_file; JSON works without it.
@@ -432,8 +431,8 @@ ibm-mq = ["dep:mqi", "mqi/dlopen2", "mqi/mqai", "mqi/mqc_9_3_0_0", "dep:libmqm-s
 # at build.
 ibm-mq-static = ["dep:mqi", "mqi/link", "mqi/mqc_9_3_0_0"]
 zeromq = ["dep:zeromq"]
-# Alternative ZeroMQ backend (omq.rs), covering PUSH/PULL, PUB/SUB and REQ/REP.
-# In `full` but not `portable`.
+# Default ZeroMQ backend (omq.rs), covering PUSH/PULL, PUB/SUB and REQ/REP.
+# In `full` and `portable`.
 # The default `backend: try_omq` uses it when present and falls back to zmq.
 zeromq-omq = ["dep:omq-tokio"]
 redis-streams = ["dep:redis", "rustls", "rustls-native-certs"]

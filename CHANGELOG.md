@@ -56,6 +56,8 @@ All notable changes to `mq-bridge`. Newest first.
   a renamed or deleted publisher stops resolving on save.
 - **C library archive for Linux arm64.** `mq-bridge-c-aarch64-unknown-linux-gnu` is built
   on a native arm64 runner with the same glibc floor (2.35) as the x86_64 archive.
+- **Feature `portable` includes `zeromq-omq`.** ZeroMQ endpoints in a `portable` build now
+  use the faster `omq` backend by default (`backend: try_omq`); `zmq` stays available.
 
 ### Fixed
 
