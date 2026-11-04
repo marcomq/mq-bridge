@@ -51,8 +51,8 @@ async fn attach<S: Socket>(mut socket: S, url: &str, bind: bool) -> zeromq::ZmqR
 }
 
 enum SenderSocket {
-    /// PUSH and PUB keep the monitor that reports a lost peer: their sends do not fail without one.
-    Push(zeromq::PushSocket, mpsc::Receiver<SocketEvent>),
+    Push(zeromq::PushSocket),
+    /// With the monitor that reports a lost peer: a PUB send does not fail without one.
     Pub(zeromq::PubSocket, mpsc::Receiver<SocketEvent>),
     Req(zeromq::ReqSocket),
 }
@@ -67,9 +67,7 @@ impl SenderSocket {
         let options = socket_options(rebuild);
         Ok(match socket_type {
             ZeroMqSocketType::Push => {
-                let mut socket = zeromq::PushSocket::with_options(options);
-                let monitor = socket.monitor();
-                Self::Push(attach(socket, url, bind).await?, monitor)
+                Self::Push(attach(zeromq::PushSocket::with_options(options), url, bind).await?)
             }
             ZeroMqSocketType::Pub => {
                 let mut socket = zeromq::PubSocket::with_options(options);
@@ -88,9 +86,9 @@ impl SenderSocket {
         })
     }
 
-    /// Whether a peer went away since the last call. Only PUSH and PUB have to ask.
+    /// Whether a peer went away since the last call. Only PUB has to ask.
     fn lost_a_peer(&mut self) -> bool {
-        let (Self::Push(_, monitor) | Self::Pub(_, monitor)) = self else {
+        let Self::Pub(_, monitor) = self else {
             return false;
         };
         let mut lost = false;
@@ -103,7 +101,7 @@ impl SenderSocket {
     /// Frees a bound address, so that a replacement can bind it.
     async fn close(self) {
         match self {
-            Self::Push(mut s, _) => drop(s.unbind_all().await),
+            Self::Push(mut s) => drop(s.unbind_all().await),
             Self::Pub(mut s, _) => drop(s.unbind_all().await),
             Self::Req(mut s) => drop(s.unbind_all().await),
         }
@@ -165,7 +163,7 @@ impl ZeroMqPublisher {
                 let broken = match job {
                     PublisherJob::Send(msg, ack_tx) => {
                         let result = match current {
-                            SenderSocket::Push(s, _) => s.send(msg).await,
+                            SenderSocket::Push(s) => s.send(msg).await,
                             SenderSocket::Pub(s, _) => s.send(msg).await,
                             SenderSocket::Req(_) => Err(zeromq::ZmqError::Other(
                                 "Req socket received Send job, expected Request",
@@ -452,7 +450,11 @@ impl ReceiverSocket {
     /// Frees a bound address at once; a new consumer may want it.
     async fn close(self) {
         match self {
-            Self::Pull(mut s) => drop(s.unbind_all().await),
+            Self::Pull(mut s) => {
+                drop(s.unbind_all().await);
+                // PullSocket has no Drop: its per-peer writer tasks keep the connections open.
+                s.backend().shutdown();
+            }
             Self::Sub(mut s) => drop(s.unbind_all().await),
             Self::Rep(mut s) => drop(s.unbind_all().await),
         }
