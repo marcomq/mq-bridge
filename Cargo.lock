@@ -4265,9 +4265,9 @@ dependencies = [
 
 [[package]]
 name = "omq-proto"
-version = "0.36.0"
+version = "0.37.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "25a7061af03da6b647d8f2a95ab1819057a92947fe0f1625929d8ccfaf69f874"
+checksum = "955c17b11f0e76b02fda9af90e35cf0c01a585242a166a361bc7a2c2e7252a4d"
 dependencies = [
  "bytes",
  "concurrent-queue",
@@ -4281,9 +4281,9 @@ dependencies = [
 
 [[package]]
 name = "omq-shm"
-version = "0.4.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f2b4193852c62db895017d8ed7c632ed17600ecefbe1a1672ab656e4a181296b"
+checksum = "0587369d3c12d65d8f19c0e40669cf01e9d7afdeb5ee1bedccdb485b909b8765"
 dependencies = [
  "arc-swap",
  "bytes",
@@ -4295,9 +4295,9 @@ dependencies = [
 
 [[package]]
 name = "omq-tokio"
-version = "0.32.0"
+version = "0.33.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "16c8339606686ae0ab2cbddef4cf1d41ed6f96d6ecc7b9f2244597a89cacbec4"
+checksum = "1207c2c822978554fbb26acc67db3502768923c9dde430cecd9ec933cd6c8a4d"
 dependencies = [
  "arc-swap",
  "bytes",
@@ -5020,7 +5020,7 @@ version = "0.14.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "03da047801ff44bb6a4d407d4860c05fd70bb81714e6b2f3812603d5b145b042"
 dependencies = [
- "heck 0.4.1",
+ "heck 0.5.0",
  "itertools 0.14.0",
  "log",
  "multimap",
