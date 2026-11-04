@@ -24,6 +24,23 @@ output: { memory: { topic: nim_route_out } }
     route.stop()
     route.join()
 
+  test "a handler can publish while its thread polls":
+    let side = Publisher.fromStr("memory: { topic: nim_nested_side, capacity: 10 }")
+    let route = Route.fromStr("""
+input: { memory: { topic: nim_nested_in } }
+output: { memory: { topic: nim_nested_out } }
+""").withHandler(proc (m: MessageView): Option[Message] =
+      side.send("side " & m.payload)
+      some newMessage(m.payload))
+    route.start()
+    Publisher.fromStr("memory: { topic: nim_nested_in }").send("x")
+    let consumer = Consumer.fromStr("memory: { topic: nim_nested_out }")
+    check consumer.poll(max = 1, timeoutMs = 5000).len == 1
+    let sideConsumer = Consumer.fromStr("memory: { topic: nim_nested_side }")
+    check sideConsumer.poll(max = 1, timeoutMs = 5000)[0].payload == "side x"
+    route.stop()
+    route.join()
+
   test "closure handler and batch handler":
     var calls = 0
     let route = Route.fromStr("""

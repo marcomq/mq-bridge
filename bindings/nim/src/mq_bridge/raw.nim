@@ -2,17 +2,29 @@
 ##
 ## One-to-one with the C headers in `bindings/c/include`; `tests/tdrift.nim`
 ## fails when a function or table size drifts from them. The library is loaded
-## at program start: pass `-d:mqbLib=/path/to/libmq_bridge.so` to point at a
-## file, otherwise the platform's loader search path is used.
+## at program start, from the first place that has it: the package's `lib/`
+## (filled by `nimble install` or `nimble getlib`), next to the executable
+## (macOS, Windows), then the platform's loader search path.
+## `-d:mqbLib=/path/to/libmq_bridge.so` replaces that list with one file.
+
+import std/os
 
 when sizeof(int) != 8:
   {.error: "mq-bridge supports 64-bit targets only".}
 
 const
-  mqbLib* {.strdefine.} =
+  libFile =
     when defined(windows): "mq_bridge.dll"
     elif defined(macosx): "libmq_bridge.dylib"
     else: "libmq_bridge.so"
+  bundledLib = currentSourcePath().parentDir.parentDir / "lib" / libFile
+  # Alternatives in `(a|b)` are tried in order; a path with `(`, `|` or `)` cannot be one.
+  bundled = if fileExists(bundledLib) and '(' notin bundledLib and '|' notin bundledLib and
+                ')' notin bundledLib: bundledLib & "|"
+            else: ""
+  mqbLib* {.strdefine.} =
+    when defined(macosx): "(" & bundled & "@executable_path/" & libFile & "|" & libFile & ")"
+    else: "(" & bundled & libFile & ")"
 
   MQB_API_VERSION* = 1'u32
   MQB_PLUGIN_ABI_MAJOR* = 1'u32

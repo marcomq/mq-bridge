@@ -19,9 +19,15 @@ git clone https://github.com/marcomq/mq-bridge
 cd mq-bridge/bindings/nim && nimble install
 ```
 
-Then get the shared library, from the `mq-bridge-c-<target>` archive of a
-[GitHub release](https://github.com/marcomq/mq-bridge/releases) (its `lib/`), or built
-from the repository root:
+`nimble install` also downloads the matching C library (every endpoint) from the
+[GitHub release](https://github.com/marcomq/mq-bridge/releases) into the package, so
+`nim c -r app.nim` works with no further step. Prebuilt libraries exist for Linux
+x86_64 and arm64, macOS arm64 and Windows x86_64; it needs `curl` and `tar`. In a
+checkout without installing, `nimble getlib` does the same download. To skip it, set
+`MQB_SKIP_LIB_DOWNLOAD=1`.
+
+To build the library yourself instead, e.g. with fewer endpoints, run from the
+repository root:
 
 ```sh
 cargo build --release -p mq-bridge-c                 # every endpoint
@@ -34,10 +40,16 @@ with another API version at start-up.
 
 ## Finding the library
 
-By default the program loads `libmq_bridge.so`, `libmq_bridge.dylib` or
-`mq_bridge.dll` through the system loader, so put it next to the executable, in a
-system library directory, or on `LD_LIBRARY_PATH` / `DYLD_LIBRARY_PATH`. To load it
-from a fixed path instead, compile with:
+The program loads the library at start, from the first of:
+
+1. the package's `src/lib/`, filled by `nimble install` or `nimble getlib`, as it was
+   when the program was compiled;
+2. next to the executable (macOS and Windows);
+3. the system loader's search path: a system library directory, or
+   `LD_LIBRARY_PATH` (Linux) / `DYLD_LIBRARY_PATH` (macOS).
+
+To ship a program, put the library next to the executable; on Linux use
+`LD_LIBRARY_PATH` or a system directory. To load one fixed file instead, compile with:
 
 ```sh
 nim c -d:mqbLib=/opt/mq-bridge/lib/libmq_bridge.so app.nim

@@ -12,20 +12,22 @@ needs no Docker.
 
 ## Run
 
-They need the full C library (SQL, HTTP, LLM and Parquet endpoints). From the
-repository root:
+They need the full C library (SQL, HTTP, LLM and Parquet endpoints), which
+`nimble getlib` downloads:
 
 ```sh
-cargo build -p mq-bridge-c
-cd bindings/nim/examples
+cd bindings/nim
+nimble getlib
+cd examples
 nim c -r customer_lookup.nim
 nim c -r csv_pipeline.nim
 nim c -r llm_tickets.nim
 nim c -r llm_tickets.nim "Explain a message queue in two sentences."
 ```
 
-The library is found as for the tests (`target/release`, `target/debug`, or
-`MQB_LIB`). Binaries and output land in `out/`.
+A library built with `cargo build -p mq-bridge-c` (`target/release` or
+`target/debug`) or named by `MQB_LIB` takes precedence. Binaries and output land in
+`out/`.
 
 - `customer_lookup` seeds its database with the `sqlite3` command. Against
   Postgres only the `url` of the CRM lookup changes, e.g.

@@ -32,7 +32,11 @@ type
 
 var
   localExec* {.threadvar.}: ptr Executor
-  helper {.threadvar.}: ptr Executor
+  helpers {.threadvar.}: seq[ptr Executor]
+    ## One per nesting level: a handler's blocking call must not queue behind
+    ## the call that is waiting for that handler.
+  helperThreads {.threadvar.}: seq[ptr Thread[ptr Executor]]
+  helperDepth {.threadvar.}: int
   offloadError* {.threadvar.}: string
 
 proc newExecutor*(): ptr Executor =
@@ -126,15 +130,25 @@ proc runOffload(job: ptr Job) {.nimcall, gcsafe, raises: [].} =
   let job = cast[ptr OffloadJob](job)
   job.fn(job.env)
 
+proc helperLoop(exec: ptr Executor) {.thread.} =
+  pumpUntil(exec, addr exec.stopped)
+
+proc stopHelpers() =
+  for i in 0 ..< helpers.len:
+    helpers[i].stop()
+    joinThread(helperThreads[i][])
+    freeShared(helperThreads[i])
+    freeExecutor(helpers[i])
+  helpers.setLen(0)
+  helperThreads.setLen(0)
+
 proc runUntilStopped*(exec: ptr Executor) =
   ## Runs `exec`'s jobs on this thread until `stop`, with blocking calls made
   ## by them pumping it too.
   localExec = exec
   inc exec.users
   pumpUntil(exec, addr exec.stopped)
-
-proc helperLoop(exec: ptr Executor) {.thread.} =
-  pumpUntil(exec, addr exec.stopped)
+  stopHelpers()
 
 proc submit*(exec: ptr Executor, job: ptr Job): bool =
   ## Like `submitForeign`, from a Nim thread: its own executor keeps running
@@ -160,7 +174,7 @@ proc offload*(fn: proc (env: pointer) {.nimcall, gcsafe, raises: [].}, env: poin
   if own == nil or own.users == 0:
     fn(env)
     return
-  if helper == nil:
+  if helperDepth == helpers.len:
     let exec = newExecutor()
     let thread = createShared(Thread[ptr Executor])
     try:
@@ -170,10 +184,13 @@ proc offload*(fn: proc (env: pointer) {.nimcall, gcsafe, raises: [].}, env: poin
       freeExecutor(exec)
       fn(env)
       return
-    helper = exec
+    helpers.add exec
+    helperThreads.add thread
   var job = OffloadJob(fn: fn, env: env)
   job.run = runOffload
-  discard submit(helper, addr job)
+  inc helperDepth
+  discard submit(helpers[helperDepth - 1], addr job)
+  dec helperDepth
 
 proc threadExecutor*(): ptr Executor =
   ## This thread's executor, created on first use and kept for the thread's life.

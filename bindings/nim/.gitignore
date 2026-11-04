@@ -5,3 +5,6 @@ tests/*
 
 # Example binaries and their output
 examples/out/
+
+# Library downloaded by nimble install / nimble getlib
+src/lib/
