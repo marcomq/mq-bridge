@@ -151,9 +151,9 @@ On the command line it is one more parameter:
   `response_format: json_object` unless `options` sets another, such as a
   strict `json_schema`. OpenAI, Ollama and vLLM take both; a server that does
   not needs the one-per-message form.
-- **A payload that is not UTF-8:** `${payload}` is sent with the invalid bytes
-  replaced. A field such as `${payload:text}` needs a JSON payload, which is
-  UTF-8.
+- **A plain-text payload:** use `${message:payload}`, which sends the payload
+  as text, with invalid UTF-8 bytes replaced. `${payload}` and fields such as
+  `${payload:text}` need a JSON payload; for plain text they render empty.
 - **No metrics per bundle.** The token `usage` of a response is not kept, and
   an answer carries no mark of the bundle it came from.
 
