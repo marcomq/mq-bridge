@@ -32,6 +32,7 @@ const paths = {
   tauri: resolve(repoRoot, "apps/mq-bridge-app/crates/desktop/tauri.conf.json"),
   nodePackage: resolve(repoRoot, "bindings/node/package.json"),
   nodeLock: resolve(repoRoot, "bindings/node/package-lock.json"),
+  nimble: resolve(repoRoot, "bindings/nim/mq_bridge.nimble"),
 };
 
 const originals = new Map(
@@ -97,6 +98,12 @@ replaceOnce(
   /^(mq_bridge_app\s*=\s*\{\s*version\s*=\s*")[^"]+(".*)$/m,
   `$1${version}$2`,
   "mq-bridge-app-core dependency version",
+);
+replaceOnce(
+  paths.nimble,
+  /^(version\s*=\s*")[^"]+(")/m,
+  `$1${version}$2`,
+  "nimble package version",
 );
 
 function syncCargoLock(path, packageNames) {

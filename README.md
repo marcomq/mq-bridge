@@ -59,6 +59,7 @@ Install the library for your language:
 | Python | [`mq-bridge`](bindings/python/README.md) ([PyPI](https://pypi.org/project/mq-bridge/)) | `pip install mq-bridge` |
 | Node.js | [`mq-bridge`](bindings/node/README.md) ([npm](https://www.npmjs.com/package/mq-bridge)) | `npm install mq-bridge` |
 | C / C++ | [`mq_bridge.h`](bindings/c/README.md) | `cargo build --release -p mq-bridge-c` (build from source) |
+| Nim | [`mq_bridge`](bindings/nim/README.md) | `nimble install` in `bindings/nim`, plus the C library |
 
 Describe a route — here Kafka → NATS with retries — in `routes.yaml`:
 

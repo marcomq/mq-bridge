@@ -265,6 +265,8 @@ The object key depends on `name_by`:
 - `auto` (default): `source_position` when the input has a replay position, otherwise
   `write_time`. With a middleware that drops records (`filter`, `deduplication`) it is
   `write_time` as well; see [object naming under a filter](../reference/cli.md#object-naming-under-a-filter).
+  A handler that drops records (returns no message) is not detected: each gap splits a batch
+  into one object per run of kept records, so set `name_by: write_time` on such a route.
 
 The extension follows `format`, `compression` and `encryption`: `jsonl`, `csv`, `parquet`,
 `jsonl.gz`, `jsonl.zst.enc`. Set `extension` to override it.

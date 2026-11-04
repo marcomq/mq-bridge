@@ -6,6 +6,11 @@ All notable changes to `mq-bridge`. Newest first.
 
 ### Added
 
+- **Nim binding (`bindings/nim`, nimble package `mq_bridge`).** Publishers, consumers,
+  routes with single, batch and per-kind handlers, and custom endpoints and middleware
+  written in Nim, over the C library. Handlers run on the thread that starts the route,
+  or on a thread of their own with `start(worker = true)`. See
+  [bindings/nim/README.md](bindings/nim/README.md).
 - **`tls.ca_file: "$.os"` and `"$.bundled"` pick the trusted CAs.** `$.os` is the
   operating system's CA store, `$.bundled` the Mozilla roots built into mq-bridge. Without
   `ca_file` every endpoint keeps its default. Where a driver cannot take a value (`$.os` on
@@ -61,6 +66,12 @@ All notable changes to `mq-bridge`. Newest first.
 
 ### Fixed
 
+- **A handler's new message lost its source position.** An `object_store` sink with the
+  default `name_by` then rejected every record of a handler route reading a file, Kafka,
+  CDC or SQL cursor. The response now keeps the record's `mqb.src.*` metadata, unless the
+  handler set its own.
+- **The C library could not open any TLS or HTTP endpoint** ("Failed to create rustls
+  client config"): it installed no crypto provider. It now installs the one it is built with.
 - **`http_bulk` (incl. `openai_chat`) and `clickhouse` could not connect over HTTPS on
   Android.** They checked certificates with the OS verifier of reqwest, which panics on
   Android unless the app initialised it through JNI, and refused `tls.ca_file` there.

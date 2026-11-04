@@ -1,0 +1,7 @@
+# Test executables built next to their sources
+tests/*
+!tests/*.nim
+!tests/*.nims
+
+# Example binaries and their output
+examples/out/

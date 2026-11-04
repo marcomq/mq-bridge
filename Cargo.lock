@@ -3836,6 +3836,7 @@ dependencies = [
  "cbindgen",
  "mq-bridge",
  "mq-bridge-bindings-common",
+ "rustls",
  "schemars",
  "serde_json",
  "serde_yaml_ng",

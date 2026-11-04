@@ -1,0 +1,74 @@
+name: Nim
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/nim.yml"
+      - "bindings/nim/**"
+      - "bindings/c/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "src/**"
+  pull_request:
+    branches: [main, dev]
+    paths:
+      - ".github/workflows/nim.yml"
+      - "bindings/nim/**"
+      - "bindings/c/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "src/**"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Nim binding tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-workspace-crates: true
+
+      - name: Build libmq_bridge
+        run: cargo build -p mq-bridge-c --no-default-features
+
+      - name: Install Nim
+        uses: jiro4989/setup-nim-action@v2
+        with:
+          nim-version: "2.2.x"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # tdrift fails when raw.nim and the C headers disagree.
+      - name: Run Nim tests
+        working-directory: bindings/nim
+        run: nimble test
+
+      - name: Type-check the examples
+        working-directory: bindings/nim/examples
+        run: for f in *.nim; do nim check --hints:off "$f"; done
+
+      - name: Run Nim tests under AddressSanitizer
+        working-directory: bindings/nim
+        run: |
+          for t in tests/t*.nim; do
+            nim c -r --hints:off -d:addressSanitizer "$t"
+          done
