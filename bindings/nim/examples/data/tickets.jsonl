@@ -13,8 +13,3 @@
 {"id": 13, "subject": "Slow dashboard", "body": "The dashboard takes over 30 seconds to load for our largest project."}
 {"id": 14, "subject": "Calendar integration", "body": "Is there a way to sync deadlines to Google Calendar?"}
 {"id": 15, "subject": "Upgrade plan", "body": "We want to move from the team plan to the business plan this month."}
-{"id": 16, "subject": "Data missing after sync", "body": "After the overnight sync half of our records are gone. Urgent, we need them for an audit."}
-{"id": 17, "subject": "Add team member", "body": "How do I invite a colleague to our workspace?"}
-{"id": 18, "subject": "Typo in email template", "body": "The welcome email says 'Wellcome'."}
-{"id": 19, "subject": "Refund for unused seats", "body": "We removed five seats last week, will we get a credit?"}
-{"id": 20, "subject": "Webhook retries", "body": "Webhooks fail with timeouts and are never retried, so we miss events."}

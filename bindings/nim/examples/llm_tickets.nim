@@ -1,5 +1,5 @@
 ## Classify support tickets with an LLM, or stream one answer token by token.
-##   llm_tickets             classify data/tickets.jsonl, ten tickets per request, four requests at a time
+##   llm_tickets             classify data/tickets.jsonl, all fifteen tickets in one request
 ##   llm_tickets "question"  stream the answer to one question
 ## Talks to Ollama on localhost by default; LLM_URL, LLM_MODEL and OPENAI_API_KEY
 ## point it at any OpenAI-compatible API.
@@ -40,21 +40,18 @@ input:
         from:
           openai_chat:
             $2
-            messages_per_request: 10
+            messages_per_request: 15
             concurrency: 4
             json: true
             options: { temperature: 0, reasoning_effort: none }
-            system: >-
-              Classify the support ticket. Answer with JSON: {"category": one of
-              billing, bug, account, feature, other; "priority": "high" only for outages or lost data, "low" for questions and
-              ideas, else "medium";
-              "summary": one short sentence}.
+            system: $4
             prompt: "${payload:subject}: ${payload:body}"
 output:
   file: { path: "$3", format: raw }
 """.multiReplace(("$1", here / "data" / "tickets.jsonl"),
                  ("$2", llm.replace("\n", "\n            ")),
-                 ("$3", here / "out" / "tickets.jsonl")))
+                 ("$3", here / "out" / "tickets.jsonl"),
+                 ("$4", $(%readFile(here / "data" / "ticket_policy.txt").strip))))
     .withHandler(triage)
     .run()
   for label, n in counts: echo label, ": ", n
