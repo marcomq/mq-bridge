@@ -4,7 +4,7 @@ services:
 
   # Any OpenAI-compatible chat API works; Ollama keeps the example offline.
   ollama:
-    image: ollama/ollama:0.12.3
+    image: ollama/ollama:0.34.2
     ports: ["127.0.0.1:11434:11434"]
     volumes: ["ollama:/root/.ollama"]
 

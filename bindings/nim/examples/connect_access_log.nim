@@ -40,8 +40,8 @@ input:
       root.latency_ms = random_int(seed: 3, min: 1, max: 900)
       root.at = now()
 output:
-  file: { path: "$1", format: raw }
-""".replace("$1", output))
+  file: { path: $1, format: raw }
+""".replace("$1", $(%output)))
   .withHandler(triage)
   .run()
 

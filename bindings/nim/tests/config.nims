@@ -17,7 +17,9 @@ else:
       switch("define", "mqbLib=" & candidate)
       break
 
+# Nim's cache ignores passC/passL, so each sanitizer needs its own objects.
 when defined(addressSanitizer):
+  switch("nimcache", getHomeDir() / ".cache" / "nim" / projectName() & "_asan")
   switch("debugger", "native")
   switch("define", "noSignalHandler")
   switch("define", "useMalloc")
@@ -25,6 +27,7 @@ when defined(addressSanitizer):
   switch("passL", "-fsanitize=address -fno-omit-frame-pointer")
 
 when defined(threadSanitizer):
+  switch("nimcache", getHomeDir() / ".cache" / "nim" / projectName() & "_tsan")
   switch("debugger", "native")
   switch("define", "noSignalHandler")
   switch("define", "useMalloc")
