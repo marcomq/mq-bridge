@@ -165,7 +165,7 @@ On the command line it is one more parameter:
 | `prompt` | required | Template of the user message |
 | `system` | none | Template of the system message |
 | `json` | `false` | Asks for `response_format: json_object` and parses the answer. An answer that is not JSON fails its message for good |
-| `options` | none | Further request fields, e.g. `temperature`, `max_tokens`, `response_format`. It cannot set `model`, `messages` or `stream`. JSON text in a URI |
+| `options` | none | Further request fields, e.g. `temperature`, `max_tokens`, `response_format`; on Ollama `reasoning_effort: none` turns off thinking. It cannot set `model`, `messages` or `stream`. JSON text in a URI |
 | `concurrency` | 8 | Requests in flight when a batch is sent to the endpoint as an output. Under a `lookup`, the lookup's own `concurrency` (default 16) decides, unless `messages_per_request` is set |
 | `messages_per_request` | none | Messages answered by one request, see [above](#several-messages-in-one-request). Unset: one request per message |
 | `max_request_bytes` | 10 MiB | With `messages_per_request`: a bundle over this size is cut earlier |
@@ -332,6 +332,8 @@ let llm: Endpoint = OpenAiChatConfig {
 
 - **Templates are escaped.** Text taken from a message is JSON-escaped, so a
   quote or a line break in it cannot break the request.
+- **Thinking models look hung.** Ollama lets a model such as `qwen3.5` reason
+  before every answer. Set `options: { reasoning_effort: none }`; Ollama ignores `think: false` here.
 - **A temporary error fails only its message.** 408, 429 and 5xx are retryable.
   List [`retry`](../cookbook/retries.md) after the `lookup`; it repeats only
   the messages that failed, so answers already paid for are kept.

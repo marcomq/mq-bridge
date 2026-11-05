@@ -32,7 +32,9 @@ type
     kvs: seq[seq[MqbKeyValue]]
 
   PluginBatch* = ref object of RootObj
-    ## One received batch. Subclass it to keep what `commit` needs.
+    ## One received batch. Subclass it to keep what `commit` needs. The host
+    ## reads `messages` in place until `commit`: return a new batch from each
+    ## `receive` and do not change its messages afterwards.
     messages*: seq[PluginMessage]
     holder: WireHolder
 
@@ -220,6 +222,8 @@ proc consumerReceiveImpl(consumer: Handle, max: csize_t, outBatch: ptr Handle,
     let c = PluginConsumer(h.target)
     var batch = c.receive(int(max))
     if batch == nil: batch = PluginBatch()
+    if batch.holder.wire.len > 0:
+      raise newMqbError(MQB_ERR_PERMANENT, "receive returned a batch it returned before")
     batch.holder.fill(batch.messages)
     let bh = BatchHandleRef(exec: h.exec, consumer: c, batch: batch)
     outMessages[] = batch.holder.wirePtr
@@ -545,3 +549,13 @@ proc registerPlugin*(plugin: Plugin) =
 proc loadPlugin*(path: string) =
   ## Loads a native plugin library and registers what it exports.
   check mqb_load_plugin(cstring(path))
+
+proc loadInstalledPlugin*(name: string) =
+  ## Loads the one installed plugin library named for `name`
+  ## (`libmq_bridge_<name>`) from the plugin search path, and nothing else.
+  check mqb_load_installed_plugin(cstring(name))
+
+proc enablePluginDiscovery*() =
+  ## Lets routes load any installed plugin whose endpoint or middleware they
+  ## name. Off by default; `MQB_PLUGIN_DISCOVERY=1` does the same.
+  mqb_enable_plugin_discovery()

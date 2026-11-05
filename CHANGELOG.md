@@ -63,9 +63,22 @@ All notable changes to `mq-bridge`. Newest first.
   on a native arm64 runner with the same glibc floor (2.35) as the x86_64 archive.
 - **Feature `portable` includes `zeromq-omq`.** ZeroMQ endpoints in a `portable` build now
   use the faster `omq` backend by default (`backend: try_omq`); `zmq` stays available.
+- **`load_installed_plugin(name)` loads one installed plugin and nothing else.** It opens
+  `libmq_bridge_<name>` from the plugin search path (Homebrew, conda, `MQB_PLUGIN_DIR`, …) and
+  registers what it exports. In Python `mq_bridge.load_installed_plugin`, in Node and Nim
+  `loadInstalledPlugin`, in C `mqb_load_installed_plugin`. It works with discovery off.
+- **Nim example `connect_access_log.nim`**: a Redpanda Connect `generate` input with a Nim
+  handler. The examples README now says how to build the library and run each example.
 
 ### Fixed
 
+- **The library no longer loads installed plugins on its own.** A program embedding
+  mq-bridge (Rust, Python, Node, C, Nim) used to load any `libmq_bridge_<name>` it found
+  for an unknown endpoint name. Discovery is now off until the host calls
+  `enable_plugin_discovery()` (`enablePluginDiscovery()` in Node and Nim,
+  `mqb_enable_plugin_discovery()` in C) or sets `MQB_PLUGIN_DISCOVERY=1`; `=0` still turns it
+  off everywhere. `mqb` and the desktop app turn it on at startup, so they behave as before.
+  A route naming an endpoint that no factory provides now says how to load its plugin.
 - **A handler's new message lost its source position.** An `object_store` sink with the
   default `name_by` then rejected every record of a handler route reading a file, Kafka,
   CDC or SQL cursor. The response now keeps the record's `mqb.src.*` metadata, unless the

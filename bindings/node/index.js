@@ -436,6 +436,14 @@ function loadEndpointPlugin(pluginPath) {
   return native.loadEndpointPlugin(pluginPath);
 }
 
+function loadInstalledPlugin(name) {
+  return native.loadInstalledPlugin(name);
+}
+
+function enablePluginDiscovery() {
+  native.enablePluginDiscovery();
+}
+
 function pluginPlatformTag(platform = process.platform, arch = process.arch) {
   const normalizedArch = arch === "x86_64" ? "x64" : arch === "aarch64" ? "arm64" : arch;
   const suffix = platform === "linux" ? "-gnu" : platform === "win32" ? "-msvc" : "";
@@ -500,7 +508,9 @@ module.exports = {
   isShutdownRequested,
   requestShutdown,
   definePluginPackage,
+  enablePluginDiscovery,
   loadEndpointPlugin,
+  loadInstalledPlugin,
   loadPluginPackage,
   pluginLibraryPath,
   registerEndpoint,

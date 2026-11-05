@@ -40,7 +40,10 @@ Custom endpoints and middleware are not Rust-only. Both bindings expose
 `register_endpoint` / `register_middleware` (`registerEndpoint` / `registerMiddleware` in
 Node), with the same batch, ack and request-reply semantics as a Rust `CustomEndpointFactory`,
 and both can load a compiled plugin — `mq_bridge.load_endpoint_plugin(path)` in Python,
-`loadEndpointPlugin(path)` in Node — so one Rust implementation serves every language.
+`loadEndpointPlugin(path)` in Node — or an installed one by name with
+`load_installed_plugin("connect")` / `loadInstalledPlugin("connect")`, so one Rust
+implementation serves every language. Nothing is loaded unasked: automatic plugin discovery
+is off until `enable_plugin_discovery()` or `MQB_PLUGIN_DISCOVERY=1`.
 Registration is process-global, keyed by name, and must happen before a route that names it
 starts; a duplicate name is an error rather than a silent replacement.
 

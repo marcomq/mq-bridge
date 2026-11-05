@@ -29,19 +29,24 @@ proc `=wasMoved`*(m: var Message) =
 proc copyRaw(src: ptr mqb_message_t): ptr mqb_message_t =
   let payload = mqb_message_payload(src)
   result = checkHandle mqb_message_new(payload.p, payload.len)
-  let id = toStr(mqb_message_id(src))
-  if id.len > 0:
-    check mqb_message_set_id(result, cstring(id))
-  for i in 0 ..< mqb_message_metadata_count(src):
-    var key, value: MqbSlice
-    check mqb_message_metadata_at(src, i, addr key, addr value)
-    check mqb_message_set_metadata(result, cstring(toStr(key)), cstring(toStr(value)))
+  try:
+    let id = toStr(mqb_message_id(src))
+    if id.len > 0:
+      check mqb_message_set_id(result, cstring(id))
+    for i in 0 ..< mqb_message_metadata_count(src):
+      var key, value: MqbSlice
+      check mqb_message_metadata_at(src, i, addr key, addr value)
+      check mqb_message_set_metadata(result, cstring(toStr(key)), cstring(toStr(value)))
+  except MqbError:
+    mqb_message_free(result)
+    raise
 
 proc `=copy`*(dst: var Message, src: Message) =
   if dst.raw == src.raw:
     return
+  let copied = if src.raw == nil: nil else: copyRaw(src.raw)
   `=destroy`(dst)
-  dst.raw = if src.raw == nil: nil else: copyRaw(src.raw)
+  dst.raw = copied
 
 proc `=dup`*(src: Message): Message =
   result.raw = if src.raw == nil: nil else: copyRaw(src.raw)

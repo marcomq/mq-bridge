@@ -135,7 +135,9 @@ output:
 ```
 
 At most 16 Nim plugins per process. `loadPlugin(path)` loads a native plugin library
-built for any language.
+built for any language; `loadInstalledPlugin("connect")` loads the installed
+`libmq_bridge_connect` and nothing else. `enablePluginDiscovery()` lets routes
+load installed plugins by endpoint name; it is off by default.
 
 ## Examples
 

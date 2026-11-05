@@ -72,3 +72,12 @@ jobs:
           for t in tests/t*.nim; do
             nim c -r --hints:off -d:addressSanitizer "$t"
           done
+
+      # ubuntu-latest's default mmap_rnd_bits breaks the TSan runtime.
+      - name: Run threaded Nim tests under ThreadSanitizer
+        working-directory: bindings/nim
+        run: |
+          sudo sysctl vm.mmap_rnd_bits=28
+          for t in tests/troute.nim tests/tplugin.nim; do
+            nim c -r --hints:off -d:threadSanitizer "$t"
+          done

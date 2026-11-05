@@ -1,5 +1,5 @@
 ## Classify support tickets with an LLM, or stream one answer token by token.
-##   llm_tickets             classify data/tickets.jsonl, four requests at a time
+##   llm_tickets             classify data/tickets.jsonl, ten tickets per request, four requests at a time
 ##   llm_tickets "question"  stream the answer to one question
 ## Talks to Ollama on localhost by default; LLM_URL, LLM_MODEL and OPENAI_API_KEY
 ## point it at any OpenAI-compatible API.
@@ -9,7 +9,7 @@ import mq_bridge
 
 const here = currentSourcePath().parentDir
 let llm = "url: \"" & getEnv("LLM_URL", "http://localhost:11434") & "\"\n" &
-          "model: \"" & getEnv("LLM_MODEL", "qwen2.5:0.5b") & "\"\n" &
+          "model: \"" & getEnv("LLM_MODEL", "qwen3.5:2b") & "\"\n" &
           (if existsEnv("OPENAI_API_KEY"): "api_key: \"${env:OPENAI_API_KEY}\"\n" else: "")
 var counts: CountTable[string]
 
@@ -37,12 +37,13 @@ input:
   middlewares:
     - lookup:
         into: llm
-        concurrency: 4
         from:
           openai_chat:
             $2
+            messages_per_request: 10
+            concurrency: 4
             json: true
-            options: { temperature: 0 }
+            options: { temperature: 0, reasoning_effort: none }
             system: >-
               Classify the support ticket. Answer with JSON: {"category": one of
               billing, bug, account, feature, other; "priority": "high" only for outages or lost data, "low" for questions and

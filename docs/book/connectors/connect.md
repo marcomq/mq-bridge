@@ -24,7 +24,9 @@ brew install marcomq/tap/mq-bridge-connect
 conda install -c marcomq mq-bridge-connect
 ```
 
-Either puts the libraries where mq-bridge discovers them. For the bindings, install the
+Either puts the libraries where `mqb` and the desktop app find them on their own. A program
+that embeds the library loads it by name first, `load_installed_plugin("connect")`
+(`loadInstalledPlugin` in Node and Nim, `mqb_load_installed_plugin` in C). Or install the
 language package and call its `register()` before starting routes:
 
 ```bash

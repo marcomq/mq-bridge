@@ -165,6 +165,9 @@ proc addHandler*(r: Route, kind: string, handler: Handler): Route {.discardable.
 
 proc start*(r: Route, worker = false) =
   ## Connects both endpoints and starts moving messages in the background.
+  ## With `worker`, handlers run on another thread: refs they capture
+  ## (`seq`, `string`, `Publisher`, ...) must not be used by other threads
+  ## meanwhile, or only under a lock, as ORC reference counts are not atomic.
   if r.exec == nil:
     if worker:
       r.exec = newExecutor()

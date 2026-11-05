@@ -23,3 +23,10 @@ when defined(addressSanitizer):
   switch("define", "useMalloc")
   switch("passC", "-fsanitize=address -fno-omit-frame-pointer")
   switch("passL", "-fsanitize=address -fno-omit-frame-pointer")
+
+when defined(threadSanitizer):
+  switch("debugger", "native")
+  switch("define", "noSignalHandler")
+  switch("define", "useMalloc")
+  switch("passC", "-fsanitize=thread -fno-omit-frame-pointer")
+  switch("passL", "-fsanitize=thread -fno-omit-frame-pointer")

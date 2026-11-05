@@ -40,10 +40,20 @@ async fn a_route_finds_an_installed_plugin_by_the_endpoint_name_it_asks_for() {
     let dir = install_plugin();
     unsafe { std::env::set_var(mq_bridge::plugin::discovery::SEARCH_PATH_VAR, &dir) };
 
+    let error = create_consumer_from_route("discovery", &custom_endpoint("fixture"))
+        .await
+        .map(|_| ())
+        .expect_err("discovery is off until the host asks for it");
+    assert!(
+        format!("{error:#}").contains("enable_plugin_discovery"),
+        "{error:#}"
+    );
     assert!(
         mq_bridge::extensions::get_endpoint_factory("fixture").is_none(),
-        "nothing may be registered before the route asks for the name"
+        "nothing may be registered before discovery is on"
     );
+
+    mq_bridge::plugin::enable_plugin_discovery();
 
     create_consumer_from_route("discovery", &custom_endpoint("fixture"))
         .await
@@ -63,6 +73,12 @@ async fn a_route_finds_an_installed_plugin_by_the_endpoint_name_it_asks_for() {
     assert!(
         message.contains(&library_file_name("not-installed")),
         "{message}"
+    );
+
+    let error = mq_bridge::plugin::load_installed_plugin("not-installed").unwrap_err();
+    assert!(
+        format!("{error:#}").contains("is not installed"),
+        "{error:#}"
     );
 
     std::fs::remove_dir_all(&dir).ok();

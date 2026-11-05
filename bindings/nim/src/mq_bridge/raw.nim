@@ -223,6 +223,8 @@ proc mqb_request_shutdown*(): bool {.importc.}
 proc mqb_is_shutdown_requested*(): bool {.importc.}
 proc mqb_config_schema*(): cstring {.importc.}
 proc mqb_load_plugin*(path: cstring): MqbStatus {.importc.}
+proc mqb_load_installed_plugin*(name: cstring): MqbStatus {.importc.}
+proc mqb_enable_plugin_discovery*() {.importc.}
 proc mqb_register_plugin*(table: ptr MqbPluginVTable): MqbStatus {.importc.}
 proc mqb_init_logging*(callback: mqb_log_fn, userData: pointer, level: cstring): MqbStatus {.importc.}
 

@@ -519,6 +519,7 @@ async fn main() -> anyhow::Result<()> {
     // This allows mq-bridge to create TLS configurations for secure endpoints.
     #[cfg(feature = "rustls-aws-lc")]
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    mq_bridge::plugin::enable_plugin_discovery();
 
     let args = Args::parse();
 

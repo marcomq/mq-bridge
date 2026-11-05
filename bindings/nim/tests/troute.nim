@@ -97,6 +97,16 @@ output: { memory: { topic: nim_worker_out } }
       check threads[0] != mainThread
       check threads[0] == threads[1]
 
+  test "a running worker route can be dropped without join":
+    block:
+      let route = Route.fromStr("""
+input: { memory: { topic: nim_drop_in } }
+output: { memory: { topic: nim_drop_out } }
+""").withHandler(proc (m: MessageView): Option[Message] = some m.toMessage)
+      route.start(worker = true)
+      Publisher.fromStr("memory: { topic: nim_drop_in }").send("x")
+      check Consumer.fromStr("memory: { topic: nim_drop_out }").poll(1, 5000).len == 1
+
   test "drained file route runs to the end":
     let dir = getTempDir()
     writeFile(dir & "nim_in.jsonl", "a\nb\nc\n")

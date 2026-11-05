@@ -2470,6 +2470,8 @@ mod tests {
     /// schemes alone sends the reader looking for a typo that is not there.
     #[test]
     fn an_unknown_scheme_names_the_plugin_file_it_looked_for() {
+        // The CLI and desktop app switch discovery on at startup.
+        mq_bridge::plugin::enable_plugin_discovery();
         let error = endpoint_from_uri("nosuchthing://host/orders")
             .map(|_| ())
             .expect_err("an unknown scheme cannot resolve");

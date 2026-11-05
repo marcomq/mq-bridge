@@ -107,6 +107,14 @@ char *mqb_config_schema(void);
 // exports. Call before starting a route that names them.
 MqbStatus mqb_load_plugin(const char *path);
 
+// Loads the one installed plugin library named for `name` (`libmq_bridge_<name>`)
+// from the plugin search path and registers what it exports. Loads nothing else.
+MqbStatus mqb_load_installed_plugin(const char *name);
+
+// Lets a route resolve an endpoint or middleware name no factory provides from
+// the installed plugins. Off by default; `MQB_PLUGIN_DISCOVERY=1` does the same.
+void mqb_enable_plugin_discovery(void);
+
 // Registers a custom endpoint or middleware implemented in this program. `table`
 // is the one a plugin library would export (see `mq_bridge_plugin.h`) and must
 // stay valid for the life of the process.

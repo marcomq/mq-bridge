@@ -1003,6 +1003,33 @@ pub fn load_endpoint_plugin(path: String) -> Result<String> {
     }
 }
 
+/// Load the one installed plugin library named for `name` (`libmq_bridge_<name>`)
+/// from the plugin search path, and nothing else. Returns the names it registered.
+#[napi(js_name = "loadInstalledPlugin")]
+pub fn load_installed_plugin(name: String) -> Result<Vec<String>> {
+    #[cfg(feature = "plugin")]
+    {
+        core::plugin::load_installed_plugin(&name)
+            .map(|infos| infos.into_iter().map(|info| info.name).collect())
+            .map_err(|err| Error::from_reason(format!("{err:#}")))
+    }
+    #[cfg(not(feature = "plugin"))]
+    {
+        let _ = name;
+        Err(Error::from_reason(
+            "this mq-bridge build was compiled without native plugin support",
+        ))
+    }
+}
+
+/// Let routes load any installed plugin whose endpoint or middleware they name.
+/// Off by default; `MQB_PLUGIN_DISCOVERY=1` does the same.
+#[napi(js_name = "enablePluginDiscovery")]
+pub fn enable_plugin_discovery() {
+    #[cfg(feature = "plugin")]
+    core::plugin::enable_plugin_discovery();
+}
+
 /// Register a JS endpoint dispatcher under `name`. Called by the `registerEndpoint`
 /// wrapper in `index.js`, which owns the instance table — do not call directly.
 #[napi(js_name = "registerEndpointDispatch")]

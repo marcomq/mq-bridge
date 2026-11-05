@@ -1,4 +1,4 @@
-import std/[unittest, json, options, locks]
+import std/[unittest, json, options, locks, strutils]
 import mq_bridge
 
 type
@@ -7,6 +7,8 @@ type
     sent: bool
   Sink = ref object of PluginPublisher
   DropPing = ref object of PluginMiddleware
+  Reuse = ref object of PluginConsumer
+    batch: PluginBatch
 
 var
   lock: Lock
@@ -31,6 +33,10 @@ method receive(g: Gen, max: int): PluginBatch =
   for p in g.payloads: messages.add toPluginMessage(p, [("source", "gen")])
   newPluginBatch(messages)
 
+method receive(r: Reuse, max: int): PluginBatch =
+  if r.batch == nil: r.batch = newPluginBatch(@[toPluginMessage("again")])
+  r.batch
+
 method commit(g: Gen, batch: PluginBatch, ds: seq[Disposition]) =
   record(ds = ds)
 
@@ -51,6 +57,8 @@ registerPlugin Plugin(name: "nim_gen", newConsumer: proc (route, config: string)
   Gen(payloads: payloads))
 registerPlugin Plugin(name: "nim_sink", newPublisher: proc (route, config: string): PluginPublisher =
   Sink())
+registerPlugin Plugin(name: "nim_reuse", newConsumer: proc (route, config: string): PluginConsumer =
+  Reuse())
 registerPlugin Plugin(name: "nim_drop_ping",
   newMiddleware: proc (route, config: string, side: MiddlewareSide): PluginMiddleware =
     DropPing())
@@ -87,6 +95,15 @@ exit_on_empty: true
       publisher.send("fail")
     withLock lock:
       check received == @["x/-"]
+
+  test "a batch returned twice is rejected":
+    let consumer = Consumer.fromStr("custom: { name: nim_reuse, config: {} }")
+    check consumer.poll(max = 10, timeoutMs = 1000).len == 1
+    try:
+      discard consumer.poll(max = 10, timeoutMs = 1000)
+      check false
+    except MqbError as e:
+      check "returned before" in e.msg
 
   test "a plugin name registered twice is rejected":
     expect MqbError:

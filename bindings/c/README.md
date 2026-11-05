@@ -140,7 +140,10 @@ exports. Its name then works as `custom: { name: ..., config: {} }` in a route,
 as an endpoint, a middleware or both, depending on its capability flags.
 [`mq_bridge_plugin_helpers.h`](include/mq_bridge_plugin_helpers.h) fills
 the entries you do not implement; [`smoke.c`](../../examples/c-library/smoke.c)
-has a complete one. `mqb_load_plugin(path)` loads a plugin library instead.
+has a complete one. `mqb_load_plugin(path)` loads a plugin library instead;
+`mqb_load_installed_plugin("connect")` loads the installed `libmq_bridge_connect`
+and nothing else. `mqb_enable_plugin_discovery()` lets routes load installed
+plugins by endpoint name; it is off by default.
 
 ## Developing
 
