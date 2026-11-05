@@ -17,8 +17,8 @@ implementation with the same delivery semantics.
 
 ## Using a plugin
 
-A plugin is loaded either by path, as below, or by the endpoint name a route
-asks for — see [Installing a plugin by name](#installing-a-plugin-by-name).
+A plugin is loaded by path, as below, or by name from where it is installed —
+see [Installing a plugin by name](#installing-a-plugin-by-name).
 
 ```rust
 // Rust
@@ -77,9 +77,7 @@ exist cannot be made safe.
 
 ## Installing a plugin by name
 
-A plugin does not have to be listed anywhere. When a route asks for a `custom`
-endpoint no factory is registered under, mq-bridge looks for one file named
-after it:
+An installed plugin is found by the file named after its endpoint:
 
 | Platform | File |
 | :--- | :--- |
@@ -88,14 +86,43 @@ after it:
 | Windows | `mq_bridge_<name>.dll` |
 
 `-` in an endpoint name becomes `_` in the file name, so `ibm-mq` is
-`libmq_bridge_ibm_mq.so`. Installing that file is the whole installation step —
-no `plugins:` entry, no `--plugin`, no `load_endpoint_plugin` call:
+`libmq_bridge_ibm_mq.so`.
+
+`mqb` and the desktop app search for it on their own: when a route asks for a
+`custom` endpoint or middleware no factory is registered under, they load the
+file named for it. For them, installing that file is the whole installation
+step — no `plugins:` entry, no `--plugin`:
 
 ```console
 mqb copy 'connect://…' 'postgres://…'
 ```
 
-Directories are searched in this order, nearest first:
+A program that embeds the library loads nothing it was not told about. It loads
+one installed plugin by name, which opens that one file and no other:
+
+```rust
+mq_bridge::plugin::load_installed_plugin("connect")?;      // Rust
+```
+
+```python
+mq_bridge.load_installed_plugin("connect")                 # Python
+```
+
+```javascript
+loadInstalledPlugin("connect");                            // Node.js
+```
+
+```c
+mqb_load_installed_plugin("connect");                      /* C; Nim: loadInstalledPlugin */
+```
+
+Or it turns on the same search `mqb` does, with
+`mq_bridge::plugin::enable_plugin_discovery()` (`enable_plugin_discovery()` in
+Python, `enablePluginDiscovery()` in Node and Nim, `mqb_enable_plugin_discovery()`
+in C) or `MQB_PLUGIN_DISCOVERY=1` in the environment.
+
+`load_installed_plugin` and discovery search the same directories, in this
+order, nearest first:
 
 1. every directory in `MQB_PLUGIN_DIR` (`:`-separated, `;` on Windows) — a
    custom location, and the one to set for an unpackaged build
@@ -117,7 +144,7 @@ prefix, so a package manager needs no special layout: `lib.install` in a brew
 formula or a conda package's default `lib` is enough, and `lib/mq-bridge` keeps
 a hand-managed install tidy.
 
-**The named file is opened first.** A route loads the plugins its endpoints and
+**The named file is opened first.** With discovery on, a route loads the plugins its endpoints and
 middlewares name — nested ones included — before its startup checks, and the
 search runs only after the registry has missed, so it costs nothing when every
 endpoint is built in. Only a name that no library file is named for, such as
@@ -128,9 +155,10 @@ lists everything — the UI schema, `mqb list` and `describe`. A file that
 does not export `mq_bridge_plugin_v1` — a plugin's own helper library, such as
 `libmq_bridge_connect_go` — is recognised from its export table and never opened.
 
-Set `MQB_PLUGIN_DISCOVERY=0` (or `false`, `off`, `no`) to switch the search off
-and resolve endpoints only from factories the host registered or a config listed
-by path.
+Set `MQB_PLUGIN_DISCOVERY=0` (or `false`, `off`, `no`) to switch the search off,
+in `mqb` too, and resolve endpoints only from factories the host registered or
+a config listed by path. `load_installed_plugin` still works then: naming the
+plugin is the host's choice.
 
 `plugin::disable_plugin_loading()` goes further: after it, the process opens no
 plugin library at all, by path or by discovery, and nothing switches it back on.
@@ -172,8 +200,8 @@ reported as a load failure, not as an unknown endpoint.
 ### Installing one with a package manager
 
 Homebrew and conda install into a prefix the search above already covers, so
-either one is the whole installation — no `plugins:` entry, no `--plugin`, no
-`load_endpoint_plugin` call:
+for `mqb` either one is the whole installation — no `plugins:` entry, no
+`--plugin`. An embedding program adds `load_installed_plugin("pulsar")`:
 
 ```console
 brew install marcomq/tap/mq-bridge-pulsar     # macOS arm64, Linux x86_64/arm64
@@ -183,7 +211,7 @@ conda install -c marcomq mq-bridge-pulsar     # the same, plus Windows x86_64
 Both cover `pulsar`, `meilisearch` and `connect`. Neither depends on
 `mq-bridge-app`: one installed library serves whatever host asks for the
 endpoint — the brewed CLI, the desktop app, a Python or Node process in a
-virtualenv — which is why the search covers `HOMEBREW_PREFIX` and
+virtualenv that calls `load_installed_plugin` — which is why the search covers `HOMEBREW_PREFIX` and
 `CONDA_PREFIX` rather than only the running binary's own prefix.
 
 ### Replacing an endpoint `mqb` already has

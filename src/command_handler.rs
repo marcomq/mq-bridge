@@ -3,6 +3,7 @@
 //  Licensed under MIT OR Apache-2.0, see LICENSE file for more details
 //  git clone https://github.com/marcomq/mq-bridge
 
+use crate::canonical_message::is_source_metadata_key;
 use crate::traits::{Handled, HandlerError, Passthrough};
 use crate::traits::{Handler, MessagePublisher};
 use crate::CanonicalMessage;
@@ -30,6 +31,27 @@ fn set_correlation_id<'a>(
                 .as_str()
                 .to_owned(),
         });
+    }
+}
+
+fn source_metadata(message: &CanonicalMessage) -> Vec<(String, String)> {
+    message
+        .metadata
+        .iter()
+        .filter(|(key, _)| is_source_metadata_key(key))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect()
+}
+
+/// A response stands for the same source record, so it keeps the record's position
+/// (`mqb.src.*`) for replay-safe sinks, unless the handler set one of its own.
+fn keep_source_metadata(response: &mut CanonicalMessage, source: Vec<(String, String)>) {
+    if !response
+        .metadata
+        .keys()
+        .any(|key| is_source_metadata_key(key))
+    {
+        response.metadata.extend(source);
     }
 }
 
@@ -70,10 +92,12 @@ impl MessagePublisher for CommandPublisher {
         }
         let inbound_correlation_id = message.metadata.get(CORRELATION_ID_KEY).cloned();
         let original_id = message.message_id;
+        let source = source_metadata(&message);
         match self.handler.handle(message).await {
             Ok(Handled::Publish(mut response_msg)) => {
                 // For internal correlation, set the response message's ID to the original.
                 response_msg.message_id = original_id;
+                keep_source_metadata(&mut response_msg, source);
                 // For end-to-end tracing, propagate or create a correlation_id.
                 set_correlation_id(
                     &mut response_msg,
@@ -119,6 +143,7 @@ impl MessagePublisher for CommandPublisher {
                 Ok(Handled::Ack) => {}
                 Ok(Handled::Publish(mut response_msg)) => {
                     response_msg.message_id = original_id;
+                    keep_source_metadata(&mut response_msg, source_metadata(&message));
                     set_correlation_id(
                         &mut response_msg,
                         || message.metadata.get(CORRELATION_ID_KEY).map(String::as_str),
@@ -398,6 +423,40 @@ mod tests {
 
         let received = channel.drain_messages();
         assert_eq!(received[0].message_id, original_id);
+    }
+
+    #[tokio::test]
+    async fn a_new_response_keeps_the_source_position_of_its_record() {
+        let memory_publisher = MemoryPublisher::new_local("test_cmd_source_position", 10);
+        let channel = memory_publisher.channel();
+        let handler = |msg: CanonicalMessage| async move {
+            let mut response = CanonicalMessage::new(b"response".to_vec(), None);
+            if msg.payload.as_ref() == b"own" {
+                response.set_metadata("mqb.src.file_record", "99");
+            }
+            Ok(Handled::Publish(response))
+        };
+        let publisher = CommandPublisher::new(memory_publisher, handler);
+        let record = |payload: &[u8], n: &str| {
+            let mut m = CanonicalMessage::new(payload.to_vec(), None);
+            m.set_metadata("mqb.src.file_path", "/in.csv");
+            m.set_metadata("mqb.src.file_record", n);
+            m
+        };
+
+        publisher.send(record(b"a", "1")).await.unwrap();
+        publisher
+            .send_batch(vec![record(b"b", "2"), record(b"own", "3")])
+            .await
+            .unwrap();
+
+        let received = channel.drain_messages();
+        let field = |i: usize, key: &str| received[i].metadata.get(key).cloned();
+        assert_eq!(field(0, "mqb.src.file_record").as_deref(), Some("1"));
+        assert_eq!(field(1, "mqb.src.file_path").as_deref(), Some("/in.csv"));
+        assert_eq!(field(1, "mqb.src.file_record").as_deref(), Some("2"));
+        assert_eq!(field(2, "mqb.src.file_record").as_deref(), Some("99"));
+        assert_eq!(field(2, "mqb.src.file_path"), None);
     }
 
     #[tokio::test]

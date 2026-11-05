@@ -35,6 +35,13 @@ The libraries land in `target/release/`. In-memory endpoints, the structural
 endpoints and middleware need no feature; the endpoint features are the ones of
 the [Node.js binding](../node/Cargo.toml).
 
+TLS endpoints need exactly one rustls provider: `rustls-aws-lc` (part of the
+default `full`) or `rustls-ring` (part of `basic`). Add one to a
+`--no-default-features` build that uses TLS, e.g. `--features kafka,nats,rustls-ring`,
+and build `basic` with `--no-default-features`; a build with both providers
+fails to compile. The provider is process-wide: if the host program already
+installed one, that one is used.
+
 ```sh
 cc -std=c11 -I include app.c -L target/release -lmq_bridge -o app
 ```
@@ -133,7 +140,10 @@ exports. Its name then works as `custom: { name: ..., config: {} }` in a route,
 as an endpoint, a middleware or both, depending on its capability flags.
 [`mq_bridge_plugin_helpers.h`](include/mq_bridge_plugin_helpers.h) fills
 the entries you do not implement; [`smoke.c`](../../examples/c-library/smoke.c)
-has a complete one. `mqb_load_plugin(path)` loads a plugin library instead.
+has a complete one. `mqb_load_plugin(path)` loads a plugin library instead;
+`mqb_load_installed_plugin("connect")` loads the installed `libmq_bridge_connect`
+and nothing else. `mqb_enable_plugin_discovery()` lets routes load installed
+plugins by endpoint name; it is off by default.
 
 ## Developing
 

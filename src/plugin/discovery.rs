@@ -5,6 +5,10 @@
 
 //! Finding an installed plugin from the endpoint name a route asked for.
 //!
+//! Discovery is off until the host opts in with [`enable_plugin_discovery`] or
+//! [`DISCOVERY_VAR`]`=1`: a library loads no code it was not told about. The
+//! `mq-bridge-app` CLI and desktop app opt in at startup.
+//!
 //! A `custom` endpoint whose name no factory is registered under is the trigger:
 //! the searched directories are consulted for `libmq_bridge_<name>` first. Only a
 //! name no library file is named for falls back to scanning every installed library,
@@ -23,27 +27,40 @@ use anyhow::{anyhow, Context};
 
 use super::{load_discovered_plugins, PluginInfo};
 
-/// Set to `0`, `false`, `off` or `no` to resolve `custom` endpoints only from
-/// factories the host registered or a config listed by path.
+/// Set to `1`, `true`, `on` or `yes` to switch discovery on, or to `0`, `false`,
+/// `off` or `no` to switch it off even where [`enable_plugin_discovery`] was called.
 pub const DISCOVERY_VAR: &str = "MQB_PLUGIN_DISCOVERY";
 
 /// Platform-separated list of directories searched ahead of the default ones.
 pub const SEARCH_PATH_VAR: &str = "MQB_PLUGIN_DIR";
 
+static DISCOVERY_REQUESTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Lets a `custom` endpoint or middleware name no factory provides be resolved
+/// from the installed plugins on [`plugin_search_path`]. Off by default.
+pub fn enable_plugin_discovery() {
+    DISCOVERY_REQUESTED.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
 /// Whether a name may be resolved against the search path. Always `false` once
 /// [`disable_plugin_loading`](super::disable_plugin_loading) was called.
 pub fn discovery_enabled() -> bool {
     !super::plugin_loading_disabled()
-        && discovery_enabled_from(std::env::var(DISCOVERY_VAR).ok().as_deref())
+        && discovery_enabled_from(
+            std::env::var(DISCOVERY_VAR).ok().as_deref(),
+            DISCOVERY_REQUESTED.load(std::sync::atomic::Ordering::SeqCst),
+        )
 }
 
-fn discovery_enabled_from(value: Option<&str>) -> bool {
-    match value {
-        Some(value) => !matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "0" | "false" | "off" | "no"
-        ),
-        None => true,
+fn discovery_enabled_from(value: Option<&str>, requested: bool) -> bool {
+    match value
+        .map(|value| value.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("0" | "false" | "off" | "no") => false,
+        Some("1" | "true" | "on" | "yes") => true,
+        _ => requested,
     }
 }
 
@@ -276,6 +293,27 @@ fn discover_plugin_in(
     Ok(None)
 }
 
+/// Loads the one installed library named for `name` (`libmq_bridge_<name>`) from
+/// [`plugin_search_path`] and registers what it exports. Nothing else is loaded, and
+/// it works whether or not discovery is on. Fails if no such library is installed.
+pub fn load_installed_plugin(name: &str) -> anyhow::Result<Vec<PluginInfo>> {
+    let file_name = library_file_name(name);
+    let dirs = plugin_search_path();
+    let Some(path) = dirs
+        .iter()
+        .map(|dir| dir.join(&file_name))
+        .find(|path| path.is_file())
+    else {
+        let searched: Vec<String> = dirs.iter().map(|dir| dir.display().to_string()).collect();
+        return Err(anyhow!(
+            "plugin `{name}` is not installed: no {file_name} in {} ({SEARCH_PATH_VAR} adds a \
+             directory)",
+            searched.join(", ")
+        ));
+    };
+    load_discovered(&path).with_context(|| format!("plugin `{name}` from {}", path.display()))
+}
+
 /// Loads every plugin library installed on the search path, so a host can list
 /// them before any route asks. Off when [`DISCOVERY_VAR`] says so.
 pub fn discover_all_endpoint_plugins() -> Vec<PluginInfo> {
@@ -438,8 +476,15 @@ pub fn search_path_hint(name: &str) -> String {
         return "plugin loading is disabled in this process".to_string();
     }
     if !discovery_enabled() {
-        return format!("plugin discovery is off ({DISCOVERY_VAR})");
+        return format!(
+            "load its plugin with load_installed_plugin(\"{name}\") or by path, or turn \
+             plugin discovery on with enable_plugin_discovery() or {DISCOVERY_VAR}=1"
+        );
     }
+    searched_hint(name)
+}
+
+fn searched_hint(name: &str) -> String {
     let file_name = library_file_name(name);
     // The path spans several install prefixes, most of which exist on no one
     // machine; a directory that is not there tells the reader nothing.
@@ -621,12 +666,26 @@ mod tests {
     }
 
     #[test]
-    fn discovery_is_on_unless_it_is_switched_off() {
-        assert!(discovery_enabled_from(None));
-        assert!(discovery_enabled_from(Some("1")));
-        for off in ["0", "false", "off", "no", " OFF "] {
-            assert!(!discovery_enabled_from(Some(off)), "{off}");
+    fn discovery_is_off_until_the_host_or_the_environment_asks() {
+        assert!(!discovery_enabled_from(None, false));
+        assert!(discovery_enabled_from(None, true));
+        for on in ["1", "true", "on", "yes", " ON "] {
+            assert!(discovery_enabled_from(Some(on), false), "{on}");
         }
+        for off in ["0", "false", "off", "no", " OFF "] {
+            assert!(!discovery_enabled_from(Some(off), true), "{off}");
+        }
+    }
+
+    #[test]
+    fn with_discovery_off_the_hint_names_both_ways_to_load() {
+        let hint = search_path_hint("connect");
+
+        assert!(
+            hint.contains("load_installed_plugin(\"connect\")"),
+            "{hint}"
+        );
+        assert!(hint.contains("enable_plugin_discovery()"), "{hint}");
     }
 
     #[test]
@@ -641,7 +700,7 @@ mod tests {
     #[test]
     fn the_hint_lists_only_directories_that_exist() {
         let name = "a-name-no-library-is-installed-for";
-        let hint = search_path_hint(name);
+        let hint = searched_hint(name);
 
         assert!(hint.contains(&library_file_name(name)), "{hint}");
         for dir in plugin_search_path() {

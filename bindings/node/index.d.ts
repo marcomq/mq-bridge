@@ -239,6 +239,19 @@ export function unregisterEndpoint(name: string): boolean;
  */
 export function loadEndpointPlugin(path: string): string;
 
+/**
+ * Load the one installed plugin library named for `name` (`libmq_bridge_<name>`)
+ * from the plugin search path, and nothing else. Returns the endpoint and
+ * middleware names it registered.
+ */
+export function loadInstalledPlugin(name: string): string[];
+
+/**
+ * Let routes load any installed plugin whose endpoint or middleware they name.
+ * Off by default; `MQB_PLUGIN_DISCOVERY=1` does the same.
+ */
+export function enablePluginDiscovery(): void;
+
 /** Resolves the native library in an mq-bridge plugin package directory. */
 export function pluginLibraryPath(packageDirectory: string): string;
 

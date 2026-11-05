@@ -40,6 +40,13 @@ fn a_route_loads_the_plugins_it_names_before_its_checks() {
     unsafe { std::env::remove_var(DISCOVERY_VAR) };
     route_naming_fixture_sink().check("prepass", None).unwrap();
     assert!(
+        get_endpoint_factory("fixture-sink").is_none(),
+        "discovery is off until the host asks for it"
+    );
+
+    mq_bridge::plugin::enable_plugin_discovery();
+    route_naming_fixture_sink().check("prepass", None).unwrap();
+    assert!(
         get_endpoint_factory("fixture-sink").is_some(),
         "the check should load the library that provides the nested name"
     );

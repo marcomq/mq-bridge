@@ -18,7 +18,7 @@ tickets_triage:
                 "account" for login, password, email and profile changes;
                 "other" for everything else.
               prompt: "Subject: ${payload:subject}\n\n${payload:body}"
-              options: { temperature: 0 }
+              options: { temperature: 0, reasoning_effort: none }
           into: triage
       - retry: { max_attempts: 5 }
     # Only known teams get a queue; any other answer goes to people.

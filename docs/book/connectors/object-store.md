@@ -247,7 +247,8 @@ mqb copy \
 
 ## Writing (sink)
 
-Every batch the route delivers becomes **one object**. An object is written once and never
+Every batch the route delivers becomes **one object**, except where records are missing
+from a `source_position` batch (see `auto` below). An object is written once and never
 appended to or replaced, so the route's `batch_size` decides how large the files get: raise it
 for an analytics table, where many small files are slow to query.
 
@@ -265,6 +266,8 @@ The object key depends on `name_by`:
 - `auto` (default): `source_position` when the input has a replay position, otherwise
   `write_time`. With a middleware that drops records (`filter`, `deduplication`) it is
   `write_time` as well; see [object naming under a filter](../reference/cli.md#object-naming-under-a-filter).
+  A handler that drops records (returns no message) is not detected: each gap splits a batch
+  into one object per run of kept records, so set `name_by: write_time` on such a route.
 
 The extension follows `format`, `compression` and `encryption`: `jsonl`, `csv`, `parquet`,
 `jsonl.gz`, `jsonl.zst.enc`. Set `extension` to override it.

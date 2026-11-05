@@ -18,7 +18,7 @@ pub struct mqb_publisher_t {
 }
 
 fn build(endpoint: Endpoint) -> anyhow::Result<mqb_publisher_t> {
-    let runtime = common::build_runtime()?;
+    let runtime = crate::build_runtime()?;
     let publisher = runtime.block_on(Publisher::new(endpoint))?;
     Ok(mqb_publisher_t { runtime, publisher })
 }

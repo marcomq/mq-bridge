@@ -360,3 +360,14 @@ class Publisher:
         metadata: Optional[Mapping[str, str]] = ...,
         id: Optional[str] = ...,
     ) -> Message: ...
+
+def load_installed_plugin(name: str) -> List[str]:
+    """Load the one installed plugin library named for ``name``
+    (``libmq_bridge_<name>``) from the plugin search path, and nothing else.
+    Returns the endpoint and middleware names it registered."""
+    ...
+
+def enable_plugin_discovery() -> None:
+    """Let routes load any installed plugin whose endpoint or middleware they
+    name. Off by default; ``MQB_PLUGIN_DISCOVERY=1`` does the same."""
+    ...

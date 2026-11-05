@@ -40,7 +40,7 @@ pub struct mqb_batch_t {
 
 fn build(name: Option<&str>, endpoint: Endpoint) -> anyhow::Result<mqb_consumer_t> {
     let name = name.map_or_else(common::default_route_name, str::to_string);
-    let runtime = common::build_runtime()?;
+    let runtime = crate::build_runtime()?;
     let consumer =
         runtime.block_on(mqb::endpoints::create_consumer_from_route(&name, &endpoint))?;
     let requires_order = consumer.commit_requires_order();

@@ -746,20 +746,31 @@ fn register_publisher_refs(previous: &[PublisherClient], current: &[PublisherCli
     }
 }
 
+/// The ref changes `register_publisher_refs(previous, current)` makes, as an overlay.
+fn publisher_ref_overrides(
+    previous: &[PublisherClient],
+    current: &[PublisherClient],
+) -> HashMap<String, Option<Endpoint>> {
+    let mut overrides: HashMap<String, Option<Endpoint>> = previous
+        .iter()
+        .map(|publisher| publisher.name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .map(|name| (name, None))
+        .collect();
+    for publisher in current {
+        let name = publisher.name.trim();
+        if !name.is_empty() {
+            overrides.insert(name.to_string(), Some(publisher.endpoint.clone()));
+        }
+    }
+    overrides
+}
+
 fn validate_consumers(
     consumers: &[ConsumerConfig],
     publishers: &[PublisherClient],
 ) -> std::result::Result<(), UpdateConfigError> {
     for consumer in consumers {
-        // Its output is registered under that name, which would replace the publisher's.
-        if let EndpointType::Ref(name) = &consumer.endpoint.endpoint_type
-            && publishers.iter().any(|p| p.name.trim() == name.trim())
-        {
-            return Err(UpdateConfigError::Validation(format!(
-                "Consumer {}: input ref '{name}' is also a publisher name",
-                consumer.name
-            )));
-        }
         let resolved_output = resolve_consumer_output(consumer, publishers)?;
         let output_endpoint = match &resolved_output {
             ResolvedConsumerOutput::None => Endpoint::null(),
@@ -1969,31 +1980,27 @@ impl UiApp {
             .collect();
 
         let _update_guard = self.config_update_lock.lock().await;
-        // Registered before validation, which resolves `ref`s to these names.
-        let previous_publishers = self.config.read().await.publishers.clone();
-        let proposed_publishers = new_config.publishers.clone();
-        register_publisher_refs(&previous_publishers, &proposed_publishers);
-        let result = self.apply_config(new_config, consumers).await;
-        if result.is_err() {
-            register_publisher_refs(&proposed_publishers, &previous_publishers);
-        }
-        result
+        self.apply_config(new_config, consumers).await
     }
 
+    /// Refs are registered only once the config is saved, so other routes never resolve a
+    /// proposed endpoint and a failed or cancelled update leaves the registry untouched.
     async fn apply_config(
         &self,
         mut new_config: AppConfig,
         consumers: Vec<crate::config::ConsumerConfig>,
     ) -> std::result::Result<(), UpdateConfigError> {
-        validate_consumers(&consumers, &new_config.publishers)?;
+        let old_config = self.config.read().await.clone();
+        let proposed_refs = publisher_ref_overrides(&old_config.publishers, &new_config.publishers);
+        mq_bridge::with_endpoint_overrides(proposed_refs, || {
+            validate_consumers(&consumers, &new_config.publishers)
+        })?;
 
         if let Some(prepare) = &self.storage_save_prepare {
             prepare(&new_config).map_err(|error| {
                 UpdateConfigError::Other(anyhow!("Failed to prepare encrypted storage: {error}"))
             })?;
         }
-
-        let old_config = self.config.read().await.clone();
 
         {
             let mut handles = self.ui_handles.write().await;
@@ -2027,21 +2034,25 @@ impl UiApp {
             }
         }
 
+        // A consumer reading a publisher's ref leaves that ref to the publisher.
+        let mut consumer_refs = Vec::new();
         for consumer in &consumers {
-            let resolved_output = resolve_consumer_output(consumer, &new_config.publishers)?;
-            let output_endpoint = match &resolved_output {
+            let EndpointType::Ref(name) = &consumer.endpoint.endpoint_type else {
+                continue;
+            };
+            if new_config
+                .publishers
+                .iter()
+                .any(|publisher| publisher.name.trim() == name.trim())
+            {
+                continue;
+            }
+            let output_endpoint = match resolve_consumer_output(consumer, &new_config.publishers)? {
                 ResolvedConsumerOutput::None => Endpoint::null(),
                 ResolvedConsumerOutput::Response { .. } => Endpoint::new_response(),
-                ResolvedConsumerOutput::Publisher { endpoint, .. } => (*endpoint).as_ref().clone(),
+                ResolvedConsumerOutput::Publisher { endpoint } => endpoint.as_ref().clone(),
             };
-            let route = Route::new(consumer.endpoint.clone(), output_endpoint);
-            if route.is_ref() {
-                route.register_output_endpoint(None).map_err(|e| {
-                    UpdateConfigError::RegisterOutputEndpoint(format!(
-                        "register_output_endpoint failed: {e}"
-                    ))
-                })?;
-            }
+            consumer_refs.push((name.clone(), output_endpoint));
         }
         new_config.consumers = consumers.clone();
 
@@ -2064,6 +2075,10 @@ impl UiApp {
 
         {
             let mut config_guard = self.config.write().await;
+            register_publisher_refs(&config_guard.publishers, &new_config.publishers);
+            for (name, endpoint) in consumer_refs {
+                register_endpoint(&name, endpoint);
+            }
             *config_guard = new_config;
         }
 
@@ -2365,6 +2380,45 @@ mod tests {
         register_publisher_refs(&before, &[publisher(&format!(" {kept} "))]);
         assert!(mq_bridge::route::get_endpoint(&kept).is_some());
         assert!(mq_bridge::route::get_endpoint(&dropped).is_none());
+    }
+
+    #[tokio::test]
+    async fn consumers_read_publisher_refs_and_failed_updates_register_nothing() {
+        let app = test_app(AppConfig::default());
+        let topic = format!("inbox-{}", Uuid::new_v4());
+        let publisher = |name: &str| PublisherClient {
+            id: String::new(),
+            name: name.to_string(),
+            endpoint: Endpoint::new(EndpointType::Memory(MemoryConfig::new(&topic, Some(8)))),
+            comment: String::new(),
+            payload: String::new(),
+            headers: Vec::new(),
+            sort_order: None,
+        };
+        let with_ref_input = |target: &str| {
+            let mut consumer = memory_consumer("c1", "c1", "unused");
+            consumer.endpoint = Endpoint::new(EndpointType::Ref(target.to_string()));
+            consumer
+        };
+
+        let rejected = format!("rejected-{}", Uuid::new_v4());
+        let config = AppConfig {
+            publishers: vec![publisher(&rejected)],
+            consumers: vec![with_ref_input(&format!("missing-{}", Uuid::new_v4()))],
+            ..Default::default()
+        };
+        assert!(app.update_config(config).await.is_err());
+        assert!(mq_bridge::route::get_endpoint(&rejected).is_none());
+
+        let inbox = format!("inbox-{}", Uuid::new_v4());
+        let config = AppConfig {
+            publishers: vec![publisher(&inbox)],
+            consumers: vec![with_ref_input(&inbox)],
+            ..Default::default()
+        };
+        app.update_config(config).await.unwrap();
+        let registered = mq_bridge::route::get_endpoint(&inbox).unwrap();
+        assert!(matches!(registered.endpoint_type, EndpointType::Memory(_)));
     }
 
     #[derive(Default)]

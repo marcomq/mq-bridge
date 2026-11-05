@@ -976,6 +976,7 @@ fn delete_desktop_secrets_for_metadata(
 pub fn run() {
     #[cfg(feature = "rustls-aws-lc")]
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    mq_bridge_app::mq_bridge::plugin::enable_plugin_discovery();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())

@@ -3016,6 +3016,33 @@ fn load_endpoint_plugin(py: Python<'_>, path: String) -> PyResult<String> {
     }
 }
 
+/// Load the one installed plugin library named for `name` (`libmq_bridge_<name>`)
+/// from the plugin search path, and nothing else. Returns the names it registered.
+#[pyfunction]
+fn load_installed_plugin(py: Python<'_>, name: String) -> PyResult<Vec<String>> {
+    #[cfg(feature = "plugin")]
+    {
+        py.detach(|| core::plugin::load_installed_plugin(&name))
+            .map(|infos| infos.into_iter().map(|info| info.name).collect())
+            .map_err(|err| PyRuntimeError::new_err(format!("{err:#}")))
+    }
+    #[cfg(not(feature = "plugin"))]
+    {
+        let _ = (py, name);
+        Err(PyRuntimeError::new_err(
+            "this mq_bridge build was compiled without native plugin support",
+        ))
+    }
+}
+
+/// Let routes load any installed plugin whose endpoint or middleware they name.
+/// Off by default; `MQB_PLUGIN_DISCOVERY=1` does the same.
+#[pyfunction]
+fn enable_plugin_discovery() {
+    #[cfg(feature = "plugin")]
+    core::plugin::enable_plugin_discovery();
+}
+
 /// Return the JSON Schema for the route/config mapping, generated on demand
 /// from the compiled Rust models (no checked-in copy, so it cannot drift).
 #[pyfunction]
@@ -3114,6 +3141,8 @@ fn _mq_bridge(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(is_shutdown_requested, module)?)?;
     module.add_function(wrap_pyfunction!(request_shutdown, module)?)?;
     module.add_function(wrap_pyfunction!(load_endpoint_plugin, module)?)?;
+    module.add_function(wrap_pyfunction!(load_installed_plugin, module)?)?;
+    module.add_function(wrap_pyfunction!(enable_plugin_discovery, module)?)?;
     module.add_function(wrap_pyfunction!(register_endpoint, module)?)?;
     module.add_function(wrap_pyfunction!(register_middleware, module)?)?;
     module.add_function(wrap_pyfunction!(unregister_endpoint, module)?)?;

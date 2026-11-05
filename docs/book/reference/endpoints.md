@@ -40,8 +40,9 @@ The Connect plugin has its own [page](../connectors/connect.md), with every link
 [processor](../connectors/connect-processors.md).
 
 Outside `mqb` (Python, Node.js, your own Rust host), or for Connect, install the plugin with
-`brew install marcomq/tap/<repo>` or `conda install -c marcomq <repo>`; it is then discovered
-automatically.
+`brew install marcomq/tap/<repo>` or `conda install -c marcomq <repo>`. `mqb` then finds it on
+its own; a library host loads it with `load_installed_plugin("<name>")`, which opens only that
+plugin.
 
 ## Consumer vs. subscriber, and nack support
 

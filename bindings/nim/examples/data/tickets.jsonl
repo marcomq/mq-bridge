@@ -1,0 +1,20 @@
+{"id": 1, "subject": "Invoice charged twice", "body": "My card was charged twice for the March invoice. Please refund one of them."}
+{"id": 2, "subject": "App crashes on start", "body": "Since the last update the Android app closes immediately after the splash screen."}
+{"id": 3, "subject": "Cannot reset password", "body": "The password reset email never arrives. I checked the spam folder."}
+{"id": 4, "subject": "Dark mode please", "body": "Would love a dark theme for the dashboard, my eyes hurt at night."}
+{"id": 5, "subject": "Whole site is down", "body": "Nobody in our team can log in, every page returns error 502. This is an outage."}
+{"id": 6, "subject": "Change billing address", "body": "We moved offices. How do I change the address printed on our invoices?"}
+{"id": 7, "subject": "Export to CSV broken", "body": "Clicking export produces an empty file since yesterday."}
+{"id": 8, "subject": "Delete my account", "body": "Please close my account and delete all my data."}
+{"id": 9, "subject": "API rate limits", "body": "Could you raise the API rate limit for our plan? We hit 429 errors at peak."}
+{"id": 10, "subject": "Thanks!", "body": "Just wanted to say the new search is great."}
+{"id": 11, "subject": "Wrong VAT on invoice", "body": "The invoice shows 19% VAT but we are a reverse-charge customer in Austria."}
+{"id": 12, "subject": "Two-factor lockout", "body": "I lost my phone and cannot log in because of two-factor authentication."}
+{"id": 13, "subject": "Slow dashboard", "body": "The dashboard takes over 30 seconds to load for our largest project."}
+{"id": 14, "subject": "Calendar integration", "body": "Is there a way to sync deadlines to Google Calendar?"}
+{"id": 15, "subject": "Upgrade plan", "body": "We want to move from the team plan to the business plan this month."}
+{"id": 16, "subject": "Data missing after sync", "body": "After the overnight sync half of our records are gone. Urgent, we need them for an audit."}
+{"id": 17, "subject": "Add team member", "body": "How do I invite a colleague to our workspace?"}
+{"id": 18, "subject": "Typo in email template", "body": "The welcome email says 'Wellcome'."}
+{"id": 19, "subject": "Refund for unused seats", "body": "We removed five seats last week, will we get a credit?"}
+{"id": 20, "subject": "Webhook retries", "body": "Webhooks fail with timeouts and are never retried, so we miss events."}

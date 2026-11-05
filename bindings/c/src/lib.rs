@@ -6,6 +6,11 @@
 #![allow(non_camel_case_types)]
 #![allow(clippy::missing_safety_doc)]
 
+#[cfg(all(feature = "rustls-ring", feature = "rustls-aws-lc"))]
+compile_error!(
+    "pick one TLS provider: `rustls-ring` or `rustls-aws-lc` (`basic` brings ring, the default `full` aws-lc; build `basic` with --no-default-features)"
+);
+
 mod consumer;
 mod message;
 mod publisher;
@@ -104,6 +109,17 @@ pub(crate) unsafe fn optional_name<'a>(ptr: *const c_char) -> anyhow::Result<Opt
     Ok(common::normalize_name(Some(unsafe { text(ptr, "name") }?)))
 }
 
+/// The library is the application here, so it installs the rustls provider TLS endpoints need.
+/// The provider is process-wide and the first one installed wins: when the host program (or
+/// an earlier call) already installed one, that one stays and this is a no-op.
+pub(crate) fn build_runtime() -> anyhow::Result<tokio::runtime::Runtime> {
+    #[cfg(feature = "rustls-aws-lc")]
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    #[cfg(all(feature = "rustls-ring", not(feature = "rustls-aws-lc")))]
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    common::build_runtime()
+}
+
 pub(crate) fn parse_config(config: &str) -> anyhow::Result<serde_yaml_ng::Value> {
     serde_yaml_ng::from_str(config).context("failed to parse YAML config")
 }
@@ -183,6 +199,23 @@ pub unsafe extern "C" fn mqb_load_plugin(path: *const c_char) -> MqbStatus {
         let path = unsafe { text(path, "path") }?;
         mqb::plugin::load_endpoint_plugins(Path::new(path)).map(drop)
     })
+}
+
+/// Loads the one installed plugin library named for `name` (`libmq_bridge_<name>`)
+/// from the plugin search path and registers what it exports. Loads nothing else.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mqb_load_installed_plugin(name: *const c_char) -> MqbStatus {
+    guard(|| {
+        let name = unsafe { text(name, "name") }?;
+        mqb::plugin::load_installed_plugin(name).map(drop)
+    })
+}
+
+/// Lets a route resolve an endpoint or middleware name no factory provides from
+/// the installed plugins. Off by default; `MQB_PLUGIN_DISCOVERY=1` does the same.
+#[unsafe(no_mangle)]
+pub extern "C" fn mqb_enable_plugin_discovery() {
+    mqb::plugin::enable_plugin_discovery();
 }
 
 /// Registers a custom endpoint or middleware implemented in this program. `table`
