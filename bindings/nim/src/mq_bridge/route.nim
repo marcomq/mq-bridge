@@ -133,10 +133,12 @@ proc `=destroy`(r: RouteObj) =
 proc fromStr*(T: typedesc[Route], config: string, name = ""): Route =
   ## A route from YAML or JSON text: a `routes:` document, a `{name: route}`
   ## map, or a single route body (`name` empty).
-  Route(raw: checkHandle blocking mqb_route_from_str(cstring(config), cstring(name)))
+  let raw = checkHandle blocking mqb_route_from_str(cstring(config), cstring(name))
+  Route(raw: raw)
 
 proc fromFile*(T: typedesc[Route], path: string, name = ""): Route =
-  Route(raw: checkHandle blocking mqb_route_from_file(cstring(path), cstring(name)))
+  let raw = checkHandle blocking mqb_route_from_file(cstring(path), cstring(name))
+  Route(raw: raw)
 
 proc addBox(r: Route, label: string, single: Handler = nil,
             batch: BatchHandler = nil): HandlerBox =

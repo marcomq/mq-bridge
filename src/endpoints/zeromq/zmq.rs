@@ -9,6 +9,7 @@ use anyhow::anyhow;
 use async_channel::{bounded, Receiver, Sender};
 use async_trait::async_trait;
 use futures::channel::mpsc;
+use futures::StreamExt;
 use std::any::Any;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -451,9 +452,24 @@ impl ReceiverSocket {
     async fn close(self) {
         match self {
             Self::Pull(mut s) => {
+                let bound = !s.binds().is_empty();
                 drop(s.unbind_all().await);
+                // Handshakes accepted before the unbind finish later and register a peer;
+                // each reports `Accepted` here, until the last one drops the backend.
+                let late_peers = bound.then(|| s.monitor());
+                let backend = Arc::downgrade(&s.backend());
                 // PullSocket has no Drop: its per-peer writer tasks keep the connections open.
                 s.backend().shutdown();
+                drop(s);
+                if let Some(mut events) = late_peers {
+                    while let Some(event) = events.next().await {
+                        if let (SocketEvent::Accepted(..), Some(backend)) =
+                            (event, backend.upgrade())
+                        {
+                            backend.shutdown();
+                        }
+                    }
+                }
             }
             Self::Sub(mut s) => drop(s.unbind_all().await),
             Self::Rep(mut s) => drop(s.unbind_all().await),

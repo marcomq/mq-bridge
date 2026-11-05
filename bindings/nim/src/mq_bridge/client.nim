@@ -40,10 +40,12 @@ proc `=dup`(src: BatchObj): BatchObj {.error.}
 proc fromStr*(T: typedesc[Publisher], config: string, name = ""): Publisher =
   ## A publisher from YAML or JSON text. `name` selects an entry of a
   ## `publishers:` document.
-  Publisher(raw: checkHandle blocking mqb_publisher_from_str(cstring(config), cstring(name)))
+  let raw = checkHandle blocking mqb_publisher_from_str(cstring(config), cstring(name))
+  Publisher(raw: raw)
 
 proc fromFile*(T: typedesc[Publisher], path: string, name = ""): Publisher =
-  Publisher(raw: checkHandle blocking mqb_publisher_from_file(cstring(path), cstring(name)))
+  let raw = checkHandle blocking mqb_publisher_from_file(cstring(path), cstring(name))
+  Publisher(raw: raw)
 
 proc send*(p: Publisher, message: Message) =
   ## Publishes one message and waits for the endpoint to accept it.
@@ -74,10 +76,12 @@ proc request*(p: Publisher, payload: string | JsonNode): Message =
 proc fromStr*(T: typedesc[Consumer], config: string, name = ""): Consumer =
   ## A consumer from YAML or JSON text. `name` selects an entry of a
   ## `consumers:` document.
-  Consumer(raw: checkHandle blocking mqb_consumer_from_str(cstring(config), cstring(name)))
+  let raw = checkHandle blocking mqb_consumer_from_str(cstring(config), cstring(name))
+  Consumer(raw: raw)
 
 proc fromFile*(T: typedesc[Consumer], path: string, name = ""): Consumer =
-  Consumer(raw: checkHandle blocking mqb_consumer_from_file(cstring(path), cstring(name)))
+  let raw = checkHandle blocking mqb_consumer_from_file(cstring(path), cstring(name))
+  Consumer(raw: raw)
 
 proc poll*(c: Consumer, max = 100, timeoutMs = -1): Batch =
   ## Receives up to `max` messages. `timeoutMs < 0` waits until something

@@ -6,6 +6,11 @@
 #![allow(non_camel_case_types)]
 #![allow(clippy::missing_safety_doc)]
 
+#[cfg(all(feature = "rustls-ring", feature = "rustls-aws-lc"))]
+compile_error!(
+    "pick one TLS provider: `rustls-ring` or `rustls-aws-lc` (`basic` brings ring, the default `full` aws-lc; build `basic` with --no-default-features)"
+);
+
 mod consumer;
 mod message;
 mod publisher;
@@ -105,6 +110,8 @@ pub(crate) unsafe fn optional_name<'a>(ptr: *const c_char) -> anyhow::Result<Opt
 }
 
 /// The library is the application here, so it installs the rustls provider TLS endpoints need.
+/// The provider is process-wide and the first one installed wins: when the host program (or
+/// an earlier call) already installed one, that one stays and this is a no-op.
 pub(crate) fn build_runtime() -> anyhow::Result<tokio::runtime::Runtime> {
     #[cfg(feature = "rustls-aws-lc")]
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();

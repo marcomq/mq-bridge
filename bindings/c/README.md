@@ -35,6 +35,13 @@ The libraries land in `target/release/`. In-memory endpoints, the structural
 endpoints and middleware need no feature; the endpoint features are the ones of
 the [Node.js binding](../node/Cargo.toml).
 
+TLS endpoints need exactly one rustls provider: `rustls-aws-lc` (part of the
+default `full`) or `rustls-ring` (part of `basic`). Add one to a
+`--no-default-features` build that uses TLS, e.g. `--features kafka,nats,rustls-ring`,
+and build `basic` with `--no-default-features`; a build with both providers
+fails to compile. The provider is process-wide: if the host program already
+installed one, that one is used.
+
 ```sh
 cc -std=c11 -I include app.c -L target/release -lmq_bridge -o app
 ```

@@ -35,7 +35,7 @@ proc getLib() =
     echo "mq_bridge: downloaded ", file, " ", version, " to ", dir
   else:
     echo "mq_bridge: could not download ", url, ": ", output
-    echo "mq_bridge: get the library yourself (see README) or set MQB_LIB"
+    echo "mq_bridge: get the library yourself (see README) and compile with -d:mqbLib=<path>"
   rmDir tmp
 
 task getlib, "Download the C library of this release into src/lib":

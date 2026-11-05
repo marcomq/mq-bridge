@@ -35,9 +35,13 @@ A library built with `cargo build -p mq-bridge-c` (`target/release` or
   (`IN (${payload:customer_id}::bigint)`).
 - `llm_tickets` talks to [Ollama](https://ollama.com) on `localhost:11434` with
   the small `qwen2.5:0.5b` model (`ollama pull qwen2.5:0.5b`, about 400 MB). Set
-  `LLM_URL`, `LLM_MODEL` and `OPENAI_API_KEY` for any OpenAI-compatible API. A
-  larger model can answer several tickets per request: add
-  `messages_per_request: 10` to the `openai_chat` block.
+  `LLM_URL`, `LLM_MODEL` and `OPENAI_API_KEY` for any OpenAI-compatible API.
+  0.5b returns valid JSON but weak labels; `LLM_MODEL=qwen3.5:2b` gets most
+  categories right (20 tickets in about a minute). It is a thinking model: add
+  `reasoning_effort: none` to `options`, or it thinks so long that no ticket
+  finishes (Ollama ignores `think: false` on this API). A larger model can
+  answer several tickets per request: add `messages_per_request: 10` to the
+  `openai_chat` block.
 - `csv_pipeline` writes `out/readings/year=…/month=…/day=…/*.parquet`. Query it
   with DuckDB:
   `SELECT * FROM read_parquet('out/readings/**/*.parquet', union_by_name = true)`.

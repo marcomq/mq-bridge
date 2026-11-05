@@ -247,7 +247,8 @@ mqb copy \
 
 ## Writing (sink)
 
-Every batch the route delivers becomes **one object**. An object is written once and never
+Every batch the route delivers becomes **one object**, except where records are missing
+from a `source_position` batch (see `auto` below). An object is written once and never
 appended to or replaced, so the route's `batch_size` decides how large the files get: raise it
 for an analytics table, where many small files are slow to query.
 
