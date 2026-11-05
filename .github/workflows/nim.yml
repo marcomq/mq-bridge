@@ -73,9 +73,23 @@ jobs:
             nim c -r --hints:off -d:addressSanitizer "$t"
           done
 
+      # TSan only sees synchronization in instrumented code, so the library and std need it too.
+      - name: Install nightly Rust for ThreadSanitizer
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+        with:
+          toolchain: nightly
+          components: rust-src
+
+      - name: Build libmq_bridge with ThreadSanitizer
+        run: cargo +nightly build -Zbuild-std --target x86_64-unknown-linux-gnu -p mq-bridge-c --no-default-features
+        env:
+          RUSTFLAGS: -Zsanitizer=thread
+
       # ubuntu-latest's default mmap_rnd_bits breaks the TSan runtime.
       - name: Run threaded Nim tests under ThreadSanitizer
         working-directory: bindings/nim
+        env:
+          MQB_LIB: ${{ github.workspace }}/target/x86_64-unknown-linux-gnu/debug/libmq_bridge.so
         run: |
           sudo sysctl vm.mmap_rnd_bits=28
           for t in tests/troute.nim tests/tplugin.nim; do
