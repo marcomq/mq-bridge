@@ -6,7 +6,7 @@ needs no Docker.
 
 | Example | Shows |
 |---|---|
-| [customer_lookup.nim](customer_lookup.nim) | Two lookups per order in parallel: one batched SQL query for the whole batch (SQLite) and one HTTP call per order, served by a second route in the same program. Nim merges the answers. |
+| [customer_lookup.nim](customer_lookup.nim) | Reads orders from CSV, enriches the whole batch with one SQL query (SQLite), and writes each order as JSON lines and pushes it to a ZeroMQ socket (no broker needed). Nim merges the customer into the order. |
 | [llm_tickets.nim](llm_tickets.nim) | Classifies support tickets with an LLM, all fifteen in one request that shares the policy prompt in `data/ticket_policy.txt`; Nim checks the labels and escalates by keyword. With a question as argument it streams one answer token by token. |
 | [csv_pipeline.nim](csv_pipeline.nim) | Reads a CSV file, types the fields and computes a dew point in Nim, drops invalid rows, and writes JSON lines plus a Parquet dataset. |
 | [connect_access_log.nim](connect_access_log.nim) | A Redpanda Connect `generate` input makes access-log events with Bloblang; Nim drops health checks, flags slow and failed requests, and counts hits per path. |
