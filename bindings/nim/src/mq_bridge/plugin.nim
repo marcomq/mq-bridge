@@ -53,7 +53,8 @@ type
     handle: Handle
     closed: bool
   InnerBatch = ref object of PluginBatch
-    handle: Handle
+    table: ptr MqbPluginVTable
+    handle: Handle ## nil once committed
 
   Plugin* = object
     name*: string
@@ -196,7 +197,7 @@ method receive*(c: InnerConsumer, max: int): PluginBatch =
   let status = blocking(innerReceive(c.table, c.handle, csize_t(max), addr batch,
                                      addr messages, addr len, addr err))
   checkInner(c.table, status, err)
-  InnerBatch(messages: fromWire(messages, len), handle: batch)
+  InnerBatch(messages: fromWire(messages, len), table: c.table, handle: batch)
 
 method commit*(c: InnerConsumer, batch: PluginBatch, dispositions: seq[Disposition]) =
   ## `batch` must be one this consumer returned; each is committed once.
@@ -404,7 +405,14 @@ proc batchCommitImpl(batch: Handle, dispositions: ptr UncheckedArray[uint8], len
   unshare(batch, BatchHandleObj)
 
 proc batchFreeImpl(batch: Handle) {.gcsafe, raises: [].} =
-  if batch != nil: unshare(batch, BatchHandleObj)
+  if batch == nil: return
+  let inner = cast[ptr BatchHandleObj](batch).batch
+  if inner of InnerBatch:
+    let b = InnerBatch(inner)
+    if b.handle != nil:
+      b.table.batchFree(b.handle)
+      b.handle = nil
+  unshare(batch, BatchHandleObj)
 
 proc publisherCreateImpl(factory: Handle, route, config: MqbSlice, outp: ptr Handle,
                          err: ptr MqbBuffer): MqbStatus {.gcsafe, raises: [].} =

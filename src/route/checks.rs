@@ -34,6 +34,11 @@ pub(super) fn check_fault_middleware_allowed(
             role
         ));
     }
+    for middleware in &endpoint.middlewares {
+        if let Middleware::Dlq(config) = middleware {
+            check_fault_middleware_allowed(&config.endpoint, route_name, role, depth + 1, visited)?;
+        }
+    }
 
     for nested in crate::endpoints::streaming_endpoints(&endpoint.endpoint_type)
         .into_iter()
@@ -59,9 +64,21 @@ pub(super) fn check_fault_middleware_allowed(
             for endpoint in cfg.cases.values() {
                 check_fault_middleware_allowed(endpoint, route_name, role, depth + 1, visited)?;
             }
+            for case in &cfg.when {
+                check_fault_middleware_allowed(&case.to, route_name, role, depth + 1, visited)?;
+            }
             if let Some(endpoint) = &cfg.default {
                 check_fault_middleware_allowed(endpoint, route_name, role, depth + 1, visited)?;
             }
+        }
+        EndpointType::Sequence(cfg) => {
+            for endpoint in &cfg.endpoints {
+                check_fault_middleware_allowed(endpoint, route_name, role, depth + 1, visited)?;
+            }
+        }
+        EndpointType::Request(cfg) => {
+            check_fault_middleware_allowed(&cfg.to, route_name, role, depth + 1, visited)?;
+            check_fault_middleware_allowed(&cfg.forward_to, route_name, role, depth + 1, visited)?;
         }
         EndpointType::Reader(inner) => {
             check_fault_middleware_allowed(inner, route_name, role, depth + 1, visited)?;

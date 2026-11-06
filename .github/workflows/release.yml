@@ -762,13 +762,18 @@ jobs:
           tag_name: ${{ needs.metadata.outputs.release_tag }}
           files: ${{ env.ASSET_PATH }}
 
+      # The conda package must not hold back publish-release, which needs this job.
       - name: Stage the library for the conda recipe
+        id: stage_full_plugin_conda
+        continue-on-error: true
         shell: bash
         run: |
           mkdir -p plugins/full/packaging/conda/stage
           tar -xzf "$ASSET_PATH" -C plugins/full/packaging/conda/stage
 
       - name: Build the conda package
+        if: ${{ steps.stage_full_plugin_conda.outcome == 'success' }}
+        continue-on-error: true
         uses: prefix-dev/rattler-build-action@1ca5f45832f419a46d1326ccc5861d7e14d67c44 # v0.2.39
         with:
           recipe-path: plugins/full/packaging/conda/recipe.yaml
@@ -1280,8 +1285,9 @@ jobs:
             exit 0
           fi
           pipx install --include-deps anaconda-client
+          mkdir -p conda-packages
           find conda-packages -type f -name '*.conda' -print0 \
-            | xargs -0 anaconda upload --user marcomq --label main
+            | xargs -0 -r anaconda upload --user marcomq --label main
 
   publish-node:
     name: Publish Node Packages

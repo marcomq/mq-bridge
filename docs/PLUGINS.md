@@ -939,7 +939,7 @@ endpoint through that table's ordinary entries, and frees it when its own handle
 is freed or the wrap fails (`mqb_inner_consumer_free`, `mqb_inner_publisher_free`).
 `MQB_WRAPPING_MIDDLEWARE` fills in the map/drop entries it does not use, and
 [`examples/c-plugin/take.c`](../examples/c-plugin/take.c) ends its input after
-`limit` batches.
+`limit` messages.
 
 [`examples/c-plugin/plugin.c`](../examples/c-plugin/plugin.c) shows both sides
 in one library, wrapping two unchanged "legacy" libraries. Its middleware turns

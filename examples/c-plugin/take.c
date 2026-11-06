@@ -31,13 +31,14 @@ static MqbStatus take_create(MqbFactoryHandle factory, MqbSlice route_name, MqbS
     char config[64] = {0};
     memcpy(config, config_json.ptr, config_json.len < 63 ? config_json.len : 63);
     const char *limit = strstr(config, "\"limit\"");
+    const char *colon = limit == NULL ? NULL : strchr(limit, ':');
     Take *take = malloc(sizeof *take);
-    if (limit == NULL || take == NULL) {
+    if (colon == NULL || take == NULL) {
         free(take);
         mqb_set_error(err, "take needs {\"limit\": N}");
         return MQB_ERR_INVALID_CONFIG;
     }
-    take->limit = strtoul(strchr(limit, ':') + 1, NULL, 10);
+    take->limit = strtoul(colon + 1, NULL, 10);
     *out = take;
     return MQB_OK;
 }

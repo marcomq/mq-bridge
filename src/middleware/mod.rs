@@ -368,8 +368,11 @@ fn plugin_fallback(
     side: &str,
 ) -> Result<(Arc<dyn CustomMiddlewareFactory>, serde_json::Value)> {
     #[cfg(feature = "plugin")]
-    if let Ok(factory) = custom_middleware_factory(BUILTIN_MIDDLEWARE_PLUGIN) {
-        return Ok((factory, serde_json::to_value(run)?));
+    match custom_middleware_factory(BUILTIN_MIDDLEWARE_PLUGIN) {
+        Ok(factory) => return Ok((factory, serde_json::to_value(run)?)),
+        Err(error) => tracing::warn!(
+            "[middleware:{route_name}] no `{BUILTIN_MIDDLEWARE_PLUGIN}` plugin available: {error:#}"
+        ),
     }
     Err(InvalidConfig(anyhow::anyhow!(
         "[middleware:{route_name}] Unsupported {side} middleware: {}",
