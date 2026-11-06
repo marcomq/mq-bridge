@@ -4,6 +4,14 @@ All notable changes to `mq-bridge`. Newest first.
 
 ## Unreleased
 
+### Changed
+
+- **The release also packages the existing full plugin.** `plugins/full` (every built-in
+  endpoint as one plugin library) now ships as a GitHub release archive per platform, in
+  the Homebrew tap (`mq-bridge-full`), on conda (`mq-bridge-full`) and on crates.io
+  (`mq-bridge-full-plugin`). A Rust host built without endpoint features can install it
+  instead of compiling `full`.
+
 ### Fixed
 
 - **`columns: auto` on PostgreSQL reuses its prepared statement.** Each batch used to be
@@ -13,6 +21,10 @@ All notable changes to `mq-bridge`. Newest first.
 - **`insert_query` keeps batching with expressions in `VALUES (…)`.** A tuple such as
   `(CAST(${payload:id} AS bigint), ${payload:name})` used to fall back to one INSERT per
   row. It is now repeated per row in one multi-row INSERT.
+- **Plugin discovery serves built-in endpoints this build leaves out.** With discovery on,
+  a `kafka:` (or any other built-in) endpoint whose feature is off is now looked up in the
+  installed plugin libraries. Before, the host had to load the library providing it by name
+  or path first.
 
 ## 1.4.0
 

@@ -5,8 +5,8 @@
 
 //! Every built-in mq-bridge endpoint as one loadable plugin library.
 //!
-//! A host that embeds mq-bridge without the endpoint features loads this library by
-//! path and keeps writing `kafka:`, `file:`, … in its routes: an endpoint the host has
+//! A host that embeds mq-bridge without the endpoint features loads this library (by
+//! path, by name or through discovery) and keeps writing `kafka:`, `file:`, … in its routes: an endpoint the host has
 //! no feature for is served by the factory registered here under the same name.
 //!
 //! The library carries its own engine. `memory` channels, `ref` names and factories

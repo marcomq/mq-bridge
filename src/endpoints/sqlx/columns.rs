@@ -753,7 +753,11 @@ mod tests {
             values,
         };
         let mut run = [
-            row(vec![BindValue::Int(1), BindValue::Int(2), BindValue::Int(3)]),
+            row(vec![
+                BindValue::Int(1),
+                BindValue::Int(2),
+                BindValue::Int(3),
+            ]),
             row(vec![
                 BindValue::Null,
                 BindValue::Float(2.5),

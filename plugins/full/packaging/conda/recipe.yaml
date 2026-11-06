@@ -1,0 +1,56 @@
+schema_version: 1
+
+context:
+  version: ${{ env.get("MQ_BRIDGE_VERSION") }}
+
+package:
+  name: mq-bridge-full
+  version: ${{ version }}
+
+# Nothing is compiled here. `stage/` holds the prebuilt archive the release
+# publishes, so conda ships the same library as the GitHub release and Homebrew.
+source:
+  path: stage
+  # CI stages exactly what belongs in the package; gitignore rules must not
+  # quietly drop a library on the way in.
+  use_gitignore: false
+
+build:
+  number: 0
+  # mq-bridge searches `<prefix>/lib/mq-bridge` on Unix and `Library\bin` on Windows.
+  script:
+    content:
+      - if: win
+        then:
+          - if not exist "%LIBRARY_BIN%" mkdir "%LIBRARY_BIN%"
+          - copy /Y mq_bridge_full.dll "%LIBRARY_BIN%"
+        else:
+          - mkdir -p "${PREFIX}/lib/mq-bridge"
+          - cp libmq_bridge_full.* "${PREFIX}/lib/mq-bridge/"
+
+tests:
+  - package_contents:
+      files:
+        - if: win
+          then: Library/bin/mq_bridge_full.dll
+          else: lib/mq-bridge/libmq_bridge_full.*
+
+about:
+  homepage: https://github.com/marcomq/mq-bridge
+  repository: https://github.com/marcomq/mq-bridge
+  documentation: https://marcomq.github.io/mq-bridge/
+  summary: Every built-in mq-bridge endpoint as one plugin library
+  description: |
+    A loadable plugin that provides every built-in mq-bridge endpoint (kafka,
+    nats, mongodb, sqlx, ...). A host built without those endpoint features
+    finds it through plugin discovery or `load_installed_plugin("full")` and
+    keeps the same route configuration.
+  license: MIT OR Apache-2.0
+  license_file:
+    - LICENSE-MIT
+    - LICENSE-APACHE
+    - THIRD_PARTY_LICENSES.txt
+
+extra:
+  recipe-maintainers:
+    - marcomq
