@@ -2,7 +2,7 @@
 
 use super::{
     audited_sql, bind_key, bind_value, classify_sql_error, copy_rows, open_copy_pool,
-    positional_placeholder, push_copy_value, quote_ident_for, BindValue, CopyPool,
+    positional_placeholder, push_copy_value, quote_ident_for, AnyQuery, BindValue, CopyPool,
     MYSQL_COLUMN_TYPES_SQL, SQLITE_COLUMN_TYPES_SQL,
 };
 use crate::errors::InvalidConfig;
@@ -86,6 +86,70 @@ fn json_bind(value: serde_json::Value) -> BindValue {
             _ => BindValue::Text(n.to_string()),
         },
         nested => BindValue::Text(nested.to_string()),
+    }
+}
+
+/// The type a PostgreSQL statement binds one column as, spelled out as `$n::int8`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum PgBind {
+    Int,
+    Float,
+    /// Integers and floats in one column: sent as text, exact, and rounded like a float.
+    Numeric,
+    Bool,
+    Text,
+}
+
+impl PgBind {
+    fn of(value: &BindValue) -> Option<Self> {
+        match value {
+            BindValue::Null => None,
+            BindValue::Int(_) => Some(Self::Int),
+            BindValue::Float(_) => Some(Self::Float),
+            BindValue::Bool(_) => Some(Self::Bool),
+            BindValue::Text(_) => Some(Self::Text),
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Int => "int8",
+            Self::Float => "float8",
+            Self::Numeric => "numeric",
+            Self::Bool => "bool",
+            Self::Text => "text",
+        }
+    }
+
+    /// Other mixed types become text, which keeps every value exact.
+    fn join(a: Option<Self>, b: Option<Self>) -> Option<Self> {
+        match (a, b) {
+            (None, x) | (x, None) => x,
+            (Some(a), Some(b)) if a == b => Some(a),
+            (Some(Self::Int | Self::Float | Self::Numeric), Some(Self::Int | Self::Float)) => {
+                Some(Self::Numeric)
+            }
+            _ => Some(Self::Text),
+        }
+    }
+
+    fn coerce(self, value: BindValue) -> BindValue {
+        match (self, value) {
+            (Self::Text | Self::Numeric, BindValue::Int(i)) => BindValue::Text(i.to_string()),
+            (Self::Text | Self::Numeric, BindValue::Float(f)) => BindValue::Text(f.to_string()),
+            (Self::Text, BindValue::Bool(b)) => BindValue::Text(b.to_string()),
+            (_, value) => value,
+        }
+    }
+}
+
+/// Binds `value` as `bind`, so a NULL carries the column's bind type too.
+fn bind_typed<'q>(query: AnyQuery<'q>, value: BindValue, bind: Option<&PgBind>) -> AnyQuery<'q> {
+    match (value, bind) {
+        (BindValue::Null, Some(PgBind::Int)) => query.bind(None::<i64>),
+        (BindValue::Null, Some(PgBind::Float)) => query.bind(None::<f64>),
+        (BindValue::Null, Some(PgBind::Bool)) => query.bind(None::<bool>),
+        (value, _) => bind_value(query, value),
     }
 }
 
@@ -290,6 +354,32 @@ impl AutoColumns {
         }
     }
 
+    /// PostgreSQL: one bind type per column of `run`, with the values converted to it.
+    /// The types go into the SQL, so a cached statement always meets the types it was
+    /// prepared with. Empty for the other drivers.
+    fn pg_binds(&self, run: &mut [AutoRow]) -> Vec<PgBind> {
+        if self.driver_name != "PostgreSQL" {
+            return Vec::new();
+        }
+        let width = run.first().map_or(0, |row| row.values.len());
+        let mut binds = vec![None; width];
+        for row in run.iter() {
+            for (bind, value) in binds.iter_mut().zip(&row.values) {
+                *bind = PgBind::join(*bind, PgBind::of(value));
+            }
+        }
+        let binds: Vec<PgBind> = binds
+            .into_iter()
+            .map(|bind| bind.unwrap_or(PgBind::Text))
+            .collect();
+        for row in run.iter_mut() {
+            for (value, bind) in row.values.iter_mut().zip(&binds) {
+                *value = bind.coerce(std::mem::replace(value, BindValue::Null));
+            }
+        }
+        binds
+    }
+
     /// The record's fields as column values. A field without a column goes into
     /// `extra_column`, or is left out.
     fn row(&self, message: &CanonicalMessage) -> Result<AutoRow, PublisherError> {
@@ -458,7 +548,8 @@ impl AutoColumns {
         }
     }
 
-    fn insert_sql(&self, columns: &[usize], rows: usize) -> String {
+    /// `binds`: PostgreSQL only, the type each column is bound as, from [`pg_binds`].
+    fn insert_sql(&self, columns: &[usize], rows: usize, binds: &[PgBind]) -> String {
         let mut sql = format!(
             "INSERT INTO {} ({}) VALUES ",
             self.table,
@@ -472,9 +563,13 @@ impl AutoColumns {
                     sql.push_str(", ");
                 }
                 let placeholder = positional_placeholder(&self.driver_name, index);
-                match &self.columns[*column].cast {
-                    Some(cast) => sql.push_str(&format!("CAST({placeholder} AS {cast})")),
-                    None => sql.push_str(&placeholder),
+                match (&self.columns[*column].cast, binds.get(i)) {
+                    (Some(cast), Some(bind)) => {
+                        let bind = bind.name();
+                        sql.push_str(&format!("CAST({placeholder}::{bind} AS {cast})"))
+                    }
+                    (Some(cast), None) => sql.push_str(&format!("CAST({placeholder} AS {cast})")),
+                    (None, _) => sql.push_str(&placeholder),
                 }
                 index += 1;
             }
@@ -546,10 +641,13 @@ impl AutoColumns {
                     continue;
                 }
             };
-            let sql = self.insert_sql(&row.columns, 1);
+            let mut run = [row];
+            let binds = self.pg_binds(&mut run);
+            let [row] = run;
+            let sql = self.insert_sql(&row.columns, 1, &binds);
             let mut query = sqlx::query(audited_sql(&sql)).persistent(false);
-            for value in row.values {
-                query = bind_value(query, value);
+            for (i, value) in row.values.into_iter().enumerate() {
+                query = bind_typed(query, value, binds.get(i));
             }
             let mut step = tx.begin().await.map_err(retryable)?;
             match query.execute(&mut *step).await.map_err(classify_sql_error) {
@@ -599,13 +697,15 @@ impl AutoColumns {
             _ => Some(pool.begin().await.map_err(retryable)?),
         };
         for (columns, run) in statements {
-            let run = self.last_per_key(run);
-            let sql = self.insert_sql(&columns, run.len());
-            // Not cached on Postgres: a statement keeps the bind types of its first record.
-            let mut query =
-                sqlx::query(audited_sql(&sql)).persistent(self.driver_name != "PostgreSQL");
-            for value in run.into_iter().flat_map(|row| row.values) {
-                query = bind_value(query, value);
+            let mut run = self.last_per_key(run);
+            let binds = self.pg_binds(&mut run);
+            let sql = self.insert_sql(&columns, run.len(), &binds);
+            // Cached: on PostgreSQL the bind types are part of the SQL text.
+            let mut query = sqlx::query(audited_sql(&sql));
+            for row in run {
+                for (i, value) in row.values.into_iter().enumerate() {
+                    query = bind_typed(query, value, binds.get(i));
+                }
             }
             match &mut tx {
                 Some(tx) => query.execute(&mut **tx).await,
@@ -622,7 +722,56 @@ impl AutoColumns {
 
 #[cfg(test)]
 mod tests {
-    use super::pg_array_literal;
+    use super::*;
+
+    #[test]
+    fn postgres_names_one_bind_type_per_column_in_the_sql() {
+        let column = |name: &str, cast: &str| TableColumn {
+            name: name.into(),
+            ident: name.into(),
+            cast: Some(cast.into()),
+            array: false,
+            boolean: false,
+        };
+        let auto = AutoColumns {
+            table: "t".into(),
+            driver_name: "PostgreSQL".into(),
+            columns: vec![
+                column("a", "bigint"),
+                column("b", "numeric"),
+                column("c", "text"),
+            ],
+            by_name: HashMap::new(),
+            by_lower_name: HashMap::new(),
+            key: Vec::new(),
+            extra: None,
+            copy_pool: None,
+            warned_unknown: AtomicBool::new(false),
+        };
+        let row = |values| AutoRow {
+            columns: vec![0, 1, 2],
+            values,
+        };
+        let mut run = [
+            row(vec![BindValue::Int(1), BindValue::Int(2), BindValue::Int(3)]),
+            row(vec![
+                BindValue::Null,
+                BindValue::Float(2.5),
+                BindValue::Text("x".into()),
+            ]),
+        ];
+        let binds = auto.pg_binds(&mut run);
+        // int8 next to a NULL; numeric for an integer beside a float; text otherwise.
+        assert_eq!(binds, [PgBind::Int, PgBind::Numeric, PgBind::Text]);
+        assert_eq!(run[0].values[1], BindValue::Text("2".into()));
+        assert_eq!(run[1].values[1], BindValue::Text("2.5".into()));
+        assert_eq!(run[0].values[2], BindValue::Text("3".into()));
+        assert_eq!(
+            auto.insert_sql(&[0, 1, 2], 1, &binds),
+            "INSERT INTO t (a, b, c) VALUES \
+             (CAST($1::int8 AS bigint), CAST($2::numeric AS numeric), CAST($3::text AS text))"
+        );
+    }
 
     #[test]
     fn json_array_becomes_a_postgres_array_literal() {

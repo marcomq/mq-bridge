@@ -1499,21 +1499,33 @@ async fn sql_dedup_store_keeps_replies_and_migrates_an_existing_table() {
 }
 
 #[test]
-fn tuple_is_bare_placeholders_only_accepts_plain_tokens() {
-    assert!(tuple_is_bare_placeholders("($1, $2)", "PostgreSQL"));
-    assert!(tuple_is_bare_placeholders("(?, ?)", "SQLite"));
-    assert!(tuple_is_bare_placeholders(
-        "(@p1, @p2)",
-        "Microsoft SQL Server"
-    ));
-    // Casts and function calls must keep the user's SQL, so the batch rebuild is skipped.
-    assert!(!tuple_is_bare_placeholders(
-        "($1, decode($2, 'base64'))",
-        "PostgreSQL"
-    ));
-    assert!(!tuple_is_bare_placeholders("($1, $2::bytea)", "PostgreSQL"));
-    assert!(!tuple_is_bare_placeholders("($1, now())", "PostgreSQL"));
-    assert!(!tuple_is_bare_placeholders("", "PostgreSQL"));
+fn values_tuple_repeats_per_row_with_its_expressions() {
+    let row = |tuple: &str, driver: &str, per_row: usize, offset: usize| {
+        let template = tuple_template(tuple, driver, per_row)?;
+        let mut out = String::new();
+        render_tuple(&template, driver, offset, &mut out);
+        Some(out)
+    };
+    let pg = "(CAST($1 AS bigint), decode($2, 'base64 $9'), $3::timestamp, now())";
+    assert_eq!(
+        row(pg, "PostgreSQL", 3, 3).as_deref(),
+        Some("(CAST($4 AS bigint), decode($5, 'base64 $9'), $6::timestamp, now())")
+    );
+    assert_eq!(
+        row("(?, unhex(?))", "SQLite", 2, 2).as_deref(),
+        Some("(?, unhex(?))")
+    );
+    assert_eq!(
+        row("(@p1, @p2)", "Microsoft SQL Server", 2, 2).as_deref(),
+        Some("(@p3, @p4)")
+    );
+    // Placeholders other than exactly 1..=per_row, or SQL the scan does not follow.
+    assert_eq!(row("($1, $1)", "PostgreSQL", 2, 0), None);
+    assert_eq!(row("($1)", "PostgreSQL", 2, 0), None);
+    assert_eq!(row("($1, $$x$$)", "PostgreSQL", 1, 0), None);
+    assert_eq!(row("($1, E'a\\'b')", "PostgreSQL", 1, 0), None);
+    assert_eq!(row("($1 -- c\n)", "PostgreSQL", 1, 0), None);
+    assert_eq!(row("", "PostgreSQL", 1, 0), None);
 }
 
 /// The batch path used to regenerate the VALUES tuple as bare placeholders, which

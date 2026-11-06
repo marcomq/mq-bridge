@@ -88,6 +88,11 @@ mqb copy --drain \
 (`insert_query` is shown URL-encoded above — the SQL is
 `INSERT INTO orders (id, sku, qty) VALUES (${payload:id}, ${payload:sku}, ${payload:qty})`.)
 
+A CSV file delivers every field as text, and PostgreSQL does not convert text into a
+`bigint`, `numeric` or `timestamp` column on its own. Cast it in the statement, for example
+`CAST(${payload:qty} AS integer)`, or use `columns: auto`, which casts every value to its
+column's type. Expressions in the `VALUES (…)` tuple are fine: a batch is still one INSERT.
+
 ## Key options
 
 | Option | Purpose |

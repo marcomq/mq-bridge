@@ -2,6 +2,18 @@
 
 All notable changes to `mq-bridge`. Newest first.
 
+## Unreleased
+
+### Fixed
+
+- **`columns: auto` on PostgreSQL reuses its prepared statement.** Each batch used to be
+  parsed and planned again, which made a 1M-row CSV load slow. The bind
+  type of every column is now part of the SQL, so the statement is cached like on the other
+  databases.
+- **`insert_query` keeps batching with expressions in `VALUES (…)`.** A tuple such as
+  `(CAST(${payload:id} AS bigint), ${payload:name})` used to fall back to one INSERT per
+  row. It is now repeated per row in one multi-row INSERT.
+
 ## 1.4.0
 
 ### Added
