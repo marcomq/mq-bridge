@@ -33,7 +33,10 @@ header = """
  */
 
 #ifndef MQ_BRIDGE_PLUGIN_H
-#define MQ_BRIDGE_PLUGIN_H"""
+#define MQ_BRIDGE_PLUGIN_H
+
+/* The wrap entries take the lent endpoint's table before the table is defined. */
+struct MqbPluginVTable;"""
 
 trailer = """
 /* Name of the discovery symbol a plugin must export; its type is MqbPluginEntry. */
@@ -47,6 +50,7 @@ trailer = """
 #define MQB_VTABLE_SIZE_V1_2 (MQB_VTABLE_SIZE_V1_1 + 11 * sizeof(size_t))
 #define MQB_VTABLE_SIZE_V1_3 (MQB_VTABLE_SIZE_V1_2 + sizeof(size_t))
 #define MQB_VTABLE_SIZE_V1_4 (MQB_VTABLE_SIZE_V1_3 + sizeof(size_t))
+#define MQB_VTABLE_SIZE_V1_5 (MQB_VTABLE_SIZE_V1_4 + 2 * sizeof(size_t))
 #define MQB_HOST_VTABLE_SIZE_V1_2 (5 * sizeof(size_t))
 
 #if defined(_WIN32)
@@ -72,7 +76,7 @@ MQB_PLUGIN_EXPORT const MqbPluginVTable *mq_bridge_plugin_v1(void);
 MQB_STATIC_ASSERT(sizeof(size_t) == 8, "the plugin ABI layout is defined for 64-bit targets");
 MQB_STATIC_ASSERT(sizeof(MqbMessage) == 16 + 4 * sizeof(size_t), "MqbMessage layout");
 MQB_STATIC_ASSERT(sizeof(MqbHostVTable) == MQB_HOST_VTABLE_SIZE_V1_2, "MqbHostVTable layout");
-MQB_STATIC_ASSERT(sizeof(MqbPluginVTable) == MQB_VTABLE_SIZE_V1_4,
+MQB_STATIC_ASSERT(sizeof(MqbPluginVTable) == MQB_VTABLE_SIZE_V1_5,
                   "MqbPluginVTable grew: add the new MQB_VTABLE_SIZE_* to bindings/c/include/cbindgen.toml");
 
 #endif /* MQ_BRIDGE_PLUGIN_H */
@@ -109,5 +113,6 @@ exclude = [
     "MQB_VTABLE_SIZE_V1_2",
     "MQB_VTABLE_SIZE_V1_3",
     "MQB_VTABLE_SIZE_V1_4",
+    "MQB_VTABLE_SIZE_V1_5",
     "MQB_HOST_VTABLE_SIZE_V1_2",
 ]

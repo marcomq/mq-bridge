@@ -39,10 +39,11 @@ about:
   homepage: https://github.com/marcomq/mq-bridge
   repository: https://github.com/marcomq/mq-bridge
   documentation: https://marcomq.github.io/mq-bridge/
-  summary: Every built-in mq-bridge endpoint as one plugin library
+  summary: Every built-in mq-bridge endpoint and middleware as one plugin library
   description: |
     A loadable plugin that provides every built-in mq-bridge endpoint (kafka,
-    nats, mongodb, sqlx, ...). A host built without those endpoint features
+    nats, mongodb, sqlx, ...) and middleware (deduplication, compression,
+    encryption, filter, aggregate). A host built without those features
     finds it through plugin discovery or `load_installed_plugin("full")` and
     keeps the same route configuration.
   license: MIT OR Apache-2.0

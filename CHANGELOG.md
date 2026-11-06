@@ -4,6 +4,20 @@ All notable changes to `mq-bridge`. Newest first.
 
 ## Unreleased
 
+### Added
+
+- **Plugin middleware can wrap the endpoint (plugin ABI 1.5).** A middleware exported with
+  `wrap_middleware:` gets the inner consumer or publisher itself, lent by the host, so a
+  plugin can now do anything a built-in middleware does: hold messages back, keep state
+  across commits, end the stream. The C helpers (`MQB_WRAPPING_MIDDLEWARE`,
+  `examples/c-plugin/take.c`) and the Nim binding (`Plugin.wraps`, `wrapConsumer`,
+  `wrapPublisher`) support it too, and `conformance::run_wrapped` checks one. Existing
+  plugins and map/drop middleware are unchanged.
+- **The full plugin also serves the built-in middleware.** A host built without
+  `dedup`, `compression`, `encryption`, `filter` or `aggregate` applies them from
+  `libmq_bridge_full` with the same route configuration. `metrics` and `otel` still need
+  the host's own feature.
+
 ### Changed
 
 - **The release also packages the existing full plugin.** `plugins/full` (every built-in

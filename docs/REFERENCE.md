@@ -162,6 +162,10 @@ a handler error propagates to the route and is reported there.
 
 A middleware whose feature is not compiled in (`deduplication` without `dedup`, `metrics`
 without `metrics`, `otel` without `otel`, `aggregate` without `aggregate`) is likewise a startup error, not a silent no-op.
+Without their feature, a host built with `plugin` takes `filter`, `deduplication`, `encryption`,
+`compression` and `aggregate` from the [full plugin](PLUGINS.md#all-built-in-endpoints-as-one-plugin),
+in the listed order; it fails as above only when no such plugin is loaded. `metrics` and `otel`
+always need the host's own feature.
 
 ---
 

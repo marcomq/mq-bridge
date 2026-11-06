@@ -3,20 +3,26 @@
 //  Licensed under MIT OR Apache-2.0, see LICENSE file for more details
 //  git clone https://github.com/marcomq/mq-bridge
 
-//! Every built-in mq-bridge endpoint as one loadable plugin library.
+//! Every built-in mq-bridge endpoint and middleware as one loadable plugin library.
 //!
 //! A host that embeds mq-bridge without the endpoint features loads this library (by
 //! path, by name or through discovery) and keeps writing `kafka:`, `file:`, … in its routes: an endpoint the host has
 //! no feature for is served by the factory registered here under the same name.
+//! A middleware the host has no feature for (`compression`, `deduplication`, …) is
+//! applied here through `builtin_middleware`, which gets the inner endpoint itself.
 //!
-//! The library carries its own engine. `memory` channels, `ref` names and factories
-//! registered in the host are therefore not visible to the endpoints created here.
+//! The library carries its own engine. `memory` channels, `ref` names, factories
+//! registered in the host and the host's metrics are therefore not visible to the
+//! endpoints and middleware created here.
 
 use anyhow::Context;
 use async_trait::async_trait;
 use mq_bridge::endpoints::{create_consumer_from_route, create_publisher_from_route};
-use mq_bridge::models::Endpoint;
-use mq_bridge::traits::{CustomEndpointFactory, MessageConsumer, MessagePublisher};
+use mq_bridge::middleware::{apply_middlewares_to_consumer, apply_middlewares_to_publisher};
+use mq_bridge::models::{Endpoint, Middleware};
+use mq_bridge::traits::{
+    CustomEndpointFactory, CustomMiddlewareFactory, MessageConsumer, MessagePublisher,
+};
 use serde_json::Value;
 
 /// Builds the endpoint the host would have built from `<name>: <config>`.
@@ -65,7 +71,8 @@ macro_rules! built_in_endpoints {
         )+
 
         mq_bridge::export_endpoint_plugins! {
-            $({ name: $name, factory: $factory }),+
+            $({ name: $name, factory: $factory }),+,
+            { name: mq_bridge::middleware::BUILTIN_MIDDLEWARE_PLUGIN, wrap_middleware: BuiltinMiddleware }
         }
     };
 }
@@ -93,4 +100,42 @@ built_in_endpoints! {
     ClickHouse => "clickhouse",
     HttpBulk => "http_bulk",
     PostgresCdc => "postgres_cdc",
+}
+
+/// Applies a list of built-in middlewares, in the host's order, around the endpoint the
+/// host lends. The config is the list, as the host serialised it.
+#[derive(Debug, Default)]
+pub struct BuiltinMiddleware;
+
+fn middlewares(config: &Value) -> anyhow::Result<Endpoint> {
+    install_crypto_provider();
+    let middlewares: Vec<Middleware> =
+        serde_json::from_value(config.clone()).context("invalid built-in middleware list")?;
+    Ok(Endpoint {
+        middlewares,
+        ..Endpoint::default()
+    })
+}
+
+#[async_trait]
+impl CustomMiddlewareFactory for BuiltinMiddleware {
+    async fn apply_consumer(
+        &self,
+        consumer: Box<dyn MessageConsumer>,
+        route_name: &str,
+        config: &Value,
+    ) -> anyhow::Result<Box<dyn MessageConsumer>> {
+        apply_middlewares_to_consumer(consumer, &middlewares(config)?, route_name).await
+    }
+
+    async fn apply_publisher(
+        &self,
+        publisher: Box<dyn MessagePublisher>,
+        route_name: &str,
+        config: &Value,
+    ) -> anyhow::Result<Box<dyn MessagePublisher>> {
+        let publisher =
+            apply_middlewares_to_publisher(publisher, &middlewares(config)?, route_name).await?;
+        Ok(Box::new(publisher))
+    }
 }

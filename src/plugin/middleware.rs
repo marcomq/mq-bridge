@@ -5,9 +5,9 @@
 
 //! A loaded plugin's middleware, presented as a [`CustomMiddlewareFactory`].
 //!
-//! Only the messages cross the ABI. The wrapper around the inner consumer or
-//! publisher stays here on the host side, so a plugin never has to call back
-//! into host objects — which is what keeps the ABI one-directional.
+//! A map/drop middleware only sees the messages: the wrapper around the inner consumer
+//! or publisher stays here on the host side. A wrapping middleware (ABI 1.5) gets the
+//! inner endpoint itself, lent through the host's own endpoint table.
 
 use std::any::Any;
 use std::sync::Arc;
@@ -15,17 +15,20 @@ use std::sync::Arc;
 use anyhow::anyhow;
 use async_trait::async_trait;
 
-use super::endpoint::{consumer_error_from, join_error, AssertSend};
+use super::endpoint::{
+    consumer_error_from, join_error, plugin_consumer, plugin_publisher, publisher_error_from,
+    AssertSend,
+};
 use super::message::{from_abi, AbiMessages};
 use super::LoadedPlugin;
 use crate::errors::{ConsumerError, PublisherError};
 use crate::middleware::deferred_commit::{run_all, DeferredCommits};
 use crate::middleware::lookup::lookup_through;
 use crate::support::plugin_abi::{
-    MqbBuffer, MqbFilterHandle, MqbMessage, MqbMiddlewareHandle, MqbSlice, MqbStatus,
-    MQB_END_OF_STREAM, MQB_ERR_CONNECTION, MQB_ERR_INVALID_CONFIG, MQB_ERR_PANIC,
-    MQB_ERR_PERMANENT, MQB_ERR_UNSUPPORTED, MQB_MESSAGE_KEPT, MQB_MIDDLEWARE_RECEIVE,
-    MQB_MIDDLEWARE_SEND, MQB_OK,
+    MqbBuffer, MqbConsumerHandle, MqbFilterHandle, MqbMessage, MqbMiddlewareHandle,
+    MqbPublisherHandle, MqbSlice, MqbStatus, MQB_END_OF_STREAM, MQB_ERR_CONNECTION,
+    MQB_ERR_INVALID_CONFIG, MQB_ERR_PANIC, MQB_ERR_PERMANENT, MQB_ERR_UNSUPPORTED,
+    MQB_MESSAGE_KEPT, MQB_MIDDLEWARE_RECEIVE, MQB_MIDDLEWARE_SEND, MQB_OK,
 };
 use crate::traits::{
     BatchCommitFunc, BoxFuture, CustomMiddlewareFactory, EndpointStatus, MessageConsumer,
@@ -109,6 +112,30 @@ impl CustomMiddlewareFactory for PluginMiddlewareFactory {
         let middleware = self
             .open(route_name, config, MQB_MIDDLEWARE_RECEIVE)
             .await?;
+        if let Some((wrap, _)) = self.plugin.table().wrap_hooks() {
+            let inner = AssertSend(super::sdk::lend_consumer(consumer).await?);
+            let route = route_name.to_owned();
+            let handle = tokio::task::spawn_blocking(move || {
+                let (middleware, inner) = (middleware, inner);
+                let mut out = MqbConsumerHandle::NULL;
+                let mut err = MqbBuffer::EMPTY;
+                let host = super::sdk::host_table();
+                let status = unsafe { wrap(middleware.handle, host, inner.0, &mut out, &mut err) };
+                if status == MQB_OK {
+                    return Ok(AssertSend(out));
+                }
+                let plugin = &middleware.plugin;
+                let cause = anyhow!(
+                    "middleware plugin `{}` could not wrap the input of route `{route}`: {}",
+                    plugin.name(),
+                    plugin.take_error(err)
+                );
+                Err(anyhow::Error::new(consumer_error_from(status, cause)))
+            })
+            .await
+            .map_err(join_error)??;
+            return Ok(plugin_consumer(Arc::clone(&self.plugin), handle.0));
+        }
         Ok(Box::new(PluginMiddlewareConsumer {
             inner: consumer,
             middleware: Arc::new(middleware),
@@ -123,6 +150,30 @@ impl CustomMiddlewareFactory for PluginMiddlewareFactory {
         config: &serde_json::Value,
     ) -> anyhow::Result<Box<dyn MessagePublisher>> {
         let middleware = self.open(route_name, config, MQB_MIDDLEWARE_SEND).await?;
+        if let Some((_, wrap)) = self.plugin.table().wrap_hooks() {
+            let inner = AssertSend(super::sdk::lend_publisher(publisher).await?);
+            let route = route_name.to_owned();
+            let handle = tokio::task::spawn_blocking(move || {
+                let (middleware, inner) = (middleware, inner);
+                let mut out = MqbPublisherHandle::NULL;
+                let mut err = MqbBuffer::EMPTY;
+                let host = super::sdk::host_table();
+                let status = unsafe { wrap(middleware.handle, host, inner.0, &mut out, &mut err) };
+                if status == MQB_OK {
+                    return Ok(AssertSend(out));
+                }
+                let plugin = &middleware.plugin;
+                let cause = anyhow!(
+                    "middleware plugin `{}` could not wrap the output of route `{route}`: {}",
+                    plugin.name(),
+                    plugin.take_error(err)
+                );
+                Err(anyhow::Error::new(publisher_error_from(status, cause)))
+            })
+            .await
+            .map_err(join_error)??;
+            return Ok(plugin_publisher(Arc::clone(&self.plugin), handle.0));
+        }
         Ok(Box::new(PluginMiddlewarePublisher {
             inner: publisher,
             middleware: Arc::new(middleware),
@@ -813,5 +864,112 @@ mod tests {
         assert_eq!(connects.load(Ordering::SeqCst), 1);
         assert_eq!(disconnects.load(Ordering::SeqCst), 1);
         assert!(!publisher.status().await.healthy);
+    }
+
+    /// Marks each message it sees, to show the wrapped endpoint was driven through it.
+    struct Tagging<T> {
+        inner: T,
+        tag: &'static str,
+    }
+
+    #[async_trait]
+    impl MessageConsumer for Tagging<Box<dyn MessageConsumer>> {
+        async fn receive_batch(&mut self, max: usize) -> Result<ReceivedBatch, ConsumerError> {
+            let mut batch = self.inner.receive_batch(max).await?;
+            for message in &mut batch.messages {
+                message.metadata.insert(self.tag.into(), "yes".into());
+            }
+            Ok(batch)
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    #[async_trait]
+    impl MessagePublisher for Tagging<Box<dyn MessagePublisher>> {
+        async fn send_batch(
+            &self,
+            mut messages: Vec<CanonicalMessage>,
+        ) -> Result<SentBatch, PublisherError> {
+            for message in &mut messages {
+                message.metadata.insert(self.tag.into(), "yes".into());
+            }
+            self.inner.send_batch(messages).await
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct TaggingFactory;
+
+    #[async_trait]
+    impl CustomMiddlewareFactory for TaggingFactory {
+        async fn apply_consumer(
+            &self,
+            inner: Box<dyn MessageConsumer>,
+            _: &str,
+            _: &serde_json::Value,
+        ) -> anyhow::Result<Box<dyn MessageConsumer>> {
+            Ok(Box::new(Tagging {
+                inner,
+                tag: "received_through",
+            }))
+        }
+
+        async fn apply_publisher(
+            &self,
+            inner: Box<dyn MessagePublisher>,
+            _: &str,
+            _: &serde_json::Value,
+        ) -> anyhow::Result<Box<dyn MessagePublisher>> {
+            Ok(Box::new(Tagging {
+                inner,
+                tag: "sent_through",
+            }))
+        }
+    }
+
+    static WRAP_TABLE: ExportedVTable =
+        crate::plugin::sdk::build_wrap_vtable::<TaggingFactory>("wrap-tagging", "0.0.0");
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_wrapping_middleware_drives_the_lent_endpoint() {
+        use crate::endpoints::memory::{MemoryConsumer, MemoryPublisher};
+        unsafe { crate::plugin::register_plugin_table(WRAP_TABLE.as_ptr()) }.unwrap();
+        let factory = get_middleware_factory("wrap-tagging").unwrap();
+        let config = serde_json::json!({});
+
+        let inner = MemoryPublisher::new_local("plugin_wrap_round_trip", 16);
+        let publisher = factory
+            .apply_publisher(Box::new(inner), "r", &config)
+            .await
+            .unwrap();
+        let messages = (0..3)
+            .map(|i| CanonicalMessage::new(format!("m{i}").into_bytes(), None))
+            .collect();
+        assert!(matches!(
+            publisher.send_batch(messages).await,
+            Ok(SentBatch::Ack)
+        ));
+
+        let inner = MemoryConsumer::new_local("plugin_wrap_round_trip", 16);
+        let mut consumer = factory
+            .apply_consumer(Box::new(inner), "r", &config)
+            .await
+            .unwrap();
+        let batch = consumer.receive_batch(10).await.unwrap();
+        assert_eq!(batch.messages.len(), 3);
+        for message in &batch.messages {
+            assert_eq!(message.metadata["sent_through"], "yes");
+            assert_eq!(message.metadata["received_through"], "yes");
+        }
+        let acks = vec![MessageDisposition::Ack; batch.messages.len()];
+        (batch.commit)(acks).await.unwrap();
+        consumer.close().await.unwrap();
     }
 }

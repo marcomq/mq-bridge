@@ -134,6 +134,34 @@ output:
     - custom: { name: drop_ping, config: {} }
 ```
 
+A middleware that needs the endpoint itself (to end the stream, hold messages back, or
+keep state across commits) sets `wraps: true` and overrides `wrapConsumer` or
+`wrapPublisher`. The host lends it the endpoint as an `InnerConsumer` / `InnerPublisher`:
+
+```nim
+type
+  Take = ref object of PluginMiddleware
+    limit: int
+  TakeConsumer = ref object of PluginConsumer
+    inner: InnerConsumer
+    left: int
+
+method wrapConsumer(t: Take, inner: InnerConsumer): PluginConsumer =
+  TakeConsumer(inner: inner, left: t.limit)
+
+method receive(c: TakeConsumer, max: int): PluginBatch =
+  if c.left == 0: raise newException(EndOfStreamError, "limit reached")
+  dec c.left
+  c.inner.receive(max)
+
+method commit(c: TakeConsumer, batch: PluginBatch, ds: seq[Disposition]) =
+  c.inner.commit(batch, ds)
+
+registerPlugin Plugin(name: "take", wraps: true,
+  newMiddleware: proc (route, config: string, side: MiddlewareSide): PluginMiddleware =
+    Take(limit: parseJson(config)["limit"].getInt))
+```
+
 At most 16 Nim plugins per process. `loadPlugin(path)` loads a native plugin library
 built for any language; `loadInstalledPlugin("connect")` loads the installed
 `libmq_bridge_connect` and nothing else. `enablePluginDiscovery()` lets routes

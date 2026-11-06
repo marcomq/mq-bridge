@@ -5,6 +5,7 @@ set(CMAKE_C_STANDARD 11)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../../bindings/c/include)
 
 add_library(drop_heartbeats SHARED minimal.c)
+add_library(take SHARED take.c)
 find_package(Threads REQUIRED)
 add_library(legacy_payments SHARED plugin.c legacy_parser.c legacy_ledger.c)
 target_link_libraries(legacy_payments Threads::Threads)

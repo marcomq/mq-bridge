@@ -658,7 +658,7 @@ jobs:
           tag_name: ${{ needs.metadata.outputs.release_tag }}
           files: ${{ env.ASSET_PATH }}
 
-  # Every built-in endpoint as one plugin library, for hosts built without them.
+  # Every built-in endpoint and middleware as one plugin library, for hosts built without them.
   # The archive is a release asset (Homebrew renders from it) and the conda package
   # repackages the same archive on its own platform's runner.
   build-full-plugin:

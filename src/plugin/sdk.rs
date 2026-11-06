@@ -61,7 +61,6 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use futures::FutureExt;
-use tokio::runtime::Runtime;
 use tokio::sync::Mutex;
 
 use crate::errors::{ConsumerError, InvalidConfig, ProcessingError};
@@ -69,19 +68,48 @@ use crate::plugin::message::{from_abi, AbiMessages};
 use crate::support::plugin_abi::{
     MqbBatchHandle, MqbBuffer, MqbCompletion, MqbConsumerHandle, MqbFactoryHandle, MqbFilterHandle,
     MqbMessage, MqbMiddlewareHandle, MqbPluginVTable, MqbPublisherHandle, MqbResponsesHandle,
-    MqbSlice, MqbStatus, MQB_CAP_CONSUMER, MQB_CAP_MIDDLEWARE, MQB_CAP_PUBLISHER,
-    MQB_DELIVERY_ACKNOWLEDGES, MQB_DELIVERY_IDEMPOTENT_SINK, MQB_DELIVERY_REPLAYS_FROM_START,
-    MQB_DELIVERY_REQUIRES_FULL_REPLAY, MQB_DISCONNECT_COMPLETED, MQB_DISCONNECT_FAILED,
-    MQB_DISPOSITION_NACK, MQB_DISPOSITION_REPLY, MQB_END_OF_STREAM, MQB_ERR_CONNECTION,
-    MQB_ERR_INVALID_CONFIG, MQB_ERR_PANIC, MQB_ERR_PERMANENT, MQB_ERR_RETRYABLE,
-    MQB_MIDDLEWARE_RECEIVE, MQB_OK, MQB_OUTCOME_OK, MQB_OUTCOME_PERMANENT, MQB_OUTCOME_RETRYABLE,
-    MQB_PLUGIN_ABI_MAJOR, MQB_PLUGIN_ABI_MINOR, MQB_SCHEMA_ENDPOINT, MQB_SCHEMA_MIDDLEWARE,
+    MqbSlice, MqbStatus, MQB_CAP_CONSUMER, MQB_CAP_MIDDLEWARE, MQB_CAP_MIDDLEWARE_WRAP,
+    MQB_CAP_PUBLISHER, MQB_DELIVERY_ACKNOWLEDGES, MQB_DELIVERY_IDEMPOTENT_SINK,
+    MQB_DELIVERY_REPLAYS_FROM_START, MQB_DELIVERY_REQUIRES_FULL_REPLAY, MQB_DISCONNECT_COMPLETED,
+    MQB_DISCONNECT_FAILED, MQB_DISPOSITION_NACK, MQB_DISPOSITION_REPLY, MQB_END_OF_STREAM,
+    MQB_ERR_CONNECTION, MQB_ERR_INVALID_CONFIG, MQB_ERR_PANIC, MQB_ERR_PERMANENT,
+    MQB_ERR_RETRYABLE, MQB_ERR_UNSUPPORTED, MQB_MIDDLEWARE_RECEIVE, MQB_MIDDLEWARE_SEND, MQB_OK,
+    MQB_OUTCOME_OK, MQB_OUTCOME_PERMANENT, MQB_OUTCOME_RETRYABLE, MQB_PLUGIN_ABI_MAJOR,
+    MQB_PLUGIN_ABI_MINOR, MQB_SCHEMA_ENDPOINT, MQB_SCHEMA_MIDDLEWARE,
 };
 use crate::traits::{
-    BatchCommitFunc, CustomEndpointFactory, DisconnectOutcome, EndpointStatus, MessageConsumer,
-    MessageDisposition, MessagePublisher,
+    BatchCommitFunc, CustomEndpointFactory, CustomMiddlewareFactory, DisconnectOutcome,
+    EndpointStatus, MessageConsumer, MessageDisposition, MessagePublisher,
 };
 use crate::{CanonicalMessage, SentBatch};
+
+/// A runtime this library owns, or the host's own, for an endpoint the host lends to a
+/// wrapping middleware: that endpoint may need the host runtime's I/O driver.
+pub(crate) struct Runtime {
+    handle: tokio::runtime::Handle,
+    _owned: Option<tokio::runtime::Runtime>,
+}
+
+impl Runtime {
+    fn current() -> Arc<Self> {
+        Arc::new(Self {
+            handle: tokio::runtime::Handle::current(),
+            _owned: None,
+        })
+    }
+
+    fn spawn<F>(&self, future: F) -> tokio::task::JoinHandle<F::Output>
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        self.handle.spawn(future)
+    }
+
+    fn enter(&self) -> tokio::runtime::EnterGuard<'_> {
+        self.handle.enter()
+    }
+}
 
 /// The runtime that drives every endpoint of this library, shared by all the
 /// plugins it exports and rebuilt if the last of them was freed.
@@ -109,7 +137,12 @@ fn build_runtime() -> anyhow::Result<Arc<Runtime>> {
     }
     builder
         .build()
-        .map(Arc::new)
+        .map(|runtime| {
+            Arc::new(Runtime {
+                handle: runtime.handle().clone(),
+                _owned: Some(runtime),
+            })
+        })
         .context("failed to start the plugin's async runtime")
 }
 
@@ -624,34 +657,56 @@ unsafe extern "C" fn consumer_create(
                 .create_consumer(&route, &config)
                 .await
                 .map_err(|error| (create_status(&error), error))?;
-            // The host route awaits this hook for endpoints it builds itself;
-            // behind the ABI only the plugin can run it.
-            if let Some(hook) = consumer.on_connect_hook() {
-                hook.await.map_err(|error| (MQB_ERR_CONNECTION, error))?;
-            }
-            let commit_requires_order = consumer.commit_requires_order();
-            Ok::<_, (MqbStatus, anyhow::Error)>((consumer, commit_requires_order))
+            connect_consumer(consumer).await
         });
-        let (consumer, commit_requires_order) = match created {
-            Ok(Ok(created)) => created,
-            Ok(Err((status, error))) => {
-                unsafe { set_error(err, format!("{error:#}")) };
-                return status;
-            }
-            Err(failure) => return unsafe { task_failed(err, failure) },
-        };
-
-        let (shutdown, _) = tokio::sync::watch::channel(false);
-        unsafe {
-            *out = MqbConsumerHandle(into_handle(ConsumerState {
-                consumer: Arc::new(Mutex::new(consumer)),
-                runtime,
-                shutdown,
-                commit_requires_order,
-            }))
-        };
-        MQB_OK
+        unsafe { finish_consumer(created, runtime, out, err) }
     })
+}
+
+/// Runs the connect hook and reads what the handle caches.
+async fn connect_consumer(consumer: Box<dyn MessageConsumer>) -> ConnectedConsumer {
+    // The host route awaits this hook for endpoints it builds itself;
+    // behind the ABI only the plugin can run it.
+    if let Some(hook) = consumer.on_connect_hook() {
+        hook.await.map_err(|error| (MQB_ERR_CONNECTION, error))?;
+    }
+    let commit_requires_order = consumer.commit_requires_order();
+    Ok((consumer, commit_requires_order))
+}
+
+/// A connected consumer and whether its commits must stay in order, or why connecting failed.
+type ConnectedConsumer = Result<(Box<dyn MessageConsumer>, bool), (MqbStatus, anyhow::Error)>;
+
+unsafe fn finish_consumer(
+    created: Result<ConnectedConsumer, TaskFailure>,
+    runtime: Arc<Runtime>,
+    out: *mut MqbConsumerHandle,
+    err: *mut MqbBuffer,
+) -> MqbStatus {
+    let (consumer, commit_requires_order) = match created {
+        Ok(Ok(created)) => created,
+        Ok(Err((status, error))) => {
+            unsafe { set_error(err, format!("{error:#}")) };
+            return status;
+        }
+        Err(failure) => return unsafe { task_failed(err, failure) },
+    };
+    unsafe { *out = consumer_handle(consumer, commit_requires_order, runtime) };
+    MQB_OK
+}
+
+fn consumer_handle(
+    consumer: Box<dyn MessageConsumer>,
+    commit_requires_order: bool,
+    runtime: Arc<Runtime>,
+) -> MqbConsumerHandle {
+    let (shutdown, _) = tokio::sync::watch::channel(false);
+    MqbConsumerHandle(into_handle(ConsumerState {
+        consumer: Arc::new(Mutex::new(consumer)),
+        runtime,
+        shutdown,
+        commit_requires_order,
+    }))
 }
 
 unsafe extern "C" fn consumer_receive_batch(
@@ -981,38 +1036,54 @@ unsafe extern "C" fn publisher_create(
                 .create_publisher(&route, &config)
                 .await
                 .map_err(|error| (create_status(&error), error))?;
-            if let Some(hook) = publisher.on_connect_hook() {
-                hook.await.map_err(|error| (MQB_ERR_CONNECTION, error))?;
-            }
-            let requires_ordered_publish = publisher.requires_ordered_publish();
-            let deferred_commit_interval_ms =
-                publisher.deferred_commit_interval().map_or(0, interval_ms);
-            Ok::<_, (MqbStatus, anyhow::Error)>((
-                publisher,
-                requires_ordered_publish,
-                deferred_commit_interval_ms,
-            ))
+            connect_publisher(publisher).await
         });
-        let (publisher, requires_ordered_publish, deferred_commit_interval_ms) = match created {
-            Ok(Ok(created)) => created,
-            Ok(Err((status, error))) => {
-                unsafe { set_error(err, format!("{error:#}")) };
-                return status;
-            }
-            Err(failure) => return unsafe { task_failed(err, failure) },
-        };
-
-        unsafe {
-            *out = MqbPublisherHandle(into_handle(PublisherState {
-                publisher: Arc::from(publisher),
-                runtime,
-                requires_ordered_publish,
-                deferred_commit_interval_ms,
-                disconnected: std::sync::atomic::AtomicBool::new(false),
-            }))
-        };
-        MQB_OK
+        unsafe { finish_publisher(created, runtime, out, err) }
     })
+}
+
+type ConnectedPublisher = (Box<dyn MessagePublisher>, bool, u64);
+
+/// Runs the connect hook and reads what the handle caches.
+async fn connect_publisher(
+    publisher: Box<dyn MessagePublisher>,
+) -> Result<ConnectedPublisher, (MqbStatus, anyhow::Error)> {
+    if let Some(hook) = publisher.on_connect_hook() {
+        hook.await.map_err(|error| (MQB_ERR_CONNECTION, error))?;
+    }
+    let requires_ordered_publish = publisher.requires_ordered_publish();
+    let deferred_commit_interval_ms = publisher.deferred_commit_interval().map_or(0, interval_ms);
+    Ok((
+        publisher,
+        requires_ordered_publish,
+        deferred_commit_interval_ms,
+    ))
+}
+
+unsafe fn finish_publisher(
+    created: Result<Result<ConnectedPublisher, (MqbStatus, anyhow::Error)>, TaskFailure>,
+    runtime: Arc<Runtime>,
+    out: *mut MqbPublisherHandle,
+    err: *mut MqbBuffer,
+) -> MqbStatus {
+    let (publisher, requires_ordered_publish, deferred_commit_interval_ms) = match created {
+        Ok(Ok(created)) => created,
+        Ok(Err((status, error))) => {
+            unsafe { set_error(err, format!("{error:#}")) };
+            return status;
+        }
+        Err(failure) => return unsafe { task_failed(err, failure) },
+    };
+    unsafe {
+        *out = MqbPublisherHandle(into_handle(PublisherState {
+            publisher: Arc::from(publisher),
+            runtime,
+            requires_ordered_publish,
+            deferred_commit_interval_ms,
+            disconnected: std::sync::atomic::AtomicBool::new(false),
+        }))
+    };
+    MQB_OK
 }
 
 unsafe extern "C" fn publisher_send_batch(
@@ -1709,6 +1780,260 @@ unsafe extern "C" fn middleware_free(middleware: MqbMiddlewareHandle) {
     });
 }
 
+// ------------------------------------------------------- wrapping middleware
+
+/// A wrapping middleware for one route and side, waiting for its inner endpoint.
+struct WrapState {
+    factory: Arc<dyn CustomMiddlewareFactory>,
+    route: String,
+    config: serde_json::Value,
+    side: u8,
+    runtime: Arc<Runtime>,
+}
+
+unsafe extern "C" fn wrap_middleware_create<W>(
+    factory: MqbFactoryHandle,
+    route_name: MqbSlice,
+    config_json: MqbSlice,
+    side: u8,
+    out: *mut MqbMiddlewareHandle,
+    err: *mut MqbBuffer,
+) -> MqbStatus
+where
+    W: CustomMiddlewareFactory + Default + 'static,
+{
+    guarded(err, || {
+        let Some(state) = (unsafe { borrow::<FactoryState>(factory.0) }) else {
+            unsafe { set_error(err, "middleware_create called with a null factory handle") };
+            return MQB_ERR_PERMANENT;
+        };
+        let (route, config) =
+            match unsafe { (read_str(route_name, "route_name"), read_config(config_json)) } {
+                (Ok(route), Ok(config)) => (route, config),
+                (Err(message), _) | (_, Err(message)) => {
+                    unsafe { set_error(err, message) };
+                    return MQB_ERR_INVALID_CONFIG;
+                }
+            };
+        unsafe {
+            *out = MqbMiddlewareHandle(into_handle(WrapState {
+                factory: Arc::new(W::default()),
+                route,
+                config,
+                side,
+                runtime: Arc::clone(&state.runtime),
+            }))
+        };
+        MQB_OK
+    })
+}
+
+unsafe extern "C" fn wrap_middleware_free(middleware: MqbMiddlewareHandle) {
+    guarded_unit(|| {
+        drop_in_runtime(unsafe { reclaim::<WrapState>(middleware.0) }, |state| {
+            &state.runtime
+        })
+    });
+}
+
+unsafe extern "C" fn wrap_middleware_apply(
+    _: MqbMiddlewareHandle,
+    _: *const MqbMessage,
+    _: usize,
+    _: *mut MqbFilterHandle,
+    _: *mut *const MqbMessage,
+    _: *mut *const u8,
+    err: *mut MqbBuffer,
+) -> MqbStatus {
+    unsafe {
+        set_error(
+            err,
+            "this middleware wraps the endpoint and maps no batches",
+        )
+    };
+    MQB_ERR_UNSUPPORTED
+}
+
+unsafe extern "C" fn wrap_result_free(_: MqbFilterHandle) {}
+
+/// Takes the wrap state, or reports why it cannot be used for `side`.
+unsafe fn wrap_state<'a>(
+    middleware: MqbMiddlewareHandle,
+    side: u8,
+    err: *mut MqbBuffer,
+) -> Result<&'a WrapState, MqbStatus> {
+    let Some(state) = (unsafe { borrow::<WrapState>(middleware.0) }) else {
+        unsafe { set_error(err, "middleware wrap called with a null handle") };
+        return Err(MQB_ERR_PERMANENT);
+    };
+    if state.side != side {
+        unsafe {
+            set_error(
+                err,
+                "middleware wrap called for the other side than it was created for",
+            )
+        };
+        return Err(MQB_ERR_PERMANENT);
+    }
+    Ok(state)
+}
+
+unsafe extern "C" fn middleware_wrap_consumer(
+    middleware: MqbMiddlewareHandle,
+    inner_table: *const MqbPluginVTable,
+    inner: MqbConsumerHandle,
+    out: *mut MqbConsumerHandle,
+    err: *mut MqbBuffer,
+) -> MqbStatus {
+    guarded(err, || {
+        // Owned from here on, whatever the result.
+        let inner = unsafe { super::endpoint::lent_consumer(inner_table, inner) };
+        let state = match unsafe { wrap_state(middleware, MQB_MIDDLEWARE_RECEIVE, err) } {
+            Ok(state) => state,
+            Err(status) => return status,
+        };
+        let (factory, route, config) = (
+            Arc::clone(&state.factory),
+            state.route.clone(),
+            state.config.clone(),
+        );
+        let runtime = Arc::clone(&state.runtime);
+        let created = block_on(&runtime, async move {
+            let consumer = factory
+                .apply_consumer(inner, &route, &config)
+                .await
+                .map_err(|error| (create_status(&error), error))?;
+            connect_consumer(consumer).await
+        });
+        unsafe { finish_consumer(created, runtime, out, err) }
+    })
+}
+
+unsafe extern "C" fn middleware_wrap_publisher(
+    middleware: MqbMiddlewareHandle,
+    inner_table: *const MqbPluginVTable,
+    inner: MqbPublisherHandle,
+    out: *mut MqbPublisherHandle,
+    err: *mut MqbBuffer,
+) -> MqbStatus {
+    guarded(err, || {
+        let inner = unsafe { super::endpoint::lent_publisher(inner_table, inner) };
+        let state = match unsafe { wrap_state(middleware, MQB_MIDDLEWARE_SEND, err) } {
+            Ok(state) => state,
+            Err(status) => return status,
+        };
+        let (factory, route, config) = (
+            Arc::clone(&state.factory),
+            state.route.clone(),
+            state.config.clone(),
+        );
+        let runtime = Arc::clone(&state.runtime);
+        let created = block_on(&runtime, async move {
+            let publisher = factory
+                .apply_publisher(inner, &route, &config)
+                .await
+                .map_err(|error| (create_status(&error), error))?;
+            connect_publisher(publisher).await
+        });
+        unsafe { finish_publisher(created, runtime, out, err) }
+    })
+}
+
+unsafe extern "C" fn no_wrap_consumer(
+    _: MqbMiddlewareHandle,
+    inner_table: *const MqbPluginVTable,
+    inner: MqbConsumerHandle,
+    _: *mut MqbConsumerHandle,
+    err: *mut MqbBuffer,
+) -> MqbStatus {
+    guarded(err, || {
+        drop(unsafe { super::endpoint::lent_consumer(inner_table, inner) });
+        unsafe { set_error(err, "this middleware maps batches and wraps no endpoint") };
+        MQB_ERR_UNSUPPORTED
+    })
+}
+
+unsafe extern "C" fn no_wrap_publisher(
+    _: MqbMiddlewareHandle,
+    inner_table: *const MqbPluginVTable,
+    inner: MqbPublisherHandle,
+    _: *mut MqbPublisherHandle,
+    err: *mut MqbBuffer,
+) -> MqbStatus {
+    guarded(err, || {
+        drop(unsafe { super::endpoint::lent_publisher(inner_table, inner) });
+        unsafe { set_error(err, "this middleware maps batches and wraps no endpoint") };
+        MQB_ERR_UNSUPPORTED
+    })
+}
+
+/// The schema half of [`MiddlewareFactory`] for a wrapping middleware `W`.
+struct WrapSchema<W>(std::marker::PhantomData<fn() -> W>);
+
+impl<W> Default for WrapSchema<W> {
+    fn default() -> Self {
+        Self(std::marker::PhantomData)
+    }
+}
+
+#[async_trait::async_trait]
+impl<W: CustomMiddlewareFactory + Default + 'static> MiddlewareFactory for WrapSchema<W> {
+    async fn create(&self, _: &str, _: &serde_json::Value) -> anyhow::Result<Box<dyn BatchFilter>> {
+        Err(anyhow::anyhow!(
+            "this middleware wraps the endpoint and maps no batches"
+        ))
+    }
+
+    fn config_schema(&self) -> Option<serde_json::Value> {
+        W::default().config_schema()
+    }
+}
+
+// ------------------------------------------------- endpoints lent by the host
+
+/// The table through which a plugin's wrapping middleware drives an endpoint the
+/// host lends it: the same entries a plugin exports, run on the host's runtime.
+pub(crate) fn host_table() -> *const MqbPluginVTable {
+    static HOST: ExportedVTable = build_vtable::<NoEndpoint, NoMiddleware>(
+        "host",
+        env!("CARGO_PKG_VERSION"),
+        CAPABILITIES_INPUT_AND_OUTPUT,
+    );
+    HOST.as_ptr()
+}
+
+/// Turns a host input endpoint into a handle of [`host_table`]. Call it on the host's
+/// runtime, which then drives the endpoint.
+pub(crate) async fn lend_consumer(
+    consumer: Box<dyn MessageConsumer>,
+) -> anyhow::Result<MqbConsumerHandle> {
+    let (consumer, commit_requires_order) = connect_consumer(consumer)
+        .await
+        .map_err(|(_, error)| error)?;
+    Ok(consumer_handle(
+        consumer,
+        commit_requires_order,
+        Runtime::current(),
+    ))
+}
+
+/// The publisher counterpart of [`lend_consumer`].
+pub(crate) async fn lend_publisher(
+    publisher: Box<dyn MessagePublisher>,
+) -> anyhow::Result<MqbPublisherHandle> {
+    let (publisher, requires_ordered_publish, deferred_commit_interval_ms) =
+        connect_publisher(publisher)
+            .await
+            .map_err(|(_, error)| error)?;
+    Ok(MqbPublisherHandle(into_handle(PublisherState {
+        publisher: Arc::from(publisher),
+        runtime: Runtime::current(),
+        requires_ordered_publish,
+        deferred_commit_interval_ms,
+        disconnected: std::sync::atomic::AtomicBool::new(false),
+    })))
+}
+
 /// A function table wrapped so it can live in a `static`.
 ///
 /// The table holds raw pointers (to its own name and to code), which makes it
@@ -1794,7 +2119,32 @@ where
         factory_delivery,
         publisher_disconnect,
         publisher_deferred_commit_interval_ms,
+        middleware_wrap_consumer: no_wrap_consumer,
+        middleware_wrap_publisher: no_wrap_publisher,
     })
+}
+
+/// Builds the function table for a wrapping middleware `W` with no endpoint: one that
+/// gets the whole inner consumer or publisher, as a middleware linked into the host does.
+///
+/// Called by [`export_endpoint_plugins!`] for a `wrap_middleware:` entry.
+#[doc(hidden)]
+pub const fn build_wrap_vtable<W>(name: &'static str, version: &'static str) -> ExportedVTable
+where
+    W: CustomMiddlewareFactory + Default + 'static,
+{
+    let mut table = build_vtable::<NoEndpoint, WrapSchema<W>>(
+        name,
+        version,
+        MQB_CAP_MIDDLEWARE | MQB_CAP_MIDDLEWARE_WRAP,
+    );
+    table.0.middleware_create = wrap_middleware_create::<W>;
+    table.0.middleware_apply = wrap_middleware_apply;
+    table.0.middleware_result_free = wrap_result_free;
+    table.0.middleware_free = wrap_middleware_free;
+    table.0.middleware_wrap_consumer = middleware_wrap_consumer;
+    table.0.middleware_wrap_publisher = middleware_wrap_publisher;
+    table
 }
 
 /// Exports an endpoint factory as a loadable mq-bridge plugin.
@@ -1833,6 +2183,7 @@ where
 /// (or [`export_endpoint_plugins!`](crate::export_endpoint_plugins)) once — and two plugin crates cannot be
 /// statically linked into the same binary. Gate the macro behind a feature if
 /// your crate is also linked directly alongside others.
+#[cfg(feature = "plugin-sdk")]
 #[macro_export]
 macro_rules! export_endpoint_plugin {
     ($($entry:tt)*) => {
@@ -1851,6 +2202,7 @@ macro_rules! export_endpoint_plugin {
 /// ```
 ///
 /// A host from 1.2 on registers all of them; an older host only the first.
+#[cfg(feature = "plugin-sdk")]
 #[macro_export]
 macro_rules! export_endpoint_plugins {
     ($({ $($entry:tt)* }),+ $(,)?) => {
@@ -1879,8 +2231,12 @@ macro_rules! export_endpoint_plugins {
 
 /// One table for [`export_endpoint_plugins!`], with the defaults filled in.
 #[doc(hidden)]
+#[cfg(feature = "plugin-sdk")]
 #[macro_export]
 macro_rules! __mq_bridge_plugin_vtable {
+    (name: $name:expr, wrap_middleware: $middleware:ty $(,)?) => {
+        $crate::plugin::sdk::build_wrap_vtable::<$middleware>($name, env!("CARGO_PKG_VERSION"))
+    };
     (name: $name:expr, factory: $factory:ty $(,)?) => {
         $crate::__mq_bridge_plugin_vtable!(
             name: $name,
@@ -1934,8 +2290,23 @@ macro_rules! __mq_bridge_plugin_vtable {
 ///         name: redact
 ///         config: { fields: ["ssn"] }
 /// ```
+///
+/// A middleware that needs the whole inner endpoint — its commits, outcomes, flushes —
+/// implements [`CustomMiddlewareFactory`] instead and is exported with `wrap_middleware`
+/// (needs a host from ABI 1.5 on):
+///
+/// ```ignore
+/// mq_bridge::export_middleware_plugin! {
+///     name: "audit",
+///     wrap_middleware: AuditFactory,
+/// }
+/// ```
+#[cfg(feature = "plugin-sdk")]
 #[macro_export]
 macro_rules! export_middleware_plugin {
+    (name: $name:expr, wrap_middleware: $middleware:ty $(,)?) => {
+        $crate::export_endpoint_plugins!({ name: $name, wrap_middleware: $middleware });
+    };
     (name: $name:expr, middleware: $middleware:ty $(,)?) => {
         $crate::export_endpoint_plugin!(
             name: $name,

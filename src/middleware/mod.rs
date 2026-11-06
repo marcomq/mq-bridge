@@ -144,7 +144,17 @@ pub async fn apply_middlewares_to_consumer(
     endpoint: &Endpoint,
     route_name: &str,
 ) -> Result<Box<dyn MessageConsumer>> {
-    for middleware in endpoint.middlewares.iter().rev() {
+    for step in steps(&endpoint.middlewares).into_iter().rev() {
+        let middleware = match step {
+            Step::One(middleware) => middleware,
+            Step::Plugin(run) => {
+                let (factory, config) = plugin_fallback(run, route_name, "consumer")?;
+                consumer = factory
+                    .apply_consumer(consumer, route_name, &config)
+                    .await?;
+                continue;
+            }
+        };
         consumer = match middleware {
             Middleware::Id(template) => Box::new(invalid(IdConsumer::new(consumer, template))?),
             #[cfg(feature = "dedup")]
@@ -241,7 +251,17 @@ pub async fn apply_middlewares_to_publisher(
     endpoint: &Endpoint,
     route_name: &str,
 ) -> Result<Arc<dyn MessagePublisher>> {
-    for middleware in &endpoint.middlewares {
+    for step in steps(&endpoint.middlewares) {
+        let middleware = match step {
+            Step::One(middleware) => middleware,
+            Step::Plugin(run) => {
+                let (factory, config) = plugin_fallback(run, route_name, "publisher")?;
+                publisher = factory
+                    .apply_publisher(publisher, route_name, &config)
+                    .await?;
+                continue;
+            }
+        };
         publisher = match middleware {
             // Consumer-only: identity is derived where a record enters the pipeline, so that
             // everything downstream — dedup, sink keying, handlers — sees the same value.
@@ -308,6 +328,58 @@ pub async fn apply_middlewares_to_publisher(
     }
     Ok(publisher.into())
 }
+
+/// One layer to apply: a middleware this build has, or a run of consecutive ones it
+/// lacks, applied together by the `builtin_middleware` plugin.
+enum Step<'a> {
+    One(&'a Middleware),
+    Plugin(&'a [Middleware]),
+}
+
+/// A built-in middleware whose feature this build lacks; metrics and otel only work in the host.
+fn served_by_plugin(middleware: &Middleware) -> bool {
+    match middleware {
+        Middleware::Deduplication(_) => !cfg!(feature = "dedup"),
+        Middleware::Encryption(_) => !cfg!(feature = "encryption"),
+        Middleware::Compression(_) => !cfg!(feature = "compression"),
+        Middleware::Aggregate(_) => !cfg!(feature = "aggregate"),
+        Middleware::Filter(_) => !cfg!(feature = "filter"),
+        _ => false,
+    }
+}
+
+/// The middlewares in config order, each run that needs the plugin grouped into one step.
+fn steps(middlewares: &[Middleware]) -> Vec<Step<'_>> {
+    let mut steps = Vec::with_capacity(middlewares.len());
+    for run in middlewares.chunk_by(|a, b| served_by_plugin(a) == served_by_plugin(b)) {
+        if served_by_plugin(&run[0]) {
+            steps.push(Step::Plugin(run));
+        } else {
+            steps.extend(run.iter().map(Step::One));
+        }
+    }
+    steps
+}
+
+/// The plugin that applies `run`, with the list as its config; the old error if none is installed.
+fn plugin_fallback(
+    run: &[Middleware],
+    route_name: &str,
+    side: &str,
+) -> Result<(Arc<dyn CustomMiddlewareFactory>, serde_json::Value)> {
+    #[cfg(feature = "plugin")]
+    if let Ok(factory) = custom_middleware_factory(BUILTIN_MIDDLEWARE_PLUGIN) {
+        return Ok((factory, serde_json::to_value(run)?));
+    }
+    Err(InvalidConfig(anyhow::anyhow!(
+        "[middleware:{route_name}] Unsupported {side} middleware: {}",
+        missing_feature(&run[0])
+    ))
+    .into())
+}
+
+/// The middleware name under which the `full` plugin applies a list of built-in middlewares.
+pub const BUILTIN_MIDDLEWARE_PLUGIN: &str = "builtin_middleware";
 
 /// Says which Cargo feature a middleware this build cannot apply needs.
 #[allow(dead_code)]

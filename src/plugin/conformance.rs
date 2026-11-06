@@ -27,7 +27,10 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Context};
 use futures::future::BoxFuture;
 
-use crate::traits::{CustomEndpointFactory, MessageConsumer, MessageDisposition, MessagePublisher};
+use crate::traits::{
+    CustomEndpointFactory, CustomMiddlewareFactory, MessageConsumer, MessageDisposition,
+    MessagePublisher,
+};
 use crate::{CanonicalMessage, SentBatch};
 
 /// What to exercise, and against which endpoint configuration.
@@ -100,6 +103,55 @@ pub async fn run(
         passed.push(name);
     }
     Ok(passed)
+}
+
+/// Runs the suite against `endpoint` with `middleware` applied on both sides. Run it with
+/// the middleware linked and loaded: one that passes everything on must keep the
+/// endpoint's semantics, also when it wraps the endpoint (ABI 1.5).
+pub async fn run_wrapped(
+    endpoint: &dyn CustomEndpointFactory,
+    middleware: &dyn CustomMiddlewareFactory,
+    middleware_config: serde_json::Value,
+    options: ConformanceOptions,
+) -> anyhow::Result<Vec<&'static str>> {
+    let wrapped = Wrapped {
+        endpoint,
+        middleware,
+        config: middleware_config,
+    };
+    run(&wrapped, options).await
+}
+
+#[derive(Debug)]
+struct Wrapped<'a> {
+    endpoint: &'a dyn CustomEndpointFactory,
+    middleware: &'a dyn CustomMiddlewareFactory,
+    config: serde_json::Value,
+}
+
+#[async_trait::async_trait]
+impl CustomEndpointFactory for Wrapped<'_> {
+    async fn create_consumer(
+        &self,
+        route_name: &str,
+        config: &serde_json::Value,
+    ) -> anyhow::Result<Box<dyn MessageConsumer>> {
+        let inner = self.endpoint.create_consumer(route_name, config).await?;
+        self.middleware
+            .apply_consumer(inner, route_name, &self.config)
+            .await
+    }
+
+    async fn create_publisher(
+        &self,
+        route_name: &str,
+        config: &serde_json::Value,
+    ) -> anyhow::Result<Box<dyn MessagePublisher>> {
+        let inner = self.endpoint.create_publisher(route_name, config).await?;
+        self.middleware
+            .apply_publisher(inner, route_name, &self.config)
+            .await
+    }
 }
 
 /// Everything published is received, payloads intact.
@@ -371,5 +423,90 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.to_string().contains("received 0 of 1"), "{error}");
+    }
+
+    #[cfg(feature = "plugin-sdk")]
+    mod wrapped {
+        use super::*;
+        use crate::endpoints::{create_consumer_from_route, create_publisher_from_route};
+        use crate::models::Endpoint;
+
+        /// A memory topic, built as a route would build it.
+        #[derive(Debug)]
+        struct Memory;
+
+        #[async_trait]
+        impl CustomEndpointFactory for Memory {
+            async fn create_consumer(
+                &self,
+                route_name: &str,
+                config: &serde_json::Value,
+            ) -> anyhow::Result<Box<dyn MessageConsumer>> {
+                create_consumer_from_route(
+                    route_name,
+                    &serde_json::from_value::<Endpoint>(config.clone())?,
+                )
+                .await
+            }
+
+            async fn create_publisher(
+                &self,
+                route_name: &str,
+                config: &serde_json::Value,
+            ) -> anyhow::Result<Box<dyn MessagePublisher>> {
+                let endpoint = serde_json::from_value::<Endpoint>(config.clone())?;
+                Ok(Box::new(
+                    create_publisher_from_route(route_name, &endpoint).await?,
+                ))
+            }
+        }
+
+        #[derive(Debug, Default)]
+        struct PassOn;
+
+        #[async_trait]
+        impl CustomMiddlewareFactory for PassOn {
+            async fn apply_consumer(
+                &self,
+                inner: Box<dyn MessageConsumer>,
+                _: &str,
+                _: &serde_json::Value,
+            ) -> anyhow::Result<Box<dyn MessageConsumer>> {
+                Ok(inner)
+            }
+
+            async fn apply_publisher(
+                &self,
+                inner: Box<dyn MessagePublisher>,
+                _: &str,
+                _: &serde_json::Value,
+            ) -> anyhow::Result<Box<dyn MessagePublisher>> {
+                Ok(inner)
+            }
+        }
+
+        static PASS_ON: crate::plugin::sdk::ExportedVTable =
+            crate::plugin::sdk::build_wrap_vtable::<PassOn>("conformance-pass-on", "0.0.0");
+
+        async fn run(
+            middleware: &dyn CustomMiddlewareFactory,
+            topic: &str,
+        ) -> anyhow::Result<Vec<&'static str>> {
+            let config = serde_json::json!({ "memory": { "topic": topic, "enable_nack": true } });
+            let options = ConformanceOptions::new(topic, config);
+            run_wrapped(&Memory, middleware, serde_json::json!({}), options).await
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn a_wrapping_middleware_conforms_the_same_linked_and_loaded() {
+            unsafe { crate::plugin::register_plugin_table(PASS_ON.as_ptr()) }.unwrap();
+            let loaded = crate::extensions::get_middleware_factory("conformance-pass-on").unwrap();
+            let direct = run(&PassOn, "conformance_wrap_direct").await.unwrap();
+            let loaded = run(loaded.as_ref(), "conformance_wrap_loaded")
+                .await
+                .unwrap();
+            assert!(direct.contains(&"nack_redelivers"), "{direct:?}");
+            assert_eq!(direct, loaded);
+        }
     }
 }
