@@ -20,6 +20,10 @@ All notable changes to `mq-bridge`. Newest first.
 
 ### Changed
 
+- **Rust plugin calls that are ready complete without a thread handoff.** The SDK polls
+  each async call once on the calling thread before handing it to the plugin's runtime.
+  A wrapping middleware at batch 1 is about 10x faster. Plugin code before its first
+  waiting `.await` now runs on the host's worker, like a built-in middleware.
 - **The release also packages the existing full plugin.** `plugins/full` (every built-in
   endpoint as one plugin library) now ships as a GitHub release archive per platform, in
   the Homebrew tap (`mq-bridge-full`), on conda (`mq-bridge-full`) and on crates.io

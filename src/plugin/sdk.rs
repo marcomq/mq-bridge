@@ -300,12 +300,21 @@ fn start<T: Send + 'static>(
         err,
     };
     let finish = SendCell(finish);
-    runtime.spawn(async move {
+    let mut task = Box::pin(async move {
         let result = run_contained(future).await;
         let finish = finish.into_inner();
         let status = guarded(done.err, || finish(result));
         done.finish(status);
     });
+    // Poll once on the caller's thread: a ready call completes without a thread handoff.
+    let _entered = runtime.enter();
+    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+    match std::panic::catch_unwind(AssertUnwindSafe(|| task.as_mut().poll(&mut cx))) {
+        Ok(std::task::Poll::Pending) => drop(runtime.spawn(task)),
+        Ok(std::task::Poll::Ready(())) => {}
+        // Dropping the task reports the call as lost through `Completion`.
+        Err(_) => drop(task),
+    }
     MQB_OK
 }
 

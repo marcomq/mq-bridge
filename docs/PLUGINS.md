@@ -790,6 +790,14 @@ This measures only the boundary cost. It matters most for small batches and
 many concurrent routes; a real broker's latency hides most of it at large
 batches. Rebuilding a plugin against 1.2 is enough to get the gain.
 
+Since 1.5 the SDK first polls each call once on the calling thread, inside the
+plugin's runtime context. A call that is ready right away completes there without
+a thread handoff; only one that has to wait moves to the plugin's runtime. Your
+code up to its first `.await` that waits therefore runs on a host worker, as a
+built-in middleware does, so don't block there. A wrapping middleware at batch 1
+(lean host plus the full plugin, memory to memory) went from about 20-30k to
+220-355k messages per second with this.
+
 Your `tracing` events and `metrics` samples reach the host as well. On load the
 SDK installs a subscriber and a recorder inside the plugin that forward to the
 host's own. The host re-emits every plugin event under the target
