@@ -70,6 +70,28 @@ something. On an input a temporary error nacks the whole batch, so the source re
 and reconnects the route. A permanent error (non-JSON payload, HTTP 4xx, a query error) is
 logged and drops only its message.
 
+## Many batches at once on an input
+
+Input middlewares handle one batch at a time, so a slow lookup on an input holds up the next
+read. A `parallel` marker below the lookup lets up to `max_in_flight` batches be enriched at
+once, still handed on in read order. Entries below the marker sit nearer the source and run
+first, one batch at a time. Anything that keeps state across batches, such as
+`deduplication`, goes there:
+
+```yaml
+input:
+  kafka: { topic: "orders", url: "localhost:9092" }
+  middlewares:
+    - lookup:
+        from: { http: { url: "http://customers.internal" } }
+        metadata: { http_path: "/customers/${payload:customer_id}" }
+        into: customer
+    - parallel: { max_in_flight: 8 }
+    - deduplication: { store: "memory://orders", ttl_seconds: 3600, key: "${payload:order_id}" }
+```
+
+On an output, raise the route's `concurrency` instead; `parallel` is input-only.
+
 ## Postgres gotchas
 
 - Cast placeholders to the column type: `WHERE id = ${payload:author_id}::int`. A field

@@ -6,6 +6,12 @@ All notable changes to `mq-bridge`. Newest first.
 
 ### Added
 
+- **`parallel` input middleware.** Input middlewares used to run one batch at a time in
+  the route's reader. The entries listed above `- parallel: { max_in_flight: N }` now run
+  on up to N batches at once, each lane on its own task, and batches still leave and
+  commit in read order. Only stateless middlewares (`transform`, `lookup`, `id`,
+  `compression`, `encryption`) may sit above it. On an input, `transform` (schema) goes
+  from 0.9M to 3.6M msg/s and a static `lookup` from 0.4M to 1.2M msg/s on 8 cores.
 - **Plugin middleware can wrap the endpoint (plugin ABI 1.5).** A middleware exported with
   `wrap_middleware:` gets the inner consumer or publisher itself, lent by the host, so a
   plugin can now do anything a built-in middleware does: hold messages back, keep state
@@ -20,6 +26,10 @@ All notable changes to `mq-bridge`. Newest first.
 
 ### Changed
 
+- **`lookup` writes its answers into the payload without parsing the whole document.**
+  Untouched fields are copied as they are, which makes a static lookup on an input about
+  1.5x faster. Fields keep their order. `aggregate` now uses the same writer, so an `into`
+  field that already exists in the payload keeps its place instead of moving to the end.
 - **Rust plugin calls that are ready complete without a thread handoff.** The SDK polls
   each async call once on the calling thread before handing it to the plugin's runtime.
   A wrapping middleware at batch 1 is about 10x faster. Plugin code before its first

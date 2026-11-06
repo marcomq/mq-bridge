@@ -504,6 +504,12 @@ name = "pack_bench"
 harness = false
 required-features = ["test-utils", "compression"]
 
+# Route throughput with a middleware chain on the input or the output side.
+[[bench]]
+name = "chain_matrix_bench"
+harness = false
+required-features = ["test-utils", "filter", "aggregate"]
+
 # Isolates the per-request HTTP route lookup (Mutex<HashMap> vs ArcSwap).
 # No external services or features required.
 [[bench]]

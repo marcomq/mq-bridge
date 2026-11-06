@@ -44,7 +44,6 @@ pub(crate) mod compression;
 mod cookie_jar;
 #[cfg(feature = "dedup")]
 pub(crate) mod deduplication;
-#[cfg(any(feature = "filter", feature = "dedup", feature = "plugin"))]
 pub(crate) mod deferred_commit;
 mod delay;
 mod dlq;
@@ -60,6 +59,7 @@ mod metrics;
 #[cfg(feature = "otel")]
 mod otel;
 mod pack;
+mod parallel;
 mod random_panic;
 mod raw_json;
 mod retry;
@@ -139,12 +139,43 @@ fn invalid<T>(result: Result<T>) -> Result<T> {
 /// Middlewares are applied in reverse order of the configuration list.
 /// This means the first middleware in the config is the outermost layer: a received message
 /// passes the last entry first and the first entry last.
+///
+/// A `parallel` entry splits the list: the entries below it wrap the consumer as usual, and
+/// each of its lanes gets its own copy of the entries above it.
 pub async fn apply_middlewares_to_consumer(
-    mut consumer: Box<dyn MessageConsumer>,
+    consumer: Box<dyn MessageConsumer>,
     endpoint: &Endpoint,
     route_name: &str,
 ) -> Result<Box<dyn MessageConsumer>> {
-    for step in steps(&endpoint.middlewares).into_iter().rev() {
+    let middlewares = &endpoint.middlewares;
+    let Some(at) = middlewares
+        .iter()
+        .position(|m| matches!(m, Middleware::Parallel(_)))
+    else {
+        return wrap_consumer(consumer, middlewares, route_name).await;
+    };
+    let Middleware::Parallel(config) = &middlewares[at] else {
+        unreachable!("position matched a parallel entry")
+    };
+    let above = &middlewares[..at];
+    let count = parallel::lane_count(config, above, route_name)?;
+    let source = wrap_consumer(consumer, &middlewares[at + 1..], route_name).await?;
+    let ordered = source.commit_requires_order();
+    let mut lanes = Vec::with_capacity(count);
+    for _ in 0..count {
+        let (feed, slot) = parallel::Feed::new(ordered);
+        let chain = wrap_consumer(Box::new(feed), above, route_name).await?;
+        lanes.push(parallel::Lane::new(chain, slot));
+    }
+    Ok(Box::new(parallel::ParallelConsumer::new(source, lanes)))
+}
+
+async fn wrap_consumer(
+    mut consumer: Box<dyn MessageConsumer>,
+    middlewares: &[Middleware],
+    route_name: &str,
+) -> Result<Box<dyn MessageConsumer>> {
+    for step in steps(middlewares).into_iter().rev() {
         let middleware = match step {
             Step::One(middleware) => middleware,
             Step::Plugin(run) => {
@@ -208,6 +239,11 @@ pub async fn apply_middlewares_to_consumer(
             }
             #[cfg(feature = "filter")]
             Middleware::Filter(cfg) => Box::new(invalid(FilterConsumer::new(consumer, &cfg.expression))?.with_on_error(cfg.on_error)),
+            Middleware::Parallel(_) => {
+                return Err(InvalidConfig(anyhow::anyhow!(
+                    "[middleware:{route_name}] an endpoint takes one `parallel` marker"
+                )).into())
+            }
             Middleware::Custom { name, config } => {
                 let factory = custom_middleware_factory(name)?;
                 factory.apply_consumer(consumer, route_name, config).await?
@@ -310,6 +346,11 @@ pub async fn apply_middlewares_to_publisher(
             }
             #[cfg(feature = "filter")]
             Middleware::Filter(cfg) => Box::new(invalid(FilterPublisher::new(publisher, &cfg.expression))?.with_on_error(cfg.on_error)),
+            Middleware::Parallel(_) => {
+                return Err(InvalidConfig(anyhow::anyhow!(
+                    "[middleware:{route_name}] `parallel` is input-only. The output side already runs `concurrency` batches at once."
+                )).into())
+            }
             Middleware::Custom { name, config } => {
                 let factory = custom_middleware_factory(name)?;
                 factory
@@ -502,6 +543,7 @@ mod placement_tests {
     async fn input_only_middleware_on_an_output_is_an_invalid_config() {
         for (middleware, hint) in [
             (serde_json::json!({"unpack": {}}), "input-only"),
+            (serde_json::json!({"parallel": {}}), "input-only"),
             (
                 serde_json::json!({"id": "${payload:order_id}"}),
                 "consumer-only",

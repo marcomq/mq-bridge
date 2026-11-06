@@ -135,6 +135,7 @@ a handler error propagates to the route and is reported there.
 | [`otel`](#otel) | ✅ | ✅ | `otel` | OpenTelemetry span per message, continuing `traceparent` |
 | [`lookup`](#lookup) | ✅ | ✅ | – | Enrich each message with other endpoints' responses |
 | [`aggregate`](#aggregate) | ✅ | ✅ | `aggregate` | Keep a running state per key and write it into each message |
+| [`parallel`](#parallel) | ✅ | – | – | Run the entries above it on several batches at once |
 | [`random_panic`](#random_panic) | ✅ | ✅ | – | Fault injection for testing |
 | [`custom`](#custom-middleware) | ✅ | ✅ | – | Your own middleware via a registered factory |
 
@@ -158,7 +159,8 @@ a handler error propagates to the route and is reported there.
 - `deduplication`, `weak_join` and `id` on an output. Deduplication
   cannot work on the publish side, and silently starting an un-deduplicated route is worse
   than refusing to start. `pack` on an input and `unpack` on an output are hard errors too —
-  the pair is directional.
+  the pair is directional. So is `parallel` on an output, which already runs `concurrency`
+  batches at once.
 
 A middleware whose feature is not compiled in (`deduplication` without `dedup`, `metrics`
 without `metrics`, `otel` without `otel`, `aggregate` without `aggregate`) is likewise a startup error, not a silent no-op.
@@ -1724,6 +1726,41 @@ Throughput on one Apple M-series core, three moving averages per key (indicative
 | `fields`, in memory | 1.8M msg/s | 700k msg/s |
 | `fields`, `single_writer`, local PostgreSQL, batch 8192 | 370k msg/s | 240k msg/s |
 | `fields`, `shared`, local PostgreSQL, batch 8192 | 49k msg/s | 17k msg/s |
+
+### `parallel`
+
+Input middlewares run one batch at a time in the route's reader, so `concurrency` does not
+speed them up. `parallel` changes that for the entries listed **above** it: each of up to
+`max_in_flight` lanes gets its own copy of them and works on a batch of its own, on its own
+task. The entries **below** it handle each batch first, one at a time, as before. Batches
+leave in the order they were read, so the route sees and commits them exactly as it would
+without the marker. Input only.
+
+| Field | Type | Default |
+|---|---|---|
+| `max_in_flight` | integer ≥ 1 | number of CPU cores |
+
+```yaml middleware
+- lookup:
+    from: { static: { body: '{"tier":"gold"}', raw: true } }
+    into: customer
+- transform: { schema_file: "order.json" }
+- parallel: { max_in_flight: 8 }
+- deduplication: { store: "memory://orders", ttl_seconds: 3600, key: "${payload:order_id}" }
+```
+
+Here `deduplication` drops repeats one batch at a time, then up to eight batches are
+validated and enriched at once.
+
+- Only `transform`, `lookup`, `id`, `compression` and `encryption` may sit above it. Anything
+  that keeps state across batches (`filter`, `deduplication`, `aggregate`, `buffer`, `unpack`,
+  `custom`, ...) is a startup error there; list it below instead. So are the middlewares a
+  lean host takes from the full plugin.
+- Each lane builds its own copy, so a `lookup` above it opens its `from` endpoint once per lane.
+- A batch a lane rejects whole is acked only after the batches read before it are committed.
+- On shutdown or a reconnect, finished batches not yet handed to the route are nacked. Lanes
+  still at work are stopped, so their batches stay uncommitted and the source redelivers them.
+- One `parallel` per endpoint.
 
 ### `random_panic`
 

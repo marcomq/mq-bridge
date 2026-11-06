@@ -530,6 +530,9 @@ pub enum Middleware {
     /// Reads payload fields by name and metadata as `meta.<key>`. Input and output.
     /// As a map, `on_error: drop` drops a message the expression cannot evaluate.
     Filter(FilterMiddleware),
+    /// Input-only. The entries listed above it run on several batches at once; batches
+    /// still leave in read order.
+    Parallel(ParallelMiddleware),
     Custom {
         name: String,
         config: serde_json::Value,
@@ -802,6 +805,20 @@ pub struct DelayMiddleware {
 pub struct TimeoutMiddleware {
     /// Longest a single send may take, in milliseconds.
     pub timeout_ms: u64,
+}
+
+/// Parallel middleware configuration.
+///
+/// Input-only marker. The middlewares listed above it run on up to `max_in_flight` batches
+/// at once, each lane with its own copy of them; the ones below it read one batch at a time.
+/// Results and commits stay in read order. Only stateless middlewares may sit above it.
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct ParallelMiddleware {
+    /// Batches processed at once. Defaults to the number of CPU cores.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_in_flight: Option<usize>,
 }
 
 /// Throughput limiter middleware configuration.
