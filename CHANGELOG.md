@@ -6,6 +6,15 @@ All notable changes to `mq-bridge`. Newest first.
 
 ### Added
 
+- **`Caller`: call a route like a function.** `Caller::from_file("routes.yaml", "enrich")`
+  (or `Caller::deploy(name, route)`) deploys a route with a `memory` input, and
+  `caller.call(message).await` returns its answer. Everything a route does applies:
+  middlewares incl. `lookup` and `parallel`, plugin endpoints and middlewares, the handler,
+  ordered sinks. Calls made at the same time are read as one batch, so a batched `lookup`
+  queries once for all of them. A failed message comes back as an error at once; the route
+  keeps running. `call_many(messages)` sends several as one batch and returns one answer
+  or error per message, in order. The bindings have it too: `Caller` in Python and Node, `mqb_caller_*` in
+  the C API (additive, `MQB_API_VERSION` unchanged) and `route.caller()` in Nim.
 - **`parallel` middleware, on an input or an output.** It lets the middlewares above it
   work on several batches at once; routes without it behave as before.
   - *On an input*, the entries above `- parallel: { max_in_flight: N }` run on up to N
@@ -53,6 +62,14 @@ All notable changes to `mq-bridge`. Newest first.
 
 ### Fixed
 
+- **A memory request/reply caller gets its answer at once.** A requester waiting on a
+  memory topic used to sit out its whole `request_timeout_ms` when the route acked the
+  message without a reply, or nacked it with `enable_nack` off. It now gets `Sent::Ack` or
+  an error right away. A memory input with `request_reply: true` answers each failed
+  message with its error text, the way an HTTP input answers 502, and keeps running
+  instead of restarting the route. A failed request whose requester stopped waiting is
+  dropped; another failed message with `enable_nack` is redelivered after a 5 s pause,
+  not at once in a loop.
 - **`columns: auto` on PostgreSQL reuses its prepared statement.** Each batch used to be
   parsed and planned again, which made a 1M-row CSV load slow. The bind
   type of every column is now part of the SQL, so the statement is cached like on the other

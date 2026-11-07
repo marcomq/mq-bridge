@@ -77,6 +77,8 @@
 //! - [`Route`] connects an input endpoint to an output endpoint and optionally
 //!   applies a handler.
 //! - [`Publisher`] creates a reusable publisher from endpoint configuration.
+//! - [`Caller`] deploys a route and calls it like an async function: `call(msg).await`
+//!   returns the route's answer.
 //! - [`traits::MessageConsumer`] and [`traits::MessagePublisher`] are the extension
 //!   points for custom transports.
 //! - [`middleware`] contains reusable reliability and processing layers.
@@ -177,6 +179,7 @@
 #![warn(rustdoc::missing_crate_level_docs)]
 
 pub mod blocking_handler;
+pub mod caller;
 pub mod canonical_message;
 // Not feature-gated: the trait, the file backend and the URL parser need no
 // optional dependency, and each external backend already reports its own
@@ -205,6 +208,7 @@ pub mod traits;
 pub mod type_handler;
 
 pub use anyhow;
+pub use caller::Caller;
 pub use canonical_message::{CanonicalMessage, MessageContext};
 pub use config_file::deploy_file;
 pub use errors::HandlerError;

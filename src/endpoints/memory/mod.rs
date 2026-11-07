@@ -15,6 +15,7 @@ pub mod ipc_unix;
 pub mod ipc_windows;
 
 // Re-export the main endpoint types for backward compatibility
+pub(crate) use endpoint::failure_reply;
 pub use endpoint::{
     get_or_create_channel, get_or_create_response_channel, MemoryChannel, MemoryConsumer,
     MemoryPublisher, MemoryQueueConsumer, MemoryResponseChannel, MemorySubscriber,

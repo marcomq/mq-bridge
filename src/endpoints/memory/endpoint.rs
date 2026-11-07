@@ -100,13 +100,25 @@ impl MemoryChannel {
 }
 
 type WaiterMap = HashMap<String, oneshot::Sender<CanonicalMessage>>;
+/// Sharded so concurrent requesters and the replying commit rarely share a lock.
+type Waiters = Arc<[Mutex<WaiterMap>]>;
+const WAITER_SHARDS: usize = 16;
+
+fn waiter_shard<'a>(waiters: &'a Waiters, correlation_id: &str) -> &'a Mutex<WaiterMap> {
+    let hash = correlation_id
+        .bytes()
+        .rev()
+        .take(8)
+        .fold(0usize, |h, b| h.wrapping_mul(31).wrapping_add(b as usize));
+    &waiters[hash % waiters.len()]
+}
 
 /// A shareable, thread-safe, in-memory channel for responses.
 #[derive(Debug, Clone)]
 pub struct MemoryResponseChannel {
     pub sender: Sender<CanonicalMessage>,
     pub receiver: Receiver<CanonicalMessage>,
-    waiters: Arc<Mutex<WaiterMap>>,
+    waiters: Waiters,
 }
 
 impl MemoryResponseChannel {
@@ -115,7 +127,9 @@ impl MemoryResponseChannel {
         Self {
             sender,
             receiver,
-            waiters: Arc::new(Mutex::new(HashMap::new())),
+            waiters: (0..WAITER_SHARDS)
+                .map(|_| Mutex::new(HashMap::new()))
+                .collect(),
         }
     }
 
@@ -143,38 +157,55 @@ impl MemoryResponseChannel {
         correlation_id: &str,
         sender: oneshot::Sender<CanonicalMessage>,
     ) -> anyhow::Result<()> {
-        let mut waiters = self.waiters.lock().unwrap();
-        if waiters.contains_key(correlation_id) {
-            return Err(anyhow!(
+        self.insert_waiter(correlation_id, sender)
+    }
+
+    fn insert_waiter(
+        &self,
+        correlation_id: &str,
+        sender: oneshot::Sender<CanonicalMessage>,
+    ) -> anyhow::Result<()> {
+        let mut waiters = waiter_shard(&self.waiters, correlation_id).lock().unwrap();
+        match waiters.entry(correlation_id.to_string()) {
+            std::collections::hash_map::Entry::Occupied(_) => Err(anyhow!(
                 "Correlation ID {} already registered",
                 correlation_id
-            ));
+            )),
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(sender);
+                Ok(())
+            }
         }
-        waiters.insert(correlation_id.to_string(), sender);
-        Ok(())
     }
 
     pub async fn remove_waiter(
         &self,
         correlation_id: &str,
     ) -> Option<oneshot::Sender<CanonicalMessage>> {
-        self.waiters.lock().unwrap().remove(correlation_id)
+        self.take_waiter(correlation_id)
+    }
+
+    fn take_waiter(&self, correlation_id: &str) -> Option<oneshot::Sender<CanonicalMessage>> {
+        waiter_shard(&self.waiters, correlation_id)
+            .lock()
+            .unwrap()
+            .remove(correlation_id)
     }
 }
 
 /// Removes a registered waiter unless disarmed, so a `send()` future dropped by a
 /// shutdown or an outer timeout cannot leave the correlation id wedged --
 /// `register_waiter` rejects duplicates.
-struct WaiterGuard {
-    waiters: Arc<Mutex<WaiterMap>>,
-    correlation_id: String,
+struct WaiterGuard<'a> {
+    channel: &'a MemoryResponseChannel,
+    correlation_id: &'a str,
     armed: bool,
 }
 
-impl WaiterGuard {
-    fn new(channel: &MemoryResponseChannel, correlation_id: String) -> Self {
+impl<'a> WaiterGuard<'a> {
+    fn new(channel: &'a MemoryResponseChannel, correlation_id: &'a str) -> Self {
         Self {
-            waiters: channel.waiters.clone(),
+            channel,
             correlation_id,
             armed: true,
         }
@@ -186,11 +217,12 @@ impl WaiterGuard {
     }
 }
 
-impl Drop for WaiterGuard {
+impl Drop for WaiterGuard<'_> {
     fn drop(&mut self) {
         if self.armed {
-            if let Ok(mut waiters) = self.waiters.lock() {
-                waiters.remove(&self.correlation_id);
+            if let Ok(mut waiters) = waiter_shard(&self.channel.waiters, self.correlation_id).lock()
+            {
+                waiters.remove(self.correlation_id);
             }
         }
     }
@@ -296,6 +328,7 @@ pub struct MemoryPublisher {
     backend: PublisherBackend,
     request_reply: bool,
     request_timeout: std::time::Duration,
+    responses: std::sync::OnceLock<MemoryResponseChannel>,
 }
 
 #[derive(Clone)]
@@ -345,6 +378,7 @@ impl MemoryPublisher {
             request_timeout: std::time::Duration::from_millis(
                 config.request_timeout_ms.unwrap_or(30000),
             ),
+            responses: Default::default(),
         })
     }
 
@@ -372,6 +406,7 @@ impl MemoryPublisher {
                     request_timeout: std::time::Duration::from_millis(
                         config.request_timeout_ms.unwrap_or(30000),
                     ),
+                    responses: Default::default(),
                 })
             }
         }
@@ -390,7 +425,86 @@ impl MemoryPublisher {
         .expect("Failed to create local memory publisher")
     }
 
-    /// Note: This helper is primarily for tests expecting a Queue.    
+    /// Whether `send` waits for a reply on an in-process queue.
+    pub(crate) fn answers_requests(&self) -> bool {
+        self.request_reply && matches!(self.backend, PublisherBackend::Queue(_))
+    }
+
+    /// Sends `messages` as one batch and waits for each reply; results keep their order.
+    /// Needs [`Self::answers_requests`].
+    pub(crate) async fn request_many(
+        &self,
+        mut messages: Vec<CanonicalMessage>,
+    ) -> Vec<Result<Sent, PublisherError>> {
+        let PublisherBackend::Queue(sender) = &self.backend else {
+            return messages
+                .into_iter()
+                .map(|_| Err(anyhow!("this memory publisher does not answer requests").into()))
+                .collect();
+        };
+        let responses = self
+            .responses
+            .get_or_init(|| get_or_create_response_channel(&self.topic));
+        let mut cids = Vec::with_capacity(messages.len());
+        let mut requests = Vec::with_capacity(messages.len());
+        for message in &mut messages {
+            let cid = message
+                .metadata
+                .entry("correlation_id".to_string())
+                .or_insert_with(fast_uuid_v7::gen_id_string)
+                .clone();
+            let (tx, rx) = oneshot::channel();
+            requests.push((
+                message.message_id,
+                responses.insert_waiter(&cid, tx).map(|()| rx),
+            ));
+            cids.push(cid);
+        }
+        let waiters: Vec<_> = cids
+            .iter()
+            .zip(&requests)
+            .map(|(cid, (_, registered))| {
+                registered.is_ok().then(|| WaiterGuard::new(responses, cid))
+            })
+            .collect();
+        let batch: Vec<_> = messages
+            .into_iter()
+            .zip(&requests)
+            .filter(|(_, (_, registered))| registered.is_ok())
+            .map(|(message, _)| message)
+            .collect();
+        let sent = if batch.is_empty() {
+            Ok(())
+        } else {
+            sender.send(batch).await.map_err(|e| e.to_string())
+        };
+
+        let deadline = tokio::time::Instant::now() + self.request_timeout;
+        let mut results = Vec::with_capacity(requests.len());
+        for (((request_id, registered), waiter), cid) in
+            requests.into_iter().zip(waiters).zip(&cids)
+        {
+            let rx = match (registered, &sent) {
+                (Err(e), _) => {
+                    results.push(Err(PublisherError::NonRetryable(e)));
+                    continue;
+                }
+                (Ok(_), Err(e)) => {
+                    results.push(Err(anyhow!("Failed to send to memory channel: {e}").into()));
+                    continue;
+                }
+                (Ok(rx), Ok(())) => rx,
+            };
+            let received = tokio::time::timeout_at(deadline, rx).await;
+            if let (Ok(Ok(_)), Some(mut waiter)) = (&received, waiter) {
+                waiter.disarm();
+            }
+            results.push(reply_result(cid, request_id, received));
+        }
+        results
+    }
+
+    /// Note: This helper is primarily for tests expecting a Queue.
     /// If used on a broadcast publisher, it will create a separate Queue channel.
     pub fn channel(&self) -> MemoryChannel {
         get_or_create_channel(&MemoryConfig {
@@ -417,17 +531,19 @@ impl MessagePublisher for MemoryPublisher {
                         .entry("correlation_id".to_string())
                         .or_insert_with(fast_uuid_v7::gen_id_string)
                         .clone();
+                    let cid = cid.as_str();
 
                     let (tx, rx) = oneshot::channel();
 
                     // Register waiter before sending
-                    let response_channel = get_or_create_response_channel(&self.topic);
+                    let response_channel = self
+                        .responses
+                        .get_or_init(|| get_or_create_response_channel(&self.topic));
                     response_channel
-                        .register_waiter(&cid, tx)
-                        .await
+                        .insert_waiter(cid, tx)
                         .map_err(PublisherError::NonRetryable)?;
                     // Covers every exit below, including this future being dropped.
-                    let mut waiter = WaiterGuard::new(&response_channel, cid.clone());
+                    let mut waiter = WaiterGuard::new(response_channel, cid);
 
                     // Send the message
                     // We use the internal sender directly to avoid recursion or cloning issues
@@ -435,30 +551,11 @@ impl MessagePublisher for MemoryPublisher {
                         return Err(anyhow!("Failed to send to memory channel: {}", e).into());
                     }
 
-                    // Wait for the response
-                    let response = match tokio::time::timeout(self.request_timeout, rx).await {
-                        Ok(Ok(resp)) => resp,
-                        Ok(Err(e)) => {
-                            return Err(anyhow!(
-                                "Failed to receive response for correlation_id {}: {}",
-                                cid,
-                                e
-                            )
-                            .into());
-                        }
-                        Err(_) => {
-                            return Err(PublisherError::Retryable(anyhow!(
-                                "Request timed out waiting for response for correlation_id {}",
-                                cid
-                            )));
-                        }
-                    };
-                    waiter.disarm();
-
-                    // A batch matches each reply to its request by id.
-                    let mut response = response;
-                    response.message_id = request_id;
-                    Ok(Sent::Response(response))
+                    let received = tokio::time::timeout(self.request_timeout, rx).await;
+                    if matches!(received, Ok(Ok(_))) {
+                        waiter.disarm();
+                    }
+                    reply_result(cid, request_id, received)
                 } else {
                     sender
                         .send(vec![message])
@@ -789,9 +886,46 @@ fn requeue_messages(topic: &str, messages: Vec<CanonicalMessage>) {
     }
 }
 
+/// Pause before a failed message is redelivered, like the default route reconnect interval.
+const FAILED_REQUEUE_PAUSE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Requeues after `pause`, so a message that keeps failing is not retried in a tight loop.
+fn requeue_messages_after(
+    topic: &str,
+    messages: Vec<CanonicalMessage>,
+    pause: std::time::Duration,
+) {
+    if messages.is_empty() {
+        return;
+    }
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        return requeue_messages(topic, messages);
+    };
+    let topic = topic.to_string();
+    handle.spawn(async move {
+        tokio::time::sleep(pause).await;
+        requeue_messages(&topic, messages);
+    });
+}
+
 struct RequeueGuard {
     topic: String,
     messages: Vec<CanonicalMessage>,
+}
+
+/// Requeues message `index` when `enable_nack` is on (the guard holds a copy), else drops it.
+fn nack_or_drop(
+    topic: &str,
+    guard: Option<&RequeueGuard>,
+    index: usize,
+    to_requeue: &mut Vec<CanonicalMessage>,
+) {
+    if let Some(msg) = guard.and_then(|g| g.messages.get(index)) {
+        warn!("Requeueing nacked message {}", index);
+        to_requeue.push(msg.clone());
+    } else {
+        warn!(topic = %topic, "Nack for message {} dropped: `enable_nack` is off", index);
+    }
 }
 
 impl Drop for RequeueGuard {
@@ -878,22 +1012,44 @@ impl MessageConsumer for MemoryQueueConsumer {
                 // Looked up on the first reply: a plain ack never touches the registry.
                 let mut response_channel = None;
                 let mut to_requeue = Vec::new();
+                let mut to_retry = Vec::new();
 
                 for (i, disposition) in dispositions.into_iter().enumerate() {
                     match disposition {
                         MessageDisposition::Reply(resp) => {
                             let channel = response_channel
                                 .get_or_insert_with(|| get_or_create_response_channel(&topic));
-                            handle_memory_reply(resp, i, &correlation_ids, channel).await;
+                            let unanswered =
+                                handle_memory_reply(resp, i, &correlation_ids, channel).await;
+                            if unanswered.is_some() {
+                                if let Some(Some(cid)) = correlation_ids.get(i) {
+                                    warn!(topic = %topic, correlation_id = %cid, "Dropping failed request: its requester no longer waits");
+                                } else {
+                                    nack_or_drop(&topic, guard.as_ref(), i, &mut to_retry);
+                                }
+                            }
                         }
                         MessageDisposition::Nack => {
                             // The guard stays armed across the awaits above.
-                            if let Some(msg) = guard.as_ref().and_then(|g| g.messages.get(i)) {
-                                warn!("Requeueing nacked message {}", i);
-                                to_requeue.push(msg.clone());
-                            } else {
-                                warn!(topic = %topic, "Nack for message {} dropped: `enable_nack` is off", i);
+                            if guard.is_some() {
+                                nack_or_drop(&topic, guard.as_ref(), i, &mut to_requeue);
+                                continue;
                             }
+                            let channel = response_channel
+                                .get_or_insert_with(|| get_or_create_response_channel(&topic));
+                            let rejected = || {
+                                let text = "rejected by the route; see its log".to_string();
+                                outcome_message(OUTCOME_RETRYABLE, text, None)
+                            };
+                            if !answer_waiter(i, &correlation_ids, channel, rejected).await {
+                                nack_or_drop(&topic, None, i, &mut to_requeue);
+                            }
+                        }
+                        MessageDisposition::Ack if !correlation_ids.is_empty() => {
+                            let channel = response_channel
+                                .get_or_insert_with(|| get_or_create_response_channel(&topic));
+                            let acked = || outcome_message(OUTCOME_ACK, String::new(), None);
+                            answer_waiter(i, &correlation_ids, channel, acked).await;
                         }
                         MessageDisposition::Ack => {}
                     }
@@ -903,6 +1059,7 @@ impl MessageConsumer for MemoryQueueConsumer {
                 // while holding a dispatch permit, so a blocking send into a full
                 // channel would deadlock the route. Messages are not dropped.
                 requeue_messages(&topic, to_requeue);
+                requeue_messages_after(&topic, to_retry, FAILED_REQUEUE_PAUSE);
 
                 // Disarm the guard after all awaits are finished.
                 if let Some(g) = &mut guard {
@@ -1059,12 +1216,94 @@ impl MessageConsumer for TransportQueueConsumer {
     }
 }
 
+/// Marks a reply that only carries how a request ended: `ack`, or a failure whose
+/// error text is the payload. The requester turns it back into `Sent::Ack` or an error.
+pub(crate) const REQUEST_OUTCOME: &str = "mqb.request.outcome";
+const OUTCOME_ACK: &str = "ack";
+const OUTCOME_RETRYABLE: &str = "retryable";
+const OUTCOME_FAILED: &str = "failed";
+
+/// The reply a route gives a waiting requester whose message failed.
+pub(crate) fn failure_reply(message_id: u128, error: &PublisherError) -> CanonicalMessage {
+    let (outcome, inner) = match error {
+        PublisherError::Retryable(e) | PublisherError::Connection(e) => (OUTCOME_RETRYABLE, e),
+        PublisherError::NonRetryable(e) => (OUTCOME_FAILED, e),
+    };
+    outcome_message(outcome, format!("{inner:#}"), Some(message_id))
+}
+
+fn outcome_message(outcome: &str, text: String, message_id: Option<u128>) -> CanonicalMessage {
+    let mut message = CanonicalMessage::new(text.into_bytes(), message_id);
+    message
+        .metadata
+        .insert(REQUEST_OUTCOME.to_string(), outcome.to_string());
+    message
+}
+
+/// Turns what a requester received (or its timeout) into the result of its send.
+fn reply_result(
+    cid: &str,
+    request_id: u128,
+    received: Result<
+        Result<CanonicalMessage, oneshot::error::RecvError>,
+        tokio::time::error::Elapsed,
+    >,
+) -> Result<Sent, PublisherError> {
+    let mut response = match received {
+        Ok(Ok(response)) => response,
+        Ok(Err(e)) => {
+            return Err(anyhow!("Failed to receive response for correlation_id {cid}: {e}").into())
+        }
+        Err(_) => {
+            return Err(PublisherError::Retryable(anyhow!(
+                "Request timed out waiting for response for correlation_id {cid}"
+            )))
+        }
+    };
+    if let Some(outcome) = response.metadata.get(REQUEST_OUTCOME) {
+        return request_outcome(outcome, &response);
+    }
+    // A batch matches each reply to its request by id.
+    response.message_id = request_id;
+    Ok(Sent::Response(response))
+}
+
+fn request_outcome(outcome: &str, response: &CanonicalMessage) -> Result<Sent, PublisherError> {
+    let text = || anyhow!("{}", String::from_utf8_lossy(&response.payload));
+    match outcome {
+        OUTCOME_ACK => Ok(Sent::Ack),
+        OUTCOME_RETRYABLE => Err(PublisherError::Retryable(text())),
+        _ => Err(PublisherError::NonRetryable(text())),
+    }
+}
+
+/// Resolves the requester waiting on message `index`, if there is one.
+async fn answer_waiter(
+    index: usize,
+    correlation_ids: &[Option<String>],
+    response_channel: &MemoryResponseChannel,
+    answer: impl FnOnce() -> CanonicalMessage,
+) -> bool {
+    let Some(Some(cid)) = correlation_ids.get(index) else {
+        return false;
+    };
+    match response_channel.take_waiter(cid) {
+        Some(tx) => {
+            let _ = tx.send(answer());
+            true
+        }
+        None => false,
+    }
+}
+
+/// Delivers a reply. Returns it back when it is a failure that no requester waits for,
+/// so the caller can treat it as the nack it replaces.
 async fn handle_memory_reply(
     mut resp: CanonicalMessage,
     index: usize,
     correlation_ids: &[Option<String>],
     response_channel: &MemoryResponseChannel,
-) {
+) -> Option<CanonicalMessage> {
     if !resp.metadata.contains_key("correlation_id") {
         if let Some(Some(cid)) = correlation_ids.get(index) {
             resp.metadata
@@ -1073,10 +1312,13 @@ async fn handle_memory_reply(
     }
 
     if let Some(cid) = resp.metadata.get("correlation_id") {
-        if let Some(tx) = response_channel.remove_waiter(cid).await {
+        if let Some(tx) = response_channel.take_waiter(cid) {
             let _ = tx.send(resp);
-            return;
+            return None;
         }
+    }
+    if resp.metadata.contains_key(REQUEST_OUTCOME) {
+        return Some(resp);
     }
     // No waiter: deliver best-effort. A forward route (no `reply_to`) still gets a
     // publisher response per message but nothing drains this channel; a blocking
@@ -1085,6 +1327,7 @@ async fn handle_memory_reply(
     if let Err(async_channel::TrySendError::Full(_)) = response_channel.sender.try_send(resp) {
         trace!("Dropping unconsumed memory response (response channel full, no waiter)");
     }
+    None
 }
 
 #[async_trait]
@@ -1463,6 +1706,87 @@ mod tests {
         Route::stop("mem_rr_test").await;
     }
 
+    fn requester(topic: &str) -> MemoryPublisher {
+        MemoryPublisher::new(&MemoryConfig {
+            topic: topic.to_string(),
+            capacity: Some(10),
+            request_reply: true,
+            request_timeout_ms: Some(10_000),
+            ..Default::default()
+        })
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn an_ack_or_nack_answers_the_requester_at_once() {
+        let topic = format!("mem_rr_outcome_{}", fast_uuid_v7::gen_id_str());
+        let mut consumer = MemoryConsumer::new_local(&topic, 10);
+        let publisher = Arc::new(requester(&topic));
+        let send = |payload: &'static str| {
+            let publisher = publisher.clone();
+            tokio::spawn(async move { publisher.send(payload.into()).await })
+        };
+        let (acked, nacked) = (send("a"), send("b"));
+
+        let mut batches = Vec::new();
+        let mut received = 0;
+        while received < 2 {
+            let batch = consumer.receive_batch(2).await.unwrap();
+            received += batch.messages.len();
+            batches.push(batch);
+        }
+        let started = std::time::Instant::now();
+        for batch in batches {
+            let dispositions = batch
+                .messages
+                .iter()
+                .map(|m| match m.get_payload_str().as_ref() {
+                    "a" => MessageDisposition::Ack,
+                    _ => MessageDisposition::Nack,
+                })
+                .collect();
+            (batch.commit)(dispositions).await.unwrap();
+        }
+
+        assert!(matches!(acked.await.unwrap(), Ok(Sent::Ack)));
+        let err = nacked.await.unwrap().unwrap_err();
+        assert!(matches!(err, PublisherError::Retryable(_)), "{err}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    }
+
+    #[tokio::test]
+    async fn a_request_reply_input_answers_failures_and_keeps_running() {
+        let topic = format!("mem_rr_fail_{}", fast_uuid_v7::gen_id_str());
+        let mut input = Endpoint::new_memory(&topic, 10);
+        if let crate::models::EndpointType::Memory(cfg) = &mut input.endpoint_type {
+            cfg.request_reply = true;
+        }
+        let handler = |msg: CanonicalMessage| async move {
+            match msg.get_payload_str().as_ref() {
+                "bad" => Err(crate::errors::HandlerError::NonRetryable(anyhow!(
+                    "bad input"
+                ))),
+                "busy" => Err(crate::errors::HandlerError::Retryable(anyhow!("busy"))),
+                _ => Ok(Handled::Publish(msg)),
+            }
+        };
+        let route = Route::new(input, Endpoint::new_response()).with_handler(handler);
+        route.deploy("mem_rr_fail_test").await.unwrap();
+        let publisher = requester(&topic);
+
+        let err = publisher.send("bad".into()).await.unwrap_err();
+        assert!(matches!(err, PublisherError::NonRetryable(_)), "{err}");
+        assert!(err.to_string().contains("bad input"), "{err}");
+        let err = publisher.send("busy".into()).await.unwrap_err();
+        assert!(matches!(err, PublisherError::Retryable(_)), "{err}");
+        let Sent::Response(ok) = publisher.send("fine".into()).await.unwrap() else {
+            panic!("expected a response");
+        };
+        assert_eq!(ok.get_payload_str(), "fine");
+
+        Route::stop("mem_rr_fail_test").await;
+    }
+
     #[tokio::test]
     async fn test_memory_request_reply_timeout_cleans_waiter() {
         let topic = format!("mem_rr_timeout_{}", fast_uuid_v7::gen_id_str());
@@ -1595,6 +1919,49 @@ mod tests {
         let result =
             tokio::time::timeout(std::time::Duration::from_millis(100), consumer.receive()).await;
         assert!(result.is_err(), "Channel should be empty");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failure_without_requester_is_redelivered_after_a_pause_or_dropped_when_stale() {
+        let topic = format!("mem_failed_requeue_{}", fast_uuid_v7::gen_id_str());
+        let mut consumer = MemoryConsumer::new(&MemoryConfig {
+            topic: topic.clone(),
+            capacity: Some(10),
+            enable_nack: true,
+            ..Default::default()
+        })
+        .unwrap();
+        let channel = consumer_channel(&topic);
+        let mut stale = CanonicalMessage::from("stale");
+        stale
+            .metadata
+            .insert("correlation_id".to_string(), "gone".to_string());
+        channel
+            .fill_messages(vec!["plain".into(), stale])
+            .await
+            .unwrap();
+
+        let batch = consumer.receive_batch(2).await.unwrap();
+        let failed = PublisherError::Retryable(anyhow!("sink down"));
+        let dispositions = batch
+            .messages
+            .iter()
+            .map(|m| MessageDisposition::Reply(failure_reply(m.message_id, &failed)))
+            .collect();
+        (batch.commit)(dispositions).await.unwrap();
+
+        assert!(channel.is_empty(), "no redelivery before the pause");
+        tokio::time::sleep(FAILED_REQUEUE_PAUSE).await;
+        let again = consumer.receive_batch(10).await.unwrap();
+        let payloads: Vec<_> = again.messages.iter().map(|m| m.get_payload_str()).collect();
+        assert_eq!(payloads, ["plain"]);
+    }
+
+    fn consumer_channel(topic: &str) -> MemoryChannel {
+        get_or_create_channel(&MemoryConfig {
+            topic: topic.to_string(),
+            ..Default::default()
+        })
     }
 
     #[tokio::test]

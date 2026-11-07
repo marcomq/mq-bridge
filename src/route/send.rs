@@ -6,6 +6,7 @@
 //! Sending one batch to the output and committing it, with the failure policy.
 
 use super::*;
+use crate::endpoints::memory::failure_reply;
 
 /// How many messages a runner may process before it must cooperatively yield.
 ///
@@ -53,6 +54,9 @@ pub(super) type Reaped = Option<Result<SendTaskOutput, tokio::task::JoinError>>;
 pub(super) enum TransientPublishFailurePolicy {
     StopRoute,
     ReplyBadGateway,
+    /// A memory input with `request_reply`: every failed message is answered with its
+    /// error, and the route keeps running.
+    ReplyError,
 }
 
 pub(super) struct BatchScratch {
@@ -151,15 +155,17 @@ pub(super) fn transient_publish_failure_policy(
 ) -> TransientPublishFailurePolicy {
     const MAX_DEPTH: usize = 16;
 
+    let of = |endpoint_type: &EndpointType| match endpoint_type {
+        EndpointType::Http(cfg)
+            if !cfg.fire_and_forget && !cfg.receive_streamable && pass_through_status =>
+        {
+            TransientPublishFailurePolicy::ReplyBadGateway
+        }
+        EndpointType::Memory(cfg) if cfg.request_reply => TransientPublishFailurePolicy::ReplyError,
+        _ => TransientPublishFailurePolicy::StopRoute,
+    };
     let EndpointType::Ref(name) = &input.endpoint_type else {
-        return match &input.endpoint_type {
-            EndpointType::Http(cfg)
-                if !cfg.fire_and_forget && !cfg.receive_streamable && pass_through_status =>
-            {
-                TransientPublishFailurePolicy::ReplyBadGateway
-            }
-            _ => TransientPublishFailurePolicy::StopRoute,
-        };
+        return of(&input.endpoint_type);
     };
     let mut name = name.clone();
     for _ in 0..MAX_DEPTH {
@@ -168,12 +174,7 @@ pub(super) fn transient_publish_failure_policy(
         };
         match referenced.endpoint_type {
             EndpointType::Ref(next) => name = next,
-            EndpointType::Http(cfg)
-                if !cfg.fire_and_forget && !cfg.receive_streamable && pass_through_status =>
-            {
-                return TransientPublishFailurePolicy::ReplyBadGateway;
-            }
-            _ => return TransientPublishFailurePolicy::StopRoute,
+            other => return of(&other),
         }
     }
     TransientPublishFailurePolicy::StopRoute
@@ -440,6 +441,43 @@ pub(super) async fn send_batch_and_commit(
         }
     }
     match sent {
+        Ok(SentBatch::Partial { responses, failed })
+            if transient_failure_policy == TransientPublishFailurePolicy::ReplyError
+                && !failed.is_empty() =>
+        {
+            let mut dispositions = map_responses_to_dispositions(
+                &scratch.message_ids,
+                responses,
+                &failed,
+                &scratch.request_ids,
+                has_dlq_middleware,
+            );
+            for (msg, e) in &failed {
+                warn!(
+                    "Answering request (ID: {:032x}) with its error: {}",
+                    msg.message_id, e
+                );
+                if let Some(i) = scratch
+                    .message_ids
+                    .iter()
+                    .position(|id| *id == msg.message_id)
+                {
+                    dispositions[i] = MessageDisposition::Reply(failure_reply(msg.message_id, e));
+                }
+            }
+            commit(dispositions).await?;
+            Ok(())
+        }
+        Err(e) if transient_failure_policy == TransientPublishFailurePolicy::ReplyError => {
+            warn!("Answering {} request(s) with their error: {}", batch_len, e);
+            let dispositions = scratch
+                .message_ids
+                .iter()
+                .map(|id| MessageDisposition::Reply(failure_reply(*id, &e)))
+                .collect();
+            commit(dispositions).await?;
+            Ok(())
+        }
         Ok(SentBatch::Ack) => {
             for id in scratch.message_ids.iter() {
                 if scratch.request_ids.contains(id) {

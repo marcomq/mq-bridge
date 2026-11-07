@@ -1372,6 +1372,131 @@ impl Route {
     }
 }
 
+/// One message of `Caller.callMany`: its answer, or the error it failed with.
+#[napi(object)]
+pub struct CallOutcome {
+    pub message: Option<NativeMessage>,
+    pub error: Option<String>,
+}
+
+/// Call a route like a function. The route input must be an in-process `memory`
+/// endpoint; calls made at the same time reach the route as one batch.
+#[napi]
+pub struct Caller {
+    runtime: Arc<Runtime>,
+    caller: core::Caller,
+}
+
+#[napi]
+impl Caller {
+    /// Deploy a `Route` (with its handlers) as a caller under the route's name.
+    #[napi(factory)]
+    pub fn from_route(route: &Route) -> Result<Self> {
+        let core_route = route.lock_route()?.clone();
+        let runtime = Arc::clone(&route.runtime);
+        let name = route.name.clone();
+        let caller = runtime
+            .block_on(async move { core::Caller::deploy(&name, core_route).await })
+            .map_err(to_napi_error)?;
+        Ok(Self { runtime, caller })
+    }
+
+    #[napi(getter)]
+    pub fn name(&self) -> String {
+        self.caller.name().to_string()
+    }
+
+    /// Send a message through the route and return its answer.
+    #[napi]
+    pub async fn call(&self, message: NativeMessage) -> Result<NativeMessage> {
+        self.call_on_runtime(message.into_canonical()?).await
+    }
+
+    #[napi]
+    pub async fn call_json(
+        &self,
+        data: JsonValue,
+        metadata: Option<HashMap<String, String>>,
+        id: Option<String>,
+    ) -> Result<NativeMessage> {
+        self.call_on_runtime(json_input_to_canonical(data, metadata, id.as_deref())?)
+            .await
+    }
+
+    /// Send several messages as one batch; one outcome per message, in order.
+    #[napi]
+    pub async fn call_many(&self, messages: Vec<NativeMessage>) -> Result<Vec<CallOutcome>> {
+        let messages = messages
+            .into_iter()
+            .map(NativeMessage::into_canonical)
+            .collect::<Result<Vec<_>>>()?;
+        let caller = self.caller.clone();
+        let answers = self
+            .runtime
+            .spawn(async move { caller.call_many(messages).await })
+            .await
+            .map_err(to_napi_error)?;
+        Ok(answers
+            .into_iter()
+            .map(|answer| match answer {
+                Ok(answer) => CallOutcome {
+                    message: Some(NativeMessage::from_canonical(&answer)),
+                    error: None,
+                },
+                Err(err) => CallOutcome {
+                    message: None,
+                    error: Some(err.to_string()),
+                },
+            })
+            .collect())
+    }
+
+    /// Send a message through the route and wait until it is handled. Returns
+    /// the answer, or `null` when the route accepted it without one.
+    #[napi]
+    pub async fn send(&self, message: NativeMessage) -> Result<Option<NativeMessage>> {
+        let message = message.into_canonical()?;
+        let caller = self.caller.clone();
+        let handle = self
+            .runtime
+            .spawn(async move { caller.send(message).await });
+        Ok(
+            match handle
+                .await
+                .map_err(to_napi_error)?
+                .map_err(to_napi_error)?
+            {
+                Sent::Ack => None,
+                Sent::Response(response) => Some(NativeMessage::from_canonical(&response)),
+            },
+        )
+    }
+
+    /// Stop the route. Resolves to `false` if it was already stopped.
+    #[napi]
+    pub async fn stop(&self) -> Result<bool> {
+        let caller = self.caller.clone();
+        self.runtime
+            .spawn(async move { caller.stop().await })
+            .await
+            .map_err(to_napi_error)
+    }
+}
+
+impl Caller {
+    async fn call_on_runtime(&self, message: CanonicalMessage) -> Result<NativeMessage> {
+        let caller = self.caller.clone();
+        let handle = self
+            .runtime
+            .spawn(async move { caller.call(message).await });
+        let response = handle
+            .await
+            .map_err(to_napi_error)?
+            .map_err(to_napi_error)?;
+        Ok(NativeMessage::from_canonical(&response))
+    }
+}
+
 #[napi]
 pub struct Publisher {
     runtime: Arc<Runtime>,

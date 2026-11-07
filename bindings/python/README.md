@@ -139,6 +139,30 @@ with Route.from_config(config, "orders_route").with_handler(handle):
 Configuration/connection errors surface from `start()` itself, not from a
 background thread. `run()` remains available for the blocking single-route case.
 
+## Calling a route like a function
+
+`Caller` deploys a route whose input is an in-process `memory` endpoint and
+returns each message's answer, like a function call. Calls made at the same
+time from several threads reach the route as one batch, so batched lookups and
+the `parallel` middleware still apply.
+
+```python
+from mq_bridge import Caller, Route
+
+route = Route.from_config({
+    "input": {"memory": {"topic": "enrich"}},
+    "output": {"response": {}},
+}, "enrich").with_handler(handle)
+
+with Caller.from_route(route) as caller:
+    answer = caller.call_json({"customer_id": 42})   # a Message
+```
+
+A message the route fails raises `RuntimeError` with the error text at once.
+`send()` returns `None` when the route accepts a message without an answer;
+`call()` raises then, so end the output with `response: {}` or an endpoint that
+answers. `Caller.from_file` / `from_config` take the same shapes as `Route`.
+
 ## Pull-based consumer
 
 `Route` is push-based: you attach a handler and the route drives it. When you

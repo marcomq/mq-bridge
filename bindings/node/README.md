@@ -81,6 +81,30 @@ The `name` is optional: pass it to pick one entry out of a `routes:`/`publishers
 document, or omit it to treat the whole config as a single bare route/endpoint body.
 `fromYaml` / `fromYamlStr` remain as deprecated aliases for `fromFile` / `fromStr`.
 
+## Calling a route like a function
+
+`Caller` deploys a route whose input is an in-process `memory` endpoint and
+resolves each message to its answer. Calls made at the same time reach the
+route as one batch.
+
+```ts
+import { Caller, Route } from "mq-bridge";
+
+const route = Route.fromConfig(
+  { input: { memory: { topic: "enrich" } }, output: { response: {} } },
+  "enrich",
+);
+route.withHandler(handle);
+
+const caller = Caller.fromRoute(route);
+const answer = await caller.callJson({ customerId: 42 });
+await caller.stop();
+```
+
+A message the route fails rejects with the error text at once. `send()`
+resolves to `null` when the route accepts a message without an answer; `call()`
+rejects then. `Caller.fromFile` / `fromConfig` take the same shapes as `Route`.
+
 ## Pull-based consumer
 
 `Route` is push-based. To pull messages on your own schedule, use `Consumer`,

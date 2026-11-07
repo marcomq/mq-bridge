@@ -24,6 +24,27 @@ export class Message {
   text(): string;
 }
 
+/**
+ * Call a route like a function. The route input must be an in-process `memory`
+ * endpoint; calls made at the same time reach the route as one batch.
+ */
+export class Caller {
+  /** Deploy a `Route` (with its handlers) as a caller under the route's name. */
+  static fromRoute(route: Route): Caller;
+  static fromFile(path: string, name?: string | null): Caller;
+  static fromConfig(config: JsonValue, name?: string | null): Caller;
+  readonly name: string;
+  /** Send a message through the route and resolve to its answer. */
+  call(message: Message): Promise<Message>;
+  callJson(data: JsonValue, metadata?: Metadata | null, id?: string | null): Promise<Message>;
+  /** Send the messages as one batch; one settled result per message, in order. */
+  callMany(messages: Message[]): Promise<PromiseSettledResult<Message>[]>;
+  /** Resolve once the message is handled: its answer, or `null` if there is none. */
+  send(message: Message): Promise<Message | null>;
+  /** Stop the route. Resolves to `false` if it was already stopped. */
+  stop(): Promise<boolean>;
+}
+
 export class Publisher {
   static fromFile(path: string, name?: string | null): Publisher;
   static fromStr(text: string, name?: string | null): Publisher;

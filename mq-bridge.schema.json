@@ -3008,12 +3008,12 @@
           "minimum": 0
         },
         "request_reply": {
-          "description": "(Publisher only) If true, send() waits for a response.",
+          "description": "Publisher: send() waits for a response. Input: each failure is answered to its requester.",
           "type": "boolean",
           "default": false
         },
         "request_timeout_ms": {
-          "description": "(Publisher only) Timeout for request-reply operations in milliseconds. Defaults to 30000ms.",
+          "description": "Publisher: how long send() waits for the response. Input: how long a `Caller` waits. Defaults to 30000ms.",
           "type": [
             "integer",
             "null"

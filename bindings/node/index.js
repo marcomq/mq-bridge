@@ -232,6 +232,61 @@ class Route {
   }
 }
 
+/**
+ * Call a route like a function: `call()` sends one message through the route
+ * and resolves to its answer. The route input must be an in-process `memory`
+ * endpoint; calls made at the same time reach the route as one batch.
+ */
+class Caller {
+  constructor(nativeCaller) {
+    this._native = nativeCaller;
+  }
+
+  /** Deploy a `Route` (with its handlers) as a caller under the route's name. */
+  static fromRoute(route) {
+    return new Caller(native.Caller.fromRoute(route._native));
+  }
+
+  static fromFile(path, name) {
+    return Caller.fromRoute(Route.fromFile(path, name));
+  }
+
+  static fromConfig(config, name) {
+    return Caller.fromRoute(Route.fromConfig(config, name));
+  }
+
+  get name() {
+    return this._native.name;
+  }
+
+  async call(message) {
+    return Message._fromNative(await this._native.call(Message._toNative(message)));
+  }
+
+  async callJson(data, metadata = null, id = null) {
+    return Message._fromNative(await this._native.callJson(data, metadata, id));
+  }
+
+  /** Send the messages as one batch; resolves like `Promise.allSettled`, in order. */
+  async callMany(messages) {
+    const outcomes = await this._native.callMany(messages.map((m) => Message._toNative(m)));
+    return outcomes.map(({ message, error }) =>
+      error == null
+        ? { status: "fulfilled", value: Message._fromNative(message) }
+        : { status: "rejected", reason: new Error(error) },
+    );
+  }
+
+  async send(message) {
+    const response = await this._native.send(Message._toNative(message));
+    return response == null ? null : Message._fromNative(response);
+  }
+
+  stop() {
+    return this._native.stop();
+  }
+}
+
 /** Throw this from `receiveBatch` to tell the route the source is finished. */
 class EndOfStream extends Error {
   constructor(message = "end of stream") {
@@ -502,6 +557,7 @@ module.exports = {
   Publisher,
   Consumer,
   Route,
+  Caller,
   EndOfStream,
   configSchema,
   initLogging,

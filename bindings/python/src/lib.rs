@@ -1479,6 +1479,170 @@ impl Route {
     }
 }
 
+/// Call a route like a function: `call()` sends one message through the route and
+/// returns its answer. The route input must be an in-process `memory` endpoint.
+/// Calls made at the same time from several threads reach the route as one batch.
+#[pyclass(module = "mq_bridge")]
+struct Caller {
+    runtime: Arc<Runtime>,
+    caller: core::Caller,
+}
+
+#[pymethods]
+impl Caller {
+    /// Deploy a `Route` (with its handlers) as a caller under the route's name.
+    #[staticmethod]
+    fn from_route(py: Python<'_>, route: &Route) -> PyResult<Self> {
+        let core_route = route.lock_route()?.clone();
+        Self::deploy(
+            py,
+            Arc::clone(&route.runtime),
+            route.name.clone(),
+            core_route,
+        )
+    }
+
+    /// Load a route from a YAML or JSON file (same shapes as `Route.from_file`) and deploy it.
+    #[staticmethod]
+    #[pyo3(signature = (path, name=None))]
+    fn from_file(py: Python<'_>, path: &str, name: Option<&str>) -> PyResult<Self> {
+        let route = Route::from_file(py, path, name)?;
+        Self::from_route(py, &route)
+    }
+
+    /// Build a route from a mapping (same shapes as `Route.from_config`) and deploy it.
+    #[staticmethod]
+    #[pyo3(signature = (config, name=None))]
+    fn from_config(
+        py: Python<'_>,
+        config: &Bound<'_, PyAny>,
+        name: Option<&str>,
+    ) -> PyResult<Self> {
+        let route = Route::from_config(py, config, name)?;
+        Self::from_route(py, &route)
+    }
+
+    #[getter]
+    fn name(&self) -> String {
+        self.caller.name().to_string()
+    }
+
+    /// Send a message through the route and return its answer.
+    #[pyo3(signature = (message, metadata=None))]
+    fn call(
+        &self,
+        py: Python<'_>,
+        message: &Bound<'_, PyAny>,
+        metadata: Option<HashMap<String, String>>,
+    ) -> PyResult<Message> {
+        let message = message_input_to_canonical(message, metadata)?;
+        self.call_canonical(py, message)
+    }
+
+    #[pyo3(signature = (data, metadata=None, id=None))]
+    fn call_json(
+        &self,
+        py: Python<'_>,
+        data: &Bound<'_, PyAny>,
+        metadata: Option<HashMap<String, String>>,
+        id: Option<String>,
+    ) -> PyResult<Message> {
+        let message = json_input_to_canonical(data, metadata, id.as_deref())?;
+        self.call_canonical(py, message)
+    }
+
+    /// Send several messages through the route as one batch. Returns one entry per
+    /// message, in order: its answer, or the exception it failed with (not raised).
+    fn call_many(
+        &self,
+        py: Python<'_>,
+        messages: Vec<Bound<'_, PyAny>>,
+    ) -> PyResult<Vec<Py<PyAny>>> {
+        let messages = messages
+            .iter()
+            .map(|message| message_input_to_canonical(message, None))
+            .collect::<PyResult<Vec<_>>>()?;
+        let caller = self.caller.clone();
+        let runtime = Arc::clone(&self.runtime);
+        let answers = py.detach(move || runtime.block_on(caller.call_many(messages)));
+        answers
+            .into_iter()
+            .map(|answer| match answer {
+                Ok(answer) => Ok(Py::new(py, Message::from_canonical(&answer))?.into_any()),
+                Err(err) => Ok(to_py_runtime_error(err).into_value(py).into_any()),
+            })
+            .collect()
+    }
+
+    /// Send a message through the route and wait until it is handled; the answer, if any,
+    /// is returned, otherwise `None`.
+    #[pyo3(signature = (message, metadata=None))]
+    fn send(
+        &self,
+        py: Python<'_>,
+        message: &Bound<'_, PyAny>,
+        metadata: Option<HashMap<String, String>>,
+    ) -> PyResult<Option<Message>> {
+        let message = message_input_to_canonical(message, metadata)?;
+        let caller = self.caller.clone();
+        let runtime = Arc::clone(&self.runtime);
+        py.detach(move || {
+            run_sync_task(&runtime, async move {
+                Ok(match caller.send(message).await? {
+                    Sent::Ack => None,
+                    Sent::Response(response) => Some(Message::from_canonical(&response)),
+                })
+            })
+        })
+        .map_err(to_py_runtime_error)
+    }
+
+    /// Stop the route. Returns `False` if it was already stopped.
+    fn stop(&self, py: Python<'_>) -> bool {
+        let caller = self.caller.clone();
+        let runtime = Arc::clone(&self.runtime);
+        py.detach(move || runtime.block_on(async move { caller.stop().await }))
+    }
+
+    fn __enter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    #[pyo3(signature = (*_args))]
+    fn __exit__(&self, py: Python<'_>, _args: &Bound<'_, PyTuple>) -> bool {
+        self.stop(py);
+        false
+    }
+}
+
+impl Caller {
+    fn deploy(
+        py: Python<'_>,
+        runtime: Arc<Runtime>,
+        name: String,
+        route: CoreRoute,
+    ) -> PyResult<Self> {
+        let deploy_runtime = Arc::clone(&runtime);
+        let caller = py
+            .detach(move || {
+                deploy_runtime.block_on(async move { core::Caller::deploy(&name, route).await })
+            })
+            .map_err(to_py_runtime_error)?;
+        Ok(Self { runtime, caller })
+    }
+
+    fn call_canonical(&self, py: Python<'_>, message: CanonicalMessage) -> PyResult<Message> {
+        let caller = self.caller.clone();
+        let runtime = Arc::clone(&self.runtime);
+        py.detach(move || {
+            run_sync_task(&runtime, async move {
+                Ok(Message::from_canonical(&caller.call(message).await?))
+            })
+        })
+        .map_err(to_py_runtime_error)
+    }
+}
+
 #[pyclass(module = "mq_bridge")]
 struct Publisher {
     runtime: Arc<Runtime>,
@@ -3133,6 +3297,7 @@ fn _mq_bridge(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<Message>()?;
     module.add_class::<Route>()?;
     module.add_class::<Publisher>()?;
+    module.add_class::<Caller>()?;
     module.add_class::<Consumer>()?;
     module.add_class::<MemoryDrainer>()?;
     module.add("__version__", env!("CARGO_PKG_VERSION"))?;

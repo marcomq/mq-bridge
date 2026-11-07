@@ -102,6 +102,23 @@ let route = Route::new(Endpoint::new_memory("in", 200), Endpoint::new_memory("ou
 route.deploy("my_route").await?;
 ```
 
+### Calling a route like a function
+
+A `Caller` deploys a route whose input is an in-process `memory` topic and waits for its
+answer, so code that needs the route's result looks like a query:
+
+```rust
+use mq_bridge::Caller;
+
+// `enrich` in routes.yaml: input `memory: { topic: enrich }` (with a `lookup`, a
+// handler, any middleware), output ending in `response: {}`.
+let enrich = Caller::from_file("routes.yaml", "enrich").await?;
+let answer = enrich.call(r#"{"customer_id": 7}"#.into()).await?;
+```
+
+Calls made at the same time are read as one batch, so a batched `lookup` or an inference
+endpoint serves them together. See [Request / reply](request-reply.md#calling-a-route-from-rust).
+
 ### Typed handlers and sending commands
 
 `TypeHandler` picks a handler by the message's `kind` metadata field and deserializes the

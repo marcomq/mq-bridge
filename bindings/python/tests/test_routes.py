@@ -10,7 +10,7 @@ import uuid
 
 import pytest
 
-from mq_bridge import Consumer, MemoryDrainer, Publisher, Route
+from mq_bridge import Caller, Consumer, MemoryDrainer, NonRetryableError, Publisher, Route
 
 
 def _unique(prefix: str) -> str:
@@ -332,3 +332,44 @@ def test_from_yaml_str_alias_is_deprecated_but_works() -> None:
     reply = publisher.request(b"ping")
 
     assert reply.payload == b"ping"
+
+
+def test_caller_returns_the_answer_and_raises_a_handler_error() -> None:
+    def handler(msg):
+        data = msg.json()
+        if data["n"] < 0:
+            raise NonRetryableError("negative input")
+        return msg.with_json({"double": data["n"] * 2})
+
+    route = Route.from_config(
+        {
+            "input": {"memory": {"topic": _unique("pytest.caller")}},
+            "output": {"response": {}},
+        },
+        _unique("caller"),
+    ).with_handler(handler)
+
+    with Caller.from_route(route) as caller:
+        results = []
+        threads = [
+            threading.Thread(target=lambda n=n: results.append(caller.call_json({"n": n}).json()))
+            for n in range(8)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        assert sorted(r["double"] for r in results) == [n * 2 for n in range(8)]
+
+        started = time.monotonic()
+        with pytest.raises(RuntimeError, match="negative input"):
+            caller.call_json({"n": -1})
+        assert time.monotonic() - started < 5.0
+
+        assert caller.call_json({"n": 4}).json() == {"double": 8}
+
+        first, failed, last = caller.call_many([b'{"n": 1}', b'{"n": -1}', b'{"n": 3}'])
+        assert first.json() == {"double": 2}
+        assert isinstance(failed, RuntimeError) and "negative input" in str(failed)
+        assert last.json() == {"double": 6}
+

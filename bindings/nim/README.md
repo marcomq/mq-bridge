@@ -94,6 +94,18 @@ only with `enable_nack: true`); any other exception drops it as failed.
 Errors raise `MqbError` or a subtype (`RetryableError`, `ConnectionError`,
 `ConfigError`, `EndOfStreamError`, `UnsupportedError`) carrying the library's text.
 
+To call a route like a function, use `route.caller()` instead of `start`. Its
+input must be an in-process `memory` endpoint:
+
+```nim
+let caller = route.caller()            # deploys the route; drop it to stop
+echo caller.call("ping").payload       # the answer; a failed message raises
+```
+
+`caller.send(msg)` returns `none` when the route accepts the message without an
+answer. Handlers run as after `start`; pass `worker = true` to call from several
+threads.
+
 ## Threads
 
 Handlers run on one Nim thread, one call at a time:

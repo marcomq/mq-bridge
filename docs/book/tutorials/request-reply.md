@@ -62,6 +62,55 @@ See [Embed the library](embedding.md) for the full load-and-run scaffolding, and
 [Core concepts](../getting-started/concepts.md) for the handler model
 (`CommandHandler` / `EventHandler` / `TypeHandler`).
 
+## Calling a route from Rust
+
+`Caller` turns a route into an async function. It deploys the route, puts each request
+on the route's `memory` input and waits for the answer:
+
+```yaml
+enrich:
+  concurrency: 4
+  input:
+    memory: { topic: "enrich" }
+    middlewares:
+      - lookup:
+          from:
+            sqlx:
+              url: "postgres://localhost/crm"
+              table: "customers"
+              lookup_query: "SELECT id, tier FROM customers WHERE id IN (${payload:customer_id}::bigint)"
+          into: customer
+  output:
+    response: {}
+```
+
+```rust
+use mq_bridge::Caller;
+
+let enrich = Caller::from_file("routes.yaml", "enrich").await?;
+let answer = enrich.call(r#"{"customer_id": 7}"#.into()).await?;
+
+// Elsewhere in the program:
+let enrich = Caller::get("enrich").expect("deployed at startup");
+```
+
+- `call` returns the answer; `send` returns `Sent::Ack` when the output only accepts the
+  message (a plain sink), and `call` fails then.
+- Calls made at the same time are read as one batch: a batched `lookup` queries once for
+  all of them, an inference endpoint gets them together.
+- `call_many(messages)` sends several messages as one batch and returns one result per
+  message, in order; one failing does not fail the others. `send_many` is its `send`.
+- A message that fails comes back as an error at once, with the error text, after the
+  route's `retry` middleware if it has one. The route keeps running.
+- The wait is bounded by the input's `request_timeout_ms` (default 30 s).
+- `parallel` on the input pays off only with many concurrent calls (about 256 and more); at
+  16-64 it makes the route slower.
+- `Caller::deploy(name, route)` takes a route built in code (with a handler);
+  `Caller::new(name, output)` adds the memory input itself. `stop()` ends the route.
+
+The same works without `Caller`: a memory input with `request_reply: true` answers each
+failure to its requester, and a `memory` publisher with `request_reply: true` sends and waits.
+
 ## Caveats
 
 - If the input does not support responses (e.g. File, SQLx), a message sent to `response` is

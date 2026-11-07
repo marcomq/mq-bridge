@@ -11,6 +11,7 @@ compile_error!(
     "pick one TLS provider: `rustls-ring` or `rustls-aws-lc` (`basic` brings ring, the default `full` aws-lc; build `basic` with --no-default-features)"
 );
 
+mod caller;
 mod consumer;
 mod message;
 mod publisher;
@@ -45,7 +46,7 @@ pub(crate) fn set_error(text: impl std::fmt::Display) {
 }
 
 /// `MQB_ERR_RETRYABLE` / `MQB_ERR_CONNECTION` when the engine classified the failure so.
-fn status_of(err: &anyhow::Error) -> MqbStatus {
+pub(crate) fn status_of(err: &anyhow::Error) -> MqbStatus {
     err.chain()
         .find_map(|cause| {
             if let Some(err) = cause.downcast_ref::<ProcessingError>() {

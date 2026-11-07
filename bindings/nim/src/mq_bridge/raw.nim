@@ -202,6 +202,7 @@ type
                                     outp: ptr Handle, err: ptr MqbBuffer): MqbStatus {.cdecl, gcsafe, raises: [].}
 
   mqb_batch_t* {.incompleteStruct.} = object
+  mqb_caller_t* {.incompleteStruct.} = object
   mqb_consumer_t* {.incompleteStruct.} = object
   mqb_message_t* {.incompleteStruct.} = object
   mqb_publisher_t* {.incompleteStruct.} = object
@@ -284,5 +285,15 @@ proc mqb_route_start*(route: ptr mqb_route_t): MqbStatus {.importc.}
 proc mqb_route_stop*(route: ptr mqb_route_t): MqbStatus {.importc.}
 proc mqb_route_join*(route: ptr mqb_route_t): MqbStatus {.importc.}
 proc mqb_route_free*(route: ptr mqb_route_t) {.importc.}
+
+proc mqb_caller_from_route*(route: ptr mqb_route_t): ptr mqb_caller_t {.importc.}
+proc mqb_caller_call*(caller: ptr mqb_caller_t, message: ptr mqb_message_t,
+                      response: ptr ptr mqb_message_t): MqbStatus {.importc.}
+proc mqb_caller_send*(caller: ptr mqb_caller_t, message: ptr mqb_message_t,
+                      response: ptr ptr mqb_message_t): MqbStatus {.importc.}
+proc mqb_caller_call_many*(caller: ptr mqb_caller_t, messages: ptr ptr mqb_message_t,
+                           count: csize_t, responses: ptr ptr mqb_message_t,
+                           statuses: ptr MqbStatus): MqbStatus {.importc.}
+proc mqb_caller_free*(caller: ptr mqb_caller_t) {.importc.}
 
 {.pop.}

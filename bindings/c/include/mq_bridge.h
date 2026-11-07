@@ -33,6 +33,10 @@
 // The messages of one `mqb_consumer_poll`, owned by the batch.
 typedef struct mqb_batch_t mqb_batch_t;
 
+// Calls a route like a function. Safe to use from several threads; calls made at
+// the same time reach the route as one batch.
+typedef struct mqb_caller_t mqb_caller_t;
+
 // A pull-based consumer over one input endpoint. `mqb_consumer_poll` does not
 // acknowledge: each batch stays outstanding until it is acked, nacked or committed.
 typedef struct mqb_consumer_t mqb_consumer_t;
@@ -124,6 +128,37 @@ MqbStatus mqb_register_plugin(const MqbPluginVTable *table);
 // thread. `level` (null for `warn`) seeds the filter; `MQ_BRIDGE_LOG` / `RUST_LOG`
 // override it. Fails if logging was already initialized.
 MqbStatus mqb_init_logging(mqb_log_fn callback, void *user_data, const char *level);
+
+// Deploys `route` (with its handlers) under its name and returns a caller for it.
+// The route input must be an in-process `memory` endpoint. Do not also start the
+// route. Null on error.
+struct mqb_caller_t *mqb_caller_from_route(const struct mqb_route_t *route);
+
+// Sends `message` through the route and stores its answer in `*response` (free it
+// with `mqb_message_free`; null on failure). A failed message returns its error.
+MqbStatus mqb_caller_call(const struct mqb_caller_t *caller,
+                          const struct mqb_message_t *message,
+                          struct mqb_message_t **response);
+
+// Like `mqb_caller_call`, but a route that accepts the message without an answer
+// succeeds with `*response` null.
+MqbStatus mqb_caller_send(const struct mqb_caller_t *caller,
+                          const struct mqb_message_t *message,
+                          struct mqb_message_t **response);
+
+// Sends `count` messages through the route as one batch. For message `i`,
+// `statuses[i]` gets its status and `responses[i]` its answer, or on failure a message
+// whose payload is the error text (free each with `mqb_message_free`). Returns `MQB_OK`
+// if all succeeded, else the first failure's status, its text also in `mqb_last_error`.
+// A call that fails before sending sets every status to its error and every response null.
+MqbStatus mqb_caller_call_many(const struct mqb_caller_t *caller,
+                               const struct mqb_message_t *const *messages,
+                               size_t count,
+                               struct mqb_message_t **responses,
+                               MqbStatus *statuses);
+
+// Stops the route and frees the caller.
+void mqb_caller_free(struct mqb_caller_t *caller);
 
 // Builds a consumer from a YAML or JSON config file. `name` selects an entry of a
 // `consumers:` document; null or `""` for a single bare endpoint. Null on error.

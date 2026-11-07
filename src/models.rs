@@ -1979,10 +1979,10 @@ pub struct MemoryConfig {
     pub url: Option<String>,
     /// The capacity of the channel. Defaults to 100.
     pub capacity: Option<usize>,
-    /// (Publisher only) If true, send() waits for a response.
+    /// Publisher: send() waits for a response. Input: each failure is answered to its requester.
     #[serde(default)]
     pub request_reply: bool,
-    /// (Publisher only) Timeout for request-reply operations in milliseconds. Defaults to 30000ms.
+    /// Publisher: how long send() waits for the response. Input: how long a `Caller` waits. Defaults to 30000ms.
     pub request_timeout_ms: Option<u64>,
     /// (Consumer only) If true, act as a **Subscriber** (fan-out). Defaults to false (queue).
     #[serde(default)]

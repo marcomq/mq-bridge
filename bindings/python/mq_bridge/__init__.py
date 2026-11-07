@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Union
 
 from ._mq_bridge import (
+    Caller,
     Consumer,
     MemoryDrainer,
     Message,
@@ -72,6 +73,7 @@ def load_plugin_package(package: Union[str, Path]) -> str:
     return load_endpoint_plugin(plugin_library_path(package))
 
 __all__ = [
+    "Caller",
     "Consumer",
     "MemoryDrainer",
     "Message",
