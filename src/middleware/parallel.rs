@@ -282,14 +282,23 @@ impl MessageConsumer for ParallelConsumer {
     /// stopped; their batches stay uncommitted, as a cancelled read leaves them.
     fn on_disconnect_hook(&self) -> Option<BoxFuture<'_, anyhow::Result<()>>> {
         Some(Box::pin(async move {
-            let (queue, held) = {
+            let (queue, mut held, in_flight) = {
                 let mut state = self.state.lock().expect("parallel state poisoned");
                 state.reading = None;
                 state.stopped = false;
-                (std::mem::take(&mut state.queue), state.deferred.take())
+                let in_flight = state.deferred.has_in_flight();
+                (
+                    std::mem::take(&mut state.queue),
+                    state.deferred.take(),
+                    in_flight,
+                )
             };
+            // An ack now would move an ordered source past a batch the route has not committed.
+            if in_flight {
+                held.retain(|(_, emptied)| emptied.all_nacks());
+            }
             let mut first_error = run_all_keeping_nacks(held).await.err();
-            let mut failed = first_error.is_some();
+            let mut failed = first_error.is_some() || in_flight;
             for item in queue {
                 let (batch, source) = match item {
                     Item::Ready(Ok(batch)) => (batch, None),

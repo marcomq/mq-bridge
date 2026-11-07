@@ -19,7 +19,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 RESULTS = HERE / os.environ.get("RESULTS", "results/current")
 WORK = HERE / ".work"
-PG_URL = "postgres://bench:bench@127.0.0.1:55432/bench"
+PG_URL = os.environ["POSTGRES_URL"]  # see docker-compose.yml
 SELECT = "SELECT path, id, name, tier FROM users WHERE path"
 
 VARIANTS = {

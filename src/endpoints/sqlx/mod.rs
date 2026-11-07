@@ -384,6 +384,16 @@ fn bind_value(query: AnyQuery<'_>, value: BindValue) -> AnyQuery<'_> {
     }
 }
 
+fn bind_type_tag(value: &BindValue) -> char {
+    match value {
+        BindValue::Null => 'n',
+        BindValue::Int(_) => 'i',
+        BindValue::Float(_) => 'f',
+        BindValue::Bool(_) => 'b',
+        BindValue::Text(_) => 't',
+    }
+}
+
 /// Reject a string carrying an embedded NUL. `text`/`varchar` cannot represent one on
 /// PostgreSQL or MySQL, and the driver dropped the bind instead of failing — the row
 /// landed with a silent SQL `NULL` while the route reported a clean success.
@@ -1753,8 +1763,16 @@ impl SqlxPublisher {
                 positional_placeholder(&self.driver_name, i + 1)
             });
             // Small lists are cached (one round trip); large ones not, as a Postgres generic plan
-            // made on a small table stays a seq scan.
-            let mut select = sqlx::query(audited_sql(&sql)).persistent(chunk.len() <= 16);
+            // made on a small table stays a seq scan. sqlx caches by SQL text alone, so the text
+            // names the bind types: a statement prepared for ints is never reused for text.
+            let persistent = chunk.len() <= 16;
+            let sql = if persistent {
+                let types: String = chunk.iter().map(|&i| bind_type_tag(&values[i])).collect();
+                format!("/* {types} */ {sql}")
+            } else {
+                sql
+            };
+            let mut select = sqlx::query(audited_sql(&sql)).persistent(persistent);
             for &i in chunk {
                 select = bind_value(select, values[i].clone());
             }

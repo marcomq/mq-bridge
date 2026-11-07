@@ -62,6 +62,9 @@ All notable changes to `mq-bridge`. Newest first.
 
 ### Fixed
 
+- **`mq-bridge-app` keeps `$$` in config files.** Expanding environment variables turned
+  `$$` into `$`, so MongoDB variables such as `$$NOW`, Postgres `$$` blocks and the literal
+  escape `$${…}` reached the engine changed. `${VAR}` and `$VAR` expand as before.
 - **A memory request/reply caller gets its answer at once.** A requester waiting on a
   memory topic used to sit out its whole `request_timeout_ms` when the route acked the
   message without a reply, or nacked it with `enable_nack` off. It now gets `Sent::Ack` or

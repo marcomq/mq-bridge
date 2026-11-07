@@ -40,7 +40,7 @@
 
 use crate::endpoints::memory::MemoryPublisher;
 use crate::models::{Endpoint, EndpointType, MemoryConfig, Route};
-use crate::traits::MessagePublisher;
+use crate::traits::{MessagePublisher, PublisherError};
 use crate::{CanonicalMessage, Sent};
 use anyhow::{anyhow, bail};
 use std::collections::HashMap;
@@ -117,10 +117,17 @@ impl Caller {
     /// Sends `message` through the route and returns how it ended: [`Sent::Response`]
     /// with the answer, or [`Sent::Ack`] when the output only accepted it.
     pub async fn send(&self, message: CanonicalMessage) -> anyhow::Result<Sent> {
-        self.requests
-            .send(message)
-            .await
-            .map_err(|e| anyhow!("Caller '{}': {e}", self.name))
+        self.requests.send(message).await.map_err(|e| self.named(e))
+    }
+
+    /// Adds the caller's name to `error`, keeping its retryable/connection/permanent kind.
+    fn named(&self, error: PublisherError) -> anyhow::Error {
+        let context = format!("Caller '{}'", self.name);
+        anyhow::Error::from(match error {
+            PublisherError::Retryable(e) => PublisherError::Retryable(e.context(context)),
+            PublisherError::NonRetryable(e) => PublisherError::NonRetryable(e.context(context)),
+            PublisherError::Connection(e) => PublisherError::Connection(e.context(context)),
+        })
     }
 
     /// Like [`Caller::call`] for several messages: they reach the route as one batch, and
@@ -145,7 +152,7 @@ impl Caller {
             .request_many(messages)
             .await
             .into_iter()
-            .map(|sent| sent.map_err(|e| anyhow!("Caller '{}': {e}", self.name)))
+            .map(|sent| sent.map_err(|e| self.named(e)))
             .collect()
     }
 

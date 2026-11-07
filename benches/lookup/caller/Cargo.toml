@@ -1,0 +1,17 @@
+[package]
+name = "caller-bench"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+mq-bridge = { path = "../../..", default-features = false, features = ["sqlx", "yaml"] }
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "postgres"] }
+tokio = { version = "1", features = ["full"] }
+serde_json = "1"
+
+[profile.release]
+debug = "line-tables-only"
+
+# Not part of the mq-bridge workspace.
+[workspace]

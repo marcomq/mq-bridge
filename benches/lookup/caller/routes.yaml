@@ -1,0 +1,40 @@
+# The routes the Caller benchmark calls. Same Postgres as the other lookup benches
+# (`docker compose up -d --wait` in benches/lookup).
+routes:
+  enrich:
+    batch_size: 256
+    concurrency: 4
+    input:
+      memory: { topic: enrich, capacity: 4096 }
+      middlewares:
+        - lookup:
+            from:
+              sqlx:
+                url: "${POSTGRES_URL}"
+                table: users
+                max_connections: 64
+                lookup_query: "SELECT path, id, name, tier FROM users WHERE path IN (${payload:path})"
+            into: user
+            concurrency: 16
+    output:
+      response: {}
+
+  # The same route with up to 8 batches looking up at once.
+  enrich_parallel:
+    batch_size: 256
+    concurrency: 4
+    input:
+      memory: { topic: enrich_parallel, capacity: 4096 }
+      middlewares:
+        - lookup:
+            from:
+              sqlx:
+                url: "${POSTGRES_URL}"
+                table: users
+                max_connections: 64
+                lookup_query: "SELECT path, id, name, tier FROM users WHERE path IN (${payload:path})"
+            into: user
+            concurrency: 16
+        - parallel: { max_in_flight: 8 }
+    output:
+      response: {}

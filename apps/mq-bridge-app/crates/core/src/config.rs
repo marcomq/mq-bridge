@@ -692,12 +692,19 @@ fn extract_inline_env_vars(content: &str, format: config::FileFormat) -> HashMap
 
 fn expand_variables(content: &str, format: config::FileFormat) -> Result<String, anyhow::Error> {
     let inline_env_vars = extract_inline_env_vars(content, format);
-    let expanded = shellexpand::env_with_context_no_errors(content, |key| {
-        std::env::var(key)
-            .ok()
-            .or_else(|| inline_env_vars.get(key).cloned())
-    });
-    Ok(expanded.to_string())
+    // `$$` reaches the engine as is (`$$NOW`, `$${…}`); shellexpand would make it `$`.
+    let expanded: Vec<String> = content
+        .split("$$")
+        .map(|part| {
+            shellexpand::env_with_context_no_errors(part, |key| {
+                std::env::var(key)
+                    .ok()
+                    .or_else(|| inline_env_vars.get(key).cloned())
+            })
+            .into_owned()
+        })
+        .collect();
+    Ok(expanded.join("$$"))
 }
 
 // New helper function to create a config source from a string.
@@ -2055,6 +2062,25 @@ routes:
         } else {
             panic!("Expected Kafka source endpoint");
         }
+    }
+
+    #[test]
+    fn variable_expansion_keeps_double_dollars_and_templates() {
+        let content = r#"
+env_vars:
+  dbUrl: "postgres://db/app"
+url: "${dbUrl}"
+query: "IN (${payload:path})"
+pipeline: '{"startDate": "$$NOW", "root": "$$ROOT"}'
+literal: "$${payload:x}"
+sql: "AS $$ BEGIN END $$"
+"#;
+        let expanded = expand_variables(content, config::FileFormat::Yaml).unwrap();
+        assert!(expanded.contains(r#"url: "postgres://db/app""#));
+        assert!(expanded.contains("IN (${payload:path})"));
+        assert!(expanded.contains(r#""$$NOW""#) && expanded.contains(r#""$$ROOT""#));
+        assert!(expanded.contains("$${payload:x}"));
+        assert!(expanded.contains("AS $$ BEGIN END $$"));
     }
 
     #[test]

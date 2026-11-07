@@ -70,6 +70,15 @@ impl Emptied {
             Emptied::Settled(dispositions) => dispositions,
         }
     }
+
+    pub(crate) fn all_nacks(&self) -> bool {
+        match self {
+            Emptied::Acked(_) => false,
+            Emptied::Settled(dispositions) => dispositions
+                .iter()
+                .all(|d| matches!(d, MessageDisposition::Nack)),
+        }
+    }
 }
 
 impl DeferredCommits {
@@ -150,6 +159,11 @@ impl DeferredCommits {
             }
         }
         Ok(())
+    }
+
+    /// Whether a retained delivery handed out is still uncommitted.
+    pub(crate) fn has_in_flight(&self) -> bool {
+        self.in_flight.load(Ordering::SeqCst) > 0
     }
 
     /// Hands the held commits to the caller, to be run from inside the commit of

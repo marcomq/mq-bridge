@@ -20,7 +20,7 @@ RAW = RESULTS / "http"
 WORK = HERE / ".work"
 PORT = 18080
 URL = f"http://127.0.0.1:{PORT}/u/[0-9]{{6}}"
-PG_URL = "postgres://bench:bench@127.0.0.1:55432/bench"
+PG_URL = os.environ["POSTGRES_URL"]  # see docker-compose.yml
 
 SELECT = "SELECT path, id, name, tier FROM users WHERE path"
 VARIANTS = {

@@ -263,6 +263,11 @@ fn resolved_transport(config: &MemoryConfig) -> anyhow::Result<TransportUrl> {
     TransportUrl::parse(&identifier)
 }
 
+/// Whether `config` is an in-process queue rather than an IPC transport.
+pub(crate) fn is_in_process(config: &MemoryConfig) -> bool {
+    matches!(resolved_transport(config), Ok(TransportUrl::Memory { .. }))
+}
+
 fn memory_namespace(config: &MemoryConfig) -> anyhow::Result<String> {
     match resolved_transport(config)? {
         TransportUrl::Memory { namespace } => Ok(namespace),

@@ -135,7 +135,7 @@ a handler error propagates to the route and is reported there.
 | [`otel`](#otel) | ✅ | ✅ | `otel` | OpenTelemetry span per message, continuing `traceparent` |
 | [`lookup`](#lookup) | ✅ | ✅ | – | Enrich each message with other endpoints' responses |
 | [`aggregate`](#aggregate) | ✅ | ✅ | `aggregate` | Keep a running state per key and write it into each message |
-| [`parallel`](#parallel) | ✅ | – | – | Run the entries above it on several batches at once |
+| [`parallel`](#parallel) | ✅ | ✅ | – | Run the entries above it on several batches at once |
 | [`random_panic`](#random_panic) | ✅ | ✅ | – | Fault injection for testing |
 | [`custom`](#custom-middleware) | ✅ | ✅ | – | Your own middleware via a registered factory |
 
@@ -159,8 +159,7 @@ a handler error propagates to the route and is reported there.
 - `deduplication`, `weak_join` and `id` on an output. Deduplication
   cannot work on the publish side, and silently starting an un-deduplicated route is worse
   than refusing to start. `pack` on an input and `unpack` on an output are hard errors too —
-  the pair is directional. So is `parallel` on an output, which already runs `concurrency`
-  batches at once.
+  the pair is directional.
 
 A middleware whose feature is not compiled in (`deduplication` without `dedup`, `metrics`
 without `metrics`, `otel` without `otel`, `aggregate` without `aggregate`) is likewise a startup error, not a silent no-op.

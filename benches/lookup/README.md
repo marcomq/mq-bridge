@@ -13,6 +13,9 @@ Three measurements against the same Postgres table (1M rows, text primary key):
 
 ## Run
 
+`run.py`, `run_file.py` and `caller/` read the database URL from `POSTGRES_URL`: point it at
+the compose database (user, password and port are in `docker-compose.yml`).
+
 ```sh
 export RESULTS=results/$(date +%Y%m%d-%H%M%S)   # a fresh directory per run; CSVs append
 docker compose up -d --wait
@@ -32,6 +35,16 @@ whose upper bound only changes with Postgres or the machine.
 caffeinate -dims python3 run_file.py --reps 2 --window 4
 caffeinate -dims python3 run.py --reps 1 --duration 3s --warmup 1s --nets loopback \
   --closed 1 64 --rates 5000 20000
+```
+
+**Caller vs a query per request (~3 min)**: a Rust program in `caller/` that fetches one user
+per request either straight with sqlx or through `Caller::call` into `caller/routes.yaml`, from
+1 to 4,096 clients, plus `call_many` vs a hand-written `= ANY($1)` and the uncached
+`IN ($1 … $n)` the route's lookup sends. Prints a markdown table.
+
+```sh
+docker compose up -d --wait
+cd caller && caffeinate -dims cargo run --release   # optional argument: requests per cell, default 50000
 ```
 
 Needs `mq-bridge-app`, `oha` (`brew install oha`) and Docker. pgbench runs inside containers

@@ -161,7 +161,11 @@ pub(super) fn transient_publish_failure_policy(
         {
             TransientPublishFailurePolicy::ReplyBadGateway
         }
-        EndpointType::Memory(cfg) if cfg.request_reply => TransientPublishFailurePolicy::ReplyError,
+        EndpointType::Memory(cfg)
+            if cfg.request_reply && crate::endpoints::memory::is_in_process(cfg) =>
+        {
+            TransientPublishFailurePolicy::ReplyError
+        }
         _ => TransientPublishFailurePolicy::StopRoute,
     };
     let EndpointType::Ref(name) = &input.endpoint_type else {
