@@ -376,20 +376,57 @@ pub(super) async fn send_batch_and_commit(
     let batch_len = messages.len();
     scratch.fill_from(&messages);
 
-    // An order-sensitive sink admits one send at a time, in source order. Everything
-    // above and below this call stays concurrent.
-    let sent = {
-        let _release = match ticket {
-            Some(mut ticket) => {
-                if let Some(prev) = ticket.prev.take() {
-                    let _ = prev.await;
+    // An order-sensitive sink admits one send at a time, in source order. The wait wraps
+    // the whole output chain, unless a `parallel` marker in it waits in its place.
+    let sent = match ticket {
+        Some(ticket) if publisher.takes_publish_turn() => {
+            let (waiting, mut waiting_rx) = tokio::sync::oneshot::channel();
+            let (reached, mut reached_rx) = tokio::sync::oneshot::channel();
+            let turn = crate::middleware::PublishTurn {
+                prev: ticket.prev,
+                _release: ticket._release,
+                waiting: Some(waiting),
+                reached: Some(reached),
+            };
+            let send = crate::middleware::with_publish_turn(turn, publisher.send_batch(messages));
+            tokio::pin!(send);
+            // Pending while working, not while queued for the turn.
+            let mut _pending = send_slot.and_then(|(sends, index)| sends.begin(index));
+            let (mut waited, mut reached_turn) = (false, false);
+            loop {
+                tokio::select! {
+                    biased;
+                    sent = &mut send => break sent,
+                    signal = &mut waiting_rx, if !waited => {
+                        waited = true;
+                        if signal.is_ok() {
+                            _pending = None;
+                        }
+                    }
+                    signal = &mut reached_rx, if !reached_turn => {
+                        reached_turn = true;
+                        if signal.is_ok() {
+                            // Dropping a guard clears the slot, so drop the old one first.
+                            _pending = None;
+                            _pending = send_slot.and_then(|(sends, index)| sends.begin(index));
+                        }
+                    }
                 }
-                Some(ticket)
             }
-            None => None,
-        };
-        let _pending = send_slot.and_then(|(sends, index)| sends.begin(index));
-        publisher.send_batch(messages).await
+        }
+        ticket => {
+            let _release = match ticket {
+                Some(mut ticket) => {
+                    if let Some(prev) = ticket.prev.take() {
+                        let _ = prev.await;
+                    }
+                    Some(ticket)
+                }
+                None => None,
+            };
+            let _pending = send_slot.and_then(|(sends, index)| sends.begin(index));
+            publisher.send_batch(messages).await
+        }
     };
     // Read-mostly: written once per run, so workers do not contend on it.
     if let Some((sends, _)) = send_slot.filter(|(s, _)| !s.delivered.load(Ordering::Relaxed)) {

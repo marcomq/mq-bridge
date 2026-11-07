@@ -179,6 +179,27 @@ pub(crate) async fn run_all(held: VecDeque<(BatchCommitFunc, Emptied)>) -> anyho
     Ok(())
 }
 
+/// Like [`run_all`], but a failure does not drop the later nacks. After it only all-nack
+/// commits run, so an ordered source is never acked past the failed batch.
+pub(crate) async fn run_all_keeping_nacks(
+    held: VecDeque<(BatchCommitFunc, Emptied)>,
+) -> anyhow::Result<()> {
+    let mut first_error = None;
+    for (commit, emptied) in held {
+        let dispositions = emptied.into_dispositions();
+        let all_nacks = dispositions
+            .iter()
+            .all(|d| matches!(d, MessageDisposition::Nack));
+        if first_error.is_some() && !all_nacks {
+            continue;
+        }
+        if let Err(error) = commit(dispositions).await {
+            first_error.get_or_insert(error);
+        }
+    }
+    first_error.map_or(Ok(()), Err)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -191,6 +212,34 @@ mod tests {
                 Ok(())
             })
         })
+    }
+
+    #[tokio::test]
+    async fn after_a_failed_commit_only_nacks_still_run() {
+        let ran = Arc::new(Mutex::new(Vec::new()));
+        let commit = |name: &'static str, fail: bool| -> BatchCommitFunc {
+            let ran = Arc::clone(&ran);
+            Box::new(move |_| {
+                ran.lock().unwrap().push(name);
+                Box::pin(async move {
+                    if fail {
+                        anyhow::bail!("{name} failed");
+                    }
+                    Ok(())
+                })
+            })
+        };
+        let held = VecDeque::from([
+            (commit("ack", true), Emptied::Acked(1)),
+            (commit("later ack", false), Emptied::Acked(1)),
+            (
+                commit("nack", false),
+                Emptied::Settled(vec![MessageDisposition::Nack]),
+            ),
+        ]);
+        let err = run_all_keeping_nacks(held).await.unwrap_err();
+        assert_eq!(err.to_string(), "ack failed");
+        assert_eq!(*ran.lock().unwrap(), ["ack", "nack"]);
     }
 
     #[tokio::test]

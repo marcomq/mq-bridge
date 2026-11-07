@@ -184,6 +184,10 @@ impl MessagePublisher for CommandPublisher {
 
     crate::traits::forward_publisher_meta!(inner);
 
+    fn takes_publish_turn(&self) -> bool {
+        self.inner.takes_publish_turn()
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -402,6 +406,32 @@ mod tests {
         let result = publisher.send("test".into()).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("inner fail"));
+    }
+
+    // A handler must not hide an output `parallel` marker, or the route serializes the chain.
+    #[tokio::test]
+    async fn test_command_handler_forwards_the_publish_turn() {
+        use crate::traits::MessagePublisher;
+
+        struct TurnTaker;
+        #[async_trait]
+        impl MessagePublisher for TurnTaker {
+            async fn send_batch(
+                &self,
+                _msgs: Vec<CanonicalMessage>,
+            ) -> Result<SentBatch, PublisherError> {
+                Ok(SentBatch::Ack)
+            }
+            fn takes_publish_turn(&self) -> bool {
+                true
+            }
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+        }
+
+        let handler = |msg: CanonicalMessage| async move { Ok(Handled::Publish(msg)) };
+        assert!(CommandPublisher::new(TurnTaker, handler).takes_publish_turn());
     }
 
     #[tokio::test]

@@ -834,17 +834,20 @@ impl Route {
         let (err_tx, err_rx) = bounded(1); // For critical, route-stopping errors
 
         // --- Publish Dispatch ---
-        // Workers normally send concurrently, which lets whole batches reach the sink out of
-        // source order. A sink that is an ordered log (the file sink) declares
-        // `requires_ordered_publish()` and gets a per-batch [`OrderTicket`] instead, which
-        // sequences the `send_batch` call itself. Only that call: batch prep, disposition
-        // mapping and commits still run across the whole pool, which is why an ordered
-        // route measures within noise of an unordered one.
+        // Workers send concurrently, so batches can reach the sink out of source order. An
+        // ordered sink (`requires_ordered_publish()`) gets a per-batch [`OrderTicket`] that
+        // sequences the whole output chain; a `parallel` marker on the output takes over that
+        // wait, so the entries above it overlap.
         let ordered_publish = publisher.requires_ordered_publish();
         if ordered_publish {
             debug!(
                 "Route '{}' publishes to an order-sensitive sink: sends are sequenced.",
                 name
+            );
+        } else if self.output_has_middleware(|m| matches!(m, Middleware::Parallel(_))) {
+            warn!(
+                "Route '{name}' has `parallel` on its output, but its sink accepts batches in any \
+                 order, so the marker has no effect; `concurrency` already overlaps the sends."
             );
         }
         // channel capacity is measured in batches, not messages

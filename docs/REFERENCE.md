@@ -1734,7 +1734,8 @@ speed them up. `parallel` changes that for the entries listed **above** it: each
 `max_in_flight` lanes gets its own copy of them and works on a batch of its own, on its own
 task. The entries **below** it handle each batch first, one at a time, as before. Batches
 leave in the order they were read, so the route sees and commits them exactly as it would
-without the marker. Input only.
+without the marker. Input and output; on an output it works differently, see
+[On an output](#on-an-output).
 
 | Field | Type | Default |
 |---|---|---|
@@ -1761,6 +1762,40 @@ validated and enriched at once.
 - On shutdown or a reconnect, finished batches not yet handed to the route are nacked. Lanes
   still at work are stopped, so their batches stay uncommitted and the source redelivers them.
 - One `parallel` per endpoint.
+
+#### On an output
+
+With `concurrency` above 1, the route's workers already send several batches at once. To a
+sink that must receive batches in source order (`file`, `dir_spool`, `http_bulk` with
+changes), the route hands one batch at a time, and that wait covers the whole output chain:
+a `lookup` on such an output runs one batch at a time, however high `concurrency` is.
+
+`parallel` on the output moves that wait to the marker. The entries **above** it run on
+every worker at once; the entries **below** it and the sink still get one batch at a time,
+in source order. The route's `concurrency` sets how many batches overlap, so `max_in_flight`
+is a startup error here, and at `concurrency: 1` the route warns that the marker does
+nothing. The same entries as on an input may sit above it. A route handler counts as above
+the marker too, so it must be safe to run on several batches at once. On a sink that takes
+batches in any order the marker has no effect (the route warns), and on a lookup's `from` it
+is refused.
+
+```yaml route
+enrich_to_file:
+  concurrency: 8
+  input: { kafka: { topic: "orders", url: "localhost:9092" } }
+  output:
+    file: { path: "orders.jsonl" }
+    middlewares:
+      - lookup:
+          from: { static: { body: '{"tier":"gold"}', raw: true } }
+          into: customer
+      - parallel: {}
+      - retry: { max_attempts: 3 }
+```
+
+Here up to eight batches are enriched at once, then `retry` and the file sink take them one
+at a time, in source order. Without the marker, entries listed later wrap the earlier ones;
+with it, everything above the marker runs before everything below it.
 
 ### `random_panic`
 

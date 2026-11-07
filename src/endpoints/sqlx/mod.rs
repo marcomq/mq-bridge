@@ -1752,8 +1752,9 @@ impl SqlxPublisher {
             let sql = query.expand(chunk.len(), |i| {
                 positional_placeholder(&self.driver_name, i + 1)
             });
-            // Not cached: a Postgres generic plan made on a small table stays a seq scan.
-            let mut select = sqlx::query(audited_sql(&sql)).persistent(false);
+            // Small lists are cached (one round trip); large ones not, as a Postgres generic plan
+            // made on a small table stays a seq scan.
+            let mut select = sqlx::query(audited_sql(&sql)).persistent(chunk.len() <= 16);
             for &i in chunk {
                 select = bind_value(select, values[i].clone());
             }

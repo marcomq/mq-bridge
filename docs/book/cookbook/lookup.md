@@ -90,7 +90,9 @@ input:
     - deduplication: { store: "memory://orders", ttl_seconds: 3600, key: "${payload:order_id}" }
 ```
 
-On an output, raise the route's `concurrency` instead; `parallel` is input-only.
+On an output, raise the route's `concurrency`. If the sink keeps source order (`file`,
+`dir_spool`), also put `parallel: {}` below the `lookup`, or the lookups still run one batch
+at a time; see [`parallel` on an output](../engine/reference.md#on-an-output).
 
 ## Postgres gotchas
 

@@ -25,6 +25,15 @@ python3 summarize.py                             # $RESULTS/summary.md
 docker compose --profile pgbench down --volumes
 ```
 
+**Quick run (~4 min)**: file throughput plus a few HTTP points on loopback; skips pgbench,
+whose upper bound only changes with Postgres or the machine.
+
+```sh
+caffeinate -dims python3 run_file.py --reps 2 --window 4
+caffeinate -dims python3 run.py --reps 1 --duration 3s --warmup 1s --nets loopback \
+  --closed 1 64 --rates 5000 20000
+```
+
 Needs `mq-bridge-app`, `oha` (`brew install oha`) and Docker. pgbench runs inside containers
 from the `postgres:17.6` image, nothing is installed on the host. Results go to
 `$RESULTS` (default `results/current/`, git-ignored). The pgbench and file CSVs append, so

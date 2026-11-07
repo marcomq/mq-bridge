@@ -6,12 +6,20 @@ All notable changes to `mq-bridge`. Newest first.
 
 ### Added
 
-- **`parallel` input middleware.** Input middlewares used to run one batch at a time in
-  the route's reader. The entries listed above `- parallel: { max_in_flight: N }` now run
-  on up to N batches at once, each lane on its own task, and batches still leave and
-  commit in read order. Only stateless middlewares (`transform`, `lookup`, `id`,
-  `compression`, `encryption`) may sit above it. On an input, `transform` (schema) goes
-  from 0.9M to 3.6M msg/s and a static `lookup` from 0.4M to 1.2M msg/s on 8 cores.
+- **`parallel` middleware, on an input or an output.** It lets the middlewares above it
+  work on several batches at once; routes without it behave as before.
+  - *On an input*, the entries above `- parallel: { max_in_flight: N }` run on up to N
+    batches at once, each lane on its own task, and batches still leave and commit in read
+    order. Only stateless middlewares (`transform`, `lookup`, `id`, `compression`,
+    `encryption`) may sit above it. `transform` (schema) goes from 0.9M to 3.6M msg/s and a
+    static `lookup` from 0.4M to 1.2M msg/s on 8 cores.
+  - *On an output* in front of a sink that keeps source order (`file`, `dir_spool`,
+    `http_bulk` with changes), the entries above `- parallel: {}` run on every route worker
+    at once; the entries below it and the sink still get batches in source order. Before,
+    the whole output chain waited for its turn, so a `lookup` there ran one batch at a time
+    at any `concurrency`. On a sink that takes batches in any order the marker has no
+    effect and the route logs a warning. New `MessagePublisher::takes_publish_turn`
+    (default `false`) lets a custom wrapper pass the marker through.
 - **Plugin middleware can wrap the endpoint (plugin ABI 1.5).** A middleware exported with
   `wrap_middleware:` gets the inner consumer or publisher itself, lent by the host, so a
   plugin can now do anything a built-in middleware does: hold messages back, keep state
@@ -26,6 +34,9 @@ All notable changes to `mq-bridge`. Newest first.
 
 ### Changed
 
+- **A batched SQL `lookup` with up to 16 keys takes one round trip instead of two.** Its
+  statement is now cached on the connection; larger `IN` lists stay uncached, so Postgres
+  does not keep a generic plan made on a small table.
 - **`lookup` writes its answers into the payload without parsing the whole document.**
   Untouched fields are copied as they are, which makes a static lookup on an input about
   1.5x faster. Fields keep their order. `aggregate` now uses the same writer, so an `into`

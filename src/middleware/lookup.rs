@@ -66,6 +66,16 @@ impl Entry {
         let payload = payload
             .map(|t| CompiledTemplate::compile(t, None))
             .transpose()?;
+        if from
+            .middlewares
+            .iter()
+            .any(|m| matches!(m, crate::models::Middleware::Parallel(_)))
+        {
+            return Err(InvalidConfig(anyhow::anyhow!(
+                "lookup: `parallel` cannot be set on a lookup's `from`; set it on the route's input or output"
+            ))
+            .into());
+        }
         // Box::pin breaks the recursive async type, as in the dlq middleware.
         let from = Box::pin(create_publisher_from_route(route_name, &with_status(from))).await?;
         let found_key = if into.is_empty() {
@@ -512,6 +522,10 @@ impl MessagePublisher for LookupPublisher {
 
     crate::traits::forward_publisher_meta!(inner);
 
+    fn takes_publish_turn(&self) -> bool {
+        self.inner.takes_publish_turn()
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -660,6 +674,20 @@ mod tests {
             .await
             .unwrap();
         (publisher, channel)
+    }
+
+    #[tokio::test]
+    async fn parallel_on_the_from_endpoint_is_refused() {
+        let config: LookupMiddleware = serde_yaml_ng::from_str(
+            "from: { static: { body: '{}', raw: true }, middlewares: [ { parallel: {} } ] }\ninto: x",
+        )
+        .unwrap();
+        let sink = MemoryPublisher::new_local("lookup_from_parallel", 1);
+        let err = LookupPublisher::new(Box::new(sink), &config, "lookup_test")
+            .await
+            .err()
+            .expect("refused");
+        assert!(err.to_string().contains("lookup's `from`"), "{err}");
     }
 
     fn msg(value: Value) -> CanonicalMessage {

@@ -884,8 +884,13 @@ impl MessagePublisher for ReorderingPublisher {
     ) -> Result<SentBatch, PublisherError> {
         let seq = messages
             .first()
-            .and_then(|message| message.get_payload_str().parse::<u64>().ok())
-            .expect("tracking test expects numeric payloads");
+            .and_then(|message| {
+                let payload = message.get_payload_str();
+                payload.parse::<u64>().ok().or_else(|| {
+                    serde_json::from_str::<serde_json::Value>(&payload).ok()?["seq"].as_u64()
+                })
+            })
+            .expect("tracking test expects numeric payloads or a `seq` field");
         let delay_ms = 10 * (6u64.saturating_sub(seq.min(6)));
         tokio::time::sleep(Duration::from_millis(delay_ms)).await;
         self.inner.send_batch(messages).await
@@ -1503,8 +1508,13 @@ impl MessagePublisher for OrderedPublishTracker {
     ) -> Result<SentBatch, PublisherError> {
         let seq = messages
             .first()
-            .and_then(|message| message.get_payload_str().parse::<u64>().ok())
-            .expect("tracking test expects numeric payloads");
+            .and_then(|message| {
+                let payload = message.get_payload_str();
+                payload.parse::<u64>().ok().or_else(|| {
+                    serde_json::from_str::<serde_json::Value>(&payload).ok()?["seq"].as_u64()
+                })
+            })
+            .expect("tracking test expects numeric payloads or a `seq` field");
         let active_now = self.observation.active.fetch_add(1, Ordering::SeqCst) + 1;
         self.observation
             .max_active
@@ -1590,6 +1600,57 @@ async fn test_order_sensitive_sink_receives_batches_in_source_order() {
         1,
         "Sequenced sends must never overlap",
     );
+}
+
+// With `parallel` on the output the route no longer waits before `send_batch`; the marker
+// waits instead. The tracker below it delays early batches, so a lost turn shows up as
+// batches arriving out of order.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_output_parallel_marker_keeps_an_ordered_sink_in_source_order() {
+    let unique_id = fast_uuid_v7::gen_id().to_string();
+    let tracking_name = format!("track_marker_{unique_id}");
+    let observation = Arc::new(PublishObservation::default());
+    register_middleware_factory(
+        &tracking_name,
+        Arc::new(OrderedPublishMiddlewareFactory {
+            observation: Arc::clone(&observation),
+            requires_order: true,
+        }),
+    )
+    .unwrap();
+    let middleware = |value| serde_json::from_value::<Middleware>(value).unwrap();
+    let input = Endpoint::new_memory(&format!("marker_in_{unique_id}"), 32);
+    let mut output = Endpoint::new(EndpointType::Null);
+    output.middlewares = vec![
+        middleware(serde_json::json!({
+            "lookup": { "from": { "static": { "body": "{\"tier\":\"gold\"}", "raw": true } }, "into": "customer" }
+        })),
+        middleware(serde_json::json!({ "parallel": {} })),
+        Middleware::Custom {
+            name: tracking_name,
+            config: serde_json::Value::Null,
+        },
+    ];
+    let route = Route::new(input.clone(), output)
+        .with_concurrency(4)
+        .with_batch_size(1);
+
+    let channel = input.channel().unwrap();
+    let messages = (0..6)
+        .map(|seq| crate::CanonicalMessage::from(format!("{{\"seq\":{seq}}}")))
+        .collect();
+    channel.fill_messages(messages).await.unwrap();
+    channel.close();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        route.run_until_err("output_marker_test", None, None),
+    )
+    .await
+    .expect("Route should not hang while draining finite input")
+    .expect("Route should complete without errors");
+
+    assert_eq!(*observation.arrived.lock().unwrap(), vec![0, 1, 2, 3, 4, 5]);
+    assert_eq!(observation.max_active.load(Ordering::SeqCst), 1);
 }
 
 // The default stays unordered so concurrent sinks keep their throughput: batches may

@@ -19,8 +19,9 @@ pub(super) struct CloseOnDrop<T>(pub(super) async_channel::Receiver<T>);
 /// Hands the right to call `send_batch` from one batch to the next when the sink
 /// declares [`MessagePublisher::requires_ordered_publish`]. `prev` resolves once the
 /// preceding batch's send returned (or its worker went away); dropping `_release` lets
-/// the batch behind it in. Only the `send_batch` call is serialised — per-batch prep,
-/// disposition mapping and commits still run concurrently across the worker pool.
+/// the batch behind it in. The `send_batch` call, output middlewares included, is serialised
+/// unless a `parallel` output marker waits in its place; per-batch prep, disposition mapping
+/// and commits still run concurrently across the worker pool.
 pub(super) struct OrderTicket {
     pub(super) prev: Option<tokio::sync::oneshot::Receiver<()>>,
     pub(super) _release: tokio::sync::oneshot::Sender<()>,

@@ -824,7 +824,7 @@
           "additionalProperties": false
         },
         {
-          "description": "Input-only. The entries listed above it run on several batches at once; batches\nstill leave in read order.",
+          "description": "The entries listed above it run on several batches at once; batches still leave in\nread order. Input and output.",
           "type": "object",
           "properties": {
             "parallel": {
@@ -1852,11 +1852,11 @@
       ]
     },
     "ParallelMiddleware": {
-      "description": "Parallel middleware configuration.\n\nInput-only marker. The middlewares listed above it run on up to `max_in_flight` batches\nat once, each lane with its own copy of them; the ones below it read one batch at a time.\nResults and commits stay in read order. Only stateless middlewares may sit above it.",
+      "description": "Parallel middleware configuration.\n\nMarker. On an input, the middlewares listed above it run on up to `max_in_flight` batches\nat once, each lane with its own copy of them; the ones below it read one batch at a time.\nOn an output, those above it run on every route worker and the ones below it send in\norder. Results and commits stay in read order. Only stateless middlewares may sit above it.",
       "type": "object",
       "properties": {
         "max_in_flight": {
-          "description": "Batches processed at once. Defaults to the number of CPU cores.",
+          "description": "Batches processed at once (input only). Defaults to the number of CPU cores.",
           "type": [
             "integer",
             "null"

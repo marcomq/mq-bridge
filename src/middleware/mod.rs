@@ -60,6 +60,7 @@ mod metrics;
 mod otel;
 mod pack;
 mod parallel;
+pub(crate) use parallel::{with_publish_turn, PublishTurn};
 mod random_panic;
 mod raw_json;
 mod retry;
@@ -283,11 +284,35 @@ async fn wrap_consumer(
 /// A route handler is wrapped *around* the result of this function (see `wrap_handler` in
 /// `endpoints/mod.rs`), so it runs once per message and nothing here re-invokes it.
 pub async fn apply_middlewares_to_publisher(
-    mut publisher: Box<dyn MessagePublisher>,
+    publisher: Box<dyn MessagePublisher>,
     endpoint: &Endpoint,
     route_name: &str,
 ) -> Result<Arc<dyn MessagePublisher>> {
-    for step in steps(&endpoint.middlewares) {
+    let middlewares = &endpoint.middlewares;
+    let Some(at) = middlewares
+        .iter()
+        .position(|m| matches!(m, Middleware::Parallel(_)))
+    else {
+        return Ok(wrap_publisher(publisher, middlewares, route_name)
+            .await?
+            .into());
+    };
+    let Middleware::Parallel(config) = &middlewares[at] else {
+        unreachable!("position matched a parallel entry")
+    };
+    let above = &middlewares[..at];
+    parallel::check_output(config, above, route_name)?;
+    let sink_side = wrap_publisher(publisher, &middlewares[at + 1..], route_name).await?;
+    let marker = Box::new(parallel::TurnPublisher::new(sink_side));
+    Ok(wrap_publisher(marker, above, route_name).await?.into())
+}
+
+async fn wrap_publisher(
+    mut publisher: Box<dyn MessagePublisher>,
+    middlewares: &[Middleware],
+    route_name: &str,
+) -> Result<Box<dyn MessagePublisher>> {
+    for step in steps(middlewares) {
         let middleware = match step {
             Step::One(middleware) => middleware,
             Step::Plugin(run) => {
@@ -348,7 +373,7 @@ pub async fn apply_middlewares_to_publisher(
             Middleware::Filter(cfg) => Box::new(invalid(FilterPublisher::new(publisher, &cfg.expression))?.with_on_error(cfg.on_error)),
             Middleware::Parallel(_) => {
                 return Err(InvalidConfig(anyhow::anyhow!(
-                    "[middleware:{route_name}] `parallel` is input-only. The output side already runs `concurrency` batches at once."
+                    "[middleware:{route_name}] an endpoint takes one `parallel` marker."
                 )).into())
             }
             Middleware::Custom { name, config } => {
@@ -367,7 +392,7 @@ pub async fn apply_middlewares_to_publisher(
             }
         };
     }
-    Ok(publisher.into())
+    Ok(publisher)
 }
 
 /// One layer to apply: a middleware this build has, or a run of consecutive ones it
@@ -543,7 +568,10 @@ mod placement_tests {
     async fn input_only_middleware_on_an_output_is_an_invalid_config() {
         for (middleware, hint) in [
             (serde_json::json!({"unpack": {}}), "input-only"),
-            (serde_json::json!({"parallel": {}}), "input-only"),
+            (
+                serde_json::json!({"parallel": {"max_in_flight": 2}}),
+                "input-only",
+            ),
             (
                 serde_json::json!({"id": "${payload:order_id}"}),
                 "consumer-only",

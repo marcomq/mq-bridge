@@ -3,20 +3,24 @@
 //  Licensed under MIT OR Apache-2.0, see LICENSE file for more details
 //  git clone https://github.com/marcomq/mq-bridge
 
-//! The `parallel` input marker: the middlewares listed above it run on several batches at
-//! once, each lane on a task of its own. Batches leave in the order they were read, so the
-//! route sees and commits them exactly as it would without the marker.
+//! The `parallel` marker. On an input, the middlewares listed above it run on several batches
+//! at once, each lane on a task of its own. Batches leave in the order they were read, so the
+//! route sees and commits them exactly as it would without the marker. On an output, the
+//! middlewares above it run on every route worker at once; an ordered sink still gets its
+//! batches in source order, because the order is enforced at the marker instead of the route.
 
-use super::deferred_commit::{run_all, DeferredCommits};
+use super::deferred_commit::{run_all, run_all_keeping_nacks, DeferredCommits};
 use super::served_by_plugin;
 use crate::errors::InvalidConfig;
 use crate::models::{Middleware, ParallelMiddleware};
 use crate::traits::{
     BatchCommitFunc, BoxFuture, ConsumerError, EndpointStatus, MessageConsumer, MessageDisposition,
-    ReceivedBatch,
+    MessagePublisher, PublisherError, ReceivedBatch, Sent, SentBatch,
 };
+use crate::CanonicalMessage;
 use async_trait::async_trait;
 use std::any::Any;
+use std::cell::Cell;
 use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
@@ -35,15 +39,7 @@ pub(super) fn lane_count(
     above: &[Middleware],
     route_name: &str,
 ) -> anyhow::Result<usize> {
-    for middleware in above {
-        if let Some(reason) = why_serial(middleware) {
-            return Err(InvalidConfig(anyhow::anyhow!(
-                "[middleware:{route_name}] `{}` cannot run above `parallel`: {reason}. List it below `parallel`, so it runs first, one batch at a time.",
-                name_of(middleware)
-            ))
-            .into());
-        }
-    }
+    check_above(above, route_name, "first")?;
     match config.max_in_flight {
         Some(0) => Err(InvalidConfig(anyhow::anyhow!(
             "[middleware:{route_name}] `parallel.max_in_flight` must be at least 1"
@@ -292,7 +288,8 @@ impl MessageConsumer for ParallelConsumer {
                 state.stopped = false;
                 (std::mem::take(&mut state.queue), state.deferred.take())
             };
-            let mut first_error = run_all(held).await.err();
+            let mut first_error = run_all_keeping_nacks(held).await.err();
+            let mut failed = first_error.is_some();
             for item in queue {
                 let (batch, source) = match item {
                     Item::Ready(Ok(batch)) => (batch, None),
@@ -310,9 +307,17 @@ impl MessageConsumer for ParallelConsumer {
                 }
                 let mut nacked = (batch.commit)(vec![MessageDisposition::Nack; count]).await;
                 if let Some(dispositions) = source.as_ref().and_then(SourceCommit::recorded) {
-                    nacked = nacked.and((source.expect("just read").commit)(dispositions).await);
+                    // After a failed commit, an ack here could move an ordered source past it.
+                    let all_nacks = dispositions
+                        .iter()
+                        .all(|d| matches!(d, MessageDisposition::Nack));
+                    if !failed || all_nacks {
+                        nacked =
+                            nacked.and((source.expect("just read").commit)(dispositions).await);
+                    }
                 }
                 if let Err(error) = nacked {
+                    failed = true;
                     tracing::warn!("parallel: failed to nack an undelivered batch: {error:#}");
                 }
             }
@@ -416,6 +421,116 @@ impl MessageConsumer for ParallelConsumer {
             Ok(source) => source.status().await,
             Err(_) => EndpointStatus::default(),
         }
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+/// Checks the entries above an output's marker; on an output, `concurrency` sets the overlap.
+pub(super) fn check_output(
+    config: &ParallelMiddleware,
+    above: &[Middleware],
+    route_name: &str,
+) -> anyhow::Result<()> {
+    if config.max_in_flight.is_some() {
+        return Err(InvalidConfig(anyhow::anyhow!(
+            "[middleware:{route_name}] `parallel.max_in_flight` is input-only. On an output, the route's `concurrency` sets how many batches run at once."
+        ))
+        .into());
+    }
+    check_above(above, route_name, "next to the sink")
+}
+
+fn check_above(above: &[Middleware], route_name: &str, below_runs: &str) -> anyhow::Result<()> {
+    for middleware in above {
+        if let Some(reason) = why_serial(middleware) {
+            return Err(InvalidConfig(anyhow::anyhow!(
+                "[middleware:{route_name}] `{}` cannot run above `parallel`: {reason}. List it below `parallel`, so it runs {below_runs}, one batch at a time.",
+                name_of(middleware)
+            ))
+            .into());
+        }
+    }
+    Ok(())
+}
+
+/// The right of one batch to reach an ordered sink: `prev` resolves once the batch before it
+/// was sent; dropping `release` lets the next one in. `waiting` and `reached` signal when the
+/// marker starts and stops waiting, so the route can leave the queued time out of its stall check.
+pub(crate) struct PublishTurn {
+    pub(crate) prev: Option<tokio::sync::oneshot::Receiver<()>>,
+    pub(crate) _release: tokio::sync::oneshot::Sender<()>,
+    pub(crate) waiting: Option<tokio::sync::oneshot::Sender<()>>,
+    pub(crate) reached: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+tokio::task_local! {
+    static TURN: Cell<Option<PublishTurn>>;
+}
+
+/// Runs `send` with `turn` handed to the output marker inside it. A batch that never reaches
+/// the marker drops its turn when `send` returns.
+pub(crate) async fn with_publish_turn<F: Future>(turn: PublishTurn, send: F) -> F::Output {
+    TURN.scope(Cell::new(Some(turn)), send).await
+}
+
+/// The `parallel` output marker: waits for the batch's turn, then hands it to the entries
+/// below the marker and the sink.
+pub(super) struct TurnPublisher {
+    inner: Box<dyn MessagePublisher>,
+}
+
+impl TurnPublisher {
+    pub(super) fn new(inner: Box<dyn MessagePublisher>) -> Self {
+        Self { inner }
+    }
+}
+
+async fn wait_for_turn() -> Option<PublishTurn> {
+    let mut turn = TURN.try_with(Cell::take).ok().flatten()?;
+    if let Some(prev) = turn.prev.take() {
+        turn.waiting.take().map(|tx| tx.send(()));
+        let _ = prev.await;
+        turn.reached.take().map(|tx| tx.send(()));
+    }
+    Some(turn)
+}
+
+#[async_trait]
+impl MessagePublisher for TurnPublisher {
+    async fn send(&self, message: CanonicalMessage) -> Result<Sent, PublisherError> {
+        let _turn = wait_for_turn().await;
+        self.inner.send(message).await
+    }
+
+    async fn send_batch(
+        &self,
+        messages: Vec<CanonicalMessage>,
+    ) -> Result<SentBatch, PublisherError> {
+        let _turn = wait_for_turn().await;
+        self.inner.send_batch(messages).await
+    }
+
+    async fn lookup_batch(
+        &self,
+        requests: &[CanonicalMessage],
+    ) -> Option<Result<Vec<Option<serde_json::Value>>, PublisherError>> {
+        self.inner.lookup_batch(requests).await
+    }
+
+    async fn lookup_each(
+        &self,
+        requests: &[CanonicalMessage],
+    ) -> Option<Vec<Result<Option<serde_json::Value>, PublisherError>>> {
+        self.inner.lookup_each(requests).await
+    }
+
+    crate::traits::forward_publisher_meta!(inner);
+
+    fn takes_publish_turn(&self) -> bool {
+        true
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -530,11 +645,13 @@ mod tests {
         )
     }
 
-    /// Acks the batch starting at `reject` inside the lane and never finishes the one at `stall`.
+    /// Acks the batch starting at `reject` inside the lane, never finishes the one at `stall`,
+    /// and nacks then fails the one at `fail`, as a retryable lookup error does.
     struct Scripted {
         inner: Box<dyn MessageConsumer>,
         reject: usize,
         stall: usize,
+        fail: usize,
     }
 
     #[async_trait]
@@ -547,6 +664,12 @@ mod tests {
                     self.inner.receive_batch(max).await
                 }
                 Some(&n) if n == self.stall => std::future::pending().await,
+                Some(&n) if n == self.fail => {
+                    (batch.commit)(vec![MessageDisposition::Nack])
+                        .await
+                        .unwrap();
+                    Err(ConsumerError::Connection(anyhow::anyhow!("lookup failed")))
+                }
                 _ => Ok(batch),
             }
         }
@@ -556,7 +679,12 @@ mod tests {
         }
     }
 
-    fn scripted(total: usize, reject: usize, stall: usize) -> (ParallelConsumer, Commits) {
+    fn scripted(
+        total: usize,
+        reject: usize,
+        stall: usize,
+        fail: usize,
+    ) -> (ParallelConsumer, Commits) {
         let commits = Commits::default();
         let source = Numbered {
             next: 0,
@@ -571,6 +699,7 @@ mod tests {
                     inner: Box::new(feed),
                     reject,
                     stall,
+                    fail,
                 };
                 Lane::new(Box::new(chain), slot)
             })
@@ -629,7 +758,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_batch_rejected_in_a_lane_is_acked_only_after_the_batches_before_it() {
-        let (mut consumer, commits) = scripted(3, 1, usize::MAX);
+        let (mut consumer, commits) = scripted(3, 1, usize::MAX, usize::MAX);
         let first = consumer.receive_batch(1).await.unwrap();
         let third = consumer.receive_batch(1).await.unwrap();
         assert_eq!((numbers(&first), numbers(&third)), (vec![0], vec![2]));
@@ -642,8 +771,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_failed_lane_nacks_its_batch_in_read_order() {
+        let (mut consumer, commits) = scripted(2, usize::MAX, usize::MAX, 0);
+        assert!(consumer.receive_batch(1).await.is_err());
+        assert_eq!(committed(&commits), [0]);
+        assert!(nacked(&commits, 0));
+
+        let (mut consumer, commits) = scripted(3, usize::MAX, usize::MAX, 1);
+        let first = consumer.receive_batch(1).await.unwrap();
+        assert_eq!(numbers(&first), [0]);
+        assert!(consumer.receive_batch(1).await.is_err());
+        assert!(committed(&commits).is_empty(), "nacked ahead of batch 0");
+
+        consumer.on_disconnect_hook().unwrap().await.unwrap();
+        assert!(nacked(&commits, 1), "{:?}", committed(&commits));
+        assert!(
+            !committed(&commits).contains(&0),
+            "batch 0 belongs to the route"
+        );
+    }
+
+    fn nacked(commits: &Commits, first: usize) -> bool {
+        commits.lock().unwrap().iter().any(|(n, dispositions)| {
+            *n == first
+                && dispositions
+                    .iter()
+                    .all(|d| matches!(d, MessageDisposition::Nack))
+        })
+    }
+
+    #[tokio::test]
     async fn disconnect_does_not_wait_for_a_stalled_lane() {
-        let (mut consumer, commits) = scripted(4, usize::MAX, 1);
+        let (mut consumer, commits) = scripted(4, usize::MAX, 1, usize::MAX);
         let first = consumer.receive_batch(1).await.unwrap();
         assert_eq!(numbers(&first), [0]);
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -677,6 +836,102 @@ mod tests {
             max_in_flight: Some(0),
         };
         assert!(lane_count(&zero, &[], "r").is_err());
+
+        let err = check_output(&config, &above, "r").unwrap_err();
+        assert!(err.to_string().contains("next to the sink"), "{err}");
+        let sized = ParallelMiddleware {
+            max_in_flight: Some(4),
+        };
+        assert!(check_output(&sized, &[], "r").is_err());
+    }
+
+    #[derive(Default)]
+    struct Stats {
+        arrived: Mutex<Vec<u64>>,
+        active: AtomicUsize,
+        peak: AtomicUsize,
+    }
+
+    /// Slows early batches down, records what reached it, then forwards to `inner` if any.
+    struct Probe {
+        inner: Option<Box<dyn MessagePublisher>>,
+        stats: Arc<Stats>,
+    }
+
+    #[async_trait]
+    impl MessagePublisher for Probe {
+        async fn send_batch(
+            &self,
+            messages: Vec<CanonicalMessage>,
+        ) -> Result<SentBatch, PublisherError> {
+            let seq: u64 = messages[0].get_payload_str().parse().unwrap();
+            let active = self.stats.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.stats.peak.fetch_max(active, Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(10 * (6 - seq))).await;
+            self.stats.arrived.lock().unwrap().push(seq);
+            self.stats.active.fetch_sub(1, Ordering::SeqCst);
+            match &self.inner {
+                Some(inner) => inner.send_batch(messages).await,
+                None => Ok(SentBatch::Ack),
+            }
+        }
+
+        fn requires_ordered_publish(&self) -> bool {
+            self.inner
+                .as_ref()
+                .is_none_or(|inner| inner.requires_ordered_publish())
+        }
+
+        fn takes_publish_turn(&self) -> bool {
+            self.inner
+                .as_ref()
+                .is_some_and(|inner| inner.takes_publish_turn())
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_output_marker_overlaps_above_and_orders_below() {
+        let (above, sink) = (Arc::new(Stats::default()), Arc::new(Stats::default()));
+        let chain: Arc<dyn MessagePublisher> = Arc::new(Probe {
+            inner: Some(Box::new(TurnPublisher::new(Box::new(Probe {
+                inner: None,
+                stats: sink.clone(),
+            })))),
+            stats: above.clone(),
+        });
+        assert!(chain.takes_publish_turn() && chain.requires_ordered_publish());
+
+        let mut prev = None;
+        let mut sends = tokio::task::JoinSet::new();
+        for seq in 0..6u64 {
+            let (release, next) = tokio::sync::oneshot::channel();
+            let turn = PublishTurn {
+                prev: prev.replace(next),
+                _release: release,
+                waiting: None,
+                reached: None,
+            };
+            let chain = chain.clone();
+            sends.spawn(with_publish_turn(turn, async move {
+                chain
+                    .send_batch(vec![CanonicalMessage::from(seq.to_string())])
+                    .await
+            }));
+        }
+        while let Some(sent) = sends.join_next().await {
+            sent.unwrap().unwrap();
+        }
+
+        assert!(
+            above.peak.load(Ordering::SeqCst) > 1,
+            "the entries above overlap"
+        );
+        assert_eq!(*sink.arrived.lock().unwrap(), vec![0, 1, 2, 3, 4, 5]);
+        assert_eq!(sink.peak.load(Ordering::SeqCst), 1);
     }
 
     /// A memory route keeps every message, with a transform in the lanes. Output workers

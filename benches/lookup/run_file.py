@@ -23,15 +23,32 @@ PG_URL = "postgres://bench:bench@127.0.0.1:55432/bench"
 SELECT = "SELECT path, id, name, tier FROM users WHERE path"
 
 VARIANTS = {
-    # name: (where clause or None for no lookup, lookup concurrency, route batch size)
-    "no_lookup": (None, 16, 512),
-    "per_message_c16": ("= ${payload:path}", 16, 512),
-    "per_message_c64": ("= ${payload:path}", 64, 512),
-    "batched_b1": ("IN (${payload:path})", 16, 1),
-    "batched_b16": ("IN (${payload:path})", 16, 16),
-    "batched_b128": ("IN (${payload:path})", 16, 128),
-    "batched_b512": ("IN (${payload:path})", 16, 512),
-    "batched_b1000": ("IN (${payload:path})", 16, 1000),
+    # name: (where clause or None for no lookup, lookup concurrency, route batch size,
+    #        `parallel` lanes or None (with lanes the lookup moves to the input; "out" keeps it
+    #        on the output with a `parallel` marker below it), route concurrency)
+    "no_lookup": (None, 16, 512, None, 1),
+    "per_message_c16": ("= ${payload:path}", 16, 512, None, 1),
+    "per_message_c64": ("= ${payload:path}", 64, 512, None, 1),
+    "batched_b1": ("IN (${payload:path})", 16, 1, None, 1),
+    "batched_b16": ("IN (${payload:path})", 16, 16, None, 1),
+    "batched_b128": ("IN (${payload:path})", 16, 128, None, 1),
+    "batched_b512": ("IN (${payload:path})", 16, 512, None, 1),
+    "batched_b1000": ("IN (${payload:path})", 16, 1000, None, 1),
+    "per_message_c16_p8": ("= ${payload:path}", 16, 512, 8, 1),
+    "batched_b16_p8": ("IN (${payload:path})", 16, 16, 8, 1),
+    "batched_b128_p8": ("IN (${payload:path})", 16, 128, 8, 1),
+    "batched_b512_p8": ("IN (${payload:path})", 16, 512, 8, 1),
+    "batched_b1000_p8": ("IN (${payload:path})", 16, 1000, 8, 1),
+    "per_message_c16_rc8": ("= ${payload:path}", 16, 512, None, 8),
+    "batched_b16_rc8": ("IN (${payload:path})", 16, 16, None, 8),
+    "batched_b128_rc8": ("IN (${payload:path})", 16, 128, None, 8),
+    "batched_b512_rc8": ("IN (${payload:path})", 16, 512, None, 8),
+    "batched_b1000_rc8": ("IN (${payload:path})", 16, 1000, None, 8),
+    "per_message_c16_rc8p": ("= ${payload:path}", 16, 512, "out", 8),
+    "batched_b16_rc8p": ("IN (${payload:path})", 16, 16, "out", 8),
+    "batched_b128_rc8p": ("IN (${payload:path})", 16, 128, "out", 8),
+    "batched_b512_rc8p": ("IN (${payload:path})", 16, 512, "out", 8),
+    "batched_b1000_rc8p": ("IN (${payload:path})", 16, 1000, "out", 8),
 }
 
 
@@ -46,7 +63,7 @@ def write_input(rows, seed):
 
 
 def route_yaml(variant, src, dst):
-    where, lookup_c, batch = VARIANTS[variant]
+    where, lookup_c, batch, lanes, route_c = VARIANTS[variant]
     lookup = "" if where is None else f"""
       middlewares:
         - lookup:
@@ -58,10 +75,29 @@ def route_yaml(variant, src, dst):
                 lookup_query: "{SELECT} {where}"
             into: user
             concurrency: {lookup_c}"""
-    return f"""log_level: warn
+    if lanes == "out":
+        lookup += "\n        - parallel: {}"
+    elif lanes:
+        return f"""log_level: warn
 routes:
   lookup_file_bench:
     concurrency: 1
+    batch_size: {batch}
+    exit_on_empty: true
+    input:
+      file:
+        path: "{src}"
+        format: raw{lookup}
+        - parallel: {{ max_in_flight: {lanes} }}
+    output:
+      file:
+        path: "{dst}"
+        format: raw
+"""
+    return f"""log_level: warn
+routes:
+  lookup_file_bench:
+    concurrency: {route_c}
     batch_size: {batch}
     exit_on_empty: true
     input:

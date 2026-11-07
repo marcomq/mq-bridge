@@ -312,6 +312,18 @@ impl Route {
                 self.options.concurrency
             ));
         }
+        if self.options.concurrency <= 1
+            && self
+                .output
+                .middlewares
+                .iter()
+                .any(|middleware| matches!(middleware, Middleware::Parallel(_)))
+        {
+            warnings.push(format!(
+                "Route '{name}' has `parallel` on its output at concurrency 1, so the entries \
+                 above it never overlap. Raise `concurrency` to run them on several batches at once."
+            ));
+        }
         if self
             .resolved_input()
             .is_some_and(|input| dedup_keys_on_minted_message_id(&input))
