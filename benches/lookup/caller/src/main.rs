@@ -1,7 +1,7 @@
 //! An application that needs one user per request: query Postgres itself, or call a route.
 //!
 //! Needs the lookup bench's Postgres (`docker compose up -d --wait` in `benches/lookup`) and
-//! `POSTGRES_URL` pointing at it; the credentials are in `benches/lookup/docker-compose.yml`.
+//! `PGUSER` / `PGPASSWORD` set to the credentials in `benches/lookup/docker-compose.yml`.
 //! Run with `cargo run --release` (optional argument: requests per measurement, default 50000).
 //!
 //! - `direct`: one `= $1` query per request on a sqlx pool of 64 connections.
@@ -12,12 +12,14 @@
 //!
 //! Every answer is checked against its key.
 
-use mq_bridge::{Caller, CanonicalMessage, Route};
+use mq_bridge::{Caller, CanonicalMessage};
 use std::collections::HashMap;
 use std::future::Future;
 use std::time::{Duration, Instant};
 
 const ROUTES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/routes.yaml");
+/// Same URL as in `routes.yaml`; user and password come from `PGUSER` / `PGPASSWORD`.
+const PG_URL: &str = "postgres://localhost:55432/bench";
 const BATCH: usize = 256;
 
 type User = (String, i64, String, String);
@@ -36,24 +38,15 @@ fn user_path(answer: &CanonicalMessage) -> String {
     answer["user"]["path"].as_str().unwrap().to_string()
 }
 
-fn postgres_url() -> String {
-    std::env::var("POSTGRES_URL").expect("set POSTGRES_URL, see benches/lookup/docker-compose.yml")
-}
-
-/// `route` from `routes.yaml`, with `${POSTGRES_URL}` taken from the environment.
 async fn deploy(route: &str) -> Caller {
-    let text = std::fs::read_to_string(ROUTES).unwrap();
-    let text = text.replace("${POSTGRES_URL}", &postgres_url());
-    Caller::deploy(route, Route::from_str(&text, route).unwrap())
-        .await
-        .unwrap()
+    Caller::from_file(ROUTES, route).await.unwrap()
 }
 
 async fn pool() -> sqlx::PgPool {
     sqlx::postgres::PgPoolOptions::new()
         .max_connections(64)
         .test_before_acquire(false)
-        .connect(&postgres_url())
+        .connect(PG_URL)
         .await
         .unwrap()
 }

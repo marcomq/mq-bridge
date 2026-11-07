@@ -10,12 +10,11 @@ routes:
         - lookup:
             from:
               sqlx:
-                url: "${POSTGRES_URL}"
+                url: "postgres://localhost:55432/bench"
                 table: users
                 max_connections: 64
                 lookup_query: "SELECT path, id, name, tier FROM users WHERE path IN (${payload:path})"
             into: user
-            concurrency: 16
     output:
       response: {}
 
@@ -29,12 +28,11 @@ routes:
         - lookup:
             from:
               sqlx:
-                url: "${POSTGRES_URL}"
+                url: "postgres://localhost:55432/bench"
                 table: users
                 max_connections: 64
                 lookup_query: "SELECT path, id, name, tier FROM users WHERE path IN (${payload:path})"
             into: user
-            concurrency: 16
         - parallel: { max_in_flight: 8 }
     output:
       response: {}

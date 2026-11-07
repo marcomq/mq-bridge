@@ -13,10 +13,13 @@ Three measurements against the same Postgres table (1M rows, text primary key):
 
 ## Run
 
-`run.py`, `run_file.py` and `caller/` read the database URL from `POSTGRES_URL`: point it at
-the compose database (user, password and port are in `docker-compose.yml`).
+`run.py` and `run_file.py` read the database URL from `POSTGRES_URL`, set to the compose
+database below. `caller/` connects to `postgres://localhost:55432/bench` and takes user and
+password from `PGUSER` / `PGPASSWORD`.
 
 ```sh
+export POSTGRES_URL=postgres://bench:bench@localhost:55432/bench   # run.py, run_file.py
+export PGUSER=bench PGPASSWORD=bench                               # caller/
 export RESULTS=results/$(date +%Y%m%d-%H%M%S)   # a fresh directory per run; CSVs append
 docker compose up -d --wait
 mkdir -p "$RESULTS" && { date; uptime; mq-bridge-app --version; oha --version; docker --version;
