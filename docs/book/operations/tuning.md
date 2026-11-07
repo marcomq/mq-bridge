@@ -97,6 +97,36 @@ through ordered sequencing or run concurrently for independent-ack transports. O
 batches wait for their commit, the route stops reading until one finishes. Rarely needs
 changing.
 
+## `parallel` — input middlewares on several batches
+
+`concurrency` widens the output side only. Input middlewares run in the route's reader, one
+batch at a time, so a `transform` or `lookup` on an input caps the route at what one core
+does. Put a `parallel` marker below them and they run on up to `max_in_flight` batches at
+once (default: the number of cores). Batches still leave and commit in read order.
+
+```yaml
+input:
+  kafka: { topic: "orders", url: "localhost:9092" }
+  middlewares:
+    - lookup:
+        from: { http: { url: "http://customers.internal" } }
+        metadata: { http_path: "/customers/${payload:customer_id}" }
+        into: customer
+    - transform: { schema_file: "order.json" }
+    - parallel: { max_in_flight: 8 }
+    - deduplication: { store: "memory://orders", ttl_seconds: 3600, key: "${payload:order_id}" }
+```
+
+Here `lookup` and `transform` run in parallel; `deduplication` does not. Entries below the
+marker sit nearer the source and handle each batch first, one at a time. `deduplication`
+must stay there: it checks each message against the keys of earlier batches, so it has to
+see the batches one after another, in read order. Only stateless
+middlewares (`transform`, `lookup`, `id`, `compression`, `encryption`) may sit above the
+marker. Deduplicating first also skips the lookup for duplicates. Each lane builds
+its own copy, so a `lookup` above it opens its `from` endpoint once per lane. On 8 cores, an
+input `transform` (schema) went from 0.9M to 3.6M msg/s, a static `lookup` from 0.4M to
+1.2M msg/s. See [`parallel`](../engine/reference.md#parallel).
+
 ## Writing to a Postgres table
 
 A SQL sink writes in one of three ways, and on Postgres they differ in speed:

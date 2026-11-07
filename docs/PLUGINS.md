@@ -269,9 +269,9 @@ override together.
 ## All built-in endpoints as one plugin
 
 `plugins/full` builds `libmq_bridge_full`, a library with a factory for every
-built-in endpoint, each under the endpoint's own name. It is for an application
-that embeds mq-bridge without the endpoint features and wants them in some
-deployments only:
+built-in endpoint, each under the endpoint's own name, and every built-in
+middleware that has a feature. It is for an application that embeds mq-bridge
+without those features and wants them in some deployments only:
 
 ```toml
 mq-bridge = { version = "1", default-features = false, features = ["plugin"] }
@@ -288,10 +288,18 @@ the factory registered under its name, and without one the route fails with
 `--no-default-features --features portable`, or with single features such as
 `--features mq-bridge/kafka`.
 
+Middleware is written as usual too. `filter`, `deduplication`, `encryption`,
+`compression` and `aggregate` without their host feature are applied by the
+library's `builtin_middleware`, which wraps the host's endpoint (see
+[Wrapping the endpoint](#wrapping-the-endpoint)). Consecutive ones cross once, in
+the listed order. `metrics` and `otel` still need the host's feature: the
+library's metrics and spans would not reach the host's exporters.
+
 The library has its own engine. A `memory` channel, a `ref` name or a factory
 registered in the host is not visible to an endpoint it creates, so keep
 structural endpoints and `memory` in the host's route and let the library provide
-only the transport. `--no-resume` is not applied to an input served this way.
+only the transport. Its deduplication stores and connections are its own as well.
+`--no-resume` is not applied to an input served this way.
 
 ## Writing a plugin
 
@@ -470,6 +478,29 @@ mq_bridge::export_endpoint_plugin! {
     middleware: PulsarMiddleware,
 }
 ```
+
+#### Wrapping the endpoint
+
+A middleware that needs more than the batch — one that keeps state across
+commits, holds messages back, ends the stream, or answers requests — wraps the
+endpoint itself (ABI 1.5). Export any `CustomMiddlewareFactory` with
+`wrap_middleware`:
+
+```rust
+mq_bridge::export_middleware_plugin! {
+    name: "take",
+    wrap_middleware: TakeFactory, // CustomMiddlewareFactory + Default
+}
+```
+
+The host lends the inner consumer or publisher through its own function table,
+and the factory's `apply_consumer` / `apply_publisher` get it as a plain
+`Box<dyn MessageConsumer>` / `Box<dyn MessagePublisher>`. Commits, outcomes,
+responses, status and `exit_on_empty` pass through the ABI both ways. Each batch
+crosses it twice per direction, so a map/drop middleware stays cheaper as a
+`BatchFilter`. A host older than 1.5 does not know the wrap entries: the route
+starts, and its first batch fails with "this middleware wraps the endpoint and
+maps no batches".
 
 ### Describing its configuration
 
@@ -759,6 +790,14 @@ This measures only the boundary cost. It matters most for small batches and
 many concurrent routes; a real broker's latency hides most of it at large
 batches. Rebuilding a plugin against 1.2 is enough to get the gain.
 
+Since 1.5 the SDK first polls each call once on the calling thread, inside the
+plugin's runtime context. A call that is ready right away completes there without
+a thread handoff; only one that has to wait moves to the plugin's runtime. Your
+code up to its first `.await` that waits therefore runs on a host worker, as a
+built-in middleware does, so don't block there. A wrapping middleware at batch 1
+(lean host plus the full plugin, memory to memory) went from about 20-30k to
+220-355k messages per second with this.
+
 Your `tracing` events and `metrics` samples reach the host as well. On load the
 SDK installs a subscriber and a recorder inside the plugin that forward to the
 host's own. The host re-emits every plugin event under the target
@@ -800,7 +839,10 @@ assert_eq!(direct, loaded);
 ```
 
 The suite checks round-tripping, metadata preservation, nack redelivery, and
-that an uncommitted batch is redelivered. Turn the redelivery checks off
+that an uncommitted batch is redelivered. `conformance::run_wrapped(endpoint,
+middleware, config, options)` runs it with a middleware applied on both sides,
+so a wrapping middleware that passes everything on can be checked linked and
+loaded the same way. Turn the redelivery checks off
 (`expect_redelivery = false`) for endpoints that legitimately have none, or whose
 broker delays redelivery beyond a test's patience, and the metadata check off
 (`expect_metadata = false`) for transports that carry payloads only.
@@ -889,6 +931,15 @@ falls back to the plain blocking call, on a thread of its own, and reports a
 healthy default status. `MQB_BLOCKING_PUBLISHER` fills in exactly those entries,
 so a publisher sets only `publisher_create`, `_send_batch`, `_flush`, `_close`
 and `_free`.
+
+A wrapping middleware sets `MQB_CAP_MIDDLEWARE_WRAP` and
+`middleware_wrap_consumer` / `_publisher`, which get the lent endpoint's table and
+handle and return a consumer or publisher handle of its own. It drives the inner
+endpoint through that table's ordinary entries, and frees it when its own handle
+is freed or the wrap fails (`mqb_inner_consumer_free`, `mqb_inner_publisher_free`).
+`MQB_WRAPPING_MIDDLEWARE` fills in the map/drop entries it does not use, and
+[`examples/c-plugin/take.c`](../examples/c-plugin/take.c) ends its input after
+`limit` messages.
 
 [`examples/c-plugin/plugin.c`](../examples/c-plugin/plugin.c) shows both sides
 in one library, wrapping two unchanged "legacy" libraries. Its middleware turns
@@ -1040,6 +1091,7 @@ Minor versions so far:
 | 1.2 | `publisher_send_batch_responses` and `responses_free`, so publish responses reach the route; `batch_commit_replies` with `MQB_DISPOSITION_REPLY`, so a plugin consumer receives the reply to send; `consumer_status` / `publisher_status`, so `status()` reports the plugin's own state; and `*_async` twins of receive, commit, send and flush that finish through an `MqbCompletion` callback instead of blocking a host thread; `plugin_init` hands the plugin an `MqbHostVTable`, through which its logs and metrics reach the host and it registers a crash handler; the optional `mq_bridge_plugin_v1_at` symbol exports several tables from one library; `factory_delivery` answers `idempotent_sink` / `acknowledges` per config. |
 | 1.3 | `publisher_disconnect`, which hands a publisher the route's outcome (`MQB_DISCONNECT_COMPLETED`, `_STOPPED`, `_FAILED`) before it is closed, so `disconnect_outcome()` works inside a loaded plugin. |
 | 1.4 | `publisher_deferred_commit_interval_ms`, with which a publisher asks the route to commit the source only after its next successful flush; `factory_delivery` bits `MQB_DELIVERY_REQUIRES_FULL_REPLAY` and `MQB_DELIVERY_REPLAYS_FROM_START`, checked at route start. |
+| 1.5 | `middleware_wrap_consumer` / `middleware_wrap_publisher` with `MQB_CAP_MIDDLEWARE_WRAP`: the host lends a middleware the inner endpoint through its own function table, so a plugin middleware can do anything a built-in one does. |
 
 Publish the supported ABI range in your package metadata, and test each packaged
 plugin against the oldest and newest mq-bridge you claim to support.

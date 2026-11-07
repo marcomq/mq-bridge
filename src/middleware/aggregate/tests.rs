@@ -1,5 +1,5 @@
 use super::*;
-use serde_json::json;
+use serde_json::{json, Map};
 
 const SUM: &str = "{ sum: (state.sum ?? 0) + amount, n: (state.n ?? 0) + 1 }";
 

@@ -331,6 +331,7 @@ kafka_to_nats:
                 Middleware::Otel(_) => {}
                 Middleware::Lookup(_) => {}
                 Middleware::Aggregate(_) => {}
+                Middleware::Parallel(_) => {}
             }
         }
 

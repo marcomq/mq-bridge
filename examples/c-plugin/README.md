@@ -1,6 +1,6 @@
 # C plugins
 
-Two mq-bridge plugins written in C against
+Three mq-bridge plugins written in C against
 [`bindings/c/include/mq_bridge_plugin.h`](../../bindings/c/include/mq_bridge_plugin.h):
 
 - **`minimal.c`** (`drop_heartbeats`, ~35 lines) is a middleware that drops
@@ -19,7 +19,12 @@ Two mq-bridge plugins written in C against
   DE12345678000000012345EUR  ->  {"account":"DE12345678","amount_minor":12345,"currency":"EUR"}
   ```
 
-Both use [`mq_bridge_plugin_helpers.h`](../../bindings/c/include/mq_bridge_plugin_helpers.h)
+- **`take.c`** (`take`) is a middleware that **wraps** the input (ABI 1.5,
+  `MQB_CAP_MIDDLEWARE_WRAP`): the host lends it the inner endpoint and its table,
+  and `take` ends the stream after `limit` messages, which a map/drop middleware
+  cannot do. Use it as `- custom: { name: take, config: { limit: 100 } }`.
+
+All use [`mq_bridge_plugin_helpers.h`](../../bindings/c/include/mq_bridge_plugin_helpers.h)
 so their tables list only the entries they implement.
 
 ## Build

@@ -270,7 +270,7 @@ jobs:
     steps:
       # The same OIDC exchange the publish job makes. It proves this workflow is
       # a registered Trusted Publisher on crates.io; it does not enumerate the
-      # three crates, so it catches a revoked or misnamed registration rather
+      # four crates, so it catches a revoked or misnamed registration rather
       # than one crate that was never set up.
       - name: crates.io trusted publishing
         uses: rust-lang/crates-io-auth-action@v1
@@ -402,6 +402,7 @@ jobs:
       # Each crate can only be dry-run as far as its dependencies are already on
       # crates.io, and this runs before anything is published:
       #   mq-bridge        - every dep is published, so the tarball builds.
+      #   full plugin      - depends on the unpublished mq-bridge at this version.
       #   app-core         - depends on the unpublished mq-bridge at this version.
       #   mq-bridge-app    - the same, through app-core.
       # `cargo package` always re-resolves the packaged Cargo.lock against the real
@@ -413,6 +414,7 @@ jobs:
       - name: Package publishable crates
         run: |
           cargo package -p mq-bridge
+          cargo package --list -p mq-bridge-full-plugin > /dev/null
           cargo package --manifest-path apps/mq-bridge-app/Cargo.toml --list -p mq-bridge-app-core > /dev/null
           cargo package --manifest-path apps/mq-bridge-app/Cargo.toml --list -p mq-bridge-app > /dev/null
 
@@ -655,6 +657,128 @@ jobs:
         with:
           tag_name: ${{ needs.metadata.outputs.release_tag }}
           files: ${{ env.ASSET_PATH }}
+
+  # Every built-in endpoint and middleware as one plugin library, for hosts built without them.
+  # The archive is a release asset (Homebrew renders from it) and the conda package
+  # repackages the same archive on its own platform's runner.
+  build-full-plugin:
+    name: Build full plugin for ${{ matrix.target }}
+    needs: [metadata, release]
+    runs-on: ${{ matrix.os }}
+    # Same LNK4099 reason as build-release.
+    env:
+      CARGO_BUILD_WARNINGS: warn
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            conda: linux-64
+          - os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            conda: linux-aarch64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            conda: osx-arm64
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+            conda: win-64
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag_name || github.ref }}
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          toolchain: stable
+          target: ${{ matrix.target }}
+
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config zlib1g-dev cmake libcurl4-openssl-dev protobuf-compiler
+
+      # Same Strawberry perl pin as build-c-library, for `kafka-ssl`'s OpenSSL build.
+      - name: Install dependencies (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          choco install protoc --no-progress -y
+          "OPENSSL_SRC_PERL=$((Get-Command perl).Source)" >> $env:GITHUB_ENV
+
+      - name: Install dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: brew install cmake pkg-config openssl@3 protobuf
+
+      - name: Build plugin library (full)
+        shell: bash
+        run: cargo build -p mq-bridge-full-plugin --release --target ${{ matrix.target }}
+
+      - name: Package artifacts
+        shell: bash
+        env:
+          CARGO_VERSION: ${{ needs.metadata.outputs.cargo_version }}
+        run: |
+          set -euo pipefail
+          ASSET_NAME="mq-bridge-full-${CARGO_VERSION}-${{ matrix.target }}"
+          OUT="target/${{ matrix.target }}/release"
+          mkdir -p staging
+          case "$RUNNER_OS" in
+            Windows) cp "$OUT/mq_bridge_full.dll" staging/ ;;
+            macOS)
+              cp "$OUT/libmq_bridge_full.dylib" staging/
+              install_name_tool -id @rpath/libmq_bridge_full.dylib staging/libmq_bridge_full.dylib
+              codesign --force --sign - staging/libmq_bridge_full.dylib
+              ;;
+            *) cp "$OUT/libmq_bridge_full.so" staging/ ;;
+          esac
+          cp LICENSE-MIT LICENSE-APACHE bindings/c/THIRD_PARTY_LICENSES.txt staging/
+          tar -czf "${ASSET_NAME}.tar.gz" -C staging .
+          echo "ASSET_PATH=${ASSET_NAME}.tar.gz" >> "$GITHUB_ENV"
+          echo "MQ_BRIDGE_VERSION=${CARGO_VERSION}" >> "$GITHUB_ENV"
+
+      # A host finds the library only through this export; also shows what it links.
+      - name: Smoke test the library
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$RUNNER_OS" == "macOS" ]; then
+            lib=staging/libmq_bridge_full.dylib
+            otool -L "$lib"
+            nm -gU "$lib" | grep -q ' _mq_bridge_plugin_v1$'
+          else
+            lib=staging/libmq_bridge_full.so
+            ldd "$lib"
+            nm -D --defined-only "$lib" | grep -q ' mq_bridge_plugin_v1$'
+          fi
+
+      - name: Upload Release Asset
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        with:
+          tag_name: ${{ needs.metadata.outputs.release_tag }}
+          files: ${{ env.ASSET_PATH }}
+
+      # The conda package must not hold back publish-release, which needs this job.
+      - name: Stage the library for the conda recipe
+        id: stage_full_plugin_conda
+        continue-on-error: true
+        shell: bash
+        run: |
+          mkdir -p plugins/full/packaging/conda/stage
+          tar -xzf "$ASSET_PATH" -C plugins/full/packaging/conda/stage
+
+      - name: Build the conda package
+        if: ${{ steps.stage_full_plugin_conda.outcome == 'success' }}
+        continue-on-error: true
+        uses: prefix-dev/rattler-build-action@1ca5f45832f419a46d1326ccc5861d7e14d67c44 # v0.2.39
+        with:
+          recipe-path: plugins/full/packaging/conda/recipe.yaml
+          build-args: --target-platform=${{ matrix.conda }} -c conda-forge
+          artifact-name: mq-bridge-full-conda-${{ matrix.conda }}
 
   build-linux-amd64:
     name: Build docker linux/amd64
@@ -949,6 +1073,7 @@ jobs:
       - metadata
       - build-release
       - build-c-library
+      - build-full-plugin
       - build-linux-arm64-asset
       - build-tauri-release
       - publish-manifest
@@ -998,7 +1123,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config zlib1g-dev cmake libcurl4-openssl-dev protobuf-compiler
 
       # Exchange the GitHub OIDC token for a short-lived crates.io token.
-          # All three crates below must each have a Trusted Publisher registered on crates.io.
+          # All four crates below must each have a Trusted Publisher registered on crates.io.
       - name: Authenticate to crates.io (Trusted Publishing)
         uses: rust-lang/crates-io-auth-action@v1
         id: auth
@@ -1023,6 +1148,7 @@ jobs:
             done
           }
           publish mq-bridge
+          publish mq-bridge-full-plugin
           publish mq-bridge-app-core apps/mq-bridge-app/Cargo.toml
           publish mq-bridge-app apps/mq-bridge-app/Cargo.toml
         env:
@@ -1135,6 +1261,33 @@ jobs:
           pipx install --include-deps anaconda-client
           find conda-packages -type f -name '*.conda' -print0 \
             | xargs -0 anaconda upload --user marcomq --label main
+
+  # Separate from publish-conda so a failed plugin package never holds back the app.
+  publish-full-plugin-conda:
+    name: Publish Full Plugin Conda Packages
+    needs: [publish-release]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Download built packages
+        uses: actions/download-artifact@v8
+        with:
+          pattern: mq-bridge-full-conda-*
+          path: conda-packages
+
+      - name: Upload to Anaconda.org
+        env:
+          ANACONDA_API_TOKEN: ${{ secrets.ANACONDA_API_TOKEN }}
+        run: |
+          if [ -z "$ANACONDA_API_TOKEN" ]; then
+            echo "::warning::ANACONDA_API_TOKEN is not configured; packages were built but not published"
+            exit 0
+          fi
+          pipx install --include-deps anaconda-client
+          mkdir -p conda-packages
+          find conda-packages -type f -name '*.conda' -print0 \
+            | xargs -0 -r anaconda upload --user marcomq --label main
 
   publish-node:
     name: Publish Node Packages
@@ -1275,12 +1428,13 @@ jobs:
           export GIT_SSH_COMMAND="ssh -i ~/.ssh/tap_key -o IdentitiesOnly=yes"
           git clone git@github.com:marcomq/homebrew-tap.git tap
           mkdir -p tap/Formula tap/Casks
-          cp out/Formula/mq-bridge-app.rb tap/Formula/mq-bridge-app.rb
-          cp out/Casks/mq-bridge.rb       tap/Casks/mq-bridge.rb
+          cp out/Formula/mq-bridge-app.rb  tap/Formula/mq-bridge-app.rb
+          cp out/Formula/mq-bridge-full.rb tap/Formula/mq-bridge-full.rb
+          cp out/Casks/mq-bridge.rb        tap/Casks/mq-bridge.rb
           cd tap
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Formula/mq-bridge-app.rb Casks/mq-bridge.rb
+          git add Formula/mq-bridge-app.rb Formula/mq-bridge-full.rb Casks/mq-bridge.rb
           # An empty staging area is the only legitimate no-op here; any other
           # commit failure must fail the job instead of skipping the push.
           if git diff --cached --quiet; then

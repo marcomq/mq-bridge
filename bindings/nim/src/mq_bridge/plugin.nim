@@ -42,6 +42,20 @@ type
   PluginPublisher* = ref object of RootObj
   PluginMiddleware* = ref object of RootObj
 
+  InnerConsumer* = ref object of PluginConsumer
+    ## The input endpoint a wrapping middleware wraps, lent by the host.
+    table: ptr MqbPluginVTable
+    handle: Handle
+    closed: bool
+  InnerPublisher* = ref object of PluginPublisher
+    ## The output endpoint a wrapping middleware wraps, lent by the host.
+    table: ptr MqbPluginVTable
+    handle: Handle
+    closed: bool
+  InnerBatch = ref object of PluginBatch
+    table: ptr MqbPluginVTable
+    handle: Handle ## nil once committed
+
   Plugin* = object
     name*: string
     version*: string
@@ -50,6 +64,8 @@ type
     newMiddleware*: proc (route, configJson: string, side: MiddlewareSide): PluginMiddleware
     delivery*: proc (configJson: string): set[DeliveryFlag]
       ## Defaults to `{dfAcknowledges}`.
+    wraps*: bool
+      ## Its middleware overrides `wrapConsumer`/`wrapPublisher` instead of `apply`.
     endpointSchema*: string   ## JSON Schema of the endpoint config, optional
     middlewareSchema*: string ## JSON Schema of the middleware config, optional
 
@@ -79,6 +95,16 @@ method apply*(m: PluginMiddleware,
   ## One entry per input: `none` drops the message, `some` keeps it (possibly
   ## rewritten).
   for message in messages: result.add some(message)
+
+method wrapConsumer*(m: PluginMiddleware, inner: InnerConsumer): PluginConsumer {.base.} =
+  ## With `Plugin.wraps`: the consumer the route reads instead of `inner`.
+  ## `close` and `setExitOnEmpty` reach `inner` without the wrapper passing them on.
+  nil
+
+method wrapPublisher*(m: PluginMiddleware, inner: InnerPublisher): PluginPublisher {.base.} =
+  ## With `Plugin.wraps`: the publisher the route sends to instead of `inner`.
+  ## `inner` is flushed after the wrapper's `flush` and closed after its `close`.
+  nil
 
 proc newPluginBatch*(messages: sink seq[PluginMessage]): PluginBatch =
   PluginBatch(messages: messages)
@@ -130,6 +156,112 @@ proc wirePtr(holder: var WireHolder): MsgArray =
   if holder.wire.len == 0: nil
   else: cast[MsgArray](addr holder.wire[0])
 
+# --- lent endpoints, driven through the host's table ------------------------
+
+proc innerReceive(t: ptr MqbPluginVTable, h: Handle, max: csize_t, b: ptr Handle,
+                  m: ptr MsgArray, l: ptr csize_t, err: ptr MqbBuffer): MqbStatus {.gcsafe, raises: [].} =
+  t.consumerReceiveBatch(h, max, b, m, l, err)
+
+proc innerCommit(t: ptr MqbPluginVTable, b: Handle, d: ptr UncheckedArray[uint8], len: csize_t,
+                 err: ptr MqbBuffer): MqbStatus {.gcsafe, raises: [].} =
+  t.batchCommit(b, d, len, err)
+
+proc innerConsumerClose(t: ptr MqbPluginVTable, h: Handle, err: ptr MqbBuffer): MqbStatus {.gcsafe, raises: [].} =
+  t.consumerClose(h, err)
+
+proc innerSend(t: ptr MqbPluginVTable, h: Handle, m: MsgArray, len: csize_t,
+               err: ptr MqbBuffer): MqbStatus {.gcsafe, raises: [].} =
+  t.publisherSendBatch(h, m, len, err)
+
+proc innerFlush(t: ptr MqbPluginVTable, h: Handle, err: ptr MqbBuffer): MqbStatus {.gcsafe, raises: [].} =
+  t.publisherFlush(h, err)
+
+proc innerPublisherClose(t: ptr MqbPluginVTable, h: Handle, err: ptr MqbBuffer): MqbStatus {.gcsafe, raises: [].} =
+  t.publisherClose(h, err)
+
+proc checkInner(t: ptr MqbPluginVTable, status: MqbStatus, err: MqbBuffer) =
+  offloadError = ""
+  if status == MQB_OK: return
+  var text = "lent endpoint failed"
+  if err.p != nil:
+    text = newString(err.len)
+    if err.len > 0: copyMem(addr text[0], err.p, err.len)
+    t.bufferFree(err)
+  raise newMqbError(status, text)
+
+method receive*(c: InnerConsumer, max: int): PluginBatch =
+  var batch: Handle
+  var messages: MsgArray
+  var len: csize_t
+  var err: MqbBuffer
+  let status = blocking(innerReceive(c.table, c.handle, csize_t(max), addr batch,
+                                     addr messages, addr len, addr err))
+  checkInner(c.table, status, err)
+  InnerBatch(messages: fromWire(messages, len), table: c.table, handle: batch)
+
+method commit*(c: InnerConsumer, batch: PluginBatch, dispositions: seq[Disposition]) =
+  ## `batch` must be one this consumer returned; each is committed once.
+  let b = InnerBatch(batch)
+  var codes = newSeq[uint8](dispositions.len)
+  for i, d in dispositions:
+    codes[i] = case d
+      of dNack: MQB_DISPOSITION_NACK
+      of dReply: MQB_DISPOSITION_REPLY
+      of dAck: MQB_DISPOSITION_ACK
+  let handle = b.handle
+  b.handle = nil
+  var err: MqbBuffer
+  let status = blocking(innerCommit(c.table, handle,
+    if codes.len == 0: nil else: cast[ptr UncheckedArray[uint8]](addr codes[0]),
+    csize_t(codes.len), addr err))
+  checkInner(c.table, status, err)
+
+method commitRequiresOrder*(c: InnerConsumer): bool =
+  c.table.consumerCommitRequiresOrder(c.handle) != 0
+
+method setExitOnEmpty*(c: InnerConsumer, exitOnEmpty: bool) =
+  c.table.consumerSetExitOnEmpty(c.handle, uint8(exitOnEmpty))
+
+method close*(c: InnerConsumer) =
+  if c.closed: return
+  c.closed = true
+  var err: MqbBuffer
+  let status = blocking(innerConsumerClose(c.table, c.handle, addr err))
+  checkInner(c.table, status, err)
+
+method send*(p: InnerPublisher, messages: seq[PluginMessage]) =
+  var holder: WireHolder
+  holder.fill(messages)
+  var err: MqbBuffer
+  let status = blocking(innerSend(p.table, p.handle, holder.wirePtr,
+                                  csize_t(messages.len), addr err))
+  checkInner(p.table, status, err)
+
+method flush*(p: InnerPublisher) =
+  var err: MqbBuffer
+  let status = blocking(innerFlush(p.table, p.handle, addr err))
+  checkInner(p.table, status, err)
+
+method close*(p: InnerPublisher) =
+  if p.closed: return
+  p.closed = true
+  var err: MqbBuffer
+  let status = blocking(innerPublisherClose(p.table, p.handle, addr err))
+  checkInner(p.table, status, err)
+
+proc release(lent: RootRef) {.gcsafe, raises: [].} =
+  ## Frees a lent endpoint's host handle; a publisher is closed first.
+  if lent of InnerConsumer:
+    let c = InnerConsumer(lent)
+    c.table.consumerFree(c.handle)
+  elif lent of InnerPublisher:
+    let p = InnerPublisher(lent)
+    if not p.closed:
+      {.cast(gcsafe).}:
+        try: p.close()
+        except Exception: discard
+    p.table.publisherFree(p.handle)
+
 # --- handles ---------------------------------------------------------------
 
 type
@@ -143,6 +275,7 @@ type
   HandleObj = object
     exec: ptr Executor
     target: RootRef
+    lent: RootRef ## the host endpoint a wrapping middleware's `target` wraps
   HandleRef = ref HandleObj
 
   BatchHandleObj = object
@@ -231,20 +364,32 @@ proc consumerReceiveImpl(consumer: Handle, max: csize_t, outBatch: ptr Handle,
     outBatch[] = share(bh)
 
 proc consumerRequiresOrderImpl(consumer: Handle): uint8 {.gcsafe, raises: [].} =
+  let h = cast[ptr HandleObj](consumer)
   {.cast(gcsafe).}:
-    try: uint8(targetOf(consumer, PluginConsumer).commitRequiresOrder())
+    try:
+      uint8(PluginConsumer(h.target).commitRequiresOrder() or
+            (h.lent != nil and PluginConsumer(h.lent).commitRequiresOrder()))
     except Exception: 0'u8
 
 proc consumerSetExitImpl(consumer: Handle, exitOnEmpty: uint8) {.gcsafe, raises: [].} =
+  let h = cast[ptr HandleObj](consumer)
   {.cast(gcsafe).}:
-    try: targetOf(consumer, PluginConsumer).setExitOnEmpty(exitOnEmpty != 0)
+    try:
+      PluginConsumer(h.target).setExitOnEmpty(exitOnEmpty != 0)
+      if h.lent != nil: PluginConsumer(h.lent).setExitOnEmpty(exitOnEmpty != 0)
     except Exception: discard
 
 proc consumerCloseImpl(consumer: Handle, err: ptr MqbBuffer): MqbStatus {.gcsafe, raises: [].} =
-  guarded(err): targetOf(consumer, PluginConsumer).close()
+  let h = cast[ptr HandleObj](consumer)
+  guarded(err):
+    PluginConsumer(h.target).close()
+    if h.lent != nil: PluginConsumer(h.lent).close()
 
 proc handleFreeImpl(h: Handle) {.gcsafe, raises: [].} =
-  if h != nil: unshare(h, HandleObj)
+  if h != nil:
+    let lent = cast[ptr HandleObj](h).lent
+    unshare(h, HandleObj)
+    if lent != nil: release(lent)
 
 proc batchCommitImpl(batch: Handle, dispositions: ptr UncheckedArray[uint8], len: csize_t,
                      err: ptr MqbBuffer): MqbStatus {.gcsafe, raises: [].} =
@@ -260,7 +405,14 @@ proc batchCommitImpl(batch: Handle, dispositions: ptr UncheckedArray[uint8], len
   unshare(batch, BatchHandleObj)
 
 proc batchFreeImpl(batch: Handle) {.gcsafe, raises: [].} =
-  if batch != nil: unshare(batch, BatchHandleObj)
+  if batch == nil: return
+  let inner = cast[ptr BatchHandleObj](batch).batch
+  if inner of InnerBatch:
+    let b = InnerBatch(inner)
+    if b.handle != nil:
+      b.table.batchFree(b.handle)
+      b.handle = nil
+  unshare(batch, BatchHandleObj)
 
 proc publisherCreateImpl(factory: Handle, route, config: MqbSlice, outp: ptr Handle,
                          err: ptr MqbBuffer): MqbStatus {.gcsafe, raises: [].} =
@@ -276,10 +428,16 @@ proc publisherSendImpl(publisher: Handle, messages: MsgArray, len: csize_t,
   guarded(err): targetOf(publisher, PluginPublisher).send(fromWire(messages, len))
 
 proc publisherFlushImpl(publisher: Handle, err: ptr MqbBuffer): MqbStatus {.gcsafe, raises: [].} =
-  guarded(err): targetOf(publisher, PluginPublisher).flush()
+  let h = cast[ptr HandleObj](publisher)
+  guarded(err):
+    PluginPublisher(h.target).flush()
+    if h.lent != nil: PluginPublisher(h.lent).flush()
 
 proc publisherCloseImpl(publisher: Handle, err: ptr MqbBuffer): MqbStatus {.gcsafe, raises: [].} =
-  guarded(err): targetOf(publisher, PluginPublisher).close()
+  let h = cast[ptr HandleObj](publisher)
+  guarded(err):
+    PluginPublisher(h.target).close()
+    if h.lent != nil: PluginPublisher(h.lent).close()
 
 proc middlewareCreateImpl(factory: Handle, route, config: MqbSlice, side: uint8,
                           outp: ptr Handle, err: ptr MqbBuffer): MqbStatus {.gcsafe, raises: [].} =
@@ -315,6 +473,26 @@ proc middlewareApplyImpl(middleware: Handle, messages: MsgArray, len: csize_t,
     outMessages[] = r.holder.wirePtr
     outKept[] = if r.kept.len == 0: nil else: cast[ptr UncheckedArray[uint8]](addr r.kept[0])
     outResult[] = share(r)
+
+proc wrapConsumerImpl(middleware: Handle, table: ptr MqbPluginVTable, inner: Handle,
+                      outp: ptr Handle, err: ptr MqbBuffer): MqbStatus {.gcsafe, raises: [].} =
+  let h = cast[ptr HandleObj](middleware)
+  let lent = InnerConsumer(table: table, handle: inner)
+  result = guarded(err):
+    let c = PluginMiddleware(h.target).wrapConsumer(lent)
+    if c == nil: raise newMqbError(MQB_ERR_UNSUPPORTED, "this middleware does not wrap an input")
+    outp[] = share(HandleRef(exec: h.exec, target: c, lent: lent))
+  if result != MQB_OK: release(lent)
+
+proc wrapPublisherImpl(middleware: Handle, table: ptr MqbPluginVTable, inner: Handle,
+                       outp: ptr Handle, err: ptr MqbBuffer): MqbStatus {.gcsafe, raises: [].} =
+  let h = cast[ptr HandleObj](middleware)
+  let lent = InnerPublisher(table: table, handle: inner)
+  result = guarded(err):
+    let p = PluginMiddleware(h.target).wrapPublisher(lent)
+    if p == nil: raise newMqbError(MQB_ERR_UNSUPPORTED, "this middleware does not wrap an output")
+    outp[] = share(HandleRef(exec: h.exec, target: p, lent: lent))
+  if result != MQB_OK: release(lent)
 
 proc resultFreeImpl(r: Handle) {.gcsafe, raises: [].} =
   if r != nil: unshare(r, ResultObj)
@@ -473,6 +651,16 @@ proc middlewareApply(middleware: Handle, messages: MsgArray, len: csize_t,
         middlewareApplyImpl(middleware, messages, len, outResult, outMessages, outKept, err),
         MQB_ERR_PERMANENT)
 
+proc middlewareWrapConsumer(middleware: Handle, table: ptr MqbPluginVTable, inner: Handle,
+                            outp: ptr Handle, err: ptr MqbBuffer): MqbStatus {.cdecl.} =
+  runOn(execOf(middleware), wrapConsumerImpl(middleware, table, inner, outp, err),
+        MQB_ERR_PERMANENT)
+
+proc middlewareWrapPublisher(middleware: Handle, table: ptr MqbPluginVTable, inner: Handle,
+                             outp: ptr Handle, err: ptr MqbBuffer): MqbStatus {.cdecl.} =
+  runOn(execOf(middleware), wrapPublisherImpl(middleware, table, inner, outp, err),
+        MQB_ERR_PERMANENT)
+
 proc resultFree(r: Handle) {.cdecl.} =
   if r != nil:
     runOn(cast[ptr ResultObj](r).exec, resultFreeImpl(r), ())
@@ -506,6 +694,7 @@ proc registerPlugin*(plugin: Plugin) =
   if plugin.newConsumer != nil: caps = caps or MQB_CAP_CONSUMER
   if plugin.newPublisher != nil: caps = caps or MQB_CAP_PUBLISHER
   if plugin.newMiddleware != nil: caps = caps or MQB_CAP_MIDDLEWARE
+  if plugin.newMiddleware != nil and plugin.wraps: caps = caps or MQB_CAP_MIDDLEWARE_WRAP
   let state = PluginState(plugin: plugin, exec: newExecutor())
   state.plugin.version = if plugin.version.len == 0: "0.0.0" else: plugin.version
   const creates = factoryCreates()
@@ -530,7 +719,9 @@ proc registerPlugin*(plugin: Plugin) =
     consumerReceiveBatchAsync: stubReceiveAsync, batchCommitAsync: stubCommitAsync,
     publisherSendBatchAsync: stubSendAsync, publisherFlushAsync: stubFlushAsync,
     pluginInit: pluginInit, factoryDelivery: delivery,
-    publisherDisconnect: stubDisconnect, publisherDeferredCommitIntervalMs: stubNoDefer)
+    publisherDisconnect: stubDisconnect, publisherDeferredCommitIntervalMs: stubNoDefer,
+    middlewareWrapConsumer: middlewareWrapConsumer,
+    middlewareWrapPublisher: middlewareWrapPublisher)
   state.worker = createShared(Thread[ptr Executor])
   createThread(state.worker[], pluginLoop, state.exec)
   slots[slotCount] = cast[ptr PluginStateObj](state)

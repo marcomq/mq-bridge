@@ -28,7 +28,7 @@ const
 
   MQB_API_VERSION* = 1'u32
   MQB_PLUGIN_ABI_MAJOR* = 1'u32
-  MQB_PLUGIN_ABI_MINOR* = 4'u32
+  MQB_PLUGIN_ABI_MINOR* = 5'u32
 
   MQB_OK* = 0'i32
   MQB_ERR_RETRYABLE* = 1'i32
@@ -51,6 +51,7 @@ const
   MQB_CAP_CONSUMER* = 1'u64
   MQB_CAP_PUBLISHER* = 2'u64
   MQB_CAP_MIDDLEWARE* = 4'u64
+  MQB_CAP_MIDDLEWARE_WRAP* = 8'u64
   MQB_SCHEMA_ENDPOINT* = 0'u32
   MQB_SCHEMA_MIDDLEWARE* = 1'u32
   MQB_MIDDLEWARE_RECEIVE* = 0'u8
@@ -68,6 +69,7 @@ const
   MQB_LOG_TRACE* = 5'u8
 
   MQB_VTABLE_SIZE_V1_4* = 43 * sizeof(uint)
+  MQB_VTABLE_SIZE_V1_5* = 45 * sizeof(uint)
   MQB_HOST_VTABLE_SIZE_V1_2* = 5 * sizeof(uint)
 
 type
@@ -194,6 +196,10 @@ type
     publisherDisconnect*: proc (publisher: Handle, outcome: uint32,
                                 err: ptr MqbBuffer): MqbStatus {.cdecl, gcsafe, raises: [].}
     publisherDeferredCommitIntervalMs*: proc (publisher: Handle): uint64 {.cdecl, gcsafe, raises: [].}
+    middlewareWrapConsumer*: proc (middleware: Handle, innerTable: ptr MqbPluginVTable, inner: Handle,
+                                   outp: ptr Handle, err: ptr MqbBuffer): MqbStatus {.cdecl, gcsafe, raises: [].}
+    middlewareWrapPublisher*: proc (middleware: Handle, innerTable: ptr MqbPluginVTable, inner: Handle,
+                                    outp: ptr Handle, err: ptr MqbBuffer): MqbStatus {.cdecl, gcsafe, raises: [].}
 
   mqb_batch_t* {.incompleteStruct.} = object
   mqb_consumer_t* {.incompleteStruct.} = object
@@ -211,7 +217,7 @@ type
 static:
   doAssert sizeof(MqbMessage) == 16 + 4 * sizeof(uint)
   doAssert sizeof(MqbHostVTable) == MQB_HOST_VTABLE_SIZE_V1_2
-  doAssert sizeof(MqbPluginVTable) == MQB_VTABLE_SIZE_V1_4
+  doAssert sizeof(MqbPluginVTable) == MQB_VTABLE_SIZE_V1_5
 
 {.push dynlib: mqbLib, cdecl, gcsafe, raises: [].}
 

@@ -3,47 +3,89 @@
 //  Licensed under MIT OR Apache-2.0, see LICENSE file for more details
 //  git clone https://github.com/marcomq/mq-bridge
 
-//! Loading endpoint plugins from native shared libraries.
-//!
-//! An endpoint can live in its own crate and its own release cycle, be compiled
-//! to a `cdylib`, and be loaded into any mq-bridge process at runtime:
+//! Native plugins: endpoints and middleware loaded from shared libraries at runtime.
 //!
 //! ```no_run
 //! let info = mq_bridge::plugin::load_endpoint_plugin("./libmq_bridge_pulsar.so")?;
-//! println!("registered endpoint `{}` (plugin {})", info.name, info.version);
+//! println!("registered `{}` (plugin {})", info.name, info.version);
 //! # Ok::<_, anyhow::Error>(())
 //! ```
 //!
-//! The endpoint is then usable from configuration under its plugin-provided
-//! name, exactly like a factory registered through [`crate::extensions`]:
+//! A route then names it like any registered factory: `custom: { name: pulsar, config: {..} }`.
+//! Plugins are native code with the full privileges of the process, not sandboxed scripts.
+//! Authors use [`sdk`] (`plugin-sdk` feature) and check the result with [`conformance`];
+//! nobody implements [`crate::support::plugin_abi`] by hand.
 //!
-//! ```yaml
-//! input:
-//!   custom:
-//!     name: pulsar
-//!     config: { url: "pulsar://localhost:6650" }
-//! ```
+//! # Storage
 //!
-//! A plugin is also found by the name a route asks for, without being listed
-//! anywhere: `custom: { name: pulsar }` with no `pulsar` factory registered
-//! looks for `libmq_bridge_pulsar` on the search path. Only the requested name
-//! is ever looked up, so installing a library does not by itself load it. See
-//! [`discovery`].
+//! | What | Where | Holds |
+//! |---|---|---|
+//! | endpoint registry | `CUSTOM_ENDPOINT_REGISTRY` in [`crate::extensions`] | name → `CustomEndpointFactory` |
+//! | middleware registry | `CUSTOM_MIDDLEWARE_REGISTRY` in [`crate::extensions`] | name → `CustomMiddlewareFactory` |
+//! | open libraries | `loaded_plugins()` here | canonical path → `LoadedPlugin`s, never removed |
+//! | kill switch | `LOADING_DISABLED` here | set once by [`disable_plugin_loading`] |
+//! | discovery switch | [`discovery`] (`MQB_PLUGIN_DISCOVERY`, [`enable_plugin_discovery`]) | off by default |
 //!
-//! Loading is permanent — a loaded library is kept for the life of the process,
-//! because unloading while endpoint handles or in-flight batches still exist
-//! cannot be made safe.
+//! A plugin is nothing special once loaded: it sits in the same two registries as a Rust
+//! factory from [`crate::extensions`], wrapped in [`PluginEndpointFactory`] /
+//! [`PluginMiddlewareFactory`], which turn trait calls into ABI calls.
+//! `loaded_plugins()` only keeps the library mapped and answers "is this file loaded?".
 //!
-//! Plugins are native code with the full privileges of the host process. Treat
-//! them like any other native dependency, not like sandboxed scripts.
+//! # Loading (`load.rs`)
 //!
-//! Endpoint authors do not implement [`crate::support::plugin_abi`] by hand:
-//! enable the `plugin-sdk` feature and use [`export_endpoint_plugin!`](crate::export_endpoint_plugin)
-//! from [`sdk`], then check the result with [`conformance`].
+//! 1. **Open**: `dlopen` the file, call `mq_bridge_plugin_v1` (and `mq_bridge_plugin_v1_at`
+//!    for a library with several plugins). Each returns a function table.
+//! 2. **Check**: the ABI major must match; read name, version and capability bits; hand the
+//!    plugin the host table (`host.rs`: logging, metrics); create its factory; read its
+//!    config schemas.
+//! 3. **Register**: `register_plugin` puts the endpoint and/or middleware into the
+//!    registries under the plugin's name, all or nothing per library; then the library goes
+//!    into `loaded_plugins()`. Loading the same file again returns the first result.
 //!
-//! A plugin may also describe its configuration as a JSON Schema, which is what
-//! lets a host render a form for it and turn a URI into typed configuration.
-//! See [`crate::support::config_schema`].
+//! # When registration happens
+//!
+//! - Explicitly: [`load_endpoint_plugin`] (CLI `--plugin`, config `plugins:`),
+//!   [`load_installed_plugin`], or [`register_plugin_table`] for a table linked into the host.
+//! - On demand, only with discovery on: when a route names something no registry holds,
+//!   [`discovery`] loads `libmq_bridge_<name>` from the search path, else scans every
+//!   library there (one library such as `full` provides many names).
+//!
+//! # Adding and overriding
+//!
+//! - A **new name** is simply added: every lookup asks the registry first.
+//! - An **existing name is never replaced**: an explicit load fails on a name already
+//!   registered; discovery skips that name and registers the library's other names.
+//! - A **built-in compiled into the host always wins**; the registry is not asked for it.
+//!   When its cargo feature is off, the host falls back to a plugin: an endpoint such as
+//!   `kafka: {..}` resolves its type name through the registry and discovery
+//!   (`builtin_endpoint_factory` in `endpoints`); `deduplication`, `compression`,
+//!   `encryption`, `filter` and `aggregate` go, as one list, to the plugin middleware
+//!   `builtin_middleware` (`served_by_plugin` in `middleware`). `metrics` and `otel` never do.
+//! - To **replace a built-in**, the host must not register its own copy: the app's
+//!   `MQB_PLUGIN_OVERRIDE` loads the installed plugin instead of registering the built-in.
+//!
+//! # Middleware that wraps the endpoint (ABI 1.5)
+//!
+//! A plain plugin middleware maps or drops messages. One with `MQB_CAP_MIDDLEWARE_WRAP`
+//! gets the inner endpoint instead: the host exports it as a function table with the same
+//! [`sdk`] code a plugin uses to export its own, and the plugin drives it as an endpoint
+//! (`LoadedPlugin::lent`).
+//!
+//! A loaded library is never unloaded: endpoint handles and in-flight batches may still
+//! point into it.
+//!
+//! # Files
+//!
+//! | File | Side | Does |
+//! |---|---|---|
+//! | `load.rs`, `loaded_plugin.rs` | host | open, check, register; the kept table + factory |
+//! | [`discovery`] | host | search path, find a library by name, trust check |
+//! | `endpoint.rs`, `middleware.rs` | host | ABI table → `CustomEndpointFactory` / `CustomMiddlewareFactory` |
+//! | `message.rs`, `completion.rs` | both | message copies across the ABI; awaiting async calls |
+//! | `host.rs`, `crash.rs` | host | table given to plugins (logs, metrics); crash reports naming the library |
+//! | `forward.rs` | plugin | sends the plugin's logs and metrics to the host |
+//! | [`sdk`] | plugin | Rust trait objects → ABI table; also used by the host to lend endpoints |
+//! | [`conformance`], `test_support` | tests | the suite every plugin should pass |
 
 mod completion;
 #[cfg(feature = "plugin-sdk")]
@@ -51,30 +93,29 @@ pub mod conformance;
 mod crash;
 pub mod discovery;
 mod endpoint;
-#[cfg(feature = "plugin-sdk")]
 mod forward;
 mod host;
+mod load;
+mod loaded_plugin;
 mod message;
 mod middleware;
 #[cfg(feature = "plugin-sdk")]
 pub mod sdk;
+// The host lends endpoints to wrapping middleware through the same export code.
+#[cfg(not(feature = "plugin-sdk"))]
+#[allow(dead_code, unused_imports)]
+mod sdk;
 #[cfg(feature = "test-utils")]
 pub mod test_support;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use crate::support::plugin_abi::{
-    check_compatibility, MqbBuffer, MqbFactoryHandle, MqbPluginEntry, MqbPluginListEntry,
-    MqbPluginVTable, MQB_OK, MQB_PLUGIN_ENTRY_SYMBOL, MQB_PLUGIN_LIST_SYMBOL, MQB_SCHEMA_ENDPOINT,
-    MQB_SCHEMA_MIDDLEWARE,
-};
-use anyhow::{anyhow, Context};
-
 use crate::extensions::{
-    get_endpoint_factory, get_middleware_factory, register_endpoint_factory,
-    register_middleware_factory, unregister_endpoint_factory, unregister_middleware_factory,
+    register_endpoint_factory, register_middleware_factory, unregister_endpoint_factory,
+    unregister_middleware_factory,
 };
 
 pub use crate::support::config_schema::{
@@ -89,123 +130,19 @@ pub use discovery::{
 pub(crate) use discovery::{discover_endpoint_plugin_or_scan, discover_middleware_plugin_or_scan};
 pub use endpoint::PluginEndpointFactory;
 pub use host::PLUGIN_LOG_TARGET;
+pub(crate) use load::load_discovered_plugins;
+pub use load::{load_endpoint_plugin, load_endpoint_plugins, register_plugin_table};
+pub(crate) use loaded_plugin::LoadedPlugin;
+pub use loaded_plugin::PluginInfo;
 pub use middleware::PluginMiddlewareFactory;
 
-/// What a successfully loaded plugin reported about itself.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PluginInfo {
-    /// Endpoint name the plugin was registered under.
-    pub name: String,
-    /// Plugin's own version string.
-    pub version: String,
-    /// ABI major version the plugin was built against.
-    pub abi_major: u32,
-    /// ABI minor version the plugin was built against.
-    pub abi_minor: u32,
-    /// Whether the plugin can create input endpoints.
-    pub supports_consumer: bool,
-    /// Whether the plugin can create output endpoints.
-    pub supports_publisher: bool,
-    /// Whether the plugin also provides a middleware under the same name.
-    pub supports_middleware: bool,
-    /// Resolved path of the loaded library.
-    pub path: PathBuf,
-    /// JSON Schema of the endpoint's `config` object, as the plugin described
-    /// it. Kept as text because that is what crossed the ABI; parse it with
-    /// [`PluginInfo::endpoint_schema`].
-    pub config_schema: Option<String>,
-    /// JSON Schema of the middleware's `config` object. See
-    /// [`PluginInfo::config_schema`].
-    pub middleware_config_schema: Option<String>,
+static LOADING_DISABLED: AtomicBool = AtomicBool::new(false);
+
+/// Every opened library, by canonical path; in-process tables under `<in-process>/<name>`.
+fn loaded_plugins() -> &'static Mutex<HashMap<PathBuf, Vec<Arc<LoadedPlugin>>>> {
+    static LOADED: OnceLock<Mutex<HashMap<PathBuf, Vec<Arc<LoadedPlugin>>>>> = OnceLock::new();
+    LOADED.get_or_init(|| Mutex::new(HashMap::new()))
 }
-
-impl PluginInfo {
-    /// The endpoint's configuration schema, parsed.
-    ///
-    /// Validated at load time, so this only returns `None` when the plugin
-    /// described nothing.
-    pub fn endpoint_schema(&self) -> Option<serde_json::Value> {
-        self.config_schema
-            .as_deref()
-            .and_then(|text| serde_json::from_str(text).ok())
-    }
-
-    /// The middleware's configuration schema, parsed.
-    pub fn middleware_schema(&self) -> Option<serde_json::Value> {
-        self.middleware_config_schema
-            .as_deref()
-            .and_then(|text| serde_json::from_str(text).ok())
-    }
-}
-
-/// A loaded plugin library plus the factory created from it.
-///
-/// Held in [`loaded_plugins`] for the life of the process so neither the
-/// library nor the factory can be dropped while an endpoint still points at it.
-pub(crate) struct LoadedPlugin {
-    /// Kept only to keep the library mapped; every code pointer below lives in it.
-    /// `None` for a table registered from this process.
-    _library: Option<Arc<libloading::Library>>,
-    table: *const MqbPluginVTable,
-    factory: MqbFactoryHandle,
-    info: PluginInfo,
-}
-
-/// Safety: the ABI requires every handle to be usable from any thread, and the
-/// table is immutable `'static` data in the library or the host program.
-unsafe impl Send for LoadedPlugin {}
-unsafe impl Sync for LoadedPlugin {}
-
-impl LoadedPlugin {
-    pub(crate) fn table(&self) -> &MqbPluginVTable {
-        // Safety: validated at load time; kept alive by `_library` or the registrant.
-        unsafe { &*self.table }
-    }
-
-    pub(crate) fn factory(&self) -> MqbFactoryHandle {
-        self.factory
-    }
-
-    pub(crate) fn name(&self) -> &str {
-        &self.info.name
-    }
-
-    /// Consumes an error buffer produced by a failed call and returns its text.
-    pub(crate) fn take_error(&self, buffer: MqbBuffer) -> String {
-        if buffer.is_empty() {
-            return "plugin reported no error message".to_string();
-        }
-        // Safety: the plugin owns the buffer until it is handed back below.
-        let text = unsafe { String::from_utf8_lossy(buffer.as_bytes()).into_owned() };
-        unsafe { (self.table().buffer_free)(buffer) };
-        text
-    }
-
-    /// Consumes a buffer whose bytes have to be text, rather than repairing
-    /// them: a schema silently mangled into replacement characters still parses.
-    pub(crate) fn take_buffer_utf8(&self, buffer: MqbBuffer) -> anyhow::Result<String> {
-        if buffer.is_empty() {
-            return Ok(String::new());
-        }
-        // Safety: the plugin owns the buffer until it is handed back below.
-        let text = unsafe { std::str::from_utf8(buffer.as_bytes()).map(str::to_owned) };
-        unsafe { (self.table().buffer_free)(buffer) };
-        text.map_err(|e| anyhow!("it returned a buffer that is not UTF-8: {e}"))
-    }
-
-    /// Consumes a buffer the plugin filled on success and returns its text.
-    pub(crate) fn take_buffer(&self, buffer: MqbBuffer) -> String {
-        if buffer.is_empty() {
-            return String::new();
-        }
-        // Safety: the plugin owns the buffer until it is handed back below.
-        let text = unsafe { String::from_utf8_lossy(buffer.as_bytes()).into_owned() };
-        unsafe { (self.table().buffer_free)(buffer) };
-        text
-    }
-}
-
-static LOADING_DISABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Switches plugin loading off for the rest of the process: no library is opened after
 /// this, by path or by discovery. There is no way back. Plugins already loaded stay.
@@ -217,17 +154,12 @@ pub fn disable_plugin_loading() {
     let _loading = loaded_plugins()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    LOADING_DISABLED.store(true, std::sync::atomic::Ordering::SeqCst);
+    LOADING_DISABLED.store(true, Ordering::SeqCst);
 }
 
 /// Whether [`disable_plugin_loading`] has been called.
 pub fn plugin_loading_disabled() -> bool {
-    LOADING_DISABLED.load(std::sync::atomic::Ordering::SeqCst)
-}
-
-fn loaded_plugins() -> &'static Mutex<HashMap<PathBuf, Vec<Arc<LoadedPlugin>>>> {
-    static LOADED: OnceLock<Mutex<HashMap<PathBuf, Vec<Arc<LoadedPlugin>>>>> = OnceLock::new();
-    LOADED.get_or_init(|| Mutex::new(HashMap::new()))
+    LOADING_DISABLED.load(Ordering::SeqCst)
 }
 
 /// The plugins already loaded from `path`, if any.
@@ -238,161 +170,15 @@ pub(crate) fn loaded_from(path: &Path) -> Option<Vec<PluginInfo>> {
     Some(plugins.iter().map(|p| p.info.clone()).collect())
 }
 
-/// Loads a native endpoint plugin and registers the endpoint it provides.
-///
-/// Call once, before starting any route that uses the endpoint. Loading the
-/// same file twice is a no-op that returns the original registration, so
-/// several components can each ensure their endpoint is present.
-///
-/// A library that exports several plugins has all of them registered; this
-/// returns the first. See [`load_endpoint_plugins`] for the whole list.
-///
-/// Fails if the file cannot be loaded, does not export the discovery symbol,
-/// was built against an incompatible ABI major version, or provides an endpoint
-/// name that a different factory already occupies.
-pub fn load_endpoint_plugin(path: impl AsRef<Path>) -> anyhow::Result<PluginInfo> {
-    let mut infos = load_endpoint_plugins(path)?;
-    Ok(infos.swap_remove(0))
-}
-
-/// Loads a native plugin library and registers every plugin it exports.
-///
-/// All or nothing: if one of them cannot be registered, none is.
-pub fn load_endpoint_plugins(path: impl AsRef<Path>) -> anyhow::Result<Vec<PluginInfo>> {
-    load_plugins(path.as_ref(), false)
-}
-
-/// Like [`load_endpoint_plugins`], but a name another factory already holds is skipped
-/// instead of failing the library, so its other names still register.
-pub(crate) fn load_discovered_plugins(path: &Path) -> anyhow::Result<Vec<PluginInfo>> {
-    load_plugins(path, true)
-}
-
-fn load_plugins(path: &Path, skip_taken: bool) -> anyhow::Result<Vec<PluginInfo>> {
-    let resolved = std::fs::canonicalize(path)
-        .with_context(|| format!("plugin library not found: {}", path.display()))?;
-
-    let mut loaded = loaded_plugins()
+/// Endpoint names currently provided by loaded plugins.
+pub fn loaded_endpoint_plugins() -> Vec<PluginInfo> {
+    loaded_plugins()
         .lock()
-        .map_err(|_| anyhow!("plugin registry lock poisoned"))?;
-    if let Some(existing) = loaded.get(&resolved) {
-        return Ok(existing.iter().map(|p| p.info.clone()).collect());
-    }
-
-    // Returning an error drops `plugins`, which frees their factories.
-    let mut plugins: Vec<Arc<LoadedPlugin>> =
-        open_plugins(&resolved)?.into_iter().map(Arc::new).collect();
-    let mut endpoints = std::collections::HashSet::new();
-    let mut middlewares = std::collections::HashSet::new();
-    let mut skipped = std::collections::HashSet::new();
-    for (index, plugin) in plugins.iter().enumerate() {
-        let info = &plugin.info;
-        let endpoint = info.supports_consumer || info.supports_publisher;
-        if !(endpoint || info.supports_middleware) {
-            return Err(anyhow!(
-                "plugin `{}` in {} declares no capabilities: it provides neither an endpoint \
-                 nor a middleware",
-                info.name,
-                resolved.display()
-            ));
-        }
-        // A name already taken by a different factory is a configuration mistake:
-        // silently replacing it would reroute traffic to the wrong place.
-        let taken = endpoint
-            && (get_endpoint_factory(&info.name).is_some() || !endpoints.insert(&info.name));
-        let taken_middleware = info.supports_middleware
-            && (get_middleware_factory(&info.name).is_some() || !middlewares.insert(&info.name));
-        if (taken || taken_middleware) && skip_taken {
-            tracing::debug!(name = %info.name, path = %resolved.display(), "skipping plugin name already registered");
-            skipped.insert(index);
-        } else if taken || taken_middleware {
-            return Err(anyhow!(
-                "`{}` from {} is already registered by another factory; \
-                 unload it or rename the plugin's endpoint",
-                info.name,
-                resolved.display()
-            ));
-        }
-    }
-
-    if !skipped.is_empty() {
-        // Unloading is not safe once the library ran, even if none of its names register.
-        if let Some(library) = plugins.first().and_then(|p| p._library.clone()) {
-            std::mem::forget(library);
-        }
-        plugins = plugins
-            .into_iter()
-            .enumerate()
-            .filter_map(|(index, plugin)| (!skipped.contains(&index)).then_some(plugin))
-            .collect();
-    }
-    for (index, plugin) in plugins.iter().enumerate() {
-        if let Err(error) = register_plugin(plugin) {
-            for registered in &plugins[..index] {
-                unregister_plugin(&registered.info);
-            }
-            return Err(error);
-        }
-    }
-    let infos: Vec<PluginInfo> = plugins.iter().map(|p| p.info.clone()).collect();
-    loaded.insert(resolved, plugins);
-    for info in &infos {
-        tracing::info!(
-            name = %info.name,
-            version = %info.version,
-            endpoint = info.supports_consumer || info.supports_publisher,
-            middleware = info.supports_middleware,
-            path = %info.path.display(),
-            "loaded plugin",
-        );
-    }
-    Ok(infos)
+        .map(|loaded| loaded.values().flatten().map(|p| p.info.clone()).collect())
+        .unwrap_or_default()
 }
 
-/// Registers a plugin table that lives in this process instead of in a loaded
-/// library, for a host that links its endpoint or middleware in.
-///
-/// Fails like [`load_endpoint_plugin`]: on an incompatible ABI, a table without
-/// capabilities, or a name another factory already occupies. Registering the
-/// same table twice fails too, before its factory is created a second time.
-/// [`disable_plugin_loading`] does not apply: no library is opened.
-///
-/// # Safety
-/// `table` must point to a valid [`MqbPluginVTable`] that, with all the code it
-/// points at, stays valid for the life of the process.
-pub unsafe fn register_plugin_table(table: *const MqbPluginVTable) -> anyhow::Result<PluginInfo> {
-    const IN_PROCESS: &str = "<in-process>";
-    let mut loaded = loaded_plugins()
-        .lock()
-        .map_err(|_| anyhow!("plugin registry lock poisoned"))?;
-    if !table.is_null() && loaded.values().flatten().any(|p| p.table == table) {
-        return Err(anyhow!("this plugin table is already registered"));
-    }
-    let plugin = Arc::new(open_plugin(None, table, Path::new(IN_PROCESS))?);
-    let info = plugin.info.clone();
-    let endpoint = info.supports_consumer || info.supports_publisher;
-    if !(endpoint || info.supports_middleware) {
-        return Err(anyhow!(
-            "plugin `{}` declares no capabilities: it provides neither an endpoint nor a middleware",
-            info.name
-        ));
-    }
-    if (endpoint && get_endpoint_factory(&info.name).is_some())
-        || (info.supports_middleware && get_middleware_factory(&info.name).is_some())
-    {
-        return Err(anyhow!(
-            "`{}` is already registered by another factory",
-            info.name
-        ));
-    }
-    register_plugin(&plugin)?;
-    loaded
-        .entry(Path::new(IN_PROCESS).join(&info.name))
-        .or_default()
-        .push(plugin);
-    Ok(info)
-}
-
+/// Puts a plugin's endpoint and middleware into the [`crate::extensions`] registries.
 fn register_plugin(plugin: &Arc<LoadedPlugin>) -> anyhow::Result<()> {
     let info = &plugin.info;
     let endpoint = info.supports_consumer || info.supports_publisher;
@@ -422,228 +208,5 @@ fn unregister_plugin(info: &PluginInfo) {
     }
     if info.supports_middleware {
         unregister_middleware_factory(&info.name);
-    }
-}
-
-/// Endpoint names currently provided by loaded plugins.
-pub fn loaded_endpoint_plugins() -> Vec<PluginInfo> {
-    loaded_plugins()
-        .lock()
-        .map(|loaded| loaded.values().flatten().map(|p| p.info.clone()).collect())
-        .unwrap_or_default()
-}
-
-/// More than any real library exports; stops a list that never ends in null.
-const MAX_PLUGINS_PER_LIBRARY: usize = 256;
-
-/// The caller holds the [`loaded_plugins`] lock, which is what makes the check below
-/// atomic with the `dlopen` against [`disable_plugin_loading`].
-fn open_plugins(path: &Path) -> anyhow::Result<Vec<LoadedPlugin>> {
-    if plugin_loading_disabled() {
-        return Err(anyhow!(
-            "plugin loading is disabled in this process; not loading {}",
-            path.display()
-        ));
-    }
-    // Before dlopen, whose initialisers can crash too.
-    crash::install();
-    // Safety: dlopen runs the library's initialisers — inherently trusting the
-    // file, as documented above.
-    let library = unsafe { libloading::Library::new(path) }
-        .with_context(|| format!("failed to load plugin library {}", path.display()))?;
-    let library = Arc::new(library);
-    // Never unmapped: its code may already be referenced (crash handlers, threads) if loading fails.
-    std::mem::forget(Arc::clone(&library));
-
-    let first = unsafe {
-        let entry: libloading::Symbol<MqbPluginEntry> =
-            library.get(MQB_PLUGIN_ENTRY_SYMBOL).with_context(|| {
-                format!(
-                    "{} does not export `{}`; it is not an mq-bridge endpoint plugin",
-                    path.display(),
-                    String::from_utf8_lossy(
-                        &MQB_PLUGIN_ENTRY_SYMBOL[..MQB_PLUGIN_ENTRY_SYMBOL.len() - 1]
-                    ),
-                )
-            })?;
-        crash::record_library(path, *entry as *const std::ffi::c_void);
-        entry()
-    };
-    let mut tables = vec![first];
-    // Safety: the symbol's type is fixed by the ABI.
-    if let Ok(list) = unsafe { library.get::<MqbPluginListEntry>(MQB_PLUGIN_LIST_SYMBOL) } {
-        for index in 1..=MAX_PLUGINS_PER_LIBRARY {
-            let table = unsafe { list(index) };
-            if table.is_null() {
-                break;
-            }
-            if index == MAX_PLUGINS_PER_LIBRARY {
-                return Err(anyhow!(
-                    "plugin {} exports more than {MAX_PLUGINS_PER_LIBRARY} plugins",
-                    path.display()
-                ));
-            }
-            tables.push(table);
-        }
-    }
-    tables
-        .into_iter()
-        .map(|table| open_plugin(Some(&library), table, path))
-        .collect()
-}
-
-fn open_plugin(
-    library: Option<&Arc<libloading::Library>>,
-    table: *const MqbPluginVTable,
-    path: &Path,
-) -> anyhow::Result<LoadedPlugin> {
-    if table.is_null() {
-        return Err(anyhow!(
-            "plugin {} returned a null function table",
-            path.display()
-        ));
-    }
-    // Safety: non-null and owned by the library, which stays loaded.
-    let table_ref = unsafe { &*table };
-    check_compatibility(table_ref)
-        .map_err(|mismatch| anyhow!("cannot load plugin {}: {mismatch}", path.display()))?;
-
-    let name = read_static_str(table_ref.name, "name")
-        .with_context(|| format!("plugin {}", path.display()))?;
-    if name.is_empty() {
-        return Err(anyhow!(
-            "plugin {} reports an empty endpoint name",
-            path.display()
-        ));
-    }
-    let version = read_static_str(table_ref.version, "version").unwrap_or_default();
-
-    // Before the factory exists, so even its creation logs through the host.
-    if let Some(init) = table_ref.host_init_hook() {
-        unsafe { init(&host::HOST_VTABLE) };
-    }
-    let mut factory = MqbFactoryHandle::NULL;
-    let mut error = MqbBuffer::EMPTY;
-    let status = unsafe { (table_ref.factory_create)(&mut factory, &mut error) };
-
-    let mut plugin = LoadedPlugin {
-        _library: library.cloned(),
-        table,
-        factory,
-        info: PluginInfo {
-            name,
-            version,
-            abi_major: table_ref.abi_major,
-            abi_minor: table_ref.abi_minor,
-            supports_consumer: table_ref.capabilities
-                & crate::support::plugin_abi::MQB_CAP_CONSUMER
-                != 0,
-            supports_publisher: table_ref.capabilities
-                & crate::support::plugin_abi::MQB_CAP_PUBLISHER
-                != 0,
-            supports_middleware: table_ref.capabilities
-                & crate::support::plugin_abi::MQB_CAP_MIDDLEWARE
-                != 0,
-            path: path.to_path_buf(),
-            config_schema: None,
-            middleware_config_schema: None,
-        },
-    };
-    if status != MQB_OK {
-        return Err(anyhow!(
-            "plugin {} failed to create its endpoint factory: {}",
-            path.display(),
-            plugin.take_error(error)
-        ));
-    }
-    if plugin.factory.is_null() {
-        return Err(anyhow!(
-            "plugin {} reported success but returned a null factory",
-            path.display()
-        ));
-    }
-
-    // Needs the factory, so it cannot happen before the checks above.
-    plugin.info.config_schema = read_config_schema(&plugin, MQB_SCHEMA_ENDPOINT)
-        .with_context(|| format!("plugin {} describes its endpoint badly", path.display()))?;
-    plugin.info.middleware_config_schema = read_config_schema(&plugin, MQB_SCHEMA_MIDDLEWARE)
-        .with_context(|| format!("plugin {} describes its middleware badly", path.display()))?;
-    Ok(plugin)
-}
-
-/// Asks a plugin for one configuration schema, and refuses one the host cannot use.
-///
-/// A schema is read once, here, rather than wherever a form or a URI needs it:
-/// a plugin that describes itself wrongly should fail to load, not fail later at
-/// whichever call site happened to look first.
-fn read_config_schema(plugin: &LoadedPlugin, kind: u32) -> anyhow::Result<Option<String>> {
-    let Some(hook) = plugin.table().config_schema_hook() else {
-        return Ok(None);
-    };
-    let mut schema = MqbBuffer::EMPTY;
-    let mut error = MqbBuffer::EMPTY;
-    let status = unsafe { hook(plugin.factory, kind, &mut schema, &mut error) };
-    if status != MQB_OK {
-        plugin.take_buffer(schema);
-        return Err(anyhow!("{}", plugin.take_error(error)));
-    }
-    if schema.is_empty() {
-        return Ok(None);
-    }
-    let text = plugin.take_buffer_utf8(schema)?;
-    let parsed: serde_json::Value = serde_json::from_str(&text)
-        .with_context(|| format!("the schema it returned is not JSON: {text}"))?;
-    crate::support::config_schema::validate(&parsed)?;
-    Ok(Some(text))
-}
-
-fn read_static_str(
-    slice: crate::support::plugin_abi::MqbSlice,
-    field: &str,
-) -> anyhow::Result<String> {
-    if slice.len != 0 && slice.ptr.is_null() {
-        return Err(anyhow!("plugin `{field}` slice has a null pointer"));
-    }
-    // Safety: the ABI requires these to point at `'static` data in the library.
-    let bytes = unsafe { slice.as_bytes() };
-    std::str::from_utf8(bytes)
-        .map(str::to_owned)
-        .with_context(|| format!("plugin `{field}` is not valid UTF-8"))
-}
-
-impl Drop for LoadedPlugin {
-    fn drop(&mut self) {
-        // Only reachable if loading failed before the plugin was published;
-        // successfully loaded plugins live in `loaded_plugins` forever.
-        if !self.factory.is_null() {
-            unsafe { (self.table().factory_free)(self.factory) };
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn missing_file_reports_the_path() {
-        let err = load_endpoint_plugin("/nonexistent/libnope.so").unwrap_err();
-        assert!(
-            err.to_string().contains("plugin library not found"),
-            "{err:#}"
-        );
-    }
-
-    #[test]
-    fn a_library_without_the_entry_symbol_is_rejected() {
-        // Any loadable native library that is not a plugin: the host's own
-        // executable is guaranteed to exist and be loadable.
-        let exe = std::env::current_exe().unwrap();
-        let err = load_endpoint_plugin(exe).unwrap_err();
-        let text = format!("{err:#}");
-        assert!(
-            text.contains("not an mq-bridge endpoint plugin") || text.contains("failed to load"),
-            "{text}"
-        );
     }
 }

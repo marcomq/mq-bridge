@@ -824,6 +824,19 @@
           "additionalProperties": false
         },
         {
+          "description": "Input-only. The entries listed above it run on several batches at once; batches\nstill leave in read order.",
+          "type": "object",
+          "properties": {
+            "parallel": {
+              "$ref": "#/$defs/ParallelMiddleware"
+            }
+          },
+          "required": [
+            "parallel"
+          ],
+          "additionalProperties": false
+        },
+        {
           "type": "object",
           "properties": {
             "custom": {
@@ -1837,6 +1850,22 @@
           "additionalProperties": false
         }
       ]
+    },
+    "ParallelMiddleware": {
+      "description": "Parallel middleware configuration.\n\nInput-only marker. The middlewares listed above it run on up to `max_in_flight` batches\nat once, each lane with its own copy of them; the ones below it read one batch at a time.\nResults and commits stay in read order. Only stateless middlewares may sit above it.",
+      "type": "object",
+      "properties": {
+        "max_in_flight": {
+          "description": "Batches processed at once. Defaults to the number of CPU cores.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
     },
     "AwsConfig": {
       "type": "object",

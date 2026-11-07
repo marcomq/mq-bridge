@@ -159,6 +159,10 @@ impl DeferredCommits {
     }
 
     /// Hands held commits to lifecycle code that only has a shared consumer reference.
+    #[cfg_attr(
+        not(any(feature = "filter", feature = "dedup", feature = "plugin")),
+        allow(dead_code)
+    )]
     pub(crate) fn take_shared(&self) -> VecDeque<(BatchCommitFunc, Emptied)> {
         std::mem::take(&mut *self.held.lock().expect("deferred commit lock poisoned"))
     }
