@@ -56,6 +56,7 @@ OpenAiChatConfig = dict
 OpenAiEmbeddingsConfig = dict
 OtelMiddleware = dict
 PackMiddleware = dict
+ParallelMiddleware = dict
 PostgresCdcConfig = dict
 QdrantConfig = dict
 RandomPanicMiddleware = dict
@@ -211,6 +212,7 @@ __all__ = [
     "OtelMiddleware",
     "PackFormat",
     "PackMiddleware",
+    "ParallelMiddleware",
     "PostgresCdcConfig",
     "PostgresConsume",
     "QdrantConfig",

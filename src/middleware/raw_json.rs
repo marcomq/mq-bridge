@@ -44,7 +44,7 @@ impl Node {
             return Ok(true);
         };
         if let Node::Raw(raw) = self {
-            if raw.first() != Some(&b'{') {
+            if raw.iter().find(|b| !b.is_ascii_whitespace()) != Some(&b'{') {
                 anyhow::bail!("{who}: cannot set '{key}': its parent is not an object");
             }
             let Ok(RawPairs(pairs)) = serde_json::from_slice::<RawPairs>(raw) else {
@@ -218,13 +218,15 @@ mod tests {
     #[test]
     fn splicing_matches_the_parsed_document_including_key_order() {
         type Case<'a> = (&'a str, Vec<(Vec<String>, &'a str)>);
-        let cases: [Case; 6] = [
+        let cases: [Case; 8] = [
             (r#"{"a":1,"b":2}"#, vec![(path("c"), r#"{"v":1}"#)]),
             (r#"{"a":1,"c":0,"b":2}"#, vec![(path("c"), "null")]),
             (r#"{"a":1,"u":{"x":1},"b":2}"#, vec![(path("u.y"), "true")]),
             (r#"{"a":1}"#, vec![(path("p.q"), "1"), (path("p.r"), "2")]),
             (r#"{"a\"b":1,"c":0}"#, vec![(path("c"), "3")]),
             (r#"{}"#, vec![(path("x"), r#""s""#)]),
+            (r#"{"a":1}"#, vec![(path("u"), " {}"), (path("u.z"), "1")]),
+            (r#"{"u":{"a\"b":1}}"#, vec![(path("u.z"), "1")]),
         ];
         for (payload, values) in cases {
             let owned = values
@@ -244,6 +246,16 @@ mod tests {
         let payload = br#"{"n":1.50,"s":"a\/b"}"#;
         let out = write_at(payload, vec![(&path("x")[..], b"1".to_vec())], "t");
         assert_eq!(out.unwrap(), br#"{"n":1.50,"s":"a\/b","x":1}"#);
+    }
+
+    #[test]
+    fn duplicate_untouched_keys_are_copied_verbatim() {
+        let out = write_at(
+            br#"{"a":1,"a":2}"#,
+            vec![(&path("x")[..], b"1".to_vec())],
+            "t",
+        );
+        assert_eq!(out.unwrap(), br#"{"a":1,"a":2,"x":1}"#);
     }
 
     #[test]

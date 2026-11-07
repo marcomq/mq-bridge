@@ -366,17 +366,29 @@ impl MessageConsumer for ParallelConsumer {
                         ConsumerError::Connection(anyhow::anyhow!("parallel lane failed: {error}"))
                     })?;
                     state.idle.push(lane);
-                    let batch = result?;
-                    if !batch.messages.is_empty() {
-                        return Ok(source.hand_out(batch, &mut state.deferred));
+                    let result = match result {
+                        Ok(batch) if !batch.messages.is_empty() => {
+                            return Ok(source.hand_out(batch, &mut state.deferred));
+                        }
+                        result => result,
+                    };
+                    // A failed lane may have recorded nacks before failing; settle them in order.
+                    let settled = match source.recorded() {
+                        Some(dispositions) => {
+                            state
+                                .deferred
+                                .settle_emptied(self.ordered, source.commit, dispositions)
+                                .await
+                        }
+                        None => Ok(()),
+                    };
+                    if let Err(error) = result {
+                        if let Err(commit_error) = settled {
+                            tracing::warn!("parallel: failed to settle a failed lane's batch: {commit_error:#}");
+                        }
+                        return Err(error);
                     }
-                    if let Some(dispositions) = source.recorded() {
-                        state
-                            .deferred
-                            .settle_emptied(self.ordered, source.commit, dispositions)
-                            .await
-                            .map_err(ConsumerError::Connection)?;
-                    }
+                    settled.map_err(ConsumerError::Connection)?;
                 }
                 read = pending_read(reading) => {
                     state.reading = None;
@@ -398,8 +410,12 @@ impl MessageConsumer for ParallelConsumer {
         }
     }
 
+    /// A retained read holds the source; waiting on it here could block forever.
     async fn status(&self) -> EndpointStatus {
-        self.source.lock().await.status().await
+        match self.source.try_lock() {
+            Ok(source) => source.status().await,
+            Err(_) => EndpointStatus::default(),
+        }
     }
 
     fn as_any(&self) -> &dyn Any {

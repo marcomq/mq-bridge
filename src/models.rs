@@ -818,6 +818,7 @@ pub struct TimeoutMiddleware {
 pub struct ParallelMiddleware {
     /// Batches processed at once. Defaults to the number of CPU cores.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(range(min = 1)))]
     pub max_in_flight: Option<usize>,
 }
 
