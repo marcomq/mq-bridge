@@ -6,9 +6,11 @@ publish = false
 
 [dependencies]
 mq-bridge = { path = "../../..", default-features = false, features = ["sqlx", "yaml"] }
-sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "postgres"] }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "postgres", "macros"] }
 tokio = { version = "1", features = ["full"] }
-serde_json = "1"
+async-graphql = { version = "7.2.1", default-features = false, features = ["dataloader", "tokio-timer"] }
 
 [profile.release]
 debug = "line-tables-only"

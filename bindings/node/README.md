@@ -84,26 +84,29 @@ document, or omit it to treat the whole config as a single bare route/endpoint b
 ## Calling a route like a function
 
 `Caller` deploys a route whose input is an in-process `memory` endpoint and
-resolves each message to its answer. Calls made at the same time reach the
-route as one batch.
+resolves each call to its answer. Calls made at the same time reach the route
+as one batch.
 
 ```ts
-import { Caller, Route } from "mq-bridge";
+import { Caller } from "mq-bridge";
 
-const route = Route.fromConfig(
-  { input: { memory: { topic: "enrich" } }, output: { response: {} } },
-  "enrich",
-);
-route.withHandler(handle);
-
-const caller = Caller.fromRoute(route);
-const answer = await caller.callJson({ customerId: 42 });
-await caller.stop();
+// `users` in routes.yaml: an `input` with only a `lookup` middleware, no `output`.
+const users = Caller.fromFile("routes.yaml", "users");
+const user = await users.call({ path: "/u/7" }); // the parsed JSON answer
+const found = await users.callMany([{ path: "/u/7" }, { path: "/u/8" }]);
+await users.stop();
 ```
+
+`call()` sends the fields as a JSON object and resolves to the parsed answer;
+`callMany()` resolves like `Promise.allSettled`, one result per request.
+`callMessage()` / `callManyMessages()` take and return `Message`s, e.g. to keep
+metadata. `Caller.fromFile` / `fromConfig` take the same shapes as `Route`, but a
+route without `input` reads from the caller and one without `output` answers with
+the message. `Caller.fromRoute(route)` deploys a route built in code, with its handler.
 
 A message the route fails rejects with the error text at once. `send()`
 resolves to `null` when the route accepts a message without an answer; `call()`
-rejects then. `Caller.fromFile` / `fromConfig` take the same shapes as `Route`.
+rejects then.
 
 ## Pull-based consumer
 

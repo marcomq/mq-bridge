@@ -72,7 +72,9 @@ pub unsafe extern "C" fn mqb_caller_call_many(
         let requests = (0..count)
             .map(|i| Ok(unsafe { handle(*messages.add(i)) }?.inner.clone()))
             .collect::<anyhow::Result<Vec<_>>>()?;
-        let answers = caller.runtime.block_on(caller.caller.call_many(requests));
+        let answers = caller
+            .runtime
+            .block_on(caller.caller.call_many_messages(requests));
         for (i, answer) in answers.into_iter().enumerate() {
             let (response, status) = match answer {
                 Ok(answer) => (answer, MQB_OK),
@@ -121,7 +123,11 @@ fn deliver(
         let caller = unsafe { handle(caller) }?;
         let message = unsafe { handle(message) }?.inner.clone();
         let answer = if needs_answer {
-            Some(caller.runtime.block_on(caller.caller.call(message))?)
+            Some(
+                caller
+                    .runtime
+                    .block_on(caller.caller.call_message(message))?,
+            )
         } else {
             match caller.runtime.block_on(caller.caller.send(message))? {
                 Sent::Ack => None,

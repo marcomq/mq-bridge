@@ -42,8 +42,7 @@ caffeinate -dims python3 run.py --reps 1 --duration 3s --warmup 1s --nets loopba
 
 **Caller vs a query per request (~3 min)**: a Rust program in `caller/` that fetches one user
 per request either straight with sqlx or through `Caller::call` into `caller/routes.yaml`, from
-1 to 4,096 clients, plus `call_many` vs a hand-written `= ANY($1)` and the uncached
-`IN ($1 … $n)` the route's lookup sends. Prints a markdown table.
+1 to 4,096 clients, plus `call_many` vs a hand-written `= ANY($1)`. Prints a markdown table.
 
 ```sh
 docker compose up -d --wait

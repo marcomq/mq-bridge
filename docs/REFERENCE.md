@@ -1161,7 +1161,9 @@ query answers the whole batch instead of one query per message:
 
 - The query's shape picks the mode: a token compared directly (`id = ${…}`) runs once per
   message; the same token as the only element of `id IN (…)` runs once per batch, with the
-  element repeated for each distinct key (at most 1000 per query).
+  element repeated for each distinct key (at most 1000 per query). On Postgres an element
+  that is just the token, optionally with a cast, runs as `id = ANY($1::bigint[])` instead:
+  one cached statement for every batch size.
 - Rows are matched back to messages by the column left of `IN` (`c.id` matches the result
   column `id`), so select that column under that name. A message whose key is missing or
   matches no row gets `null`; if several rows match, the first wins.
@@ -1757,6 +1759,8 @@ validated and enriched at once.
   `custom`, ...) is a startup error there; list it below instead. So are the middlewares a
   lean host takes from the full plugin.
 - Each lane builds its own copy, so a `lookup` above it opens its `from` endpoint once per lane.
+- While a lane is busy, a read smaller than a quarter of the route's `batch_size` is not
+  started on its own: it waits for more messages or a free lane, then goes as one batch.
 - A batch a lane rejects whole is acked only after the batches read before it are committed.
 - On shutdown or a reconnect, finished batches not yet handed to the route are nacked. Lanes
   still at work are stopped, so their batches stay uncommitted and the source redelivers them.

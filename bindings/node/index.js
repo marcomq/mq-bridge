@@ -233,10 +233,18 @@ class Route {
 }
 
 /**
- * Call a route like a function: `call()` sends one message through the route
- * and resolves to its answer. The route input must be an in-process `memory`
- * endpoint; calls made at the same time reach the route as one batch.
+ * Call a route like a function: `call({ path: key })` sends the fields through the
+ * route and resolves to its JSON answer. Calls made at the same time reach the
+ * route as one batch.
  */
+function settled(outcomes, valueOf) {
+  return outcomes.map((outcome) =>
+    outcome.error == null
+      ? { status: "fulfilled", value: valueOf(outcome) }
+      : { status: "rejected", reason: new Error(outcome.error) },
+  );
+}
+
 class Caller {
   constructor(nativeCaller) {
     this._native = nativeCaller;
@@ -247,34 +255,35 @@ class Caller {
     return new Caller(native.Caller.fromRoute(route._native));
   }
 
+  /** Without an `input`, the route reads from the caller; without an `output`, it answers. */
   static fromFile(path, name) {
-    return Caller.fromRoute(Route.fromFile(path, name));
+    return new Caller(native.Caller.fromFile(path, name));
   }
 
   static fromConfig(config, name) {
-    return Caller.fromRoute(Route.fromConfig(config, name));
+    return new Caller(native.Caller.fromConfig(config, name));
   }
 
   get name() {
     return this._native.name;
   }
 
-  async call(message) {
-    return Message._fromNative(await this._native.call(Message._toNative(message)));
+  call(fields) {
+    return this._native.call(fields);
   }
 
-  async callJson(data, metadata = null, id = null) {
-    return Message._fromNative(await this._native.callJson(data, metadata, id));
+  async callMessage(message) {
+    return Message._fromNative(await this._native.callMessage(Message._toNative(message)));
   }
 
-  /** Send the messages as one batch; resolves like `Promise.allSettled`, in order. */
-  async callMany(messages) {
-    const outcomes = await this._native.callMany(messages.map((m) => Message._toNative(m)));
-    return outcomes.map(({ message, error }) =>
-      error == null
-        ? { status: "fulfilled", value: Message._fromNative(message) }
-        : { status: "rejected", reason: new Error(error) },
-    );
+  /** Send the field objects as one batch; resolves like `Promise.allSettled`, in order. */
+  async callMany(requests) {
+    return settled(await this._native.callMany(requests), ({ value }) => value);
+  }
+
+  async callManyMessages(messages) {
+    const outcomes = await this._native.callManyMessages(messages.map((m) => Message._toNative(m)));
+    return settled(outcomes, ({ message }) => Message._fromNative(message));
   }
 
   async send(message) {

@@ -1,38 +1,84 @@
 # The routes the Caller benchmark calls. Same Postgres as the other lookup benches
 # (`docker compose up -d --wait` in benches/lookup).
-routes:
-  enrich:
-    batch_size: 256
-    concurrency: 4
-    input:
-      memory: { topic: enrich, capacity: 4096 }
-      middlewares:
-        - lookup:
-            from:
-              sqlx:
-                url: "postgres://localhost:55432/bench"
-                table: users
-                max_connections: 64
-                lookup_query: "SELECT path, id, name, tier FROM users WHERE path IN (${payload:path})"
-            into: user
-    output:
-      response: {}
+#
+# No `input` and no `output`: a Caller reads the calls itself and answers with the row.
 
-  # The same route with up to 8 batches looking up at once.
-  enrich_parallel:
-    batch_size: 256
-    concurrency: 4
-    input:
-      memory: { topic: enrich_parallel, capacity: 4096 }
-      middlewares:
-        - lookup:
-            from:
-              sqlx:
-                url: "postgres://localhost:55432/bench"
-                table: users
-                max_connections: 64
-                lookup_query: "SELECT path, id, name, tier FROM users WHERE path IN (${payload:path})"
-            into: user
-        - parallel: { max_in_flight: 8 }
-    output:
-      response: {}
+# All calls waiting at the same moment become one `IN (…)` query.
+users:
+  batch_size: 256
+  concurrency: 4
+  input:
+    middlewares:
+      - lookup:
+          from:
+            sqlx:
+              url: "postgres://localhost:55432/bench"
+              table: users
+              max_connections: 64
+              lookup_query: "SELECT path, id, name, tier FROM users WHERE path IN (${payload:path})"
+          into: $
+
+# The same, with up to 16 of those queries waiting for Postgres at once.
+users_parallel:
+  batch_size: 256
+  concurrency: 4
+  input:
+    middlewares:
+      - lookup:
+          from:
+            sqlx:
+              url: "postgres://localhost:55432/bench"
+              table: users
+              max_connections: 8
+              lookup_query: "SELECT path, id, name, tier FROM users WHERE path IN (${payload:path})"
+          into: $
+      - parallel: { max_in_flight: 16 }
+
+# The same with up to 32 queries at once (each lane opens its own pool).
+users_parallel32:
+  batch_size: 256
+  concurrency: 4
+  input:
+    middlewares:
+      - lookup:
+          from:
+            sqlx:
+              url: "postgres://localhost:55432/bench"
+              table: users
+              max_connections: 4
+              lookup_query: "SELECT path, id, name, tier FROM users WHERE path IN (${payload:path})"
+          into: $
+      - parallel: { max_in_flight: 32 }
+
+# 8 lanes, with room for 4,096 waiting calls (the Caller default now).
+users_parallel_cap:
+  batch_size: 256
+  concurrency: 4
+  input:
+    memory: { topic: users_parallel_cap, capacity: 4096 }
+    middlewares:
+      - lookup:
+          from:
+            sqlx:
+              url: "postgres://localhost:55432/bench"
+              table: users
+              max_connections: 64
+              lookup_query: "SELECT path, id, name, tier FROM users WHERE path IN (${payload:path})"
+          into: $
+      - parallel: { max_in_flight: 8 }
+
+# 8 lanes, reading up to 512 calls per batch (the memory input stops filling at half).
+users_parallel_b512:
+  batch_size: 512
+  concurrency: 4
+  input:
+    middlewares:
+      - lookup:
+          from:
+            sqlx:
+              url: "postgres://localhost:55432/bench"
+              table: users
+              max_connections: 64
+              lookup_query: "SELECT path, id, name, tier FROM users WHERE path IN (${payload:path})"
+          into: $
+      - parallel: { max_in_flight: 8 }

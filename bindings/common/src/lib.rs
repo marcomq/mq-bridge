@@ -55,6 +55,14 @@ pub fn load_named_route(path: &Path, name: Option<&str>) -> anyhow::Result<Route
     named_route_from_value(load_config_value(path)?, name)
 }
 
+/// The route `name` for a `Caller`, with its defaults: a missing `input` reads from the
+/// caller's memory topic, a missing `output` answers (see `mq_bridge::Caller::from_file`).
+pub fn caller_route_from_value(value: serde_yaml_ng::Value, name: &str) -> anyhow::Result<Route> {
+    let value: serde_json::Value =
+        serde_yaml_ng::from_value(value).context("config is not representable as JSON")?;
+    mq_bridge::Caller::route_from_config(value, name)
+}
+
 /// Resolve a route from a config value. When `name` is `Some`, look it up in a
 /// `routes:` document (falling back to a single-route body). When `name` is
 /// `None`, the value must be a single bare route body. A `config:` export root

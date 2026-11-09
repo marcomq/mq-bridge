@@ -25,20 +25,23 @@ export class Message {
 }
 
 /**
- * Call a route like a function. The route input must be an in-process `memory`
- * endpoint; calls made at the same time reach the route as one batch.
+ * Call a route like a function: `call({ path: key })` resolves to the route's JSON
+ * answer. Calls made at the same time reach the route as one batch.
  */
 export class Caller {
   /** Deploy a `Route` (with its handlers) as a caller under the route's name. */
   static fromRoute(route: Route): Caller;
+  /** Without an `input`, the route reads from the caller; without an `output`, it answers. */
   static fromFile(path: string, name?: string | null): Caller;
   static fromConfig(config: JsonValue, name?: string | null): Caller;
   readonly name: string;
-  /** Send a message through the route and resolve to its answer. */
-  call(message: Message): Promise<Message>;
-  callJson(data: JsonValue, metadata?: Metadata | null, id?: string | null): Promise<Message>;
-  /** Send the messages as one batch; one settled result per message, in order. */
-  callMany(messages: Message[]): Promise<PromiseSettledResult<Message>[]>;
+  /** Send the fields as one JSON object and resolve to the route's answer, parsed. */
+  call<T = JsonValue>(fields: JsonValue): Promise<T>;
+  /** Send a message and resolve to the answer as a message, e.g. to keep its metadata. */
+  callMessage(message: Message): Promise<Message>;
+  /** Send the field objects as one batch; one settled result per request, in order. */
+  callMany<T = JsonValue>(requests: JsonValue[]): Promise<PromiseSettledResult<T>[]>;
+  callManyMessages(messages: Message[]): Promise<PromiseSettledResult<Message>[]>;
   /** Resolve once the message is handled: its answer, or `null` if there is none. */
   send(message: Message): Promise<Message | null>;
   /** Stop the route. Resolves to `false` if it was already stopped. */

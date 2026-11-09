@@ -9,6 +9,7 @@
 //! middlewares above it run on every route worker at once; an ordered sink still gets its
 //! batches in source order, because the order is enforced at the marker instead of the route.
 
+use super::buffer::merge_commits;
 use super::deferred_commit::{run_all, run_all_keeping_nacks, DeferredCommits};
 use super::served_by_plugin;
 use crate::errors::InvalidConfig;
@@ -212,6 +213,47 @@ struct State {
     stopped: bool,
     /// Commits of batches a lane rejected whole, held behind batches the route has not committed.
     deferred: DeferredCommits,
+    /// The latest read, while too small to be worth a lane of its own (see [`worth_a_lane`]).
+    held: Option<ReceivedBatch>,
+}
+
+impl State {
+    fn start(&mut self, batch: ReceivedBatch, max_messages: usize) {
+        let lane = self
+            .idle
+            .pop()
+            .expect("a batch starts only with a free lane");
+        let (running, source) = lane.start(batch, max_messages);
+        self.queue.push_back(Item::Running(running, source));
+    }
+
+    fn start_held(&mut self, max_messages: usize) {
+        if let Some(batch) = self.held.take() {
+            self.start(batch, max_messages);
+        }
+    }
+
+    fn busy(&self) -> bool {
+        self.queue
+            .iter()
+            .any(|item| matches!(item, Item::Running(..)))
+    }
+}
+
+/// While another lane is busy, a smaller batch keeps collecting until it fills to this or a
+/// lane finishes: many small queries cost the backend more than a few full ones.
+fn worth_a_lane(len: usize, max_messages: usize) -> bool {
+    len >= (max_messages / 4).max(1)
+}
+
+fn merged(first: ReceivedBatch, then: ReceivedBatch) -> ReceivedBatch {
+    let commit = merge_commits(vec![
+        (first.messages.len(), first.commit),
+        (then.messages.len(), then.commit),
+    ]);
+    let mut messages = first.messages;
+    messages.extend(then.messages);
+    ReceivedBatch { messages, commit }
 }
 
 /// Reads batches one at a time and runs each through a free lane, handing results out in
@@ -235,6 +277,7 @@ impl ParallelConsumer {
                 reading: None,
                 stopped: false,
                 deferred: DeferredCommits::new(),
+                held: None,
             }),
         }
     }
@@ -287,6 +330,9 @@ impl MessageConsumer for ParallelConsumer {
                 state.reading = None;
                 state.stopped = false;
                 let in_flight = state.deferred.has_in_flight();
+                if let Some(batch) = state.held.take() {
+                    state.queue.push_back(Item::Ready(Ok(batch)));
+                }
                 (
                     std::mem::take(&mut state.queue),
                     state.deferred.take(),
@@ -358,8 +404,10 @@ impl MessageConsumer for ParallelConsumer {
                 && state.queue.len() < self.lanes
             {
                 let source = self.source.clone();
+                let held = state.held.as_ref().map_or(0, |b| b.messages.len());
+                let room = max_messages.saturating_sub(held).max(1);
                 state.reading = Some(Box::pin(async move {
-                    source.lock_owned().await.receive_batch(max_messages).await
+                    source.lock_owned().await.receive_batch(room).await
                 }));
             }
             if state.reading.is_none() && state.queue.is_empty() {
@@ -380,6 +428,7 @@ impl MessageConsumer for ParallelConsumer {
                         ConsumerError::Connection(anyhow::anyhow!("parallel lane failed: {error}"))
                     })?;
                     state.idle.push(lane);
+                    state.start_held(max_messages);
                     let result = match result {
                         Ok(batch) if !batch.messages.is_empty() => {
                             return Ok(source.hand_out(batch, &mut state.deferred));
@@ -406,19 +455,28 @@ impl MessageConsumer for ParallelConsumer {
                 }
                 read = pending_read(reading) => {
                     state.reading = None;
-                    let item = match read {
+                    match read {
                         Ok(batch) if !batch.messages.is_empty() => {
-                            let lane = state.idle.pop().expect("a read starts only with a free lane");
-                            let (running, source) = lane.start(batch, max_messages);
-                            Item::Running(running, source)
+                            let batch = match state.held.take() {
+                                Some(held) => merged(held, batch),
+                                None => batch,
+                            };
+                            if state.busy() && !worth_a_lane(batch.messages.len(), max_messages) {
+                                state.held = Some(batch);
+                            } else {
+                                state.start(batch, max_messages);
+                            }
                         }
-                        Ok(empty) => Item::Ready(Ok(empty)),
+                        Ok(empty) => {
+                            state.start_held(max_messages);
+                            state.queue.push_back(Item::Ready(Ok(empty)));
+                        }
                         Err(error) => {
+                            state.start_held(max_messages);
                             state.stopped = true;
-                            Item::Ready(Err(error))
+                            state.queue.push_back(Item::Ready(Err(error)));
                         }
-                    };
-                    state.queue.push_back(item);
+                    }
                 }
             }
         }
@@ -746,6 +804,27 @@ mod tests {
         }
         assert_eq!(seen, (0..64).collect::<Vec<_>>());
         assert!(peak.load(Ordering::SeqCst) > 1, "lanes never overlapped");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn small_reads_wait_for_a_busy_lane_as_one_batch() {
+        let (mut consumer, commits, _) = parallel(16, 1, 4);
+        let (mut seen, mut largest) = (Vec::new(), 0);
+        loop {
+            match consumer.receive_batch(8).await {
+                Ok(batch) => {
+                    largest = largest.max(batch.messages.len());
+                    seen.extend(numbers(&batch));
+                    let acks = vec![MessageDisposition::Ack; batch.messages.len()];
+                    (batch.commit)(acks).await.unwrap();
+                }
+                Err(ConsumerError::EndOfStream) => break,
+                Err(other) => panic!("{other}"),
+            }
+        }
+        assert_eq!(seen, (0..16).collect::<Vec<_>>());
+        assert!(largest > 1, "every read got a lane of its own");
+        assert_eq!(committed(&commits), (0..16).collect::<Vec<_>>());
     }
 
     #[tokio::test]

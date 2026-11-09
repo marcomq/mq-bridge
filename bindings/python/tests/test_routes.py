@@ -352,7 +352,7 @@ def test_caller_returns_the_answer_and_raises_a_handler_error() -> None:
     with Caller.from_route(route) as caller:
         results = []
         threads = [
-            threading.Thread(target=lambda n=n: results.append(caller.call_json({"n": n}).json()))
+            threading.Thread(target=lambda n=n: results.append(caller.call({"n": n})))
             for n in range(8)
         ]
         for thread in threads:
@@ -363,13 +363,17 @@ def test_caller_returns_the_answer_and_raises_a_handler_error() -> None:
 
         started = time.monotonic()
         with pytest.raises(RuntimeError, match="negative input"):
-            caller.call_json({"n": -1})
+            caller.call(n=-1)
         assert time.monotonic() - started < 5.0
 
-        assert caller.call_json({"n": 4}).json() == {"double": 8}
+        assert caller.call(n=4, fields="a field, not the mapping") == {"double": 8}
+        assert caller.call_message(b'{"n": 5}').json() == {"double": 10}
 
-        first, failed, last = caller.call_many([b'{"n": 1}', b'{"n": -1}', b'{"n": 3}'])
-        assert first.json() == {"double": 2}
+        first, failed, last = caller.call_many([{"n": 1}, {"n": -1}, {"n": 3}])
+        assert first == {"double": 2}
         assert isinstance(failed, RuntimeError) and "negative input" in str(failed)
-        assert last.json() == {"double": 6}
+        assert last == {"double": 6}
+
+        [message] = caller.call_many_messages([b'{"n": 6}'])
+        assert message.json() == {"double": 12}
 

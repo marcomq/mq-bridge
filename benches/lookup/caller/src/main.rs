@@ -2,59 +2,73 @@
 //!
 //! Needs the lookup bench's Postgres (`docker compose up -d --wait` in `benches/lookup`) and
 //! `PGUSER` / `PGPASSWORD` set to the credentials in `benches/lookup/docker-compose.yml`.
-//! Run with `cargo run --release` (optional argument: requests per measurement, default 50000).
+//! Run with `cargo run --release -- [requests per measurement, default 50000] [variants]`,
+//! variants as a comma-separated list of the names below (default: all).
 //!
 //! - `direct`: one `= $1` query per request on a sqlx pool of 64 connections.
-//! - `caller`: `Caller::call` per request into the `enrich` route of `routes.yaml`, whose
-//!   `lookup` sends one `IN (…)` query for all requests waiting at that moment.
+//! - `direct_pool192`: the same on 192 connections (1,024 and 4,096 clients; Postgres allows 200).
+//! - `dataloader_1ms` / `dataloader_0ms`: `load_one` on async-graphql's `DataLoader` with that
+//!   `delay`, `max_batch_size` 256, one `= ANY($1)` per batch on the 64-connection pool.
+//! - `dataloader_any_text` / `dataloader_in` / `dataloader_in_cached`: `dataloader_0ms` with
+//!   the array as one text literal, or `IN ($1…$n)` prepared per call or cached.
+//! - `users` / `users_parallel`: `call` into that route of `routes.yaml`, whose `lookup`
+//!   sends one query for all calls waiting at that moment. `users_parallel32` /
+//!   `users_parallel_b512` / `users_parallel_cap` vary its lanes,
+//!   batch size and input capacity.
 //! - `direct_any` / `call_many`: a client holding 256 keys at once, as one `= ANY($1)` query
-//!   or one `Caller::call_many`.
+//!   or one `call_many`.
 //!
 //! Every answer is checked against its key.
 
-use mq_bridge::{Caller, CanonicalMessage};
-use std::collections::HashMap;
+use async_graphql::dataloader::{DataLoader, Loader};
+use mq_bridge::Caller;
+use serde::Deserialize;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+#[derive(Clone, Deserialize, sqlx::FromRow)]
+#[allow(dead_code)]
+struct User {
+    path: String,
+    id: i64,
+    name: String,
+    tier: String,
+}
 
 const ROUTES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/routes.yaml");
 /// Same URL as in `routes.yaml`; user and password come from `PGUSER` / `PGPASSWORD`.
 const PG_URL: &str = "postgres://localhost:55432/bench";
-const BATCH: usize = 256;
+const MANY: usize = 256;
 
-type User = (String, i64, String, String);
+async fn deploy(route: &str) -> Caller {
+    Caller::from_file(ROUTES, route).await.unwrap()
+}
 
 /// A user key spread over the table's one million rows.
 fn key(n: usize) -> String {
     format!("/u/{:06}", n.wrapping_mul(2_654_435_761) % 1_000_000)
 }
 
-fn request(key: &str) -> CanonicalMessage {
-    format!(r#"{{"path":"{key}"}}"#).into()
-}
-
-fn user_path(answer: &CanonicalMessage) -> String {
-    let answer: serde_json::Value = serde_json::from_slice(&answer.payload).unwrap();
-    answer["user"]["path"].as_str().unwrap().to_string()
-}
-
-async fn deploy(route: &str) -> Caller {
-    Caller::from_file(ROUTES, route).await.unwrap()
-}
-
-async fn pool() -> sqlx::PgPool {
+async fn pool_of(connections: u32) -> sqlx::PgPool {
     sqlx::postgres::PgPoolOptions::new()
-        .max_connections(64)
+        .max_connections(connections)
         .test_before_acquire(false)
         .connect(PG_URL)
         .await
         .unwrap()
 }
 
-async fn direct(clients: usize, per_client: usize) {
-    let pool = pool().await;
-    measure("direct", clients, per_client, 1, move |keys| {
-        let pool = pool.clone();
+async fn pool() -> sqlx::PgPool {
+    pool_of(64).await
+}
+
+async fn direct(name: &str, connections: u32, clients: usize, per_client: usize) {
+    let pool = pool_of(connections).await;
+    let handle = pool.clone();
+    measure(name, clients, per_client, 1, move |keys| {
+        let pool = handle.clone();
         async move {
             let user: User =
                 sqlx::query_as("SELECT path, id, name, tier FROM users WHERE path = $1")
@@ -62,29 +76,113 @@ async fn direct(clients: usize, per_client: usize) {
                     .fetch_one(&pool)
                     .await
                     .unwrap();
-            assert_eq!(user.0, keys[0]);
+            assert_eq!(user.path, keys[0]);
         }
     })
     .await;
+    pool.close().await;
 }
 
-async fn caller(route: &str, clients: usize, per_client: usize) {
-    let caller = deploy(route).await;
-    let handle = caller.clone();
-    measure(route, clients, per_client, 1, move |keys| {
-        let caller = handle.clone();
+/// How a DataLoader batch asks Postgres.
+#[derive(Clone, Copy)]
+enum Form {
+    /// `= ANY($1)` with a text array, one cached statement.
+    Any,
+    /// `= ANY($1::text[])` with the array as one text literal, as a driver without arrays can.
+    AnyText,
+    /// `IN ($1…$n)`, cached per list length or prepared per call (as the route's lookup).
+    In { cached: bool },
+}
+
+struct UserLoader {
+    pool: sqlx::PgPool,
+    form: Form,
+}
+
+/// `{"a","b"}`: a Postgres array literal of text keys.
+fn array_literal(keys: &[String]) -> String {
+    let quoted: Vec<String> = keys
+        .iter()
+        .map(|k| format!("\"{}\"", k.replace('\\', "\\\\").replace('"', "\\\"")))
+        .collect();
+    format!("{{{}}}", quoted.join(","))
+}
+
+impl Loader<String> for UserLoader {
+    type Value = User;
+    type Error = Arc<sqlx::Error>;
+
+    async fn load(&self, keys: &[String]) -> Result<HashMap<String, User>, Self::Error> {
+        const ANY: &str = "SELECT path, id, name, tier FROM users WHERE path = ANY($1)";
+        const ANY_TEXT: &str =
+            "SELECT path, id, name, tier FROM users WHERE path = ANY($1::text[])";
+        let users: Vec<User> = match self.form {
+            Form::Any => sqlx::query_as(ANY).bind(keys).fetch_all(&self.pool).await?,
+            Form::AnyText => {
+                sqlx::query_as(ANY_TEXT)
+                    .bind(array_literal(keys))
+                    .fetch_all(&self.pool)
+                    .await?
+            }
+            Form::In { cached } => {
+                let params: Vec<String> = (1..=keys.len()).map(|i| format!("${i}")).collect();
+                let sql = format!(
+                    "SELECT path, id, name, tier FROM users WHERE path IN ({})",
+                    params.join(",")
+                );
+                let mut query =
+                    sqlx::query_as(sqlx::AssertSqlSafe(sql.as_str())).persistent(cached);
+                for key in keys {
+                    query = query.bind(key);
+                }
+                query.fetch_all(&self.pool).await?
+            }
+        };
+        Ok(users.into_iter().map(|u| (u.path.clone(), u)).collect())
+    }
+}
+
+async fn dataloader(name: &str, delay: Duration, form: Form, clients: usize, per_client: usize) {
+    let pool = pool().await;
+    let loader = Arc::new(
+        DataLoader::new(
+            UserLoader {
+                pool: pool.clone(),
+                form,
+            },
+            tokio::spawn,
+        )
+        .delay(delay)
+        .max_batch_size(256),
+    );
+    measure(name, clients, per_client, 1, move |keys| {
+        let loader = loader.clone();
         async move {
-            let answer = caller.call(request(&keys[0])).await.unwrap();
-            assert_eq!(user_path(&answer), keys[0]);
+            let user = loader.load_one(keys[0].clone()).await.unwrap().unwrap();
+            assert_eq!(user.path, keys[0]);
         }
     })
     .await;
-    caller.stop().await;
+    pool.close().await;
+}
+
+async fn call(route: &str, clients: usize, per_client: usize) {
+    let users = deploy(route).await;
+    let handle = users.clone();
+    measure(route, clients, per_client, 1, move |keys| {
+        let users = handle.clone();
+        async move {
+            let user: User = users.call([("path", &keys[0])]).await.unwrap();
+            assert_eq!(user.path, keys[0]);
+        }
+    })
+    .await;
+    users.stop().await;
 }
 
 async fn direct_any(clients: usize, per_client: usize) {
     let pool = pool().await;
-    measure("direct_any", clients, per_client, BATCH, move |keys| {
+    measure("direct_any", clients, per_client, MANY, move |keys| {
         let pool = pool.clone();
         async move {
             let users: Vec<User> =
@@ -93,53 +191,29 @@ async fn direct_any(clients: usize, per_client: usize) {
                     .fetch_all(&pool)
                     .await
                     .unwrap();
-            let by_key: HashMap<_, _> = users.into_iter().map(|u| (u.0.clone(), u)).collect();
-            assert!(keys.iter().all(|k| by_key.contains_key(k)));
-        }
-    })
-    .await;
-}
-
-/// The query the route's `lookup` sends: one `IN ($1 … $n)`, not cached for n > 16.
-async fn direct_in(clients: usize, per_client: usize) {
-    let pool = pool().await;
-    measure("direct_in", clients, per_client, BATCH, move |keys| {
-        let pool = pool.clone();
-        async move {
-            let list: Vec<String> = (1..=keys.len()).map(|i| format!("${i}")).collect();
-            let sql = format!(
-                "SELECT path, id, name, tier FROM users WHERE path IN ({})",
-                list.join(", ")
-            );
-            let mut select = sqlx::query_as(sqlx::AssertSqlSafe(sql)).persistent(false);
-            for key in &keys {
-                select = select.bind(key);
-            }
-            let users: Vec<User> = select.fetch_all(&pool).await.unwrap();
-            let by_key: HashMap<_, _> = users.into_iter().map(|u| (u.0.clone(), u)).collect();
-            assert!(keys.iter().all(|k| by_key.contains_key(k)));
+            let found: HashSet<&str> = users.iter().map(|u| u.path.as_str()).collect();
+            assert!(keys.iter().all(|k| found.contains(k.as_str())));
         }
     })
     .await;
 }
 
 async fn call_many(route: &str, clients: usize, per_client: usize) {
-    let caller = deploy(route).await;
-    let handle = caller.clone();
+    let users = deploy(route).await;
+    let handle = users.clone();
     let name = format!("call_many {route}");
-    measure(&name, clients, per_client, BATCH, move |keys| {
-        let caller = handle.clone();
+    measure(&name, clients, per_client, MANY, move |keys| {
+        let users = handle.clone();
         async move {
-            let answers = caller
-                .call_many(keys.iter().map(|k| request(k)).collect())
-                .await;
-            for (key, answer) in keys.iter().zip(answers) {
-                assert_eq!(&user_path(&answer.unwrap()), key);
+            let found: Vec<anyhow::Result<User>> =
+                users.call_many(keys.iter().map(|k| [("path", k)])).await;
+            for (key, user) in keys.iter().zip(found) {
+                assert_eq!(&user.unwrap().path, key);
             }
         }
     })
     .await;
-    caller.stop().await;
+    users.stop().await;
 }
 
 /// Runs `clients` tasks that each send `per_client` keys, `chunk` keys per `op`, and prints
@@ -188,19 +262,53 @@ async fn main() {
         .nth(1)
         .map(|n| n.parse().expect("requests per measurement"))
         .unwrap_or(50_000);
+    let only: Option<Vec<String>> = std::env::args()
+        .nth(2)
+        .map(|names| names.split(',').map(str::to_owned).collect());
+    let run = |name: &str| only.as_ref().is_none_or(|o| o.iter().any(|n| n == name));
 
     println!("| variant | clients | keys/s | p50 | p99 |\n|---|---|---|---|---|");
     for clients in [1, 16, 64, 256, 1024, 4096] {
         let per_client = (total / clients).clamp(50, 5_000);
-        direct(clients, per_client).await;
-        caller("enrich", clients, per_client).await;
-        caller("enrich_parallel", clients, per_client).await;
+        if run("direct") {
+            direct("direct", 64, clients, per_client).await;
+        }
+        if run("direct_pool192") && clients >= 1024 {
+            direct("direct_pool192", 192, clients, per_client).await;
+        }
+        let (ms, zero) = (Duration::from_millis(1), Duration::ZERO);
+        for (name, delay, form) in [
+            ("dataloader_1ms", ms, Form::Any),
+            ("dataloader_0ms", zero, Form::Any),
+            ("dataloader_any_text", zero, Form::AnyText),
+            ("dataloader_in", zero, Form::In { cached: false }),
+            ("dataloader_in_cached", zero, Form::In { cached: true }),
+        ] {
+            if run(name) {
+                dataloader(name, delay, form, clients, per_client).await;
+            }
+        }
+        for route in [
+            "users",
+            "users_parallel",
+            "users_parallel32",
+            "users_parallel_b512",
+            "users_parallel_cap",
+        ] {
+            if run(route) {
+                call(route, clients, per_client).await;
+            }
+        }
     }
     for clients in [1, 4, 16, 64] {
-        let per_client = (total / clients).max(BATCH * 8);
-        direct_any(clients, per_client).await;
-        direct_in(clients, per_client).await;
-        call_many("enrich", clients, per_client).await;
-        call_many("enrich_parallel", clients, per_client).await;
+        let per_client = (total / clients).max(MANY * 8);
+        if run("direct_any") {
+            direct_any(clients, per_client).await;
+        }
+        for route in ["users", "users_parallel"] {
+            if run(&format!("call_many {route}")) {
+                call_many(route, clients, per_client).await;
+            }
+        }
     }
 }

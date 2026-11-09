@@ -3,7 +3,7 @@
 //  Licensed under MIT OR Apache-2.0, see LICENSE file for more details
 //  git clone https://github.com/marcomq/mq-bridge
 
-//! Call a route like a function: `caller.call(message).await` returns the route's answer.
+//! Call a route like a function: `users.call([("path", key)]).await` returns the route's answer.
 //!
 //! A [`Caller`] is a normal deployed [`Route`] whose input is an in-process `memory`
 //! topic. Each call puts one request on that topic and waits for its reply, so everything
@@ -14,24 +14,29 @@
 //!
 //! ```no_run
 //! use mq_bridge::models::Endpoint;
-//! use mq_bridge::{CanonicalMessage, Caller, Route};
+//! use mq_bridge::Caller;
+//!
+//! #[derive(serde::Deserialize)]
+//! struct User { id: i64, name: String }
 //!
 //! # async fn example() -> anyhow::Result<()> {
-//! // The route from `routes.yaml`; its input is `memory: { topic: enrich }` and its
-//! // output ends with `response: {}`.
-//! let enrich = Caller::from_file("routes.yaml", "enrich").await?;
-//! let answer = enrich.call(CanonicalMessage::from(r#"{"id": 7}"#)).await?;
+//! // The route `users` from `routes.yaml`. Without an `input`, the caller reads from its
+//! // own memory topic; without an `output`, the route answers with the message.
+//! let users = Caller::from_file("routes.yaml", "users").await?;
+//! let user: Option<User> = users.call([("path", "/u/7")]).await?;
+//! let found: Vec<anyhow::Result<Option<User>>> =
+//!     users.call_many([[("path", "/u/7")], [("path", "/u/8")]]).await;
 //!
 //! // Or built in code: the caller adds the memory input itself.
 //! let echo = Caller::new("echo", Endpoint::new_response()).await?;
-//! assert_eq!(echo.call("hi".into()).await?.get_payload_str(), "hi");
+//! assert_eq!(echo.call_message("hi".into()).await?.get_payload_str(), "hi");
 //! # Ok(())
 //! # }
 //! ```
 //!
 //! How a call ends:
 //! - The output answers (`response: {}`, `http`, `request`, an answering plugin endpoint):
-//!   [`Caller::call`] returns that message.
+//!   [`Caller::call`] returns that answer, parsed as JSON into the type you ask for.
 //! - The output only accepts the message (a plain sink): [`Caller::send`] returns
 //!   [`Sent::Ack`]; [`Caller::call`] returns an error.
 //! - The message fails: both return the error, as soon as the route gives up on it
@@ -42,10 +47,74 @@ use crate::endpoints::memory::MemoryPublisher;
 use crate::models::{Endpoint, EndpointType, MemoryConfig, Route};
 use crate::traits::{MessagePublisher, PublisherError};
 use crate::{CanonicalMessage, Sent};
-use anyhow::{anyhow, bail};
-use std::collections::HashMap;
+use anyhow::{anyhow, bail, Context};
+use serde::de::DeserializeOwned;
+use serde::ser::{SerializeMap, Serializer};
+use serde::Serialize;
+use std::collections::{BTreeMap, HashMap};
+use std::hash::BuildHasher;
 use std::path::Path;
 use std::sync::{Arc, OnceLock, PoisonError, RwLock};
+
+/// The fields of one call, sent as a JSON object: `[("path", key)]`, a `Vec` of pairs,
+/// a `HashMap` / `BTreeMap`, or a `serde_json::Value` (e.g. `json!({"id": 7, "day": d})`
+/// for values of different types, or `serde_json::to_value(&my_struct)?`).
+pub trait CallFields {
+    /// Writes the fields as one JSON value.
+    fn write_json(self, out: &mut Vec<u8>) -> serde_json::Result<()>;
+}
+
+fn write_pairs<K: AsRef<str>, V: Serialize>(
+    pairs: impl IntoIterator<Item = (K, V)>,
+    out: &mut Vec<u8>,
+) -> serde_json::Result<()> {
+    let mut serializer = serde_json::Serializer::new(out);
+    let mut map = serializer.serialize_map(None)?;
+    for (key, value) in pairs {
+        map.serialize_entry(key.as_ref(), &value)?;
+    }
+    map.end()
+}
+
+impl<K: AsRef<str>, V: Serialize, const N: usize> CallFields for [(K, V); N] {
+    fn write_json(self, out: &mut Vec<u8>) -> serde_json::Result<()> {
+        write_pairs(self, out)
+    }
+}
+
+impl<K: AsRef<str>, V: Serialize> CallFields for Vec<(K, V)> {
+    fn write_json(self, out: &mut Vec<u8>) -> serde_json::Result<()> {
+        write_pairs(self, out)
+    }
+}
+
+impl<K: AsRef<str>, V: Serialize, S: BuildHasher> CallFields for HashMap<K, V, S> {
+    fn write_json(self, out: &mut Vec<u8>) -> serde_json::Result<()> {
+        write_pairs(self, out)
+    }
+}
+
+impl<K: AsRef<str>, V: Serialize> CallFields for BTreeMap<K, V> {
+    fn write_json(self, out: &mut Vec<u8>) -> serde_json::Result<()> {
+        write_pairs(self, out)
+    }
+}
+
+impl CallFields for serde_json::Value {
+    fn write_json(self, out: &mut Vec<u8>) -> serde_json::Result<()> {
+        serde_json::to_writer(out, &self)
+    }
+}
+
+/// Waiting calls a caller's input holds when its config sets no `capacity`. With the memory
+/// default of 100, thousands of concurrent callers contend for a free slot and batches stay
+/// small: 4,096 callers on a batched Postgres lookup went from 143k to 193k calls/s.
+const CALLER_CAPACITY: usize = 4096;
+
+/// The memory topic a caller reads from when its route names no input.
+pub(crate) fn default_topic(name: &str) -> String {
+    format!("mqb-caller-{name}")
+}
 
 /// A deployed route that answers calls. Cheap to clone; all clones call the same route.
 #[derive(Clone)]
@@ -65,7 +134,8 @@ impl Caller {
     ///
     /// The input must be an in-process `memory` endpoint (not `ipc://`, not
     /// `subscribe_mode`). Its `request_reply` is switched on, so a failed message is
-    /// answered with its error instead of stopping the route. The caller is also
+    /// answered with its error instead of stopping the route. Without a `capacity`, it
+    /// holds 4,096 waiting calls instead of 100. The caller is also
     /// registered under `name` for [`Caller::get`].
     pub async fn deploy(name: &str, mut route: Route) -> anyhow::Result<Self> {
         let EndpointType::Memory(input) = &mut route.input.endpoint_type else {
@@ -75,6 +145,7 @@ impl Caller {
             bail!("Caller '{name}': the memory input cannot use `subscribe_mode`");
         }
         input.request_reply = true;
+        input.capacity.get_or_insert(CALLER_CAPACITY);
         let requests = MemoryPublisher::new(input)?;
         if !requests.answers_requests() {
             bail!("Caller '{name}': the memory input must be in-process, not a transport URL");
@@ -93,21 +164,100 @@ impl Caller {
     /// Use [`Caller::deploy`] for a handler, input middlewares or route options.
     pub async fn new(name: &str, output: Endpoint) -> anyhow::Result<Self> {
         let input = Endpoint::new(EndpointType::Memory(MemoryConfig {
-            topic: format!("mqb-caller-{name}"),
+            topic: default_topic(name),
             ..Default::default()
         }));
         Self::deploy(name, Route::new(input, output)).await
     }
 
-    /// Deploys the route `name` from the `routes:` section of a config file.
+    /// Deploys the route `name` from a YAML or JSON config file (a `routes:` document, a
+    /// bare `{name: route}` map, or one route body).
+    ///
+    /// Unlike [`Route::from_file`], the route may leave out its `input` (or give only its
+    /// `middlewares`): the caller then reads from an internal memory topic. A missing
+    /// `output` becomes `response: {}`, so the route answers with the message.
     pub async fn from_file(path: impl AsRef<Path>, name: &str) -> anyhow::Result<Self> {
-        Self::deploy(name, Route::from_file(path, name)?).await
+        let config = crate::config_file::read_file(path.as_ref())?;
+        Self::from_config(config, name).await
     }
 
-    /// Sends `message` through the route and returns its answer.
+    /// Like [`Caller::from_file`], but parses the config from a string, e.g. one route body
+    /// written inline next to the code that calls it.
+    pub async fn from_str(text: &str, name: &str) -> anyhow::Result<Self> {
+        Self::from_config(crate::config_file::parse_str(text)?, name).await
+    }
+
+    /// Like [`Caller::from_file`], but takes an already-parsed config document.
+    pub async fn from_config(config: serde_json::Value, name: &str) -> anyhow::Result<Self> {
+        Self::deploy(name, Self::route_from_config(config, name)?).await
+    }
+
+    /// The route [`Caller::from_config`] would deploy, with the caller's defaults filled
+    /// in, to add a handler before [`Caller::deploy`].
+    pub fn route_from_config(config: serde_json::Value, name: &str) -> anyhow::Result<Route> {
+        crate::config_file::caller_route(config, name)
+    }
+
+    /// Sends `fields` as one JSON object through the route and parses its answer as `T`.
+    ///
+    /// Ask for an `Option<T>` when the route may answer `null`, as a `lookup` does for a key
+    /// without a row. Fails if the message fails, times out, the output accepts it without
+    /// an answer, or the answer is not JSON of that shape.
+    pub async fn call<T: DeserializeOwned>(&self, fields: impl CallFields) -> anyhow::Result<T> {
+        let answer = self.call_message(self.request(fields)?).await?;
+        self.parse(&answer)
+    }
+
+    /// Like [`Caller::call`] for several requests: they reach the route as one batch, and
+    /// the answers come back in their order, each failing or succeeding on its own.
+    pub async fn call_many<T: DeserializeOwned, F: CallFields>(
+        &self,
+        requests: impl IntoIterator<Item = F>,
+    ) -> Vec<anyhow::Result<T>> {
+        let mut messages = Vec::new();
+        let encode_errors: Vec<Option<anyhow::Error>> = requests
+            .into_iter()
+            .map(|fields| self.request(fields).map(|m| messages.push(m)).err())
+            .collect();
+        let mut answers = self.call_many_messages(messages).await.into_iter();
+        encode_errors
+            .into_iter()
+            .map(|error| match error {
+                Some(error) => Err(error),
+                None => answers
+                    .next()
+                    .unwrap_or_else(|| Err(anyhow!("Caller '{}': no answer", self.name)))
+                    .and_then(|answer| self.parse(&answer)),
+            })
+            .collect()
+    }
+
+    fn request(&self, fields: impl CallFields) -> anyhow::Result<CanonicalMessage> {
+        let mut payload = Vec::with_capacity(64);
+        fields
+            .write_json(&mut payload)
+            .with_context(|| format!("Caller '{}': cannot encode the request", self.name))?;
+        Ok(CanonicalMessage::new(payload, None))
+    }
+
+    fn parse<T: DeserializeOwned>(&self, answer: &CanonicalMessage) -> anyhow::Result<T> {
+        serde_json::from_slice(&answer.payload).with_context(|| {
+            format!(
+                "Caller '{}': the answer does not parse as the requested type: {}",
+                self.name,
+                answer.get_payload_str()
+            )
+        })
+    }
+
+    /// Sends `message` through the route and returns its answer as a message, e.g. to
+    /// forward it with its metadata.
     ///
     /// Fails if the message fails, times out, or the output accepts it without an answer.
-    pub async fn call(&self, message: CanonicalMessage) -> anyhow::Result<CanonicalMessage> {
+    pub async fn call_message(
+        &self,
+        message: CanonicalMessage,
+    ) -> anyhow::Result<CanonicalMessage> {
         match self.send(message).await? {
             Sent::Response(response) => Ok(response),
             Sent::Ack => Err(self.no_answer()),
@@ -130,9 +280,9 @@ impl Caller {
         })
     }
 
-    /// Like [`Caller::call`] for several messages: they reach the route as one batch, and
-    /// the answers come back in their order, each failing or succeeding on its own.
-    pub async fn call_many(
+    /// Like [`Caller::call_message`] for several messages: they reach the route as one
+    /// batch, and the answers come back in their order, each failing or succeeding on its own.
+    pub async fn call_many_messages(
         &self,
         messages: Vec<CanonicalMessage>,
     ) -> Vec<anyhow::Result<CanonicalMessage>> {
@@ -215,17 +365,21 @@ mod tests {
         });
         let caller = Caller::deploy(&name, route).await.unwrap();
 
-        let answer = caller.call("a".into()).await.unwrap();
+        let answer = caller.call_message("a".into()).await.unwrap();
         assert_eq!(answer.get_payload_str(), "enriched a");
         let started = std::time::Instant::now();
-        let err = caller.call("bad".into()).await.unwrap_err();
+        let err = caller.call_message("bad".into()).await.unwrap_err();
         assert!(err.to_string().contains("cannot enrich"), "{err}");
         assert!(started.elapsed() < std::time::Duration::from_secs(2));
-        let again = Caller::get(&name).unwrap().call("b".into()).await.unwrap();
+        let again = Caller::get(&name)
+            .unwrap()
+            .call_message("b".into())
+            .await
+            .unwrap();
         assert_eq!(again.get_payload_str(), "enriched b");
 
         let many = caller
-            .call_many(vec!["c".into(), "bad".into(), "d".into()])
+            .call_many_messages(vec!["c".into(), "bad".into(), "d".into()])
             .await;
         assert_eq!(many[0].as_ref().unwrap().get_payload_str(), "enriched c");
         assert!(many[1]
@@ -245,7 +399,7 @@ mod tests {
             .await
             .unwrap();
         assert!(matches!(caller.send("x".into()).await.unwrap(), Sent::Ack));
-        let err = caller.call("x".into()).await.unwrap_err();
+        let err = caller.call_message("x".into()).await.unwrap_err();
         assert!(err.to_string().contains("without an answer"), "{err}");
         caller.stop().await;
     }
@@ -313,7 +467,7 @@ mod tests {
         let calls: Vec<_> = (0..200)
             .map(|i| {
                 let caller = caller.clone();
-                tokio::spawn(async move { caller.call(format!("{i}").into()).await })
+                tokio::spawn(async move { caller.call_message(format!("{i}").into()).await })
             })
             .collect();
         for (i, call) in calls.into_iter().enumerate() {
@@ -328,7 +482,7 @@ mod tests {
         };
 
         let many = caller
-            .call_many((0..50).map(|i| format!("m{i}").into()).collect())
+            .call_many_messages((0..50).map(|i| format!("m{i}").into()).collect())
             .await;
         for (i, answer) in many.into_iter().enumerate() {
             assert_eq!(answer.unwrap().get_payload_str(), format!("label for m{i}"));
@@ -365,8 +519,7 @@ mod tests {
             }}),
         );
         let caller = Caller::from_file(&path, &name).await.unwrap();
-        let answer = caller.call(r#"{"id":7}"#.into()).await.unwrap();
-        let answer: serde_json::Value = serde_json::from_slice(&answer.payload).unwrap();
+        let answer: serde_json::Value = caller.call([("id", 7)]).await.unwrap();
         assert_eq!(
             answer,
             serde_json::json!({"id": 7, "customer": {"tier": "gold"}})
@@ -413,6 +566,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_route_without_input_and_output_answers_with_typed_fields() {
+        #[derive(serde::Deserialize, Debug, PartialEq)]
+        struct Customer {
+            tier: String,
+        }
+        let route = r#"{
+            "batch_size": 16,
+            "input": { "middlewares": [ { "lookup": {
+                "from": { "static": { "body": "{\"tier\":\"${payload:tier}\"}", "raw": true } },
+                "into": "$"
+            } } ] }
+        }"#;
+        let caller = Caller::from_str(route, &unique("caller_defaults"))
+            .await
+            .unwrap();
+
+        let gold: Customer = caller.call([("tier", "gold")]).await.unwrap();
+        assert_eq!(gold.tier, "gold");
+        let mixed: serde_json::Value = caller
+            .call(serde_json::json!({"tier": "silver", "id": 7}))
+            .await
+            .unwrap();
+        assert_eq!(mixed, serde_json::json!({"tier": "silver"}));
+
+        let many: Vec<anyhow::Result<Customer>> =
+            caller.call_many([[("tier", "a")], [("tier", "b")]]).await;
+        let tiers: Vec<String> = many.into_iter().map(|c| c.unwrap().tier).collect();
+        assert_eq!(tiers, ["a", "b"]);
+
+        let wrong = caller.call::<u64>([("tier", "x")]).await.unwrap_err();
+        assert!(wrong.to_string().contains("does not parse"), "{wrong}");
+        caller.stop().await;
+    }
+
+    #[test]
+    fn caller_defaults_apply_only_where_nothing_is_given() {
+        let route = |body: serde_json::Value| {
+            let route = Caller::route_from_config(body, "c").unwrap();
+            (route.input.endpoint_type, route.output.endpoint_type)
+        };
+        let (input, output) = route(serde_json::json!({ "batch_size": 4 }));
+        assert!(matches!(input, EndpointType::Memory(m) if m.topic == "mqb-caller-c"));
+        assert!(matches!(output, EndpointType::Response(_)));
+
+        for empty in [
+            serde_json::json!({}),
+            serde_json::Value::Null,
+            serde_json::json!({ "c": null }),
+            serde_json::json!({ "routes": { "c": { "input": null } } }),
+        ] {
+            let (input, output) = route(empty);
+            assert!(matches!(input, EndpointType::Memory(_)));
+            assert!(matches!(output, EndpointType::Response(_)));
+        }
+
+        let (_, output) = route(serde_json::json!({ "c": { "output": "null" } }));
+        assert!(matches!(output, EndpointType::Null));
+
+        let (input, _) = route(serde_json::json!({
+            "routes": { "c": { "input": { "memory": { "topic": "own" } } } }
+        }));
+        assert!(matches!(input, EndpointType::Memory(m) if m.topic == "own"));
+
+        let strict = Route::from_config(serde_json::json!({ "c": { "batch_size": 4 } }), "c");
+        assert!(strict.is_err(), "Route keeps requiring an input");
+    }
+
+    #[tokio::test]
     async fn only_an_in_process_memory_input_is_accepted() {
         let route = Route::new(Endpoint::new(EndpointType::Null), Endpoint::new_response());
         let err = Caller::deploy(&unique("caller_bad"), route)
@@ -420,5 +641,25 @@ mod tests {
             .err()
             .unwrap();
         assert!(err.to_string().contains("`memory` endpoint"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn the_input_holds_many_calls_unless_capacity_is_set() {
+        let roomy = Caller::new(&unique("caller_cap"), Endpoint::new_response())
+            .await
+            .unwrap();
+        assert_eq!(
+            roomy.requests.status().await.capacity,
+            Some(CALLER_CAPACITY)
+        );
+
+        let input = Endpoint::new_memory(&unique("caller_cap_in"), 8);
+        let route = Route::new(input, Endpoint::new_response());
+        let own = Caller::deploy(&unique("caller_cap_own"), route)
+            .await
+            .unwrap();
+        assert_eq!(own.requests.status().await.capacity, Some(8));
+        roomy.stop().await;
+        own.stop().await;
     }
 }

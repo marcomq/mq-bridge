@@ -3821,6 +3821,7 @@ dependencies = [
  "fast-uuid-v7",
  "mq-bridge",
  "serde",
+ "serde_json",
  "serde_yaml_ng",
  "tokio",
  "tracing",

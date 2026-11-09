@@ -311,14 +311,17 @@ class MemoryDrainer:
 
 
 class Caller:
-    """Call a route like a function. The route input must be an in-process
-    ``memory`` endpoint; concurrent calls reach the route as one batch."""
+    """Call a route like a function: ``call(path=key)`` returns the route's
+    parsed JSON answer. Concurrent calls reach the route as one batch."""
 
     @classmethod
     def from_route(cls, route: Route) -> "Caller": ...
 
     @classmethod
-    def from_file(cls, path: str, name: Optional[str] = ...) -> "Caller": ...
+    def from_file(cls, path: str, name: Optional[str] = ...) -> "Caller":
+        """Without an ``input``, the route reads from the caller; without an
+        ``output``, it answers with the message."""
+        ...
 
     @classmethod
     def from_config(
@@ -329,19 +332,20 @@ class Caller:
     def name(self) -> str: ...
 
     def call(
+        self, fields: Optional[JsonValue] = ..., /, **kwargs: JsonValue
+    ) -> JsonValue: ...
+
+    def call_message(
         self,
         message: Union[Message, bytes],
         metadata: Optional[Mapping[str, str]] = ...,
     ) -> Message: ...
 
-    def call_json(
-        self,
-        data: JsonValue,
-        metadata: Optional[Mapping[str, str]] = ...,
-        id: Optional[str] = ...,
-    ) -> Message: ...
-
     def call_many(
+        self, requests: Sequence[JsonValue]
+    ) -> List[Union[JsonValue, RuntimeError]]: ...
+
+    def call_many_messages(
         self, messages: Sequence[Union[Message, bytes]]
     ) -> List[Union[Message, RuntimeError]]: ...
 

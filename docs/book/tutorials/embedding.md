@@ -110,10 +110,10 @@ answer, so code that needs the route's result looks like a query:
 ```rust
 use mq_bridge::Caller;
 
-// `enrich` in routes.yaml: input `memory: { topic: enrich }` (with a `lookup`, a
-// handler, any middleware), output ending in `response: {}`.
+// `enrich` in routes.yaml: an `input` with only middlewares (a `lookup`, any other) and
+// no `output`; the caller feeds the route and the route answers with the message.
 let enrich = Caller::from_file("routes.yaml", "enrich").await?;
-let answer = enrich.call(r#"{"customer_id": 7}"#.into()).await?;
+let answer: serde_json::Value = enrich.call([("customer_id", 7)]).await?;
 ```
 
 Calls made at the same time are read as one batch, so a batched `lookup` or an inference

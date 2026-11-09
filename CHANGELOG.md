@@ -6,22 +6,30 @@ All notable changes to `mq-bridge`. Newest first.
 
 ### Added
 
-- **`Caller`: call a route like a function.** `Caller::from_file("routes.yaml", "enrich")`
-  (or `Caller::deploy(name, route)`) deploys a route with a `memory` input, and
-  `caller.call(message).await` returns its answer. Everything a route does applies:
-  middlewares incl. `lookup` and `parallel`, plugin endpoints and middlewares, the handler,
-  ordered sinks. Calls made at the same time are read as one batch, so a batched `lookup`
-  queries once for all of them. A failed message comes back as an error at once; the route
-  keeps running. `call_many(messages)` sends several as one batch and returns one answer
-  or error per message, in order. The bindings have it too: `Caller` in Python and Node, `mqb_caller_*` in
-  the C API (additive, `MQB_API_VERSION` unchanged) and `route.caller()` in Nim.
+- **`Caller`: call a route like a function.** `Caller::from_file("routes.yaml", "users")`
+  (or `from_str`, `from_config`, `Caller::deploy(name, route)`) deploys a route with a
+  `memory` input, and `let user: User = users.call([("path", key)]).await?` sends the fields
+  as one JSON object and parses the answer. A route loaded this way may leave out its
+  `input` (or give only its `middlewares`) and its `output`: the caller then feeds it and
+  it answers with the message. `call_message` takes and returns a `CanonicalMessage`.
+  Everything a route does applies: middlewares incl. `lookup` and `parallel`, plugin
+  endpoints and middlewares, the handler, ordered sinks. Calls made at the same time are
+  read as one batch, so a batched `lookup` queries once for all of them; the input holds
+  4,096 waiting calls unless `capacity` is set. A failed message
+  comes back as an error at once; the route keeps running. `call_many` /
+  `call_many_messages` send several as one batch and return one answer or error per
+  request, in order. The bindings have it too: `Caller` in Python and Node (`call(path=key)`
+  / `call({ path: key })`), `mqb_caller_*` in the C API (additive, `MQB_API_VERSION`
+  unchanged) and `route.caller()` in Nim.
 - **`parallel` middleware, on an input or an output.** It lets the middlewares above it
   work on several batches at once; routes without it behave as before.
   - *On an input*, the entries above `- parallel: { max_in_flight: N }` run on up to N
     batches at once, each lane on its own task, and batches still leave and commit in read
     order. Only stateless middlewares (`transform`, `lookup`, `id`, `compression`,
     `encryption`) may sit above it. `transform` (schema) goes from 0.9M to 3.6M msg/s and a
-    static `lookup` from 0.4M to 1.2M msg/s on 8 cores.
+    static `lookup` from 0.4M to 1.2M msg/s on 8 cores. While a lane is busy, a read
+    smaller than a quarter of the batch size waits for more messages or a free lane, so
+    more lanes do not split a batched SQL `lookup` into many small queries.
   - *On an output* in front of a sink that keeps source order (`file`, `dir_spool`,
     `http_bulk` with changes), the entries above `- parallel: {}` run on every route worker
     at once; the entries below it and the sink still get batches in source order. Before,
@@ -43,9 +51,12 @@ All notable changes to `mq-bridge`. Newest first.
 
 ### Changed
 
-- **A batched SQL `lookup` with up to 16 keys takes one round trip instead of two.** Its
-  statement is now cached on the connection; larger `IN` lists stay uncached, so Postgres
-  does not keep a generic plan made on a small table.
+- **A batched SQL `lookup` takes one round trip instead of two.** On Postgres, `id IN
+  (${payload:id}::bigint)` runs as `id = ANY($1::bigint[])` with all keys in one parameter:
+  one cached statement for any batch size (64 concurrent callers: 28-40k instead of 27-30k
+  keys/s; 4,096: 210-220k instead of 180-190k). This needs the element to be the token,
+  optionally with a cast; without one, the keys must share a type. Other databases cache lists
+  of up to 16 keys.
 - **`lookup` writes its answers into the payload without parsing the whole document.**
   Untouched fields are copied as they are, which makes a static lookup on an input about
   1.5x faster. Fields keep their order. `aggregate` now uses the same writer, so an `into`

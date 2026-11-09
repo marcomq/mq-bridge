@@ -1759,6 +1759,18 @@ impl SqlxPublisher {
             .collect();
         let mut records = Vec::new();
         for chunk in lookup_batch::distinct(&keys).chunks(lookup_batch::MAX_KEYS_PER_QUERY) {
+            if let Some(sql) = self.pg_any_sql(query, chunk.iter().map(|&i| &values[i])) {
+                let literal = lookup_batch::pg_array_literal(
+                    chunk.iter().filter_map(|&i| keys[i].as_deref()),
+                );
+                let rows = sqlx::query(audited_sql(&sql))
+                    .bind(literal)
+                    .fetch_all(&self.pool)
+                    .await
+                    .map_err(lookup_error)?;
+                push_json_rows(&rows, &mut records)?;
+                continue;
+            }
             let sql = query.expand(chunk.len(), |i| {
                 positional_placeholder(&self.driver_name, i + 1)
             });
@@ -1777,20 +1789,51 @@ impl SqlxPublisher {
                 select = bind_value(select, values[i].clone());
             }
             let rows = select.fetch_all(&self.pool).await.map_err(lookup_error)?;
-            let Some(first) = rows.first() else { continue };
-            let schema = JsonRowSchema::from_row(first);
-            let mut buf = Vec::new();
-            for row in &rows {
-                buf.clear();
-                schema.encode_row(row, &mut buf);
-                records.push(
-                    serde_json::from_slice(&buf)
-                        .map_err(|e| PublisherError::NonRetryable(e.into()))?,
-                );
-            }
+            push_json_rows(&rows, &mut records)?;
         }
         lookup_batch::answer(&keys, records, &query.key).map_err(PublisherError::NonRetryable)
     }
+
+    /// On Postgres, `IN (…)` as `= ANY($1::type[])`: one cached statement and one round trip
+    /// for any number of keys. Without a cast the keys must share a type.
+    fn pg_any_sql<'a>(
+        &self,
+        query: &ListQuery,
+        mut values: impl Iterator<Item = &'a BindValue>,
+    ) -> Option<String> {
+        if self.driver_name != "PostgreSQL" {
+            return None;
+        }
+        let first = bind_type_tag(values.next()?);
+        if !values.all(|v| bind_type_tag(v) == first) && query.suffix.trim().is_empty() {
+            return None;
+        }
+        query.pg_any(match first {
+            'i' => "int8",
+            'f' => "float8",
+            'b' => "bool",
+            _ => "text",
+        })
+    }
+}
+
+fn push_json_rows(
+    rows: &[sqlx::any::AnyRow],
+    records: &mut Vec<serde_json::Value>,
+) -> Result<(), PublisherError> {
+    let Some(first) = rows.first() else {
+        return Ok(());
+    };
+    let schema = JsonRowSchema::from_row(first);
+    let mut buf = Vec::new();
+    for row in rows {
+        buf.clear();
+        schema.encode_row(row, &mut buf);
+        records.push(
+            serde_json::from_slice(&buf).map_err(|e| PublisherError::NonRetryable(e.into()))?,
+        );
+    }
+    Ok(())
 }
 
 #[async_trait]
