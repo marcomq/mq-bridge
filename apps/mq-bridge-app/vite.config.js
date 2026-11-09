@@ -22,7 +22,16 @@ const proxiedPaths = [
 module.exports = defineConfig({
   root: resolve(__dirname, "ui"),
   publicDir: resolve(__dirname, "crates/core/static"),
-  plugins: [svelte({ configFile: resolve(__dirname, "svelte.config.js") })],
+  plugins: [
+    svelte({ configFile: resolve(__dirname, "svelte.config.js") }),
+    {
+      // json-schema-ref-parser lazy-loads the Node-only undici for HTTP refs; keep it out of the browser bundle.
+      name: "external-undici",
+      apply: "build",
+      enforce: "pre",
+      resolveId: (id) => (id === "undici" ? { id, external: true } : null),
+    },
+  ],
   resolve: {
     alias: {
       // Map absolute paths in index.html to the physical static folder.

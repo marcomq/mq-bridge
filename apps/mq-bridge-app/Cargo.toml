@@ -55,3 +55,5 @@ strip = true
 # global registry during local app builds.
 [patch.crates-io]
 mq-bridge = { path = "../.." }
+# Temporary: rumqttc 0.25.1 plus only the rustls-webpki 0.103 bump; drop once rumqttc releases it.
+rumqttc = { git = "https://github.com/bytebeamio/rumqtt", rev = "0b0ed643208cf77190e9d5cf08f3e3eece6e3ec3" }
