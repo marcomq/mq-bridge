@@ -101,3 +101,6 @@ deny = []
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# Temporary: rumqttc 0.25.1 + rustls-webpki 0.103 bump from unmerged PR bytebeamio/rumqtt#1037
+# (commit from fork sl8vz/rumqtt, Cargo.toml-only diff); drop once rumqttc releases it.
+allow-git = ["https://github.com/bytebeamio/rumqtt"]
