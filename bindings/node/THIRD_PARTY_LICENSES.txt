@@ -2910,9 +2910,14 @@ Source: https://github.com/kornelski/rust_urlencoding
 Copyright/attribution: © 2016 Bertram Truong
 Copyright/attribution: © 2021 Kornel Lesiński
 
-utf8_iter@1.0.4
+utf8_iter@1.1.0
 License: Apache-2.0 OR MIT
 Source: https://github.com/hsivonen/utf8_iter
+
+utf_types@1.0.0
+License: Apache-2.0 OR MIT
+Source: https://github.com/hsivonen/utf_types
+Copyright/attribution: Copyright Mozilla Foundation
 
 uuid@1.27.0
 License: Apache-2.0 OR MIT
