@@ -414,7 +414,7 @@ jobs:
       - name: Package publishable crates
         run: |
           cargo package -p mq-bridge
-          cargo package --list -p mq-bridge-full-plugin > /dev/null
+          cargo package --list -p mq-bridge-full > /dev/null
           cargo package --manifest-path apps/mq-bridge-app/Cargo.toml --list -p mq-bridge-app-core > /dev/null
           cargo package --manifest-path apps/mq-bridge-app/Cargo.toml --list -p mq-bridge-app > /dev/null
 
@@ -715,7 +715,7 @@ jobs:
 
       - name: Build plugin library (full)
         shell: bash
-        run: cargo build -p mq-bridge-full-plugin --release --target ${{ matrix.target }}
+        run: cargo build -p mq-bridge-full --release --target ${{ matrix.target }}
 
       - name: Package artifacts
         shell: bash
@@ -1148,7 +1148,7 @@ jobs:
             done
           }
           publish mq-bridge
-          publish mq-bridge-full-plugin
+          publish mq-bridge-full
           publish mq-bridge-app-core apps/mq-bridge-app/Cargo.toml
           publish mq-bridge-app apps/mq-bridge-app/Cargo.toml
         env:

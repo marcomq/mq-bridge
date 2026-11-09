@@ -3,7 +3,7 @@
 //! Ignored by default: it needs the plugin built first, and the host built without `sled`.
 //!
 //! ```text
-//! cargo build -p mq-bridge-full-plugin --no-default-features --features mq-bridge/sled
+//! cargo build -p mq-bridge-full --no-default-features --features mq-bridge/sled
 //! MQB_PLUGIN_DIR=target/debug MQB_PLUGIN_DISCOVERY=1 \
 //!   cargo test --features plugin --test full_plugin_discovery_test -- --ignored
 //! ```

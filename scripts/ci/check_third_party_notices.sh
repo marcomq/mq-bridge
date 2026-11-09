@@ -37,7 +37,7 @@ check . bindings/python/THIRD_PARTY_LICENSES.txt -p mq-bridge-py
 check . bindings/node/THIRD_PARTY_LICENSES.txt -p mq-bridge-node
 check . bindings/c/THIRD_PARTY_LICENSES.txt -p mq-bridge-c
 # The full plugin archive ships the C library's notice file.
-check . bindings/c/THIRD_PARTY_LICENSES.txt -p mq-bridge-full-plugin
+check . bindings/c/THIRD_PARTY_LICENSES.txt -p mq-bridge-full
 check apps/mq-bridge-app apps/mq-bridge-app/crates/core/THIRD_PARTY_LICENSES.txt --workspace
 
 exit "$status"

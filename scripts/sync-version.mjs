@@ -135,7 +135,7 @@ syncCargoLock(paths.rootLock, [
   "mq-bridge",
   "mq-bridge-bindings-common",
   "mq-bridge-c",
-  "mq-bridge-full-plugin",
+  "mq-bridge-full",
   "mq-bridge-node",
   "mq-bridge-py",
 ]);

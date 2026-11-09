@@ -3846,7 +3846,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "mq-bridge-full-plugin"
+name = "mq-bridge-full"
 version = "1.4.0"
 dependencies = [
  "anyhow",

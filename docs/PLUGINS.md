@@ -301,6 +301,23 @@ structural endpoints and `memory` in the host's route and let the library provid
 only the transport. Its deduplication stores and connections are its own as well.
 `--no-resume` is not applied to an input served this way.
 
+The library is currenlty slower than compiling the feature in, because every call crosses
+the plugin boundary and a wrapping middleware crosses it twice. Middleware from
+the library, memory to memory (messages per second, macOS arm64, release build):
+
+| Middleware | Batch | Compiled in | From the library |
+| :--- | ---: | ---: | ---: |
+| compression | 1 | 608k | 218k |
+| compression | 128 | 931k | 788k |
+| compression | 1000 | 1.55M | 1.13M |
+| filter | 1 | 1.14M | 355k |
+| filter | 128 | 3.95M | 2.84M |
+| filter | 1000 | 3.92M | 2.97M |
+
+At batch 1 that is about a third of the compiled-in rate; from batch 128 on,
+70-85 %. An endpoint crosses once per batch, so a broker's own latency hides most
+of it. Compile the feature in where throughput at small batches matters.
+
 ## Writing a plugin
 
 Implement the ordinary mq-bridge contracts — `CustomEndpointFactory`,
