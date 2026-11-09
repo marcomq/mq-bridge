@@ -3708,7 +3708,7 @@ dependencies = [
 
 [[package]]
 name = "mq-bridge"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -3814,7 +3814,7 @@ dependencies = [
 
 [[package]]
 name = "mq-bridge-bindings-common"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "fast-uuid-v7",
@@ -3829,7 +3829,7 @@ dependencies = [
 
 [[package]]
 name = "mq-bridge-c"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3847,7 +3847,7 @@ dependencies = [
 
 [[package]]
 name = "mq-bridge-full"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3858,7 +3858,7 @@ dependencies = [
 
 [[package]]
 name = "mq-bridge-node"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3913,7 +3913,7 @@ dependencies = [
 
 [[package]]
 name = "mq-bridge-py"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "async-trait",

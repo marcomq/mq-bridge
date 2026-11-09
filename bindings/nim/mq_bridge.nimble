@@ -1,4 +1,4 @@
-version       = "1.4.0"
+version       = "1.5.0"
 author        = "Marco Mengelkoch"
 description   = "Nim binding of mq-bridge: move messages between brokers, databases, files and HTTP"
 license       = "MIT OR Apache-2.0"
