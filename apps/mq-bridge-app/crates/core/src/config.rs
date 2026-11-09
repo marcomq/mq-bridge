@@ -693,8 +693,8 @@ fn extract_inline_env_vars(content: &str, format: config::FileFormat) -> HashMap
 fn expand_variables(content: &str, format: config::FileFormat) -> Result<String, anyhow::Error> {
     let inline_env_vars = extract_inline_env_vars(content, format);
     // `$$` reaches the engine as is (`$$NOW`, `$${…}`); shellexpand would make it `$`.
-    let expanded: Vec<String> = content
-        .split("$$")
+    let expanded: Vec<String> = split_literal_double_dollars(content)
+        .into_iter()
         .map(|part| {
             shellexpand::env_with_context_no_errors(part, |key| {
                 std::env::var(key)
@@ -705,6 +705,34 @@ fn expand_variables(content: &str, format: config::FileFormat) -> Result<String,
         })
         .collect();
     Ok(expanded.join("$$"))
+}
+
+/// Splits at each `$$` outside a `${…}` reference, so `${NAME:-a$$b}` stays whole.
+fn split_literal_double_dollars(content: &str) -> Vec<&str> {
+    let bytes = content.as_bytes();
+    let (mut parts, mut start, mut depth, mut i) = (Vec::new(), 0, 0usize, 0);
+    while i < bytes.len() {
+        if depth == 0 && bytes[i..].starts_with(b"$$") {
+            parts.push(&content[start..i]);
+            i += 2;
+            start = i;
+            continue;
+        }
+        if bytes[i..].starts_with(b"${") {
+            depth += 1;
+            i += 2;
+            continue;
+        }
+        match bytes[i] {
+            b'}' if depth > 0 => depth -= 1,
+            // An unclosed reference must not swallow the `$$` on later lines.
+            b'\n' => depth = 0,
+            _ => {}
+        }
+        i += 1;
+    }
+    parts.push(&content[start..]);
+    parts
 }
 
 // New helper function to create a config source from a string.
@@ -2070,6 +2098,7 @@ routes:
 env_vars:
   dbUrl: "postgres://db/app"
 url: "${dbUrl}"
+fallback: "${dbUrl:-pass$$word}"
 query: "IN (${payload:path})"
 pipeline: '{"startDate": "$$NOW", "root": "$$ROOT"}'
 literal: "$${payload:x}"
@@ -2077,6 +2106,10 @@ sql: "AS $$ BEGIN END $$"
 "#;
         let expanded = expand_variables(content, config::FileFormat::Yaml).unwrap();
         assert!(expanded.contains(r#"url: "postgres://db/app""#));
+        assert!(
+            expanded.contains(r#"fallback: "postgres://db/app""#),
+            "{expanded}"
+        );
         assert!(expanded.contains("IN (${payload:path})"));
         assert!(expanded.contains(r#""$$NOW""#) && expanded.contains(r#""$$ROOT""#));
         assert!(expanded.contains("$${payload:x}"));
