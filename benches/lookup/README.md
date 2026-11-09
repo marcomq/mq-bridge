@@ -47,8 +47,12 @@ vs a hand-written `= ANY($1)`. Prints a markdown table with the median of each c
 
 ```sh
 docker compose up -d --wait
-cd caller && caffeinate -dims cargo run --release   # optional args: requests per cell (50000), variants (all), runs (3)
+cd caller && caffeinate -dims cargo run --release   # optional args: target requests per cell (50000), variants (all), runs (3)
 ```
+
+The first argument is a target, not an exact count: each client sends target / clients requests,
+clamped to 50–5,000. The default gives 5,000 requests at 1 client, and at least 204,800 at 4,096
+clients, even with a lower target.
 
 Needs `mq-bridge-app`, `oha` (`brew install oha`) and Docker. pgbench runs inside containers
 from the `postgres:17.6` image, nothing is installed on the host. Results go to
