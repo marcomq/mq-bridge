@@ -547,8 +547,9 @@ pub trait MessagePublisher: Send + Sync + 'static {
     ///
     /// Override to `true` when the destination *is* an ordered log and shuffling it
     /// corrupts the result — `file` does. The route then admits one batch at a time
-    /// into `send_batch`, in sequence; everything around that call still runs across
-    /// the worker pool, so an ordered route measures within noise of an unordered one.
+    /// into `send_batch`, in sequence, output middlewares included; a `parallel` marker on
+    /// the output lets the entries above it overlap. Everything around that call still runs
+    /// across the worker pool.
     ///
     /// Only override it where the *cost* is also low, which means a sink whose
     /// `send_batch` is already serialised internally (the file sink holds a write lock
@@ -561,6 +562,14 @@ pub trait MessagePublisher: Send + Sync + 'static {
     /// (global ordering would serialise an inherently parallel sink); set
     /// `concurrency: 1` if per-key order matters.
     fn requires_ordered_publish(&self) -> bool {
+        false
+    }
+
+    /// `true` when a `parallel` marker inside this chain waits for the batch's turn at an
+    /// ordered sink itself, so the route lets the middlewares above the marker overlap.
+    /// A wrapper that does not forward it keeps the default: the route waits before
+    /// calling `send_batch`.
+    fn takes_publish_turn(&self) -> bool {
         false
     }
 
@@ -625,6 +634,10 @@ impl<T: MessagePublisher + ?Sized> MessagePublisher for Arc<T> {
         (**self).requires_ordered_publish()
     }
 
+    fn takes_publish_turn(&self) -> bool {
+        (**self).takes_publish_turn()
+    }
+
     fn deferred_commit_interval(&self) -> Option<std::time::Duration> {
         (**self).deferred_commit_interval()
     }
@@ -679,6 +692,10 @@ impl<T: MessagePublisher + ?Sized> MessagePublisher for Box<T> {
 
     fn requires_ordered_publish(&self) -> bool {
         (**self).requires_ordered_publish()
+    }
+
+    fn takes_publish_turn(&self) -> bool {
+        (**self).takes_publish_turn()
     }
 
     fn deferred_commit_interval(&self) -> Option<std::time::Duration> {

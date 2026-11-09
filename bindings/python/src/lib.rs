@@ -1479,6 +1479,220 @@ impl Route {
     }
 }
 
+/// Call a route like a function: `call(path=key)` sends the fields through the route and
+/// returns its JSON answer. Calls made at the same time from several threads reach the
+/// route as one batch.
+#[pyclass(module = "mq_bridge")]
+struct Caller {
+    runtime: Arc<Runtime>,
+    caller: core::Caller,
+}
+
+#[pymethods]
+impl Caller {
+    /// Deploy a `Route` (with its handlers) as a caller under the route's name.
+    #[staticmethod]
+    fn from_route(py: Python<'_>, route: &Route) -> PyResult<Self> {
+        let core_route = route.lock_route()?.clone();
+        Self::deploy(
+            py,
+            Arc::clone(&route.runtime),
+            route.name.clone(),
+            core_route,
+        )
+    }
+
+    /// Load a route from a YAML or JSON file and deploy it. Unlike `Route.from_file`, a
+    /// missing `input` reads from the caller's own memory topic and a missing `output`
+    /// answers with the message.
+    #[staticmethod]
+    #[pyo3(signature = (path, name=None))]
+    fn from_file(py: Python<'_>, path: &str, name: Option<&str>) -> PyResult<Self> {
+        let value = common::load_config_value(Path::new(path)).map_err(to_py_runtime_error)?;
+        Self::from_value(py, value, name)
+    }
+
+    /// Like `from_file`, but takes the config as a mapping.
+    #[staticmethod]
+    #[pyo3(signature = (config, name=None))]
+    fn from_config(
+        py: Python<'_>,
+        config: &Bound<'_, PyAny>,
+        name: Option<&str>,
+    ) -> PyResult<Self> {
+        let bytes = python_to_json_bytes(config)?;
+        let value = serde_yaml_ng::from_slice(&bytes)
+            .context("failed to parse config mapping")
+            .map_err(to_py_runtime_error)?;
+        Self::from_value(py, value, name)
+    }
+
+    #[getter]
+    fn name(&self) -> String {
+        self.caller.name().to_string()
+    }
+
+    /// Send the fields as one JSON object through the route and return its answer, parsed:
+    /// `caller.call(path=key)` or `caller.call({"path": key})`.
+    #[pyo3(signature = (fields=None, /, **kwargs))]
+    fn call(
+        &self,
+        py: Python<'_>,
+        fields: Option<&Bound<'_, PyAny>>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        let fields = call_fields(fields, kwargs)?;
+        let caller = self.caller.clone();
+        let runtime = Arc::clone(&self.runtime);
+        let answer = py
+            .detach(move || {
+                run_sync_task(
+                    &runtime,
+                    async move { caller.call::<JsonValue>(fields).await },
+                )
+            })
+            .map_err(to_py_runtime_error)?;
+        json_to_python(py, &answer)
+    }
+
+    /// Send a message through the route and return its answer as a message.
+    #[pyo3(signature = (message, metadata=None))]
+    fn call_message(
+        &self,
+        py: Python<'_>,
+        message: &Bound<'_, PyAny>,
+        metadata: Option<HashMap<String, String>>,
+    ) -> PyResult<Message> {
+        let message = message_input_to_canonical(message, metadata)?;
+        let caller = self.caller.clone();
+        let runtime = Arc::clone(&self.runtime);
+        py.detach(move || {
+            run_sync_task(&runtime, async move {
+                Ok(Message::from_canonical(
+                    &caller.call_message(message).await?,
+                ))
+            })
+        })
+        .map_err(to_py_runtime_error)
+    }
+
+    /// Send several field mappings through the route as one batch. Returns one entry per
+    /// request, in order: its parsed answer, or the exception it failed with (not raised).
+    fn call_many(
+        &self,
+        py: Python<'_>,
+        requests: Vec<Bound<'_, PyAny>>,
+    ) -> PyResult<Vec<Py<PyAny>>> {
+        let requests = requests
+            .iter()
+            .map(python_json_value)
+            .collect::<PyResult<Vec<_>>>()?;
+        let caller = self.caller.clone();
+        let runtime = Arc::clone(&self.runtime);
+        let answers =
+            py.detach(move || runtime.block_on(caller.call_many::<JsonValue, _>(requests)));
+        answers
+            .into_iter()
+            .map(|answer| match answer {
+                Ok(answer) => json_to_python(py, &answer),
+                Err(err) => Ok(to_py_runtime_error(err).into_value(py).into_any()),
+            })
+            .collect()
+    }
+
+    /// Like `call_many` for messages; each answer is a `Message`.
+    fn call_many_messages(
+        &self,
+        py: Python<'_>,
+        messages: Vec<Bound<'_, PyAny>>,
+    ) -> PyResult<Vec<Py<PyAny>>> {
+        let messages = messages
+            .iter()
+            .map(|message| message_input_to_canonical(message, None))
+            .collect::<PyResult<Vec<_>>>()?;
+        let caller = self.caller.clone();
+        let runtime = Arc::clone(&self.runtime);
+        let answers = py.detach(move || runtime.block_on(caller.call_many_messages(messages)));
+        answers
+            .into_iter()
+            .map(|answer| match answer {
+                Ok(answer) => Ok(Py::new(py, Message::from_canonical(&answer))?.into_any()),
+                Err(err) => Ok(to_py_runtime_error(err).into_value(py).into_any()),
+            })
+            .collect()
+    }
+
+    /// Send a message through the route and wait until it is handled; the answer, if any,
+    /// is returned, otherwise `None`.
+    #[pyo3(signature = (message, metadata=None))]
+    fn send(
+        &self,
+        py: Python<'_>,
+        message: &Bound<'_, PyAny>,
+        metadata: Option<HashMap<String, String>>,
+    ) -> PyResult<Option<Message>> {
+        let message = message_input_to_canonical(message, metadata)?;
+        let caller = self.caller.clone();
+        let runtime = Arc::clone(&self.runtime);
+        py.detach(move || {
+            run_sync_task(&runtime, async move {
+                Ok(match caller.send(message).await? {
+                    Sent::Ack => None,
+                    Sent::Response(response) => Some(Message::from_canonical(&response)),
+                })
+            })
+        })
+        .map_err(to_py_runtime_error)
+    }
+
+    /// Stop the route. Returns `False` if it was already stopped.
+    fn stop(&self, py: Python<'_>) -> bool {
+        let caller = self.caller.clone();
+        let runtime = Arc::clone(&self.runtime);
+        py.detach(move || runtime.block_on(async move { caller.stop().await }))
+    }
+
+    fn __enter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    #[pyo3(signature = (*_args))]
+    fn __exit__(&self, py: Python<'_>, _args: &Bound<'_, PyTuple>) -> bool {
+        self.stop(py);
+        false
+    }
+}
+
+impl Caller {
+    fn deploy(
+        py: Python<'_>,
+        runtime: Arc<Runtime>,
+        name: String,
+        route: CoreRoute,
+    ) -> PyResult<Self> {
+        let deploy_runtime = Arc::clone(&runtime);
+        let caller = py
+            .detach(move || {
+                deploy_runtime.block_on(async move { core::Caller::deploy(&name, route).await })
+            })
+            .map_err(to_py_runtime_error)?;
+        Ok(Self { runtime, caller })
+    }
+
+    fn from_value(
+        py: Python<'_>,
+        value: serde_yaml_ng::Value,
+        name: Option<&str>,
+    ) -> PyResult<Self> {
+        let name =
+            common::normalize_name(name).map_or_else(common::default_route_name, str::to_string);
+        let route = common::caller_route_from_value(value, &name)
+            .and_then(|route| Route::build(route, name))
+            .map_err(to_py_runtime_error)?;
+        Self::from_route(py, &route)
+    }
+}
+
 #[pyclass(module = "mq_bridge")]
 struct Publisher {
     runtime: Arc<Runtime>,
@@ -2772,6 +2986,35 @@ fn json_bytes_to_python(py: Python<'_>, payload: &[u8]) -> PyResult<Py<PyAny>> {
     Ok(value)
 }
 
+/// A Python value as JSON, for the fields of `Caller.call`.
+fn python_json_value(obj: &Bound<'_, PyAny>) -> PyResult<JsonValue> {
+    serde_json::from_slice(&python_to_json_bytes(obj)?)
+        .map_err(|err| PyValueError::new_err(format!("failed to encode JSON: {err}")))
+}
+
+/// The JSON object of `Caller.call`: the `fields` mapping, then the keyword arguments.
+fn call_fields(
+    fields: Option<&Bound<'_, PyAny>>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<JsonValue> {
+    let mut object = match fields.map(python_json_value).transpose()? {
+        None => serde_json::Map::new(),
+        Some(JsonValue::Object(object)) if kwargs.is_some() => object,
+        Some(other) if kwargs.is_none() => return Ok(other),
+        Some(_) => {
+            return Err(PyTypeError::new_err(
+                "Caller.call: keyword fields need a mapping as the first argument",
+            ))
+        }
+    };
+    if let Some(kwargs) = kwargs {
+        if let JsonValue::Object(extra) = python_json_value(kwargs.as_any())? {
+            object.extend(extra);
+        }
+    }
+    Ok(JsonValue::Object(object))
+}
+
 fn python_to_json_bytes(obj: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
     let ctx = PyJsonEncodeContext {
         seen: RefCell::new(HashSet::new()),
@@ -3133,6 +3376,7 @@ fn _mq_bridge(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<Message>()?;
     module.add_class::<Route>()?;
     module.add_class::<Publisher>()?;
+    module.add_class::<Caller>()?;
     module.add_class::<Consumer>()?;
     module.add_class::<MemoryDrainer>()?;
     module.add("__version__", env!("CARGO_PKG_VERSION"))?;

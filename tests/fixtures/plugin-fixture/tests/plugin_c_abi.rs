@@ -330,3 +330,41 @@ async fn an_unsupported_async_commit_falls_back_to_the_blocking_one() {
     );
     assert_eq!(last, mq_bridge::support::plugin_abi::MQB_DISPOSITION_NACK);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_wrapping_c_middleware_ends_the_lent_input_after_its_limit() {
+    use mq_bridge::endpoints::memory::MemoryConsumer;
+    use mq_bridge::errors::ConsumerError;
+    use mq_bridge::extensions::get_middleware_factory;
+    use mq_bridge::traits::MessageDisposition;
+
+    let info = load_endpoint_plugin(build_c_plugin("take", &["take.c"])).expect("load take.c");
+    assert!(info.supports_middleware);
+    let topic = format!("c_take_{}", std::process::id());
+    get_or_create_channel(&MemoryConfig::new(&topic, Some(16)))
+        .fill_messages(
+            (0..5)
+                .map(|i| CanonicalMessage::from(format!("m{i}")))
+                .collect(),
+        )
+        .await
+        .unwrap();
+
+    let factory = get_middleware_factory("take").expect("registered");
+    let inner = Box::new(MemoryConsumer::new_local(&topic, 16));
+    let mut consumer = factory
+        .apply_consumer(inner, "r", &json!({ "limit": 2 }))
+        .await
+        .expect("wrap the input");
+    let batch = consumer.receive_batch(10).await.expect("first batch");
+    let texts: Vec<_> = batch.messages.iter().map(|m| m.get_payload_str()).collect();
+    assert_eq!(texts, ["m0", "m1"]);
+    (batch.commit)(vec![MessageDisposition::Ack; 2])
+        .await
+        .unwrap();
+    assert!(matches!(
+        consumer.receive_batch(10).await,
+        Err(ConsumerError::EndOfStream)
+    ));
+    consumer.close().await.unwrap();
+}

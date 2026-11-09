@@ -48,6 +48,56 @@ impl ListQuery {
         out.push_str(&self.after);
         out
     }
+
+    /// The query as `column = ANY($1::type[])` (Postgres): one statement for any number of
+    /// keys. The element's cast names the type, else `default_type`; `None` when the element
+    /// is more than the token and a cast.
+    #[cfg_attr(not(feature = "sqlite"), allow(dead_code))]
+    pub fn pg_any(&self, default_type: &str) -> Option<String> {
+        if !self.prefix.trim().is_empty() {
+            return None;
+        }
+        let cast = self.suffix.trim();
+        let element = if cast.is_empty() {
+            default_type
+        } else {
+            cast.strip_prefix("::")?.trim()
+        };
+        let plain = |c: char| c.is_ascii_alphanumeric() || " _(),.\"".contains(c);
+        let collates = element
+            .split_whitespace()
+            .any(|word| word.eq_ignore_ascii_case("collate"));
+        if element.is_empty() || !element.chars().all(plain) || collates {
+            return None;
+        }
+        let column = self.before[..self.before.len() - 1].trim_end();
+        let column = &column[..column.len() - 2];
+        Some(format!(
+            "{column}= ANY($1::{element}[]){}",
+            &self.after[1..]
+        ))
+    }
+}
+
+/// `{"a","b"}`: a Postgres array literal of `keys`, bound as one text value.
+#[cfg_attr(not(feature = "sqlite"), allow(dead_code))]
+pub(crate) fn pg_array_literal<'a>(keys: impl Iterator<Item = &'a str>) -> String {
+    let mut out = String::from("{");
+    for (i, key) in keys.enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push('"');
+        for c in key.chars() {
+            if c == '"' || c == '\\' {
+                out.push('\\');
+            }
+            out.push(c);
+        }
+        out.push('"');
+    }
+    out.push('}');
+    out
 }
 
 /// Byte ranges of every `${…}` token in `text`.
@@ -344,6 +394,21 @@ mod tests {
             q.expand(2, |i| format!("${}", i + 1)),
             "SELECT c.id, name FROM customers c WHERE c.id in ($1::bigint, $2::bigint) ORDER BY id"
         );
+        assert_eq!(
+            q.pg_any("text").unwrap(),
+            "SELECT c.id, name FROM customers c WHERE c.id = ANY($1::bigint[]) ORDER BY id"
+        );
+        let uncast = parse_sql("SELECT * FROM t WHERE k IN(${payload:k})")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            uncast.pg_any("text").unwrap(),
+            "SELECT * FROM t WHERE k = ANY($1::text[])"
+        );
+        assert_eq!(
+            pg_array_literal([r#"a"b"#, r"c\d", "e,f"].into_iter()),
+            r#"{"a\"b","c\\d","e,f"}"#
+        );
     }
 
     #[test]
@@ -354,6 +419,11 @@ mod tests {
                 .unwrap();
         assert_eq!(q.key, "Id");
         assert_eq!((q.prefix.as_str(), q.suffix.as_str()), ("toUInt64(", ")"));
+        assert_eq!(q.pg_any("text"), None);
+        let collated = parse_sql(r#"SELECT * FROM t WHERE k IN (${payload:k}::text COLLATE "C")"#)
+            .unwrap()
+            .unwrap();
+        assert_eq!(collated.pg_any("text"), None);
     }
 
     #[test]

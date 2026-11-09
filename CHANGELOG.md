@@ -2,6 +2,100 @@
 
 All notable changes to `mq-bridge`. Newest first.
 
+## 1.5.0
+
+### Added
+
+- **`Caller`: call a route like a function.** `Caller::from_file("routes.yaml", "users")`
+  (or `from_str`, `from_config`, `Caller::deploy(name, route)`) deploys a route with a
+  `memory` input, and `let user: User = users.call([("path", key)]).await?` sends the fields
+  as one JSON object and parses the answer. A route loaded this way may leave out its
+  `input` (or give only its `middlewares`) and its `output`: the caller then feeds it and
+  it answers with the message. `call_message` takes and returns a `CanonicalMessage`.
+  Everything a route does applies: middlewares incl. `lookup` and `parallel`, plugin
+  endpoints and middlewares, the handler, ordered sinks. Calls made at the same time are
+  read as one batch, so a batched `lookup` queries once for all of them; the input holds
+  4,096 waiting calls unless `capacity` is set. A failed message
+  comes back as an error at once; the route keeps running. `call_many` /
+  `call_many_messages` send several as one batch and return one answer or error per
+  request, in order. The bindings have it too: `Caller` in Python and Node (`call(path=key)`
+  / `call({ path: key })`), `mqb_caller_*` in the C API (additive, `MQB_API_VERSION`
+  unchanged) and `route.caller()` in Nim.
+- **`parallel` middleware, on an input or an output.** It lets the middlewares above it
+  work on several batches at once; routes without it behave as before.
+  - *On an input*, the entries above `- parallel: { max_in_flight: N }` run on up to N
+    batches at once, each lane on its own task, and batches still leave and commit in read
+    order. Only stateless middlewares (`transform`, `lookup`, `id`, `compression`,
+    `encryption`) may sit above it. `transform` (schema) goes from 0.9M to 3.6M msg/s and a
+    static `lookup` from 0.4M to 1.2M msg/s on 8 cores. While a lane is busy, a read
+    smaller than a quarter of the batch size waits for more messages or a free lane, so
+    more lanes do not split a batched SQL `lookup` into many small queries.
+  - *On an output* in front of a sink that keeps source order (`file`, `dir_spool`,
+    `http_bulk` with changes), the entries above `- parallel: {}` run on every route worker
+    at once; the entries below it and the sink still get batches in source order. Before,
+    the whole output chain waited for its turn, so a `lookup` there ran one batch at a time
+    at any `concurrency`. On a sink that takes batches in any order the marker has no
+    effect and the route logs a warning. New `MessagePublisher::takes_publish_turn`
+    (default `false`) lets a custom wrapper pass the marker through.
+- **Plugin middleware can wrap the endpoint (plugin ABI 1.5).** A middleware exported with
+  `wrap_middleware:` gets the inner consumer or publisher itself, lent by the host, so a
+  plugin can now do anything a built-in middleware does: hold messages back, keep state
+  across commits, end the stream. The C helpers (`MQB_WRAPPING_MIDDLEWARE`,
+  `examples/c-plugin/take.c`) and the Nim binding (`Plugin.wraps`, `wrapConsumer`,
+  `wrapPublisher`) support it too, and `conformance::run_wrapped` checks one. Existing
+  plugins and map/drop middleware are unchanged.
+- **The full plugin also serves the built-in middleware.** A host built without
+  `dedup`, `compression`, `encryption`, `filter` or `aggregate` applies them from
+  `libmq_bridge_full` with the same route configuration. `metrics` and `otel` still need
+  the host's own feature.
+
+### Changed
+
+- **A batched SQL `lookup` takes one round trip instead of two.** On Postgres, `id IN
+  (${payload:id}::bigint)` runs as `id = ANY($1::bigint[])` with all keys in one parameter:
+  one cached statement for any batch size (64 concurrent callers: 28-40k instead of 27-30k
+  keys/s; 4,096: 210-220k instead of 180-190k). This needs the element to be the token,
+  optionally with a cast; without one, the keys must share a type. Other databases cache lists
+  of up to 16 keys.
+- **`lookup` writes its answers into the payload without parsing the whole document.**
+  Untouched fields are copied as they are, which makes a static lookup on an input about
+  1.5x faster. Fields keep their order. `aggregate` now uses the same writer, so an `into`
+  field that already exists in the payload keeps its place instead of moving to the end.
+- **Rust plugin calls that are ready complete without a thread handoff.** The SDK polls
+  each async call once on the calling thread before handing it to the plugin's runtime.
+  A wrapping middleware at batch 1 is about 10x faster. Plugin code before its first
+  waiting `.await` now runs on the host's worker, like a built-in middleware.
+- **The release also packages the existing full plugin.** `plugins/full` (every built-in
+  endpoint as one plugin library) now ships as `mq-bridge-full`: a GitHub release archive
+  per platform, in the Homebrew tap, on conda and on crates.io. A Rust host built without
+  endpoint features can install it
+  instead of compiling `full`.
+
+### Fixed
+
+- **`mq-bridge-app` keeps `$$` in config files.** Expanding environment variables turned
+  `$$` into `$`, so MongoDB variables such as `$$NOW`, Postgres `$$` blocks and the literal
+  escape `$${…}` reached the engine changed. `${VAR}` and `$VAR` expand as before.
+- **A memory request/reply caller gets its answer at once.** A requester waiting on a
+  memory topic used to sit out its whole `request_timeout_ms` when the route acked the
+  message without a reply, or nacked it with `enable_nack` off. It now gets `Sent::Ack` or
+  an error right away. A memory input with `request_reply: true` answers each failed
+  message with its error text, the way an HTTP input answers 502, and keeps running
+  instead of restarting the route. A failed request whose requester stopped waiting is
+  dropped; another failed message with `enable_nack` is redelivered after a 5 s pause,
+  not at once in a loop.
+- **`columns: auto` on PostgreSQL reuses its prepared statement.** Each batch used to be
+  parsed and planned again, which made a 1M-row CSV load slow. The bind
+  type of every column is now part of the SQL, so the statement is cached like on the other
+  databases.
+- **`insert_query` keeps batching with expressions in `VALUES (…)`.** A tuple such as
+  `(CAST(${payload:id} AS bigint), ${payload:name})` used to fall back to one INSERT per
+  row. It is now repeated per row in one multi-row INSERT.
+- **Plugin discovery serves built-in endpoints this build leaves out.** With discovery on,
+  a `kafka:` (or any other built-in) endpoint whose feature is off is now looked up in the
+  installed plugin libraries. Before, the host had to load the library providing it by name
+  or path first.
+
 ## 1.4.0
 
 ### Added

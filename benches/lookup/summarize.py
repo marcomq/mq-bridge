@@ -71,7 +71,11 @@ def main():
 
 
 VARIANT_ORDER = ["no_lookup", "per_message_c16", "per_message_c64", "batched_b1", "batched_b16",
-                 "batched_b128", "batched_b512", "batched_b1000"]
+                 "batched_b128", "batched_b512", "batched_b1000", "per_message_c16_p8",
+                 "batched_b16_p8", "batched_b128_p8", "batched_b512_p8", "batched_b1000_p8",
+                 "per_message_c16_rc8", "batched_b16_rc8", "batched_b128_rc8", "batched_b512_rc8",
+                 "batched_b1000_rc8", "per_message_c16_rc8p", "batched_b16_rc8p", "batched_b128_rc8p",
+                 "batched_b512_rc8p", "batched_b1000_rc8p"]
 
 
 def http_section():

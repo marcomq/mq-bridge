@@ -8,12 +8,12 @@ members = ["crates/core", "crates/cli", "crates/desktop"]
 resolver = "2"
 
 [workspace.package]
-version = "1.4.0"
+version = "1.5.0"
 
 [workspace.dependencies]
 # The CLI always ships the local-filesystem endpoints, whatever else is selected.
-mq-bridge = { version = "1.4.0", path = "../..", default-features = false, features = ["file", "dir-spool"] }
-mq_bridge_app = { version = "1.4.0", path = "crates/core", package = "mq-bridge-app-core", default-features = false }
+mq-bridge = { version = "1.5.0", path = "../..", default-features = false, features = ["file", "dir-spool"] }
+mq_bridge_app = { version = "1.5.0", path = "crates/core", package = "mq-bridge-app-core", default-features = false }
 mq-bridge-pulsar = { version = "0.1.6", default-features = false }
 
 anyhow = "1.0"
@@ -55,3 +55,5 @@ strip = true
 # global registry during local app builds.
 [patch.crates-io]
 mq-bridge = { path = "../.." }
+# Temporary: rumqttc 0.25.1 plus only the rustls-webpki 0.103 bump; drop once rumqttc releases it.
+rumqttc = { git = "https://github.com/bytebeamio/rumqtt", rev = "0b0ed643208cf77190e9d5cf08f3e3eece6e3ec3" }

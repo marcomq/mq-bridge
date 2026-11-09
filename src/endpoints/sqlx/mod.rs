@@ -163,30 +163,87 @@ fn binds_after_values(sql: &str) -> bool {
     })
 }
 
-/// True when `tuple` (including its outer parens) is nothing but comma-separated
-/// positional placeholders, i.e. the batch rebuild can regenerate it losslessly.
-/// Anything else — `decode($1, 'base64')`, `$1::bytea`, `now()`, a literal — must keep
-/// the user's own SQL.
-fn tuple_is_bare_placeholders(tuple: &str, driver_name: &str) -> bool {
-    let inner = tuple
-        .trim()
-        .strip_prefix('(')
-        .and_then(|s| s.strip_suffix(')'));
-    let Some(inner) = inner else {
-        return false;
+/// A piece of a VALUES tuple: SQL kept verbatim, or the 1-based placeholder of a row.
+#[derive(Debug, PartialEq)]
+enum TuplePart<'a> {
+    Sql(&'a str),
+    Bind(usize),
+}
+
+/// Splits `tuple` (including its parens) at its placeholders, so the batch path can repeat
+/// it per row with the user's expressions intact. `None` when it cannot be repeated safely:
+/// its placeholders are not exactly `1..=per_row`, or it holds SQL the scan does not follow
+/// (dollar quoting, `E'…'` strings, comments).
+fn tuple_template<'a>(
+    tuple: &'a str,
+    driver_name: &str,
+    per_row: usize,
+) -> Option<Vec<TuplePart<'a>>> {
+    let tuple = tuple.trim();
+    if !(tuple.starts_with('(') && tuple.ends_with(')')) {
+        return None;
+    }
+    let bytes = tuple.as_bytes();
+    let digits = |from: usize| {
+        bytes[from..]
+            .iter()
+            .take_while(|b| b.is_ascii_digit())
+            .count()
     };
-    inner.split(',').all(|part| {
-        let part = part.trim();
-        match driver_name {
-            "PostgreSQL" => part
-                .strip_prefix('$')
-                .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())),
-            "Microsoft SQL Server" => part
-                .strip_prefix("@p")
-                .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())),
-            _ => part == "?",
+    let mut parts = Vec::new();
+    let mut binds = Vec::new();
+    let (mut start, mut i) = (0, 0);
+    while i < bytes.len() {
+        let (index, len) = match (bytes[i], driver_name) {
+            (b'\'' | b'"', _) => {
+                if bytes[i] == b'\'' && i > 0 && bytes[i - 1].eq_ignore_ascii_case(&b'e') {
+                    return None;
+                }
+                let close = tuple[i + 1..].find(bytes[i] as char)?;
+                i += close + 2;
+                continue;
+            }
+            (b'-', _) if bytes.get(i + 1) == Some(&b'-') => return None,
+            (b'/', _) if bytes.get(i + 1) == Some(&b'*') => return None,
+            (b'$', "PostgreSQL") => match digits(i + 1) {
+                0 => return None,
+                n => (tuple[i + 1..i + 1 + n].parse().ok()?, 1 + n),
+            },
+            (b'@', "Microsoft SQL Server") if bytes.get(i + 1) == Some(&b'p') => {
+                match digits(i + 2) {
+                    0 => (0, 0),
+                    n => (tuple[i + 2..i + 2 + n].parse().ok()?, 2 + n),
+                }
+            }
+            (b'?', "PostgreSQL" | "Microsoft SQL Server") => (0, 0),
+            (b'?', _) => (binds.len() + 1, 1),
+            _ => (0, 0),
+        };
+        if len == 0 {
+            i += 1;
+            continue;
         }
-    })
+        parts.push(TuplePart::Sql(&tuple[start..i]));
+        parts.push(TuplePart::Bind(index));
+        binds.push(index);
+        i += len;
+        start = i;
+    }
+    parts.push(TuplePart::Sql(&tuple[start..]));
+    binds.sort_unstable();
+    (binds == (1..=per_row).collect::<Vec<_>>()).then_some(parts)
+}
+
+/// Appends one row of `template`, its placeholders shifted by `offset`.
+fn render_tuple(template: &[TuplePart<'_>], driver_name: &str, offset: usize, out: &mut String) {
+    for part in template {
+        match part {
+            TuplePart::Sql(sql) => out.push_str(sql),
+            TuplePart::Bind(index) => {
+                out.push_str(&positional_placeholder(driver_name, offset + index))
+            }
+        }
+    }
 }
 
 /// Parse `${metadata:<key>}` / `${payload:<field>}` tokens out of an `insert_query`,
@@ -324,6 +381,16 @@ fn bind_value(query: AnyQuery<'_>, value: BindValue) -> AnyQuery<'_> {
         BindValue::Float(f) => query.bind(f),
         BindValue::Bool(b) => query.bind(b),
         BindValue::Text(s) => query.bind(s),
+    }
+}
+
+fn bind_type_tag(value: &BindValue) -> char {
+    match value {
+        BindValue::Null => 'n',
+        BindValue::Int(_) => 'i',
+        BindValue::Float(_) => 'f',
+        BindValue::Bool(_) => 'b',
+        BindValue::Text(_) => 't',
     }
 }
 
@@ -1692,29 +1759,81 @@ impl SqlxPublisher {
             .collect();
         let mut records = Vec::new();
         for chunk in lookup_batch::distinct(&keys).chunks(lookup_batch::MAX_KEYS_PER_QUERY) {
+            if let Some(sql) = self.pg_any_sql(query, chunk.iter().map(|&i| &values[i])) {
+                let literal = lookup_batch::pg_array_literal(
+                    chunk.iter().filter_map(|&i| keys[i].as_deref()),
+                );
+                let rows = sqlx::query(audited_sql(&sql))
+                    .bind(literal)
+                    .fetch_all(&self.pool)
+                    .await
+                    .map_err(lookup_error)?;
+                push_json_rows(&rows, &mut records)?;
+                continue;
+            }
             let sql = query.expand(chunk.len(), |i| {
                 positional_placeholder(&self.driver_name, i + 1)
             });
-            // Not cached: a Postgres generic plan made on a small table stays a seq scan.
-            let mut select = sqlx::query(audited_sql(&sql)).persistent(false);
+            // Small lists are cached (one round trip); large ones not, as a Postgres generic plan
+            // made on a small table stays a seq scan. sqlx caches by SQL text alone, so the text
+            // names the bind types: a statement prepared for ints is never reused for text.
+            let persistent = chunk.len() <= 16;
+            let sql = if persistent {
+                let types: String = chunk.iter().map(|&i| bind_type_tag(&values[i])).collect();
+                format!("/* {types} */ {sql}")
+            } else {
+                sql
+            };
+            let mut select = sqlx::query(audited_sql(&sql)).persistent(persistent);
             for &i in chunk {
                 select = bind_value(select, values[i].clone());
             }
             let rows = select.fetch_all(&self.pool).await.map_err(lookup_error)?;
-            let Some(first) = rows.first() else { continue };
-            let schema = JsonRowSchema::from_row(first);
-            let mut buf = Vec::new();
-            for row in &rows {
-                buf.clear();
-                schema.encode_row(row, &mut buf);
-                records.push(
-                    serde_json::from_slice(&buf)
-                        .map_err(|e| PublisherError::NonRetryable(e.into()))?,
-                );
-            }
+            push_json_rows(&rows, &mut records)?;
         }
         lookup_batch::answer(&keys, records, &query.key).map_err(PublisherError::NonRetryable)
     }
+
+    /// On Postgres, `IN (…)` as `= ANY($1::type[])`: one cached statement and one round trip
+    /// for any number of keys. Without a cast the keys must share a type.
+    fn pg_any_sql<'a>(
+        &self,
+        query: &ListQuery,
+        mut values: impl Iterator<Item = &'a BindValue>,
+    ) -> Option<String> {
+        if self.driver_name != "PostgreSQL" {
+            return None;
+        }
+        let first = bind_type_tag(values.next()?);
+        if !values.all(|v| bind_type_tag(v) == first) && query.suffix.trim().is_empty() {
+            return None;
+        }
+        query.pg_any(match first {
+            'i' => "int8",
+            'f' => "float8",
+            'b' => "bool",
+            _ => "text",
+        })
+    }
+}
+
+fn push_json_rows(
+    rows: &[sqlx::any::AnyRow],
+    records: &mut Vec<serde_json::Value>,
+) -> Result<(), PublisherError> {
+    let Some(first) = rows.first() else {
+        return Ok(());
+    };
+    let schema = JsonRowSchema::from_row(first);
+    let mut buf = Vec::new();
+    for row in rows {
+        buf.clear();
+        schema.encode_row(row, &mut buf);
+        records.push(
+            serde_json::from_slice(&buf).map_err(|e| PublisherError::NonRetryable(e.into()))?,
+        );
+    }
+    Ok(())
 }
 
 #[async_trait]
@@ -1855,15 +1974,6 @@ impl SqlxPublisher {
             None => ("", ""),
         };
 
-        // The rebuild below emits a tuple of bare placeholders, so anything else the user
-        // wrote inside the tuple — a cast, `decode(…, 'base64')` for a bytea column, a
-        // function call, a literal — would be dropped and the value bound raw against the
-        // target column's type. Single-row `send()` keeps the tuple verbatim.
-        if !tuple_is_bare_placeholders(values_tuple, &self.driver_name) {
-            warn!("insert_query's VALUES tuple contains an expression, not just tokens. Falling back to iterative inserts.");
-            return self.send_batch_iterative(messages).await;
-        }
-
         // A token after the VALUES tuple (e.g. `ON CONFLICT … DO UPDATE SET v = ${payload:v}`)
         // was already rewritten to a placeholder by `parse_insert_template`, numbered for the
         // single-row query. The rebuild below renumbers only the row tuples, so the suffix
@@ -1883,6 +1993,11 @@ impl SqlxPublisher {
 
         // Placeholders per row: N tokens in token mode, 1 (the payload) in legacy mode.
         let per_row = self.column_sources.len().max(1);
+        // The tuple is repeated per row with its expressions (`CAST(…)`, `decode(…)`) kept.
+        let Some(template) = tuple_template(values_tuple, &self.driver_name, per_row) else {
+            warn!("insert_query's VALUES tuple cannot be repeated per row. Falling back to iterative inserts.");
+            return self.send_batch_iterative(messages).await;
+        };
         let per_statement = (columns::MAX_BINDS / per_row).max(1);
         let retryable = |e: sqlx::Error| PublisherError::Retryable(anyhow!(e));
         // One statement is atomic by itself; a batch split at the bind limit needs a transaction.
@@ -1891,22 +2006,12 @@ impl SqlxPublisher {
             false => None,
         };
         for chunk in messages.chunks(per_statement) {
-            // A running 1-based index spans the whole statement.
             let mut placeholders = String::new();
-            let mut param_idx = 1;
             for i in 0..chunk.len() {
                 if i > 0 {
                     placeholders.push_str(", ");
                 }
-                placeholders.push('(');
-                for j in 0..per_row {
-                    if j > 0 {
-                        placeholders.push_str(", ");
-                    }
-                    placeholders.push_str(&positional_placeholder(&self.driver_name, param_idx));
-                    param_idx += 1;
-                }
-                placeholders.push(')');
+                render_tuple(&template, &self.driver_name, i * per_row, &mut placeholders);
             }
 
             let sql = format!("{} VALUES {}{}", base_query, placeholders, values_suffix);

@@ -1,4 +1,4 @@
-import std/options
+import std/[json, options]
 import ./[raw, errors, executor, message]
 
 type
@@ -23,6 +23,7 @@ type
     exec: ptr Executor
     worker: ptr Thread[ptr Executor]
     pumping: bool
+    caller: ptr mqb_caller_t
   Route* = ref RouteObj
     ## One route: an input endpoint, optional handlers, an output endpoint.
     ##
@@ -30,6 +31,17 @@ type
     ## `run()` that is the calling thread: they run while it is inside a
     ## mq_bridge call (`join`, `send`, `poll`, ...) or `dispatch`.
     ## `start(worker = true)` runs them on a thread of their own instead.
+
+  CallerObj = object
+    route: Route
+  Caller* = ref CallerObj
+    ## Calls a route like a function; see `caller`. Dropping the last
+    ## reference to it and its route stops the route.
+
+  CallOutcome* = object
+    ## One message of `callMany`: its answer, or the error it failed with.
+    answer*: Option[Message]
+    error*: ref MqbError
 
   HandlerJob = object of Job
     box: ptr HandlerBoxObj
@@ -119,6 +131,8 @@ proc unpump(r: var RouteObj) =
     r.pumping = false
 
 proc `=destroy`(r: RouteObj) =
+  if r.caller != nil:
+    blocking mqb_caller_free(r.caller)
   if r.raw != nil:
     blocking mqb_route_free(r.raw)
   if r.pumping:
@@ -163,11 +177,7 @@ proc addHandler*(r: Route, kind: string, handler: Handler): Route {.discardable.
   check mqb_route_add_handler(r.raw, cstring(kind), handlerTrampoline, cast[pointer](box))
   r
 
-proc start*(r: Route, worker = false) =
-  ## Connects both endpoints and starts moving messages in the background.
-  ## With `worker`, handlers run on another thread: refs they capture
-  ## (`seq`, `string`, `Publisher`, ...) must not be used by other threads
-  ## meanwhile, or only under a lock, as ORC reference counts are not atomic.
+proc prepare(r: Route, worker: bool) =
   if r.exec == nil:
     if worker:
       r.exec = newExecutor()
@@ -180,6 +190,13 @@ proc start*(r: Route, worker = false) =
   if r.worker == nil and r.boxes.len > 0 and not r.pumping:
     inc r.exec.users
     r.pumping = true
+
+proc start*(r: Route, worker = false) =
+  ## Connects both endpoints and starts moving messages in the background.
+  ## With `worker`, handlers run on another thread: refs they capture
+  ## (`seq`, `string`, `Publisher`, ...) must not be used by other threads
+  ## meanwhile, or only under a lock, as ORC reference counts are not atomic.
+  r.prepare(worker)
   let status = blocking mqb_route_start(r.raw)
   if status != MQB_OK:
     let text = lastError()
@@ -208,3 +225,58 @@ proc dispatch*(): int {.discardable.} =
   ## Runs the handler calls waiting for this thread and returns how many ran,
   ## for a thread that is busy outside mq_bridge calls.
   if localExec == nil: 0 else: dispatchPending(localExec)
+
+proc caller*(r: Route, worker = false): Caller =
+  ## Deploys the route (with its handlers) and returns a `Caller` for it; do not
+  ## also `start` it. The input must be an in-process `memory` endpoint. Handlers
+  ## run as after `start(worker)`; use `worker = true` to call from several threads.
+  if r.caller != nil:
+    raise newMqbError(MQB_ERR_PERMANENT, "the route already has a caller")
+  r.prepare(worker)
+  r.caller = blocking mqb_caller_from_route(r.raw)
+  if r.caller == nil:
+    let text = lastError()
+    r[].unpump()
+    raise newMqbError(MQB_ERR_PERMANENT, text)
+  Caller(route: r)
+
+proc call*(c: Caller, message: Message): Message =
+  ## Sends `message` through the route and returns its answer. A failed message
+  ## raises its error.
+  var response: ptr mqb_message_t
+  check blocking mqb_caller_call(c.route.caller, message.raw, addr response)
+  result.raw = response
+
+proc call*(c: Caller, payload: string | JsonNode): Message =
+  c.call(newMessage(payload))
+
+proc callMany*(c: Caller, messages: openArray[Message]): seq[CallOutcome] =
+  ## Sends `messages` through the route as one batch and returns one outcome
+  ## per message, in order. A failed message does not raise.
+  let n = messages.len
+  var requests = newSeq[ptr mqb_message_t](n)
+  for i in 0 ..< n: requests[i] = messages[i].raw
+  var responses = newSeq[ptr mqb_message_t](n)
+  var statuses = newSeq[MqbStatus](n)
+  let first = if n == 0: nil else: addr requests[0]
+  let outp = if n == 0: nil else: addr responses[0]
+  let codes = if n == 0: nil else: addr statuses[0]
+  let status = blocking mqb_caller_call_many(c.route.caller, first, csize_t(n), outp, codes)
+  if status != MQB_OK and (n == 0 or responses[0] == nil):
+    raise newMqbError(status, lastError())
+  result = newSeq[CallOutcome](n)
+  for i in 0 ..< n:
+    let response = Message(raw: responses[i])
+    if statuses[i] == MQB_OK:
+      result[i].answer = some response
+    else:
+      result[i].error = newMqbError(statuses[i], response.payload)
+
+proc send*(c: Caller, message: Message): Option[Message] =
+  ## Like `call`, but a route that accepts the message without an answer
+  ## returns `none`.
+  var response: ptr mqb_message_t
+  check blocking mqb_caller_send(c.route.caller, message.raw, addr response)
+  if response != nil:
+    result = some Message(raw: response)
+

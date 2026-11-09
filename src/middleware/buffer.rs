@@ -472,7 +472,7 @@ impl BufferConsumer {
 }
 
 /// Splits the merged disposition vec back to each sub-batch's original commit, in order.
-fn merge_commits(commits: Vec<(usize, BatchCommitFunc)>) -> BatchCommitFunc {
+pub(super) fn merge_commits(commits: Vec<(usize, BatchCommitFunc)>) -> BatchCommitFunc {
     Box::new(move |dispositions: Vec<MessageDisposition>| {
         Box::pin(async move {
             let mut offset = 0usize;

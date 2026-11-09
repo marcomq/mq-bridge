@@ -1372,6 +1372,185 @@ impl Route {
     }
 }
 
+/// One request of `Caller.callMany` / `callManyMessages`: its answer, or the error it
+/// failed with.
+#[napi(object)]
+pub struct CallOutcome {
+    pub value: Option<JsonValue>,
+    pub message: Option<NativeMessage>,
+    pub error: Option<String>,
+}
+
+/// Call a route like a function. The route input must be an in-process `memory`
+/// endpoint; calls made at the same time reach the route as one batch.
+#[napi]
+pub struct Caller {
+    runtime: Arc<Runtime>,
+    caller: core::Caller,
+}
+
+#[napi]
+impl Caller {
+    /// Deploy a `Route` (with its handlers) as a caller under the route's name.
+    #[napi(factory)]
+    pub fn from_route(route: &Route) -> Result<Self> {
+        let core_route = route.lock_route()?.clone();
+        let runtime = Arc::clone(&route.runtime);
+        let name = route.name.clone();
+        let caller = runtime
+            .block_on(async move { core::Caller::deploy(&name, core_route).await })
+            .map_err(to_napi_error)?;
+        Ok(Self { runtime, caller })
+    }
+
+    /// Load the route `name` from a config file and deploy it. Unlike `Route.fromFile`,
+    /// a missing `input` reads from the caller's own memory topic and a missing
+    /// `output` answers with the message.
+    #[napi(factory)]
+    pub fn from_file(path: String, name: Option<String>) -> Result<Self> {
+        let value = common::load_config_value(Path::new(&path)).map_err(to_napi_error)?;
+        Self::from_value(value, name)
+    }
+
+    /// Like `fromFile`, but takes the config as a mapping.
+    #[napi(factory)]
+    pub fn from_config(config: JsonValue, name: Option<String>) -> Result<Self> {
+        let value = serde_yaml_ng::to_value(config)
+            .context("failed to convert config mapping")
+            .map_err(to_napi_error)?;
+        Self::from_value(value, name)
+    }
+
+    #[napi(getter)]
+    pub fn name(&self) -> String {
+        self.caller.name().to_string()
+    }
+
+    /// Send `fields` as one JSON object through the route and return its answer as JSON.
+    #[napi]
+    pub async fn call(&self, fields: JsonValue) -> Result<JsonValue> {
+        let caller = self.caller.clone();
+        self.runtime
+            .spawn(async move { caller.call::<JsonValue>(fields).await })
+            .await
+            .map_err(to_napi_error)?
+            .map_err(to_napi_error)
+    }
+
+    /// Send a message through the route and return its answer as a message.
+    #[napi]
+    pub async fn call_message(&self, message: NativeMessage) -> Result<NativeMessage> {
+        let message = message.into_canonical()?;
+        let caller = self.caller.clone();
+        let response = self
+            .runtime
+            .spawn(async move { caller.call_message(message).await })
+            .await
+            .map_err(to_napi_error)?
+            .map_err(to_napi_error)?;
+        Ok(NativeMessage::from_canonical(&response))
+    }
+
+    /// Send several field objects as one batch; one outcome per request, in order.
+    #[napi]
+    pub async fn call_many(&self, requests: Vec<JsonValue>) -> Result<Vec<CallOutcome>> {
+        let caller = self.caller.clone();
+        let answers = self
+            .runtime
+            .spawn(async move { caller.call_many::<JsonValue, _>(requests).await })
+            .await
+            .map_err(to_napi_error)?;
+        Ok(answers
+            .into_iter()
+            .map(|answer| match answer {
+                Ok(value) => CallOutcome {
+                    value: Some(value),
+                    message: None,
+                    error: None,
+                },
+                Err(err) => CallOutcome {
+                    value: None,
+                    message: None,
+                    error: Some(err.to_string()),
+                },
+            })
+            .collect())
+    }
+
+    /// Send several messages as one batch; one outcome per message, in order.
+    #[napi]
+    pub async fn call_many_messages(
+        &self,
+        messages: Vec<NativeMessage>,
+    ) -> Result<Vec<CallOutcome>> {
+        let messages = messages
+            .into_iter()
+            .map(NativeMessage::into_canonical)
+            .collect::<Result<Vec<_>>>()?;
+        let caller = self.caller.clone();
+        let answers = self
+            .runtime
+            .spawn(async move { caller.call_many_messages(messages).await })
+            .await
+            .map_err(to_napi_error)?;
+        Ok(answers
+            .into_iter()
+            .map(|answer| match answer {
+                Ok(answer) => CallOutcome {
+                    value: None,
+                    message: Some(NativeMessage::from_canonical(&answer)),
+                    error: None,
+                },
+                Err(err) => CallOutcome {
+                    value: None,
+                    message: None,
+                    error: Some(err.to_string()),
+                },
+            })
+            .collect())
+    }
+
+    /// Send a message through the route and wait until it is handled. Returns
+    /// the answer, or `null` when the route accepted it without one.
+    #[napi]
+    pub async fn send(&self, message: NativeMessage) -> Result<Option<NativeMessage>> {
+        let message = message.into_canonical()?;
+        let caller = self.caller.clone();
+        let handle = self
+            .runtime
+            .spawn(async move { caller.send(message).await });
+        Ok(
+            match handle
+                .await
+                .map_err(to_napi_error)?
+                .map_err(to_napi_error)?
+            {
+                Sent::Ack => None,
+                Sent::Response(response) => Some(NativeMessage::from_canonical(&response)),
+            },
+        )
+    }
+
+    /// Stop the route. Resolves to `false` if it was already stopped.
+    #[napi]
+    pub async fn stop(&self) -> Result<bool> {
+        let caller = self.caller.clone();
+        self.runtime
+            .spawn(async move { caller.stop().await })
+            .await
+            .map_err(to_napi_error)
+    }
+}
+
+impl Caller {
+    fn from_value(value: serde_yaml_ng::Value, name: Option<String>) -> Result<Self> {
+        let name = common::normalize_name(name.as_deref())
+            .map_or_else(common::default_route_name, str::to_string);
+        let route = common::caller_route_from_value(value, &name).map_err(to_napi_error)?;
+        Self::from_route(&Route::build(route, name)?)
+    }
+}
+
 #[napi]
 pub struct Publisher {
     runtime: Arc<Runtime>,

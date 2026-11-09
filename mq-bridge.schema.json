@@ -824,6 +824,19 @@
           "additionalProperties": false
         },
         {
+          "description": "The entries listed above it run on several batches at once; batches still leave in\nread order. Input and output.",
+          "type": "object",
+          "properties": {
+            "parallel": {
+              "$ref": "#/$defs/ParallelMiddleware"
+            }
+          },
+          "required": [
+            "parallel"
+          ],
+          "additionalProperties": false
+        },
+        {
           "type": "object",
           "properties": {
             "custom": {
@@ -1837,6 +1850,22 @@
           "additionalProperties": false
         }
       ]
+    },
+    "ParallelMiddleware": {
+      "description": "Parallel middleware configuration.\n\nMarker. On an input, the middlewares listed above it run on up to `max_in_flight` batches\nat once, each lane with its own copy of them; the ones below it read one batch at a time.\nOn an output, those above it run on every route worker and the ones below it send in\norder. Results and commits stay in read order. Only stateless middlewares may sit above it.",
+      "type": "object",
+      "properties": {
+        "max_in_flight": {
+          "description": "Batches processed at once (input only). Defaults to the number of CPU cores.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
     },
     "AwsConfig": {
       "type": "object",
@@ -2979,12 +3008,12 @@
           "minimum": 0
         },
         "request_reply": {
-          "description": "(Publisher only) If true, send() waits for a response.",
+          "description": "Publisher: send() waits for a response. Input: each failure is answered to its requester.",
           "type": "boolean",
           "default": false
         },
         "request_timeout_ms": {
-          "description": "(Publisher only) Timeout for request-reply operations in milliseconds. Defaults to 30000ms.",
+          "description": "Publisher: how long send() waits for the response. Input: how long a `Caller` waits. Defaults to 30000ms.",
           "type": [
             "integer",
             "null"

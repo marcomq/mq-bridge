@@ -609,6 +609,7 @@ class Middleware(TypedDict, total=False):
     metrics: MetricsMiddleware
     otel: OtelMiddleware
     pack: PackMiddleware
+    parallel: ParallelMiddleware
     random_panic: RandomPanicMiddleware
     retry: RetryMiddleware
     timeout: TimeoutMiddleware
@@ -753,6 +754,11 @@ class PackMiddleware(TypedDict, total=False):
     format: PackFormat
     max_bytes: int
     max_messages: int
+
+
+class ParallelMiddleware(TypedDict, total=False):
+    """Parallel middleware configuration."""
+    max_in_flight: Optional[int]
 
 
 class PostgresCdcConfig(TypedDict, total=False):

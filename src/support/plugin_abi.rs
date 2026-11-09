@@ -80,7 +80,10 @@ pub const MQB_PLUGIN_ABI_MAJOR: u32 = 1;
 /// * **1.4** appended [`MqbPluginVTable::publisher_deferred_commit_interval_ms`],
 ///   with which a publisher defers source commits to its next flush, and added the
 ///   [`MQB_DELIVERY_REQUIRES_FULL_REPLAY`] and [`MQB_DELIVERY_REPLAYS_FROM_START`] flags.
-pub const MQB_PLUGIN_ABI_MINOR: u32 = 4;
+/// * **1.5** appended [`MqbPluginVTable::middleware_wrap_consumer`] and
+///   [`MqbPluginVTable::middleware_wrap_publisher`], with which a middleware wraps the
+///   whole inner endpoint instead of mapping messages ([`MQB_CAP_MIDDLEWARE_WRAP`]).
+pub const MQB_PLUGIN_ABI_MINOR: u32 = 5;
 
 /// The route pass drained its input to the end.
 pub const MQB_DISCONNECT_COMPLETED: u32 = 0;
@@ -153,6 +156,10 @@ pub const MQB_CAP_CONSUMER: u64 = 1 << 0;
 pub const MQB_CAP_PUBLISHER: u64 = 1 << 1;
 /// The plugin provides a middleware under the same name.
 pub const MQB_CAP_MIDDLEWARE: u64 = 1 << 2;
+/// (ABI 1.5) The middleware wraps the inner endpoint through
+/// [`MqbPluginVTable::middleware_wrap_consumer`] / [`MqbPluginVTable::middleware_wrap_publisher`]
+/// instead of [`MqbPluginVTable::middleware_apply`]. Set together with [`MQB_CAP_MIDDLEWARE`].
+pub const MQB_CAP_MIDDLEWARE_WRAP: u64 = 1 << 3;
 
 /// Asks [`MqbPluginVTable::factory_config_schema`] for the endpoint's
 /// configuration object.
@@ -700,7 +707,36 @@ pub struct MqbPluginVTable {
     /// Milliseconds after which the route flushes this publisher and only then commits
     /// the source; `0` commits at once. Read once, after `publisher_create`.
     pub publisher_deferred_commit_interval_ms: MqbPublisherDeferredCommitInterval,
+
+    // --- Added in ABI 1.5. Read through `wrap_hooks`.
+    /// Wraps the host's input endpoint `inner`, which is driven through the consumer
+    /// entries of `inner_table`, and writes a consumer handle of **this** table. On
+    /// [`MQB_OK`] the new handle owns `inner` and closes and frees it through
+    /// `inner_table`. It takes `inner` whatever the result: on failure it frees it. Only called with
+    /// [`MQB_CAP_MIDDLEWARE_WRAP`] set, on a middleware created for the receive side.
+    pub middleware_wrap_consumer: MqbMiddlewareWrapConsumer,
+    /// The publisher counterpart of [`middleware_wrap_consumer`](Self::middleware_wrap_consumer),
+    /// on a middleware created for the send side.
+    pub middleware_wrap_publisher: MqbMiddlewareWrapPublisher,
 }
+
+/// Signature of [`MqbPluginVTable::middleware_wrap_consumer`].
+pub type MqbMiddlewareWrapConsumer = unsafe extern "C" fn(
+    middleware: MqbMiddlewareHandle,
+    inner_table: *const MqbPluginVTable,
+    inner: MqbConsumerHandle,
+    out: *mut MqbConsumerHandle,
+    err: *mut MqbBuffer,
+) -> MqbStatus;
+
+/// Signature of [`MqbPluginVTable::middleware_wrap_publisher`].
+pub type MqbMiddlewareWrapPublisher = unsafe extern "C" fn(
+    middleware: MqbMiddlewareHandle,
+    inner_table: *const MqbPluginVTable,
+    inner: MqbPublisherHandle,
+    out: *mut MqbPublisherHandle,
+    err: *mut MqbBuffer,
+) -> MqbStatus;
 
 /// Signature of [`MqbPluginVTable::publisher_deferred_commit_interval_ms`].
 pub type MqbPublisherDeferredCommitInterval =
@@ -944,6 +980,20 @@ impl MqbPluginVTable {
         }
         Some(self.publisher_deferred_commit_interval_ms)
     }
+
+    /// The 1.5 wrap entries, or `None` for an older plugin or one without
+    /// [`MQB_CAP_MIDDLEWARE_WRAP`], whose middleware then maps messages.
+    pub fn wrap_hooks(&self) -> Option<(MqbMiddlewareWrapConsumer, MqbMiddlewareWrapPublisher)> {
+        if self.struct_size < MQB_VTABLE_SIZE_V1_5
+            || self.capabilities & MQB_CAP_MIDDLEWARE_WRAP == 0
+        {
+            return None;
+        }
+        Some((
+            self.middleware_wrap_consumer,
+            self.middleware_wrap_publisher,
+        ))
+    }
 }
 
 /// Size of the **1.0** field set: 7 header words (`struct_size`, the packed
@@ -987,6 +1037,11 @@ pub const MQB_VTABLE_SIZE_V1_3: usize = MQB_VTABLE_SIZE_V1_2 + core::mem::size_o
 /// [`MqbPluginVTable::publisher_deferred_commit_interval_ms`]. A feature gate like
 /// [`MQB_VTABLE_SIZE_V1_1`].
 pub const MQB_VTABLE_SIZE_V1_4: usize = MQB_VTABLE_SIZE_V1_3 + core::mem::size_of::<usize>();
+
+/// Size of the **1.5** field set: 1.4 plus [`MqbPluginVTable::middleware_wrap_consumer`]
+/// and [`MqbPluginVTable::middleware_wrap_publisher`]. A feature gate like
+/// [`MQB_VTABLE_SIZE_V1_1`].
+pub const MQB_VTABLE_SIZE_V1_5: usize = MQB_VTABLE_SIZE_V1_4 + 2 * core::mem::size_of::<usize>();
 
 /// Why a plugin was rejected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1115,7 +1170,26 @@ mod tests {
             MQB_VTABLE_SIZE_V1_4,
             MQB_VTABLE_SIZE_V1_3 + size_of::<usize>()
         );
-        assert_eq!(size_of::<MqbPluginVTable>(), MQB_VTABLE_SIZE_V1_4);
+    }
+
+    #[test]
+    fn the_1_5_table_size_matches_the_declared_table() {
+        assert_eq!(
+            MQB_VTABLE_SIZE_V1_5,
+            MQB_VTABLE_SIZE_V1_4 + 2 * size_of::<usize>()
+        );
+        assert_eq!(size_of::<MqbPluginVTable>(), MQB_VTABLE_SIZE_V1_5);
+    }
+
+    #[test]
+    fn wrap_hooks_need_the_1_5_size_and_the_capability() {
+        let mut table = stub_table();
+        table.struct_size = MQB_VTABLE_SIZE_V1_5;
+        assert!(table.wrap_hooks().is_none());
+        table.capabilities |= MQB_CAP_MIDDLEWARE | MQB_CAP_MIDDLEWARE_WRAP;
+        assert!(table.wrap_hooks().is_some());
+        table.struct_size = MQB_VTABLE_SIZE_V1_4;
+        assert!(table.wrap_hooks().is_none());
     }
 
     #[test]
@@ -1341,6 +1415,24 @@ mod tests {
         unsafe extern "C" fn publisher_deferred_commit_interval_ms(_: MqbPublisherHandle) -> u64 {
             250
         }
+        unsafe extern "C" fn wrap_consumer(
+            _: MqbMiddlewareHandle,
+            _: *const MqbPluginVTable,
+            _: MqbConsumerHandle,
+            _: *mut MqbConsumerHandle,
+            _: *mut MqbBuffer,
+        ) -> MqbStatus {
+            MQB_ERR_UNSUPPORTED
+        }
+        unsafe extern "C" fn wrap_publisher(
+            _: MqbMiddlewareHandle,
+            _: *const MqbPluginVTable,
+            _: MqbPublisherHandle,
+            _: *mut MqbPublisherHandle,
+            _: *mut MqbBuffer,
+        ) -> MqbStatus {
+            MQB_ERR_UNSUPPORTED
+        }
         unsafe extern "C" fn middleware_create(
             _: MqbFactoryHandle,
             _: MqbSlice,
@@ -1514,6 +1606,8 @@ mod tests {
             factory_delivery,
             publisher_disconnect,
             publisher_deferred_commit_interval_ms,
+            middleware_wrap_consumer: wrap_consumer,
+            middleware_wrap_publisher: wrap_publisher,
         }
     }
 }

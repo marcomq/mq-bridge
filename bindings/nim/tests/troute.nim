@@ -133,3 +133,20 @@ output: { memory: { topic: nim_retry_out } }
     let batch = Consumer.fromStr("memory: { topic: nim_retry_out }").poll(1, 10000)
     check batch.len == 1
     check attempts >= 2
+
+  test "a caller returns the answer and raises the handler error":
+    let route = Route.fromStr("""
+input: { memory: { topic: nim_caller } }
+output: { response: {} }
+""").withHandler(proc (m: MessageView): Option[Message] =
+      if m.payload == "bad": raise newException(ValueError, "bad input")
+      some newMessage(m.payload.toUpperAscii))
+    let caller = route.caller()
+    check caller.call("ping").payload == "PING"
+    expect MqbError:
+      discard caller.call("bad")
+    check caller.send(newMessage("again")).get.payload == "AGAIN"
+    let many = caller.callMany([newMessage("a"), newMessage("bad"), newMessage("b")])
+    check many[0].answer.get.payload == "A"
+    check many[1].answer.isNone and "returned status" in many[1].error.msg
+    check many[2].answer.get.payload == "B"

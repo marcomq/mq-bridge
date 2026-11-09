@@ -224,6 +224,10 @@ impl MessagePublisher for TransformPublisher {
 
     crate::traits::forward_publisher_meta!(inner);
 
+    fn takes_publish_turn(&self) -> bool {
+        self.inner.takes_publish_turn()
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }

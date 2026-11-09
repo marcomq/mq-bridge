@@ -20,15 +20,21 @@ RAW = RESULTS / "http"
 WORK = HERE / ".work"
 PORT = 18080
 URL = f"http://127.0.0.1:{PORT}/u/[0-9]{{6}}"
-PG_URL = "postgres://bench:bench@127.0.0.1:55432/bench"
+PG_URL = os.environ["POSTGRES_URL"]  # see docker-compose.yml
 
 SELECT = "SELECT path, id, name, tier FROM users WHERE path"
 VARIANTS = {
-    # name: (where clause, lookup concurrency, route concurrency)
-    "per_message_c16": ("= ${metadata:key}", 16, 1),
-    "per_message_c64": ("= ${metadata:key}", 64, 1),
-    "batched_rc1": ("IN (${metadata:key})", 16, 1),
-    "batched_rc4": ("IN (${metadata:key})", 16, 4),
+    # name: (where clause, lookup concurrency, route concurrency, `parallel` lanes or None,
+    #        input `buffer` max_delay_ms or None)
+    "per_message_c16": ("= ${metadata:key}", 16, 1, None, None),
+    "per_message_c64": ("= ${metadata:key}", 64, 1, None, None),
+    "batched_rc1": ("IN (${metadata:key})", 16, 1, None, None),
+    "batched_rc4": ("IN (${metadata:key})", 16, 4, None, None),
+    "per_message_c16_p8": ("= ${metadata:key}", 16, 1, 8, None),
+    "batched_p8": ("IN (${metadata:key})", 16, 1, 8, None),
+    "batched_p16": ("IN (${metadata:key})", 16, 1, 16, None),
+    "batched_p8_buf1": ("IN (${metadata:key})", 16, 1, 8, 1),
+    "batched_p8_buf2": ("IN (${metadata:key})", 16, 1, 8, 2),
 }
 # netem adds timer overhead: 300us measured as +0.49 ms on a pgbench `SELECT 1` (0.047 -> 0.533 ms).
 NETS = {"loopback": None, "rtt+0.5ms": "300us"}
@@ -42,7 +48,10 @@ def sh(*cmd, check=True, capture=True, timeout=600):
 
 
 def route_yaml(variant):
-    where, lookup_c, route_c = VARIANTS[variant]
+    where, lookup_c, route_c, lanes, buf = VARIANTS[variant]
+    marker = f"\n        - parallel: {{ max_in_flight: {lanes} }}" if lanes else ""
+    if buf:
+        marker += f"\n        - buffer: {{ max_messages: 512, max_delay_ms: {buf} }}"
     return f"""log_level: warn
 routes:
   lookup_bench:
@@ -63,7 +72,7 @@ routes:
             metadata:
               key: "${{metadata:http_path}}"
             into: user
-            concurrency: {lookup_c}
+            concurrency: {lookup_c}{marker}
     output:
       response: {{}}
 """
@@ -123,6 +132,9 @@ def main():
     ap.add_argument("--warmup", default="5s")
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--only", nargs="*", help="limit to these variants")
+    ap.add_argument("--nets", nargs="*", choices=list(NETS), default=list(NETS))
+    ap.add_argument("--closed", nargs="*", type=int, default=CLOSED, help="client counts")
+    ap.add_argument("--rates", nargs="*", type=int, default=RATES, help="open-load req/s")
     args = ap.parse_args()
 
     RAW.mkdir(parents=True, exist_ok=True)
@@ -130,7 +142,7 @@ def main():
     rng = random.Random(args.seed)
     for rep in range(1, args.reps + 1):
         # Randomised order per repetition spreads slow drift (thermal, background load) evenly.
-        cells = [(n, v) for n in NETS for v in variants]
+        cells = [(n, v) for n in args.nets for v in variants]
         rng.shuffle(cells)
         for net, variant in cells:
             set_netem(NETS[net])
@@ -138,7 +150,7 @@ def main():
             try:
                 check_once()
                 oha(args.warmup, 64)
-                points = [("closed", c) for c in CLOSED] + [("open", r) for r in RATES]
+                points = [("closed", c) for c in args.closed] + [("open", r) for r in args.rates]
                 for mode, load in points:
                     if mode == "closed":
                         result = oha(args.duration, load)

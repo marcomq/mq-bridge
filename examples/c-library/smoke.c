@@ -261,6 +261,64 @@ static void test_request_reply(void) {
     mqb_route_free(route);
 }
 
+/* Upper-cases the payload, or fails permanently on "bad". */
+static MqbStatus upper_case_or_fail(const mqb_message_t *message, mqb_message_t **out,
+                                    void *user_data) {
+    if (slice_is(mqb_message_payload(message), "bad")) {
+        return MQB_ERR_PERMANENT;
+    }
+    return upper_case(message, out, user_data);
+}
+
+static void test_caller(void) {
+    atomic_int calls = 0;
+    mqb_route_t *route = mqb_route_from_str(
+        "input: { memory: { topic: smoke_caller } }\n"
+        "output: { response: {} }\n",
+        "smoke_caller");
+    CHECK(route != NULL);
+    CHECK(mqb_route_set_handler(route, upper_case_or_fail, &calls) == MQB_OK);
+    mqb_caller_t *caller = mqb_caller_from_route(route);
+    CHECK(caller != NULL);
+    mqb_route_free(route);
+
+    mqb_message_t *request = text_message("ping");
+    mqb_message_t *response = NULL;
+    CHECK(mqb_caller_call(caller, request, &response) == MQB_OK);
+    CHECK(response != NULL && slice_is(mqb_message_payload(response), "PING"));
+    mqb_message_free(response);
+    mqb_message_free(request);
+
+    request = text_message("bad");
+    CHECK(mqb_caller_call(caller, request, &response) != MQB_OK);
+    CHECK(response == NULL && strstr(mqb_last_error(), "returned status") != NULL);
+    mqb_message_free(request);
+
+    request = text_message("again");
+    CHECK(mqb_caller_send(caller, request, &response) == MQB_OK);
+    CHECK(response != NULL && slice_is(mqb_message_payload(response), "AGAIN"));
+    mqb_message_free(response);
+    mqb_message_free(request);
+
+    const mqb_message_t *batch[3] = {text_message("a"), text_message("bad"), text_message("b")};
+    mqb_message_t *answers[3];
+    MqbStatus statuses[3];
+    CHECK(mqb_caller_call_many(caller, batch, 3, answers, statuses) != MQB_OK);
+    CHECK(statuses[0] == MQB_OK && slice_is(mqb_message_payload(answers[0]), "A"));
+    CHECK(statuses[1] != MQB_OK && answers[1] != NULL);
+    CHECK(strstr(mqb_last_error(), "returned status") != NULL);
+    CHECK(statuses[2] == MQB_OK && slice_is(mqb_message_payload(answers[2]), "B"));
+    for (int i = 0; i < 3; i++) {
+        mqb_message_free(answers[i]);
+        mqb_message_free((mqb_message_t *)batch[i]);
+    }
+    const mqb_message_t *broken[2] = {text_message("a"), NULL};
+    CHECK(mqb_caller_call_many(caller, broken, 2, answers, statuses) != MQB_OK);
+    CHECK(answers[0] == NULL && answers[1] == NULL && statuses[0] != MQB_OK);
+    mqb_message_free((mqb_message_t *)broken[0]);
+    mqb_caller_free(caller);
+}
+
 /* An in-process plugin: a middleware dropping "ping" and an output counting messages. */
 static atomic_int delivered;
 
@@ -411,6 +469,7 @@ int main(int argc, char **argv) {
     test_route_with_handler();
     test_route_with_batch_handler();
     test_request_reply();
+    test_caller();
     test_in_process_plugin();
     test_csv_to_json(argc > 1 ? argv[1] : "/tmp");
     CHECK(atomic_load(&log_events) > 0);

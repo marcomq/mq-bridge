@@ -687,7 +687,7 @@ fn check_consumer_recursive(
                     return Ok(warnings);
                 }
             }
-            if named_endpoint_factory(endpoint.endpoint_type.name()).is_some() {
+            if builtin_endpoint_factory(endpoint.endpoint_type.name())?.is_some() {
                 return Ok(warnings);
             }
             Err(anyhow!(
@@ -1742,12 +1742,20 @@ pub(crate) fn named_endpoint_factory(name: &str) -> Option<Arc<dyn CustomEndpoin
     factory
 }
 
+/// [`named_endpoint_factory`], else one from an installed plugin such as the full plugin.
+fn builtin_endpoint_factory(name: &str) -> Result<Option<Arc<dyn CustomEndpointFactory>>> {
+    match named_endpoint_factory(name) {
+        Some(factory) => Ok(Some(factory)),
+        None => discover_custom_endpoint(name),
+    }
+}
+
 /// The factory under a built-in endpoint's own name and the endpoint's config as JSON.
 /// Serves the named `http_bulk` endpoints and built-ins this build has no feature for.
 fn builtin_fallback(
     endpoint_type: &EndpointType,
 ) -> Result<Option<(Arc<dyn CustomEndpointFactory>, serde_json::Value)>> {
-    let Some(factory) = named_endpoint_factory(endpoint_type.name()) else {
+    let Some(factory) = builtin_endpoint_factory(endpoint_type.name())? else {
         return Ok(None);
     };
     // Externally tagged: `{"kafka": {..}}`; the factory takes the inner object.
@@ -2616,7 +2624,7 @@ fn check_publisher_recursive(
                     return Ok(warnings);
                 }
             }
-            if named_endpoint_factory(endpoint.endpoint_type.name()).is_some() {
+            if builtin_endpoint_factory(endpoint.endpoint_type.name())?.is_some() {
                 return Ok(warnings);
             }
             Err(anyhow!(

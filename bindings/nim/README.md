@@ -94,6 +94,18 @@ only with `enable_nack: true`); any other exception drops it as failed.
 Errors raise `MqbError` or a subtype (`RetryableError`, `ConnectionError`,
 `ConfigError`, `EndOfStreamError`, `UnsupportedError`) carrying the library's text.
 
+To call a route like a function, use `route.caller()` instead of `start`. Its
+input must be an in-process `memory` endpoint:
+
+```nim
+let caller = route.caller()            # deploys the route; drop it to stop
+echo caller.call("ping").payload       # the answer; a failed message raises
+```
+
+`caller.send(msg)` returns `none` when the route accepts the message without an
+answer. Handlers run as after `start`; pass `worker = true` to call from several
+threads.
+
 ## Threads
 
 Handlers run on one Nim thread, one call at a time:
@@ -132,6 +144,34 @@ output:
   nats: { url: "nats://localhost:4222", subject: orders }
   middlewares:
     - custom: { name: drop_ping, config: {} }
+```
+
+A middleware that needs the endpoint itself (to end the stream, hold messages back, or
+keep state across commits) sets `wraps: true` and overrides `wrapConsumer` or
+`wrapPublisher`. The host lends it the endpoint as an `InnerConsumer` / `InnerPublisher`:
+
+```nim
+type
+  Take = ref object of PluginMiddleware
+    limit: int
+  TakeConsumer = ref object of PluginConsumer
+    inner: InnerConsumer
+    left: int
+
+method wrapConsumer(t: Take, inner: InnerConsumer): PluginConsumer =
+  TakeConsumer(inner: inner, left: t.limit)
+
+method receive(c: TakeConsumer, max: int): PluginBatch =
+  if c.left == 0: raise newException(EndOfStreamError, "limit reached")
+  dec c.left
+  c.inner.receive(max)
+
+method commit(c: TakeConsumer, batch: PluginBatch, ds: seq[Disposition]) =
+  c.inner.commit(batch, ds)
+
+registerPlugin Plugin(name: "take", wraps: true,
+  newMiddleware: proc (route, config: string, side: MiddlewareSide): PluginMiddleware =
+    Take(limit: parseJson(config)["limit"].getInt))
 ```
 
 At most 16 Nim plugins per process. `loadPlugin(path)` loads a native plugin library

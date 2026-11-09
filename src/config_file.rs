@@ -24,7 +24,7 @@ struct NamedPublisher {
     endpoint: Endpoint,
 }
 
-fn parse_str(text: &str) -> anyhow::Result<Value> {
+pub(crate) fn parse_str(text: &str) -> anyhow::Result<Value> {
     #[cfg(feature = "yaml")]
     let value = serde_yaml_ng::from_str(text).context("failed to parse YAML config")?;
     #[cfg(not(feature = "yaml"))]
@@ -33,7 +33,7 @@ fn parse_str(text: &str) -> anyhow::Result<Value> {
     Ok(value)
 }
 
-fn read_file(path: &Path) -> anyhow::Result<Value> {
+pub(crate) fn read_file(path: &Path) -> anyhow::Result<Value> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read config from {}", path.display()))?;
     parse_str(&text).with_context(|| format!("invalid config in {}", path.display()))
@@ -128,6 +128,59 @@ fn named_route(value: Value, name: &str) -> anyhow::Result<Route> {
             "No route named '{name}' found, and the config could not be parsed as a single route{note}"
         )
     })
+}
+
+/// The route `name` for a [`Caller`](crate::Caller): a missing `input` (or one with only
+/// `middlewares`) reads from the caller's memory topic, a missing `output` answers.
+pub(crate) fn caller_route(value: Value, name: &str) -> anyhow::Result<Route> {
+    let mut value = unwrap_config_root(value)?;
+    if let Some(route) = route_body_mut(&mut value, name) {
+        add_caller_defaults(route, name);
+    }
+    named_route(value, name)
+}
+
+/// The body of route `name`, or the whole document when it is one route body. An empty
+/// body (`{}` or `null`) counts as a route with nothing given.
+fn route_body_mut<'a>(
+    value: &'a mut Value,
+    name: &str,
+) -> Option<&'a mut serde_json::Map<String, Value>> {
+    let map = object_or_empty(value)?;
+    if map.contains_key("routes") || map.contains_key("publishers") {
+        return object_or_empty(map.get_mut("routes")?.get_mut(name)?);
+    }
+    if map.contains_key(name) {
+        return object_or_empty(map.get_mut(name)?);
+    }
+    let single_route = map.is_empty()
+        || map.contains_key("input")
+        || map.contains_key("output")
+        || map.values().any(|v| !v.is_object());
+    single_route.then_some(map)
+}
+
+fn object_or_empty(value: &mut Value) -> Option<&mut serde_json::Map<String, Value>> {
+    if value.is_null() {
+        *value = Value::Object(serde_json::Map::new());
+    }
+    value.as_object_mut()
+}
+
+fn add_caller_defaults(route: &mut serde_json::Map<String, Value>, name: &str) {
+    let memory = || serde_json::json!({ "topic": crate::caller::default_topic(name) });
+    match route.get_mut("input") {
+        None | Some(Value::Null) => {
+            route.insert("input".into(), serde_json::json!({ "memory": memory() }));
+        }
+        Some(Value::Object(input)) if input.keys().all(|key| key == "middlewares") => {
+            input.insert("memory".into(), memory());
+        }
+        Some(_) => {}
+    }
+    if route.get("output").is_none_or(Value::is_null) {
+        route.insert("output".into(), serde_json::json!({ "response": {} }));
+    }
 }
 
 /// The names a config document does define, for the missing-name error.

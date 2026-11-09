@@ -139,6 +139,35 @@ with Route.from_config(config, "orders_route").with_handler(handle):
 Configuration/connection errors surface from `start()` itself, not from a
 background thread. `run()` remains available for the blocking single-route case.
 
+## Calling a route like a function
+
+`Caller` deploys a route whose input is an in-process `memory` endpoint and
+returns each call's answer, like a function call. Calls made at the same time
+from several threads reach the route as one batch, so batched lookups and the
+`parallel` middleware still apply.
+
+```python
+from mq_bridge import Caller
+
+# `users` in routes.yaml: an `input` with only a `lookup` middleware, no `output`.
+with Caller.from_file("routes.yaml", "users") as users:
+    user = users.call(path="/u/7")                   # the parsed JSON answer
+    found = users.call_many([{"path": "/u/7"}, {"path": "/u/8"}])
+```
+
+`call()` sends its keyword arguments (or one mapping) as a JSON object and
+returns the parsed answer; `call_many()` does that for several and returns one
+answer or `RuntimeError` per request. `call_message()` / `call_many_messages()`
+take and return `Message`s, e.g. to keep metadata. `Caller.from_file` /
+`from_config` take the same shapes as `Route`, but a route without `input`
+reads from the caller and one without `output` answers with the message.
+`Caller.from_route(route)` deploys a route built in code, with its handler.
+
+A message the route fails raises `RuntimeError` with the error text at once.
+`send()` returns `None` when the route accepts a message without an answer;
+`call()` raises then, so leave out the output, end it with `response: {}`, or
+use an endpoint that answers.
+
 ## Pull-based consumer
 
 `Route` is push-based: you attach a handler and the route drives it. When you

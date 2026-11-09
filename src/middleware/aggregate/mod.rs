@@ -5,7 +5,7 @@
 
 //! Keeps one state document per key in this process and updates it with every message.
 
-use crate::middleware::raw_json::RawPairs;
+use crate::middleware::raw_json::{write_at, RawPairs};
 use crate::models::{AggregateConsistency, AggregateEmit, AggregateMiddleware, AggregateOnError};
 use crate::support::interpolation::CompiledTemplate;
 use crate::traits::{
@@ -17,7 +17,7 @@ use anyhow::Context;
 use async_trait::async_trait;
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
-use serde_json::{Map, Value};
+use serde_json::Value;
 use states::States;
 use std::any::Any;
 use std::borrow::Cow;
@@ -1230,7 +1230,7 @@ impl Aggregate {
         if values.is_empty() {
             return Ok((msg.payload.to_vec(), notes));
         }
-        Ok((write_payload(&msg.payload, values)?, notes))
+        Ok((write_at(&msg.payload, values, "aggregate")?, notes))
     }
 
     /// Updates the states message by message, in order. A failing message changes no state.
@@ -1716,143 +1716,6 @@ fn write_json(variable: &Variable, out: &mut Vec<u8>) -> anyhow::Result<()> {
         }
         dynamic => serde_json::to_writer(out, &Value::from(dynamic.clone()))?,
     }
-    Ok(())
-}
-
-/// JSON being assembled: text copied as is, or an object whose fields are set by path.
-enum Node {
-    Raw(Vec<u8>),
-    Object(Vec<(String, Node)>),
-}
-
-impl Node {
-    /// Sets `json` at `path`. `Ok(false)` when an object on the way has escaped keys.
-    fn insert(&mut self, path: &[String], json: Vec<u8>) -> anyhow::Result<bool> {
-        let Some((key, rest)) = path.split_first() else {
-            *self = Node::Raw(json);
-            return Ok(true);
-        };
-        if let Node::Raw(raw) = self {
-            if raw.first() != Some(&b'{') {
-                anyhow::bail!("aggregate: cannot set '{key}': its parent is not an object");
-            }
-            let Ok(RawPairs(pairs)) = serde_json::from_slice::<RawPairs>(raw) else {
-                return Ok(false);
-            };
-            let fields = pairs
-                .into_iter()
-                .map(|(k, v)| (k.to_string(), Node::Raw(v.get().as_bytes().to_vec())))
-                .collect();
-            *self = Node::Object(fields);
-        }
-        let Node::Object(fields) = self else {
-            unreachable!("raw text was just expanded")
-        };
-        let at = match fields.iter().position(|(k, _)| k == key) {
-            Some(at) => at,
-            None => {
-                fields.push((key.clone(), Node::Object(Vec::new())));
-                fields.len() - 1
-            }
-        };
-        fields[at].1.insert(rest, json)
-    }
-
-    fn write(&self, out: &mut Vec<u8>) -> anyhow::Result<()> {
-        match self {
-            Node::Raw(raw) => out.extend_from_slice(raw),
-            Node::Object(fields) => {
-                out.push(b'{');
-                for (i, (key, node)) in fields.iter().enumerate() {
-                    if i > 0 {
-                        out.push(b',');
-                    }
-                    serde_json::to_writer(&mut *out, key)?;
-                    out.push(b':');
-                    node.write(out)?;
-                }
-                out.push(b'}');
-            }
-        }
-        Ok(())
-    }
-}
-
-/// Writes each JSON value at its path, copying every untouched field verbatim.
-fn write_payload(payload: &[u8], values: Vec<(&[String], Vec<u8>)>) -> anyhow::Result<Vec<u8>> {
-    if let Some(spliced) = splice(payload, &values)? {
-        return Ok(spliced);
-    }
-    // Keys with escapes cannot be borrowed; those payloads take the full parse.
-    let mut doc: Value = serde_json::from_slice(payload)?;
-    for (path, json) in values {
-        insert_at(&mut doc, path, serde_json::from_slice(&json)?)?;
-    }
-    Ok(serde_json::to_vec(&doc)?)
-}
-
-fn splice(payload: &[u8], values: &[(&[String], Vec<u8>)]) -> anyhow::Result<Option<Vec<u8>>> {
-    let Ok(RawPairs(pairs)) = serde_json::from_slice::<RawPairs>(payload) else {
-        return Ok(None);
-    };
-    let mut written: Vec<(&str, Node)> = Vec::with_capacity(values.len());
-    for (path, json) in values {
-        let (top, rest) = path.split_first().expect("path is non-empty");
-        let at = match written.iter().position(|(key, _)| key == top) {
-            Some(at) => at,
-            None => {
-                let node = match pairs.iter().rev().find(|(key, _)| key == top) {
-                    Some((_, raw)) if !rest.is_empty() => Node::Raw(raw.get().as_bytes().to_vec()),
-                    _ => Node::Object(Vec::new()),
-                };
-                written.push((top, node));
-                written.len() - 1
-            }
-        };
-        if !written[at].1.insert(rest, json.clone())? {
-            return Ok(None);
-        }
-    }
-
-    let mut out = Vec::with_capacity(payload.len() + 128 * written.len());
-    out.push(b'{');
-    for (key, raw) in &pairs {
-        if written.iter().any(|(top, _)| top == key) {
-            continue;
-        }
-        out.push(b'"');
-        out.extend_from_slice(key.as_bytes());
-        out.extend_from_slice(b"\":");
-        out.extend_from_slice(raw.get().as_bytes());
-        out.push(b',');
-    }
-    for (key, node) in &written {
-        serde_json::to_writer(&mut out, key)?;
-        out.push(b':');
-        node.write(&mut out)?;
-        out.push(b',');
-    }
-    out.pop();
-    out.push(b'}');
-    Ok(Some(out))
-}
-
-/// Writes `value` at the dotted `path`, creating objects along the way.
-fn insert_at(root: &mut Value, path: &[String], value: Value) -> anyhow::Result<()> {
-    let (last, parents) = path.split_last().expect("path is non-empty");
-    let mut cur = root;
-    for key in parents {
-        let Value::Object(map) = cur else {
-            anyhow::bail!("aggregate: cannot nest under '{key}': it is not an object");
-        };
-        cur = map
-            .entry(key.as_str())
-            .or_insert_with(|| Value::Object(Map::new()));
-    }
-    let Value::Object(map) = cur else {
-        anyhow::bail!("aggregate: cannot set '{last}': its parent is not an object");
-    };
-    map.insert(last.clone(), value);
     Ok(())
 }
 

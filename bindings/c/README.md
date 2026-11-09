@@ -111,6 +111,23 @@ mqb_route_join(route);
 mqb_route_free(route);
 ```
 
+To call a route like a function, deploy it with `mqb_caller_from_route` instead
+of starting it. Its input must be an in-process `memory` endpoint; calls made at
+the same time from several threads reach the route as one batch.
+
+```c
+mqb_caller_t *caller = mqb_caller_from_route(route);   /* do not also start route */
+mqb_message_t *answer = NULL;
+if (mqb_caller_call(caller, request, &answer) == MQB_OK) {
+    /* use answer */
+    mqb_message_free(answer);
+}                                /* else mqb_last_error() holds the route's error */
+mqb_caller_free(caller);         /* stops the route */
+```
+
+`mqb_caller_send` succeeds with a null answer when the route accepts the message
+without one.
+
 ## Rules
 
 - **Every call blocks** the calling thread. There are no callbacks to complete

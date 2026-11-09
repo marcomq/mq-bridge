@@ -135,6 +135,7 @@ a handler error propagates to the route and is reported there.
 | [`otel`](#otel) | ✅ | ✅ | `otel` | OpenTelemetry span per message, continuing `traceparent` |
 | [`lookup`](#lookup) | ✅ | ✅ | – | Enrich each message with other endpoints' responses |
 | [`aggregate`](#aggregate) | ✅ | ✅ | `aggregate` | Keep a running state per key and write it into each message |
+| [`parallel`](#parallel) | ✅ | ✅ | – | Run the entries above it on several batches at once |
 | [`random_panic`](#random_panic) | ✅ | ✅ | – | Fault injection for testing |
 | [`custom`](#custom-middleware) | ✅ | ✅ | – | Your own middleware via a registered factory |
 
@@ -162,6 +163,10 @@ a handler error propagates to the route and is reported there.
 
 A middleware whose feature is not compiled in (`deduplication` without `dedup`, `metrics`
 without `metrics`, `otel` without `otel`, `aggregate` without `aggregate`) is likewise a startup error, not a silent no-op.
+Without their feature, a host built with `plugin` takes `filter`, `deduplication`, `encryption`,
+`compression` and `aggregate` from the [full plugin](PLUGINS.md#all-built-in-endpoints-as-one-plugin),
+in the listed order; it fails as above only when no such plugin is loaded. `metrics` and `otel`
+always need the host's own feature.
 
 ---
 
@@ -1156,7 +1161,9 @@ query answers the whole batch instead of one query per message:
 
 - The query's shape picks the mode: a token compared directly (`id = ${…}`) runs once per
   message; the same token as the only element of `id IN (…)` runs once per batch, with the
-  element repeated for each distinct key (at most 1000 per query).
+  element repeated for each distinct key (at most 1000 per query). On Postgres an element
+  that is just the token, optionally with a cast, runs as `id = ANY($1::bigint[])` instead:
+  one cached statement for every batch size.
 - Rows are matched back to messages by the column left of `IN` (`c.id` matches the result
   column `id`), so select that column under that name. A message whose key is missing or
   matches no row gets `null`; if several rows match, the first wins.
@@ -1720,6 +1727,78 @@ Throughput on one Apple M-series core, three moving averages per key (indicative
 | `fields`, in memory | 1.8M msg/s | 700k msg/s |
 | `fields`, `single_writer`, local PostgreSQL, batch 8192 | 370k msg/s | 240k msg/s |
 | `fields`, `shared`, local PostgreSQL, batch 8192 | 49k msg/s | 17k msg/s |
+
+### `parallel`
+
+Input middlewares run one batch at a time in the route's reader, so `concurrency` does not
+speed them up. `parallel` changes that for the entries listed **above** it: each of up to
+`max_in_flight` lanes gets its own copy of them and works on a batch of its own, on its own
+task. The entries **below** it handle each batch first, one at a time, as before. Batches
+leave in the order they were read, so the route sees and commits them exactly as it would
+without the marker. Input and output; on an output it works differently, see
+[On an output](#on-an-output).
+
+| Field | Type | Default |
+|---|---|---|
+| `max_in_flight` | integer ≥ 1 | number of CPU cores |
+
+```yaml middleware
+- lookup:
+    from: { static: { body: '{"tier":"gold"}', raw: true } }
+    into: customer
+- transform: { schema_file: "order.json" }
+- parallel: { max_in_flight: 8 }
+- deduplication: { store: "memory://orders", ttl_seconds: 3600, key: "${payload:order_id}" }
+```
+
+Here `deduplication` drops repeats one batch at a time, then up to eight batches are
+validated and enriched at once.
+
+- Only `transform`, `lookup`, `id`, `compression` and `encryption` may sit above it. Anything
+  that keeps state across batches (`filter`, `deduplication`, `aggregate`, `buffer`, `unpack`,
+  `custom`, ...) is a startup error there; list it below instead. So are the middlewares a
+  lean host takes from the full plugin.
+- Each lane builds its own copy, so a `lookup` above it opens its `from` endpoint once per lane.
+- While a lane is busy, a read smaller than a quarter of the route's `batch_size` is not
+  started on its own: it waits for more messages or a free lane, then goes as one batch.
+- A batch a lane rejects whole is acked only after the batches read before it are committed.
+- On shutdown or a reconnect, finished batches not yet handed to the route are nacked. Lanes
+  still at work are stopped, so their batches stay uncommitted and the source redelivers them.
+- One `parallel` per endpoint.
+
+#### On an output
+
+With `concurrency` above 1, the route's workers already send several batches at once. To a
+sink that must receive batches in source order (`file`, `dir_spool`, `http_bulk` with
+changes), the route hands one batch at a time, and that wait covers the whole output chain:
+a `lookup` on such an output runs one batch at a time, however high `concurrency` is.
+
+`parallel` on the output moves that wait to the marker. The entries **above** it run on
+every worker at once; the entries **below** it and the sink still get one batch at a time,
+in source order. The route's `concurrency` sets how many batches overlap, so `max_in_flight`
+is a startup error here, and at `concurrency: 1` the route warns that the marker does
+nothing. The same entries as on an input may sit above it. A route handler counts as above
+the marker too, so it must be safe to run on several batches at once. On a sink that takes
+batches in any order the marker has no effect (the route warns), and on a lookup's `from` it
+is refused.
+
+```yaml route
+enrich_to_file:
+  concurrency: 8
+  input: { kafka: { topic: "orders", url: "localhost:9092" } }
+  output:
+    file: { path: "orders.jsonl" }
+    middlewares:
+      - lookup:
+          from: { static: { body: '{"tier":"gold"}', raw: true } }
+          into: customer
+      - parallel: {}
+      - retry: { max_attempts: 3 }
+```
+
+Here up to eight batches are enriched at once, then `retry` and the file sink take them one
+at a time, in source order. Without the marker, entries listed later wrap the earlier ones;
+with it, everything above the marker runs before everything below it.
 
 ### `random_panic`
 

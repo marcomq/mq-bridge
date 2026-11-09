@@ -530,6 +530,9 @@ pub enum Middleware {
     /// Reads payload fields by name and metadata as `meta.<key>`. Input and output.
     /// As a map, `on_error: drop` drops a message the expression cannot evaluate.
     Filter(FilterMiddleware),
+    /// The entries listed above it run on several batches at once; batches still leave in
+    /// read order. Input and output.
+    Parallel(ParallelMiddleware),
     Custom {
         name: String,
         config: serde_json::Value,
@@ -802,6 +805,22 @@ pub struct DelayMiddleware {
 pub struct TimeoutMiddleware {
     /// Longest a single send may take, in milliseconds.
     pub timeout_ms: u64,
+}
+
+/// Parallel middleware configuration.
+///
+/// Marker. On an input, the middlewares listed above it run on up to `max_in_flight` batches
+/// at once, each lane with its own copy of them; the ones below it read one batch at a time.
+/// On an output, those above it run on every route worker and the ones below it send in
+/// order. Results and commits stay in read order. Only stateless middlewares may sit above it.
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct ParallelMiddleware {
+    /// Batches processed at once (input only). Defaults to the number of CPU cores.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(range(min = 1)))]
+    pub max_in_flight: Option<usize>,
 }
 
 /// Throughput limiter middleware configuration.
@@ -1960,10 +1979,10 @@ pub struct MemoryConfig {
     pub url: Option<String>,
     /// The capacity of the channel. Defaults to 100.
     pub capacity: Option<usize>,
-    /// (Publisher only) If true, send() waits for a response.
+    /// Publisher: send() waits for a response. Input: each failure is answered to its requester.
     #[serde(default)]
     pub request_reply: bool,
-    /// (Publisher only) Timeout for request-reply operations in milliseconds. Defaults to 30000ms.
+    /// Publisher: how long send() waits for the response. Input: how long a `Caller` waits. Defaults to 30000ms.
     pub request_timeout_ms: Option<u64>,
     /// (Consumer only) If true, act as a **Subscriber** (fan-out). Defaults to false (queue).
     #[serde(default)]

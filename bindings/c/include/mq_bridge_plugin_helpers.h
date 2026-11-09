@@ -187,6 +187,54 @@ static inline MqbStatus mqb_stub_middleware_apply(MqbMiddlewareHandle middleware
     return MQB_ERR_UNSUPPORTED;
 }
 
+/* Releases an endpoint the host lent to middleware_wrap_consumer/_publisher, through
+ * the table it came with. A wrap that fails, or a wrapper being freed, calls these. */
+static inline void mqb_inner_consumer_free(const MqbPluginVTable *table, MqbConsumerHandle inner) {
+    table->consumer_free(inner);
+}
+static inline void mqb_inner_publisher_free(const MqbPluginVTable *table,
+                                            MqbPublisherHandle inner) {
+    MqbBuffer err = {0};
+    if (table->publisher_close(inner, &err) != MQB_OK) {
+        table->buffer_free(err);
+    }
+    table->publisher_free(inner);
+}
+/* Passes on `status` from a call into the lent endpoint, moving its error text out of
+ * the inner table's `inner_err` into this plugin's `err`. */
+static inline MqbStatus mqb_inner_status(const MqbPluginVTable *table, MqbStatus status,
+                                         MqbBuffer inner_err, MqbBuffer *err) {
+    if (inner_err.ptr == NULL) {
+        return status;
+    }
+    uint8_t *ptr = (uint8_t *)malloc(inner_err.len);
+    if (err != NULL && ptr != NULL) {
+        memcpy(ptr, inner_err.ptr, inner_err.len);
+        err->ptr = ptr;
+        err->len = inner_err.len;
+        err->cap = inner_err.len;
+    } else {
+        free(ptr);
+    }
+    table->buffer_free(inner_err);
+    return status;
+}
+/* A map/drop middleware wraps no endpoint; it still owns and releases the lent one. */
+static inline MqbStatus mqb_stub_wrap_consumer(MqbMiddlewareHandle middleware,
+                                               const MqbPluginVTable *inner_table,
+                                               MqbConsumerHandle inner, MqbConsumerHandle *out,
+                                               MqbBuffer *err) {
+    mqb_inner_consumer_free(inner_table, inner);
+    return MQB_ERR_UNSUPPORTED;
+}
+static inline MqbStatus mqb_stub_wrap_publisher(MqbMiddlewareHandle middleware,
+                                                const MqbPluginVTable *inner_table,
+                                                MqbPublisherHandle inner, MqbPublisherHandle *out,
+                                                MqbBuffer *err) {
+    mqb_inner_publisher_free(inner_table, inner);
+    return MQB_ERR_UNSUPPORTED;
+}
+
 #if defined(__GNUC__)
 #pragma GCC diagnostic pop
 #endif
@@ -241,13 +289,23 @@ static inline MqbStatus mqb_stub_middleware_apply(MqbMiddlewareHandle middleware
     .publisher_disconnect = mqb_stub_disconnect,                                            \
     .publisher_deferred_commit_interval_ms = mqb_stub_no_deferred_commit
 
+#define MQB_NO_WRAP                                                                         \
+    .middleware_wrap_consumer = mqb_stub_wrap_consumer,                                     \
+    .middleware_wrap_publisher = mqb_stub_wrap_publisher
+
 #define MQB_NO_MIDDLEWARE                                                                   \
     .middleware_create = mqb_stub_middleware_create,                                        \
     .middleware_apply = mqb_stub_middleware_apply,                                          \
-    .middleware_result_free = mqb_stub_free, .middleware_free = mqb_stub_free
+    .middleware_result_free = mqb_stub_free, .middleware_free = mqb_stub_free, MQB_NO_WRAP
 
 /* middleware_create/_free for a middleware that keeps no per-route state. */
 #define MQB_STATELESS_MIDDLEWARE                                                            \
-    .middleware_create = mqb_stub_middleware_create, .middleware_free = mqb_stub_free
+    .middleware_create = mqb_stub_middleware_create, .middleware_free = mqb_stub_free,      \
+    MQB_NO_WRAP
+
+/* (ABI 1.5) For a middleware that wraps the inner endpoint (MQB_CAP_MIDDLEWARE_WRAP): the
+ * table then sets middleware_create, middleware_free and both middleware_wrap_* itself. */
+#define MQB_WRAPPING_MIDDLEWARE                                                             \
+    .middleware_apply = mqb_stub_middleware_apply, .middleware_result_free = mqb_stub_free
 
 #endif /* MQ_BRIDGE_PLUGIN_HELPERS_H */

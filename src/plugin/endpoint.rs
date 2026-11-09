@@ -177,14 +177,7 @@ impl CustomEndpointFactory for PluginEndpointFactory {
         .await
         .map_err(join_error)??;
 
-        Ok(Box::new(PluginConsumer {
-            consumer: Arc::new(ConsumerHandle {
-                plugin: Arc::clone(&self.plugin),
-                handle: handle.0,
-                blocking: AtomicBool::new(false),
-                closed: AtomicBool::new(false),
-            }),
-        }))
+        Ok(plugin_consumer(Arc::clone(&self.plugin), handle.0))
     }
 
     async fn create_publisher(
@@ -228,13 +221,7 @@ impl CustomEndpointFactory for PluginEndpointFactory {
         .await
         .map_err(join_error)??;
 
-        Ok(Box::new(PluginPublisher {
-            publisher: Arc::new(PublisherHandle {
-                plugin: Arc::clone(&self.plugin),
-                handle: handle.0,
-                blocking: AtomicBool::new(false),
-            }),
-        }))
+        Ok(plugin_publisher(Arc::clone(&self.plugin), handle.0))
     }
 }
 
@@ -526,6 +513,61 @@ impl Drop for ConsumerHandle {
 
 struct PluginConsumer {
     consumer: Arc<ConsumerHandle>,
+}
+
+impl PluginConsumer {
+    fn new(plugin: Arc<LoadedPlugin>, handle: MqbConsumerHandle) -> Self {
+        Self {
+            consumer: Arc::new(ConsumerHandle {
+                plugin,
+                handle,
+                blocking: AtomicBool::new(false),
+                closed: AtomicBool::new(false),
+            }),
+        }
+    }
+}
+
+/// Drives a consumer `handle` of `plugin` as a [`MessageConsumer`]; owns the handle.
+pub(crate) fn plugin_consumer(
+    plugin: Arc<LoadedPlugin>,
+    handle: MqbConsumerHandle,
+) -> Box<dyn MessageConsumer> {
+    Box::new(PluginConsumer::new(plugin, handle))
+}
+
+/// Drives a publisher `handle` of `plugin` as a [`MessagePublisher`]; owns the handle.
+pub(crate) fn plugin_publisher(
+    plugin: Arc<LoadedPlugin>,
+    handle: MqbPublisherHandle,
+) -> Box<dyn MessagePublisher> {
+    Box::new(PluginPublisher {
+        publisher: Arc::new(PublisherHandle {
+            plugin,
+            handle,
+            blocking: AtomicBool::new(false),
+        }),
+    })
+}
+
+/// Drives a consumer the other side of the ABI lent through `table`.
+///
+/// Safety: `table` must outlive the result; `handle` must belong to it.
+pub(crate) unsafe fn lent_consumer(
+    table: *const crate::support::plugin_abi::MqbPluginVTable,
+    handle: MqbConsumerHandle,
+) -> Box<dyn MessageConsumer> {
+    plugin_consumer(Arc::new(unsafe { LoadedPlugin::lent(table) }), handle)
+}
+
+/// The publisher counterpart of [`lent_consumer`].
+///
+/// Safety: as for [`lent_consumer`].
+pub(crate) unsafe fn lent_publisher(
+    table: *const crate::support::plugin_abi::MqbPluginVTable,
+    handle: MqbPublisherHandle,
+) -> Box<dyn MessagePublisher> {
+    plugin_publisher(Arc::new(unsafe { LoadedPlugin::lent(table) }), handle)
 }
 
 #[async_trait]

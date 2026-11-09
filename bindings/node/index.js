@@ -232,6 +232,70 @@ class Route {
   }
 }
 
+/**
+ * Call a route like a function: `call({ path: key })` sends the fields through the
+ * route and resolves to its JSON answer. Calls made at the same time reach the
+ * route as one batch.
+ */
+function settled(outcomes, valueOf) {
+  return outcomes.map((outcome) =>
+    outcome.error == null
+      ? { status: "fulfilled", value: valueOf(outcome) }
+      : { status: "rejected", reason: new Error(outcome.error) },
+  );
+}
+
+class Caller {
+  constructor(nativeCaller) {
+    this._native = nativeCaller;
+  }
+
+  /** Deploy a `Route` (with its handlers) as a caller under the route's name. */
+  static fromRoute(route) {
+    return new Caller(native.Caller.fromRoute(route._native));
+  }
+
+  /** Without an `input`, the route reads from the caller; without an `output`, it answers. */
+  static fromFile(path, name) {
+    return new Caller(native.Caller.fromFile(path, name));
+  }
+
+  static fromConfig(config, name) {
+    return new Caller(native.Caller.fromConfig(config, name));
+  }
+
+  get name() {
+    return this._native.name;
+  }
+
+  call(fields) {
+    return this._native.call(fields);
+  }
+
+  async callMessage(message) {
+    return Message._fromNative(await this._native.callMessage(Message._toNative(message)));
+  }
+
+  /** Send the field objects as one batch; resolves like `Promise.allSettled`, in order. */
+  async callMany(requests) {
+    return settled(await this._native.callMany(requests), ({ value }) => value);
+  }
+
+  async callManyMessages(messages) {
+    const outcomes = await this._native.callManyMessages(messages.map((m) => Message._toNative(m)));
+    return settled(outcomes, ({ message }) => Message._fromNative(message));
+  }
+
+  async send(message) {
+    const response = await this._native.send(Message._toNative(message));
+    return response == null ? null : Message._fromNative(response);
+  }
+
+  stop() {
+    return this._native.stop();
+  }
+}
+
 /** Throw this from `receiveBatch` to tell the route the source is finished. */
 class EndOfStream extends Error {
   constructor(message = "end of stream") {
@@ -502,6 +566,7 @@ module.exports = {
   Publisher,
   Consumer,
   Route,
+  Caller,
   EndOfStream,
   configSchema,
   initLogging,

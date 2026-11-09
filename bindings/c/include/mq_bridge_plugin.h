@@ -25,6 +25,9 @@
 #ifndef MQ_BRIDGE_PLUGIN_H
 #define MQ_BRIDGE_PLUGIN_H
 
+/* The wrap entries take the lent endpoint's table before the table is defined. */
+struct MqbPluginVTable;
+
 /* Generated from src/support/plugin_abi.rs by cbindgen. Do not edit.
  * Regenerate: MQB_BLESS=1 cargo test -p mq-bridge-plugin-fixture --test plugin_c_header */
 
@@ -49,7 +52,10 @@
 // * **1.4** appended `MqbPluginVTable::publisher_deferred_commit_interval_ms`,
 //   with which a publisher defers source commits to its next flush, and added the
 //   `MQB_DELIVERY_REQUIRES_FULL_REPLAY` and `MQB_DELIVERY_REPLAYS_FROM_START` flags.
-#define MQB_PLUGIN_ABI_MINOR 4
+// * **1.5** appended `MqbPluginVTable::middleware_wrap_consumer` and
+//   `MqbPluginVTable::middleware_wrap_publisher`, with which a middleware wraps the
+//   whole inner endpoint instead of mapping messages (`MQB_CAP_MIDDLEWARE_WRAP`).
+#define MQB_PLUGIN_ABI_MINOR 5
 
 // The route pass drained its input to the end.
 #define MQB_DISCONNECT_COMPLETED 0
@@ -88,6 +94,11 @@
 
 // The plugin provides a middleware under the same name.
 #define MQB_CAP_MIDDLEWARE (1 << 2)
+
+// (ABI 1.5) The middleware wraps the inner endpoint through
+// `MqbPluginVTable::middleware_wrap_consumer` / `MqbPluginVTable::middleware_wrap_publisher`
+// instead of `MqbPluginVTable::middleware_apply`. Set together with `MQB_CAP_MIDDLEWARE`.
+#define MQB_CAP_MIDDLEWARE_WRAP (1 << 3)
 
 // Asks `MqbPluginVTable::factory_config_schema` for the endpoint's
 // configuration object.
@@ -355,6 +366,20 @@ typedef MqbStatus (*MqbPublisherDisconnect)(MqbPublisherHandle publisher,
 // Signature of `MqbPluginVTable::publisher_deferred_commit_interval_ms`.
 typedef uint64_t (*MqbPublisherDeferredCommitInterval)(MqbPublisherHandle publisher);
 
+// Signature of `MqbPluginVTable::middleware_wrap_consumer`.
+typedef MqbStatus (*MqbMiddlewareWrapConsumer)(MqbMiddlewareHandle middleware,
+                                               const struct MqbPluginVTable *inner_table,
+                                               MqbConsumerHandle inner,
+                                               MqbConsumerHandle *out,
+                                               struct MqbBuffer *err);
+
+// Signature of `MqbPluginVTable::middleware_wrap_publisher`.
+typedef MqbStatus (*MqbMiddlewareWrapPublisher)(MqbMiddlewareHandle middleware,
+                                                const struct MqbPluginVTable *inner_table,
+                                                MqbPublisherHandle inner,
+                                                MqbPublisherHandle *out,
+                                                struct MqbBuffer *err);
+
 // The function table a plugin exports through `MQB_PLUGIN_ENTRY_SYMBOL`.
 //
 // Every fallible function takes an `err` out-parameter. On a non-`MQB_OK`
@@ -580,6 +605,15 @@ typedef struct MqbPluginVTable {
   // Milliseconds after which the route flushes this publisher and only then commits
   // the source; `0` commits at once. Read once, after `publisher_create`.
   MqbPublisherDeferredCommitInterval publisher_deferred_commit_interval_ms;
+  // Wraps the host's input endpoint `inner`, which is driven through the consumer
+  // entries of `inner_table`, and writes a consumer handle of **this** table. On
+  // `MQB_OK` the new handle owns `inner` and closes and frees it through
+  // `inner_table`. It takes `inner` whatever the result: on failure it frees it. Only called with
+  // `MQB_CAP_MIDDLEWARE_WRAP` set, on a middleware created for the receive side.
+  MqbMiddlewareWrapConsumer middleware_wrap_consumer;
+  // The publisher counterpart of `middleware_wrap_consumer`,
+  // on a middleware created for the send side.
+  MqbMiddlewareWrapPublisher middleware_wrap_publisher;
 } MqbPluginVTable;
 
 // Signature of the exported discovery symbol.
@@ -628,6 +662,7 @@ typedef const struct MqbPluginVTable *(*MqbPluginListEntry)(size_t index);
 #define MQB_VTABLE_SIZE_V1_2 (MQB_VTABLE_SIZE_V1_1 + 11 * sizeof(size_t))
 #define MQB_VTABLE_SIZE_V1_3 (MQB_VTABLE_SIZE_V1_2 + sizeof(size_t))
 #define MQB_VTABLE_SIZE_V1_4 (MQB_VTABLE_SIZE_V1_3 + sizeof(size_t))
+#define MQB_VTABLE_SIZE_V1_5 (MQB_VTABLE_SIZE_V1_4 + 2 * sizeof(size_t))
 #define MQB_HOST_VTABLE_SIZE_V1_2 (5 * sizeof(size_t))
 
 #if defined(_WIN32)
@@ -653,7 +688,7 @@ MQB_PLUGIN_EXPORT const MqbPluginVTable *mq_bridge_plugin_v1(void);
 MQB_STATIC_ASSERT(sizeof(size_t) == 8, "the plugin ABI layout is defined for 64-bit targets");
 MQB_STATIC_ASSERT(sizeof(MqbMessage) == 16 + 4 * sizeof(size_t), "MqbMessage layout");
 MQB_STATIC_ASSERT(sizeof(MqbHostVTable) == MQB_HOST_VTABLE_SIZE_V1_2, "MqbHostVTable layout");
-MQB_STATIC_ASSERT(sizeof(MqbPluginVTable) == MQB_VTABLE_SIZE_V1_4,
+MQB_STATIC_ASSERT(sizeof(MqbPluginVTable) == MQB_VTABLE_SIZE_V1_5,
                   "MqbPluginVTable grew: add the new MQB_VTABLE_SIZE_* to bindings/c/include/cbindgen.toml");
 
 #endif /* MQ_BRIDGE_PLUGIN_H */

@@ -912,7 +912,7 @@ bench = [
     { name = "uvicorn", specifier = ">=0.30" },
 ]
 dev = [
-    { name = "maturin", specifier = ">=1.7,<2.0" },
+    { name = "maturin", specifier = ">=1.10,<2.0" },
     { name = "pytest", specifier = ">=8.3" },
 ]
 

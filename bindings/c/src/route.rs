@@ -307,6 +307,18 @@ impl mqb_route_t {
         }
     }
 
+    pub(crate) fn for_caller(&self) -> anyhow::Result<(Arc<Runtime>, Route, String)> {
+        if self.lock_state()?.running {
+            return Err(anyhow!("route '{}' is already running", self.name));
+        }
+        let route = self
+            .route
+            .lock()
+            .map_err(|_| anyhow!("route lock poisoned"))?
+            .clone();
+        Ok((Arc::clone(&self.runtime), route, self.name.clone()))
+    }
+
     fn stop(&self) -> anyhow::Result<()> {
         if let Some(stop_tx) = self.lock_state()?.stop_tx.take() {
             let _ = stop_tx.send(());

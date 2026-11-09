@@ -4017,7 +4017,7 @@ License: MIT
 Source: https://github.com/denoland/rust-urlpattern
 Copyright/attribution: Copyright (c) 2021 the Deno authors
 
-utf8_iter@1.0.4
+utf8_iter@1.1.0
 License: Apache-2.0 OR MIT
 Source: https://github.com/hsivonen/utf8_iter
 
@@ -4025,6 +4025,11 @@ utf8parse@0.2.2
 License: Apache-2.0 OR MIT
 Source: https://github.com/alacritty/vte
 Copyright/attribution: Copyright (c) 2016 Joe Wilm
+
+utf_types@1.0.0
+License: Apache-2.0 OR MIT
+Source: https://github.com/hsivonen/utf_types
+Copyright/attribution: Copyright Mozilla Foundation
 
 uuid@1.27.0
 License: Apache-2.0 OR MIT

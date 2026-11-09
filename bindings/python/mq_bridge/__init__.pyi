@@ -1,5 +1,5 @@
 from types import TracebackType
-from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple, Type, Union
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Type, Union
 
 __version__: str
 
@@ -308,6 +308,63 @@ class MemoryDrainer:
         timeout: Optional[float] = ...,
         batch_size: int = ...,
     ) -> int: ...
+
+
+class Caller:
+    """Call a route like a function: ``call(path=key)`` returns the route's
+    parsed JSON answer. Concurrent calls reach the route as one batch."""
+
+    @classmethod
+    def from_route(cls, route: Route) -> "Caller": ...
+
+    @classmethod
+    def from_file(cls, path: str, name: Optional[str] = ...) -> "Caller":
+        """Without an ``input``, the route reads from the caller; without an
+        ``output``, it answers with the message."""
+        ...
+
+    @classmethod
+    def from_config(
+        cls, config: Mapping[str, Any], name: Optional[str] = ...
+    ) -> "Caller": ...
+
+    @property
+    def name(self) -> str: ...
+
+    def call(
+        self, fields: Optional[JsonValue] = ..., /, **kwargs: JsonValue
+    ) -> JsonValue: ...
+
+    def call_message(
+        self,
+        message: Union[Message, bytes],
+        metadata: Optional[Mapping[str, str]] = ...,
+    ) -> Message: ...
+
+    def call_many(
+        self, requests: Sequence[JsonValue]
+    ) -> List[Union[JsonValue, RuntimeError]]: ...
+
+    def call_many_messages(
+        self, messages: Sequence[Union[Message, bytes]]
+    ) -> List[Union[Message, RuntimeError]]: ...
+
+    def send(
+        self,
+        message: Union[Message, bytes],
+        metadata: Optional[Mapping[str, str]] = ...,
+    ) -> Optional[Message]: ...
+
+    def stop(self) -> bool: ...
+
+    def __enter__(self) -> "Caller": ...
+
+    def __exit__(
+        self,
+        exc_type: Optional[Type[BaseException]],
+        exc: Optional[BaseException],
+        tb: Optional[TracebackType],
+    ) -> bool: ...
 
 
 class Publisher:

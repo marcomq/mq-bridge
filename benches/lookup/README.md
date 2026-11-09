@@ -13,7 +13,13 @@ Three measurements against the same Postgres table (1M rows, text primary key):
 
 ## Run
 
+`run.py` and `run_file.py` read the database URL from `POSTGRES_URL`, set to the compose
+database below. `caller/` connects to `postgres://localhost:55432/bench` and takes user and
+password from `PGUSER` / `PGPASSWORD`.
+
 ```sh
+export POSTGRES_URL=postgres://bench:bench@localhost:55432/bench   # run.py, run_file.py
+export PGUSER=bench PGPASSWORD=bench                               # caller/
 export RESULTS=results/$(date +%Y%m%d-%H%M%S)   # a fresh directory per run; CSVs append
 docker compose up -d --wait
 mkdir -p "$RESULTS" && { date; uptime; mq-bridge-app --version; oha --version; docker --version;
@@ -23,6 +29,25 @@ caffeinate -dims python3 run_file.py             # 1M-row input, ≤15 s per cel
 caffeinate -dims python3 run.py                  # ~40 min; --reps 1 --duration 2s --warmup 1s for a smoke run
 python3 summarize.py                             # $RESULTS/summary.md
 docker compose --profile pgbench down --volumes
+```
+
+**Quick run (~4 min)**: file throughput plus a few HTTP points on loopback; skips pgbench,
+whose upper bound only changes with Postgres or the machine.
+
+```sh
+caffeinate -dims python3 run_file.py --reps 2 --window 4
+caffeinate -dims python3 run.py --reps 1 --duration 3s --warmup 1s --nets loopback \
+  --closed 1 64 --rates 5000 20000
+```
+
+**Caller vs a query per request (~5 min for the post's 7 variants, longer for all)**: a Rust program in `caller/` that fetches one user
+per request either straight with sqlx or through `Caller::call` into `caller/routes.yaml`, from
+1 to 4,096 clients, against async-graphql's DataLoader and pipelined tokio-postgres, plus `call_many`
+vs a hand-written `= ANY($1)`. Prints a markdown table with the median of each cell's runs.
+
+```sh
+docker compose up -d --wait
+cd caller && caffeinate -dims cargo run --release   # optional args: requests per cell (50000), variants (all), runs (3)
 ```
 
 Needs `mq-bridge-app`, `oha` (`brew install oha`) and Docker. pgbench runs inside containers

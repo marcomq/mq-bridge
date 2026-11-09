@@ -60,7 +60,7 @@ exit = "warn"
 collapsible_if = "allow"
 
 [workspace.package]
-version = "1.4.0"
+version = "1.5.0"
 
 [workspace.dependencies]
 anyhow = "1.0"
@@ -504,6 +504,12 @@ name = "pack_bench"
 harness = false
 required-features = ["test-utils", "compression"]
 
+# Route throughput with a middleware chain on the input or the output side.
+[[bench]]
+name = "chain_matrix_bench"
+harness = false
+required-features = ["test-utils", "filter", "aggregate"]
+
 # Isolates the per-request HTTP route lookup (Mutex<HashMap> vs ArcSwap).
 # No external services or features required.
 [[bench]]
@@ -531,3 +537,7 @@ version = "0.39"
 default-features = false
 features = ["cmake-build", "tokio"]
 optional = true
+
+# Temporary: rumqttc 0.25.1 plus only the rustls-webpki 0.103 bump; drop once rumqttc releases it.
+[patch.crates-io]
+rumqttc = { git = "https://github.com/bytebeamio/rumqtt", rev = "0b0ed643208cf77190e9d5cf08f3e3eece6e3ec3" }

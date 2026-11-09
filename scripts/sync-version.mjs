@@ -27,6 +27,7 @@ const paths = {
   rootCargo: resolve(repoRoot, "Cargo.toml"),
   rootLock: resolve(repoRoot, "Cargo.lock"),
   appCargo: resolve(repoRoot, "apps/mq-bridge-app/Cargo.toml"),
+  fullPluginCargo: resolve(repoRoot, "plugins/full/Cargo.toml"),
   appLock: resolve(repoRoot, "apps/mq-bridge-app/Cargo.lock"),
   server: resolve(repoRoot, "apps/mq-bridge-app/server.json"),
   tauri: resolve(repoRoot, "apps/mq-bridge-app/crates/desktop/tauri.conf.json"),
@@ -94,6 +95,12 @@ replaceOnce(
   "mq-bridge app dependency version",
 );
 replaceOnce(
+  paths.fullPluginCargo,
+  /^(mq-bridge\s*=\s*\{\s*version\s*=\s*")[^"]+(".*)$/m,
+  `$1${version}$2`,
+  "mq-bridge full plugin dependency version",
+);
+replaceOnce(
   paths.appCargo,
   /^(mq_bridge_app\s*=\s*\{\s*version\s*=\s*")[^"]+(".*)$/m,
   `$1${version}$2`,
@@ -128,6 +135,7 @@ syncCargoLock(paths.rootLock, [
   "mq-bridge",
   "mq-bridge-bindings-common",
   "mq-bridge-c",
+  "mq-bridge-full",
   "mq-bridge-node",
   "mq-bridge-py",
 ]);

@@ -7,6 +7,7 @@
 
 use crate::endpoints::create_publisher_from_route;
 use crate::errors::InvalidConfig;
+use crate::middleware::raw_json::write_at;
 use crate::models::{Endpoint, LookupMiddleware};
 use crate::support::interpolation::CompiledTemplate;
 use crate::traits::{
@@ -17,7 +18,7 @@ use crate::CanonicalMessage;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::StreamExt;
-use serde_json::{value::RawValue, Map, Value};
+use serde_json::{value::RawValue, Value};
 use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -65,6 +66,16 @@ impl Entry {
         let payload = payload
             .map(|t| CompiledTemplate::compile(t, None))
             .transpose()?;
+        if from
+            .middlewares
+            .iter()
+            .any(|m| matches!(m, crate::models::Middleware::Parallel(_)))
+        {
+            return Err(InvalidConfig(anyhow::anyhow!(
+                "lookup: `parallel` cannot be set on a lookup's `from`; set it on the route's input or output"
+            ))
+            .into());
+        }
         // Box::pin breaks the recursive async type, as in the dlq middleware.
         let from = Box::pin(create_publisher_from_route(route_name, &with_status(from))).await?;
         let found_key = if into.is_empty() {
@@ -106,22 +117,7 @@ impl Entry {
         request
     }
 
-    /// Answers every message, in order. `None` = not found.
-    async fn fetch_many(
-        &self,
-        msgs: &[&CanonicalMessage],
-        concurrency: usize,
-    ) -> Vec<Result<Option<Value>, PublisherError>> {
-        let requests: Vec<CanonicalMessage> = msgs.iter().map(|m| self.request(m)).collect();
-        CONCURRENCY
-            .scope(
-                concurrency,
-                answer_all(self.from.as_ref(), requests, answer_of, |v| v),
-            )
-            .await
-    }
-
-    /// As `fetch_many`, but each answer as the JSON bytes that replace the payload.
+    /// Answers every message, in order, as JSON bytes. `None` = not found.
     async fn fetch_json(
         &self,
         msgs: &[&CanonicalMessage],
@@ -368,10 +364,11 @@ impl Lookup {
                 return messages.into_iter().zip(answers).map(replace).collect();
             }
         }
-        let docs: Vec<Result<Value, PublisherError>> = messages
+        let docs: Vec<Result<(), PublisherError>> = messages
             .iter()
             .map(|m| {
-                serde_json::from_slice(&m.payload).map_err(|e| {
+                let checked = serde_json::from_slice::<serde::de::IgnoredAny>(&m.payload);
+                checked.map(drop).map_err(|e| {
                     PublisherError::NonRetryable(anyhow::anyhow!(
                         "lookup: payload is not JSON: {e}"
                     ))
@@ -387,7 +384,7 @@ impl Lookup {
         let fetches = self
             .entries
             .iter()
-            .map(|entry| entry.fetch_many(&targets, self.concurrency));
+            .map(|entry| entry.fetch_json(&targets, self.concurrency));
         let mut per_entry: Vec<_> = futures::future::join_all(fetches)
             .await
             .into_iter()
@@ -397,11 +394,13 @@ impl Lookup {
             .into_iter()
             .zip(docs)
             .map(|(msg, doc)| {
-                let doc = doc.map_err(|e| (msg.clone(), e));
+                if let Err(e) = doc {
+                    return Err((msg, e));
+                }
                 let results = per_entry
                     .iter_mut()
                     .map(|r| r.next().expect("one result per message"));
-                self.apply(msg, doc?, results)
+                self.apply(msg, results)
             })
             .collect()
     }
@@ -410,8 +409,7 @@ impl Lookup {
     fn apply(
         &self,
         mut msg: CanonicalMessage,
-        mut doc: Value,
-        results: impl Iterator<Item = Result<Option<Value>, PublisherError>>,
+        results: impl Iterator<Item = Result<Option<Bytes>, PublisherError>>,
     ) -> Result<CanonicalMessage, (CanonicalMessage, PublisherError)> {
         // Drain every entry first, so the per-entry iterators stay aligned across messages.
         let results = match results
@@ -423,22 +421,22 @@ impl Lookup {
             Err(e) => return Err((msg, e)),
         };
         let mut all_found = true;
+        let mut values = Vec::with_capacity(results.len());
         for (entry, found) in self.entries.iter().zip(results) {
             all_found &= found.is_some();
             msg.metadata
                 .insert(entry.found_key.clone(), found.is_some().to_string());
-            if let Err(e) = insert_at(&mut doc, &entry.into, found.unwrap_or(Value::Null)) {
-                return Err((msg, PublisherError::NonRetryable(e)));
-            }
+            let json = found.map_or_else(|| b"null".to_vec(), |found| found.to_vec());
+            values.push((entry.into.as_slice(), json));
         }
         msg.metadata
             .insert(FOUND.to_string(), all_found.to_string());
-        match serde_json::to_vec(&doc) {
+        match write_at(&msg.payload, values, "lookup") {
             Ok(bytes) => {
                 msg.payload = bytes.into();
                 Ok(msg)
             }
-            Err(e) => Err((msg, PublisherError::NonRetryable(e.into()))),
+            Err(e) => Err((msg, PublisherError::NonRetryable(e))),
         }
     }
 }
@@ -455,29 +453,6 @@ fn replace(
         .insert(FOUND.to_string(), found.is_some().to_string());
     msg.payload = found.unwrap_or_else(|| Bytes::from_static(b"null"));
     Ok(msg)
-}
-
-/// Writes `value` at the dotted `path`, creating objects along the way; an empty path
-/// replaces `root`.
-fn insert_at(root: &mut Value, path: &[String], value: Value) -> anyhow::Result<()> {
-    let Some((last, parents)) = path.split_last() else {
-        *root = value;
-        return Ok(());
-    };
-    let mut cur = root;
-    for key in parents {
-        let Value::Object(map) = cur else {
-            anyhow::bail!("lookup: cannot nest under '{key}': it is not an object");
-        };
-        cur = map
-            .entry(key.as_str())
-            .or_insert_with(|| Value::Object(Map::new()));
-    }
-    let Value::Object(map) = cur else {
-        anyhow::bail!("lookup: cannot set '{last}': its parent is not an object");
-    };
-    map.insert(last.clone(), value);
-    Ok(())
 }
 
 pub struct LookupPublisher {
@@ -546,6 +521,10 @@ impl MessagePublisher for LookupPublisher {
     }
 
     crate::traits::forward_publisher_meta!(inner);
+
+    fn takes_publish_turn(&self) -> bool {
+        self.inner.takes_publish_turn()
+    }
 
     fn as_any(&self) -> &dyn Any {
         self
@@ -695,6 +674,20 @@ mod tests {
             .await
             .unwrap();
         (publisher, channel)
+    }
+
+    #[tokio::test]
+    async fn parallel_on_the_from_endpoint_is_refused() {
+        let config: LookupMiddleware = serde_yaml_ng::from_str(
+            "from: { static: { body: '{}', raw: true }, middlewares: [ { parallel: {} } ] }\ninto: x",
+        )
+        .unwrap();
+        let sink = MemoryPublisher::new_local("lookup_from_parallel", 1);
+        let err = LookupPublisher::new(Box::new(sink), &config, "lookup_test")
+            .await
+            .err()
+            .expect("refused");
+        assert!(err.to_string().contains("lookup's `from`"), "{err}");
     }
 
     fn msg(value: Value) -> CanonicalMessage {
