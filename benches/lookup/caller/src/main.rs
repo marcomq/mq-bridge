@@ -2,10 +2,13 @@
 //!
 //! Needs the lookup bench's Postgres (`docker compose up -d --wait` in `benches/lookup`) and
 //! `PGUSER` / `PGPASSWORD` set to the credentials in `benches/lookup/docker-compose.yml`.
-//! Run with `cargo run --release -- [requests per measurement, default 50000] [variants]`,
-//! variants as a comma-separated list of the names below (default: all).
+//! Run with `cargo run --release -- [requests per measurement, default 50000] [variants] [runs]`,
+//! variants as a comma-separated list of the names below (default: all, or `all`). Each cell
+//! runs `runs` times (default 3) and prints the median keys/s with the range, and median latencies.
 //!
 //! - `direct`: one `= $1` query per request on a sqlx pool of 64 connections.
+//! - `pipelined16` / `pipelined64`: one `= $1` query per request on that many tokio-postgres
+//!   connections, round robin; concurrent queries on one connection are pipelined.
 //! - `direct_pool192`: the same on 192 connections (1,024 and 4,096 clients; Postgres allows 200).
 //! - `dataloader_1ms` / `dataloader_0ms`: `load_one` on async-graphql's `DataLoader` with that
 //!   `delay`, `max_batch_size` 256, one `= ANY($1)` per batch on the 64-connection pool.
@@ -25,6 +28,7 @@ use mq_bridge::Caller;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -64,10 +68,16 @@ async fn pool() -> sqlx::PgPool {
     pool_of(64).await
 }
 
-async fn direct(name: &str, connections: u32, clients: usize, per_client: usize) {
+struct Stats {
+    keys_per_s: f64,
+    p50: Duration,
+    p99: Duration,
+}
+
+async fn direct(connections: u32, clients: usize, per_client: usize) -> Stats {
     let pool = pool_of(connections).await;
     let handle = pool.clone();
-    measure(name, clients, per_client, 1, move |keys| {
+    let stats = measure(clients, per_client, 1, move |keys| {
         let pool = handle.clone();
         async move {
             let user: User =
@@ -81,6 +91,38 @@ async fn direct(name: &str, connections: u32, clients: usize, per_client: usize)
     })
     .await;
     pool.close().await;
+    stats
+}
+
+async fn pipelined(connections: usize, clients: usize, per_client: usize) -> Stats {
+    let mut config: tokio_postgres::Config = PG_URL.parse().unwrap();
+    if let Ok(user) = std::env::var("PGUSER") {
+        config.user(user);
+    }
+    if let Ok(password) = std::env::var("PGPASSWORD") {
+        config.password(password);
+    }
+    let mut conns = Vec::with_capacity(connections);
+    for _ in 0..connections {
+        let (client, connection) = config.connect(tokio_postgres::NoTls).await.unwrap();
+        tokio::spawn(connection);
+        let stmt = client
+            .prepare("SELECT path, id, name, tier FROM users WHERE path = $1")
+            .await
+            .unwrap();
+        conns.push((client, stmt));
+    }
+    let conns = Arc::new(conns);
+    let next = Arc::new(AtomicUsize::new(0));
+    measure(clients, per_client, 1, move |keys| {
+        let (conns, next) = (conns.clone(), next.clone());
+        async move {
+            let (client, stmt) = &conns[next.fetch_add(1, Ordering::Relaxed) % conns.len()];
+            let row = client.query_one(stmt, &[&keys[0]]).await.unwrap();
+            assert_eq!(row.get::<_, &str>(0), keys[0]);
+        }
+    })
+    .await
 }
 
 /// How a DataLoader batch asks Postgres.
@@ -142,7 +184,7 @@ impl Loader<String> for UserLoader {
     }
 }
 
-async fn dataloader(name: &str, delay: Duration, form: Form, clients: usize, per_client: usize) {
+async fn dataloader(delay: Duration, form: Form, clients: usize, per_client: usize) -> Stats {
     let pool = pool().await;
     let loader = Arc::new(
         DataLoader::new(
@@ -155,7 +197,7 @@ async fn dataloader(name: &str, delay: Duration, form: Form, clients: usize, per
         .delay(delay)
         .max_batch_size(256),
     );
-    measure(name, clients, per_client, 1, move |keys| {
+    let stats = measure(clients, per_client, 1, move |keys| {
         let loader = loader.clone();
         async move {
             let user = loader.load_one(keys[0].clone()).await.unwrap().unwrap();
@@ -164,12 +206,13 @@ async fn dataloader(name: &str, delay: Duration, form: Form, clients: usize, per
     })
     .await;
     pool.close().await;
+    stats
 }
 
-async fn call(route: &str, clients: usize, per_client: usize) {
+async fn call(route: &str, clients: usize, per_client: usize) -> Stats {
     let users = deploy(route).await;
     let handle = users.clone();
-    measure(route, clients, per_client, 1, move |keys| {
+    let stats = measure(clients, per_client, 1, move |keys| {
         let users = handle.clone();
         async move {
             let user: User = users.call([("path", &keys[0])]).await.unwrap();
@@ -178,11 +221,12 @@ async fn call(route: &str, clients: usize, per_client: usize) {
     })
     .await;
     users.stop().await;
+    stats
 }
 
-async fn direct_any(clients: usize, per_client: usize) {
+async fn direct_any(clients: usize, per_client: usize) -> Stats {
     let pool = pool().await;
-    measure("direct_any", clients, per_client, MANY, move |keys| {
+    measure(clients, per_client, MANY, move |keys| {
         let pool = pool.clone();
         async move {
             let users: Vec<User> =
@@ -195,14 +239,13 @@ async fn direct_any(clients: usize, per_client: usize) {
             assert!(keys.iter().all(|k| found.contains(k.as_str())));
         }
     })
-    .await;
+    .await
 }
 
-async fn call_many(route: &str, clients: usize, per_client: usize) {
+async fn call_many(route: &str, clients: usize, per_client: usize) -> Stats {
     let users = deploy(route).await;
     let handle = users.clone();
-    let name = format!("call_many {route}");
-    measure(&name, clients, per_client, MANY, move |keys| {
+    let stats = measure(clients, per_client, MANY, move |keys| {
         let users = handle.clone();
         async move {
             let found: Vec<anyhow::Result<User>> =
@@ -214,11 +257,12 @@ async fn call_many(route: &str, clients: usize, per_client: usize) {
     })
     .await;
     users.stop().await;
+    stats
 }
 
-/// Runs `clients` tasks that each send `per_client` keys, `chunk` keys per `op`, and prints
+/// Runs `clients` tasks that each send `per_client` keys, `chunk` keys per `op`, and returns
 /// keys/s plus the latency of one `op`.
-async fn measure<F, Fut>(name: &str, clients: usize, per_client: usize, chunk: usize, op: F)
+async fn measure<F, Fut>(clients: usize, per_client: usize, chunk: usize, op: F) -> Stats
 where
     F: Fn(Vec<String>) -> Fut + Clone + Send + 'static,
     Fut: Future<Output = ()> + Send,
@@ -249,11 +293,41 @@ where
     let keys_per_s = (clients * per_client) as f64 / start.elapsed().as_secs_f64();
     latencies.sort();
     let at = |q: f64| latencies[((latencies.len() as f64 * q) as usize).min(latencies.len() - 1)];
-    println!(
-        "| {name} | {clients} | {keys_per_s:.0} | {:.1?} | {:.1?} |",
-        at(0.5),
-        at(0.99)
+    Stats {
+        keys_per_s,
+        p50: at(0.5),
+        p99: at(0.99),
+    }
+}
+
+/// Prints the median of `runs` (keys/s with min–max, p50, p99).
+fn report(name: &str, clients: usize, mut runs: Vec<Stats>) {
+    let median = |v: &mut Vec<f64>| {
+        v.sort_by(f64::total_cmp);
+        v[v.len() / 2]
+    };
+    let mut rate: Vec<f64> = runs.iter().map(|s| s.keys_per_s).collect();
+    let (min, max) = (
+        rate.iter().cloned().fold(f64::MAX, f64::min),
+        rate.iter().cloned().fold(0.0, f64::max),
     );
+    let rate = median(&mut rate);
+    runs.sort_by_key(|s| s.p50);
+    let p50 = runs[runs.len() / 2].p50;
+    runs.sort_by_key(|s| s.p99);
+    let p99 = runs[runs.len() / 2].p99;
+    println!("| {name} | {clients} | {rate:.0} ({min:.0}–{max:.0}) | {p50:.1?} | {p99:.1?} |");
+}
+
+/// Runs a cell `$runs` times, building a fresh future each time, and reports the median.
+macro_rules! cell {
+    ($name:expr, $clients:expr, $runs:expr, $run:expr) => {{
+        let mut all = Vec::new();
+        for _ in 0..$runs {
+            all.push($run.await);
+        }
+        report($name, $clients, all);
+    }};
 }
 
 #[tokio::main]
@@ -265,16 +339,36 @@ async fn main() {
     let only: Option<Vec<String>> = std::env::args()
         .nth(2)
         .map(|names| names.split(',').map(str::to_owned).collect());
+    let only = only.filter(|o| o != &["all"]);
+    let runs: usize = std::env::args()
+        .nth(3)
+        .map(|n| n.parse().expect("runs per cell"))
+        .unwrap_or(3);
     let run = |name: &str| only.as_ref().is_none_or(|o| o.iter().any(|n| n == name));
 
-    println!("| variant | clients | keys/s | p50 | p99 |\n|---|---|---|---|---|");
+    println!("| variant | clients | keys/s (min–max) | p50 | p99 |\n|---|---|---|---|---|");
     for clients in [1, 16, 64, 256, 1024, 4096] {
         let per_client = (total / clients).clamp(50, 5_000);
         if run("direct") {
-            direct("direct", 64, clients, per_client).await;
+            cell!("direct", clients, runs, direct(64, clients, per_client));
         }
         if run("direct_pool192") && clients >= 1024 {
-            direct("direct_pool192", 192, clients, per_client).await;
+            cell!(
+                "direct_pool192",
+                clients,
+                runs,
+                direct(192, clients, per_client)
+            );
+        }
+        for (name, connections) in [("pipelined16", 16), ("pipelined64", 64)] {
+            if run(name) {
+                cell!(
+                    name,
+                    clients,
+                    runs,
+                    pipelined(connections, clients, per_client)
+                );
+            }
         }
         let (ms, zero) = (Duration::from_millis(1), Duration::ZERO);
         for (name, delay, form) in [
@@ -285,7 +379,12 @@ async fn main() {
             ("dataloader_in_cached", zero, Form::In { cached: true }),
         ] {
             if run(name) {
-                dataloader(name, delay, form, clients, per_client).await;
+                cell!(
+                    name,
+                    clients,
+                    runs,
+                    dataloader(delay, form, clients, per_client)
+                );
             }
         }
         for route in [
@@ -296,18 +395,19 @@ async fn main() {
             "users_parallel_cap",
         ] {
             if run(route) {
-                call(route, clients, per_client).await;
+                cell!(route, clients, runs, call(route, clients, per_client));
             }
         }
     }
     for clients in [1, 4, 16, 64] {
         let per_client = (total / clients).max(MANY * 8);
         if run("direct_any") {
-            direct_any(clients, per_client).await;
+            cell!("direct_any", clients, runs, direct_any(clients, per_client));
         }
         for route in ["users", "users_parallel"] {
-            if run(&format!("call_many {route}")) {
-                call_many(route, clients, per_client).await;
+            let name = format!("call_many {route}");
+            if run(&name) {
+                cell!(&name, clients, runs, call_many(route, clients, per_client));
             }
         }
     }

@@ -32,6 +32,7 @@ VARIANTS = {
     "batched_rc4": ("IN (${metadata:key})", 16, 4, None, None),
     "per_message_c16_p8": ("= ${metadata:key}", 16, 1, 8, None),
     "batched_p8": ("IN (${metadata:key})", 16, 1, 8, None),
+    "batched_p16": ("IN (${metadata:key})", 16, 1, 16, None),
     "batched_p8_buf1": ("IN (${metadata:key})", 16, 1, 8, 1),
     "batched_p8_buf2": ("IN (${metadata:key})", 16, 1, 8, 2),
 }

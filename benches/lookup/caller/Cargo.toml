@@ -9,6 +9,7 @@ mq-bridge = { path = "../../..", default-features = false, features = ["sqlx", "
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "postgres", "macros"] }
+tokio-postgres = "0.7.18"
 tokio = { version = "1", features = ["full"] }
 async-graphql = { version = "7.2.1", default-features = false, features = ["dataloader", "tokio-timer"] }
 

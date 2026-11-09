@@ -18,7 +18,8 @@ users:
               lookup_query: "SELECT path, id, name, tier FROM users WHERE path IN (${payload:path})"
           into: $
 
-# The same, with up to 16 of those queries waiting for Postgres at once.
+# The same, with up to 16 batches in flight. The lanes share one pool (same URL and options),
+# so at most 8 queries wait for Postgres at once.
 users_parallel:
   batch_size: 256
   concurrency: 4
@@ -34,7 +35,7 @@ users_parallel:
           into: $
       - parallel: { max_in_flight: 16 }
 
-# The same with up to 32 queries at once (each lane opens its own pool).
+# The same with 32 lanes, sharing a pool of 4 connections.
 users_parallel32:
   batch_size: 256
   concurrency: 4
