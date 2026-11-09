@@ -64,7 +64,10 @@ impl ListQuery {
             cast.strip_prefix("::")?.trim()
         };
         let plain = |c: char| c.is_ascii_alphanumeric() || " _(),.\"".contains(c);
-        if element.is_empty() || !element.chars().all(plain) {
+        let collates = element
+            .split_whitespace()
+            .any(|word| word.eq_ignore_ascii_case("collate"));
+        if element.is_empty() || !element.chars().all(plain) || collates {
             return None;
         }
         let column = self.before[..self.before.len() - 1].trim_end();
@@ -417,6 +420,10 @@ mod tests {
         assert_eq!(q.key, "Id");
         assert_eq!((q.prefix.as_str(), q.suffix.as_str()), ("toUInt64(", ")"));
         assert_eq!(q.pg_any("text"), None);
+        let collated = parse_sql(r#"SELECT * FROM t WHERE k IN (${payload:k}::text COLLATE "C")"#)
+            .unwrap()
+            .unwrap();
+        assert_eq!(collated.pg_any("text"), None);
     }
 
     #[test]
