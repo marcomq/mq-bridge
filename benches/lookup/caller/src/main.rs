@@ -1,32 +1,28 @@
-//! An application that needs one user per request: query Postgres itself, or call a route.
+//! One user per request from Postgres: one query per request with sqlx, or `Caller::call` into
+//! an mq-bridge route that answers all calls waiting at that moment with one query.
+//! Pipelined tokio-postgres and async-graphql's DataLoader are measured for comparison.
 //!
 //! Needs the lookup bench's Postgres (`docker compose up -d --wait` in `benches/lookup`) and
 //! `PGUSER` / `PGPASSWORD` set to the credentials in `benches/lookup/docker-compose.yml`.
-//! Run with `cargo run --release -- [requests per measurement, default 50000] [variants] [runs]`,
-//! variants as a comma-separated list of the names below (default: all, or `all`). Each cell
-//! runs `runs` times (default 3) and prints the median keys/s with the range, and median latencies.
+//! `cargo run --release -- [requests per cell, 50000] [variants, all] [runs, 3]`, variants as a
+//! comma-separated list of:
 //!
 //! - `direct`: one `= $1` query per request on a sqlx pool of 64 connections.
+//! - `mq_bridge`: one `call` per request into the route below.
 //! - `pipelined16` / `pipelined64`: one `= $1` query per request on that many tokio-postgres
 //!   connections, round robin; concurrent queries on one connection are pipelined.
-//! - `direct_pool192`: the same on 192 connections (1,024 and 4,096 clients; Postgres allows 200).
-//! - `dataloader_1ms` / `dataloader_0ms`: `load_one` on async-graphql's `DataLoader` with that
-//!   `delay`, `max_batch_size` 256, one `= ANY($1)` per batch on the 64-connection pool.
-//! - `dataloader_any_text` / `dataloader_in` / `dataloader_in_cached`: `dataloader_0ms` with
-//!   the array as one text literal, or `IN ($1…$n)` prepared per call or cached.
-//! - `users` / `users_parallel`: `call` into that route of `routes.yaml`, whose `lookup`
-//!   sends one query for all calls waiting at that moment. `users_parallel32` /
-//!   `users_parallel_b512` / `users_parallel_cap` vary its lanes,
-//!   batch size and input capacity.
-//! - `direct_any` / `call_many`: a client holding 256 keys at once, as one `= ANY($1)` query
-//!   or one `call_many`.
+//! - `dataloader` / `dataloader_in`: async-graphql's DataLoader, one `= ANY($1)` or
+//!   `IN ($1…$n)` per batch, on the 64-connection pool.
+//! - `direct_pool192`: `direct` on 192 connections (1,024 and 4,096 clients only).
 //!
+//! Each cell runs `runs` times and prints the median requests/s with the range, p50 and p99.
 //! Every answer is checked against its key.
 
+use anyhow::Context;
 use async_graphql::dataloader::{DataLoader, Loader};
 use mq_bridge::Caller;
 use serde::Deserialize;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::future::Future;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -41,57 +37,72 @@ struct User {
     tier: String,
 }
 
-const ROUTES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/routes.yaml");
-/// Same URL as in `routes.yaml`; user and password come from `PGUSER` / `PGPASSWORD`.
+/// User and password come from `PGUSER` / `PGPASSWORD`.
 const PG_URL: &str = "postgres://localhost:55432/bench";
-const MANY: usize = 256;
+const BY_KEY: &str = "SELECT path, id, name, tier FROM users WHERE path = $1";
 
-async fn deploy(route: &str) -> Caller {
-    Caller::from_file(ROUTES, route).await.unwrap()
-}
+// ---------------------------------------------------------------------------------------------
+// direct: one query per request
 
-/// A user key spread over the table's one million rows.
-fn key(n: usize) -> String {
-    format!("/u/{:06}", n.wrapping_mul(2_654_435_761) % 1_000_000)
-}
-
-async fn pool_of(connections: u32) -> sqlx::PgPool {
-    sqlx::postgres::PgPoolOptions::new()
+async fn direct(connections: u32, clients: usize, per_client: usize) -> Stats {
+    let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(connections)
         .test_before_acquire(false)
         .connect(PG_URL)
         .await
-        .unwrap()
-}
+        .unwrap();
 
-async fn pool() -> sqlx::PgPool {
-    pool_of(64).await
-}
-
-struct Stats {
-    keys_per_s: f64,
-    p50: Duration,
-    p99: Duration,
-}
-
-async fn direct(connections: u32, clients: usize, per_client: usize) -> Stats {
-    let pool = pool_of(connections).await;
-    let handle = pool.clone();
-    let stats = measure(clients, per_client, 1, move |keys| {
-        let pool = handle.clone();
-        async move {
-            let user: User =
-                sqlx::query_as("SELECT path, id, name, tier FROM users WHERE path = $1")
-                    .bind(&keys[0])
-                    .fetch_one(&pool)
-                    .await
-                    .unwrap();
-            assert_eq!(user.path, keys[0]);
-        }
+    let stats = measure(clients, per_client, &pool, |pool, key| async move {
+        let user: User = sqlx::query_as(BY_KEY).bind(&key).fetch_one(&pool).await?;
+        Ok(user)
     })
     .await;
+
     pool.close().await;
     stats
+}
+
+// ---------------------------------------------------------------------------------------------
+// mq-bridge: one call per request, one query per batch of waiting calls
+
+/// The calls waiting at the same moment are read as one batch (up to 256), and `lookup`
+/// answers the whole batch with one query (`IN (…)` runs as `= ANY($1)` on Postgres).
+/// `parallel` keeps up to 16 batches in flight, sharing the pool of 8 connections.
+const ROUTE: &str = r#"
+batch_size: 256
+concurrency: 4
+input:
+  middlewares:
+    - lookup:
+        from:
+          sqlx:
+            url: "postgres://localhost:55432/bench"
+            table: users
+            max_connections: 8
+            lookup_query: "SELECT path, id, name, tier FROM users WHERE path IN (${payload:path})"
+        into: $
+    - parallel: { max_in_flight: 16 }
+"#;
+
+async fn mq_bridge(clients: usize, per_client: usize) -> Stats {
+    let users = Caller::from_str(ROUTE, "users").await.unwrap();
+
+    let stats = measure(clients, per_client, &users, |users, key| async move {
+        let user: User = users.call([("path", &key)]).await?;
+        Ok(user)
+    })
+    .await;
+
+    users.stop().await;
+    stats
+}
+
+// ---------------------------------------------------------------------------------------------
+// pipelined: one query per request, several in flight on each connection
+
+struct Pipelines {
+    connections: Vec<(tokio_postgres::Client, tokio_postgres::Statement)>,
+    next: AtomicUsize,
 }
 
 async fn pipelined(connections: usize, clients: usize, per_client: usize) -> Stats {
@@ -102,52 +113,38 @@ async fn pipelined(connections: usize, clients: usize, per_client: usize) -> Sta
     if let Ok(password) = std::env::var("PGPASSWORD") {
         config.password(password);
     }
-    let mut conns = Vec::with_capacity(connections);
+    let mut opened = Vec::with_capacity(connections);
     for _ in 0..connections {
         let (client, connection) = config.connect(tokio_postgres::NoTls).await.unwrap();
         tokio::spawn(connection);
-        let stmt = client
-            .prepare("SELECT path, id, name, tier FROM users WHERE path = $1")
-            .await
-            .unwrap();
-        conns.push((client, stmt));
+        let statement = client.prepare(BY_KEY).await.unwrap();
+        opened.push((client, statement));
     }
-    let conns = Arc::new(conns);
-    let next = Arc::new(AtomicUsize::new(0));
-    measure(clients, per_client, 1, move |keys| {
-        let (conns, next) = (conns.clone(), next.clone());
-        async move {
-            let (client, stmt) = &conns[next.fetch_add(1, Ordering::Relaxed) % conns.len()];
-            let row = client.query_one(stmt, &[&keys[0]]).await.unwrap();
-            assert_eq!(row.get::<_, &str>(0), keys[0]);
-        }
+    let pipelines = Arc::new(Pipelines {
+        connections: opened,
+        next: AtomicUsize::new(0),
+    });
+
+    measure(clients, per_client, &pipelines, |p, key| async move {
+        let n = p.next.fetch_add(1, Ordering::Relaxed) % p.connections.len();
+        let (client, statement) = &p.connections[n];
+        let row = client.query_one(statement, &[&key]).await?;
+        Ok(User {
+            path: row.get(0),
+            id: row.get(1),
+            name: row.get(2),
+            tier: row.get(3),
+        })
     })
     .await
 }
 
-/// How a DataLoader batch asks Postgres.
-#[derive(Clone, Copy)]
-enum Form {
-    /// `= ANY($1)` with a text array, one cached statement.
-    Any,
-    /// `= ANY($1::text[])` with the array as one text literal, as a driver without arrays can.
-    AnyText,
-    /// `IN ($1…$n)`, cached per list length or prepared per call (as the route's lookup).
-    In { cached: bool },
-}
+// ---------------------------------------------------------------------------------------------
+// dataloader: one load_one per request, one query per batch
 
 struct UserLoader {
     pool: sqlx::PgPool,
-    form: Form,
-}
-
-/// `{"a","b"}`: a Postgres array literal of text keys.
-fn array_literal(keys: &[String]) -> String {
-    let quoted: Vec<String> = keys
-        .iter()
-        .map(|k| format!("\"{}\"", k.replace('\\', "\\\\").replace('"', "\\\"")))
-        .collect();
-    format!("{{{}}}", quoted.join(","))
+    in_list: bool,
 }
 
 impl Loader<String> for UserLoader {
@@ -155,132 +152,90 @@ impl Loader<String> for UserLoader {
     type Error = Arc<sqlx::Error>;
 
     async fn load(&self, keys: &[String]) -> Result<HashMap<String, User>, Self::Error> {
-        const ANY: &str = "SELECT path, id, name, tier FROM users WHERE path = ANY($1)";
-        const ANY_TEXT: &str =
-            "SELECT path, id, name, tier FROM users WHERE path = ANY($1::text[])";
-        let users: Vec<User> = match self.form {
-            Form::Any => sqlx::query_as(ANY).bind(keys).fetch_all(&self.pool).await?,
-            Form::AnyText => {
-                sqlx::query_as(ANY_TEXT)
-                    .bind(array_literal(keys))
-                    .fetch_all(&self.pool)
-                    .await?
+        let users: Vec<User> = if self.in_list {
+            // `IN ($1, …, $n)` is a different statement for every batch size.
+            let params: Vec<String> = (1..=keys.len()).map(|i| format!("${i}")).collect();
+            let sql = format!(
+                "SELECT path, id, name, tier FROM users WHERE path IN ({})",
+                params.join(",")
+            );
+            let mut query = sqlx::query_as(sqlx::AssertSqlSafe(sql.as_str())).persistent(false);
+            for key in keys {
+                query = query.bind(key);
             }
-            Form::In { cached } => {
-                let params: Vec<String> = (1..=keys.len()).map(|i| format!("${i}")).collect();
-                let sql = format!(
-                    "SELECT path, id, name, tier FROM users WHERE path IN ({})",
-                    params.join(",")
-                );
-                let mut query =
-                    sqlx::query_as(sqlx::AssertSqlSafe(sql.as_str())).persistent(cached);
-                for key in keys {
-                    query = query.bind(key);
-                }
-                query.fetch_all(&self.pool).await?
-            }
+            query.fetch_all(&self.pool).await?
+        } else {
+            sqlx::query_as("SELECT path, id, name, tier FROM users WHERE path = ANY($1)")
+                .bind(keys)
+                .fetch_all(&self.pool)
+                .await?
         };
         Ok(users.into_iter().map(|u| (u.path.clone(), u)).collect())
     }
 }
 
-async fn dataloader(delay: Duration, form: Form, clients: usize, per_client: usize) -> Stats {
-    let pool = pool().await;
+async fn dataloader(in_list: bool, clients: usize, per_client: usize) -> Stats {
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(64)
+        .test_before_acquire(false)
+        .connect(PG_URL)
+        .await
+        .unwrap();
     let loader = Arc::new(
         DataLoader::new(
             UserLoader {
                 pool: pool.clone(),
-                form,
+                in_list,
             },
             tokio::spawn,
         )
-        .delay(delay)
+        .delay(Duration::ZERO)
         .max_batch_size(256),
     );
-    let stats = measure(clients, per_client, 1, move |keys| {
-        let loader = loader.clone();
-        async move {
-            let user = loader.load_one(keys[0].clone()).await.unwrap().unwrap();
-            assert_eq!(user.path, keys[0]);
-        }
+
+    let stats = measure(clients, per_client, &loader, |loader, key| async move {
+        loader.load_one(key).await?.context("user not found")
     })
     .await;
+
     pool.close().await;
     stats
 }
 
-async fn call(route: &str, clients: usize, per_client: usize) -> Stats {
-    let users = deploy(route).await;
-    let handle = users.clone();
-    let stats = measure(clients, per_client, 1, move |keys| {
-        let users = handle.clone();
-        async move {
-            let user: User = users.call([("path", &keys[0])]).await.unwrap();
-            assert_eq!(user.path, keys[0]);
-        }
-    })
-    .await;
-    users.stop().await;
-    stats
+// ---------------------------------------------------------------------------------------------
+// measuring
+
+/// A user key spread over the table's one million rows.
+fn key(n: usize) -> String {
+    format!("/u/{:06}", n.wrapping_mul(2_654_435_761) % 1_000_000)
 }
 
-async fn direct_any(clients: usize, per_client: usize) -> Stats {
-    let pool = pool().await;
-    measure(clients, per_client, MANY, move |keys| {
-        let pool = pool.clone();
-        async move {
-            let users: Vec<User> =
-                sqlx::query_as("SELECT path, id, name, tier FROM users WHERE path = ANY($1)")
-                    .bind(&keys)
-                    .fetch_all(&pool)
-                    .await
-                    .unwrap();
-            let found: HashSet<&str> = users.iter().map(|u| u.path.as_str()).collect();
-            assert!(keys.iter().all(|k| found.contains(k.as_str())));
-        }
-    })
-    .await
+struct Stats {
+    requests_per_s: f64,
+    p50: Duration,
+    p99: Duration,
 }
 
-async fn call_many(route: &str, clients: usize, per_client: usize) -> Stats {
-    let users = deploy(route).await;
-    let handle = users.clone();
-    let stats = measure(clients, per_client, MANY, move |keys| {
-        let users = handle.clone();
-        async move {
-            let found: Vec<anyhow::Result<User>> =
-                users.call_many(keys.iter().map(|k| [("path", k)])).await;
-            for (key, user) in keys.iter().zip(found) {
-                assert_eq!(&user.unwrap().path, key);
-            }
-        }
-    })
-    .await;
-    users.stop().await;
-    stats
-}
-
-/// Runs `clients` tasks that each send `per_client` keys, `chunk` keys per `op`, and returns
-/// keys/s plus the latency of one `op`.
-async fn measure<F, Fut>(clients: usize, per_client: usize, chunk: usize, op: F) -> Stats
+/// Runs `clients` tasks that each look up `per_client` users one after another with
+/// `lookup(ctx, key)`, checks every answer, and returns requests/s and per-request latency.
+async fn measure<C, F, Fut>(clients: usize, per_client: usize, ctx: &C, lookup: F) -> Stats
 where
-    F: Fn(Vec<String>) -> Fut + Clone + Send + 'static,
-    Fut: Future<Output = ()> + Send,
+    C: Clone + Send + 'static,
+    F: Fn(C, String) -> Fut + Copy + Send + 'static,
+    Fut: Future<Output = anyhow::Result<User>> + Send + 'static,
 {
     let start = Instant::now();
     let tasks: Vec<_> = (0..clients)
         .map(|client| {
-            let op = op.clone();
+            let ctx = ctx.clone();
             tokio::spawn(async move {
-                let mut latencies = Vec::new();
-                for first in (0..per_client).step_by(chunk) {
-                    let last = (first + chunk).min(per_client);
-                    let keys = (first..last)
-                        .map(|i| key(client * per_client + i))
-                        .collect();
+                let mut latencies = Vec::with_capacity(per_client);
+                for i in 0..per_client {
+                    let key = key(client * per_client + i);
                     let started = Instant::now();
-                    op(keys).await;
+                    let user = lookup(ctx.clone(), key.clone()).await.unwrap();
                     latencies.push(started.elapsed());
+                    assert_eq!(user.path, key);
                 }
                 latencies
             })
@@ -290,23 +245,23 @@ where
     for task in tasks {
         latencies.extend(task.await.unwrap());
     }
-    let keys_per_s = (clients * per_client) as f64 / start.elapsed().as_secs_f64();
+    let requests_per_s = (clients * per_client) as f64 / start.elapsed().as_secs_f64();
     latencies.sort();
     let at = |q: f64| latencies[((latencies.len() as f64 * q) as usize).min(latencies.len() - 1)];
     Stats {
-        keys_per_s,
+        requests_per_s,
         p50: at(0.5),
         p99: at(0.99),
     }
 }
 
-/// Prints the median of `runs` (keys/s with min–max, p50, p99).
+/// Prints the median of `runs` (requests/s with min–max, p50, p99).
 fn report(name: &str, clients: usize, mut runs: Vec<Stats>) {
     let median = |v: &mut Vec<f64>| {
         v.sort_by(f64::total_cmp);
         v[v.len() / 2]
     };
-    let mut rate: Vec<f64> = runs.iter().map(|s| s.keys_per_s).collect();
+    let mut rate: Vec<f64> = runs.iter().map(|s| s.requests_per_s).collect();
     let (min, max) = (
         rate.iter().cloned().fold(f64::MAX, f64::min),
         rate.iter().cloned().fold(0.0, f64::max),
@@ -334,7 +289,7 @@ macro_rules! cell {
 async fn main() {
     let total: usize = std::env::args()
         .nth(1)
-        .map(|n| n.parse().expect("requests per measurement"))
+        .map(|n| n.parse().expect("requests per cell"))
         .unwrap_or(50_000);
     let only: Option<Vec<String>> = std::env::args()
         .nth(2)
@@ -346,19 +301,14 @@ async fn main() {
         .unwrap_or(3);
     let run = |name: &str| only.as_ref().is_none_or(|o| o.iter().any(|n| n == name));
 
-    println!("| variant | clients | keys/s (min–max) | p50 | p99 |\n|---|---|---|---|---|");
+    println!("| variant | clients | requests/s (min–max) | p50 | p99 |\n|---|---|---|---|---|");
     for clients in [1, 16, 64, 256, 1024, 4096] {
         let per_client = (total / clients).clamp(50, 5_000);
         if run("direct") {
             cell!("direct", clients, runs, direct(64, clients, per_client));
         }
-        if run("direct_pool192") && clients >= 1024 {
-            cell!(
-                "direct_pool192",
-                clients,
-                runs,
-                direct(192, clients, per_client)
-            );
+        if run("mq_bridge") {
+            cell!("mq_bridge", clients, runs, mq_bridge(clients, per_client));
         }
         for (name, connections) in [("pipelined16", 16), ("pipelined64", 64)] {
             if run(name) {
@@ -370,45 +320,23 @@ async fn main() {
                 );
             }
         }
-        let (ms, zero) = (Duration::from_millis(1), Duration::ZERO);
-        for (name, delay, form) in [
-            ("dataloader_1ms", ms, Form::Any),
-            ("dataloader_0ms", zero, Form::Any),
-            ("dataloader_any_text", zero, Form::AnyText),
-            ("dataloader_in", zero, Form::In { cached: false }),
-            ("dataloader_in_cached", zero, Form::In { cached: true }),
-        ] {
+        for (name, in_list) in [("dataloader", false), ("dataloader_in", true)] {
             if run(name) {
                 cell!(
                     name,
                     clients,
                     runs,
-                    dataloader(delay, form, clients, per_client)
+                    dataloader(in_list, clients, per_client)
                 );
             }
         }
-        for route in [
-            "users",
-            "users_parallel",
-            "users_parallel32",
-            "users_parallel_b512",
-            "users_parallel_cap",
-        ] {
-            if run(route) {
-                cell!(route, clients, runs, call(route, clients, per_client));
-            }
-        }
-    }
-    for clients in [1, 4, 16, 64] {
-        let per_client = (total / clients).max(MANY * 8);
-        if run("direct_any") {
-            cell!("direct_any", clients, runs, direct_any(clients, per_client));
-        }
-        for route in ["users", "users_parallel"] {
-            let name = format!("call_many {route}");
-            if run(&name) {
-                cell!(&name, clients, runs, call_many(route, clients, per_client));
-            }
+        if run("direct_pool192") && clients >= 1024 {
+            cell!(
+                "direct_pool192",
+                clients,
+                runs,
+                direct(192, clients, per_client)
+            );
         }
     }
 }
