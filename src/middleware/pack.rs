@@ -111,9 +111,7 @@ impl MessagePublisher for PackPublisher {
         for range in &ranges {
             let body = self.packer.pack(&messages[range.clone()]);
             let mut packed = CanonicalMessage::new_bytes(body, None);
-            packed
-                .metadata
-                .insert(PACK_COUNT_KEY.to_string(), range.len().to_string());
+            packed.set_metadata(PACK_COUNT_KEY, range.len().to_string());
             physical.push(packed);
         }
         let packed_ids: Vec<u128> = physical.iter().map(|m| m.message_id).collect();
@@ -427,7 +425,7 @@ mod tests {
         (0..count)
             .map(|i| {
                 let mut message = CanonicalMessage::from(format!("row-{i}").as_str());
-                message.metadata.insert("seq".to_string(), i.to_string());
+                message.set_metadata("seq", i.to_string());
                 message
             })
             .collect()
@@ -524,14 +522,14 @@ mod tests {
         let input = rows(1000);
         let wire = publish(&pack_config(1000, 1 << 20), input.clone()).await;
         assert_eq!(wire.len(), 1, "1000 rows must cost one transport operation");
-        assert_eq!(wire[0].metadata.get(PACK_COUNT_KEY).unwrap(), "1000");
+        assert_eq!(wire[0].get_metadata(PACK_COUNT_KEY).unwrap(), "1000");
 
         let (mut consumer, _) = unpacker(wire);
         let batch = consumer.receive_batch(10_000).await.unwrap();
         assert_eq!(batch.messages.len(), 1000);
         for (got, want) in batch.messages.iter().zip(&input) {
             assert_eq!(got.payload, want.payload);
-            assert_eq!(got.metadata, want.metadata);
+            assert_eq!(got.metadata_map(), want.metadata_map());
             assert_eq!(got.message_id, want.message_id);
         }
     }
@@ -549,7 +547,7 @@ mod tests {
         assert_eq!(wire.len(), 3);
         let counts: Vec<&str> = wire
             .iter()
-            .map(|m| m.metadata[PACK_COUNT_KEY].as_str())
+            .map(|m| m.get_metadata(PACK_COUNT_KEY).unwrap())
             .collect();
         assert_eq!(
             counts,
@@ -753,7 +751,7 @@ mod tests {
             assert_eq!(batch.messages.len(), 200, "{algorithm:?}");
             for (got, want) in batch.messages.iter().zip(&input) {
                 assert_eq!(got.payload, want.payload, "{algorithm:?}");
-                assert_eq!(got.metadata, want.metadata, "{algorithm:?}");
+                assert_eq!(got.metadata_map(), want.metadata_map(), "{algorithm:?}");
                 assert_eq!(got.message_id, want.message_id, "{algorithm:?}");
             }
         }
@@ -825,7 +823,7 @@ mod tests {
         assert_eq!(batch.messages.len(), 200);
         for (got, want) in batch.messages.iter().zip(&input) {
             assert_eq!(got.payload, want.payload);
-            assert_eq!(got.metadata, want.metadata);
+            assert_eq!(got.metadata_map(), want.metadata_map());
         }
     }
 
@@ -895,7 +893,7 @@ mod tests {
         assert_eq!(batch.messages.len(), 5);
         for (got, want) in batch.messages.iter().zip(&input) {
             assert_eq!(got.payload, want.payload);
-            assert!(got.metadata.is_empty());
+            assert!(got.metadata_is_empty());
         }
     }
 

@@ -519,16 +519,15 @@ fn handled_to_bridge_response(handled: Handled) -> BridgeResponse {
     };
 
     let status = message
-        .metadata
-        .get("http_status_code")
-        .and_then(|value: &String| value.parse::<u16>().ok())
+        .get_metadata("http_status_code")
+        .and_then(|value: &str| value.parse::<u16>().ok())
         .unwrap_or(200);
-    let content_type = message.metadata.get("Content-Type").cloned();
+    let content_type = message.get_metadata("Content-Type").map(str::to_owned);
 
     let mut headers: HashMap<String, String> = HashMap::new();
-    for (key, value) in &message.metadata {
+    for (key, value) in message.metadata_iter() {
         if key != "http_status_code" && key != "Content-Type" {
-            headers.insert(key.clone(), value.clone());
+            headers.insert(key.to_owned(), value.to_owned());
         }
     }
 
@@ -827,23 +826,15 @@ async fn dispatch_ui_request(
     );
 
     let mut message = CanonicalMessage::from(body_text.to_string());
-    message
-        .metadata
-        .insert("http_method".into(), method.to_uppercase());
-    message
-        .metadata
-        .insert("http_path".into(), path.to_string());
+    message.set_metadata("http_method", method.to_uppercase());
+    message.set_metadata("http_path", path.to_string());
     // Tauri IPC is an in-process, same-user caller and is therefore trusted as
     // the local loopback equivalent for the read-only peer registry endpoint.
     if path.eq_ignore_ascii_case("/peer-status") {
-        message
-            .metadata
-            .insert("mqb_peer_loopback".into(), "true".into());
+        message.set_metadata("mqb_peer_loopback", "true");
     }
     if !query.is_empty() {
-        message
-            .metadata
-            .insert("http_query".into(), query.to_string());
+        message.set_metadata("http_query", query.to_string());
     }
 
     state

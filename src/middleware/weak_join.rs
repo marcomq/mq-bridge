@@ -202,8 +202,8 @@ impl WeakJoinConsumer {
         for m in messages {
             // Skip messages without a branch label rather than collapsing them
             // under a shared "unknown" key.
-            let branch = match m.metadata.get(branch_by) {
-                Some(b) => b.clone(),
+            let branch = match m.get_metadata(branch_by) {
+                Some(b) => b.to_owned(),
                 None => continue,
             };
             if obj.contains_key(&branch) {
@@ -215,12 +215,8 @@ impl WeakJoinConsumer {
         let complete = self.is_complete(messages);
         let merged_payload = serde_json::to_vec(&Value::Object(obj)).unwrap_or_default();
         let mut new_msg = self.finalize(key, merged_payload, messages.first());
-        new_msg
-            .metadata
-            .insert("join_branches".to_string(), present.join(","));
-        new_msg
-            .metadata
-            .insert("join_complete".to_string(), complete.to_string());
+        new_msg.set_metadata("join_branches", present.join(","));
+        new_msg.set_metadata("join_complete", complete.to_string());
         new_msg
     }
 
@@ -234,11 +230,9 @@ impl WeakJoinConsumer {
         let mut new_msg =
             CanonicalMessage::new(payload, Some(fast_uuid_v7::gen_id_with_sub_ms_4()));
         if let Some(first) = first {
-            new_msg.metadata = first.metadata.clone();
+            new_msg.extend_metadata(first.metadata_iter());
         }
-        new_msg
-            .metadata
-            .insert(self.config.group_by.clone(), key.to_string());
+        new_msg.set_metadata(self.config.group_by.clone(), key.to_string());
         new_msg
     }
 
@@ -251,7 +245,7 @@ impl WeakJoinConsumer {
             Some(branch_by) => {
                 let distinct: HashSet<&str> = messages
                     .iter()
-                    .filter_map(|m| m.metadata.get(branch_by).map(String::as_str))
+                    .filter_map(|m| m.get_metadata(branch_by))
                     .collect();
                 if self.config.required.is_empty() {
                     distinct.len() >= self.config.expected_count
@@ -481,9 +475,8 @@ impl MessageConsumer for WeakJoinConsumer {
                 let now = Instant::now();
                 for (idx, msg) in batch.messages.into_iter().enumerate() {
                     let key = msg
-                        .metadata
-                        .get(&self.config.group_by)
-                        .cloned()
+                        .get_metadata(&self.config.group_by)
+                        .map(str::to_owned)
                         .unwrap_or_else(|| "default".to_string());
                     let group = state.pending.entry(key.clone()).or_insert_with(|| Group {
                         started: now,
@@ -563,10 +556,7 @@ mod tests {
         assert_eq!(payload.len(), 2);
         assert_eq!(payload[0]["val"], 1);
         assert_eq!(payload[1]["val"], 2);
-        assert_eq!(
-            joined.metadata.get("group_id").map(|s| s.as_str()),
-            Some("A")
-        );
+        assert_eq!(joined.get_metadata("group_id"), Some("A"));
     }
 
     #[tokio::test]
@@ -647,10 +637,7 @@ mod tests {
         // Branch-keyed object, not a positional array.
         assert_eq!(payload["postgres"]["id"], 42);
         assert_eq!(payload["features"]["score"], 0.9);
-        assert_eq!(
-            joined.metadata.get("join_complete").map(|s| s.as_str()),
-            Some("true")
-        );
+        assert_eq!(joined.get_metadata("join_complete"), Some("true"));
     }
 
     #[tokio::test]

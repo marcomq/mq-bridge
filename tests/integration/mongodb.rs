@@ -484,11 +484,7 @@ pub async fn test_mongodb_capture_all_exits_on_empty() {
                     break;
                 }
                 saw_stream_insert |= batch.messages.iter().any(|message| {
-                    message
-                        .metadata
-                        .get("mongodb.operation")
-                        .map(String::as_str)
-                        == Some("insert")
+                    message.get_metadata("mongodb.operation") == Some("insert")
                         && serde_json::from_slice::<serde_json::Value>(&message.payload)
                             .ok()
                             .and_then(|body| body.get("id").and_then(|id| id.as_i64()))

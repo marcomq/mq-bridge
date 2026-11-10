@@ -38,6 +38,7 @@ const
   MQB_ERR_PANIC* = 5'i32
   MQB_ERR_UNSUPPORTED* = 6'i32
   MQB_ERR_CONNECTION* = 7'i32
+  MQB_PENDING* = 8'i32
 
   MQB_DISCONNECT_COMPLETED* = 0'u32
   MQB_DISCONNECT_STOPPED* = 1'u32
@@ -58,6 +59,7 @@ const
   MQB_MIDDLEWARE_SEND* = 1'u8
   MQB_MESSAGE_DROPPED* = 0'u8
   MQB_MESSAGE_KEPT* = 1'u8
+  MQB_MESSAGE_REPLACED* = 2'u8
   MQB_DELIVERY_IDEMPOTENT_SINK* = 1'u8
   MQB_DELIVERY_ACKNOWLEDGES* = 2'u8
   MQB_DELIVERY_REQUIRES_FULL_REPLAY* = 4'u8
@@ -69,7 +71,7 @@ const
   MQB_LOG_TRACE* = 5'u8
 
   MQB_VTABLE_SIZE_V1_4* = 43 * sizeof(uint)
-  MQB_VTABLE_SIZE_V1_5* = 45 * sizeof(uint)
+  MQB_VTABLE_SIZE_V1_5* = 46 * sizeof(uint)
   MQB_HOST_VTABLE_SIZE_V1_2* = 5 * sizeof(uint)
 
 type
@@ -200,6 +202,10 @@ type
                                    outp: ptr Handle, err: ptr MqbBuffer): MqbStatus {.cdecl, gcsafe, raises: [].}
     middlewareWrapPublisher*: proc (middleware: Handle, innerTable: ptr MqbPluginVTable, inner: Handle,
                                     outp: ptr Handle, err: ptr MqbBuffer): MqbStatus {.cdecl, gcsafe, raises: [].}
+    middlewareApplyAsync*: proc (middleware: Handle, messages: MsgArray, len: csize_t,
+                                 verdicts: ptr UncheckedArray[uint8], outResult: ptr Handle,
+                                 outReplaced: ptr MsgArray, err: ptr MqbBuffer,
+                                 completion: MqbCompletion): MqbStatus {.cdecl, gcsafe, raises: [].}
 
   mqb_batch_t* {.incompleteStruct.} = object
   mqb_caller_t* {.incompleteStruct.} = object

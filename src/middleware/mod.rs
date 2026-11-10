@@ -428,17 +428,29 @@ fn steps(middlewares: &[Middleware]) -> Vec<Step<'_>> {
 }
 
 /// The plugin that applies `run`, with the list as its config; the old error if none is installed.
+/// The map entry is preferred for a list it can run as a batch map.
 fn plugin_fallback(
     run: &[Middleware],
     route_name: &str,
     side: &str,
 ) -> Result<(Arc<dyn CustomMiddlewareFactory>, serde_json::Value)> {
     #[cfg(feature = "plugin")]
-    match custom_middleware_factory(BUILTIN_MIDDLEWARE_PLUGIN) {
-        Ok(factory) => return Ok((factory, serde_json::to_value(run)?)),
-        Err(error) => tracing::warn!(
-            "[middleware:{route_name}] no `{BUILTIN_MIDDLEWARE_PLUGIN}` plugin available: {error:#}"
-        ),
+    {
+        let config = serde_json::to_value(run)?;
+        if runs_as_map(run) {
+            match custom_middleware_factory(BUILTIN_MAP_MIDDLEWARE_PLUGIN) {
+                Ok(factory) => return Ok((factory, config)),
+                Err(error) => tracing::debug!(
+                    "[middleware:{route_name}] no `{BUILTIN_MAP_MIDDLEWARE_PLUGIN}` plugin, trying `{BUILTIN_MIDDLEWARE_PLUGIN}`: {error:#}"
+                ),
+            }
+        }
+        match custom_middleware_factory(BUILTIN_MIDDLEWARE_PLUGIN) {
+            Ok(factory) => return Ok((factory, config)),
+            Err(error) => tracing::warn!(
+                "[middleware:{route_name}] no `{BUILTIN_MIDDLEWARE_PLUGIN}` plugin available: {error:#}"
+            ),
+        }
     }
     Err(InvalidConfig(anyhow::anyhow!(
         "[middleware:{route_name}] Unsupported {side} middleware: {}",
@@ -449,6 +461,84 @@ fn plugin_fallback(
 
 /// The middleware name under which the `full` plugin applies a list of built-in middlewares.
 pub const BUILTIN_MIDDLEWARE_PLUGIN: &str = "builtin_middleware";
+
+/// Read access to a message, owned or lent, for evaluating a filter expression.
+pub trait MessageView {
+    fn payload(&self) -> &[u8];
+    fn get_metadata(&self, key: &str) -> Option<&str>;
+    fn metadata_iter(&self) -> impl Iterator<Item = (&str, &str)>;
+}
+
+impl MessageView for crate::CanonicalMessage {
+    fn payload(&self) -> &[u8] {
+        &self.payload
+    }
+
+    fn get_metadata(&self, key: &str) -> Option<&str> {
+        crate::CanonicalMessage::get_metadata(self, key)
+    }
+
+    fn metadata_iter(&self) -> impl Iterator<Item = (&str, &str)> {
+        crate::CanonicalMessage::metadata_iter(self)
+    }
+}
+
+/// A middleware list made only of `filter`s, evaluated on messages the caller borrows.
+#[doc(hidden)]
+pub struct Filters {
+    #[cfg(feature = "filter")]
+    predicates: Vec<filter::Predicate>,
+}
+
+impl Filters {
+    /// `None` unless every entry is a `filter` this build can run.
+    pub fn from_list(list: &[Middleware]) -> anyhow::Result<Option<Self>> {
+        #[cfg(feature = "filter")]
+        {
+            let mut predicates = Vec::with_capacity(list.len());
+            for middleware in list {
+                let Middleware::Filter(config) = middleware else {
+                    return Ok(None);
+                };
+                predicates.push(filter::Predicate::new(config)?);
+            }
+            Ok((!predicates.is_empty()).then_some(Self { predicates }))
+        }
+        #[cfg(not(feature = "filter"))]
+        {
+            let _ = list;
+            Ok(None)
+        }
+    }
+
+    /// Whether the message passes every filter.
+    pub fn matches(&self, message: &impl MessageView) -> anyhow::Result<bool> {
+        #[cfg(feature = "filter")]
+        for predicate in &self.predicates {
+            if !predicate.matches(message)? {
+                return Ok(false);
+            }
+        }
+        let _ = message;
+        Ok(true)
+    }
+}
+
+/// Like [`BUILTIN_MIDDLEWARE_PLUGIN`], for a list that only rewrites or drops messages; one
+/// plugin call per batch instead of several per endpoint call.
+pub const BUILTIN_MAP_MIDDLEWARE_PLUGIN: &str = "builtin_map_middleware";
+
+/// True if [`BUILTIN_MAP_MIDDLEWARE_PLUGIN`] can run the list: deduplication and aggregate
+/// act on the source's commit, which a batch map does not see.
+#[doc(hidden)]
+pub fn runs_as_map(list: &[Middleware]) -> bool {
+    !list.iter().any(|middleware| {
+        matches!(
+            middleware,
+            Middleware::Deduplication(_) | Middleware::Aggregate(_)
+        )
+    })
+}
 
 /// Says which Cargo feature a middleware this build cannot apply needs.
 #[allow(dead_code)]

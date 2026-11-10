@@ -20,6 +20,7 @@ use zen_expression::{compile_expression, Expression, Variable};
 
 use super::deferred_commit::{run_all, DeferredCommits};
 use super::raw_json::RawPairs;
+use super::MessageView;
 use crate::models::InputErrorPolicy;
 use crate::traits::{
     BatchCommitFunc, BoxFuture, CommitFunc, ConsumerError, EndpointStatus, MessageConsumer,
@@ -31,6 +32,30 @@ use crate::CanonicalMessage;
 ///
 /// It shadows a payload field of the same name.
 const METADATA_PREFIX: &str = "meta";
+
+/// A `filter` middleware evaluated on a message the caller only borrows.
+pub(crate) struct Predicate {
+    filter: CompiledFilter,
+    on_error: InputErrorPolicy,
+}
+
+impl Predicate {
+    pub fn new(config: &crate::models::FilterMiddleware) -> anyhow::Result<Self> {
+        Ok(Self {
+            filter: CompiledFilter::new(&config.expression)
+                .map_err(|e| anyhow!("invalid filter expression: {e:#}"))?,
+            on_error: config.on_error,
+        })
+    }
+
+    /// Whether the message passes; `on_error` decides for one the expression cannot read.
+    pub fn matches(&self, message: &impl MessageView) -> anyhow::Result<bool> {
+        let matched = self
+            .filter
+            .matches_with_context(message, &mut FilterContext::new());
+        keep_or_fail(matched, self.on_error)
+    }
+}
 
 /// A compiled predicate over a message's payload and metadata.
 pub(crate) struct CompiledFilter {
@@ -238,9 +263,9 @@ impl FastPredicate {
 
     /// Evaluates from the record's top-level spans, so only the fields the predicate
     /// actually names are ever parsed.
-    fn evaluate_spans(
+    fn evaluate_spans<M: MessageView>(
         &self,
-        message: &CanonicalMessage,
+        message: &M,
         pairs: &[(&str, &serde_json::value::RawValue)],
         warn: &mut dyn FnMut(&str),
     ) -> Option<bool> {
@@ -257,17 +282,16 @@ impl FastPredicate {
         }
     }
 
-    fn evaluate_term_from_spans(
+    fn evaluate_term_from_spans<M: MessageView>(
         term: &FastTerm,
-        message: &CanonicalMessage,
+        message: &M,
         pairs: &[(&str, &serde_json::value::RawValue)],
         warn: &mut dyn FnMut(&str),
     ) -> Option<bool> {
         if let Some(key) = term.metadata_key() {
             let reading = message
-                .metadata
-                .get(key)
-                .map_or(Reading::Absent, |value| Reading::Text(value));
+                .get_metadata(key)
+                .map_or(Reading::Absent, Reading::Text);
             if reading.is_unusable() {
                 warn(&format!("{METADATA_PREFIX}.{key}"));
             }
@@ -328,11 +352,11 @@ impl FilterContext {
         }
     }
 
-    fn load_payload(&mut self, message: &CanonicalMessage) -> anyhow::Result<()> {
+    fn load_payload<M: MessageView>(&mut self, message: &M) -> anyhow::Result<()> {
         if self.payload_loaded {
             return Ok(());
         }
-        let mut document: Value = serde_json::from_slice(message.payload.as_ref())
+        let mut document: Value = serde_json::from_slice(message.payload())
             .context("filter requires a structured JSON object payload")?;
         let object = document
             .as_object_mut()
@@ -349,7 +373,7 @@ impl FilterContext {
         Ok(())
     }
 
-    fn add_metadata(&mut self, message: &CanonicalMessage, keys: &[String], all: bool) {
+    fn add_metadata<M: MessageView>(&mut self, message: &M, keys: &[String], all: bool) {
         if keys.is_empty() && !all {
             return;
         }
@@ -365,15 +389,14 @@ impl FilterContext {
         // Overwrites: `meta` shadows a payload field of the same name, and re-inserting
         // the same message's metadata on a reused context is idempotent.
         if all {
-            for (key, value) in &message.metadata {
-                meta.insert(key.clone(), Value::String(value.clone()));
+            for (key, value) in message.metadata_iter() {
+                meta.insert(key.to_owned(), Value::String(value.to_owned()));
             }
         } else {
             for key in keys {
                 let value = message
-                    .metadata
-                    .get(key)
-                    .map_or(Value::Null, |value| Value::String(value.clone()));
+                    .get_metadata(key)
+                    .map_or(Value::Null, |value| Value::String(value.to_owned()));
                 meta.insert(key.clone(), value);
             }
         }
@@ -433,9 +456,9 @@ impl CompiledFilter {
         self.matches_with_context(message, &mut FilterContext::new())
     }
 
-    pub(crate) fn matches_with_context(
+    pub(crate) fn matches_with_context<M: MessageView>(
         &self,
-        message: &CanonicalMessage,
+        message: &M,
         context: &mut FilterContext,
     ) -> anyhow::Result<bool> {
         if let Some(predicate) = &self.fast_predicate {
@@ -443,7 +466,7 @@ impl CompiledFilter {
                 let mut warn = |field: &str| self.warn_unusable_field(field);
                 // A metadata-only predicate must not require the payload to be JSON.
                 let decided = if self.fast_reads_payload {
-                    match serde_json::from_slice(&message.payload) {
+                    match serde_json::from_slice(message.payload()) {
                         Ok(RawPairs(pairs)) => predicate.evaluate_spans(message, &pairs, &mut warn),
                         Err(_) => None,
                     }
@@ -473,7 +496,7 @@ impl CompiledFilter {
         }
 
         for key in &self.metadata_keys {
-            if !message.metadata.contains_key(key) {
+            if message.get_metadata(key).is_none() {
                 has_unusable_field = true;
                 self.warn_unusable_field(&format!("{METADATA_PREFIX}.{key}"));
             }
@@ -1252,17 +1275,11 @@ impl MessagePublisher for FilterPublisher {
 mod tests {
     use super::*;
     use bytes::Bytes;
-    use std::collections::HashMap;
 
     fn message(payload: &str, metadata: &[(&str, &str)]) -> CanonicalMessage {
-        CanonicalMessage {
-            message_id: 1,
-            payload: Bytes::from(payload.to_string()),
-            metadata: metadata
-                .iter()
-                .map(|(k, v)| (k.to_string(), v.to_string()))
-                .collect::<HashMap<_, _>>(),
-        }
+        let mut message = CanonicalMessage::new_bytes(Bytes::from(payload.to_string()), Some(1));
+        message.extend_metadata(metadata.iter().copied());
+        message
     }
 
     #[test]

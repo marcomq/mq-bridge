@@ -20,6 +20,7 @@ header = """
  *  - Every function pointer in the table must be non-null, including ones the
  *    plugin does not support: point those at a stub returning
  *    MQB_ERR_UNSUPPORTED (or doing nothing, for the *_free entries).
+ *    The one exception is middleware_apply_async, which may be NULL.
  *  - Host -> plugin data (arguments) is borrowed for the call only; copy what
  *    you keep. Plugin -> host data stays valid until its handle is freed.
  *    middleware_apply's output may point into its input.
@@ -50,7 +51,7 @@ trailer = """
 #define MQB_VTABLE_SIZE_V1_2 (MQB_VTABLE_SIZE_V1_1 + 11 * sizeof(size_t))
 #define MQB_VTABLE_SIZE_V1_3 (MQB_VTABLE_SIZE_V1_2 + sizeof(size_t))
 #define MQB_VTABLE_SIZE_V1_4 (MQB_VTABLE_SIZE_V1_3 + sizeof(size_t))
-#define MQB_VTABLE_SIZE_V1_5 (MQB_VTABLE_SIZE_V1_4 + 2 * sizeof(size_t))
+#define MQB_VTABLE_SIZE_V1_5 (MQB_VTABLE_SIZE_V1_4 + 3 * sizeof(size_t))
 #define MQB_HOST_VTABLE_SIZE_V1_2 (5 * sizeof(size_t))
 
 #if defined(_WIN32)

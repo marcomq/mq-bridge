@@ -95,7 +95,7 @@ impl MessagePublisher for StaticEndpointPublisher {
         // response these become headers (e.g. `content-type`), so the server
         // emits them instead of defaulting to `application/octet-stream`.
         for (key, value) in &self.metadata {
-            response_msg.metadata.insert(key.clone(), value.clone());
+            response_msg.set_metadata(key.clone(), value.clone());
         }
         trace!(
             message_id = %format!("{:032x}", response_msg.message_id),
@@ -179,7 +179,7 @@ impl MessageConsumer for StaticRequestConsumer {
             return Err(ConsumerError::EndOfStream);
         }
         let mut message = CanonicalMessage::new_bytes(self.next_payload(), None);
-        message.metadata = self.metadata.clone();
+        message = message.with_metadata(self.metadata.clone());
         trace!(message_id = %format!("{:032x}", message.message_id), "Producing static message");
         let commit = Box::new(|_disposition: MessageDisposition| {
             Box::pin(async { Ok(()) }) as BoxFuture<'static, anyhow::Result<()>>
@@ -199,7 +199,7 @@ impl MessageConsumer for StaticRequestConsumer {
         let mut messages = Vec::with_capacity(_max_messages);
         for _ in 0.._max_messages {
             let mut message = CanonicalMessage::new_bytes(self.next_payload(), None);
-            message.metadata = self.metadata.clone();
+            message = message.with_metadata(self.metadata.clone());
             messages.push(message);
         }
         // For a static consumer, committing is a no-op, so we provide a simple async no-op closure.
@@ -266,16 +266,10 @@ mod tests {
         // Raw payload: no JSON quoting.
         assert_eq!(response_msg.payload.as_ref(), b"Hello, World!");
         assert_eq!(
-            response_msg
-                .metadata
-                .get("content-type")
-                .map(String::as_str),
+            response_msg.get_metadata("content-type"),
             Some("text/plain")
         );
-        assert_eq!(
-            response_msg.metadata.get("server").map(String::as_str),
-            Some("mq-bridge")
-        );
+        assert_eq!(response_msg.get_metadata("server"), Some("mq-bridge"));
     }
 
     #[tokio::test]

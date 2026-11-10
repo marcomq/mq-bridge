@@ -30,9 +30,8 @@ fn change_event_source_metadata_is_opt_in_and_orders_by_cluster_time() {
     )
     .expect("event carries a payload");
     assert!(!off
-        .metadata
-        .keys()
-        .any(|key| crate::canonical_message::is_source_metadata_key(key)));
+        .metadata_iter()
+        .any(|(key, _)| crate::canonical_message::is_source_metadata_key(key)));
 
     let on = super::readers::MongoDbChangeStreamReader::event_to_message(
         &event,
@@ -42,26 +41,17 @@ fn change_event_source_metadata_is_opt_in_and_orders_by_cluster_time() {
     )
     .expect("event carries a payload");
     assert_eq!(
-        on.metadata
-            .get("mqb.src.mongodb_namespace")
-            .map(String::as_str),
+        on.get_metadata("mqb.src.mongodb_namespace"),
         Some("shop.orders")
     );
     // (seconds << 32) | increment — the server's own oplog ordering.
     assert_eq!(
-        on.metadata
-            .get("mqb.src.mongodb_cluster_time")
-            .map(String::as_str),
+        on.get_metadata("mqb.src.mongodb_cluster_time"),
         Some(((1_700_000_000u64 << 32) | 3).to_string()).as_deref()
     );
-    assert!(on.metadata.contains_key("mqb.src.mongodb_resume_token"));
+    assert!(on.has_metadata("mqb.src.mongodb_resume_token"));
     // First change seen at this cluster time.
-    assert_eq!(
-        on.metadata
-            .get("mqb.src.mongodb_ordinal")
-            .map(String::as_str),
-        Some("0")
-    );
+    assert_eq!(on.get_metadata("mqb.src.mongodb_ordinal"), Some("0"));
 
     // A second change in the same transaction gets the next ordinal, so an idempotent
     // sink can name them as one contiguous range instead of colliding.
@@ -72,12 +62,7 @@ fn change_event_source_metadata_is_opt_in_and_orders_by_cluster_time() {
         &ordinals,
     )
     .expect("event carries a payload");
-    assert_eq!(
-        next.metadata
-            .get("mqb.src.mongodb_ordinal")
-            .map(String::as_str),
-        Some("1")
-    );
+    assert_eq!(next.get_metadata("mqb.src.mongodb_ordinal"), Some("1"));
 }
 
 #[test]
@@ -170,24 +155,15 @@ fn snapshot_source_metadata_uses_namespace_and_document_id() {
     );
 
     assert_eq!(
-        message
-            .metadata
-            .get("mqb.src.mongodb_namespace")
-            .map(String::as_str),
+        message.get_metadata("mqb.src.mongodb_namespace"),
         Some("shop.orders")
     );
     assert_eq!(
-        message
-            .metadata
-            .get("mqb.src.mongodb_document_id")
-            .map(String::as_str),
+        message.get_metadata("mqb.src.mongodb_document_id"),
         Some("\"order-42\"")
     );
     assert_eq!(
-        message
-            .metadata
-            .get("mqb.src.mongodb_snapshot_index")
-            .map(String::as_str),
+        message.get_metadata("mqb.src.mongodb_snapshot_index"),
         Some("0")
     );
 }
@@ -201,21 +177,13 @@ fn parse_document_takes_wrapped_fields_and_falls_back_otherwise() {
     })
     .expect("wrapped document parses");
     assert_eq!(msg.payload.as_ref(), b"hello");
-    assert_eq!(
-        msg.metadata.get("kind").map(String::as_str),
-        Some("greeting")
-    );
+    assert_eq!(msg.get_metadata("kind"), Some("greeting"));
     assert_eq!(msg.message_id, u128::from_be_bytes(id.bytes()));
 
     // Foreign document (no `payload`): serialized whole, marked raw.
     let raw =
         parse_mongodb_document(doc! { "_id": 7, "name": "ada" }).expect("foreign document parses");
-    assert_eq!(
-        raw.metadata
-            .get("mq_bridge.original_format")
-            .map(String::as_str),
-        Some("raw")
-    );
+    assert_eq!(raw.get_metadata("mq_bridge.original_format"), Some("raw"));
     assert!(serde_json::from_slice::<serde_json::Value>(&raw.payload).unwrap()["name"] == "ada");
 
     // Non-string metadata values still take the raw path, document intact.
@@ -297,9 +265,8 @@ fn resume_token_encode_decode_roundtrips() {
 #[test]
 fn message_to_document_strips_source_metadata_but_keeps_user_keys() {
     let mut msg = CanonicalMessage::new(b"hello".to_vec(), None);
-    msg.metadata.insert("kind".to_string(), "order".to_string());
-    msg.metadata
-        .insert("mqb.src.kafka_offset".to_string(), "42".to_string());
+    msg.set_metadata("kind", "order");
+    msg.set_metadata("mqb.src.kafka_offset", "42");
 
     let doc = message_to_document(&msg, &MongoDbFormat::Text, None, None).unwrap();
     let metadata = doc.get_document("metadata").unwrap();
@@ -375,8 +342,7 @@ fn message_to_document_id_field_missing_or_non_json_errors() {
 #[test]
 fn message_to_document_id_template_uses_replay_stable_metadata() {
     let mut msg = CanonicalMessage::new(br#"{"order_id":"A-1"}"#.to_vec(), None);
-    msg.metadata
-        .insert("mqb.id".to_string(), "order-A-1".to_string());
+    msg.set_metadata("mqb.id", "order-A-1");
     let template = CompiledTemplate::compile("${metadata:mqb.id}", None).unwrap();
 
     let doc = message_to_document(&msg, &MongoDbFormat::Json, None, Some(&template)).unwrap();
@@ -415,10 +381,7 @@ fn tag_outcome_on_returns_tagged_response() {
         match tag_outcome(true, msg, outcome) {
             Sent::Response(m) => {
                 assert_eq!(m.message_id, id);
-                assert_eq!(
-                    m.metadata.get(OUTCOME_KEY).map(String::as_str),
-                    Some(outcome)
-                );
+                assert_eq!(m.get_metadata(OUTCOME_KEY), Some(outcome));
             }
             Sent::Ack => panic!("expected Response when report_outcome is on"),
         }
@@ -595,19 +558,13 @@ async fn mongo_find_answers_with_the_first_match() {
     };
     let doc: serde_json::Value = serde_json::from_slice(&hit.payload).unwrap();
     assert_eq!(doc["name"], "Ada");
-    assert_eq!(
-        hit.metadata.get("mongodb.found").map(String::as_str),
-        Some("true")
-    );
+    assert_eq!(hit.get_metadata("mongodb.found"), Some("true"));
 
     let Sent::Response(miss) = finder.send(ask("nobody")).await.unwrap() else {
         panic!("find must answer with a response");
     };
     assert!(miss.payload.is_empty());
-    assert_eq!(
-        miss.metadata.get("mongodb.found").map(String::as_str),
-        Some("false")
-    );
+    assert_eq!(miss.get_metadata("mongodb.found"), Some("false"));
 
     // Batched `$in`: `name` is not unique, so each key keeps only its first document.
     writer
@@ -763,10 +720,7 @@ async fn mongo_aggregate_query_answers_per_message_and_per_batch() {
         panic!("aggregate_query must answer with a response");
     };
     assert!(miss.payload.is_empty());
-    assert_eq!(
-        miss.metadata.get("mongodb.found").map(String::as_str),
-        Some("false")
-    );
+    assert_eq!(miss.get_metadata("mongodb.found"), Some("false"));
 
     // Batched: `$group` drops `customer`, so results match by `_id`.
     let batched =
@@ -871,10 +825,7 @@ async fn mongo_update_upserts_and_answers_with_the_new_document() {
         };
         let doc: serde_json::Value = serde_json::from_slice(&r.payload).unwrap();
         assert_eq!(counter(Some(doc)), expected);
-        assert_eq!(
-            r.metadata.get("mongodb.found").map(String::as_str),
-            Some("true")
-        );
+        assert_eq!(r.get_metadata("mongodb.found"), Some("true"));
     }
 }
 

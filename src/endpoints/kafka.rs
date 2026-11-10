@@ -822,8 +822,12 @@ impl MessageConsumer for KafkaConsumer {
         let tpl = offsets_to_tpl(&last_offsets)?;
         let canonical_message = item.message;
 
-        let reply_topic = canonical_message.metadata.get("reply_to").cloned();
-        let correlation_id = canonical_message.metadata.get("correlation_id").cloned();
+        let reply_topic = canonical_message
+            .get_metadata("reply_to")
+            .map(str::to_owned);
+        let correlation_id = canonical_message
+            .get_metadata("correlation_id")
+            .map(str::to_owned);
 
         // The commit function for Kafka needs to commit the offset of the processed message.
         // We can't move `self.consumer` into the closure, but we can commit by position.
@@ -1012,7 +1016,7 @@ fn message_headers(message: &CanonicalMessage) -> OwnedHeaders {
         key: "mq_bridge.message_id",
         value: Some(format!("{:032x}", message.message_id).as_bytes()),
     });
-    for (key, value) in &message.metadata {
+    for (key, value) in message.metadata_iter() {
         // The tombstone flag is our own marker for a null value; it is re-expressed by
         // omitting the payload, not by shipping a header the next consumer would keep.
         if key == KAFKA_TOMBSTONE_KEY || crate::canonical_message::is_source_metadata_key(key) {
@@ -1030,7 +1034,7 @@ fn message_headers(message: &CanonicalMessage) -> OwnedHeaders {
 /// when set and present, otherwise the message_id as big-endian bytes.
 fn record_key(partition_key: Option<&str>, message: &CanonicalMessage) -> Vec<u8> {
     partition_key
-        .and_then(|f| message.metadata.get(f))
+        .and_then(|f| message.get_metadata(f))
         .map(|v| v.as_bytes().to_vec())
         .unwrap_or_else(|| message.message_id.to_be_bytes().to_vec())
 }
@@ -1039,8 +1043,7 @@ fn record_key(partition_key: Option<&str>, message: &CanonicalMessage) -> Vec<u8
 /// with an empty payload would write a zero-length value, which does not delete the key.
 fn is_tombstone(message: &CanonicalMessage) -> bool {
     message
-        .metadata
-        .get(KAFKA_TOMBSTONE_KEY)
+        .get_metadata(KAFKA_TOMBSTONE_KEY)
         .is_some_and(|v| v == "true")
 }
 
@@ -1541,14 +1544,12 @@ fn to_canonical_with_topic_id<M: Message>(
                     String::from_utf8_lossy(header.value.unwrap_or_default()).to_string(),
                 );
             }
-            canonical_message.metadata = metadata;
+            canonical_message = canonical_message.with_metadata(metadata);
         }
     }
 
     if tombstone {
-        canonical_message
-            .metadata
-            .insert(KAFKA_TOMBSTONE_KEY.to_string(), "true".to_string());
+        canonical_message.set_metadata(KAFKA_TOMBSTONE_KEY, "true");
     }
 
     Ok(canonical_message)
@@ -1559,18 +1560,9 @@ fn to_canonical_with_source_metadata<M: Message>(
     topic_in_id: bool,
 ) -> anyhow::Result<CanonicalMessage> {
     let mut canonical_message = to_canonical_with_topic_id(message, topic_in_id)?;
-    canonical_message.metadata.insert(
-        "mqb.src.kafka_topic".to_string(),
-        message.topic().to_string(),
-    );
-    canonical_message.metadata.insert(
-        "mqb.src.kafka_partition".to_string(),
-        message.partition().to_string(),
-    );
-    canonical_message.metadata.insert(
-        "mqb.src.kafka_offset".to_string(),
-        message.offset().to_string(),
-    );
+    canonical_message.set_metadata("mqb.src.kafka_topic", message.topic().to_string());
+    canonical_message.set_metadata("mqb.src.kafka_partition", message.partition().to_string());
+    canonical_message.set_metadata("mqb.src.kafka_offset", message.offset().to_string());
     Ok(canonical_message)
 }
 
@@ -2077,8 +2069,10 @@ fn assemble_batch(
         match item {
             Ok(item) => {
                 parts.reply_infos.push((
-                    item.message.metadata.get("reply_to").cloned(),
-                    item.message.metadata.get("correlation_id").cloned(),
+                    item.message.get_metadata("reply_to").map(str::to_owned),
+                    item.message
+                        .get_metadata("correlation_id")
+                        .map(str::to_owned),
                 ));
                 parts.messages.push(item.message);
                 record_offset(&mut parts.offsets, &item.topic, item.partition, item.offset);
@@ -2358,12 +2352,8 @@ mod tests {
     #[test]
     fn test_publisher_drops_source_metadata_headers() {
         let mut message = CanonicalMessage::new(b"payload".to_vec(), None);
-        message
-            .metadata
-            .insert("tenant".to_string(), "acme".to_string());
-        message
-            .metadata
-            .insert("mqb.src.kafka_offset".to_string(), "42".to_string());
+        message.set_metadata("tenant", "acme");
+        message.set_metadata("mqb.src.kafka_offset", "42");
 
         let headers = message_headers(&message);
 
@@ -2449,13 +2439,7 @@ mod tests {
         let canonical = to_canonical(&msg).expect("a tombstone must not fail the batch");
 
         assert!(canonical.payload.is_empty());
-        assert_eq!(
-            canonical
-                .metadata
-                .get(KAFKA_TOMBSTONE_KEY)
-                .map(String::as_str),
-            Some("true")
-        );
+        assert_eq!(canonical.get_metadata(KAFKA_TOMBSTONE_KEY), Some("true"));
     }
 
     #[test]
@@ -2465,7 +2449,7 @@ mod tests {
         let canonical = to_canonical(&msg).unwrap();
 
         assert_eq!(canonical.payload.as_ref(), b"{\"a\":1}");
-        assert!(!canonical.metadata.contains_key(KAFKA_TOMBSTONE_KEY));
+        assert!(!canonical.has_metadata(KAFKA_TOMBSTONE_KEY));
     }
 
     /// A tombstone keeps its headers: the flag is added to the metadata the headers
@@ -2480,11 +2464,8 @@ mod tests {
 
         let canonical = to_canonical(&msg).unwrap();
 
-        assert_eq!(
-            canonical.metadata.get("op").map(String::as_str),
-            Some("delete")
-        );
-        assert!(canonical.metadata.contains_key(KAFKA_TOMBSTONE_KEY));
+        assert_eq!(canonical.get_metadata("op"), Some("delete"));
+        assert!(canonical.has_metadata(KAFKA_TOMBSTONE_KEY));
     }
 
     /// Round trip: what the consumer flagged, the publisher turns back into a null value.
@@ -2568,14 +2549,8 @@ mod tests {
     fn test_assemble_batch_extracts_reply_info() {
         let (tx, rx) = prefetch_channel(8);
         let mut with_reply = prefetched("t", 0, 1);
-        with_reply
-            .message
-            .metadata
-            .insert("reply_to".to_string(), "inbox.1".to_string());
-        with_reply
-            .message
-            .metadata
-            .insert("correlation_id".to_string(), "abc".to_string());
+        with_reply.message.set_metadata("reply_to", "inbox.1");
+        with_reply.message.set_metadata("correlation_id", "abc");
         tx.try_send(Ok(with_reply)).unwrap();
 
         let parts = assemble_batch(Ok(prefetched("t", 0, 0)), &rx, 16);
@@ -3205,8 +3180,7 @@ mod tests {
     #[test]
     fn test_record_key_selector() {
         let mut msg = CanonicalMessage::new(b"payload".to_vec(), None);
-        msg.metadata
-            .insert("pk".to_string(), "public.orders".to_string());
+        msg.set_metadata("pk", "public.orders");
 
         // Configured field present: its value is the key.
         assert_eq!(record_key(Some("pk"), &msg), b"public.orders".to_vec());

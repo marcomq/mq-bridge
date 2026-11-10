@@ -153,7 +153,7 @@ async fn http_publisher_pass_through_status_is_opt_in() {
             panic!("pass-through status returned Ack");
         };
         assert_eq!(
-            response.metadata.get(HTTP_STATUS_CODE).map(String::as_str),
+            response.get_metadata(HTTP_STATUS_CODE),
             Some(expected_status)
         );
         assert_eq!(response.get_payload_str(), expected_status);
@@ -473,10 +473,7 @@ async fn test_http_consumer_publisher_integration() {
     };
     assert_eq!(response.payload, b"response_payload".to_vec());
     // The publisher exposes the response status alongside the headers/version.
-    assert_eq!(
-        response.metadata.get(HTTP_STATUS_CODE).map(String::as_str),
-        Some("200")
-    );
+    assert_eq!(response.get_metadata(HTTP_STATUS_CODE), Some("200"));
 }
 
 #[tokio::test]
@@ -574,41 +571,19 @@ async fn test_http_receive_streamable_sse_items_share_correlation_id() {
 
         let first_correlation = first
             .message
-            .metadata
-            .get("correlation_id")
-            .cloned()
+            .get_metadata("correlation_id")
+            .map(str::to_owned)
             .expect("first correlation_id");
         let second_correlation = second
             .message
-            .metadata
-            .get("correlation_id")
-            .cloned()
+            .get_metadata("correlation_id")
+            .map(str::to_owned)
             .expect("second correlation_id");
         assert_eq!(first_correlation, second_correlation);
-        assert_eq!(
-            first
-                .message
-                .metadata
-                .get("http_stream_index")
-                .map(String::as_str),
-            Some("0")
-        );
-        assert_eq!(
-            second
-                .message
-                .metadata
-                .get("http_stream_index")
-                .map(String::as_str),
-            Some("1")
-        );
-        assert_eq!(
-            second.message.metadata.get("sse_id").map(String::as_str),
-            Some("evt-2")
-        );
-        assert_eq!(
-            second.message.metadata.get("sse_event").map(String::as_str),
-            Some("update")
-        );
+        assert_eq!(first.message.get_metadata("http_stream_index"), Some("0"));
+        assert_eq!(second.message.get_metadata("http_stream_index"), Some("1"));
+        assert_eq!(second.message.get_metadata("sse_id"), Some("evt-2"));
+        assert_eq!(second.message.get_metadata("sse_event"), Some("update"));
 
         let first_reply = CanonicalMessage::from_vec("reply-first");
         let second_reply = CanonicalMessage::from_vec("reply-second");
@@ -640,7 +615,7 @@ async fn test_http_receive_streamable_sse_items_share_correlation_id() {
     assert!(body.contains("data: reply-first"));
     assert!(body.contains("data: reply-second"));
     assert_eq!(
-        response.metadata.get("content-type").map(String::as_str),
+        response.get_metadata("content-type"),
         Some("text/event-stream")
     );
 }
@@ -715,29 +690,11 @@ async fn test_http_publisher_stream_response_to_sink() {
         .expect("first streamed response");
     assert_eq!(first.message.get_payload_str(), "alpha");
     assert_eq!(
-        first
-            .message
-            .metadata
-            .get("correlation_id")
-            .map(String::as_str),
+        first.message.get_metadata("correlation_id"),
         Some("llm-stream-1")
     );
-    assert_eq!(
-        first
-            .message
-            .metadata
-            .get("http_stream_index")
-            .map(String::as_str),
-        Some("0")
-    );
-    assert_eq!(
-        first
-            .message
-            .metadata
-            .get("http_stream_end")
-            .map(String::as_str),
-        Some("false")
-    );
+    assert_eq!(first.message.get_metadata("http_stream_index"), Some("0"));
+    assert_eq!(first.message.get_metadata("http_stream_end"), Some("false"));
     (first.commit)(MessageDisposition::Ack).await.unwrap();
 
     let second = sink_consumer
@@ -745,36 +702,14 @@ async fn test_http_publisher_stream_response_to_sink() {
         .await
         .expect("second streamed response");
     assert_eq!(second.message.get_payload_str(), "beta");
-    assert_eq!(
-        second.message.metadata.get("sse_event").map(String::as_str),
-        Some("delta")
-    );
-    assert_eq!(
-        second
-            .message
-            .metadata
-            .get("http_stream_index")
-            .map(String::as_str),
-        Some("1")
-    );
+    assert_eq!(second.message.get_metadata("sse_event"), Some("delta"));
+    assert_eq!(second.message.get_metadata("http_stream_index"), Some("1"));
     (second.commit)(MessageDisposition::Ack).await.unwrap();
 
     let end = sink_consumer.receive().await.expect("stream end marker");
     assert!(end.message.payload.is_empty());
-    assert_eq!(
-        end.message
-            .metadata
-            .get("http_stream_end")
-            .map(String::as_str),
-        Some("true")
-    );
-    assert_eq!(
-        end.message
-            .metadata
-            .get("http_stream_index")
-            .map(String::as_str),
-        Some("2")
-    );
+    assert_eq!(end.message.get_metadata("http_stream_end"), Some("true"));
+    assert_eq!(end.message.get_metadata("http_stream_index"), Some("2"));
     (end.commit)(MessageDisposition::Ack).await.unwrap();
 }
 
@@ -899,15 +834,10 @@ async fn test_http_publisher_stream_response_to_stream_buffer_isolates_parallel_
         let received = consumer_a.receive().await.expect("stream-a item");
         let is_end = received
             .message
-            .metadata
-            .get("http_stream_end")
+            .get_metadata("http_stream_end")
             .is_some_and(|value| value == "true");
         assert_eq!(
-            received
-                .message
-                .metadata
-                .get("correlation_id")
-                .map(String::as_str),
+            received.message.get_metadata("correlation_id"),
             Some("stream-a")
         );
         if !is_end {
@@ -924,15 +854,10 @@ async fn test_http_publisher_stream_response_to_stream_buffer_isolates_parallel_
         let received = consumer_b.receive().await.expect("stream-b item");
         let is_end = received
             .message
-            .metadata
-            .get("http_stream_end")
+            .get_metadata("http_stream_end")
             .is_some_and(|value| value == "true");
         assert_eq!(
-            received
-                .message
-                .metadata
-                .get("correlation_id")
-                .map(String::as_str),
+            received.message.get_metadata("correlation_id"),
             Some("stream-b")
         );
         if !is_end {
@@ -1019,27 +944,15 @@ async fn test_http_publisher_stream_response_to_stream_buffer_uses_message_id_fa
     let item = consumer.receive().await.expect("fallback stream item");
     assert_eq!(item.message.get_payload_str(), "fallback");
     assert_eq!(
-        item.message
-            .metadata
-            .get("correlation_id")
-            .map(String::as_str),
+        item.message.get_metadata("correlation_id"),
         Some(expected_correlation_id.as_str())
     );
     (item.commit)(MessageDisposition::Ack).await.unwrap();
 
     let end = consumer.receive().await.expect("fallback end marker");
+    assert_eq!(end.message.get_metadata("http_stream_end"), Some("true"));
     assert_eq!(
-        end.message
-            .metadata
-            .get("http_stream_end")
-            .map(String::as_str),
-        Some("true")
-    );
-    assert_eq!(
-        end.message
-            .metadata
-            .get("correlation_id")
-            .map(String::as_str),
+        end.message.get_metadata("correlation_id"),
         Some(expected_correlation_id.as_str())
     );
     (end.commit)(MessageDisposition::Ack).await.unwrap();
@@ -1604,12 +1517,9 @@ async fn test_http_route_handler_response_uses_inline_path() {
     ));
     let handler = |mut msg: CanonicalMessage| async move {
         msg.payload = Bytes::from_static(b"handled-response");
-        msg.metadata
-            .insert("content-type".to_string(), "text/plain".to_string());
-        msg.metadata
-            .insert("x-response-id".to_string(), "resp-1".to_string());
-        msg.metadata
-            .insert("http_status_code".to_string(), "201".to_string());
+        msg.set_metadata("content-type", "text/plain");
+        msg.set_metadata("x-response-id", "resp-1");
+        msg.set_metadata("http_status_code", "201");
         Ok(Handled::Publish(msg))
     };
     output.handler = Some(std::sync::Arc::new(handler));
@@ -1666,8 +1576,7 @@ async fn test_http_route_handler_content_type_matching_request_is_not_suppressed
     ));
     let handler = |mut msg: CanonicalMessage| async move {
         msg.payload = Bytes::from_static(b"42");
-        msg.metadata
-            .insert("content-type".to_string(), "text/plain".to_string());
+        msg.set_metadata("content-type", "text/plain");
         Ok(Handled::Publish(msg))
     };
     output.handler = Some(std::sync::Arc::new(handler));
@@ -1725,8 +1634,7 @@ async fn test_http_route_handler_with_buffer_uses_inline_path() {
         }));
     let handler = |mut msg: CanonicalMessage| async move {
         msg.payload = Bytes::from_static(b"handled-buffered");
-        msg.metadata
-            .insert("content-type".to_string(), "text/plain".to_string());
+        msg.set_metadata("content-type", "text/plain");
         Ok(Handled::Publish(msg))
     };
     output.handler = Some(std::sync::Arc::new(handler));
@@ -1860,13 +1768,9 @@ async fn test_http_consumers_share_listener_by_path() {
     });
 
     let mut alpha_message = CanonicalMessage::new(b"alpha".to_vec(), None);
-    alpha_message
-        .metadata
-        .insert("http_path".to_string(), "/alpha".to_string());
+    alpha_message.set_metadata("http_path", "/alpha");
     let mut beta_message = CanonicalMessage::new(b"beta".to_vec(), None);
-    beta_message
-        .metadata
-        .insert("http_path".to_string(), "/beta".to_string());
+    beta_message.set_metadata("http_path", "/beta");
 
     publisher.send(alpha_message).await.unwrap();
     publisher.send(beta_message).await.unwrap();
@@ -1961,7 +1865,8 @@ fn test_http_client(
 async fn handler_metadata_for_request_headers(headers: &[(&str, &str)]) -> HashMap<String, String> {
     handler_message_for_request(HttpConfig::default(), headers, Bytes::from_static(b"body"))
         .await
-        .metadata
+        .metadata_map()
+        .clone()
 }
 
 /// Sends one request to a consumer built from `base` and returns the message the handler sees.
@@ -2088,7 +1993,8 @@ async fn test_forward_headers_keeps_only_listed_headers() {
         Bytes::from_static(b"body"),
     )
     .await
-    .metadata;
+    .metadata_map()
+    .clone();
 
     assert_eq!(
         metadata.get("x-trace-id").map(String::as_str),
@@ -2119,7 +2025,7 @@ async fn test_forward_headers_still_decompresses_an_unlisted_content_encoding() 
         handler_message_for_request(config, &[("content-encoding", "gzip")], gzipped).await;
 
     assert_eq!(message.payload.as_ref(), b"hello");
-    assert!(!message.metadata.contains_key("content-encoding"));
+    assert!(!message.has_metadata("content-encoding"));
 }
 
 #[tokio::test]
@@ -2269,7 +2175,7 @@ async fn test_basic_auth_enforcement_is_unaffected_by_header_capture() {
         .unwrap();
     assert_eq!(accepted.status(), StatusCode::ACCEPTED);
 
-    let metadata = receive_task.await.unwrap().metadata;
+    let metadata = receive_task.await.unwrap().metadata_map().clone();
     assert_eq!(
         metadata
             .get("mqb.src.http_authorization")
@@ -2668,7 +2574,7 @@ async fn stream_response_into_sink(
             .await
             .unwrap_or_else(|_| panic!("no end marker; sent {sent:?}, got {items:?}"))
             .unwrap();
-        let metadata = &received.message.metadata;
+        let metadata = received.message.metadata_map();
         assert_eq!(
             metadata.get("http_stream_index").map(String::as_str),
             Some(items.len().to_string().as_str())
@@ -2928,7 +2834,7 @@ async fn proxied(
     .unwrap();
     let mut request = CanonicalMessage::from_vec("request");
     for (key, value) in metadata {
-        request.metadata.insert(key.to_string(), value.to_string());
+        request.set_metadata(key.to_string(), value.to_string());
     }
     match publisher.send(request).await? {
         Sent::Response(response) => Ok(response),
@@ -2950,7 +2856,7 @@ async fn a_decoded_upstream_response_is_not_labelled_as_encoded() {
     let addr = serve_host_echo().await;
     let response = proxied(addr, &[("accept-encoding", "gzip")]).await.unwrap();
     assert_eq!(response.get_payload_str(), addr.to_string());
-    assert_eq!(response.metadata.get("content-encoding"), None);
+    assert_eq!(response.get_metadata("content-encoding"), None);
 }
 
 #[tokio::test]
@@ -2968,7 +2874,7 @@ fn reply_metadata_that_is_no_header_does_not_fail_the_response() {
         ("not a header", "x"),
         ("x-kept", "yes"),
     ] {
-        reply.metadata.insert(key.to_string(), value.to_string());
+        reply.set_metadata(key.to_string(), value.to_string());
     }
     let response = make_response(
         crate::traits::MessageDisposition::Reply(reply),
@@ -2993,7 +2899,7 @@ struct RefusingSink {
 impl MessagePublisher for RefusingSink {
     async fn send(&self, message: CanonicalMessage) -> Result<Sent, PublisherError> {
         let mut taken = self.taken.lock().unwrap();
-        let is_end = message.metadata.get("http_stream_end").map(String::as_str) == Some("true");
+        let is_end = message.get_metadata("http_stream_end") == Some("true");
         if taken.len() >= 2 && !is_end {
             return Err(PublisherError::Retryable(anyhow::anyhow!("sink is full")));
         }

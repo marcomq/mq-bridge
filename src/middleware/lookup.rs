@@ -105,14 +105,14 @@ impl Entry {
                 let mut request = msg.clone();
                 // An incoming message must not steer an `http` lookup; only `metadata` may.
                 for key in ["http_method", "http_path", "http_query"] {
-                    request.metadata.remove(key);
+                    request.remove_metadata(key);
                 }
                 request
             }
         };
         for (key, template) in &self.metadata {
             let value = String::from_utf8_lossy(&template.render(Some(msg))).into_owned();
-            request.metadata.insert(key.clone(), value);
+            request.set_metadata(key.clone(), value);
         }
         request
     }
@@ -252,8 +252,7 @@ fn answer_payload(sent: Sent) -> Result<Option<Bytes>, PublisherError> {
         }
     };
     if let Some(status) = response
-        .metadata
-        .get(HTTP_STATUS_CODE)
+        .get_metadata(HTTP_STATUS_CODE)
         .and_then(|s| s.parse::<u16>().ok())
     {
         match status {
@@ -424,13 +423,11 @@ impl Lookup {
         let mut values = Vec::with_capacity(results.len());
         for (entry, found) in self.entries.iter().zip(results) {
             all_found &= found.is_some();
-            msg.metadata
-                .insert(entry.found_key.clone(), found.is_some().to_string());
+            msg.set_metadata(entry.found_key.clone(), found.is_some().to_string());
             let json = found.map_or_else(|| b"null".to_vec(), |found| found.to_vec());
             values.push((entry.into.as_slice(), json));
         }
-        msg.metadata
-            .insert(FOUND.to_string(), all_found.to_string());
+        msg.set_metadata(FOUND, all_found.to_string());
         match write_at(&msg.payload, values, "lookup") {
             Ok(bytes) => {
                 msg.payload = bytes.into();
@@ -449,8 +446,7 @@ fn replace(
         Ok(found) => found,
         Err(e) => return Err((msg, e)),
     };
-    msg.metadata
-        .insert(FOUND.to_string(), found.is_some().to_string());
+    msg.set_metadata(FOUND, found.is_some().to_string());
     msg.payload = found.unwrap_or_else(|| Bytes::from_static(b"null"));
     Ok(msg)
 }
@@ -719,10 +715,7 @@ into: customer.profile
             json!({"id": 1, "customer": {"profile": {"name": "user-1"}}})
         );
         assert_eq!(payload(&sent[1])["customer"]["profile"]["name"], "user-2");
-        assert_eq!(
-            sent[1].metadata.get(FOUND).map(String::as_str),
-            Some("true")
-        );
+        assert_eq!(sent[1].get_metadata(FOUND), Some("true"));
     }
 
     #[tokio::test]
@@ -736,10 +729,7 @@ into: customer.profile
             publisher.send(msg(json!({"id": 1}))).await.unwrap();
             let sent = channel.drain_messages();
             assert_eq!(payload(&sent[0]), json!({"id": 1, "user": null}), "{from}");
-            assert_eq!(
-                sent[0].metadata.get(FOUND).map(String::as_str),
-                Some("false")
-            );
+            assert_eq!(sent[0].get_metadata(FOUND), Some("false"));
         }
     }
 
@@ -781,7 +771,7 @@ entries:
             payload(&sent[0]),
             json!({"id": 1, "user": {"n": 1}, "features": {"device": null}})
         );
-        let meta = |k: &str| sent[0].metadata.get(k).map(String::as_str);
+        let meta = |k: &str| sent[0].get_metadata(k);
         assert_eq!(meta("lookup.user.found"), Some("true"));
         assert_eq!(meta("lookup.features.device.found"), Some("false"));
         assert_eq!(meta(FOUND), Some("false"));
@@ -809,13 +799,13 @@ into: $
         )
         .await;
         let mut incoming = CanonicalMessage::new(b"not json".to_vec(), None);
-        incoming.metadata.insert("tenant".into(), "acme".into());
+        incoming.set_metadata("tenant", "acme");
         let id = incoming.message_id;
         publisher.send(incoming).await.unwrap();
         let sent = channel.drain_messages();
         assert_eq!(payload(&sent[0]), json!({"for": "acme"}));
         assert_eq!(sent[0].message_id, id);
-        let meta = |k: &str| sent[0].metadata.get(k).map(String::as_str);
+        let meta = |k: &str| sent[0].get_metadata(k);
         assert_eq!(meta("tenant"), Some("acme"));
         assert_eq!(meta(FOUND), Some("true"));
 
@@ -827,10 +817,7 @@ into: $
         publisher.send(msg(json!({"id": 1}))).await.unwrap();
         let sent = channel.drain_messages();
         assert_eq!(payload(&sent[0]), Value::Null);
-        assert_eq!(
-            sent[0].metadata.get(FOUND).map(String::as_str),
-            Some("false")
-        );
+        assert_eq!(sent[0].get_metadata(FOUND), Some("false"));
 
         for (body, expected, found) in [
             ("plain text", json!("plain text"), "true"),
@@ -844,7 +831,7 @@ into: $
             publisher.send(msg(json!({"id": 1}))).await.unwrap();
             let sent = channel.drain_messages();
             assert_eq!(payload(&sent[0]), expected, "{body}");
-            assert_eq!(sent[0].metadata.get(FOUND).map(String::as_str), Some(found));
+            assert_eq!(sent[0].get_metadata(FOUND), Some(found));
         }
     }
 
@@ -1125,10 +1112,7 @@ entries:
         assert_eq!(from.calls.load(std::sync::atomic::Ordering::Relaxed), 1);
         assert_eq!(payload(&out[0])["user"], json!({"id": 1}));
         assert_eq!(payload(&out[1])["user"], Value::Null);
-        assert_eq!(
-            out[1].metadata.get(FOUND).map(String::as_str),
-            Some("false")
-        );
+        assert_eq!(out[1].get_metadata(FOUND), Some("false"));
         assert_eq!(payload(&out[2])["user"], json!({"id": 3}));
     }
 
@@ -1146,11 +1130,11 @@ entries:
             ("http_path", "/admin"),
             ("http_query", "x=1"),
         ] {
-            incoming.metadata.insert(k.into(), v.into());
+            incoming.set_metadata(k, v);
         }
-        incoming.metadata.insert("tenant".into(), "acme".into());
+        incoming.set_metadata("tenant", "acme");
         let request = entry.request(&incoming);
-        let meta = |k: &str| request.metadata.get(k).map(String::as_str);
+        let meta = |k: &str| request.get_metadata(k);
         assert_eq!(meta("http_path"), Some("/users/7"));
         assert_eq!(meta("http_method"), None);
         assert_eq!(meta("http_query"), None);

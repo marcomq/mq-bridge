@@ -25,6 +25,9 @@ mq-bridge = { version = "1.5.0", path = "../..", default-features = false, featu
 rustls = { version = "0.23", optional = true, default-features = false, features = ["std", "tls12", "logging"] }
 serde_json.workspace = true
 
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
 [features]
 default = ["full"]
 full = ["mq-bridge/full", "rustls-aws-lc"]

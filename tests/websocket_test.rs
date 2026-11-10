@@ -52,14 +52,8 @@ async fn websocket_endpoint_roundtrip() {
     assert_eq!(batch.messages.len(), 1);
     let message = batch.messages.pop().expect("one message");
     assert_eq!(message.get_payload_str(), "hello integration");
-    assert_eq!(
-        message.metadata.get("ws_message_type").map(String::as_str),
-        Some("text")
-    );
-    assert_eq!(
-        message.metadata.get("ws_path").map(String::as_str),
-        Some("/events")
-    );
+    assert_eq!(message.get_metadata("ws_message_type"), Some("text"));
+    assert_eq!(message.get_metadata("ws_path"), Some("/events"));
     (batch.commit)(vec![MessageDisposition::Ack])
         .await
         .expect("commit should succeed");
@@ -89,10 +83,7 @@ async fn websocket_endpoint_handles_binary_payloads() {
     assert_eq!(batch.messages.len(), 1);
     let message = batch.messages.pop().expect("one message");
     assert_eq!(message.payload.as_ref(), &[0, 1, 2, 3, 255]);
-    assert_eq!(
-        message.metadata.get("ws_message_type").map(String::as_str),
-        Some("binary")
-    );
+    assert_eq!(message.get_metadata("ws_message_type"), Some("binary"));
     (batch.commit)(vec![MessageDisposition::Ack])
         .await
         .expect("commit should succeed");
@@ -130,10 +121,9 @@ async fn websocket_publisher_reuses_connection_for_single_sends() {
         for message in batch.messages {
             peers.push(
                 message
-                    .metadata
-                    .get("ws_peer_addr")
+                    .get_metadata("ws_peer_addr")
                     .expect("message should include peer addr")
-                    .clone(),
+                    .to_owned(),
             );
         }
         (batch.commit)(vec![MessageDisposition::Ack; batch_len])

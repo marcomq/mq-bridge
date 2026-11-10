@@ -278,7 +278,7 @@ fn warn_unsendable_header(key: &str) {
 /// The NATS headers of an outgoing message: its metadata and the message id.
 fn publish_headers(message: &CanonicalMessage, deduplicate: bool) -> HeaderMap {
     let mut headers = HeaderMap::new();
-    for (key, value) in &message.metadata {
+    for (key, value) in message.metadata_iter() {
         if crate::canonical_message::is_source_metadata_key(key) {
             continue; // source/provenance keys must not be forwarded
         }
@@ -876,30 +876,23 @@ fn create_nats_canonical_message(
                     metadata.insert(key, joined_value);
                 }
             }
-            canonical_message.metadata = metadata;
+            canonical_message = canonical_message.with_metadata(metadata);
         }
     }
     if include_native_reply_to {
         if let Some(reply) = &message.reply {
-            canonical_message
-                .metadata
-                .entry("reply_to".to_string())
-                .or_insert_with(|| reply.to_string());
+            if !canonical_message.has_metadata("reply_to") {
+                canonical_message.set_metadata("reply_to", reply.to_string());
+            }
         }
     }
     // Source-position cursor keys (useful for dlt-style pull consumers; the
     // per-message subject is the only way to recover it under a wildcard
     // subscription). `nats_stream_sequence` is absent for core NATS.
     if source_metadata {
-        canonical_message.metadata.insert(
-            "mqb.src.nats_subject".to_string(),
-            message.subject.to_string(),
-        );
+        canonical_message.set_metadata("mqb.src.nats_subject", message.subject.to_string());
         if let Some(sequence) = sequence {
-            canonical_message.metadata.insert(
-                "mqb.src.nats_stream_sequence".to_string(),
-                sequence.to_string(),
-            );
+            canonical_message.set_metadata("mqb.src.nats_stream_sequence", sequence.to_string());
         }
     }
     canonical_message
@@ -1067,10 +1060,7 @@ mod tests {
 
         let canonical = create_nats_canonical_message(&message, None, true, false);
 
-        assert_eq!(
-            canonical.metadata.get("reply_to").map(String::as_str),
-            Some("_INBOX.reply")
-        );
+        assert_eq!(canonical.get_metadata("reply_to"), Some("_INBOX.reply"));
     }
 
     #[test]
@@ -1079,7 +1069,7 @@ mod tests {
 
         let canonical = create_nats_canonical_message(&message, Some(1), false, false);
 
-        assert!(!canonical.metadata.contains_key("reply_to"));
+        assert!(!canonical.has_metadata("reply_to"));
     }
 
     #[test]
@@ -1089,22 +1079,16 @@ mod tests {
         let canonical = create_nats_canonical_message(&message, Some(42), false, true);
 
         assert_eq!(
-            canonical
-                .metadata
-                .get("mqb.src.nats_subject")
-                .map(String::as_str),
+            canonical.get_metadata("mqb.src.nats_subject"),
             Some("test.subject")
         );
         assert_eq!(
-            canonical
-                .metadata
-                .get("mqb.src.nats_stream_sequence")
-                .map(String::as_str),
+            canonical.get_metadata("mqb.src.nats_stream_sequence"),
             Some("42")
         );
         // Core NATS (no sequence) omits the sequence key.
         let core = create_nats_canonical_message(&message, None, false, true);
-        assert!(!core.metadata.contains_key("mqb.src.nats_stream_sequence"));
+        assert!(!core.has_metadata("mqb.src.nats_stream_sequence"));
         assert!(crate::canonical_message::is_source_metadata_key(
             "mqb.src.nats_subject"
         ));
@@ -1122,19 +1106,13 @@ mod tests {
 
         let canonical = create_nats_canonical_message(&message, Some(7), false, true);
 
-        assert!(!canonical.metadata.contains_key("mqb.src.kafka_offset"));
+        assert!(!canonical.has_metadata("mqb.src.kafka_offset"));
         assert_eq!(
-            canonical
-                .metadata
-                .get("mqb.src.nats_subject")
-                .map(String::as_str),
+            canonical.get_metadata("mqb.src.nats_subject"),
             Some("test.subject"),
             "spoofed subject must be overwritten by the real one"
         );
-        assert_eq!(
-            canonical.metadata.get("user_key").map(String::as_str),
-            Some("kept")
-        );
+        assert_eq!(canonical.get_metadata("user_key"), Some("kept"));
     }
 
     #[test]
@@ -1146,7 +1124,7 @@ mod tests {
         let canonical = create_nats_canonical_message(&message, Some(1), false, false);
 
         assert_eq!(
-            canonical.metadata.get("reply_to").map(String::as_str),
+            canonical.get_metadata("reply_to"),
             Some("app.reply.subject")
         );
     }
@@ -1160,7 +1138,7 @@ mod tests {
         let canonical = create_nats_canonical_message(&message, None, true, false);
 
         assert_eq!(
-            canonical.metadata.get("reply_to").map(String::as_str),
+            canonical.get_metadata("reply_to"),
             Some("app.reply.subject")
         );
     }
@@ -1177,7 +1155,7 @@ mod tests {
             ("multiline", "one\ntwo"),
             ("kept", "value"),
         ] {
-            message.metadata.insert(key.to_string(), value.to_string());
+            message.set_metadata(key.to_string(), value.to_string());
         }
 
         let headers = publish_headers(&message, false);
@@ -1279,6 +1257,6 @@ mod tests {
     fn core_native_reply_true_with_no_reply_is_absent() {
         let message = nats_message(None, None);
         let canonical = create_nats_canonical_message(&message, None, true, false);
-        assert!(!canonical.metadata.contains_key("reply_to"));
+        assert!(!canonical.has_metadata("reply_to"));
     }
 }

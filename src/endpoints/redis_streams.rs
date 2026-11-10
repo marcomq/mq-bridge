@@ -240,7 +240,7 @@ impl MessagePublisher for RedisStreamsPublisher {
                 .arg(message.payload.as_ref())
                 .arg(MESSAGE_ID_FIELD)
                 .arg(format!("{:032x}", message.message_id));
-            for (key, value) in &message.metadata {
+            for (key, value) in message.metadata_iter() {
                 // Never let a metadata key shadow the reserved fields; a duplicate
                 // XADD field would overwrite the payload/id on read (last wins).
                 if key == PAYLOAD_FIELD || key == MESSAGE_ID_FIELD {
@@ -708,11 +708,10 @@ fn parse_entry(id: String, map: HashMap<String, redis::Value>) -> StreamEntry {
     }
 
     let mut msg = CanonicalMessage::new(payload, message_id);
-    msg.metadata = metadata;
+    msg = msg.with_metadata(metadata);
     // Opt-in via the MQB_SOURCE_METADATA env var; off by default.
     if crate::canonical_message::source_metadata_enabled() {
-        msg.metadata
-            .insert("mqb.src.redis_stream_id".to_string(), id.clone());
+        msg.set_metadata("mqb.src.redis_stream_id", id.clone());
     }
     StreamEntry { id, msg }
 }
@@ -923,13 +922,10 @@ mod tests {
         let entry = parse_entry("1-0".to_string(), map);
         assert_eq!(entry.msg.payload.as_ref(), b"hello");
         assert_eq!(entry.msg.message_id, 0x2a);
-        assert_eq!(
-            entry.msg.metadata.get("user_key").map(String::as_str),
-            Some("kept")
-        );
+        assert_eq!(entry.msg.get_metadata("user_key"), Some("kept"));
         // Reserved fields never leak into user metadata.
-        assert!(!entry.msg.metadata.contains_key(PAYLOAD_FIELD));
-        assert!(!entry.msg.metadata.contains_key(MESSAGE_ID_FIELD));
+        assert!(!entry.msg.has_metadata(PAYLOAD_FIELD));
+        assert!(!entry.msg.has_metadata(MESSAGE_ID_FIELD));
     }
 
     #[test]
@@ -940,11 +936,8 @@ mod tests {
         map.insert("user_key".to_string(), bulk("kept"));
 
         let entry = parse_entry("2-0".to_string(), map);
-        assert!(!entry.msg.metadata.contains_key("mqb.src.kafka_offset"));
-        assert_eq!(
-            entry.msg.metadata.get("user_key").map(String::as_str),
-            Some("kept")
-        );
+        assert!(!entry.msg.has_metadata("mqb.src.kafka_offset"));
+        assert_eq!(entry.msg.get_metadata("user_key"), Some("kept"));
     }
 
     #[test]

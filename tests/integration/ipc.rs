@@ -69,8 +69,7 @@ async fn test_unix_ipc_basic_roundtrip() {
 
     // Send a message from client
     let mut msg = CanonicalMessage::from_vec(b"Hello IPC!");
-    msg.metadata
-        .insert("test_key".to_string(), "test_value".to_string());
+    msg.set_metadata("test_key", "test_value");
 
     client.send_batch(vec![msg.clone()]).await.unwrap();
 
@@ -78,10 +77,7 @@ async fn test_unix_ipc_basic_roundtrip() {
     let received = server.recv_batch().await.unwrap();
     assert_eq!(received.len(), 1);
     assert_eq!(received[0].payload.as_ref(), b"Hello IPC!");
-    assert_eq!(
-        received[0].metadata.get("test_key"),
-        Some(&"test_value".to_string())
-    );
+    assert_eq!(received[0].get_metadata("test_key"), Some("test_value"));
 }
 
 #[cfg(unix)]

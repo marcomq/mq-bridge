@@ -1639,15 +1639,9 @@ mod tests {
 
     fn kafka_message(offset: i64) -> CanonicalMessage {
         let mut message = json_msg(serde_json::json!({ "offset": offset }));
-        message
-            .metadata
-            .insert("mqb.src.kafka_topic".into(), "orders".into());
-        message
-            .metadata
-            .insert("mqb.src.kafka_partition".into(), "0".into());
-        message
-            .metadata
-            .insert("mqb.src.kafka_offset".into(), offset.to_string());
+        message.set_metadata("mqb.src.kafka_topic", "orders");
+        message.set_metadata("mqb.src.kafka_partition", "0");
+        message.set_metadata("mqb.src.kafka_offset", offset.to_string());
         message
     }
 
@@ -3001,10 +2995,7 @@ mod tests {
                 .collect();
             assert_eq!(read, rows, "{compression:?}");
             assert_eq!(
-                batch.messages[0]
-                    .metadata
-                    .get("mq_bridge.original_format")
-                    .map(String::as_str),
+                batch.messages[0].get_metadata("mq_bridge.original_format"),
                 Some("parquet")
             );
             (batch.commit)(vec![MessageDisposition::Ack; 3])

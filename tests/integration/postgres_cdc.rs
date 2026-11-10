@@ -109,9 +109,8 @@ async fn drain_ids(consumer: &mut PostgresCdcConsumer, want: usize) -> Vec<(Stri
         let n = batch.messages.len();
         for msg in &batch.messages {
             let op = msg
-                .metadata
-                .get("postgres.operation")
-                .cloned()
+                .get_metadata("postgres.operation")
+                .map(str::to_owned)
                 .unwrap_or_default();
             let body: serde_json::Value = serde_json::from_slice(&msg.payload).unwrap_or_default();
             let id = body.get("id").and_then(|v| v.as_i64()).unwrap_or(-1);
@@ -212,7 +211,12 @@ pub async fn test_postgres_cdc_key_change() {
                         .expect("timed out waiting for CDC events")
                         .expect("receive_batch failed");
                 for message in &batch.messages {
-                    let meta = |key: &str| message.metadata.get(key).cloned().unwrap_or_default();
+                    let meta = |key: &str| {
+                        message
+                            .get_metadata(key)
+                            .map(str::to_owned)
+                            .unwrap_or_default()
+                    };
                     seen.push((
                         meta("postgres.operation"),
                         meta("postgres.key"),
@@ -357,8 +361,7 @@ pub async fn test_postgres_cdc_confirms_lsn_on_clean_stop() {
             let n = batch.messages.len();
             for msg in &batch.messages {
                 let lsn = msg
-                    .metadata
-                    .get("postgres.lsn")
+                    .get_metadata("postgres.lsn")
                     .expect("each change carries postgres.lsn");
                 last_lsn = last_lsn.max(lsn_to_u64(lsn));
             }
@@ -868,7 +871,7 @@ output:
         while docs.len() < 3 {
             assert!(Instant::now() < deadline, "timed out waiting for joined documents");
             for msg in output.drain_messages() {
-                let op = msg.metadata.get("postgres.operation").cloned();
+                let op = msg.get_metadata("postgres.operation").map(str::to_owned);
                 let doc: serde_json::Value = serde_json::from_slice(&msg.payload).unwrap();
                 println!("{op:?} {doc}");
                 docs.push((op.unwrap_or_default(), doc));

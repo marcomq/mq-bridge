@@ -166,7 +166,7 @@ impl TypeHandler {
 #[async_trait]
 impl Handler for TypeHandler {
     async fn handle(&self, msg: CanonicalMessage) -> Result<Handled, HandlerError> {
-        if let Some(type_val) = msg.metadata.get(&self.type_key) {
+        if let Some(type_val) = msg.get_metadata(&self.type_key) {
             if let Some(handler) = self.handlers.get(type_val) {
                 return handler.handle(msg).await;
             }
@@ -178,7 +178,7 @@ impl Handler for TypeHandler {
 
         Err(HandlerError::NonRetryable(anyhow::anyhow!(
             "No handler registered for type: '{:?}' and no fallback provided",
-            msg.metadata.get(&self.type_key)
+            msg.get_metadata(&self.type_key)
         )))
     }
 
@@ -194,9 +194,9 @@ impl Handler for TypeHandler {
         let mut runs: Vec<(BatchTarget, Vec<(usize, CanonicalMessage)>)> = Vec::new();
 
         for (index, msg) in msgs.into_iter().enumerate() {
-            let target = if let Some(type_val) = msg.metadata.get(&self.type_key) {
+            let target = if let Some(type_val) = msg.get_metadata(&self.type_key) {
                 if self.handlers.contains_key(type_val) {
-                    Some(BatchTarget::Handler(type_val.clone()))
+                    Some(BatchTarget::Handler(type_val.to_owned()))
                 } else if self.fallback.is_some() {
                     Some(BatchTarget::Fallback)
                 } else {
@@ -219,7 +219,7 @@ impl Handler for TypeHandler {
             } else {
                 results[index] = Some(Err(HandlerError::NonRetryable(anyhow::anyhow!(
                     "No handler registered for type: '{:?}' and no fallback provided",
-                    msg.metadata.get(&self.type_key)
+                    msg.get_metadata(&self.type_key)
                 ))));
             }
         }
@@ -329,7 +329,7 @@ mod tests {
         let handler =
             TypeHandler::new().add("test_ctx", |msg: TestMsg, ctx: MessageContext| async move {
                 assert_eq!(msg.val, "hello");
-                assert_eq!(ctx.metadata.get("meta").map(|s| s.as_str()), Some("data"));
+                assert_eq!(ctx.get_metadata("meta"), Some("data"));
                 Ok(Handled::Ack)
             });
 
@@ -523,10 +523,7 @@ mod tests {
 
         if let Handled::Publish(event_msg) = result {
             // Verify event type
-            assert_eq!(
-                event_msg.metadata.get("kind").map(|s| s.as_str()),
-                Some("order_submitted")
-            );
+            assert_eq!(event_msg.get_metadata("kind"), Some("order_submitted"));
 
             // Process event (Projection)
             let proj_result = projection_handler.handle(event_msg).await.unwrap();

@@ -187,15 +187,13 @@ async fn metadata_preserved(
     let publisher = open_publisher(factory, options).await?;
 
     let mut message = CanonicalMessage::from("metadata-check");
-    message
-        .metadata
-        .insert("conformance".to_string(), "value".to_string());
+    message.set_metadata("conformance", "value");
     send(&*publisher, vec![message]).await?;
 
     let expected = vec!["metadata-check".to_string()];
     let received = receive(&mut *consumer, &expected, options, MessageDisposition::Ack).await?;
-    let value = received[0].metadata.get("conformance");
-    if value.map(String::as_str) != Some("value") {
+    let value = received[0].get_metadata("conformance");
+    if value != Some("value") {
         // Not every transport carries metadata; say so precisely rather than
         // leaving the caller to guess from a payload mismatch.
         bail!(

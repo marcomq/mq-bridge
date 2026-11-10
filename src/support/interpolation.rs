@@ -440,7 +440,7 @@ impl CompiledTemplate {
                 Payload::Doc(doc) => walk(doc, path).map(value_to_string),
                 Payload::None => None,
             },
-            Source::Metadata(key) => msg.and_then(|m| m.metadata.get(key)).cloned(),
+            Source::Metadata(key) => msg.and_then(|m| m.get_metadata(key)).map(str::to_owned),
             Source::MessageId => msg.map(|m| format_message_id(m.message_id)),
             Source::MessagePayload => msg.map(|m| String::from_utf8_lossy(&m.payload).into_owned()),
             Source::Gen(generator) => Some(match generator {
@@ -857,7 +857,7 @@ mod tests {
     fn msg_with(payload: &str, metadata: &[(&str, &str)]) -> CanonicalMessage {
         let mut m = CanonicalMessage::new(payload.as_bytes().to_vec(), None);
         for (k, v) in metadata {
-            m.metadata.insert(k.to_string(), v.to_string());
+            m.set_metadata(k.to_string(), v.to_string());
         }
         m
     }

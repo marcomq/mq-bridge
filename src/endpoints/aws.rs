@@ -56,7 +56,7 @@ fn canonical_from_sqs(
     let message_id =
         sqs_message_id.and_then(|id| crate::canonical_message::message_id_from_str(id).ok());
     let mut canonical = CanonicalMessage::new(payload, message_id);
-    canonical.metadata = metadata;
+    canonical = canonical.with_metadata(metadata);
     canonical
 }
 
@@ -84,8 +84,8 @@ struct Outgoing {
 impl Outgoing {
     /// Metadata the services cannot carry is left out; a message they would refuse is an error.
     fn new(message: &CanonicalMessage, binary: bool, to_sqs: bool) -> anyhow::Result<Self> {
-        let mut attributes = HashMap::with_capacity(message.metadata.len());
-        for (key, value) in &message.metadata {
+        let mut attributes = HashMap::with_capacity(message.metadata_len());
+        for (key, value) in message.metadata_iter() {
             if crate::canonical_message::is_source_metadata_key(key) || value.is_empty() {
                 continue;
             }
@@ -93,7 +93,7 @@ impl Outgoing {
                 warn_invalid_attribute_name(key);
                 continue;
             }
-            attributes.insert(key.clone(), value.clone());
+            attributes.insert(key.to_owned(), value.to_owned());
         }
         let body = encode_aws_payload(&message.payload, &mut attributes, binary)?;
         if body.is_empty() {
@@ -779,9 +779,7 @@ mod tests {
 
         let received = canonical_from_sqs(out.body, Some(attributes), None);
         assert_eq!(&received.payload[..], &[0, 159, 146, 150]);
-        assert!(!received
-            .metadata
-            .contains_key(AWS_BINARY_ENCODED_METADATA_KEY));
+        assert!(!received.has_metadata(AWS_BINARY_ENCODED_METADATA_KEY));
     }
 
     #[test]
@@ -791,11 +789,8 @@ mod tests {
             ("kept".to_string(), attribute("yes")),
         ]);
         let received = canonical_from_sqs("body".to_string(), Some(attributes), None);
-        assert!(!received.metadata.contains_key("mqb.src.kafka_offset"));
-        assert_eq!(
-            received.metadata.get("kept").map(String::as_str),
-            Some("yes")
-        );
+        assert!(!received.has_metadata("mqb.src.kafka_offset"));
+        assert_eq!(received.get_metadata("kept"), Some("yes"));
     }
 
     #[test]
@@ -814,11 +809,9 @@ mod tests {
     fn metadata_sqs_cannot_carry_is_left_out() {
         let mut message = CanonicalMessage::new(b"body".to_vec(), None);
         for (key, value) in [("empty", ""), ("http:header", "x"), ("AWS.reserved", "x")] {
-            message.metadata.insert(key.to_string(), value.to_string());
+            message.set_metadata(key.to_string(), value.to_string());
         }
-        message
-            .metadata
-            .insert("trace.id".to_string(), "1".to_string());
+        message.set_metadata("trace.id", "1");
 
         let out = Outgoing::new(&message, false, true).unwrap();
         assert_eq!(out.attributes.keys().collect::<Vec<_>>(), ["trace.id"]);
@@ -831,7 +824,7 @@ mod tests {
 
         let mut crowded = CanonicalMessage::new(b"body".to_vec(), None);
         for i in 0..=SQS_MAX_ATTRIBUTES {
-            crowded.metadata.insert(format!("key{i}"), "v".to_string());
+            crowded.set_metadata(format!("key{i}"), "v");
         }
         assert!(Outgoing::new(&crowded, false, true).is_err());
         // SNS has no such limit.

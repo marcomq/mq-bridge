@@ -922,16 +922,16 @@ async fn handle_direct_connection(
         };
 
         let original_id = message.message_id;
-        let inbound_correlation_id = message.metadata.get("correlation_id").cloned();
+        let inbound_correlation_id = message.get_metadata("correlation_id").map(str::to_owned);
         let handled = match handler.handle(message).await {
             Ok(Handled::Publish(mut response_msg)) => {
                 response_msg.message_id = original_id;
-                response_msg
-                    .metadata
-                    .entry("correlation_id".to_string())
-                    .or_insert(
+                if !response_msg.has_metadata("correlation_id") {
+                    response_msg.set_metadata(
+                        "correlation_id",
                         inbound_correlation_id.unwrap_or_else(|| format!("{:032x}", original_id)),
                     );
+                }
                 Handled::Publish(response_msg)
             }
             Ok(Handled::Ack) => Handled::Ack,
@@ -1088,16 +1088,10 @@ fn canonical_from_websocket_frame(
     };
 
     let mut message = CanonicalMessage::new(payload, metadata.message_id);
-    message
-        .metadata
-        .insert("ws_message_type".to_string(), message_type.to_string());
-    message
-        .metadata
-        .insert("ws_path".to_string(), metadata.path.clone());
-    message
-        .metadata
-        .insert("ws_peer_addr".to_string(), peer_addr.to_string());
-    message.metadata.extend(metadata.headers.clone());
+    message.set_metadata("ws_message_type", message_type.to_string());
+    message.set_metadata("ws_path", metadata.path.clone());
+    message.set_metadata("ws_peer_addr", peer_addr.to_string());
+    message.extend_metadata(metadata.headers.clone());
     Some(message)
 }
 
@@ -1139,7 +1133,7 @@ fn parse_message_id(raw: &str) -> Option<u128> {
 }
 
 fn canonical_to_websocket_message(message: &CanonicalMessage) -> Message {
-    let message_type = message.metadata.get("ws_message_type").map(String::as_str);
+    let message_type = message.get_metadata("ws_message_type");
     match message_type {
         Some("binary") => Message::binary(message.payload.clone().to_vec()),
         Some("text") => Message::text(message.get_payload_str().into_owned()),
@@ -1341,8 +1335,8 @@ mod tests {
         let received = consumer.receive_batch(1).await.unwrap();
         assert_eq!(&received.messages[0].payload[..], b"hello");
         assert!(!received.messages[0]
-            .metadata
-            .keys()
+            .metadata_iter()
+            .map(|(key, _)| key)
             .any(|key| key.contains("authorization")));
     }
 
@@ -1469,10 +1463,7 @@ mod tests {
         assert_eq!(batch.messages.len(), 1);
         let message = batch.messages.pop().expect("one message");
         assert_eq!(message.get_payload_str(), "hello");
-        assert_eq!(
-            message.metadata.get("ws_message_type").map(String::as_str),
-            Some("text")
-        );
+        assert_eq!(message.get_metadata("ws_message_type"), Some("text"));
     }
 
     async fn raw_client(url: &str) -> ClientWebSocketStream {

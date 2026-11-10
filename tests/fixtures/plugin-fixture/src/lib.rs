@@ -368,15 +368,11 @@ impl MessageConsumer for FixtureConsumer {
                         MessageDisposition::Ack => "ack",
                         MessageDisposition::Nack => "nack",
                         MessageDisposition::Reply(reply) => {
-                            record
-                                .metadata
-                                .insert("reply".to_string(), reply.get_payload_str().into_owned());
+                            record.set_metadata("reply", reply.get_payload_str().into_owned());
                             "reply"
                         }
                     };
-                    record
-                        .metadata
-                        .insert("disposition".to_string(), label.to_string());
+                    record.set_metadata("disposition", label);
                     log.ready.push_back(record);
                     if nacked {
                         queue.ready.push_front(message);
@@ -431,10 +427,7 @@ fn queue_status(name: &str) -> EndpointStatus {
 /// The response to one published message, when `respond` is set.
 fn response_to(message: &CanonicalMessage) -> CanonicalMessage {
     let mut response = CanonicalMessage::from(format!("re:{}", message.get_payload_str()));
-    response.metadata.insert(
-        "request_id".to_string(),
-        format!("{:x}", message.message_id),
-    );
+    response.set_metadata("request_id", format!("{:x}", message.message_id));
     response
 }
 
@@ -649,7 +642,7 @@ impl FixtureFilter {
                 };
                 let mut rewritten = CanonicalMessage::from(format!("{payload}{suffix}"));
                 rewritten.message_id = message.message_id;
-                rewritten.metadata = message.metadata;
+                rewritten.extend_metadata(message.metadata_iter());
                 Some(rewritten)
             })
             .collect())

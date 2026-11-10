@@ -80,7 +80,7 @@ impl SwitchPublisher {
                 metadata_key,
                 cases,
             } => {
-                if let Some(val) = message.metadata.get(metadata_key) {
+                if let Some(val) = message.get_metadata(metadata_key) {
                     if let Some(publisher) = cases.get(val) {
                         return Ok(Some(publisher));
                     }

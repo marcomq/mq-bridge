@@ -625,9 +625,7 @@ mod tests {
     #[tokio::test]
     async fn forwards_response_verbatim() {
         let mut response = CanonicalMessage::from("http-body");
-        response
-            .metadata
-            .insert("http_status_code".into(), "200".into());
+        response.set_metadata("http_status_code", "200");
         let response_id = response.message_id;
 
         let request = MockRequest::new(Ok(Sent::Response(response)));
@@ -640,13 +638,7 @@ mod tests {
         let received = received.lock().unwrap();
         assert_eq!(received.len(), 1);
         assert_eq!(received[0].get_payload_str(), "http-body");
-        assert_eq!(
-            received[0]
-                .metadata
-                .get("http_status_code")
-                .map(String::as_str),
-            Some("200")
-        );
+        assert_eq!(received[0].get_metadata("http_status_code"), Some("200"));
         assert_eq!(received[0].message_id, response_id);
     }
 
@@ -667,7 +659,7 @@ mod tests {
         assert_eq!(received[0].get_payload_str(), "original-payload");
         assert_eq!(received[0].message_id, original_id);
         // No status tag was invented on the fallback.
-        assert!(!received[0].metadata.contains_key("http_status_code"));
+        assert!(!received[0].has_metadata("http_status_code"));
     }
 
     /// A failed request must not answer the caller with its own echoed payload: the error
@@ -703,9 +695,7 @@ mod tests {
     #[tokio::test]
     async fn response_forward_replies_to_caller() {
         let mut response = CanonicalMessage::from("http-body");
-        response
-            .metadata
-            .insert("http_status_code".into(), "200".into());
+        response.set_metadata("http_status_code", "200");
         let response_id = response.message_id;
 
         let request = MockRequest::new(Ok(Sent::Response(response)));
@@ -738,9 +728,7 @@ mod tests {
     #[tokio::test]
     async fn forward_failure_propagates() {
         let mut response = CanonicalMessage::from("body");
-        response
-            .metadata
-            .insert("http_status_code".into(), "200".into());
+        response.set_metadata("http_status_code", "200");
         let request = MockRequest::new(Ok(Sent::Response(response)));
         let publisher = RequestForwardPublisher::new(request, RecordingSink::failing());
 

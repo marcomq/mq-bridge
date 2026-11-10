@@ -179,12 +179,8 @@ async fn test_amqp_unroutable_reply_acks_the_request() {
         {
             let mut consumer = AmqpConsumer::new(&config).await.unwrap();
             let mut request = mq_bridge::CanonicalMessage::from("request needing reply");
-            request
-                .metadata
-                .insert("reply_to".to_string(), missing_reply_queue);
-            request
-                .metadata
-                .insert("correlation_id".to_string(), "reply-fail-cid".to_string());
+            request.set_metadata("reply_to", missing_reply_queue);
+            request.set_metadata("correlation_id", "reply-fail-cid");
 
             publisher.send(request).await.unwrap();
 

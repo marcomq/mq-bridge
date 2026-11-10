@@ -92,7 +92,7 @@ async fn commit_log(factory: &dyn CustomEndpointFactory, queue: &str) -> Box<dyn
 }
 
 fn meta<'a>(message: &'a CanonicalMessage, key: &str) -> Option<&'a str> {
-    message.metadata.get(key).map(String::as_str)
+    message.get_metadata(key)
 }
 
 /// Sorted payloads of the first `expected` messages on `queue`.

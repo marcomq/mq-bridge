@@ -139,7 +139,12 @@ impl NativeMessage {
     fn from_canonical(message: &CanonicalMessage) -> Self {
         Self {
             payload: message.payload.to_vec().into(),
-            metadata: Some(message.metadata.clone()),
+            metadata: Some(
+                message
+                    .metadata_iter()
+                    .map(|(key, value)| (key.to_owned(), value.to_owned()))
+                    .collect(),
+            ),
             id: Some(core::canonical_message::format_message_id(
                 message.message_id,
             )),
@@ -2094,7 +2099,7 @@ fn build_message(
     let message_id = id.map(parse_message_id).transpose()?;
     let mut message = CanonicalMessage::new(payload, message_id);
     if let Some(metadata) = metadata {
-        message.metadata.extend(metadata);
+        message.extend_metadata(metadata);
     }
     Ok(message)
 }

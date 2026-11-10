@@ -47,7 +47,10 @@ All notable changes to `mq-bridge`. Newest first.
 - **The full plugin also serves the built-in middleware.** A host built without
   `dedup`, `compression`, `encryption`, `filter` or `aggregate` applies them from
   `libmq_bridge_full` with the same route configuration. `metrics` and `otel` still need
-  the host's own feature.
+  the host's own feature. `filter`, `compression` and `encryption` run there as a batch
+  map (`builtin_map_middleware`): the host keeps the endpoint and its commits, and a batch
+  crosses into the plugin once. `deduplication` and `aggregate`, which act on commits, wrap
+  the endpoint.
 
 ### Changed
 
@@ -65,11 +68,34 @@ All notable changes to `mq-bridge`. Newest first.
   each async call once on the calling thread before handing it to the plugin's runtime.
   A wrapping middleware at batch 1 is about 10x faster. Plugin code before its first
   waiting `.await` now runs on the host's worker, like a built-in middleware.
+- **Map middleware from a plugin no longer blocks a host thread (plugin ABI 1.5).** The
+  new, nullable `middleware_apply_async` entry writes one verdict per message (kept,
+  dropped, replaced) into a buffer the host reuses from batch to batch, and returns as soon
+  as it is done. Only a middleware that has to wait returns `MQB_PENDING` and completes
+  through a callback. Kept and dropped messages allocate nothing on either side. A plugin
+  that leaves it null keeps the blocking `middleware_apply`. The Rust SDK fills it in. A
+  message the middleware returns unchanged comes back as the host's own payload and
+  metadata instead of a copy, and a failed send hands the sink's retry the message as it
+  was before the middleware.
+- **A Rust plugin middleware can read the batch without copying it.** `BatchFilter`
+  gains `on_receive_ref` / `on_send_ref`, which get the host's messages as `MessageRef`s
+  (payload, metadata, id) and return a `Verdict` per message: `Keep` passes it on with
+  nothing copied in either direction, `Drop` drops it, `Replace` sends a new one. The
+  defaults copy and call `on_receive` / `on_send`, so existing plugins are unchanged. The
+  full plugin uses it for a list of only `filter`s.
 - **The release also packages the existing full plugin.** `plugins/full` (every built-in
   endpoint as one plugin library) now ships as `mq-bridge-full`: a GitHub release archive
   per platform, in the Homebrew tap, on conda and on crates.io. A Rust host built without
   endpoint features can install it
   instead of compiling `full`.
+
+### Deprecated
+
+- `CanonicalMessage::metadata` and `MessageContext::metadata` as direct `HashMap` fields;
+  use `get_metadata` / `set_metadata` / `remove_metadata` / `metadata_iter`. The field
+  becomes an opaque `Metadata` type in 2.0. 1.5 does not warn by default;
+  `RUSTFLAGS="--cfg mqb_deprecate_metadata"` lists every use (see
+  [MIGRATING_TO_2.0.md](docs/MIGRATING_TO_2.0.md)).
 
 ### Fixed
 

@@ -68,7 +68,7 @@ fn corpus_without_metadata() -> Vec<CanonicalMessage> {
     corpus()
         .into_iter()
         .map(|mut message| {
-            message.metadata.clear();
+            message.clear_metadata();
             message
         })
         .collect()
@@ -80,11 +80,20 @@ fn corpus_without_metadata() -> Vec<CanonicalMessage> {
 fn decode_individually(wire: &[(Vec<u8>, Bytes)]) -> usize {
     let mut count = 0;
     for (meta, payload) in wire {
-        let mut message = CanonicalMessage::new_bytes(payload.clone(), None);
-        message.metadata = serde_json::from_slice(meta).expect("metadata frame parses");
-        count += message.metadata.len();
+        let message = CanonicalMessage::new_bytes(payload.clone(), None)
+            .with_metadata(serde_json::from_slice(meta).expect("metadata frame parses"));
+        count += message.metadata_len();
     }
     count
+}
+
+/// Serializes the metadata pairs as a JSON object straight from the iterator.
+struct MetadataFrame<'a>(&'a CanonicalMessage);
+
+impl serde::Serialize for MetadataFrame<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_map(self.0.metadata_iter())
+    }
 }
 
 fn frame_individually_owned(messages: &[CanonicalMessage]) -> Vec<(Vec<u8>, Bytes)> {
@@ -92,7 +101,7 @@ fn frame_individually_owned(messages: &[CanonicalMessage]) -> Vec<(Vec<u8>, Byte
         .iter()
         .map(|message| {
             (
-                serde_json::to_vec(&message.metadata).expect("metadata serializes"),
+                serde_json::to_vec(&MetadataFrame(message)).expect("metadata serializes"),
                 message.payload.clone(),
             )
         })
@@ -116,9 +125,8 @@ fn corpus() -> Vec<CanonicalMessage> {
             );
             let mut message = CanonicalMessage::new(payload.into_bytes(), None);
             message
-                .metadata
-                .insert("mqb.src.file_offset".to_string(), i.to_string());
-            message.metadata.insert("kind".to_string(), "order".to_string());
+                .set_metadata("mqb.src.file_offset", i.to_string());
+            message.set_metadata("kind", "order");
             message
         })
         .collect()
@@ -176,7 +184,7 @@ fn codecs() -> [(&'static str, Compression); 4] {
 fn frame_individually(messages: &[CanonicalMessage]) -> usize {
     let mut bytes = 0;
     for message in messages {
-        let meta = serde_json::to_vec(&message.metadata).expect("metadata serializes");
+        let meta = serde_json::to_vec(&MetadataFrame(message)).expect("metadata serializes");
         bytes += meta.len() + message.payload.len();
     }
     bytes

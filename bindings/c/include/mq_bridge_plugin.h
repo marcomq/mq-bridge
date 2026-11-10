@@ -10,6 +10,7 @@
  *  - Every function pointer in the table must be non-null, including ones the
  *    plugin does not support: point those at a stub returning
  *    MQB_ERR_UNSUPPORTED (or doing nothing, for the *_free entries).
+ *    The one exception is middleware_apply_async, which may be NULL.
  *  - Host -> plugin data (arguments) is borrowed for the call only; copy what
  *    you keep. Plugin -> host data stays valid until its handle is freed.
  *    middleware_apply's output may point into its input.
@@ -54,7 +55,9 @@ struct MqbPluginVTable;
 //   `MQB_DELIVERY_REQUIRES_FULL_REPLAY` and `MQB_DELIVERY_REPLAYS_FROM_START` flags.
 // * **1.5** appended `MqbPluginVTable::middleware_wrap_consumer` and
 //   `MqbPluginVTable::middleware_wrap_publisher`, with which a middleware wraps the
-//   whole inner endpoint instead of mapping messages (`MQB_CAP_MIDDLEWARE_WRAP`).
+//   whole inner endpoint instead of mapping messages (`MQB_CAP_MIDDLEWARE_WRAP`), and
+//   `MqbPluginVTable::middleware_apply_async`, a `middleware_apply` that writes its
+//   verdicts into host buffers and completes inline or later (`MQB_PENDING`).
 #define MQB_PLUGIN_ABI_MINOR 5
 
 // The route pass drained its input to the end.
@@ -122,6 +125,10 @@ struct MqbPluginVTable;
 
 // The middleware kept this message, possibly rewritten.
 #define MQB_MESSAGE_KEPT 1
+
+// (ABI 1.5) Only from `MqbPluginVTable::middleware_apply_async`: the message was
+// replaced by the next entry of the replacement array.
+#define MQB_MESSAGE_REPLACED 2
 
 // `MqbPluginVTable::factory_delivery` flag: a publisher built from the config absorbs replays.
 #define MQB_DELIVERY_IDEMPOTENT_SINK (1 << 0)
@@ -233,6 +240,9 @@ typedef void *MqbResponsesHandle;
 //
 // A plugin that returns `MQB_ERR_UNSUPPORTED` from a non-blocking entry gets
 // its blocking twin instead, from then on for that endpoint.
+//
+// `MqbPluginVTable::middleware_apply_async` differs: there only `MQB_PENDING` means
+// the callback follows.
 typedef struct MqbCompletion {
   void (*callback)(void *ctx, MqbStatus status);
   void *ctx;
@@ -379,6 +389,16 @@ typedef MqbStatus (*MqbMiddlewareWrapPublisher)(MqbMiddlewareHandle middleware,
                                                 MqbPublisherHandle inner,
                                                 MqbPublisherHandle *out,
                                                 struct MqbBuffer *err);
+
+// Signature of `MqbPluginVTable::middleware_apply_async`, a nullable pointer.
+typedef MqbStatus (*MqbMiddlewareApplyAsync)(MqbMiddlewareHandle middleware,
+                                             const struct MqbMessage *messages,
+                                             size_t len,
+                                             uint8_t *verdicts,
+                                             MqbFilterHandle *out_result,
+                                             const struct MqbMessage **out_replaced,
+                                             struct MqbBuffer *err,
+                                             struct MqbCompletion completion);
 
 // The function table a plugin exports through `MQB_PLUGIN_ENTRY_SYMBOL`.
 //
@@ -614,6 +634,19 @@ typedef struct MqbPluginVTable {
   // The publisher counterpart of `middleware_wrap_consumer`,
   // on a middleware created for the send side.
   MqbMiddlewareWrapPublisher middleware_wrap_publisher;
+  // Like `middleware_apply`, but the plugin writes one
+  // verdict per message into the host's `verdicts` array (`len` entries):
+  // `MQB_MESSAGE_KEPT` (unchanged), `MQB_MESSAGE_DROPPED` or
+  // `MQB_MESSAGE_REPLACED`. Only if a message was replaced does it write a result
+  // handle and `out_replaced`, one message per replaced entry in input order, valid
+  // until the result is freed; a replacement may point into the input.
+  //
+  // Any status but `MQB_PENDING` means the call is over and the completion is never
+  // called. `MQB_PENDING` means it is called exactly once, from any thread, after the
+  // outputs are written; the input, `verdicts` and the out-pointers stay valid until
+  // then. May be null, and `MQB_ERR_UNSUPPORTED` falls back to `middleware_apply`.
+  // Read it through `MqbPluginVTable::middleware_apply_async_hook`.
+  MqbMiddlewareApplyAsync middleware_apply_async;
 } MqbPluginVTable;
 
 // Signature of the exported discovery symbol.
@@ -651,6 +684,10 @@ typedef const struct MqbPluginVTable *(*MqbPluginListEntry)(size_t index);
 // Connection-level failure. The host reconnects the endpoint.
 #define MQB_ERR_CONNECTION 7
 
+// (ABI 1.5) Only from `MqbPluginVTable::middleware_apply_async`: the call goes on and
+// completes later through its `MqbCompletion`.
+#define MQB_PENDING 8
+
 /* Name of the discovery symbol a plugin must export; its type is MqbPluginEntry. */
 #define MQB_PLUGIN_ENTRY_SYMBOL "mq_bridge_plugin_v1"
 /* Optional symbol exporting several tables; its type is MqbPluginListEntry. */
@@ -662,7 +699,7 @@ typedef const struct MqbPluginVTable *(*MqbPluginListEntry)(size_t index);
 #define MQB_VTABLE_SIZE_V1_2 (MQB_VTABLE_SIZE_V1_1 + 11 * sizeof(size_t))
 #define MQB_VTABLE_SIZE_V1_3 (MQB_VTABLE_SIZE_V1_2 + sizeof(size_t))
 #define MQB_VTABLE_SIZE_V1_4 (MQB_VTABLE_SIZE_V1_3 + sizeof(size_t))
-#define MQB_VTABLE_SIZE_V1_5 (MQB_VTABLE_SIZE_V1_4 + 2 * sizeof(size_t))
+#define MQB_VTABLE_SIZE_V1_5 (MQB_VTABLE_SIZE_V1_4 + 3 * sizeof(size_t))
 #define MQB_HOST_VTABLE_SIZE_V1_2 (5 * sizeof(size_t))
 
 #if defined(_WIN32)

@@ -3854,6 +3854,7 @@ dependencies = [
  "mq-bridge",
  "rustls",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]

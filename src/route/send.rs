@@ -186,10 +186,8 @@ pub(super) fn transient_publish_failure_policy(
 
 pub(super) fn bad_gateway_reply(message_id: u128) -> MessageDisposition {
     let mut response = crate::CanonicalMessage::new(b"Bad Gateway".to_vec(), Some(message_id));
-    response
-        .metadata
-        .insert("http_status_code".to_string(), "502".to_string());
-    response.metadata.insert(
+    response.set_metadata("http_status_code", "502");
+    response.set_metadata(
         "content-type".to_string(),
         "text/plain; charset=utf-8".to_string(),
     );
@@ -291,7 +289,7 @@ impl BatchScratch {
         self.request_ids.extend(
             messages
                 .iter()
-                .filter(|m| m.metadata.contains_key("reply_to"))
+                .filter(|m| m.has_metadata("reply_to"))
                 .map(|m| m.message_id),
         );
     }

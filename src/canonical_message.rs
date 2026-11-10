@@ -3,6 +3,10 @@
 //  Licensed under MIT OR Apache-2.0, see LICENSE file for more details
 //  git clone https://github.com/marcomq/mq-bridge
 
+// This module owns the `metadata` fields (deprecated under `--cfg mqb_deprecate_metadata`)
+// and implements their accessors.
+#![allow(deprecated)]
+
 use bytes::Bytes;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -22,8 +26,16 @@ use crate::type_handler::KIND_KEY;
 pub struct CanonicalMessage {
     pub message_id: u128,
     pub payload: Bytes,
-    /// String key/value pairs next to the payload. Prefer [`Self::get_metadata`],
-    /// [`Self::set_metadata`] and [`Self::remove_metadata`] over the map itself.
+    /// String key/value pairs next to the payload. Use [`Self::get_metadata`],
+    /// [`Self::set_metadata`], [`Self::remove_metadata`] and [`Self::metadata_iter`];
+    /// in 2.0 this field becomes an opaque `Metadata` type.
+    #[cfg_attr(
+        mqb_deprecate_metadata,
+        deprecated(
+            since = "1.5.0",
+            note = "becomes an opaque Metadata type in 2.0; use get_metadata / set_metadata / remove_metadata / metadata_iter"
+        )
+    )]
     pub metadata: HashMap<String, String>,
 }
 
@@ -606,6 +618,72 @@ impl CanonicalMessage {
             .map(|(key, value)| (key.as_str(), value.as_str()))
     }
 
+    /// True if the metadata holds `key`.
+    pub fn has_metadata(&self, key: &str) -> bool {
+        self.metadata.contains_key(key)
+    }
+
+    /// Number of metadata pairs.
+    pub fn metadata_len(&self) -> usize {
+        self.metadata.len()
+    }
+
+    /// Builds a message from its parts without generating an id.
+    #[cfg_attr(not(any(feature = "file", feature = "mongodb")), allow(dead_code))]
+    pub(crate) fn from_parts(
+        message_id: u128,
+        payload: Bytes,
+        metadata: HashMap<String, String>,
+    ) -> Self {
+        Self {
+            message_id,
+            payload,
+            metadata,
+        }
+    }
+
+    /// The whole map, for crate code that serializes or hands it on as one value.
+    pub(crate) fn metadata_map(&self) -> &HashMap<String, String> {
+        &self.metadata
+    }
+
+    pub(crate) fn metadata_map_mut(&mut self) -> &mut HashMap<String, String> {
+        &mut self.metadata
+    }
+
+    /// Reserves room for `additional` more metadata pairs.
+    pub fn reserve_metadata(&mut self, additional: usize) {
+        self.metadata.reserve(additional);
+    }
+
+    /// True if there is no metadata.
+    pub fn metadata_is_empty(&self) -> bool {
+        self.metadata.is_empty()
+    }
+
+    /// Sets every pair, replacing existing keys.
+    pub fn extend_metadata<K, V>(&mut self, pairs: impl IntoIterator<Item = (K, V)>)
+    where
+        K: Into<String>,
+        V: Into<String>,
+    {
+        self.metadata.extend(
+            pairs
+                .into_iter()
+                .map(|(key, value)| (key.into(), value.into())),
+        );
+    }
+
+    /// Keeps only the pairs for which `keep` returns true.
+    pub fn retain_metadata(&mut self, mut keep: impl FnMut(&str, &str) -> bool) {
+        self.metadata.retain(|key, value| keep(key, value));
+    }
+
+    /// Removes all metadata.
+    pub fn clear_metadata(&mut self) {
+        self.metadata.clear();
+    }
+
     pub fn with_metadata_kv(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.metadata.insert(key.into(), value.into());
         self
@@ -657,7 +735,44 @@ impl From<serde_json::Value> for CanonicalMessage {
 #[derive(Debug, Clone)]
 pub struct MessageContext {
     pub message_id: u128,
+    /// Use [`Self::get_metadata`] and [`Self::metadata_iter`]; in 2.0 this field
+    /// becomes an opaque `Metadata` type.
+    #[cfg_attr(
+        mqb_deprecate_metadata,
+        deprecated(
+            since = "1.5.0",
+            note = "becomes an opaque Metadata type in 2.0; use get_metadata / set_metadata / remove_metadata / metadata_iter"
+        )
+    )]
     pub metadata: HashMap<String, String>,
+}
+
+impl MessageContext {
+    /// The metadata value of `key`.
+    pub fn get_metadata(&self, key: &str) -> Option<&str> {
+        self.metadata.get(key).map(String::as_str)
+    }
+
+    /// Sets the metadata value of `key`, returning the value it had.
+    pub fn set_metadata(
+        &mut self,
+        key: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Option<String> {
+        self.metadata.insert(key.into(), value.into())
+    }
+
+    /// Removes `key` from the metadata, returning its value.
+    pub fn remove_metadata(&mut self, key: &str) -> Option<String> {
+        self.metadata.remove(key)
+    }
+
+    /// The metadata pairs, in no particular order.
+    pub fn metadata_iter(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.metadata
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+    }
 }
 
 impl From<CanonicalMessage> for MessageContext {

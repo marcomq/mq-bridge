@@ -199,9 +199,8 @@ impl StreamQueryPublisher {
 
     async fn one(&self, message: &CanonicalMessage) -> Result<CanonicalMessage, PublisherError> {
         let correlation_id = message
-            .metadata
-            .get("correlation_id")
-            .cloned()
+            .get_metadata("correlation_id")
+            .map(str::to_owned)
             .unwrap_or_else(|| format!("{:032x}", message.message_id));
         let mut tokens = Tokens::new(correlation_id);
         let attempt = AssertUnwindSafe(self.attempt(message, &mut tokens))
@@ -560,7 +559,7 @@ async fn listen(mut consumer: Box<dyn MessageConsumer>, running: std::sync::Weak
             return;
         };
         for message in &batch.messages {
-            match message.metadata.get("correlation_id") {
+            match message.get_metadata("correlation_id") {
                 Some(id) => running.cancel(id),
                 None => running.cancel(message.get_payload_str().trim()),
             }
@@ -700,11 +699,7 @@ mod tests {
     }
 
     fn meta<'a>(message: &'a CanonicalMessage, key: &str) -> &'a str {
-        message
-            .metadata
-            .get(key)
-            .map(String::as_str)
-            .unwrap_or_default()
+        message.get_metadata(key).unwrap_or_default()
     }
 
     fn answer(sent: Result<Sent, PublisherError>) -> CanonicalMessage {

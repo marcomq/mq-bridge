@@ -402,8 +402,7 @@ fn since(clock: Option<usize>, slots: &[f64], now: f64) -> f64 {
 
 /// Whether the message asks to be folded as the newest, see [`OVERWRITE_KEY`].
 fn overwrites(msg: &CanonicalMessage) -> bool {
-    msg.metadata
-        .get(OVERWRITE_KEY)
+    msg.get_metadata(OVERWRITE_KEY)
         .is_some_and(|v| v.trim().eq_ignore_ascii_case("true"))
 }
 
@@ -1155,7 +1154,7 @@ impl Aggregate {
                      metadata `{key}`. Logged once."
                 );
             }
-            msg.metadata.insert(key.to_string(), names);
+            msg.set_metadata(key.to_string(), names);
         }
         Ok(msg)
     }
@@ -1538,14 +1537,8 @@ impl Aggregate {
         };
         if self.reads_meta {
             let meta = msg
-                .metadata
-                .iter()
-                .map(|(k, v)| {
-                    (
-                        Symbol::from(k.as_str()),
-                        Variable::String(v.as_str().into()),
-                    )
-                })
+                .metadata_iter()
+                .map(|(k, v)| (Symbol::from(k), Variable::String(v.into())))
                 .collect();
             object
                 .borrow_mut()

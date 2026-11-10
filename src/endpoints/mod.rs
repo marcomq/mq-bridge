@@ -3277,22 +3277,16 @@ mod tests {
         assert_eq!(batch.messages.len(), 2, "file input produced no rows");
         for (index, message) in batch.messages.iter().enumerate() {
             assert_eq!(
-                message
-                    .metadata
-                    .get("mqb.src.file_path")
-                    .map(String::as_str),
+                message.get_metadata("mqb.src.file_path"),
                 Some(input.to_string_lossy().as_ref())
             );
             // The record index is the replay position, so it has to be the row's own index.
             assert_eq!(
-                message
-                    .metadata
-                    .get("mqb.src.file_record")
-                    .map(String::as_str),
+                message.get_metadata("mqb.src.file_record"),
                 Some(index.to_string().as_str())
             );
             // `consume` reproduces its record index, so it carries no epoch.
-            assert!(!message.metadata.contains_key("mqb.src.file_epoch"));
+            assert!(!message.has_metadata("mqb.src.file_epoch"));
             assert!(crate::support::source_ranges::SourcePosition::from_message(message).is_ok());
         }
     }
@@ -3323,7 +3317,7 @@ mod tests {
                     .unwrap();
             let batch = consumer.receive_batch(10).await.unwrap();
             let first = batch.messages.first().expect("file input produced no rows");
-            assert!(first.metadata.contains_key("mqb.src.file_epoch"));
+            assert!(first.has_metadata("mqb.src.file_epoch"));
             positions
                 .push(crate::support::source_ranges::SourcePosition::from_message(first).unwrap());
         }

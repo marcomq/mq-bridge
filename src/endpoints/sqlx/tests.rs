@@ -738,7 +738,7 @@ fn test_parse_insert_template_malformed() {
 #[test]
 fn test_resolve_source_metadata() {
     let mut msg = CanonicalMessage::new(b"{}".to_vec(), None);
-    msg.metadata.insert("k".to_string(), "v".to_string());
+    msg.set_metadata("k", "v");
     let json = serde_json::from_slice(&msg.payload).ok();
     assert_eq!(
         resolve_source(&msg, &ColumnSource::Metadata("k".to_string()), &json),
@@ -874,7 +874,7 @@ async fn test_classify_sqlite_schema_error_is_permanent() {
 fn test_resolve_source_no_fallback() {
     // Payload source must NOT fall back to metadata and vice versa.
     let mut msg = CanonicalMessage::new(b"not json".to_vec(), None);
-    msg.metadata.insert("k".to_string(), "meta".to_string());
+    msg.set_metadata("k", "meta");
     let json: Option<serde_json::Value> = serde_json::from_slice(&msg.payload).ok();
     assert!(json.is_none());
     // payload:k -> Null even though metadata has "k"
@@ -982,7 +982,7 @@ async fn test_sqlx_multicolumn_insert() {
     let publisher = SqlxPublisher::new(&config).await.unwrap();
 
     let mut msg = CanonicalMessage::new(br#"{"sku":"abc","qty":7}"#.to_vec(), None);
-    msg.metadata.insert("cust".to_string(), "c1".to_string());
+    msg.set_metadata("cust", "c1");
     publisher.send(msg).await.unwrap();
 
     let row = sqlx::query("SELECT sku, qty, cust FROM orders")
@@ -1015,7 +1015,7 @@ async fn test_sqlx_multicolumn_non_json_payload_nulls() {
     let publisher = SqlxPublisher::new(&config).await.unwrap();
 
     let mut msg = CanonicalMessage::new(b"raw non-json".to_vec(), None);
-    msg.metadata.insert("a".to_string(), "meta_a".to_string());
+    msg.set_metadata("a", "meta_a");
     publisher.send(msg).await.unwrap();
 
     let row = sqlx::query("SELECT a, b FROM t")
@@ -1048,7 +1048,7 @@ async fn test_sqlx_multicolumn_batch() {
     let mut msgs = Vec::new();
     for i in 0..3 {
         let mut m = CanonicalMessage::new(format!("{{\"b\":{}}}", i * 10).into_bytes(), None);
-        m.metadata.insert("a".to_string(), format!("row{}", i));
+        m.set_metadata("a", format!("row{}", i));
         msgs.push(m);
     }
     publisher.send_batch(msgs).await.unwrap();
@@ -1623,8 +1623,8 @@ async fn test_sqlx_cursor_reader_stamps_source_positions() {
     let batch = reader.receive_batch(3).await.unwrap();
     assert_eq!(batch.messages.len(), 3);
     assert_eq!(
-        batch.messages[0].metadata.get("mqb.src.sqlx_table"),
-        Some(&"orders".to_string())
+        batch.messages[0].get_metadata("mqb.src.sqlx_table"),
+        Some("orders")
     );
 
     // The cursor value is the offset itself, so the rows form one contiguous run and an
@@ -1747,15 +1747,9 @@ async fn lookup_query_answers_with_the_first_row() {
     let responses = responses.unwrap();
     let hit: serde_json::Value = serde_json::from_slice(&responses[0].payload).unwrap();
     assert_eq!(hit, serde_json::json!({"name": "Ada", "age": 36}));
-    assert_eq!(
-        responses[0].metadata.get("sqlx.found").map(String::as_str),
-        Some("true")
-    );
+    assert_eq!(responses[0].get_metadata("sqlx.found"), Some("true"));
     assert!(responses[1].payload.is_empty());
-    assert_eq!(
-        responses[1].metadata.get("sqlx.found").map(String::as_str),
-        Some("false")
-    );
+    assert_eq!(responses[1].get_metadata("sqlx.found"), Some("false"));
 
     let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users")
         .fetch_one(&pool)
@@ -1820,10 +1814,7 @@ async fn an_in_lookup_query_answers_a_batch_in_one_query() {
         serde_json::from_slice::<serde_json::Value>(&single.payload).unwrap(),
         serde_json::json!({"id": 1, "name": "Ada"})
     );
-    assert_eq!(
-        single.metadata.get("sqlx.found").map(String::as_str),
-        Some("true")
-    );
+    assert_eq!(single.get_metadata("sqlx.found"), Some("true"));
 }
 
 #[test]
@@ -2028,7 +2019,7 @@ async fn writing_lookup_postgres_runs_a_batch_as_one_function_call() {
     let Sent::Response(one) = batched.send(counter_msg("c", 7)).await.unwrap() else {
         panic!("a lookup answers");
     };
-    assert_eq!(one.metadata[FOUND_KEY], "true");
+    assert_eq!(one.get_metadata(FOUND_KEY).unwrap(), "true");
     assert_eq!(
         serde_json::from_slice::<serde_json::Value>(&one.payload).unwrap(),
         serde_json::json!({"k": "c", "c": 7})

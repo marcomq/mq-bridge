@@ -59,9 +59,8 @@ fn resolve_token(
             .cloned()
             .unwrap_or(Value::Null),
         Some(("metadata", name)) => msg
-            .metadata
-            .get(name)
-            .map(|s| Value::String(s.clone()))
+            .get_metadata(name)
+            .map(|s| Value::String(s.to_owned()))
             .unwrap_or(Value::Null),
         _ => Value::String(token.to_string()),
     }
@@ -527,9 +526,7 @@ impl ClickHousePublisher {
         };
         let found = row.is_some();
         let mut response = CanonicalMessage::new(row.unwrap_or_default(), Some(message.message_id));
-        response
-            .metadata
-            .insert(FOUND_KEY.to_string(), found.to_string());
+        response.set_metadata(FOUND_KEY, found.to_string());
         Ok(Sent::Response(response))
     }
 
@@ -1176,7 +1173,7 @@ mod tests {
     fn msg(payload: &serde_json::Value, meta: &[(&str, &str)]) -> CanonicalMessage {
         let mut m = CanonicalMessage::new(serde_json::to_vec(payload).unwrap(), None);
         for (k, v) in meta {
-            m.metadata.insert(k.to_string(), v.to_string());
+            m.set_metadata(k.to_string(), v.to_string());
         }
         m
     }

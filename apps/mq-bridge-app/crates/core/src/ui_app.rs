@@ -387,7 +387,7 @@ fn resolve_node_modules_path(request_path: &str) -> Option<PathBuf> {
 }
 
 fn query_param(msg: &CanonicalMessage, key: &str) -> Option<String> {
-    let query = msg.metadata.get("http_query")?;
+    let query = msg.get_metadata("http_query")?;
     query
         .split('&')
         .find_map(|pair| pair.strip_prefix(&format!("{key}=")))
@@ -400,8 +400,7 @@ fn query_param(msg: &CanonicalMessage, key: &str) -> Option<String> {
 }
 
 fn request_peer_is_loopback(msg: &CanonicalMessage) -> bool {
-    msg.metadata
-        .get("mqb_peer_loopback")
+    msg.get_metadata("mqb_peer_loopback")
         .is_some_and(|value| value == "true")
 }
 
@@ -422,10 +421,8 @@ impl From<&ConsumerStatusSnapshot> for StatusSummary {
 }
 
 fn header_value<'a>(msg: &'a CanonicalMessage, key: &str) -> Option<&'a str> {
-    msg.metadata
-        .get(key)
-        .or_else(|| msg.metadata.get(&key.to_ascii_lowercase()))
-        .map(String::as_str)
+    msg.get_metadata(key)
+        .or_else(|| msg.get_metadata(&key.to_ascii_lowercase()))
 }
 
 fn extract_authority(value: &str) -> Option<&str> {
@@ -670,10 +667,9 @@ impl CollectorContext {
         // The configured response, if any, is recorded alongside the
         // request so the UI can show both halves of a request/reply.
         if let ResolvedConsumerOutput::Response { response: Some(r) } = &self.output {
-            let meta = &mut enriched.metadata;
-            meta.insert("ui_response_payload".into(), r.payload.clone());
+            enriched.set_metadata("ui_response_payload", r.payload.clone());
             if let Ok(headers) = serde_json::to_string(&r.headers) {
-                meta.insert("ui_response_metadata".into(), headers);
+                enriched.set_metadata("ui_response_metadata", headers);
             }
         }
 
@@ -1059,16 +1055,10 @@ impl UiApp {
         self.ensure_throughput_updater();
 
         let method = msg
-            .metadata
-            .get("http_method")
-            .map(|s| s.as_str())
+            .get_metadata("http_method")
             .unwrap_or("GET")
             .to_uppercase();
-        let raw_path = msg
-            .metadata
-            .get("http_path")
-            .map(|s| s.as_str())
-            .unwrap_or("/");
+        let raw_path = msg.get_metadata("http_path").unwrap_or("/");
 
         // Strip anything after '#' to allow the UI to send "visible identifiers"
         // that appear in the browser network tab but are ignored for routing.
@@ -1189,7 +1179,7 @@ impl UiApp {
             Handled::Publish(m) => m,
         };
 
-        let response = if !response.metadata.contains_key("http_status_code") {
+        let response = if !response.has_metadata("http_status_code") {
             response.with_status_code("200")
         } else {
             response
@@ -1406,7 +1396,10 @@ impl UiApp {
                     None => MessageCapture::open(&topic),
                 };
                 for m in capture.drain() {
-                    let mut metadata = m.metadata.clone();
+                    let mut metadata: HashMap<String, String> = m
+                        .metadata_iter()
+                        .map(|(key, value)| (key.to_owned(), value.to_owned()))
+                        .collect();
                     let source = metadata
                         .remove(CAPTURE_SOURCE_KEY)
                         .unwrap_or_else(|| "unknown".into());
@@ -1502,7 +1495,7 @@ impl UiApp {
         if let Some(publisher) = publisher {
             let mut canonical = CanonicalMessage::from(payload);
             for (k, v) in metadata {
-                canonical.metadata.insert(k, v);
+                canonical.set_metadata(k, v);
             }
 
             let response = match publisher.send(canonical).await {
@@ -1514,7 +1507,12 @@ impl UiApp {
                 Ok(Sent::Response(message)) => PublishResponse {
                     status: "Response".to_string(),
                     payload: Some(message.get_payload_str().to_string()),
-                    metadata: Some(message.metadata),
+                    metadata: Some(
+                        message
+                            .metadata_iter()
+                            .map(|(key, value)| (key.to_owned(), value.to_owned()))
+                            .collect(),
+                    ),
                 },
                 Err(e) => return Err(anyhow!("Publish error: {e}")),
             };
@@ -2741,7 +2739,7 @@ publishers:
         assert!(text.contains("http://app:${MQB__PUBLISHERS__"), "{text}");
 
         let saved = call("POST", shown.payload.to_vec()).await;
-        assert_eq!(saved.metadata["http_status_code"], "200");
+        assert_eq!(saved.get_metadata("http_status_code").unwrap(), "200");
         let kept = serde_json::to_string(&app.get_config().await).unwrap();
         assert!(
             kept.contains("hunter1") && kept.contains("hunter2"),
@@ -2765,7 +2763,10 @@ publishers:
                 else {
                     panic!("the UI should return an HTTP response")
                 };
-                response.metadata["http_status_code"].clone()
+                response
+                    .get_metadata("http_status_code")
+                    .unwrap()
+                    .to_owned()
             }
         };
 
@@ -2798,13 +2799,7 @@ publishers:
         let Handled::Publish(response) = response else {
             panic!("peer status should return an HTTP response")
         };
-        assert_eq!(
-            response
-                .metadata
-                .get("http_status_code")
-                .map(String::as_str),
-            Some("403")
-        );
+        assert_eq!(response.get_metadata("http_status_code"), Some("403"));
 
         let request = CanonicalMessage::new(Vec::new(), None)
             .with_metadata_kv("http_method", "GET")
@@ -2814,13 +2809,7 @@ publishers:
         let Handled::Publish(response) = response else {
             panic!("peer status should return an HTTP response")
         };
-        assert_eq!(
-            response
-                .metadata
-                .get("http_status_code")
-                .map(String::as_str),
-            Some("200")
-        );
+        assert_eq!(response.get_metadata("http_status_code"), Some("200"));
         // Reading peers must not publish: without a running heartbeat there is
         // no lease for this process, and the read path never creates one.
         let peers: PeerStatusResponse = serde_json::from_slice(&response.payload).unwrap();

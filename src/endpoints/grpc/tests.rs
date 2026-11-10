@@ -625,8 +625,14 @@ mod dynamic {
         assert_eq!(json["data"], "aGVsbG8=");
         assert_eq!(json["sequence"], "7");
         assert_eq!(json["auth"], "Bearer test-token");
-        assert_eq!(first_message.metadata["grpc.ack_guarantee"], "none");
-        assert_eq!(first_message.metadata["grpc.response_index"], "0");
+        assert_eq!(
+            first_message.get_metadata("grpc.ack_guarantee").unwrap(),
+            "none"
+        );
+        assert_eq!(
+            first_message.get_metadata("grpc.response_index").unwrap(),
+            "0"
+        );
 
         let mut second = DynamicConsumer::new(&config, &config.url).await.unwrap();
         let second_batch = second.receive_batch(1).await.unwrap();
@@ -660,7 +666,7 @@ mod dynamic {
                         let request: serde_json::Value =
                             serde_json::from_slice(&msg.payload).unwrap();
                         assert_eq!(
-                            msg.metadata["mq_bridge.topic"],
+                            msg.get_metadata("mq_bridge.topic").unwrap(),
                             "/mqbridge.test.v1.DynamicFixture/Unary"
                         );
                         let sequence: i64 = request["sequence"].as_str().unwrap().parse().unwrap();

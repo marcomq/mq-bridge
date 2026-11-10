@@ -3668,17 +3668,10 @@ impl MessageConsumer for FileConsumer {
         let mut batch = self.receive_batch_inner(max_messages).await?;
         if self.source_metadata {
             for message in &mut batch.messages {
-                message
-                    .metadata
-                    .insert("mqb.src.file_path".to_string(), self.path.clone());
-                message.metadata.insert(
-                    "mqb.src.file_record".to_string(),
-                    self.next_record.to_string(),
-                );
+                message.set_metadata("mqb.src.file_path", self.path.clone());
+                message.set_metadata("mqb.src.file_record", self.next_record.to_string());
                 if let Some(epoch) = self.run_epoch {
-                    message
-                        .metadata
-                        .insert("mqb.src.file_epoch".to_string(), epoch.to_string());
+                    message.set_metadata("mqb.src.file_epoch", epoch.to_string());
                 }
                 self.next_record += 1;
             }
@@ -3775,8 +3768,7 @@ impl FileConsumer {
                                             !matches!(d, crate::traits::MessageDisposition::Nack)
                                         })
                                         .filter_map(|(_, m)| {
-                                            m.metadata
-                                                .get("file_offset")
+                                            m.get_metadata("file_offset")
                                                 .and_then(|s| s.parse::<u64>().ok())
                                         })
                                         .max();
@@ -3976,7 +3968,7 @@ pub(crate) fn encode_record(
                 serde_json::to_vec(&RecordWrapper {
                     message_id: msg.message_id,
                     payload: one_line.as_deref().unwrap_or(raw),
-                    metadata: &msg.metadata,
+                    metadata: msg.metadata_map(),
                 })
                 .map(Bytes::from)
             } else {
@@ -3988,7 +3980,7 @@ pub(crate) fn encode_record(
                 serde_json::to_vec(&RecordWrapper {
                     message_id: msg.message_id,
                     payload: text,
-                    metadata: &msg.metadata,
+                    metadata: msg.metadata_map(),
                 })
                 .map(Bytes::from)
             } else {
@@ -4072,7 +4064,7 @@ const BYTE_PAYLOAD_MARK: &str = "1";
 /// Write a binary payload under a `json`/`text` sink as the byte-array wrapper, marked so
 /// the reader restores the bytes instead of the array's JSON text.
 fn encode_byte_payload(msg: &CanonicalMessage) -> Result<Bytes, serde_json::Error> {
-    let mut metadata = msg.metadata.clone();
+    let mut metadata = msg.metadata_map().clone();
     metadata.insert(BYTE_PAYLOAD_KEY.to_string(), BYTE_PAYLOAD_MARK.to_string());
     serde_json::to_vec(&RecordWrapper {
         message_id: msg.message_id,
@@ -4110,8 +4102,7 @@ fn decode_one(
         None => parse_message(bytes, format, &mut None)?,
     };
     if with_offset {
-        msg.metadata
-            .insert("file_offset".to_string(), position.to_string());
+        msg.set_metadata("file_offset", position.to_string());
     }
     Some(msg)
 }
@@ -4309,8 +4300,7 @@ pub(crate) fn parse_message(
         _ if buffer.is_empty() => None,
         FileFormat::Raw => {
             let mut msg = CanonicalMessage::new(buffer.to_vec(), None);
-            msg.metadata
-                .insert("mq_bridge.original_format".to_string(), "raw".to_string());
+            msg.set_metadata("mq_bridge.original_format", "raw");
             Some(msg)
         }
         // `json` keeps the payload as JSON, so its bytes are copied out of the line
@@ -4340,11 +4330,9 @@ pub(crate) fn parse_message(
                     match (payload.into_option(), payload_base64) {
                         // A `normal`-written binary record read back through a `json` source.
                         (None, Some(b64)) => match decode_base64_payload(&b64) {
-                            Some(payload) => CanonicalMessage {
-                                message_id,
-                                payload,
-                                metadata,
-                            },
+                            Some(payload) => {
+                                CanonicalMessage::from_parts(message_id, payload, metadata)
+                            }
                             None => raw_fallback_message(buffer, bad_payload_error()),
                         },
                         // A marked record holds a byte array the sink could not represent as
@@ -4358,18 +4346,18 @@ pub(crate) fn parse_message(
                         {
                             decode_byte_payload_record(buffer).unwrap_or_else(|| {
                                 strip_byte_marker(&mut metadata);
-                                CanonicalMessage {
+                                CanonicalMessage::from_parts(
                                     message_id,
-                                    payload: payload.get().as_bytes().to_vec().into(),
+                                    payload.get().as_bytes().to_vec().into(),
                                     metadata,
-                                }
+                                )
                             })
                         }
-                        (Some(payload), None) => CanonicalMessage {
+                        (Some(payload), None) => CanonicalMessage::from_parts(
                             message_id,
-                            payload: payload.get().as_bytes().to_vec().into(),
+                            payload.get().as_bytes().to_vec().into(),
                             metadata,
-                        },
+                        ),
                         // Mutually exclusive, like CloudEvents `data`/`data_base64`.
                         (Some(_), Some(_)) | (None, None) => {
                             raw_fallback_message(buffer, bad_payload_error())
@@ -4418,11 +4406,11 @@ impl BytePayloadMessage {
             // Mutually exclusive, like CloudEvents `data`/`data_base64`.
             (Some(_), Some(_)) | (None, None) => return None,
         };
-        Some(CanonicalMessage {
-            message_id: self.message_id,
+        Some(CanonicalMessage::from_parts(
+            self.message_id,
             payload,
-            metadata: self.metadata,
-        })
+            self.metadata,
+        ))
     }
 }
 
@@ -4516,8 +4504,7 @@ fn raw_fallback_message(buffer: &[u8], err: serde_json::Error) -> CanonicalMessa
         tracing::debug!(error = %err, content_length = buffer.len(), "{message}");
     }
     let mut msg = CanonicalMessage::new(buffer.to_vec(), None);
-    msg.metadata
-        .insert("mq_bridge.original_format".to_string(), "raw".to_string());
+    msg.set_metadata("mq_bridge.original_format", "raw");
     msg
 }
 

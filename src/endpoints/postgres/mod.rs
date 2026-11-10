@@ -314,25 +314,14 @@ impl PostgresCdcConsumer {
                     self.confirm_when_idle(lsn);
                 }
                 for (ordinal, mut msg) in self.tx_buffer.drain(..).enumerate() {
-                    let operation = msg
-                        .metadata
-                        .get("postgres.operation")
-                        .map_or("", |s| s.as_str());
+                    let operation = msg.get_metadata("postgres.operation").unwrap_or("");
                     // A truncate names no row, so it has no key but still gets a stable id.
                     let key = msg
-                        .metadata
-                        .get("postgres.key")
-                        .map(String::as_str)
+                        .get_metadata("postgres.key")
                         .or((operation == "truncate").then_some(""));
                     let dedup_id = key.map(|key| {
-                        let schema = msg
-                            .metadata
-                            .get("postgres.schema")
-                            .map_or("", |s| s.as_str());
-                        let table = msg
-                            .metadata
-                            .get("postgres.table")
-                            .map_or("", |s| s.as_str());
+                        let schema = msg.get_metadata("postgres.schema").unwrap_or("");
+                        let table = msg.get_metadata("postgres.table").unwrap_or("");
                         // Include op + in-tx ordinal so multiple changes to the same key
                         // in one commit get distinct (still deterministic) ids.
                         cdc_dedup_id(self.id_hash, schema, table, key, lsn, operation, ordinal)
@@ -340,8 +329,7 @@ impl PostgresCdcConsumer {
                     if let Some(id) = dedup_id {
                         msg.message_id = id;
                     }
-                    msg.metadata
-                        .insert("postgres.lsn".to_string(), lsn_str.clone());
+                    msg.set_metadata("postgres.lsn", lsn_str.clone());
                     if self.source_metadata {
                         add_source_metadata(&mut msg, &self.slot_name, lsn, ordinal);
                     }
@@ -488,14 +476,11 @@ fn cdc_message(rel: &Relation, operation: &str, body: serde_json::Value) -> Cano
         .and_then(|obj| replica_key_string(rel, obj));
     let payload = serde_json::to_vec(&body).unwrap_or_default();
     let mut msg = CanonicalMessage::new_bytes(payload.into(), None);
-    msg.metadata
-        .insert("postgres.operation".to_string(), operation.to_string());
-    msg.metadata
-        .insert("postgres.schema".to_string(), rel.namespace.clone());
-    msg.metadata
-        .insert("postgres.table".to_string(), rel.name.clone());
+    msg.set_metadata("postgres.operation", operation.to_string());
+    msg.set_metadata("postgres.schema", rel.namespace.clone());
+    msg.set_metadata("postgres.table", rel.name.clone());
     if let Some(key) = key {
-        msg.metadata.insert("postgres.key".to_string(), key);
+        msg.set_metadata("postgres.key", key);
     }
     msg
 }
@@ -568,15 +553,9 @@ fn cdc_dedup_id(
 }
 
 fn add_source_metadata(message: &mut CanonicalMessage, slot: &str, lsn: u64, ordinal: usize) {
-    message
-        .metadata
-        .insert("mqb.src.postgres_slot".into(), slot.into());
-    message
-        .metadata
-        .insert("mqb.src.postgres_lsn".into(), lsn.to_string());
-    message
-        .metadata
-        .insert("mqb.src.postgres_ordinal".into(), ordinal.to_string());
+    message.set_metadata("mqb.src.postgres_slot", slot);
+    message.set_metadata("mqb.src.postgres_lsn", lsn.to_string());
+    message.set_metadata("mqb.src.postgres_ordinal", ordinal.to_string());
 }
 
 /// A safe Postgres identifier for a publication / replication slot: non-empty
@@ -616,7 +595,7 @@ fn stage_update(rel: &Relation, u: &Update) -> anyhow::Result<CanonicalMessage> 
     // Postgres sends the old key only when the update changed it.
     if let (UpdateOldKind::Key, Some(old)) = (u.old_kind, &u.old) {
         if let Some(old_key) = replica_key_string(rel, &row_object(rel, old)?) {
-            msg.metadata.insert("postgres.old_key".to_string(), old_key);
+            msg.set_metadata("postgres.old_key", old_key);
         }
     }
     Ok(msg)
@@ -640,7 +619,7 @@ fn stage_delete(rel: &Relation, d: &Delete) -> anyhow::Result<CanonicalMessage> 
 
 fn stage_truncate(rel: &Relation, _t: &Truncate) -> CanonicalMessage {
     let mut msg = cdc_message(rel, "truncate", serde_json::json!({}));
-    msg.metadata.remove("postgres.key");
+    msg.remove_metadata("postgres.key");
     msg
 }
 
@@ -898,10 +877,7 @@ mod cdc_id_tests {
         let rel = rel_with_key();
         let body = serde_json::json!({ "id": 7, "body": "x" });
         let msg = cdc_message(&rel, "insert", body);
-        assert_eq!(
-            msg.metadata.get("postgres.key").map(String::as_str),
-            Some("[7]")
-        );
+        assert_eq!(msg.get_metadata("postgres.key"), Some("[7]"));
     }
 
     #[test]
@@ -944,26 +920,14 @@ mod cdc_id_tests {
         add_source_metadata(&mut message, "bridge_slot", 9_876_543_210, 1);
 
         assert_eq!(
-            message
-                .metadata
-                .get("mqb.src.postgres_slot")
-                .map(String::as_str),
+            message.get_metadata("mqb.src.postgres_slot"),
             Some("bridge_slot")
         );
         assert_eq!(
-            message
-                .metadata
-                .get("mqb.src.postgres_lsn")
-                .map(String::as_str),
+            message.get_metadata("mqb.src.postgres_lsn"),
             Some("9876543210")
         );
-        assert_eq!(
-            message
-                .metadata
-                .get("mqb.src.postgres_ordinal")
-                .map(String::as_str),
-            Some("1")
-        );
+        assert_eq!(message.get_metadata("mqb.src.postgres_ordinal"), Some("1"));
     }
 
     fn row(id: &str, body: &str) -> pgoutput::messages::TupleData {
@@ -974,7 +938,7 @@ mod cdc_id_tests {
     }
 
     fn meta<'a>(message: &'a CanonicalMessage, key: &str) -> Option<&'a str> {
-        message.metadata.get(key).map(String::as_str)
+        message.get_metadata(key)
     }
 
     #[test]

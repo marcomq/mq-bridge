@@ -58,12 +58,10 @@ impl IdConsumer {
                 // Every segment is built from a `String`, so the render is always valid UTF-8.
                 let id = String::from_utf8(rendered)
                     .expect("interpolation renders UTF-8 by construction");
-                message
-                    .metadata
-                    .insert(MESSAGE_IDENTITY_KEY.to_string(), id);
+                message.set_metadata(MESSAGE_IDENTITY_KEY, id);
             }
             _ => {
-                message.metadata.remove(MESSAGE_IDENTITY_KEY);
+                message.remove_metadata(MESSAGE_IDENTITY_KEY);
                 self.warn_unresolved(message);
             }
         }
@@ -153,8 +151,8 @@ mod tests {
         let mut consumer = consumer_over(&[r#"{"order_id":"A-1"}"#], "${payload:order_id}").await;
         let batch = consumer.receive_batch(1).await.unwrap();
         assert_eq!(
-            batch.messages[0].metadata.get(MESSAGE_IDENTITY_KEY),
-            Some(&"A-1".to_string())
+            batch.messages[0].get_metadata(MESSAGE_IDENTITY_KEY),
+            Some("A-1")
         );
     }
 
@@ -171,8 +169,8 @@ mod tests {
             "message_id is per-read, so this test would prove nothing if they matched"
         );
         assert_eq!(
-            first.metadata.get(MESSAGE_IDENTITY_KEY),
-            second.metadata.get(MESSAGE_IDENTITY_KEY)
+            first.get_metadata(MESSAGE_IDENTITY_KEY),
+            second.get_metadata(MESSAGE_IDENTITY_KEY)
         );
     }
 
@@ -181,7 +179,7 @@ mod tests {
     async fn an_unresolvable_template_leaves_the_key_unset() {
         let mut consumer = consumer_over(&[r#"{"other":"x"}"#], "${payload:order_id}").await;
         let batch = consumer.receive_batch(1).await.unwrap();
-        assert_eq!(batch.messages[0].metadata.get(MESSAGE_IDENTITY_KEY), None);
+        assert_eq!(batch.messages[0].get_metadata(MESSAGE_IDENTITY_KEY), None);
     }
 
     /// The dangerous case: one token resolves and the other does not, so the render is
@@ -195,7 +193,7 @@ mod tests {
         )
         .await;
         let batch = consumer.receive_batch(1).await.unwrap();
-        assert_eq!(batch.messages[0].metadata.get(MESSAGE_IDENTITY_KEY), None);
+        assert_eq!(batch.messages[0].get_metadata(MESSAGE_IDENTITY_KEY), None);
     }
 
     /// Same trap with a literal prefix instead of a second token.
@@ -203,7 +201,7 @@ mod tests {
     async fn a_literal_prefix_does_not_count_as_a_resolved_identity() {
         let mut consumer = consumer_over(&[r#"{"other":"x"}"#], "order-${payload:order_id}").await;
         let batch = consumer.receive_batch(1).await.unwrap();
-        assert_eq!(batch.messages[0].metadata.get(MESSAGE_IDENTITY_KEY), None);
+        assert_eq!(batch.messages[0].get_metadata(MESSAGE_IDENTITY_KEY), None);
     }
 
     /// Consumer middlewares are wrapped in reverse, so the **last** entry sits closest to the
@@ -234,10 +232,7 @@ mod tests {
                 .unwrap();
 
         let message = consumer.receive().await.unwrap().message;
-        assert_eq!(
-            message.metadata.get(MESSAGE_IDENTITY_KEY),
-            Some(&"X-outer".to_string())
-        );
+        assert_eq!(message.get_metadata(MESSAGE_IDENTITY_KEY), Some("X-outer"));
     }
 
     /// Silently ignoring it on an output would leave `mqb.id` unset with no way to notice.
@@ -293,13 +288,11 @@ mod tests {
         let inner = MemoryConsumer::new(&config).unwrap();
         let mut consumer = IdConsumer::new(Box::new(inner), "${payload:order_id}").unwrap();
         let mut message = CanonicalMessage::from(r#"{"other":"x"}"#);
-        message
-            .metadata
-            .insert(MESSAGE_IDENTITY_KEY.to_string(), "stale".to_string());
+        message.set_metadata(MESSAGE_IDENTITY_KEY, "stale");
 
         consumer.stamp(&mut message);
 
-        assert_eq!(message.metadata.get(MESSAGE_IDENTITY_KEY), None);
+        assert_eq!(message.get_metadata(MESSAGE_IDENTITY_KEY), None);
     }
 
     /// A tokenless template renders the same string for every message, which is the collapse

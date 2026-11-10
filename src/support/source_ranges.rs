@@ -49,29 +49,25 @@ pub struct SourceRun {
 
 impl SourcePosition {
     pub fn from_message(message: &CanonicalMessage) -> Result<Self> {
-        if message.metadata.contains_key(TOPIC_KEY)
-            || message.metadata.contains_key(PARTITION_KEY)
-            || message.metadata.contains_key(OFFSET_KEY)
+        if message.has_metadata(TOPIC_KEY)
+            || message.has_metadata(PARTITION_KEY)
+            || message.has_metadata(OFFSET_KEY)
         {
             return Self::from_kafka_message(message);
         }
-        if message.metadata.contains_key(POSTGRES_SLOT_KEY)
-            || message.metadata.contains_key(POSTGRES_LSN_KEY)
-            || message.metadata.contains_key(POSTGRES_ORDINAL_KEY)
+        if message.has_metadata(POSTGRES_SLOT_KEY)
+            || message.has_metadata(POSTGRES_LSN_KEY)
+            || message.has_metadata(POSTGRES_ORDINAL_KEY)
         {
             return Self::from_postgres_message(message);
         }
-        if message.metadata.contains_key(MONGODB_NAMESPACE_KEY) {
+        if message.has_metadata(MONGODB_NAMESPACE_KEY) {
             return Self::from_mongodb_message(message);
         }
-        if message.metadata.contains_key(FILE_PATH_KEY)
-            || message.metadata.contains_key(FILE_RECORD_KEY)
-        {
+        if message.has_metadata(FILE_PATH_KEY) || message.has_metadata(FILE_RECORD_KEY) {
             return Self::from_file_message(message);
         }
-        if message.metadata.contains_key(SQLX_TABLE_KEY)
-            || message.metadata.contains_key(SQLX_CURSOR_KEY)
-        {
+        if message.has_metadata(SQLX_TABLE_KEY) || message.has_metadata(SQLX_CURSOR_KEY) {
             return Self::from_sqlx_message(message);
         }
         bail!("idempotent sink requires Kafka, postgres_cdc, mongodb, file or sqlx source-position metadata");
@@ -79,11 +75,10 @@ impl SourcePosition {
 
     fn from_kafka_message(message: &CanonicalMessage) -> Result<Self> {
         let topic = message
-            .metadata
-            .get(TOPIC_KEY)
+            .get_metadata(TOPIC_KEY)
             .filter(|value| !value.is_empty())
             .ok_or_else(|| anyhow!("idempotent sink requires {TOPIC_KEY}"))?
-            .clone();
+            .to_owned();
         let partition = parse_signed_position(message, PARTITION_KEY)?;
         let offset = parse_unsigned_position(message, OFFSET_KEY)?;
         if partition < 0 {
@@ -100,8 +95,7 @@ impl SourcePosition {
 
     fn from_postgres_message(message: &CanonicalMessage) -> Result<Self> {
         let slot = message
-            .metadata
-            .get(POSTGRES_SLOT_KEY)
+            .get_metadata(POSTGRES_SLOT_KEY)
             .filter(|value| !value.is_empty())
             .ok_or_else(|| anyhow!("idempotent sink requires {POSTGRES_SLOT_KEY}"))?;
         let lsn = parse_unsigned_position(message, POSTGRES_LSN_KEY)?;
@@ -126,14 +120,13 @@ impl SourcePosition {
     /// it modifies.
     fn from_mongodb_message(message: &CanonicalMessage) -> Result<Self> {
         let namespace = message
-            .metadata
-            .get(MONGODB_NAMESPACE_KEY)
+            .get_metadata(MONGODB_NAMESPACE_KEY)
             .filter(|value| !value.is_empty())
             .ok_or_else(|| anyhow!("idempotent sink requires {MONGODB_NAMESPACE_KEY}"))?;
 
         // Snapshot documents are paged by ascending `_id`, so their scan index is a
         // contiguous, deterministic position.
-        if message.metadata.contains_key(MONGODB_SNAPSHOT_INDEX_KEY) {
+        if message.has_metadata(MONGODB_SNAPSHOT_INDEX_KEY) {
             let index = parse_unsigned_position(message, MONGODB_SNAPSHOT_INDEX_KEY)?;
             return Ok(Self {
                 source: SourcePartition {
@@ -165,8 +158,7 @@ impl SourcePosition {
     /// consecutive, so they would force one object per record.
     fn from_file_message(message: &CanonicalMessage) -> Result<Self> {
         let path = message
-            .metadata
-            .get(FILE_PATH_KEY)
+            .get_metadata(FILE_PATH_KEY)
             .filter(|value| !value.is_empty())
             .ok_or_else(|| anyhow!("idempotent sink requires {FILE_PATH_KEY}"))?;
         let record = parse_unsigned_position(message, FILE_RECORD_KEY)?;
@@ -174,7 +166,7 @@ impl SourcePosition {
         // the record indexes of the run before it. Sorted ahead of the index because a
         // later run always reads later records.
         let identity = sanitize_path_identity(path);
-        let topic = match message.metadata.get(FILE_EPOCH_KEY) {
+        let topic = match message.get_metadata(FILE_EPOCH_KEY) {
             Some(_) => {
                 let epoch = parse_unsigned_position(message, FILE_EPOCH_KEY)?;
                 format!("file-{identity}-{epoch:00$}", POSITION_WIDTH)
@@ -196,8 +188,7 @@ impl SourcePosition {
     /// contiguous ordering, before stamping.
     fn from_sqlx_message(message: &CanonicalMessage) -> Result<Self> {
         let table = message
-            .metadata
-            .get(SQLX_TABLE_KEY)
+            .get_metadata(SQLX_TABLE_KEY)
             .filter(|value| !value.is_empty())
             .ok_or_else(|| anyhow!("idempotent sink requires {SQLX_TABLE_KEY}"))?;
         let cursor = parse_unsigned_position(message, SQLX_CURSOR_KEY)?;
@@ -242,8 +233,7 @@ fn sanitize_path_identity(path: &str) -> String {
 
 fn parse_signed_position(message: &CanonicalMessage, key: &str) -> Result<i64> {
     message
-        .metadata
-        .get(key)
+        .get_metadata(key)
         .ok_or_else(|| anyhow!("idempotent sink requires {key}"))?
         .parse()
         .map_err(|_| anyhow!("idempotent sink requires an integer {key}"))
@@ -251,8 +241,7 @@ fn parse_signed_position(message: &CanonicalMessage, key: &str) -> Result<i64> {
 
 fn parse_unsigned_position(message: &CanonicalMessage, key: &str) -> Result<u64> {
     message
-        .metadata
-        .get(key)
+        .get_metadata(key)
         .ok_or_else(|| anyhow!("idempotent sink requires {key}"))?
         .parse()
         .map_err(|_| anyhow!("idempotent sink requires a non-negative integer {key}"))
@@ -434,27 +423,17 @@ mod tests {
 
     fn message(topic: &str, partition: i32, offset: u64) -> CanonicalMessage {
         let mut message = CanonicalMessage::new(b"payload".to_vec(), None);
-        message.metadata.insert(TOPIC_KEY.into(), topic.into());
-        message
-            .metadata
-            .insert(PARTITION_KEY.into(), partition.to_string());
-        message
-            .metadata
-            .insert(OFFSET_KEY.into(), offset.to_string());
+        message.set_metadata(TOPIC_KEY, topic);
+        message.set_metadata(PARTITION_KEY, partition.to_string());
+        message.set_metadata(OFFSET_KEY, offset.to_string());
         message
     }
 
     fn postgres_message(slot: &str, lsn: u64, ordinal: u64) -> CanonicalMessage {
         let mut message = CanonicalMessage::new(b"payload".to_vec(), None);
-        message
-            .metadata
-            .insert(POSTGRES_SLOT_KEY.into(), slot.into());
-        message
-            .metadata
-            .insert(POSTGRES_LSN_KEY.into(), lsn.to_string());
-        message
-            .metadata
-            .insert(POSTGRES_ORDINAL_KEY.into(), ordinal.to_string());
+        message.set_metadata(POSTGRES_SLOT_KEY, slot);
+        message.set_metadata(POSTGRES_LSN_KEY, lsn.to_string());
+        message.set_metadata(POSTGRES_ORDINAL_KEY, ordinal.to_string());
         message
     }
 
@@ -465,20 +444,14 @@ mod tests {
         assert!(error.to_string().contains("source-position metadata"));
 
         let mut invalid = message("orders", 0, 1);
-        invalid
-            .metadata
-            .insert(OFFSET_KEY.into(), "not-an-offset".into());
+        invalid.set_metadata(OFFSET_KEY, "not-an-offset");
         assert!(SourcePosition::from_message(&invalid).is_err());
     }
 
     fn sqlx_message(table: &str, cursor: u64) -> CanonicalMessage {
         let mut message = CanonicalMessage::new(b"payload".to_vec(), None);
-        message
-            .metadata
-            .insert(SQLX_TABLE_KEY.into(), table.to_string());
-        message
-            .metadata
-            .insert(SQLX_CURSOR_KEY.into(), cursor.to_string());
+        message.set_metadata(SQLX_TABLE_KEY, table.to_string());
+        message.set_metadata(SQLX_CURSOR_KEY, cursor.to_string());
         message
     }
 
@@ -512,13 +485,11 @@ mod tests {
     #[test]
     fn sqlx_cursor_positions_require_a_table_and_numeric_cursor() {
         let mut missing_table = sqlx_message("orders", 1);
-        missing_table.metadata.remove(SQLX_TABLE_KEY);
+        missing_table.remove_metadata(SQLX_TABLE_KEY);
         assert!(SourcePosition::from_message(&missing_table).is_err());
 
         let mut text_cursor = sqlx_message("orders", 1);
-        text_cursor
-            .metadata
-            .insert(SQLX_CURSOR_KEY.into(), "2026-08-18T00:00:00Z".into());
+        text_cursor.set_metadata(SQLX_CURSOR_KEY, "2026-08-18T00:00:00Z");
         assert!(SourcePosition::from_message(&text_cursor).is_err());
     }
 
@@ -691,35 +662,23 @@ mod tests {
 
     fn mongo_change(namespace: &str, cluster_time: u64, ordinal: u64) -> CanonicalMessage {
         let mut message = CanonicalMessage::new(b"payload".to_vec(), None);
-        message
-            .metadata
-            .insert(MONGODB_NAMESPACE_KEY.into(), namespace.into());
-        message
-            .metadata
-            .insert(MONGODB_CLUSTER_TIME_KEY.into(), cluster_time.to_string());
-        message
-            .metadata
-            .insert(MONGODB_ORDINAL_KEY.into(), ordinal.to_string());
+        message.set_metadata(MONGODB_NAMESPACE_KEY, namespace);
+        message.set_metadata(MONGODB_CLUSTER_TIME_KEY, cluster_time.to_string());
+        message.set_metadata(MONGODB_ORDINAL_KEY, ordinal.to_string());
         message
     }
 
     fn mongo_snapshot(namespace: &str, index: u64) -> CanonicalMessage {
         let mut message = CanonicalMessage::new(b"payload".to_vec(), None);
-        message
-            .metadata
-            .insert(MONGODB_NAMESPACE_KEY.into(), namespace.into());
-        message
-            .metadata
-            .insert(MONGODB_SNAPSHOT_INDEX_KEY.into(), index.to_string());
+        message.set_metadata(MONGODB_NAMESPACE_KEY, namespace);
+        message.set_metadata(MONGODB_SNAPSHOT_INDEX_KEY, index.to_string());
         message
     }
 
     fn file_record(path: &str, record: u64) -> CanonicalMessage {
         let mut message = CanonicalMessage::new(b"payload".to_vec(), None);
-        message.metadata.insert(FILE_PATH_KEY.into(), path.into());
-        message
-            .metadata
-            .insert(FILE_RECORD_KEY.into(), record.to_string());
+        message.set_metadata(FILE_PATH_KEY, path);
+        message.set_metadata(FILE_RECORD_KEY, record.to_string());
         message
     }
 

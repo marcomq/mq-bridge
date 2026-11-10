@@ -39,7 +39,7 @@ async fn otel_middleware_activates_itself_and_continues_the_trace() {
         .unwrap();
     let batch = consumer.receive_batch(10).await.unwrap();
     assert_eq!(
-        batch.messages[0].metadata["traceparent"],
+        batch.messages[0].get_metadata("traceparent").unwrap(),
         format!("00-{TRACE_ID}-{PARENT_SPAN}-01")
     );
 
@@ -64,7 +64,7 @@ async fn otel_middleware_activates_itself_and_continues_the_trace() {
 
     let batch = consumer.receive_batch(10).await.unwrap();
     let received = batch.messages[0].clone();
-    let traceparent = received.metadata["traceparent"].clone();
+    let traceparent = received.get_metadata("traceparent").unwrap();
     assert!(traceparent.starts_with(&format!("00-{TRACE_ID}-")));
     assert!(
         !traceparent.contains(PARENT_SPAN),

@@ -145,9 +145,11 @@ impl tonic::codec::Decoder for RawProtobufDecoder {
     }
 }
 
-pub(super) fn canonical_to_bridge(message: CanonicalMessage, topic: Option<&str>) -> BridgeMessage {
-    let mut metadata: HashMap<String, String> = message
-        .metadata
+pub(super) fn canonical_to_bridge(
+    mut message: CanonicalMessage,
+    topic: Option<&str>,
+) -> BridgeMessage {
+    let mut metadata: HashMap<String, String> = std::mem::take(message.metadata_map_mut())
         .into_iter()
         .filter(|(key, _)| !crate::canonical_message::is_source_metadata_key(key))
         .collect();

@@ -51,6 +51,8 @@ resolver = "2"
 # Warn-by-default since edition 2024; kept explicit. It keeps each unsafe operation in
 # the plugin FFI layer marked at its own call site.
 unsafe_op_in_unsafe_fn = "warn"
+# Opt-in deprecation of the `metadata` fields that become opaque in 2.0; CI lints with it.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(mqb_deprecate_metadata)"] }
 
 [workspace.lints.clippy]
 todo = "warn"
