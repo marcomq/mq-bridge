@@ -653,10 +653,8 @@ unsafe fn settle(
             MQB_MESSAGE_DROPPED => {}
             MQB_MESSAGE_REPLACED => {
                 let theirs = replacements.next().expect("counted above");
-                let original = unsafe { replace_in_place(message, ours, theirs) };
-                if keep_originals {
-                    originals.push(original);
-                }
+                // Kept either way: a later replacement may still point into this input.
+                originals.push(unsafe { replace_in_place(message, ours, theirs) });
             }
             other => {
                 return Err(malformed(
@@ -666,6 +664,9 @@ unsafe fn settle(
             }
         }
         keep_flags.push(*verdict != MQB_MESSAGE_DROPPED);
+    }
+    if !keep_originals {
+        originals.clear();
     }
     let mut kept = input.take_messages();
     let mut flags = keep_flags.iter();
