@@ -114,19 +114,14 @@ impl TryFrom<MongoMessageRaw> for CanonicalMessage {
             }
         };
 
-        Ok(CanonicalMessage {
-            message_id,
-            payload,
-            metadata,
-        })
+        Ok(CanonicalMessage::from_parts(message_id, payload, metadata))
     }
 }
 
 fn document_to_canonical(doc: Document) -> anyhow::Result<CanonicalMessage> {
     let payload = serde_json::to_vec(&doc)?;
     let mut msg = CanonicalMessage::new(payload, None);
-    msg.metadata
-        .insert("mq_bridge.original_format".to_string(), "raw".to_string());
+    msg.set_metadata("mq_bridge.original_format", "raw");
     Ok(msg)
 }
 
@@ -183,8 +178,7 @@ fn message_to_document(
 ) -> anyhow::Result<Document> {
     // If request-reply metadata is present, we must use the wrapped format to preserve it,
     // regardless of whether the original format was raw.
-    let force_wrapped = message.metadata.contains_key("correlation_id")
-        || message.metadata.contains_key("reply_to");
+    let force_wrapped = message.has_metadata("correlation_id") || message.has_metadata("reply_to");
 
     let explicit_id = explicit_id_bson(message, id_field, id_template)?;
 
@@ -200,7 +194,7 @@ fn message_to_document(
 
     let id_uuid = mongodb::bson::Uuid::from_bytes(message.message_id.to_be_bytes());
 
-    let mut metadata = message.metadata.clone();
+    let mut metadata = message.metadata_map().clone();
     // Source/provenance keys are per-hop context, not stored document fields.
     metadata.retain(|key, _| !crate::canonical_message::is_source_metadata_key(key));
     let payload_bson = if matches!(format, MongoDbFormat::Json) {
@@ -313,8 +307,7 @@ async fn handle_reply(
     if let Some(coll_name) = reply_to {
         let mut resp = response;
         if let Some(cid) = correlation_id {
-            resp.metadata
-                .insert("correlation_id".to_string(), cid.clone());
+            resp.set_metadata("correlation_id", cid.clone());
         }
         let doc = message_to_document(&resp, &MongoDbFormat::Normal, None, None).map_err(|e| {
             tracing::error!(collection = %coll_name, error = %e, "Failed to serialize MongoDB reply");

@@ -153,7 +153,7 @@ mod tests {
         consumer: &mut Box<dyn MessageConsumer>,
         mut message: CanonicalMessage,
     ) -> Option<CanonicalMessage> {
-        message.metadata.insert("kind".into(), "order".into());
+        message.set_metadata("kind", "order");
         for _ in 0..40 {
             let _ = publisher.send_batch(vec![message.clone()]).await;
             if let Some(got) = receive_one(consumer, Duration::from_millis(250)).await {
@@ -175,7 +175,7 @@ mod tests {
             .await
             .expect("nothing arrived");
         assert_eq!(got.get_payload_str(), "body");
-        assert_eq!(got.metadata.get("kind").map(String::as_str), Some("order"));
+        assert_eq!(got.get_metadata("kind"), Some("order"));
     }
 
     #[tokio::test]
@@ -201,7 +201,7 @@ mod tests {
         let got = arrives(publisher.as_ref(), &mut subscribed[0], "body".into())
             .await
             .expect("nothing arrived");
-        assert_eq!(got.metadata.get("kind").map(String::as_str), Some("order"));
+        assert_eq!(got.get_metadata("kind"), Some("order"));
         let other = receive_one(&mut subscribed[1], Duration::from_millis(300)).await;
         assert!(other.is_none(), "got a message of another topic");
     }

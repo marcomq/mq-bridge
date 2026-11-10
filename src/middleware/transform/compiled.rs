@@ -681,14 +681,8 @@ impl Compiled {
 
         if self.expression_uses_metadata {
             let meta = message
-                .metadata
-                .iter()
-                .map(|(key, value)| {
-                    (
-                        Symbol::from(key.as_str()),
-                        Variable::String(value.as_str().into()),
-                    )
-                })
+                .metadata_iter()
+                .map(|(key, value)| (Symbol::from(key), Variable::String(value.into())))
                 .collect();
             object
                 .borrow_mut()
@@ -778,9 +772,8 @@ impl Compiled {
                     "meta".to_string(),
                     Value::Object(
                         message
-                            .metadata
-                            .iter()
-                            .map(|(key, value)| (key.clone(), Value::String(value.clone())))
+                            .metadata_iter()
+                            .map(|(key, value)| (key.to_owned(), Value::String(value.to_owned())))
                             .collect(),
                     ),
                 );
@@ -813,9 +806,7 @@ impl Compiled {
     ) -> Result<(), TransformError> {
         match self.on_error {
             TransformErrorPolicy::PassThrough => {
-                message
-                    .metadata
-                    .insert(TRANSFORM_ERROR_KEY.to_string(), error.to_string());
+                message.set_metadata(TRANSFORM_ERROR_KEY, error.to_string());
                 Ok(())
             }
             TransformErrorPolicy::Reject => Err(error),
@@ -831,9 +822,7 @@ mod tests {
     fn message(payload: &str, metadata: &[(&str, &str)]) -> CanonicalMessage {
         let mut message = CanonicalMessage::new(payload.as_bytes().to_vec(), None);
         for (key, value) in metadata {
-            message
-                .metadata
-                .insert((*key).to_string(), (*value).to_string());
+            message.set_metadata((*key).to_string(), (*value).to_string());
         }
         message
     }

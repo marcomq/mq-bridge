@@ -453,11 +453,14 @@ impl MemoryPublisher {
         let mut cids = Vec::with_capacity(messages.len());
         let mut requests = Vec::with_capacity(messages.len());
         for message in &mut messages {
-            let cid = message
-                .metadata
-                .entry("correlation_id".to_string())
-                .or_insert_with(fast_uuid_v7::gen_id_string)
-                .clone();
+            let cid = match message.get_metadata("correlation_id") {
+                Some(cid) => cid.to_owned(),
+                None => {
+                    let cid = fast_uuid_v7::gen_id_string();
+                    message.set_metadata("correlation_id", cid.clone());
+                    cid
+                }
+            };
             let (tx, rx) = oneshot::channel();
             requests.push((
                 message.message_id,
@@ -531,11 +534,14 @@ impl MessagePublisher for MemoryPublisher {
             PublisherBackend::Queue(sender) => {
                 if self.request_reply {
                     let request_id = message.message_id;
-                    let cid = message
-                        .metadata
-                        .entry("correlation_id".to_string())
-                        .or_insert_with(fast_uuid_v7::gen_id_string)
-                        .clone();
+                    let cid = match message.get_metadata("correlation_id") {
+                        Some(cid) => cid.to_owned(),
+                        None => {
+                            let cid = fast_uuid_v7::gen_id_string();
+                            message.set_metadata("correlation_id", cid.clone());
+                            cid
+                        }
+                    };
                     let cid = cid.as_str();
 
                     let (tx, rx) = oneshot::channel();
@@ -982,17 +988,15 @@ impl MessageConsumer for MemoryQueueConsumer {
         let topic = self.topic.clone();
         let expected_count = messages.len();
         // Only request/reply traffic carries them; an empty list costs no allocation.
-        let correlation_ids: Vec<Option<String>> = if messages
-            .iter()
-            .any(|m| m.metadata.contains_key("correlation_id"))
-        {
-            messages
-                .iter()
-                .map(|m| m.metadata.get("correlation_id").cloned())
-                .collect()
-        } else {
-            Vec::new()
-        };
+        let correlation_ids: Vec<Option<String>> =
+            if messages.iter().any(|m| m.has_metadata("correlation_id")) {
+                messages
+                    .iter()
+                    .map(|m| m.get_metadata("correlation_id").map(str::to_owned))
+                    .collect()
+            } else {
+                Vec::new()
+            };
 
         // Guard to requeue messages if the batch is dropped without commit/nack.
         let mut guard = if self.enable_nack {
@@ -1239,9 +1243,7 @@ pub(crate) fn failure_reply(message_id: u128, error: &PublisherError) -> Canonic
 
 fn outcome_message(outcome: &str, text: String, message_id: Option<u128>) -> CanonicalMessage {
     let mut message = CanonicalMessage::new(text.into_bytes(), message_id);
-    message
-        .metadata
-        .insert(REQUEST_OUTCOME.to_string(), outcome.to_string());
+    message.set_metadata(REQUEST_OUTCOME, outcome.to_string());
     message
 }
 
@@ -1265,7 +1267,7 @@ fn reply_result(
             )))
         }
     };
-    if let Some(outcome) = response.metadata.get(REQUEST_OUTCOME) {
+    if let Some(outcome) = response.get_metadata(REQUEST_OUTCOME) {
         return request_outcome(outcome, &response);
     }
     // A batch matches each reply to its request by id.
@@ -1309,20 +1311,19 @@ async fn handle_memory_reply(
     correlation_ids: &[Option<String>],
     response_channel: &MemoryResponseChannel,
 ) -> Option<CanonicalMessage> {
-    if !resp.metadata.contains_key("correlation_id") {
+    if !resp.has_metadata("correlation_id") {
         if let Some(Some(cid)) = correlation_ids.get(index) {
-            resp.metadata
-                .insert("correlation_id".to_string(), cid.clone());
+            resp.set_metadata("correlation_id", cid.clone());
         }
     }
 
-    if let Some(cid) = resp.metadata.get("correlation_id") {
+    if let Some(cid) = resp.get_metadata("correlation_id") {
         if let Some(tx) = response_channel.take_waiter(cid) {
             let _ = tx.send(resp);
             return None;
         }
     }
-    if resp.metadata.contains_key(REQUEST_OUTCOME) {
+    if resp.has_metadata(REQUEST_OUTCOME) {
         return Some(resp);
     }
     // No waiter: deliver best-effort. A forward route (no `reply_to`) still gets a
@@ -1806,9 +1807,7 @@ mod tests {
         .unwrap();
 
         let mut message = CanonicalMessage::from("request with no responder");
-        message
-            .metadata
-            .insert("correlation_id".to_string(), correlation_id.clone());
+        message.set_metadata("correlation_id", correlation_id.clone());
 
         let err = publisher.send(message).await.unwrap_err();
         assert!(err
@@ -1861,9 +1860,7 @@ mod tests {
         .unwrap();
 
         let mut message = CanonicalMessage::from("request that gets cancelled");
-        message
-            .metadata
-            .insert("correlation_id".to_string(), correlation_id.clone());
+        message.set_metadata("correlation_id", correlation_id.clone());
 
         let outcome = tokio::time::timeout(
             std::time::Duration::from_millis(25),
@@ -1938,9 +1935,7 @@ mod tests {
         .unwrap();
         let channel = consumer_channel(&topic);
         let mut stale = CanonicalMessage::from("stale");
-        stale
-            .metadata
-            .insert("correlation_id".to_string(), "gone".to_string());
+        stale.set_metadata("correlation_id", "gone");
         channel
             .fill_messages(vec!["plain".into(), stale])
             .await

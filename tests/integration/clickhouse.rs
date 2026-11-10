@@ -119,7 +119,7 @@ pub async fn test_clickhouse_roundtrip() {
         };
         let map_pub = ClickHousePublisher::new(&map_cfg).await.unwrap();
         let mut msg = CanonicalMessage::new(br#"{"sku":"widget","qty":7}"#.to_vec(), None);
-        msg.metadata.insert("cust".into(), "c-1".into());
+        msg.set_metadata("cust", "c-1");
         map_pub.send(msg).await.unwrap();
 
         let got = ch_exec("SELECT sku, qty, cust FROM ch_orders FORMAT JSONEachRow").await;
@@ -149,7 +149,7 @@ pub async fn test_clickhouse_roundtrip() {
         };
         let row: serde_json::Value = serde_json::from_slice(&hit.payload).unwrap();
         assert_eq!(row, serde_json::json!({"id": 7, "name": "msg-7"}));
-        assert_eq!(hit.metadata.get("clickhouse.found").unwrap(), "true");
+        assert_eq!(hit.get_metadata("clickhouse.found").unwrap(), "true");
 
         let miss = sel_pub
             .send(CanonicalMessage::new(br#"{"id":999,"name":"it's\n\\x"}"#.to_vec(), None))
@@ -159,7 +159,7 @@ pub async fn test_clickhouse_roundtrip() {
             panic!("lookup_query must answer with a response")
         };
         assert!(miss.payload.is_empty());
-        assert_eq!(miss.metadata.get("clickhouse.found").unwrap(), "false");
+        assert_eq!(miss.get_metadata("clickhouse.found").unwrap(), "false");
 
         let in_cfg = ClickHouseConfig {
             lookup_query: Some("SELECT id, name FROM ch_events WHERE id IN (${payload:id})".into()),

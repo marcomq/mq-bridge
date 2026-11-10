@@ -993,15 +993,17 @@ impl Message {
     fn from_canonical(message: &CanonicalMessage) -> Self {
         Self {
             payload: message.payload.clone(),
-            metadata: message.metadata.clone(),
+            metadata: message
+                .metadata_iter()
+                .map(|(key, value)| (key.to_owned(), value.to_owned()))
+                .collect(),
             id: Some(message.message_id),
         }
     }
 
     fn to_canonical(&self) -> PyResult<CanonicalMessage> {
-        let mut message = CanonicalMessage::new_bytes(self.payload.clone(), self.id);
-        message.metadata = self.metadata.clone();
-        Ok(message)
+        Ok(CanonicalMessage::new_bytes(self.payload.clone(), self.id)
+            .with_metadata(self.metadata.clone()))
     }
 }
 
@@ -2435,7 +2437,7 @@ fn build_message(
     let message_id = id.map(parse_message_id).transpose()?;
     let mut message = CanonicalMessage::new(payload, message_id);
     if let Some(metadata) = metadata {
-        message.metadata.extend(metadata);
+        message.extend_metadata(metadata);
     }
     Ok(message)
 }
@@ -2595,14 +2597,13 @@ fn invoke_python_handler_many(
 
                 match arg {
                     Ok(arg) => match callable.bind(py).call1((arg,)) {
-                        Ok(result) => python_result_to_handled(
-                            &result,
-                            message_id,
-                            message.metadata,
-                        )
-                        .map_err(|err| {
-                            python_error_to_handler_error(py_err_context(label, message_id), err)
-                        }),
+                        Ok(result) => python_result_to_handled(&result, message_id, message)
+                            .map_err(|err| {
+                                python_error_to_handler_error(
+                                    py_err_context(label, message_id),
+                                    err,
+                                )
+                            }),
                         Err(err) => Err(python_error_to_handler_error(
                             py_err_context(label, message_id),
                             err,
@@ -2653,7 +2654,7 @@ fn invoke_python_batch_handler(
             .zip(results)
             .map(|(message, result)| {
                 let message_id = message.message_id;
-                python_result_to_handled(&result, message_id, message.metadata).map_err(|err| {
+                python_result_to_handled(&result, message_id, message).map_err(|err| {
                     python_error_to_handler_error(py_err_context(label, message_id), err)
                 })
             })
@@ -2706,7 +2707,7 @@ fn python_error_to_handler_error(ctx: PyErrorContext<'_>, err: PyErr) -> Handler
 fn python_result_to_handled(
     obj: &Bound<'_, PyAny>,
     message_id: u128,
-    inherited_metadata: HashMap<String, String>,
+    inherited: CanonicalMessage,
 ) -> PyResult<Handled> {
     if obj.is_none() {
         return Ok(Handled::Ack);
@@ -2719,21 +2720,21 @@ fn python_result_to_handled(
     }
 
     if obj.is_instance_of::<PyBytes>() || obj.is_instance_of::<PyByteArray>() {
-        let mut message = CanonicalMessage::from_vec(obj.extract::<Vec<u8>>()?);
-        message.metadata = inherited_metadata;
+        let mut message = inherited;
+        message.payload = Bytes::from(obj.extract::<Vec<u8>>()?);
         message.set_id(message_id);
         return Ok(Handled::Publish(message));
     }
 
     if let Ok(text) = obj.extract::<String>() {
-        let mut message = CanonicalMessage::from(text);
-        message.metadata = inherited_metadata;
+        let mut message = inherited;
+        message.payload = Bytes::from(text);
         message.set_id(message_id);
         return Ok(Handled::Publish(message));
     }
 
-    let mut message = CanonicalMessage::from_vec(python_to_json_bytes(obj)?);
-    message.metadata = inherited_metadata;
+    let mut message = inherited;
+    message.payload = Bytes::from(python_to_json_bytes(obj)?);
     message.set_id(message_id);
     Ok(Handled::Publish(message))
 }
@@ -3569,7 +3570,8 @@ memory:
         Python::attach(|py| {
             let none_value = py.None();
             assert!(matches!(
-                python_result_to_handled(none_value.bind(py), 7, HashMap::new()).unwrap(),
+                python_result_to_handled(none_value.bind(py), 7, CanonicalMessage::from(""))
+                    .unwrap(),
                 Handled::Ack
             ));
 
@@ -3586,16 +3588,14 @@ memory:
             match python_result_to_handled(
                 py_message.bind(py).as_any(),
                 11,
-                HashMap::from([("source".to_string(), "input".to_string())]),
+                CanonicalMessage::from("")
+                    .with_metadata(HashMap::from([("source".to_string(), "input".to_string())])),
             )
             .unwrap()
             {
                 Handled::Publish(message) => {
                     assert_eq!(message.payload.as_ref(), b"hello");
-                    assert_eq!(
-                        message.metadata.get("kind").map(String::as_str),
-                        Some("demo")
-                    );
+                    assert_eq!(message.get_metadata("kind"), Some("demo"));
                     assert_eq!(message.message_id, 11);
                 }
                 Handled::Ack => panic!("expected publish"),
@@ -3606,20 +3606,17 @@ memory:
             match python_result_to_handled(
                 py_dict.as_any(),
                 13,
-                HashMap::from([
+                CanonicalMessage::from("").with_metadata(HashMap::from([
                     ("kind".to_string(), "demo.kind".to_string()),
                     ("reply_to".to_string(), "memory://reply".to_string()),
-                ]),
+                ])),
             )
             .unwrap()
             {
                 Handled::Publish(message) => {
                     let parsed: JsonValue = message.parse().unwrap();
                     assert_eq!(parsed, json!({ "seen": 42 }));
-                    assert_eq!(
-                        message.metadata.get("kind").map(String::as_str),
-                        Some("demo.kind")
-                    );
+                    assert_eq!(message.get_metadata("kind"), Some("demo.kind"));
                     assert_eq!(message.message_id, 13);
                 }
                 Handled::Ack => panic!("expected publish"),
@@ -3789,10 +3786,7 @@ routes:
             Handled::Publish(message) => {
                 let parsed: JsonValue = message.parse().unwrap();
                 assert_eq!(parsed, json!({ "seen": 21 }));
-                assert_eq!(
-                    message.metadata.get("kind").map(String::as_str),
-                    Some("demo.kind")
-                );
+                assert_eq!(message.get_metadata("kind"), Some("demo.kind"));
             }
             Handled::Ack => panic!("expected publish"),
         }

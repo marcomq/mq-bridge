@@ -158,8 +158,8 @@ pub const READER_MESSAGE_ID_KEY: &str = "mqb.reader.message_id";
 /// A route matches replies to requests by id, so the read message takes the request's
 /// id and keeps its own in metadata.
 fn as_reply_to(mut message: CanonicalMessage, request_id: u128) -> CanonicalMessage {
-    message.metadata.insert(
-        READER_MESSAGE_ID_KEY.to_string(),
+    message.set_metadata(
+        READER_MESSAGE_ID_KEY,
         format!("{:032x}", message.message_id),
     );
     message.message_id = request_id;

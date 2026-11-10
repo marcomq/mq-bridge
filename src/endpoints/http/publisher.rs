@@ -165,14 +165,13 @@ impl HttpPublisher {
         );
 
         let method = message
-            .metadata
-            .get(HTTP_METHOD)
+            .get_metadata(HTTP_METHOD)
             .and_then(|m| hyper::Method::from_bytes(m.as_bytes()).ok())
             .unwrap_or_else(|| self.method.clone());
 
-        let uri = if let Some(path) = message.metadata.get(HTTP_PATH) {
-            let mut path_and_query = path.clone();
-            if let Some(query) = message.metadata.get(HTTP_QUERY) {
+        let uri = if let Some(path) = message.get_metadata(HTTP_PATH) {
+            let mut path_and_query = path.to_owned();
+            if let Some(query) = message.get_metadata(HTTP_QUERY) {
                 if !query.is_empty() {
                     path_and_query.push('?');
                     path_and_query.push_str(query);
@@ -197,7 +196,7 @@ impl HttpPublisher {
 
         let mut request_builder = Request::builder().method(method).uri(uri);
 
-        for (key, value) in &message.metadata {
+        for (key, value) in message.metadata_iter() {
             if key == HTTP_METHOD
                 || key == HTTP_PATH
                 || key == HTTP_QUERY
@@ -325,9 +324,8 @@ impl HttpPublisher {
                 }
 
                 let correlation_id = message
-                    .metadata
-                    .get("correlation_id")
-                    .cloned()
+                    .get_metadata("correlation_id")
+                    .map(str::to_owned)
                     .unwrap_or_else(|| format!("{:032x}", message.message_id));
                 match super::stream::publish_response_stream(
                     response.into_body(),
@@ -421,7 +419,7 @@ impl HttpPublisher {
 
         let mut response_message =
             CanonicalMessage::new_bytes(response_bytes, Some(message.message_id));
-        response_message.metadata = response_metadata;
+        response_message = response_message.with_metadata(response_metadata);
         Ok(Sent::Response(response_message))
     }
 

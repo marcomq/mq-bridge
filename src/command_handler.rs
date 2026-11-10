@@ -9,7 +9,6 @@ use crate::traits::{Handler, MessagePublisher};
 use crate::CanonicalMessage;
 use async_trait::async_trait;
 use std::any::Any;
-use std::collections::hash_map::Entry;
 use std::future::Future;
 use std::sync::Arc;
 
@@ -24,22 +23,22 @@ fn set_correlation_id<'a>(
     inbound: impl FnOnce() -> Option<&'a str>,
     original_id: u128,
 ) {
-    if let Entry::Vacant(slot) = response.metadata.entry(CORRELATION_ID_KEY.to_string()) {
-        slot.insert(match inbound() {
+    if !response.has_metadata(CORRELATION_ID_KEY) {
+        let id = match inbound() {
             Some(id) => id.to_owned(),
             None => fast_uuid_v7::format_uuid_hex(original_id)
                 .as_str()
                 .to_owned(),
-        });
+        };
+        response.set_metadata(CORRELATION_ID_KEY, id);
     }
 }
 
 fn source_metadata(message: &CanonicalMessage) -> Vec<(String, String)> {
     message
-        .metadata
-        .iter()
+        .metadata_iter()
         .filter(|(key, _)| is_source_metadata_key(key))
-        .map(|(key, value)| (key.clone(), value.clone()))
+        .map(|(key, value)| (key.to_owned(), value.to_owned()))
         .collect()
 }
 
@@ -47,11 +46,10 @@ fn source_metadata(message: &CanonicalMessage) -> Vec<(String, String)> {
 /// (`mqb.src.*`) for replay-safe sinks, unless the handler set one of its own.
 fn keep_source_metadata(response: &mut CanonicalMessage, source: Vec<(String, String)>) {
     if !response
-        .metadata
-        .keys()
-        .any(|key| is_source_metadata_key(key))
+        .metadata_iter()
+        .any(|(key, _)| is_source_metadata_key(key))
     {
-        response.metadata.extend(source);
+        response.extend_metadata(source);
     }
 }
 
@@ -90,7 +88,7 @@ impl MessagePublisher for CommandPublisher {
             Some(Passthrough::Ack) => return Ok(Sent::Ack),
             None => {}
         }
-        let inbound_correlation_id = message.metadata.get(CORRELATION_ID_KEY).cloned();
+        let inbound_correlation_id = message.get_metadata(CORRELATION_ID_KEY).map(str::to_owned);
         let original_id = message.message_id;
         let source = source_metadata(&message);
         match self.handler.handle(message).await {
@@ -146,7 +144,7 @@ impl MessagePublisher for CommandPublisher {
                     keep_source_metadata(&mut response_msg, source_metadata(&message));
                     set_correlation_id(
                         &mut response_msg,
-                        || message.metadata.get(CORRELATION_ID_KEY).map(String::as_str),
+                        || message.get_metadata(CORRELATION_ID_KEY),
                         original_id,
                     );
                     to_publish.push(response_msg);
@@ -211,13 +209,16 @@ mod tests {
         ] {
             let mut msg = CanonicalMessage::new(Vec::new(), None);
             set_correlation_id(&mut msg, || None, id);
-            assert_eq!(msg.metadata[CORRELATION_ID_KEY], format!("{id:032x}"));
+            assert_eq!(
+                msg.get_metadata(CORRELATION_ID_KEY).unwrap(),
+                format!("{id:032x}")
+            );
         }
         let mut msg = CanonicalMessage::new(Vec::new(), None);
         set_correlation_id(&mut msg, || Some("inbound"), 7);
-        assert_eq!(msg.metadata[CORRELATION_ID_KEY], "inbound");
+        assert_eq!(msg.get_metadata(CORRELATION_ID_KEY).unwrap(), "inbound");
         set_correlation_id(&mut msg, || None, 8);
-        assert_eq!(msg.metadata[CORRELATION_ID_KEY], "inbound");
+        assert_eq!(msg.get_metadata(CORRELATION_ID_KEY).unwrap(), "inbound");
     }
 
     #[tokio::test]
@@ -264,9 +265,7 @@ mod tests {
         forward.send("c".into()).await.unwrap();
         let received = forward_channel.drain_messages();
         assert_eq!(received.len(), 3);
-        assert!(received
-            .iter()
-            .all(|m| !m.metadata.contains_key(CORRELATION_ID_KEY)));
+        assert!(received.iter().all(|m| !m.has_metadata(CORRELATION_ID_KEY)));
 
         let ack_out = MemoryPublisher::new_local("test_command_observe_ack", 10);
         let ack_channel = ack_out.channel();
@@ -481,7 +480,7 @@ mod tests {
             .unwrap();
 
         let received = channel.drain_messages();
-        let field = |i: usize, key: &str| received[i].metadata.get(key).cloned();
+        let field = |i: usize, key: &str| received[i].get_metadata(key).map(str::to_owned);
         assert_eq!(field(0, "mqb.src.file_record").as_deref(), Some("1"));
         assert_eq!(field(1, "mqb.src.file_path").as_deref(), Some("/in.csv"));
         assert_eq!(field(1, "mqb.src.file_record").as_deref(), Some("2"));

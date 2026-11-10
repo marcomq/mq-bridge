@@ -393,15 +393,9 @@ async fn test_file_sink_creates_directory() {
 async fn idempotent_file_sink_replays_only_uncovered_kafka_offsets_after_restart() {
     fn kafka_message(offset: i64) -> crate::CanonicalMessage {
         let mut message = msg!(json!({ "offset": offset }));
-        message
-            .metadata
-            .insert("mqb.src.kafka_topic".into(), "orders".into());
-        message
-            .metadata
-            .insert("mqb.src.kafka_partition".into(), "0".into());
-        message
-            .metadata
-            .insert("mqb.src.kafka_offset".into(), offset.to_string());
+        message.set_metadata("mqb.src.kafka_topic", "orders");
+        message.set_metadata("mqb.src.kafka_partition", "0");
+        message.set_metadata("mqb.src.kafka_offset", offset.to_string());
         message
     }
 
@@ -464,15 +458,9 @@ async fn idempotent_file_sink_replays_only_uncovered_kafka_offsets_after_restart
 async fn idempotent_file_parts_are_compressed_and_named_for_it() {
     fn kafka_message(offset: i64) -> crate::CanonicalMessage {
         let mut message = msg!(json!({ "offset": offset }));
-        message
-            .metadata
-            .insert("mqb.src.kafka_topic".into(), "orders".into());
-        message
-            .metadata
-            .insert("mqb.src.kafka_partition".into(), "0".into());
-        message
-            .metadata
-            .insert("mqb.src.kafka_offset".into(), offset.to_string());
+        message.set_metadata("mqb.src.kafka_topic", "orders");
+        message.set_metadata("mqb.src.kafka_partition", "0");
+        message.set_metadata("mqb.src.kafka_offset", offset.to_string());
         message
     }
 
@@ -563,7 +551,7 @@ async fn file_source_metadata_numbers_records_and_feeds_an_idempotent_sink() {
     let records = batch
         .messages
         .iter()
-        .map(|m| m.metadata.get("mqb.src.file_record").unwrap().as_str())
+        .map(|m| m.get_metadata("mqb.src.file_record").unwrap())
         .collect::<Vec<_>>();
     assert_eq!(records, vec!["0", "1", "2"]);
 
@@ -615,9 +603,7 @@ async fn resuming_file_modes_get_a_run_epoch_so_reruns_cannot_reuse_a_record_ind
     let batch = first.receive_batch(10).await.unwrap();
     assert!(!batch.messages.is_empty());
     let first_run = SourcePosition::from_message(&batch.messages[0]).unwrap();
-    assert!(batch.messages[0]
-        .metadata
-        .contains_key("mqb.src.file_epoch"));
+    assert!(batch.messages[0].has_metadata("mqb.src.file_epoch"));
 
     // A second run restarts the record index at 0, so the epoch is what stops it from
     // naming those records the same as the first run's and having them dropped.
@@ -687,7 +673,7 @@ async fn consume_mode_repeats_its_record_identity_across_runs() {
 
     // No epoch: re-reading the same file must produce the same names, which is exactly
     // how the idempotent sink recognises the rewrite and skips it.
-    assert!(!a.messages[0].metadata.contains_key("mqb.src.file_epoch"));
+    assert!(!a.messages[0].has_metadata("mqb.src.file_epoch"));
     assert_eq!(
         SourcePosition::from_message(&a.messages[0]).unwrap(),
         SourcePosition::from_message(&b.messages[0]).unwrap()
@@ -698,15 +684,9 @@ async fn consume_mode_repeats_its_record_identity_across_runs() {
 async fn idempotent_file_sink_replays_postgres_cdc_changes_in_one_commit() {
     fn postgres_message(ordinal: u64) -> crate::CanonicalMessage {
         let mut message = msg!(json!({ "ordinal": ordinal }));
-        message
-            .metadata
-            .insert("mqb.src.postgres_slot".into(), "bridge_slot".into());
-        message
-            .metadata
-            .insert("mqb.src.postgres_lsn".into(), "9876543210".into());
-        message
-            .metadata
-            .insert("mqb.src.postgres_ordinal".into(), ordinal.to_string());
+        message.set_metadata("mqb.src.postgres_slot", "bridge_slot");
+        message.set_metadata("mqb.src.postgres_lsn", "9876543210");
+        message.set_metadata("mqb.src.postgres_ordinal", ordinal.to_string());
         message
     }
 
@@ -1833,9 +1813,7 @@ async fn test_file_formats_and_fallbacks() {
     assert_eq!(
         received_fallback
             .message
-            .metadata
-            .get("mq_bridge.original_format")
-            .map(|s| s.as_str()),
+            .get_metadata("mq_bridge.original_format"),
         Some("raw")
     );
 }
@@ -3375,10 +3353,7 @@ async fn test_file_normal_format_preserves_id_of_raw_origin_message() {
     let received = source.receive().await.unwrap().message;
     assert_eq!(received.message_id, id);
     assert_eq!(received.get_payload_str(), "hello");
-    assert_eq!(
-        received.metadata.get("kind").map(String::as_str),
-        Some("greeting")
-    );
+    assert_eq!(received.get_metadata("kind"), Some("greeting"));
 }
 
 #[cfg(feature = "compression")]
@@ -3470,7 +3445,7 @@ fn test_parse_message_payload_shapes() {
     )
     .expect("line decodes");
     assert_eq!(msg.payload.to_vec(), b"hi");
-    assert_eq!(msg.metadata.get("k").map(String::as_str), Some("v"));
+    assert_eq!(msg.get_metadata("k"), Some("v"));
     assert_eq!(
         format!("{:032x}", msg.message_id),
         "019f9b12d7867ebea7eca1aa71bc47ae"
@@ -3481,12 +3456,7 @@ fn test_parse_message_payload_shapes() {
     let msg =
         parse_message(b"not json at all", &FileFormat::Normal, &mut header).expect("line decodes");
     assert_eq!(msg.payload.to_vec(), b"not json at all");
-    assert_eq!(
-        msg.metadata
-            .get("mq_bridge.original_format")
-            .map(String::as_str),
-        Some("raw")
-    );
+    assert_eq!(msg.get_metadata("mq_bridge.original_format"), Some("raw"));
 }
 
 /// `json` copies the payload's own bytes out of the line, so everything a
@@ -3540,7 +3510,7 @@ fn test_json_format_round_trip_preserves_payload_bytes() {
         "0.1234567890123456789",
     ] {
         let mut msg = CanonicalMessage::new(payload.as_bytes().to_vec(), None);
-        msg.metadata.insert("k".to_string(), "v".to_string());
+        msg.set_metadata("k", "v");
         let line = encode_record(&msg, &FileFormat::Json, b"\n").expect("record encodes");
 
         let mut header = None;
@@ -3550,7 +3520,7 @@ fn test_json_format_round_trip_preserves_payload_bytes() {
             payload,
             "payload changed on the way through"
         );
-        assert_eq!(back.metadata.get("k").map(String::as_str), Some("v"));
+        assert_eq!(back.get_metadata("k"), Some("v"));
         assert_eq!(back.message_id, msg.message_id);
     }
 }
@@ -3884,7 +3854,7 @@ fn binary_payload_round_trips_through_json_and_text_formats() {
             "{format:?} must preserve a binary payload verbatim"
         );
         assert!(
-            !parsed.metadata.contains_key("mq_bridge.payload_bytes"),
+            !parsed.has_metadata("mq_bridge.payload_bytes"),
             "the byte marker is a storage detail and must not leak downstream"
         );
     }
@@ -3908,10 +3878,7 @@ fn byte_payload_marker_is_only_honoured_when_it_is_ours() {
     let parsed = parse_message(line, &FileFormat::Json, &mut None).unwrap();
     assert_eq!(parsed.payload.as_ref(), b"[1,2,3]");
     assert_eq!(
-        parsed
-            .metadata
-            .get("mq_bridge.payload_bytes")
-            .map(String::as_str),
+        parsed.get_metadata("mq_bridge.payload_bytes"),
         Some("theirs")
     );
 }
@@ -3925,8 +3892,7 @@ fn pre_existing_marker_does_not_break_a_binary_round_trip() {
 
     let payload = vec![0x28u8, 0xb5, 0x2f, 0xfd, 0x00];
     let mut msg = crate::CanonicalMessage::new(payload.clone(), Some(9));
-    msg.metadata
-        .insert("mq_bridge.payload_bytes".to_string(), "theirs".to_string());
+    msg.set_metadata("mq_bridge.payload_bytes", "theirs");
 
     let line = encode_record(&msg, &FileFormat::Json, b"\n").unwrap();
     let parsed = parse_message(&line, &FileFormat::Json, &mut None).unwrap();
@@ -3975,8 +3941,7 @@ fn parallel_record_decode_matches_a_sequential_one() {
                 .filter_map(|&(start, end, position)| {
                     let mut msg =
                         parse_message(&buf[start..end], &FileFormat::Csv, &mut expected_state)?;
-                    msg.metadata
-                        .insert("file_offset".to_string(), position.to_string());
+                    msg.set_metadata("file_offset", position.to_string());
                     Some(msg)
                 })
                 .collect();
@@ -3989,8 +3954,8 @@ fn parallel_record_decode_matches_a_sequential_one() {
             for (got, want) in actual.iter().zip(&expected) {
                 assert_eq!(got.payload, want.payload, "payload differs");
                 assert_eq!(
-                    got.metadata.get("file_offset"),
-                    want.metadata.get("file_offset"),
+                    got.get_metadata("file_offset"),
+                    want.get_metadata("file_offset"),
                     "offset differs"
                 );
             }
@@ -4049,7 +4014,7 @@ proptest::proptest! {
         use crate::endpoints::file::encode_record;
         let payload = serde_json::to_vec(&json!({ text.clone(): [text.clone(), {"n": -1.5}] })).unwrap();
         let mut msg = crate::CanonicalMessage::new(payload.clone(), None);
-        msg.metadata.insert("k".to_string(), text.clone());
+        msg.set_metadata("k", text.clone());
 
         let mut file = Vec::new();
         for _ in 0..2 {
@@ -4063,7 +4028,7 @@ proptest::proptest! {
             let want: serde_json::Value = serde_json::from_slice(&payload).unwrap();
             proptest::prop_assert_eq!(got_payload, want);
             if format != FileFormat::Json {
-                proptest::prop_assert_eq!(got.metadata.get("k"), Some(&text));
+                proptest::prop_assert_eq!(got.get_metadata("k"), Some(text.as_str()));
             }
         }
     }
@@ -4670,9 +4635,7 @@ async fn part_files_appear_after_the_grouped_sync() {
         let publisher = FilePublisher::new(&config).await.unwrap();
         let mut message = msg!(json!({ "n": 1 }));
         for (key, value) in [("topic", "t"), ("partition", "0"), ("offset", "7")] {
-            message
-                .metadata
-                .insert(format!("mqb.src.kafka_{key}"), value.into());
+            message.set_metadata(format!("mqb.src.kafka_{key}"), value);
         }
         publisher.send_batch(vec![message]).await.unwrap();
         let parts = || {

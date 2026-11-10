@@ -9,11 +9,14 @@
 //! path, by name or through discovery) and keeps writing `kafka:`, `file:`, … in its routes: an endpoint the host has
 //! no feature for is served by the factory registered here under the same name.
 //! A middleware the host has no feature for (`compression`, `deduplication`, …) is
-//! applied here through `builtin_middleware`, which gets the inner endpoint itself.
+//! applied here through `builtin_middleware`, which gets the inner endpoint itself, or
+//! through `builtin_map_middleware` when it only rewrites or drops messages.
 //!
 //! The library carries its own engine. `memory` channels, `ref` names, factories
 //! registered in the host and the host's metrics are therefore not visible to the
 //! endpoints and middleware created here.
+
+mod map;
 
 use anyhow::Context;
 use async_trait::async_trait;
@@ -72,7 +75,13 @@ macro_rules! built_in_endpoints {
 
         mq_bridge::export_endpoint_plugins! {
             $({ name: $name, factory: $factory }),+,
-            { name: mq_bridge::middleware::BUILTIN_MIDDLEWARE_PLUGIN, wrap_middleware: BuiltinMiddleware }
+            { name: mq_bridge::middleware::BUILTIN_MIDDLEWARE_PLUGIN, wrap_middleware: BuiltinMiddleware },
+            {
+                name: mq_bridge::middleware::BUILTIN_MAP_MIDDLEWARE_PLUGIN,
+                factory: mq_bridge::plugin::sdk::NoEndpoint,
+                middleware: map::BuiltinMapMiddleware,
+                capabilities: mq_bridge::plugin::sdk::CAPABILITIES_MIDDLEWARE_ONLY,
+            }
         }
     };
 }

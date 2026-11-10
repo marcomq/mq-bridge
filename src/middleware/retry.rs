@@ -23,11 +23,9 @@ pub struct RetryPublisher {
 /// already carrying one.
 fn tag_attempt(message: &mut CanonicalMessage, attempt: usize) {
     if attempt > 1 {
-        message
-            .metadata
-            .insert(RETRY_ATTEMPT_KEY.to_string(), attempt.to_string());
+        message.set_metadata(RETRY_ATTEMPT_KEY, attempt.to_string());
     } else {
-        message.metadata.remove(RETRY_ATTEMPT_KEY);
+        message.remove_metadata(RETRY_ATTEMPT_KEY);
     }
 }
 
@@ -386,7 +384,7 @@ mod tests {
         impl MessagePublisher for RecordingPublisher {
             async fn send(&self, msg: CanonicalMessage) -> Result<Sent, PublisherError> {
                 let mut seen = self.seen.lock().unwrap();
-                seen.push(msg.metadata.get(RETRY_ATTEMPT_KEY).cloned());
+                seen.push(msg.get_metadata(RETRY_ATTEMPT_KEY).map(str::to_owned));
                 if seen.len() > self.succeed_after {
                     Ok(Sent::Ack)
                 } else {

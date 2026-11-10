@@ -249,7 +249,7 @@ impl CookieJarConsumer {
 
     fn process_message(&self, message: &mut CanonicalMessage) {
         capture_session_inputs(
-            &message.metadata,
+            message.metadata_map(),
             &self.store,
             &self.config.cookie_metadata_key,
             &self.config.set_cookie_metadata_key,
@@ -257,7 +257,7 @@ impl CookieJarConsumer {
             self.config.max_cookies,
         );
         export_session_metadata(
-            &mut message.metadata,
+            message.metadata_map_mut(),
             &self.store,
             self.config.export_metadata_prefix.as_deref(),
         );
@@ -317,7 +317,7 @@ impl CookieJarPublisher {
 
     fn prepare_message(&self, message: &mut CanonicalMessage) {
         capture_session_inputs(
-            &message.metadata,
+            message.metadata_map(),
             &self.store,
             &self.config.cookie_metadata_key,
             &self.config.set_cookie_metadata_key,
@@ -325,14 +325,14 @@ impl CookieJarPublisher {
             self.config.max_cookies,
         );
         inject_session_metadata(
-            &mut message.metadata,
+            message.metadata_map_mut(),
             &self.store,
             &self.config.cookie_metadata_key,
             &self.config.inject_metadata,
             self.config.export_metadata_prefix.as_deref(),
         );
         export_session_metadata(
-            &mut message.metadata,
+            message.metadata_map_mut(),
             &self.store,
             self.config.export_metadata_prefix.as_deref(),
         );
@@ -340,7 +340,7 @@ impl CookieJarPublisher {
 
     fn process_response_message(&self, message: &mut CanonicalMessage) {
         capture_session_inputs(
-            &message.metadata,
+            message.metadata_map(),
             &self.store,
             &self.config.cookie_metadata_key,
             &self.config.set_cookie_metadata_key,
@@ -348,7 +348,7 @@ impl CookieJarPublisher {
             self.config.max_cookies,
         );
         export_session_metadata(
-            &mut message.metadata,
+            message.metadata_map_mut(),
             &self.store,
             self.config.export_metadata_prefix.as_deref(),
         );
@@ -441,8 +441,8 @@ mod tests {
     impl MessagePublisher for RecordingPublisher {
         async fn send(&self, message: CanonicalMessage) -> Result<Sent, PublisherError> {
             self.sent.lock().unwrap().push(message.clone());
-            let mut response = CanonicalMessage::from("ok");
-            response.metadata = self.response_metadata.clone();
+            let response =
+                CanonicalMessage::from("ok").with_metadata(self.response_metadata.clone());
             Ok(Sent::Response(response))
         }
 
@@ -497,7 +497,7 @@ mod tests {
         }
 
         let sent = sent.lock().unwrap();
-        let cookie = sent[1].metadata.get("cookie").unwrap();
+        let cookie = sent[1].get_metadata("cookie").unwrap();
         let mut pairs: Vec<&str> = cookie.split("; ").collect();
         pairs.sort_unstable();
         assert_eq!(pairs, ["csrf=xyz", "sid=abc"]);
@@ -541,23 +541,16 @@ mod tests {
             .unwrap();
 
         let sent = sent.lock().unwrap();
-        assert!(!sent[0].metadata.contains_key("cookie"));
-        assert_eq!(
-            sent[1].metadata.get("cookie").map(|s| s.as_str()),
-            Some("session_id=abc123")
-        );
+        assert!(!sent[0].has_metadata("cookie"));
+        assert_eq!(sent[1].get_metadata("cookie"), Some("session_id=abc123"));
     }
 
     #[tokio::test]
     async fn test_cookie_jar_shared_scope_can_move_values_from_consumer_to_publisher() {
         let scope = format!("shared-scope-{}", fast_uuid_v7::gen_id_string());
         let mut inbound = CanonicalMessage::from("input");
-        inbound
-            .metadata
-            .insert("cookie".to_string(), "sid=xyz".to_string());
-        inbound
-            .metadata
-            .insert("x-csrf-token".to_string(), "csrf123".to_string());
+        inbound.set_metadata("cookie", "sid=xyz");
+        inbound.set_metadata("x-csrf-token", "csrf123");
 
         let consumer_cfg = CookieJarMiddleware {
             shared_scope: Some(scope.clone()),
@@ -582,17 +575,11 @@ mod tests {
         );
         let received = consumer.receive_batch(10).await.unwrap();
         assert_eq!(
-            received.messages[0]
-                .metadata
-                .get("session.cookie.sid")
-                .map(|s| s.as_str()),
+            received.messages[0].get_metadata("session.cookie.sid"),
             Some("xyz")
         );
         assert_eq!(
-            received.messages[0]
-                .metadata
-                .get("session.value.x-csrf-token")
-                .map(|s| s.as_str()),
+            received.messages[0].get_metadata("session.value.x-csrf-token"),
             Some("csrf123")
         );
 
@@ -608,14 +595,8 @@ mod tests {
         publisher.send(CanonicalMessage::from("out")).await.unwrap();
 
         let sent = sent.lock().unwrap();
-        assert_eq!(
-            sent[0].metadata.get("cookie").map(|s| s.as_str()),
-            Some("sid=xyz")
-        );
-        assert_eq!(
-            sent[0].metadata.get("x-forwarded-csrf").map(|s| s.as_str()),
-            Some("csrf123")
-        );
+        assert_eq!(sent[0].get_metadata("cookie"), Some("sid=xyz"));
+        assert_eq!(sent[0].get_metadata("x-forwarded-csrf"), Some("csrf123"));
     }
 
     /// `inject_metadata` must also resolve a name held in the cookie store, not only one
@@ -625,7 +606,7 @@ mod tests {
     async fn test_inject_metadata_resolves_a_captured_cookie_by_either_spelling() {
         let scope = format!("inject-scope-{}", fast_uuid_v7::gen_id_string());
         let mut inbound = CanonicalMessage::from("input");
-        inbound.metadata.insert(
+        inbound.set_metadata(
             "set-cookie".to_string(),
             "session=xyz789; Path=/".to_string(),
         );
@@ -666,10 +647,10 @@ mod tests {
 
             let sent = sent.lock().unwrap();
             assert_eq!(
-                sent[0].metadata.get("authorization").map(|s| s.as_str()),
+                sent[0].get_metadata("authorization"),
                 Some("xyz789"),
                 "inject_metadata did not resolve {session_key:?}, got {:?}",
-                sent[0].metadata
+                sent[0].metadata_map()
             );
         }
     }

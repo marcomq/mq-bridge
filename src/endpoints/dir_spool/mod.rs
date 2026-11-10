@@ -817,7 +817,7 @@ impl DirSpoolPublisher {
                 suffix.clone(),
                 serde_json::to_vec(&SidecarView {
                     message_id: crate::canonical_message::format_message_id(message.message_id),
-                    metadata: &message.metadata,
+                    metadata: message.metadata_map(),
                 })
                 .context("Failed to encode dir_spool metadata sidecar")?,
             )),
@@ -1390,16 +1390,12 @@ impl DirSpoolConsumer {
             None => (None, HashMap::new()),
         };
         let mut message = CanonicalMessage::new(payload, message_id);
-        message.metadata = metadata;
+        message = message.with_metadata(metadata);
         // A sidecar is a file anyone can write; reserved keys come from this consumer only.
         message.strip_source_metadata();
         if self.source_metadata {
-            message
-                .metadata
-                .insert(SRC_PATH_KEY.to_string(), self.path.clone());
-            message
-                .metadata
-                .insert(SRC_CHUNK_KEY.to_string(), base.to_string());
+            message.set_metadata(SRC_PATH_KEY, self.path.clone());
+            message.set_metadata(SRC_CHUNK_KEY, base.to_string());
         }
         Ok(message)
     }

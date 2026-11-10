@@ -53,7 +53,7 @@ pub(crate) fn tracer_installed() -> bool {
 
 /// Reads a W3C `traceparent` (`00-<trace id>-<span id>-<flags>`) and `tracestate`.
 fn extract(msg: &CanonicalMessage) -> Context {
-    let remote = msg.metadata.get(TRACEPARENT).and_then(|header| {
+    let remote = msg.get_metadata(TRACEPARENT).and_then(|header| {
         let mut parts = header.trim().split('-');
         let (version, trace, span, flags) =
             (parts.next()?, parts.next()?, parts.next()?, parts.next()?);
@@ -61,8 +61,7 @@ fn extract(msg: &CanonicalMessage) -> Context {
             return None;
         }
         let state = msg
-            .metadata
-            .get(TRACESTATE)
+            .get_metadata(TRACESTATE)
             .and_then(|s| TraceState::from_str(s).ok())
             .unwrap_or_default();
         let span_context = SpanContext::new(
@@ -86,8 +85,8 @@ fn inject(cx: &Context, msg: &mut CanonicalMessage) {
     if !sc.is_valid() {
         return;
     }
-    msg.metadata.insert(
-        TRACEPARENT.to_string(),
+    msg.set_metadata(
+        TRACEPARENT,
         format!(
             "00-{:032x}-{:016x}-{:02x}",
             sc.trace_id(),
@@ -97,7 +96,7 @@ fn inject(cx: &Context, msg: &mut CanonicalMessage) {
     );
     let state = sc.trace_state().header();
     if !state.is_empty() {
-        msg.metadata.insert(TRACESTATE.to_string(), state);
+        msg.set_metadata(TRACESTATE, state);
     }
 }
 

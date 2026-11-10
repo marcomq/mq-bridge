@@ -662,12 +662,10 @@ impl MongoDbChangeStreamReader {
                     match serde_json::to_vec(&doc) {
                         Ok(payload) => {
                             let mut msg = CanonicalMessage::new(payload, None);
-                            msg.metadata
-                                .insert("mongodb.operation".to_string(), "insert".to_string());
-                            msg.metadata
-                                .insert("mongodb.snapshot".to_string(), "true".to_string());
+                            msg.set_metadata("mongodb.operation", "insert");
+                            msg.set_metadata("mongodb.snapshot", "true");
                             if let Some(enc) = encode_id(&id) {
-                                msg.metadata.insert("mongodb.document_id".to_string(), enc);
+                                msg.set_metadata("mongodb.document_id", enc);
                             }
                             if self.source_metadata {
                                 add_snapshot_source_metadata(
@@ -770,11 +768,10 @@ impl MongoDbChangeStreamReader {
         };
 
         let mut msg = CanonicalMessage::new(payload, None);
-        msg.metadata
-            .insert("mongodb.operation".to_string(), op.to_string());
+        msg.set_metadata("mongodb.operation", op.to_string());
         if let Some(id) = event.document_key.as_ref().and_then(|k| k.get("_id")) {
             if let Some(enc) = encode_id(id) {
-                msg.metadata.insert("mongodb.document_id".to_string(), enc);
+                msg.set_metadata("mongodb.document_id", enc);
             }
         }
         if source_metadata {
@@ -903,9 +900,7 @@ fn add_source_metadata(
     ordinals: &Mutex<OrdinalCounter>,
 ) {
     if let Ok(token) = encode_resume_token(&event.id) {
-        message
-            .metadata
-            .insert("mqb.src.mongodb_resume_token".to_string(), token);
+        message.set_metadata("mqb.src.mongodb_resume_token", token);
     }
     let Some(ts) = event.cluster_time else {
         // Without a cluster time the event has no orderable position. The namespace is left
@@ -916,24 +911,16 @@ fn add_source_metadata(
         );
         return;
     };
-    message.metadata.insert(
-        "mqb.src.mongodb_namespace".to_string(),
-        namespace.to_string(),
-    );
+    message.set_metadata("mqb.src.mongodb_namespace", namespace.to_string());
     let packed = (u64::from(ts.time) << 32) | u64::from(ts.increment);
-    message.metadata.insert(
-        "mqb.src.mongodb_cluster_time".to_string(),
-        packed.to_string(),
-    );
+    message.set_metadata("mqb.src.mongodb_cluster_time", packed.to_string());
     // Every change in a transaction shares a cluster time; the ordinal separates them
     // so an idempotent sink can name them as one contiguous range.
     let ordinal = ordinals
         .lock()
         .expect("ordinal counter poisoned")
         .next_in(packed);
-    message
-        .metadata
-        .insert("mqb.src.mongodb_ordinal".to_string(), ordinal.to_string());
+    message.set_metadata("mqb.src.mongodb_ordinal", ordinal.to_string());
 }
 
 /// Tags a snapshot document with the stable identity used when it is redelivered.
@@ -943,21 +930,13 @@ pub(super) fn add_snapshot_source_metadata(
     id: &Bson,
     index: u64,
 ) {
-    message.metadata.insert(
-        "mqb.src.mongodb_namespace".to_string(),
-        namespace.to_string(),
-    );
+    message.set_metadata("mqb.src.mongodb_namespace", namespace.to_string());
     if let Ok(document_id) = serde_json::to_string(id) {
-        message
-            .metadata
-            .insert("mqb.src.mongodb_document_id".to_string(), document_id);
+        message.set_metadata("mqb.src.mongodb_document_id", document_id);
     }
     // The scan is ordered by ascending `_id`, so this index is deterministic: a re-read after a
     // nack or a restart reproduces the same names, which an idempotent sink skips.
-    message.metadata.insert(
-        "mqb.src.mongodb_snapshot_index".to_string(),
-        index.to_string(),
-    );
+    message.set_metadata("mqb.src.mongodb_snapshot_index", index.to_string());
 }
 
 /// The change-event operation name stored in message metadata.

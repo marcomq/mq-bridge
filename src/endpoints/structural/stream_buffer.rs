@@ -58,7 +58,7 @@
 //! // Send the request with an explicit correlation id. If you omit this
 //! // metadata, the HTTP publisher uses format!("{:032x}", message.message_id).
 //! let mut request = CanonicalMessage::new(Payload::Text("hello".into()), None);
-//! request.metadata.insert("correlation_id".into(), correlation_id.into());
+//! request.set_metadata("correlation_id", correlation_id);
 //! // create_publisher(&http).await?.send(request).await?;
 //!
 //! // Read only this request's streamed responses using the same topic and
@@ -285,9 +285,8 @@ impl StreamBufferPublisher {
 impl MessagePublisher for StreamBufferPublisher {
     async fn send(&self, message: CanonicalMessage) -> Result<Sent, PublisherError> {
         let correlation_id = message
-            .metadata
-            .get("correlation_id")
-            .cloned()
+            .get_metadata("correlation_id")
+            .map(str::to_owned)
             .ok_or_else(|| {
                 PublisherError::NonRetryable(anyhow!(
                     "stream_buffer publisher requires message metadata 'correlation_id'"
@@ -322,9 +321,8 @@ impl MessagePublisher for StreamBufferPublisher {
             return Ok(SentBatch::Ack);
         };
         let correlation_id = first
-            .metadata
-            .get("correlation_id")
-            .cloned()
+            .get_metadata("correlation_id")
+            .map(str::to_owned)
             .ok_or_else(|| {
                 PublisherError::NonRetryable(anyhow!(
                     "stream_buffer publisher requires message metadata 'correlation_id'"
@@ -332,7 +330,7 @@ impl MessagePublisher for StreamBufferPublisher {
             })?;
         if messages
             .iter()
-            .any(|message| message.metadata.get("correlation_id") != Some(&correlation_id))
+            .any(|message| message.get_metadata("correlation_id") != Some(&correlation_id))
         {
             return Err(PublisherError::NonRetryable(anyhow!(
                 "stream_buffer publisher batch requires a single shared correlation_id"
@@ -542,7 +540,7 @@ impl MessageConsumer for StreamBufferConsumer {
                             if guard
                                 .messages
                                 .get(index)
-                                .and_then(|message| message.metadata.get("http_stream_end"))
+                                .and_then(|message| message.get_metadata("http_stream_end"))
                                 .is_some_and(|value| value == "true")
                             {
                                 saw_acked_end_marker = true;

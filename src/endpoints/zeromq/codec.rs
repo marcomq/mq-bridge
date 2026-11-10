@@ -22,7 +22,7 @@ pub(crate) fn encode_frames(
     if matches!(format, ZeroMqFormat::RawFramed) {
         // Source/provenance keys are per-hop context and must not be forwarded.
         message.strip_source_metadata();
-        let meta = serde_json::to_vec(&message.metadata)
+        let meta = serde_json::to_vec(message.metadata_map())
             .map_err(|e| PublisherError::NonRetryable(anyhow!(e)))?;
         Ok(vec![Bytes::from(meta), message.payload.clone()])
     } else {
@@ -103,7 +103,7 @@ pub(crate) fn decode_frames(
                 match serde_json::from_slice::<std::collections::HashMap<String, String>>(
                     framed[0].as_ref(),
                 ) {
-                    Ok(meta) => msg.metadata = meta,
+                    Ok(meta) => msg = msg.with_metadata(meta),
                     Err(e) => warn!(
                         is_sub,
                         frames = frames.len(),
@@ -140,9 +140,7 @@ pub(crate) fn decode_frames(
     if crate::canonical_message::source_metadata_enabled() {
         if let Some(topic) = topic {
             for message in &mut messages {
-                message
-                    .metadata
-                    .insert("mqb.src.zeromq_topic".to_string(), topic.clone());
+                message.set_metadata("mqb.src.zeromq_topic", topic.clone());
             }
         }
     }
@@ -169,14 +167,14 @@ mod proptests {
             meta in metadata(),
         ) {
             let mut msg = CanonicalMessage::new(payload.clone(), None);
-            msg.metadata = meta.clone();
+            msg = msg.with_metadata(meta.clone());
             let frames = encode_frames(&mut msg, &ZeroMqFormat::RawFramed).unwrap();
             prop_assert_eq!(frames.len(), 2);
 
             let decoded = decode_frames(frames, false, &ZeroMqFormat::RawFramed).unwrap();
             prop_assert_eq!(decoded.len(), 1);
             prop_assert_eq!(decoded[0].payload.as_ref(), payload.as_slice());
-            prop_assert_eq!(&decoded[0].metadata, &meta);
+            prop_assert_eq!(decoded[0].metadata_map(), &meta);
         }
 
         /// `raw` carries bytes only; headers are dropped by design.
@@ -186,14 +184,14 @@ mod proptests {
             meta in metadata(),
         ) {
             let mut msg = CanonicalMessage::new(payload.clone(), None);
-            msg.metadata = meta;
+            msg = msg.with_metadata(meta);
             let frames = encode_frames(&mut msg, &ZeroMqFormat::Raw).unwrap();
             prop_assert_eq!(frames.len(), 1);
 
             let decoded = decode_frames(frames, false, &ZeroMqFormat::Raw).unwrap();
             prop_assert_eq!(decoded.len(), 1);
             prop_assert_eq!(decoded[0].payload.as_ref(), payload.as_slice());
-            prop_assert!(decoded[0].metadata.is_empty());
+            prop_assert!(decoded[0].metadata_is_empty());
         }
 
         /// Arbitrary inbound frames come from other people's producers: decoding must return a

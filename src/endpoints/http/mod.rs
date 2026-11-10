@@ -472,24 +472,15 @@ pub trait HttpRequestExt {
 
 impl HttpRequestExt for CanonicalMessage {
     fn http_method(&self) -> &str {
-        self.metadata
-            .get(HTTP_METHOD)
-            .map(String::as_str)
-            .unwrap_or("")
+        self.get_metadata(HTTP_METHOD).unwrap_or("")
     }
 
     fn http_path(&self) -> &str {
-        self.metadata
-            .get(HTTP_PATH)
-            .map(String::as_str)
-            .unwrap_or("")
+        self.get_metadata(HTTP_PATH).unwrap_or("")
     }
 
     fn http_query(&self) -> &str {
-        self.metadata
-            .get(HTTP_QUERY)
-            .map(String::as_str)
-            .unwrap_or("")
+        self.get_metadata(HTTP_QUERY).unwrap_or("")
     }
 
     fn query_param(&self, key: &str) -> Option<&str> {
@@ -504,8 +495,7 @@ impl HttpRequestExt for CanonicalMessage {
     }
 
     fn accepts_gzip(&self) -> bool {
-        self.metadata
-            .get("accept-encoding")
+        self.get_metadata("accept-encoding")
             .is_some_and(|v| v.to_ascii_lowercase().contains("gzip"))
     }
 }
@@ -1803,7 +1793,7 @@ async fn handle_request_internal(
         "Received HTTP request"
     );
 
-    message.metadata = metadata;
+    message = message.with_metadata(metadata);
 
     if let Some(inline_publisher) = state.inline_publisher.as_ref() {
         let timeout_duration = state.request_timeout;
@@ -2038,8 +2028,7 @@ fn make_response(
     match disposition {
         MessageDisposition::Reply(mut msg) => {
             let status = msg
-                .metadata
-                .remove(HTTP_STATUS_CODE)
+                .remove_metadata(HTTP_STATUS_CODE)
                 .and_then(|s| s.parse::<u16>().ok())
                 .and_then(|code| StatusCode::from_u16(code).ok())
                 .unwrap_or(StatusCode::OK);
@@ -2054,7 +2043,7 @@ fn make_response(
             // pass, so the body is never double-encoded.
             let mut preset_encoding: Option<String> = None;
             let mut trailers = hyper::HeaderMap::new();
-            for (key, value) in &msg.metadata {
+            for (key, value) in msg.metadata_iter() {
                 if crate::canonical_message::is_source_metadata_key(key) {
                     continue; // source/provenance keys must not leak as response headers
                 }
@@ -2100,7 +2089,7 @@ fn make_response(
                 } else if key.eq_ignore_ascii_case("content-encoding")
                     && !value.trim().eq_ignore_ascii_case("identity")
                 {
-                    preset_encoding = Some(value.clone());
+                    preset_encoding = Some(value.to_owned());
                 }
 
                 if !key.eq_ignore_ascii_case("content-encoding")

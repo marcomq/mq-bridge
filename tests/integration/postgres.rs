@@ -141,7 +141,7 @@ pub async fn test_postgres_multicolumn() {
 
         let mut msg =
             CanonicalMessage::new(br#"{"sku":"abc","qty":7,"price":1.5}"#.to_vec(), None);
-        msg.metadata.insert("cust".to_string(), "c1".to_string());
+        msg.set_metadata("cust", "c1");
         publisher.send(msg).await.unwrap();
 
         // Batch of 2 with typed columns and per-row metadata.
@@ -152,7 +152,7 @@ pub async fn test_postgres_multicolumn() {
                     .into_bytes(),
                 None,
             );
-            m.metadata.insert("cust".to_string(), format!("b{i}"));
+            m.set_metadata("cust", format!("b{i}"));
             batch.push(m);
         }
         publisher.send_batch(batch).await.unwrap();

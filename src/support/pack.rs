@@ -127,7 +127,7 @@ impl Packer {
     /// Whether a batch is framed with metadata: the flag is per batch, so one
     /// message carrying any makes every record pay the metadata-count varint.
     pub(crate) fn batch_has_metadata(&self, messages: &[CanonicalMessage]) -> bool {
-        self.format == PackFormat::Mqb && messages.iter().any(|m| !m.metadata.is_empty())
+        self.format == PackFormat::Mqb && messages.iter().any(|m| !m.metadata_is_empty())
     }
 
     /// Uncompressed body bytes this message will add to a batch. The chunker adds
@@ -143,8 +143,8 @@ impl Packer {
                     len += 16;
                 }
                 if batch_has_metadata {
-                    len += uvarint_len(message.metadata.len() as u64);
-                    for (key, value) in &message.metadata {
+                    len += uvarint_len(message.metadata_len() as u64);
+                    for (key, value) in message.metadata_iter() {
                         len += uvarint_len(key.len() as u64) + key.len();
                         len += uvarint_len(value.len() as u64) + value.len();
                     }
@@ -202,8 +202,8 @@ impl Packer {
             put_uvarint(&mut out, message.payload.len() as u64);
             out.extend_from_slice(&message.payload);
             if with_metadata {
-                put_uvarint(&mut out, message.metadata.len() as u64);
-                for (key, value) in &message.metadata {
+                put_uvarint(&mut out, message.metadata_len() as u64);
+                for (key, value) in message.metadata_iter() {
                     put_uvarint(&mut out, key.len() as u64);
                     out.extend_from_slice(key.as_bytes());
                     put_uvarint(&mut out, value.len() as u64);
@@ -381,7 +381,7 @@ fn unpack_mqb(payload: &Bytes, limits: &UnpackLimits) -> Result<Vec<CanonicalMes
                     std::str::from_utf8(take(&body, &mut pos, value_len, "metadata value")?)?;
                 metadata.insert(key.to_string(), value.to_string());
             }
-            message.metadata = metadata;
+            message = message.with_metadata(metadata);
         }
         messages.push(message);
     }
@@ -401,9 +401,7 @@ mod tests {
     fn message(payload: &str, metadata: &[(&str, &str)]) -> CanonicalMessage {
         let mut message = CanonicalMessage::from(payload);
         for (key, value) in metadata {
-            message
-                .metadata
-                .insert((*key).to_string(), (*value).to_string());
+            message.set_metadata((*key).to_string(), (*value).to_string());
         }
         message
     }
@@ -449,7 +447,7 @@ mod tests {
         let out = unpack(PackFormat::Mqb, &packed, &UnpackLimits::default()).unwrap();
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].payload, input[0].payload);
-        assert_eq!(out[0].metadata, input[0].metadata);
+        assert_eq!(out[0].metadata_map(), input[0].metadata_map());
         assert_eq!(out[0].message_id, input[0].message_id);
     }
 
@@ -469,7 +467,7 @@ mod tests {
         assert_eq!(out.len(), input.len());
         for (i, (got, want)) in out.iter().zip(&input).enumerate() {
             assert_eq!(got.payload, want.payload, "record {i}");
-            assert_eq!(got.metadata, want.metadata, "record {i}");
+            assert_eq!(got.metadata_map(), want.metadata_map(), "record {i}");
             assert_eq!(got.message_id, want.message_id, "record {i}");
         }
     }
@@ -498,7 +496,7 @@ mod tests {
         );
         assert!(bare.len() < tagged.len());
         let out = unpack(PackFormat::Mqb, &bare, &UnpackLimits::default()).unwrap();
-        assert!(out[0].metadata.is_empty());
+        assert!(out[0].metadata_is_empty());
     }
 
     #[test]
@@ -549,7 +547,7 @@ mod tests {
             assert_eq!(out.len(), input.len(), "cut at {cut}");
             for (got, want) in out.iter().zip(&input) {
                 assert_eq!(got.payload, want.payload, "cut at {cut}");
-                assert_eq!(got.metadata, want.metadata, "cut at {cut}");
+                assert_eq!(got.metadata_map(), want.metadata_map(), "cut at {cut}");
             }
         }
     }
@@ -674,7 +672,7 @@ mod tests {
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].payload.as_ref(), b"hello");
         assert_eq!(out[1].payload.as_ref(), b"world");
-        assert!(out[1].metadata.is_empty(), "the format carries no metadata");
+        assert!(out[1].metadata_is_empty(), "the format carries no metadata");
     }
 
     #[test]
@@ -705,7 +703,7 @@ mod proptests {
             (prop::collection::vec(any::<u8>(), 0..256), metadata).prop_map(
                 |(payload, metadata)| {
                     let mut message = CanonicalMessage::new(payload, None);
-                    message.metadata = metadata;
+                    message = message.with_metadata(metadata);
                     message
                 },
             ),
@@ -721,7 +719,7 @@ mod proptests {
             prop_assert_eq!(out.len(), input.len());
             for (got, want) in out.iter().zip(&input) {
                 prop_assert_eq!(&got.payload, &want.payload);
-                prop_assert_eq!(&got.metadata, &want.metadata);
+                prop_assert_eq!(got.metadata_map(), want.metadata_map());
                 prop_assert_eq!(got.message_id, want.message_id);
             }
         }

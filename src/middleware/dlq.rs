@@ -34,15 +34,9 @@ fn tag_dlq_failure(message: &mut CanonicalMessage, error: &str, route_name: &str
 /// One batch is one dead-lettering event, so every message in it must carry the same
 /// timestamp — taking `now()` per message would spread them across the loop.
 fn tag_dlq_failure_at(message: &mut CanonicalMessage, error: &str, route_name: &str, now_ms: &str) {
-    message
-        .metadata
-        .insert(DLQ_ERROR_KEY.to_string(), error.to_string());
-    message
-        .metadata
-        .insert(DLQ_ROUTE_KEY.to_string(), route_name.to_string());
-    message
-        .metadata
-        .insert(DLQ_TIMESTAMP_KEY.to_string(), now_ms.to_string());
+    message.set_metadata(DLQ_ERROR_KEY, error.to_string());
+    message.set_metadata(DLQ_ROUTE_KEY, route_name.to_string());
+    message.set_metadata(DLQ_TIMESTAMP_KEY, now_ms.to_string());
 }
 
 fn now_ms() -> String {
@@ -642,7 +636,7 @@ mod tests {
         assert_eq!(dlq_msgs[0].payload, msg_payload.as_slice());
 
         // A dead-lettered record must say why it was dead-lettered.
-        let meta = &dlq_msgs[0].metadata;
+        let meta = dlq_msgs[0].metadata_map();
         assert!(
             meta.get(DLQ_ERROR_KEY)
                 .is_some_and(|e| e.contains("Always fails")),
@@ -797,7 +791,7 @@ mod tests {
         let stamps: Vec<Option<String>> = {
             let seen = seen.lock().unwrap();
             seen.iter()
-                .map(|m| m.metadata.get(DLQ_TIMESTAMP_KEY).cloned())
+                .map(|m| m.get_metadata(DLQ_TIMESTAMP_KEY).map(str::to_owned))
                 .collect()
         };
         assert_eq!(stamps.len(), 3, "every message must reach the DLQ");

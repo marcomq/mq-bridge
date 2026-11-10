@@ -160,9 +160,9 @@ impl HandlerContext {
             )));
         };
         if let Some(id) = &self.correlation_id {
-            msg.metadata
-                .entry(CORRELATION_ID_KEY.to_string())
-                .or_insert_with(|| id.clone());
+            if !msg.has_metadata(CORRELATION_ID_KEY) {
+                msg.set_metadata(CORRELATION_ID_KEY, id.clone());
+            }
         }
         self.runtime.block_on(emitter.send(msg)).map(|_| ())
     }
@@ -209,7 +209,8 @@ impl ThreadedHandler {
                 for job in rx {
                     // Read before the check, so a cancel racing with it bumps the generation.
                     let generation = state.generation.load(Ordering::Acquire);
-                    let correlation_id = job.msg.metadata.get(CORRELATION_ID_KEY).cloned();
+                    let correlation_id =
+                        job.msg.get_metadata(CORRELATION_ID_KEY).map(str::to_owned);
                     if correlation_id
                         .as_deref()
                         .is_some_and(|id| state.contains(id))
@@ -293,8 +294,8 @@ mod tests {
         let emitted = channel.drain_messages();
         let payloads: Vec<_> = emitted.iter().map(|m| m.get_payload_str()).collect();
         assert_eq!(payloads, ["1a", "1b", "2a", "2b"]);
-        assert_eq!(emitted[0].metadata[CORRELATION_ID_KEY], "t1");
-        assert!(!emitted[2].metadata.contains_key(CORRELATION_ID_KEY));
+        assert_eq!(emitted[0].get_metadata(CORRELATION_ID_KEY).unwrap(), "t1");
+        assert!(!emitted[2].has_metadata(CORRELATION_ID_KEY));
     }
 
     #[tokio::test]

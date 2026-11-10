@@ -10,6 +10,7 @@
  *  - Every function pointer in the table must be non-null, including ones the
  *    plugin does not support: point those at a stub returning
  *    MQB_ERR_UNSUPPORTED (or doing nothing, for the *_free entries).
+ *    The one exception is middleware_apply_async, which may be NULL.
  *  - Host -> plugin data (arguments) is borrowed for the call only; copy what
  *    you keep. Plugin -> host data stays valid until its handle is freed.
  *    middleware_apply's output may point into its input.
@@ -54,7 +55,8 @@ struct MqbPluginVTable;
 //   `MQB_DELIVERY_REQUIRES_FULL_REPLAY` and `MQB_DELIVERY_REPLAYS_FROM_START` flags.
 // * **1.5** appended `MqbPluginVTable::middleware_wrap_consumer` and
 //   `MqbPluginVTable::middleware_wrap_publisher`, with which a middleware wraps the
-//   whole inner endpoint instead of mapping messages (`MQB_CAP_MIDDLEWARE_WRAP`).
+//   whole inner endpoint instead of mapping messages (`MQB_CAP_MIDDLEWARE_WRAP`), and
+//   `MqbPluginVTable::middleware_apply_async`, the non-blocking twin of `middleware_apply`.
 #define MQB_PLUGIN_ABI_MINOR 5
 
 // The route pass drained its input to the end.
@@ -380,6 +382,16 @@ typedef MqbStatus (*MqbMiddlewareWrapPublisher)(MqbMiddlewareHandle middleware,
                                                 MqbPublisherHandle *out,
                                                 struct MqbBuffer *err);
 
+// Signature of `MqbPluginVTable::middleware_apply_async`, a nullable pointer.
+typedef MqbStatus (*MqbMiddlewareApplyAsync)(MqbMiddlewareHandle middleware,
+                                             const struct MqbMessage *messages,
+                                             size_t len,
+                                             MqbFilterHandle *out_result,
+                                             const struct MqbMessage **out_messages,
+                                             const uint8_t **out_kept,
+                                             struct MqbBuffer *err,
+                                             struct MqbCompletion completion);
+
 // The function table a plugin exports through `MQB_PLUGIN_ENTRY_SYMBOL`.
 //
 // Every fallible function takes an `err` out-parameter. On a non-`MQB_OK`
@@ -614,6 +626,11 @@ typedef struct MqbPluginVTable {
   // The publisher counterpart of `middleware_wrap_consumer`,
   // on a middleware created for the send side.
   MqbMiddlewareWrapPublisher middleware_wrap_publisher;
+  // Non-blocking twin of `middleware_apply`, completed
+  // through `MqbCompletion`. The input stays valid until the callback. May be
+  // null, and `MQB_ERR_UNSUPPORTED` falls back to `middleware_apply`. Read it
+  // through `MqbPluginVTable::middleware_apply_async_hook`.
+  MqbMiddlewareApplyAsync middleware_apply_async;
 } MqbPluginVTable;
 
 // Signature of the exported discovery symbol.
@@ -662,7 +679,7 @@ typedef const struct MqbPluginVTable *(*MqbPluginListEntry)(size_t index);
 #define MQB_VTABLE_SIZE_V1_2 (MQB_VTABLE_SIZE_V1_1 + 11 * sizeof(size_t))
 #define MQB_VTABLE_SIZE_V1_3 (MQB_VTABLE_SIZE_V1_2 + sizeof(size_t))
 #define MQB_VTABLE_SIZE_V1_4 (MQB_VTABLE_SIZE_V1_3 + sizeof(size_t))
-#define MQB_VTABLE_SIZE_V1_5 (MQB_VTABLE_SIZE_V1_4 + 2 * sizeof(size_t))
+#define MQB_VTABLE_SIZE_V1_5 (MQB_VTABLE_SIZE_V1_4 + 3 * sizeof(size_t))
 #define MQB_HOST_VTABLE_SIZE_V1_2 (5 * sizeof(size_t))
 
 #if defined(_WIN32)

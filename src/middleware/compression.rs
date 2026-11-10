@@ -315,7 +315,7 @@ mod tests {
 
             let plaintext = "compress me ".repeat(64);
             let mut msg = CanonicalMessage::from(plaintext.as_str());
-            msg.metadata.insert("kind".to_string(), "note".to_string());
+            msg.set_metadata("kind", "note");
             publisher.send_batch(vec![msg]).await.unwrap();
 
             // The wire payload is compressed (smaller) and metadata stays clear.
@@ -326,10 +326,7 @@ mod tests {
                 "algo {algo:?}"
             );
             assert!(wire[0].payload.len() < plaintext.len(), "algo {algo:?}");
-            assert_eq!(
-                wire[0].metadata.get("kind").map(|s| s.as_str()),
-                Some("note")
-            );
+            assert_eq!(wire[0].get_metadata("kind"), Some("note"));
 
             let mut consumer = CompressionConsumer::new(
                 Box::new(MockConsumer {

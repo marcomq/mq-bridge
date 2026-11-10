@@ -1626,7 +1626,7 @@ mod tests {
 
         let batch = consumer.receive_batch(2).await.expect("events");
         assert_eq!(payload_texts(&batch.messages), [r#"{"n":1}"#, "two"]);
-        let metadata = &batch.messages[0].metadata;
+        let metadata = batch.messages[0].metadata_map();
         assert_eq!(metadata["sse_id"], "1");
         assert_eq!(metadata["sse_event"], "added");
         let nacked = vec![MessageDisposition::Ack, MessageDisposition::Nack];

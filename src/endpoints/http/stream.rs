@@ -171,9 +171,8 @@ pub(super) fn format_stream_reply(format: HttpStreamFormat, message: &CanonicalM
         }
         HttpStreamFormat::Sse => {
             let event_id = message
-                .metadata
-                .get("sse_id")
-                .cloned()
+                .get_metadata("sse_id")
+                .map(str::to_owned)
                 .unwrap_or_else(|| fast_uuid_v7::format_uuid(message.message_id).to_string());
             format_sse_frame(Some(&event_id), None, &message.payload)
         }
@@ -475,7 +474,7 @@ async fn send_stream_item(
         stream_index,
         "Received HTTP stream item"
     );
-    message.metadata = metadata;
+    message = message.with_metadata(metadata);
 
     let response_tx = dispatch.response_tx.clone();
     let response_format = dispatch.response_format;
@@ -961,7 +960,7 @@ async fn publish_stream_payload(
         .or_insert_with(|| "false".to_string());
 
     let mut message = CanonicalMessage::new_bytes(payload, None);
-    message.metadata = metadata;
+    message = message.with_metadata(metadata);
 
     match sink.send(message).await? {
         Sent::Ack | Sent::Response(_) => Ok(()),

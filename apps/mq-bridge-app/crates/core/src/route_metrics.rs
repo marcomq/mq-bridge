@@ -43,7 +43,7 @@ const RETRY_ATTEMPT_KEY: &str = "mq_bridge.retry.attempt";
 /// messages behind `max_attempts: 4` reported as twenty. Absence of the key
 /// means attempt 1, which `retry` guarantees by clearing it on a first try.
 pub fn is_redelivery(msg: &CanonicalMessage) -> bool {
-    msg.metadata.contains_key(RETRY_ATTEMPT_KEY)
+    msg.has_metadata(RETRY_ATTEMPT_KEY)
 }
 
 /// Counts and optionally captures a route's messages, forwarding or acking
@@ -370,10 +370,9 @@ impl MessageCapture {
     /// Never blocks the route: if the buffer is full the oldest entry is dropped
     /// to preserve "last N" semantics.
     pub fn push(&self, source_key: &str, mut msg: CanonicalMessage) {
-        msg.metadata
-            .insert(CAPTURE_SOURCE_KEY.into(), source_key.to_string());
-        msg.metadata.insert(
-            CAPTURE_TIME_KEY.into(),
+        msg.set_metadata(CAPTURE_SOURCE_KEY, source_key.to_string());
+        msg.set_metadata(
+            CAPTURE_TIME_KEY,
             chrono::Utc::now().timestamp_millis().to_string(),
         );
 
@@ -594,14 +593,8 @@ mod tests {
             .collect();
 
         assert_eq!(payloads, vec!["second", "third"]);
-        assert_eq!(
-            drained[0]
-                .metadata
-                .get(CAPTURE_SOURCE_KEY)
-                .map(String::as_str),
-            Some("src")
-        );
-        assert!(drained[0].metadata.contains_key(CAPTURE_TIME_KEY));
+        assert_eq!(drained[0].get_metadata(CAPTURE_SOURCE_KEY), Some("src"));
+        assert!(drained[0].has_metadata(CAPTURE_TIME_KEY));
         // Reads are destructive.
         assert!(capture.drain().is_empty());
     }

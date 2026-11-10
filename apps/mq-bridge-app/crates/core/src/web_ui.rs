@@ -32,10 +32,7 @@ impl WebUiHttpHandler {
         // loopback bind trusts the listener — which a port-forward onto
         // loopback (`ssh -L`, `kubectl port-forward`) can still satisfy from
         // off-box. Tighten to the real peer address once mq-bridge exposes it.
-        msg.metadata.insert(
-            "mqb_peer_loopback".to_string(),
-            self.bound_to_loopback.to_string(),
-        );
+        msg.set_metadata("mqb_peer_loopback", self.bound_to_loopback.to_string());
         self.app.handle_ui_message(msg, true).await
     }
 }

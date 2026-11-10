@@ -82,7 +82,8 @@ pub const MQB_PLUGIN_ABI_MAJOR: u32 = 1;
 ///   [`MQB_DELIVERY_REQUIRES_FULL_REPLAY`] and [`MQB_DELIVERY_REPLAYS_FROM_START`] flags.
 /// * **1.5** appended [`MqbPluginVTable::middleware_wrap_consumer`] and
 ///   [`MqbPluginVTable::middleware_wrap_publisher`], with which a middleware wraps the
-///   whole inner endpoint instead of mapping messages ([`MQB_CAP_MIDDLEWARE_WRAP`]).
+///   whole inner endpoint instead of mapping messages ([`MQB_CAP_MIDDLEWARE_WRAP`]), and
+///   [`MqbPluginVTable::middleware_apply_async`], the non-blocking twin of `middleware_apply`.
 pub const MQB_PLUGIN_ABI_MINOR: u32 = 5;
 
 /// The route pass drained its input to the end.
@@ -718,7 +719,26 @@ pub struct MqbPluginVTable {
     /// The publisher counterpart of [`middleware_wrap_consumer`](Self::middleware_wrap_consumer),
     /// on a middleware created for the send side.
     pub middleware_wrap_publisher: MqbMiddlewareWrapPublisher,
+    /// Non-blocking twin of [`middleware_apply`](Self::middleware_apply), completed
+    /// through [`MqbCompletion`]. The input stays valid until the callback. May be
+    /// null, and [`MQB_ERR_UNSUPPORTED`] falls back to `middleware_apply`. Read it
+    /// through [`MqbPluginVTable::middleware_apply_async_hook`].
+    pub middleware_apply_async: MqbMiddlewareApplyAsync,
 }
+
+/// Signature of [`MqbPluginVTable::middleware_apply_async`], a nullable pointer.
+pub type MqbMiddlewareApplyAsync = Option<
+    unsafe extern "C" fn(
+        middleware: MqbMiddlewareHandle,
+        messages: *const MqbMessage,
+        len: usize,
+        out_result: *mut MqbFilterHandle,
+        out_messages: *mut *const MqbMessage,
+        out_kept: *mut *const u8,
+        err: *mut MqbBuffer,
+        completion: MqbCompletion,
+    ) -> MqbStatus,
+>;
 
 /// Signature of [`MqbPluginVTable::middleware_wrap_consumer`].
 pub type MqbMiddlewareWrapConsumer = unsafe extern "C" fn(
@@ -994,6 +1014,15 @@ impl MqbPluginVTable {
             self.middleware_wrap_publisher,
         ))
     }
+
+    /// The 1.5 non-blocking apply entry, or `None` when the plugin predates it or
+    /// left it null; the host then runs `middleware_apply` on its blocking pool.
+    pub fn middleware_apply_async_hook(&self) -> MqbMiddlewareApplyAsync {
+        if self.struct_size < MQB_VTABLE_SIZE_V1_5 {
+            return None;
+        }
+        self.middleware_apply_async
+    }
 }
 
 /// Size of the **1.0** field set: 7 header words (`struct_size`, the packed
@@ -1038,10 +1067,11 @@ pub const MQB_VTABLE_SIZE_V1_3: usize = MQB_VTABLE_SIZE_V1_2 + core::mem::size_o
 /// [`MQB_VTABLE_SIZE_V1_1`].
 pub const MQB_VTABLE_SIZE_V1_4: usize = MQB_VTABLE_SIZE_V1_3 + core::mem::size_of::<usize>();
 
-/// Size of the **1.5** field set: 1.4 plus [`MqbPluginVTable::middleware_wrap_consumer`]
-/// and [`MqbPluginVTable::middleware_wrap_publisher`]. A feature gate like
+/// Size of the **1.5** field set: 1.4 plus [`MqbPluginVTable::middleware_wrap_consumer`],
+/// [`MqbPluginVTable::middleware_wrap_publisher`] and
+/// [`MqbPluginVTable::middleware_apply_async`]. A feature gate like
 /// [`MQB_VTABLE_SIZE_V1_1`].
-pub const MQB_VTABLE_SIZE_V1_5: usize = MQB_VTABLE_SIZE_V1_4 + 2 * core::mem::size_of::<usize>();
+pub const MQB_VTABLE_SIZE_V1_5: usize = MQB_VTABLE_SIZE_V1_4 + 3 * core::mem::size_of::<usize>();
 
 /// Why a plugin was rejected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1176,7 +1206,7 @@ mod tests {
     fn the_1_5_table_size_matches_the_declared_table() {
         assert_eq!(
             MQB_VTABLE_SIZE_V1_5,
-            MQB_VTABLE_SIZE_V1_4 + 2 * size_of::<usize>()
+            MQB_VTABLE_SIZE_V1_4 + 3 * size_of::<usize>()
         );
         assert_eq!(size_of::<MqbPluginVTable>(), MQB_VTABLE_SIZE_V1_5);
     }
@@ -1190,6 +1220,29 @@ mod tests {
         assert!(table.wrap_hooks().is_some());
         table.struct_size = MQB_VTABLE_SIZE_V1_4;
         assert!(table.wrap_hooks().is_none());
+    }
+
+    #[test]
+    fn a_null_or_pre_1_5_async_apply_is_no_hook() {
+        unsafe extern "C" fn apply_async(
+            _: MqbMiddlewareHandle,
+            _: *const MqbMessage,
+            _: usize,
+            _: *mut MqbFilterHandle,
+            _: *mut *const MqbMessage,
+            _: *mut *const u8,
+            _: *mut MqbBuffer,
+            _: MqbCompletion,
+        ) -> MqbStatus {
+            MQB_OK
+        }
+        let mut table = stub_table();
+        table.struct_size = MQB_VTABLE_SIZE_V1_5;
+        assert!(table.middleware_apply_async_hook().is_none());
+        table.middleware_apply_async = Some(apply_async);
+        assert!(table.middleware_apply_async_hook().is_some());
+        table.struct_size = MQB_VTABLE_SIZE_V1_4;
+        assert!(table.middleware_apply_async_hook().is_none());
     }
 
     #[test]
@@ -1608,6 +1661,7 @@ mod tests {
             publisher_deferred_commit_interval_ms,
             middleware_wrap_consumer: wrap_consumer,
             middleware_wrap_publisher: wrap_publisher,
+            middleware_apply_async: None,
         }
     }
 }

@@ -234,10 +234,7 @@ fn batch_to_messages(
             continue;
         }
         let mut msg = CanonicalMessage::new(line.to_vec(), None);
-        msg.metadata.insert(
-            "mq_bridge.original_format".to_string(),
-            "parquet".to_string(),
-        );
+        msg.set_metadata("mq_bridge.original_format", "parquet");
         out.push(msg);
     }
     Ok(out)

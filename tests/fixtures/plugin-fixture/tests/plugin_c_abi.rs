@@ -77,7 +77,8 @@ fn assert_every_entry_is_set(library: &Path) {
             .expect("the entry symbol");
         let table = entry();
         let words = (*table).struct_size / size_of::<usize>();
-        let words = std::slice::from_raw_parts(table.cast::<usize>(), words);
+        // The last entry, `middleware_apply_async`, may be null.
+        let words = std::slice::from_raw_parts(table.cast::<usize>(), words - 1);
         for (index, word) in words.iter().enumerate().skip(HEADER_WORDS) {
             assert_ne!(*word, 0, "function entry {} is null", index - HEADER_WORDS);
         }
@@ -174,10 +175,7 @@ async fn the_minimal_c_middleware_passes_kept_messages_through_unchanged() {
     assert_eq!(messages.len(), 1, "the heartbeat is dropped");
     assert_eq!(messages[0].get_payload_str(), "order-1");
     assert_eq!(messages[0].message_id, order_id);
-    assert_eq!(
-        messages[0].metadata.get("source").map(String::as_str),
-        Some("atm")
-    );
+    assert_eq!(messages[0].get_metadata("source"), Some("atm"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -198,10 +196,7 @@ async fn a_c_middleware_parses_and_drops_records_in_a_route() {
         payload,
         json!({ "account": "DE12345678", "amount_minor": 12345, "currency": "EUR" })
     );
-    assert_eq!(
-        messages[0].metadata.get("source").map(String::as_str),
-        Some("atm")
-    );
+    assert_eq!(messages[0].get_metadata("source"), Some("atm"));
 }
 
 #[tokio::test(flavor = "multi_thread")]

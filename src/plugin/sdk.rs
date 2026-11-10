@@ -64,18 +64,19 @@ use futures::FutureExt;
 use tokio::sync::Mutex;
 
 use crate::errors::{ConsumerError, InvalidConfig, ProcessingError};
-use crate::plugin::message::{from_abi, AbiMessages};
+use crate::plugin::message::{from_abi, read_message, AbiMessages};
 use crate::support::plugin_abi::{
     MqbBatchHandle, MqbBuffer, MqbCompletion, MqbConsumerHandle, MqbFactoryHandle, MqbFilterHandle,
-    MqbMessage, MqbMiddlewareHandle, MqbPluginVTable, MqbPublisherHandle, MqbResponsesHandle,
-    MqbSlice, MqbStatus, MQB_CAP_CONSUMER, MQB_CAP_MIDDLEWARE, MQB_CAP_MIDDLEWARE_WRAP,
-    MQB_CAP_PUBLISHER, MQB_DELIVERY_ACKNOWLEDGES, MQB_DELIVERY_IDEMPOTENT_SINK,
-    MQB_DELIVERY_REPLAYS_FROM_START, MQB_DELIVERY_REQUIRES_FULL_REPLAY, MQB_DISCONNECT_COMPLETED,
-    MQB_DISCONNECT_FAILED, MQB_DISPOSITION_NACK, MQB_DISPOSITION_REPLY, MQB_END_OF_STREAM,
-    MQB_ERR_CONNECTION, MQB_ERR_INVALID_CONFIG, MQB_ERR_PANIC, MQB_ERR_PERMANENT,
-    MQB_ERR_RETRYABLE, MQB_ERR_UNSUPPORTED, MQB_MIDDLEWARE_RECEIVE, MQB_MIDDLEWARE_SEND, MQB_OK,
-    MQB_OUTCOME_OK, MQB_OUTCOME_PERMANENT, MQB_OUTCOME_RETRYABLE, MQB_PLUGIN_ABI_MAJOR,
-    MQB_PLUGIN_ABI_MINOR, MQB_SCHEMA_ENDPOINT, MQB_SCHEMA_MIDDLEWARE,
+    MqbKeyValue, MqbMessage, MqbMiddlewareHandle, MqbPluginVTable, MqbPublisherHandle,
+    MqbResponsesHandle, MqbSlice, MqbStatus, MQB_CAP_CONSUMER, MQB_CAP_MIDDLEWARE,
+    MQB_CAP_MIDDLEWARE_WRAP, MQB_CAP_PUBLISHER, MQB_DELIVERY_ACKNOWLEDGES,
+    MQB_DELIVERY_IDEMPOTENT_SINK, MQB_DELIVERY_REPLAYS_FROM_START,
+    MQB_DELIVERY_REQUIRES_FULL_REPLAY, MQB_DISCONNECT_COMPLETED, MQB_DISCONNECT_FAILED,
+    MQB_DISPOSITION_NACK, MQB_DISPOSITION_REPLY, MQB_END_OF_STREAM, MQB_ERR_CONNECTION,
+    MQB_ERR_INVALID_CONFIG, MQB_ERR_PANIC, MQB_ERR_PERMANENT, MQB_ERR_RETRYABLE,
+    MQB_ERR_UNSUPPORTED, MQB_MIDDLEWARE_RECEIVE, MQB_MIDDLEWARE_SEND, MQB_OK, MQB_OUTCOME_OK,
+    MQB_OUTCOME_PERMANENT, MQB_OUTCOME_RETRYABLE, MQB_PLUGIN_ABI_MAJOR, MQB_PLUGIN_ABI_MINOR,
+    MQB_SCHEMA_ENDPOINT, MQB_SCHEMA_MIDDLEWARE,
 };
 use crate::traits::{
     BatchCommitFunc, CustomEndpointFactory, CustomMiddlewareFactory, DisconnectOutcome,
@@ -307,9 +308,14 @@ fn start<T: Send + 'static>(
         done.finish(status);
     });
     // Poll once on the caller's thread: a ready call completes without a thread handoff.
+    // Unconstrained, so a spent coop budget cannot force a ready call onto another thread.
     let _entered = runtime.enter();
     let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
-    match std::panic::catch_unwind(AssertUnwindSafe(|| task.as_mut().poll(&mut cx))) {
+    let first_poll = || {
+        let once = tokio::task::unconstrained(std::future::poll_fn(|cx| task.as_mut().poll(cx)));
+        std::pin::pin!(once).poll(&mut cx)
+    };
+    match std::panic::catch_unwind(AssertUnwindSafe(first_poll)) {
         Ok(std::task::Poll::Pending) => drop(runtime.spawn(task)),
         Ok(std::task::Poll::Ready(())) => {}
         // Dropping the task reports the call as lost through `Completion`.
@@ -1577,6 +1583,100 @@ unsafe fn write_status(
 
 // ---------------------------------------------------------------- middleware
 
+/// A message the host lends for one middleware call, read in place without a copy.
+///
+/// It is valid only while the call runs; [`MessageRef::to_message`] copies it out.
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+pub struct MessageRef<'a> {
+    raw: MqbMessage,
+    _lent: std::marker::PhantomData<&'a [u8]>,
+}
+
+// Safety: the host neither changes nor frees the lent batch until the call completes.
+unsafe impl Send for MessageRef<'_> {}
+unsafe impl Sync for MessageRef<'_> {}
+
+impl<'a> MessageRef<'a> {
+    /// # Safety
+    /// `ptr` must point at `len` messages that stay valid and unchanged for `'a`.
+    unsafe fn slice(ptr: *const MqbMessage, len: usize) -> &'a [MessageRef<'a>] {
+        if ptr.is_null() || len == 0 {
+            return &[];
+        }
+        // SAFETY: the caller's contract; `repr(transparent)` gives MessageRef MqbMessage's layout.
+        unsafe { std::slice::from_raw_parts(ptr.cast(), len) }
+    }
+
+    pub fn message_id(&self) -> u128 {
+        u128::from_be_bytes(self.raw.message_id)
+    }
+
+    pub fn payload(&self) -> &'a [u8] {
+        // SAFETY: the host keeps the lent batch valid and unchanged for `'a`.
+        unsafe { self.raw.payload.as_bytes() }
+    }
+
+    /// The metadata entries; an entry that is not UTF-8 is skipped.
+    pub fn metadata_iter(&self) -> impl Iterator<Item = (&'a str, &'a str)> + 'a {
+        let entries: &'a [MqbKeyValue] = if self.raw.metadata.is_null() {
+            &[]
+        } else {
+            // SAFETY: non-null, `metadata_len` entries of the batch lent for `'a`.
+            unsafe { std::slice::from_raw_parts(self.raw.metadata, self.raw.metadata_len) }
+        };
+        entries.iter().filter_map(|entry| {
+            // SAFETY: key and value slices belong to the same lent batch.
+            let key = std::str::from_utf8(unsafe { entry.key.as_bytes() }).ok()?;
+            let value = std::str::from_utf8(unsafe { entry.value.as_bytes() }).ok()?;
+            Some((key, value))
+        })
+    }
+
+    pub fn metadata(&self, key: &str) -> Option<&'a str> {
+        self.metadata_iter()
+            .find(|(name, _)| *name == key)
+            .map(|(_, value)| value)
+    }
+
+    /// An owned copy, e.g. to hand to [`Verdict::Replace`] after changing it.
+    pub fn to_message(&self) -> CanonicalMessage {
+        // SAFETY: the batch is valid for `'a`, which outlives this call; everything is copied.
+        unsafe { read_message(&self.raw, true, true) }
+    }
+}
+
+impl crate::middleware::MessageView for MessageRef<'_> {
+    fn payload(&self) -> &[u8] {
+        MessageRef::payload(self)
+    }
+
+    fn get_metadata(&self, key: &str) -> Option<&str> {
+        self.metadata(key)
+    }
+
+    fn metadata_iter(&self) -> impl Iterator<Item = (&str, &str)> {
+        MessageRef::metadata_iter(self)
+    }
+}
+
+/// What a middleware does with one message of a borrowed batch.
+pub enum Verdict {
+    /// Pass the message on as it is; nothing is copied.
+    Keep,
+    /// Drop it; the host acknowledges it, so it is not redelivered.
+    Drop,
+    /// Pass this message on instead.
+    Replace(CanonicalMessage),
+}
+
+fn verdicts(filtered: Vec<Option<CanonicalMessage>>) -> Vec<Verdict> {
+    filtered
+        .into_iter()
+        .map(|message| message.map_or(Verdict::Drop, Verdict::Replace))
+        .collect()
+}
+
 /// A middleware, as a plugin sees it: a batch goes in, the same batch comes
 /// back with entries rewritten or dropped.
 ///
@@ -1604,6 +1704,19 @@ pub trait BatchFilter: Send + Sync + 'static {
         messages: Vec<CanonicalMessage>,
     ) -> anyhow::Result<Vec<Option<CanonicalMessage>>> {
         Ok(messages.into_iter().map(Some).collect())
+    }
+
+    /// [`Self::on_receive`] over the host's own batch, without copying it in. Return one
+    /// [`Verdict`] per message, in order. The default copies and calls `on_receive`.
+    async fn on_receive_ref(&self, messages: &[MessageRef<'_>]) -> anyhow::Result<Vec<Verdict>> {
+        let owned = messages.iter().map(MessageRef::to_message).collect();
+        Ok(verdicts(self.on_receive(owned).await?))
+    }
+
+    /// [`Self::on_send`] over the host's own batch; see [`Self::on_receive_ref`].
+    async fn on_send_ref(&self, messages: &[MessageRef<'_>]) -> anyhow::Result<Vec<Verdict>> {
+        let owned = messages.iter().map(MessageRef::to_message).collect();
+        Ok(verdicts(self.on_send(owned).await?))
     }
 }
 
@@ -1644,16 +1757,38 @@ impl CustomEndpointFactory for NoEndpoint {}
 
 struct MiddlewareState {
     filter: Arc<dyn BatchFilter>,
+    results: ResultPool,
     /// `MQB_MIDDLEWARE_RECEIVE` or `MQB_MIDDLEWARE_SEND`, fixed at creation.
     side: u8,
     runtime: Arc<Runtime>,
 }
 
+/// Results the host released, reused so a call allocates no new arrays. Boxed: the box
+/// itself is the handle the host holds.
+#[allow(clippy::vec_box)]
+type ResultPool = Arc<std::sync::Mutex<Vec<Box<FilterResultState>>>>;
+
 struct FilterResultState {
-    /// Parallel to the input: dropped entries hold an empty placeholder the
-    /// host never reads.
-    messages: AbiMessages,
+    /// The replaced messages, which `messages` points into.
+    replaced: AbiMessages,
+    /// Parallel to the input: a kept entry is the host's own, a dropped one is never read.
+    messages: Vec<MqbMessage>,
     kept: Vec<u8>,
+    /// Weak, so a pooled result does not keep its own pool alive.
+    #[allow(clippy::vec_box)]
+    pool: std::sync::Weak<std::sync::Mutex<Vec<Box<FilterResultState>>>>,
+}
+
+fn recycled_result(pool: &ResultPool) -> Box<FilterResultState> {
+    let reused = pool.lock().unwrap_or_else(|e| e.into_inner()).pop();
+    reused.unwrap_or_else(|| {
+        Box::new(FilterResultState {
+            replaced: AbiMessages::new(Vec::new()),
+            messages: Vec::new(),
+            kept: Vec::new(),
+            pool: Arc::downgrade(pool),
+        })
+    })
 }
 
 unsafe extern "C" fn middleware_create<M>(
@@ -1697,12 +1832,148 @@ where
         unsafe {
             *out = MqbMiddlewareHandle(into_handle(MiddlewareState {
                 filter: Arc::from(filter),
+                results: ResultPool::default(),
                 side,
                 runtime,
             }))
         };
         MQB_OK
     })
+}
+
+/// The filter run over the host's input in place. The host keeps the input alive and
+/// unchanged until the call completes, which outlasts the returned future.
+unsafe fn apply_filter(
+    state: &MiddlewareState,
+    messages: *const MqbMessage,
+    len: usize,
+) -> impl Future<Output = anyhow::Result<Vec<Verdict>>> + Send + 'static {
+    let messages: &'static [MessageRef<'static>] = unsafe { MessageRef::slice(messages, len) };
+    let filter = Arc::clone(&state.filter);
+    let receive = state.side == MQB_MIDDLEWARE_RECEIVE;
+    async move {
+        if receive {
+            filter.on_receive_ref(messages).await
+        } else {
+            filter.on_send_ref(messages).await
+        }
+    }
+}
+
+/// Writes a filter's verdicts through the `middleware_apply` out-pointers.
+///
+/// A kept message, and an unchanged payload or metadata of a replaced one, points back
+/// into the host's `input`, which the host recognises and reuses instead of copying.
+#[allow(clippy::too_many_arguments)]
+unsafe fn write_filtered(
+    filtered: Result<anyhow::Result<Vec<Verdict>>, TaskFailure>,
+    pool: &ResultPool,
+    input: *const MqbMessage,
+    len: usize,
+    out_result: *mut MqbFilterHandle,
+    out_messages: *mut *const MqbMessage,
+    out_kept: *mut *const u8,
+    err: *mut MqbBuffer,
+) -> MqbStatus {
+    use crate::support::plugin_abi::{MQB_MESSAGE_DROPPED, MQB_MESSAGE_KEPT};
+    const DROPPED: u8 = MQB_MESSAGE_DROPPED;
+    const REPLACED: u8 = MQB_MESSAGE_KEPT;
+    // Marks the host's own message until the loop below; then sent as MQB_MESSAGE_KEPT.
+    const KEPT: u8 = 2;
+    let filtered = match filtered {
+        Ok(Ok(filtered)) => filtered,
+        Ok(Err(error)) => {
+            unsafe { set_error(err, format!("{error:#}")) };
+            return filter_status(&error);
+        }
+        Err(failure) => return unsafe { task_failed(err, failure) },
+    };
+    // Enforced here so a mistake surfaces as a clear error rather than as a
+    // mismatched array the host would read out of bounds.
+    if filtered.len() != len {
+        unsafe {
+            set_error(
+                err,
+                format!(
+                    "middleware returned {} entries for a batch of {len}; it must return \
+                     exactly one entry per message, in order",
+                    filtered.len()
+                ),
+            )
+        };
+        return MQB_ERR_PERMANENT;
+    }
+
+    let mut state = recycled_result(pool);
+    let mut kept = std::mem::take(&mut state.kept);
+    kept.clear();
+    let mut replaced = Vec::new();
+    for verdict in filtered {
+        kept.push(match verdict {
+            Verdict::Keep => KEPT,
+            Verdict::Drop => DROPPED,
+            Verdict::Replace(message) => {
+                replaced.push(message);
+                REPLACED
+            }
+        });
+    }
+
+    // SAFETY: the host keeps `len` input messages valid until the call completes.
+    let input = unsafe { MessageRef::slice(input, len) };
+    let replaced = AbiMessages::new(replaced);
+    let mut replacements = replaced.abi().iter();
+    let dropped = MqbMessage {
+        message_id: [0; 16],
+        payload: MqbSlice::from_bytes(&[]),
+        metadata: std::ptr::null(),
+        metadata_len: 0,
+    };
+    let mut messages = std::mem::take(&mut state.messages);
+    messages.clear();
+    for (ours, kind) in input.iter().zip(&mut kept) {
+        messages.push(match *kind {
+            KEPT => {
+                *kind = MQB_MESSAGE_KEPT;
+                ours.raw
+            }
+            REPLACED => {
+                let mut out = *replacements.next().expect("one entry per replacement");
+                // SAFETY: `out` points into `replaced`, which is alive in this scope.
+                if unsafe { out.payload.as_bytes() } == ours.payload() {
+                    out.payload = ours.raw.payload;
+                }
+                if out.metadata_len == ours.raw.metadata_len && same_entries(&out, &ours.raw) {
+                    out.metadata = ours.raw.metadata;
+                }
+                out
+            }
+            _ => dropped,
+        });
+    }
+    state.replaced = replaced;
+    state.messages = messages;
+    state.kept = kept;
+    unsafe {
+        *out_messages = state.messages.as_ptr();
+        *out_kept = state.kept.as_ptr();
+        *out_result = MqbFilterHandle(Box::into_raw(state).cast());
+    }
+    MQB_OK
+}
+
+/// True if both messages hold the same metadata entries, in any order.
+fn same_entries(ours: &MqbMessage, theirs: &MqbMessage) -> bool {
+    // SAFETY: each reference is one valid message; its slices live in the host's input or
+    // in `replaced`, both alive while `write_filtered` runs.
+    let (ours, theirs) = unsafe {
+        (
+            MessageRef::slice(std::ptr::from_ref(ours), 1)[0],
+            MessageRef::slice(std::ptr::from_ref(theirs), 1)[0],
+        )
+    };
+    ours.metadata_iter()
+        .all(|(key, value)| theirs.metadata(key) == Some(value))
 }
 
 unsafe extern "C" fn middleware_apply(
@@ -1719,65 +1990,77 @@ unsafe extern "C" fn middleware_apply(
             unsafe { set_error(err, "middleware_apply called with a null handle") };
             return MQB_ERR_PERMANENT;
         };
-        let messages = unsafe { from_abi(messages, len) };
-        let filter = Arc::clone(&state.filter);
-        let receive = state.side == MQB_MIDDLEWARE_RECEIVE;
-        let filtered = block_on(&state.runtime, async move {
-            if receive {
-                filter.on_receive(messages).await
-            } else {
-                filter.on_send(messages).await
-            }
-        });
-        let filtered = match filtered {
-            Ok(Ok(filtered)) => filtered,
-            Ok(Err(error)) => {
-                unsafe { set_error(err, format!("{error:#}")) };
-                return filter_status(&error);
-            }
-            Err(failure) => return unsafe { task_failed(err, failure) },
-        };
-        // Enforced here so a mistake surfaces as a clear error rather than as a
-        // mismatched array the host would read out of bounds.
-        if filtered.len() != len {
-            unsafe {
-                set_error(
-                    err,
-                    format!(
-                        "middleware returned {} entries for a batch of {len}; it must return \
-                         exactly one entry per message, in order",
-                        filtered.len()
-                    ),
-                )
-            };
-            return MQB_ERR_PERMANENT;
-        }
-
-        let mut kept = Vec::with_capacity(len);
-        let messages = filtered
-            .into_iter()
-            .map(|message| {
-                kept.push(u8::from(message.is_some()));
-                // Keeps the arrays parallel; the host skips dropped entries.
-                message.unwrap_or_else(|| CanonicalMessage::new(Vec::new(), None))
-            })
-            .collect();
-
-        let state = Box::new(FilterResultState {
-            messages: AbiMessages::new(messages),
-            kept,
-        });
+        let filter = unsafe { apply_filter(state, messages, len) };
+        let filtered = block_on(&state.runtime, filter);
         unsafe {
-            *out_messages = state.messages.as_ptr();
-            *out_kept = state.kept.as_ptr();
-            *out_result = MqbFilterHandle(Box::into_raw(state).cast());
+            write_filtered(
+                filtered,
+                &state.results,
+                messages,
+                len,
+                out_result,
+                out_messages,
+                out_kept,
+                err,
+            )
         }
-        MQB_OK
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe extern "C" fn middleware_apply_async(
+    middleware: MqbMiddlewareHandle,
+    messages: *const MqbMessage,
+    len: usize,
+    out_result: *mut MqbFilterHandle,
+    out_messages: *mut *const MqbMessage,
+    out_kept: *mut *const u8,
+    err: *mut MqbBuffer,
+    completion: MqbCompletion,
+) -> MqbStatus {
+    guarded(err, || {
+        let Some(state) = (unsafe { borrow::<MiddlewareState>(middleware.0) }) else {
+            unsafe { set_error(err, "middleware_apply_async called with a null handle") };
+            return MQB_ERR_PERMANENT;
+        };
+        let filter = unsafe { apply_filter(state, messages, len) };
+        let input = SendCell(messages);
+        let pool = Arc::clone(&state.results);
+        start(
+            &state.runtime,
+            filter,
+            err,
+            completion,
+            move |filtered| unsafe {
+                let input = input.into_inner();
+                write_filtered(
+                    filtered,
+                    &pool,
+                    input,
+                    len,
+                    out_result,
+                    out_messages,
+                    out_kept,
+                    err,
+                )
+            },
+        )
     })
 }
 
 unsafe extern "C" fn middleware_result_free(result: MqbFilterHandle) {
-    guarded_unit(|| drop(unsafe { reclaim::<FilterResultState>(result.0) }));
+    guarded_unit(|| {
+        let Some(mut state) = (unsafe { reclaim::<FilterResultState>(result.0) }) else {
+            return;
+        };
+        state.replaced = AbiMessages::new(Vec::new());
+        if let Some(pool) = state.pool.upgrade() {
+            let mut pool = pool.lock().unwrap_or_else(|e| e.into_inner());
+            if pool.len() < 64 {
+                pool.push(state);
+            }
+        }
+    })
 }
 
 unsafe extern "C" fn middleware_free(middleware: MqbMiddlewareHandle) {
@@ -2130,6 +2413,7 @@ where
         publisher_deferred_commit_interval_ms,
         middleware_wrap_consumer: no_wrap_consumer,
         middleware_wrap_publisher: no_wrap_publisher,
+        middleware_apply_async: Some(middleware_apply_async),
     })
 }
 
@@ -2153,6 +2437,7 @@ where
     table.0.middleware_free = wrap_middleware_free;
     table.0.middleware_wrap_consumer = middleware_wrap_consumer;
     table.0.middleware_wrap_publisher = middleware_wrap_publisher;
+    table.0.middleware_apply_async = None;
     table
 }
 

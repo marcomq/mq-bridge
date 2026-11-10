@@ -1229,9 +1229,8 @@ fn skip_leaves_out_only_the_entry_that_cannot_be_computed() {
             .as_ref()
             .ok()
             .unwrap()
-            .metadata
-            .get(SKIPPED_KEY)
-            .cloned()
+            .get_metadata(SKIPPED_KEY)
+            .map(str::to_owned)
     };
     assert_eq!(skipped(0), None);
     for i in [1, 2] {
@@ -1258,10 +1257,10 @@ entries:
         ]);
         let first = out[0].as_ref().ok().unwrap();
         assert_eq!(first.payload.as_ref(), b"not json");
-        assert!(first.metadata[SKIPPED_KEY].contains(','));
+        assert!(first.get_metadata(SKIPPED_KEY).unwrap().contains(','));
         let second = out[1].as_ref().ok().unwrap();
         assert_eq!(second.payload.as_ref(), br#"{"other":1}"#);
-        assert!(second.metadata.contains_key(SKIPPED_KEY));
+        assert!(second.has_metadata(SKIPPED_KEY));
     }
 }
 
@@ -1277,7 +1276,7 @@ async fn skip_works_against_a_shared_store() {
     ];
     let (out, _) = agg.fold_batch(batch).await.unwrap();
     let first = out[0].as_ref().ok().unwrap();
-    assert_eq!(first.metadata[SKIPPED_KEY], "shop_stats");
+    assert_eq!(first.get_metadata(SKIPPED_KEY).unwrap(), "shop_stats");
     let second: Value = serde_json::from_slice(&out[1].as_ref().ok().unwrap().payload).unwrap();
     assert_eq!(second["card_stats"]["n"], json!(2));
     assert_eq!(second["shop_stats"]["n"], json!(1));
@@ -1337,9 +1336,8 @@ fn ema_by_half_life_weights_by_elapsed_time() {
                 .as_ref()
                 .ok()
                 .unwrap()
-                .metadata
-                .get(LATE_KEY)
-                .cloned()
+                .get_metadata(LATE_KEY)
+                .map(str::to_owned)
         };
         assert_eq!(at(0), 0.0);
         // One half-life later the first value weighs half: 30 / 1.5.
@@ -1412,7 +1410,7 @@ fn overwrite_metadata_folds_a_late_message_as_the_newest() {
     let late = |overwrite: bool| {
         let mut m = msg(json!({"k": 1, "x": 7, "ts": 50}));
         if overwrite {
-            m.metadata.insert(OVERWRITE_KEY.into(), "true".into());
+            m.set_metadata(OVERWRITE_KEY, "true");
         }
         m
     };
@@ -1427,19 +1425,9 @@ fn overwrite_metadata_folds_a_late_message_as_the_newest() {
         doc["s"]["v"].clone()
     };
     assert_eq!(v(1), json!(1.0));
-    assert!(out[1]
-        .as_ref()
-        .ok()
-        .unwrap()
-        .metadata
-        .contains_key(LATE_KEY));
+    assert!(out[1].as_ref().ok().unwrap().has_metadata(LATE_KEY));
     assert_eq!(v(2), json!(7.0));
-    assert!(!out[2]
-        .as_ref()
-        .ok()
-        .unwrap()
-        .metadata
-        .contains_key(LATE_KEY));
+    assert!(!out[2].as_ref().ok().unwrap().has_metadata(LATE_KEY));
     // The clock was set back to 50, so 60 is in order again.
     assert_eq!(v(3), json!(3.0));
 }

@@ -87,7 +87,7 @@ fn publish_properties(message: &CanonicalMessage, no_persistence: bool) -> Basic
         // Delivery mode 2 makes the message persistent
         BasicProperties::default().with_delivery_mode(2)
     };
-    let metadata = &message.metadata;
+    let metadata = message.metadata_map();
     if let Some(reply_to) = metadata
         .get("reply_to")
         .and_then(|v| short_string("reply_to", v))
@@ -764,33 +764,22 @@ fn delivery_to_canonical_message(
     let mut canonical_message = CanonicalMessage::new(delivery.data.clone(), message_id);
 
     if let Some(amqp_id) = delivery.properties.message_id().as_ref() {
-        canonical_message
-            .metadata
-            .insert("amqp_message_id".to_string(), amqp_id.to_string());
+        canonical_message.set_metadata("amqp_message_id", amqp_id.to_string());
     }
     if let Some(correlation_id) = delivery.properties.correlation_id().as_ref() {
-        canonical_message
-            .metadata
-            .insert("correlation_id".to_string(), correlation_id.to_string());
+        canonical_message.set_metadata("correlation_id", correlation_id.to_string());
     }
     if let Some(reply_to) = delivery.properties.reply_to().as_ref() {
-        canonical_message
-            .metadata
-            .insert("reply_to".to_string(), reply_to.to_string());
+        canonical_message.set_metadata("reply_to", reply_to.to_string());
     }
 
     // Source-position cursor keys (useful for dlt-style pull consumers).
     if source_metadata {
-        canonical_message.metadata.insert(
-            "mqb.src.amqp_routing_key".to_string(),
-            delivery.routing_key.to_string(),
-        );
-        canonical_message.metadata.insert(
-            "mqb.src.amqp_exchange".to_string(),
-            delivery.exchange.to_string(),
-        );
-        canonical_message.metadata.insert(
-            "mqb.src.amqp_delivery_tag".to_string(),
+        canonical_message
+            .set_metadata("mqb.src.amqp_routing_key", delivery.routing_key.to_string());
+        canonical_message.set_metadata("mqb.src.amqp_exchange", delivery.exchange.to_string());
+        canonical_message.set_metadata(
+            "mqb.src.amqp_delivery_tag",
             delivery.delivery_tag.to_string(),
         );
     }
@@ -818,9 +807,7 @@ fn delivery_to_canonical_message(
                 lapin::types::AMQPValue::Double(f) => f.to_string(),
                 _ => continue,
             };
-            canonical_message
-                .metadata
-                .insert(key.to_string(), value_str);
+            canonical_message.set_metadata(key.to_string(), value_str);
         }
     }
     canonical_message
@@ -894,8 +881,8 @@ impl MessageConsumer for AmqpConsumer {
 
         let msg = delivery_to_canonical_message(&first_delivery, self.source_metadata);
         reply_infos.push((
-            msg.metadata.get("reply_to").cloned(),
-            msg.metadata.get("correlation_id").cloned(),
+            msg.get_metadata("reply_to").map(str::to_owned),
+            msg.get_metadata("correlation_id").map(str::to_owned),
         ));
         messages.push(msg);
         ackers.push(first_delivery.acker);
@@ -906,8 +893,8 @@ impl MessageConsumer for AmqpConsumer {
                 Some(Ok(Some(delivery))) => {
                     let msg = delivery_to_canonical_message(&delivery, self.source_metadata);
                     reply_infos.push((
-                        msg.metadata.get("reply_to").cloned(),
-                        msg.metadata.get("correlation_id").cloned(),
+                        msg.get_metadata("reply_to").map(str::to_owned),
+                        msg.get_metadata("correlation_id").map(str::to_owned),
                     ));
                     messages.push(msg);
                     ackers.push(delivery.acker);
@@ -1205,15 +1192,9 @@ mod tests {
 
         let message = delivery_to_canonical_message(&delivery, false);
 
-        assert_eq!(message.metadata.get("count").map(String::as_str), Some("7"));
-        assert_eq!(
-            message.metadata.get("ratio").map(String::as_str),
-            Some("0.5")
-        );
-        assert_eq!(
-            message.metadata.get("small").map(String::as_str),
-            Some("-3")
-        );
+        assert_eq!(message.get_metadata("count"), Some("7"));
+        assert_eq!(message.get_metadata("ratio"), Some("0.5"));
+        assert_eq!(message.get_metadata("small"), Some("-3"));
     }
 
     /// A short string holds 255 bytes; a longer one is a debug assertion in lapin and a
@@ -1222,14 +1203,10 @@ mod tests {
     fn a_string_over_255_bytes_is_left_out_of_the_properties() {
         let long = "k".repeat(256);
         let mut message = CanonicalMessage::new(b"x".to_vec(), Some(1));
-        message.metadata.insert(long.clone(), "value".to_string());
-        message
-            .metadata
-            .insert("reply_to".to_string(), long.clone());
-        message.metadata.insert("correlation_id".to_string(), long);
-        message
-            .metadata
-            .insert("kept".to_string(), "value".to_string());
+        message.set_metadata(long.clone(), "value");
+        message.set_metadata("reply_to", long.clone());
+        message.set_metadata("correlation_id", long);
+        message.set_metadata("kept", "value");
 
         let properties = publish_properties(&message, false);
 

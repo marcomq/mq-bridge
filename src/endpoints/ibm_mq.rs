@@ -701,8 +701,8 @@ async fn spawn_consumer_thread(
                                         // Opt-in via MQB_SOURCE_METADATA; off by default.
                                         if crate::canonical_message::source_metadata_enabled() {
                                             if let Some(queue) = config.queue.as_deref() {
-                                                canonical.metadata.insert(
-                                                    "mqb.src.ibmmq_queue".to_string(),
+                                                canonical.set_metadata(
+                                                    "mqb.src.ibmmq_queue",
                                                     queue.to_string(),
                                                 );
                                             }

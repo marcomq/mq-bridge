@@ -478,7 +478,7 @@ pub trait MessagePublisher: Send + Sync + 'static {
 
     async fn send(&self, message: CanonicalMessage) -> Result<Sent, PublisherError> {
         let message_id = message.message_id;
-        let expects_reply = message.metadata.contains_key("reply_to");
+        let expects_reply = message.has_metadata("reply_to");
         match self.send_batch(vec![message]).await {
             Ok(SentBatch::Ack) => {
                 if expects_reply {

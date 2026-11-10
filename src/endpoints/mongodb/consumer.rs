@@ -387,8 +387,8 @@ impl MongoDbConsumer {
 
                 let msg = parse_mongodb_document(doc)?;
 
-                let reply_collection_name = msg.metadata.get("reply_to").cloned();
-                let correlation_id = msg.metadata.get("correlation_id").cloned();
+                let reply_collection_name = msg.get_metadata("reply_to").map(str::to_owned);
+                let correlation_id = msg.get_metadata("correlation_id").map(str::to_owned);
                 let db = self.db.clone();
                 let collection_clone = self.collection.clone();
 
@@ -505,8 +505,8 @@ impl MongoDbConsumer {
 
             let msg = parse_mongodb_document(doc)?;
             reply_infos.push((
-                msg.metadata.get("reply_to").cloned(),
-                msg.metadata.get("correlation_id").cloned(),
+                msg.get_metadata("reply_to").map(str::to_owned),
+                msg.get_metadata("correlation_id").map(str::to_owned),
             ));
             messages.push(msg);
 

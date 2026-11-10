@@ -39,7 +39,7 @@ impl EncryptionPublisher {
     }
 
     fn seal_message(&self, message: &mut CanonicalMessage) -> Result<(), PublisherError> {
-        let aad = self.crypto.metadata_aad(&message.metadata);
+        let aad = self.crypto.metadata_aad(message.metadata_map());
         let sealed = self
             .crypto
             .seal(&message.payload, &aad)
@@ -112,7 +112,7 @@ impl EncryptionConsumer {
         // A decrypt/authentication failure is permanent: the ciphertext will never
         // open, so it must be surfaced as non-retryable rather than triggering an
         // endless reconnect-and-re-read of the same poison message.
-        let aad = self.crypto.metadata_aad(&message.metadata);
+        let aad = self.crypto.metadata_aad(message.metadata_map());
         let opened = self
             .crypto
             .open(&message.payload, &aad)
@@ -312,25 +312,19 @@ mod tests {
         .unwrap();
 
         let mut msg = CanonicalMessage::from("top secret");
-        msg.metadata.insert("kind".to_string(), "note".to_string());
+        msg.set_metadata("kind", "note");
         publisher.send_batch(vec![msg]).await.unwrap();
 
         // The wire payload is ciphertext; metadata stays clear.
         let wire = sent.lock().unwrap().clone();
         assert_ne!(wire[0].payload.as_ref(), b"top secret");
-        assert_eq!(
-            wire[0].metadata.get("kind").map(|s| s.as_str()),
-            Some("note")
-        );
+        assert_eq!(wire[0].get_metadata("kind"), Some("note"));
 
         let mut consumer =
             EncryptionConsumer::new(Box::new(MockConsumer::new(wire)), &config()).unwrap();
         let batch = consumer.receive_batch(10).await.unwrap();
         assert_eq!(batch.messages[0].payload.as_ref(), b"top secret");
-        assert_eq!(
-            batch.messages[0].metadata.get("kind").map(|s| s.as_str()),
-            Some("note")
-        );
+        assert_eq!(batch.messages[0].get_metadata("kind"), Some("note"));
     }
 
     #[tokio::test]
@@ -389,18 +383,15 @@ mod tests {
             EncryptionPublisher::new(Box::new(RecordingPublisher { sent: sent.clone() }), &cfg)
                 .unwrap();
         let mut msg = CanonicalMessage::from("payload");
-        msg.metadata
-            .insert("tenant".to_string(), "acme".to_string());
-        msg.metadata.insert("trace".to_string(), "t1".to_string());
+        msg.set_metadata("tenant", "acme");
+        msg.set_metadata("trace", "t1");
         publisher.send_batch(vec![msg]).await.unwrap();
 
         let wire = sent.lock().unwrap().clone();
 
         // An unlisted key stays free to change.
         let mut untouched = wire.clone();
-        untouched[0]
-            .metadata
-            .insert("trace".to_string(), "t2".to_string());
+        untouched[0].set_metadata("trace", "t2");
         let mut consumer =
             EncryptionConsumer::new(Box::new(MockConsumer::new(untouched)), &cfg).unwrap();
         let batch = consumer.receive_batch(10).await.unwrap();
@@ -408,9 +399,7 @@ mod tests {
 
         // The listed one does not: the message is dropped and acked, not redelivered.
         let mut swapped = wire;
-        swapped[0]
-            .metadata
-            .insert("tenant".to_string(), "evil".to_string());
+        swapped[0].set_metadata("tenant", "evil");
         let inner = MockConsumer::new(swapped);
         let committed = inner.committed.clone();
         let mut consumer = EncryptionConsumer::new(Box::new(inner), &cfg).unwrap();

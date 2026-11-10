@@ -162,12 +162,8 @@ pub async fn test_kafka_request_reply() {
 
         let correlation_id = "cid-12345";
         let mut req_msg = CanonicalMessage::new(b"request".to_vec(), None);
-        req_msg
-            .metadata
-            .insert("reply_to".to_string(), reply_topic.to_string());
-        req_msg
-            .metadata
-            .insert("correlation_id".to_string(), correlation_id.to_string());
+        req_msg.set_metadata("reply_to", reply_topic.to_string());
+        req_msg.set_metadata("correlation_id", correlation_id.to_string());
 
         client_publisher.send(req_msg).await.unwrap();
 
@@ -178,11 +174,7 @@ pub async fn test_kafka_request_reply() {
                 .unwrap();
         assert_eq!(received_resp.message.payload, b"response".as_slice());
         assert_eq!(
-            received_resp
-                .message
-                .metadata
-                .get("correlation_id")
-                .map(|s| s.as_str()),
+            received_resp.message.get_metadata("correlation_id"),
             Some(correlation_id)
         );
         println!("Kafka Request-Reply test passed!");
@@ -244,10 +236,8 @@ pub async fn test_kafka_request_reply_multiple_sequential() {
         for i in 0..8 {
             let cid = format!("cid-{}", i);
             let mut msg = CanonicalMessage::new(format!("req-{}", i).into_bytes(), None);
-            msg.metadata
-                .insert("reply_to".to_string(), reply_topic.clone());
-            msg.metadata
-                .insert("correlation_id".to_string(), cid.clone());
+            msg.set_metadata("reply_to", reply_topic.clone());
+            msg.set_metadata("correlation_id", cid.clone());
             expected.insert(cid.clone());
             client_publisher.send(msg).await.unwrap();
         }
@@ -259,7 +249,10 @@ pub async fn test_kafka_request_reply_multiple_sequential() {
                     .await
                     .expect("Timed out waiting for Kafka sequential response")
                     .unwrap();
-            let cid = rec.message.metadata.get("correlation_id").cloned();
+            let cid = rec
+                .message
+                .get_metadata("correlation_id")
+                .map(str::to_owned);
             if let Some(c) = cid {
                 received.insert(c);
             }
@@ -310,12 +303,8 @@ pub async fn test_kafka_request_reply_lost_response() {
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
         let mut req_msg = CanonicalMessage::new(b"lost_request".to_vec(), None);
-        req_msg
-            .metadata
-            .insert("reply_to".to_string(), reply_topic.clone());
-        req_msg
-            .metadata
-            .insert("correlation_id".to_string(), "lost-cid".to_string());
+        req_msg.set_metadata("reply_to", reply_topic.clone());
+        req_msg.set_metadata("correlation_id", "lost-cid");
 
         client_publisher.send(req_msg).await.unwrap();
 
@@ -628,12 +617,8 @@ pub async fn test_amqp_request_reply() {
 
         let correlation_id = "cid-amqp-123";
         let mut req_msg = CanonicalMessage::new(b"request".to_vec(), None);
-        req_msg
-            .metadata
-            .insert("reply_to".to_string(), reply_queue.to_string());
-        req_msg
-            .metadata
-            .insert("correlation_id".to_string(), correlation_id.to_string());
+        req_msg.set_metadata("reply_to", reply_queue.to_string());
+        req_msg.set_metadata("correlation_id", correlation_id.to_string());
 
         tokio::time::timeout(
             std::time::Duration::from_secs(5),
@@ -651,11 +636,7 @@ pub async fn test_amqp_request_reply() {
 
         assert_eq!(received_resp.message.payload, b"response".as_slice());
         assert_eq!(
-            received_resp
-                .message
-                .metadata
-                .get("correlation_id")
-                .map(|s| s.as_str()),
+            received_resp.message.get_metadata("correlation_id"),
             Some(correlation_id)
         );
         println!("AMQP Request-Reply test passed!");
@@ -700,12 +681,8 @@ pub async fn test_mqtt_request_reply() {
 
         let correlation_data = "cid-mqtt-123";
         let mut req_msg = CanonicalMessage::new(b"request".to_vec(), None);
-        req_msg
-            .metadata
-            .insert("reply_to".to_string(), reply_topic.to_string());
-        req_msg
-            .metadata
-            .insert("correlation_id".to_string(), correlation_data.to_string());
+        req_msg.set_metadata("reply_to", reply_topic.to_string());
+        req_msg.set_metadata("correlation_id", correlation_data.to_string());
 
         tokio::time::timeout(
             std::time::Duration::from_secs(5),
@@ -723,11 +700,7 @@ pub async fn test_mqtt_request_reply() {
 
         assert_eq!(received_resp.message.payload, b"response".as_slice());
         assert_eq!(
-            received_resp
-                .message
-                .metadata
-                .get("correlation_id")
-                .map(|s| s.as_str()),
+            received_resp.message.get_metadata("correlation_id"),
             Some(correlation_data)
         );
         println!("MQTT Request-Reply test passed!");

@@ -122,7 +122,7 @@ fn audited_sql(sql: &str) -> AssertSqlSafe<&str> {
 /// Resolved per-row; never falls back between the two sources.
 #[derive(Debug, Clone, PartialEq)]
 enum ColumnSource {
-    /// `${metadata:<key>}` — `message.metadata.get(key)`, else NULL.
+    /// `${metadata:<key>}` — `message.get_metadata(key)`, else NULL.
     Metadata(String),
     /// `${payload:<field>}` — top-level JSON field of the payload, else NULL.
     Payload(String),
@@ -336,8 +336,8 @@ fn resolve_source(
     payload_json: &Option<serde_json::Value>,
 ) -> BindValue {
     match source {
-        ColumnSource::Metadata(key) => match msg.metadata.get(key) {
-            Some(v) => BindValue::Text(v.clone()),
+        ColumnSource::Metadata(key) => match msg.get_metadata(key) {
+            Some(v) => BindValue::Text(v.to_owned()),
             None => BindValue::Null,
         },
         ColumnSource::Payload(field) => match payload_json.as_ref().and_then(|v| v.get(field)) {
@@ -1428,9 +1428,7 @@ impl SqlxPublisher {
             (None, _) => unreachable!("lookup_one runs only for a lookup publisher"),
         };
         let mut response = CanonicalMessage::new(payload, Some(message.message_id));
-        response
-            .metadata
-            .insert(FOUND_KEY.to_string(), found.to_string());
+        response.set_metadata(FOUND_KEY, found.to_string());
         Ok(Sent::Response(response))
     }
 
@@ -3605,12 +3603,8 @@ impl SqlxCursorReader {
             )));
         }
 
-        message
-            .metadata
-            .insert("mqb.src.sqlx_table".to_string(), self.table.clone());
-        message
-            .metadata
-            .insert("mqb.src.sqlx_cursor".to_string(), value.to_string());
+        message.set_metadata("mqb.src.sqlx_table", self.table.clone());
+        message.set_metadata("mqb.src.sqlx_cursor", value.to_string());
         Ok(())
     }
 }

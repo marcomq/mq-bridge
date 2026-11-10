@@ -9,7 +9,7 @@ fn config(path: &std::path::Path) -> DirSpoolConfig {
 
 fn message(payload: &str, kind: &str) -> CanonicalMessage {
     let mut msg = CanonicalMessage::from_vec(payload.as_bytes().to_vec());
-    msg.metadata.insert("kind".to_string(), kind.to_string());
+    msg.set_metadata("kind", kind.to_string());
     msg
 }
 
@@ -229,7 +229,7 @@ async fn roundtrips_payload_and_metadata_through_the_spool() {
     assert_eq!(received.len(), 2);
     assert_eq!(&received[0].payload[..], b"frame-one");
     assert_eq!(&received[1].payload[..], b"frame-two");
-    assert_eq!(received[0].metadata.get("kind").unwrap(), "video");
+    assert_eq!(received[0].get_metadata("kind").unwrap(), "video");
     // `drain_on_read` defaults to true, so an acked chunk leaves no chunk behind. The two
     // live endpoints' claim files are all that is left, and neither is a chunk.
     assert_eq!(entries(dir.path()), vec!["CONSUMER", "PRODUCER"]);
@@ -777,7 +777,7 @@ async fn reads_a_bare_payload_file_written_without_a_sidecar() {
     let received = drain(&mut consumer, 10).await;
     assert_eq!(received.len(), 1);
     assert_eq!(&received[0].payload[..], b"foreign");
-    assert!(received[0].metadata.is_empty());
+    assert!(received[0].metadata_is_empty());
 }
 
 /// A perusal reader sees *every* chunk once, not every chunk above a watermark. Names
@@ -821,11 +821,11 @@ async fn stamps_source_metadata_when_asked() {
     let mut consumer = DirSpoolConsumer::new(&cfg).await.unwrap();
     let received = drain(&mut consumer, 10).await;
     assert_eq!(
-        received[0].metadata.get(SRC_CHUNK_KEY).unwrap(),
+        received[0].get_metadata(SRC_CHUNK_KEY).unwrap(),
         "000000000"
     );
     assert_eq!(
-        received[0].metadata.get(SRC_PATH_KEY).unwrap(),
+        received[0].get_metadata(SRC_PATH_KEY).unwrap(),
         dir.path().to_str().unwrap()
     );
 }
@@ -836,23 +836,17 @@ async fn reserved_source_keys_in_a_sidecar_are_dropped() {
     let cfg = config(dir.path());
 
     let mut forged = message("payload", "x");
-    forged
-        .metadata
-        .insert("mqb.src.offset".to_string(), "42".to_string());
-    forged
-        .metadata
-        .insert(SRC_CHUNK_KEY.to_string(), "forged".to_string());
-    forged
-        .metadata
-        .insert("kept".to_string(), "yes".to_string());
+    forged.set_metadata("mqb.src.offset", "42");
+    forged.set_metadata(SRC_CHUNK_KEY, "forged");
+    forged.set_metadata("kept", "yes");
     let publisher = DirSpoolPublisher::new(&cfg).await.unwrap();
     publisher.send_batch(vec![forged]).await.unwrap();
 
     let mut consumer = DirSpoolConsumer::new(&cfg).await.unwrap();
     let received = drain(&mut consumer, 10).await;
-    assert_eq!(received[0].metadata.get("kept").unwrap(), "yes");
-    assert!(!received[0].metadata.contains_key("mqb.src.offset"));
-    assert!(!received[0].metadata.contains_key(SRC_CHUNK_KEY));
+    assert_eq!(received[0].get_metadata("kept").unwrap(), "yes");
+    assert!(!received[0].has_metadata("mqb.src.offset"));
+    assert!(!received[0].has_metadata(SRC_CHUNK_KEY));
 }
 
 #[tokio::test]
@@ -876,7 +870,7 @@ async fn honours_custom_extensions_and_a_disabled_sidecar() {
     assert_eq!(received.len(), 1);
     assert_eq!(&received[0].payload[..], b"nal-unit");
     // No sidecar means no metadata to restore.
-    assert!(received[0].metadata.is_empty());
+    assert!(received[0].metadata_is_empty());
 }
 
 /// A consumer whose two extensions match would read every sidecar as a payload and deliver
@@ -968,7 +962,7 @@ async fn round_trips_with_fsync_off() {
     let received = drain(&mut consumer, 10).await;
     assert_eq!(received.len(), 2);
     assert_eq!(&received[0].payload[..], b"unsynced");
-    assert_eq!(received[0].metadata.get("kind").unwrap(), "x");
+    assert_eq!(received[0].get_metadata("kind").unwrap(), "x");
     // Acked chunks are still deleted; only the fsyncs are gone.
     assert_eq!(entries(dir.path()), vec!["CONSUMER", "PRODUCER"]);
 }
@@ -1058,7 +1052,7 @@ async fn keeps_queue_order_across_shard_boundaries() {
     let expected: Vec<String> = (0..23).map(|index| format!("chunk-{index}")).collect();
     assert_eq!(payloads, expected);
     assert_eq!(
-        received[10].metadata.get(SRC_CHUNK_KEY).unwrap(),
+        received[10].get_metadata(SRC_CHUNK_KEY).unwrap(),
         "0/1/0",
         "the chunk's recorded identity is its path relative to the spool"
     );

@@ -77,7 +77,7 @@ impl InputMessage {
             msg.message_id = parsed.message_id;
         }
         for (k, v) in self.metadata {
-            msg.metadata.insert(k, v);
+            msg.set_metadata(k, v);
         }
         Ok(msg)
     }
@@ -424,10 +424,10 @@ fn elapsed_and_average(messages: u64, timing: Option<RouteTiming>) -> (Option<f6
 
 /// Renders one captured message in the same shape the web UI's `/messages`
 /// endpoint returns, so both surfaces describe a message identically.
-fn captured_message_json(m: CanonicalMessage) -> serde_json::Value {
-    let mut metadata = m.metadata.clone();
-    metadata.remove(CAPTURE_SOURCE_KEY);
-    let time = format_capture_time(metadata.remove(CAPTURE_TIME_KEY).as_deref());
+fn captured_message_json(mut m: CanonicalMessage) -> serde_json::Value {
+    m.remove_metadata(CAPTURE_SOURCE_KEY);
+    let time = format_capture_time(m.remove_metadata(CAPTURE_TIME_KEY).as_deref());
+    let metadata: HashMap<&str, &str> = m.metadata_iter().collect();
 
     // Structured payloads are returned as JSON; anything else as a string.
     let payload: serde_json::Value = serde_json::from_slice(&m.payload)
@@ -454,7 +454,7 @@ fn describe_sent(sent: Sent) -> serde_json::Value {
         Sent::Response(msg) => serde_json::json!({
             "status": "Response",
             "payload": msg.get_payload_str(),
-            "metadata": msg.metadata,
+            "metadata": msg.metadata_iter().collect::<HashMap<_, _>>(),
         }),
     }
 }

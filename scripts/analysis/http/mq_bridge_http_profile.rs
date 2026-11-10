@@ -588,18 +588,17 @@ async fn inline_response_request(
         }
     };
 
-    let mut message = CanonicalMessage::new_bytes(payload, None);
-    message.metadata = metadata;
+    let message = CanonicalMessage::new_bytes(payload, None).with_metadata(metadata);
 
     let response = match publisher.send(message).await {
         Ok(Sent::Response(message)) => {
             let mut builder = Response::builder().status(200);
             if mode == ProfileMode::InlineResponse {
-                for (key, value) in &message.metadata {
+                for (key, value) in message.metadata_iter() {
                     if key.eq_ignore_ascii_case("http_status_code") {
                         continue;
                     }
-                    builder = builder.header(key.as_str(), value.as_str());
+                    builder = builder.header(key, value);
                 }
             }
             builder.body(full(message.payload)).unwrap()

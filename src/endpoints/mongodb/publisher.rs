@@ -252,9 +252,7 @@ impl MongoDbPublisher {
                 None => Vec::new(),
             };
             let mut response = CanonicalMessage::new(payload, Some(message.message_id));
-            response
-                .metadata
-                .insert(FOUND_KEY.to_string(), found.is_some().to_string());
+            response.set_metadata(FOUND_KEY, found.is_some().to_string());
             return Ok(Sent::Response(response));
         }
         let found = match &self.update {
@@ -279,9 +277,7 @@ impl MongoDbPublisher {
             None => Vec::new(),
         };
         let mut response = CanonicalMessage::new(payload, Some(message.message_id));
-        response
-            .metadata
-            .insert(FOUND_KEY.to_string(), found.is_some().to_string());
+        response.set_metadata(FOUND_KEY, found.is_some().to_string());
         Ok(Sent::Response(response))
     }
 
@@ -558,9 +554,7 @@ impl MongoDbPublisher {
             None => Vec::new(),
         };
         let mut response = CanonicalMessage::new(payload, Some(message.message_id));
-        response
-            .metadata
-            .insert(FOUND_KEY.to_string(), found.is_some().to_string());
+        response.set_metadata(FOUND_KEY, found.is_some().to_string());
         Ok(Sent::Response(response))
     }
 
@@ -641,13 +635,11 @@ impl MongoDbPublisher {
                     ))
                 })?;
 
-                if let Some(cid) = existing_msg.metadata.get("correlation_id") {
-                    message
-                        .metadata
-                        .insert("correlation_id".to_string(), cid.clone());
+                if let Some(cid) = existing_msg.get_metadata("correlation_id") {
+                    message.set_metadata("correlation_id", cid);
                 }
-                if let Some(rt) = existing_msg.metadata.get("reply_to") {
-                    message.metadata.insert("reply_to".to_string(), rt.clone());
+                if let Some(rt) = existing_msg.get_metadata("reply_to") {
+                    message.set_metadata("reply_to", rt);
                 }
                 Ok(())
             }
@@ -674,9 +666,7 @@ pub(crate) fn tag_outcome(
     outcome: &str,
 ) -> Sent {
     if report_outcome {
-        message
-            .metadata
-            .insert(OUTCOME_KEY.to_string(), outcome.to_string());
+        message.set_metadata(OUTCOME_KEY, outcome.to_string());
         Sent::Response(message)
     } else {
         Sent::Ack
@@ -1164,20 +1154,16 @@ impl MessagePublisher for MongoDbPublisher {
         }
 
         // --- Request-Reply Logic ---
-        let mut correlation_id = if let Some(cid) = message.metadata.get("correlation_id") {
-            cid.clone()
+        let mut correlation_id = if let Some(cid) = message.get_metadata("correlation_id") {
+            cid.to_owned()
         } else {
             fast_uuid_v7::gen_id_string()
         };
         // Convention: reply collection is named <request_collection>_replies
         let reply_collection_name = format!("{}_replies", self.collection_name);
 
-        message
-            .metadata
-            .insert("correlation_id".to_string(), correlation_id.clone());
-        message
-            .metadata
-            .insert("reply_to".to_string(), reply_collection_name.clone());
+        message.set_metadata("correlation_id", correlation_id.clone());
+        message.set_metadata("reply_to", reply_collection_name.clone());
 
         trace!(message_id = %format!("{:032x}", message.message_id), correlation_id = %correlation_id, collection = %self.collection_name, "Publishing request document to MongoDB");
         let doc = message_to_document(
@@ -1195,8 +1181,8 @@ impl MessagePublisher for MongoDbPublisher {
                     warn!(message_id = %format!("{:032x}", message.message_id), "Duplicate key error inserting request into MongoDB. Treating as idempotent success.");
                     self.recover_correlation_id_from_duplicate(&mut message)
                         .await?;
-                    if let Some(cid) = message.metadata.get("correlation_id") {
-                        correlation_id = cid.clone();
+                    if let Some(cid) = message.get_metadata("correlation_id") {
+                        correlation_id = cid.to_owned();
                     }
                 } else {
                     let error = anyhow::anyhow!(e)

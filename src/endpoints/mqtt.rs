@@ -63,23 +63,24 @@ impl Client {
         // metadata is non-empty; if stripping the source keys empties metadata we
         // must still keep the envelope, or the message_id would be lost.
         let had_source_metadata = message
-            .metadata
-            .keys()
-            .any(|key| crate::canonical_message::is_source_metadata_key(key));
+            .metadata_iter()
+            .any(|(key, _)| crate::canonical_message::is_source_metadata_key(key));
         // Drop source/provenance keys so they are not forwarded (v5 user
         // properties or the v3 JSON envelope below).
         message.strip_source_metadata();
         match self {
             Client::V5(client) => {
                 let mut props = PublishProperties::default();
-                if let Some(rt) = message.metadata.get("reply_to") {
-                    props.response_topic = Some(rt.clone());
+                if let Some(rt) = message.get_metadata("reply_to") {
+                    props.response_topic = Some(rt.to_owned());
                 }
-                if let Some(cd) = message.metadata.get("correlation_id") {
+                if let Some(cd) = message.get_metadata("correlation_id") {
                     props.correlation_data = Some(cd.as_bytes().to_vec().into());
                 }
                 let mut user_properties: Vec<(String, String)> =
-                    message.metadata.into_iter().collect();
+                    std::mem::take(message.metadata_map_mut())
+                        .into_iter()
+                        .collect();
                 user_properties.push((
                     "mq_bridge.message_id".to_string(),
                     format!("{:032x}", message.message_id),
@@ -91,7 +92,7 @@ impl Client {
                     .map_err(|e| e.into())
             }
             Client::V3(client) => {
-                let payload = if !message.metadata.is_empty() || had_source_metadata {
+                let payload = if !message.metadata_is_empty() || had_source_metadata {
                     serde_json::to_vec(&message)?
                 } else {
                     message.payload.into()
@@ -673,8 +674,8 @@ impl MessageConsumer for MqttListener {
         let message_id = message.message_id;
         let redeliver_tx = self.redeliver_tx.clone();
         let client = self.client.clone();
-        let reply_topic = message.metadata.get("reply_to").cloned();
-        let correlation_data = message.metadata.get("correlation_id").cloned();
+        let reply_topic = message.get_metadata("reply_to").map(str::to_owned);
+        let correlation_data = message.get_metadata("correlation_id").map(str::to_owned);
         let ack_info = internal.ack;
 
         let commit = Box::new(move |disposition: MessageDisposition| {
@@ -719,8 +720,11 @@ impl MessageConsumer for MqttListener {
         match first {
             Ok(internal) => {
                 reply_infos.push((
-                    internal.msg.metadata.get("reply_to").cloned(),
-                    internal.msg.metadata.get("correlation_id").cloned(),
+                    internal.msg.get_metadata("reply_to").map(str::to_owned),
+                    internal
+                        .msg
+                        .get_metadata("correlation_id")
+                        .map(str::to_owned),
                 ));
                 messages.push(internal.msg);
                 acks.push(internal.ack);
@@ -733,8 +737,11 @@ impl MessageConsumer for MqttListener {
             match self.try_next_message() {
                 Some(internal) => {
                     reply_infos.push((
-                        internal.msg.metadata.get("reply_to").cloned(),
-                        internal.msg.metadata.get("correlation_id").cloned(),
+                        internal.msg.get_metadata("reply_to").map(str::to_owned),
+                        internal
+                            .msg
+                            .get_metadata("correlation_id")
+                            .map(str::to_owned),
                     ));
                     messages.push(internal.msg);
                     acks.push(internal.ack);
@@ -834,7 +841,7 @@ async fn handle_mqtt_reply(
         trace!(topic = %rt, "Committing MQTT message, sending reply");
         let mut msg = resp;
         if let Some(cd) = correlation_data {
-            msg.metadata.insert("correlation_id".to_string(), cd);
+            msg.set_metadata("correlation_id", cd);
         }
         // Use a timeout to prevent hanging if the client buffer is full or eventloop is stuck
         match tokio::time::timeout(
@@ -1198,14 +1205,14 @@ fn publish_to_canonical_message_v5(p: &PublishV5) -> CanonicalMessage {
         }
 
         if !metadata.is_empty() {
-            canonical_message.metadata = metadata;
+            canonical_message = canonical_message.with_metadata(metadata);
         }
     }
     // Per-message topic — the only source cursor MQTT offers.
     // Opt-in via the MQB_SOURCE_METADATA env var; off by default.
     if crate::canonical_message::source_metadata_enabled() {
-        canonical_message.metadata.insert(
-            "mqb.src.mqtt_topic".to_string(),
+        canonical_message.set_metadata(
+            "mqb.src.mqtt_topic",
             String::from_utf8_lossy(&p.topic).into_owned(),
         );
     }
@@ -1224,8 +1231,7 @@ fn publish_to_canonical_message_v3(p: &rumqttc::Publish) -> CanonicalMessage {
     msg.strip_source_metadata();
     // Opt-in via the MQB_SOURCE_METADATA env var; off by default.
     if crate::canonical_message::source_metadata_enabled() {
-        msg.metadata
-            .insert("mqb.src.mqtt_topic".to_string(), p.topic.clone());
+        msg.set_metadata("mqb.src.mqtt_topic", p.topic.clone());
     }
     msg
 }
@@ -1392,25 +1398,17 @@ mod tests {
         // and the authoritative per-message topic cursor injected.
         let _source_metadata = crate::canonical_message::force_source_metadata_for_test(Some(true));
         let mut msg = CanonicalMessage::from_vec("body");
-        msg.metadata
-            .insert("mqb.src.kafka_offset".to_string(), "999".to_string());
-        msg.metadata
-            .insert("user_key".to_string(), "kept".to_string());
+        msg.set_metadata("mqb.src.kafka_offset", "999");
+        msg.set_metadata("user_key", "kept");
         let envelope = serde_json::to_vec(&msg).unwrap();
         let publish = PublishV3::new("orders/new", QoS::AtLeastOnce, envelope);
 
         let canonical = publish_to_canonical_message_v3(&publish);
 
-        assert!(!canonical.metadata.contains_key("mqb.src.kafka_offset"));
+        assert!(!canonical.has_metadata("mqb.src.kafka_offset"));
+        assert_eq!(canonical.get_metadata("user_key"), Some("kept"));
         assert_eq!(
-            canonical.metadata.get("user_key").map(String::as_str),
-            Some("kept")
-        );
-        assert_eq!(
-            canonical
-                .metadata
-                .get("mqb.src.mqtt_topic")
-                .map(String::as_str),
+            canonical.get_metadata("mqb.src.mqtt_topic"),
             Some("orders/new")
         );
     }

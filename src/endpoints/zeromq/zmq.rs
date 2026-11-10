@@ -780,20 +780,15 @@ mod tests {
         // A wire payload carries a reserved `mqb.src.*` key. decode_batch must drop
         // it so it can't masquerade as a framework-injected cursor downstream.
         let mut msg = CanonicalMessage::from_vec("body");
-        msg.metadata
-            .insert("mqb.src.kafka_offset".to_string(), "999".to_string());
-        msg.metadata
-            .insert("user_key".to_string(), "kept".to_string());
+        msg.set_metadata("mqb.src.kafka_offset", "999");
+        msg.set_metadata("user_key", "kept");
         let payload = serde_json::to_vec(&vec![msg]).unwrap();
         let zmq_msg = ZmqMessage::from(bytes::Bytes::from(payload));
 
         let decoded = ZeroMqConsumer::decode_batch(zmq_msg, false, &ZeroMqFormat::Json).unwrap();
         assert_eq!(decoded.len(), 1);
-        assert!(!decoded[0].metadata.contains_key("mqb.src.kafka_offset"));
-        assert_eq!(
-            decoded[0].metadata.get("user_key").map(String::as_str),
-            Some("kept")
-        );
+        assert!(!decoded[0].has_metadata("mqb.src.kafka_offset"));
+        assert_eq!(decoded[0].get_metadata("user_key"), Some("kept"));
     }
 
     #[test]
@@ -806,7 +801,7 @@ mod tests {
         let decoded = ZeroMqConsumer::decode_batch(zmq_msg, false, &ZeroMqFormat::Raw).unwrap();
         assert_eq!(decoded.len(), 1);
         assert_eq!(decoded[0].payload.as_ref(), json_looking);
-        assert!(decoded[0].metadata.is_empty());
+        assert!(decoded[0].metadata_is_empty());
     }
 
     #[test]
@@ -847,14 +842,8 @@ mod tests {
             ZeroMqConsumer::decode_batch(zmq_msg, false, &ZeroMqFormat::RawFramed).unwrap();
         assert_eq!(decoded.len(), 1);
         assert_eq!(decoded[0].payload.as_ref(), &[0xFF, 0xD8, 0xFF]);
-        assert_eq!(
-            decoded[0].metadata.get("kind").map(String::as_str),
-            Some("jpeg")
-        );
-        assert_eq!(
-            decoded[0].metadata.get("trace_id").map(String::as_str),
-            Some("abc")
-        );
+        assert_eq!(decoded[0].get_metadata("kind"), Some("jpeg"));
+        assert_eq!(decoded[0].get_metadata("trace_id"), Some("abc"));
     }
 
     #[test]
@@ -865,7 +854,7 @@ mod tests {
             ZeroMqConsumer::decode_batch(zmq_msg, false, &ZeroMqFormat::RawFramed).unwrap();
         assert_eq!(decoded.len(), 1);
         assert_eq!(decoded[0].payload.as_ref(), b"just_payload");
-        assert!(decoded[0].metadata.is_empty());
+        assert!(decoded[0].metadata_is_empty());
     }
 
     #[tokio::test]
@@ -892,7 +881,7 @@ mod tests {
 
         let raw_bytes = vec![0xFF, 0xD8, 0xFF, 0xE0];
         let mut msg = CanonicalMessage::new(raw_bytes.clone(), None);
-        msg.metadata.insert("kind".to_string(), "jpeg".to_string());
+        msg.set_metadata("kind", "jpeg");
         publisher.send(msg).await.unwrap();
 
         let received = tokio::time::timeout(Duration::from_secs(2), consumer.receive())
@@ -900,10 +889,7 @@ mod tests {
             .expect("Timed out waiting for message")
             .unwrap();
         assert_eq!(received.message.payload.as_ref(), raw_bytes.as_slice());
-        assert_eq!(
-            received.message.metadata.get("kind").map(String::as_str),
-            Some("jpeg")
-        );
+        assert_eq!(received.message.get_metadata("kind"), Some("jpeg"));
     }
 
     #[tokio::test]

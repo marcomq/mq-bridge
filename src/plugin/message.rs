@@ -6,8 +6,6 @@
 //! Message conversion for both sides of the plugin ABI: the host uses it to
 //! publish and to read received batches, the SDK for the mirror image.
 
-use std::collections::HashMap;
-
 use crate::support::plugin_abi::{MqbKeyValue, MqbMessage, MqbSlice};
 use crate::CanonicalMessage;
 
@@ -20,28 +18,45 @@ pub(crate) unsafe fn from_abi(ptr: *const MqbMessage, len: usize) -> Vec<Canonic
     if ptr.is_null() || len == 0 {
         return Vec::new();
     }
+    // SAFETY: the caller guarantees `len` initialised messages at the non-null `ptr`.
     unsafe { std::slice::from_raw_parts(ptr, len) }
         .iter()
-        .map(|message| {
-            let id = u128::from_be_bytes(message.message_id);
-            let mut canonical = CanonicalMessage::new(
-                unsafe { message.payload.as_bytes() }.to_vec(),
-                (id != 0).then_some(id),
-            );
-            if !message.metadata.is_null() && message.metadata_len > 0 {
-                let entries =
-                    unsafe { std::slice::from_raw_parts(message.metadata, message.metadata_len) };
-                canonical.metadata = HashMap::with_capacity(entries.len());
-                for entry in entries {
-                    canonical.metadata.insert(
-                        String::from_utf8_lossy(unsafe { entry.key.as_bytes() }).into_owned(),
-                        String::from_utf8_lossy(unsafe { entry.value.as_bytes() }).into_owned(),
-                    );
-                }
-            }
-            canonical
-        })
+        // SAFETY: each message comes from that batch, so its slices are still valid.
+        .map(|message| unsafe { read_message(message, true, true) })
         .collect()
+}
+
+/// Copies one borrowed message; a part not copied is left empty for the caller to fill.
+///
+/// # Safety
+/// As for [`from_abi`].
+pub(crate) unsafe fn read_message(
+    message: &MqbMessage,
+    copy_payload: bool,
+    copy_metadata: bool,
+) -> CanonicalMessage {
+    let id = u128::from_be_bytes(message.message_id);
+    let payload = if copy_payload {
+        // SAFETY: the caller keeps the batch alive for this call; `to_vec` copies out before it ends.
+        unsafe { message.payload.as_bytes() }.to_vec()
+    } else {
+        Vec::new()
+    };
+    let mut canonical = CanonicalMessage::new(payload, (id != 0).then_some(id));
+    if copy_metadata && !message.metadata.is_null() && message.metadata_len > 0 {
+        // SAFETY: non-null and, per the caller's contract, `metadata_len` initialised entries.
+        let entries = unsafe { std::slice::from_raw_parts(message.metadata, message.metadata_len) };
+        let metadata = canonical.metadata_map_mut();
+        metadata.reserve(entries.len());
+        // SAFETY (key / value below): same batch, still alive; both are copied into owned Strings.
+        for entry in entries {
+            metadata.insert(
+                String::from_utf8_lossy(unsafe { entry.key.as_bytes() }).into_owned(),
+                String::from_utf8_lossy(unsafe { entry.value.as_bytes() }).into_owned(),
+            );
+        }
+    }
+    canonical
 }
 
 /// Messages in ABI form, together with the storage their slices point into.
@@ -58,34 +73,36 @@ pub(crate) struct AbiMessages {
 
 impl AbiMessages {
     pub(crate) fn new(messages: Vec<CanonicalMessage>) -> Self {
-        let total = messages.iter().map(|message| message.metadata.len()).sum();
+        let total = messages.iter().map(CanonicalMessage::metadata_len).sum();
         // Exact capacity: a reallocation would dangle the pointers taken below.
         let mut metadata: Vec<MqbKeyValue> = Vec::with_capacity(total);
-        let mut ranges = Vec::with_capacity(messages.len());
         for message in &messages {
-            let start = metadata.len();
-            for (key, value) in &message.metadata {
+            for (key, value) in message.metadata_iter() {
                 metadata.push(MqbKeyValue {
                     key: MqbSlice::from_str(key),
                     value: MqbSlice::from_str(value),
                 });
             }
-            ranges.push((start, metadata.len() - start));
         }
         let base = metadata.as_ptr();
+        let mut start = 0;
         let abi = messages
             .iter()
-            .zip(ranges)
-            .map(|(message, (start, len))| MqbMessage {
-                message_id: message.message_id.to_be_bytes(),
-                payload: MqbSlice::from_bytes(&message.payload),
+            .map(|message| {
+                let len = message.metadata_len();
                 // Safety: `start` indexes `metadata`, which is never grown again.
-                metadata: if len == 0 {
+                let entries = if len == 0 {
                     std::ptr::null()
                 } else {
                     unsafe { base.add(start) }
-                },
-                metadata_len: len,
+                };
+                start += len;
+                MqbMessage {
+                    message_id: message.message_id.to_be_bytes(),
+                    payload: MqbSlice::from_bytes(&message.payload),
+                    metadata: entries,
+                    metadata_len: len,
+                }
             })
             .collect();
         Self {
@@ -103,6 +120,10 @@ impl AbiMessages {
         self.messages.len()
     }
 
+    pub(crate) fn abi(&self) -> &[MqbMessage] {
+        &self.abi
+    }
+
     /// Recovers the messages, consuming the ABI view of them. Lets a publish
     /// outcome be paired back with the message it belongs to.
     pub(crate) fn into_messages(self) -> Vec<CanonicalMessage> {
@@ -117,18 +138,15 @@ mod tests {
     #[test]
     fn messages_survive_the_round_trip() {
         let mut original = CanonicalMessage::from("payload");
-        original.metadata.insert("kind".into(), "order".into());
+        original.set_metadata("kind", "order");
         let owned = AbiMessages::new(vec![original.clone(), CanonicalMessage::from("plain")]);
 
         let restored = unsafe { from_abi(owned.as_ptr(), owned.len()) };
         assert_eq!(restored.len(), 2);
         assert_eq!(restored[0].payload, original.payload);
         assert_eq!(restored[0].message_id, original.message_id);
-        assert_eq!(
-            restored[0].metadata.get("kind").map(String::as_str),
-            Some("order")
-        );
-        assert!(restored[1].metadata.is_empty());
+        assert_eq!(restored[0].get_metadata("kind"), Some("order"));
+        assert_eq!(restored[1].metadata_len(), 0);
     }
 
     #[test]

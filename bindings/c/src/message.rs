@@ -71,8 +71,7 @@ pub unsafe extern "C" fn mqb_message_set_metadata(
         let value = unsafe { text(value, "value") }?;
         message
             .inner
-            .metadata
-            .insert(key.to_string(), value.to_string());
+            .set_metadata(key.to_string(), value.to_string());
         Ok(())
     })
 }
@@ -106,7 +105,7 @@ pub unsafe extern "C" fn mqb_message_metadata(
     key: *const c_char,
 ) -> MqbSlice {
     let found = unsafe { handle(message) }
-        .and_then(|message| Ok(message.inner.metadata.get(unsafe { text(key, "key") }?)));
+        .and_then(|message| Ok(message.inner.get_metadata(unsafe { text(key, "key") }?)));
     match found {
         Ok(Some(value)) => MqbSlice::from_str(value),
         _ => ABSENT,
@@ -115,7 +114,7 @@ pub unsafe extern "C" fn mqb_message_metadata(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mqb_message_metadata_count(message: *const mqb_message_t) -> usize {
-    unsafe { handle(message) }.map_or(0, |message| message.inner.metadata.len())
+    unsafe { handle(message) }.map_or(0, |message| message.inner.metadata_len())
 }
 
 /// The metadata entry at `index` (below `mqb_message_metadata_count`), in no
@@ -131,8 +130,7 @@ pub unsafe extern "C" fn mqb_message_metadata_at(
         let message = unsafe { handle(message) }?;
         let (found_key, found_value) = message
             .inner
-            .metadata
-            .iter()
+            .metadata_iter()
             .nth(index)
             .ok_or_else(|| anyhow!("metadata index {index} is out of range"))?;
         if key.is_null() || value.is_null() {

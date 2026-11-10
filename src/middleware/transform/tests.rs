@@ -624,9 +624,7 @@ fn test_expression_runs_after_mapping_and_reads_metadata() {
     }));
     let mut message =
         CanonicalMessage::from(json!({ "first_name": "Ada", "last_name": "Lovelace" }).to_string());
-    message
-        .metadata
-        .insert("source".to_string(), "postgres".to_string());
+    message.set_metadata("source", "postgres");
 
     cfg.transform(&mut message).unwrap();
 
@@ -822,7 +820,7 @@ async fn test_publisher_pass_through_policy_annotates_instead_of_failing() {
     assert_eq!(sent.len(), 1);
     // Payload is untouched, and the reason is carried for downstream routing.
     assert_eq!(sent[0].get_payload_str(), r#"{"n":"abc"}"#);
-    assert!(sent[0].metadata.contains_key(TRANSFORM_ERROR_KEY));
+    assert!(sent[0].has_metadata(TRANSFORM_ERROR_KEY));
 }
 
 #[tokio::test]
