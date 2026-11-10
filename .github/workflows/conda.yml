@@ -34,7 +34,7 @@ jobs:
           - target: linux-64
             runner: ubuntu-22.04
           - target: osx-arm64
-            runner: macos-14
+            runner: macos-latest
           - target: win-64
             runner: windows-2022
     runs-on: ${{ matrix.runner }}
