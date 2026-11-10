@@ -40,10 +40,10 @@ caffeinate -dims python3 run.py --reps 1 --duration 3s --warmup 1s --nets loopba
   --closed 1 64 --rates 5000 20000
 ```
 
-**Caller vs a query per request (~5 min for the post's 7 variants, longer for all)**: a Rust program in `caller/` that fetches one user
-per request either straight with sqlx or through `Caller::call` into `caller/routes.yaml`, from
-1 to 4,096 clients, against async-graphql's DataLoader and pipelined tokio-postgres, plus `call_many`
-vs a hand-written `= ANY($1)`. Prints a markdown table with the median of each cell's runs.
+**Caller vs a query per request (~6 min)**: a Rust program in `caller/` that fetches one user
+per request either straight with sqlx or through `Caller::call` into a route defined in
+`caller/src/main.rs`, from 1 to 4,096 clients, against async-graphql's DataLoader and pipelined
+tokio-postgres. Prints a markdown table with the median of each cell's runs.
 
 ```sh
 docker compose up -d --wait
