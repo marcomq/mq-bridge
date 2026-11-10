@@ -290,7 +290,9 @@ the factory registered under its name, and without one the route fails with
 
 Middleware is written as usual too. `filter`, `deduplication`, `encryption`,
 `compression` and `aggregate` without their host feature are applied by the
-library's `builtin_middleware`, which wraps the host's endpoint (see
+library. `filter`, `compression` and `encryption` run there as a batch map; the
+host keeps the endpoint. `deduplication` and `aggregate` act on commits, so the
+library's `builtin_middleware` wraps the host's endpoint for them (see
 [Wrapping the endpoint](#wrapping-the-endpoint)). Consecutive ones cross once, in
 the listed order. `metrics` and `otel` still need the host's feature: the
 library's metrics and spans would not reach the host's exporters.
@@ -301,22 +303,29 @@ structural endpoints and `memory` in the host's route and let the library provid
 only the transport. Its deduplication stores and connections are its own as well.
 `--no-resume` is not applied to an input served this way.
 
-The library is currenlty slower than compiling the feature in, because every call crosses
-the plugin boundary and a wrapping middleware crosses it twice. Middleware from
-the library, memory to memory (messages per second, macOS arm64, release build):
+The library is slower than compiling the feature in, because every call crosses the
+plugin boundary. `filter`, `compression` and `encryption` cross once per batch;
+`deduplication` and `aggregate` wrap the endpoint and cross on every read and commit.
+Messages per second through the middleware alone (stub source and sink), ~100-byte
+JSON, macOS arm64, release build, host with mimalloc like the `mqb` CLI:
 
 | Middleware | Batch | Compiled in | From the library |
 | :--- | ---: | ---: | ---: |
-| compression | 1 | 608k | 218k |
-| compression | 128 | 931k | 788k |
-| compression | 1000 | 1.55M | 1.13M |
-| filter | 1 | 1.14M | 355k |
-| filter | 128 | 3.95M | 2.84M |
-| filter | 1000 | 3.92M | 2.97M |
+| filter (consumer) | 1 | 2.76M | 1.98M |
+| filter (consumer) | 128 | 5.15M | 4.78M |
+| filter (publisher) | 1 | 3.53M | 2.12M |
+| filter (publisher) | 128 | 5.23M | 4.98M |
+| compression zstd | 1 | 329k | 234k |
+| compression zstd | 128 | 338k | 307k |
 
-At batch 1 that is about a third of the compiled-in rate; from batch 128 on,
-70-85 %. An endpoint crosses once per batch, so a broker's own latency hides most
-of it. Compile the feature in where throughput at small batches matters.
+A `filter` writes one verdict per message into a buffer the host reuses and allocates
+nothing for kept or dropped messages: 60-70 % of the compiled-in rate at batch 1, over
+90 % at batch 128. `compression` and `encryption` produce new messages: about 70 % at
+batch 1, 90 % at 128. An endpoint crosses once per batch, so a broker's own latency hides
+most of it. Compile the feature in where throughput at small batches matters.
+
+Build a plugin with the system allocator. A plugin and a host that both use mimalloc
+crashed on macOS.
 
 ## Writing a plugin
 
@@ -484,6 +493,32 @@ that can never pass, so that it is not retried forever:
 ```rust
 return Err(ProcessingError::NonRetryable(anyhow!("not a JSON payload")).into());
 ```
+
+`on_receive` and `on_send` get their own copy of the batch. A middleware that
+mostly passes messages on, or only reads them, can skip that copy: implement
+`on_receive_ref` / `on_send_ref` instead. They read the host's batch in place and
+answer with one `Verdict` per message, in order. `Keep` passes the message on with
+nothing copied, `Drop` drops it, and `Replace` sends a new message instead:
+
+```rust
+use mq_bridge::plugin::sdk::{MessageRef, Verdict};
+
+#[async_trait]
+impl mq_bridge::plugin::sdk::BatchFilter for OnlyOrders {
+    async fn on_send_ref(&self, messages: &[MessageRef<'_>]) -> anyhow::Result<Vec<Verdict>> {
+        Ok(messages
+            .iter()
+            .map(|m| match m.metadata("kind") {
+                Some("order") => Verdict::Keep,
+                _ => Verdict::Drop,
+            })
+            .collect())
+    }
+}
+```
+
+A `MessageRef` is only valid during the call; `to_message()` copies it out, e.g.
+to change it and return it as `Replace`.
 
 A plugin that provides both uses one name for both, which is usually what a
 transport-specific middleware wants:

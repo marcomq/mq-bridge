@@ -67,49 +67,67 @@ pub(crate) unsafe fn read_message(
 pub(crate) struct AbiMessages {
     messages: Vec<CanonicalMessage>,
     /// Metadata for every message; `abi` points into it.
-    _metadata: Vec<MqbKeyValue>,
+    metadata: Vec<MqbKeyValue>,
     abi: Vec<MqbMessage>,
 }
 
 impl AbiMessages {
     pub(crate) fn new(messages: Vec<CanonicalMessage>) -> Self {
+        let mut abi = Self {
+            messages: Vec::new(),
+            metadata: Vec::new(),
+            abi: Vec::new(),
+        };
+        abi.reload(messages);
+        abi
+    }
+
+    /// Replaces the messages, reusing the ABI arrays' capacity.
+    pub(crate) fn reload(&mut self, messages: Vec<CanonicalMessage>) {
         let total = messages.iter().map(CanonicalMessage::metadata_len).sum();
-        // Exact capacity: a reallocation would dangle the pointers taken below.
-        let mut metadata: Vec<MqbKeyValue> = Vec::with_capacity(total);
+        self.abi.clear();
+        self.metadata.clear();
+        // Reserved up front: a reallocation would dangle the pointers taken below.
+        self.metadata.reserve(total);
         for message in &messages {
             for (key, value) in message.metadata_iter() {
-                metadata.push(MqbKeyValue {
+                self.metadata.push(MqbKeyValue {
                     key: MqbSlice::from_str(key),
                     value: MqbSlice::from_str(value),
                 });
             }
         }
-        let base = metadata.as_ptr();
+        let base = self.metadata.as_ptr();
         let mut start = 0;
-        let abi = messages
-            .iter()
-            .map(|message| {
-                let len = message.metadata_len();
-                // Safety: `start` indexes `metadata`, which is never grown again.
-                let entries = if len == 0 {
-                    std::ptr::null()
-                } else {
-                    unsafe { base.add(start) }
-                };
-                start += len;
-                MqbMessage {
-                    message_id: message.message_id.to_be_bytes(),
-                    payload: MqbSlice::from_bytes(&message.payload),
-                    metadata: entries,
-                    metadata_len: len,
-                }
-            })
-            .collect();
-        Self {
-            messages,
-            _metadata: metadata,
-            abi,
-        }
+        self.abi.extend(messages.iter().map(|message| {
+            let len = message.metadata_len();
+            // Safety: `start` indexes `metadata`, which is not grown again.
+            let entries = if len == 0 {
+                std::ptr::null()
+            } else {
+                unsafe { base.add(start) }
+            };
+            start += len;
+            MqbMessage {
+                message_id: message.message_id.to_be_bytes(),
+                payload: MqbSlice::from_bytes(&message.payload),
+                metadata: entries,
+                metadata_len: len,
+            }
+        }));
+        self.messages = messages;
+    }
+
+    /// The ABI entries beside the messages they point into.
+    pub(crate) fn split(&mut self) -> (&[MqbMessage], &mut [CanonicalMessage]) {
+        (&self.abi, &mut self.messages)
+    }
+
+    /// Takes the messages out, leaving the arrays empty for the next [`Self::reload`].
+    pub(crate) fn take_messages(&mut self) -> Vec<CanonicalMessage> {
+        self.abi.clear();
+        self.metadata.clear();
+        std::mem::take(&mut self.messages)
     }
 
     pub(crate) fn as_ptr(&self) -> *const MqbMessage {

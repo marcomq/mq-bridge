@@ -10,15 +10,20 @@
 //! inner endpoint itself, lent through the host's own endpoint table.
 
 use std::any::Any;
+use std::cell::UnsafeCell;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::ffi::c_void;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 
 use anyhow::anyhow;
 use async_trait::async_trait;
 use bytes::Bytes;
+use futures::task::AtomicWaker;
 
-use super::completion;
 use super::endpoint::{
     consumer_error_from, join_error, plugin_consumer, plugin_publisher, publisher_error_from,
     AssertSend,
@@ -29,10 +34,11 @@ use crate::errors::{ConsumerError, PublisherError};
 use crate::middleware::deferred_commit::{run_all, DeferredCommits};
 use crate::middleware::lookup::lookup_through;
 use crate::support::plugin_abi::{
-    MqbBuffer, MqbConsumerHandle, MqbFilterHandle, MqbMessage, MqbMiddlewareApplyAsync,
-    MqbMiddlewareHandle, MqbPublisherHandle, MqbSlice, MqbStatus, MQB_END_OF_STREAM,
-    MQB_ERR_CONNECTION, MQB_ERR_INVALID_CONFIG, MQB_ERR_PANIC, MQB_ERR_PERMANENT,
-    MQB_ERR_UNSUPPORTED, MQB_MESSAGE_KEPT, MQB_MIDDLEWARE_RECEIVE, MQB_MIDDLEWARE_SEND, MQB_OK,
+    MqbBuffer, MqbCompletion, MqbConsumerHandle, MqbFilterHandle, MqbMessage,
+    MqbMiddlewareApplyAsync, MqbMiddlewareHandle, MqbPublisherHandle, MqbSlice, MqbStatus,
+    MQB_END_OF_STREAM, MQB_ERR_CONNECTION, MQB_ERR_INVALID_CONFIG, MQB_ERR_PANIC,
+    MQB_ERR_PERMANENT, MQB_ERR_UNSUPPORTED, MQB_MESSAGE_DROPPED, MQB_MESSAGE_KEPT,
+    MQB_MESSAGE_REPLACED, MQB_MIDDLEWARE_RECEIVE, MQB_MIDDLEWARE_SEND, MQB_OK, MQB_PENDING,
 };
 use crate::traits::{
     BatchCommitFunc, BoxFuture, CustomMiddlewareFactory, EndpointStatus, MessageConsumer,
@@ -89,6 +95,7 @@ impl PluginMiddlewareFactory {
             plugin: Arc::clone(&self.plugin),
             handle: handle.0,
             blocking: AtomicBool::new(false),
+            spare: Mutex::default(),
         })
     }
 }
@@ -143,6 +150,7 @@ impl CustomMiddlewareFactory for PluginMiddlewareFactory {
         }
         Ok(Box::new(PluginMiddlewareConsumer {
             inner: consumer,
+            scratch: Scratch::new(&middleware.plugin),
             middleware: Arc::new(middleware),
             deferred: DeferredCommits::new(),
         }))
@@ -192,6 +200,8 @@ struct PluginMiddleware {
     handle: MqbMiddlewareHandle,
     /// Set once the plugin refuses the non-blocking apply.
     blocking: AtomicBool,
+    /// Call buffers for the send side, whose batches may overlap.
+    spare: Mutex<Vec<Arc<Scratch>>>,
 }
 
 unsafe impl Send for PluginMiddleware {}
@@ -202,7 +212,7 @@ unsafe impl Sync for PluginMiddleware {}
 struct Filtered {
     kept: Vec<CanonicalMessage>,
     keep_flags: Vec<bool>,
-    /// One per kept message, when asked for; empty otherwise.
+    /// One per kept message, when asked for and something was replaced; empty otherwise.
     originals: Vec<Original>,
 }
 
@@ -223,7 +233,14 @@ struct ApplyFailure {
     cause: anyhow::Error,
 }
 
-/// The out-parameters of one `middleware_apply`.
+fn malformed(plugin: &LoadedPlugin, what: impl std::fmt::Display) -> ApplyFailure {
+    ApplyFailure {
+        status: MQB_ERR_PERMANENT,
+        cause: anyhow!("middleware plugin `{}` {what}", plugin.name()),
+    }
+}
+
+/// The out-parameters of one blocking `middleware_apply`.
 struct Applied {
     result: MqbFilterHandle,
     messages: *const MqbMessage,
@@ -250,18 +267,113 @@ impl Applied {
     }
 }
 
-/// A non-blocking apply in flight: its input lives until the plugin completes.
-struct ApplySlots {
+/// The buffers of a `middleware_apply_async` call, reused batch after batch. Only the
+/// owner of the `Arc` fills them; the plugin holds a second reference while a call is
+/// pending.
+struct Scratch {
+    call: UnsafeCell<Call>,
     plugin: Arc<LoadedPlugin>,
-    input: AbiMessages,
-    out: Applied,
+    /// Where an abandoned result is released, never on the plugin's own thread.
+    host: Option<tokio::runtime::Handle>,
+    done: AtomicBool,
+    status: AtomicI32,
+    waker: AtomicWaker,
 }
 
-unsafe impl Send for ApplySlots {}
+struct Call {
+    input: AbiMessages,
+    verdicts: Vec<u8>,
+    result: MqbFilterHandle,
+    replaced: *const MqbMessage,
+    err: MqbBuffer,
+}
 
-impl completion::Slots for ApplySlots {
-    fn abandon(self) {
-        self.out.release(&self.plugin);
+// `call` is reached by its owner between calls, or by the plugin while one is pending.
+unsafe impl Send for Scratch {}
+unsafe impl Sync for Scratch {}
+
+impl Scratch {
+    fn new(plugin: &Arc<LoadedPlugin>) -> Arc<Self> {
+        Arc::new(Scratch {
+            call: UnsafeCell::new(Call {
+                input: AbiMessages::new(Vec::new()),
+                verdicts: Vec::new(),
+                result: MqbFilterHandle::NULL,
+                replaced: std::ptr::null(),
+                err: MqbBuffer::EMPTY,
+            }),
+            plugin: Arc::clone(plugin),
+            host: tokio::runtime::Handle::try_current().ok(),
+            done: AtomicBool::new(false),
+            status: AtomicI32::new(MQB_OK),
+            waker: AtomicWaker::new(),
+        })
+    }
+}
+
+impl Call {
+    fn unread(&mut self) -> Applied {
+        Applied {
+            result: std::mem::replace(&mut self.result, MqbFilterHandle::NULL),
+            err: std::mem::replace(&mut self.err, MqbBuffer::EMPTY),
+            ..Applied::EMPTY
+        }
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let call = self.call.get_mut();
+        if call.result.is_null() && call.err.is_empty() {
+            return;
+        }
+        let unread = AssertSend(call.unread());
+        let plugin = Arc::clone(&self.plugin);
+        let release = move || {
+            let unread = unread;
+            unread.0.release(&plugin);
+        };
+        match &self.host {
+            Some(host) => drop(host.spawn_blocking(release)),
+            None => release(),
+        }
+    }
+}
+
+unsafe extern "C" fn completed(ctx: *mut c_void, status: MqbStatus) {
+    // SAFETY: `ctx` is the reference `apply_async` handed over for this call.
+    let scratch = unsafe { Arc::from_raw(ctx.cast_const().cast::<Scratch>()) };
+    scratch.status.store(status, Ordering::Relaxed);
+    scratch.done.store(true, Ordering::Release);
+    scratch.waker.wake();
+}
+
+/// Waits for a pending call. Dropped before it finishes, it leaves the buffers to the
+/// plugin and gives the owner fresh ones.
+struct Pending<'a> {
+    scratch: &'a mut Arc<Scratch>,
+    finished: bool,
+}
+
+impl Future for Pending<'_> {
+    type Output = MqbStatus;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<MqbStatus> {
+        self.scratch.waker.register(cx.waker());
+        if !self.scratch.done.load(Ordering::Acquire) {
+            return Poll::Pending;
+        }
+        self.finished = true;
+        Poll::Ready(self.scratch.status.load(Ordering::Relaxed))
+    }
+}
+
+impl Drop for Pending<'_> {
+    fn drop(&mut self) {
+        if !self.finished {
+            let plugin = Arc::clone(&self.scratch.plugin);
+            *self.scratch = Scratch::new(&plugin);
+        }
     }
 }
 
@@ -269,13 +381,17 @@ impl PluginMiddleware {
     /// `keep_originals` fills [`Filtered::originals`], which only a send needs.
     async fn apply(
         self: &Arc<Self>,
+        scratch: &mut Arc<Scratch>,
         messages: Vec<CanonicalMessage>,
         keep_originals: bool,
     ) -> Result<Filtered, ApplyFailure> {
         let hook = self.plugin.table().middleware_apply_async_hook();
         let messages = match hook {
             Some(_) if !self.blocking.load(Ordering::Relaxed) => {
-                match self.apply_async(hook, messages, keep_originals).await {
+                match self
+                    .apply_async(hook, scratch, messages, keep_originals)
+                    .await
+                {
                     Ok(filtered) => return filtered,
                     Err(messages) => messages,
                 }
@@ -285,54 +401,114 @@ impl PluginMiddleware {
         self.apply_blocking(messages, keep_originals).await
     }
 
+    /// [`Self::apply`] with buffers from the spare pool, for callers that may overlap.
+    async fn apply_pooled(
+        self: &Arc<Self>,
+        messages: Vec<CanonicalMessage>,
+        keep_originals: bool,
+    ) -> Result<Filtered, ApplyFailure> {
+        let spare = self.spare.lock().unwrap_or_else(|e| e.into_inner()).pop();
+        let mut scratch = spare.unwrap_or_else(|| Scratch::new(&self.plugin));
+        let filtered = self.apply(&mut scratch, messages, keep_originals).await;
+        let mut spare = self.spare.lock().unwrap_or_else(|e| e.into_inner());
+        if spare.len() < 64 {
+            spare.push(scratch);
+        }
+        filtered
+    }
+
     /// `Err` hands the batch back when the plugin has no non-blocking apply after all.
     async fn apply_async(
         &self,
         hook: MqbMiddlewareApplyAsync,
+        scratch: &mut Arc<Scratch>,
         messages: Vec<CanonicalMessage>,
         keep_originals: bool,
     ) -> Result<Result<Filtered, ApplyFailure>, Vec<CanonicalMessage>> {
         let Some(hook) = hook else {
             return Err(messages);
         };
-        let handle = AssertSend(self.handle);
-        let pending = {
-            let input = AbiMessages::new(messages);
-            let (ptr, len) = (input.as_ptr(), input.len());
-            let slots = ApplySlots {
-                plugin: Arc::clone(&self.plugin),
+        if Arc::get_mut(scratch).is_none() {
+            // The plugin has yet to let go of an abandoned call.
+            *scratch = Scratch::new(&self.plugin);
+        }
+        let call = scratch.call.get();
+        // SAFETY: we are the only owner, so no call is in flight.
+        let (input, len, verdicts) = unsafe {
+            let call = &mut *call;
+            call.input.reload(messages);
+            call.verdicts.clear();
+            call.verdicts.resize(call.input.len(), MQB_MESSAGE_KEPT);
+            call.replaced = std::ptr::null();
+            (
+                call.input.as_ptr(),
+                call.input.len(),
+                call.verdicts.as_mut_ptr(),
+            )
+        };
+        scratch.done.store(false, Ordering::Relaxed);
+        let ctx = Arc::into_raw(Arc::clone(scratch))
+            .cast_mut()
+            .cast::<c_void>();
+        let completion = MqbCompletion {
+            callback: completed,
+            ctx,
+        };
+        let status = unsafe {
+            hook(
+                self.handle,
                 input,
-                out: Applied::EMPTY,
-            };
-            completion::call(slots, |slots, completion| unsafe {
-                hook(
-                    handle.0,
-                    ptr,
-                    len,
-                    std::ptr::addr_of_mut!((*slots).out.result),
-                    std::ptr::addr_of_mut!((*slots).out.messages),
-                    std::ptr::addr_of_mut!((*slots).out.kept),
-                    std::ptr::addr_of_mut!((*slots).out.err),
-                    completion,
-                )
-            })
+                len,
+                verdicts,
+                &raw mut (*call).result,
+                &raw mut (*call).replaced,
+                &raw mut (*call).err,
+                completion,
+            )
         };
-        let (status, slots) = match pending.finish().await {
-            Ok(finished) => finished,
-            Err(cause) => {
-                return Ok(Err(ApplyFailure {
-                    status: MQB_ERR_CONNECTION,
-                    cause,
-                }))
+        let status = if status == MQB_PENDING {
+            Pending {
+                scratch,
+                finished: false,
             }
+            .await
+        } else {
+            // SAFETY: with any other status the completion never runs.
+            unsafe { Arc::decrement_strong_count(ctx.cast_const().cast::<Scratch>()) };
+            status
         };
-        let ApplySlots { plugin, input, out } = slots;
+
+        // SAFETY: the call is over; after completing, the plugin touches only atomics.
+        let call = unsafe { &mut *scratch.call.get() };
         if status == MQB_ERR_UNSUPPORTED {
             self.blocking.store(true, Ordering::Relaxed);
-            out.release(&plugin);
-            return Err(input.into_messages());
+            call.unread().release(&self.plugin);
+            return Err(call.input.take_messages());
         }
-        Ok(read_applied(&plugin, status, input, out, keep_originals))
+        let filtered = if status == MQB_OK {
+            unsafe {
+                settle(
+                    &self.plugin,
+                    &mut call.input,
+                    &call.verdicts,
+                    call.replaced,
+                    keep_originals,
+                )
+            }
+        } else {
+            let err = std::mem::replace(&mut call.err, MqbBuffer::EMPTY);
+            Err(ApplyFailure {
+                status,
+                cause: anyhow!(
+                    "middleware plugin `{}` failed on a batch of {len} messages: {}",
+                    self.plugin.name(),
+                    self.plugin.take_error(err)
+                ),
+            })
+        };
+        call.unread().release(&self.plugin);
+        drop(call.input.take_messages());
+        Ok(filtered)
     }
 
     async fn apply_blocking(
@@ -342,7 +518,7 @@ impl PluginMiddleware {
     ) -> Result<Filtered, ApplyFailure> {
         let middleware = Arc::clone(self);
         tokio::task::spawn_blocking(move || {
-            let input = AbiMessages::new(messages);
+            let mut input = AbiMessages::new(messages);
             let mut out = Applied::EMPTY;
             let status = unsafe {
                 (middleware.plugin.table().middleware_apply)(
@@ -355,13 +531,17 @@ impl PluginMiddleware {
                     &mut out.err,
                 )
             };
-            AssertSend(read_applied(
-                &middleware.plugin,
-                status,
-                input,
-                out,
-                keep_originals,
-            ))
+            let filtered = unsafe {
+                read_applied(
+                    &middleware.plugin,
+                    status,
+                    &mut input,
+                    &mut out,
+                    keep_originals,
+                )
+            };
+            out.release(&middleware.plugin);
+            AssertSend(filtered)
         })
         .await
         .map_err(|err| ApplyFailure {
@@ -372,91 +552,156 @@ impl PluginMiddleware {
     }
 }
 
-/// Reads a finished apply and releases its result. A kept message whose payload or
-/// metadata the plugin pointed back at `input` reuses the host's own copy.
-fn read_applied(
+/// Turns a blocking `middleware_apply`'s parallel arrays into verdicts: a kept entry that
+/// still points at the host's own message is unchanged, any other kept entry replaces it.
+unsafe fn read_applied(
     plugin: &Arc<LoadedPlugin>,
     status: MqbStatus,
-    input: AbiMessages,
-    out: Applied,
+    input: &mut AbiMessages,
+    out: &mut Applied,
     keep_originals: bool,
 ) -> Result<Filtered, ApplyFailure> {
-    // Released even if the call failed after writing a handle, or if the
-    // arrays below turn out malformed.
-    let guard = FilterResult {
-        plugin: Arc::clone(plugin),
-        handle: out.result,
-    };
     if status != MQB_OK {
+        let err = std::mem::replace(&mut out.err, MqbBuffer::EMPTY);
         return Err(ApplyFailure {
             status,
             cause: anyhow!(
                 "middleware plugin `{}` failed on a batch of {} messages: {}",
                 plugin.name(),
                 input.len(),
-                plugin.take_error(out.err)
+                plugin.take_error(err)
             ),
         });
     }
     if out.messages.is_null() || out.kept.is_null() {
-        return Err(ApplyFailure {
-            status: MQB_ERR_PERMANENT,
-            cause: anyhow!(
-                "middleware plugin `{}` returned a null result array",
-                plugin.name()
-            ),
-        });
+        return Err(malformed(plugin, "returned a null result array"));
     }
-
     let len = input.len();
     // SAFETY: both checked non-null above; the ABI makes them one entry per input message,
-    // owned by the result `guard` keeps alive until after the loop.
+    // owned by the result, which the caller releases after this returns.
     let flags = unsafe { std::slice::from_raw_parts(out.kept, len) };
     let results = unsafe { std::slice::from_raw_parts(out.messages, len) };
-    let mut keep_flags = Vec::with_capacity(len);
-    let mut kept = Vec::with_capacity(len);
-    // Per kept message: its source index, and whether payload / metadata are the source's.
-    let mut sources = Vec::with_capacity(len);
-    for (index, ((flag, result), ours)) in flags.iter().zip(results).zip(input.abi()).enumerate() {
-        let keep = *flag == MQB_MESSAGE_KEPT;
-        keep_flags.push(keep);
+    let mut verdicts = Vec::with_capacity(len);
+    let mut replaced = Vec::new();
+    for ((flag, result), ours) in flags.iter().zip(results).zip(input.abi()) {
         // A dropped entry's message is unspecified, so only kept ones are read.
-        if !keep {
-            continue;
-        }
-        let payload =
-            result.payload.ptr == ours.payload.ptr && result.payload.len == ours.payload.len;
-        let metadata = result.metadata == ours.metadata && result.metadata_len == ours.metadata_len;
-        sources.push((index, payload, metadata));
-        // SAFETY: a kept entry points into the result (alive until `guard`) or into `input`.
-        kept.push(unsafe { read_message(result, !payload, !metadata) });
+        let verdict = if *flag != MQB_MESSAGE_KEPT {
+            MQB_MESSAGE_DROPPED
+        } else if result.message_id == ours.message_id
+            && same_payload(result, ours)
+            && same_metadata(result, ours)
+        {
+            MQB_MESSAGE_KEPT
+        } else {
+            replaced.push(*result);
+            MQB_MESSAGE_REPLACED
+        };
+        verdicts.push(verdict);
     }
-    drop(guard);
+    unsafe { settle(plugin, input, &verdicts, replaced.as_ptr(), keep_originals) }
+}
 
-    let mut inputs = input.into_messages();
-    let mut originals = Vec::with_capacity(if keep_originals { kept.len() } else { 0 });
-    for ((index, payload, metadata), message) in sources.into_iter().zip(&mut kept) {
-        let source = &mut inputs[index];
-        if payload {
-            message.payload = std::mem::take(&mut source.payload);
+fn same_payload(theirs: &MqbMessage, ours: &MqbMessage) -> bool {
+    theirs.payload.ptr == ours.payload.ptr && theirs.payload.len == ours.payload.len
+}
+
+fn same_metadata(theirs: &MqbMessage, ours: &MqbMessage) -> bool {
+    theirs.metadata == ours.metadata && theirs.metadata_len == ours.metadata_len
+}
+
+/// Applies the verdicts to the batch in place: dropped messages leave it, replaced ones
+/// are rewritten, reusing the host's own payload or metadata where the replacement points
+/// back at it.
+///
+/// # Safety
+/// `replaced` holds one valid message per [`MQB_MESSAGE_REPLACED`] verdict.
+unsafe fn settle(
+    plugin: &LoadedPlugin,
+    input: &mut AbiMessages,
+    verdicts: &[u8],
+    replaced: *const MqbMessage,
+    keep_originals: bool,
+) -> Result<Filtered, ApplyFailure> {
+    let count = verdicts
+        .iter()
+        .filter(|verdict| **verdict == MQB_MESSAGE_REPLACED)
+        .count();
+    let replacements: &[MqbMessage] = match count {
+        0 => &[],
+        _ if replaced.is_null() => {
+            return Err(malformed(plugin, "returned a null replacement array"))
         }
-        if metadata {
-            *message.metadata_map_mut() = std::mem::take(source.metadata_map_mut());
+        _ => unsafe { std::slice::from_raw_parts(replaced, count) },
+    };
+    let keep_originals = keep_originals && count > 0;
+    let mut replacements = replacements.iter();
+    let mut keep_flags = Vec::with_capacity(verdicts.len());
+    let mut originals = Vec::new();
+    let (abi, messages) = input.split();
+    for ((message, ours), verdict) in messages.iter_mut().zip(abi).zip(verdicts) {
+        match *verdict {
+            MQB_MESSAGE_KEPT => {
+                if keep_originals {
+                    originals.push(Original {
+                        message_id: message.message_id,
+                        payload: None,
+                        metadata: None,
+                        rewritten: message.payload.clone(),
+                    });
+                }
+            }
+            MQB_MESSAGE_DROPPED => {}
+            MQB_MESSAGE_REPLACED => {
+                let theirs = replacements.next().expect("counted above");
+                let original = unsafe { replace_in_place(message, ours, theirs) };
+                if keep_originals {
+                    originals.push(original);
+                }
+            }
+            other => {
+                return Err(malformed(
+                    plugin,
+                    format!("returned unknown verdict {other}"),
+                ))
+            }
         }
-        if keep_originals {
-            originals.push(Original {
-                message_id: source.message_id,
-                payload: (!payload).then(|| std::mem::take(&mut source.payload)),
-                metadata: (!metadata).then(|| std::mem::take(source.metadata_map_mut())),
-                rewritten: message.payload.clone(),
-            });
-        }
+        keep_flags.push(*verdict != MQB_MESSAGE_DROPPED);
     }
+    let mut kept = input.take_messages();
+    let mut flags = keep_flags.iter();
+    kept.retain(|_| flags.next().copied().unwrap_or(false));
     Ok(Filtered {
         kept,
         keep_flags,
         originals,
     })
+}
+
+/// Rewrites `message` as `theirs`, returning what it was.
+///
+/// # Safety
+/// `theirs` is a valid message; `ours` is `message` in ABI form.
+unsafe fn replace_in_place(
+    message: &mut CanonicalMessage,
+    ours: &MqbMessage,
+    theirs: &MqbMessage,
+) -> Original {
+    let payload = same_payload(theirs, ours);
+    let metadata = same_metadata(theirs, ours);
+    let mut fresh = unsafe { read_message(theirs, !payload, !metadata) };
+    if payload {
+        fresh.payload = message.payload.clone();
+    }
+    if metadata {
+        *fresh.metadata_map_mut() = std::mem::take(message.metadata_map_mut());
+    }
+    let mut source = std::mem::replace(message, fresh);
+    Original {
+        message_id: source.message_id,
+        payload: (!payload).then(|| std::mem::take(&mut source.payload)),
+        metadata: (!metadata).then(|| std::mem::take(source.metadata_map_mut())),
+        rewritten: message.payload.clone(),
+    }
 }
 
 /// Hands failed messages back as they came in, so a retry above re-applies the
@@ -514,6 +759,8 @@ impl Drop for FilterResult {
 struct PluginMiddlewareConsumer {
     inner: Box<dyn MessageConsumer>,
     middleware: Arc<PluginMiddleware>,
+    /// Filled only here, through `&mut self`.
+    scratch: Arc<Scratch>,
     /// Acks for batches the plugin emptied, held on sources with ordered commits.
     deferred: DeferredCommits,
 }
@@ -538,7 +785,7 @@ impl MessageConsumer for PluginMiddlewareConsumer {
                 kept, keep_flags, ..
             } = self
                 .middleware
-                .apply(messages, false)
+                .apply(&mut self.scratch, messages, false)
                 .await
                 .map_err(|failure| consumer_error_from(failure.status, failure.cause))?;
 
@@ -650,19 +897,19 @@ impl MessagePublisher for PluginMiddlewarePublisher {
         if messages.is_empty() {
             return Ok(SentBatch::Ack);
         }
-        let filtered =
-            self.middleware
-                .apply(messages, true)
-                .await
-                .map_err(|failure| match failure.status {
-                    MQB_ERR_CONNECTION => PublisherError::Connection(failure.cause),
-                    MQB_ERR_PERMANENT
-                    | MQB_ERR_INVALID_CONFIG
-                    | MQB_ERR_UNSUPPORTED
-                    | MQB_ERR_PANIC
-                    | MQB_END_OF_STREAM => PublisherError::NonRetryable(failure.cause),
-                    _ => PublisherError::Retryable(failure.cause),
-                })?;
+        let filtered = self
+            .middleware
+            .apply_pooled(messages, true)
+            .await
+            .map_err(|failure| match failure.status {
+                MQB_ERR_CONNECTION => PublisherError::Connection(failure.cause),
+                MQB_ERR_PERMANENT
+                | MQB_ERR_INVALID_CONFIG
+                | MQB_ERR_UNSUPPORTED
+                | MQB_ERR_PANIC
+                | MQB_END_OF_STREAM => PublisherError::NonRetryable(failure.cause),
+                _ => PublisherError::Retryable(failure.cause),
+            })?;
         if filtered.kept.is_empty() {
             // Everything was dropped on purpose, which is a successful publish.
             return Ok(SentBatch::Ack);
@@ -684,7 +931,11 @@ impl MessagePublisher for PluginMiddlewarePublisher {
         &self,
         requests: &[CanonicalMessage],
     ) -> Option<Vec<Result<Option<serde_json::Value>, PublisherError>>> {
-        let filtered = self.middleware.apply(requests.to_vec(), false).await.ok()?;
+        let filtered = self
+            .middleware
+            .apply_pooled(requests.to_vec(), false)
+            .await
+            .ok()?;
         let mut kept = filtered.kept.into_iter();
         let outcomes = filtered
             .keep_flags
@@ -1055,6 +1306,67 @@ mod tests {
         assert_eq!(sent[0].payload.as_ptr(), kept);
         assert_eq!(&sent[1].payload[..], b"ABC");
         assert_eq!(sent[1].get_metadata("k"), Some("v"));
+    }
+
+    /// Waits before it answers, so the call completes through the callback.
+    #[derive(Default)]
+    struct Slow;
+
+    #[async_trait]
+    impl BatchFilter for Slow {
+        async fn on_send_ref(&self, messages: &[MessageRef<'_>]) -> anyhow::Result<Vec<Verdict>> {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            Ok(messages
+                .iter()
+                .map(|message| {
+                    let mut copy = message.to_message();
+                    copy.payload = message.payload().to_ascii_uppercase().into();
+                    Verdict::Replace(copy)
+                })
+                .collect())
+        }
+    }
+
+    #[async_trait]
+    impl MiddlewareFactory for Slow {
+        async fn create(
+            &self,
+            _: &str,
+            _: &serde_json::Value,
+        ) -> anyhow::Result<Box<dyn BatchFilter>> {
+            Ok(Box::new(Slow))
+        }
+    }
+
+    static SLOW_TABLE: ExportedVTable =
+        build_vtable::<NoEndpoint, Slow>("slow", "0.0.0", CAPABILITIES_MIDDLEWARE_ONLY);
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_pending_call_completes_and_an_abandoned_one_is_released() {
+        unsafe { crate::plugin::register_plugin_table(SLOW_TABLE.as_ptr()) }.unwrap();
+        let factory = get_middleware_factory("slow").unwrap();
+        let sink = Recording::default();
+        let sent = Arc::clone(&sink.sent);
+        let publisher = factory
+            .apply_publisher(Box::new(sink), "r", &serde_json::json!({}))
+            .await
+            .unwrap();
+        let abandoned = tokio::time::timeout(
+            std::time::Duration::from_millis(1),
+            publisher.send_batch(vec![CanonicalMessage::from("late")]),
+        )
+        .await;
+        assert!(abandoned.is_err());
+        publisher
+            .send_batch(vec![CanonicalMessage::from("abc")])
+            .await
+            .unwrap();
+        // Lets the abandoned call complete and release its result.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let sent = sent.lock().unwrap();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(&sent[0].payload[..], b"ABC");
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -438,8 +438,11 @@ fn plugin_fallback(
     {
         let config = serde_json::to_value(run)?;
         if runs_as_map(run) {
-            if let Ok(factory) = custom_middleware_factory(BUILTIN_MAP_MIDDLEWARE_PLUGIN) {
-                return Ok((factory, config));
+            match custom_middleware_factory(BUILTIN_MAP_MIDDLEWARE_PLUGIN) {
+                Ok(factory) => return Ok((factory, config)),
+                Err(error) => tracing::debug!(
+                    "[middleware:{route_name}] no `{BUILTIN_MAP_MIDDLEWARE_PLUGIN}` plugin, trying `{BUILTIN_MIDDLEWARE_PLUGIN}`: {error:#}"
+                ),
             }
         }
         match custom_middleware_factory(BUILTIN_MIDDLEWARE_PLUGIN) {

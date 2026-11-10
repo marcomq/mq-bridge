@@ -74,8 +74,9 @@ use crate::support::plugin_abi::{
     MQB_DELIVERY_REQUIRES_FULL_REPLAY, MQB_DISCONNECT_COMPLETED, MQB_DISCONNECT_FAILED,
     MQB_DISPOSITION_NACK, MQB_DISPOSITION_REPLY, MQB_END_OF_STREAM, MQB_ERR_CONNECTION,
     MQB_ERR_INVALID_CONFIG, MQB_ERR_PANIC, MQB_ERR_PERMANENT, MQB_ERR_RETRYABLE,
-    MQB_ERR_UNSUPPORTED, MQB_MIDDLEWARE_RECEIVE, MQB_MIDDLEWARE_SEND, MQB_OK, MQB_OUTCOME_OK,
-    MQB_OUTCOME_PERMANENT, MQB_OUTCOME_RETRYABLE, MQB_PLUGIN_ABI_MAJOR, MQB_PLUGIN_ABI_MINOR,
+    MQB_ERR_UNSUPPORTED, MQB_MESSAGE_DROPPED, MQB_MESSAGE_KEPT, MQB_MESSAGE_REPLACED,
+    MQB_MIDDLEWARE_RECEIVE, MQB_MIDDLEWARE_SEND, MQB_OK, MQB_OUTCOME_OK, MQB_OUTCOME_PERMANENT,
+    MQB_OUTCOME_RETRYABLE, MQB_PENDING, MQB_PLUGIN_ABI_MAJOR, MQB_PLUGIN_ABI_MINOR,
     MQB_SCHEMA_ENDPOINT, MQB_SCHEMA_MIDDLEWARE,
 };
 use crate::traits::{
@@ -296,18 +297,44 @@ fn start<T: Send + 'static>(
     completion: MqbCompletion,
     finish: impl FnOnce(Result<T, TaskFailure>) -> MqbStatus + 'static,
 ) -> MqbStatus {
-    let done = Completion {
-        completion: Some(completion),
-        err,
-    };
+    if let Some(status) = poll_or_spawn(runtime, future, err, completion, finish) {
+        Completion {
+            completion: Some(completion),
+            err,
+        }
+        .finish(status);
+    }
+    MQB_OK
+}
+
+/// Like [`start`], but a call that finishes at once returns its status instead of
+/// completing; [`MQB_PENDING`] means the completion follows.
+fn start_inline<T: Send + 'static>(
+    runtime: &Runtime,
+    future: impl Future<Output = T> + Send + 'static,
+    err: *mut MqbBuffer,
+    completion: MqbCompletion,
+    finish: impl FnOnce(Result<T, TaskFailure>) -> MqbStatus + 'static,
+) -> MqbStatus {
+    poll_or_spawn(runtime, future, err, completion, finish).unwrap_or(MQB_PENDING)
+}
+
+/// Polls the call once on the caller's thread: `Some(status)` if it finished there,
+/// otherwise the rest runs on the runtime and reports through `completion`.
+fn poll_or_spawn<T: Send + 'static>(
+    runtime: &Runtime,
+    future: impl Future<Output = T> + Send + 'static,
+    err: *mut MqbBuffer,
+    completion: MqbCompletion,
+    finish: impl FnOnce(Result<T, TaskFailure>) -> MqbStatus + 'static,
+) -> Option<MqbStatus> {
     let finish = SendCell(finish);
+    let out = SendCell(err);
     let mut task = Box::pin(async move {
         let result = run_contained(future).await;
         let finish = finish.into_inner();
-        let status = guarded(done.err, || finish(result));
-        done.finish(status);
+        guarded(out.into_inner(), || finish(result))
     });
-    // Poll once on the caller's thread: a ready call completes without a thread handoff.
     // Unconstrained, so a spent coop budget cannot force a ready call onto another thread.
     let _entered = runtime.enter();
     let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
@@ -316,12 +343,17 @@ fn start<T: Send + 'static>(
         std::pin::pin!(once).poll(&mut cx)
     };
     match std::panic::catch_unwind(AssertUnwindSafe(first_poll)) {
-        Ok(std::task::Poll::Pending) => drop(runtime.spawn(task)),
-        Ok(std::task::Poll::Ready(())) => {}
-        // Dropping the task reports the call as lost through `Completion`.
-        Err(_) => drop(task),
+        Ok(std::task::Poll::Ready(status)) => Some(status),
+        Ok(std::task::Poll::Pending) => {
+            let done = Completion {
+                completion: Some(completion),
+                err,
+            };
+            drop(runtime.spawn(async move { done.finish(task.await) }));
+            None
+        }
+        Err(_) => Some(unsafe { task_failed(err, TaskFailure::Lost) }),
     }
-    MQB_OK
 }
 
 // ---------------------------------------------------------------- plugin state
@@ -1757,38 +1789,19 @@ impl CustomEndpointFactory for NoEndpoint {}
 
 struct MiddlewareState {
     filter: Arc<dyn BatchFilter>,
-    results: ResultPool,
     /// `MQB_MIDDLEWARE_RECEIVE` or `MQB_MIDDLEWARE_SEND`, fixed at creation.
     side: u8,
     runtime: Arc<Runtime>,
 }
 
-/// Results the host released, reused so a call allocates no new arrays. Boxed: the box
-/// itself is the handle the host holds.
-#[allow(clippy::vec_box)]
-type ResultPool = Arc<std::sync::Mutex<Vec<Box<FilterResultState>>>>;
-
+/// The replacements of one apply, which the host reads until it frees the handle.
 struct FilterResultState {
-    /// The replaced messages, which `messages` points into.
-    replaced: AbiMessages,
-    /// Parallel to the input: a kept entry is the host's own, a dropped one is never read.
+    /// The replacement messages, which `messages` points into.
+    _replaced: AbiMessages,
+    /// `middleware_apply_async`: one per replacement. `middleware_apply`: one per input,
+    /// parallel to `kept`.
     messages: Vec<MqbMessage>,
     kept: Vec<u8>,
-    /// Weak, so a pooled result does not keep its own pool alive.
-    #[allow(clippy::vec_box)]
-    pool: std::sync::Weak<std::sync::Mutex<Vec<Box<FilterResultState>>>>,
-}
-
-fn recycled_result(pool: &ResultPool) -> Box<FilterResultState> {
-    let reused = pool.lock().unwrap_or_else(|e| e.into_inner()).pop();
-    reused.unwrap_or_else(|| {
-        Box::new(FilterResultState {
-            replaced: AbiMessages::new(Vec::new()),
-            messages: Vec::new(),
-            kept: Vec::new(),
-            pool: Arc::downgrade(pool),
-        })
-    })
 }
 
 unsafe extern "C" fn middleware_create<M>(
@@ -1832,7 +1845,6 @@ where
         unsafe {
             *out = MqbMiddlewareHandle(into_handle(MiddlewareState {
                 filter: Arc::from(filter),
-                results: ResultPool::default(),
                 side,
                 runtime,
             }))
@@ -1841,17 +1853,30 @@ where
     })
 }
 
-/// The filter run over the host's input in place. The host keeps the input alive and
-/// unchanged until the call completes, which outlasts the returned future.
+/// The filter run over the host's input in place; the host keeps it alive until the call
+/// completes. With `copy` (a call timeout is set) it reads a copy the future owns instead,
+/// since a timed-out future keeps running after the host has freed its input.
 unsafe fn apply_filter(
     state: &MiddlewareState,
     messages: *const MqbMessage,
     len: usize,
+    copy: bool,
 ) -> impl Future<Output = anyhow::Result<Vec<Verdict>>> + Send + 'static {
-    let messages: &'static [MessageRef<'static>] = unsafe { MessageRef::slice(messages, len) };
+    let lent: &'static [MessageRef<'static>] = unsafe { MessageRef::slice(messages, len) };
+    let copied = copy.then(|| {
+        SendCell(AbiMessages::new(
+            lent.iter().map(MessageRef::to_message).collect(),
+        ))
+    });
+    let messages = match &copied {
+        // SAFETY: the copy moves into the future below; its heap buffers stay in place.
+        Some(copy) => unsafe { MessageRef::slice(copy.0.abi().as_ptr(), len) },
+        None => lent,
+    };
     let filter = Arc::clone(&state.filter);
     let receive = state.side == MQB_MIDDLEWARE_RECEIVE;
     async move {
+        let _copied = copied;
         if receive {
             filter.on_receive_ref(messages).await
         } else {
@@ -1860,33 +1885,23 @@ unsafe fn apply_filter(
     }
 }
 
-/// Writes a filter's verdicts through the `middleware_apply` out-pointers.
-///
-/// A kept message, and an unchanged payload or metadata of a replaced one, points back
-/// into the host's `input`, which the host recognises and reuses instead of copying.
-#[allow(clippy::too_many_arguments)]
-unsafe fn write_filtered(
+/// Checks a filter's verdicts and writes one `MQB_MESSAGE_*` per input into `kinds`.
+/// Returns the replacements, if any: an unchanged payload or metadata points back into
+/// the host's `input`, which the host recognises and reuses instead of copying.
+unsafe fn encode_verdicts(
     filtered: Result<anyhow::Result<Vec<Verdict>>, TaskFailure>,
-    pool: &ResultPool,
     input: *const MqbMessage,
-    len: usize,
-    out_result: *mut MqbFilterHandle,
-    out_messages: *mut *const MqbMessage,
-    out_kept: *mut *const u8,
+    kinds: &mut [u8],
     err: *mut MqbBuffer,
-) -> MqbStatus {
-    use crate::support::plugin_abi::{MQB_MESSAGE_DROPPED, MQB_MESSAGE_KEPT};
-    const DROPPED: u8 = MQB_MESSAGE_DROPPED;
-    const REPLACED: u8 = MQB_MESSAGE_KEPT;
-    // Marks the host's own message until the loop below; then sent as MQB_MESSAGE_KEPT.
-    const KEPT: u8 = 2;
+) -> Result<Option<Box<FilterResultState>>, MqbStatus> {
+    let len = kinds.len();
     let filtered = match filtered {
         Ok(Ok(filtered)) => filtered,
         Ok(Err(error)) => {
             unsafe { set_error(err, format!("{error:#}")) };
-            return filter_status(&error);
+            return Err(filter_status(&error));
         }
-        Err(failure) => return unsafe { task_failed(err, failure) },
+        Err(failure) => return Err(unsafe { task_failed(err, failure) }),
     };
     // Enforced here so a mistake surfaces as a clear error rather than as a
     // mismatched array the host would read out of bounds.
@@ -1901,58 +1916,93 @@ unsafe fn write_filtered(
                 ),
             )
         };
-        return MQB_ERR_PERMANENT;
+        return Err(MQB_ERR_PERMANENT);
     }
 
-    let mut state = recycled_result(pool);
-    let mut kept = std::mem::take(&mut state.kept);
-    kept.clear();
     let mut replaced = Vec::new();
-    for verdict in filtered {
-        kept.push(match verdict {
-            Verdict::Keep => KEPT,
-            Verdict::Drop => DROPPED,
+    for (kind, verdict) in kinds.iter_mut().zip(filtered) {
+        *kind = match verdict {
+            Verdict::Keep => MQB_MESSAGE_KEPT,
+            Verdict::Drop => MQB_MESSAGE_DROPPED,
             Verdict::Replace(message) => {
                 replaced.push(message);
-                REPLACED
+                MQB_MESSAGE_REPLACED
             }
-        });
+        };
     }
-
+    if replaced.is_empty() {
+        return Ok(None);
+    }
     // SAFETY: the host keeps `len` input messages valid until the call completes.
     let input = unsafe { MessageRef::slice(input, len) };
     let replaced = AbiMessages::new(replaced);
     let mut replacements = replaced.abi().iter();
+    let messages = input
+        .iter()
+        .zip(kinds.iter())
+        .filter(|(_, kind)| **kind == MQB_MESSAGE_REPLACED)
+        .map(|(ours, _)| {
+            let mut out = *replacements.next().expect("one entry per replacement");
+            // SAFETY: `out` points into `replaced`, which is alive in this scope.
+            if unsafe { out.payload.as_bytes() } == ours.payload() {
+                out.payload = ours.raw.payload;
+            }
+            if out.metadata_len == ours.raw.metadata_len && same_entries(&out, &ours.raw) {
+                out.metadata = ours.raw.metadata;
+            }
+            out
+        })
+        .collect();
+    Ok(Some(Box::new(FilterResultState {
+        _replaced: replaced,
+        messages,
+        kept: Vec::new(),
+    })))
+}
+
+/// Writes a filter's verdicts through the blocking `middleware_apply` out-pointers: two
+/// arrays parallel to the input, a kept message pointing back at the host's own.
+#[allow(clippy::too_many_arguments)]
+unsafe fn write_filtered(
+    filtered: Result<anyhow::Result<Vec<Verdict>>, TaskFailure>,
+    input: *const MqbMessage,
+    len: usize,
+    out_result: *mut MqbFilterHandle,
+    out_messages: *mut *const MqbMessage,
+    out_kept: *mut *const u8,
+    err: *mut MqbBuffer,
+) -> MqbStatus {
+    let mut kept = vec![MQB_MESSAGE_DROPPED; len];
+    let mut state = match unsafe { encode_verdicts(filtered, input, &mut kept, err) } {
+        Ok(Some(state)) => state,
+        Ok(None) => Box::new(FilterResultState {
+            _replaced: AbiMessages::new(Vec::new()),
+            messages: Vec::new(),
+            kept: Vec::new(),
+        }),
+        Err(status) => return status,
+    };
+    // SAFETY: the host keeps `len` input messages valid until the call returns.
+    let input = unsafe { MessageRef::slice(input, len) };
     let dropped = MqbMessage {
         message_id: [0; 16],
         payload: MqbSlice::from_bytes(&[]),
         metadata: std::ptr::null(),
         metadata_len: 0,
     };
-    let mut messages = std::mem::take(&mut state.messages);
-    messages.clear();
-    for (ours, kind) in input.iter().zip(&mut kept) {
-        messages.push(match *kind {
-            KEPT => {
+    let mut replacements = std::mem::take(&mut state.messages).into_iter();
+    state.messages = input
+        .iter()
+        .zip(&mut kept)
+        .map(|(ours, kind)| match *kind {
+            MQB_MESSAGE_KEPT => ours.raw,
+            MQB_MESSAGE_REPLACED => {
                 *kind = MQB_MESSAGE_KEPT;
-                ours.raw
-            }
-            REPLACED => {
-                let mut out = *replacements.next().expect("one entry per replacement");
-                // SAFETY: `out` points into `replaced`, which is alive in this scope.
-                if unsafe { out.payload.as_bytes() } == ours.payload() {
-                    out.payload = ours.raw.payload;
-                }
-                if out.metadata_len == ours.raw.metadata_len && same_entries(&out, &ours.raw) {
-                    out.metadata = ours.raw.metadata;
-                }
-                out
+                replacements.next().expect("one entry per replacement")
             }
             _ => dropped,
-        });
-    }
-    state.replaced = replaced;
-    state.messages = messages;
+        })
+        .collect();
     state.kept = kept;
     unsafe {
         *out_messages = state.messages.as_ptr();
@@ -1965,7 +2015,7 @@ unsafe fn write_filtered(
 /// True if both messages hold the same metadata entries, in any order.
 fn same_entries(ours: &MqbMessage, theirs: &MqbMessage) -> bool {
     // SAFETY: each reference is one valid message; its slices live in the host's input or
-    // in `replaced`, both alive while `write_filtered` runs.
+    // in `replaced`, both alive while `encode_verdicts` runs.
     let (ours, theirs) = unsafe {
         (
             MessageRef::slice(std::ptr::from_ref(ours), 1)[0],
@@ -1990,12 +2040,11 @@ unsafe extern "C" fn middleware_apply(
             unsafe { set_error(err, "middleware_apply called with a null handle") };
             return MQB_ERR_PERMANENT;
         };
-        let filter = unsafe { apply_filter(state, messages, len) };
+        let filter = unsafe { apply_filter(state, messages, len, call_timeout().is_some()) };
         let filtered = block_on(&state.runtime, filter);
         unsafe {
             write_filtered(
                 filtered,
-                &state.results,
                 messages,
                 len,
                 out_result,
@@ -2012,9 +2061,9 @@ unsafe extern "C" fn middleware_apply_async(
     middleware: MqbMiddlewareHandle,
     messages: *const MqbMessage,
     len: usize,
+    kinds: *mut u8,
     out_result: *mut MqbFilterHandle,
-    out_messages: *mut *const MqbMessage,
-    out_kept: *mut *const u8,
+    out_replaced: *mut *const MqbMessage,
     err: *mut MqbBuffer,
     completion: MqbCompletion,
 ) -> MqbStatus {
@@ -2023,44 +2072,35 @@ unsafe extern "C" fn middleware_apply_async(
             unsafe { set_error(err, "middleware_apply_async called with a null handle") };
             return MQB_ERR_PERMANENT;
         };
-        let filter = unsafe { apply_filter(state, messages, len) };
+        let filter = unsafe { apply_filter(state, messages, len, call_timeout().is_some()) };
         let input = SendCell(messages);
-        let pool = Arc::clone(&state.results);
-        start(
+        let kinds = SendCell(kinds);
+        start_inline(
             &state.runtime,
             filter,
             err,
             completion,
             move |filtered| unsafe {
-                let input = input.into_inner();
-                write_filtered(
-                    filtered,
-                    &pool,
-                    input,
-                    len,
-                    out_result,
-                    out_messages,
-                    out_kept,
-                    err,
-                )
+                let kinds = match len {
+                    0 => &mut [],
+                    _ => std::slice::from_raw_parts_mut(kinds.into_inner(), len),
+                };
+                match encode_verdicts(filtered, input.into_inner(), kinds, err) {
+                    Ok(None) => MQB_OK,
+                    Ok(Some(state)) => {
+                        *out_replaced = state.messages.as_ptr();
+                        *out_result = MqbFilterHandle(Box::into_raw(state).cast());
+                        MQB_OK
+                    }
+                    Err(status) => status,
+                }
             },
         )
     })
 }
 
 unsafe extern "C" fn middleware_result_free(result: MqbFilterHandle) {
-    guarded_unit(|| {
-        let Some(mut state) = (unsafe { reclaim::<FilterResultState>(result.0) }) else {
-            return;
-        };
-        state.replaced = AbiMessages::new(Vec::new());
-        if let Some(pool) = state.pool.upgrade() {
-            let mut pool = pool.lock().unwrap_or_else(|e| e.into_inner());
-            if pool.len() < 64 {
-                pool.push(state);
-            }
-        }
-    })
+    guarded_unit(|| drop(unsafe { reclaim::<FilterResultState>(result.0) }));
 }
 
 unsafe extern "C" fn middleware_free(middleware: MqbMiddlewareHandle) {
@@ -2614,6 +2654,43 @@ macro_rules! export_middleware_plugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A timed-out filter keeps running after the host freed its input, so with a timeout
+    /// the filter must read its own copy.
+    #[tokio::test]
+    async fn a_copied_filter_input_outlives_the_host_batch() {
+        #[derive(Default)]
+        struct Record(std::sync::Mutex<Vec<Vec<u8>>>);
+
+        #[async_trait::async_trait]
+        impl BatchFilter for Record {
+            async fn on_send_ref(
+                &self,
+                messages: &[MessageRef<'_>],
+            ) -> anyhow::Result<Vec<Verdict>> {
+                tokio::task::yield_now().await;
+                let mut seen = self.0.lock().unwrap();
+                seen.extend(messages.iter().map(|m| m.payload().to_vec()));
+                Ok(messages.iter().map(|_| Verdict::Keep).collect())
+            }
+        }
+
+        let record = Arc::new(Record::default());
+        let state = MiddlewareState {
+            filter: record.clone(),
+            side: MQB_MIDDLEWARE_SEND,
+            runtime: Runtime::current(),
+        };
+        let host = AbiMessages::new(vec![
+            CanonicalMessage::from("a"),
+            CanonicalMessage::from("b"),
+        ]);
+        let future = unsafe { apply_filter(&state, host.abi().as_ptr(), 2, true) };
+        drop(host);
+
+        assert_eq!(future.await.unwrap().len(), 2);
+        assert_eq!(*record.0.lock().unwrap(), [b"a".to_vec(), b"b".to_vec()]);
+    }
 
     #[test]
     fn error_buffers_round_trip_through_the_host() {
