@@ -181,7 +181,7 @@ mongodb = { version = "3.8", optional = true, features = ["cert-key-password"] }
 object_store = { version = "0.14", optional = true, default-features = false, features = ["aws", "gcp", "azure", "http", "fs"] }
 
 # NATS
-async-nats = { version = "0.51", optional = true }
+async-nats = { version = "0.52", optional = true }
 
 # MQTT.
 # `use-rustls-no-provider` pulls tokio-rustls without a crypto provider (its
@@ -259,7 +259,7 @@ zeromq = { version = "0.7", optional = true }
 # Default ZeroMQ backend (`backend: try_omq`). Faster than libzmq per its
 # benchmarks and adds CURVE/PLAIN security. Pure Rust without default
 # features; needs MSRV 1.93 / edition 2024.
-omq-tokio = { version = "0.33", optional = true }
+omq-tokio = { version = "0.34", optional = true }
 
 # Redis Streams. Pure-Rust client (no C bindings). TLS via rustls (ring), so
 # `rediss://` URLs work; webpki-roots ships the CA bundle so there's no system
