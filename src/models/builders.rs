@@ -1103,10 +1103,12 @@ with_value_setters!(PostgresCdcConfig { with_source_metadata => source_metadata:
 with_optional_string_setters!(PostgresCdcConfig { with_cursor_id => cursor_id });
 with_value_setters!(SqlxConfig { with_delete_after_read => delete_after_read: bool, with_auto_create_table => auto_create_table: bool, with_bulk_copy => bulk_copy: bool, with_create_publication => create_publication: bool, with_tls => tls: TlsConfig });
 with_optional_setters!(SqlxConfig { with_polling_interval_ms => polling_interval_ms: u64, with_max_polling_interval_ms => max_polling_interval_ms: u64, with_max_connections => max_connections: u32, with_min_connections => min_connections: u32, with_acquire_timeout_ms => acquire_timeout_ms: u64, with_idle_timeout_ms => idle_timeout_ms: u64, with_max_lifetime_ms => max_lifetime_ms: u64, with_test_before_acquire => test_before_acquire: bool, with_shared => shared: bool });
-with_optional_string_setters!(SqlxConfig { with_insert_query => insert_query, with_select_query => select_query, with_cursor_column => cursor_column, with_cursor_id => cursor_id, with_checkpoint_store => checkpoint_store, with_publication => publication, with_slot_name => slot_name });
-with_optional_string_setters!(ClickHouseConfig { with_database => database, with_cursor_column => cursor_column, with_cursor_id => cursor_id, with_checkpoint_store => checkpoint_store, with_select_columns => select_columns });
+with_optional_string_setters!(SqlxConfig { with_insert_query => insert_query, with_lookup_query => lookup_query, with_select_query => select_query, with_cursor_column => cursor_column, with_cursor_id => cursor_id, with_checkpoint_store => checkpoint_store, with_publication => publication, with_slot_name => slot_name });
+with_optional_string_setters!(ClickHouseConfig { with_database => database, with_lookup_query => lookup_query, with_cursor_column => cursor_column, with_cursor_id => cursor_id, with_checkpoint_store => checkpoint_store, with_select_columns => select_columns });
 with_value_setters!(ClickHouseConfig { with_async_insert => async_insert: bool, with_tls => tls: TlsConfig, with_compression => compression: Compression });
 with_optional_setters!(ClickHouseConfig { with_columns => columns: std::collections::BTreeMap<String, String>, with_wait_for_async_insert => wait_for_async_insert: bool, with_polling_interval_ms => polling_interval_ms: u64, with_max_polling_interval_ms => max_polling_interval_ms: u64, with_request_timeout_ms => request_timeout_ms: u64, with_connect_timeout_ms => connect_timeout_ms: u64 });
+with_optional_string_setters!(LookupMiddleware { with_into => into, with_payload => payload });
+with_value_setters!(LookupMiddleware { with_metadata => metadata: HashMap<String, String>, with_concurrency => concurrency: usize });
 with_value_setters!(TlsConfig { with_required => required: bool, with_accept_invalid_certs => accept_invalid_certs: bool });
 with_optional_string_setters!(TlsConfig { with_cert_password => cert_password });
 
@@ -1119,6 +1121,26 @@ impl DeduplicationMiddleware {
             ttl_seconds,
             key: None,
             replay_response: false,
+        }
+    }
+}
+
+impl LookupMiddleware {
+    /// Asks `from` about each message, e.g. `LookupMiddleware::new(EndpointType::Sqlx(db))`.
+    pub fn new(from: impl Into<Endpoint>) -> Self {
+        Self {
+            from: Some(from.into()),
+            concurrency: default_lookup_concurrency(),
+            ..Default::default()
+        }
+    }
+}
+
+impl ParallelMiddleware {
+    /// Runs the middlewares above it on up to `max_in_flight` batches at once.
+    pub fn new(max_in_flight: usize) -> Self {
+        Self {
+            max_in_flight: Some(max_in_flight),
         }
     }
 }

@@ -244,6 +244,12 @@ pub struct Endpoint {
     pub handler: Option<Arc<dyn Handler>>,
 }
 
+impl From<EndpointType> for Endpoint {
+    fn from(endpoint_type: EndpointType) -> Self {
+        Endpoint::new(endpoint_type)
+    }
+}
+
 // Not derived: a derived clone is `#[inline]` and was copied into every codegen unit.
 impl Clone for Endpoint {
     #[inline(never)]

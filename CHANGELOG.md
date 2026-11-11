@@ -2,6 +2,18 @@
 
 All notable changes to `mq-bridge`. Newest first.
 
+## Unreleased
+
+### Added
+
+- **Builders for a batched lookup route in code.** `LookupMiddleware::new(from)` with
+  `with_into`, `with_payload`, `with_metadata` and `with_concurrency`;
+  `ParallelMiddleware::new(max_in_flight)`; `Endpoint::with_lookup(…)` and
+  `Endpoint::with_parallel(n)`, which append in the order written; `with_lookup_query` on
+  `SqlxConfig` and `ClickHouseConfig`; and `From<EndpointType> for Endpoint`. A `Caller`
+  with a batched lookup no longer needs YAML or struct literals:
+  `Endpoint::new_memory("users", 4096).with_lookup(LookupMiddleware::new(EndpointType::Sqlx(db)).with_into("$")).with_parallel(16)`.
+
 ## 1.5.0
 
 ### Added

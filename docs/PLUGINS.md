@@ -230,7 +230,7 @@ without waiting for a new `mqb` release:
 MQB_PLUGIN_OVERRIDE=meilisearch mqb copy 'postgres://…/orders' 'meilisearch://localhost:7700?index=orders'
 
 # prefer an installed plugin for every built-in extension
-MQB_PLUGIN_OVERRIDE=1 mqb run -c config.yaml
+MQB_PLUGIN_OVERRIDE=1 mqb -c config.yaml
 ```
 
 The value is `1`, `true`, `yes`, `on` or `all` for every extension, or a
