@@ -22,7 +22,7 @@ trusted to stay inside the options it was given.
 flowchart LR
   H[Helpdesk webhook] -- "POST /tickets" --> B[mq-bridge route]
   B -- "chat completion" --> L[LLM]
-  L -- '{"team": "billing"}' --> B
+  L -- "{#quot;team#quot;: #quot;billing#quot;}" --> B
   B --> S1[(tickets.billing)]
   B --> S2[(tickets.technical)]
   B --> S3[(tickets.account)]

@@ -11,7 +11,7 @@ Explained in the book: [Classify and route messages with an LLM](https://marcomq
 flowchart LR
   H[Helpdesk webhook] -- "POST /tickets" --> B[mq-bridge]
   B -- "chat completion" --> L[Ollama]
-  L -- '{"team": "billing"}' --> B
+  L -- "{#quot;team#quot;: #quot;billing#quot;}" --> B
   B --> S1[(tickets.billing)]
   B --> S2[(tickets.technical)]
   B --> S3[(tickets.account)]
