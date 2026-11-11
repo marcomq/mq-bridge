@@ -8,6 +8,53 @@
 
 use super::*;
 
+/// `From<Config>` for `EndpointType` and `Endpoint`, so `LookupMiddleware::new(db)` takes a config.
+macro_rules! endpoint_from_config {
+    ($($variant:ident($config:ty)),* $(,)?) => {$(
+        impl From<$config> for EndpointType {
+            fn from(config: $config) -> Self {
+                EndpointType::$variant(config)
+            }
+        }
+
+        impl From<$config> for Endpoint {
+            fn from(config: $config) -> Self {
+                Endpoint::new(config.into())
+            }
+        }
+    )*};
+}
+
+endpoint_from_config!(
+    Aws(AwsConfig),
+    Kafka(KafkaConfig),
+    Nats(NatsConfig),
+    File(FileConfig),
+    DirSpool(DirSpoolConfig),
+    ObjectStore(ObjectStoreConfig),
+    Static(StaticConfig),
+    Memory(MemoryConfig),
+    Sled(SledConfig),
+    Amqp(AmqpConfig),
+    MongoDb(MongoDbConfig),
+    Mqtt(MqttConfig),
+    Http(HttpConfig),
+    WebSocket(WebSocketConfig),
+    IbmMq(IbmMqConfig),
+    ZeroMq(ZeroMqConfig),
+    RedisStreams(RedisStreamsConfig),
+    Grpc(GrpcConfig),
+    Sqlx(SqlxConfig),
+    ClickHouse(ClickHouseConfig),
+    HttpBulk(HttpBulkConfig),
+    PostgresCdc(PostgresCdcConfig),
+    Sequence(SequenceConfig),
+    StreamBuffer(StreamBufferConfig),
+    Switch(SwitchConfig),
+    Response(ResponseConfig),
+    Request(RequestForwardConfig),
+);
+
 macro_rules! with_value_setters {
     ($config:ty { $($method:ident => $field:ident: $value:ty),* $(,)? }) => {
         impl $config {
@@ -1109,6 +1156,8 @@ with_value_setters!(ClickHouseConfig { with_async_insert => async_insert: bool, 
 with_optional_setters!(ClickHouseConfig { with_columns => columns: std::collections::BTreeMap<String, String>, with_wait_for_async_insert => wait_for_async_insert: bool, with_polling_interval_ms => polling_interval_ms: u64, with_max_polling_interval_ms => max_polling_interval_ms: u64, with_request_timeout_ms => request_timeout_ms: u64, with_connect_timeout_ms => connect_timeout_ms: u64 });
 with_optional_string_setters!(LookupMiddleware { with_into => into, with_payload => payload });
 with_value_setters!(LookupMiddleware { with_metadata => metadata: HashMap<String, String>, with_concurrency => concurrency: usize });
+with_optional_string_setters!(LookupEntry { with_payload => payload });
+with_value_setters!(LookupEntry { with_metadata => metadata: HashMap<String, String> });
 with_value_setters!(TlsConfig { with_required => required: bool, with_accept_invalid_certs => accept_invalid_certs: bool });
 with_optional_string_setters!(TlsConfig { with_cert_password => cert_password });
 
@@ -1126,12 +1175,30 @@ impl DeduplicationMiddleware {
 }
 
 impl LookupMiddleware {
-    /// Asks `from` about each message, e.g. `LookupMiddleware::new(EndpointType::Sqlx(db))`.
+    /// Asks `from` about each message, e.g. `LookupMiddleware::new(db)` with a `SqlxConfig`.
     pub fn new(from: impl Into<Endpoint>) -> Self {
         Self {
             from: Some(from.into()),
             concurrency: default_lookup_concurrency(),
             ..Default::default()
+        }
+    }
+
+    /// Adds a further lookup that runs in parallel with `from` and writes to its own `into`.
+    pub fn with_entry(mut self, entry: LookupEntry) -> Self {
+        self.entries.push(entry);
+        self
+    }
+}
+
+impl LookupEntry {
+    /// Asks `from` about each message and writes the response to the payload path `into`.
+    pub fn new(from: impl Into<Endpoint>, into: impl Into<String>) -> Self {
+        Self {
+            from: from.into(),
+            metadata: HashMap::new(),
+            payload: None,
+            into: into.into(),
         }
     }
 }

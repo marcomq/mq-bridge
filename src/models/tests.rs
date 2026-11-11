@@ -1420,7 +1420,7 @@ mod builder_tests {
             .with_lookup_query(query)
             .with_max_connections(8);
         let built = Endpoint::new_memory("users", 4096)
-            .with_lookup(LookupMiddleware::new(EndpointType::Sqlx(db)).with_into("$"))
+            .with_lookup(LookupMiddleware::new(db).with_into("$"))
             .with_parallel(16);
         let parsed: Endpoint = serde_json::from_value(serde_json::json!({
             "memory": { "topic": "users", "capacity": 4096 },
@@ -1431,6 +1431,25 @@ mod builder_tests {
                     "into": "$" } },
                 { "parallel": { "max_in_flight": 16 } }
             ]
+        }))
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(&built).unwrap(),
+            serde_json::to_value(&parsed).unwrap()
+        );
+    }
+
+    #[test]
+    fn lookup_entry_builders_match_the_config_form() {
+        let users = Endpoint::new_memory("users", 10);
+        let prices = Endpoint::new_memory("prices", 10);
+        let built = LookupMiddleware::new(users.clone())
+            .with_into("user")
+            .with_entry(LookupEntry::new(prices.clone(), "price").with_payload("${payload:sku}"));
+        let parsed: LookupMiddleware = serde_json::from_value(serde_json::json!({
+            "from": users,
+            "into": "user",
+            "entries": [{ "from": prices, "into": "price", "payload": "${payload:sku}" }]
         }))
         .unwrap();
         assert_eq!(

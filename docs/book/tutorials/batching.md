@@ -67,16 +67,18 @@ let user: User = users.call([("path", &key)]).await?;   // Option<User> if it ma
 The same route, built in code:
 
 ```rust
-use mq_bridge::models::{Endpoint, EndpointType, LookupMiddleware, SqlxConfig};
-use mq_bridge::{Caller, Route};
+use mq_bridge::models::{LookupMiddleware, SqlxConfig};
+use mq_bridge::Caller;
 
 let db = SqlxConfig::new("postgres://localhost/app", "users")
     .with_lookup_query("SELECT path, id, name, tier FROM users WHERE path IN (${payload:path})")
     .with_max_connections(8);
-let input = Endpoint::new_memory("users", 4096)
-    .with_lookup(LookupMiddleware::new(EndpointType::Sqlx(db)).with_into("$"))
-    .with_parallel(16);
-let users = Caller::deploy("users", Route::new(input, Endpoint::new_response()).with_batch_size(256)).await?;
+let users = Caller::builder("users")
+    .with_lookup(LookupMiddleware::new(db).with_into("$"))
+    .with_parallel(16)
+    .with_batch_size(256)
+    .deploy()
+    .await?;
 ```
 
 - `batch_size` is a ceiling. A batch holds the calls that are waiting, never more than that.
