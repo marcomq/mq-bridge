@@ -12,6 +12,7 @@
 # Using the library
 - [Embed the library (Rust/Python/Node)](tutorials/embedding.md)
 - [Request / reply](tutorials/request-reply.md)
+- [Batching lookups behind one call](tutorials/batching.md)
 - [Language bindings API](reference/bindings.md)
 
 # Using the app
