@@ -281,6 +281,12 @@ mq-bridge = { version = "1", default-features = false, features = ["plugin"] }
 mq_bridge::plugin::load_endpoint_plugins("/opt/app/libmq_bridge_full.so")?;
 ```
 
+For an even smaller tree, pin `idna_adapter = "=1.0.0"` in the application's own
+`[dependencies]`. `url` then skips the ICU Unicode tables: 81 crates instead of 99
+for mq-bridge 1.5 without default features. Host names in URLs must then be ASCII
+(or already punycode). mq-bridge does not pin this itself, because it would apply to
+every crate in your build that parses URLs.
+
 Routes are written as usual (`kafka:`, `file:`, `sqlx:`, not `custom:`). An
 endpoint the host has a feature for is built by the host; any other is built by
 the factory registered under its name, and without one the route fails with
