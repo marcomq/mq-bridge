@@ -259,7 +259,7 @@ zeromq = { version = "0.7", optional = true }
 # Default ZeroMQ backend (`backend: try_omq`). Faster than libzmq per its
 # benchmarks and adds CURVE/PLAIN security. Pure Rust without default
 # features; needs MSRV 1.93 / edition 2024.
-omq-tokio = { version = "0.34", optional = true }
+omq-tokio = { version = "0.35", optional = true }
 
 # Redis Streams. Pure-Rust client (no C bindings). TLS via rustls (ring), so
 # `rediss://` URLs work; webpki-roots ships the CA bundle so there's no system
