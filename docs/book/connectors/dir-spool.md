@@ -96,7 +96,7 @@ naming, not parsing behavior.
 Use a record-oriented connector when records must be framed:
 
 - The [file connector](./file.md) reads or writes one named file, for example
-  `file:///data/orders.jsonl?format=json` or `file:///data/orders.csv?format=csv`.
+  `file:///data/orders.jsonl?format=raw` or `file:///data/orders.csv?format=csv`.
 - Local [object storage](./object-store.md) watches a directory of immutable,
   multi-record files, making it a better fit for CSV/JSONL ETL drop zones.
 - Sending either source to a directory spool creates one chunk per emitted
@@ -114,7 +114,7 @@ one-message chunk format.
 
 ```bash
 mqb copy --drain \
-  --from file:///data/orders.jsonl?format=json \
+  --from file:///data/orders.jsonl?format=raw \
   --to 'dir-spool:///var/spool/orders?emit_done=success'
 ```
 

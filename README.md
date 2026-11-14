@@ -229,6 +229,8 @@ A minor release may add a configuration field, a variant of a configuration or e
 
 The minimum Rust version is 1.89. The features `aws`, `sqlx` and `postgres-cdc`, and so `full`, need 1.94.1; `zeromq-omq` needs 1.93.
 
+Without default features the crate pulls 99 crates; pinning `idna_adapter = "=1.0.0"` in your own `Cargo.toml` drops that to 81 (ASCII-only host names in URLs). Endpoints you don't compile in can come from the prebuilt full plugin at runtime, see [PLUGINS.md](docs/PLUGINS.md#all-built-in-endpoints-as-one-plugin).
+
 ## Running Tests
 The project includes integration and performance tests. Most backend tests require Docker.
 

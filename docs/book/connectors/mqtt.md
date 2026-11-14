@@ -36,7 +36,7 @@ mqb copy \
 
 ```bash
 mqb copy --drain \
-  --from file:///data/events.jsonl?format=json \
+  --from file:///data/events.jsonl?format=raw \
   --to mqtts://user:pass@broker.local:8883?topic=events
 ```
 

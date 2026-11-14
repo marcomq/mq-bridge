@@ -1409,3 +1409,52 @@ fn debug_of_http_bulk_auth_hides_its_secrets() {
     assert!(!printed.contains("hunter"), "{printed}");
     assert!(printed.contains("client_id: \"app\"") && printed.contains("session_token: None"));
 }
+
+mod builder_tests {
+    use super::*;
+
+    #[test]
+    fn lookup_and_parallel_builders_match_the_config_form() {
+        let query = "SELECT path, name FROM users WHERE path IN (${payload:path})";
+        let db = SqlxConfig::new("postgres://localhost/app", "users")
+            .with_lookup_query(query)
+            .with_max_connections(8);
+        let built = Endpoint::new_memory("users", 4096)
+            .with_lookup(LookupMiddleware::new(db).with_into("$"))
+            .with_parallel(16);
+        let parsed: Endpoint = serde_json::from_value(serde_json::json!({
+            "memory": { "topic": "users", "capacity": 4096 },
+            "middlewares": [
+                { "lookup": {
+                    "from": { "sqlx": { "url": "postgres://localhost/app", "table": "users",
+                                        "max_connections": 8, "lookup_query": query } },
+                    "into": "$" } },
+                { "parallel": { "max_in_flight": 16 } }
+            ]
+        }))
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(&built).unwrap(),
+            serde_json::to_value(&parsed).unwrap()
+        );
+    }
+
+    #[test]
+    fn lookup_entry_builders_match_the_config_form() {
+        let users = Endpoint::new_memory("users", 10);
+        let prices = Endpoint::new_memory("prices", 10);
+        let built = LookupMiddleware::new(users.clone())
+            .with_into("user")
+            .with_entry(LookupEntry::new(prices.clone(), "price").with_payload("${payload:sku}"));
+        let parsed: LookupMiddleware = serde_json::from_value(serde_json::json!({
+            "from": users,
+            "into": "user",
+            "entries": [{ "from": prices, "into": "price", "payload": "${payload:sku}" }]
+        }))
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(&built).unwrap(),
+            serde_json::to_value(&parsed).unwrap()
+        );
+    }
+}

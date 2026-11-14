@@ -8,6 +8,53 @@
 
 use super::*;
 
+/// `From<Config>` for `EndpointType` and `Endpoint`, so `LookupMiddleware::new(db)` takes a config.
+macro_rules! endpoint_from_config {
+    ($($variant:ident($config:ty)),* $(,)?) => {$(
+        impl From<$config> for EndpointType {
+            fn from(config: $config) -> Self {
+                EndpointType::$variant(config)
+            }
+        }
+
+        impl From<$config> for Endpoint {
+            fn from(config: $config) -> Self {
+                Endpoint::new(config.into())
+            }
+        }
+    )*};
+}
+
+endpoint_from_config!(
+    Aws(AwsConfig),
+    Kafka(KafkaConfig),
+    Nats(NatsConfig),
+    File(FileConfig),
+    DirSpool(DirSpoolConfig),
+    ObjectStore(ObjectStoreConfig),
+    Static(StaticConfig),
+    Memory(MemoryConfig),
+    Sled(SledConfig),
+    Amqp(AmqpConfig),
+    MongoDb(MongoDbConfig),
+    Mqtt(MqttConfig),
+    Http(HttpConfig),
+    WebSocket(WebSocketConfig),
+    IbmMq(IbmMqConfig),
+    ZeroMq(ZeroMqConfig),
+    RedisStreams(RedisStreamsConfig),
+    Grpc(GrpcConfig),
+    Sqlx(SqlxConfig),
+    ClickHouse(ClickHouseConfig),
+    HttpBulk(HttpBulkConfig),
+    PostgresCdc(PostgresCdcConfig),
+    Sequence(SequenceConfig),
+    StreamBuffer(StreamBufferConfig),
+    Switch(SwitchConfig),
+    Response(ResponseConfig),
+    Request(RequestForwardConfig),
+);
+
 macro_rules! with_value_setters {
     ($config:ty { $($method:ident => $field:ident: $value:ty),* $(,)? }) => {
         impl $config {
@@ -1102,11 +1149,15 @@ with_value_setters!(RequestForwardConfig { with_to => to: Box<Endpoint>, with_fo
 with_value_setters!(PostgresCdcConfig { with_source_metadata => source_metadata: bool, with_create_slot => create_slot: bool, with_create_publication => create_publication: bool, with_publication_tables => publication_tables: Vec<String>, with_temporary_slot => temporary_slot: bool, with_status_interval_ms => status_interval_ms: u64, with_tls => tls: TlsConfig });
 with_optional_string_setters!(PostgresCdcConfig { with_cursor_id => cursor_id });
 with_value_setters!(SqlxConfig { with_delete_after_read => delete_after_read: bool, with_auto_create_table => auto_create_table: bool, with_bulk_copy => bulk_copy: bool, with_create_publication => create_publication: bool, with_tls => tls: TlsConfig });
-with_optional_setters!(SqlxConfig { with_polling_interval_ms => polling_interval_ms: u64, with_max_polling_interval_ms => max_polling_interval_ms: u64, with_max_connections => max_connections: u32, with_min_connections => min_connections: u32, with_acquire_timeout_ms => acquire_timeout_ms: u64, with_idle_timeout_ms => idle_timeout_ms: u64, with_max_lifetime_ms => max_lifetime_ms: u64, with_test_before_acquire => test_before_acquire: bool, with_shared => shared: bool });
-with_optional_string_setters!(SqlxConfig { with_insert_query => insert_query, with_select_query => select_query, with_cursor_column => cursor_column, with_cursor_id => cursor_id, with_checkpoint_store => checkpoint_store, with_publication => publication, with_slot_name => slot_name });
-with_optional_string_setters!(ClickHouseConfig { with_database => database, with_cursor_column => cursor_column, with_cursor_id => cursor_id, with_checkpoint_store => checkpoint_store, with_select_columns => select_columns });
+with_optional_setters!(SqlxConfig { with_load_mode => load_mode: SqlLoadMode, with_polling_interval_ms => polling_interval_ms: u64, with_max_polling_interval_ms => max_polling_interval_ms: u64, with_max_connections => max_connections: u32, with_min_connections => min_connections: u32, with_acquire_timeout_ms => acquire_timeout_ms: u64, with_idle_timeout_ms => idle_timeout_ms: u64, with_max_lifetime_ms => max_lifetime_ms: u64, with_test_before_acquire => test_before_acquire: bool, with_shared => shared: bool });
+with_optional_string_setters!(SqlxConfig { with_insert_query => insert_query, with_lookup_query => lookup_query, with_select_query => select_query, with_cursor_column => cursor_column, with_cursor_id => cursor_id, with_checkpoint_store => checkpoint_store, with_publication => publication, with_slot_name => slot_name });
+with_optional_string_setters!(ClickHouseConfig { with_database => database, with_lookup_query => lookup_query, with_cursor_column => cursor_column, with_cursor_id => cursor_id, with_checkpoint_store => checkpoint_store, with_select_columns => select_columns });
 with_value_setters!(ClickHouseConfig { with_async_insert => async_insert: bool, with_tls => tls: TlsConfig, with_compression => compression: Compression });
 with_optional_setters!(ClickHouseConfig { with_columns => columns: std::collections::BTreeMap<String, String>, with_wait_for_async_insert => wait_for_async_insert: bool, with_polling_interval_ms => polling_interval_ms: u64, with_max_polling_interval_ms => max_polling_interval_ms: u64, with_request_timeout_ms => request_timeout_ms: u64, with_connect_timeout_ms => connect_timeout_ms: u64 });
+with_optional_string_setters!(LookupMiddleware { with_into => into, with_payload => payload });
+with_value_setters!(LookupMiddleware { with_metadata => metadata: HashMap<String, String>, with_concurrency => concurrency: usize });
+with_optional_string_setters!(LookupEntry { with_payload => payload });
+with_value_setters!(LookupEntry { with_metadata => metadata: HashMap<String, String> });
 with_value_setters!(TlsConfig { with_required => required: bool, with_accept_invalid_certs => accept_invalid_certs: bool });
 with_optional_string_setters!(TlsConfig { with_cert_password => cert_password });
 
@@ -1119,6 +1170,44 @@ impl DeduplicationMiddleware {
             ttl_seconds,
             key: None,
             replay_response: false,
+        }
+    }
+}
+
+impl LookupMiddleware {
+    /// Asks `from` about each message, e.g. `LookupMiddleware::new(db)` with a `SqlxConfig`.
+    pub fn new(from: impl Into<Endpoint>) -> Self {
+        Self {
+            from: Some(from.into()),
+            concurrency: default_lookup_concurrency(),
+            ..Default::default()
+        }
+    }
+
+    /// Adds a further lookup that runs in parallel with `from` and writes to its own `into`.
+    pub fn with_entry(mut self, entry: LookupEntry) -> Self {
+        self.entries.push(entry);
+        self
+    }
+}
+
+impl LookupEntry {
+    /// Asks `from` about each message and writes the response to the payload path `into`.
+    pub fn new(from: impl Into<Endpoint>, into: impl Into<String>) -> Self {
+        Self {
+            from: from.into(),
+            metadata: HashMap::new(),
+            payload: None,
+            into: into.into(),
+        }
+    }
+}
+
+impl ParallelMiddleware {
+    /// Runs the middlewares above it on up to `max_in_flight` batches at once.
+    pub fn new(max_in_flight: usize) -> Self {
+        Self {
+            max_in_flight: Some(max_in_flight),
         }
     }
 }

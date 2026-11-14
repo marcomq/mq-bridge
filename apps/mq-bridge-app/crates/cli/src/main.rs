@@ -436,6 +436,20 @@ struct CopyArgs {
     #[arg(long, value_name = "SECS")]
     wait: Option<u64>,
 
+    /// Load a SQL destination as one unit, committed when the copy completes:
+    /// `atomic_append` adds the rows, `replace` first deletes the old ones.
+    ///
+    /// Readers keep seeing the old rows until then, and a failed or interrupted
+    /// copy leaves the table unchanged. Implies `--drain`; the same as
+    /// `?load_mode=` on the destination URI.
+    #[arg(
+        long,
+        value_name = "MODE",
+        value_parser = parse_load_mode,
+        conflicts_with = "resume"
+    )]
+    load_mode: Option<mq_bridge::models::SqlLoadMode>,
+
     /// Route concurrency (defaults to 4).
     #[arg(long)]
     concurrency: Option<usize>,
@@ -1085,7 +1099,12 @@ enum StopWhen {
 /// `--wait` is long polling over a drain: it governs only how long we look for
 /// the first message, so it implies `--drain` rather than competing with it.
 fn drains(args: &CopyArgs) -> bool {
-    args.drain || args.wait.is_some()
+    args.drain || args.wait.is_some() || args.load_mode.is_some()
+}
+
+fn parse_load_mode(value: &str) -> Result<mq_bridge::models::SqlLoadMode, String> {
+    serde_json::from_value(serde_json::Value::from(value))
+        .map_err(|_| format!("expected `atomic_append` or `replace`, got `{value}`"))
 }
 
 /// Runs the `agent-listen` subcommand: holds this machine's agent inbox open
@@ -1134,6 +1153,7 @@ async fn run_agent_listen(args: AgentListenArgs) -> anyhow::Result<()> {
             // inbox open and stops at the first delivery instead.
             drain: take_queued_only,
             wait: Some(args.wait),
+            load_mode: None,
             concurrency: Some(1),
             batch_size: None,
             verbose: args.verbose,
@@ -1190,7 +1210,10 @@ async fn run_copy(args: CopyArgs, stop_when: StopWhen) -> anyhow::Result<()> {
     use mq_bridge::route::RouteOutcome;
 
     let (from, to) = copy_endpoints(&args)?;
-    let (mut input, output) = copy_route_endpoints(from, to)?;
+    let (mut input, mut output) = copy_route_endpoints(from, to)?;
+    if let Some(mode) = args.load_mode {
+        copy_pipeline::configure_load_mode(&mut output, mode)?;
+    }
     warn_about_surprising_copy(&input, &output);
     let copy_id = copy_pipeline::checkpoint_identity(&input, &output, args.filter.as_deref())?;
     let resume = if args.resume {
@@ -1222,7 +1245,9 @@ async fn run_copy(args: CopyArgs, stop_when: StopWhen) -> anyhow::Result<()> {
     // `FirstMessage` deliberately does not drain: a drained route releases the
     // source, and reacquiring it between polls is what opens the window a second
     // listener can slip through.
-    let drain = drains(&args) && stop_when == StopWhen::SourceDrained;
+    // A load commits when the drain completes, so `?load_mode=` drains like `--load-mode`.
+    let atomic_load = copy_pipeline::loads_atomically(&output);
+    let drain = (drains(&args) || atomic_load) && stop_when == StopWhen::SourceDrained;
     let options = RouteOptions {
         concurrency: args.concurrency.unwrap_or(DEFAULT_CONCURRENCY),
         batch_size: args
@@ -1354,6 +1379,12 @@ async fn run_copy(args: CopyArgs, stop_when: StopWhen) -> anyhow::Result<()> {
         // settled outcome; a healthy one reports the same `Stopped` either way.
         if outcome.is_none() {
             let settled = stop_and_settle(&handle).await;
+            if atomic_load && matches!(settled, Some(RouteOutcome::Stopped) | None) {
+                anyhow::bail!(
+                    "copy interrupted: the load was rolled back, the table is unchanged (read {})",
+                    throughput(&copied, &read, started).rows_display()
+                );
+            }
             return copy_result(
                 settled,
                 handle.status().error,

@@ -13,7 +13,6 @@
 //! `lookup` queries once for all of them.
 //!
 //! ```no_run
-//! use mq_bridge::models::Endpoint;
 //! use mq_bridge::Caller;
 //!
 //! #[derive(serde::Deserialize)]
@@ -27,8 +26,8 @@
 //! let found: Vec<anyhow::Result<Option<User>>> =
 //!     users.call_many([[("path", "/u/7")], [("path", "/u/8")]]).await;
 //!
-//! // Or built in code: the caller adds the memory input itself.
-//! let echo = Caller::new("echo", Endpoint::new_response()).await?;
+//! // Or built in code: the caller adds the memory input and the answering output itself.
+//! let echo = Caller::builder("echo").with_batch_size(64).deploy().await?;
 //! assert_eq!(echo.call_message("hi".into()).await?.get_payload_str(), "hi");
 //! # Ok(())
 //! # }
@@ -161,13 +160,22 @@ impl Caller {
     }
 
     /// Deploys a route from an internal memory topic to `output` and returns its caller.
-    /// Use [`Caller::deploy`] for a handler, input middlewares or route options.
+    /// Use [`Caller::builder`] for a handler, input middlewares or route options.
     pub async fn new(name: &str, output: Endpoint) -> anyhow::Result<Self> {
+        Self::builder(name).with_output(output).deploy().await
+    }
+
+    /// Starts a caller route that reads from an internal memory topic and answers with the
+    /// message; add middlewares and options, then [`CallerBuilder::deploy`].
+    pub fn builder(name: &str) -> CallerBuilder {
         let input = Endpoint::new(EndpointType::Memory(MemoryConfig {
             topic: default_topic(name),
             ..Default::default()
         }));
-        Self::deploy(name, Route::new(input, output)).await
+        CallerBuilder {
+            name: name.to_string(),
+            route: Route::new(input, Endpoint::new_response()),
+        }
     }
 
     /// Deploys the route `name` from a YAML or JSON config file (a `routes:` document, a
@@ -333,6 +341,84 @@ impl Caller {
             .unwrap_or_else(PoisonError::into_inner)
             .remove(&self.name);
         Route::stop(&self.name).await
+    }
+}
+
+/// A caller route under construction, from [`Caller::builder`]. Middlewares go on its
+/// input, in the order written; the output answers with the message unless replaced.
+#[derive(Debug)]
+#[must_use = "a CallerBuilder does nothing until `deploy` is awaited"]
+pub struct CallerBuilder {
+    name: String,
+    route: Route,
+}
+
+impl CallerBuilder {
+    fn memory_input(&mut self) -> &mut MemoryConfig {
+        match &mut self.route.input.endpoint_type {
+            EndpointType::Memory(config) => config,
+            _ => unreachable!("Caller::builder always reads from a memory input"),
+        }
+    }
+
+    /// How long a call waits for its answer before it fails; defaults to 30 s.
+    pub fn with_request_timeout_ms(mut self, timeout_ms: u64) -> Self {
+        self.memory_input().request_timeout_ms = Some(timeout_ms);
+        self
+    }
+
+    /// How many calls may wait to be read; defaults to 4,096.
+    pub fn with_capacity(mut self, capacity: usize) -> Self {
+        self.memory_input().capacity = Some(capacity);
+        self
+    }
+
+    /// How many batches the route sends to its output at once; see [`Route::with_concurrency`].
+    pub fn with_concurrency(mut self, concurrency: usize) -> Self {
+        self.route = self.route.with_concurrency(concurrency);
+        self
+    }
+
+    /// Appends a `lookup` to the input; see [`Endpoint::with_lookup`].
+    pub fn with_lookup(mut self, lookup: crate::models::LookupMiddleware) -> Self {
+        self.route.input = self.route.input.with_lookup(lookup);
+        self
+    }
+
+    /// Appends `parallel` to the input: the middlewares before it run on up to
+    /// `max_in_flight` batches at once.
+    pub fn with_parallel(mut self, max_in_flight: usize) -> Self {
+        self.route.input = self.route.input.with_parallel(max_in_flight);
+        self
+    }
+
+    /// Appends any middleware to the input.
+    pub fn add_middleware(mut self, middleware: crate::models::Middleware) -> Self {
+        self.route.input = self.route.input.add_middleware(middleware);
+        self
+    }
+
+    /// The most calls read as one batch; see [`Route::with_batch_size`].
+    pub fn with_batch_size(mut self, batch_size: usize) -> Self {
+        self.route = self.route.with_batch_size(batch_size);
+        self
+    }
+
+    /// Runs `handler` on each message before the output.
+    pub fn with_handler(mut self, handler: impl crate::traits::Handler + 'static) -> Self {
+        self.route = self.route.with_handler(handler);
+        self
+    }
+
+    /// Replaces the answering `response` output, e.g. with an endpoint that replies itself.
+    pub fn with_output(mut self, output: Endpoint) -> Self {
+        self.route.output = output;
+        self
+    }
+
+    /// Deploys the route and returns its caller; see [`Caller::deploy`].
+    pub async fn deploy(self) -> anyhow::Result<Caller> {
+        Caller::deploy(&self.name, self.route).await
     }
 }
 
@@ -524,6 +610,48 @@ mod tests {
             answer,
             serde_json::json!({"id": 7, "customer": {"tier": "gold"}})
         );
+        caller.stop().await;
+    }
+
+    #[tokio::test]
+    async fn a_built_caller_enriches_with_lookup_and_answers() {
+        let tier: Endpoint = serde_json::from_value(serde_json::json!(
+            { "static": { "body": r#"{"tier":"gold"}"#, "raw": true } }
+        ))
+        .unwrap();
+        let caller = Caller::builder(&unique("caller_built"))
+            .with_lookup(crate::models::LookupMiddleware::new(tier).with_into("customer"))
+            .with_parallel(4)
+            .with_batch_size(16)
+            .deploy()
+            .await
+            .unwrap();
+        let answers: Vec<anyhow::Result<serde_json::Value>> =
+            caller.call_many([[("id", 7)], [("id", 8)]]).await;
+        for (answer, id) in answers.into_iter().zip([7, 8]) {
+            assert_eq!(
+                answer.unwrap(),
+                serde_json::json!({"id": id, "customer": {"tier": "gold"}})
+            );
+        }
+        caller.stop().await;
+    }
+
+    #[tokio::test]
+    async fn a_built_caller_times_out_after_its_request_timeout() {
+        let caller = Caller::builder(&unique("caller_timeout"))
+            .with_request_timeout_ms(50)
+            .with_capacity(8)
+            .with_handler(|msg: CanonicalMessage| async move {
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                Ok(Handled::Publish(msg))
+            })
+            .deploy()
+            .await
+            .unwrap();
+        let started = std::time::Instant::now();
+        assert!(caller.call_message("slow".into()).await.is_err());
+        assert!(started.elapsed() < std::time::Duration::from_millis(250));
         caller.stop().await;
     }
 

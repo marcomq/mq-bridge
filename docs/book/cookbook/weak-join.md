@@ -32,7 +32,7 @@ Set `branch_by` to wait for **named** branches (e.g. one message from `inventory
 From the `copy` CLI, object/array fields take a JSON literal:
 
 ```bash
---from '...|weak-join?group_by=cid&expected_count=2&timeout_ms=1000&required=["inventory","pricing"]'
+--from '...|weak-join?group_by=cid&branch_by=source&timeout_ms=1000&required=["inventory","pricing"]'
 ```
 
 ## On timeout

@@ -21,6 +21,7 @@ Query parameters recognised as config fields for this connector. The object-type
 | `idle_timeout_ms` | integer | no | — | Maximum idle time for a connection in milliseconds. Defaults to 600000ms (10 minutes). |
 | `insert_query` | string | no | — | (Publisher only) Optional. A custom SQL INSERT query. Use `?` as a placeholder for the payload. If not provided, a default `INSERT INTO {table} (payload) VALUES (?)` is used.  For multi-column inserts, embed explicit source tokens directly in the query: `${metadata:<key>}` binds `message.metadata["<key>"]`, and `${payload:<field>}` binds the top-level JSON field `<field>` of the payload (types preserved: numbers/bools stay numeric/bool). There is no fallback between the two: an absent metadata key, non-JSON payload, or missing/non-scalar field binds SQL NULL. Example: `INSERT INTO orders (customer_id, sku, qty) VALUES (${metadata:customer_id}, ${payload:sku}, ${payload:qty})`. A query with no `${...}` tokens behaves exactly as before (whole payload bound once). `auto_create_table` is not supported together with a token-based query.  Tokens bind as text/number/bool; Postgres won't implicitly cast text into a `numeric`/`timestamptz` column (these arrive as JSON strings from a sql source). Add an explicit cast next to the token — it is preserved verbatim in the SQL: `VALUES (${payload:amount}::numeric, ${payload:created_at}::timestamptz)`. |
 | `key` | string | no | — | (Publisher only, with `columns`) Key column(s), comma-separated: a row with the same key is updated, not inserted again. |
+| `load_mode` | `atomic_append` \| `replace` | no | — | (Publisher only, drain routes) `atomic_append` or `replace`: commit the whole drain at its end; readers see the old rows until then. |
 | `lookup_query` | string | no | — | (Publisher only) SELECT for `lookup`, answering with the first row. Write `WHERE id IN (${payload:id})` to answer a whole batch in one query, matching rows by `id`. |
 | `max_connections` | integer | no | — | Maximum number of connections in the pool. Defaults to 10. |
 | `max_lifetime_ms` | integer | no | — | Maximum lifetime of a connection in milliseconds. Defaults to 1800000ms (30 minutes). |
@@ -49,6 +50,10 @@ TLS configuration for secure connections.
 Configures Transport Layer Security (TLS/SSL) for encrypted communication.
 Supports both client certificate (mutual TLS) and server certificate validation.
 
+`ca_file` also takes `"$.os"` (the operating system's CA store) or `"$.bundled"` (the
+Mozilla roots built into mq-bridge). Which endpoint supports which, and what it trusts
+without `ca_file`, is in the TLS section of the configuration guide.
+
 #### Examples
 
 ```rust
@@ -67,7 +72,7 @@ let tls = TlsConfig {
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
 | `accept_invalid_certs` | boolean | no | `false` | If true, disable server certificate verification (insecure). |
-| `ca_file` | string | no | — | Path to the CA certificate file. |
+| `ca_file` | string | no | — | Path to the CA certificate file, or `$.os` (OS CA store) or `$.bundled` (built-in public roots). |
 | `cert_file` | string | no | — | Path to the client certificate file (PEM). |
 | `cert_password` | string | no | — | Password for the private key (if encrypted). |
 | `key_file` | string | no | — | Path to the client private key file (PEM). |

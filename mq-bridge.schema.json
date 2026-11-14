@@ -4683,6 +4683,17 @@
           "type": "boolean",
           "default": false
         },
+        "load_mode": {
+          "description": "(Publisher only, drain routes) `atomic_append` or `replace`: commit the whole drain at its end; readers see the old rows until then.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SqlLoadMode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "polling_interval_ms": {
           "description": "(Consumer only) Polling interval in milliseconds. Defaults to 100ms.",
           "type": [
@@ -4815,6 +4826,21 @@
           "description": "Each top-level JSON field goes into the table column of the same name.",
           "type": "string",
           "const": "auto"
+        }
+      ]
+    },
+    "SqlLoadMode": {
+      "description": "How a SQL sink commits a drain: all of it at the end, instead of batch by batch.",
+      "oneOf": [
+        {
+          "description": "One transaction for the whole drain, committed when it completes.",
+          "type": "string",
+          "const": "atomic_append"
+        },
+        {
+          "description": "As `atomic_append`, after deleting the old rows; an empty source leaves the table as it was.",
+          "type": "string",
+          "const": "replace"
         }
       ]
     },

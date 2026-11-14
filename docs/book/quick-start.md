@@ -19,7 +19,7 @@ running as a continuous bridge (see
 The common copy controls are deliberately small:
 
 ```text
-mqb copy SOURCE TARGET [--filter EXPR] [--resume | --no-resume] [--drain] [--wait SECS]
+mqb copy SOURCE TARGET [--filter EXPR] [--resume | --no-resume] [--drain] [--wait SECS] [--load-mode MODE]
 ```
 
 `--filter` evaluates a readable expression against each top-level JSON payload,
@@ -150,13 +150,20 @@ Each retry is a fresh connection, roughly four a second. That is free for a spoo
 or a file, but a long `--wait` against a broker or a database reconnects thousands
 of times; prefer a short wait there, or a continuous bridge.
 
+`--load-mode atomic_append|replace` loads a SQL destination as one transaction: readers see
+the old rows until the drain completes, and a failed copy leaves the table unchanged. It
+implies `--drain`; see [Loading as one unit](./connectors/postgres.md#loading-as-one-unit).
+
 ## Escape hatch: driver options and full connection strings
 
-Any query parameter that isn't a recognised config field (e.g. `sslmode`,
-`replicaSet`) is left on the connection URL untouched, so driver-specific
-options just work — including object-typed fields like `tls`, which can
-never be set from a single scalar query param and so always stays on the URL
-(e.g. `mongodb://host/?tls=true&database=appdb` passes `tls=true` straight
+For connectors whose driver reads options from the URL (PostgreSQL, MySQL, SQLite,
+MongoDB, ClickHouse, AMQP, Redis, HTTP, WebSocket), any query parameter that isn't a
+recognised config field (e.g. `sslmode`, `replicaSet`) is left on the connection URL
+untouched, so driver-specific options just work. The others (Kafka, NATS, MQTT, files,
+object storage, …) reject an unknown parameter instead; `mqb describe <scheme>` says
+which applies. An object-typed field such as `tls` takes a JSON literal
+(`?tls={...}`); on a pass-through connector, a plain scalar for it stays on the URL
+instead (e.g. `mongodb://host/?tls=true&database=appdb` passes `tls=true` straight
 through to the MongoDB driver). If you already have a complete connection
 string (copied from elsewhere, or one whose own options would otherwise be
 mis-parsed as config), skip decomposition entirely and pass it verbatim with

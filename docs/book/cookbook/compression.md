@@ -93,11 +93,11 @@ be read back. Verified round trip:
 
 ```bash
 mqb copy --drain \
-  --from 'file:///tmp/in.jsonl?format=json' \
+  --from 'file:///tmp/in.jsonl?format=raw' \
   --to   'file:///tmp/packed.bin?format=normal|compression?algorithm=zstd'
 mqb copy --drain \
   --from 'file:///tmp/packed.bin?format=normal|compression?algorithm=zstd' \
-  --to   'file:///tmp/out.jsonl?format=json'
+  --to   'file:///tmp/out.jsonl?format=raw'
 ```
 
 ## Compression *and* encryption

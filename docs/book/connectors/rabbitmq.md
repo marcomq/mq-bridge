@@ -39,7 +39,7 @@ mqb copy \
 
 ```bash
 mqb copy --drain \
-  --from file:///data/events.jsonl?format=json \
+  --from file:///data/events.jsonl?format=raw \
   --to 'amqp://guest:guest@localhost:5672/%2f?exchange=events&queue=events'
 ```
 

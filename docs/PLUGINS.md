@@ -230,7 +230,7 @@ without waiting for a new `mqb` release:
 MQB_PLUGIN_OVERRIDE=meilisearch mqb copy 'postgres://…/orders' 'meilisearch://localhost:7700?index=orders'
 
 # prefer an installed plugin for every built-in extension
-MQB_PLUGIN_OVERRIDE=1 mqb run -c config.yaml
+MQB_PLUGIN_OVERRIDE=1 mqb -c config.yaml
 ```
 
 The value is `1`, `true`, `yes`, `on` or `all` for every extension, or a
@@ -280,6 +280,12 @@ mq-bridge = { version = "1", default-features = false, features = ["plugin"] }
 ```rust,ignore
 mq_bridge::plugin::load_endpoint_plugins("/opt/app/libmq_bridge_full.so")?;
 ```
+
+For an even smaller tree, pin `idna_adapter = "=1.0.0"` in the application's own
+`[dependencies]`. `url` then skips the ICU Unicode tables: 81 crates instead of 99
+for mq-bridge 1.5 without default features. Host names in URLs must then be ASCII
+(or already punycode). mq-bridge does not pin this itself, because it would apply to
+every crate in your build that parses URLs.
 
 Routes are written as usual (`kafka:`, `file:`, `sqlx:`, not `custom:`). An
 endpoint the host has a feature for is built by the host; any other is built by

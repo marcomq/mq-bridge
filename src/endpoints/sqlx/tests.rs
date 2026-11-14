@@ -2563,3 +2563,194 @@ fn the_key_password_does_not_reach_the_connection_url() {
     );
     assert!(!url.contains("hunter2"), "{url}");
 }
+
+async fn load_publisher(url: &str, mode: crate::models::SqlLoadMode, auto: bool) -> SqlxPublisher {
+    let config = SqlxConfig {
+        url: url.to_string(),
+        table: "loaded".to_string(),
+        insert_query: (!auto).then(|| "INSERT INTO loaded (v) VALUES (${payload:v})".to_string()),
+        columns: auto.then_some(crate::models::SqlColumns::Auto),
+        load_mode: Some(mode),
+        ..Default::default()
+    };
+    SqlxPublisher::new(&config).await.unwrap()
+}
+
+async fn loaded_rows(pool: &AnyPool) -> Vec<String> {
+    sqlx::query("SELECT v FROM loaded ORDER BY v")
+        .fetch_all(pool)
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| row.get("v"))
+        .collect()
+}
+
+async fn finish_load(
+    publisher: &SqlxPublisher,
+    outcome: crate::traits::DisconnectOutcome,
+) -> anyhow::Result<()> {
+    let hook = publisher
+        .on_disconnect_hook()
+        .expect("load_mode sets a disconnect hook");
+    crate::traits::with_disconnect_outcome(outcome, hook).await
+}
+
+fn values(values: &[&str]) -> Vec<CanonicalMessage> {
+    values
+        .iter()
+        .map(|v| CanonicalMessage::new(format!(r#"{{"v":"{v}"}}"#).into_bytes(), None))
+        .collect()
+}
+
+async fn setup_loaded_table() -> (tempfile::TempDir, String, AnyPool) {
+    let (dir, url) = setup_db_file().await;
+    let pool = AnyPool::connect(&url).await.unwrap();
+    sqlx::query("CREATE TABLE loaded (v TEXT NOT NULL)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO loaded (v) VALUES ('old')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    (dir, url, pool)
+}
+
+#[tokio::test]
+async fn load_mode_commits_only_when_the_route_completes() {
+    use crate::models::SqlLoadMode::{AtomicAppend, Replace};
+    use crate::traits::DisconnectOutcome::Completed;
+    for (mode, auto, committed) in [
+        (AtomicAppend, false, vec!["a", "b", "c", "old"]),
+        (Replace, true, vec!["a", "b", "c"]),
+    ] {
+        let (_dir, url, pool) = setup_loaded_table().await;
+        let publisher = load_publisher(&url, mode, auto).await;
+        publisher.send_batch(values(&["a", "b"])).await.unwrap();
+        publisher.send(values(&["c"]).remove(0)).await.unwrap();
+        assert_eq!(
+            loaded_rows(&pool).await,
+            ["old"],
+            "{mode:?}: a reader sees the old rows"
+        );
+        finish_load(&publisher, Completed).await.unwrap();
+        assert_eq!(loaded_rows(&pool).await, committed, "{mode:?}");
+    }
+}
+
+#[tokio::test]
+async fn load_mode_rolls_back_a_load_that_did_not_complete() {
+    use crate::traits::DisconnectOutcome::{Failed, Stopped};
+    for outcome in [Stopped, Failed] {
+        let (_dir, url, pool) = setup_loaded_table().await;
+        let publisher = load_publisher(&url, crate::models::SqlLoadMode::Replace, false).await;
+        publisher.send_batch(values(&["a"])).await.unwrap();
+        finish_load(&publisher, outcome).await.unwrap();
+        assert_eq!(loaded_rows(&pool).await, ["old"], "{outcome:?}");
+    }
+}
+
+#[tokio::test]
+async fn load_mode_replace_with_an_empty_source_keeps_the_table() {
+    let (_dir, url, pool) = setup_loaded_table().await;
+    let publisher = load_publisher(&url, crate::models::SqlLoadMode::Replace, false).await;
+    publisher.send_batch(Vec::new()).await.unwrap();
+    finish_load(&publisher, crate::traits::DisconnectOutcome::Completed)
+        .await
+        .unwrap();
+    assert_eq!(loaded_rows(&pool).await, ["old"]);
+}
+
+#[tokio::test]
+async fn load_mode_one_rejected_row_fails_the_whole_load() {
+    use crate::models::SqlLoadMode::AtomicAppend;
+    for auto in [false, true] {
+        let (_dir, url, pool) = setup_loaded_table().await;
+        let publisher = load_publisher(&url, AtomicAppend, auto).await;
+        publisher.send_batch(values(&["a"])).await.unwrap();
+        let rejected = CanonicalMessage::new(br#"{"v":null}"#.to_vec(), None);
+        let err = publisher.send_batch(vec![rejected]).await.unwrap_err();
+        assert!(
+            matches!(err, PublisherError::Connection(_)),
+            "auto={auto}: {err}"
+        );
+        assert!(
+            publisher.send_batch(values(&["b"])).await.is_err(),
+            "auto={auto}"
+        );
+        let finished = finish_load(&publisher, crate::traits::DisconnectOutcome::Completed).await;
+        assert!(
+            finished.is_err(),
+            "auto={auto}: a completed run must report the rollback"
+        );
+        assert_eq!(loaded_rows(&pool).await, ["old"], "auto={auto}");
+    }
+}
+
+#[tokio::test]
+async fn load_mode_rejects_a_lookup_query() {
+    let (_dir, url, _pool) = setup_loaded_table().await;
+    let config = SqlxConfig {
+        url,
+        table: "loaded".to_string(),
+        lookup_query: Some("SELECT v FROM loaded WHERE v = ${payload:v}".to_string()),
+        load_mode: Some(crate::models::SqlLoadMode::AtomicAppend),
+        ..Default::default()
+    };
+    let err = SqlxPublisher::new(&config).await.err().expect("rejected");
+    assert!(
+        err.downcast_ref::<crate::errors::InvalidConfig>().is_some(),
+        "{err:#}"
+    );
+}
+
+#[tokio::test]
+async fn load_mode_route_commits_a_drain_and_needs_exit_on_empty() {
+    use crate::models::{Endpoint, EndpointType, FileConfig, Route};
+    let (dir, url, pool) = setup_loaded_table().await;
+    let input_path = dir.path().join("in.jsonl");
+    std::fs::write(&input_path, "{\"v\":\"a\"}\n{\"v\":\"b\"}\n").unwrap();
+    let input = Endpoint::new(EndpointType::File(FileConfig::new(
+        input_path.to_str().unwrap(),
+    )));
+    let output = Endpoint::new(EndpointType::Sqlx(SqlxConfig {
+        url,
+        table: "loaded".to_string(),
+        insert_query: Some("INSERT INTO loaded (v) VALUES (${payload:v})".to_string()),
+        load_mode: Some(crate::models::SqlLoadMode::Replace),
+        ..Default::default()
+    }));
+
+    let err = Route::new(input.clone(), output.clone())
+        .run("load_mode_without_drain")
+        .await
+        .expect_err("a route that never completes would never commit");
+    assert!(format!("{err:#}").contains("exit_on_empty"), "{err:#}");
+
+    let drain = |input: &Endpoint, name: &'static str| {
+        let route = Route::new(input.clone(), output.clone()).with_exit_on_empty(true);
+        async move {
+            let handle = route.run(name).await.unwrap();
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while handle.outcome().is_none() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("the drain did not end");
+            handle.outcome()
+        }
+    };
+    let completed = Some(crate::route::RouteOutcome::Completed);
+    assert_eq!(drain(&input, "load_mode_drain").await, completed);
+    assert_eq!(loaded_rows(&pool).await, ["a", "b"]);
+
+    std::fs::write(&input_path, "{\"v\":\"c\"}\n{\"v\":null}\n").unwrap();
+    assert_ne!(drain(&input, "load_mode_rejected").await, completed);
+    assert_eq!(
+        loaded_rows(&pool).await,
+        ["a", "b"],
+        "a rejected row rolls the load back"
+    );
+}

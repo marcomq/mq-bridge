@@ -122,9 +122,12 @@ jobs:
       
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-      
-      - name: Cache cargo build
-        uses: Swatinem/rust-cache@v2
+
+      # Pilot: kache instead of rust-cache, to compare cold/warm times on this job.
+      - name: Cache compiler outputs (kache)
+        uses: kunobi-ninja/kache-action@v1
+        with:
+          version: v2.1.1
 
       # setup-python provides a non-PEP-668 interpreter; the system python3 on
       # ubuntu-latest is externally managed and rejects a plain pip install.
@@ -154,6 +157,10 @@ jobs:
 
       - name: Memory leak soak (route commit-task JoinSet)
         run: cargo test --test memory_leak_test --features=full -- --ignored --nocapture
+
+      - name: kache stats
+        if: always()
+        run: kache stats --last-build
 
   # Compile the integration test binaries ONCE (release, full,test-utils) and
   # publish them as a nextest archive. The three run jobs below download this

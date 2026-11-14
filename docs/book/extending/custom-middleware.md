@@ -12,6 +12,7 @@ Middleware attaches to a route side, so the list goes under `input:` or `output:
 output:
   mongodb:
     url: "mongodb://localhost:27017"
+    database: "shop"
   middlewares:
     - my_enricher: { lookup_url: "http://enrich.internal" }
 ```
@@ -23,6 +24,7 @@ form is the same middleware, for configs validated against `mq-bridge.schema.jso
 output:
   mongodb:
     url: "mongodb://localhost:27017"
+    database: "shop"
   middlewares:
     - custom:
         name: "my_enricher"

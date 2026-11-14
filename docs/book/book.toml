@@ -23,5 +23,12 @@ enable = true
 [output.html.playground]
 runnable = false
 
+# Old URL -> new page, relative to the old URL. Add an entry when a page moves or is
+# renamed; README.md chapters render as index.html, so links to README.html land here.
+[output.html.redirect]
+"/use-cases/README.html"  = "index.html"
+"/connectors/README.html" = "index.html"
+"/reference/README.html"  = "index.html"
+
 [build]
 build-dir = "book"

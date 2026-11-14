@@ -3839,3 +3839,60 @@ fn a_wss_listener_with_a_ca_file_takes_only_clients_with_a_certificate() {
         "mutual TLS copy",
     );
 }
+
+/// `--load-mode replace` swaps a table's rows as one unit and implies `--drain`; a rejected
+/// row fails the copy and leaves the table as it was.
+#[cfg(any(feature = "full", feature = "sqlx"))]
+#[test]
+fn copy_load_mode_replaces_a_table_as_one_unit() {
+    let dir = TestDir::new();
+    let database = dir.path().join("load.db");
+    sqlite_execute(
+        &database,
+        &[
+            "CREATE TABLE orders (id INTEGER NOT NULL)",
+            "INSERT INTO orders (id) VALUES (0)",
+        ],
+    );
+    let source = dir.path().join("in.jsonl");
+    let target = dir.path().join("out.jsonl");
+    let table = format!("sqlite://{}?table=orders", database.display());
+    let load = |rows: &str, sink: &str, extra: &[&str]| {
+        std::fs::write(&source, rows).expect("write source");
+        cli()
+            .args(["copy", &format!("file://{}?format=raw", source.display()), sink])
+            .args(extra)
+            .output()
+            .expect("run CLI copy")
+    };
+    let table_rows = || {
+        let _ = std::fs::remove_file(&target);
+        let output = cli()
+            .args([
+                "copy",
+                &format!("{table}&cursor_column=id"),
+                &format!("file://{}?format=raw", target.display()),
+                "--drain",
+            ])
+            .output()
+            .expect("read the table back");
+        assert!(output.status.success(), "{output:?}");
+        std::fs::read_to_string(&target).expect("read target")
+    };
+    let auto = format!("{table}&columns=auto");
+
+    let output = load("{\"id\":1}\n{\"id\":2}\n", &auto, &["--load-mode", "replace"]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(table_rows(), "{\"id\":1}\n{\"id\":2}\n");
+
+    let rejected = load(
+        "{\"id\":3}\n{\"id\":null}\n",
+        &format!("{auto}&load_mode=atomic_append"),
+        &[],
+    );
+    assert!(!rejected.status.success(), "{rejected:?}");
+    assert_eq!(table_rows(), "{\"id\":1}\n{\"id\":2}\n");
+
+    let conflicting = load("", &auto, &["--load-mode", "replace", "--resume"]);
+    assert!(!conflicting.status.success(), "{conflicting:?}");
+}

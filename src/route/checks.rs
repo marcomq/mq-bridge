@@ -236,7 +236,73 @@ pub(super) fn endpoint_tree_full_replay_sink(
     }
 }
 
+/// Whether a SQL sink below the route output sets `load_mode`; it is only valid as the output itself.
+fn nested_load_mode_sink(endpoint: &Endpoint, visited_refs: &mut HashSet<String>) -> bool {
+    let nested = |endpoint: &Endpoint, visited: &mut HashSet<String>| {
+        matches!(&endpoint.endpoint_type, EndpointType::Sqlx(c) if c.load_mode.is_some())
+            || nested_load_mode_sink(endpoint, visited)
+    };
+    match &endpoint.endpoint_type {
+        EndpointType::Ref(name) => {
+            visited_refs.insert(name.clone())
+                && get_endpoint(name).is_some_and(|referenced| nested(&referenced, visited_refs))
+        }
+        EndpointType::Fanout(endpoints) => endpoints.iter().any(|e| nested(e, visited_refs)),
+        EndpointType::Switch(config) => config
+            .cases
+            .values()
+            .chain(config.when.iter().map(|case| &case.to))
+            .chain(config.default.iter().map(Box::as_ref))
+            .any(|e| nested(e, visited_refs)),
+        EndpointType::Request(config) => {
+            nested(&config.to, visited_refs) || nested(&config.forward_to, visited_refs)
+        }
+        _ => false,
+    }
+}
+
 impl Route {
+    /// The `load_mode` of a SQL output that commits the whole drain at its end.
+    pub(super) fn output_load_mode(&self) -> Option<crate::models::SqlLoadMode> {
+        match &self.output.endpoint_type {
+            EndpointType::Sqlx(config) => config.load_mode,
+            _ => None,
+        }
+    }
+
+    fn check_load_mode(&self, name: &str, no_resume: bool) -> anyhow::Result<()> {
+        let invalid =
+            |text: String| Err(crate::errors::InvalidConfig(anyhow::anyhow!(text)).into());
+        if nested_load_mode_sink(&self.output, &mut HashSet::new()) {
+            return invalid(format!(
+                "Route '{name}': `load_mode` is only supported on a SQL endpoint that is the route \
+                 output itself, not inside ref, fanout, switch or request."
+            ));
+        }
+        if matches!(&self.input.endpoint_type, EndpointType::Sqlx(c) if c.load_mode.is_some()) {
+            return invalid(format!(
+                "Route '{name}': `load_mode` belongs on the SQL output; the input does not use it."
+            ));
+        }
+        if self.output_load_mode().is_none() {
+            return Ok(());
+        }
+        if !self.options.exit_on_empty {
+            return invalid(format!(
+                "Route '{name}': `load_mode` commits when the route has drained its source; set \
+                 `exit_on_empty: true` (or run with --drain)."
+            ));
+        }
+        if !source_replays_from_start(&self.input, no_resume, 0) {
+            return invalid(format!(
+                "Route '{name}': `load_mode` rolls a failed run back completely, so the input must \
+                 read the full data set again on the next run; this one resumes from a saved \
+                 position, consumes what it reads, or deduplicates across runs."
+            ));
+        }
+        Ok(())
+    }
+
     /// Validates the route configuration, checking if endpoints are supported and correctly configured.
     /// Core types like file, memory, and response are always supported.
     /// # Arguments
@@ -345,6 +411,7 @@ impl Route {
                 ));
             }
         }
+        self.check_load_mode(name, no_resume)?;
         if let Some(sink) = endpoint_tree_full_replay_sink(&self.output, &mut HashSet::new()) {
             if !source_replays_from_start(&self.input, no_resume, 0) {
                 let input = match self.resolved_input().as_deref().map(|i| &i.endpoint_type) {

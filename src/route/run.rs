@@ -153,6 +153,8 @@ impl Route {
         };
 
         let exit_on_empty = self.options.exit_on_empty;
+        // A reconnect would open a fresh transaction while the source resumes past the rolled-back rows.
+        let single_attempt = self.output_load_mode().is_some();
         let handle = tokio::spawn(async move {
             // The startup `ready` channel is consumed once by `run()`; only the first
             // (re)connect needs to notify it.
@@ -244,8 +246,8 @@ impl Route {
                                     // An exhausted source is a clean terminal, not a failure:
                                     // it ends the route the same way `exit_on_empty` does.
                                     let is_end_of_stream = e.downcast_ref::<ConsumerError>().is_some_and(|ce| matches!(ce, ConsumerError::EndOfStream));
-                                    let is_permanent =
-                                        e.downcast_ref::<ProcessingError>().is_some_and(|pe| matches!(pe, ProcessingError::NonRetryable(_)))
+                                    let is_permanent = single_attempt
+                                        || e.downcast_ref::<ProcessingError>().is_some_and(|pe| matches!(pe, ProcessingError::NonRetryable(_)))
                                         || e.downcast_ref::<ConsumerError>().is_some_and(|ce| matches!(ce, ConsumerError::Permanent(_)))
                                         || e.is::<crate::errors::InvalidConfig>()
                                         || (exit_on_empty && is_authentication_failure(&e))
@@ -322,11 +324,12 @@ impl Route {
                                     }
                                     // Same bound as the error arm: a drain whose task keeps
                                     // panicking will never reach its empty batch.
-                                    if exit_on_empty
-                                        && drain_gives_up(
-                                            sends_loop.delivered.load(Ordering::Relaxed),
-                                            consecutive_failures,
-                                        )
+                                    if single_attempt
+                                        || exit_on_empty
+                                            && drain_gives_up(
+                                                sends_loop.delivered.load(Ordering::Relaxed),
+                                                consecutive_failures,
+                                            )
                                     {
                                         outcome_guard.set(RouteOutcome::Failed);
                                         error!(
@@ -352,6 +355,11 @@ impl Route {
                                         }
                                     }
                                     break; // -> next reconnect iteration
+                                }
+                                _ if single_attempt => {
+                                    outcome_guard.set(RouteOutcome::Failed);
+                                    error!("Route '{}' lost its connection; a `load_mode` output does not reconnect, its load was rolled back.", shown_loop);
+                                    break 'reconnect;
                                 }
                                 _ => break, // The route should reconnect and continue running.
                             }
@@ -732,8 +740,7 @@ impl Route {
         }
         commit_router.shutdown().await;
         run_consumer_disconnect_hook(name, consumer.as_ref()).await;
-        run_publisher_disconnect_hook(name, &publisher, disconnect_outcome(&run_result)).await;
-        run_result
+        self.close_publisher(name, &publisher, run_result).await
     }
 
     /// The main concurrent runner for when concurrency > 1.
@@ -1133,7 +1140,24 @@ impl Route {
         } else {
             Ok(shutdown_rx.is_empty())
         };
-        run_publisher_disconnect_hook(name, &publisher, disconnect_outcome(&result)).await;
-        result
+        self.close_publisher(name, &publisher, result).await
+    }
+
+    /// Runs the publisher's disconnect hook. For a `load_mode` output that hook commits the
+    /// load, so its failure turns a completed run into a failed one.
+    async fn close_publisher(
+        &self,
+        name: &str,
+        publisher: &Arc<dyn MessagePublisher>,
+        result: anyhow::Result<bool>,
+    ) -> anyhow::Result<bool> {
+        let closed =
+            publisher_disconnect_result(name, publisher, disconnect_outcome(&result)).await;
+        match (result, closed) {
+            (Ok(false), Err(err)) if self.output_load_mode().is_some() => Err(err.context(
+                format!("Route '{name}' drained, but its `load_mode` load was not committed"),
+            )),
+            (result, _) => result,
+        }
     }
 }
