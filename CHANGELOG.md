@@ -6,6 +6,13 @@ All notable changes to `mq-bridge`. Newest first.
 
 ### Added
 
+- **`load_mode` for SQL sinks: load a drain as one unit.** `atomic_append` writes every row of
+  a drain into one transaction and commits it when the route completes; `replace` deletes the
+  old rows first, in the same transaction. Readers see the old rows until the commit, and a
+  failed or interrupted run leaves the table unchanged. Set it as `load_mode:` on a sqlx
+  output, `?load_mode=` on a URI, or with `mqb copy --load-mode`, which implies `--drain`.
+  Needs `exit_on_empty` and a source that reads the full data set on every run; opt-in, other
+  routes are unchanged.
 - **Builders for a batched lookup route in code.** `LookupMiddleware::new(from)` with
   `with_into`, `with_payload`, `with_metadata` and `with_concurrency`;
   `ParallelMiddleware::new(max_in_flight)`; `Endpoint::with_lookup(…)` and

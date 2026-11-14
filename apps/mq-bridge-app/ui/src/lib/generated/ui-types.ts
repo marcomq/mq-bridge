@@ -307,6 +307,10 @@ export interface UnpackMiddleware {
 
 export type FilterMiddleware = string | Record<string, never>;
 
+export interface ParallelMiddleware {
+  max_in_flight?: number | null;
+}
+
 export interface AwsConfig {
   queue_url?: string | null;
   topic_arn?: string | null;
@@ -697,6 +701,7 @@ export interface SqlxConfig {
   extra_column?: string | null;
   auto_create_table?: boolean;
   bulk_copy?: boolean;
+  load_mode?: SqlLoadMode | null;
   polling_interval_ms?: number | null;
   max_polling_interval_ms?: number | null;
   publication?: string | null;
@@ -715,6 +720,8 @@ export interface SqlxConfig {
 }
 
 export type SqlColumns = "auto";
+
+export type SqlLoadMode = "atomic_append" | "replace";
 
 export type SqlTimestamps = "text" | "rfc3339";
 

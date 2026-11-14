@@ -8,7 +8,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 use anyhow::{anyhow, bail};
 use async_trait::async_trait;
 use mq_bridge::ReceivedBatch;
-use mq_bridge::models::{Endpoint, EndpointType, FileConsumerMode, Middleware, MongoConsume};
+use mq_bridge::models::{
+    Endpoint, EndpointType, FileConsumerMode, Middleware, MongoConsume, SqlLoadMode,
+};
 use mq_bridge::traits::{
     BoxFuture, ConsumerError, CustomMiddlewareFactory, EndpointStatus, MessageConsumer,
 };
@@ -56,6 +58,31 @@ impl ResumeCapability {
 /// reported — before anything is copied.
 pub fn configure_filter(input: &mut Endpoint, expression: &str) {
     insert_before_buffer(input, Middleware::Filter(expression.into()));
+}
+
+/// Sets `load_mode` on a SQL destination; `--load-mode` and `?load_mode=` must agree.
+pub fn configure_load_mode(output: &mut Endpoint, mode: SqlLoadMode) -> anyhow::Result<()> {
+    let EndpointType::Sqlx(config) = &mut output.endpoint_type else {
+        bail!("--load-mode needs a SQL destination (postgres://, mysql://, sqlite://)");
+    };
+    let name = |mode| match mode {
+        SqlLoadMode::AtomicAppend => "atomic_append",
+        SqlLoadMode::Replace => "replace",
+    };
+    match config.load_mode {
+        Some(set) if set != mode => bail!(
+            "--load-mode {} contradicts `load_mode={}` in the destination URI",
+            name(mode),
+            name(set)
+        ),
+        _ => config.load_mode = Some(mode),
+    }
+    Ok(())
+}
+
+/// Whether the destination loads the whole copy as one transaction.
+pub fn loads_atomically(output: &Endpoint) -> bool {
+    matches!(&output.endpoint_type, EndpointType::Sqlx(config) if config.load_mode.is_some())
 }
 
 /// Attaches a row counter next to the source and returns the shared tally.

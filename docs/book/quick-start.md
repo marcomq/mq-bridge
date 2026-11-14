@@ -19,7 +19,7 @@ running as a continuous bridge (see
 The common copy controls are deliberately small:
 
 ```text
-mqb copy SOURCE TARGET [--filter EXPR] [--resume | --no-resume] [--drain] [--wait SECS]
+mqb copy SOURCE TARGET [--filter EXPR] [--resume | --no-resume] [--drain] [--wait SECS] [--load-mode MODE]
 ```
 
 `--filter` evaluates a readable expression against each top-level JSON payload,
@@ -149,6 +149,10 @@ whole wait.
 Each retry is a fresh connection, roughly four a second. That is free for a spool
 or a file, but a long `--wait` against a broker or a database reconnects thousands
 of times; prefer a short wait there, or a continuous bridge.
+
+`--load-mode atomic_append|replace` loads a SQL destination as one transaction: readers see
+the old rows until the drain completes, and a failed copy leaves the table unchanged. It
+implies `--drain`; see [Loading as one unit](./connectors/postgres.md#loading-as-one-unit).
 
 ## Escape hatch: driver options and full connection strings
 

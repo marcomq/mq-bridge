@@ -107,6 +107,7 @@ column's type. Expressions in the `VALUES (…)` tuple are fine: a batch is stil
 | `extra_column` | (Publisher, with `columns`) Column that takes the fields without a column of their own, as one JSON object (`jsonb`, `json` or text). |
 | `insert_query` | Custom INSERT with `${payload:field}` / `${metadata:key}` tokens for multi-column writes. |
 | `bulk_copy` | PostgreSQL only — use `COPY FROM STDIN` for high-throughput bulk loads. |
+| `load_mode` | (Publisher, drain routes) `atomic_append` or `replace`: one transaction for the whole load, committed at its end. See [Loading as one unit](#loading-as-one-unit). |
 | `delete_after_read` | Consumer deletes rows after they're processed (mutually exclusive with `cursor_column`). |
 
 Any other query parameter (e.g. `sslmode=disable`) is left on the connection
@@ -216,11 +217,52 @@ work:
 | Your own statement, renamed fields, casts, `ON CONFLICT … DO NOTHING` | `insert_query` with `${payload:field}` tokens; see [Upserts](../cookbook/upserts.md) |
 | Fastest load into PostgreSQL | `bulk_copy: true`, with `columns: auto` or a token `insert_query` |
 | The whole payload in one column | neither; see [Queue tables](#queue-tables) |
+| Readers see the old rows or all new ones, never half a load | `load_mode`; see [Loading as one unit](#loading-as-one-unit) |
 
 A row the database rejects for a reason that will not change (a type error, a violated
 constraint) fails as non-retryable and goes to a [`dlq`](../cookbook/dlq.md) if one is
 configured. Connection errors and deadlocks are reported as retryable, for a
 [`retry`](../cookbook/retries.md) middleware to repeat.
+
+## Loading as one unit
+
+By default each batch is committed when it is written, so a reader sees a load grow and a
+failed run leaves the rows it wrote so far. `load_mode` makes the whole load one
+transaction instead:
+
+| `load_mode` | Effect |
+|---|---|
+| `atomic_append` | Every row goes into one transaction, committed when the source is drained. |
+| `replace` | The same, after `DELETE FROM <table>` in that transaction. An empty source leaves the table as it was. |
+
+```bash
+mqb copy file:///data/orders.csv 'postgres://user:pass@host/db?table=orders&columns=auto' --load-mode replace
+```
+
+`--load-mode` implies `--drain`; `?load_mode=` on the destination URI or `load_mode:` in a
+route does the same. Readers keep seeing the old rows, without waiting, until the commit;
+then they see all new ones. A failed or interrupted run rolls back and leaves the table
+unchanged, and the copy exits non-zero.
+
+- **Drain routes only.** The load commits when the route completes, so a route needs
+  `exit_on_empty: true` (`mqb run --drain`). The sink must be the route's output itself, not
+  inside `fanout`, `switch` or a `ref`.
+- **All or nothing.** One row the database rejects fails the whole load: there is no
+  row-by-row redo and no dead-lettering. A lost connection fails the run instead of
+  reconnecting.
+- **Run it again from the start.** The source must read the full data set on every run: a
+  file, a table read with `cursor_column` but without `cursor_id`, object storage. `--resume`,
+  a saved checkpoint, `deduplication`, and sources that consume what they read (queues,
+  `delete_after_read`) are rejected.
+- **Cost of `replace`.** The `DELETE` is a normal one: it takes time on a large table, leaves
+  dead rows for `VACUUM` (InnoDB purge on MySQL), and writers to the same rows wait until the
+  load commits. Views, grants, foreign keys and triggers stay untouched, which a swap of
+  tables would not guarantee.
+- **The table must exist.** On MySQL a `CREATE TABLE` commits any open transaction, so create
+  the table before the load.
+- **One long transaction.** It stays open for the whole run, so server limits such as
+  PostgreSQL's `idle_in_transaction_session_timeout` or a pooler's transaction timeout must
+  allow the longest pause between two batches; MySQL's undo log grows with the load.
 
 ## Connection, TLS and pool
 

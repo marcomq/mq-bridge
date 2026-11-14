@@ -104,8 +104,8 @@ use handle::OutcomeGuard;
 pub(crate) use handle::{DropReport, PendingSends};
 pub use handle::{RouteHandle, RouteOutcome};
 pub(crate) use hooks::{
-    disconnect_outcome, run_consumer_connect_hook, run_consumer_disconnect_hook,
-    run_publisher_connect_hook, run_publisher_disconnect_hook,
+    disconnect_outcome, publisher_disconnect_result, run_consumer_connect_hook,
+    run_consumer_disconnect_hook, run_publisher_connect_hook, run_publisher_disconnect_hook,
 };
 pub(crate) use registry::route_display_name;
 use registry::*;

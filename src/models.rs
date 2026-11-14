@@ -1284,6 +1284,17 @@ pub enum SqlColumns {
     Auto,
 }
 
+/// How a SQL sink commits a drain: all of it at the end, instead of batch by batch.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum SqlLoadMode {
+    /// One transaction for the whole drain, committed when it completes.
+    AtomicAppend,
+    /// As `atomic_append`, after deleting the old rows; an empty source leaves the table as it was.
+    Replace,
+}
+
 /// What a CSV sink does with a record whose keys differ from the columns.
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -3062,6 +3073,9 @@ pub struct SqlxConfig {
     /// (Publisher only) PostgreSQL only. Bulk-load batches via `COPY FROM STDIN` (much faster than multi-row INSERT). Requires a token-based `insert_query`; no `ON CONFLICT`/`RETURNING`.
     #[serde(default)]
     pub bulk_copy: bool,
+    /// (Publisher only, drain routes) `atomic_append` or `replace`: commit the whole drain at its end; readers see the old rows until then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub load_mode: Option<SqlLoadMode>,
     /// (Consumer only) Polling interval in milliseconds. Defaults to 100ms.
     pub polling_interval_ms: Option<u64>,
     /// (Consumer only) If set, the poll interval backs off exponentially from `polling_interval_ms`

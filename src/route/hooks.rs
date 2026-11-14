@@ -54,19 +54,29 @@ pub(crate) async fn run_publisher_disconnect_hook(
     publisher: &Arc<dyn MessagePublisher>,
     outcome: DisconnectOutcome,
 ) {
+    let _ = publisher_disconnect_result(route_name, publisher, outcome).await;
+}
+
+/// Runs the publisher's disconnect hook and also returns its error, which is otherwise only logged.
+pub(crate) async fn publisher_disconnect_result(
+    route_name: &str,
+    publisher: &Arc<dyn MessagePublisher>,
+    outcome: DisconnectOutcome,
+) -> anyhow::Result<()> {
     // Scoped rather than passed as an argument, so it reaches the sink through any depth
     // of middleware without each wrapper having to forward it.
     with_disconnect_outcome(outcome, async {
-        if let Some(hook) = publisher.on_disconnect_hook() {
-            if let Err(err) = hook.await {
-                warn!(
-                    "Publisher on_disconnect hook failed for route '{}': {}",
-                    route_name, err
-                );
-            }
-        }
+        let Some(hook) = publisher.on_disconnect_hook() else {
+            return Ok(());
+        };
+        hook.await.inspect_err(|err| {
+            warn!(
+                "Publisher on_disconnect hook failed for route '{}': {}",
+                route_name, err
+            );
+        })
     })
-    .await;
+    .await
 }
 
 pub(crate) async fn run_consumer_disconnect_hook(route_name: &str, consumer: &dyn MessageConsumer) {

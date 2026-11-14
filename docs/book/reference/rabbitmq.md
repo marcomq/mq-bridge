@@ -30,6 +30,10 @@ TLS configuration for secure connections.
 Configures Transport Layer Security (TLS/SSL) for encrypted communication.
 Supports both client certificate (mutual TLS) and server certificate validation.
 
+`ca_file` also takes `"$.os"` (the operating system's CA store) or `"$.bundled"` (the
+Mozilla roots built into mq-bridge). Which endpoint supports which, and what it trusts
+without `ca_file`, is in the TLS section of the configuration guide.
+
 #### Examples
 
 ```rust
@@ -48,7 +52,7 @@ let tls = TlsConfig {
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
 | `accept_invalid_certs` | boolean | no | `false` | If true, disable server certificate verification (insecure). |
-| `ca_file` | string | no | — | Path to the CA certificate file. |
+| `ca_file` | string | no | — | Path to the CA certificate file, or `$.os` (OS CA store) or `$.bundled` (built-in public roots). |
 | `cert_file` | string | no | — | Path to the client certificate file (PEM). |
 | `cert_password` | string | no | — | Password for the private key (if encrypted). |
 | `key_file` | string | no | — | Path to the client private key file (PEM). |

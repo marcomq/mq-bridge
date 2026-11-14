@@ -1,9 +1,9 @@
 //! `columns: auto`: write each top-level JSON field into the table column of the same name.
 
 use super::{
-    audited_sql, bind_key, bind_value, classify_sql_error, copy_rows, open_copy_pool,
-    positional_placeholder, push_copy_value, quote_ident_for, AnyQuery, BindValue, CopyPool,
-    MYSQL_COLUMN_TYPES_SQL, SQLITE_COLUMN_TYPES_SQL,
+    audited_sql, bind_key, bind_value, classify_sql_error, copy_rows, copy_rows_on, load::HeldTx,
+    open_copy_pool, positional_placeholder, push_copy_value, quote_ident_for, AnyQuery, BindValue,
+    CopyPool, MYSQL_COLUMN_TYPES_SQL, SQLITE_COLUMN_TYPES_SQL,
 };
 use crate::errors::InvalidConfig;
 use crate::models::SqlxConfig;
@@ -612,7 +612,7 @@ impl AutoColumns {
                 Err(e) => failed.push((message, e)),
             }
         }
-        match self.write(pool, rows).await {
+        match self.write(pool, None, rows).await {
             Err(PublisherError::NonRetryable(e)) if kept.len() > 1 => {
                 warn!(table = %self.table, error = %e, "SQLx batch rejected; writing it one record at a time");
                 failed.extend(self.write_isolating(pool, kept).await?);
@@ -620,6 +620,24 @@ impl AutoColumns {
             other => other?,
         }
         Ok(SentBatch::from_failures(failed))
+    }
+
+    pub(super) fn copy_pool(&self) -> Option<&CopyPool> {
+        self.copy_pool.as_ref()
+    }
+
+    /// `load_mode`: every record into the held transaction; one rejected record fails the batch.
+    pub(super) async fn send_held(
+        &self,
+        pool: &AnyPool,
+        held: &mut HeldTx,
+        messages: &[CanonicalMessage],
+    ) -> Result<(), PublisherError> {
+        let rows = messages
+            .iter()
+            .map(|message| self.row(message))
+            .collect::<Result<Vec<_>, _>>()?;
+        self.write(pool, Some(held), rows).await
     }
 
     /// Redoes a batch the database rejected, a savepoint per record, and returns the
@@ -664,7 +682,13 @@ impl AutoColumns {
     }
 
     /// Writes the rows with as few statements as their shapes allow; all of them or none.
-    async fn write(&self, pool: &AnyPool, rows: Vec<AutoRow>) -> Result<(), PublisherError> {
+    /// With `held`, it writes into that transaction and leaves committing to its owner.
+    async fn write(
+        &self,
+        pool: &AnyPool,
+        mut held: Option<&mut HeldTx>,
+        rows: Vec<AutoRow>,
+    ) -> Result<(), PublisherError> {
         let statements = self.statements(rows);
         let retryable = |e: sqlx::Error| PublisherError::Retryable(anyhow!(e));
 
@@ -688,13 +712,16 @@ impl AutoColumns {
                 }
                 copies.push((stmt, buf));
             }
-            return copy_rows(copy_pool, &copies).await;
+            return match held {
+                Some(held) => copy_rows_on(held.pg()?, &copies).await,
+                None => copy_rows(copy_pool, &copies).await,
+            };
         }
 
         // One statement is atomic by itself; several need a transaction.
-        let mut tx = match statements.len() {
-            0 | 1 => None,
-            _ => Some(pool.begin().await.map_err(retryable)?),
+        let mut tx = match (&held, statements.len()) {
+            (Some(_), _) | (None, 0 | 1) => None,
+            (None, _) => Some(pool.begin().await.map_err(retryable)?),
         };
         for (columns, run) in statements {
             let mut run = self.last_per_key(run);
@@ -707,9 +734,10 @@ impl AutoColumns {
                     query = bind_typed(query, value, binds.get(i));
                 }
             }
-            match &mut tx {
-                Some(tx) => query.execute(&mut **tx).await,
-                None => query.execute(pool).await,
+            match (&mut held, &mut tx) {
+                (Some(held), _) => query.execute(held.any()?).await,
+                (None, Some(tx)) => query.execute(&mut **tx).await,
+                (None, None) => query.execute(pool).await,
             }
             .map_err(classify_sql_error)?;
         }
