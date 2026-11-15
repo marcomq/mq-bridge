@@ -80,3 +80,5 @@ let tls = TlsConfig {
 | `key_file` | string | no | — | Path to the client private key file (PEM). |
 | `required` | boolean | no | `false` | If true, enable TLS/SSL. |
 
+**`ca_file` here:** a CA file or `$.bundled` (the default). `$.os` is not supported: the driver takes only a path, so name the OS bundle instead, e.g. `/etc/ssl/certs/ca-certificates.crt`.
+

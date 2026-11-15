@@ -411,7 +411,13 @@ impl CallerBuilder {
     }
 
     /// Replaces the answering `response` output, e.g. with an endpoint that replies itself.
-    pub fn with_output(mut self, output: Endpoint) -> Self {
+    ///
+    /// A handler set earlier with [`CallerBuilder::with_handler`] moves to the new output,
+    /// unless that output brings a handler of its own, which then wins.
+    pub fn with_output(mut self, mut output: Endpoint) -> Self {
+        if output.handler.is_none() {
+            output.handler = self.route.output.handler.take();
+        }
         self.route.output = output;
         self
     }
@@ -634,6 +640,22 @@ mod tests {
                 serde_json::json!({"id": id, "customer": {"tier": "gold"}})
             );
         }
+        caller.stop().await;
+    }
+
+    #[tokio::test]
+    async fn a_handler_set_before_with_output_still_runs() {
+        let caller = Caller::builder(&unique("caller_handler_output"))
+            .with_handler(|mut msg: CanonicalMessage| async move {
+                msg.set_payload_str("handled".to_string());
+                Ok(Handled::Publish(msg))
+            })
+            .with_output(Endpoint::new_response())
+            .deploy()
+            .await
+            .unwrap();
+        let answer = caller.call_message("x".into()).await.unwrap();
+        assert_eq!(answer.get_payload_str(), "handled");
         caller.stop().await;
     }
 

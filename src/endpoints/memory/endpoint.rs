@@ -481,13 +481,18 @@ impl MemoryPublisher {
             .filter(|(_, (_, registered))| registered.is_ok())
             .map(|(message, _)| message)
             .collect();
+        let deadline = tokio::time::Instant::now() + self.request_timeout;
         let sent = if batch.is_empty() {
             Ok(())
         } else {
-            sender.send(batch).await.map_err(|e| e.to_string())
+            match tokio::time::timeout_at(deadline, sender.send(batch)).await {
+                Ok(sent) => sent.map_err(|e| e.to_string()),
+                Err(_) => Err(format!(
+                    "no room in the queue within {:?}",
+                    self.request_timeout
+                )),
+            }
         };
-
-        let deadline = tokio::time::Instant::now() + self.request_timeout;
         let mut results = Vec::with_capacity(requests.len());
         for (((request_id, registered), waiter), cid) in
             requests.into_iter().zip(waiters).zip(&cids)
@@ -556,13 +561,23 @@ impl MessagePublisher for MemoryPublisher {
                     // Covers every exit below, including this future being dropped.
                     let mut waiter = WaiterGuard::new(response_channel, cid);
 
-                    // Send the message
-                    // We use the internal sender directly to avoid recursion or cloning issues
-                    if let Err(e) = sender.send(vec![message]).await {
-                        return Err(anyhow!("Failed to send to memory channel: {}", e).into());
+                    // One deadline covers waiting for queue space and for the reply.
+                    let deadline = tokio::time::Instant::now() + self.request_timeout;
+                    match tokio::time::timeout_at(deadline, sender.send(vec![message])).await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => {
+                            return Err(anyhow!("Failed to send to memory channel: {}", e).into())
+                        }
+                        Err(_) => {
+                            return Err(anyhow!(
+                            "Failed to send to memory channel: no room in the queue within {:?}",
+                            self.request_timeout
+                        )
+                            .into())
+                        }
                     }
 
-                    let received = tokio::time::timeout(self.request_timeout, rx).await;
+                    let received = tokio::time::timeout_at(deadline, rx).await;
                     if matches!(received, Ok(Ok(_))) {
                         waiter.disarm();
                     }

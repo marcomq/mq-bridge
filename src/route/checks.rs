@@ -245,11 +245,27 @@ fn load_mode(endpoint: &Endpoint) -> Option<crate::models::SqlLoadMode> {
     }
 }
 
-/// Whether a sink below the route output sets `load_mode`; it is only valid as the output itself.
+/// Whether a sink below the route output, or in a middleware such as `dlq`, sets `load_mode`;
+/// it is only valid as the output itself.
 fn nested_load_mode_sink(endpoint: &Endpoint, visited_refs: &mut HashSet<String>) -> bool {
     let nested = |endpoint: &Endpoint, visited: &mut HashSet<String>| {
         load_mode(endpoint).is_some() || nested_load_mode_sink(endpoint, visited)
     };
+    let in_middleware = endpoint
+        .middlewares
+        .iter()
+        .any(|middleware| match middleware {
+            Middleware::Dlq(config) => nested(&config.endpoint, visited_refs),
+            Middleware::Lookup(config) => config
+                .from
+                .iter()
+                .chain(config.entries.iter().map(|entry| &entry.from))
+                .any(|from| nested(from, visited_refs)),
+            _ => false,
+        });
+    if in_middleware {
+        return true;
+    }
     match &endpoint.endpoint_type {
         EndpointType::Ref(name) => {
             visited_refs.insert(name.clone())
@@ -275,13 +291,15 @@ impl Route {
         load_mode(&self.output)
     }
 
-    fn check_load_mode(&self, name: &str, no_resume: bool) -> anyhow::Result<()> {
+    pub(super) fn check_load_mode(&self, name: &str, no_resume: bool) -> anyhow::Result<()> {
         let invalid =
             |text: String| Err(crate::errors::InvalidConfig(anyhow::anyhow!(text)).into());
-        if nested_load_mode_sink(&self.output, &mut HashSet::new()) {
+        if nested_load_mode_sink(&self.output, &mut HashSet::new())
+            || nested_load_mode_sink(&self.input, &mut HashSet::new())
+        {
             return invalid(format!(
                 "Route '{name}': `load_mode` is only supported on a SQL or MongoDB endpoint that is the route \
-                 output itself, not inside ref, fanout, switch or request."
+                 output itself, not inside ref, fanout, switch, request or a middleware such as dlq."
             ));
         }
         if load_mode(&self.input).is_some() {

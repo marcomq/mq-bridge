@@ -1236,6 +1236,9 @@ impl SqlxPublisher {
                 "`before_load` and `after_load` run inside a load; set `load_mode` as well"
             ))));
         }
+        if config.load_mode.is_some() && matches!(driver_name.as_str(), "MySQL" | "MariaDB") {
+            ensure_transactional_engine(&pool, &config.table).await?;
+        }
         let load = config.load_mode.map(|mode| {
             load::HeldLoad::new(
                 mode,
@@ -2978,6 +2981,36 @@ const MYSQL_COLUMN_TYPES_SQL: &str = "SELECT COLUMN_NAME AS name, LOWER(DATA_TYP
      FROM information_schema.columns \
      WHERE table_schema = COALESCE(NULLIF(?, ''), DATABASE()) AND table_name = ? \
      ORDER BY ORDINAL_POSITION";
+
+/// Rejects `load_mode` on a MySQL/MariaDB table whose engine cannot roll back (MyISAM, MEMORY, ...).
+/// A table that does not exist yet passes; it is created with the server's default engine.
+async fn ensure_transactional_engine(pool: &AnyPool, table: &str) -> anyhow::Result<()> {
+    let (schema, name) = match table.split_once('.') {
+        Some((s, t)) => (s.trim_matches('`'), t.trim_matches('`')),
+        None => ("", table.trim_matches('`')),
+    };
+    let row: Option<(String, String)> = sqlx::query_as(audited_sql(
+        "SELECT CAST(t.ENGINE AS CHAR), CAST(COALESCE(e.TRANSACTIONS, 'NO') AS CHAR) \
+         FROM information_schema.TABLES t \
+         LEFT JOIN information_schema.ENGINES e ON e.ENGINE = t.ENGINE \
+         WHERE t.TABLE_SCHEMA = COALESCE(NULLIF(?, ''), DATABASE()) AND t.TABLE_NAME = ? \
+         AND t.ENGINE IS NOT NULL",
+    ))
+    .bind(schema.to_string())
+    .bind(name.to_string())
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| anyhow!("Failed to look up the storage engine of '{table}': {e}"))?;
+    match row {
+        Some((engine, transactions)) if !transactions.eq_ignore_ascii_case("YES") => {
+            Err(anyhow!(crate::errors::InvalidConfig(anyhow!(
+                "`load_mode` needs a transactional table, but '{table}' uses the {engine} engine, \
+                 which cannot roll back a failed load; convert it (e.g. to InnoDB) first"
+            ))))
+        }
+        _ => Ok(()),
+    }
+}
 
 /// Build the SELECT projection used in place of `*` for the cursor reader.
 ///

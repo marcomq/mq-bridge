@@ -3860,7 +3860,11 @@ fn copy_load_mode_replaces_a_table_as_one_unit() {
     let load = |rows: &str, sink: &str, extra: &[&str]| {
         std::fs::write(&source, rows).expect("write source");
         cli()
-            .args(["copy", &format!("file://{}?format=raw", source.display()), sink])
+            .args([
+                "copy",
+                &format!("file://{}?format=raw", source.display()),
+                sink,
+            ])
             .args(extra)
             .output()
             .expect("run CLI copy")
@@ -3881,14 +3885,18 @@ fn copy_load_mode_replaces_a_table_as_one_unit() {
     };
     let auto = format!("{table}&columns=auto");
 
-    let output = load("{\"id\":1}\n{\"id\":2}\n", &auto, &["--load-mode", "replace"]);
+    let output = load(
+        "{\"id\":1}\n{\"id\":2}\n",
+        &auto,
+        &["--load-mode", "replace"],
+    );
     assert!(output.status.success(), "{output:?}");
     assert_eq!(table_rows(), "{\"id\":1}\n{\"id\":2}\n");
 
     let rejected = load(
         "{\"id\":3}\n{\"id\":null}\n",
         &format!("{auto}&load_mode=atomic_append"),
-        &[],
+        &["--batch-size", "1", "--concurrency", "1"],
     );
     assert!(!rejected.status.success(), "{rejected:?}");
     assert_eq!(table_rows(), "{\"id\":1}\n{\"id\":2}\n");

@@ -73,3 +73,5 @@ let tls = TlsConfig {
 | `key_file` | string | no | — | Path to the client private key file (PEM). |
 | `required` | boolean | no | `false` | If true, enable TLS/SSL. |
 
+**`ca_file` here:** a client takes a CA file, `$.os` or `$.bundled` (the default). A listener uses `ca_file` to check client certificates and needs a CA file.
+

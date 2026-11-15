@@ -60,3 +60,5 @@ let tls = TlsConfig {
 | `key_file` | string | no | — | Path to the client private key file (PEM). |
 | `required` | boolean | no | `false` | If true, enable TLS/SSL. |
 
+**`ca_file` here:** a CA file or `$.os` (the default). `$.bundled` is not supported: the driver takes only PEM files or paths.
+

@@ -8,7 +8,7 @@ import html
 import re
 import sys
 from pathlib import Path
-from urllib.parse import unquote
+from urllib.parse import unquote, urlsplit
 
 OUT = Path(sys.argv[1] if len(sys.argv) > 1 else Path(__file__).resolve().parent / "book")
 SKIP = {"print.html", "toc.html", "404.html"}
@@ -16,8 +16,9 @@ REFRESH = re.compile(r'http-equiv="refresh"[^>]*url=([^"]+)"', re.I)
 
 
 def resolve(target):
-    """Follows redirect pages; returns the final file."""
-    for _ in range(5):
+    """Follows redirect pages; returns the final file, or None for a loop or too many hops."""
+    seen = set()
+    for _ in range(6):  # up to five redirects
         if target.is_dir():
             target = target / "index.html"
         if target.suffix != ".html" or not target.exists():
@@ -25,8 +26,11 @@ def resolve(target):
         m = REFRESH.search(target.read_text(errors="ignore"))
         if not m:
             return target
-        target = (target.parent / unquote(html.unescape(m.group(1)).split("#")[0])).resolve()
-    return target
+        if target in seen:
+            return None
+        seen.add(target)
+        target = (target.parent / unquote(urlsplit(html.unescape(m.group(1))).path)).resolve()
+    return None
 
 
 def main():
@@ -39,8 +43,12 @@ def main():
             href = html.unescape(href)
             if re.match(r"^[a-z][a-z0-9+.-]*:", href, re.I):
                 continue
-            path, _, frag = href.partition("#")
+            parts = urlsplit(href)
+            path, frag = parts.path, parts.fragment
             target = resolve((page.parent / unquote(path)).resolve() if path else page.resolve())
+            if target is None:
+                broken.append(f"{page.relative_to(OUT)}: {href} (redirect loop or too many redirects)")
+                continue
             if not target.exists():
                 broken.append(f"{page.relative_to(OUT)}: {href} (no such page)")
                 continue

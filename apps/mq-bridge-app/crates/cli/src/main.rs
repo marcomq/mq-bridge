@@ -1380,9 +1380,16 @@ async fn run_copy(args: CopyArgs, stop_when: StopWhen) -> anyhow::Result<()> {
         // settled outcome; a healthy one reports the same `Stopped` either way.
         if outcome.is_none() {
             let settled = stop_and_settle(&handle).await;
-            if atomic_load && matches!(settled, Some(RouteOutcome::Stopped) | None) {
+            if atomic_load && matches!(settled, Some(RouteOutcome::Stopped)) {
                 anyhow::bail!(
                     "copy interrupted: the load was rolled back, the table is unchanged (read {})",
+                    throughput(&copied, &read, started).rows_display()
+                );
+            }
+            if atomic_load && settled.is_none() {
+                anyhow::bail!(
+                    "copy interrupted: the route did not finish stopping, so whether the load \
+                     was committed or rolled back is unknown (read {})",
                     throughput(&copied, &read, started).rows_display()
                 );
             }

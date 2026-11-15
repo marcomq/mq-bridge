@@ -200,10 +200,22 @@ impl Route {
                             info!("Shutdown signal received for route '{}'.", shown_loop);
                             // Notify the inner task to shut down.
                             let _ = internal_shutdown_tx.send(()).await;
-                            // Wait for the inner task to finish gracefully.
-                            let _ = run_task.await;
+                            // Wait for the inner task to finish gracefully; it may have
+                            // completed or failed before it saw the signal.
+                            let finished = run_task.await;
                             forward_buffered_ready(&mut startup_notified, &iter_ready_rx, &ready_tx).await;
-                            outcome_guard.set(RouteOutcome::Stopped);
+                            outcome_guard.set(match finished {
+                                Ok(Ok(false)) => RouteOutcome::Completed,
+                                Ok(Err(e)) if !e.downcast_ref::<ConsumerError>().is_some_and(|ce| matches!(ce, ConsumerError::EndOfStream)) => {
+                                    let mut s = recover_write_lock(&status_loop, "route_handle_status");
+                                    s.healthy = false;
+                                    s.error = Some(show(e.to_string()));
+                                    RouteOutcome::Failed
+                                }
+                                Ok(Err(_)) => RouteOutcome::Completed,
+                                Err(e) if e.is_panic() => RouteOutcome::Failed,
+                                _ => RouteOutcome::Stopped,
+                            });
                             break 'reconnect;
                         }
                         // A pass that stays up this long has recovered: clear the flap
@@ -431,6 +443,7 @@ impl Route {
         shutdown_rx: Option<async_channel::Receiver<()>>,
         ready_tx: Option<Sender<()>>,
     ) -> anyhow::Result<bool> {
+        self.check_load_mode(name, false)?;
         self.run_until_err_reporting_to(name, shutdown_rx, ready_tx, None, None, false)
             .await
     }

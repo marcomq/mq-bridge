@@ -160,7 +160,12 @@ jobs:
 
       - name: kache stats
         if: always()
-        run: kache stats --last-build
+        run: |
+          if command -v kache >/dev/null 2>&1; then
+            kache stats --last-build
+          else
+            echo "kache not installed; skipping stats"
+          fi
 
   # Compile the integration test binaries ONCE (release, full,test-utils) and
   # publish them as a nextest archive. The three run jobs below download this

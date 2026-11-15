@@ -271,8 +271,8 @@ transaction instead:
 mqb copy file:///data/orders.csv 'postgres://user:pass@host/db?table=orders&columns=auto' --load-mode replace
 ```
 
-`--load-mode` implies `--drain`; `?load_mode=` on the destination URI or `load_mode:` in a
-route does the same. Readers keep seeing the old rows, without waiting, until the commit;
+In `mqb copy`, `--load-mode` and `?load_mode=` on the destination URI imply `--drain`. A
+route in a config file with `load_mode:` must set `exit_on_empty: true` itself. Readers keep seeing the old rows, without waiting, until the commit;
 then they see all new ones. A failed or interrupted run rolls back and leaves the table
 unchanged, and the copy exits non-zero.
 
