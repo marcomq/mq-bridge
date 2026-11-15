@@ -140,7 +140,8 @@ capture() {
   eval "$cmd" >/dev/null 2>&1 || true
   for _ in $(seq 1 "$RUNS"); do
     "$reset"
-    out="$(eval "$cmd --color always" 2>&1)" || true
+    out="$(eval "$cmd --color always" 2>&1 \
+      | grep -Ev '^[0-9_]+ rows \([0-9_]+ rows/s\)$')" || true
     rate="$(printf '%s\n' "$out" | sed $'s/\x1b\\[[0-9;]*m//g' \
       | sed -n 's/.*(\([0-9_]*\) rows\/s).*/\1/p' | tr -d _ | tail -1)"
     echo "   ${rate:-failed} rows/s" >&2

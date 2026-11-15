@@ -332,6 +332,18 @@ impl FastPredicate {
         }
     }
 
+    fn text_compares_any(&self, paths: &[String]) -> bool {
+        match self {
+            Self::Term(term) => {
+                matches!(term.literal, FastLiteral::String(_))
+                    && paths.contains(&term.path.join("."))
+            }
+            Self::And(left, right) | Self::Or(left, right) => {
+                left.text_compares_any(paths) || right.text_compares_any(paths)
+            }
+        }
+    }
+
     fn reads_payload(&self) -> bool {
         match self {
             Self::Term(term) => term.metadata_key().is_none(),
@@ -417,10 +429,13 @@ impl CompiledFilter {
             )
         })?;
         let lone_equals = has_lone_equals(&normalized);
-        let fast_predicate = compile_fast_predicate(&expression);
         let (payload_paths, metadata_keys, uses_all_metadata, has_unsupported_path) =
             referenced_paths(&expression);
         let numeric_paths = numerically_compared_paths(&expression);
+        // The slow path reads such a field as a number for the whole expression, so a
+        // string equality on it no longer holds there; the fast path tests terms alone.
+        let fast_predicate = compile_fast_predicate(&expression)
+            .filter(|predicate| !predicate.text_compares_any(&numeric_paths));
         // An indexed path never resolves, so tolerating it per message would drop every
         // message while the route reported itself healthy. Refuse to start instead.
         if has_unsupported_path {
@@ -1611,7 +1626,10 @@ mod tests {
             "100 < number(amount)",
             "number(amount) > 100 and country == 'US'",
             "number(meta.retries) >= 3",
+            "amount > 50 and amount == '100'",
         ];
+        // The slow path reads `amount` as a number throughout, so these must not go fast.
+        let slow_only = ["amount > 50 and amount == '100'"];
 
         let payloads = [
             r#"{"amount":100,"country":"US","active":true,"a":1,"b":2,"c":3}"#,
@@ -1641,9 +1659,10 @@ mod tests {
 
         for expression in expressions {
             let fast = CompiledFilter::new(expression).unwrap();
-            assert!(
+            assert_eq!(
                 fast.fast_predicate.is_some(),
-                "{expression} should compile to the fast path"
+                !slow_only.contains(&expression),
+                "{expression} took the wrong path"
             );
             let mut zen = CompiledFilter::new(expression).unwrap();
             zen.fast_predicate = None;

@@ -539,9 +539,9 @@ tokio::task_local! {
     static TURN: Cell<Option<PublishTurn>>;
 }
 
-/// Runs `send` with `turn` handed to the output marker inside it. The turn comes back unless
-/// the marker took it and the send succeeded: a send that failed, at the marker or before
-/// reaching it, keeps its turn, so the caller decides when the next batch may go.
+/// Runs `send` with `turn` handed to the output marker inside it. The turn always comes back,
+/// so the caller decides from the outer result when the next batch may go: a middleware above
+/// the marker can still fail a batch the sink accepted.
 pub(crate) async fn with_publish_turn<F: Future>(
     turn: PublishTurn,
     send: F,
@@ -606,7 +606,7 @@ impl MessagePublisher for TurnPublisher {
         } else {
             self.inner.send_batch(messages).await
         };
-        if send_failed(&sent) && turn.is_some() {
+        if turn.is_some() {
             let _ = TURN.try_with(|cell| cell.set(turn));
         }
         sent
