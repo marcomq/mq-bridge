@@ -8,7 +8,6 @@ authors = ["Marco Mengelkochs"]
 repository = "https://github.com/marcomq/mq-bridge"
 license = "MIT OR Apache-2.0"
 description = "Zero-code ETL and message bridge (CLI, server, MCP): brokers (Kafka, NATS, AMQP, MQTT), databases incl. Postgres/MongoDB CDC, Parquet on S3/GCS/Azure object storage, HTTP/gRPC."
-homepage = "https://marcomq.github.io/mq-bridge/"
 documentation = "https://marcomq.github.io/mq-bridge/"
 readme = "../../README.md"
 keywords = ["kafka", "messaging", "etl", "cdc", "streaming"]
