@@ -236,11 +236,11 @@ fn render_connector(c: &Connector) -> String {
             // its own field-by-field sub-table below instead of a JSON dump.
             (_, Some(nested_schema)) => {
                 appendix.push_str(&render_nested(&f.name, &root, nested_schema));
-                if f.name == "tls" {
-                    if let Some(note) = ca_file_note(&c.endpoint) {
-                        appendix.push_str(note);
-                        appendix.push_str("\n\n");
-                    }
+                if f.name == "tls"
+                    && let Some(note) = ca_file_note(&c.endpoint)
+                {
+                    appendix.push_str(note);
+                    appendix.push_str("\n\n");
                 }
                 // GitHub keeps underscores in heading anchors, so the link must
                 // match the raw field name — `#publication_tables`, not `-`.
