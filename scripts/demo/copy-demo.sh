@@ -2,7 +2,8 @@
 # Re-shoot docs/assets/copy-demo.png: three real `mqb copy` runs of 1M rows each.
 #
 #   scripts/demo/copy-demo.sh up      # start and seed the containers
-#   scripts/demo/copy-demo.sh shoot   # warm up, capture, check, render
+#   scripts/demo/copy-demo.sh shoot   # per copy: start only its containers, warm up,
+#                                     # keep the fastest of RUNS (default 3); check, render
 #   scripts/demo/copy-demo.sh down    # remove the containers
 #
 # Needs docker, python3 and `freeze`. MQB selects the binary (default: mqb on PATH),
@@ -11,9 +12,9 @@ set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 WORK="$REPO/target/copy-demo"
-MQB="${MQB:-$(command -v mqb)}"
 CONTAINERS="mqb-demo-pg mqb-demo-s3 mqb-demo-nats mqb-demo-clickhouse mqb-demo-kafka"
 CHECKPOINT=/tmp/ck.json
+RUNS="${RUNS:-3}"
 
 export AWS_ENDPOINT_URL=http://127.0.0.1:4566
 export AWS_ACCESS_KEY_ID=test
@@ -54,16 +55,16 @@ PY
 up() {
   orders_csv
   down
-  docker run -d --name mqb-demo-pg -p 5433:5432 \
+  docker run -d --name mqb-demo-pg -p 127.0.0.1:5433:5432 \
     -e POSTGRES_USER=analytics -e POSTGRES_PASSWORD=demo -e POSTGRES_DB=shop \
     postgres:16-alpine >/dev/null
-  docker run -d --name mqb-demo-s3 -p 4566:4566 -e SERVICES=s3 -e LS_LOG=warn \
+  docker run -d --name mqb-demo-s3 -p 127.0.0.1:4566:4566 -e SERVICES=s3 -e LS_LOG=warn \
     localstack/localstack:4.12.0 >/dev/null
-  docker run -d --name mqb-demo-nats -p 4222:4222 nats:2.12.2-alpine3.22 >/dev/null
-  docker run -d --name mqb-demo-clickhouse -p 8123:8123 --ulimit nofile=262144:262144 \
+  docker run -d --name mqb-demo-nats -p 127.0.0.1:4222:4222 nats:2.12.2-alpine3.22 >/dev/null
+  docker run -d --name mqb-demo-clickhouse -p 127.0.0.1:8123:8123 --ulimit nofile=262144:262144 \
     -e CLICKHOUSE_USER=demo -e CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1 \
     clickhouse/clickhouse-server:24.8 >/dev/null
-  docker run -d --name mqb-demo-kafka --hostname kafka -p 9092:9092 \
+  docker run -d --name mqb-demo-kafka --hostname kafka -p 127.0.0.1:9092:9092 \
     -e KAFKA_BROKER_ID=1 -e KAFKA_PROCESS_ROLES=broker,controller \
     -e KAFKA_CONTROLLER_QUORUM_VOTERS=1@kafka:9093 -e KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER \
     -e CLUSTER_ID=copy-demo-cluster-id-0001 \
@@ -98,20 +99,64 @@ down() {
 # Each of these silently yields a run that copies nothing and still renders fine:
 # a kept SQL cursor, a kept checkpoint file, or an object-store prefix that already
 # holds the range.
-reset_state() {
-  psql -c "DROP TABLE IF EXISTS mqb_cursors_orders;"
-  rm -f "$CHECKPOINT"
+reset_s3() {
   docker exec mqb-demo-s3 awslocal s3 rb --force s3://lake >/dev/null 2>&1 || true
   docker exec mqb-demo-s3 awslocal s3 mb s3://lake >/dev/null
+}
+
+reset_pg() {
+  psql -c "DROP TABLE IF EXISTS mqb_cursors_orders;"
+}
+
+reset_kafka() {
+  rm -f "$CHECKPOINT"
   docker exec mqb-demo-kafka kafka-topics --bootstrap-server localhost:9092 \
     --delete --if-exists --topic orders >/dev/null
 }
 
+wait_ready() {
+  for container in "$@"; do
+    case "$container" in
+      mqb-demo-pg) wait_for postgres docker exec mqb-demo-pg pg_isready -U analytics -d shop ;;
+      mqb-demo-s3) wait_for s3 docker exec mqb-demo-s3 awslocal s3 ls ;;
+      mqb-demo-nats) wait_for nats nc -z 127.0.0.1 4222 ;;
+      mqb-demo-clickhouse) wait_for clickhouse clickhouse --query "SELECT 1" ;;
+      mqb-demo-kafka) wait_for kafka docker exec mqb-demo-kafka kafka-topics \
+        --bootstrap-server localhost:9092 --list ;;
+    esac
+  done
+}
+
+# Runs one copy with only its own containers up (idle brokers beside it slow it down),
+# warms it up, and prints the fastest of $RUNS captures under its header.
+capture() {
+  local header="$1" reset="$2" cmd="$3" best="" best_rate=-1 out rate
+  shift 3
+  # shellcheck disable=SC2086
+  docker stop $CONTAINERS >/dev/null 2>&1 || true
+  docker start "$@" >/dev/null
+  wait_ready "$@" >&2
+  "$reset"
+  eval "$cmd" >/dev/null 2>&1 || true
+  for _ in $(seq 1 "$RUNS"); do
+    "$reset"
+    out="$(eval "$cmd --color always" 2>&1)" || true
+    rate="$(printf '%s\n' "$out" | sed $'s/\x1b\\[[0-9;]*m//g' \
+      | sed -n 's/.*(\([0-9_]*\) rows\/s).*/\1/p' | tr -d _ | tail -1)"
+    echo "   ${rate:-failed} rows/s" >&2
+    if [ "${rate:-0}" -gt "$best_rate" ]; then best_rate="${rate:-0}"; best="$out"; fi
+  done
+  printf '%s\n%s\n' "$header" "$best"
+}
+
 shoot() {
+  MQB="${MQB:-$(command -v mqb)}"
+  [ -n "$MQB" ] || { echo "ERROR: mqb not found; set MQB" >&2; exit 1; }
+  MQB="$(cd "$(dirname "$MQB")" && pwd)/$(basename "$MQB")"
   cd "$WORK"
   # mqb is a launcher for the mq-bridge-app next to it, so put its directory on PATH.
-  PATH="$(cd "$(dirname "$MQB")" && pwd):$PATH"
-  mqb --version
+  PATH="$(dirname "$MQB"):$PATH"
+  "$MQB" --version
 
   local src1="'file://orders.csv?format=csv'"
   local dst1="'s3://lake/orders?format=payload&extension=jsonl.zst&compression=zstd'"
@@ -123,29 +168,35 @@ shoot() {
   local dst3="'kafka://127.0.0.1:9092?topic=orders'"
   local opt3="--drain --resume --batch-size 32768"
 
-  echo "-- warm-up (discarded)"
-  reset_state
-  eval "mqb copy $src1 $dst1 $opt1" >/dev/null
-  eval "mqb copy $src2 $dst2 $opt2" >/dev/null
-  eval "mqb copy $src3 $dst3 $opt3" >/dev/null
-
-  echo "-- capture"
-  reset_state
+  echo "-- capture: each copy alone, warmed up, fastest of $RUNS"
   {
-    printf '$ mqb copy %s %s %s\n' "$src1" "$dst1" "$opt1"
-    eval "mqb copy $src1 $dst1 $opt1 --color always" 2>&1
-    printf '\n$ mqb copy %s\n%s %s\n' "$src2" "$dst2" "$opt2"
-    eval "mqb copy $src2 $dst2 $opt2 --color always" 2>&1
-    printf '\n$ mqb copy %s\n%s %s\n' "$src3" "$dst3" "$opt3"
-    eval "mqb copy $src3 $dst3 $opt3 --color always" 2>&1
+    capture "$(printf '$ mqb copy %s %s %s' "$src1" "$dst1" "$opt1")" \
+      reset_s3 "\"\$MQB\" copy $src1 $dst1 $opt1" mqb-demo-s3
+    capture "$(printf '\n$ mqb copy %s\n%s %s' "$src2" "$dst2" "$opt2")" \
+      reset_pg "\"\$MQB\" copy $src2 $dst2 $opt2" mqb-demo-pg mqb-demo-nats
+    capture "$(printf '\n$ mqb copy %s\n%s %s' "$src3" "$dst3" "$opt3")" \
+      reset_kafka "\"\$MQB\" copy $src3 $dst3 $opt3" mqb-demo-clickhouse mqb-demo-kafka
   } > transcript.txt
+  # shellcheck disable=SC2086
+  docker stop $CONTAINERS >/dev/null
   cat transcript.txt
 
-  local kept
-  kept="$(awk -F, 'NR > 1 && $3 > 50' orders.csv | wc -l | python3 -c 'print(f"{int(input()):_}")')"
-  [ "$(grep -c 'copied 1_000_000 rows' transcript.txt)" -eq 2 ] || {
-    echo "ERROR: expected two full 1,000,000-row runs" >&2; exit 1; }
-  grep -q "copied $kept of 1_000_000 rows" transcript.txt || {
+  local kept full=2 filtered
+  kept="$(python3 -c '
+import csv, sys
+with open(sys.argv[1], newline="") as f:
+    kept = sum(float(row["amount"]) > 50 for row in csv.DictReader(f))
+print(f"{kept:_}")
+' orders.csv)"
+  # A filter that keeps every row reports like an unfiltered run.
+  if [ "$kept" = "1_000_000" ]; then
+    full=3; filtered="copied 1_000_000 rows"
+  else
+    filtered="copied $kept of 1_000_000 rows"
+  fi
+  [ "$(grep -c 'copied 1_000_000 rows' transcript.txt)" -eq "$full" ] || {
+    echo "ERROR: expected $full full 1,000,000-row runs" >&2; exit 1; }
+  grep -q "$filtered" transcript.txt || {
     echo "ERROR: filtered run did not report $kept rows" >&2; exit 1; }
   [ "$(grep -c -v -e '^\$ ' -e "^'" -e '^copied ' -e '^$' transcript.txt)" -eq 0 ] || {
     echo "ERROR: transcript holds warnings or errors" >&2; exit 1; }

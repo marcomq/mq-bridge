@@ -33,7 +33,10 @@ use pyo3::conversion::IntoPyObjectExt;
 use pyo3::create_exception;
 use pyo3::exceptions::{PyAttributeError, PyException, PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyByteArray, PyBytes, PyDict, PyList, PyModule, PyTuple, PyType};
+use pyo3::types::{
+    PyAny, PyBool, PyByteArray, PyBytes, PyDict, PyFloat, PyInt, PyList, PyModule, PyString,
+    PyTuple, PyType,
+};
 use serde::de::{DeserializeSeed, Error as DeError, MapAccess, SeqAccess, Visitor};
 use serde::ser::{Error as SerError, SerializeMap, SerializeSeq};
 use serde::{Serialize, Serializer};
@@ -230,49 +233,59 @@ impl PythonWorker {
         let (tx, rx) = std::sync::mpsc::channel::<PythonWorkerRequest>();
         thread::Builder::new()
             .name(format!("mqb-py-{}", label))
+            // Keeps this thread's Python thread state for its lifetime; otherwise every
+            // handler call creates and frees one, with a fresh frame stack (mmap/munmap).
             .spawn(move || {
-                while let Ok(first) = rx.recv() {
-                    // Drain any requests that piled up while we were busy so a
-                    // single GIL acquisition serves all of them. Under load this
-                    // amortizes the Python interpreter entry/exit cost across many
-                    // requests (the dominant per-request cost at high concurrency);
-                    // at low load the channel is empty and this stays a single call.
-                    let mut requests = vec![first];
-                    while let Ok(next) = rx.try_recv() {
-                        requests.push(next);
-                    }
+                Python::attach(move |py| {
+                    py.detach(move || {
+                        while let Ok(first) = rx.recv() {
+                            // Drain any requests that piled up while we were busy so a
+                            // single GIL acquisition serves all of them. Under load this
+                            // amortizes the Python interpreter entry/exit cost across many
+                            // requests (the dominant per-request cost at high concurrency);
+                            // at low load the channel is empty and this stays a single call.
+                            let mut requests = vec![first];
+                            while let Ok(next) = rx.try_recv() {
+                                requests.push(next);
+                            }
 
-                    if requests.len() == 1 {
-                        let request = requests.pop().unwrap();
-                        let _permit = request.permit;
-                        let results =
-                            invoke_python_handler_many(&callable, mode, &label, request.messages);
-                        let _ = request.reply_tx.send(results);
-                        continue;
-                    }
+                            if requests.len() == 1 {
+                                let request = requests.pop().unwrap();
+                                let _permit = request.permit;
+                                let results = invoke_python_handler_many(
+                                    &callable,
+                                    mode,
+                                    &label,
+                                    request.messages,
+                                );
+                                let _ = request.reply_tx.send(results);
+                                continue;
+                            }
 
-                    // Coalesce: flatten every queued request's messages into one
-                    // batch, invoke Python once, then split results back to each
-                    // caller in order (invoke_python_handler_many preserves order).
-                    let mut all_messages = Vec::new();
-                    let mut replies = Vec::with_capacity(requests.len());
-                    let mut permits = Vec::with_capacity(requests.len());
-                    for request in requests {
-                        let count = request.messages.len();
-                        all_messages.extend(request.messages);
-                        replies.push((request.reply_tx, count));
-                        permits.push(request.permit);
-                    }
+                            // Coalesce: flatten every queued request's messages into one
+                            // batch, invoke Python once, then split results back to each
+                            // caller in order (invoke_python_handler_many preserves order).
+                            let mut all_messages = Vec::new();
+                            let mut replies = Vec::with_capacity(requests.len());
+                            let mut permits = Vec::with_capacity(requests.len());
+                            for request in requests {
+                                let count = request.messages.len();
+                                all_messages.extend(request.messages);
+                                replies.push((request.reply_tx, count));
+                                permits.push(request.permit);
+                            }
 
-                    let mut results =
-                        invoke_python_handler_many(&callable, mode, &label, all_messages)
-                            .into_iter();
-                    for (reply_tx, count) in replies {
-                        let chunk: Vec<_> = results.by_ref().take(count).collect();
-                        let _ = reply_tx.send(chunk);
-                    }
-                    drop(permits);
-                }
+                            let mut results =
+                                invoke_python_handler_many(&callable, mode, &label, all_messages)
+                                    .into_iter();
+                            for (reply_tx, count) in replies {
+                                let chunk: Vec<_> = results.by_ref().take(count).collect();
+                                let _ = reply_tx.send(chunk);
+                            }
+                            drop(permits);
+                        }
+                    })
+                })
             })
             .expect("failed to spawn Python handler worker");
         Self { tx }
@@ -1579,18 +1592,15 @@ impl Caller {
         fields: Option<&Bound<'_, PyAny>>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        let fields = call_fields(fields, kwargs)?;
+        let request = CanonicalMessage::new(call_fields(fields, kwargs)?, None);
         let caller = self.caller.clone();
         let runtime = Arc::clone(&self.runtime);
         let answer = py
             .detach(move || {
-                run_sync_task(
-                    &runtime,
-                    async move { caller.call::<JsonValue>(fields).await },
-                )
+                run_sync_task(&runtime, async move { caller.call_message(request).await })
             })
             .map_err(to_py_runtime_error)?;
-        json_to_python(py, &answer)
+        call_answer_to_python(py, self.caller.name(), &answer)
     }
 
     /// Send a message through the route and return its answer as a message.
@@ -1729,6 +1739,19 @@ impl Caller {
             .map_err(to_py_runtime_error)?;
         Self::from_route(py, &route)
     }
+}
+
+fn call_answer_to_python(
+    py: Python<'_>,
+    caller: &str,
+    answer: &CanonicalMessage,
+) -> PyResult<Py<PyAny>> {
+    json_bytes_to_python(py, &answer.payload).map_err(|_| {
+        PyRuntimeError::new_err(format!(
+            "Caller '{caller}': the answer does not parse as JSON: {}",
+            answer.get_payload_str()
+        ))
+    })
 }
 
 #[pyclass(module = "mq_bridge")]
@@ -2940,6 +2963,26 @@ impl Serialize for PyJsonEncodeValue<'_, '_> {
             return serializer.serialize_none();
         }
 
+        // Exact builtin types first: each failed `extract` below raises and discards a PyErr.
+        if let Ok(value) = self.obj.cast_exact::<PyString>() {
+            return serializer.serialize_str(&value.to_cow().map_err(S::Error::custom)?);
+        }
+        if let Ok(value) = self.obj.cast_exact::<PyBool>() {
+            return serializer.serialize_bool(value.is_true());
+        }
+        if self.obj.is_exact_instance_of::<PyInt>() {
+            if let Ok(value) = self.obj.extract::<i64>() {
+                return serializer.serialize_i64(value);
+            }
+        }
+        if let Ok(value) = self.obj.cast_exact::<PyFloat>() {
+            let value = value.value();
+            if !value.is_finite() {
+                return Err(S::Error::custom("NaN and infinity are not valid JSON"));
+            }
+            return serializer.serialize_f64(value);
+        }
+
         if let Ok(value) = self.obj.extract::<bool>() {
             return serializer.serialize_bool(value);
         }
@@ -3029,27 +3072,27 @@ fn python_json_value(obj: &Bound<'_, PyAny>) -> PyResult<JsonValue> {
         .map_err(|err| PyValueError::new_err(format!("failed to encode JSON: {err}")))
 }
 
-/// The JSON object of `Caller.call`: the `fields` mapping, then the keyword arguments.
+/// The JSON of `Caller.call`: the `fields` mapping, then the keyword arguments.
 fn call_fields(
     fields: Option<&Bound<'_, PyAny>>,
     kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<JsonValue> {
-    let mut object = match fields.map(python_json_value).transpose()? {
-        None => serde_json::Map::new(),
-        Some(JsonValue::Object(object)) if kwargs.is_some() => object,
-        Some(other) if kwargs.is_none() => return Ok(other),
-        Some(_) => {
-            return Err(PyTypeError::new_err(
-                "Caller.call: keyword fields need a mapping as the first argument",
-            ))
-        }
+) -> PyResult<Vec<u8>> {
+    let (fields, kwargs) = match (fields, kwargs) {
+        (None, None) => return Ok(b"{}".to_vec()),
+        (Some(fields), None) => return python_to_json_bytes(fields),
+        (None, Some(kwargs)) => return python_to_json_bytes(kwargs.as_any()),
+        (Some(fields), Some(kwargs)) => (fields, kwargs),
     };
-    if let Some(kwargs) = kwargs {
-        if let JsonValue::Object(extra) = python_json_value(kwargs.as_any())? {
-            object.extend(extra);
-        }
+    let JsonValue::Object(mut object) = python_json_value(fields)? else {
+        return Err(PyTypeError::new_err(
+            "Caller.call: keyword fields need a mapping as the first argument",
+        ));
+    };
+    if let JsonValue::Object(extra) = python_json_value(kwargs.as_any())? {
+        object.extend(extra);
     }
-    Ok(JsonValue::Object(object))
+    serde_json::to_vec(&object)
+        .map_err(|err| PyValueError::new_err(format!("failed to encode JSON: {err}")))
 }
 
 fn python_to_json_bytes(obj: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {

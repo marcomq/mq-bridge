@@ -16,6 +16,7 @@ use async_trait::async_trait;
 use serde_json::{Map, Value};
 use zen_expression::compiler::{Compare, FetchFastTarget, Jump, Opcode};
 use zen_expression::expression::Standard;
+use zen_expression::functions::{FunctionKind, InternalFunction};
 use zen_expression::{compile_expression, Expression, Variable};
 
 use super::deferred_commit::{run_all, DeferredCommits};
@@ -94,6 +95,8 @@ enum FastPredicate {
 struct FastTerm {
     /// Dotted path into the merged document, so metadata reads as `["meta", key]`.
     path: Vec<String>,
+    /// Written as `number(field)`, so only a numeric reading can be decided here.
+    cast: bool,
     op: FastOp,
     literal: FastLiteral,
 }
@@ -189,8 +192,8 @@ impl FastTerm {
     fn evaluate(&self, reading: Reading<'_>) -> Option<bool> {
         match self.op {
             // Equality never errors: mismatched types simply do not match.
-            FastOp::Eq => Some(self.equals(reading)),
-            FastOp::Ne => Some(!self.equals(reading)),
+            FastOp::Eq if !self.cast => Some(self.equals(reading)),
+            FastOp::Ne if !self.cast => Some(!self.equals(reading)),
             _ => {
                 let FastLiteral::Number(expected) = &self.literal else {
                     return None;
@@ -292,7 +295,8 @@ impl FastPredicate {
             let reading = message
                 .get_metadata(key)
                 .map_or(Reading::Absent, Reading::Text);
-            if reading.is_unusable() {
+            // `number()` of an unusable field errors, which the slow path reports itself.
+            if reading.is_unusable() && !term.cast {
                 warn(&format!("{METADATA_PREFIX}.{key}"));
             }
             return term.evaluate(reading);
@@ -312,7 +316,7 @@ impl FastPredicate {
             None => None,
         };
         let reading = value.as_ref().map_or(Reading::Absent, Reading::Json);
-        if reading.is_unusable() {
+        if reading.is_unusable() && !term.cast {
             warn(key);
         }
         term.evaluate(reading)
@@ -631,19 +635,23 @@ fn parse_fast_node(opcodes: &[Opcode]) -> Option<FastPredicate> {
 }
 
 fn parse_fast_term(opcodes: &[Opcode]) -> Option<FastTerm> {
-    let (left, right, op) = match opcodes {
-        [left, right, Opcode::Equal] => (left, right, FastOp::Eq),
-        [left, right, Opcode::Equal, Opcode::Not] => (left, right, FastOp::Ne),
-        [left, right, Opcode::Compare(compare)] => (left, right, FastOp::from_compare(*compare)),
+    let (operands, op) = match opcodes {
+        [operands @ .., Opcode::Equal] => (operands, FastOp::Eq),
+        [operands @ .., Opcode::Equal, Opcode::Not] => (operands, FastOp::Ne),
+        [operands @ .., Opcode::Compare(compare)] => (operands, FastOp::from_compare(*compare)),
         _ => return None,
     };
 
-    let (path, literal, op) = match parse_fast_fetch(left).zip(parse_fast_literal(right)) {
-        Some((path, literal)) => (path, literal, op),
+    let field_first = operands
+        .split_last()
+        .and_then(|(last, field)| parse_fast_field(field).zip(parse_fast_literal(last)));
+    let ((path, cast), literal, op) = match field_first {
+        Some((field, literal)) => (field, literal, op),
         // A literal written on the left reverses the test.
         None => {
-            let (literal, path) = parse_fast_literal(left).zip(parse_fast_fetch(right))?;
-            (path, literal, op.flipped())
+            let (first, field) = operands.split_first()?;
+            let (literal, field) = parse_fast_literal(first).zip(parse_fast_field(field))?;
+            (field, literal, op.flipped())
         }
     };
     if path.is_empty() {
@@ -651,11 +659,28 @@ fn parse_fast_term(opcodes: &[Opcode]) -> Option<FastTerm> {
     }
     // The engine compares only numbers, and reports anything else as a typed-field
     // problem the slow path phrases. Ordering against another kind of literal is
-    // therefore left to it entirely.
-    if op.is_ordering() && !matches!(literal, FastLiteral::Number(_)) {
+    // therefore left to it entirely, as is `number()` against anything but a number.
+    if (op.is_ordering() || cast) && !matches!(literal, FastLiteral::Number(_)) {
         return None;
     }
-    Some(FastTerm { path, op, literal })
+    Some(FastTerm {
+        path,
+        cast,
+        op,
+        literal,
+    })
+}
+
+/// A bare field, or one wrapped in `number()`.
+fn parse_fast_field(opcodes: &[Opcode]) -> Option<(Vec<String>, bool)> {
+    match opcodes {
+        [fetch] => Some((parse_fast_fetch(fetch)?, false)),
+        [fetch, Opcode::CallFunction {
+            kind: FunctionKind::Internal(InternalFunction::Number),
+            arg_count: 1,
+        }] => Some((parse_fast_fetch(fetch)?, true)),
+        _ => None,
+    }
 }
 
 fn parse_fast_fetch(opcode: &Opcode) -> Option<Vec<String>> {
@@ -1579,6 +1604,13 @@ mod tests {
             "meta.kind == 'order' and amount > 100",
             "amount == null",
             "amount != null",
+            "number(amount) > 100",
+            "number(amount) <= 100",
+            "number(amount) == 100",
+            "number(amount) != 100",
+            "100 < number(amount)",
+            "number(amount) > 100 and country == 'US'",
+            "number(meta.retries) >= 3",
         ];
 
         let payloads = [
@@ -1587,6 +1619,7 @@ mod tests {
             // Text-typed columns, as a CSV or SQL source delivers them.
             r#"{"amount":"100","country":"US","active":true}"#,
             r#"{"amount":"250.75","country":"US"}"#,
+            r#"{"amount":" 1e3 ","country":"US"}"#,
             // Readings the engine refuses: text that is not a number, a bool, a
             // container, an explicit null, and an absent field.
             r#"{"amount":"abc","country":"US"}"#,
@@ -1653,6 +1686,8 @@ mod tests {
             "a == 1 and b == 2 and c == 3",
             "a == 1 or b > 2 and c == 3",
             "meta.retries > 3 and status == 'open'",
+            "number(meta.count) >= 2",
+            "2 <= number(x)",
         ] {
             assert!(
                 CompiledFilter::new(expression)
@@ -1664,9 +1699,11 @@ mod tests {
         }
 
         for expression in [
-            // A call or arithmetic is not a bare field against a bare literal.
-            "number(meta.count) >= 2",
+            // Arithmetic, or a call other than `number()`, is not a bare field.
             "x + 1 == 2",
+            "number(x + 1) > 2",
+            "len(x) > 2",
+            "number(x) == '2'",
             // The engine orders numbers only, so ordering against anything else has to
             // reach the slow path that reports it as a typed-field problem.
             "x > 'a'",

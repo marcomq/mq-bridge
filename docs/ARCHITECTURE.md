@@ -419,7 +419,7 @@ Both implement `MessageConsumer` trait. Subscribers often wrap consumers (e.g., 
 3. **Custom endpoints**: Implement `CustomEndpointFactory` trait
 4. **Custom middleware**: Implement `CustomMiddlewareFactory` trait
 5. **Typed handlers**: Use `TypeHandler` to deserialize messages into Rust types based on `kind` metadata field
-6. **Request-Reply**: Enable via `request_reply: true` in publisher config (NATS, MongoDB, Memory). Uses UUID v7 for correlation.
+6. **Request-Reply**: Enable via `request_reply: true` in publisher config (NATS, MongoDB, in-process `memory://`; IPC memory publishers reject it). Uses UUID v7 for correlation.
 
 ## Performance Considerations
 

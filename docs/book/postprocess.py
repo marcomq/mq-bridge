@@ -66,14 +66,16 @@ def first_paragraph(markdown):
 
 def add_head(file, page, description):
     # mdBook renders README.md as index.html but leaves links to it as README.html.
-    text = re.sub(r'href="([^":]*)README\.html', r'href="\1index.html', file.read_text())
+    text = re.sub(r'href="([^":]*)README\.html', r'href="\1index.html', file.read_text(encoding="utf-8"))
     if 'rel="canonical"' in text:
-        file.write_text(text)
+        file.write_text(text, encoding="utf-8")
         return
     head = [f'<link rel="canonical" href="{url(page)}">']
     if description:
         meta = f'<meta name="description" content="{html.escape(description)}">'
-        text, replaced = re.subn(r'<meta name="description" content="[^"]*">', meta, text, count=1)
+        text, replaced = re.subn(
+            r'<meta name="description" content="[^"]*">', lambda _: meta, text, count=1
+        )
         if not replaced:
             head.append(meta)
     title = re.search(r"<title>(.*?)</title>", text, re.S)
@@ -89,7 +91,7 @@ def add_head(file, page, description):
     if shown:
         head.append(f'<meta property="og:description" content="{shown.group(1)}">')
     lines = "".join(f"    {tag}\n    " for tag in head)
-    file.write_text(text.replace("</head>", f"{lines}</head>", 1))
+    file.write_text(text.replace("</head>", f"{lines}</head>", 1), encoding="utf-8")
 
 
 def main():
@@ -99,7 +101,7 @@ def main():
     descriptions = {}
     explicit = 0
     for md in pages:
-        source = (SRC / md).read_text()
+        source = (SRC / md).read_text(encoding="utf-8")
         match = DESCRIPTION.search(source[:2000])
         explicit += bool(match)
         descriptions[html_path(md)] = " ".join(match.group(1).split()) if match else first_paragraph(source)

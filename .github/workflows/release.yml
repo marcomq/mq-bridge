@@ -1098,15 +1098,15 @@ jobs:
           # anything else -- a swallowed error here surfaces later as a
           # confusing "no matching version" failure on the dependent crate.
           publish() {
-            for attempt in 1 2 3 4 5; do
+            for attempt in $(seq 1 10); do
               cargo publish -p "$1" ${2:+--manifest-path "$2"} 2>&1 | tee "publish-$1.log" && return
               if grep -Eq "already uploaded|already exists on crates.io index" "publish-$1.log"; then
                 echo "$1 is already on crates.io, continuing"
                 return
               fi
-              [ "$attempt" = 5 ] && return 1
+              [ "$attempt" = 10 ] && return 1
               echo "publish of $1 failed; waiting for registry propagation"
-              sleep 20
+              sleep 30
             done
           }
           publish mq-bridge

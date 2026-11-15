@@ -27,6 +27,11 @@
 📚 <a href="docs/REFERENCE.md">Middleware &amp; endpoint reference</a>
 </p>
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/marcomq/mq-bridge/main/docs/assets/copy-demo.png"
+       alt="mqb copy: a CSV file to S3 as zstd-compressed JSONL, a filtered Postgres table to NATS, and a ClickHouse table to Kafka — 1,000,000 rows each, one command per line" width="900">
+</p>
+
 ## What is mq-bridge?
 
 `mq-bridge` is an asynchronous Rust library that moves messages and data between systems: Kafka, NATS, RabbitMQ, MQTT, MongoDB, PostgreSQL/MySQL/SQLite, Postgres CDC, ClickHouse, Redis Streams, HTTP, WebSocket, gRPC, ZeroMQ, AWS SQS/SNS, IBM MQ, cloud object storage, files, and in-memory channels. Every endpoint sits behind the same batch-shaped `receive_batch` / `send_batch` traits, so any source can feed any sink.

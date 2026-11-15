@@ -4,6 +4,22 @@ All notable changes to `mq-bridge`. Newest first.
 
 ## 1.6.1
 
+### Changed
+
+- **Python: `Caller.call()` and JSON handlers encode faster.** A `str`, `int`, `float` or
+  `bool` field no longer goes through failed conversions first, and `call()` encodes its
+  fields and decodes the answer once instead of twice.
+- **`parallel` and `buffer` no longer copy every message's outcome when they settle a
+  batch.** Each answer, metadata included, was cloned once per merged commit; on a batched
+  lookup behind a `Caller` that was about a third of the route's CPU.
+- **Python: handler threads keep their Python thread state.** Each handler call created
+  and freed one, including a fresh frame stack, which was about a third of the handler
+  thread's time. An HTTP route answering from a Python handler went from ~78k to ~87k
+  req/s at 8 connections.
+- **`filter`: `number(field)` compared with a number takes the fast path.** Expressions
+  like `number(amount) > 50` used to build a JSON value for every message and run the
+  expression engine; now only the named field is parsed. Results are unchanged.
+
 ### Fixed
 
 - **Python and Node: a drain ends with a custom middleware on the input.** A middleware

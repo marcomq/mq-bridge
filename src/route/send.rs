@@ -435,7 +435,7 @@ pub(super) async fn send_batch_and_commit(
             // As below: a failed send keeps its turn until the caller has marked the route.
             let kept = kept.filter(|_| crate::middleware::send_failed(&sent));
             *ticket = kept.map(|turn| OrderTicket {
-                prev: None,
+                prev: turn.prev,
                 _release: turn._release,
                 failed: turn.failed,
             });
@@ -592,7 +592,8 @@ pub(super) async fn send_batch_and_commit(
                     );
                     return Ok(());
                 }
-                if !has_retry_middleware {
+                // An ordered sink must not take later batches ahead of the redelivered ones.
+                if !has_retry_middleware || ticket.is_some() {
                     return Err(err);
                 }
                 warn!(
