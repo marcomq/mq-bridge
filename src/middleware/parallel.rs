@@ -539,21 +539,18 @@ tokio::task_local! {
     static TURN: Cell<Option<PublishTurn>>;
 }
 
-/// Runs `send` with `turn` handed to the output marker inside it. A batch that never reaches
-/// the marker drops its turn when `send` returns. A send that failed at the marker hands its
-/// turn back, so the caller decides when the next batch may go.
+/// Runs `send` with `turn` handed to the output marker inside it. The turn comes back unless
+/// the marker took it and the send succeeded: a send that failed, at the marker or before
+/// reaching it, keeps its turn, so the caller decides when the next batch may go.
 pub(crate) async fn with_publish_turn<F: Future>(
     turn: PublishTurn,
     send: F,
 ) -> (F::Output, Option<PublishTurn>) {
-    let (sent, kept) = TURN
-        .scope(Cell::new(Some(turn)), async {
-            let sent = send.await;
-            (sent, TURN.with(Cell::take))
-        })
-        .await;
-    // Only a turn the marker waited for and put back is still worth holding.
-    (sent, kept.filter(|turn| turn.prev.is_none()))
+    TURN.scope(Cell::new(Some(turn)), async {
+        let sent = send.await;
+        (sent, TURN.with(Cell::take))
+    })
+    .await
 }
 
 /// Whether a send left messages unsent.
