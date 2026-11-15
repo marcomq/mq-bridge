@@ -6,3 +6,6 @@ publish = false
 
 [dependencies]
 mq-bridge = { path = "../../..", default-features = false }
+
+[lints]
+workspace = true
