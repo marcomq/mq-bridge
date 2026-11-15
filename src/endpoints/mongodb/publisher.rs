@@ -186,27 +186,26 @@ impl MongoDbPublisher {
             }
         }
 
-        let load = config
-            .load_mode
-            .map(|_| super::load::StagedLoad::new(client.clone(), db.clone(), collection_name));
+        let ttl = config.ttl_seconds.map(Duration::from_secs);
+        let load = config.load_mode.map(|_| {
+            super::load::StagedLoad::new(client.clone(), db.clone(), collection_name, ttl)
+        });
         let collection = db.collection(
             load.as_ref()
                 .map_or(collection_name, super::load::StagedLoad::staging),
         );
         info!(database = %config.database, collection = %collection_name, request_reply = %config.request_reply, "MongoDB publisher connected");
 
-        if let Some(ttl) = config.ttl_seconds {
+        // With `load_mode` the staging collection gets it, so the target is unchanged until the swap.
+        if let Some(ttl) = ttl.filter(|_| load.is_none()) {
             let options = mongodb::options::IndexOptions::builder()
-                .expire_after(Duration::from_secs(ttl))
+                .expire_after(ttl)
                 .build();
             let model = IndexModel::builder()
                 .keys(doc! { "created_at": 1 })
                 .options(options)
                 .build();
-            // On the target even with `load_mode`: the swap copies it, and creating it on the
-            // staging collection would create that too early.
-            let target = db.collection::<Document>(collection_name);
-            if let Err(e) = target.create_index(model).await {
+            if let Err(e) = collection.create_index(model).await {
                 warn!(
                     "Failed to create TTL index on publisher collection {} : {}",
                     collection_name, e

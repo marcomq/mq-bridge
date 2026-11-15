@@ -55,7 +55,7 @@ def parse_args() -> argparse.Namespace:
         default="mqb-worker,mqb-direct,faststream,fastapi,starlette,sanic,aiohttp",
         help=(
             "Comma-separated subset of: mqb-worker, mqb-direct, faststream, "
-            "fastapi, starlette, sanic, aiohttp."
+            "fastapi, starlette, sanic, aiohttp, pyronova, pyronova-1 (one sub-interpreter)."
         ),
     )
     parser.add_argument("--route-concurrency", type=int, default=8)
@@ -340,6 +340,28 @@ def aiohttp_server():
     )
 
 
+def pyronova_server(workers: int | None = None):
+    port = free_port()
+    return _spawn_python(
+        f"""
+        from pyronova import Pyronova
+
+        app = Pyronova()
+
+        @app.post("{PATH}")
+        def bench(req):
+            data = req.json()
+            data["value"] += 1
+            return data
+
+        if __name__ == "__main__":
+            app.run(host="{HOST}", port={port}, workers={workers})
+        """,
+        prefix="mqb-pyronova-",
+        port=port,
+    )
+
+
 TARGETS = {
     "mqb-worker": lambda a: mqb_server("worker", a.route_concurrency),
     "mqb-direct": lambda a: mqb_server("direct", a.route_concurrency),
@@ -348,6 +370,8 @@ TARGETS = {
     "starlette": lambda a: starlette_server(),
     "sanic": lambda a: sanic_server(),
     "aiohttp": lambda a: aiohttp_server(),
+    "pyronova": lambda a: pyronova_server(),
+    "pyronova-1": lambda a: pyronova_server(workers=1),
 }
 
 

@@ -319,8 +319,10 @@ from file extensions. Use separate prefixes and routes for mixed formats.
 - `normal` and `json` read mq-bridge message wrappers, one per line, and preserve metadata.
 - For ordinary third-party JSONL, use `payload` (also `raw`): each line becomes one message payload without
   validating or transforming its JSON.
-- `text` and `payload` emit delimited byte records without JSON or CSV parsing. A JSON array is not
-  expanded into records.
+- `text` reads the same message wrappers as `normal` and emits their payload: the line
+  `{"message_id":"…","payload":"hi"}` becomes a message with the payload `hi`.
+- `payload` emits each delimited byte record as it is, without JSON or CSV parsing. A JSON
+  array is not expanded into records.
 
 One input object can produce many messages, and route batching still applies. The source
 fetches each object into memory before splitting it, so set `max_object_bytes` for untrusted or

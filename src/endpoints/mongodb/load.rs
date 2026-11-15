@@ -26,6 +26,8 @@ struct LoadState {
     poisoned: Option<String>,
     finished: bool,
     heartbeat: Option<tokio::task::JoinHandle<()>>,
+    /// The staging collection could not be dropped; its lease stays so a later load reclaims it.
+    keep_lease: bool,
 }
 
 pub(super) struct StagedLoad {
@@ -33,16 +35,22 @@ pub(super) struct StagedLoad {
     db: Database,
     target: String,
     staging: String,
+    /// `ttl_seconds`: the TTL index is built on the staging collection, not the target.
+    ttl: Option<Duration>,
+    /// Set by the heartbeat when another load reclaimed this one's lease.
+    lost: Arc<AtomicBool>,
     state: tokio::sync::Mutex<LoadState>,
 }
 
 impl StagedLoad {
-    pub(super) fn new(client: Client, db: Database, target: &str) -> Self {
+    pub(super) fn new(client: Client, db: Database, target: &str, ttl: Option<Duration>) -> Self {
         Self {
             client,
             db,
             target: target.to_string(),
             staging: format!("{}{:032x}", staging_prefix(target), fast_uuid_v7::gen_id()),
+            ttl,
+            lost: Default::default(),
             state: Default::default(),
         }
     }
@@ -69,6 +77,9 @@ impl StagedLoad {
                     "load_mode: an earlier write of this load failed, the target stays unchanged: {reason}"
                 )));
             }
+            if self.lost.load(Ordering::Acquire) {
+                return Err(Self::fail(&mut state, lease_lost()));
+            }
             if !state.started {
                 state.started = true;
                 if let Err(e) = self.create_staging().await {
@@ -77,6 +88,7 @@ impl StagedLoad {
                 state.heartbeat = Some(tokio::spawn(renew_lease(
                     self.leases(),
                     self.staging.clone(),
+                    self.lost.clone(),
                 )));
             }
         }
@@ -136,6 +148,20 @@ impl StagedLoad {
             .run_command(create)
             .await
             .with_context(|| format!("load_mode: creating '{}' failed", self.staging))?;
+        if let Some(ttl) = self.ttl {
+            let model = IndexModel::builder()
+                .keys(doc! { "created_at": 1 })
+                .options(
+                    mongodb::options::IndexOptions::builder()
+                        .expire_after(ttl)
+                        .build(),
+                )
+                .build();
+            let staging = self.db.collection::<Document>(&self.staging);
+            if let Err(e) = staging.create_index(model).await {
+                warn!(collection = %self.staging, error = %e, "load_mode: creating the TTL index failed");
+            }
+        }
         Ok(())
     }
 
@@ -143,32 +169,66 @@ impl StagedLoad {
         self.db.collection::<Document>(&self.staging).drop().await
     }
 
-    /// Drops the target's staging collections whose load holds no live lease. The lease was
-    /// taken first, so two loads starting together see each other's.
+    /// Drops the target's staging collections whose lease for this target has expired. Only a
+    /// lease proves a collection is a staging one; one without a lease is left alone. Claiming
+    /// the lease first fences its owner: its renewal and the check before its swap then fail.
     async fn drop_abandoned(&self) -> anyhow::Result<()> {
-        let prefix = staging_prefix(&self.target);
+        let pattern = format!(
+            "^{}[0-9a-f]{{32}}$",
+            regex_escape(&staging_prefix(&self.target))
+        );
         let staged = self
             .db
             .list_collection_names()
-            .filter(doc! { "name": { "$regex": format!("^{}", regex_escape(&prefix)) } })
+            .filter(doc! { "name": { "$regex": pattern } })
             .await?;
-        let live: Vec<String> = self
-            .leases()
-            .find(doc! { "_id": { "$in": &staged }, "$expr": { "$gt": ["$expires_at", "$$NOW"] } })
-            .projection(doc! { "_id": 1 })
-            .await?
-            .filter_map(|lease| async move { lease.ok()?.get_str("_id").ok().map(str::to_string) })
-            .collect()
-            .await;
-        for name in staged.iter().filter(|name| !live.contains(name)) {
+        for name in &staged {
+            let claimed = self
+                .leases()
+                .update_one(
+                    doc! { "_id": name, "target": &self.target, "$or": [
+                        { "reclaimed": true },
+                        { "$expr": { "$lte": ["$expires_at", "$$NOW"] } },
+                    ] },
+                    doc! { "$set": { "reclaimed": true } },
+                )
+                .await?;
+            if claimed.matched_count == 0 {
+                continue;
+            }
             warn!(collection = %name, "load_mode: dropping the staging collection of a load that did not finish");
             self.db.collection::<Document>(name).drop().await?;
+            self.leases().delete_one(doc! { "_id": name }).await?;
         }
         self.leases()
-            .delete_many(
-                doc! { "target": &self.target, "$expr": { "$lte": ["$expires_at", "$$NOW"] } },
-            )
+            .delete_many(doc! {
+                "target": &self.target,
+                "_id": { "$nin": &staged },
+                "$expr": { "$lte": ["$expires_at", "$$NOW"] },
+            })
             .await?;
+        Ok(())
+    }
+
+    /// Renews the lease unless it expired or was reclaimed, so no other load can reclaim it
+    /// for the next [`LEASE`]; the last check before the swap.
+    async fn hold_lease(&self) -> anyhow::Result<()> {
+        let renewed = self
+            .leases()
+            .update_one(
+                doc! {
+                    "_id": &self.staging,
+                    "reclaimed": { "$ne": true },
+                    "$expr": { "$gt": ["$expires_at", "$$NOW"] },
+                },
+                vec![doc! { "$set": { "expires_at": lease_expiry() } }],
+            )
+            .await
+            .context("load_mode: renewing the load's lease failed")?;
+        if renewed.matched_count == 0 {
+            self.lost.store(true, Ordering::Release);
+            return Err(lease_lost());
+        }
         Ok(())
     }
 
@@ -177,10 +237,10 @@ impl StagedLoad {
         if let Some(heartbeat) = state.heartbeat.take() {
             heartbeat.abort();
         }
-        if state.started {
+        if state.started && !state.keep_lease {
             if let Err(e) = self
                 .leases()
-                .delete_one(doc! { "_id": &self.staging })
+                .delete_one(doc! { "_id": &self.staging, "reclaimed": { "$ne": true } })
                 .await
             {
                 warn!(collection = %self.staging, error = %e, "load_mode: releasing the lease failed; it expires by itself");
@@ -207,9 +267,15 @@ impl StagedLoad {
                 let Some(index) = index.as_document() else {
                     continue;
                 };
-                // Both exist on the staging collection already: `_id_` always, a clustered one from `create`.
+                // Already on the staging collection: `_id_` always, a clustered one from `create`,
+                // the TTL index from `ttl_seconds`.
+                let ttl_index = self.ttl.is_some()
+                    && index
+                        .get_document("key")
+                        .is_ok_and(|key| key.len() == 1 && key.contains_key("created_at"));
                 if index.get_str("name").ok() == Some("_id_")
                     || index.get_bool("clustered").unwrap_or(false)
+                    || ttl_index
                 {
                     continue;
                 }
@@ -225,6 +291,7 @@ impl StagedLoad {
                 .await
                 .context("building the target's indexes on the loaded documents failed")?;
         }
+        self.hold_lease().await?;
         let db = self.db.name();
         self.client
             .database("admin")
@@ -261,7 +328,7 @@ impl StagedLoad {
                     Ok(())
                 }
                 Err(e) => {
-                    self.discard().await;
+                    state.keep_lease = !self.discard().await;
                     Err(e.context(format!(
                         "load_mode: replacing '{target}' failed, it is unchanged"
                     )))
@@ -273,7 +340,7 @@ impl StagedLoad {
             }
             (outcome, poisoned, started) => {
                 if started {
-                    self.discard().await;
+                    state.keep_lease = !self.discard().await;
                 }
                 warn!(collection = %target, ?outcome, "load_mode: load discarded, the collection is unchanged");
                 match (outcome, poisoned) {
@@ -286,9 +353,14 @@ impl StagedLoad {
         }
     }
 
-    async fn discard(&self) {
-        if let Err(e) = self.drop_staging().await {
-            warn!(collection = %self.staging, error = %e, "load_mode: dropping the staging collection failed; the next load drops it");
+    /// Drops the staging collection; false if that failed.
+    async fn discard(&self) -> bool {
+        match self.drop_staging().await {
+            Ok(()) => true,
+            Err(e) => {
+                warn!(collection = %self.staging, error = %e, "load_mode: dropping the staging collection failed; the next load drops it");
+                false
+            }
         }
     }
 }
@@ -310,17 +382,29 @@ fn lease_expiry() -> Document {
     doc! { "$add": ["$$NOW", LEASE.as_millis() as i64] }
 }
 
-async fn renew_lease(leases: Collection<Document>, staging: String) {
+fn lease_lost() -> anyhow::Error {
+    anyhow!("load_mode: the load's lease expired and another load reclaimed its staging collection")
+}
+
+async fn renew_lease(leases: Collection<Document>, staging: String, lost: Arc<AtomicBool>) {
     loop {
         tokio::time::sleep(LEASE_RENEWAL).await;
         let renewed = leases
             .update_one(
-                doc! { "_id": &staging },
+                doc! { "_id": &staging, "reclaimed": { "$ne": true } },
                 vec![doc! { "$set": { "expires_at": lease_expiry() } }],
             )
             .await;
-        if let Err(e) = renewed {
-            warn!(collection = %staging, error = %e, "load_mode: renewing the load's lease failed");
+        match renewed {
+            Ok(r) if r.matched_count == 0 => {
+                warn!(collection = %staging, "load_mode: the load's lease was reclaimed; its writes now fail");
+                lost.store(true, Ordering::Release);
+                return;
+            }
+            Ok(_) => {}
+            Err(e) => {
+                warn!(collection = %staging, error = %e, "load_mode: renewing the load's lease failed")
+            }
         }
     }
 }

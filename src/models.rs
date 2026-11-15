@@ -2219,6 +2219,10 @@ pub struct MongoDbConfig {
     pub update_batch_field: Option<String>,
     /// (Publisher only, drain routes) `replace`: load into a staging collection that replaces this one when the drain completes; indexes and options carry over.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(schema_with = "replace_only_load_mode_schema")
+    )]
     pub load_mode: Option<SqlLoadMode>,
     /// The ID used for the cursor in sequenced mode. If not provided, consumption starts from the current sequence (ephemeral).
     pub cursor_id: Option<String>,

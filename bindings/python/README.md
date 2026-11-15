@@ -28,7 +28,7 @@
 ## Why mq-bridge?
 
 - **One API for many transports.** Kafka, NATS, AMQP, MQTT, MongoDB, PostgreSQL/MySQL/SQLite, ClickHouse, Redis Streams, HTTP, WebSocket, gRPC, ZeroMQ, AWS SQS/SNS, IBM MQ, object storage, files and in-memory channels share one config shape. To switch the broker, you change the config, not your handler.
-- **Rust does the heavy lifting.** Broker I/O, batching, ack/nack, commit ordering, retries and JSON (de)serialization run in the Tokio-based Rust core. Python only runs your handler, so a single Python process can serve HTTP faster than the common Python frameworks (see [Performance](#performance)).
+- **Rust does the heavy lifting.** Broker I/O, batching, ack/nack, commit ordering, retries and JSON (de)serialization run in the Tokio-based Rust core. Python only runs your handler. From plain synchronous code, one `send_batch()` call sends ~8x the HTTP requests `aiohttp` manages, and a route serves HTTP at ~2x the fastest asyncio framework (see [Performance](#performance)).
 - **Pipelines from configuration.** Transform, filter, switch, fan out, enrich, deduplicate, rate-limit, retry or send to a DLQ with a few lines of YAML, with no Python code in the hot path.
 - **Plain, synchronous Python.** You don't need `asyncio` or callbacks. `send_json()` blocks until the broker acks, a handler is an ordinary function, and `Consumer.poll()` hands you a list.
 - **The same config runs everywhere.** You can prototype a route in the [`mqb` CLI or desktop app](https://github.com/marcomq/mq-bridge/tree/main/apps/mq-bridge-app) and then load the identical YAML in Python, Rust or Node.js.
@@ -100,19 +100,37 @@ with Consumer.from_config({"nats": {"subject": "orders", "url": "nats://localhos
 
 ## Performance
 
-The Python package is a thin layer over the same engine as the Rust crate and the `mqb` CLI. Python touches only your handler, so the figures below carry over to Python as long as the work stays in config.
+The Python package is a thin layer over the same engine as the Rust crate and the `mqb` CLI. Python touches only your handler; connections, batching, concurrency and JSON stay in Rust, outside the GIL.
 
-**HTTP serving, one Python process each** (handler: parse JSON, add 1, return JSON; driven by `wrk` so the load generator isn't the bottleneck; 8-core macOS):
+All figures below were measured on an Apple M1 (8 cores), CPython 3.14.7, mq-bridge 1.5.0 from PyPI, one Python process per contender. The scripts are under [Benchmarks](#benchmarks).
 
-| Concurrent connections | mq-bridge | Fastest of FastAPI / Starlette / Sanic / aiohttp / FastStream |
-| :--- | ---: | ---: |
-| 1 | ~22k req/s | ~24k req/s |
-| 8 | **~78k req/s** | ~46k req/s |
-| 32 | **~82–100k req/s** | ~50k req/s |
+**Sending HTTP requests** (200-byte JSON POST to a local nginx, so the target is never the limit):
 
-mq-bridge parses and serializes the JSON in Rust, outside the GIL, while the Python frameworks do it in Python. That is a real architectural advantage, not a benchmark trick: the application logic is Python in every case. At a single connection, the frameworks are on par or slightly ahead; the gap opens under load. You can reproduce these numbers with [`analysis/bench_http_native.py`](#benchmarks).
+| Client | 1 in flight | 16 in flight | 64 in flight |
+| :--- | ---: | ---: | ---: |
+| `requests` (one `Session` per thread) | 2,151 req/s | 2,850 req/s | 2,969 req/s |
+| `httpx.Client` (threads) | 3,422 req/s | 2,752 req/s | 2,896 req/s |
+| `httpx.AsyncClient` (uvloop) | 1,946 req/s | 630 req/s | 154 req/s |
+| `aiohttp` (uvloop) | 14,062 req/s | 20,718 req/s | 20,560 req/s |
+| mq-bridge `Publisher.send()` (threads) | **21,130 req/s** | **88,055 req/s** | **82,388 req/s** |
+| mq-bridge `Publisher.send_batch()` (one thread) | **23,981 req/s** | **132,527 req/s** | **160,955 req/s** |
 
-**Data movement** (engine figures, measured through the `mqb` CLI on the same machine as each baseline):
+One `send_batch()` call from plain synchronous code sends ~8x what `aiohttp` reaches with an event loop, and ~50x `requests`. You don't need `asyncio` for it: `batch_concurrency` in the endpoint config sets how many requests are in flight at once.
+
+**Serving HTTP** (handler: parse JSON, add 1, return JSON; driven by `wrk` so the load generator isn't the bottleneck):
+
+| Framework | 1 connection | 8 connections | 32 connections |
+| :--- | ---: | ---: | ---: |
+| FastAPI (uvicorn) | 13,555 req/s | 18,100 req/s | 19,017 req/s |
+| Starlette (uvicorn) | 19,952 req/s | 30,553 req/s | 30,979 req/s |
+| aiohttp | 15,339 req/s | 28,726 req/s | 31,225 req/s |
+| Sanic | 23,676 req/s | 40,893 req/s | 42,263 req/s |
+| FastStream (ASGI, uvicorn) | 23,814 req/s | 42,989 req/s | 44,308 req/s |
+| mq-bridge `Route` + handler | 21,041 req/s | **84,078 req/s** | **109,606 req/s** |
+
+Under load, mq-bridge serves ~2–2.5x the fastest asyncio framework and ~5x FastAPI. The application logic is Python in every case; mq-bridge parses and serializes the JSON in Rust, outside the GIL. At a single connection the asyncio frameworks are on par.
+
+**Data movement** (engine figures, measured through the `mqb` CLI on the same machine as each baseline; a Python route that stays in config runs the same engine code):
 
 | Job | mq-bridge | Baseline |
 | :--- | ---: | :--- |
@@ -420,3 +438,11 @@ uv run python analysis/bench_http_native.py --connections 1,8,32 --duration 8
 ```
 
 Requires `wrk` on `PATH` (`brew install wrk`). The FastStream target compares its ASGI custom-route path over Uvicorn; it is not a broker-backed subscriber/publisher benchmark.
+
+HTTP sending, mq-bridge `Publisher` vs `requests`, `httpx` and `aiohttp`, against a local nginx (`brew install nginx`):
+
+```bash
+uv run python analysis/bench_http_send.py --concurrency 1,16,64 --duration 5
+```
+
+Run the scripts from a directory where `import mq_bridge` resolves to the build you want to measure. In `bindings/python/` that is the in-tree package, which is only current after `maturin develop --release`.

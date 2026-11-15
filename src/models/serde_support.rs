@@ -607,6 +607,13 @@ where
 
 /// A `type` list rather than `anyOf`, so form renderers keep a plain text field.
 #[cfg(feature = "schema")]
+/// MongoDB accepts only `replace`; `atomic_append` is rejected when the publisher starts.
+pub(crate) fn replace_only_load_mode_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "anyOf": [{ "type": "string", "const": "replace" }, { "type": "null" }]
+    })
+}
+
 pub(crate) fn topic_list_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
     schemars::json_schema!({
         "type": ["string", "array", "null"],

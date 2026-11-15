@@ -3340,7 +3340,8 @@
           "description": "(Publisher only, drain routes) `replace`: load into a staging collection that replaces this one when the drain completes; indexes and options carry over.",
           "anyOf": [
             {
-              "$ref": "#/$defs/SqlLoadMode"
+              "type": "string",
+              "const": "replace"
             },
             {
               "type": "null"
@@ -3443,21 +3444,6 @@
           "type": "string",
           "const": "payload",
           "x-alias-of": "raw"
-        }
-      ]
-    },
-    "SqlLoadMode": {
-      "description": "How a SQL sink commits a drain: all of it at the end, instead of batch by batch.",
-      "oneOf": [
-        {
-          "description": "One transaction for the whole drain, committed when it completes.",
-          "type": "string",
-          "const": "atomic_append"
-        },
-        {
-          "description": "As `atomic_append`, after deleting the old rows; an empty source leaves the table as it was.",
-          "type": "string",
-          "const": "replace"
         }
       ]
     },
@@ -4866,6 +4852,21 @@
           "description": "Each top-level JSON field goes into the table column of the same name.",
           "type": "string",
           "const": "auto"
+        }
+      ]
+    },
+    "SqlLoadMode": {
+      "description": "How a SQL sink commits a drain: all of it at the end, instead of batch by batch.",
+      "oneOf": [
+        {
+          "description": "One transaction for the whole drain, committed when it completes.",
+          "type": "string",
+          "const": "atomic_append"
+        },
+        {
+          "description": "As `atomic_append`, after deleting the old rows; an empty source leaves the table as it was.",
+          "type": "string",
+          "const": "replace"
         }
       ]
     },

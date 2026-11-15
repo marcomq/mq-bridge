@@ -631,7 +631,7 @@ class MongoDbConfig(TypedDict, total=False):
     find: Optional[str]
     format: MongoDbFormat
     id_field: Optional[str]
-    load_mode: Optional[SqlLoadMode]
+    load_mode: Optional[Literal["replace"]]
     meta_collection: Optional[str]
     password: Optional[str]
     polling_interval_ms: Optional[int]

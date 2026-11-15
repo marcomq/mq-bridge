@@ -424,6 +424,8 @@ pub struct MongoDbChangeStreamReader {
     ended: Mutex<Option<String>>,
     /// Without a checkpoint: why the collection is gone, until its `invalidate` arrives.
     gone: Mutex<Option<String>>,
+    /// Without a checkpoint: the `invalidate` to reopen the stream after, kept until that succeeds.
+    invalidated: Mutex<Option<(ResumeToken, String)>>,
 }
 
 /// The last acknowledged position of a reader without a checkpoint, kept for the session.
@@ -536,9 +538,15 @@ impl MongoDbChangeStreamReader {
         // silently drop every event. The snapshot phase keeps the raw predicate (it queries the
         // collection directly). Note: delete events carry no `fullDocument`, so document-field
         // filters exclude deletes.
+        // Lifecycle events pass the filter, so a dropped or renamed collection is still noticed.
         let pipeline: Vec<Document> = receive_query
             .as_ref()
-            .map(|q| vec![doc! { "$match": full_document_match(q) }])
+            .map(|q| {
+                vec![doc! { "$match": { "$or": [
+                    full_document_match(q),
+                    { "operationType": { "$in": ["drop", "dropDatabase", "rename", "invalidate"] } },
+                ] } }]
+            })
             .unwrap_or_default();
 
         let checkpoint: Option<Arc<dyn crate::checkpoint::CheckpointStore>> = if no_resume {
@@ -635,6 +643,7 @@ impl MongoDbChangeStreamReader {
             replay: Arc::new(Mutex::new(replay)),
             ended: Mutex::new(None),
             gone: Mutex::new(None),
+            invalidated: Mutex::new(None),
         })
     }
 
@@ -841,10 +850,10 @@ impl MongoDbChangeStreamReader {
 
     /// A drop, rename or invalidate of the watched collection. A reader with a checkpoint stops:
     /// resuming would replay the same end, and skipping it would hide that the collection was
-    /// replaced. Without one the stream goes on after the `invalidate`, from the next change.
-    async fn on_collection_gone(
+    /// replaced. Without one the stream goes on after the `invalidate`, from the next change;
+    /// [`Self::reopen_invalidated`] reopens it.
+    fn on_collection_gone(
         &self,
-        stream: &mut ChangeStream<ChangeStreamEvent<Document>>,
         event: &ChangeStreamEvent<Document>,
         reason: String,
     ) -> Result<(), ConsumerError> {
@@ -856,11 +865,30 @@ impl MongoDbChangeStreamReader {
             return Ok(());
         }
         let reason = self.gone.lock().unwrap().take().unwrap_or(reason);
-        warn!(collection = %self.collection_name, "MongoDB change stream: the collection was {reason}; reading on from the next change. Documents it holds now that no change event brought are not emitted");
-        *stream = open_change_stream_after(&self.collection, &self.pipeline, event.id.clone())
-            .await
-            .map_err(ConsumerError::Connection)?;
+        *self.invalidated.lock().unwrap() = Some((event.id.clone(), reason));
         Ok(())
+    }
+
+    /// Reopens the stream after a pending `invalidate`; on failure it stays pending for the next call.
+    async fn reopen_invalidated(
+        &self,
+        stream: &mut ChangeStream<ChangeStreamEvent<Document>>,
+    ) -> Result<(), ConsumerError> {
+        let pending = self.invalidated.lock().unwrap().take();
+        let Some((token, reason)) = pending else {
+            return Ok(());
+        };
+        match open_change_stream_after(&self.collection, &self.pipeline, token.clone()).await {
+            Ok(reopened) => {
+                warn!(collection = %self.collection_name, "MongoDB change stream: the collection was {reason}; reading on from the next change. Documents it holds now that no change event brought are not emitted");
+                *stream = reopened;
+                Ok(())
+            }
+            Err(e) => {
+                *self.invalidated.lock().unwrap() = Some((token, reason));
+                Err(ConsumerError::Connection(e))
+            }
+        }
     }
 
     /// Called while the stream is idle: persist the change stream's postBatchResumeToken so the
@@ -1050,6 +1078,7 @@ impl MessageConsumer for MongoDbChangeStreamReader {
             *stream_guard = Some(opened);
         }
         let stream = stream_guard.as_mut().expect("stream opened above");
+        self.reopen_invalidated(stream).await?;
 
         let mut messages = Vec::new();
         // Per-message resume token: resuming `after` the last acked event's token gives
@@ -1088,7 +1117,8 @@ impl MessageConsumer for MongoDbChangeStreamReader {
             match poll {
                 Ok(Ok(Some(event))) => {
                     if let Some(reason) = collection_gone(&event, &self.collection_name) {
-                        self.on_collection_gone(stream, &event, reason).await?;
+                        self.on_collection_gone(&event, reason)?;
+                        self.reopen_invalidated(stream).await?;
                         continue;
                     }
                     let token = event.id.clone();
@@ -1145,7 +1175,11 @@ impl MessageConsumer for MongoDbChangeStreamReader {
                             *self.ended.lock().unwrap() = Some(reason);
                             break;
                         }
-                        self.on_collection_gone(stream, &event, reason).await?;
+                        self.on_collection_gone(&event, reason)?;
+                        // The collected changes go out first; the next call reopens the stream.
+                        if self.invalidated.lock().unwrap().is_some() {
+                            break;
+                        }
                         continue;
                     }
                     let token = event.id.clone();
