@@ -20,6 +20,11 @@ All notable changes to `mq-bridge`. Newest first.
   behind it were still written. After the reconnect the failed batch came again and landed
   behind them. Those batches are now handed back unsent, with or without a `parallel` marker
   on the output.
+- **Postgres cursor reads are fast again.** Since 1.0.1 the check that holds back rows of
+  transactions still open made each page's query look so expensive to the planner that
+  Postgres JIT-compiled it every time, which made a page several times slower than its
+  rows. The check now runs once per page with a cheap estimate; which rows are read is
+  unchanged. On older releases, `ALTER ROLE <reader> SET jit = off` avoids the cost.
 
 ## 1.6.0
 

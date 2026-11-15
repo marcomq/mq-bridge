@@ -20,7 +20,7 @@ keywords = [
   "clickhouse", "parquet", "s3", "object-storage", "http", "grpc", "mq-bridge",
 ]
 classifiers = [
-  "Development Status :: 3 - Alpha",
+  "Development Status :: 5 - Production/Stable",
   "Intended Audience :: Developers",
   "Topic :: Database",
   "Topic :: System :: Networking",

@@ -1,3 +1,5 @@
+<!-- description: mq-bridge moves data between Kafka, NATS, RabbitMQ, MQTT, databases, files and HTTP with batching, retries, DLQ, deduplication and CDC. One Rust engine as a CLI, MCP server or library for Rust, Python and Node.js. -->
+
 # Introduction
 
 <p align="center">

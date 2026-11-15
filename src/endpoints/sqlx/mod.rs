@@ -3478,6 +3478,10 @@ async fn pg_xmin_readable(pool: &AnyPool, table: &str) -> bool {
 /// Ends a page before the first row written by a transaction no older than the oldest one
 /// still open: that one may yet commit a lower cursor value, which `col > last` would skip.
 /// Only the page window is checked, so the cost stays one page.
+///
+/// `ARRAY(...)` runs the window once as an InitPlan; its lowest value (a NULL first) cuts the
+/// same rows as `< ALL` over the whole window. `CASE` hides the `ALL` from the row estimate,
+/// which would otherwise favour a sort over the index or, as a SubPlan, trigger JIT per page.
 fn pg_in_flight_cut(
     table: &str,
     cursor_column: &str,
@@ -3489,9 +3493,10 @@ fn pg_in_flight_cut(
         .map(|lower| format!(" WHERE {cursor_column} > {lower}"))
         .unwrap_or_default();
     format!(
-        "{cursor_column} < ALL (SELECT mqb_w.mqb_c FROM (SELECT {cursor_column} AS mqb_c, \
-         xmin AS mqb_x FROM {table}{window_filter} ORDER BY {order_column} ASC LIMIT {limit}) \
-         mqb_w WHERE age(mqb_w.mqb_x) <= {PG_OLDEST_IN_FLIGHT_AGE})"
+        "CASE WHEN {cursor_column} < ALL (ARRAY(SELECT mqb_w.mqb_c FROM (SELECT {cursor_column} \
+         AS mqb_c, xmin AS mqb_x FROM {table}{window_filter} ORDER BY {order_column} ASC LIMIT \
+         {limit}) mqb_w WHERE age(mqb_w.mqb_x) <= {PG_OLDEST_IN_FLIGHT_AGE} \
+         ORDER BY mqb_w.mqb_c ASC NULLS FIRST LIMIT 1)) THEN true END"
     )
 }
 

@@ -2,6 +2,7 @@
 title    = "mqb · mq-bridge"
 authors  = ["mq-bridge contributors"]
 language = "en"
+description = "mq-bridge moves and reshapes data between message brokers, databases, files and HTTP: a fast Rust engine with a CLI, an MCP server and Rust, Python and Node.js libraries."
 src      = "."
 
 [output.html]
