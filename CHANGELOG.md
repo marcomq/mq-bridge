@@ -2,6 +2,20 @@
 
 All notable changes to `mq-bridge`. Newest first.
 
+## 1.6.1
+
+### Fixed
+
+- **Python and Node: a drain ends with a custom middleware on the input.** A middleware
+  registered with `register_middleware` / `registerMiddleware` did not pass `exit_on_empty`
+  on to the source, so a route reading from `memory`, Kafka, NATS or another waiting source
+  never exited once it was empty.
+- **Python and Node: a custom middleware keeps the endpoint's ordering, flush and hooks.**
+  Behind a middleware on the output, a `file` sink with `concurrency` above 1 could write
+  batches out of order, and a sink that only makes its writes durable on flush had the
+  source's commits released before that flush. The endpoint's connect and disconnect hooks
+  and its status were not passed on either, on input and output.
+
 ## 1.6.0
 
 ### Added

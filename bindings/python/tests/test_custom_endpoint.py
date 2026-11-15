@@ -364,6 +364,46 @@ def test_middleware_dropping_a_whole_batch_does_not_end_the_route() -> None:
     assert source.commits == ["ack", "ack"]
 
 
+def test_input_middleware_lets_a_blocking_source_drain() -> None:
+    """The middleware must pass `exit_on_empty` on, or a memory source waits forever."""
+    in_topic = _unique("pytest.mw.drain.in")
+    out_topic = _unique("pytest.mw.drain.out")
+    mw = _register_mw("drain", lambda route_name, config: Tagger(config))
+
+    config = {
+        "routes": {
+            "mw_drain_route": {
+                "exit_on_empty": True,
+                "input": {
+                    "memory": {"topic": in_topic, "capacity": 4096},
+                    "middlewares": [{"custom": {"name": mw, "config": {}}}],
+                },
+                "output": {"memory": {"topic": out_topic, "capacity": 4096}},
+            }
+        },
+        "publishers": {"pub": {"memory": {"topic": in_topic, "capacity": 4096}}},
+    }
+    route = Route.from_config(config, "mw_drain_route")
+    publisher = Publisher.from_config(config, "pub")
+    drainer = MemoryDrainer.from_topic(out_topic, 4096)
+    publisher.send(Message(b"payload"))
+
+    finished = threading.Event()
+
+    def run() -> None:
+        route.run()
+        finished.set()
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    try:
+        assert drainer.drain(1, timeout=10.0) == 1
+        assert finished.wait(timeout=10.0), "route did not exit once the source was empty"
+    finally:
+        route.stop()
+        thread.join(timeout=5.0)
+
+
 def test_middleware_rewrites_on_the_output_side() -> None:
     in_topic = _unique("pytest.mw.in")
     sink = ListSink()

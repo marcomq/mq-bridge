@@ -897,6 +897,22 @@ impl MessageConsumer for JsMiddlewareConsumer {
         }
     }
 
+    fn set_exit_on_empty(&mut self, exit_on_empty: bool) {
+        self.inner.set_exit_on_empty(exit_on_empty);
+    }
+
+    fn on_connect_hook(&self) -> Option<core::traits::BoxFuture<'_, anyhow::Result<()>>> {
+        self.inner.on_connect_hook()
+    }
+
+    fn on_disconnect_hook(&self) -> Option<core::traits::BoxFuture<'_, anyhow::Result<()>>> {
+        self.inner.on_disconnect_hook()
+    }
+
+    async fn status(&self) -> core::traits::EndpointStatus {
+        self.inner.status().await
+    }
+
     fn commit_requires_order(&self) -> bool {
         self.inner.commit_requires_order()
     }
@@ -941,6 +957,26 @@ impl core::traits::MessagePublisher for JsMiddlewarePublisher {
 
     async fn flush(&self) -> anyhow::Result<()> {
         self.inner.flush().await
+    }
+
+    fn requires_ordered_publish(&self) -> bool {
+        self.inner.requires_ordered_publish()
+    }
+
+    fn deferred_commit_interval(&self) -> Option<std::time::Duration> {
+        self.inner.deferred_commit_interval()
+    }
+
+    fn on_connect_hook(&self) -> Option<core::traits::BoxFuture<'_, anyhow::Result<()>>> {
+        self.inner.on_connect_hook()
+    }
+
+    fn on_disconnect_hook(&self) -> Option<core::traits::BoxFuture<'_, anyhow::Result<()>>> {
+        self.inner.on_disconnect_hook()
+    }
+
+    async fn status(&self) -> core::traits::EndpointStatus {
+        self.inner.status().await
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
