@@ -52,6 +52,16 @@ impl HeldTx {
         }
     }
 
+    /// Runs `before_load` / `after_load`, which may hold several statements.
+    async fn execute_script(&mut self, sql: &str) -> Result<(), sqlx::Error> {
+        let sql = sqlx::raw_sql(super::audited_sql(sql));
+        match self {
+            Self::Any(tx) => sql.execute(&mut **tx).await.map(drop),
+            #[cfg(feature = "sqlx")]
+            Self::Pg(tx) => sql.execute(&mut **tx).await.map(drop),
+        }
+    }
+
     async fn commit(self) -> Result<(), sqlx::Error> {
         match self {
             Self::Any(tx) => tx.commit().await,
@@ -86,14 +96,23 @@ pub(super) struct LoadState {
 pub(super) struct HeldLoad {
     mode: SqlLoadMode,
     table: String,
+    before_load: Option<String>,
+    after_load: Option<String>,
     state: tokio::sync::Mutex<LoadState>,
 }
 
 impl HeldLoad {
-    pub(super) fn new(mode: SqlLoadMode, table: &str) -> Self {
+    pub(super) fn new(
+        mode: SqlLoadMode,
+        table: &str,
+        before_load: Option<String>,
+        after_load: Option<String>,
+    ) -> Self {
         Self {
             mode,
             table: table.to_string(),
+            before_load,
+            after_load,
             state: Default::default(),
         }
     }
@@ -126,6 +145,13 @@ impl HeldLoad {
                         .await
                         .map_err(|e| PublisherError::NonRetryable(anyhow!(e)))?;
                 }
+                if let Some(sql) = &self.before_load {
+                    tx.execute_script(sql).await.map_err(|e| {
+                        PublisherError::NonRetryable(
+                            super::sql_error_text(e).context("before_load failed"),
+                        )
+                    })?;
+                }
                 Ok(tx)
             }
             .await;
@@ -145,7 +171,17 @@ impl HeldLoad {
         let tx = state.tx.take();
         let table = &self.table;
         match (outcome, state.poisoned.take(), tx) {
-            (DisconnectOutcome::Completed, None, Some(tx)) => {
+            (DisconnectOutcome::Completed, None, Some(mut tx)) => {
+                if let Some(sql) = &self.after_load {
+                    if let Err(e) = tx.execute_script(sql).await {
+                        if let Err(rollback) = tx.rollback().await {
+                            warn!(table = %table, error = %rollback, "load_mode: rollback failed; the database discards the open transaction itself");
+                        }
+                        return Err(super::sql_error_text(e).context(format!(
+                            "load_mode: after_load failed, the load into '{table}' was rolled back"
+                        )));
+                    }
+                }
                 tx.commit().await.map_err(|e| {
                     anyhow!(e).context(format!(
                         "load_mode: committing the load into '{table}' failed; nothing was written"

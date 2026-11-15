@@ -180,8 +180,8 @@ processes share one port; a second process started by mistake raises no error.
 `copied …` summary goes to stderr so it does not land among the rows.
 
 ```bash
-pg_dump_rows | mqb copy '-?format=raw' 'kafka://localhost:9092?topic=rows'
-mqb copy 'postgres://…/shop?table=orders&cursor_column=id' '-?format=raw' --limit 5
+pg_dump_rows | mqb copy '-?format=payload' 'kafka://localhost:9092?topic=rows'
+mqb copy 'postgres://…/shop?table=orders&cursor_column=id' '-?format=payload' --limit 5
 ```
 
 When the reader of stdout goes away (`mqb copy … - | head -2`), the copy ends with one

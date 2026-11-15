@@ -93,11 +93,11 @@ be read back. Verified round trip:
 
 ```bash
 mqb copy --drain \
-  --from 'file:///tmp/in.jsonl?format=raw' \
+  --from 'file:///tmp/in.jsonl?format=payload' \
   --to   'file:///tmp/packed.bin?format=normal|compression?algorithm=zstd'
 mqb copy --drain \
   --from 'file:///tmp/packed.bin?format=normal|compression?algorithm=zstd' \
-  --to   'file:///tmp/out.jsonl?format=raw'
+  --to   'file:///tmp/out.jsonl?format=payload'
 ```
 
 ## Compression *and* encryption
@@ -111,7 +111,7 @@ encrypted data at rest, use the endpoints' own fields, which apply
 output:
   file:
     path: "data.enc"
-    format: raw
+    format: payload
     compression: lz4
     encryption: { key: "${env:MQB_ENC_KEY}" }
 ```

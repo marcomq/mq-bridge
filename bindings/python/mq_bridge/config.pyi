@@ -631,6 +631,7 @@ class MongoDbConfig(TypedDict, total=False):
     find: Optional[str]
     format: MongoDbFormat
     id_field: Optional[str]
+    load_mode: Optional[SqlLoadMode]
     meta_collection: Optional[str]
     password: Optional[str]
     polling_interval_ms: Optional[int]
@@ -872,7 +873,9 @@ class SledConfig(TypedDict, total=False):
 class SqlxConfig(TypedDict, total=False):
     """General SQLx connection configuration."""
     acquire_timeout_ms: Optional[int]
+    after_load: Optional[str]
     auto_create_table: bool
+    before_load: Optional[str]
     bulk_copy: bool
     checkpoint_store: Optional[str]
     columns: Optional[SqlColumns]
@@ -884,6 +887,7 @@ class SqlxConfig(TypedDict, total=False):
     idle_timeout_ms: Optional[int]
     insert_query: Optional[str]
     key: Optional[str]
+    load_mode: Optional[SqlLoadMode]
     lookup_query: Optional[str]
     max_connections: Optional[int]
     max_lifetime_ms: Optional[int]
@@ -1044,6 +1048,7 @@ SpoolClaim = Literal["exclusive", "warn", "off"]
 SpoolDone = Literal["never", "success", "end"]
 SpoolFsync = Literal["chunk", "off"]
 SqlColumns = Literal["auto"]
+SqlLoadMode = Literal["atomic_append", "replace"]
 SqlTimestamps = Literal["text", "rfc3339"]
 StaticConfig = Union[str, Dict[str, Any]]
 TransformErrorPolicy = Literal["reject", "pass_through"]

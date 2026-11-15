@@ -438,6 +438,7 @@ struct CopyArgs {
 
     /// Load a SQL destination as one unit, committed when the copy completes:
     /// `atomic_append` adds the rows, `replace` first deletes the old ones.
+    /// MongoDB takes `replace`: a staging collection swapped in at the end.
     ///
     /// Readers keep seeing the old rows until then, and a failed or interrupted
     /// copy leaves the table unchanged. Implies `--drain`; the same as
@@ -1474,30 +1475,39 @@ fn copy_route_endpoints(
 
 /// How often a copy on a terminal redraws its running count.
 const COPY_PROGRESS_INTERVAL: Duration = Duration::from_secs(2);
+/// How often a copy whose stderr is a log file or a pipe writes a progress line.
+const COPY_PROGRESS_LOG_INTERVAL: Duration = Duration::from_secs(10);
 
-/// A running row count on stderr while a copy is in flight. Only on a terminal, so a
-/// log file or a pipe never sees it; dropped (and its line cleared) before the summary.
+/// A running row count on stderr while a copy is in flight: one redrawn line on a terminal,
+/// a plain line every 10 s otherwise. A terminal's line is cleared before the summary.
 struct CopyProgress(Option<tokio::task::JoinHandle<()>>);
 
 impl CopyProgress {
     fn start(copied: Arc<std::sync::atomic::AtomicU64>, verbose: bool) -> Self {
         use std::io::IsTerminal;
-        if verbose || !std::io::stderr().is_terminal() {
+        if verbose {
             return Self(None);
         }
+        let terminal = std::io::stderr().is_terminal();
+        let interval = if terminal {
+            COPY_PROGRESS_INTERVAL
+        } else {
+            COPY_PROGRESS_LOG_INTERVAL
+        };
         Self(Some(tokio::spawn(async move {
             let mut before = 0;
             loop {
-                tokio::time::sleep(COPY_PROGRESS_INTERVAL).await;
+                tokio::time::sleep(interval).await;
                 let rows = copied.load(std::sync::atomic::Ordering::Relaxed);
-                let rate = (rows - before) as f64 / COPY_PROGRESS_INTERVAL.as_secs_f64();
+                let rate = (rows - before) as f64 / interval.as_secs_f64();
                 before = rows;
-                PROGRESS_DRAWN.store(true, std::sync::atomic::Ordering::Relaxed);
-                eprint!(
-                    "\r\x1b[2K{} rows ({} rows/s)",
-                    grouped(rows),
-                    grouped(rate as u64)
-                );
+                let line = format!("{} rows ({} rows/s)", grouped(rows), grouped(rate as u64));
+                if terminal {
+                    PROGRESS_DRAWN.store(true, std::sync::atomic::Ordering::Relaxed);
+                    eprint!("\r\x1b[2K{line}");
+                } else {
+                    eprintln!("{line}");
+                }
             }
         })))
     }

@@ -2689,6 +2689,50 @@ async fn load_mode_one_rejected_row_fails_the_whole_load() {
 }
 
 #[tokio::test]
+async fn load_mode_runs_before_and_after_load_in_its_transaction() {
+    use crate::traits::DisconnectOutcome::Completed;
+    let hooked = |url: &str, after_load: &str| SqlxConfig {
+        url: url.to_string(),
+        table: "loaded".to_string(),
+        insert_query: Some("INSERT INTO loaded (v) VALUES (${payload:v})".to_string()),
+        load_mode: Some(crate::models::SqlLoadMode::Replace),
+        before_load: Some("INSERT INTO loaded (v) VALUES ('before')".to_string()),
+        after_load: Some(after_load.to_string()),
+        ..Default::default()
+    };
+
+    let (_dir, url, pool) = setup_loaded_table().await;
+    let counted = "INSERT INTO loaded (v) SELECT 'n=' || COUNT(*) FROM loaded; \
+                   INSERT INTO loaded (v) VALUES ('after')";
+    let publisher = SqlxPublisher::new(&hooked(&url, counted)).await.unwrap();
+    publisher.send_batch(values(&["a", "b"])).await.unwrap();
+    assert_eq!(loaded_rows(&pool).await, ["old"]);
+    finish_load(&publisher, Completed).await.unwrap();
+    assert_eq!(
+        loaded_rows(&pool).await,
+        ["a", "after", "b", "before", "n=3"]
+    );
+
+    let (_dir, url, pool) = setup_loaded_table().await;
+    let failing = "INSERT INTO missing (v) VALUES ('x')";
+    let publisher = SqlxPublisher::new(&hooked(&url, failing)).await.unwrap();
+    publisher.send_batch(values(&["a"])).await.unwrap();
+    let err = finish_load(&publisher, Completed).await.unwrap_err();
+    assert!(format!("{err:#}").contains("after_load"), "{err:#}");
+    assert_eq!(loaded_rows(&pool).await, ["old"]);
+
+    let config = SqlxConfig {
+        load_mode: None,
+        ..hooked(&url, failing)
+    };
+    let err = SqlxPublisher::new(&config).await.err().expect("rejected");
+    assert!(
+        err.downcast_ref::<crate::errors::InvalidConfig>().is_some(),
+        "{err:#}"
+    );
+}
+
+#[tokio::test]
 async fn load_mode_rejects_a_lookup_query() {
     let (_dir, url, _pool) = setup_loaded_table().await;
     let config = SqlxConfig {

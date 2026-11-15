@@ -113,6 +113,7 @@ SpoolClaim = str
 SpoolDone = str
 SpoolFsync = str
 SqlColumns = str
+SqlLoadMode = str
 SqlTimestamps = str
 StaticConfig = str
 TransformErrorPolicy = str
@@ -230,6 +231,7 @@ __all__ = [
     "SpoolDone",
     "SpoolFsync",
     "SqlColumns",
+    "SqlLoadMode",
     "SqlTimestamps",
     "SqlxConfig",
     "StaticConfig",

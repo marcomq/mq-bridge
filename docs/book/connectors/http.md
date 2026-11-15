@@ -189,7 +189,7 @@ mqb copy \
 
 ```bash
 mqb copy --drain \
-  --from 'file:///data/events.jsonl?format=raw' \
+  --from 'file:///data/events.jsonl?format=payload' \
   --to 'https://api.example.com/ingest?method=POST&request_timeout_ms=5000'
 ```
 

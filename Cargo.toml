@@ -62,7 +62,7 @@ exit = "warn"
 collapsible_if = "allow"
 
 [workspace.package]
-version = "1.5.0"
+version = "1.6.0"
 
 [workspace.dependencies]
 anyhow = "1.0"
@@ -247,6 +247,8 @@ aws-sigv4 = { version = "1.4", optional = true }
 
 # SQLx
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls", "any"], optional = true }
+# Only for the `LevelFilter` sqlx's statement-log settings take; sqlx already depends on it.
+log = { version = "0.4", optional = true }
 
 # ClickHouse — talks the ClickHouse HTTP interface directly (JSONEachRow in/out).
 # reqwest is used rather than the typed `clickhouse` crate because that crate is
@@ -441,7 +443,7 @@ redis-streams = ["dep:redis", "rustls", "rustls-native-certs"]
 # Note: The grpc feature requires protobuf-src which can significantly increase build times.
 grpc = ["tonic", "tonic-reflection", "prost", "prost-types", "prost-reflect", "tokio-stream", "tonic-prost", "tonic-prost-build", "rustls", "rustls-native-certs", "vendored-protoc"]
 # SQL endpoint with only the SQLite driver; `sqlx` adds PostgreSQL and MySQL/MariaDB.
-sqlite = ["dep:sqlx", "sqlx/sqlite-bundled"]
+sqlite = ["dep:sqlx", "dep:log", "sqlx/sqlite-bundled"]
 sqlx = ["sqlite", "sqlx/postgres", "sqlx/mysql"]
 clickhouse = ["dep:reqwest", "dep:flate2", "dep:lz4_flex", "dep:zstd", "rustls", "rustls-pemfile", "webpki-roots", "rustls-native-certs"]
 # Generic bulk document sink over HTTP (search engines and similar APIs).

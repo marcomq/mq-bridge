@@ -60,29 +60,37 @@ pub fn configure_filter(input: &mut Endpoint, expression: &str) {
     insert_before_buffer(input, Middleware::Filter(expression.into()));
 }
 
-/// Sets `load_mode` on a SQL destination; `--load-mode` and `?load_mode=` must agree.
+/// Sets `load_mode` on a SQL or MongoDB destination; `--load-mode` and `?load_mode=` must agree.
 pub fn configure_load_mode(output: &mut Endpoint, mode: SqlLoadMode) -> anyhow::Result<()> {
-    let EndpointType::Sqlx(config) = &mut output.endpoint_type else {
-        bail!("--load-mode needs a SQL destination (postgres://, mysql://, sqlite://)");
+    let load_mode = match &mut output.endpoint_type {
+        EndpointType::Sqlx(config) => &mut config.load_mode,
+        EndpointType::MongoDb(config) => &mut config.load_mode,
+        _ => bail!(
+            "--load-mode needs a SQL or MongoDB destination (postgres://, mysql://, sqlite://, mongodb://)"
+        ),
     };
     let name = |mode| match mode {
         SqlLoadMode::AtomicAppend => "atomic_append",
         SqlLoadMode::Replace => "replace",
     };
-    match config.load_mode {
+    match *load_mode {
         Some(set) if set != mode => bail!(
             "--load-mode {} contradicts `load_mode={}` in the destination URI",
             name(mode),
             name(set)
         ),
-        _ => config.load_mode = Some(mode),
+        _ => *load_mode = Some(mode),
     }
     Ok(())
 }
 
-/// Whether the destination loads the whole copy as one transaction.
+/// Whether the destination loads the whole copy as one unit.
 pub fn loads_atomically(output: &Endpoint) -> bool {
-    matches!(&output.endpoint_type, EndpointType::Sqlx(config) if config.load_mode.is_some())
+    match &output.endpoint_type {
+        EndpointType::Sqlx(config) => config.load_mode.is_some(),
+        EndpointType::MongoDb(config) => config.load_mode.is_some(),
+        _ => false,
+    }
 }
 
 /// Attaches a row counter next to the source and returns the shared tally.

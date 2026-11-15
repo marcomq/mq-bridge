@@ -195,7 +195,7 @@ see the [Compression](../cookbook/compression.md) and
 
 A source on `normal`/`json`/`text` expects that same wrapper. A line that is valid JSON but not
 the wrapper becomes the whole payload (its own `metadata` is discarded, with a warning); use
-`format: raw` for plain JSON lines.
+`format: payload` for plain JSON lines.
 
 In the wrapper, a UTF-8 payload is a plain JSON string under `payload`; a binary one
 (compressed, encrypted, Protobuf, …) is base64-encoded under `payload_base64`. The two are

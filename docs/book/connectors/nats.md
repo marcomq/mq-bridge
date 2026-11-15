@@ -184,7 +184,7 @@ Core NATS consumer to the native reply subject.
 
 ```bash
 mqb copy --drain \
-  --from 'file:///data/orders.jsonl?format=raw' \
+  --from 'file:///data/orders.jsonl?format=payload' \
   --to 'nats://localhost:4222?subject=orders.new&stream=orders'
 ```
 

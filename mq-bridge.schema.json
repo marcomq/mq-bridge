@@ -2471,7 +2471,7 @@
           "const": "normal"
         },
         {
-          "description": "The full `CanonicalMessage` is serialized to JSON. Payload is rendered as a JSON value if possible. Also `envelope_json`; for plain JSON lines use `raw`.",
+          "description": "The full `CanonicalMessage` is serialized to JSON. Payload is rendered as a JSON value if possible. Also `envelope_json`; for plain JSON lines use `payload`.",
           "type": "string",
           "const": "json"
         },
@@ -2481,7 +2481,7 @@
           "const": "text"
         },
         {
-          "description": "Only the payload is written, one per line: plain JSON lines for JSON payloads. For consumers, the line is read as raw bytes. Also `payload`.",
+          "description": "Only the payload is written, one per line: plain JSON lines for JSON payloads. For consumers, the line is read as raw bytes. Also `payload`, the clearer name.",
           "type": "string",
           "const": "raw"
         },
@@ -3336,6 +3336,17 @@
             "null"
           ]
         },
+        "load_mode": {
+          "description": "(Publisher only, drain routes) `replace`: load into a staging collection that replaces this one when the drain completes; indexes and options carry over.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SqlLoadMode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "cursor_id": {
           "description": "The ID used for the cursor in sequenced mode. If not provided, consumption starts from the current sequence (ephemeral).",
           "type": [
@@ -3432,6 +3443,21 @@
           "type": "string",
           "const": "payload",
           "x-alias-of": "raw"
+        }
+      ]
+    },
+    "SqlLoadMode": {
+      "description": "How a SQL sink commits a drain: all of it at the end, instead of batch by batch.",
+      "oneOf": [
+        {
+          "description": "One transaction for the whole drain, committed when it completes.",
+          "type": "string",
+          "const": "atomic_append"
+        },
+        {
+          "description": "As `atomic_append`, after deleting the old rows; an empty source leaves the table as it was.",
+          "type": "string",
+          "const": "replace"
         }
       ]
     },
@@ -4694,6 +4720,20 @@
             }
           ]
         },
+        "before_load": {
+          "description": "(Publisher only, with `load_mode`) SQL run in the load's transaction before its first row, after `replace` empties the table.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "after_load": {
+          "description": "(Publisher only, with `load_mode`) SQL run in the load's transaction before it commits, e.g. a `MERGE` from a staging table.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "polling_interval_ms": {
           "description": "(Consumer only) Polling interval in milliseconds. Defaults to 100ms.",
           "type": [
@@ -4826,21 +4866,6 @@
           "description": "Each top-level JSON field goes into the table column of the same name.",
           "type": "string",
           "const": "auto"
-        }
-      ]
-    },
-    "SqlLoadMode": {
-      "description": "How a SQL sink commits a drain: all of it at the end, instead of batch by batch.",
-      "oneOf": [
-        {
-          "description": "One transaction for the whole drain, committed when it completes.",
-          "type": "string",
-          "const": "atomic_append"
-        },
-        {
-          "description": "As `atomic_append`, after deleting the old rows; an empty source leaves the table as it was.",
-          "type": "string",
-          "const": "replace"
         }
       ]
     },

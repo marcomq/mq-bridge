@@ -798,7 +798,7 @@ ciphertext does not compress. For compressed *and* encrypted data at rest, use t
 output:
   file:
     path: "data.enc"
-    format: raw
+    format: payload
     compression: lz4          # none | gzip | lz4 | zstd  (`compression` feature)
     encryption: { key: "${env:MQB_ENC_KEY}" }
 ```
@@ -2094,7 +2094,7 @@ output:
       openai_embeddings: { model: text-embedding-3-small, input: "${payload:text}" }
       middlewares:
         - buffer: { max_messages: 500, max_delay_ms: 0 }
-    forward_to: { file: { path: "vectors.jsonl", format: raw } }
+    forward_to: { file: { path: "vectors.jsonl", format: payload } }
 ```
 
 Whatever `forward_to` returns is passed back up. A plain sink acks, `forward_to: {}` (the

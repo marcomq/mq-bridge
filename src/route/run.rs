@@ -1154,8 +1154,8 @@ impl Route {
         let closed =
             publisher_disconnect_result(name, publisher, disconnect_outcome(&result)).await;
         match (result, closed) {
-            (Ok(false), Err(err)) if self.output_load_mode().is_some() => Err(err.context(
-                format!("Route '{name}' drained, but its `load_mode` load was not committed"),
+            (Ok(false), Err(err)) if self.output_load_mode().is_some() => Err(anyhow::anyhow!(
+                "Route '{name}' drained, but its `load_mode` load was not committed: {err:#}"
             )),
             (result, _) => result,
         }

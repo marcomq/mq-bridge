@@ -609,7 +609,13 @@ async fn create_sqlx_pool(config: &SqlxConfig) -> anyhow::Result<AnyPool> {
         probe.close().await.ok();
     }
 
-    Ok(pool_options.connect(&url).await?)
+    // sqlx logs a statement slower than 1 s at WARN with its full text, which for a batch
+    // INSERT is up to a megabyte on one line.
+    use sqlx::ConnectOptions;
+    use std::str::FromStr;
+    let connect_options = sqlx::any::AnyConnectOptions::from_str(&url)?
+        .log_slow_statements(log::LevelFilter::Debug, Duration::from_secs(1));
+    Ok(pool_options.connect_with(connect_options).await?)
 }
 
 /// Returns a shared connection pool for this database, building one on first use.
@@ -1077,7 +1083,18 @@ fn sql_error_text(e: sqlx::Error) -> anyhow::Error {
 
 fn classify_sql_error(e: sqlx::Error) -> PublisherError {
     if sql_error_is_deterministic(&e) {
-        return PublisherError::NonRetryable(sql_error_text(e));
+        let mismatch = e
+            .as_database_error()
+            .and_then(|db_err| db_err.code())
+            .is_some_and(|code| code == "42804");
+        let error = sql_error_text(e);
+        if mismatch {
+            return PublisherError::NonRetryable(anyhow!(
+                "{error}; cast the value in the query, e.g. `CAST(${{payload:amount}} AS numeric)`, \
+                 or use `columns: auto`, which casts every value to its column's type"
+            ));
+        }
+        return PublisherError::NonRetryable(error);
     }
     PublisherError::Retryable(sql_error_text(e))
 }
@@ -1212,9 +1229,21 @@ impl SqlxPublisher {
                 "`load_mode` writes a whole load; it cannot be combined with `lookup_query`"
             ))));
         }
-        let load = config
-            .load_mode
-            .map(|mode| load::HeldLoad::new(mode, &config.table));
+        if config.load_mode.is_none()
+            && (config.before_load.is_some() || config.after_load.is_some())
+        {
+            return Err(anyhow!(crate::errors::InvalidConfig(anyhow!(
+                "`before_load` and `after_load` run inside a load; set `load_mode` as well"
+            ))));
+        }
+        let load = config.load_mode.map(|mode| {
+            load::HeldLoad::new(
+                mode,
+                &config.table,
+                config.before_load.clone(),
+                config.after_load.clone(),
+            )
+        });
         if let Some(template) = &config.lookup_query {
             let writes = lookup_writes(template);
             if writes {

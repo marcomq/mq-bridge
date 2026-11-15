@@ -4,6 +4,7 @@
 //  git clone https://github.com/marcomq/mq-bridge
 
 use super::*;
+use crate::models::SqlLoadMode;
 use crate::support::lookup_batch::{self, ListQuery};
 use mongodb::options::UpdateModifications;
 
@@ -30,6 +31,8 @@ pub struct MongoDbPublisher {
     update: Option<CompiledTemplate>,
     /// Set by `update_batch_field`: a key's messages share one `update` call.
     update_batch_field: Option<String>,
+    /// Set by `load_mode`: writes go to a staging collection swapped in when the route completes.
+    load: Option<super::load::StagedLoad>,
 }
 
 /// Metadata key carrying the insert outcome when `report_outcome` is enabled.
@@ -118,6 +121,24 @@ impl MongoDbPublisher {
                 );
             }
         }
+        if let Some(mode) = config.load_mode {
+            let invalid = |reason: &str| anyhow!(crate::errors::InvalidConfig(anyhow!("{reason}")));
+            if mode != SqlLoadMode::Replace {
+                return Err(invalid(
+                    "MongoDB supports `load_mode: replace` only; it swaps a staging collection in",
+                ));
+            }
+            if config.request_reply
+                || config.report_outcome
+                || find.is_some()
+                || aggregate_query.is_some()
+            {
+                return Err(invalid(
+                    "`load_mode` writes a whole load; it cannot be combined with `request_reply`, \
+                     `report_outcome`, `find` or `aggregate_query`",
+                ));
+            }
+        }
         let shared_client = create_shared_client(config).await?;
         let client = (*shared_client).clone();
         let db = client.database(&config.database);
@@ -147,6 +168,7 @@ impl MongoDbPublisher {
                 aggregate_list,
                 update,
                 update_batch_field,
+                load: None,
             });
         }
 
@@ -164,7 +186,13 @@ impl MongoDbPublisher {
             }
         }
 
-        let collection = db.collection(collection_name);
+        let load = config
+            .load_mode
+            .map(|_| super::load::StagedLoad::new(client.clone(), db.clone(), collection_name));
+        let collection = db.collection(
+            load.as_ref()
+                .map_or(collection_name, super::load::StagedLoad::staging),
+        );
         info!(database = %config.database, collection = %collection_name, request_reply = %config.request_reply, "MongoDB publisher connected");
 
         if let Some(ttl) = config.ttl_seconds {
@@ -175,7 +203,10 @@ impl MongoDbPublisher {
                 .keys(doc! { "created_at": 1 })
                 .options(options)
                 .build();
-            if let Err(e) = collection.create_index(model).await {
+            // On the target even with `load_mode`: the swap copies it, and creating it on the
+            // staging collection would create that too early.
+            let target = db.collection::<Document>(collection_name);
+            if let Err(e) = target.create_index(model).await {
                 warn!(
                     "Failed to create TTL index on publisher collection {} : {}",
                     collection_name, e
@@ -230,6 +261,7 @@ impl MongoDbPublisher {
             aggregate_list: None,
             update: None,
             update_batch_field: None,
+            load,
         })
     }
 
@@ -1114,6 +1146,104 @@ pub(super) fn query_error(e: mongodb::error::Error) -> PublisherError {
     }
 }
 
+impl MongoDbPublisher {
+    /// One unordered `insert_many`; per-document failures come back in `SentBatch::Partial`.
+    async fn insert_batch(
+        &self,
+        messages: Vec<CanonicalMessage>,
+    ) -> Result<SentBatch, PublisherError> {
+        trace!(count = messages.len(), collection = %self.collection_name, message_ids = ?LazyMessageIds(&messages), "Publishing batch of documents to MongoDB");
+        let mut docs = Vec::with_capacity(messages.len());
+        let mut failed_messages = Vec::new();
+        let mut valid_messages = Vec::with_capacity(messages.len());
+
+        for message in messages {
+            match message_to_document(
+                &message,
+                &self.format,
+                self.id_field.as_deref(),
+                self.id_template.as_ref(),
+            ) {
+                Ok(doc) => {
+                    docs.push(doc);
+                    valid_messages.push(message);
+                }
+                Err(e) => {
+                    failed_messages.push((message, PublisherError::NonRetryable(e)));
+                }
+            }
+        }
+
+        if docs.is_empty() {
+            if failed_messages.is_empty() {
+                return Ok(SentBatch::Ack);
+            } else {
+                return Ok(SentBatch::Partial {
+                    responses: None,
+                    failed: failed_messages,
+                });
+            }
+        }
+
+        // Unordered: an ordered insert stops at the first error, so one duplicate
+        // `_id` would leave the rest uninserted and indistinguishable from a
+        // failure. Capped collections take unordered inserts too and still store
+        // in $natural order.
+        match self.collection.insert_many(docs).ordered(false).await {
+            Ok(_) => Ok(SentBatch::from_failures(failed_messages)),
+            Err(e) => {
+                if let ErrorKind::InsertMany(ref err) = *e.kind {
+                    let mut errors_by_index = HashMap::new();
+                    if let Some(write_errors) = &err.write_errors {
+                        for we in write_errors {
+                            errors_by_index.insert(we.index, we);
+                        }
+                    }
+
+                    // If we have a write concern error, assume all failed to be safe (potential rollback).
+                    // A retry of a stored document is a duplicate `_id`, so it is idempotent.
+                    if err.write_concern_error.is_some() {
+                        warn!("MongoDB write concern error detected. Retrying entire batch.");
+                        for msg in valid_messages {
+                            failed_messages.push((
+                                msg,
+                                PublisherError::Retryable(anyhow::anyhow!(
+                                    "MongoDB write concern error"
+                                )),
+                            ));
+                        }
+                        return Ok(SentBatch::Partial {
+                            responses: None,
+                            failed: failed_messages,
+                        });
+                    }
+
+                    // Every document was attempted, so an index with no write
+                    // error was inserted and each error stands on its own.
+                    for (i, msg) in valid_messages.into_iter().enumerate() {
+                        if let Some(w) = errors_by_index.get(&i) {
+                            let error = anyhow::anyhow!("MongoDB write error: {:?}", w);
+                            match classify_insert_error(w.code, &w.message) {
+                                InsertRejection::AlreadyStored => {}
+                                InsertRejection::Permanent => {
+                                    failed_messages.push((msg, PublisherError::NonRetryable(error)))
+                                }
+                                InsertRejection::Transient => {
+                                    failed_messages.push((msg, PublisherError::Retryable(error)))
+                                }
+                            }
+                        }
+                    }
+
+                    Ok(SentBatch::from_failures(failed_messages))
+                } else {
+                    Err(PublisherError::Retryable(anyhow!(e)))
+                }
+            }
+        }
+    }
+}
+
 #[async_trait]
 impl MessagePublisher for MongoDbPublisher {
     async fn send(&self, mut message: CanonicalMessage) -> Result<Sent, PublisherError> {
@@ -1122,6 +1252,10 @@ impl MessagePublisher for MongoDbPublisher {
         }
         if let Some(template) = &self.find {
             return self.find_one(template, &message).await;
+        }
+        if self.load.is_some() {
+            self.send_batch(vec![message]).await?;
+            return Ok(Sent::Ack);
         }
         if !self.request_reply {
             trace!(message_id = %format!("{:032x}", message.message_id), collection = %self.collection_name, "Publishing document to MongoDB");
@@ -1254,95 +1388,28 @@ impl MessagePublisher for MongoDbPublisher {
                 .await;
         }
 
-        trace!(count = messages.len(), collection = %self.collection_name, message_ids = ?LazyMessageIds(&messages), "Publishing batch of documents to MongoDB");
-        let mut docs = Vec::with_capacity(messages.len());
-        let mut failed_messages = Vec::new();
-        let mut valid_messages = Vec::with_capacity(messages.len());
-
-        for message in messages {
-            match message_to_document(
-                &message,
-                &self.format,
-                self.id_field.as_deref(),
-                self.id_template.as_ref(),
-            ) {
-                Ok(doc) => {
-                    docs.push(doc);
-                    valid_messages.push(message);
-                }
-                Err(e) => {
-                    failed_messages.push((message, PublisherError::NonRetryable(e)));
-                }
-            }
-        }
-
-        if docs.is_empty() {
-            if failed_messages.is_empty() {
-                return Ok(SentBatch::Ack);
-            } else {
-                return Ok(SentBatch::Partial {
-                    responses: None,
-                    failed: failed_messages,
-                });
-            }
-        }
-
-        // Unordered: an ordered insert stops at the first error, so one duplicate
-        // `_id` would leave the rest uninserted and indistinguishable from a
-        // failure. Capped collections take unordered inserts too and still store
-        // in $natural order.
-        match self.collection.insert_many(docs).ordered(false).await {
-            Ok(_) => Ok(SentBatch::from_failures(failed_messages)),
-            Err(e) => {
-                if let ErrorKind::InsertMany(ref err) = *e.kind {
-                    let mut errors_by_index = HashMap::new();
-                    if let Some(write_errors) = &err.write_errors {
-                        for we in write_errors {
-                            errors_by_index.insert(we.index, we);
+        if let Some(load) = &self.load {
+            return load
+                .write(async {
+                    match self.insert_batch(messages).await? {
+                        SentBatch::Partial { failed, .. } if !failed.is_empty() => {
+                            Err(PublisherError::NonRetryable(anyhow!(
+                                "MongoDB rejected {} of the batch's documents, first: {}",
+                                failed.len(),
+                                failed[0].1
+                            )))
                         }
+                        sent => Ok(sent),
                     }
-
-                    // If we have a write concern error, assume all failed to be safe (potential rollback).
-                    // A retry of a stored document is a duplicate `_id`, so it is idempotent.
-                    if err.write_concern_error.is_some() {
-                        warn!("MongoDB write concern error detected. Retrying entire batch.");
-                        for msg in valid_messages {
-                            failed_messages.push((
-                                msg,
-                                PublisherError::Retryable(anyhow::anyhow!(
-                                    "MongoDB write concern error"
-                                )),
-                            ));
-                        }
-                        return Ok(SentBatch::Partial {
-                            responses: None,
-                            failed: failed_messages,
-                        });
-                    }
-
-                    // Every document was attempted, so an index with no write
-                    // error was inserted and each error stands on its own.
-                    for (i, msg) in valid_messages.into_iter().enumerate() {
-                        if let Some(w) = errors_by_index.get(&i) {
-                            let error = anyhow::anyhow!("MongoDB write error: {:?}", w);
-                            match classify_insert_error(w.code, &w.message) {
-                                InsertRejection::AlreadyStored => {}
-                                InsertRejection::Permanent => {
-                                    failed_messages.push((msg, PublisherError::NonRetryable(error)))
-                                }
-                                InsertRejection::Transient => {
-                                    failed_messages.push((msg, PublisherError::Retryable(error)))
-                                }
-                            }
-                        }
-                    }
-
-                    Ok(SentBatch::from_failures(failed_messages))
-                } else {
-                    Err(PublisherError::Retryable(anyhow!(e)))
-                }
-            }
+                })
+                .await;
         }
+        self.insert_batch(messages).await
+    }
+
+    fn on_disconnect_hook(&self) -> Option<BoxFuture<'_, anyhow::Result<()>>> {
+        let load = self.load.as_ref()?;
+        Some(Box::pin(load.finish()))
     }
 
     async fn status(&self) -> EndpointStatus {

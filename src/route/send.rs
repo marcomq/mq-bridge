@@ -251,24 +251,39 @@ pub(super) fn is_other_grpc_status(_error: &anyhow::Error) -> bool {
 /// drop is invisible: the route resolves to [`RouteOutcome::Completed`] with
 /// `error: None` and the caller cannot tell a clean run from one that threw data
 /// away. [`OutcomeGuard`] publishes the tally when the route ends.
-pub(super) fn record_dropped_messages(
+///
+/// Only the first [`LOGGED_DROPS`] are logged one by one: a load with a bad column would
+/// otherwise print a line per row. The rest are counted into the route's error.
+pub(super) fn record_dropped<'a>(
     drops: Option<&Arc<RwLock<DropReport>>>,
-    dropped: usize,
-    cause: &PublisherError,
+    dropped: impl Iterator<Item = (u128, &'a PublisherError)>,
 ) {
-    record_dropped_causes(drops, std::iter::repeat_n(cause, dropped));
-}
-
-/// [`record_dropped_messages`] with a cause per message.
-pub(super) fn record_dropped_causes<'a>(
-    drops: Option<&Arc<RwLock<DropReport>>>,
-    causes: impl Iterator<Item = &'a PublisherError>,
-) {
-    let Some(drops) = drops else { return };
+    let Some(drops) = drops else {
+        dropped.for_each(|(id, cause)| log_drop(id, cause));
+        return;
+    };
     let mut report = recover_write_lock(drops, "route_drop_report");
-    for cause in causes {
+    for (id, cause) in dropped {
+        if report.count < LOGGED_DROPS {
+            log_drop(id, cause);
+        } else if report.count == LOGGED_DROPS {
+            error!(
+                "Dropped {LOGGED_DROPS} messages; further drops are counted, not logged. \
+                 The route's error reports the total and the causes"
+            );
+        }
         report.add(cause);
     }
+}
+
+/// Drops a route logs one by one before it only counts them.
+const LOGGED_DROPS: u64 = 10;
+
+fn log_drop(id: u128, cause: &PublisherError) {
+    error!(
+        "Dropping message (ID: {:032x}) due to non-retryable error: {}",
+        id, cause
+    );
 }
 
 impl BatchScratch {
@@ -530,13 +545,13 @@ pub(super) async fn send_batch_and_commit(
                 if !has_dlq_middleware {
                     let permanent =
                         |e: &&PublisherError| matches!(e, PublisherError::NonRetryable(_));
-                    for (msg, e) in failed.iter().filter(|(_, e)| permanent(&e)) {
-                        error!(
-                            "Dropping message (ID: {:032x}) due to non-retryable error: {}",
-                            msg.message_id, e
-                        );
-                    }
-                    record_dropped_causes(drops, failed.iter().map(|(_, e)| e).filter(permanent));
+                    record_dropped(
+                        drops,
+                        failed
+                            .iter()
+                            .filter(|(_, e)| permanent(&e))
+                            .map(|(msg, e)| (msg.message_id, e)),
+                    );
                 }
                 let mut dispositions = map_responses_to_dispositions(
                     &scratch.message_ids,
@@ -570,14 +585,11 @@ pub(super) async fn send_batch_and_commit(
                 return Ok(());
             }
 
-            for (msg, e) in &failed {
-                error!(
-                    "Dropping message (ID: {:032x}) due to non-retryable error: {}",
-                    msg.message_id, e
-                );
-            }
-            if !has_dlq_middleware {
-                record_dropped_causes(drops, failed.iter().map(|(_, e)| e));
+            let failed_ids = failed.iter().map(|(msg, e)| (msg.message_id, e));
+            if has_dlq_middleware {
+                failed_ids.for_each(|(id, e)| log_drop(id, e));
+            } else {
+                record_dropped(drops, failed_ids);
             }
             let err_tx = err_tx.clone();
             let dispositions = map_responses_to_dispositions(
@@ -635,13 +647,7 @@ pub(super) async fn send_batch_and_commit(
                 // re-reading the same poison messages forever, but the data is
                 // gone. Record it: a drop that leaves no trace is how a route
                 // reports a clean success while having discarded messages.
-                for id in scratch.message_ids.iter() {
-                    error!(
-                        "Dropping message (ID: {:032x}) due to non-retryable error: {}",
-                        id, e
-                    );
-                }
-                record_dropped_messages(drops, batch_len, &e);
+                record_dropped(drops, scratch.message_ids.iter().map(|id| (*id, &e)));
                 Ok(())
             } else {
                 Err(e.into())

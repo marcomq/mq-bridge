@@ -41,7 +41,7 @@ bash:
 ```bash
 mqb copy \
   --from 'postgres://user:pass@localhost/db?table=src&sslmode=disable' \
-  --to   'file://out.jsonl?format=raw' \
+  --to   'file://out.jsonl?format=payload' \
   --drain
 ```
 

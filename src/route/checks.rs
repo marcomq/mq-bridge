@@ -236,11 +236,19 @@ pub(super) fn endpoint_tree_full_replay_sink(
     }
 }
 
-/// Whether a SQL sink below the route output sets `load_mode`; it is only valid as the output itself.
+/// The `load_mode` of a SQL or MongoDB endpoint.
+fn load_mode(endpoint: &Endpoint) -> Option<crate::models::SqlLoadMode> {
+    match &endpoint.endpoint_type {
+        EndpointType::Sqlx(config) => config.load_mode,
+        EndpointType::MongoDb(config) => config.load_mode,
+        _ => None,
+    }
+}
+
+/// Whether a sink below the route output sets `load_mode`; it is only valid as the output itself.
 fn nested_load_mode_sink(endpoint: &Endpoint, visited_refs: &mut HashSet<String>) -> bool {
     let nested = |endpoint: &Endpoint, visited: &mut HashSet<String>| {
-        matches!(&endpoint.endpoint_type, EndpointType::Sqlx(c) if c.load_mode.is_some())
-            || nested_load_mode_sink(endpoint, visited)
+        load_mode(endpoint).is_some() || nested_load_mode_sink(endpoint, visited)
     };
     match &endpoint.endpoint_type {
         EndpointType::Ref(name) => {
@@ -262,12 +270,9 @@ fn nested_load_mode_sink(endpoint: &Endpoint, visited_refs: &mut HashSet<String>
 }
 
 impl Route {
-    /// The `load_mode` of a SQL output that commits the whole drain at its end.
+    /// The `load_mode` of an output that commits the whole drain at its end.
     pub(super) fn output_load_mode(&self) -> Option<crate::models::SqlLoadMode> {
-        match &self.output.endpoint_type {
-            EndpointType::Sqlx(config) => config.load_mode,
-            _ => None,
-        }
+        load_mode(&self.output)
     }
 
     fn check_load_mode(&self, name: &str, no_resume: bool) -> anyhow::Result<()> {
@@ -275,13 +280,13 @@ impl Route {
             |text: String| Err(crate::errors::InvalidConfig(anyhow::anyhow!(text)).into());
         if nested_load_mode_sink(&self.output, &mut HashSet::new()) {
             return invalid(format!(
-                "Route '{name}': `load_mode` is only supported on a SQL endpoint that is the route \
+                "Route '{name}': `load_mode` is only supported on a SQL or MongoDB endpoint that is the route \
                  output itself, not inside ref, fanout, switch or request."
             ));
         }
-        if matches!(&self.input.endpoint_type, EndpointType::Sqlx(c) if c.load_mode.is_some()) {
+        if load_mode(&self.input).is_some() {
             return invalid(format!(
-                "Route '{name}': `load_mode` belongs on the SQL output; the input does not use it."
+                "Route '{name}': `load_mode` belongs on the output; the input does not use it."
             ));
         }
         if self.output_load_mode().is_none() {

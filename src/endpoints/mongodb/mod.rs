@@ -35,6 +35,7 @@ mod aggregate;
 mod consumer;
 #[cfg(feature = "dedup")]
 mod dedup;
+mod load;
 mod publisher;
 mod readers;
 

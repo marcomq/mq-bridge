@@ -6,7 +6,7 @@ document, so a rejected document fails alone. Tested against Typesense 29.
 
 ```sh
 mqb copy --drain --batch-size 10000 \
-  'file://books.jsonl?format=raw' \
+  'file://books.jsonl?format=payload' \
   'typesense://localhost:8108/books?api_key=<api key>'
 ```
 
@@ -76,7 +76,7 @@ for the publication and the slot.
 echo '{"type":"object","properties":{"id":{"type":"string"}}}' > id-as-string.json
 
 mqb copy --drain --batch-size 10000 \
-  'file://books.jsonl?format=raw' \
+  'file://books.jsonl?format=payload' \
   'typesense://localhost:8108/books?api_key=<api key>|transform?schema_file=id-as-string.json'
 ```
 

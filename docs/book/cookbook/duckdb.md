@@ -25,7 +25,7 @@ The same export from the CLI:
 
 ```bash
 mqb copy --drain \
-  'file:///data/orders.jsonl?format=raw' \
+  'file:///data/orders.jsonl?format=payload' \
   'local-store:///var/lib/mqb/lake/orders?format=parquet&compression=zstd'
 ```
 

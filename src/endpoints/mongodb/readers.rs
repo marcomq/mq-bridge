@@ -294,6 +294,23 @@ async fn open_change_stream(
     })
 }
 
+/// Opens a change stream again after the `invalidate` event `token`, the way MongoDB documents
+/// continuing past a dropped or renamed collection.
+async fn open_change_stream_after(
+    collection: &Collection<Document>,
+    pipeline: &[Document],
+    token: ResumeToken,
+) -> anyhow::Result<ChangeStream<ChangeStreamEvent<Document>>> {
+    let name = collection.name().to_string();
+    collection
+        .watch()
+        .pipeline(pipeline.to_vec())
+        .full_document(FullDocumentType::UpdateLookup)
+        .start_after(token)
+        .await
+        .with_context(|| format!("Failed to reopen the MongoDB change stream for '{name}'"))
+}
+
 /// True only for the MongoDB "change streams require a replica set" error (code 40573) — the one
 /// case where `capture_all` may fall back to the insert-only `_id` reader. Auth, network, and
 /// configuration failures return false so they propagate instead of being silently downgraded.
@@ -403,6 +420,10 @@ pub struct MongoDbChangeStreamReader {
     exit_on_empty: bool,
     /// Without a checkpoint: where to reopen the stream after a nack.
     replay: Arc<Mutex<ReplayPoint>>,
+    /// With a checkpoint: the collection was dropped or renamed while a batch was being filled.
+    ended: Mutex<Option<String>>,
+    /// Without a checkpoint: why the collection is gone, until its `invalidate` arrives.
+    gone: Mutex<Option<String>>,
 }
 
 /// The last acknowledged position of a reader without a checkpoint, kept for the session.
@@ -612,6 +633,8 @@ impl MongoDbChangeStreamReader {
             cdc_ordinals: Arc::new(Mutex::new(OrdinalCounter::default())),
             exit_on_empty: false,
             replay: Arc::new(Mutex::new(replay)),
+            ended: Mutex::new(None),
+            gone: Mutex::new(None),
         })
     }
 
@@ -816,6 +839,30 @@ impl MongoDbChangeStreamReader {
         Ok(true)
     }
 
+    /// A drop, rename or invalidate of the watched collection. A reader with a checkpoint stops:
+    /// resuming would replay the same end, and skipping it would hide that the collection was
+    /// replaced. Without one the stream goes on after the `invalidate`, from the next change.
+    async fn on_collection_gone(
+        &self,
+        stream: &mut ChangeStream<ChangeStreamEvent<Document>>,
+        event: &ChangeStreamEvent<Document>,
+        reason: String,
+    ) -> Result<(), ConsumerError> {
+        if self.checkpoint.is_some() {
+            return Err(stream_ended(&self.collection_name, &reason));
+        }
+        if !matches!(event.operation_type, OperationType::Invalidate) {
+            *self.gone.lock().unwrap() = Some(reason);
+            return Ok(());
+        }
+        let reason = self.gone.lock().unwrap().take().unwrap_or(reason);
+        warn!(collection = %self.collection_name, "MongoDB change stream: the collection was {reason}; reading on from the next change. Documents it holds now that no change event brought are not emitted");
+        *stream = open_change_stream_after(&self.collection, &self.pipeline, event.id.clone())
+            .await
+            .map_err(ConsumerError::Connection)?;
+        Ok(())
+    }
+
     /// Called while the stream is idle: persist the change stream's postBatchResumeToken so the
     /// durable checkpoint tracks the oplog even with no matching changes. Only advances when no
     /// batch is in flight (`inflight == 0`) and no un-acked gap exists (`refresh_clean`), so the
@@ -939,6 +986,30 @@ pub(super) fn add_snapshot_source_metadata(
     message.set_metadata("mqb.src.mongodb_snapshot_index", index.to_string());
 }
 
+/// Why the watched collection's change stream cannot go on, if `event` ends it.
+fn collection_gone(event: &ChangeStreamEvent<Document>, collection: &str) -> Option<String> {
+    match &event.operation_type {
+        OperationType::Drop => Some("dropped".into()),
+        OperationType::DropDatabase => Some("dropped with its database".into()),
+        OperationType::Invalidate => Some("invalidated".into()),
+        OperationType::Rename => Some(match event.to.as_ref().and_then(|to| to.coll.as_deref()) {
+            Some(to) if to == collection => "replaced by a renamed collection".into(),
+            Some(to) => format!("renamed to '{to}'"),
+            None => "renamed".into(),
+        }),
+        _ => None,
+    }
+}
+
+/// Ends a reader with a checkpoint at a dropped, renamed or replaced collection.
+fn stream_ended(collection: &str, reason: &str) -> ConsumerError {
+    ConsumerError::Permanent(anyhow!(
+        "MongoDB change stream on '{collection}' ended: the collection was {reason} (a `load_mode: replace` \
+         swap does this). Its changes cannot be followed past that point; resync it, then start \
+         with a new `cursor_id`"
+    ))
+}
+
 /// The change-event operation name stored in message metadata.
 fn op_str(op: &OperationType) -> &'static str {
     match op {
@@ -960,6 +1031,9 @@ impl MessageConsumer for MongoDbChangeStreamReader {
             });
         }
 
+        if let Some(reason) = self.ended.lock().unwrap().take() {
+            return Err(stream_ended(&self.collection_name, &reason));
+        }
         let mut stream_guard = self.stream.lock().await;
         // Snapshot phase (opt-in cold start): drain existing documents, then open the stream at the
         // pre-snapshot position and fall through to streaming.
@@ -1013,6 +1087,10 @@ impl MessageConsumer for MongoDbChangeStreamReader {
             };
             match poll {
                 Ok(Ok(Some(event))) => {
+                    if let Some(reason) = collection_gone(&event, &self.collection_name) {
+                        self.on_collection_gone(stream, &event, reason).await?;
+                        continue;
+                    }
                     let token = event.id.clone();
                     if let Some(msg) = Self::event_to_message(
                         &event,
@@ -1032,6 +1110,9 @@ impl MessageConsumer for MongoDbChangeStreamReader {
                 // No change ready: the getMore came back empty, or it outran the refresh interval.
                 Ok(Ok(None)) => {
                     if !stream.is_alive() {
+                        if self.checkpoint.is_some() {
+                            return Err(stream_ended(&self.collection_name, "invalidated"));
+                        }
                         return Err(anyhow!("MongoDB change stream ended unexpectedly").into());
                     }
                     // Nothing stored yet (the snapshot just ended): do not wait for the interval.
@@ -1059,6 +1140,14 @@ impl MessageConsumer for MongoDbChangeStreamReader {
         while messages.len() < max_messages {
             match tokio::time::timeout(Duration::from_millis(10), stream.next_if_any()).await {
                 Ok(Ok(Some(event))) => {
+                    if let Some(reason) = collection_gone(&event, &self.collection_name) {
+                        if self.checkpoint.is_some() {
+                            *self.ended.lock().unwrap() = Some(reason);
+                            break;
+                        }
+                        self.on_collection_gone(stream, &event, reason).await?;
+                        continue;
+                    }
                     let token = event.id.clone();
                     if let Some(msg) = Self::event_to_message(
                         &event,
