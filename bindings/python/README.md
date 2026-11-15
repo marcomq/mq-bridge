@@ -90,7 +90,7 @@ curl -s -X POST localhost:8080/score -d '{"id": 1, "text": "hello"}'
 ```python
 from mq_bridge import Consumer
 
-with Consumer.from_config({"nats": {"subject": "orders", "url": "nats://localhost:4222"}}) as consumer:
+with Consumer.from_config({"nats": {"subject": "orders", "stream": "orders", "url": "nats://localhost:4222"}}) as consumer:
     while True:
         batch = consumer.poll(max=500, timeout_ms=1000)
         for message in batch:
@@ -208,7 +208,7 @@ A message the route fails raises `RuntimeError` with the error text at once. `se
 ```python
 from mq_bridge import Consumer
 
-consumer = Consumer.from_config({"nats": {"subject": "orders", "url": "nats://localhost:4222"}})
+consumer = Consumer.from_config({"nats": {"subject": "orders", "stream": "orders", "url": "nats://localhost:4222"}})
 
 while not consumer.exhausted:
     batch = consumer.poll(max=500, timeout_ms=1000)   # [] on timeout
@@ -227,7 +227,7 @@ while not consumer.exhausted:
 > - most brokers stop sending once their unacknowledged/prefetch window fills, so `poll()` eventually **stalls** and returns nothing;
 > - the uncommitted batches are held in memory pending their ack, so the process **grows unbounded**.
 >
-> Commit after each batch you have durably handled (as in the loops above). If a batch fails downstream, simply *don't* commit it — it will be redelivered.
+> Commit after each batch you have durably handled (as in the loops above). `commit()` also acks every earlier uncommitted batch, so if a batch fails downstream, don't poll on and commit later batches past it: retry that batch until it succeeds and then commit, or stop the consumer without committing (`close()`) so a new one gets it redelivered. To release only the failed batch, use the per-batch tokens below.
 
 ### Per-batch tokens: `poll_batch` / `ack` / `nack`
 
@@ -269,7 +269,7 @@ from mq_bridge import Consumer
 
 @dlt.resource(name="orders")
 def orders():
-    consumer = Consumer.from_config({"nats": {"subject": "orders", "url": "nats://localhost:4222"}})
+    consumer = Consumer.from_config({"nats": {"subject": "orders", "stream": "orders", "url": "nats://localhost:4222"}})
     while not consumer.exhausted:
         batch = consumer.poll(max=500, timeout_ms=1000)
         if not batch:
@@ -412,7 +412,7 @@ MQ_BRIDGE_RUN_PERF_TESTS=1 uv run pytest -q -m performance
 
 ```bash
 # from bindings/python/
-cargo test --features schema --lib schema_tests::generate_json_schema
+cargo test -p mq-bridge --features schema --lib schema_tests::generate_json_schema
 uv run --no-sync python scripts/gen_config_types.py --schema ../../mq-bridge.schema.json
 ```
 

@@ -14,6 +14,7 @@ use tracing::{info, warn};
 
 /// MongoDB's code for a collection that does not exist.
 const NAMESPACE_NOT_FOUND: i32 = 26;
+const INDEX_NOT_FOUND: i32 = 27;
 /// One document per running load: `_id` is its staging collection, `expires_at` server time.
 pub(super) const LEASE_COLLECTION: &str = "mqb_load_leases";
 const LEASE: Duration = Duration::from_secs(60);
@@ -262,27 +263,50 @@ impl StagedLoad {
             Err(e) => return Err(anyhow!(e).context("listing the target's indexes failed")),
         };
         let mut indexes = Vec::new();
+        let mut replace_ttl_index = false;
         if let Some(listed) = &listed {
             for index in first_batch(listed)? {
                 let Some(index) = index.as_document() else {
                     continue;
                 };
-                // Already on the staging collection: `_id_` always, a clustered one from `create`,
-                // the TTL index from `ttl_seconds`.
-                let ttl_index = self.ttl.is_some()
-                    && index
-                        .get_document("key")
-                        .is_ok_and(|key| key.len() == 1 && key.contains_key("created_at"));
+                // Already on the staging collection: `_id_` always, a clustered one from `create`.
                 if index.get_str("name").ok() == Some("_id_")
                     || index.get_bool("clustered").unwrap_or(false)
-                    || ttl_index
                 {
                     continue;
                 }
                 let mut index = index.clone();
                 index.remove("v");
                 index.remove("ns");
+                let ttl = self.ttl.filter(|_| {
+                    index
+                        .get_document("key")
+                        .is_ok_and(|key| key.len() == 1 && key.contains_key("created_at"))
+                });
+                if let Some(ttl) = ttl {
+                    // The TTL index from `ttl_seconds` covers it unless it has options of its own.
+                    if index
+                        .keys()
+                        .all(|k| matches!(k.as_str(), "key" | "name" | "expireAfterSeconds"))
+                    {
+                        continue;
+                    }
+                    index.insert("expireAfterSeconds", ttl.as_secs() as i64);
+                    replace_ttl_index = true;
+                }
                 indexes.push(index);
+            }
+        }
+        if replace_ttl_index {
+            match self
+                .db
+                .run_command(doc! { "dropIndexes": &self.staging, "index": { "created_at": 1 } })
+                .await
+            {
+                Ok(_) => {}
+                Err(e) if matches!(*e.kind, ErrorKind::Command(ref c) if c.code == INDEX_NOT_FOUND) =>
+                    {}
+                Err(e) => return Err(anyhow!(e).context("replacing the TTL index failed")),
             }
         }
         if !indexes.is_empty() {

@@ -294,13 +294,20 @@ fn ca_file_note(endpoint: &str) -> Option<&'static str> {
         }
         "clickhouse" => {
             "**`ca_file` here:** a CA file (added to the OS store), `$.os` (the default) or \
-             `$.bundled`."
+             `$.bundled`. On Android an unset `ca_file` uses the bundled roots, and a CA file \
+             replaces them."
         }
         "kafka" | "amqp" => {
             "**`ca_file` here:** a CA file or `$.os` (the default). `$.bundled` is not \
              supported: the driver takes only PEM files or paths."
         }
-        "mongodb" | "sqlx" | "postgres_cdc" => {
+        "postgres_cdc" => {
+            "**`ca_file` here:** a CA file or `$.bundled`. Unset, the `sslrootcert` of the \
+             `url` is used when it names one, otherwise the bundled roots. `$.os` is not \
+             supported: the driver takes only a path, so name the OS bundle instead, e.g. \
+             `/etc/ssl/certs/ca-certificates.crt`."
+        }
+        "mongodb" | "sqlx" => {
             "**`ca_file` here:** a CA file or `$.bundled` (the default). `$.os` is not \
              supported: the driver takes only a path, so name the OS bundle instead, e.g. \
              `/etc/ssl/certs/ca-certificates.crt`."

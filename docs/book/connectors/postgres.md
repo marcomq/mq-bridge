@@ -292,7 +292,9 @@ unchanged, and the copy exits non-zero.
   tables would not guarantee.
 - **SQL before and after the load.** `before_load` runs in the load's transaction before the
   first row, after `replace` has emptied the table; `after_load` runs in it just before the
-  commit. Both may hold several statements. A failing `after_load` rolls the whole load back,
+  commit. Both may hold several statements, but none may end the transaction: no `COMMIT`
+  or `ROLLBACK`, and on MySQL no statement that commits implicitly (`TRUNCATE`, DDL such as
+  `CREATE` or `ALTER`), or the load is no longer atomic. A failing `after_load` rolls the whole load back,
   so a load into a staging table and a `MERGE` into the real one commit together:
 
   ```yaml

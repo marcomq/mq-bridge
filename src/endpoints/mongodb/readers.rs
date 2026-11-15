@@ -323,6 +323,8 @@ pub(crate) fn is_change_stream_unsupported(err: &anyhow::Error) -> bool {
 /// the change stream's `postBatchResumeToken` so a long-idle stream's saved token can't age out of
 /// the oplog window. This interval bounds how stale that saved position can get.
 const IDLE_RESUME_REFRESH: Duration = Duration::from_secs(10);
+/// Tries to reopen a change stream after an `invalidate` before the error reaches the route.
+const REOPEN_ATTEMPTS: u32 = 8;
 
 /// Opens a change-stream reader's resume-token checkpoint.
 async fn open_change_stream_checkpoint(
@@ -878,15 +880,26 @@ impl MongoDbChangeStreamReader {
         let Some((token, reason)) = pending else {
             return Ok(());
         };
-        match open_change_stream_after(&self.collection, &self.pipeline, token.clone()).await {
-            Ok(reopened) => {
-                warn!(collection = %self.collection_name, "MongoDB change stream: the collection was {reason}; reading on from the next change. Documents it holds now that no change event brought are not emitted");
-                *stream = reopened;
-                Ok(())
-            }
-            Err(e) => {
-                *self.invalidated.lock().unwrap() = Some((token, reason));
-                Err(ConsumerError::Connection(e))
+        // A reconnect builds a new reader that starts at "now", so retry here first.
+        let mut backoff = Duration::from_millis(100);
+        let mut attempt = 1;
+        loop {
+            match open_change_stream_after(&self.collection, &self.pipeline, token.clone()).await {
+                Ok(reopened) => {
+                    warn!(collection = %self.collection_name, "MongoDB change stream: the collection was {reason}; reading on from the next change. Documents it holds now that no change event brought are not emitted");
+                    *stream = reopened;
+                    return Ok(());
+                }
+                Err(e) if attempt < REOPEN_ATTEMPTS => {
+                    warn!(collection = %self.collection_name, error = %e, attempt, "Reopening the MongoDB change stream failed; retrying");
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(Duration::from_secs(5));
+                    attempt += 1;
+                }
+                Err(e) => {
+                    *self.invalidated.lock().unwrap() = Some((token, reason));
+                    return Err(ConsumerError::Connection(e));
+                }
             }
         }
     }

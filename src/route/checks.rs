@@ -281,6 +281,27 @@ fn nested_load_mode_sink(endpoint: &Endpoint, visited_refs: &mut HashSet<String>
         EndpointType::Request(config) => {
             nested(&config.to, visited_refs) || nested(&config.forward_to, visited_refs)
         }
+        EndpointType::Http(config) => config
+            .stream_response_to
+            .as_deref()
+            .is_some_and(|e| nested(e, visited_refs)),
+        EndpointType::HttpBulk(config) => config
+            .query
+            .iter()
+            .flat_map(|query| {
+                query
+                    .stream_to
+                    .as_deref()
+                    .into_iter()
+                    .chain(query.cancel_from.as_deref())
+            })
+            .any(|e| nested(e, visited_refs)),
+        EndpointType::OpenAiChat(config) => config
+            .stream_to
+            .as_deref()
+            .into_iter()
+            .chain(config.cancel_from.as_deref())
+            .any(|e| nested(e, visited_refs)),
         _ => false,
     }
 }

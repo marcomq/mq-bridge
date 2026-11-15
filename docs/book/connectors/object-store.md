@@ -321,8 +321,9 @@ from file extensions. Use separate prefixes and routes for mixed formats.
   validating or transforming its JSON.
 - `text` reads the same message wrappers as `normal` and emits their payload: the line
   `{"message_id":"…","payload":"hi"}` becomes a message with the payload `hi`.
-- `payload` emits each delimited byte record as it is, without JSON or CSV parsing. A JSON
-  array is not expanded into records.
+- `payload` emits each delimited byte record without JSON or CSV parsing. With the default
+  `\n` delimiter a trailing `\r` is stripped from each record and empty records are skipped;
+  otherwise the bytes are kept as they are. A JSON array is not expanded into records.
 
 One input object can produce many messages, and route batching still applies. The source
 fetches each object into memory before splitting it, so set `max_object_bytes` for untrusted or

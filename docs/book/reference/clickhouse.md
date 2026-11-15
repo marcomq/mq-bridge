@@ -65,5 +65,5 @@ let tls = TlsConfig {
 | `key_file` | string | no | — | Path to the client private key file (PEM). |
 | `required` | boolean | no | `false` | If true, enable TLS/SSL. |
 
-**`ca_file` here:** a CA file (added to the OS store), `$.os` (the default) or `$.bundled`.
+**`ca_file` here:** a CA file (added to the OS store), `$.os` (the default) or `$.bundled`. On Android an unset `ca_file` uses the bundled roots, and a CA file replaces them.
 

@@ -1293,22 +1293,23 @@ async fn mongo_load_mode_replace_swaps_only_a_completed_load() {
     finish(publisher, Completed).await.unwrap();
     assert_eq!(stored().await, ["a", "b"]);
 
-    let (dead, live) = (
-        format!("{name}_mqb_load_dead"),
-        format!("{name}_mqb_load_live"),
-    );
-    for staging in [&dead, &live] {
+    let [dead, live, unleased] =
+        [1u8, 2, 3].map(|n| format!("{name}_mqb_load_{}", format!("{n:x}").repeat(32)));
+    for staging in [&dead, &live, &unleased] {
         db.create_collection(staging).await.unwrap();
     }
+    let lease = |id: &str, expires: i64| {
+        doc! { "_id": id, "target": &name, "expires_at": mongodb::bson::DateTime::from_millis(expires) }
+    };
     leases
-        .insert_one(doc! { "_id": &live, "target": &name, "expires_at": mongodb::bson::DateTime::from_millis(i64::MAX / 2) })
+        .insert_many([lease(&dead, 0), lease(&live, i64::MAX / 2)])
         .await
         .unwrap();
     let publisher = MongoDbPublisher::new(&config).await.unwrap();
     publisher.send_batch(msgs(&[r#"{"v":"c"}"#])).await.unwrap();
     finish(publisher, Completed).await.unwrap();
     assert_eq!(stored().await, ["c"]);
-    assert_eq!(staged().await, std::slice::from_ref(&live));
+    assert_eq!(staged().await, [live.clone(), unleased.clone()]);
     assert_eq!(
         leases
             .count_documents(doc! { "target": &name })
@@ -1317,6 +1318,8 @@ async fn mongo_load_mode_replace_swaps_only_a_completed_load() {
         1
     );
     leases.delete_one(doc! { "_id": &live }).await.unwrap();
-    db.collection::<Document>(&live).drop().await.unwrap();
+    for staging in [&live, &unleased] {
+        db.collection::<Document>(staging).drop().await.unwrap();
+    }
     target.drop().await.unwrap();
 }

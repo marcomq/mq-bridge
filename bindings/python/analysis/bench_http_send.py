@@ -87,29 +87,45 @@ def start_nginx(workers: int) -> tuple[subprocess.Popen, int, Path]:
 
 
 # ---------------------------------------------------------------------------------------
-# Workers: each returns the number of 2xx responses received before `deadline`.
+# Workers: each builds its clients once, runs a warmup, then returns (count, elapsed) for
+# the 2xx responses received in the measured window.
 
 
-def run_threads(concurrency: int, deadline: float, make_send):
-    counts = [0] * concurrency
+def measure(run, warmup: float, duration: float) -> tuple[int, float]:
+    run(time.perf_counter() + warmup)
+    start = time.perf_counter()
+    count = run(start + duration)
+    return count, time.perf_counter() - start
+
+
+def run_threads(sends: list, deadline: float) -> int:
+    counts = [0] * len(sends)
+    errors: list[BaseException] = []
 
     def loop(i: int) -> None:
-        send = make_send()
-        n = 0
-        while time.perf_counter() < deadline:
-            send()
-            n += 1
-        counts[i] = n
+        send = sends[i]
+        try:
+            while time.perf_counter() < deadline:
+                send()
+                counts[i] += 1
+        except BaseException as exc:  # surfaced after join
+            errors.append(exc)
 
-    threads = [threading.Thread(target=loop, args=(i,)) for i in range(concurrency)]
+    threads = [threading.Thread(target=loop, args=(i,)) for i in range(len(sends))]
     for t in threads:
         t.start()
     for t in threads:
         t.join()
+    if errors:
+        raise errors[0]
     return sum(counts)
 
 
-def w_requests(url: str, concurrency: int, deadline: float) -> int:
+def measure_threads(sends: list, warmup: float, duration: float) -> tuple[int, float]:
+    return measure(lambda deadline: run_threads(sends, deadline), warmup, duration)
+
+
+def w_requests(url: str, concurrency: int, warmup: float, duration: float) -> tuple[int, float]:
     import requests
 
     def make_send():
@@ -122,25 +138,22 @@ def w_requests(url: str, concurrency: int, deadline: float) -> int:
 
         return send
 
-    return run_threads(concurrency, deadline, make_send)
+    return measure_threads([make_send() for _ in range(concurrency)], warmup, duration)
 
 
-def w_httpx_sync(url: str, concurrency: int, deadline: float) -> int:
+def w_httpx_sync(url: str, concurrency: int, warmup: float, duration: float) -> tuple[int, float]:
     import httpx
 
     limits = httpx.Limits(max_connections=concurrency, max_keepalive_connections=concurrency)
     client = httpx.Client(limits=limits)
 
-    def make_send():
-        def send():
-            client.post(url, content=BODY, headers={"content-type": "application/json"}).raise_for_status()
+    def send():
+        client.post(url, content=BODY, headers={"content-type": "application/json"}).raise_for_status()
 
-        return send
-
-    return run_threads(concurrency, deadline, make_send)
+    return measure_threads([send] * concurrency, warmup, duration)
 
 
-def run_async(concurrency: int, deadline: float, make_client, post):
+def run_async(concurrency: int, warmup: float, duration: float, make_client, post) -> tuple[int, float]:
     import asyncio
 
     try:
@@ -150,25 +163,32 @@ def run_async(concurrency: int, deadline: float, make_client, post):
     except ImportError:
         pass
 
-    async def main() -> int:
+    async def main() -> tuple[int, float]:
         client = await make_client()
-        counts = [0] * concurrency
 
-        async def loop(i: int) -> None:
-            n = 0
-            while time.perf_counter() < deadline:
-                await post(client)
-                n += 1
-            counts[i] = n
+        async def run(deadline: float) -> int:
+            counts = [0] * concurrency
 
-        await asyncio.gather(*(loop(i) for i in range(concurrency)))
-        await (getattr(client, "aclose", None) or client.close)()
-        return sum(counts)
+            async def loop(i: int) -> None:
+                while time.perf_counter() < deadline:
+                    await post(client)
+                    counts[i] += 1
+
+            await asyncio.gather(*(loop(i) for i in range(concurrency)))
+            return sum(counts)
+
+        try:
+            await run(time.perf_counter() + warmup)
+            start = time.perf_counter()
+            count = await run(start + duration)
+            return count, time.perf_counter() - start
+        finally:
+            await (getattr(client, "aclose", None) or client.close)()
 
     return asyncio.run(main())
 
 
-def w_httpx_async(url: str, concurrency: int, deadline: float) -> int:
+def w_httpx_async(url: str, concurrency: int, warmup: float, duration: float) -> tuple[int, float]:
     import httpx
 
     async def make_client():
@@ -179,10 +199,10 @@ def w_httpx_async(url: str, concurrency: int, deadline: float) -> int:
         r = await client.post(url, content=BODY, headers={"content-type": "application/json"})
         r.raise_for_status()
 
-    return run_async(concurrency, deadline, make_client, post)
+    return run_async(concurrency, warmup, duration, make_client, post)
 
 
-def w_aiohttp(url: str, concurrency: int, deadline: float) -> int:
+def w_aiohttp(url: str, concurrency: int, warmup: float, duration: float) -> tuple[int, float]:
     import aiohttp
 
     async def make_client():
@@ -193,7 +213,7 @@ def w_aiohttp(url: str, concurrency: int, deadline: float) -> int:
             r.raise_for_status()
             await r.read()
 
-    return run_async(concurrency, deadline, make_client, post)
+    return run_async(concurrency, warmup, duration, make_client, post)
 
 
 def mqb_publisher(url: str, concurrency: int):
@@ -204,23 +224,23 @@ def mqb_publisher(url: str, concurrency: int):
     )
 
 
-def w_mqb_send_threads(url: str, concurrency: int, deadline: float) -> int:
+def w_mqb_send_threads(url: str, concurrency: int, warmup: float, duration: float) -> tuple[int, float]:
     publisher = mqb_publisher(url, concurrency)
-
-    def make_send():
-        return lambda: publisher.send(BODY)
-
-    return run_threads(concurrency, deadline, make_send)
+    return measure_threads([lambda: publisher.send(BODY)] * concurrency, warmup, duration)
 
 
-def w_mqb_send_batch(url: str, concurrency: int, deadline: float) -> int:
+def w_mqb_send_batch(url: str, concurrency: int, warmup: float, duration: float) -> tuple[int, float]:
     publisher = mqb_publisher(url, concurrency)
     batch = [BODY] * max(256, concurrency * 16)
-    n = 0
-    while time.perf_counter() < deadline:
-        publisher.send_batch(batch)
-        n += len(batch)
-    return n
+
+    def run(deadline: float) -> int:
+        n = 0
+        while time.perf_counter() < deadline:
+            publisher.send_batch(batch)
+            n += len(batch)
+        return n
+
+    return measure(run, warmup, duration)
 
 
 WORKERS = {
@@ -243,11 +263,7 @@ MODULES = {
 
 
 def child(target: str, url: str, concurrency: int, duration: float, warmup: float) -> None:
-    worker = WORKERS[target]
-    worker(url, concurrency, time.perf_counter() + warmup)
-    start = time.perf_counter()
-    count = worker(url, concurrency, start + duration)
-    elapsed = time.perf_counter() - start
+    count, elapsed = WORKERS[target](url, concurrency, warmup, duration)
     print(json.dumps({"count": count, "elapsed": elapsed}))
 
 

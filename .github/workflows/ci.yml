@@ -167,9 +167,9 @@ jobs:
             echo "kache not installed; skipping stats"
           fi
 
-  # Compile the integration test binaries ONCE (release, full,test-utils) and
-  # publish them as a nextest archive. The three run jobs below download this
-  # archive instead of each recompiling the same binaries.
+  # Compile the integration test binary ONCE (`ci` profile = release without LTO,
+  # full,test-utils) and publish it as a nextest archive. The run jobs below
+  # download this archive instead of each recompiling the same binary.
   integration-build:
     name: Integration — Build
     runs-on: ubuntu-latest
@@ -187,15 +187,15 @@ jobs:
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
         with:
-          # Shared with the benchmark job so the full-feature dependency compile
-          # is reused across jobs/runs.
-          shared-key: release-full
+          # Own key: the `ci` profile builds different artifacts than the
+          # benchmark job's `release` profile.
+          shared-key: ci-integration
 
       - name: Build nextest archive
         run: |
           cargo nextest archive \
-            --release --features full,test-utils \
-            --test integration_test --test armature_integration \
+            --cargo-profile ci --features full,test-utils \
+            --test integration_test \
             --archive-file nextest-archive.tar.zst
 
       - name: Upload nextest archive
@@ -210,6 +210,8 @@ jobs:
   # archive from integration-build — no recompilation. `--no-capture` implies
   # `--test-threads=1`, and tests tear their compose stacks down with `down -v`,
   # so parallelism has to come from separate runners rather than from nextest.
+  # `partition` shards many small tests; `backend` (MQB_TEST_BACKEND) splits the
+  # aggregate tests, with the `!` half catching backends added later.
   integration:
     name: Integration — ${{ matrix.name }}
     runs-on: ubuntu-latest
@@ -219,18 +221,34 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: Status
+          - name: Status 1/2
             filter: 'binary(integration_test) & test(=test_all_status)'
+            backend: 'kafka,mongodb'
+          - name: Status 2/2
+            filter: 'binary(integration_test) & test(=test_all_status)'
+            backend: '!kafka,!mongodb'
           - name: Logic
             filter: 'binary(integration_test) & (test(=test_all_request_reply) | test(=test_all_subscriber_logic))'
-          - name: Contract & CDC
+          - name: Contract & CDC 1/2
             filter: 'binary(integration_test) & (test(/^integration::contract::/) | test(/postgres_cdc/))'
-          - name: Endpoints
+            partition: 'slice:1/2'
+          - name: Contract & CDC 2/2
+            filter: 'binary(integration_test) & (test(/^integration::contract::/) | test(/postgres_cdc/))'
+            partition: 'slice:2/2'
+          - name: Endpoints 1/2
             filter: 'binary(integration_test) & not test(/^integration::contract::/) & not test(/postgres_cdc/) & not test(=test_all_status) & not test(=test_all_request_reply) & not test(=test_all_subscriber_logic) & not test(=test_all_performance_pipeline) & not test(=test_all_performance_direct)'
+            partition: 'slice:1/2'
+          - name: Endpoints 2/2
+            filter: 'binary(integration_test) & not test(/^integration::contract::/) & not test(/postgres_cdc/) & not test(=test_all_status) & not test(=test_all_request_reply) & not test(=test_all_subscriber_logic) & not test(=test_all_performance_pipeline) & not test(=test_all_performance_direct)'
+            partition: 'slice:2/2'
           - name: Performance Pipeline
             filter: 'binary(integration_test) & test(=test_all_performance_pipeline)'
-          - name: Performance Direct
+          - name: Performance Direct 1/2
             filter: 'binary(integration_test) & test(=test_all_performance_direct)'
+            backend: 'mongodb,aws'
+          - name: Performance Direct 2/2
+            filter: 'binary(integration_test) & test(=test_all_performance_direct)'
+            backend: '!mongodb,!aws'
     services:
       docker:
         image: docker:dind
@@ -276,37 +294,32 @@ jobs:
           ./tests/integration/scripts/gen_certs.sh ibm-mq
 
       - name: Run ${{ matrix.name }} integration tests
+        env:
+          MQB_TEST_BACKEND: ${{ matrix.backend }}
+          PARTITION: ${{ matrix.partition }}
         run: |
           cargo nextest run --archive-file nextest-archive.tar.zst \
             --run-ignored all --no-capture \
+            ${PARTITION:+--partition "$PARTITION"} \
             -E '${{ matrix.filter }}'
 
   # Armature clones an external repo and runs its test suite: no docker stacks, no
   # TLS certs, no keytool. It used to pay ~1.3m of setup for 1.7m of tests.
   # Advisory: it builds armature's `develop` head unlocked, so their breakage shows here.
+  # The test only shells out to git and cargo, so a debug build with default
+  # features suffices and the job need not wait for integration-build.
   integration-armature:
     name: Integration — Armature
     runs-on: ubuntu-latest
     continue-on-error: true
-    needs: integration-build
     steps:
       - uses: actions/checkout@v7
 
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@v2
-        with:
-          tool: nextest
-
-      - name: Download nextest archive
-        uses: actions/download-artifact@v8
-        with:
-          name: integration-nextest-archive
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
       - name: Run armature integration tests
-        run: |
-          cargo nextest run --archive-file nextest-archive.tar.zst \
-            --run-ignored all --no-capture \
-            -E 'binary(armature_integration)'
+        run: cargo test --test armature_integration -- --ignored --nocapture
 
   # Documentation
   docs:
