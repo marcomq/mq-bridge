@@ -18,7 +18,6 @@ mq-bridge-pulsar = { version = "0.1.6", default-features = false }
 
 anyhow = "1.0"
 async-trait = "0.1"
-hex = "0.4.3"
 metrics = "0.24.6"
 metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
 mimalloc = { version = "0.1", default-features = false }
