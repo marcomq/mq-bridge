@@ -22,7 +22,7 @@ descriptive name that means exactly the same:
 | `text` | `envelope_text` | the whole message as JSON, the payload as a string |
 | `normal` | `envelope` | the whole message as JSON, the payload as text or base64 |
 
-For a file other tools read, `raw` is almost always the one you want; `json` is for a file
+For a file other tools read, `payload` is almost always the one you want; `json` is for a file
 mq-bridge reads back with ids and metadata intact.
 
 ## Config (YAML / library)
@@ -34,7 +34,7 @@ The same settings as a route endpoint in a config file, or in `Route.from_config
 input:
   file: { path: "/data/in.csv", format: csv }
 output:
-  file: { path: "/data/out.jsonl", format: raw }
+  file: { path: "/data/out.jsonl", format: payload }
 ```
 
 The URL path becomes the `path` field.
@@ -69,7 +69,7 @@ mqb copy \
 
 | Option | Purpose |
 |---|---|
-| `format` | `normal`, `json`, `text`, `raw`, or `csv`. |
+| `format` | `normal`, `json`, `text`, `payload` (also `raw`), or `csv`. |
 | `delimiter` | Message delimiter. Defaults to newline. |
 | `mode` | Consumer only: `consume` (from start), `subscribe` (tail from end), or persistent offset-tracked modes. |
 | `compression` | Compress/decompress each batch: `none` (default), `gzip`, `lz4`, `zstd` (needs the `compression` build feature). A source must declare the same codec the file was written with. See [Compression](../cookbook/compression.md). On the command line a path ending in `.gz`, `.zst` or `.lz4` sets it; `compression=none` overrides. |
@@ -142,4 +142,4 @@ insignificant JSON whitespace), so each message stays one line of the file. With
 `delimiter`, any occurrence of it inside a JSON string is written as a `\uXXXX` escape, which
 decodes to the same value. A delimiter that would appear in JSON syntax itself, such as `,`,
 fails the message; `0x1e` (record separator) never occurs in JSON and is a safe choice.
-`raw` writes the payload untouched, so its delimiter must not occur in the payloads.
+`payload` writes the payload untouched, so its delimiter must not occur in the payloads.

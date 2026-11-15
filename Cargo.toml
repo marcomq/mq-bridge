@@ -62,7 +62,7 @@ exit = "warn"
 collapsible_if = "allow"
 
 [workspace.package]
-version = "1.5.0"
+version = "1.6.0"
 
 [workspace.dependencies]
 anyhow = "1.0"
@@ -92,6 +92,17 @@ debug = false
 [profile.release]
 lto = "thin"
 strip = "symbols"
+
+# CI integration tests: release optimisation without cross-crate LTO, for a
+# shorter build. Benchmarks keep using `release`.
+[profile.ci]
+inherits = "release"
+lto = false
+opt-level = 1
+
+# Dependencies come from the rust-cache, so they keep full optimisation.
+[profile.ci.package."*"]
+opt-level = 3
 
 [[bin]]
 name = "mq_bridge_http_profile"
@@ -181,7 +192,7 @@ mongodb = { version = "3.8", optional = true, features = ["cert-key-password"] }
 object_store = { version = "0.14", optional = true, default-features = false, features = ["aws", "gcp", "azure", "http", "fs"] }
 
 # NATS
-async-nats = { version = "0.51", optional = true }
+async-nats = { version = "0.52", optional = true }
 
 # MQTT.
 # `use-rustls-no-provider` pulls tokio-rustls without a crypto provider (its
@@ -247,6 +258,8 @@ aws-sigv4 = { version = "1.4", optional = true }
 
 # SQLx
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls", "any"], optional = true }
+# Only for the `LevelFilter` sqlx's statement-log settings take; sqlx already depends on it.
+log = { version = "0.4", optional = true }
 
 # ClickHouse — talks the ClickHouse HTTP interface directly (JSONEachRow in/out).
 # reqwest is used rather than the typed `clickhouse` crate because that crate is
@@ -259,7 +272,7 @@ zeromq = { version = "0.7", optional = true }
 # Default ZeroMQ backend (`backend: try_omq`). Faster than libzmq per its
 # benchmarks and adds CURVE/PLAIN security. Pure Rust without default
 # features; needs MSRV 1.93 / edition 2024.
-omq-tokio = { version = "0.33", optional = true }
+omq-tokio = { version = "0.35", optional = true }
 
 # Redis Streams. Pure-Rust client (no C bindings). TLS via rustls (ring), so
 # `rediss://` URLs work; webpki-roots ships the CA bundle so there's no system
@@ -441,7 +454,7 @@ redis-streams = ["dep:redis", "rustls", "rustls-native-certs"]
 # Note: The grpc feature requires protobuf-src which can significantly increase build times.
 grpc = ["tonic", "tonic-reflection", "prost", "prost-types", "prost-reflect", "tokio-stream", "tonic-prost", "tonic-prost-build", "rustls", "rustls-native-certs", "vendored-protoc"]
 # SQL endpoint with only the SQLite driver; `sqlx` adds PostgreSQL and MySQL/MariaDB.
-sqlite = ["dep:sqlx", "sqlx/sqlite-bundled"]
+sqlite = ["dep:sqlx", "dep:log", "sqlx/sqlite-bundled"]
 sqlx = ["sqlite", "sqlx/postgres", "sqlx/mysql"]
 clickhouse = ["dep:reqwest", "dep:flate2", "dep:lz4_flex", "dep:zstd", "rustls", "rustls-pemfile", "webpki-roots", "rustls-native-certs"]
 # Generic bulk document sink over HTTP (search engines and similar APIs).

@@ -421,9 +421,12 @@ jobs:
   # Created as a draft: assets are staged onto it by the build jobs, and it is
   # only made public by `publish-release` once every one of them has succeeded.
   # A failed CLI or bundle build must not leave an empty release behind.
+  # Not gated on the tests: a draft is private, so the asset builds run in
+  # parallel with the test gate and `publish-release` waits for both.
   release:
     name: Create Draft Release
-    needs: [metadata, preflight, test, app-checks, package-dry-run]
+    needs: [metadata, preflight]
+    if: ${{ !inputs.publish_only }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -439,7 +442,7 @@ jobs:
 
       - name: Create Release
         id: create_release
-        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         with:
           tag_name: ${{ needs.metadata.outputs.release_tag }}
           name: Release ${{ needs.metadata.outputs.release_tag }}
@@ -546,16 +549,23 @@ jobs:
           fi
 
       - name: Upload Release Asset
-        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         with:
           tag_name: ${{ needs.metadata.outputs.release_tag }}
           files: ${{ env.ASSET_PATH }}
 
+  # The C library and the full plugin share one job per target: both live in
+  # this workspace, so the dependency graph is compiled once for the two.
+  #
   # The C library has no ABI stability, so each archive carries the header that
   # matches its library. Shared library only: a `full` static archive is huge and
   # needs a per-target native link line.
-  build-c-library:
-    name: Build C library asset for ${{ matrix.target }}
+  #
+  # The full plugin is every built-in endpoint and middleware as one plugin library,
+  # for hosts built without them. The archive is a release asset (Homebrew renders
+  # from it) and the conda package repackages the same archive on its own runner.
+  build-native-libs:
+    name: Build C library + full plugin for ${{ matrix.target }}
     needs: [metadata, release]
     runs-on: ${{ matrix.os }}
     # Same LNK4099 reason as build-release.
@@ -570,13 +580,17 @@ jobs:
           # Same runners as the CLI assets, so both share one glibc floor.
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
+            conda: linux-64
           # Native arm64 runner, like the Node binding: `full` pulls C sources that don't cross-compile.
           - os: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
+            conda: linux-aarch64
           - os: macos-latest
             target: aarch64-apple-darwin
+            conda: osx-arm64
           - os: windows-2022
             target: x86_64-pc-windows-msvc
+            conda: win-64
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -610,7 +624,7 @@ jobs:
         shell: bash
         run: cargo rustc -p mq-bridge-c --release --target ${{ matrix.target }} --crate-type cdylib
 
-      - name: Package artifacts
+      - name: Package C library
         shell: bash
         run: |
           ASSET_NAME="mq-bridge-c-${{ matrix.target }}"
@@ -632,10 +646,10 @@ jobs:
           cp bindings/c/THIRD_PARTY_LICENSES.txt staging/
           if [ "$RUNNER_OS" == "Windows" ]; then
             7z a "${ASSET_NAME}.zip" ./staging/*
-            echo "ASSET_PATH=${ASSET_NAME}.zip" >> "$GITHUB_ENV"
+            echo "C_ASSET_PATH=${ASSET_NAME}.zip" >> "$GITHUB_ENV"
           else
             tar -czf "${ASSET_NAME}.tar.gz" -C staging .
-            echo "ASSET_PATH=${ASSET_NAME}.tar.gz" >> "$GITHUB_ENV"
+            echo "C_ASSET_PATH=${ASSET_NAME}.tar.gz" >> "$GITHUB_ENV"
           fi
 
       # CI only links the `--no-default-features` build; this is the one place a C
@@ -645,79 +659,24 @@ jobs:
         shell: bash
         run: |
           mkdir unpacked
-          tar -xzf "$ASSET_PATH" -C unpacked
+          tar -xzf "$C_ASSET_PATH" -C unpacked
           cc -std=c11 -I unpacked/include examples/c-library/smoke.c \
             -L unpacked/lib -lmq_bridge "-Wl,-rpath,$PWD/unpacked/lib" -o smoke
           if [ "$RUNNER_OS" == "macOS" ]; then otool -L unpacked/lib/libmq_bridge.dylib; else ldd unpacked/lib/libmq_bridge.so; fi
           ./smoke "$RUNNER_TEMP" | tee smoke.log
           grep -q "smoke test passed" smoke.log
 
-      - name: Upload Release Asset
-        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+      - name: Upload C library asset
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         with:
           tag_name: ${{ needs.metadata.outputs.release_tag }}
-          files: ${{ env.ASSET_PATH }}
-
-  # Every built-in endpoint and middleware as one plugin library, for hosts built without them.
-  # The archive is a release asset (Homebrew renders from it) and the conda package
-  # repackages the same archive on its own platform's runner.
-  build-full-plugin:
-    name: Build full plugin for ${{ matrix.target }}
-    needs: [metadata, release]
-    runs-on: ${{ matrix.os }}
-    # Same LNK4099 reason as build-release.
-    env:
-      CARGO_BUILD_WARNINGS: warn
-    permissions:
-      contents: write
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-22.04
-            target: x86_64-unknown-linux-gnu
-            conda: linux-64
-          - os: ubuntu-22.04-arm
-            target: aarch64-unknown-linux-gnu
-            conda: linux-aarch64
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            conda: osx-arm64
-          - os: windows-2022
-            target: x86_64-pc-windows-msvc
-            conda: win-64
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7
-        with:
-          ref: ${{ inputs.tag_name || github.ref }}
-
-      - name: Install Rust toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v2
-        with:
-          toolchain: stable
-          target: ${{ matrix.target }}
-
-      - name: Install dependencies (Linux)
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config zlib1g-dev cmake libcurl4-openssl-dev protobuf-compiler
-
-      # Same Strawberry perl pin as build-c-library, for `kafka-ssl`'s OpenSSL build.
-      - name: Install dependencies (Windows)
-        if: runner.os == 'Windows'
-        run: |
-          choco install protoc --no-progress -y
-          "OPENSSL_SRC_PERL=$((Get-Command perl).Source)" >> $env:GITHUB_ENV
-
-      - name: Install dependencies (macOS)
-        if: runner.os == 'macOS'
-        run: brew install cmake pkg-config openssl@3 protobuf
+          files: ${{ env.C_ASSET_PATH }}
 
       - name: Build plugin library (full)
         shell: bash
         run: cargo build -p mq-bridge-full --release --target ${{ matrix.target }}
 
-      - name: Package artifacts
+      - name: Package full plugin
         shell: bash
         env:
           CARGO_VERSION: ${{ needs.metadata.outputs.cargo_version }}
@@ -725,18 +684,18 @@ jobs:
           set -euo pipefail
           ASSET_NAME="mq-bridge-full-${CARGO_VERSION}-${{ matrix.target }}"
           OUT="target/${{ matrix.target }}/release"
-          mkdir -p staging
+          mkdir -p plugin-staging
           case "$RUNNER_OS" in
-            Windows) cp "$OUT/mq_bridge_full.dll" staging/ ;;
+            Windows) cp "$OUT/mq_bridge_full.dll" plugin-staging/ ;;
             macOS)
-              cp "$OUT/libmq_bridge_full.dylib" staging/
-              install_name_tool -id @rpath/libmq_bridge_full.dylib staging/libmq_bridge_full.dylib
-              codesign --force --sign - staging/libmq_bridge_full.dylib
+              cp "$OUT/libmq_bridge_full.dylib" plugin-staging/
+              install_name_tool -id @rpath/libmq_bridge_full.dylib plugin-staging/libmq_bridge_full.dylib
+              codesign --force --sign - plugin-staging/libmq_bridge_full.dylib
               ;;
-            *) cp "$OUT/libmq_bridge_full.so" staging/ ;;
+            *) cp "$OUT/libmq_bridge_full.so" plugin-staging/ ;;
           esac
-          cp LICENSE-MIT LICENSE-APACHE bindings/c/THIRD_PARTY_LICENSES.txt staging/
-          tar -czf "${ASSET_NAME}.tar.gz" -C staging .
+          cp LICENSE-MIT LICENSE-APACHE bindings/c/THIRD_PARTY_LICENSES.txt plugin-staging/
+          tar -czf "${ASSET_NAME}.tar.gz" -C plugin-staging .
           echo "ASSET_PATH=${ASSET_NAME}.tar.gz" >> "$GITHUB_ENV"
           echo "MQ_BRIDGE_VERSION=${CARGO_VERSION}" >> "$GITHUB_ENV"
 
@@ -747,17 +706,17 @@ jobs:
         run: |
           set -euo pipefail
           if [ "$RUNNER_OS" == "macOS" ]; then
-            lib=staging/libmq_bridge_full.dylib
+            lib=plugin-staging/libmq_bridge_full.dylib
             otool -L "$lib"
             nm -gU "$lib" | grep -q ' _mq_bridge_plugin_v1$'
           else
-            lib=staging/libmq_bridge_full.so
+            lib=plugin-staging/libmq_bridge_full.so
             ldd "$lib"
             nm -D --defined-only "$lib" | grep -q ' mq_bridge_plugin_v1$'
           fi
 
-      - name: Upload Release Asset
-        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+      - name: Upload full plugin asset
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         with:
           tag_name: ${{ needs.metadata.outputs.release_tag }}
           files: ${{ env.ASSET_PATH }}
@@ -1066,14 +1025,17 @@ jobs:
   # The single point where the release becomes public. Everything above stages
   # artifacts onto the draft; if any of it fails, the tag is left with a draft
   # that can be deleted, not a published release missing half its downloads.
-  # Everything that publishes to an external registry hangs off this job.
+  # Everything that publishes to an external registry hangs off this job, and
+  # this is where the test gate applies: the builds above run alongside it.
   publish-release:
     name: Publish GitHub Release
     needs:
       - metadata
+      - test
+      - app-checks
+      - package-dry-run
       - build-release
-      - build-c-library
-      - build-full-plugin
+      - build-native-libs
       - build-linux-arm64-asset
       - build-tauri-release
       - publish-manifest
@@ -1154,33 +1116,16 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
 
-  # The addon and wheel builds hang off the test gate, not off publish-release.
-  # Nothing in them touches a registry, so there was never a reason to wait ~45min
-  # for the docker images and desktop bundles first -- that serialisation was the
-  # single biggest item on the critical path. The uploads below still wait for
-  # publish-release, so the contract that nothing goes public until every build
-  # has passed is unchanged; the cost is that a run which fails late has already
-  # paid for these builds.
+  # The addon and wheel builds hang off preflight only, not off the test gate or
+  # publish-release: nothing in them touches a registry. The uploads below wait
+  # for publish-release, which waits for the tests, so nothing goes public until
+  # every build and test has passed; the cost is that a run which fails has
+  # already paid for these builds. They also run on `publish_only`, since
+  # publish-node.yml only consumes artifacts from its own run.
   build-node-packages:
     name: Build Node Packages
-    needs: [metadata, preflight, test, app-checks, package-dry-run]
-    # `publish_only` skips the test gate, and a skipped dependency skips the
-    # dependent unless the condition tolerates it. The addons still have to be
-    # rebuilt on that path: publish-node.yml only consumes artifacts from its
-    # own run.
-    #
-    # `preflight` is checked explicitly. Tolerating a skipped `needs` opts this
-    # job out of the default "skip when a dependency failed" rule for ALL of
-    # them, so without this a refused preflight still paid for the full matrix --
-    # and on `publish_only`, where the test gate is short-circuited, still
-    # published.
-    if: >-
-      ${{ !cancelled() && !inputs.skip_npm
-          && needs.preflight.result == 'success'
-          && (inputs.publish_only
-              || (needs.test.result == 'success'
-                  && needs.app-checks.result == 'success'
-                  && needs.package-dry-run.result == 'success')) }}
+    needs: [metadata, preflight]
+    if: ${{ !inputs.skip_npm }}
     permissions:
       contents: read
     uses: ./.github/workflows/build-node.yml
@@ -1189,16 +1134,7 @@ jobs:
 
   build-python-packages:
     name: Build Python Packages
-    needs: [metadata, preflight, test, app-checks, package-dry-run]
-    # See build-node-packages: `preflight` has to be named explicitly, because
-    # tolerating a skipped `needs` waives the default failure-skip for every one.
-    if: >-
-      ${{ !cancelled()
-          && needs.preflight.result == 'success'
-          && (inputs.publish_only
-              || (needs.test.result == 'success'
-                  && needs.app-checks.result == 'success'
-                  && needs.package-dry-run.result == 'success')) }}
+    needs: [metadata, preflight]
     permissions:
       contents: read
       # GitHub validates the maximum permissions of every job in a reusable
@@ -1212,21 +1148,12 @@ jobs:
       # that is exactly the failure that cost a full release run before.
       skip_publish: true
 
-  # Deliberately NOT gated on publish-release: the conda matrix takes ~33 min
-  # (win-64), which fits entirely inside the ~35 min node macOS build already on
-  # the critical path. Only the upload below waits for the release to go public.
+  # Deliberately NOT gated on publish-release or the tests (see
+  # build-node-packages). Only the upload below waits for the release to go public.
   build-conda-packages:
     name: Build Conda Packages
-    needs: [metadata, preflight, test, app-checks, package-dry-run]
-    # See build-node-packages: `preflight` has to be named explicitly, because
-    # tolerating a skipped `needs` waives the default failure-skip for every one.
-    if: >-
-      ${{ !cancelled()
-          && !inputs.publish_only
-          && needs.preflight.result == 'success'
-          && needs.test.result == 'success'
-          && needs.app-checks.result == 'success'
-          && needs.package-dry-run.result == 'success' }}
+    needs: [metadata, preflight]
+    if: ${{ !inputs.publish_only }}
     permissions:
       contents: read
     uses: ./.github/workflows/conda.yml
@@ -1552,7 +1479,7 @@ jobs:
           tar -czf mq-bridge-cli-aarch64-unknown-linux-gnu.tar.gz -C staging .
 
       - name: Upload Release Asset
-        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         with:
           tag_name: ${{ needs.metadata.outputs.release_tag }}
           files: mq-bridge-cli-aarch64-unknown-linux-gnu.tar.gz

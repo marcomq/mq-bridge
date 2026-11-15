@@ -55,7 +55,7 @@ is what you want (ciphertext does not compress):
 output:
   file:
     path: "data.enc"
-    format: raw
+    format: payload
     compression: lz4          # none | gzip | lz4 | zstd  (`compression` feature)
     encryption: { key: "${env:MQB_ENC_KEY}" }
 ```

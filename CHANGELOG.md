@@ -2,6 +2,66 @@
 
 All notable changes to `mq-bridge`. Newest first.
 
+## 1.6.0
+
+### Added
+
+- **`load_mode` for SQL sinks: load a drain as one unit.** `atomic_append` writes every row of
+  a drain into one transaction and commits it when the route completes; `replace` deletes the
+  old rows first, in the same transaction. Readers see the old rows until the commit, and a
+  failed or interrupted run leaves the table unchanged. Set it as `load_mode:` on a sqlx
+  output, `?load_mode=` on a URI, or with `mqb copy --load-mode`, which implies `--drain`.
+  Needs `exit_on_empty` and a source that reads the full data set on every run; opt-in, other
+  routes are unchanged.
+- **Builders for a batched lookup route in code.** `LookupMiddleware::new(from)` with
+  `with_into`, `with_payload`, `with_metadata` and `with_concurrency`;
+  `ParallelMiddleware::new(max_in_flight)`; `Endpoint::with_lookup(…)` and
+  `Endpoint::with_parallel(n)`, which append in the order written; `with_lookup_query` on
+  `SqlxConfig` and `ClickHouseConfig`; and `From<EndpointType> for Endpoint`. A `Caller`
+  with a batched lookup no longer needs YAML or struct literals:
+  `Endpoint::new_memory("users", 4096).with_lookup(LookupMiddleware::new(db).with_into("$")).with_parallel(16)`.
+  Several lookups in parallel: `LookupMiddleware::with_entry(LookupEntry::new(from, into))`,
+  with `with_payload` and `with_metadata` on `LookupEntry`.
+- **`Caller::builder(name)`.** Builds a caller route without naming its memory input or
+  `response` output: `Caller::builder("users").with_lookup(…).with_parallel(16).deploy().await?`.
+  Also `add_middleware`, `with_batch_size`, `with_concurrency`, `with_request_timeout_ms`,
+  `with_capacity`, `with_handler` and `with_output`.
+- **`From<…Config>` for `EndpointType` and `Endpoint`** for every endpoint config, so
+  `LookupMiddleware::new(db)` takes a `SqlxConfig` directly.
+- **`before_load` and `after_load` on a SQL sink with `load_mode`.** SQL run in the load's
+  transaction before its first row and just before it commits; several statements are
+  allowed. A failing `after_load` rolls the load back, so loading a staging table and a
+  `MERGE` into the real one commit together.
+- **`load_mode: replace` for a MongoDB sink.** A drain loads into a staging collection that
+  replaces the collection with one `renameCollection` when the route completes, keeping its
+  indexes and options. Readers see the old documents until then; a failed or interrupted
+  run leaves the collection unchanged. Each run gets its own staging collection; one left
+  behind by a crashed run is dropped by the next load, found through an expired lease in
+  `mqb_load_leases`. Also `?load_mode=replace` and `mqb copy --load-mode replace`.
+
+### Changed
+
+- **`columns: auto` spends less CPU per row.** The `INSERT` text is built once per batch shape
+  instead of every batch, and a record is read without building a JSON map first. A 1M-row
+  CSV load into PostgreSQL with `--load-mode` took 4.1 s instead of 5.0 s.
+- **A route logs the first 10 dropped messages one by one, then only counts them.** A load
+  with a bad column printed one `ERROR` line per row; the route's error still reports the
+  total and the causes.
+- **`mqb copy` reports progress when stderr is not a terminal**, as one line every 10 s, so
+  a copy in a log or CI shows that it is moving.
+- **sqlx's slow-statement log is at `debug` level.** A statement over 1 s was logged at
+  `WARN` with its full text, which for a batch `INSERT` is up to a megabyte on one line.
+- **A PostgreSQL type mismatch (`42804`) says how to fix it:** cast the value in
+  `insert_query`, or use `columns: auto`.
+- **Docs and warnings say `format: payload` instead of `format: raw`.** Both names mean the
+  same and `raw` keeps working; `payload` says what ends up in the file.
+- **A MongoDB change stream handles a dropped, renamed or replaced collection.** It reconnected
+  after 5 s instead: without `cursor_id` it missed the changes made meanwhile, with one it
+  replayed the end forever. Without `cursor_id` it now reads on right after the `invalidate`
+  (`startAfter`) with a warning; with one the route ends with a permanent error.
+- **Documented: deleting rows with a SQL sink.** `insert_query` runs an `UPDATE` or `DELETE` per
+  message; the PostgreSQL page shows CDC deletes routed by `postgres.operation`.
+
 ## 1.5.0
 
 ### Added

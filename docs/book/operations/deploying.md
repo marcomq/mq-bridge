@@ -22,9 +22,9 @@ docker run --rm --name mq-bridge -p 9091:9091 -v "$(pwd)":/app \
 ```
 
 - The default `latest` image is a plain multi-arch image for `amd64` and `arm64`.
-- **IBM MQ** support is published separately as the `latest-ibm-mq` / `ibm-mq` tags, `amd64`
-  only (no redistributable arm64 client yet). Start it with `--platform=linux/amd64`, or build
-  yourself with `cargo build --release --features=ibm-mq`.
+- An image that bundles IBM's **IBM MQ** client library is published as the `latest-ibm-mq` /
+  `ibm-mq` tags, `amd64` only (no redistributable arm64 client yet). Start it with
+  `--platform=linux/amd64`, or build it yourself; see [IBM MQ setup](../IBM_MQ_SETUP.md).
 
 ### Ports in containers
 
@@ -36,8 +36,7 @@ nothing is reachable until you publish it — so the image's `CMD` is `--ui`, th
 that sets `args:` replaces `CMD` wholesale, and the environment survives that. The container
 boundary is the gate: without `-p` (or a Kubernetes Service), neither port leaves the container.
 
-Docker replaces `CMD` **wholesale** as soon as you pass any argument of your own. That is what
-keeps the headless modes headless:
+Docker replaces `CMD` **wholesale** as soon as you pass any argument of your own.
 
 The two settings are carried differently, and that difference is the whole design:
 
@@ -117,8 +116,8 @@ Full hardening notes (including the PCI-DSS-oriented checklist) are in the
 
 ## Observability
 
-Wire up the [`metrics`](observability.md) middleware and scrape the Prometheus endpoint; ship
-the JSON logs to your aggregator. See [Observability & metrics](observability.md).
+Wire up the [`metrics`](observability.md) middleware and scrape the Prometheus endpoint; set
+`logger: json` and ship the logs to your aggregator. See [Observability & metrics](observability.md).
 
 ## Continuous deployment of this book
 

@@ -29,6 +29,7 @@ orders_to_postgres:
   output:
     sqlx:
       url: "postgres://localhost/shop"
+      table: "orders"
       insert_query: "INSERT INTO orders (id, body) VALUES (${payload:id}, ${payload:body}) ON CONFLICT (id) DO NOTHING"
 ```
 
@@ -351,6 +352,7 @@ kafka_to_postgres:
   output:
     sqlx:
       url: "postgres://localhost/shop"
+      table: "events"
       insert_query: >
         INSERT INTO events (topic, part, off, body)
         VALUES (${metadata:mqb.src.kafka_topic}, ${metadata:mqb.src.kafka_partition},

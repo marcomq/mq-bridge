@@ -19,6 +19,7 @@ Query parameters recognised as config fields for this connector. The object-type
 | `find` | string | no | — | (Publisher only) Extended-JSON filter template for `lookup`, e.g. `{"_id": "${payload:id}"}`. Answers with the first match. `{"_id": {"$in": ["${payload:id}"]}}` answers a batch at once. |
 | `format` | `normal` \| `json` \| `text` \| `raw` \| `envelope` \| `envelope_json` \| `envelope_text` \| `payload` | no | `normal` | Format for storing messages. Defaults to Normal. |
 | `id_field` | string | no | — | (Publisher only) Top-level payload field whose value becomes the document `_id`, or a replay-stable `${...}` template such as `${metadata:mqb.id}`. Enables idempotent inserts through MongoDB's unique `_id` index. Sink collections only. |
+| `load_mode` | `replace` | no | — | (Publisher only, drain routes) `replace`: load into a staging collection that replaces this one when the drain completes; indexes and options carry over. |
 | `meta_collection` | string | no | — | **Deprecated** — unused since the publisher no longer writes `seq`. Kept for compatibility. |
 | `password` | string | no | — | Optional password. Takes precedence over any credentials embedded in the `url`. Use embedded URL credentials for simple one-off connections but prefer explicit username/password fields (or environment-sourced secrets) for clarity and secret management in production. |
 | `polling_interval_ms` | integer | no | — | (Consumer only) Polling interval in milliseconds for the consumer (when not using Change Streams). Defaults to 100ms. |
@@ -43,6 +44,10 @@ TLS configuration for secure connections.
 Configures Transport Layer Security (TLS/SSL) for encrypted communication.
 Supports both client certificate (mutual TLS) and server certificate validation.
 
+`ca_file` also takes `"$.os"` (the operating system's CA store) or `"$.bundled"` (the
+Mozilla roots built into mq-bridge). Which endpoint supports which, and what it trusts
+without `ca_file`, is in the TLS section of the configuration guide.
+
 #### Examples
 
 ```rust
@@ -61,9 +66,11 @@ let tls = TlsConfig {
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
 | `accept_invalid_certs` | boolean | no | `false` | If true, disable server certificate verification (insecure). |
-| `ca_file` | string | no | — | Path to the CA certificate file. |
+| `ca_file` | string | no | — | Path to the CA certificate file, or `$.os` (OS CA store) or `$.bundled` (built-in public roots). |
 | `cert_file` | string | no | — | Path to the client certificate file (PEM). |
 | `cert_password` | string | no | — | Password for the private key (if encrypted). |
 | `key_file` | string | no | — | Path to the client private key file (PEM). |
 | `required` | boolean | no | `false` | If true, enable TLS/SSL. |
+
+**`ca_file` here:** a CA file or `$.bundled` (the default). `$.os` is not supported: the driver takes only a path, so name the OS bundle instead, e.g. `/etc/ssl/certs/ca-certificates.crt`.
 

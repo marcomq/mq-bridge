@@ -105,8 +105,10 @@ column's type. Expressions in the `VALUES (…)` tuple are fine: a batch is stil
 | `columns` | (Publisher) `auto` writes each JSON field into the table column of the same name. The table must exist. |
 | `key` | (Publisher, with `columns`) Key column(s), comma-separated. A row with the same key is updated; needs a `UNIQUE` or `PRIMARY KEY` on them. |
 | `extra_column` | (Publisher, with `columns`) Column that takes the fields without a column of their own, as one JSON object (`jsonb`, `json` or text). |
-| `insert_query` | Custom INSERT with `${payload:field}` / `${metadata:key}` tokens for multi-column writes. |
+| `insert_query` | Custom statement with `${payload:field}` / `${metadata:key}` tokens: an `INSERT` for multi-column writes, or an `UPDATE` / `DELETE`. |
 | `bulk_copy` | PostgreSQL only — use `COPY FROM STDIN` for high-throughput bulk loads. |
+| `load_mode` | (Publisher, drain routes) `atomic_append` or `replace`: one transaction for the whole load, committed at its end. See [Loading as one unit](#loading-as-one-unit). |
+| `before_load` / `after_load` | (Publisher, with `load_mode`) SQL run in the load's transaction before its first row / before it commits. |
 | `delete_after_read` | Consumer deletes rows after they're processed (mutually exclusive with `cursor_column`). |
 
 Any other query parameter (e.g. `sslmode=disable`) is left on the connection
@@ -216,11 +218,106 @@ work:
 | Your own statement, renamed fields, casts, `ON CONFLICT … DO NOTHING` | `insert_query` with `${payload:field}` tokens; see [Upserts](../cookbook/upserts.md) |
 | Fastest load into PostgreSQL | `bulk_copy: true`, with `columns: auto` or a token `insert_query` |
 | The whole payload in one column | neither; see [Queue tables](#queue-tables) |
+| Readers see the old rows or all new ones, never half a load | `load_mode`; see [Loading as one unit](#loading-as-one-unit) |
+| Delete or update the row a message names, e.g. a CDC `delete` | `insert_query` with `DELETE` or `UPDATE`; see [Deleting rows](#deleting-rows) |
 
 A row the database rejects for a reason that will not change (a type error, a violated
 constraint) fails as non-retryable and goes to a [`dlq`](../cookbook/dlq.md) if one is
 configured. Connection errors and deadlocks are reported as retryable, for a
 [`retry`](../cookbook/retries.md) middleware to repeat.
+
+### Deleting rows
+
+`insert_query` takes any statement, not only `INSERT`; one without a `VALUES` list runs
+once per message with its tokens bound. To mirror a [CDC](../tutorials/postgres-cdc.md) stream, send deletes to a
+second sink by the `postgres.operation` metadata:
+
+```yaml
+output:
+  switch:
+    metadata_key: "postgres.operation"
+    cases:
+      delete:
+        sqlx:
+          url: "postgres://user:pass@dst/app"
+          table: "orders"
+          insert_query: "DELETE FROM orders WHERE id = ${payload:id}::bigint"
+    default:
+      sqlx:
+        url: "postgres://user:pass@dst/app"
+        table: "orders"
+        columns: auto
+        key: "id"
+```
+
+- **Order within a batch.** `switch` writes the deletes and the upserts of one batch at the
+  same time, so a row inserted and deleted in the same batch can end up present. When that
+  can happen, guard by version (`postgres.lsn`) or set `batch_size: 1` on the route.
+- **As a lookup.** A `lookup_query` of `DELETE … RETURNING *` deletes the row and hands it
+  to the message, for example to archive it; see [Enrichment & lookups](../cookbook/lookup.md).
+
+## Loading as one unit
+
+By default each batch is committed when it is written, so a reader sees a load grow and a
+failed run leaves the rows it wrote so far. `load_mode` makes the whole load one
+transaction instead:
+
+| `load_mode` | Effect |
+|---|---|
+| `atomic_append` | Every row goes into one transaction, committed when the source is drained. |
+| `replace` | The same, after `DELETE FROM <table>` in that transaction. An empty source leaves the table as it was. |
+
+```bash
+mqb copy file:///data/orders.csv 'postgres://user:pass@host/db?table=orders&columns=auto' --load-mode replace
+```
+
+In `mqb copy`, `--load-mode` and `?load_mode=` on the destination URI imply `--drain`. A
+route in a config file with `load_mode:` must set `exit_on_empty: true` itself. Readers keep seeing the old rows, without waiting, until the commit;
+then they see all new ones. A failed or interrupted run rolls back and leaves the table
+unchanged, and the copy exits non-zero.
+
+- **Drain routes only.** The load commits when the route completes, so a route needs
+  `exit_on_empty: true` (`mqb run --drain`). The sink must be the route's output itself, not
+  inside `fanout`, `switch` or a `ref`.
+- **All or nothing.** One row the database rejects fails the whole load: there is no
+  row-by-row redo and no dead-lettering. A lost connection fails the run instead of
+  reconnecting.
+- **Run it again from the start.** The source must read the full data set on every run: a
+  file, a table read with `cursor_column` but without `cursor_id`, object storage. `--resume`,
+  a saved checkpoint, `deduplication`, and sources that consume what they read (queues,
+  `delete_after_read`) are rejected.
+- **Cost of `replace`.** The `DELETE` is a normal one: it takes time on a large table, leaves
+  dead rows for `VACUUM` (InnoDB purge on MySQL), and writers to the same rows wait until the
+  load commits. Views, grants, foreign keys and triggers stay untouched, which a swap of
+  tables would not guarantee.
+- **SQL before and after the load.** `before_load` runs in the load's transaction before the
+  first row, after `replace` has emptied the table; `after_load` runs in it just before the
+  commit. Both may hold several statements, but none may end the transaction: no `COMMIT`
+  or `ROLLBACK`, and on MySQL no statement that commits implicitly (`TRUNCATE`, DDL such as
+  `CREATE` or `ALTER`), or the load is no longer atomic. A failing `after_load` rolls the whole load back,
+  so a load into a staging table and a `MERGE` into the real one commit together:
+
+  ```yaml
+  sqlx:
+    url: "postgres://user:pass@host/db"
+    table: "orders_staging"
+    columns: auto
+    load_mode: replace
+    after_load: |
+      MERGE INTO orders o USING orders_staging s ON o.id = s.id
+      WHEN MATCHED THEN UPDATE SET qty = s.qty
+      WHEN NOT MATCHED THEN INSERT (id, qty) VALUES (s.id, s.qty);
+  ```
+
+  Neither runs when the source was empty. On MySQL, DDL such as `CREATE` or `TRUNCATE`
+  commits the open transaction, so keep both to DML there.
+- **The table must exist.** On MySQL a `CREATE TABLE` commits any open transaction, so create
+  the table before the load.
+- **Add `bulk_copy`.** A load is all or nothing anyway, so `COPY` gives up nothing here. With
+  1,000-row batches it loaded 1M CSV rows 15–25% faster than `INSERT`.
+- **One long transaction.** It stays open for the whole run, so server limits such as
+  PostgreSQL's `idle_in_transaction_session_timeout` or a pooler's transaction timeout must
+  allow the longest pause between two batches; MySQL's undo log grows with the load.
 
 ## Connection, TLS and pool
 

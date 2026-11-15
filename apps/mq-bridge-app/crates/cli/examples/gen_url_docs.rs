@@ -236,6 +236,12 @@ fn render_connector(c: &Connector) -> String {
             // its own field-by-field sub-table below instead of a JSON dump.
             (_, Some(nested_schema)) => {
                 appendix.push_str(&render_nested(&f.name, &root, nested_schema));
+                if f.name == "tls"
+                    && let Some(note) = ca_file_note(&c.endpoint)
+                {
+                    appendix.push_str(note);
+                    appendix.push_str("\n\n");
+                }
                 // GitHub keeps underscores in heading anchors, so the link must
                 // match the raw field name — `#publication_tables`, not `-`.
                 format!("[see below](#{})", f.name)
@@ -269,6 +275,45 @@ fn render_connector(c: &Connector) -> String {
         out.push_str(&appendix);
     }
     out
+}
+
+/// Which `ca_file` values this connector takes; mirrors the CA table in CONFIGURATION.md.
+fn ca_file_note(endpoint: &str) -> Option<&'static str> {
+    Some(match endpoint {
+        "http" | "websocket" => {
+            "**`ca_file` here:** a client takes a CA file, `$.os` or `$.bundled` (the default). \
+             A listener uses `ca_file` to check client certificates and needs a CA file."
+        }
+        "grpc" => {
+            "**`ca_file` here:** a client takes a CA file (added to the bundled roots), `$.os` or \
+             `$.bundled` (the default). In `server_mode`, `ca_file` checks client certificates \
+             and needs a CA file."
+        }
+        "nats" | "mqtt" | "redis_streams" => {
+            "**`ca_file` here:** a CA file, `$.os` or `$.bundled` (the default)."
+        }
+        "clickhouse" => {
+            "**`ca_file` here:** a CA file (added to the OS store), `$.os` (the default) or \
+             `$.bundled`. On Android an unset `ca_file` uses the bundled roots, and a CA file \
+             replaces them."
+        }
+        "kafka" | "amqp" => {
+            "**`ca_file` here:** a CA file or `$.os` (the default). `$.bundled` is not \
+             supported: the driver takes only PEM files or paths."
+        }
+        "postgres_cdc" => {
+            "**`ca_file` here:** a CA file or `$.bundled`. Unset, the `sslrootcert` of the \
+             `url` is used when it names one, otherwise the bundled roots. `$.os` is not \
+             supported: the driver takes only a path, so name the OS bundle instead, e.g. \
+             `/etc/ssl/certs/ca-certificates.crt`."
+        }
+        "mongodb" | "sqlx" => {
+            "**`ca_file` here:** a CA file or `$.bundled` (the default). `$.os` is not \
+             supported: the driver takes only a path, so name the OS bundle instead, e.g. \
+             `/etc/ssl/certs/ca-certificates.crt`."
+        }
+        _ => return None,
+    })
 }
 
 /// Renders a struct-typed field (e.g. `tls`) as its own field-by-field

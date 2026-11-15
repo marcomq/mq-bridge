@@ -140,8 +140,8 @@ A SQL sink writes in one of three ways, and on Postgres they differ in speed:
 - **Batch size.** Between about 1,000 and 8,000 rows per batch is enough. Above that a multi-row
   `INSERT` gains nothing, and with `concurrency: 4` it got slower.
 - **`bulk_copy`** switches the sink to `COPY FROM STDIN`. It pays off from roughly 8,000 rows per
-  batch and is no faster below. `COPY` cannot upsert, so it does not combine with `key` or an
-  `ON CONFLICT` clause.
+  batch with an `insert_query`; with `columns: auto` too, whether it pays off depends on the
+  batch size. `COPY` cannot upsert, so it does not combine with `key` or an `ON CONFLICT` clause.
 - **`insert_query` over `columns: auto`.** Mapping every record by name costs throughput: in the
   benchmark an `insert_query` was 1.2–1.5x faster on the same rows. Write the query out when
   the sink is the bottleneck.

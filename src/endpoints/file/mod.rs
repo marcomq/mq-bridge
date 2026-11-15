@@ -4488,8 +4488,8 @@ fn raw_fallback_message(buffer: &[u8], err: serde_json::Error) -> CanonicalMessa
             "File line is valid JSON but not a record envelope, so the whole line is \
              taken as the payload and its own `metadata` is discarded. A `json`/`normal`/\
              `text` source expects the envelope a matching sink writes: \
-             {\"message_id\": ..., \"payload\": ..., \"metadata\": {...}}. Use `format: raw` \
-             for plain JSON lines. Further occurrences are logged at debug level.",
+             {\"message_id\": ..., \"payload\": ..., \"metadata\": {...}}. Use `format: payload` \
+             (also `raw`) for plain JSON lines. Further occurrences are logged at debug level.",
         )
     } else {
         (

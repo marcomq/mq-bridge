@@ -64,6 +64,23 @@ input:
 let user: User = users.call([("path", &key)]).await?;   // Option<User> if it may be missing
 ```
 
+The same route, built in code:
+
+```rust
+use mq_bridge::models::{LookupMiddleware, SqlxConfig};
+use mq_bridge::Caller;
+
+let db = SqlxConfig::new("postgres://localhost/app", "users")
+    .with_lookup_query("SELECT path, id, name, tier FROM users WHERE path IN (${payload:path})")
+    .with_max_connections(8);
+let users = Caller::builder("users")
+    .with_lookup(LookupMiddleware::new(db).with_into("$"))
+    .with_parallel(16)
+    .with_batch_size(256)
+    .deploy()
+    .await?;
+```
+
 - `batch_size` is a ceiling. A batch holds the calls that are waiting, never more than that.
 - On Postgres, `IN (…)` runs as `= ANY($1)` with an array, so every batch size shares one
   prepared statement.

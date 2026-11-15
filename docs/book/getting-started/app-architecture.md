@@ -13,7 +13,7 @@ the application routes HTTP through the engine:
 
 1. **HTTP input** — an `http` input endpoint listens on the configured UI port and converts
    incoming HTTP requests into `CanonicalMessage`s.
-2. **WebUiHandler** — a custom `Handler` processes these messages as a router: serving static
+2. **`UiApp`** — the route's handler processes these messages as a router: serving static
    files (HTML, JS) or handling API requests (e.g. `/config`, `/schema.json`).
 3. **Response output** — the handler returns a response message, sent to a `response` output
    endpoint, completing the HTTP request-response cycle.
@@ -23,8 +23,8 @@ patterns and act as a lightweight web server.
 
 ## Frontend: `vanilla-schema-forms`
 
-The Web UI is generated dynamically from the Rust configuration structures — no hand-written form
-code:
+The views are Svelte components; the configuration forms inside them are generated dynamically
+from the Rust configuration structures — no hand-written form code:
 
 1. **Schema generation** — the backend uses `schemars` to generate a JSON Schema for the
    `AppConfig` struct at runtime, exposed via `/schema.json` (also available on the CLI:

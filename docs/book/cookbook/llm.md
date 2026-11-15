@@ -55,7 +55,7 @@ model's answer replaces the message and is forwarded:
 
 ```yaml
 articles_summarise:
-  input: { file: { path: "articles.jsonl", format: raw } }
+  input: { file: { path: "articles.jsonl", format: payload } }
   output:
     request:
       to:
@@ -63,7 +63,7 @@ articles_summarise:
           url: "http://localhost:11434"
           model: llama3.2
           prompt: "Summarise in one sentence: ${payload:text}"
-      forward_to: { file: { path: "summaries.jsonl", format: raw } }
+      forward_to: { file: { path: "summaries.jsonl", format: payload } }
 ```
 
 A `request` endpoint sends one message at a time, so this form makes one API

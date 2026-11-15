@@ -14,7 +14,7 @@ const rawSchemas = execFileSync(
   ["run", "-p", "mq-bridge-app-core", "--bin", "export-ui-type-schemas", "--quiet"],
   // The app is its own cargo workspace and the repo root excludes `apps/`, so
   // running this from the root cannot see `mq-bridge-app-core` at all.
-  { cwd: appRoot, encoding: "utf8" },
+  { cwd: appRoot, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 },
 );
 
 const schemas = JSON.parse(rawSchemas);

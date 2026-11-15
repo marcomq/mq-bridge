@@ -31,7 +31,7 @@ At its core is a zero-config `copy` command that moves data between databases, q
 ```bash
 mqb copy \
   'postgres://${PGUSER}:${PGPASSWORD}@localhost/db?table=src&sslmode=disable' \
-  'file://out.jsonl?format=raw' \
+  'file://out.jsonl?format=payload' \
   --filter 'amount > 100' \
   --drain
 ```

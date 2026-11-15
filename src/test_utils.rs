@@ -161,11 +161,20 @@ where
     .await
 }
 
+/// `MQB_TEST_BACKEND` is a comma-separated list of substrings; a `!` prefix excludes.
 pub fn should_run(test_name: &str) -> bool {
     let filter = std::env::var("MQB_TEST_BACKEND")
         .unwrap_or_default()
         .to_lowercase();
-    filter.is_empty() || test_name.to_lowercase().contains(&filter)
+    let name = test_name.to_lowercase();
+    let (excluded, included): (Vec<&str>, Vec<&str>) = filter
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .partition(|s| s.starts_with('!'));
+    let is_included = included.is_empty() || included.iter().any(|f| name.contains(f));
+    let is_excluded = excluded.iter().any(|f| name.contains(&f[1..]));
+    is_included && !is_excluded
 }
 
 /// Adds a performance result to the global collector.

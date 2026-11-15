@@ -7,7 +7,7 @@ OpenSearch has the same `_bulk` API but has not been tried.
 
 ```sh
 mqb copy --drain --batch-size 5000 \
-  'file://books.jsonl?format=raw' \
+  'file://books.jsonl?format=payload' \
   'elasticsearch://localhost:9200/books?api_key=<api key>'
 ```
 

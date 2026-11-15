@@ -244,6 +244,12 @@ pub struct Endpoint {
     pub handler: Option<Arc<dyn Handler>>,
 }
 
+impl From<EndpointType> for Endpoint {
+    fn from(endpoint_type: EndpointType) -> Self {
+        Endpoint::new(endpoint_type)
+    }
+}
+
 // Not derived: a derived clone is `#[inline]` and was copied into every codegen unit.
 impl Clone for Endpoint {
     #[inline(never)]
@@ -1201,13 +1207,13 @@ pub enum FileFormat {
     #[default]
     #[serde(alias = "envelope")]
     Normal,
-    /// The full `CanonicalMessage` is serialized to JSON. Payload is rendered as a JSON value if possible. Also `envelope_json`; for plain JSON lines use `raw`.
+    /// The full `CanonicalMessage` is serialized to JSON. Payload is rendered as a JSON value if possible. Also `envelope_json`; for plain JSON lines use `payload`.
     #[serde(alias = "envelope_json")]
     Json,
     /// The full `CanonicalMessage` is serialized to JSON. Payload is rendered as a string if possible. Also `envelope_text`.
     #[serde(alias = "envelope_text")]
     Text,
-    /// Only the payload is written, one per line: plain JSON lines for JSON payloads. For consumers, the line is read as raw bytes. Also `payload`.
+    /// Only the payload is written, one per line: plain JSON lines for JSON payloads. For consumers, the line is read as raw bytes. Also `payload`, the clearer name.
     #[serde(alias = "payload")]
     Raw,
     /// CSV rows mapped to/from JSON objects (string values only). The first row is the header/schema.
@@ -1276,6 +1282,17 @@ impl SqlTimestamps {
 pub enum SqlColumns {
     /// Each top-level JSON field goes into the table column of the same name.
     Auto,
+}
+
+/// How a SQL sink commits a drain: all of it at the end, instead of batch by batch.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum SqlLoadMode {
+    /// One transaction for the whole drain, committed when it completes.
+    AtomicAppend,
+    /// As `atomic_append`, after deleting the old rows; an empty source leaves the table as it was.
+    Replace,
 }
 
 /// What a CSV sink does with a record whose keys differ from the columns.
@@ -2200,6 +2217,13 @@ pub struct MongoDbConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schema", schemars(skip))]
     pub update_batch_field: Option<String>,
+    /// (Publisher only, drain routes) `replace`: load into a staging collection that replaces this one when the drain completes; indexes and options carry over.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(schema_with = "replace_only_load_mode_schema")
+    )]
+    pub load_mode: Option<SqlLoadMode>,
     /// The ID used for the cursor in sequenced mode. If not provided, consumption starts from the current sequence (ephemeral).
     pub cursor_id: Option<String>,
     /// **Deprecated** — unused since the publisher no longer writes `seq`. Kept for compatibility.
@@ -3056,6 +3080,15 @@ pub struct SqlxConfig {
     /// (Publisher only) PostgreSQL only. Bulk-load batches via `COPY FROM STDIN` (much faster than multi-row INSERT). Requires a token-based `insert_query`; no `ON CONFLICT`/`RETURNING`.
     #[serde(default)]
     pub bulk_copy: bool,
+    /// (Publisher only, drain routes) `atomic_append` or `replace`: commit the whole drain at its end; readers see the old rows until then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub load_mode: Option<SqlLoadMode>,
+    /// (Publisher only, with `load_mode`) SQL run in the load's transaction before its first row, after `replace` empties the table.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_load: Option<String>,
+    /// (Publisher only, with `load_mode`) SQL run in the load's transaction before it commits, e.g. a `MERGE` from a staging table.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_load: Option<String>,
     /// (Consumer only) Polling interval in milliseconds. Defaults to 100ms.
     pub polling_interval_ms: Option<u64>,
     /// (Consumer only) If set, the poll interval backs off exponentially from `polling_interval_ms`

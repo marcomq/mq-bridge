@@ -317,10 +317,13 @@ from file extensions. Use separate prefixes and routes for mixed formats.
   feature, which `mqb` includes. The file is fetched whole, but its rows are decoded batch
   by batch as the route consumes them, so memory stays near the file's size.
 - `normal` and `json` read mq-bridge message wrappers, one per line, and preserve metadata.
-- For ordinary third-party JSONL, use `raw`: each line becomes one message payload without
+- For ordinary third-party JSONL, use `payload` (also `raw`): each line becomes one message payload without
   validating or transforming its JSON.
-- `text` and `raw` emit delimited byte records without JSON or CSV parsing. A JSON array is not
-  expanded into records.
+- `text` reads the same message wrappers as `normal` and emits their payload: the line
+  `{"message_id":"…","payload":"hi"}` becomes a message with the payload `hi`.
+- `payload` emits each delimited byte record without JSON or CSV parsing. With the default
+  `\n` delimiter a trailing `\r` is stripped from each record and empty records are skipped;
+  otherwise the bytes are kept as they are. A JSON array is not expanded into records.
 
 One input object can produce many messages, and route batching still applies. The source
 fetches each object into memory before splitting it, so set `max_object_bytes` for untrusted or

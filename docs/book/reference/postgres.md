@@ -9,7 +9,9 @@ Query parameters recognised as config fields for this connector. The object-type
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
 | `acquire_timeout_ms` | integer | no | — | Timeout for acquiring a connection from the pool in milliseconds. Defaults to 30000ms. |
+| `after_load` | string | no | — | (Publisher only, with `load_mode`) SQL run in the load's transaction before it commits, e.g. a `MERGE` from a staging table. |
 | `auto_create_table` | boolean | no | `false` | (Publisher only) If true, automatically create the table and indexes if they don't exist. Defaults to false. |
+| `before_load` | string | no | — | (Publisher only, with `load_mode`) SQL run in the load's transaction before its first row, after `replace` empties the table. |
 | `bulk_copy` | boolean | no | `false` | (Publisher only) PostgreSQL only. Bulk-load batches via `COPY FROM STDIN` (much faster than multi-row INSERT). Requires a token-based `insert_query`; no `ON CONFLICT`/`RETURNING`. |
 | `checkpoint_store` | string | no | — | (Consumer only) Where to persist the resume cursor in `cursor_column` mode. A URL selects the backend; a bare name (or `/name`) reuses the **source** datastore with that table name: - absent → source datastore, table `mqb_cursors_<source_table>` (auto-unique) - `/my_cursors` → source datastore, table `my_cursors` - `file:///var/lib/mqb/cursors.json` → local JSON file (read-only / write-restricted sources) - `postgres://user@host/db/table` or `mysql://host/db/table` → external SQL table (table optional) - `mongodb://host/db/collection` → external MongoDB collection (collection optional) - `s3://bucket/prefix` (also `gs://`, `az://`, `abfs://`) → cloud object store; creds via env  When no table/collection is named, it defaults to `mqb_cursors_<source_table>`. May embed connection credentials, so it is treated as a secret. |
 | `columns` | `auto` | no | — | (Publisher only) `auto`: write each JSON field into the table column of the same name. The table must exist. |
@@ -21,6 +23,7 @@ Query parameters recognised as config fields for this connector. The object-type
 | `idle_timeout_ms` | integer | no | — | Maximum idle time for a connection in milliseconds. Defaults to 600000ms (10 minutes). |
 | `insert_query` | string | no | — | (Publisher only) Optional. A custom SQL INSERT query. Use `?` as a placeholder for the payload. If not provided, a default `INSERT INTO {table} (payload) VALUES (?)` is used.  For multi-column inserts, embed explicit source tokens directly in the query: `${metadata:<key>}` binds `message.metadata["<key>"]`, and `${payload:<field>}` binds the top-level JSON field `<field>` of the payload (types preserved: numbers/bools stay numeric/bool). There is no fallback between the two: an absent metadata key, non-JSON payload, or missing/non-scalar field binds SQL NULL. Example: `INSERT INTO orders (customer_id, sku, qty) VALUES (${metadata:customer_id}, ${payload:sku}, ${payload:qty})`. A query with no `${...}` tokens behaves exactly as before (whole payload bound once). `auto_create_table` is not supported together with a token-based query.  Tokens bind as text/number/bool; Postgres won't implicitly cast text into a `numeric`/`timestamptz` column (these arrive as JSON strings from a sql source). Add an explicit cast next to the token — it is preserved verbatim in the SQL: `VALUES (${payload:amount}::numeric, ${payload:created_at}::timestamptz)`. |
 | `key` | string | no | — | (Publisher only, with `columns`) Key column(s), comma-separated: a row with the same key is updated, not inserted again. |
+| `load_mode` | `atomic_append` \| `replace` | no | — | (Publisher only, drain routes) `atomic_append` or `replace`: commit the whole drain at its end; readers see the old rows until then. |
 | `lookup_query` | string | no | — | (Publisher only) SELECT for `lookup`, answering with the first row. Write `WHERE id IN (${payload:id})` to answer a whole batch in one query, matching rows by `id`. |
 | `max_connections` | integer | no | — | Maximum number of connections in the pool. Defaults to 10. |
 | `max_lifetime_ms` | integer | no | — | Maximum lifetime of a connection in milliseconds. Defaults to 1800000ms (30 minutes). |
@@ -49,6 +52,10 @@ TLS configuration for secure connections.
 Configures Transport Layer Security (TLS/SSL) for encrypted communication.
 Supports both client certificate (mutual TLS) and server certificate validation.
 
+`ca_file` also takes `"$.os"` (the operating system's CA store) or `"$.bundled"` (the
+Mozilla roots built into mq-bridge). Which endpoint supports which, and what it trusts
+without `ca_file`, is in the TLS section of the configuration guide.
+
 #### Examples
 
 ```rust
@@ -67,9 +74,11 @@ let tls = TlsConfig {
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
 | `accept_invalid_certs` | boolean | no | `false` | If true, disable server certificate verification (insecure). |
-| `ca_file` | string | no | — | Path to the CA certificate file. |
+| `ca_file` | string | no | — | Path to the CA certificate file, or `$.os` (OS CA store) or `$.bundled` (built-in public roots). |
 | `cert_file` | string | no | — | Path to the client certificate file (PEM). |
 | `cert_password` | string | no | — | Password for the private key (if encrypted). |
 | `key_file` | string | no | — | Path to the client private key file (PEM). |
 | `required` | boolean | no | `false` | If true, enable TLS/SSL. |
+
+**`ca_file` here:** a CA file or `$.bundled` (the default). `$.os` is not supported: the driver takes only a path, so name the OS bundle instead, e.g. `/etc/ssl/certs/ca-certificates.crt`.
 

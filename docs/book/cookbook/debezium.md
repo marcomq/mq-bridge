@@ -57,9 +57,11 @@ mysql_orders_to_postgres:
 
 - The `unwrap` transform makes each payload the row itself (`{"id": 7, "status": "open", …}`).
   Without it the row is under `after`, inside Debezium's change envelope.
-- A failed write answers the request with HTTP 500 and Debezium sends the change again, so
-  delivery is at-least-once. The upsert makes the repeat harmless; see
-  [Upserts & insert-if-absent](upserts.md).
+- A transient write failure (connection, timeout) answers the request with an HTTP error and
+  Debezium sends the change again, so delivery is at-least-once. The upsert makes the repeat
+  harmless; see [Upserts & insert-if-absent](upserts.md). A permanent failure (e.g. a type
+  error) is dropped and acknowledged like on any route, so Debezium moves on; add a
+  [`dlq`](dlq.md) to keep it.
 - Debezium keeps the log position in its offset file. Keep that file and the schema history on
   durable storage, or a restart re-reads the initial snapshot.
 - For another database, change `connector.class` and the `database.*` properties. The

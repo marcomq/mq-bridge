@@ -43,6 +43,9 @@ jobs:
       - name: Build book
         run: mdbook build docs/book
 
+      - name: Check internal links
+        run: python3 docs/book/check-links.py
+
       # llms.txt lives at the repository root; publish it with the book.
       - name: Publish llms.txt
         run: cp llms.txt docs/book/book/llms.txt

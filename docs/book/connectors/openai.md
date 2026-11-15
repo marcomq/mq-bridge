@@ -27,7 +27,7 @@ output:
       openai_embeddings: { model: text-embedding-3-small, input: "${payload:text}" }
       middlewares:
         - buffer: { max_messages: 500, max_delay_ms: 0 }
-    forward_to: { file: { path: "vectors.jsonl", format: raw } }
+    forward_to: { file: { path: "vectors.jsonl", format: payload } }
 ```
 
 A `lookup`, or the endpoint as the output itself, batches without it.
@@ -305,7 +305,7 @@ output:
           aws_sigv4: { region: us-west-2, service: bedrock }
         model: openai.gpt-oss-20b-1:0
         prompt: "Summarise: ${payload:text}"
-    forward_to: { file: { path: "summaries.jsonl", format: raw } }
+    forward_to: { file: { path: "summaries.jsonl", format: payload } }
 ```
 
 This was checked for its configuration only, not run against Bedrock.

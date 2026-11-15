@@ -208,7 +208,7 @@ pub mod traits;
 pub mod type_handler;
 
 pub use anyhow;
-pub use caller::{CallFields, Caller};
+pub use caller::{CallFields, Caller, CallerBuilder};
 pub use canonical_message::{CanonicalMessage, MessageContext};
 pub use config_file::deploy_file;
 pub use errors::HandlerError;

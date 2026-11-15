@@ -56,6 +56,8 @@ The document lands in `app_db.webhooks`.
   starting at `initial_interval_ms` and backing off. See the
   [Retries & backoff](../cookbook/retries.md) recipe for the full knob set and its
   interaction with a [dead-letter queue](../cookbook/dlq.md).
+- **`mongodb` output** with `format: "json"` stores each payload as a readable JSON
+  document rather than the default full-message serialization.
 
 > [!NOTE]
 > Delivery here is **at-least-once**: a write that actually succeeded but whose
@@ -64,8 +66,6 @@ The document lands in `app_db.webhooks`.
 > the value becomes the document `_id`: a retry of an already-written message is then
 > rejected by the unique `_id` instead of appending a new document — see
 > [Upserts](../cookbook/upserts.md).
-- **`mongodb` output** with `format: "json"` stores each payload as a readable JSON
-  document rather than the default full-message serialization.
 
 ## Variations
 

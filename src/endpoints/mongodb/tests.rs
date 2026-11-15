@@ -1167,3 +1167,159 @@ async fn readers_refuse_a_bad_config_before_touching_the_server() {
     let snapshot = super::readers::MongoDbIdReader::new(&resumed).await;
     assert!(refusal(snapshot.map(drop)).contains("does not support 'cursor_id'"));
 }
+
+#[tokio::test]
+async fn mongo_load_mode_takes_replace_only_and_no_lookups() {
+    use crate::models::SqlLoadMode::{AtomicAppend, Replace};
+    let config = |mode, find: Option<&str>| MongoDbConfig {
+        url: "mongodb://localhost:1".to_string(),
+        database: "db".to_string(),
+        collection: Some("c".to_string()),
+        load_mode: Some(mode),
+        find: find.map(str::to_string),
+        ..Default::default()
+    };
+    for config in [
+        config(AtomicAppend, None),
+        config(Replace, Some(r#"{"_id": 1}"#)),
+    ] {
+        let err = MongoDbPublisher::new(&config)
+            .await
+            .err()
+            .expect("rejected");
+        assert!(
+            err.downcast_ref::<crate::errors::InvalidConfig>().is_some(),
+            "{err:#}"
+        );
+    }
+}
+
+/// Needs `tests/integration/docker-compose/mongodb.yml` running.
+#[tokio::test]
+#[ignore = "requires a MongoDB on localhost:27017"]
+async fn mongo_load_mode_replace_swaps_only_a_completed_load() {
+    use crate::traits::DisconnectOutcome::{Completed, Stopped};
+    use mongodb::bson::{doc, Document};
+    let name = format!("load_{}", fast_uuid_v7::gen_id());
+    let db = mongodb::Client::with_uri_str("mongodb://localhost:27017")
+        .await
+        .unwrap()
+        .database("mq_bridge_test");
+    db.run_command(doc! { "create": &name, "validator": { "v": { "$type": "string" } } })
+        .await
+        .unwrap();
+    let target = db.collection::<Document>(&name);
+    target.insert_one(doc! { "v": "old" }).await.unwrap();
+    target
+        .create_index(
+            mongodb::IndexModel::builder()
+                .keys(doc! { "v": 1 })
+                .options(
+                    mongodb::options::IndexOptions::builder()
+                        .unique(true)
+                        .build(),
+                )
+                .build(),
+        )
+        .await
+        .unwrap();
+    let config = MongoDbConfig {
+        url: "mongodb://localhost:27017".to_string(),
+        database: "mq_bridge_test".to_string(),
+        collection: Some(name.clone()),
+        format: MongoDbFormat::Raw,
+        load_mode: Some(crate::models::SqlLoadMode::Replace),
+        ttl_seconds: Some(3600),
+        ..Default::default()
+    };
+    let msgs = |values: &[&str]| {
+        values
+            .iter()
+            .map(|v| CanonicalMessage::new(v.as_bytes().to_vec(), None))
+            .collect::<Vec<_>>()
+    };
+    let stored = || async {
+        let mut values: Vec<String> = target
+            .find(doc! {})
+            .await
+            .unwrap()
+            .map(|d| d.unwrap().get_str("v").unwrap_or("?").to_string())
+            .collect()
+            .await;
+        values.sort();
+        values
+    };
+    let finish = |publisher: MongoDbPublisher, outcome| async move {
+        let hook = publisher
+            .on_disconnect_hook()
+            .expect("load_mode sets a hook");
+        crate::traits::with_disconnect_outcome(outcome, hook).await
+    };
+    let staged = || async {
+        let mut names: Vec<String> = db.list_collection_names().await.unwrap();
+        names.retain(|n| n.starts_with(&format!("{name}_mqb_load_")));
+        names.sort();
+        names
+    };
+    let leases = db.collection::<Document>(super::load::LEASE_COLLECTION);
+
+    let publisher = MongoDbPublisher::new(&config).await.unwrap();
+    publisher.send_batch(msgs(&[r#"{"v":"a"}"#])).await.unwrap();
+    finish(publisher, Stopped).await.unwrap();
+    assert_eq!(stored().await, ["old"]);
+    assert!(staged().await.is_empty());
+
+    let publisher = MongoDbPublisher::new(&config).await.unwrap();
+    publisher
+        .send_batch(msgs(&[r#"{"v":"a"}"#, r#"{"v":1}"#]))
+        .await
+        .unwrap_err();
+    let err = finish(publisher, Completed).await.unwrap_err();
+    assert!(format!("{err:#}").contains("was discarded"), "{err:#}");
+    assert_eq!(stored().await, ["old"]);
+
+    let publisher = MongoDbPublisher::new(&config).await.unwrap();
+    publisher
+        .send_batch(msgs(&[r#"{"v":"a"}"#, r#"{"v":"b"}"#]))
+        .await
+        .unwrap();
+    finish(publisher, Completed).await.unwrap();
+    assert_eq!(stored().await, ["a", "b"]);
+    assert!(staged().await.is_empty());
+    target.insert_one(doc! { "v": "a" }).await.unwrap_err();
+    target.insert_one(doc! { "v": 2 }).await.unwrap_err();
+
+    let publisher = MongoDbPublisher::new(&config).await.unwrap();
+    finish(publisher, Completed).await.unwrap();
+    assert_eq!(stored().await, ["a", "b"]);
+
+    let [dead, live, unleased] =
+        [1u8, 2, 3].map(|n| format!("{name}_mqb_load_{}", format!("{n:x}").repeat(32)));
+    for staging in [&dead, &live, &unleased] {
+        db.create_collection(staging).await.unwrap();
+    }
+    let lease = |id: &str, expires: i64| {
+        doc! { "_id": id, "target": &name, "expires_at": mongodb::bson::DateTime::from_millis(expires) }
+    };
+    leases
+        .insert_many([lease(&dead, 0), lease(&live, i64::MAX / 2)])
+        .await
+        .unwrap();
+    let publisher = MongoDbPublisher::new(&config).await.unwrap();
+    publisher.send_batch(msgs(&[r#"{"v":"c"}"#])).await.unwrap();
+    finish(publisher, Completed).await.unwrap();
+    assert_eq!(stored().await, ["c"]);
+    assert_eq!(staged().await, [live.clone(), unleased.clone()]);
+    assert_eq!(
+        leases
+            .count_documents(doc! { "target": &name })
+            .await
+            .unwrap(),
+        1
+    );
+    leases.delete_one(doc! { "_id": &live }).await.unwrap();
+    for staging in [&live, &unleased] {
+        db.collection::<Document>(staging).drop().await.unwrap();
+    }
+    target.drop().await.unwrap();
+}

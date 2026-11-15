@@ -7,7 +7,7 @@ vector comes from an embeddings API, which
 
 ```sh
 mqb copy --drain \
-  'file://points.jsonl?format=raw' \
+  'file://points.jsonl?format=payload' \
   'qdrant://localhost:6333/docs?api_key=<api key>'
 ```
 
@@ -81,7 +81,7 @@ example.
 ## Copy a collection out
 
 ```sh
-mqb copy --drain 'qdrant://localhost:6333/docs' 'file://points.jsonl?format=raw'
+mqb copy --drain 'qdrant://localhost:6333/docs' 'file://points.jsonl?format=payload'
 ```
 
 Each message is one point with its payload and vector. It is a copy, not a

@@ -1,9 +1,9 @@
 //! `columns: auto`: write each top-level JSON field into the table column of the same name.
 
 use super::{
-    audited_sql, bind_key, bind_value, classify_sql_error, copy_rows, open_copy_pool,
-    positional_placeholder, push_copy_value, quote_ident_for, AnyQuery, BindValue, CopyPool,
-    MYSQL_COLUMN_TYPES_SQL, SQLITE_COLUMN_TYPES_SQL,
+    audited_sql, bind_key, bind_value, classify_sql_error, copy_rows, copy_rows_on, load::HeldTx,
+    open_copy_pool, positional_placeholder, push_copy_value, quote_ident_for, AnyQuery, BindValue,
+    CopyPool, MYSQL_COLUMN_TYPES_SQL, SQLITE_COLUMN_TYPES_SQL,
 };
 use crate::errors::InvalidConfig;
 use crate::models::SqlxConfig;
@@ -11,13 +11,23 @@ use crate::outcomes::SentBatch;
 use crate::traits::PublisherError;
 use crate::CanonicalMessage;
 use anyhow::anyhow;
+use serde::de::{Deserialize, Deserializer, MapAccess, Visitor};
 use sqlx::{AnyPool, Row};
+use std::borrow::Cow;
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use tracing::warn;
 
 /// Bind parameters per statement; below the limit of every supported driver.
 pub(super) const MAX_BINDS: usize = 30_000;
+
+/// Bytes of INSERT text kept; a full cache starts over. One 30,000-bind statement is about 1 MB.
+const SQL_CACHE_BYTES: usize = 8 << 20;
+
+/// The columns, row count and bind types an INSERT statement is built for.
+type SqlShape = (Vec<usize>, usize, Vec<PgBind>);
 
 /// `format_type` gives a name a cast accepts, without the length a cast would truncate to.
 const PG_COLUMN_CASTS_SQL: &str =
@@ -55,6 +65,74 @@ pub(super) struct AutoColumns {
     extra: Option<usize>,
     copy_pool: Option<CopyPool>,
     warned_unknown: AtomicBool,
+    sql_cache: Mutex<HashMap<SqlShape, Arc<str>>>,
+}
+
+/// A payload's top-level fields in document order; names without escapes stay borrowed.
+struct Fields<'a>(Vec<(Cow<'a, str>, serde_json::Value)>);
+
+struct FieldName<'a>(Cow<'a, str>);
+
+impl<'de> Deserialize<'de> for FieldName<'de> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct NameVisitor;
+        impl<'de> Visitor<'de> for NameVisitor {
+            type Value = FieldName<'de>;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a field name")
+            }
+            fn visit_borrowed_str<E>(self, v: &'de str) -> Result<Self::Value, E> {
+                Ok(FieldName(Cow::Borrowed(v)))
+            }
+            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E> {
+                Ok(FieldName(Cow::Owned(v.to_owned())))
+            }
+            fn visit_string<E>(self, v: String) -> Result<Self::Value, E> {
+                Ok(FieldName(Cow::Owned(v)))
+            }
+        }
+        deserializer.deserialize_str(NameVisitor)
+    }
+}
+
+impl<'de> Deserialize<'de> for Fields<'de> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct FieldsVisitor;
+        impl<'de> Visitor<'de> for FieldsVisitor {
+            type Value = Fields<'de>;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a JSON object")
+            }
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                let mut fields: Vec<(Cow<str>, serde_json::Value)> =
+                    Vec::with_capacity(map.size_hint().unwrap_or(8));
+                // Wide records look a repeated name up by hash instead of a scan.
+                let mut index: Option<HashMap<Cow<str>, usize>> = None;
+                while let Some((FieldName(name), value)) = map.next_entry()? {
+                    if index.is_none() && fields.len() >= 32 {
+                        let built = fields.iter().enumerate().map(|(i, (n, _))| (n.clone(), i));
+                        index = Some(built.collect());
+                    }
+                    let seen = match &index {
+                        Some(index) => index.get(&name).copied(),
+                        None => fields.iter().position(|(n, _)| *n == name),
+                    };
+                    // A repeated name keeps its first position and its last value, as a JSON map does.
+                    match seen {
+                        Some(at) => fields[at].1 = value,
+                        None => {
+                            if let Some(index) = &mut index {
+                                index.insert(name.clone(), fields.len());
+                            }
+                            fields.push((name, value));
+                        }
+                    }
+                }
+                Ok(Fields(fields))
+            }
+        }
+        deserializer.deserialize_map(FieldsVisitor)
+    }
 }
 
 fn invalid(message: String) -> anyhow::Error {
@@ -90,7 +168,7 @@ fn json_bind(value: serde_json::Value) -> BindValue {
 }
 
 /// The type a PostgreSQL statement binds one column as, spelled out as `$n::int8`.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum PgBind {
     Int,
     Float,
@@ -331,6 +409,7 @@ impl AutoColumns {
             extra,
             copy_pool,
             warned_unknown: AtomicBool::new(false),
+            sql_cache: Mutex::new(HashMap::new()),
         })
     }
 
@@ -383,8 +462,8 @@ impl AutoColumns {
     /// The record's fields as column values. A field without a column goes into
     /// `extra_column`, or is left out.
     fn row(&self, message: &CanonicalMessage) -> Result<AutoRow, PublisherError> {
-        let fields = match serde_json::from_slice(&message.payload) {
-            Ok(serde_json::Value::Object(fields)) => fields,
+        let fields = match serde_json::from_slice::<Fields>(&message.payload) {
+            Ok(Fields(fields)) => fields,
             _ => {
                 return Err(PublisherError::NonRetryable(anyhow!(
                     "`columns: auto` needs a JSON object as payload"
@@ -396,13 +475,13 @@ impl AutoColumns {
             Vec::with_capacity(fields.len());
         let mut unmapped = serde_json::Map::new();
         for (field, value) in fields {
-            let exact = self.by_name.get(&field);
+            let exact = self.by_name.get(field.as_ref());
             let Some(&index) = exact.or_else(|| self.by_lower_name.get(&field.to_lowercase()))
             else {
-                unmapped.insert(field, value);
+                unmapped.insert(field.into_owned(), value);
                 continue;
             };
-            let loose = exact.is_none().then_some(field);
+            let loose = exact.is_none().then(|| field.into_owned());
             match cells.iter_mut().find(|(i, ..)| *i == index) {
                 None => cells.push((index, value, loose)),
                 // The field with the column's exact name wins; the other one has no column.
@@ -548,8 +627,31 @@ impl AutoColumns {
         }
     }
 
+    /// [`build_insert_sql`](Self::build_insert_sql), built once per shape.
+    fn insert_sql(&self, columns: &[usize], rows: usize, binds: &[PgBind]) -> Arc<str> {
+        let shape = (columns.to_vec(), rows, binds.to_vec());
+        let cached = |cache: &Mutex<HashMap<SqlShape, Arc<str>>>| {
+            cache
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&shape)
+                .cloned()
+        };
+        if let Some(sql) = cached(&self.sql_cache) {
+            return sql;
+        }
+        let sql: Arc<str> = self.build_insert_sql(columns, rows, binds).into();
+        let mut cache = self.sql_cache.lock().unwrap_or_else(|e| e.into_inner());
+        let held: usize = cache.values().map(|s| s.len()).sum();
+        if held + sql.len() > SQL_CACHE_BYTES {
+            cache.clear();
+        }
+        cache.insert(shape, sql.clone());
+        sql
+    }
+
     /// `binds`: PostgreSQL only, the type each column is bound as, from [`pg_binds`].
-    fn insert_sql(&self, columns: &[usize], rows: usize, binds: &[PgBind]) -> String {
+    fn build_insert_sql(&self, columns: &[usize], rows: usize, binds: &[PgBind]) -> String {
         let mut sql = format!(
             "INSERT INTO {} ({}) VALUES ",
             self.table,
@@ -563,14 +665,13 @@ impl AutoColumns {
                     sql.push_str(", ");
                 }
                 let placeholder = positional_placeholder(&self.driver_name, index);
-                match (&self.columns[*column].cast, binds.get(i)) {
+                let _ = match (&self.columns[*column].cast, binds.get(i)) {
                     (Some(cast), Some(bind)) => {
-                        let bind = bind.name();
-                        sql.push_str(&format!("CAST({placeholder}::{bind} AS {cast})"))
+                        write!(sql, "CAST({placeholder}::{} AS {cast})", bind.name())
                     }
-                    (Some(cast), None) => sql.push_str(&format!("CAST({placeholder} AS {cast})")),
-                    (None, _) => sql.push_str(&placeholder),
-                }
+                    (Some(cast), None) => write!(sql, "CAST({placeholder} AS {cast})"),
+                    (None, _) => sql.write_str(&placeholder),
+                };
                 index += 1;
             }
             sql.push(')');
@@ -612,7 +713,7 @@ impl AutoColumns {
                 Err(e) => failed.push((message, e)),
             }
         }
-        match self.write(pool, rows).await {
+        match self.write(pool, None, rows).await {
             Err(PublisherError::NonRetryable(e)) if kept.len() > 1 => {
                 warn!(table = %self.table, error = %e, "SQLx batch rejected; writing it one record at a time");
                 failed.extend(self.write_isolating(pool, kept).await?);
@@ -620,6 +721,24 @@ impl AutoColumns {
             other => other?,
         }
         Ok(SentBatch::from_failures(failed))
+    }
+
+    pub(super) fn copy_pool(&self) -> Option<&CopyPool> {
+        self.copy_pool.as_ref()
+    }
+
+    /// `load_mode`: every record into the held transaction; one rejected record fails the batch.
+    pub(super) async fn send_held(
+        &self,
+        pool: &AnyPool,
+        held: &mut HeldTx,
+        messages: &[CanonicalMessage],
+    ) -> Result<(), PublisherError> {
+        let rows = messages
+            .iter()
+            .map(|message| self.row(message))
+            .collect::<Result<Vec<_>, _>>()?;
+        self.write(pool, Some(held), rows).await
     }
 
     /// Redoes a batch the database rejected, a savepoint per record, and returns the
@@ -664,7 +783,13 @@ impl AutoColumns {
     }
 
     /// Writes the rows with as few statements as their shapes allow; all of them or none.
-    async fn write(&self, pool: &AnyPool, rows: Vec<AutoRow>) -> Result<(), PublisherError> {
+    /// With `held`, it writes into that transaction and leaves committing to its owner.
+    async fn write(
+        &self,
+        pool: &AnyPool,
+        mut held: Option<&mut HeldTx>,
+        rows: Vec<AutoRow>,
+    ) -> Result<(), PublisherError> {
         let statements = self.statements(rows);
         let retryable = |e: sqlx::Error| PublisherError::Retryable(anyhow!(e));
 
@@ -688,13 +813,16 @@ impl AutoColumns {
                 }
                 copies.push((stmt, buf));
             }
-            return copy_rows(copy_pool, &copies).await;
+            return match held {
+                Some(held) => copy_rows_on(held.pg()?, &copies).await,
+                None => copy_rows(copy_pool, &copies).await,
+            };
         }
 
         // One statement is atomic by itself; several need a transaction.
-        let mut tx = match statements.len() {
-            0 | 1 => None,
-            _ => Some(pool.begin().await.map_err(retryable)?),
+        let mut tx = match (&held, statements.len()) {
+            (Some(_), _) | (None, 0 | 1) => None,
+            (None, _) => Some(pool.begin().await.map_err(retryable)?),
         };
         for (columns, run) in statements {
             let mut run = self.last_per_key(run);
@@ -707,9 +835,10 @@ impl AutoColumns {
                     query = bind_typed(query, value, binds.get(i));
                 }
             }
-            match &mut tx {
-                Some(tx) => query.execute(&mut **tx).await,
-                None => query.execute(pool).await,
+            match (&mut held, &mut tx) {
+                (Some(held), _) => query.execute(held.any()?).await,
+                (None, Some(tx)) => query.execute(&mut **tx).await,
+                (None, None) => query.execute(pool).await,
             }
             .map_err(classify_sql_error)?;
         }
@@ -747,6 +876,7 @@ mod tests {
             extra: None,
             copy_pool: None,
             warned_unknown: AtomicBool::new(false),
+            sql_cache: Mutex::new(HashMap::new()),
         };
         let row = |values| AutoRow {
             columns: vec![0, 1, 2],
@@ -771,10 +901,21 @@ mod tests {
         assert_eq!(run[1].values[1], BindValue::Text("2.5".into()));
         assert_eq!(run[0].values[2], BindValue::Text("3".into()));
         assert_eq!(
-            auto.insert_sql(&[0, 1, 2], 1, &binds),
+            &*auto.insert_sql(&[0, 1, 2], 1, &binds),
             "INSERT INTO t (a, b, c) VALUES \
              (CAST($1::int8 AS bigint), CAST($2::numeric AS numeric), CAST($3::text AS text))"
         );
+    }
+
+    #[test]
+    fn fields_read_like_a_json_map() {
+        let Fields(fields) = serde_json::from_slice(br#"{"a":1,"b\u0041":2,"a":3}"#).unwrap();
+        let fields: Vec<(&str, i64)> = fields
+            .iter()
+            .map(|(n, v)| (n.as_ref(), v.as_i64().unwrap()))
+            .collect();
+        assert_eq!(fields, [("a", 3), ("bA", 2)]);
+        assert!(serde_json::from_slice::<Fields>(b"[1]").is_err());
     }
 
     #[test]

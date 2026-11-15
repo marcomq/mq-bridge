@@ -93,6 +93,11 @@ pub(super) fn source_replays_from_start(
         EndpointType::MongoDb(config) => {
             config.resolved_consume() == crate::models::MongoConsume::Snapshot
         }
+        // A snapshot creates no slot; only a checkpoint store would save its backfill progress.
+        EndpointType::PostgresCdc(config) => {
+            config.consume == Some(crate::models::PostgresConsume::Snapshot)
+                && config.checkpoint_store.is_none()
+        }
         EndpointType::Sequence(config) => {
             config.cursor_id.is_none()
                 && config

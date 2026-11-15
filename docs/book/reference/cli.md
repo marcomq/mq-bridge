@@ -153,6 +153,7 @@ mqb copy \
 | `--no-resume` | off | Ignore optional cursor/checkpoint resume state, including its warnings and errors. Conflicts with `--resume`; native queue/CDC offsets are unchanged. |
 | `--drain` | off | Exit once the source yields an empty batch. Without it, `copy` runs as a continuous bridge until Ctrl-C. A drain does not wait for an endpoint: it fails on the first error while nothing has been delivered yet. |
 | `--wait <secs>` | off | Wait up to that long for the source to produce something, then drain and exit. |
+| `--load-mode <mode>` | off | `atomic_append` or `replace`: load a SQL destination as one transaction, committed when the drain completes; a failed copy leaves the table unchanged. Implies `--drain`, conflicts with `--resume`. See [Loading as one unit](../connectors/postgres.md#loading-as-one-unit). |
 | `--limit <n>` | off | Stop after `n` rows reached the destination (with `--filter`: `n` matching rows). Ends the copy with or without `--drain`. For previews; conflicts with `--resume`. |
 | `-v`, `--verbose` | off | Log endpoints, connections and shutdown. Without it only warnings and errors are logged. |
 | `--concurrency <N>` | `4` | Route concurrency. |
@@ -179,8 +180,8 @@ processes share one port; a second process started by mistake raises no error.
 `copied …` summary goes to stderr so it does not land among the rows.
 
 ```bash
-pg_dump_rows | mqb copy '-?format=raw' 'kafka://localhost:9092?topic=rows'
-mqb copy 'postgres://…/shop?table=orders&cursor_column=id' '-?format=raw' --limit 5
+pg_dump_rows | mqb copy '-?format=payload' 'kafka://localhost:9092?topic=rows'
+mqb copy 'postgres://…/shop?table=orders&cursor_column=id' '-?format=payload' --limit 5
 ```
 
 When the reader of stdout goes away (`mqb copy … - | head -2`), the copy ends with one

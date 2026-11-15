@@ -46,12 +46,19 @@ dev = [
   "pytest>=8.3",
 ]
 bench = [
+  "aiodataloader>=0.4",
   "aiohttp>=3.10",
+  "asyncpg>=0.29",
   "fastapi>=0.115",
   "faststream>=0.6; python_version >= '3.10'",
+  "httpx>=0.27",
+  "pyronova>=2.10; python_version >= '3.14'",
+  "requests>=2.32",
   "sanic>=24.6",
   "starlette>=0.40",
+  "strawberry-graphql>=0.240; python_version >= '3.10'",
   "uvicorn>=0.30",
+  "uvloop>=0.19; sys_platform != 'win32'",
 ]
 
 [tool.pytest.ini_options]

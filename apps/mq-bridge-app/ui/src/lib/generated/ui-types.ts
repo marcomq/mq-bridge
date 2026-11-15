@@ -307,6 +307,10 @@ export interface UnpackMiddleware {
 
 export type FilterMiddleware = string | Record<string, never>;
 
+export interface ParallelMiddleware {
+  max_in_flight?: number | null;
+}
+
 export interface AwsConfig {
   queue_url?: string | null;
   topic_arn?: string | null;
@@ -513,6 +517,7 @@ export interface MongoDbConfig {
   report_outcome?: boolean;
   find?: string | null;
   aggregate_query?: string | null;
+  load_mode?: SqlLoadMode | null;
   cursor_id?: string | null;
   meta_collection?: string | null;
   shared?: boolean | null;
@@ -521,6 +526,8 @@ export interface MongoDbConfig {
 export type MongoConsume = "delete" | "snapshot" | "capture_new" | "capture_all";
 
 export type MongoDbFormat = "normal" | "json" | "text" | "raw" | "envelope" | "envelope_json" | "envelope_text" | "payload";
+
+export type SqlLoadMode = "atomic_append" | "replace";
 
 export interface MqttConfig {
   url: string;
@@ -697,6 +704,9 @@ export interface SqlxConfig {
   extra_column?: string | null;
   auto_create_table?: boolean;
   bulk_copy?: boolean;
+  load_mode?: SqlLoadMode | null;
+  before_load?: string | null;
+  after_load?: string | null;
   polling_interval_ms?: number | null;
   max_polling_interval_ms?: number | null;
   publication?: string | null;

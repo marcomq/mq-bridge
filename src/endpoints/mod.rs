@@ -157,6 +157,18 @@ impl Endpoint {
         self
     }
 
+    /// Appends a `lookup`; like every middleware, its place in the list matters.
+    pub fn with_lookup(self, lookup: crate::models::LookupMiddleware) -> Self {
+        self.add_middleware(Middleware::Lookup(Box::new(lookup)))
+    }
+
+    /// Appends `parallel`: the middlewares added before it run on up to `max_in_flight` batches at once.
+    pub fn with_parallel(self, max_in_flight: usize) -> Self {
+        self.add_middleware(Middleware::Parallel(
+            crate::models::ParallelMiddleware::new(max_in_flight),
+        ))
+    }
+
     pub fn with_dlq(mut self, dlq: crate::models::DeadLetterQueueMiddleware) -> Self {
         // DLQ should be outer to Retry, but inner to Metrics.
         let mut insert_idx = self.middlewares.len();

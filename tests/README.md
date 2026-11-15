@@ -6,7 +6,7 @@ The default test run should stay Docker-free and skip ignored slow/external test
 | --- | --- | --- |
 | Fast/default tests | `cargo test` | No Docker or external services expected. |
 | Docker integration suite | `cargo test --test integration_test --features full,test-utils --release -- --ignored --nocapture --test-threads=1` | Runs the ignored aggregate suites. Docker Compose must be available. |
-| One Docker backend | `MQB_TEST_BACKEND=kafka cargo test --test integration_test --features full,test-utils --release -- --ignored --nocapture --test-threads=1` | `MQB_TEST_BACKEND` is a substring filter; examples: `kafka`, `nats`, `mongodb`, `amqp`, `mqtt`, `postgres`, `sqlite`, `websocket`. |
+| One Docker backend | `MQB_TEST_BACKEND=kafka cargo test --test integration_test --features full,test-utils --release -- --ignored --nocapture --test-threads=1` | `MQB_TEST_BACKEND` is a comma-separated substring filter; a `!` prefix excludes (`mongodb,aws` or `!mongodb,!aws`); examples: `kafka`, `nats`, `mongodb`, `amqp`, `mqtt`, `postgres`, `sqlite`, `websocket`. |
 | SQLite direct performance | `cargo test --test sqlite_test --features sqlx,test-utils sqlite_performance_direct -- --ignored --nocapture` | File-backed, no Docker. Measured locally at about 42s on 2026-06-21. |
 | Route recovery checks | `cargo test test_route_recovery_from_faults -- --ignored --nocapture` | No Docker. Measured locally at about 2s for the two consumer recovery tests on 2026-06-21. |
 | Publisher recovery check | `cargo test test_publisher_recovery_from_faults -- --ignored --nocapture` | No Docker. Measured locally at about 1s on 2026-06-21. |

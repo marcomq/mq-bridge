@@ -26,6 +26,7 @@ use tracing::{info, trace, warn};
 mod columns;
 #[cfg(feature = "dedup")]
 mod dedup;
+mod load;
 #[cfg(feature = "dedup")]
 pub(crate) use dedup::build_sql_dedup_store;
 #[cfg(feature = "aggregate")]
@@ -608,7 +609,13 @@ async fn create_sqlx_pool(config: &SqlxConfig) -> anyhow::Result<AnyPool> {
         probe.close().await.ok();
     }
 
-    Ok(pool_options.connect(&url).await?)
+    // sqlx logs a statement slower than 1 s at WARN with its full text, which for a batch
+    // INSERT is up to a megabyte on one line.
+    use sqlx::ConnectOptions;
+    use std::str::FromStr;
+    let connect_options = sqlx::any::AnyConnectOptions::from_str(&url)?
+        .log_slow_statements(log::LevelFilter::Debug, Duration::from_secs(1));
+    Ok(pool_options.connect_with(connect_options).await?)
 }
 
 /// Returns a shared connection pool for this database, building one on first use.
@@ -660,6 +667,8 @@ pub struct SqlxPublisher {
     pg_batch: Option<PgBatchLookup>,
     /// Set by `columns: auto`: rows are built from the record's fields, not from `insert_query`.
     auto: Option<columns::AutoColumns>,
+    /// Set by `load_mode`: every write goes into one transaction, committed when the route completes.
+    load: Option<load::HeldLoad>,
 }
 
 /// The raw `lookup_query` a PostgreSQL batch function is generated from.
@@ -943,6 +952,27 @@ async fn copy_rows(pool: &CopyPool, _copies: &[(String, String)]) -> Result<(), 
     match *pool {}
 }
 
+/// Runs each `(COPY statement, rows)` on `conn`, inside the transaction it already holds.
+#[cfg(feature = "sqlx")]
+async fn copy_rows_on(
+    conn: &mut load::CopyConn,
+    copies: &[(String, String)],
+) -> Result<(), PublisherError> {
+    for (stmt, buf) in copies {
+        let copier = conn.copy_in_raw(stmt).await;
+        copy_in(copier.map_err(classify_sql_error)?, buf.as_bytes()).await?;
+    }
+    Ok(())
+}
+
+#[cfg(not(feature = "sqlx"))]
+async fn copy_rows_on(
+    conn: &mut load::CopyConn,
+    _copies: &[(String, String)],
+) -> Result<(), PublisherError> {
+    match *conn {}
+}
+
 /// Sends `buf` as the data of a started `COPY … FROM STDIN` and ends it.
 #[cfg(feature = "sqlx")]
 async fn copy_in<C>(
@@ -1053,7 +1083,18 @@ fn sql_error_text(e: sqlx::Error) -> anyhow::Error {
 
 fn classify_sql_error(e: sqlx::Error) -> PublisherError {
     if sql_error_is_deterministic(&e) {
-        return PublisherError::NonRetryable(sql_error_text(e));
+        let mismatch = e
+            .as_database_error()
+            .and_then(|db_err| db_err.code())
+            .is_some_and(|code| code == "42804");
+        let error = sql_error_text(e);
+        if mismatch {
+            return PublisherError::NonRetryable(anyhow!(
+                "{error}; cast the value in the query, e.g. `CAST(${{payload:amount}} AS numeric)`, \
+                 or use `columns: auto`, which casts every value to its column's type"
+            ));
+        }
+        return PublisherError::NonRetryable(error);
     }
     PublisherError::Retryable(sql_error_text(e))
 }
@@ -1183,6 +1224,29 @@ impl SqlxPublisher {
 
         info!(table = %config.table, driver = %driver_name, "SQLx publisher connected");
 
+        if config.load_mode.is_some() && config.lookup_query.is_some() {
+            return Err(anyhow!(crate::errors::InvalidConfig(anyhow!(
+                "`load_mode` writes a whole load; it cannot be combined with `lookup_query`"
+            ))));
+        }
+        if config.load_mode.is_none()
+            && (config.before_load.is_some() || config.after_load.is_some())
+        {
+            return Err(anyhow!(crate::errors::InvalidConfig(anyhow!(
+                "`before_load` and `after_load` run inside a load; set `load_mode` as well"
+            ))));
+        }
+        if config.load_mode.is_some() && matches!(driver_name.as_str(), "MySQL" | "MariaDB") {
+            ensure_transactional_engine(&pool, &config.table).await?;
+        }
+        let load = config.load_mode.map(|mode| {
+            load::HeldLoad::new(
+                mode,
+                &config.table,
+                config.before_load.clone(),
+                config.after_load.clone(),
+            )
+        });
         if let Some(template) = &config.lookup_query {
             let writes = lookup_writes(template);
             if writes {
@@ -1207,6 +1271,7 @@ impl SqlxPublisher {
                 table,
                 copy: None,
                 auto: None,
+                load: None,
             });
         }
 
@@ -1233,6 +1298,7 @@ impl SqlxPublisher {
                 table,
                 copy: None,
                 auto: Some(auto),
+                load,
             });
         }
 
@@ -1372,6 +1438,7 @@ impl SqlxPublisher {
             lookup: None,
             pg_batch: None,
             auto: None,
+            load,
         })
     }
 
@@ -1840,6 +1907,9 @@ impl MessagePublisher for SqlxPublisher {
         if self.lookup.is_some() {
             return self.lookup_one(&message).await;
         }
+        if let Some(load) = &self.load {
+            return self.send_held(load, &[message]).await.map(|()| Sent::Ack);
+        }
         if let Some(auto) = &self.auto {
             return match auto.send(&self.pool, vec![message]).await? {
                 SentBatch::Partial { mut failed, .. } if !failed.is_empty() => {
@@ -1875,11 +1945,18 @@ impl MessagePublisher for SqlxPublisher {
                 .await;
         }
 
+        if let Some(load) = &self.load {
+            return self
+                .send_held(load, &messages)
+                .await
+                .map(|()| SentBatch::Ack);
+        }
+
         if let Some(auto) = &self.auto {
             return auto.send(&self.pool, messages).await;
         }
 
-        match self.write_batch(&messages).await {
+        match self.write_batch(&messages, None).await {
             Err(PublisherError::NonRetryable(e)) if messages.len() > 1 => {
                 warn!(error = %e, "SQLx batch rejected; writing it one message at a time");
                 self.send_batch_isolating(messages).await
@@ -1918,16 +1995,45 @@ impl MessagePublisher for SqlxPublisher {
         }
     }
 
+    fn on_disconnect_hook(&self) -> Option<BoxFuture<'_, anyhow::Result<()>>> {
+        let load = self.load.as_ref()?;
+        Some(Box::pin(load.finish()))
+    }
+
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
 }
 
 impl SqlxPublisher {
+    /// `load_mode`: writes into the held transaction; one rejected row fails the whole load.
+    async fn send_held(
+        &self,
+        load: &load::HeldLoad,
+        messages: &[CanonicalMessage],
+    ) -> Result<(), PublisherError> {
+        let copy_pool = match &self.auto {
+            Some(auto) => auto.copy_pool(),
+            None => self.copy.as_ref().map(|sink| &sink.pool),
+        };
+        let mut write = load.lock(&self.pool, copy_pool).await?;
+        let result = match (&self.auto, write.tx()) {
+            (_, Err(e)) => Err(e),
+            (Some(auto), Ok(tx)) => auto.send_held(&self.pool, tx, messages).await,
+            (None, Ok(tx)) => self.write_batch(messages, Some(tx)).await,
+        };
+        write.settle(result)
+    }
+
     /// Writes the batch with as few statements as the query allows; all of it or nothing.
-    async fn write_batch(&self, messages: &[CanonicalMessage]) -> Result<(), PublisherError> {
+    /// With `held`, it writes into that transaction and leaves committing to its owner.
+    async fn write_batch(
+        &self,
+        messages: &[CanonicalMessage],
+        mut held: Option<&mut load::HeldTx>,
+    ) -> Result<(), PublisherError> {
         if let Some(sink) = &self.copy {
-            return self.send_batch_copy(sink, messages).await;
+            return self.send_batch_copy(sink, messages, held).await;
         }
 
         trace!(count = messages.len(), message_ids = ?LazyMessageIds(messages), "Publishing batch to SQLx");
@@ -1938,7 +2044,7 @@ impl SqlxPublisher {
             Some(pos) => pos,
             None => {
                 warn!("Could not optimize batch insert due to custom query format. Falling back to iterative inserts.");
-                return self.send_batch_iterative(messages).await;
+                return self.send_batch_iterative(messages, held).await;
             }
         };
         let base_query = &self.insert_query[..values_pos];
@@ -1979,14 +2085,14 @@ impl SqlxPublisher {
         // handles these correctly.
         if binds_after_values(values_suffix) {
             warn!("insert_query binds a value after the VALUES tuple. Falling back to iterative inserts.");
-            return self.send_batch_iterative(messages).await;
+            return self.send_batch_iterative(messages, held).await;
         }
 
         // The `(payload)` single-column guard only applies to legacy mode; a
         // token-based query is already known-correct from `parse_insert_template`.
         if self.column_sources.is_empty() && !contains_payload_clause(base_query) {
             warn!("Could not optimize batch insert due to custom query format. Falling back to iterative inserts.");
-            return self.send_batch_iterative(messages).await;
+            return self.send_batch_iterative(messages, held).await;
         }
 
         // Placeholders per row: N tokens in token mode, 1 (the payload) in legacy mode.
@@ -1994,12 +2100,12 @@ impl SqlxPublisher {
         // The tuple is repeated per row with its expressions (`CAST(…)`, `decode(…)`) kept.
         let Some(template) = tuple_template(values_tuple, &self.driver_name, per_row) else {
             warn!("insert_query's VALUES tuple cannot be repeated per row. Falling back to iterative inserts.");
-            return self.send_batch_iterative(messages).await;
+            return self.send_batch_iterative(messages, held).await;
         };
         let per_statement = (columns::MAX_BINDS / per_row).max(1);
         let retryable = |e: sqlx::Error| PublisherError::Retryable(anyhow!(e));
         // One statement is atomic by itself; a batch split at the bind limit needs a transaction.
-        let mut tx = match messages.len() > per_statement {
+        let mut tx = match held.is_none() && messages.len() > per_statement {
             true => Some(self.pool.begin().await.map_err(retryable)?),
             false => None,
         };
@@ -2022,9 +2128,10 @@ impl SqlxPublisher {
                     query = bind_message_sources(query, msg, &self.column_sources)?;
                 }
             }
-            match &mut tx {
-                Some(tx) => query.execute(&mut **tx).await,
-                None => query.execute(&self.pool).await,
+            match (&mut held, &mut tx) {
+                (Some(held), _) => query.execute(held.any()?).await,
+                (None, Some(tx)) => query.execute(&mut **tx).await,
+                (None, None) => query.execute(&self.pool).await,
             }
             .map_err(classify_sql_error)?;
         }
@@ -2078,6 +2185,7 @@ impl SqlxPublisher {
         &self,
         sink: &PgCopySink,
         messages: &[CanonicalMessage],
+        held: Option<&mut load::HeldTx>,
     ) -> Result<(), PublisherError> {
         let stmt = format!(
             "COPY {} ({}) FROM STDIN WITH (FORMAT text)",
@@ -2099,7 +2207,10 @@ impl SqlxPublisher {
             buf.push('\n');
         }
 
-        copy_rows(&sink.pool, &[(stmt, buf)]).await?;
+        match held {
+            Some(held) => copy_rows_on(held.pg()?, &[(stmt, buf)]).await?,
+            None => copy_rows(&sink.pool, &[(stmt, buf)]).await?,
+        }
 
         trace!(count = messages.len(), table = %sink.table, "Bulk-copied batch to PostgreSQL");
         Ok(())
@@ -2110,12 +2221,14 @@ impl SqlxPublisher {
     async fn send_batch_iterative(
         &self,
         messages: &[CanonicalMessage],
+        held: Option<&mut load::HeldTx>,
     ) -> Result<(), PublisherError> {
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| PublisherError::Retryable(anyhow!(e)))?;
+        let retryable = |e: sqlx::Error| PublisherError::Retryable(anyhow!(e));
+        let mut own = None;
+        let conn = match held {
+            Some(held) => held.any()?,
+            None => &mut **own.insert(self.pool.begin().await.map_err(retryable)?),
+        };
         for msg in messages {
             let query = sqlx::query(audited_sql(&self.insert_query));
             let query = if self.column_sources.is_empty() {
@@ -2123,11 +2236,14 @@ impl SqlxPublisher {
             } else {
                 bind_message_sources(query, msg, &self.column_sources)?
             };
-            query.execute(&mut *tx).await.map_err(classify_sql_error)?;
+            query
+                .execute(&mut *conn)
+                .await
+                .map_err(classify_sql_error)?;
         }
-        tx.commit()
-            .await
-            .map_err(|e| PublisherError::Retryable(anyhow!(e)))?;
+        if let Some(tx) = own {
+            tx.commit().await.map_err(retryable)?;
+        }
         Ok(())
     }
 }
@@ -2865,6 +2981,36 @@ const MYSQL_COLUMN_TYPES_SQL: &str = "SELECT COLUMN_NAME AS name, LOWER(DATA_TYP
      FROM information_schema.columns \
      WHERE table_schema = COALESCE(NULLIF(?, ''), DATABASE()) AND table_name = ? \
      ORDER BY ORDINAL_POSITION";
+
+/// Rejects `load_mode` on a MySQL/MariaDB table whose engine cannot roll back (MyISAM, MEMORY, ...).
+/// A table that does not exist yet passes; it is created with the server's default engine.
+async fn ensure_transactional_engine(pool: &AnyPool, table: &str) -> anyhow::Result<()> {
+    let (schema, name) = match table.split_once('.') {
+        Some((s, t)) => (s.trim_matches('`'), t.trim_matches('`')),
+        None => ("", table.trim_matches('`')),
+    };
+    let row: Option<(String, String)> = sqlx::query_as(audited_sql(
+        "SELECT CAST(t.ENGINE AS CHAR), CAST(COALESCE(e.TRANSACTIONS, 'NO') AS CHAR) \
+         FROM information_schema.TABLES t \
+         LEFT JOIN information_schema.ENGINES e ON e.ENGINE = t.ENGINE \
+         WHERE t.TABLE_SCHEMA = COALESCE(NULLIF(?, ''), DATABASE()) AND t.TABLE_NAME = ? \
+         AND t.ENGINE IS NOT NULL",
+    ))
+    .bind(schema.to_string())
+    .bind(name.to_string())
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| anyhow!("Failed to look up the storage engine of '{table}': {e}"))?;
+    match row {
+        Some((engine, transactions)) if !transactions.eq_ignore_ascii_case("YES") => {
+            Err(anyhow!(crate::errors::InvalidConfig(anyhow!(
+                "`load_mode` needs a transactional table, but '{table}' uses the {engine} engine, \
+                 which cannot roll back a failed load; convert it (e.g. to InnoDB) first"
+            ))))
+        }
+        _ => Ok(()),
+    }
+}
 
 /// Build the SELECT projection used in place of `*` for the cursor reader.
 ///

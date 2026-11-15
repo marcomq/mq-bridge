@@ -11,14 +11,16 @@ For how the UI is built (schema-driven forms, the engine acting as its own web s
 
 ## Layout
 
-The window is split into three top-level tabs, a sidebar listing your endpoints, and a top bar:
+The window is split into four top-level tabs, a sidebar listing your endpoints, and a top bar:
 
 - **Publishers** (↑) — endpoints you *send to* (build/test requests, run request/response traffic).
 - **Consumers** (↓) — endpoints you *receive from* (live message log, payload inspection).
 - **App Config** (⚙) — application-wide settings, config security, and environment variables.
+- **Status** (◉) — what this and every other mq-bridge process on the machine is running, with
+  rate and uptime (the same view as [`mqb status`](../reference/cli.md)).
 
-The top bar shows a **runtime status** indicator (`idle` / `active consumer(s)`), a **theme**
-switcher (light / auto / dark), and **Save**. The sidebar filters endpoints and offers one-click
+The top bar shows a **runtime status** indicator (`idle` / `active consumer(s)`), the number of
+other mq-bridge instances on the machine, a **theme** switcher (light / auto / dark), and **Save**. The sidebar filters endpoints and offers one-click
 import from **Postman**, **OpenAPI**, **AsyncAPI**, and existing **mq-bridge** configs.
 
 ## Publishers

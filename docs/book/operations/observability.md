@@ -1,6 +1,6 @@
 # Observability & metrics
 
-`mq-bridge-app` is production-ready with structured **JSON logging** and a **Prometheus** metrics
+`mq-bridge-app` is production-ready with optional structured **JSON logging** and a **Prometheus** metrics
 endpoint, plus per-route status you can query at runtime.
 
 ## Metrics
@@ -20,8 +20,9 @@ orders_bridge:
     nats: { subject: "orders.processed", stream: "orders_stream", url: "nats://localhost:4222" }
 ```
 
-Metrics are exposed for a Prometheus scrape. Point your Prometheus (or Grafana Agent) at the
-running server and build dashboards on the emitted throughput/latency/error series.
+`mq-bridge-app` serves them for a Prometheus scrape at `/metrics` on `metrics_addr` (the
+container image sets `0.0.0.0:9090`, see [Deploying](deploying.md)). Point your Prometheus (or
+Grafana Agent) there and build dashboards on the emitted throughput/latency/error series.
 
 > ⚠️ **Metrics are not free.** The `metrics` middleware records a measurement per message on
 > whichever side it is attached, so it adds per-message overhead and can measurably reduce
@@ -55,10 +56,11 @@ middleware is left out of the chain, so it costs nothing per message.
 
 ## Logging
 
-Logs are structured JSON, suited to shipping into a log aggregator. Two things to keep in mind:
+Logs are plain text by default. Set `logger: json` in the config (or `MQB__LOGGER=json`) for
+structured JSON, suited to shipping into a log aggregator. Three things to keep in mind:
 
 - **Message payloads are emitted only at `trace` level.** Run production above `trace` so no
-  sensitive data (e.g. cardholder data) reaches logs or traces. See the
+  sensitive data (e.g. personal data) reaches logs or traces. See the
   [TLS & security hardening](../engine/configuration.md#tls--security-hardening) notes.
 - The MCP server's `stdio` transport owns **stdout** for the protocol, so its logs go to
   **stderr**. In HTTP transport this is not a concern.

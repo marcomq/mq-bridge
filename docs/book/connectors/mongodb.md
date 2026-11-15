@@ -12,8 +12,8 @@ mongodb://[user:password@]host[:port]/?database=<db>&collection=<name>
 
 | What you want | URL |
 | :--- | :--- |
-| Write JSON documents to a collection | `mongodb://localhost:27017/?database=shop&collection=orders&format=raw` |
-| The same, with the payload's `order_id` as `_id` | `mongodb://localhost:27017/?database=shop&collection=orders&format=raw&id_field=order_id` |
+| Write JSON documents to a collection | `mongodb://localhost:27017/?database=shop&collection=orders&format=payload` |
+| The same, with the payload's `order_id` as `_id` | `mongodb://localhost:27017/?database=shop&collection=orders&format=payload&id_field=order_id` |
 | Copy a collection, then follow its changes | `mongodb://localhost:27017/?database=shop&collection=orders` |
 | Follow changes only | `mongodb://localhost:27017/?database=shop&collection=orders&consume=capture_new` |
 | Copy a collection once, without a replica set | `mongodb://localhost:27017/?database=shop&collection=orders&consume=snapshot` |
@@ -43,7 +43,7 @@ output:
     password: "${MONGO_PASSWORD}"
     database: "shop"
     collection: "orders"
-    format: raw
+    format: payload
 ```
 
 `username` and `password` take precedence over credentials in the `url`. For TLS with a
@@ -61,32 +61,32 @@ output:
 ## Writing
 
 `format` decides what a stored document looks like. **For a collection that other programs
-query, use `format: raw`.** The default keeps the message intact for another mq-bridge route
+query, use `format: payload`.** The default keeps the message intact for another mq-bridge route
 to read, and stores the payload as binary.
 
 For the message `{"order_id": "A-1", "total": 20}`:
 
 | `format` | Stored document | Use for |
 | :--- | :--- | :--- |
-| `raw` | `{ _id: …, order_id: "A-1", total: 20 }` | Documents you query |
+| `payload` (also `raw`) | `{ _id: …, order_id: "A-1", total: 20 }` | Documents you query |
 | `json` | `{ _id: …, payload: { order_id: "A-1", total: 20 }, metadata: {…}, created_at: … }` | Queryable payload, metadata kept |
 | `text` | `{ _id: …, payload: "{\"order_id\": …}", metadata: {…}, created_at: … }` | Text payloads |
 | `normal` (default) | `{ _id: …, payload: <binary>, metadata: {…}, created_at: … }` | Queues between mq-bridge routes; any payload |
 
-With `raw`, a payload that is not a JSON object is stored like `normal`.
+With `payload`, a payload that is not a JSON object is stored like `normal`.
 
 Load a JSONL file into a collection, with the order number as `_id`:
 
 ```yaml
 load_orders:
   input:
-    file: { path: "/data/orders.jsonl", format: raw }
+    file: { path: "/data/orders.jsonl", format: payload }
   output:
     mongodb:
       url: "mongodb://localhost:27017"
       database: "shop"
       collection: "orders"
-      format: raw
+      format: payload
       id_field: "order_id"
 ```
 
@@ -94,7 +94,7 @@ load_orders:
   A document whose `_id` exists is left as it is and counts as written, so running the load
   twice does not duplicate anything. It does not update the stored document. A message
   without the field fails. More in [Upserts & insert-if-absent](../cookbook/upserts.md).
-- **Without `id_field`** the `_id` is the payload's own `_id` (`raw`), or one that is generated.
+- **Without `id_field`** the `_id` is the payload's own `_id` (`payload`), or one that is generated.
 - **`ttl_seconds`** creates a TTL index, so documents are removed that long after they were
   written. **`capped_size_bytes`** creates the collection as a capped collection.
 
@@ -146,7 +146,7 @@ Copy a collection of a standalone `mongod` into a file, once:
 ```bash
 mqb copy --drain \
   --from 'mongodb://localhost/?database=shop&collection=customers&consume=snapshot' \
-  --to 'file:///data/customers.jsonl?format=raw'
+  --to 'file:///data/customers.jsonl?format=payload'
 ```
 
 `snapshot` delivers what exists when it runs. It cannot resume and refuses a `cursor_id`.
@@ -179,7 +179,7 @@ two writers are ordered by their clocks. A reader that needs an exact order uses
 `capture_all` or `capture_new`.
 
 Documents without `insert_order` are read first, in `_id` order: those written with
-`format: raw`, by another program, or by an earlier version.
+`format: payload`, by another program, or by an earlier version.
 
 ## Examples
 
@@ -188,7 +188,7 @@ Documents without `insert_order` are read first, in `_id` order: those written w
 ```bash
 mqb copy --drain \
   --from 'file:///data/customers.csv?format=csv' \
-  --to 'mongodb://localhost/?database=app&collection=customers&format=raw'
+  --to 'mongodb://localhost/?database=app&collection=customers&format=payload'
 ```
 
 **Copy a collection into PostgreSQL (replica set required):**
@@ -207,14 +207,52 @@ mqb copy \
   --to 'kafka://kafka.local:9092?topic=orders'
 ```
 
+### Replacing a collection as one unit
+
+`load_mode: replace` loads into a staging collection of its own,
+`<collection>_mqb_load_<id>`, and replaces the collection with it in one `renameCollection`
+when the source is drained. Readers see the
+old documents until then, and all new ones after.
+
+```bash
+mqb copy 'file:///data/orders.jsonl?format=payload' \
+  'mongodb://localhost:27017/?database=shop&collection=orders&format=payload&id_field=order_id' --load-mode replace
+```
+
+- **The collection keeps its indexes and options.** The staging collection is created with
+  the collection's options (validator, collation, capped size), and its indexes are built on
+  the loaded documents before the swap. An index the new documents violate, such as a
+  unique one, fails the load.
+- **A failed or interrupted run leaves the collection unchanged** and drops the staging
+  collection; the copy exits non-zero. One document MongoDB rejects fails the whole load.
+- **A crash leaves no garbage for long.** A running load holds a lease in the collection
+  `mqb_load_leases` and renews it every 15 s; the next load into the same collection drops
+  every staging collection whose lease is older than 60 s.
+- **Two loads into the same collection do not mix.** Each writes its own staging
+  collection; the one that finishes last replaces the collection.
+- **An empty source leaves the collection unchanged.**
+- **Drain routes only**, with the same rules as SQL's
+  [`load_mode`](postgres.md#loading-as-one-unit): `exit_on_empty: true`, the sink is the
+  route's output itself, and the source reads the full data set on every run.
+- **Only `replace`.** There is no `atomic_append`, and `load_mode` cannot be combined with
+  `request_reply`, `report_outcome`, `find` or `aggregate_query`.
+- **No sharded collections, no views or time series:** `renameCollection` does not
+  replace those. `readWrite` on the database is enough for the swap.
+- **Change streams on the collection end at the swap.** MongoDB sends them `rename` and
+  `invalidate`, not the documents that were replaced or loaded. A `capture_new` or
+  `capture_all` reader with a `cursor_id` stops there with a permanent error, since a copy it
+  feeds no longer matches; resync the collection and start it with a new `cursor_id`. Without
+  a `cursor_id` the reader logs a warning and reads on from the next change.
+
 ## Key options
 
 | Option | Purpose |
 |---|---|
 | `database` | **Required.** |
 | `collection` | Collection name. |
-| `format` | Publisher: how a message is stored: `normal` (default), `json`, `text`, `raw`. |
+| `format` | Publisher: how a message is stored: `normal` (default), `json`, `text`, `payload` (also `raw`). |
 | `id_field` | Publisher-only: payload field that becomes `_id`. |
+| `load_mode` | Publisher, drain routes: `replace` swaps in a staging collection when the drain completes. See [Replacing a collection as one unit](#replacing-a-collection-as-one-unit). |
 | `consume` | `capture_all` (default — snapshot then change stream, replica set required), `capture_new` (changes only, replica set required), `snapshot` (one-shot read, no replica set), or `delete` (durable work queue — destructive; also `consumer`). |
 | `cursor_id` | Names the saved read position of `capture_new`/`capture_all`. |
 | `checkpoint_store` | Where to persist the resume cursor for `capture_new`/`capture_all`. |

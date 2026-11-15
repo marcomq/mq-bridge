@@ -110,8 +110,12 @@ let enrich = Caller::get("enrich").expect("deployed at startup");
   memory input holds 100). Calls beyond that wait for a free slot.
 - `parallel` on the input pays off only with many concurrent calls (about 256 and more); at
   16-64 it makes the route slower.
-- `Caller::deploy(name, route)` takes a route built in code (with a handler);
-  `Caller::new(name, output)` adds the memory input itself. `stop()` ends the route.
+- `Caller::builder(name)` builds the route in code without naming its memory input or
+  `response` output: `.with_lookup(…)`, `.with_parallel(n)`, `.add_middleware(…)`,
+  `.with_batch_size(n)`, `.with_concurrency(n)`, `.with_request_timeout_ms(ms)`,
+  `.with_capacity(n)`, `.with_handler(…)`, `.with_output(…)`, then `.deploy().await`.
+  `Caller::new(name, output)` is the short form for an output only; `Caller::deploy(name,
+  route)` takes a complete route. `stop()` ends the route.
 
 The same works without `Caller`: a memory input with `request_reply: true` answers each
 failure to its requester, and a `memory` publisher with `request_reply: true` sends and waits.
