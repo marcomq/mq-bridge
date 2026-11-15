@@ -15,6 +15,11 @@ All notable changes to `mq-bridge`. Newest first.
   batches out of order, and a sink that only makes its writes durable on flush had the
   source's commits released before that flush. The endpoint's connect and disconnect hooks
   and its status were not passed on either, on input and output.
+- **An ordered sink gets nothing past a failed batch.** With `concurrency` above 1, a failed
+  send to a `file` or `object_store` output stopped the route, but the batches already read
+  behind it were still written. After the reconnect the failed batch came again and landed
+  behind them. Those batches are now handed back unsent, with or without a `parallel` marker
+  on the output.
 
 ## 1.6.0
 

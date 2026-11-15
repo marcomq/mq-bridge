@@ -531,6 +531,8 @@ pub(crate) struct PublishTurn {
     pub(crate) _release: tokio::sync::oneshot::Sender<()>,
     pub(crate) waiting: Option<tokio::sync::oneshot::Sender<()>>,
     pub(crate) reached: Option<tokio::sync::oneshot::Sender<()>>,
+    /// Set once a batch stopped the route: the batches behind it are not sent any more.
+    pub(crate) failed: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 tokio::task_local! {
@@ -538,9 +540,29 @@ tokio::task_local! {
 }
 
 /// Runs `send` with `turn` handed to the output marker inside it. A batch that never reaches
-/// the marker drops its turn when `send` returns.
-pub(crate) async fn with_publish_turn<F: Future>(turn: PublishTurn, send: F) -> F::Output {
-    TURN.scope(Cell::new(Some(turn)), send).await
+/// the marker drops its turn when `send` returns. A send that failed at the marker hands its
+/// turn back, so the caller decides when the next batch may go.
+pub(crate) async fn with_publish_turn<F: Future>(
+    turn: PublishTurn,
+    send: F,
+) -> (F::Output, Option<PublishTurn>) {
+    let (sent, kept) = TURN
+        .scope(Cell::new(Some(turn)), async {
+            let sent = send.await;
+            (sent, TURN.with(Cell::take))
+        })
+        .await;
+    // Only a turn the marker waited for and put back is still worth holding.
+    (sent, kept.filter(|turn| turn.prev.is_none()))
+}
+
+/// Whether a send left messages unsent.
+pub(crate) fn send_failed(sent: &Result<SentBatch, PublisherError>) -> bool {
+    match sent {
+        Ok(SentBatch::Ack) => false,
+        Ok(SentBatch::Partial { failed, .. }) => !failed.is_empty(),
+        Err(_) => true,
+    }
 }
 
 /// The `parallel` output marker: waits for the batch's turn, then hands it to the entries
@@ -576,8 +598,21 @@ impl MessagePublisher for TurnPublisher {
         &self,
         messages: Vec<CanonicalMessage>,
     ) -> Result<SentBatch, PublisherError> {
-        let _turn = wait_for_turn().await;
-        self.inner.send_batch(messages).await
+        let turn = wait_for_turn().await;
+        let stopped = turn
+            .as_ref()
+            .is_some_and(|turn| turn.failed.load(std::sync::atomic::Ordering::Relaxed));
+        let sent = if stopped {
+            Err(PublisherError::Retryable(anyhow::anyhow!(
+                "An earlier batch failed; this one is not sent, to keep the output in source order"
+            )))
+        } else {
+            self.inner.send_batch(messages).await
+        };
+        if send_failed(&sent) && turn.is_some() {
+            let _ = TURN.try_with(|cell| cell.set(turn));
+        }
+        sent
     }
 
     async fn lookup_batch(
@@ -1002,6 +1037,7 @@ mod tests {
                 _release: release,
                 waiting: None,
                 reached: None,
+                failed: Default::default(),
             };
             let chain = chain.clone();
             sends.spawn(with_publish_turn(turn, async move {
@@ -1011,7 +1047,7 @@ mod tests {
             }));
         }
         while let Some(sent) = sends.join_next().await {
-            sent.unwrap().unwrap();
+            sent.unwrap().0.unwrap();
         }
 
         assert!(

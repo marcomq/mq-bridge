@@ -60,7 +60,7 @@ mod metrics;
 mod otel;
 mod pack;
 mod parallel;
-pub(crate) use parallel::{with_publish_turn, PublishTurn};
+pub(crate) use parallel::{send_failed, with_publish_turn, PublishTurn};
 mod random_panic;
 mod raw_json;
 mod retry;

@@ -25,6 +25,8 @@ pub(super) struct CloseOnDrop<T>(pub(super) async_channel::Receiver<T>);
 pub(super) struct OrderTicket {
     pub(super) prev: Option<tokio::sync::oneshot::Receiver<()>>,
     pub(super) _release: tokio::sync::oneshot::Sender<()>,
+    /// Set once a batch stopped the route: the batches behind it are not sent any more.
+    pub(super) failed: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Routes batch commits either through the ordered sequencer (cumulative-ack

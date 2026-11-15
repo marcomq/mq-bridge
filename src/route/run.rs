@@ -895,6 +895,7 @@ impl Route {
         let flush_gate = commit_router.flush_gate(&publisher, &err_tx);
 
         // --- Worker Pool ---
+        let order_failed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mut join_set = JoinSet::new();
         for i in 0..self.options.concurrency {
             let work_rx_clone = work_rx.clone();
@@ -910,6 +911,7 @@ impl Route {
             // Owned per worker: the borrow cannot outlive this loop iteration.
             let drops = drops.cloned();
             let sends = sends.cloned();
+            let order_failed = Arc::clone(&order_failed);
             join_set.spawn(async move {
                 debug!("Starting worker {}", i);
                 let mut batch_scratch = BatchScratch::with_capacity(batch_size);
@@ -917,7 +919,7 @@ impl Route {
                 // A worker only leaves this loop when the route is going down, so closing the
                 // channel on the way out (panic included) unblocks a producer waiting on a full one.
                 let work = CloseOnDrop(work_rx_clone);
-                while let Ok((messages, commit_func, ticket)) = work.0.recv().await {
+                while let Ok((messages, commit_func, mut ticket)) = work.0.recv().await {
                     let batch_len = messages.len();
                     if let Err(err) = send_batch_and_commit(
                         &publisher,
@@ -932,10 +934,12 @@ impl Route {
                         &mut batch_scratch,
                         drops.as_ref(),
                         sends.as_deref().map(|sends| (sends, i)),
-                        ticket,
+                        &mut ticket,
                     )
                     .await
                     {
+                        // Before the ticket is dropped, which lets the next batch in.
+                        order_failed.store(true, Ordering::Relaxed);
                         error!("Worker failed to process message batch: {}", err);
                         report_route_error(&err_tx, err, "Could not send error to main task");
                         break;
@@ -1066,6 +1070,7 @@ impl Route {
                         let ticket = OrderTicket {
                             prev: prev_publish.take(),
                             _release: release,
+                            failed: Arc::clone(&order_failed),
                         };
                         prev_publish = Some(next_prev);
                         ticket
