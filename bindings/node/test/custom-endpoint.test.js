@@ -438,6 +438,50 @@ test("middleware dropping a whole batch does not end the route", async () => {
   assert.deepEqual(commits, ["ack", "ack"]);
 });
 
+test("an input middleware lets a waiting source drain", async () => {
+  // `memory` waits for messages unless the route tells it to exit when empty, and
+  // that instruction has to pass through the middleware.
+  const inTopic = unique("node.mw.drain.in");
+  const outTopic = unique("node.mw.drain.out");
+  const mw = registerMw("drain_tagger", (routeName, config) => tagger(config));
+
+  const config = {
+    routes: {
+      drain_route: {
+        exit_on_empty: true,
+        input: {
+          memory: { topic: inTopic, capacity: 4096 },
+          middlewares: [{ custom: { name: mw, config: {} } }],
+        },
+        output: { memory: { topic: outTopic, capacity: 4096 } },
+      },
+    },
+    publishers: { pub: { memory: { topic: inTopic, capacity: 4096 } } },
+  };
+  const route = Route.fromConfig(config, "drain_route");
+  const publisher = Publisher.fromConfig(config, "pub");
+  const consumer = Consumer.fromConfig({ memory: { topic: outTopic, capacity: 4096 } }, "");
+
+  await publisher.send(new Message(Buffer.from("payload")));
+  route.start();
+  try {
+    const messages = await consumer.poll(10, 5000);
+    assert.deepEqual(
+      messages.map((m) => m.payload.toString()),
+      ["payload!"],
+    );
+    let timer;
+    const timedOut = new Promise((resolve) => {
+      timer = setTimeout(() => resolve("timeout"), 10000);
+    });
+    const outcome = await Promise.race([route.wait().then(() => "exited"), timedOut]);
+    clearTimeout(timer);
+    assert.equal(outcome, "exited", "route did not exit once the source was empty");
+  } finally {
+    await shutdown(route);
+  }
+});
+
 test("middleware rewrites on the output side", async () => {
   const inTopic = unique("node.mw.in");
   const received = [];
