@@ -1464,6 +1464,8 @@ struct PublishObservation {
     arrived: Mutex<Vec<u64>>,
     active: std::sync::atomic::AtomicUsize,
     max_active: std::sync::atomic::AtomicUsize,
+    /// The batch whose send fails with a retryable error.
+    fail_at: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -1524,6 +1526,10 @@ impl MessagePublisher for OrderedPublishTracker {
             10 * (6u64.saturating_sub(seq.min(6))),
         ))
         .await;
+        if self.observation.fail_at == Some(seq) {
+            self.observation.active.fetch_sub(1, Ordering::SeqCst);
+            return Err(PublisherError::Retryable(anyhow::anyhow!("sink is down")));
+        }
         let result = self.inner.send_batch(messages).await;
         self.observation.arrived.lock().unwrap().push(seq);
         self.observation.active.fetch_sub(1, Ordering::SeqCst);
@@ -1540,10 +1546,22 @@ impl MessagePublisher for OrderedPublishTracker {
 }
 
 async fn run_publish_order_route(requires_order: bool) -> Arc<PublishObservation> {
+    let (observation, result) = run_publish_order_route_with(requires_order, None).await;
+    result.expect("Route should complete without errors");
+    observation
+}
+
+async fn run_publish_order_route_with(
+    requires_order: bool,
+    fail_at: Option<u64>,
+) -> (Arc<PublishObservation>, anyhow::Result<bool>) {
     let unique_id = fast_uuid_v7::gen_id().to_string();
     let tracking_name = format!("track_publish_{}", unique_id);
     let in_topic = format!("publish_order_in_{}", unique_id);
-    let observation = Arc::new(PublishObservation::default());
+    let observation = Arc::new(PublishObservation {
+        fail_at,
+        ..Default::default()
+    });
 
     register_middleware_factory(
         &tracking_name,
@@ -1571,15 +1589,24 @@ async fn run_publish_order_route(requires_order: bool) -> Arc<PublishObservation
     input_channel.fill_messages(messages).await.unwrap();
     input_channel.close();
 
-    tokio::time::timeout(
+    let result = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         route.run_until_err("publish_order_test", None, None),
     )
     .await
-    .expect("Route should not hang while draining finite input")
-    .expect("Route should complete without errors");
+    .expect("Route should not hang while draining finite input");
 
-    observation
+    (observation, result)
+}
+
+// A batch behind a failed one is redelivered after it, so writing it now would put it
+// ahead of the failed batch in the sink.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_order_sensitive_sink_gets_nothing_past_a_failed_batch() {
+    let (observation, result) = run_publish_order_route_with(true, Some(1)).await;
+
+    assert!(result.is_err(), "The failed send must stop the route");
+    assert_eq!(*observation.arrived.lock().unwrap(), vec![0]);
 }
 
 // Regression (issue #71): with `concurrency > 1` the workers used to call `send_batch`
@@ -1607,9 +1634,30 @@ async fn test_order_sensitive_sink_receives_batches_in_source_order() {
 // batches arriving out of order.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_output_parallel_marker_keeps_an_ordered_sink_in_source_order() {
+    let (observation, result) = run_output_marker_route(None).await;
+    result.expect("Route should complete without errors");
+
+    assert_eq!(*observation.arrived.lock().unwrap(), vec![0, 1, 2, 3, 4, 5]);
+    assert_eq!(observation.max_active.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_output_parallel_marker_sends_nothing_past_a_failed_batch() {
+    let (observation, result) = run_output_marker_route(Some(1)).await;
+
+    assert!(result.is_err(), "The failed send must stop the route");
+    assert_eq!(*observation.arrived.lock().unwrap(), vec![0]);
+}
+
+async fn run_output_marker_route(
+    fail_at: Option<u64>,
+) -> (Arc<PublishObservation>, anyhow::Result<bool>) {
     let unique_id = fast_uuid_v7::gen_id().to_string();
     let tracking_name = format!("track_marker_{unique_id}");
-    let observation = Arc::new(PublishObservation::default());
+    let observation = Arc::new(PublishObservation {
+        fail_at,
+        ..Default::default()
+    });
     register_middleware_factory(
         &tracking_name,
         Arc::new(OrderedPublishMiddlewareFactory {
@@ -1641,16 +1689,14 @@ async fn test_output_parallel_marker_keeps_an_ordered_sink_in_source_order() {
         .collect();
     channel.fill_messages(messages).await.unwrap();
     channel.close();
-    tokio::time::timeout(
+    let result = tokio::time::timeout(
         Duration::from_secs(5),
         route.run_until_err("output_marker_test", None, None),
     )
     .await
-    .expect("Route should not hang while draining finite input")
-    .expect("Route should complete without errors");
+    .expect("Route should not hang while draining finite input");
 
-    assert_eq!(*observation.arrived.lock().unwrap(), vec![0, 1, 2, 3, 4, 5]);
-    assert_eq!(observation.max_active.load(Ordering::SeqCst), 1);
+    (observation, result)
 }
 
 // The default stays unordered so concurrent sinks keep their throughput: batches may

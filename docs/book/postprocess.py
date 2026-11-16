@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Post-build step for search engines and LLMs. Run after `mdbook build docs/book`.
 
-Adds a canonical URL and a per-page meta description to the built HTML, and writes
-sitemap.xml, llms.txt and llms-full.txt into the build directory. A page sets its
-description with a first-line comment: <!-- description: ... -->
+Adds a canonical URL, a per-page meta description and link-preview (Open Graph) tags
+to the built HTML, and writes sitemap.xml, llms.txt and llms-full.txt into the build
+directory. A page sets its description with a first-line comment:
+<!-- description: ... -->; without one, its first paragraph is used.
 """
 import html
 import re
@@ -18,6 +19,7 @@ DESCRIPTION = re.compile(r"<!--\s*description:\s*(.*?)\s*-->", re.S)
 SKIP = {"print.html", "404.html", "toc.html"}
 # mdBook also writes the first chapter as the site's index.html.
 FRONT_PAGE = "introduction.html"
+PREVIEW_IMAGE = SITE + "images/social-preview.png"
 
 
 def chapters():
@@ -42,15 +44,67 @@ def url(page):
     return SITE + (page[: -len("index.html")] if page.endswith("index.html") else page)
 
 
+def first_paragraph(markdown):
+    """The first prose paragraph as plain text, cut to search-snippet length."""
+    in_code = False
+    for block in re.split(r"\n\s*\n", DESCRIPTION.sub("", markdown)):
+        block = block.strip()
+        if block.count("```") % 2:
+            in_code = not in_code
+            continue
+        if in_code or not block or re.match(r"[#<|>!`\-*+\d\[{]", block):
+            continue
+        text = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", block)
+        text = " ".join(re.sub(r"[*`]", "", text).split())
+        if len(text) < 60 or text.endswith(":"):
+            continue
+        if len(text) > 160:
+            text = text[:159].rsplit(" ", 1)[0].rstrip(",;:—-") + "…"
+        return text
+    return None
+
+
+def add_head(file, page, description):
+    # mdBook renders README.md as index.html but leaves links to it as README.html.
+    text = re.sub(r'href="([^":]*)README\.html', r'href="\1index.html', file.read_text(encoding="utf-8"))
+    if 'rel="canonical"' in text:
+        file.write_text(text, encoding="utf-8")
+        return
+    head = [f'<link rel="canonical" href="{url(page)}">']
+    if description:
+        meta = f'<meta name="description" content="{html.escape(description)}">'
+        text, replaced = re.subn(
+            r'<meta name="description" content="[^"]*">', lambda _: meta, text, count=1
+        )
+        if not replaced:
+            head.append(meta)
+    title = re.search(r"<title>(.*?)</title>", text, re.S)
+    shown = re.search(r'<meta name="description" content="([^"]+)">', text + "".join(head))
+    head += [
+        '<meta property="og:type" content="website">',
+        f'<meta property="og:url" content="{url(page)}">',
+        f'<meta property="og:image" content="{PREVIEW_IMAGE}">',
+        '<meta name="twitter:card" content="summary_large_image">',
+    ]
+    if title:
+        head.append(f'<meta property="og:title" content="{title.group(1).strip()}">')
+    if shown:
+        head.append(f'<meta property="og:description" content="{shown.group(1)}">')
+    lines = "".join(f"    {tag}\n    " for tag in head)
+    file.write_text(text.replace("</head>", f"{lines}</head>", 1), encoding="utf-8")
+
+
 def main():
     if not OUT.is_dir():
         sys.exit(f"{OUT} not found: run `mdbook build` first")
     pages = chapters()
     descriptions = {}
+    explicit = 0
     for md in pages:
-        match = DESCRIPTION.search((SRC / md).read_text()[:2000])
-        if match:
-            descriptions[html_path(md)] = " ".join(match.group(1).split())
+        source = (SRC / md).read_text(encoding="utf-8")
+        match = DESCRIPTION.search(source[:2000])
+        explicit += bool(match)
+        descriptions[html_path(md)] = " ".join(match.group(1).split()) if match else first_paragraph(source)
 
     urls = []
     for md in pages:
@@ -58,20 +112,9 @@ def main():
         file = OUT / page
         if not file.is_file() or page.name in SKIP:
             continue
-        # mdBook renders README.md as index.html but leaves links to it as README.html.
-        text = re.sub(r'href="([^":]*)README\.html', r'href="\1index.html', file.read_text())
-        head = f'<link rel="canonical" href="{url(page)}">'
-        if page in descriptions:
-            meta = f'<meta name="description" content="{html.escape(descriptions[page])}">'
-            text, replaced = re.subn(r'<meta name="description" content="[^"]*">', meta, text, count=1)
-            if not replaced:
-                head += "\n        " + meta
-        if 'rel="canonical"' not in text:
-            text = text.replace("</head>", f"    {head}\n    </head>", 1)
-        file.write_text(text)
+        add_head(file, page, descriptions[page])
         if page.as_posix() == FRONT_PAGE:
-            index = OUT / "index.html"
-            index.write_text(index.read_text().replace("</head>", f"    {head}\n    </head>", 1))
+            add_head(OUT / "index.html", page, descriptions[page])
             continue
         urls.append(url(page))
 
@@ -88,7 +131,7 @@ def main():
         body = DESCRIPTION.sub("", (SRC / md).read_text()).strip()
         full.append(f"\n\n---\nSource: {url(html_path(md))}\n\n{body}\n")
     (OUT / "llms-full.txt").write_text("".join(full))
-    print(f"postprocess: {len(urls)} pages, {len(descriptions)} descriptions, sitemap.xml, llms.txt, llms-full.txt")
+    print(f"postprocess: {len(urls)} pages, {explicit} written descriptions, sitemap.xml, llms.txt, llms-full.txt")
 
 
 if __name__ == "__main__":

@@ -2,6 +2,46 @@
 
 All notable changes to `mq-bridge`. Newest first.
 
+## 1.6.1
+
+### Changed
+
+- **Python: `Caller.call()` and JSON handlers encode faster.** A `str`, `int`, `float` or
+  `bool` field no longer goes through failed conversions first, and `call()` encodes its
+  fields and decodes the answer once instead of twice.
+- **`parallel` and `buffer` no longer copy every message's outcome when they settle a
+  batch.** Each answer, metadata included, was cloned once per merged commit; on a batched
+  lookup behind a `Caller` that was about a third of the route's CPU.
+- **Python: handler threads keep their Python thread state.** Each handler call created
+  and freed one, including a fresh frame stack, which was about a third of the handler
+  thread's time. An HTTP route answering from a Python handler went from ~78k to ~87k
+  req/s at 8 connections.
+- **`filter`: `number(field)` compared with a number takes the fast path.** Expressions
+  like `number(amount) > 50` used to build a JSON value for every message and run the
+  expression engine; now only the named field is parsed. Results are unchanged.
+
+### Fixed
+
+- **Python and Node: a drain ends with a custom middleware on the input.** A middleware
+  registered with `register_middleware` / `registerMiddleware` did not pass `exit_on_empty`
+  on to the source, so a route reading from `memory`, Kafka, NATS or another waiting source
+  never exited once it was empty.
+- **Python and Node: a custom middleware keeps the endpoint's ordering, flush and hooks.**
+  Behind a middleware on the output, a `file` sink with `concurrency` above 1 could write
+  batches out of order, and a sink that only makes its writes durable on flush had the
+  source's commits released before that flush. The endpoint's connect and disconnect hooks
+  and its status were not passed on either, on input and output.
+- **An ordered sink gets nothing past a failed batch.** With `concurrency` above 1, a failed
+  send to a `file` or `object_store` output stopped the route, but the batches already read
+  behind it were still written. After the reconnect the failed batch came again and landed
+  behind them. Those batches are now handed back unsent, with or without a `parallel` marker
+  on the output.
+- **Postgres cursor reads are fast again.** Since 1.0.1 the check that holds back rows of
+  transactions still open made each page's query look so expensive to the planner that
+  Postgres JIT-compiled it every time, which made a page several times slower than its
+  rows. The check now runs once per page with a cheap estimate; which rows are read is
+  unchanged. On older releases, `ALTER ROLE <reader> SET jit = off` avoids the cost.
+
 ## 1.6.0
 
 ### Added

@@ -475,13 +475,11 @@ impl BufferConsumer {
 pub(super) fn merge_commits(commits: Vec<(usize, BatchCommitFunc)>) -> BatchCommitFunc {
     Box::new(move |dispositions: Vec<MessageDisposition>| {
         Box::pin(async move {
-            let mut offset = 0usize;
+            let mut dispositions = dispositions.into_iter();
             // A failed sub-commit must not leave the later ones unsettled.
             let mut first_error = None;
             for (count, commit) in commits {
-                let end = (offset + count).min(dispositions.len());
-                let slice = dispositions[offset..end].to_vec();
-                offset = end;
+                let slice = dispositions.by_ref().take(count).collect();
                 if let Err(e) = commit(slice).await {
                     first_error.get_or_insert(e);
                 }

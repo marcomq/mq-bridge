@@ -368,7 +368,7 @@ pub(super) fn spawn_send(
             context.drops.as_ref(),
             context.sends.as_deref().map(|sends| (sends, 0)),
             // Sends never overlap, so no ticket is needed.
-            None,
+            &mut None,
         )
         .await;
         (result, commit_tasks, scratch)
@@ -389,29 +389,30 @@ pub(super) async fn send_batch_and_commit(
     scratch: &mut BatchScratch,
     drops: Option<&Arc<RwLock<DropReport>>>,
     send_slot: Option<(&PendingSends, usize)>,
-    ticket: Option<OrderTicket>,
+    ticket: &mut Option<OrderTicket>,
 ) -> anyhow::Result<()> {
     let batch_len = messages.len();
     scratch.fill_from(&messages);
 
     // An order-sensitive sink admits one send at a time, in source order. The wait wraps
     // the whole output chain, unless a `parallel` marker in it waits in its place.
-    let sent = match ticket {
-        Some(ticket) if publisher.takes_publish_turn() => {
+    let sent = match ticket.take() {
+        Some(owned) if publisher.takes_publish_turn() => {
             let (waiting, mut waiting_rx) = tokio::sync::oneshot::channel();
             let (reached, mut reached_rx) = tokio::sync::oneshot::channel();
             let turn = crate::middleware::PublishTurn {
-                prev: ticket.prev,
-                _release: ticket._release,
+                prev: owned.prev,
+                _release: owned._release,
                 waiting: Some(waiting),
                 reached: Some(reached),
+                failed: owned.failed,
             };
             let send = crate::middleware::with_publish_turn(turn, publisher.send_batch(messages));
             tokio::pin!(send);
             // Pending while working, not while queued for the turn.
             let mut _pending = send_slot.and_then(|(sends, index)| sends.begin(index));
             let (mut waited, mut reached_turn) = (false, false);
-            loop {
+            let (sent, kept) = loop {
                 tokio::select! {
                     biased;
                     sent = &mut send => break sent,
@@ -430,20 +431,36 @@ pub(super) async fn send_batch_and_commit(
                         }
                     }
                 }
-            }
-        }
-        ticket => {
-            let _release = match ticket {
-                Some(mut ticket) => {
-                    if let Some(prev) = ticket.prev.take() {
-                        let _ = prev.await;
-                    }
-                    Some(ticket)
-                }
-                None => None,
             };
+            // As below: a failed send keeps its turn until the caller has marked the route.
+            let kept = kept.filter(|_| crate::middleware::send_failed(&sent));
+            *ticket = kept.map(|turn| OrderTicket {
+                prev: turn.prev,
+                _release: turn._release,
+                failed: turn.failed,
+            });
+            sent
+        }
+        mut turn => {
+            if let Some(prev) = turn.as_mut().and_then(|turn| turn.prev.take()) {
+                let _ = prev.await;
+            }
             let _pending = send_slot.and_then(|(sends, index)| sends.begin(index));
-            publisher.send_batch(messages).await
+            let stopped = turn
+                .as_ref()
+                .is_some_and(|turn| turn.failed.load(Ordering::Relaxed));
+            let sent = if stopped {
+                Err(PublisherError::Retryable(anyhow::anyhow!(
+                    "An earlier batch failed; this one is not sent, to keep the output in source order"
+                )))
+            } else {
+                publisher.send_batch(messages).await
+            };
+            // A failed send keeps its turn until the caller has marked the route as stopped.
+            if crate::middleware::send_failed(&sent) {
+                *ticket = turn;
+            }
+            sent
         }
     };
     // Read-mostly: written once per run, so workers do not contend on it.
@@ -575,7 +592,8 @@ pub(super) async fn send_batch_and_commit(
                     );
                     return Ok(());
                 }
-                if !has_retry_middleware {
+                // An ordered sink must not take later batches ahead of the redelivered ones.
+                if !has_retry_middleware || ticket.is_some() {
                     return Err(err);
                 }
                 warn!(
