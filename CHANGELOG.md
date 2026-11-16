@@ -1897,7 +1897,7 @@ upgrading.
   `start_route` use the top-level schema annotation `x-mqb-default-batch-size` of a custom
   output when no batch size is given. The general default stays 1,024; of the built-in
   endpoints only the `meilisearch` preset declares one, 50,000.
-- **Plugin repository template.** [examples/plugin-template](examples/plugin-template) holds a
+- **Plugin repository template.** [mq-bridge-plugin-template](https://github.com/marcomq/mq-bridge-plugin-template) holds a
   working endpoint with its npm and Python packages, conda recipe, Homebrew formula script and
   CI and release workflows, plus a script that renames it.
 

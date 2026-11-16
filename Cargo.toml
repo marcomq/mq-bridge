@@ -41,7 +41,7 @@ members = [
     "tests/fixtures/grpc-config-compat",
 ]
 # apps/mq-bridge-app is its own workspace with its own Cargo.lock; see its manifest.
-exclude = ["apps", "examples/plugin-template", "examples/test-without-a-broker"]
+exclude = ["apps", "examples/test-without-a-broker"]
 resolver = "2"
 
 # Lints that are off by default in rustc/clippy and mark code that was never meant to
