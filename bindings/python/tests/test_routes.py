@@ -4,6 +4,7 @@ These exercise the actual compiled extension (not just internal Rust units)
 over in-memory endpoints, so no Docker services are required.
 """
 
+import asyncio
 import threading
 import time
 import uuid
@@ -376,4 +377,14 @@ def test_caller_returns_the_answer_and_raises_a_handler_error() -> None:
 
         [message] = caller.call_many_messages([b'{"n": 6}'])
         assert message.json() == {"double": 12}
+
+        async def acalls():
+            calls = [caller.acall(n=n) for n in range(8)] + [caller.acall({"n": -1})]
+            return await asyncio.gather(*calls, return_exceptions=True)
+
+        *answers, failed = asyncio.run(acalls())
+        assert [a["double"] for a in answers] == [n * 2 for n in range(8)]
+        assert isinstance(failed, RuntimeError) and "negative input" in str(failed)
+        with pytest.raises(RuntimeError, match="no running event loop"):
+            caller.acall(n=1)
 

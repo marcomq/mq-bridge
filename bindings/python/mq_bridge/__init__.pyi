@@ -1,3 +1,4 @@
+import asyncio
 from types import TracebackType
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Type, Union
 
@@ -334,6 +335,13 @@ class Caller:
     def call(
         self, fields: Optional[JsonValue] = ..., /, **kwargs: JsonValue
     ) -> JsonValue: ...
+
+    def acall(
+        self, fields: Optional[JsonValue] = ..., /, **kwargs: JsonValue
+    ) -> "asyncio.Future[JsonValue]":
+        """Like ``call``, for asyncio: ``await caller.acall(path=key)``. Must be
+        called from a running event loop."""
+        ...
 
     def call_message(
         self,

@@ -8,9 +8,10 @@ lookup bench's Postgres (1M rows, `benches/lookup/docker-compose.yml`). Variants
   up to 256) whose batch function runs `WHERE path = ANY($1)` on the same pool.
 - `mqb-caller`: `Caller.call(path=key)` from one thread per client into a route with a
   batched `lookup` and `parallel`, the same route as `benches/lookup/caller`.
+- `mqb-caller-async`: the same route through `await Caller.acall(path=key)`.
 
-The asyncio variants run one event loop (uvloop when installed) with one task per client;
-the Caller variant runs one OS thread per client. Every answer is checked.
+The asyncio variants (incl. `mqb-caller-async`) run one event loop (uvloop when installed)
+with one task per client; `mqb-caller` runs one OS thread per client. Every answer is checked.
 
 Usage (from bindings/python, with the lookup bench's Postgres up):
     uv run python analysis/bench_dataloader.py --clients 1,16,64,256,1024 --duration 5
@@ -30,7 +31,7 @@ import time
 PG_URL = os.environ.get("POSTGRES_URL", "postgres://bench:bench@127.0.0.1:55432/bench")
 POOL = 8
 BATCH = 256
-TARGETS = ["asyncpg-direct", "strawberry-dataloader", "aiodataloader", "mqb-caller"]
+TARGETS = ["asyncpg-direct", "strawberry-dataloader", "aiodataloader", "mqb-caller", "mqb-caller-async"]
 BY_KEY = "SELECT path, id, name, tier FROM users WHERE path = $1"
 BY_KEYS = "SELECT path, id, name, tier FROM users WHERE path = ANY($1::text[])"
 
@@ -63,14 +64,21 @@ def run_asyncio(clients: int, duration: float, warmup: float, variant: str) -> d
         pass
 
     async def main() -> dict:
-        pool = await asyncpg.create_pool(PG_URL, min_size=POOL, max_size=POOL)
+        pool = None
+        if variant != "mqb-caller-async":
+            pool = await asyncpg.create_pool(PG_URL, min_size=POOL, max_size=POOL)
 
         async def batch_fn(keys):
             rows = await pool.fetch(BY_KEYS, list(keys))
             by_path = {r["path"]: dict(r) for r in rows}
             return [by_path.get(k) for k in keys]
 
-        if variant == "asyncpg-direct":
+        if variant == "mqb-caller-async":
+            users = users_caller()
+
+            def lookup(k):
+                return users.acall(path=k)
+        elif variant == "asyncpg-direct":
             async def lookup(k):
                 row = await pool.fetchrow(BY_KEY, k)
                 return dict(row) if row else None
@@ -108,7 +116,10 @@ def run_asyncio(clients: int, duration: float, warmup: float, variant: str) -> d
 
         await phase(warmup, False)
         count, elapsed, lats = await phase(duration, True)
-        await pool.close()
+        if pool is None:
+            users.stop()
+        else:
+            await pool.close()
         return summarize(count, elapsed, lats)
 
     return asyncio.run(main())
@@ -118,7 +129,7 @@ def run_asyncio(clients: int, duration: float, warmup: float, variant: str) -> d
 # mq-bridge Caller, one thread per client
 
 
-def run_caller(clients: int, duration: float, warmup: float) -> dict:
+def users_caller():
     from mq_bridge import Caller
 
     route = {
@@ -143,7 +154,11 @@ def run_caller(clients: int, duration: float, warmup: float) -> dict:
             ]
         },
     }
-    users = Caller.from_config(route, "users")
+    return Caller.from_config(route, "users")
+
+
+def run_caller(clients: int, duration: float, warmup: float) -> dict:
+    users = users_caller()
 
     def phase(seconds: float, record: bool):
         deadline = time.perf_counter() + seconds

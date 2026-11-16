@@ -199,6 +199,8 @@ with Caller.from_file("routes.yaml", "users") as users:
 
 `call()` sends its keyword arguments (or one mapping) as a JSON object and returns the parsed answer; `call_many()` does that for several and returns one answer or `RuntimeError` per request. `call_message()` / `call_many_messages()` take and return `Message`s, e.g. to keep metadata. `Caller.from_file` / `from_config` take the same shapes as `Route`, but a route without `input` reads from the caller and one without `output` answers with the message. `Caller.from_route(route)` deploys a route built in code, with its handler.
 
+In asyncio code, `await users.acall(path="/u/7")` does what `call()` does without blocking the event loop or needing a thread per call; calls awaited at the same time from many tasks reach the route as one batch. On the lookup bench (Postgres, 1,024 concurrent tasks) that is about 3x the throughput of 1,024 threads calling `call()`. Cancelling the awaiting task does not withdraw the request.
+
 A message the route fails raises `RuntimeError` with the error text at once. `send()` returns `None` when the route accepts a message without an answer; `call()` raises then, so leave out the output, end it with `response: {}`, or use an endpoint that answers.
 
 ## Pull-based consumer

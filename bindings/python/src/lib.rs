@@ -11,7 +11,7 @@ use std::future::Future;
 use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 
@@ -33,6 +33,7 @@ use pyo3::conversion::IntoPyObjectExt;
 use pyo3::create_exception;
 use pyo3::exceptions::{PyAttributeError, PyException, PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
+use pyo3::sync::PyOnceLock;
 use pyo3::types::{
     PyAny, PyBool, PyByteArray, PyBytes, PyDict, PyFloat, PyInt, PyList, PyModule, PyString,
     PyTuple, PyType,
@@ -1603,6 +1604,35 @@ impl Caller {
         call_answer_to_python(py, self.caller.name(), &answer)
     }
 
+    /// Like `call`, for asyncio: `await caller.acall(path=key)`. Must be called from a
+    /// running event loop. Cancelling the awaiting task does not withdraw the request.
+    #[pyo3(signature = (fields=None, /, **kwargs))]
+    fn acall(
+        &self,
+        py: Python<'_>,
+        fields: Option<&Bound<'_, PyAny>>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        let request = CanonicalMessage::new(call_fields(fields, kwargs)?, None);
+        let event_loop = GET_RUNNING_LOOP
+            .import(py, "asyncio", "get_running_loop")?
+            .call0()?;
+        let future = event_loop.call_method0("create_future")?.unbind();
+        let reply_to = (event_loop.unbind(), future.clone_ref(py));
+        let caller = self.caller.clone();
+        self.runtime.spawn(async move {
+            let answer = caller.call_message(request).await;
+            let (event_loop, future) = reply_to;
+            let _ = async_replies().send(AsyncReply {
+                event_loop,
+                future,
+                caller: caller.name().to_string(),
+                answer,
+            });
+        });
+        Ok(future)
+    }
+
     /// Send a message through the route and return its answer as a message.
     #[pyo3(signature = (message, metadata=None))]
     fn call_message(
@@ -1752,6 +1782,99 @@ fn call_answer_to_python(
             answer.get_payload_str()
         ))
     })
+}
+
+static GET_RUNNING_LOOP: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static RESOLVE_FUTURES: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static ASYNC_REPLIES: OnceLock<mpsc::Sender<AsyncReply>> = OnceLock::new();
+
+struct AsyncReply {
+    event_loop: Py<PyAny>,
+    future: Py<PyAny>,
+    caller: String,
+    answer: anyhow::Result<CanonicalMessage>,
+}
+
+fn async_replies() -> &'static mpsc::Sender<AsyncReply> {
+    ASYNC_REPLIES.get_or_init(|| {
+        let (sender, receiver) = mpsc::channel();
+        thread::Builder::new()
+            .name("mq-bridge-py-replies".to_string())
+            .spawn(move || {
+                // Keeps one Python thread state for this thread, as in `PythonWorker`.
+                Python::try_attach(move |py| py.detach(move || deliver_async_replies(&receiver)));
+            })
+            .expect("failed to spawn the asyncio reply thread");
+        sender
+    })
+}
+
+/// Hands finished `acall`s to their event loops: everything queued since the last wake-up
+/// goes in one GIL acquisition and one `call_soon_threadsafe` per loop.
+fn deliver_async_replies(receiver: &mpsc::Receiver<AsyncReply>) {
+    while let Ok(first) = receiver.recv() {
+        let replies: Vec<AsyncReply> = std::iter::once(first).chain(receiver.try_iter()).collect();
+        let attached = Python::try_attach(|py| {
+            if let Err(err) = schedule_async_replies(py, replies) {
+                error!("failed to deliver asyncio replies: {err}");
+            }
+        });
+        if attached.is_none() {
+            return;
+        }
+    }
+}
+
+fn schedule_async_replies(py: Python<'_>, replies: Vec<AsyncReply>) -> PyResult<()> {
+    let mut by_loop: Vec<(Py<PyAny>, Vec<Py<PyTuple>>)> = Vec::new();
+    for reply in replies {
+        let (failed, value) = match reply
+            .answer
+            .map_err(to_py_runtime_error)
+            .and_then(|answer| call_answer_to_python(py, &reply.caller, &answer))
+        {
+            Ok(value) => (false, value),
+            Err(err) => (true, err.into_value(py).into_any()),
+        };
+        let entry = PyTuple::new(py, [reply.future, value, failed.into_py_any(py)?])?.unbind();
+        match by_loop
+            .iter_mut()
+            .find(|(event_loop, _)| event_loop.is(&reply.event_loop))
+        {
+            Some((_, entries)) => entries.push(entry),
+            None => by_loop.push((reply.event_loop, vec![entry])),
+        }
+    }
+    let resolve = RESOLVE_FUTURES.get_or_try_init(py, || {
+        wrap_pyfunction!(resolve_futures, py).map(|f| f.into_any().unbind())
+    })?;
+    for (event_loop, entries) in by_loop {
+        // A closed loop raises here; its futures are gone with it.
+        let _ = event_loop.call_method1(
+            py,
+            "call_soon_threadsafe",
+            (resolve, PyList::new(py, entries)?),
+        );
+    }
+    Ok(())
+}
+
+#[pyfunction]
+fn resolve_futures(entries: &Bound<'_, PyList>) -> PyResult<()> {
+    for entry in entries {
+        let (future, value, failed): (Bound<'_, PyAny>, Bound<'_, PyAny>, bool) =
+            entry.extract()?;
+        if future.call_method0("done")?.is_truthy()? {
+            continue;
+        }
+        let method = if failed {
+            "set_exception"
+        } else {
+            "set_result"
+        };
+        future.call_method1(method, (value,))?;
+    }
+    Ok(())
 }
 
 #[pyclass(module = "mq_bridge")]
