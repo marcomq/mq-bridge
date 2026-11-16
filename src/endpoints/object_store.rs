@@ -38,7 +38,7 @@ use crate::models::{
 #[cfg(feature = "encryption")]
 use crate::support::crypto::Crypto;
 use crate::support::source_ranges::{
-    finalized_name, parse_finalized_name, CoveredRanges, SourcePartition,
+    finalized_name, parse_finalized_name, CoveredRanges, SourcePartition, SourceRun,
 };
 use crate::traits::{
     BoxFuture, ConsumerError, MessageConsumer, MessageDisposition, MessagePublisher,
@@ -283,7 +283,8 @@ fn split_and_parse(
 #[derive(Default)]
 struct ObjectBody {
     bytes: Vec<u8>,
-    rows: Vec<serde_json::Value>,
+    #[cfg(feature = "parquet")]
+    rows: crate::support::parquet::RowBuffer,
     /// The CSV columns, settled by this object's first row; every object has its own header.
     csv_columns: Option<Vec<String>>,
     csv_row: Vec<u8>,
@@ -299,9 +300,7 @@ impl ObjectBody {
     ) -> anyhow::Result<()> {
         #[cfg(feature = "parquet")]
         if *format == FileFormat::Parquet {
-            self.rows
-                .push(crate::support::parquet::parse_row(&msg.payload)?);
-            return Ok(());
+            return self.rows.push(&msg.payload);
         }
         if *format == FileFormat::Csv {
             csv_append_record(
@@ -321,7 +320,11 @@ impl ObjectBody {
     }
 
     fn is_empty(&self) -> bool {
-        self.bytes.is_empty() && self.rows.is_empty()
+        #[cfg(feature = "parquet")]
+        if !self.rows.is_empty() {
+            return false;
+        }
+        self.bytes.is_empty()
     }
 }
 
@@ -539,7 +542,8 @@ impl ObjectStorePublisher {
     fn encode_object_body(&self, body: ObjectBody) -> Result<Vec<u8>, PublisherError> {
         #[cfg(feature = "parquet")]
         let mut body = if self.format == FileFormat::Parquet {
-            crate::support::parquet::encode_rows(&body.rows, self.compression)
+            body.rows
+                .encode(self.compression)
                 .map_err(PublisherError::NonRetryable)?
         } else {
             body.bytes
@@ -631,7 +635,53 @@ impl ObjectStorePublisher {
         let runs = covered
             .uncovered_runs(messages)
             .map_err(PublisherError::NonRetryable)?;
+        let (objects, failed) = self
+            .off_runtime(move |publisher| publisher.encode_runs(runs))
+            .await??;
+        for (source, start, end, body) in objects {
+            self.put_source_range(&source, start, end, body).await?;
+        }
+        Ok(SentBatch::from_failures(failed))
+    }
 
+    /// Runs the CPU-bound part of a send on the blocking pool. Building and encoding a large
+    /// batch takes milliseconds; on a runtime worker it stalls the route's producer, which
+    /// woke this task and shares its thread.
+    async fn off_runtime<T: Send + 'static>(
+        &self,
+        work: impl FnOnce(&Self) -> T + Send + 'static,
+    ) -> Result<T, PublisherError> {
+        let publisher = self.clone();
+        match tokio::task::spawn_blocking(move || work(&publisher)).await {
+            Ok(value) => Ok(value),
+            Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+            Err(error) => Err(PublisherError::Retryable(anyhow!(error))),
+        }
+    }
+
+    fn encode_batch(
+        &self,
+        messages: Vec<CanonicalMessage>,
+    ) -> Result<(Option<Vec<u8>>, FailedMessages), PublisherError> {
+        let mut body = ObjectBody::default();
+        let mut failed = Vec::new();
+        for mut msg in messages {
+            msg.strip_source_metadata();
+            if let Err(e) = body.push(&msg, &self.format, &self.delimiter, &self.csv) {
+                failed.push((msg, PublisherError::NonRetryable(e)));
+            }
+        }
+        if body.is_empty() {
+            return Ok((None, failed));
+        }
+        Ok((Some(self.encode_object_body(body)?), failed))
+    }
+
+    fn encode_runs(
+        &self,
+        runs: Vec<SourceRun>,
+    ) -> Result<(Vec<EncodedRange>, FailedMessages), PublisherError> {
+        let mut objects = Vec::new();
         let mut failed = Vec::new();
         for run in runs {
             // A record that cannot be encoded splits the run rather than failing the batch:
@@ -651,13 +701,8 @@ impl ObjectStorePublisher {
                     }
                     Err(error) => {
                         if let Some(end) = segment_end.take() {
-                            self.put_source_range(
-                                &run.source,
-                                segment_start,
-                                end,
-                                std::mem::take(&mut body),
-                            )
-                            .await?;
+                            let body = self.encode_object_body(std::mem::take(&mut body))?;
+                            objects.push((run.source.clone(), segment_start, end, body));
                         }
                         // `take` above emptied the body, and it can only be non-empty when
                         // `segment_end` was set, so there is nothing left to discard here.
@@ -667,11 +712,11 @@ impl ObjectStorePublisher {
                 }
             }
             if let Some(end) = segment_end {
-                self.put_source_range(&run.source, segment_start, end, body)
-                    .await?;
+                let body = self.encode_object_body(body)?;
+                objects.push((run.source, segment_start, end, body));
             }
         }
-        Ok(SentBatch::from_failures(failed))
+        Ok((objects, failed))
     }
 
     /// Writes one contiguous source range as a single object and records it as covered.
@@ -680,11 +725,10 @@ impl ObjectStorePublisher {
         source: &SourcePartition,
         start: u64,
         end: u64,
-        body: ObjectBody,
+        body: Vec<u8>,
     ) -> Result<(), PublisherError> {
         let name = finalized_name(source, start, end, &self.extension)
             .map_err(PublisherError::NonRetryable)?;
-        let body = self.encode_object_body(body)?;
         let key = self.base.clone().join(name.as_str());
         self.write_object(&key, body, true).await?;
         self.covered_ranges
@@ -694,6 +738,10 @@ impl ObjectStorePublisher {
             .map_err(PublisherError::NonRetryable)
     }
 }
+
+type FailedMessages = Vec<(CanonicalMessage, PublisherError)>;
+/// An encoded object body with the source range it covers.
+type EncodedRange = (SourcePartition, u64, u64, Vec<u8>);
 
 /// Converts Unix-epoch milliseconds (UTC) to a `(year, month, day)` civil date using
 /// Howard Hinnant's `civil_from_days` algorithm — avoids a date-crate dependency.
@@ -723,22 +771,16 @@ impl MessagePublisher for ObjectStorePublisher {
         if self.name_by == NameBy::SourcePosition {
             return self.send_batch_by_source_position(messages).await;
         }
-        let mut body = ObjectBody::default();
-        let mut failed = Vec::new();
-        for mut msg in messages {
-            msg.strip_source_metadata();
-            if let Err(e) = body.push(&msg, &self.format, &self.delimiter, &self.csv) {
-                failed.push((msg, PublisherError::NonRetryable(e)));
-            }
-        }
-        if body.is_empty() {
+        let (body, failed) = self
+            .off_runtime(move |publisher| publisher.encode_batch(messages))
+            .await??;
+        let Some(body) = body else {
             // Every message failed to encode; nothing to write.
             return Ok(SentBatch::Partial {
                 responses: None,
                 failed,
             });
-        }
-        let body = self.encode_object_body(body)?;
+        };
         let key = self.next_key();
         self.write_object(&key, body, false).await?;
         trace!(key = %key, "Wrote object to object store");

@@ -10,26 +10,241 @@
 use crate::models::Compression;
 use crate::CanonicalMessage;
 use anyhow::{anyhow, Context};
-use arrow_json::reader::{infer_json_schema_from_iterator, ReaderBuilder};
+use arrow_json::reader::{infer_json_schema, infer_json_schema_from_iterator, ReaderBuilder};
 use arrow_json::writer::{LineDelimited, WriterBuilder};
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder};
 use parquet::arrow::ArrowWriter;
 use parquet::basic::{Compression as ParquetCompression, GzipLevel, ZstdLevel};
 use parquet::file::properties::WriterProperties;
+use serde::de::{DeserializeSeed, Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use std::sync::Arc;
-
-/// Parses one payload as a Parquet row; anything but a JSON object is rejected.
-pub(crate) fn parse_row(payload: &[u8]) -> anyhow::Result<serde_json::Value> {
-    let value: serde_json::Value =
-        serde_json::from_slice(payload).context("parquet row payload is not valid JSON")?;
-    if !value.is_object() {
-        return Err(anyhow!("parquet row payload must be a JSON object"));
-    }
-    Ok(value)
-}
 
 /// Largest integer magnitude an `f64` holds exactly.
 const F64_EXACT_INT: u64 = 1 << 53;
+
+/// Rows whose schema the fast path decodes the whole batch with.
+const SAMPLE_ROWS: usize = 1024;
+
+const NULL: u8 = 1;
+const BOOL: u8 = 1 << 1;
+const INT: u8 = 1 << 2;
+const FLOAT: u8 = 1 << 3;
+const STR: u8 = 1 << 4;
+/// An object, an array, or an integer beyond `i64`.
+const OTHER: u8 = 1 << 5;
+/// An integer beyond [`F64_EXACT_INT`].
+const BIG_INT: u8 = 1 << 6;
+
+/// The JSON-object payloads of one Parquet body, kept as NDJSON bytes.
+///
+/// A push validates the payload without building a tree and notes the kinds of value its
+/// top-level fields hold. A batch of scalars whose kinds the first [`SAMPLE_ROWS`] already
+/// show is decoded straight from the bytes with the schema inferred from that sample, which
+/// is the schema the whole batch infers. Any other batch goes through [`encode_rows`].
+#[derive(Default)]
+pub(crate) struct RowBuffer {
+    ndjson: Vec<u8>,
+    rows: usize,
+    fields: Vec<(String, u8)>,
+    /// Byte length and field kinds once [`SAMPLE_ROWS`] rows are in.
+    sample: Option<(usize, Vec<u8>)>,
+}
+
+impl RowBuffer {
+    /// Adds one payload as a row; anything but a JSON object is rejected and adds none.
+    pub(crate) fn push(&mut self, payload: &[u8]) -> anyhow::Result<()> {
+        let known = self.fields.len();
+        let mut de = serde_json::Deserializer::from_slice(payload);
+        if let Err(e) = de
+            .deserialize_map(RowKinds(&mut self.fields))
+            .and_then(|()| de.end())
+        {
+            self.fields.truncate(known);
+            return Err(if e.is_data() {
+                anyhow!("parquet row payload must be a JSON object")
+            } else {
+                anyhow!(e).context("parquet row payload is not valid JSON")
+            });
+        }
+        let payload = payload.trim_ascii();
+        if payload.iter().any(|b| matches!(b, b'\n' | b'\r')) {
+            // Valid JSON has line breaks only as whitespace, which the schema sample reads by line.
+            self.ndjson.extend(payload.iter().map(|&b| {
+                if matches!(b, b'\n' | b'\r') {
+                    b' '
+                } else {
+                    b
+                }
+            }));
+        } else {
+            self.ndjson.extend_from_slice(payload);
+        }
+        self.ndjson.push(b'\n');
+        self.rows += 1;
+        if self.rows == SAMPLE_ROWS {
+            let kinds = self.fields.iter().map(|(_, kinds)| *kinds).collect();
+            self.sample = Some((self.ndjson.len(), kinds));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.rows == 0
+    }
+
+    /// Encodes the rows into one Parquet body. `compression` picks the column codec.
+    pub(crate) fn encode(&self, compression: Compression) -> anyhow::Result<Vec<u8>> {
+        if let Some(batch) = self.decode_scalars() {
+            return write_batch(&batch, compression);
+        }
+        let rows = serde_json::Deserializer::from_slice(&self.ndjson)
+            .into_iter()
+            .collect::<Result<Vec<serde_json::Value>, _>>()?;
+        encode_rows(&rows, compression)
+    }
+
+    fn decode_scalars(&self) -> Option<arrow_array::RecordBatch> {
+        let sampled = |i: usize| match &self.sample {
+            Some((_, kinds)) => kinds.get(i).copied(),
+            None => Some(self.fields[i].1),
+        };
+        let fits = self.fields.iter().enumerate().all(|(i, (_, kinds))| {
+            let lossy = kinds & FLOAT != 0 && kinds & BIG_INT != 0;
+            kinds & OTHER == 0
+                && !lossy
+                && sampled(i).is_some_and(|seen| (seen ^ kinds) & !BIG_INT == 0)
+        });
+        if !fits {
+            return None;
+        }
+        let end = self
+            .sample
+            .as_ref()
+            .map_or(self.ndjson.len(), |(end, _)| *end);
+        let (schema, _) = infer_json_schema(&self.ndjson[..end], None).ok()?;
+        let mut decoder = ReaderBuilder::new(Arc::new(schema))
+            .with_batch_size(self.rows)
+            .with_coerce_primitive(true)
+            .with_strict_mode(true)
+            .build_decoder()
+            .ok()?;
+        if decoder.decode(&self.ndjson).ok()? != self.ndjson.len() {
+            return None;
+        }
+        decoder.flush().ok()?
+    }
+}
+
+/// Visits one JSON object, or-ing the kind of each top-level value into its field.
+struct RowKinds<'a>(&'a mut Vec<(String, u8)>);
+
+impl<'de> Visitor<'de> for RowKinds<'_> {
+    type Value = ();
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("a JSON object")
+    }
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
+        let mut hint = 0;
+        while let Some(field) = map.next_key_seed(FieldIndex {
+            fields: &mut *self.0,
+            hint,
+        })? {
+            self.0[field].1 |= map.next_value_seed(ValueKind)?;
+            hint = field + 1;
+        }
+        Ok(())
+    }
+}
+
+/// Resolves a key to its field, trying the slot after the previous key first.
+struct FieldIndex<'a> {
+    fields: &'a mut Vec<(String, u8)>,
+    hint: usize,
+}
+
+impl<'de> DeserializeSeed<'de> for FieldIndex<'_> {
+    type Value = usize;
+    fn deserialize<D: Deserializer<'de>>(self, de: D) -> Result<usize, D::Error> {
+        de.deserialize_str(self)
+    }
+}
+
+impl Visitor<'_> for FieldIndex<'_> {
+    type Value = usize;
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("an object key")
+    }
+    fn visit_str<E>(self, key: &str) -> Result<usize, E> {
+        if self
+            .fields
+            .get(self.hint)
+            .is_some_and(|(name, _)| name == key)
+        {
+            return Ok(self.hint);
+        }
+        Ok(match self.fields.iter().position(|(name, _)| name == key) {
+            Some(i) => i,
+            None => {
+                self.fields.push((key.to_owned(), 0));
+                self.fields.len() - 1
+            }
+        })
+    }
+}
+
+struct ValueKind;
+
+impl<'de> DeserializeSeed<'de> for ValueKind {
+    type Value = u8;
+    fn deserialize<D: Deserializer<'de>>(self, de: D) -> Result<u8, D::Error> {
+        de.deserialize_any(self)
+    }
+}
+
+impl<'de> Visitor<'de> for ValueKind {
+    type Value = u8;
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("a JSON value")
+    }
+    fn visit_unit<E>(self) -> Result<u8, E> {
+        Ok(NULL)
+    }
+    fn visit_bool<E>(self, _: bool) -> Result<u8, E> {
+        Ok(BOOL)
+    }
+    fn visit_i64<E>(self, v: i64) -> Result<u8, E> {
+        Ok(int_kind(v.unsigned_abs()))
+    }
+    fn visit_u64<E>(self, v: u64) -> Result<u8, E> {
+        Ok(if i64::try_from(v).is_err() {
+            OTHER
+        } else {
+            int_kind(v)
+        })
+    }
+    fn visit_f64<E>(self, _: f64) -> Result<u8, E> {
+        Ok(FLOAT)
+    }
+    fn visit_str<E>(self, _: &str) -> Result<u8, E> {
+        Ok(STR)
+    }
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<u8, A::Error> {
+        while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+        Ok(OTHER)
+    }
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<u8, A::Error> {
+        while seq.next_element::<IgnoredAny>()?.is_some() {}
+        Ok(OTHER)
+    }
+}
+
+fn int_kind(magnitude: u64) -> u8 {
+    if magnitude > F64_EXACT_INT {
+        INT | BIG_INT
+    } else {
+        INT
+    }
+}
 
 /// Encodes rows into one Parquet body. `compression` picks the column codec.
 ///
@@ -44,8 +259,14 @@ pub(crate) fn encode_rows(
         Err(first) => rows_to_batch(&stringify_conflicting_fields(rows))
             .with_context(|| format!("after stringifying conflicting fields ({first:#})"))?,
     };
-    let schema = batch.schema();
+    write_batch(&batch, compression)
+}
 
+fn write_batch(
+    batch: &arrow_array::RecordBatch,
+    compression: Compression,
+) -> anyhow::Result<Vec<u8>> {
+    let schema = batch.schema();
     let codec = match compression {
         Compression::None => ParquetCompression::UNCOMPRESSED,
         Compression::Gzip => ParquetCompression::GZIP(GzipLevel::default()),
@@ -54,7 +275,7 @@ pub(crate) fn encode_rows(
     };
     let props = WriterProperties::builder().set_compression(codec).build();
     let mut writer = ArrowWriter::try_new(Vec::new(), schema, Some(props))?;
-    writer.write(&batch)?;
+    writer.write(batch)?;
     Ok(writer.into_inner()?)
 }
 
@@ -302,6 +523,83 @@ mod tests {
         let rows: Vec<_> = (0..100).map(|i| serde_json::json!({"id": i})).collect();
         let body = encode_rows(&rows, Compression::None).unwrap();
         assert!(decode_rows(body, Some(64)).is_err());
+    }
+
+    fn buffer(rows: &[serde_json::Value]) -> RowBuffer {
+        let mut buffer = RowBuffer::default();
+        for row in rows {
+            buffer.push(&serde_json::to_vec(row).unwrap()).unwrap();
+        }
+        buffer
+    }
+
+    fn decoded(body: Vec<u8>) -> Vec<serde_json::Value> {
+        decode_rows(body, None)
+            .unwrap()
+            .iter()
+            .map(|msg| serde_json::from_slice(&msg.payload).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn scalar_rows_decode_from_bytes_as_the_full_path_would() {
+        let rows: Vec<_> = (0..SAMPLE_ROWS as i64 + 500)
+            .map(|i| {
+                let mut row = serde_json::json!({
+                    "id": i - 100,
+                    "amount": i as f64 + 0.25,
+                    "name": format!("c\"{i}\n\u{e9}"),
+                    "paid": i % 2 == 0,
+                });
+                if i % 7 == 0 {
+                    row["note"] = serde_json::Value::Null;
+                } else if i % 3 == 0 {
+                    row["note"] = "late".into();
+                }
+                row
+            })
+            .collect();
+        let buffer = buffer(&rows);
+        assert!(buffer.decode_scalars().is_some());
+        assert_eq!(
+            decoded(buffer.encode(Compression::Zstd).unwrap()),
+            decoded(encode_rows(&rows, Compression::Zstd).unwrap())
+        );
+    }
+
+    #[test]
+    fn a_kind_the_sample_did_not_show_is_not_truncated() {
+        let mut rows: Vec<_> = (0..SAMPLE_ROWS)
+            .map(|i| serde_json::json!({ "n": i }))
+            .collect();
+        rows.push(serde_json::json!({"n": 12.5}));
+        let buffer = buffer(&rows);
+        assert!(buffer.decode_scalars().is_none());
+        let rows = decoded(buffer.encode(Compression::None).unwrap());
+        assert_eq!(rows[SAMPLE_ROWS]["n"], 12.5);
+    }
+
+    #[test]
+    fn a_large_integer_after_sampled_floats_stays_exact() {
+        let big = (1u64 << 53) + 1;
+        let mut rows = vec![serde_json::json!({"n": 1.5}); SAMPLE_ROWS];
+        rows.push(serde_json::json!({ "n": big }));
+        let buffer = buffer(&rows);
+        assert!(buffer.decode_scalars().is_none());
+        let rows = decoded(buffer.encode(Compression::None).unwrap());
+        assert_eq!(rows[SAMPLE_ROWS]["n"], big.to_string());
+    }
+
+    #[test]
+    fn a_rejected_payload_adds_no_row() {
+        let mut buffer = RowBuffer::default();
+        assert!(buffer.push(b"[1]").is_err());
+        assert!(buffer.push(br#"{"x": "#).is_err());
+        let pretty = serde_json::to_vec_pretty(&serde_json::json!({"a": 1, "b": "x"})).unwrap();
+        buffer.push(&pretty).unwrap();
+        assert!(buffer.decode_scalars().is_some());
+        let rows = decoded(buffer.encode(Compression::None).unwrap());
+        assert_eq!(rows, vec![serde_json::json!({"a": 1, "b": "x"})]);
     }
 
     #[test]
