@@ -16,7 +16,7 @@ use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchR
 use parquet::arrow::ArrowWriter;
 use parquet::basic::{Compression as ParquetCompression, GzipLevel, ZstdLevel};
 use parquet::file::properties::WriterProperties;
-use serde::de::{DeserializeSeed, Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
+use serde::de::{DeserializeSeed, Deserializer, MapAccess, SeqAccess, Visitor};
 use std::sync::Arc;
 
 /// Largest integer magnitude an `f64` holds exactly.
@@ -48,15 +48,21 @@ pub(crate) struct RowBuffer {
     fields: Vec<(String, u8)>,
     /// Byte length and field kinds once [`SAMPLE_ROWS`] rows are in.
     sample: Option<(usize, Vec<u8>)>,
+    /// Field and kind of each value in the row being pushed, merged once it validates.
+    row: Vec<(usize, u8)>,
 }
 
 impl RowBuffer {
     /// Adds one payload as a row; anything but a JSON object is rejected and adds none.
     pub(crate) fn push(&mut self, payload: &[u8]) -> anyhow::Result<()> {
         let known = self.fields.len();
+        self.row.clear();
         let mut de = serde_json::Deserializer::from_slice(payload);
         if let Err(e) = de
-            .deserialize_map(RowKinds(&mut self.fields))
+            .deserialize_map(RowKinds {
+                fields: &mut self.fields,
+                row: &mut self.row,
+            })
             .and_then(|()| de.end())
         {
             self.fields.truncate(known);
@@ -65,6 +71,13 @@ impl RowBuffer {
             } else {
                 anyhow!(e).context("parquet row payload is not valid JSON")
             });
+        }
+        self.row.sort_unstable_by_key(|(field, _)| *field);
+        let mut previous = None;
+        for &(field, kind) in &self.row {
+            // A repeated key sends the batch to the full path, which keeps the last value.
+            self.fields[field].1 |= if previous == Some(field) { OTHER } else { kind };
+            previous = Some(field);
         }
         let payload = payload.trim_ascii();
         if payload.iter().any(|b| matches!(b, b'\n' | b'\r')) {
@@ -135,8 +148,11 @@ impl RowBuffer {
     }
 }
 
-/// Visits one JSON object, or-ing the kind of each top-level value into its field.
-struct RowKinds<'a>(&'a mut Vec<(String, u8)>);
+/// Visits one JSON object, recording the kind of each top-level value against its field.
+struct RowKinds<'a> {
+    fields: &'a mut Vec<(String, u8)>,
+    row: &'a mut Vec<(usize, u8)>,
+}
 
 impl<'de> Visitor<'de> for RowKinds<'_> {
     type Value = ();
@@ -146,10 +162,10 @@ impl<'de> Visitor<'de> for RowKinds<'_> {
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
         let mut hint = 0;
         while let Some(field) = map.next_key_seed(FieldIndex {
-            fields: &mut *self.0,
+            fields: &mut *self.fields,
             hint,
         })? {
-            self.0[field].1 |= map.next_value_seed(ValueKind)?;
+            self.row.push((field, map.next_value_seed(ValueKind)?));
             hint = field + 1;
         }
         Ok(())
@@ -228,12 +244,16 @@ impl<'de> Visitor<'de> for ValueKind {
     fn visit_str<E>(self, _: &str) -> Result<u8, E> {
         Ok(STR)
     }
+    // Nested values are walked like top-level ones, not skipped, so they get the string,
+    // number and depth checks a `serde_json::Value` parse applies.
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<u8, A::Error> {
-        while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+        while map.next_key_seed(ValueKind)?.is_some() {
+            map.next_value_seed(ValueKind)?;
+        }
         Ok(OTHER)
     }
     fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<u8, A::Error> {
-        while seq.next_element::<IgnoredAny>()?.is_some() {}
+        while seq.next_element_seed(ValueKind)?.is_some() {}
         Ok(OTHER)
     }
 }
@@ -600,6 +620,40 @@ mod tests {
         assert!(buffer.decode_scalars().is_some());
         let rows = decoded(buffer.encode(Compression::None).unwrap());
         assert_eq!(rows, vec![serde_json::json!({"a": 1, "b": "x"})]);
+    }
+
+    #[test]
+    fn a_payload_rejected_after_its_map_leaves_no_kind_behind() {
+        let mut buffer = RowBuffer::default();
+        buffer.push(br#"{"n":1}"#).unwrap();
+        assert!(buffer.push(br#"{"n":1.5} trailing"#).is_err());
+        for i in 1..SAMPLE_ROWS {
+            buffer.push(format!(r#"{{"n":{i}}}"#).as_bytes()).unwrap();
+        }
+        buffer.push(br#"{"n":12.5}"#).unwrap();
+        let rows = decoded(buffer.encode(Compression::None).unwrap());
+        assert_eq!(rows[SAMPLE_ROWS]["n"], 12.5);
+    }
+
+    #[test]
+    fn a_repeated_key_keeps_its_last_value() {
+        let mut buffer = RowBuffer::default();
+        buffer.push(br#"{"n":"x","n":1}"#).unwrap();
+        assert!(buffer.decode_scalars().is_none());
+        let rows = decoded(buffer.encode(Compression::None).unwrap());
+        assert_eq!(rows, vec![serde_json::json!({"n": 1})]);
+    }
+
+    #[test]
+    fn an_invalid_nested_value_is_rejected_on_push() {
+        let mut buffer = RowBuffer::default();
+        buffer.push(br#"{"id":1}"#).unwrap();
+        assert!(buffer.push(b"{\"a\":{\"b\":\"\xff\"}}").is_err());
+        assert!(buffer.push(br#"{"a":[1e400]}"#).is_err());
+        let deep = format!(r#"{{"a":{}{}}}"#, "[".repeat(200), "]".repeat(200));
+        assert!(buffer.push(deep.as_bytes()).is_err());
+        let rows = decoded(buffer.encode(Compression::None).unwrap());
+        assert_eq!(rows, vec![serde_json::json!({"id": 1})]);
     }
 
     #[test]

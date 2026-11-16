@@ -48,6 +48,13 @@ Both packages install the same import path, `mq_bridge`:
 
 pip picks the right wheel for your platform, so you don't need a marker or a manual choice. Kafka, SQLx, gRPC and static IBM MQ don't build on musl/Alpine and Windows arm64; calling them there raises a clear runtime error, and everything else works the same. Install `mq-bridge-basic` only if you want the lean build on a full-support system too. Memory and file endpoints are always present.
 
+On conda, the package is `mq-bridge-py` on conda-forge
+([feedstock](https://github.com/conda-forge/mq-bridge-feedstock)), with the same import path:
+
+```bash
+conda install -c conda-forge mq-bridge-py   # or: pixi add mq-bridge-py
+```
+
 ## Quick start
 
 ### Publish a message, with no route and no config file
