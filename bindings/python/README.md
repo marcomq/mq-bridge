@@ -105,6 +105,8 @@ with Consumer.from_config({"nats": {"subject": "orders", "stream": "orders", "ur
         consumer.commit()                 # ack only after handling
 ```
 
+If parsing dominates your handler, `orjson.loads(message.payload)` decodes ~1.5x faster than `message.json()` (1M 106-byte records: 2.5M/s vs 1.7M/s). End to end on a Kafka topic the gain was 0–10 %, since at ~900k records/s the parse is no longer the bottleneck.
+
 ## Performance
 
 The Python package is a thin layer over the same engine as the Rust crate and the `mqb` CLI. Python touches only your handler; connections, batching, concurrency and JSON stay in Rust, outside the GIL.
@@ -136,6 +138,39 @@ One `send_batch()` call from plain synchronous code sends ~8x what `aiohttp` rea
 | mq-bridge `Route` + handler | 21,041 req/s | **84,078 req/s** | **109,606 req/s** |
 
 Under load, mq-bridge serves ~2–2.5x the fastest asyncio framework and ~5x FastAPI. The application logic is Python in every case; mq-bridge parses and serializes the JSON in Rust, outside the GIL. At a single connection the asyncio frameworks are on par.
+
+**Consuming Kafka into dicts** (1M JSON records of ~106 B on 4 partitions, local broker, every record parsed into a `dict`; mq-bridge 1.6.1, median of 3):
+
+| Consumer | records/s |
+| :--- | ---: |
+| `aiokafka` `getmany()` + `json.loads` (uvloop) | 293,000 |
+| `confluent-kafka` `consume(1000)` + `json.loads` | 469,000 |
+| mq-bridge `Consumer.poll(1000)` + `message.json()` | **845,000** |
+| mq-bridge `Route` + batch handler + `message.json()` | **857,000** |
+
+~1.8x `confluent-kafka` and ~2.9x `aiokafka`, with no tuning. The `confluent-kafka` row already sets `fetch.queue.backoff.ms=10`; with librdkafka's default it stalls at 159,000 records/s. Swapping `json.loads` for `orjson.loads` brings `confluent-kafka` level with mq-bridge.
+
+**Loading JSONL into Postgres** (1M rows, 6 columns; mq-bridge 1.6.1, median of 3):
+
+| Loader | rows/s |
+| :--- | ---: |
+| psycopg 3 `executemany` (pipelined) | 64,000 |
+| asyncpg `copy_records_to_table` | 246,000 |
+| psycopg 3 `COPY` + `json.loads` | 263,000 |
+| psycopg 3 `COPY` + `orjson.loads` | 349,000 |
+| mq-bridge `Route` file → sqlx, `bulk_copy`, `batch_size: 5000`, `concurrency: 4` | **696,000** |
+
+One process and one config line give ~2x the fastest single-connection Python loader: the route keeps 4 `COPY` statements in flight from Rust while Python stays idle. Splitting the file over 4 processes by hand gets psycopg into the same range (520,000 rows/s in a separate run where the route reached 657,000). Batching and concurrency are explained under [Fast bulk loads](https://github.com/marcomq/mq-bridge/blob/main/docs/book/connectors/postgres.md#fast-bulk-loads).
+
+```python
+Route.from_config({
+    "input": {"file": {"path": "readings.jsonl", "format": "payload"}},
+    "output": {"sqlx": {"url": PG_URL, "table": "readings", "columns": "auto", "bulk_copy": True}},
+    "batch_size": 5000,
+    "concurrency": 4,
+    "exit_on_empty": True,
+}).run()
+```
 
 **Data movement** (engine figures, measured through the `mqb` CLI on the same machine as each baseline; a Python route that stays in config runs the same engine code):
 
@@ -450,6 +485,15 @@ HTTP sending, mq-bridge `Publisher` vs `requests`, `httpx` and `aiohttp`, agains
 
 ```bash
 uv run python analysis/bench_http_send.py --concurrency 1,16,64 --duration 5
+```
+
+Kafka consume and Postgres load, against the Compose services in `tests/integration/docker-compose/` (`kafka.yml`, `postgres.yml`); needs `confluent-kafka`, `aiokafka`, `uvloop`, `orjson`, `psycopg` and `asyncpg`:
+
+```bash
+python analysis/bench_kafka_consume.py seed --records 1000000
+python analysis/bench_kafka_consume.py run --records 1000000 --repeats 3
+python analysis/bench_pg_load.py gen --rows 1000000 --file /tmp/readings.jsonl
+python analysis/bench_pg_load.py run --file /tmp/readings.jsonl --repeats 3
 ```
 
 Run the scripts from a directory where `import mq_bridge` resolves to the build you want to measure. In `bindings/python/` that is the in-tree package, which is only current after `maturin develop --release`.
