@@ -832,7 +832,9 @@ async fn postgres_cdc_consumer(
     }
     let plan = postgres_backfill_sequence(route_name, cfg, mode, source_metadata).await?;
     Ok(Box::new(
-        sequence::SequenceConsumer::new(route_name, &plan).await?,
+        sequence::SequenceConsumer::new(route_name, &plan)
+            .await?
+            .with_cdc_values(),
     ))
 }
 

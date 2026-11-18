@@ -2727,8 +2727,18 @@ struct JsonColumn {
     /// `"name":` — quoted, escaped and colon-terminated, ready to memcpy into a payload.
     key: Vec<u8>,
     ordinal: usize,
+    render: ColumnRender,
+}
+
+/// How a column's value becomes JSON, beyond the native `Any` decode.
+#[derive(Clone, Copy, PartialEq)]
+enum ColumnRender {
+    Native,
     /// The text value is already JSON and is embedded as it is.
-    raw_json: bool,
+    RawJson,
+    /// Postgres text of the given type OID, rendered as the `postgres_cdc` stream does.
+    #[cfg(feature = "postgres-cdc")]
+    PgText(u32),
 }
 
 /// The column layout of a batch, resolved once from its first row.
@@ -2749,19 +2759,22 @@ impl JsonRowSchema {
                 JsonColumn {
                     key,
                     ordinal: col.ordinal(),
-                    raw_json: false,
+                    render: ColumnRender::Native,
                 }
             })
             .collect();
         Self { columns }
     }
 
-    fn mark_raw_json(&mut self, row: &sqlx::any::AnyRow, names: &[String]) {
-        if names.is_empty() {
+    fn mark_renders(&mut self, row: &sqlx::any::AnyRow, renders: &[(String, ColumnRender)]) {
+        if renders.is_empty() {
             return;
         }
         for (col, meta) in self.columns.iter_mut().zip(row.columns()) {
-            col.raw_json = names.iter().any(|n| n == meta.name());
+            col.render = renders
+                .iter()
+                .find(|(n, _)| n == meta.name())
+                .map_or(ColumnRender::Native, |(_, r)| *r);
         }
     }
 
@@ -2780,12 +2793,29 @@ impl JsonRowSchema {
                 buf.push(b',');
             }
             buf.extend_from_slice(&col.key);
-            if col.raw_json {
-                match row.try_get::<Option<&str>, _>(col.ordinal) {
-                    Ok(Some(json)) if !json.is_empty() => buf.extend_from_slice(json.as_bytes()),
-                    _ => buf.extend_from_slice(b"null"),
+            match col.render {
+                ColumnRender::Native => {}
+                ColumnRender::RawJson => {
+                    match row.try_get::<Option<&str>, _>(col.ordinal) {
+                        Ok(Some(json)) if !json.is_empty() => {
+                            buf.extend_from_slice(json.as_bytes())
+                        }
+                        _ => buf.extend_from_slice(b"null"),
+                    }
+                    continue;
                 }
-                continue;
+                #[cfg(feature = "postgres-cdc")]
+                ColumnRender::PgText(oid) => {
+                    match row.try_get::<Option<&str>, _>(col.ordinal) {
+                        Ok(Some(text)) => {
+                            let value = crate::endpoints::postgres::text_to_json(oid, text)
+                                .unwrap_or_else(|_| text.into());
+                            let _ = serde_json::to_writer(&mut *buf, &value);
+                        }
+                        _ => buf.extend_from_slice(b"null"),
+                    }
+                    continue;
+                }
             }
             let kind = value_kind(row, col.ordinal).unwrap_or(sqlx::any::AnyTypeInfoKind::Null);
             write_json_value(row, col.ordinal, kind, buf);
@@ -2971,7 +3001,8 @@ const SQLITE_COLUMN_TYPES_SQL: &str =
 /// `$1::regclass` resolves the (optionally schema-qualified) table name against the current
 /// search_path. `pg_attribute.attname`/`pg_type.typname` are Postgres `name`-typed columns,
 /// which `Any` cannot decode directly (distinct from `text`), so cast them explicitly.
-const PG_COLUMN_TYPES_SQL: &str = "SELECT a.attname::text AS name, t.typname::text AS typname \
+const PG_COLUMN_TYPES_SQL: &str = "SELECT a.attname::text AS name, t.typname::text AS typname, \
+     a.atttypid::int8 AS oid \
      FROM pg_attribute a JOIN pg_type t ON t.oid = a.atttypid \
      WHERE a.attrelid = $1::regclass AND a.attnum > 0 AND NOT a.attisdropped \
      ORDER BY a.attnum";
@@ -3028,7 +3059,7 @@ async fn build_cursor_projection(
     driver_name: &str,
     table: &str,
     timestamps: crate::models::SqlTimestamps,
-) -> (String, Vec<String>) {
+) -> (String, Vec<(String, ColumnRender)>) {
     let star = || ("*".to_string(), Vec::new());
     type SafeFn = fn(&str) -> bool;
     type CastFn = fn(&str) -> String;
@@ -3085,8 +3116,10 @@ async fn build_cursor_projection(
             return star();
         }
     };
+    #[cfg(feature = "postgres-cdc")]
+    let cdc = driver_name == "PostgreSQL" && crate::endpoints::postgres::cdc_values();
     let mut parts = Vec::with_capacity(rows.len());
-    let mut raw_json = Vec::new();
+    let mut renders = Vec::new();
     for row in &rows {
         let name: String = match row.try_get("name") {
             Ok(n) => n,
@@ -3094,23 +3127,35 @@ async fn build_cursor_projection(
         };
         let typname: String = row.try_get("typname").unwrap_or_default();
         let ident = quote_ident_for(driver_name, &name);
+        #[cfg(feature = "postgres-cdc")]
+        if cdc
+            && !matches!(
+                typname.as_str(),
+                "bool" | "int2" | "int4" | "int8" | "text" | "varchar" | "json" | "jsonb"
+            )
+        {
+            let oid: i64 = row.try_get("oid").unwrap_or_default();
+            parts.push(cast(&ident));
+            renders.push((name, ColumnRender::PgText(oid as u32)));
+            continue;
+        }
         if is_safe(&typname) {
             parts.push(ident);
         } else if driver_name == "PostgreSQL" && matches!(typname.as_str(), "json" | "jsonb") {
             parts.push(cast(&ident));
-            raw_json.push(name);
+            renders.push((name, ColumnRender::RawJson));
         } else if let Some(rendered) = pg_rfc3339(driver_name, &typname, &ident, timestamps) {
             parts.push(rendered);
         } else if driver_name == "PostgreSQL" && typname.starts_with('_') {
             // Array types: the text form is `{1,2}`, so render them as a JSON array.
             parts.push(format!("to_jsonb({ident})::text AS {ident}"));
-            raw_json.push(name);
+            renders.push((name, ColumnRender::RawJson));
         } else {
             // Cast to a string type so `Any` can decode it; keep the column name via alias.
             parts.push(cast(&ident));
         }
     }
-    (parts.join(", "), raw_json)
+    (parts.join(", "), renders)
 }
 
 /// The projection for a Postgres timestamp column under `timestamps: rfc3339`.
@@ -3413,7 +3458,7 @@ pub struct SqlxCursorReader {
     position: Arc<Mutex<CursorPosition<SqlCursor>>>,
     run_position: Option<(crate::route::RunPositions, String)>,
     /// Columns the projection renders as JSON text (Postgres `json`/`jsonb` and arrays).
-    raw_json_columns: Vec<String>,
+    column_renders: Vec<(String, ColumnRender)>,
     /// Page queries, built once: only the bound cursor and limit vary between polls.
     sql_first: String,
     sql_next: String,
@@ -3577,7 +3622,7 @@ impl SqlxCursorReader {
         };
         info!(table = %config.table, cursor_id = ?config.cursor_id, has_checkpoint = %last_value.is_some(), "SQLx cursor reader initialized");
 
-        let (projection, raw_json_columns) =
+        let (projection, column_renders) =
             build_cursor_projection(&pool, &driver_name, &config.table, config.timestamps).await;
 
         let lower_bound = positional_placeholder(&driver_name, 1);
@@ -3651,7 +3696,7 @@ impl SqlxCursorReader {
                 epoch: 0,
             })),
             run_position,
-            raw_json_columns,
+            column_renders,
             source_metadata,
         })
     }
@@ -3787,7 +3832,7 @@ impl MessageConsumer for SqlxCursorReader {
             // values, not columns).
             let cursor_col = resolve_cursor_column(&rows[0], &self.cursor_column);
             let mut schema = JsonRowSchema::from_row(&rows[0]);
-            schema.mark_raw_json(&rows[0], &self.raw_json_columns);
+            schema.mark_renders(&rows[0], &self.column_renders);
 
             // Extract (cursor, message) for every fetched row.
             let mut fetched: Vec<(SqlCursor, CanonicalMessage)> = Vec::with_capacity(rows.len());

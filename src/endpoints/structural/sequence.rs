@@ -74,6 +74,9 @@ pub struct SequenceConsumer {
     settle_timeout: Duration,
     /// A phase ended with deliveries unconfirmed: the marker is not advanced any more.
     unconfirmed: bool,
+    /// The backfill `postgres_cdc` expands to: phases read values as the CDC stream renders them.
+    #[cfg(feature = "postgres-cdc")]
+    cdc_values: bool,
 }
 
 impl SequenceConsumer {
@@ -151,7 +154,15 @@ impl SequenceConsumer {
             unsettled: Arc::default(),
             settle_timeout: SETTLE_TIMEOUT,
             unconfirmed: false,
+            #[cfg(feature = "postgres-cdc")]
+            cdc_values: false,
         })
+    }
+
+    #[cfg(feature = "postgres-cdc")]
+    pub(crate) fn with_cdc_values(mut self) -> Self {
+        self.cdc_values = true;
+        self
     }
 
     async fn load_phase(
@@ -211,20 +222,31 @@ impl SequenceConsumer {
                     endpoint.endpoint_type.name()
                 ))
             })?;
-            let mut consumer =
-                crate::endpoints::create_consumer_from_route(&self.route_name, endpoint)
-                    .await
-                    .map_err(|e| {
-                        // Past the static check a failure is taken as transient, so the
-                        // route reconnects (STRUCT-06); `InvalidConfig` still stops it.
-                        ConsumerError::from(e.context(format!(
-                            "[route:{}] sequence phase {} of {} ({}) failed to start",
-                            self.route_name,
-                            self.phase + 1,
-                            self.endpoints.len(),
-                            endpoint.endpoint_type.name()
-                        )))
-                    })?;
+            let created = crate::endpoints::create_consumer_from_route(&self.route_name, endpoint);
+            #[cfg(feature = "postgres-cdc")]
+            let created = {
+                let cdc = self.cdc_values;
+                async move {
+                    if cdc {
+                        crate::endpoints::postgres::CDC_VALUES
+                            .scope((), created)
+                            .await
+                    } else {
+                        created.await
+                    }
+                }
+            };
+            let mut consumer = created.await.map_err(|e| {
+                // Past the static check a failure is taken as transient, so the
+                // route reconnects (STRUCT-06); `InvalidConfig` still stops it.
+                ConsumerError::from(e.context(format!(
+                    "[route:{}] sequence phase {} of {} ({}) failed to start",
+                    self.route_name,
+                    self.phase + 1,
+                    self.endpoints.len(),
+                    endpoint.endpoint_type.name()
+                )))
+            })?;
             let drain = if self.is_last_phase() {
                 self.exit_on_empty
             } else {

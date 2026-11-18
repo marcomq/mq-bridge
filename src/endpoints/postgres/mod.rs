@@ -44,6 +44,17 @@ use pgoutput::messages::{
 };
 use pgoutput::registry::RelationRegistry;
 use pgoutput::tuple_to_json_object;
+pub(crate) use pgoutput::values::text_to_json;
+
+tokio::task_local! {
+    /// Set while a `capture_all`/`snapshot` backfill phase is built: its rows then render
+    /// values as the CDC stream does, so a column reads the same in both phases.
+    pub(crate) static CDC_VALUES: ();
+}
+
+pub(crate) fn cdc_values() -> bool {
+    CDC_VALUES.try_with(|_| ()).is_ok()
+}
 use state::{format_lsn, parse_lsn};
 
 /// A logical-replication CDC consumer for a single Postgres publication + slot.

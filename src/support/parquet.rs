@@ -189,7 +189,8 @@ impl<'de> Visitor<'de> for RowKinds<'_> {
             } else {
                 0
             };
-            self.row.push((field, map.next_value_seed(ValueKind)? | raw));
+            self.row
+                .push((field, map.next_value_seed(ValueKind)? | raw));
             hint = field + 1;
         }
         Ok(())

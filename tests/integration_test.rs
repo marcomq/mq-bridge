@@ -315,6 +315,16 @@ async fn test_postgres_cdc_dates_ignore_the_role_datestyle() {
 #[cfg(all(feature = "postgres-cdc", feature = "test-utils"))]
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires docker compose (postgres with wal_level=logical)"]
+async fn test_postgres_cdc_capture_all_snapshot_matches_cdc_values() {
+    if should_run("postgres_cdc") || should_run("postgres") {
+        integration::postgres_cdc::test_postgres_cdc_capture_all_snapshot_matches_cdc_values()
+            .await;
+    }
+}
+
+#[cfg(all(feature = "postgres-cdc", feature = "test-utils"))]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires docker compose (postgres with wal_level=logical)"]
 async fn test_postgres_cdc_key_change() {
     if should_run("postgres_cdc") || should_run("postgres") {
         integration::postgres_cdc::test_postgres_cdc_key_change().await;

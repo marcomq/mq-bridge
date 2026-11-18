@@ -2179,7 +2179,9 @@ input:
 ```
 
 `postgres_cdc: consume: capture_all` **expands to exactly the `sequence` below** — it reads the
-publication's tables, takes each table's primary key as the cursor, and appends the CDC phase. Use
+publication's tables, takes each table's primary key as the cursor, and appends the CDC phase. One
+difference: the expanded back fill renders values as the CDC phase does (bytea as base64, `NaN` as a
+string, arrays element by element), while a hand-written `sqlx` phase keeps the `sqlx` rendering. Use
 the explicit form only when that expansion cannot serve you:
 
 | Situation | Spelling |

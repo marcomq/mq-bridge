@@ -2,6 +2,15 @@
 
 All notable changes to `mq-bridge`. Newest first.
 
+## Unreleased
+
+### Fixed
+
+- **`http`: a decimal `message-id` header is read as decimal.** `42` became 66 because
+  unprefixed hex was tried first. IDs are now read as on `websocket` and `grpc` (UUID,
+  `0x` hex, decimal), with unprefixed hex as the last fallback, so `ff` still reads as 255.
+  A client that sends all-digit hex IDs without `0x` gets a different id now.
+
 ## 1.6.1
 
 ### Changed
