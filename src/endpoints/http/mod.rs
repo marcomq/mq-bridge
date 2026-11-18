@@ -7,6 +7,7 @@ use self::stream::{
     handle_streamable_request, stream_request_format, stream_response_format,
     HttpReceiveStreamConfig, PublishResponseStreamError,
 };
+use crate::canonical_message::parse_message_id;
 use crate::canonical_message::tracing_support::LazyMessageIds;
 use crate::models::{Compression, HttpConfig, HttpServerProtocol, TlsConfig};
 use crate::support::compression_pool::{gzip_http, lz4_pooled, zstd_pooled};
@@ -40,7 +41,6 @@ use std::sync::{Arc, Mutex, OnceLock};
 use tokio::net::{TcpListener, TcpSocket};
 use tokio_rustls::TlsAcceptor;
 use tracing::{debug, info, trace, warn};
-use uuid::Uuid;
 
 type HttpSourceMessage = (CanonicalMessage, HttpReply);
 
@@ -1513,88 +1513,29 @@ async fn handle_request_internal(
         .await
         .map_err(|e| anyhow!(e))?;
 
-    if let Some((expected_user, expected_pass)) = configured_basic_auth(state.basic_auth.as_ref()) {
-        if let Some(auth_header) = req.headers().get("authorization") {
-            match auth_header.to_str() {
-                Ok(auth_str) => {
-                    if let Some(encoded) = auth_str.strip_prefix("Basic ") {
-                        if let Ok(decoded) = general_purpose::STANDARD.decode(encoded) {
-                            if let Ok(credentials) = String::from_utf8(decoded) {
-                                let (user, pass) = if let Some(colon_pos) = credentials.find(':') {
-                                    (&credentials[..colon_pos], &credentials[colon_pos + 1..])
-                                } else {
-                                    ("", "")
-                                };
-                                // Constant-time compares (and non-short-circuiting `&`) so
-                                // response timing can't reveal how much of the credential matched.
-                                let user_ok =
-                                    constant_time_eq(user.as_bytes(), expected_user.as_bytes());
-                                let pass_ok =
-                                    constant_time_eq(pass.as_bytes(), expected_pass.as_bytes());
-                                if user_ok & pass_ok {
-                                    // Auth successful, proceed
-                                } else {
-                                    return Ok(text_error_response(
-                                        StatusCode::UNAUTHORIZED,
-                                        "Invalid credentials",
-                                        accepts_text,
-                                        None,
-                                    ));
-                                }
-                            } else {
-                                return Ok(text_error_response(
-                                    StatusCode::BAD_REQUEST,
-                                    "Invalid authorization header encoding",
-                                    accepts_text,
-                                    None,
-                                ));
-                            }
-                        } else {
-                            return Ok(text_error_response(
-                                StatusCode::BAD_REQUEST,
-                                "Invalid base64 encoding in authorization header",
-                                accepts_text,
-                                None,
-                            ));
-                        }
-                    } else {
-                        return Ok(text_error_response(
-                            StatusCode::UNAUTHORIZED,
-                            "Missing Basic authentication scheme",
-                            accepts_text,
-                            Some(&basic_auth_challenge_headers()),
-                        ));
-                    }
-                }
-                Err(_) => {
-                    return Ok(text_error_response(
-                        StatusCode::BAD_REQUEST,
-                        "Invalid authorization header encoding",
-                        accepts_text,
-                        None,
-                    ));
-                }
-            }
-        } else {
+    if let Some((user, pass)) = configured_basic_auth(state.basic_auth.as_ref()) {
+        if let Err((status, reason, challenge)) = check_basic_auth(req.headers(), user, pass) {
+            let headers = challenge.then(basic_auth_challenge_headers);
             return Ok(text_error_response(
-                StatusCode::UNAUTHORIZED,
-                "Missing authorization header",
+                status,
+                reason,
                 accepts_text,
-                Some(&basic_auth_challenge_headers()),
+                headers.as_ref(),
             ));
         }
     }
 
     let (parts, body) = req.into_parts();
 
+    // The encoding to use for the response, gated on what the client advertised it can decode.
+    let response_compression = if state.compression_enabled {
+        negotiate_response_compression(&parts.headers)
+    } else {
+        Compression::None
+    };
     // Pure-echo fast path: skip metadata construction; the response is fully
     // determined by the request. Gate is header-only so the body is untouched.
     if inline_echo_fast_path_applies(&state, &parts.headers) {
-        let response_compression = if state.compression_enabled {
-            negotiate_response_compression(&parts.headers)
-        } else {
-            Compression::None
-        };
         return inline_echo_response(
             &state,
             &parts.headers,
@@ -1615,25 +1556,10 @@ async fn handle_request_internal(
         conn_info: &conn_info,
     };
 
-    let mut message_id = None;
-    if let Some(header_value) = parts.headers.get(state.message_id_header.as_str()) {
-        if let Ok(s) = header_value.to_str() {
-            if let Ok(uuid) = Uuid::parse_str(s) {
-                message_id = Some(uuid.as_u128());
-            } else if let Ok(n) = u128::from_str_radix(s.trim_start_matches("0x"), 16) {
-                message_id = Some(n);
-            } else if let Ok(n) = s.parse::<u128>() {
-                message_id = Some(n);
-            }
-        }
-    }
-
-    // The encoding to use for the response, gated on what the client advertised it can decode.
-    let response_compression = if state.compression_enabled {
-        negotiate_response_compression(&parts.headers)
-    } else {
-        Compression::None
-    };
+    // Unprefixed hex is read only after decimal, so `42` stays 42.
+    let message_id = (parts.headers.get(state.message_id_header.as_str()))
+        .and_then(|value| value.to_str().ok())
+        .and_then(|s| parse_message_id(s).or_else(|| u128::from_str_radix(s, 16).ok()));
 
     // Extract metadata before consuming body
     let mut metadata = HashMap::with_capacity(parts.headers.len() + 6);
@@ -2338,6 +2264,48 @@ fn basic_auth_challenge_headers() -> HashMap<String, String> {
         "Basic realm=\"mq-bridge\"".to_string(),
     );
     headers
+}
+
+/// Checks the `authorization` header against the configured credentials. The error is the
+/// status, the reason and whether to send a `WWW-Authenticate` challenge.
+fn check_basic_auth(
+    headers: &hyper::HeaderMap,
+    user: &str,
+    pass: &str,
+) -> Result<(), (StatusCode, &'static str, bool)> {
+    let bad_encoding = (
+        StatusCode::BAD_REQUEST,
+        "Invalid authorization header encoding",
+        false,
+    );
+    let header = (headers.get("authorization")).ok_or((
+        StatusCode::UNAUTHORIZED,
+        "Missing authorization header",
+        true,
+    ))?;
+    let encoded = (header
+        .to_str()
+        .map_err(|_| bad_encoding)?
+        .strip_prefix("Basic "))
+    .ok_or((
+        StatusCode::UNAUTHORIZED,
+        "Missing Basic authentication scheme",
+        true,
+    ))?;
+    let decoded = general_purpose::STANDARD.decode(encoded).map_err(|_| {
+        let reason = "Invalid base64 encoding in authorization header";
+        (StatusCode::BAD_REQUEST, reason, false)
+    })?;
+    let credentials = String::from_utf8(decoded).map_err(|_| bad_encoding)?;
+    let (given_user, given_pass) = credentials.split_once(':').unwrap_or(("", ""));
+    // Constant-time compares (and non-short-circuiting `&`) so response timing can't reveal
+    // how much of the credential matched.
+    let user_ok = constant_time_eq(given_user.as_bytes(), user.as_bytes());
+    if user_ok & constant_time_eq(given_pass.as_bytes(), pass.as_bytes()) {
+        Ok(())
+    } else {
+        Err((StatusCode::UNAUTHORIZED, "Invalid credentials", false))
+    }
 }
 
 fn configured_basic_auth(basic_auth: Option<&(String, String)>) -> Option<(&str, &str)> {

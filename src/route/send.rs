@@ -354,20 +354,14 @@ pub(super) fn spawn_send(
 ) -> JoinHandle<SendTaskOutput> {
     let context = Arc::clone(context);
     tokio::spawn(async move {
+        // Sends never overlap, so no ticket is needed.
         let result = send_batch_and_commit(
-            &context.publisher,
+            &context,
             messages,
             commit,
-            context.has_retry_middleware,
-            context.has_dlq_middleware,
-            context.transient_failure_policy,
-            &context.err_tx,
-            context.commit_semaphore.as_ref(),
             &mut commit_tasks,
             &mut scratch,
-            context.drops.as_ref(),
-            context.sends.as_deref().map(|sends| (sends, 0)),
-            // Sends never overlap, so no ticket is needed.
+            0,
             &mut None,
         )
         .await;
@@ -375,22 +369,23 @@ pub(super) fn spawn_send(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Sends one batch and commits it; `slot` is the sender's index in the pending-sends report.
 pub(super) async fn send_batch_and_commit(
-    publisher: &Arc<dyn MessagePublisher>,
+    context: &SendContext,
     messages: Vec<crate::CanonicalMessage>,
     commit: BatchCommitFunc,
-    has_retry_middleware: bool,
-    has_dlq_middleware: bool,
-    transient_failure_policy: TransientPublishFailurePolicy,
-    err_tx: &Sender<anyhow::Error>,
-    commit_semaphore: Option<&Arc<tokio::sync::Semaphore>>,
     commit_tasks: &mut JoinSet<()>,
     scratch: &mut BatchScratch,
-    drops: Option<&Arc<RwLock<DropReport>>>,
-    send_slot: Option<(&PendingSends, usize)>,
+    slot: usize,
     ticket: &mut Option<OrderTicket>,
 ) -> anyhow::Result<()> {
+    let (publisher, err_tx) = (&context.publisher, &context.err_tx);
+    let (has_retry_middleware, has_dlq_middleware) =
+        (context.has_retry_middleware, context.has_dlq_middleware);
+    let transient_failure_policy = context.transient_failure_policy;
+    let commit_semaphore = context.commit_semaphore.as_ref();
+    let drops = context.drops.as_ref();
+    let send_slot = context.sends.as_deref().map(|sends| (sends, slot));
     let batch_len = messages.len();
     scratch.fill_from(&messages);
 

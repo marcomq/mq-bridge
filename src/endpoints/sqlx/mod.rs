@@ -6,6 +6,7 @@
 use super::poll::PollBackoff;
 use crate::canonical_message::tracing_support::LazyMessageIds;
 use crate::models::{CaRoots, SqlxConfig};
+use crate::support::cursor_batch::{CursorPosition, Unsettled};
 use crate::support::interpolation::pick_fields;
 use crate::support::lookup_batch::{self, ListQuery};
 use crate::traits::{
@@ -3409,7 +3410,7 @@ pub struct SqlxCursorReader {
     driver_name: String,
     backoff: PollBackoff,
     checkpoint: Option<Arc<dyn crate::checkpoint::CheckpointStore>>,
-    position: Arc<Mutex<CursorPosition>>,
+    position: Arc<Mutex<CursorPosition<SqlCursor>>>,
     run_position: Option<(crate::route::RunPositions, String)>,
     /// Columns the projection renders as JSON text (Postgres `json`/`jsonb` and arrays).
     raw_json_columns: Vec<String>,
@@ -3420,42 +3421,6 @@ pub struct SqlxCursorReader {
     sql_unguarded: Option<(String, String)>,
     hidden_rows_warned: bool,
     source_metadata: bool,
-}
-
-/// Where the next page starts. A nack rewinds `last` and starts a new `epoch`; batches read
-/// in an older one are read again, so their commits confirm nothing.
-#[derive(Default)]
-struct CursorPosition {
-    last: Option<SqlCursor>,
-    epoch: u64,
-}
-
-/// A batch handed out and not settled yet. Dropped without a commit, its rows are read again.
-struct Unsettled {
-    position: Arc<Mutex<CursorPosition>>,
-    resume_from: Option<SqlCursor>,
-    epoch: u64,
-    settled: bool,
-}
-
-impl Unsettled {
-    // A method, so the commit closure takes the whole guard and not a copy of the flag.
-    fn settle(&mut self) {
-        self.settled = true;
-    }
-}
-
-impl Drop for Unsettled {
-    fn drop(&mut self) {
-        if self.settled {
-            return;
-        }
-        let mut position = self.position.lock().unwrap();
-        if position.epoch == self.epoch {
-            position.last = self.resume_from.take();
-            position.epoch += 1;
-        }
-    }
 }
 
 /// `age()` of the oldest transaction still in flight, as the 32-bit xid row `xmin`s compare to.
@@ -3895,45 +3860,15 @@ impl MessageConsumer for SqlxCursorReader {
 
             let checkpoint = self.checkpoint.clone();
             let run_position = self.run_position.clone();
-            let position = self.position.clone();
-            let resume_from = last; // cursor value before this batch (for rollback on nack)
             let mut unsettled = Unsettled {
-                position: position.clone(),
-                resume_from: resume_from.clone(),
+                position: self.position.clone(),
+                resume_from: last,
                 epoch,
                 settled: false,
             };
             let commit = Box::new(move |dispositions: Vec<MessageDisposition>| {
                 Box::pin(async move {
-                    unsettled.settle();
-                    // Count the contiguous run of Acks from the front (stop at first Nack).
-                    let mut acked = 0usize;
-                    for disp in dispositions.iter().take(cursors.len()) {
-                        if matches!(disp, MessageDisposition::Ack | MessageDisposition::Reply(_)) {
-                            acked += 1;
-                        } else {
-                            break;
-                        }
-                    }
-                    let boundary = if acked == 0 {
-                        resume_from
-                    } else {
-                        Some(cursors[acked - 1].clone())
-                    };
-                    // If any row was not acked, roll the in-memory read cursor back to the
-                    // committed boundary so nacked/unprocessed rows are re-read next poll
-                    // (at-least-once) instead of being skipped until a restart.
-                    {
-                        let mut position = position.lock().unwrap();
-                        // Read before an earlier nack: confirming it would skip the nacked row.
-                        if position.epoch != epoch {
-                            return Ok(());
-                        }
-                        if acked < cursors.len() {
-                            position.last = boundary.clone();
-                            position.epoch += 1;
-                        }
-                    }
+                    let boundary = unsettled.settle(&cursors, &dispositions);
                     if let (Some(cur), Some((positions, key))) = (&boundary, run_position) {
                         positions.lock().unwrap().insert(key, cur.encode());
                     }

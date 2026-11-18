@@ -2,7 +2,7 @@
 // (stable since 1.80) is always available here; the crate-wide 1.75 MSRV doesn't apply.
 #![allow(clippy::incompatible_msrv)]
 
-use super::{HttpReply, HttpSourceMessage};
+use super::{full, streamed, text_error_response, BoxBody, HttpReply, HttpSourceMessage};
 use crate::support::sse::{find_sse_event_end, parse_sse_event, ParsedSseEvent};
 use crate::traits::{
     BoxFuture, CommitFunc, MessageDisposition, MessagePublisher, PublisherError, Sent,
@@ -11,7 +11,6 @@ use crate::CanonicalMessage;
 use anyhow::anyhow;
 use bytes::Bytes;
 use http_body_util::BodyExt;
-use http_body_util::StreamBody;
 use hyper::body::Frame;
 use hyper::body::Incoming;
 use hyper::{Response, StatusCode};
@@ -19,25 +18,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, trace, warn};
 
-type BoxBody = http_body_util::combinators::BoxBody<Bytes, anyhow::Error>;
 type HttpStreamResponseTx = async_channel::Sender<Result<Frame<Bytes>, anyhow::Error>>;
 
 pub(super) enum PublishResponseStreamError {
     BeforePublish(PublisherError),
     Partial(PublisherError),
-}
-
-fn full<T: Into<Bytes>>(chunk: T) -> BoxBody {
-    http_body_util::Full::new(chunk.into())
-        .map_err(|_| anyhow!("Infallible"))
-        .boxed()
-}
-
-fn streamed<S>(stream: S) -> BoxBody
-where
-    S: futures::Stream<Item = Result<Frame<Bytes>, anyhow::Error>> + Send + Sync + 'static,
-{
-    StreamBody::new(stream).boxed()
 }
 
 /// Rejects an NDJSON/SSE stream whose un-drained accumulation (a single record with no
@@ -56,35 +41,6 @@ fn bound_stream_buffer(buffer: &[u8]) -> anyhow::Result<()> {
 /// The same cap for a response stream: a retry would meet the same record.
 fn bound_response_buffer(buffer: &[u8]) -> Result<(), PublisherError> {
     bound_stream_buffer(buffer).map_err(PublisherError::NonRetryable)
-}
-
-fn has_content_type_header(headers: &HashMap<String, String>) -> bool {
-    headers
-        .keys()
-        .any(|key| key.eq_ignore_ascii_case("content-type"))
-}
-
-fn text_error_response(
-    status: StatusCode,
-    body: impl Into<Bytes>,
-    accepts_text: bool,
-    custom_headers: Option<&HashMap<String, String>>,
-) -> Response<BoxBody> {
-    let mut builder = Response::builder().status(status);
-
-    if let Some(custom_headers) = custom_headers {
-        for (header_name, header_value) in custom_headers {
-            builder = builder.header(header_name.as_str(), header_value.as_str());
-        }
-
-        if accepts_text && !has_content_type_header(custom_headers) {
-            builder = builder.header("content-type", "text/plain; charset=utf-8");
-        }
-    } else if accepts_text {
-        builder = builder.header("content-type", "text/plain; charset=utf-8");
-    }
-
-    builder.body(full(body)).unwrap()
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

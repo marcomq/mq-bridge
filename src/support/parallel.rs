@@ -148,8 +148,10 @@ where
     if chunks <= 1 {
         return messages.into_iter().map(f).collect();
     }
+    crate::support::probe::probe!("map_messages.parallel");
 
-    let per_chunk = messages.len().div_ceil(chunks);
+    let total = messages.len();
+    let per_chunk = total.div_ceil(chunks);
     let mut parts = messages.chunks(per_chunk).len();
     let mut remaining = messages;
     let mut tail = Vec::with_capacity(parts.saturating_sub(1));
@@ -171,7 +173,8 @@ where
         })
         .collect();
 
-    let mut out: Vec<T> = remaining.into_iter().map(|m| f(m)).collect();
+    let mut out = Vec::with_capacity(total);
+    out.extend(remaining.into_iter().map(|m| f(m)));
     for handle in handles {
         match handle.await {
             Ok(part) => out.extend(part),

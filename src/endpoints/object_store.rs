@@ -27,10 +27,10 @@
 //!   non-destructive, at-least-once at object granularity.
 
 use crate::checkpoint::{self, CheckpointBackend, CheckpointStore, VersionedCheckpoint};
-use crate::endpoints::file::{
-    csv_append_record, encode_record, parse_delimiter, parse_message, CsvDialect, CsvHeader,
-    CsvQuoteState,
-};
+use crate::codec::csv::{csv_append_record, parse_delimiter, CsvHeader};
+use crate::codec::format::{encode_record, parse_message};
+use crate::codec::framing::split_records;
+use crate::codec::CsvDialect;
 use crate::models::{
     Compression, DatePartitionStyle, DecodeErrorPolicy, FileFormat, NameBy, ObjectStoreConfig,
     ObjectStoreFsync,
@@ -212,54 +212,6 @@ fn classify_put_error(error: ObjectStoreError, context: String) -> PublisherErro
     }
 }
 
-/// Splits a fetched object into record slices on `delimiter`, dropping a trailing empty
-/// remainder and a stray `\r` before a `\n` delimiter (mirrors the file reader). With
-/// `csv`, a delimiter inside a quoted field is data, as it is for the file reader.
-fn split_records<'a>(data: &'a [u8], delimiter: &[u8], csv: Option<&CsvDialect>) -> Vec<&'a [u8]> {
-    let mut records = Vec::new();
-    if delimiter.is_empty() {
-        return records;
-    }
-    let newline = delimiter.len() == 1 && delimiter[0] == b'\n';
-    // An `auto` separator is settled on the object's first line.
-    let syntax = csv.map(|csv| {
-        let first_line = memchr::memmem::find(data, delimiter).unwrap_or(data.len());
-        csv.resolve(&data[..first_line])
-    });
-    let mut quotes = CsvQuoteState::new(syntax.unwrap_or_default());
-    let mut scanned = 0;
-    let mut start = 0;
-    let mut i = 0;
-    while i + delimiter.len() <= data.len() {
-        if &data[i..i + delimiter.len()] == delimiter {
-            if let Some(syntax) = syntax {
-                quotes.feed(&data[scanned..i]);
-                scanned = i;
-                if quotes.in_quotes() {
-                    i += 1;
-                    continue;
-                }
-                quotes = CsvQuoteState::new(syntax);
-                scanned = i + delimiter.len();
-            }
-            let mut end = i;
-            if newline && end > start && data[end - 1] == b'\r' {
-                end -= 1;
-            }
-            records.push(&data[start..end]);
-            i += delimiter.len();
-            start = i;
-        } else {
-            i += 1;
-        }
-    }
-    if start < data.len() {
-        // Trailing record with no closing delimiter.
-        records.push(&data[start..]);
-    }
-    records
-}
-
 /// Splits and decodes an object's bytes into messages, threading CSV header state across
 /// the object's lines (so the first CSV row establishes the schema).
 fn split_and_parse(
@@ -310,6 +262,7 @@ impl ObjectBody {
                 &mut self.csv_row,
                 delimiter,
                 csv,
+                true,
             )?;
             return Ok(());
         }

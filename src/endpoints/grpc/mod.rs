@@ -23,7 +23,6 @@ use tonic::metadata::MetadataMap;
 use tonic::transport::Channel;
 use tonic::transport::{Certificate, ClientTlsConfig, Identity};
 use tonic::Status;
-use uuid::Uuid;
 
 pub mod proto {
     #![allow(clippy::all)]
@@ -168,15 +167,7 @@ pub(super) fn canonical_to_bridge(
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 pub(super) fn bridge_to_canonical(msg: BridgeMessage) -> CanonicalMessage {
-    let message_id = if msg.id.is_empty() {
-        None
-    } else if let Ok(uuid) = Uuid::parse_str(&msg.id) {
-        Some(uuid.as_u128())
-    } else if msg.id.starts_with("0x") || msg.id.starts_with("0X") {
-        u128::from_str_radix(msg.id.trim_start_matches("0x").trim_start_matches("0X"), 16).ok()
-    } else {
-        msg.id.parse::<u128>().ok()
-    };
+    let message_id = crate::canonical_message::parse_message_id(&msg.id);
     CanonicalMessage::new(msg.payload, message_id).with_metadata(msg.metadata)
 }
 

@@ -198,39 +198,26 @@ fn message_to_document(
     let mut metadata = message.metadata_map().clone();
     // Source/provenance keys are per-hop context, not stored document fields.
     metadata.retain(|key, _| !crate::canonical_message::is_source_metadata_key(key));
-    let payload_bson = if matches!(format, MongoDbFormat::Json) {
-        if let Ok(json_val) = serde_json::from_slice::<serde_json::Value>(&message.payload) {
-            if let Ok(bson_val) = mongodb::bson::to_bson(&json_val) {
-                metadata.insert("type".to_string(), "json".to_string());
-                bson_val
-            } else {
-                Bson::Binary(mongodb::bson::Binary {
-                    subtype: mongodb::bson::spec::BinarySubtype::Generic,
-                    bytes: message.payload.to_vec(),
-                })
-            }
-        } else {
-            // Fallback to binary if not valid JSON
-            Bson::Binary(mongodb::bson::Binary {
-                subtype: mongodb::bson::spec::BinarySubtype::Generic,
-                bytes: message.payload.to_vec(),
-            })
+    // A payload the format cannot represent falls back to binary, without a `type` tag.
+    let typed = match format {
+        MongoDbFormat::Json => serde_json::from_slice::<serde_json::Value>(&message.payload)
+            .ok()
+            .and_then(|json| mongodb::bson::to_bson(&json).ok())
+            .map(|bson| (bson, "json")),
+        MongoDbFormat::Text => std::str::from_utf8(&message.payload)
+            .ok()
+            .map(|text| (Bson::String(text.to_string()), "text")),
+        MongoDbFormat::Normal | MongoDbFormat::Raw => None,
+    };
+    let payload_bson = match typed {
+        Some((bson, kind)) => {
+            metadata.insert("type".to_string(), kind.to_string());
+            bson
         }
-    } else if matches!(format, MongoDbFormat::Text) {
-        if let Ok(text) = std::str::from_utf8(&message.payload) {
-            metadata.insert("type".to_string(), "text".to_string());
-            Bson::String(text.to_string())
-        } else {
-            Bson::Binary(mongodb::bson::Binary {
-                subtype: mongodb::bson::spec::BinarySubtype::Generic,
-                bytes: message.payload.to_vec(),
-            })
-        }
-    } else {
-        Bson::Binary(mongodb::bson::Binary {
+        None => Bson::Binary(mongodb::bson::Binary {
             subtype: mongodb::bson::spec::BinarySubtype::Generic,
             bytes: message.payload.to_vec(),
-        })
+        }),
     };
 
     let metadata_doc =

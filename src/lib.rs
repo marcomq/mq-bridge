@@ -185,6 +185,8 @@ pub mod canonical_message;
 // optional dependency, and each external backend already reports its own
 // missing feature at runtime.
 pub mod checkpoint;
+#[cfg(feature = "file")]
+pub(crate) mod codec;
 pub mod command_handler;
 mod config_file;
 pub mod endpoints;

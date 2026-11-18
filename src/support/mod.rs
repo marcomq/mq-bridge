@@ -20,6 +20,8 @@ pub mod connection_registry;
 pub mod crypto;
 #[cfg(any(feature = "encryption", feature = "file"))]
 pub(crate) mod crypto_envelope;
+#[cfg(any(feature = "clickhouse", feature = "sqlite", feature = "sqlx"))]
+pub(crate) mod cursor_batch;
 pub mod http_status;
 pub mod interpolation;
 #[cfg(feature = "file")]
@@ -42,6 +44,8 @@ pub(crate) mod parquet;
 #[cfg(feature = "plugin")]
 pub mod plugin_abi;
 pub mod poll_job;
+#[doc(hidden)]
+pub mod probe;
 pub(crate) mod redact;
 pub mod source_ranges;
 #[cfg(any(feature = "http", feature = "http-bulk"))]

@@ -315,7 +315,9 @@ impl CookieJarPublisher {
         }
     }
 
-    fn prepare_message(&self, message: &mut CanonicalMessage) {
+    /// Captures the session from `message` and exports it back; `inject` also sets the
+    /// cookie header for an outgoing request.
+    fn sync_session(&self, message: &mut CanonicalMessage, inject: bool) {
         capture_session_inputs(
             message.metadata_map(),
             &self.store,
@@ -324,29 +326,15 @@ impl CookieJarPublisher {
             &self.config.capture_metadata_keys,
             self.config.max_cookies,
         );
-        inject_session_metadata(
-            message.metadata_map_mut(),
-            &self.store,
-            &self.config.cookie_metadata_key,
-            &self.config.inject_metadata,
-            self.config.export_metadata_prefix.as_deref(),
-        );
-        export_session_metadata(
-            message.metadata_map_mut(),
-            &self.store,
-            self.config.export_metadata_prefix.as_deref(),
-        );
-    }
-
-    fn process_response_message(&self, message: &mut CanonicalMessage) {
-        capture_session_inputs(
-            message.metadata_map(),
-            &self.store,
-            &self.config.cookie_metadata_key,
-            &self.config.set_cookie_metadata_key,
-            &self.config.capture_metadata_keys,
-            self.config.max_cookies,
-        );
+        if inject {
+            inject_session_metadata(
+                message.metadata_map_mut(),
+                &self.store,
+                &self.config.cookie_metadata_key,
+                &self.config.inject_metadata,
+                self.config.export_metadata_prefix.as_deref(),
+            );
+        }
         export_session_metadata(
             message.metadata_map_mut(),
             &self.store,
@@ -358,11 +346,11 @@ impl CookieJarPublisher {
 #[async_trait]
 impl MessagePublisher for CookieJarPublisher {
     async fn send(&self, mut message: CanonicalMessage) -> Result<Sent, PublisherError> {
-        self.prepare_message(&mut message);
+        self.sync_session(&mut message, true);
         match self.inner.send(message).await? {
             Sent::Ack => Ok(Sent::Ack),
             Sent::Response(mut response) => {
-                self.process_response_message(&mut response);
+                self.sync_session(&mut response, false);
                 Ok(Sent::Response(response))
             }
         }
@@ -373,7 +361,7 @@ impl MessagePublisher for CookieJarPublisher {
         mut messages: Vec<CanonicalMessage>,
     ) -> Result<SentBatch, PublisherError> {
         for message in &mut messages {
-            self.prepare_message(message);
+            self.sync_session(message, true);
         }
 
         match self.inner.send_batch(messages).await? {
@@ -384,7 +372,7 @@ impl MessagePublisher for CookieJarPublisher {
             } => {
                 if let Some(responses) = &mut responses {
                     for response in responses {
-                        self.process_response_message(response);
+                        self.sync_session(response, false);
                     }
                 }
                 Ok(SentBatch::Partial { responses, failed })
