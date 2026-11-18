@@ -49,8 +49,8 @@ Routes are defined via YAML files, JSON files, or environment variables (prefix:
 
 ## When Making Changes
 
-1. **New endpoint**: Add to `endpoints/mod.rs` factory functions, implement `MessageConsumer`/`MessagePublisher` traits
-2. **New middleware**: Add to `middleware/mod.rs`, implement middleware wrapper types
+1. **New endpoint**: Add to `endpoints.rs` factory functions, implement `MessageConsumer`/`MessagePublisher` traits
+2. **New middleware**: Add to `middleware.rs`, implement middleware wrapper types
 3. **Configuration changes**: Update `models.rs` with new config structs, add to `EndpointType`/`Middleware` enums
 4. **Tests**: Add integration tests in `tests/integration/`, update Docker Compose if needed; a broker source also gets a contract test in `tests/integration/contract.rs`
 5. **Documentation**: Update README.md and add doc comments; when middleware or endpoint behaviour changes, also check the book's hand-written pages in `docs/book/cookbook` and `operations`

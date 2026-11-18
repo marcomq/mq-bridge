@@ -109,7 +109,7 @@ a handler error propagates to the route and is reported there.
 > `route::tests::test_dlq_and_retry_batch_integration`,
 > `middleware::transform::tests::test_rejected_message_reaches_the_dlq_through_the_config_wiring`,
 > and `reference_docs_test::publisher_middleware_wraps_last_entry_outermost`, and is
-> documented on `apply_middlewares_to_publisher` in `src/middleware/mod.rs`.
+> documented on `apply_middlewares_to_publisher` in `src/middleware.rs`.
 
 ### What exists
 

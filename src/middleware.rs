@@ -267,7 +267,7 @@ async fn wrap_consumer(
 /// exhausted-retry failure. See `docs/REFERENCE.md` for the full ordering rules.
 ///
 /// A route handler is wrapped *around* the result of this function (see `wrap_handler` in
-/// `endpoints/mod.rs`), so it runs once per message and nothing here re-invokes it.
+/// `endpoints.rs`), so it runs once per message and nothing here re-invokes it.
 pub async fn apply_middlewares_to_publisher(
     publisher: Box<dyn MessagePublisher>,
     endpoint: &Endpoint,

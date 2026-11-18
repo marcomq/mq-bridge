@@ -414,8 +414,8 @@ Both implement `MessageConsumer` trait. Subscribers often wrap consumers (e.g., 
 
 ## Common Patterns
 
-1. **Creating endpoints**: Use factory functions in `endpoints/mod.rs` (`create_consumer_from_route`, `create_publisher_from_route`)
-2. **Adding middleware**: Middlewares are applied in `middleware/mod.rs` via `apply_middlewares_to_consumer` and `apply_middlewares_to_publisher`
+1. **Creating endpoints**: Use factory functions in `endpoints.rs` (`create_consumer_from_route`, `create_publisher_from_route`)
+2. **Adding middleware**: Middlewares are applied in `middleware.rs` via `apply_middlewares_to_consumer` and `apply_middlewares_to_publisher`
 3. **Custom endpoints**: Implement `CustomEndpointFactory` trait
 4. **Custom middleware**: Implement `CustomMiddlewareFactory` trait
 5. **Typed handlers**: Use `TypeHandler` to deserialize messages into Rust types based on `kind` metadata field
@@ -440,8 +440,8 @@ src/
 ├── config_file.rs        # Loading routes from YAML/JSON files
 ├── route.rs              # Route execution logic (sequential/concurrent)
 ├── shutdown.rs           # Graceful shutdown signalling
+├── endpoints.rs          # Factory functions for creating consumers/publishers
 ├── endpoints/            # Endpoint implementations
-│   ├── mod.rs           # Factory functions for creating consumers/publishers
 │   ├── amqp.rs          # AMQP (RabbitMQ) consumer/publisher
 │   ├── aws.rs           # AWS SQS/SNS
 │   ├── clickhouse.rs    # ClickHouse sink + cursor source
