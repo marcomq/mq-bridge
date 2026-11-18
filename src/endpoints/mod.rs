@@ -7,6 +7,7 @@
 pub mod amqp;
 #[cfg(feature = "aws")]
 pub mod aws;
+pub(crate) mod backends;
 pub mod capabilities;
 #[cfg(feature = "clickhouse")]
 pub mod clickhouse;
@@ -834,7 +835,7 @@ async fn postgres_cdc_consumer(
     Ok(Box::new(
         sequence::SequenceConsumer::new(route_name, &plan)
             .await?
-            .with_cdc_values(),
+            .with_phase_opener(std::sync::Arc::new(postgres::open_backfill_phase)),
     ))
 }
 

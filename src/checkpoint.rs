@@ -157,44 +157,7 @@ pub async fn open_endpoint_checkpoint(
     route_name: &str,
     endpoint_type: &crate::models::EndpointType,
 ) -> anyhow::Result<Option<Arc<VersionedCheckpoint>>> {
-    use crate::models::EndpointType;
-    let _ = route_name;
-    match endpoint_type {
-        #[cfg(any(feature = "sqlite", feature = "sqlx"))]
-        EndpointType::Sqlx(cfg) if cfg.publication.is_none() && cfg.cursor_column.is_some() => {
-            crate::endpoints::sqlx::cursor_checkpoint(cfg).await
-        }
-        #[cfg(feature = "clickhouse")]
-        EndpointType::ClickHouse(cfg) => crate::endpoints::clickhouse::cursor_checkpoint(cfg).await,
-        #[cfg(feature = "http-bulk")]
-        EndpointType::HttpBulk(cfg) => crate::endpoints::http_bulk::cursor_checkpoint(cfg).await,
-        #[cfg(feature = "object-store")]
-        EndpointType::ObjectStore(cfg) => {
-            crate::endpoints::object_store::cursor_checkpoint(cfg).await
-        }
-        #[cfg(feature = "mongodb")]
-        EndpointType::MongoDb(cfg) => {
-            use crate::models::MongoConsume;
-            if !matches!(
-                cfg.resolved_consume(),
-                MongoConsume::CaptureNew | MongoConsume::CaptureAll
-            ) {
-                return Err(anyhow!(
-                    "mongodb keeps a resume checkpoint only in capture_new/capture_all mode"
-                ));
-            }
-            let mut cfg = cfg.clone();
-            cfg.collection.get_or_insert_with(|| route_name.to_string());
-            crate::endpoints::mongodb::change_stream_checkpoint(&cfg).await
-        }
-        EndpointType::PostgresCdc(_) => Err(anyhow!(
-            "postgres_cdc resumes from its replication slot, which is authoritative; manage the slot instead"
-        )),
-        EndpointType::Sqlx(cfg) if cfg.publication.is_some() => Err(anyhow!(
-            "sqlx with `publication` resumes from its replication slot, which is authoritative; manage the slot instead"
-        )),
-        _ => Err(anyhow!("this endpoint has no mq-bridge resume checkpoint")),
-    }
+    crate::endpoints::backends::endpoint_checkpoint(route_name, endpoint_type).await
 }
 
 /// Returns a process-wide async lock for `path`, so concurrent saves to the same checkpoint
@@ -551,78 +514,12 @@ pub async fn build_external_store(
             path,
             checkpoint_key(source_name, cursor_id),
         ))),
-        CheckpointBackend::Sqlx { url, table } => {
-            #[cfg(any(feature = "sqlite", feature = "sqlx"))]
-            {
-                crate::endpoints::sqlx::build_sql_checkpoint_store(
-                    &url,
-                    table,
-                    source_name,
-                    cursor_id,
-                )
-                .await
-            }
-            #[cfg(not(any(feature = "sqlite", feature = "sqlx")))]
-            {
-                let _ = (table, source_name, cursor_id);
-                let features = if url.starts_with("sqlite:") {
-                    "'sqlite' or 'sqlx' feature"
-                } else {
-                    "'sqlx' feature"
-                };
-                Err(anyhow!(
-                    "checkpoint_store '{}' requires the {features} to be enabled",
-                    crate::support::redact::url_password(&url)
-                ))
-            }
-        }
-        CheckpointBackend::Mongo {
-            url,
-            database,
-            collection,
-        } => {
-            #[cfg(feature = "mongodb")]
-            {
-                crate::endpoints::mongodb::build_mongo_checkpoint_store(
-                    &url,
-                    &database,
-                    collection,
-                    source_name,
-                    cursor_id,
-                )
-                .await
-            }
-            #[cfg(not(feature = "mongodb"))]
-            {
-                let _ = (database, collection, source_name, cursor_id);
-                Err(anyhow!(
-                    "checkpoint_store '{}' requires the 'mongodb' feature to be enabled",
-                    crate::support::redact::url_password(&url)
-                ))
-            }
-        }
-        CheckpointBackend::ObjectStore { url } => {
-            #[cfg(feature = "object-store")]
-            {
-                object_store_backend::build_object_store_checkpoint_store(
-                    &url,
-                    source_name,
-                    cursor_id,
-                )
-                .await
-            }
-            #[cfg(not(feature = "object-store"))]
-            {
-                let _ = (source_name, cursor_id);
-                Err(anyhow!(
-                    "checkpoint_store '{}' requires the 'object-store' feature to be enabled",
-                    crate::support::redact::url_password(&url)
-                ))
-            }
-        }
         CheckpointBackend::Source { .. } => Err(anyhow!(
             "internal: Source checkpoint backend must be built by the caller"
         )),
+        shared => {
+            crate::endpoints::backends::checkpoint_store(shared, source_name, cursor_id).await
+        }
     }
 }
 
@@ -729,7 +626,7 @@ pub(crate) mod object_store_backend {
     /// Build an object-store checkpoint store from a cloud URL. Each cursor gets its own object at
     /// `<url prefix>/<sanitized source:cursor_id>_<hash>`, so multiple cursors in one prefix never
     /// collide, even when sanitization alone would make two distinct sources look the same.
-    pub(super) async fn build_object_store_checkpoint_store(
+    pub(crate) async fn build_object_store_checkpoint_store(
         url: &str,
         source_name: &str,
         cursor_id: &str,

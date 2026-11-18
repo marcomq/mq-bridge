@@ -223,25 +223,10 @@ pub(super) fn is_authentication_failure(error: &anyhow::Error) -> bool {
         "needs a replica set",
     ];
     let text = format!("{error:#}").to_ascii_lowercase();
-    let generic_marker_counts = !is_other_grpc_status(error);
+    let generic_marker_counts = !crate::endpoints::backends::quotes_peer_failure(error);
     MARKERS.iter().any(|marker| {
         text.contains(marker) && (generic_marker_counts || *marker != "authentication failed")
     })
-}
-
-/// A gRPC status other than `Unauthenticated`, whose message may only quote a peer's failure.
-#[cfg(feature = "grpc")]
-pub(super) fn is_other_grpc_status(error: &anyhow::Error) -> bool {
-    error.chain().any(|cause| {
-        cause
-            .downcast_ref::<crate::endpoints::grpc::GrpcStatusError>()
-            .is_some_and(|status| status.code() != tonic::Code::Unauthenticated)
-    })
-}
-
-#[cfg(not(feature = "grpc"))]
-pub(super) fn is_other_grpc_status(_error: &anyhow::Error) -> bool {
-    false
 }
 
 /// Records a batch the route discarded after a permanent sink rejection.

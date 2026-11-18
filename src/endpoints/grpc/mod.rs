@@ -90,6 +90,15 @@ impl std::fmt::Debug for GrpcStatusError {
 
 impl std::error::Error for GrpcStatusError {}
 
+/// A status other than `Unauthenticated`, whose message may only quote a peer's failure.
+pub(crate) fn quotes_peer_failure(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<GrpcStatusError>()
+            .is_some_and(|status| status.code() != tonic::Code::Unauthenticated)
+    })
+}
+
 pub(super) const GRPC_BATCH_POLL_MS: u64 = 15; // Increased for better batching in performance tests, and to reduce "poll timed out" warnings
 /// Acks for one committed batch that may be in flight at once.
 pub(super) const GRPC_ACK_CONCURRENCY: usize = 64;

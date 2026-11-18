@@ -29,21 +29,6 @@ pub(crate) fn source_is_at_most_once(endpoint_type: &EndpointType) -> bool {
     }
 }
 
-/// Whether `no_resume` reaches this input. A compiled-out endpoint is served by a registered
-/// factory, and the search presets build their reader without it, so both still resume.
-#[allow(clippy::match_like_matches_macro)] // Every `cfg!` is `true` in a full build.
-pub(super) fn input_applies_no_resume(endpoint_type: &EndpointType) -> bool {
-    match endpoint_type {
-        EndpointType::ObjectStore(_) => cfg!(feature = "object-store"),
-        EndpointType::HttpBulk(_) => cfg!(feature = "http-bulk"),
-        EndpointType::ClickHouse(_) => cfg!(feature = "clickhouse"),
-        EndpointType::Sqlx(_) => cfg!(any(feature = "sqlite", feature = "sqlx")),
-        EndpointType::MongoDb(_) => cfg!(feature = "mongodb"),
-        EndpointType::Ref(_) => true,
-        _ => false,
-    }
-}
-
 /// Whether every run of this input reads the full data set from the start. `false` unless the
 /// configuration shows it: no saved position, nothing consumed, no dedup across runs.
 /// `no_resume` ignores saved checkpoints where the consumer applies it.
@@ -53,7 +38,8 @@ pub(super) fn source_replays_from_start(
     depth: usize,
 ) -> bool {
     const MAX_DEPTH: usize = 16;
-    let no_resume = no_resume && input_applies_no_resume(&endpoint.endpoint_type);
+    let no_resume =
+        no_resume && crate::endpoints::backends::input_applies_no_resume(&endpoint.endpoint_type);
     // A checkpoint opens only with both a cursor id and a store.
     let unsaved = |cursor_id: &Option<String>, store: &Option<String>| {
         no_resume || cursor_id.is_none() || store.is_none()
@@ -117,7 +103,8 @@ pub(super) fn source_replays_from_start(
 /// `sequence` children ignore `no_resume`, so they are checked without it.
 pub(super) fn input_saves_position(endpoint: &Endpoint, no_resume: bool, depth: usize) -> bool {
     const MAX_DEPTH: usize = 16;
-    let no_resume = no_resume && input_applies_no_resume(&endpoint.endpoint_type);
+    let no_resume =
+        no_resume && crate::endpoints::backends::input_applies_no_resume(&endpoint.endpoint_type);
     let saved = |cursor_id: &Option<String>, store: &Option<String>| {
         !no_resume && cursor_id.is_some() && store.is_some()
     };

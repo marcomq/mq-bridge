@@ -46,32 +46,8 @@ pub(crate) async fn build_store(
         "mqb_aggregate_{}",
         crate::checkpoint::sanitize_ident(route_name)
     );
-    match crate::checkpoint::parse_checkpoint_store(spec)? {
-        #[cfg(any(feature = "sqlite", feature = "sqlx"))]
-        crate::checkpoint::CheckpointBackend::Sqlx { url, table } => {
-            crate::endpoints::sqlx::build_sql_state_store(&url, table.unwrap_or(name)).await
-        }
-        #[cfg(feature = "mongodb")]
-        crate::checkpoint::CheckpointBackend::Mongo {
-            url,
-            database,
-            collection,
-        } => {
-            crate::endpoints::mongodb::build_mongo_state_store(
-                &url,
-                &database,
-                &collection.unwrap_or(name),
-            )
-            .await
-        }
-        _ => {
-            let _ = name;
-            anyhow::bail!(
-                "aggregate: store '{spec}' is not supported; use a postgres, sqlite or mongodb \
-                 URL, in a build with the `sqlx` or `mongodb` feature"
-            )
-        }
-    }
+    let backend = crate::checkpoint::parse_checkpoint_store(spec)?;
+    crate::endpoints::backends::state_store(backend, name).await
 }
 
 /// An in-process store, for tests of the shared path.

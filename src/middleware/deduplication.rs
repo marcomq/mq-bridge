@@ -128,16 +128,9 @@ pub(crate) enum DedupBackend {
     Sled { path: String, durable: bool },
     /// In-process exact-key store (`memory://[name][?max_keys=N]`); an empty name is the route's.
     Memory { name: String, max_keys: usize },
-    /// Shared MongoDB collection (`mongodb://host/db[/collection]`).
-    #[cfg(feature = "mongodb")]
-    Mongo {
-        url: String,
-        database: String,
-        collection: Option<String>,
-    },
-    /// Shared SQL table (`postgres|mysql|mariadb|sqlite://…[/table]`).
-    #[cfg(any(feature = "sqlite", feature = "sqlx"))]
-    Sqlx { url: String, table: Option<String> },
+    /// Shared MongoDB collection (`mongodb://host/db[/collection]`) or SQL table
+    /// (`postgres|mysql|mariadb|sqlite://…[/table]`).
+    Shared(crate::checkpoint::CheckpointBackend),
 }
 
 /// Parse a `store:` value. `sled:`/bare paths select the local store; other schemes are handed to
@@ -195,36 +188,17 @@ pub(crate) fn parse_dedup_store(spec: &str) -> anyhow::Result<DedupBackend> {
     }
 }
 
-/// Parse a non-sled `store:` scheme by delegating to the checkpoint URL parser, then accepting
-/// only the backends deduplication supports in this build.
-#[cfg(any(feature = "mongodb", feature = "sqlite", feature = "sqlx"))]
+/// Parse a non-sled `store:` scheme with the checkpoint URL parser; MongoDB and SQL are shared.
 fn parse_networked_dedup_store(spec: &str) -> anyhow::Result<DedupBackend> {
+    use crate::checkpoint::CheckpointBackend;
     match crate::checkpoint::parse_checkpoint_store(spec)? {
-        #[cfg(feature = "mongodb")]
-        crate::checkpoint::CheckpointBackend::Mongo {
-            url,
-            database,
-            collection,
-        } => Ok(DedupBackend::Mongo {
-            url,
-            database,
-            collection,
-        }),
-        #[cfg(any(feature = "sqlite", feature = "sqlx"))]
-        crate::checkpoint::CheckpointBackend::Sqlx { url, table } => {
-            Ok(DedupBackend::Sqlx { url, table })
+        shared @ (CheckpointBackend::Mongo { .. } | CheckpointBackend::Sqlx { .. }) => {
+            Ok(DedupBackend::Shared(shared))
         }
         other => Err(anyhow!(
-            "deduplication store '{spec}' is not supported (only sled, mongodb, and SQL); got {other:?}"
+            "deduplication store '{spec}' is not supported (only sled, memory, mongodb, and SQL); got {other:?}"
         )),
     }
-}
-
-#[cfg(not(any(feature = "mongodb", feature = "sqlite", feature = "sqlx")))]
-fn parse_networked_dedup_store(spec: &str) -> anyhow::Result<DedupBackend> {
-    Err(anyhow!(
-        "deduplication store '{spec}' requires a networked backend feature (mongodb, sqlite or sqlx); this build supports only local sled paths"
-    ))
 }
 
 async fn build_store(
@@ -241,26 +215,9 @@ async fn build_store(
         DedupBackend::Sled { path, durable } => Ok(Arc::new(
             SledDedupStore::new(&path, ttl_seconds, replay_response)?.durable(durable),
         )),
-        #[cfg(feature = "mongodb")]
-        DedupBackend::Mongo {
-            url,
-            database,
-            collection,
-        } => {
-            crate::endpoints::mongodb::build_mongo_dedup_store(
-                &url,
-                &database,
-                collection,
-                ttl_seconds,
-                route_name,
-            )
-            .await
-        }
-        #[cfg(any(feature = "sqlite", feature = "sqlx"))]
-        DedupBackend::Sqlx { url, table } => {
-            crate::endpoints::sqlx::build_sql_dedup_store(
-                &url,
-                table,
+        DedupBackend::Shared(backend) => {
+            crate::endpoints::backends::dedup_store(
+                backend,
                 ttl_seconds,
                 route_name,
                 replay_response,

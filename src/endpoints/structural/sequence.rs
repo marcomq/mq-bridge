@@ -74,10 +74,15 @@ pub struct SequenceConsumer {
     settle_timeout: Duration,
     /// A phase ended with deliveries unconfirmed: the marker is not advanced any more.
     unconfirmed: bool,
-    /// The backfill `postgres_cdc` expands to: phases read values as the CDC stream renders them.
-    #[cfg(feature = "postgres-cdc")]
-    cdc_values: bool,
+    /// Builds a phase's consumer in place of `create_consumer_from_route`.
+    open_phase: Option<PhaseOpener>,
 }
+
+pub(crate) type PhaseFuture<'a> =
+    futures::future::BoxFuture<'a, anyhow::Result<Box<dyn MessageConsumer>>>;
+/// Builds one phase's consumer; an endpoint that expands to a `sequence` can set its own.
+pub(crate) type PhaseOpener =
+    Arc<dyn for<'a> Fn(&'a str, &'a Endpoint) -> PhaseFuture<'a> + Send + Sync>;
 
 impl SequenceConsumer {
     pub async fn new(route_name: &str, config: &SequenceConfig) -> anyhow::Result<Self> {
@@ -154,14 +159,14 @@ impl SequenceConsumer {
             unsettled: Arc::default(),
             settle_timeout: SETTLE_TIMEOUT,
             unconfirmed: false,
-            #[cfg(feature = "postgres-cdc")]
-            cdc_values: false,
+            open_phase: None,
         })
     }
 
-    #[cfg(feature = "postgres-cdc")]
-    pub(crate) fn with_cdc_values(mut self) -> Self {
-        self.cdc_values = true;
+    // Unused in builds without an endpoint that expands to a `sequence`.
+    #[allow(dead_code)]
+    pub(crate) fn with_phase_opener(mut self, open: PhaseOpener) -> Self {
+        self.open_phase = Some(open);
         self
     }
 
@@ -222,21 +227,13 @@ impl SequenceConsumer {
                     endpoint.endpoint_type.name()
                 ))
             })?;
-            let created = crate::endpoints::create_consumer_from_route(&self.route_name, endpoint);
-            #[cfg(feature = "postgres-cdc")]
-            let created = {
-                let cdc = self.cdc_values;
-                async move {
-                    if cdc {
-                        crate::endpoints::postgres::CDC_VALUES
-                            .scope((), created)
-                            .await
-                    } else {
-                        created.await
-                    }
+            let created = match &self.open_phase {
+                Some(open) => open(&self.route_name, endpoint).await,
+                None => {
+                    crate::endpoints::create_consumer_from_route(&self.route_name, endpoint).await
                 }
             };
-            let mut consumer = created.await.map_err(|e| {
+            let mut consumer = created.map_err(|e| {
                 // Past the static check a failure is taken as transient, so the
                 // route reconnects (STRUCT-06); `InvalidConfig` still stops it.
                 ConsumerError::from(e.context(format!(

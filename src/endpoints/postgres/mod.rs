@@ -47,13 +47,24 @@ use pgoutput::tuple_to_json_object;
 pub(crate) use pgoutput::values::text_to_json;
 
 tokio::task_local! {
-    /// Set while a `capture_all`/`snapshot` backfill phase is built: its rows then render
-    /// values as the CDC stream does, so a column reads the same in both phases.
-    pub(crate) static CDC_VALUES: ();
+    static CDC_VALUES: ();
 }
 
+/// True while [`open_backfill_phase`] builds a consumer: its rows render values as the CDC
+/// stream does, so a column reads the same in the back fill and in the stream.
 pub(crate) fn cdc_values() -> bool {
     CDC_VALUES.try_with(|_| ()).is_ok()
+}
+
+/// Opens one phase of the `sequence` that `capture_all`/`snapshot` expands to.
+pub(crate) fn open_backfill_phase<'a>(
+    route_name: &'a str,
+    endpoint: &'a crate::models::Endpoint,
+) -> crate::endpoints::structural::sequence::PhaseFuture<'a> {
+    Box::pin(CDC_VALUES.scope(
+        (),
+        crate::endpoints::create_consumer_from_route(route_name, endpoint),
+    ))
 }
 use state::{format_lsn, parse_lsn};
 
