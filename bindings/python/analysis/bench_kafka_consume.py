@@ -88,12 +88,16 @@ class Tally:
         self.count = 0
         self.total = 0.0
         self.first: float | None = None
+        self.last: float | None = None
 
-    def add(self, n: int, s: float) -> None:
+    def begin(self, n: int) -> None:
         if n and self.first is None:
             self.first = time.perf_counter()
+
+    def add(self, n: int, s: float) -> None:
         self.count += n
         self.total += s
+        self.last = time.perf_counter()
 
 
 def run_confluent(n: int, loads, tuned: bool = True) -> Tally:
@@ -113,7 +117,9 @@ def run_confluent(n: int, loads, tuned: bool = True) -> Tally:
     while t.count < n:
         s = 0.0
         ok = 0
-        for m in c.consume(num_messages=BATCH, timeout=1.0):
+        msgs = c.consume(num_messages=BATCH, timeout=1.0)
+        t.begin(len(msgs))
+        for m in msgs:
             if m.error():
                 continue
             s += loads(m.value())["temp"]
@@ -142,6 +148,7 @@ def run_aiokafka(n: int) -> Tally:
             while t.count < n:
                 batches = await c.getmany(timeout_ms=1000, max_records=BATCH)
                 for msgs in batches.values():
+                    t.begin(len(msgs))
                     t.add(len(msgs), sum(json.loads(m.value)["temp"] for m in msgs))
         finally:
             await c.stop()
@@ -161,6 +168,7 @@ def run_mqb_consumer(n: int, decode) -> Tally:
     with Consumer.from_config(kafka_endpoint()) as c:
         while t.count < n:
             msgs = c.poll(max=BATCH, timeout_ms=1000)
+            t.begin(len(msgs))
             t.add(len(msgs), sum(decode(m)["temp"] for m in msgs))
             c.commit()
     return t
@@ -173,6 +181,7 @@ def run_mqb_route(n: int, decode) -> Tally:
     done = threading.Event()
 
     def handler(msgs):
+        t.begin(len(msgs))
         t.add(len(msgs), sum(decode(m)["temp"] for m in msgs))
         if t.count >= n:
             done.set()
@@ -213,7 +222,7 @@ def child(variant: str, n: int) -> None:
         "variant": variant,
         "count": t.count,
         "sum": t.total,
-        "steady": t.count / (end - (t.first or start)),
+        "steady": t.count / ((t.last or end) - (t.first or start)),
         "total": t.count / (end - start),
     }))
 
@@ -223,16 +232,21 @@ def run(n: int, repeats: int, variants: list[str], timeout: float) -> None:
     rows: dict[str, list[dict]] = {v: [] for v in variants}
     for rep in range(repeats):
         for v in variants:
-            proc = subprocess.run(
-                [sys.executable, __file__, "child", v, "--records", str(n)],
-                capture_output=True, text=True, timeout=timeout,
-            )
+            try:
+                proc = subprocess.run(
+                    [sys.executable, __file__, "child", v, "--records", str(n)],
+                    capture_output=True, text=True, timeout=timeout,
+                )
+            except subprocess.TimeoutExpired:
+                print(f"{v}: TIMEOUT after {timeout:.0f}s", flush=True)
+                continue
             if proc.returncode != 0:
                 print(f"{v}: FAILED\n{proc.stderr[-2000:]}", flush=True)
                 continue
             r = json.loads(proc.stdout.strip().splitlines()[-1])
             if r["count"] != n or abs(r["sum"] - want) > 1e-3 * n:
                 print(f"{v}: WRONG count={r['count']} sum={r['sum']:.2f} want={want:.2f}", flush=True)
+                continue
             rows[v].append(r)
             print(f"rep {rep + 1} {v:18} steady {r['steady']:>11,.0f}/s  total {r['total']:>11,.0f}/s", flush=True)
 
@@ -242,6 +256,8 @@ def run(n: int, repeats: int, variants: list[str], timeout: float) -> None:
         if rows[v]:
             print(f"| {v} | {statistics.median(r['steady'] for r in rows[v]):,.0f} | "
                   f"{statistics.median(r['total'] for r in rows[v]):,.0f} |")
+        else:
+            print(f"| {v} | failed | failed |")
 
 
 def main() -> None:

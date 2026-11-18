@@ -216,7 +216,7 @@ work:
 |---|---|
 | Fields into the columns of the same name, with upsert | `columns: auto`, `key`; see [Writing by column name](#writing-by-column-name) |
 | Your own statement, renamed fields, casts, `ON CONFLICT … DO NOTHING` | `insert_query` with `${payload:field}` tokens; see [Upserts](../cookbook/upserts.md) |
-| Fastest load into PostgreSQL | `bulk_copy: true`, with `columns: auto` or a token `insert_query`, plus `batch_size` and `concurrency`; see [Fast bulk loads](#fast-bulk-loads) |
+| Fastest load into PostgreSQL | `bulk_copy: true`, with `columns: auto` or a token `insert_query` (one bare `${payload:…}` token per value), plus `batch_size` and `concurrency`; see [Fast bulk loads](#fast-bulk-loads) |
 | The whole payload in one column | neither; see [Queue tables](#queue-tables) |
 | Readers see the old rows or all new ones, never half a load | `load_mode`; see [Loading as one unit](#loading-as-one-unit) |
 | Delete or update the row a message names, e.g. a CDC `delete` | `insert_query` with `DELETE` or `UPDATE`; see [Deleting rows](#deleting-rows) |
@@ -226,6 +226,12 @@ work:
 Each batch is one statement (`COPY` or `INSERT`) with its own commit, and with `concurrency: 1`
 the route waits for it before it writes the next batch. PostgreSQL spends a fixed amount on
 every statement (about 2 ms in the measurement below), so small batches are dominated by it.
+With `columns: auto`, consecutive records that name different fields need separate
+statements, so a batch only shares one statement while its records have the same field set.
+
+With `bulk_copy` and an `insert_query`, every `VALUES` entry must be one bare `${…}` token:
+expressions such as `CAST(${payload:qty} AS integer)`, `ON CONFLICT` and `RETURNING` are
+rejected. Use `columns: auto` to get the type casts.
 
 - **`batch_size: 5000` or more with `bulk_copy`** spreads that fixed cost over more rows.
   `INSERT` does not gain from it.
@@ -352,8 +358,9 @@ unchanged, and the copy exits non-zero.
   commits the open transaction, so keep both to DML there.
 - **The table must exist.** On MySQL a `CREATE TABLE` commits any open transaction, so create
   the table before the load.
-- **Add `bulk_copy` and raise `batch_size`.** A load is all or nothing anyway, so `COPY` gives
-  up nothing here. With 1,000-row batches it loaded 1M CSV rows 15–25% faster than `INSERT`;
+- **On PostgreSQL, add `bulk_copy` and raise `batch_size`.** A load is all or nothing anyway,
+  so `COPY` gives up nothing here. It cannot be combined with `key`: `COPY` has no upsert, and
+  the load's transaction does not change that. MySQL and MariaDB have no `bulk_copy`. With 1,000-row batches it loaded 1M CSV rows 15–25% faster than `INSERT`;
   with 10,000-row batches 1M JSON rows went from 156,000 to 236,000 rows/s. See
   [Fast bulk loads](#fast-bulk-loads).
 - **One long transaction.** It stays open for the whole run, so server limits such as

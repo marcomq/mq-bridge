@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
 import statistics
 import subprocess
 import sys
@@ -120,7 +121,10 @@ def run_asyncpg_copy(path: str) -> None:
                 with open(path, "rb") as f:
                     for line in f:
                         d = json.loads(line)
-                        chunk.append((d["id"], d["sensor"], datetime.fromisoformat(d["ts"]),
+                        ts = d["ts"]
+                        if ts.endswith("Z"):
+                            ts = ts[:-1] + "+00:00"
+                        chunk.append((d["id"], d["sensor"], datetime.fromisoformat(ts),
                                       d["temp"], d["humidity"], d["status"]))
                         if len(chunk) == 10_000:
                             await conn.copy_records_to_table(TABLE, records=chunk, columns=COLS)
@@ -157,15 +161,24 @@ def part_paths(path: str) -> list[str]:
 
 
 def split_file(path: str) -> None:
-    parts = part_paths(path)
-    if all(os.path.exists(p) and os.path.getmtime(p) >= os.path.getmtime(path) for p in parts):
-        return
-    outs = [open(p, "wb") for p in parts]
-    with open(path, "rb") as f:
-        for i, line in enumerate(f):
-            outs[i % PARTS].write(line)
-    for o in outs:
-        o.close()
+    marker = f"{path}.parts-done"
+    st = os.stat(path)
+    stamp = f"{st.st_size}:{st.st_mtime_ns}"
+    if os.path.exists(marker):
+        with open(marker) as m:
+            if m.read() == stamp:
+                return
+        os.remove(marker)
+    outs = [open(p, "wb") for p in part_paths(path)]
+    try:
+        with open(path, "rb") as f:
+            for i, line in enumerate(f):
+                outs[i % PARTS].write(line)
+    finally:
+        for o in outs:
+            o.close()
+    with open(marker, "w") as m:
+        m.write(stamp)
 
 
 def _psycopg_part(path: str) -> None:
@@ -250,21 +263,26 @@ def run(path: str, repeats: int, variants: list[str], timeout: float) -> None:
     for rep in range(repeats):
         for v in variants:
             reset_table()
+            proc = subprocess.Popen(
+                [sys.executable, __file__, "child", v, "--file", path],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True,
+            )
             try:
-                proc = subprocess.run(
-                    [sys.executable, __file__, "child", v, "--file", path],
-                    capture_output=True, text=True, timeout=timeout,
-                )
+                stdout, stderr = proc.communicate(timeout=timeout)
             except subprocess.TimeoutExpired:
+                # Kill the whole group, so -4proc workers stop too; communicate waits for their pipes.
+                os.killpg(proc.pid, signal.SIGKILL)
+                proc.communicate()
                 print(f"rep {rep + 1} {v}: TIMEOUT after {timeout:.0f}s", flush=True)
                 continue
             if proc.returncode != 0:
-                print(f"rep {rep + 1} {v}: FAILED\n{proc.stderr[-2000:]}", flush=True)
+                print(f"rep {rep + 1} {v}: FAILED\n{stderr[-2000:]}", flush=True)
                 continue
-            secs = json.loads(proc.stdout.strip().splitlines()[-1])["seconds"]
+            secs = json.loads(stdout.strip().splitlines()[-1])["seconds"]
             n, s = row_stats()
             ok = n == rows and abs(s - want) < 1e-3 * rows
-            results[v].append(secs)
+            if ok:
+                results[v].append(secs)
             print(f"rep {rep + 1} {v:20} {secs:7.2f} s  {rows / secs:>11,.0f} rows/s"
                   f"{'' if ok else f'  WRONG rows={n} sum={s:.2f}'}", flush=True)
 

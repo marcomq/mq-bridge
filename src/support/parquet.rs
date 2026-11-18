@@ -34,6 +34,11 @@ const STR: u8 = 1 << 4;
 const OTHER: u8 = 1 << 5;
 /// An integer beyond [`F64_EXACT_INT`].
 const BIG_INT: u8 = 1 << 6;
+/// The value is or holds an object keyed [`RAW_VALUE_KEY`].
+const RAW: u8 = 1 << 7;
+
+/// Key a `serde_json::Value` parse (feature `raw_value`) unwraps as embedded JSON text.
+const RAW_VALUE_KEY: &str = "$serde_json::private::RawValue";
 
 /// The JSON-object payloads of one Parquet body, kept as NDJSON bytes.
 ///
@@ -71,6 +76,17 @@ impl RowBuffer {
             } else {
                 anyhow!(e).context("parquet row payload is not valid JSON")
             });
+        }
+        if self.row.iter().any(|(_, kind)| kind & RAW != 0) {
+            // The full path reads these as embedded JSON text, so check them as it will.
+            let valid = serde_json::from_slice::<serde_json::Value>(payload);
+            if !valid.as_ref().is_ok_and(serde_json::Value::is_object) {
+                self.fields.truncate(known);
+                return Err(match valid {
+                    Err(e) => anyhow!(e).context("parquet row payload is not valid JSON"),
+                    Ok(_) => anyhow!("parquet row payload must be a JSON object"),
+                });
+            }
         }
         self.row.sort_unstable_by_key(|(field, _)| *field);
         let mut previous = None;
@@ -123,8 +139,11 @@ impl RowBuffer {
         };
         let fits = self.fields.iter().enumerate().all(|(i, (_, kinds))| {
             let lossy = kinds & FLOAT != 0 && kinds & BIG_INT != 0;
+            // A number in a string column keeps its source text here, but not on the full path.
+            let numeric_text = kinds & STR != 0 && kinds & (INT | FLOAT) != 0;
             kinds & OTHER == 0
                 && !lossy
+                && !numeric_text
                 && sampled(i).is_some_and(|seen| (seen ^ kinds) & !BIG_INT == 0)
         });
         if !fits {
@@ -165,7 +184,12 @@ impl<'de> Visitor<'de> for RowKinds<'_> {
             fields: &mut *self.fields,
             hint,
         })? {
-            self.row.push((field, map.next_value_seed(ValueKind)?));
+            let raw = if self.fields[field].0 == RAW_VALUE_KEY {
+                OTHER | RAW
+            } else {
+                0
+            };
+            self.row.push((field, map.next_value_seed(ValueKind)? | raw));
             hint = field + 1;
         }
         Ok(())
@@ -247,14 +271,38 @@ impl<'de> Visitor<'de> for ValueKind {
     // Nested values are walked like top-level ones, not skipped, so they get the string,
     // number and depth checks a `serde_json::Value` parse applies.
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<u8, A::Error> {
-        while map.next_key_seed(ValueKind)?.is_some() {
-            map.next_value_seed(ValueKind)?;
+        let mut kind = OTHER;
+        while let Some(raw) = map.next_key_seed(KeyIsRaw)? {
+            kind |= map.next_value_seed(ValueKind)? & RAW | if raw { RAW } else { 0 };
         }
-        Ok(OTHER)
+        Ok(kind)
     }
     fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<u8, A::Error> {
-        while seq.next_element_seed(ValueKind)?.is_some() {}
-        Ok(OTHER)
+        let mut kind = OTHER;
+        while let Some(element) = seq.next_element_seed(ValueKind)? {
+            kind |= element & RAW;
+        }
+        Ok(kind)
+    }
+}
+
+/// Reads a nested object key, telling whether it is [`RAW_VALUE_KEY`].
+struct KeyIsRaw;
+
+impl<'de> DeserializeSeed<'de> for KeyIsRaw {
+    type Value = bool;
+    fn deserialize<D: Deserializer<'de>>(self, de: D) -> Result<bool, D::Error> {
+        de.deserialize_str(self)
+    }
+}
+
+impl Visitor<'_> for KeyIsRaw {
+    type Value = bool;
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("an object key")
+    }
+    fn visit_str<E>(self, key: &str) -> Result<bool, E> {
+        Ok(key == RAW_VALUE_KEY)
     }
 }
 
@@ -654,6 +702,40 @@ mod tests {
         assert!(buffer.push(deep.as_bytes()).is_err());
         let rows = decoded(buffer.encode(Compression::None).unwrap());
         assert_eq!(rows, vec![serde_json::json!({"id": 1})]);
+    }
+
+    #[test]
+    fn an_invalid_raw_value_wrapper_is_rejected_on_push() {
+        let mut buffer = RowBuffer::default();
+        buffer.push(br#"{"id":1}"#).unwrap();
+        assert!(buffer
+            .push(br#"{"$serde_json::private::RawValue":"{not json"}"#)
+            .is_err());
+        assert!(buffer
+            .push(br#"{"a":{"$serde_json::private::RawValue":"[1"}}"#)
+            .is_err());
+        assert!(buffer
+            .push(br#"{"$serde_json::private::RawValue":"[1]"}"#)
+            .is_err());
+        let rows = decoded(buffer.encode(Compression::None).unwrap());
+        assert_eq!(rows, vec![serde_json::json!({"id": 1})]);
+    }
+
+    #[test]
+    fn a_number_in_a_string_column_matches_the_full_path() {
+        let payloads: [&[u8]; 2] = [br#"{"n":1e2}"#, br#"{"n":"x"}"#];
+        let mut buffer = RowBuffer::default();
+        for payload in payloads {
+            buffer.push(payload).unwrap();
+        }
+        let rows: Vec<serde_json::Value> = payloads
+            .iter()
+            .map(|p| serde_json::from_slice(p).unwrap())
+            .collect();
+        assert_eq!(
+            decoded(buffer.encode(Compression::None).unwrap()),
+            decoded(encode_rows(&rows, Compression::None).unwrap())
+        );
     }
 
     #[test]

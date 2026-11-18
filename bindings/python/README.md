@@ -496,4 +496,7 @@ python analysis/bench_pg_load.py gen --rows 1000000 --file /tmp/readings.jsonl
 python analysis/bench_pg_load.py run --file /tmp/readings.jsonl --repeats 3
 ```
 
+> [!WARNING]
+> `bench_pg_load.py run` drops and recreates the `readings` table before every variant. Point `POSTGRES_URL` at a disposable database.
+
 Run the scripts from a directory where `import mq_bridge` resolves to the build you want to measure. In `bindings/python/` that is the in-tree package, which is only current after `maturin develop --release`.
